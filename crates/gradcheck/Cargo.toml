@@ -75,6 +75,10 @@ brain-timesfm3.workspace = true
 # `check_florence2` (src/florence2.rs) - the Florence-2 BART text
 # encoder-decoder's LoRA/full-fine-tune training graph.
 brain-florence2.workspace = true
+# `check_modernbert` (src/modernbert.rs) - Laya's ModernBERT trunk + decision
+# head, seeded backward (Laya M5). Two separate `ParamStore`s (trunk/head)
+# checked jointly.
+brain-modernbert.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

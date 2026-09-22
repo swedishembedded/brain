@@ -115,6 +115,25 @@ pub use lfm2_seeded::check_lfm_seeded;
 pub mod florence2;
 pub use florence2::{check_florence2, check_florence2_lora};
 
+/// Laya's ModernBERT trunk + decision head (`crates/modernbert`), seeded
+/// backward (Laya M5) - the windowed local-attention backward, the no-bias
+/// LayerNorm backward, GeGLU's backward, and the decision head's own
+/// multi-layer transformer + scorer + act_head, including the act_head
+/// detach. A bespoke [`CheckModel`] harness spanning TWO `ParamStore`s (the
+/// trunk's and the head's), not the blanket `model::Model` impl: this crate
+/// has no natural single-batch/single-loss `Model` shape the way an LM does.
+///
+/// `check_modernbert_ff1_elementwise` - the supplementary per-entry proof for
+/// `head.{0,1}.ff1.weight` (the Linear immediately before the head's plain
+/// ReLU), needed alongside `check_modernbert`'s own directional check because
+/// that check's whole-tensor perturbation can push many of the 256 output
+/// units' pre-activations across the ReLU kink at once - see
+/// `check_modernbert_ff1_elementwise`'s own doc for the measured evidence
+/// (bit-identical analytic gradients, a swinging "numeric" FD estimate across
+/// back-to-back runs on the SAME GPU backend).
+pub mod modernbert;
+pub use modernbert::{check_modernbert, check_modernbert_ff1_elementwise};
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;
@@ -208,6 +227,20 @@ impl Report {
 /// single-entry step has no `√numel` amplification, so the loss difference is
 /// `eps·|∂L/∂wᵢ|` and fp32 cancellation bites sooner.
 pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
+    let n = m.read_weight(name).len();
+    elementwise_check_at(m, name, eps, &(0..n).collect::<Vec<_>>())
+}
+
+/// [`elementwise_check`]'s own engine, generalised to an explicit INDEX set
+/// rather than always `0..numel` - see `gradcheck::modernbert::
+/// check_modernbert_ff1_elementwise`'s own doc for why a large GEMM weight
+/// (16384 entries) needs a deterministic STRIDED subset rather than the
+/// exhaustive sweep `elementwise_check` gives every other caller (`~2·numel`
+/// forward passes is fine at `check_rrdbnet_elementwise`'s 1728 entries,
+/// prohibitive - over an hour, measured - at 16384). `elementwise_check`
+/// itself is unchanged behaviourally: it is now a thin `0..numel` wrapper
+/// around this.
+pub fn elementwise_check_at<M: CheckModel>(m: &M, name: &str, eps: f32, indices: &[usize]) -> Report {
     m.zero_grads();
     let _ = m.loss();
     m.backward();
@@ -216,8 +249,8 @@ pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
     let g = m.read_grad(name);
     assert_eq!(g.len(), w0.len(), "{name}: grad/weight size mismatch");
     let mut w = w0.clone();
-    let mut checks = Vec::with_capacity(w0.len());
-    for i in 0..w0.len() {
+    let mut checks = Vec::with_capacity(indices.len());
+    for &i in indices {
         w[i] = w0[i] + eps;
         m.write_weight(name, &w);
         let lp = m.loss();

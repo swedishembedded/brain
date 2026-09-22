@@ -75,12 +75,57 @@
 //! produced (a `-1e4` logit softmaxes to essentially zero probability and
 //! never appears in a top-2).
 //!
-//! **This milestone is forward-only.** No backward, no training step -
-//! that is Laya M5, mirroring `crates/decide/src/head.rs`'s own `Bwd` split.
+//! **M3 was forward-only; M5 adds the seeded backward** - `crates/decide/src
+//! /head.rs`'s own `Bwd` split, but bigger, since this head is a real
+//! multi-layer transformer rather than one cross-attention block.
+//!
+//! # Backward (Laya M5)
+//!
+//! [`LayaHead::new_train_on`] + [`LayaHead::set_call_train`] +
+//! [`LayaHead::backward`] mirror `decide::head::Head`'s own
+//! `new_on(train=true)`/`set_call`/`backward` split. Three pieces worth
+//! naming:
+//!
+//! - **The plain-ReLU FFN's backward needs the PRE-activation value**, which
+//!   M3's own `relu_inplace` dispatch destroys (it overwrites `ff1` in
+//!   place). The forward now writes the activation into a SEPARATE `ff1_act`
+//!   buffer via `leaky_relu` (existing kernel, `slope=0.0` computes exactly
+//!   plain ReLU) instead - a non-behavioral change (same numbers, different
+//!   buffer) that both a frozen and a trainable head now share, so there is
+//!   still only ONE `build_steps`. `leaky_relu_bwd` at the same `slope=0.0`
+//!   is the adjoint - no new kernel for either direction.
+//! - **The `h0 = hidden + type_emb[qtype]` broadcast add's backward reuses
+//!   the generic `emb_bwd` scatter**, not a new kernel: `type_row_ids` (one
+//!   qtype id PER ROW, already built and uploaded by [`LayaHead::set_call`]
+//!   for the forward broadcast-gather) is EXACTLY the index buffer
+//!   `emb_bwd_step` wants, so `grad(type_emb.weight)[q,:] += sum_{row:
+//!   type_row_ids[row]==q} d_h0[row,:]` falls out of the existing kernel with
+//!   no new index-construction logic.
+//! - **The `act_head` detach is implemented, not skipped**: the real
+//!   checkpoint computes its four calibration features from a
+//!   `p = torch.softmax(logits.detach(), -1)`, so gradient through the loss
+//!   never reaches the option logits via the features path in the real
+//!   training recipe - only via `pooled` (the first `d` columns of
+//!   `concat`). This backward reproduces that exactly: `act.fc1`'s `dx`
+//!   produces a `[q, d+4]` gradient, and the existing `concat_split` kernel
+//!   (built for NCHW concat-backward elsewhere, `H=W=1` here) extracts ONLY
+//!   the first `d` columns into `d_pooled`; the last 4 (the features'
+//!   own share) are computed and then deliberately discarded, never
+//!   contributing to any parameter's gradient. This is a conscious choice,
+//!   not a default: the alternative (differentiate the host-side softmax/
+//!   top-k/entropy formula and route gradient back into `logits` too) is
+//!   possible but diverges from how the real checkpoint was actually
+//!   trained, and M5's own bar is internal consistency (gradcheck), not
+//!   recipe fidelity - so a future fine-tuning milestone that wants the
+//!   non-detached path needs to add it deliberately, not assume it.
+//! - **`dx[head_layers]` (the head's own top-of-stack gradient) is CLEARED
+//!   FIRST**, exactly `decide::head::Head::backward`'s own documented reason:
+//!   the marker gather's scatter and the pooled gather's scatter both
+//!   ACCUMULATE onto it, and nothing else assigns the rows either omits.
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
 use paramstore::{ParamStore, Role};
 
@@ -199,12 +244,72 @@ struct HeadLayerBufs {
     attn_out: DeviceBuffer,
     res1: DeviceBuffer,
     xn2: DeviceBuffer,
+    /// The FFN's PRE-activation - never overwritten (unlike M3's original
+    /// in-place `relu_inplace`), because the backward's `leaky_relu_bwd`
+    /// needs it back. See the module doc's "Backward" section.
     ff1: DeviceBuffer,
+    /// The FFN's POST-activation, `leaky_relu(ff1, slope=0.0)` - a separate
+    /// buffer from `ff1` for the same reason.
+    ff1_act: DeviceBuffer,
     ff2: DeviceBuffer,
 }
 
-/// Laya's decision head. Inference-only (`Role::Frozen` weights, no
-/// backward) - the seeded backward is Laya M5, a separate milestone.
+/// Reverse-pass buffers and the recorded backward step list, allocated only
+/// by [`LayaHead::new_train_on`] - mirrors `decide::head::Head`'s own `Bwd`,
+/// scaled up for this head's real multi-layer transformer shape. Every entry
+/// is a GRADIENT; the activations it reads are the forward's own cached
+/// buffers. Per-layer scratch is shared across layers; only `dx` is per
+/// layer.
+struct Bwd {
+    /// Seed: `dL/d(logits)`, one per option marker. COPY_DST.
+    d_logits: DeviceBuffer,
+    /// Seed: `dL/d(act_logits)`, `[n_questions, n_act]`. COPY_DST.
+    d_act_logits: DeviceBuffer,
+    // ---- scorer backward scratch, `[cap_markers, *]` ----
+    d_scorer_gelu: DeviceBuffer,
+    d_scorer_fc1: DeviceBuffer,
+    d_scorer_ln: DeviceBuffer,
+    d_gathered: DeviceBuffer,
+    mean_m: DeviceBuffer,
+    inv_m: DeviceBuffer,
+    // ---- act_head backward scratch, `[cap_questions, *]` ----
+    d_act_gelu: DeviceBuffer,
+    d_act_fc1: DeviceBuffer,
+    /// `[cap_questions, d+4]` - the full `dx` of `act.fc1`, BEFORE the
+    /// detach split. See the module doc's "act_head detach" note.
+    d_concat: DeviceBuffer,
+    /// `[cap_questions, d]` - `d_concat`'s first `d` columns only, via
+    /// `concat_split`. The last 4 columns are computed into `d_concat` and
+    /// then never read again - the detach.
+    d_pooled: DeviceBuffer,
+    // ---- per-head-layer loop scratch, `[cap_rows, *]`, reused per layer ----
+    /// `dx[l]` = grad of `x[l]`, for `l` in `1..=head_layers`. `dx[l]` at
+    /// `l == head_layers` is CLEARED then scatter-accumulated by both
+    /// gathers before the loop starts; `l == 0`'s own gradient is written
+    /// directly into the caller-supplied trunk seed buffer, not stored here.
+    dx: Vec<DeviceBuffer>,
+    d_res1: DeviceBuffer,
+    d_ff1_act: DeviceBuffer,
+    d_ff1: DeviceBuffer,
+    d_xn2: DeviceBuffer,
+    /// Scratch for a pre-norm's `dx` output before it re-joins the residual -
+    /// reused for both LN2's and LN1's backward within one layer (the two
+    /// uses never overlap - see `crate::model::ModernBert`'s own `d_tmp` for
+    /// the identical reasoning).
+    d_tmp: DeviceBuffer,
+    d_xn: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_qkv: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    mean: DeviceBuffer,
+    inv: DeviceBuffer,
+    steps: Vec<Step>,
+}
+
+/// Laya's decision head. `Role::Frozen` by [`LayaHead::new_on`] (inference
+/// only); [`LayaHead::new_train_on`] builds the SAME forward (`Role::
+/// Trainable` weights) plus the seeded backward - see the module doc's
+/// "Backward" section.
 pub struct LayaHead {
     gpu: Gpu,
     k: crate::kern::Ids,
@@ -241,6 +346,7 @@ pub struct LayaHead {
     act_logits: DeviceBuffer,
     steps: Vec<Step>,
     act_steps: Vec<Step>,
+    bwd: Option<Bwd>,
 }
 
 impl LayaHead {
@@ -257,11 +363,40 @@ impl LayaHead {
         cap_questions: u32,
         init: &HashMap<String, Vec<f32>>,
     ) -> LayaHead {
+        LayaHead::build(gpu, cfg, cap_rows, max_span, cap_markers, cap_questions, init, false)
+    }
+
+    /// A **trainable** head: every parameter `Role::Trainable` (gradient +
+    /// AdamW moments) plus the reverse step list. Use [`LayaHead::
+    /// set_call_train`] (not [`LayaHead::set_call`]) so the backward has
+    /// somewhere to write the trunk's seed gradient.
+    pub fn new_train_on(
+        gpu: Gpu,
+        cfg: LayaConfig,
+        cap_rows: u32,
+        max_span: u32,
+        cap_markers: u32,
+        cap_questions: u32,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> LayaHead {
+        LayaHead::build(gpu, cfg, cap_rows, max_span, cap_markers, cap_questions, init, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        gpu: Gpu,
+        cfg: LayaConfig,
+        cap_rows: u32,
+        max_span: u32,
+        cap_markers: u32,
+        cap_questions: u32,
+        init: &HashMap<String, Vec<f32>>,
+        train: bool,
+    ) -> LayaHead {
         assert!(max_span <= cap_rows, "max_span {max_span} > cap_rows {cap_rows}");
-        let roles: Vec<(String, usize, Role)> = tensor_manifest(&cfg)
-            .into_iter()
-            .map(|(n, s)| (n, s.iter().product::<usize>(), Role::Frozen))
-            .collect();
+        let role = if train { Role::Trainable } else { Role::Frozen };
+        let roles: Vec<(String, usize, Role)> =
+            tensor_manifest(&cfg).into_iter().map(|(n, s)| (n, s.iter().product::<usize>(), role)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, init);
 
         let n = cap_rows as u64;
@@ -270,6 +405,7 @@ impl LayaHead {
         let per_row = cfg.n_heads as u64 * max_span as u64 * 4;
         let chunk = ((SLAB_BUDGET / per_row.max(1)).max(1) as u32).min(max_span.max(1));
         let slab = cfg.n_heads as u64 * chunk as u64 * max_span as u64;
+        let head_layers = cfg.head_layers;
 
         let idbuf = |name: &str, cap: u64| {
             gpu.buffer(name, cap * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST)
@@ -283,6 +419,7 @@ impl LayaHead {
                 res1: gpu.storage(n * d),
                 xn2: gpu.storage(n * d),
                 ff1: gpu.storage(n * ff),
+                ff1_act: gpu.storage(n * ff),
                 ff2: gpu.storage(n * d),
             })
             .collect();
@@ -291,7 +428,7 @@ impl LayaHead {
         let act_hidden = cfg.act_hidden as u64;
         let n_act = cfg.n_act as u64;
         let k = crate::kern::Ids::resolve(&gpu);
-        LayaHead {
+        let mut head = LayaHead {
             k,
             cap_rows,
             cap_markers,
@@ -326,10 +463,42 @@ impl LayaHead {
             act_logits: gpu.storage(q * n_act),
             steps: Vec::new(),
             act_steps: Vec::new(),
+            bwd: None,
             gpu,
             cfg,
             ps,
+        };
+        if train {
+            let st = |w: u64| head.gpu.storage(w);
+            head.bwd = Some(Bwd {
+                d_logits: head.gpu.buffer("d_logits", m * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST),
+                d_act_logits: head.gpu.buffer("d_act_logits", q * n_act * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST),
+                d_scorer_gelu: st(m * d),
+                d_scorer_fc1: st(m * d),
+                d_scorer_ln: st(m * d),
+                d_gathered: st(m * d),
+                mean_m: st(m),
+                inv_m: st(m),
+                d_act_gelu: st(q * act_hidden),
+                d_act_fc1: st(q * act_hidden),
+                d_concat: st(q * (d + 4)),
+                d_pooled: st(q * d),
+                dx: (0..head_layers).map(|_| st(n * d)).collect(),
+                d_res1: st(n * d),
+                d_ff1_act: st(n * ff),
+                d_ff1: st(n * ff),
+                d_xn2: st(n * d),
+                d_tmp: st(n * d),
+                d_xn: st(n * d),
+                d_ctx: st(n * d),
+                d_qkv: st(n * 3 * d),
+                d_scores: st(slab),
+                mean: st(n),
+                inv: st(n),
+                steps: Vec::new(),
+            });
         }
+        head
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -475,11 +644,14 @@ impl LayaHead {
             s.push(block::layernorm_fwd(g, &ln, &lb.res1, self.w(&format!("{p}.norm2.weight")), self.w(&format!("{p}.norm2.bias")), &lb.xn2, d, n, self.cfg.eps));
             s.push(g.step(self.k.matmul, &[&lb.xn2, self.w(&format!("{p}.ff1.weight")), &lb.ff1], &[n, d, ff], n * ff));
             s.push(g.step(self.k.bias_add, &[&lb.ff1, self.w(&format!("{p}.ff1.bias"))], &[n, ff], n * ff));
-            // PLAIN RELU, not GELU - see the module doc's trap note. In place
-            // is safe: this milestone is forward-only, so nothing needs the
-            // pre-activation value back.
-            s.push(g.step(self.k.relu_inplace, &[&lb.ff1], &[n * ff], n * ff));
-            s.push(g.step(self.k.matmul, &[&lb.ff1, self.w(&format!("{p}.ff2.weight")), &lb.ff2], &[n, ff, d], n * d));
+            // PLAIN RELU, not GELU - see the module doc's trap note.
+            // Non-in-place (`leaky_relu` at `slope=0.0`, not `relu_inplace`):
+            // the backward (Laya M5) needs the PRE-activation `ff1` back, so
+            // the activation is written into the separate `ff1_act` buffer -
+            // see the module doc's "Backward" section. Same numbers either
+            // way; only the buffer layout changed.
+            s.push(g.step(self.k.leaky_relu, &[&lb.ff1, &lb.ff1_act], &[n * ff, f(0.0)], n * ff));
+            s.push(g.step(self.k.matmul, &[&lb.ff1_act, self.w(&format!("{p}.ff2.weight")), &lb.ff2], &[n, ff, d], n * d));
             s.push(g.step(self.k.bias_add, &[&lb.ff2, self.w(&format!("{p}.ff2.bias"))], &[n, d], n * d));
             s.push(g.step(self.k.add2, &[&lb.res1, &lb.ff2, &self.x[l + 1]], &[n * d], n * d));
         }
@@ -516,6 +688,218 @@ impl LayaHead {
         s.push(g.step(self.k.gelu_erf, &[&self.act_fc1, &self.act_gelu], &[q * ah], q * ah));
         s.push(g.step(self.k.matmul, &[&self.act_gelu, self.w("act.fc2.weight"), &self.act_logits], &[q, ah, na], q * na));
         s.push(g.step(self.k.bias_add, &[&self.act_logits, self.w("act.fc2.bias")], &[q, na], q * na));
+        s
+    }
+
+    /// [`LayaHead::set_call`] for a TRAINABLE head: same validation and
+    /// bookkeeping, plus `d_hidden_out` - the trunk's own seed buffer
+    /// (`ModernBert::seed_buf`) - which this head's backward writes into
+    /// directly. A separate entry point rather than an added parameter on
+    /// [`LayaHead::set_call`], whose signature M4's real-weight parity tests
+    /// already use and which stays byte-for-byte unchanged.
+    pub fn set_call_train(&mut self, hidden: &DeviceBuffer, d_hidden_out: &DeviceBuffer, spans: &[(u32, u32)], qtype: &[u32], marker_rows: &[u32], arity: &[usize]) {
+        self.set_call(hidden, spans, qtype, marker_rows, arity);
+        let steps = self.build_bwd_steps(hidden, d_hidden_out);
+        if let Some(bw) = &mut self.bwd {
+            bw.steps = steps;
+        }
+    }
+
+    /// Whether this head was built trainable.
+    pub fn is_trainable(&self) -> bool {
+        self.bwd.is_some()
+    }
+
+    /// Zero every parameter gradient. Call once per step BEFORE
+    /// [`LayaHead::backward`], which accumulates into them.
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    /// Read one parameter's current value.
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.gpu.read(self.w(name), self.numel(name))
+    }
+
+    /// Overwrite one parameter - the finite-difference checker's perturbation.
+    pub fn set_weight(&self, name: &str, data: &[f32]) {
+        assert_eq!(data.len(), self.numel(name), "{name}");
+        self.gpu.write_f32(self.w(name), data);
+    }
+
+    fn numel(&self, name: &str) -> usize {
+        tensor_manifest(&self.cfg)
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, s)| s.iter().product::<usize>())
+            .unwrap_or_else(|| panic!("no parameter {name:?}"))
+    }
+
+    /// Read one parameter's accumulated gradient.
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.gpu.read(self.ps.g(name), self.numel(name))
+    }
+
+    /// Seed with `dL/d(logits)` (one per option marker) and `dL/d(act_logits)`
+    /// (`[n_questions, n_act]`), both host-computed by the loss, and run the
+    /// reverse pass - which writes the trunk's seed buffer
+    /// (`d_hidden_out`, supplied to [`LayaHead::set_call_train`]) in place.
+    pub fn backward(&self, d_logits: &[f32], d_act_logits: &[f32]) {
+        let b = self.bwd.as_ref().expect("backward on an inference head");
+        assert_eq!(d_logits.len(), self.n_markers as usize, "one gradient per option marker");
+        assert_eq!(
+            d_act_logits.len(),
+            self.n_questions as usize * self.cfg.n_act as usize,
+            "[n_questions, n_act] act-logit gradient"
+        );
+        self.gpu.write_f32(&b.d_logits, d_logits);
+        self.gpu.write_f32(&b.d_act_logits, d_act_logits);
+        // CLEARED FIRST, and it must be - see the module doc's "Backward"
+        // section: the marker gather's and the pooled gather's scatters both
+        // ACCUMULATE onto `dx[head_layers]` (the top of the per-layer loop),
+        // so a stale value from a previous step would otherwise survive
+        // underneath them.
+        let top = b.dx.last().expect("head_layers >= 1");
+        self.gpu.submit(&[top], &b.steps);
+    }
+
+    /// The exact adjoint of [`LayaHead::build_steps`] plus [`LayaHead::
+    /// build_act_steps`], walked bottom up: scorer, then act_head (both
+    /// scatter onto `dx[head_layers]`), then the head-layer stack down to
+    /// `x[0]`, then the type-embedding scatter and the trunk hand-off.
+    fn build_bwd_steps(&self, hidden: &DeviceBuffer, d_hidden_out: &DeviceBuffer) -> Vec<Step> {
+        let _ = hidden; // the trunk's own hidden buffer is read only by the FORWARD (h0 = hidden + type_emb); the backward's hand-off is purely additive into `d_hidden_out`.
+        let g = &self.gpu;
+        let b = self.bwd.as_ref().expect("build_bwd_steps in training mode only");
+        let d = self.cfg.d_model;
+        let ff = self.cfg.ff_mult * self.cfg.d_model;
+        let ah = self.cfg.act_hidden;
+        let na = self.cfg.n_act;
+        let n = self.rows;
+        let (m, q) = (self.n_markers, self.n_questions);
+        let heads = self.cfg.n_heads;
+        let hd = self.cfg.head_dim();
+        // `.layernorm` is never dispatched through this struct - only
+        // `.ln_stats`/`.layernorm_dx` are read by `ln_stats_fwd`/
+        // `layernorm_dx_bwd` - but this head's LayerNorms are BIASED, so
+        // `ln_dbeta` is dispatched separately below (unlike the trunk's
+        // no-bias backward, which never calls it).
+        let ln = block::LayerNormIds {
+            layernorm: self.k.layernorm,
+            layernorm_rows: None,
+            ln_stats: self.k.ln_stats,
+            ln_stats_rows: None,
+            layernorm_dx: self.k.layernorm_dx,
+            layernorm_dx_rows: None,
+        };
+        let cross = block::CrossIds { scores: self.k.scores_cross, softmax: self.k.softmax_cross, apply: self.k.apply_cross };
+        let cross_bwd = block::CrossBwdIds::resolve(g, self.k.dscores_cross, self.k.dq_cross, self.k.dk_cross_acc, self.k.dv_cross_acc);
+        let eb = block::EmbBwdIds::resolve(g, self.k.emb_bwd);
+        let gr = |name: &str| self.ps.g(name);
+        let mut s: Vec<Step> = Vec::new();
+        let head_layers = self.cfg.head_layers as usize;
+        let top = b.dx.last().expect("head_layers >= 1");
+
+        // ---- scorer: LayerNorm -> Linear -> GELU -> Linear (all BIASED) ----
+        s.push(g.step(self.k.bias_grad, &[&b.d_logits, gr("scorer.fc2.bias")], &[m, 1], 1));
+        s.push(g.step(self.k.matmul_dw, &[&b.d_logits, &self.scorer_gelu, gr("scorer.fc2.weight")], &[m, d, 1], d));
+        s.push(g.step(self.k.matmul_dx, &[&b.d_logits, self.w("scorer.fc2.weight"), &b.d_scorer_gelu], &[m, d, 1, 0], m * d));
+        s.push(g.step(self.k.gelu_erf_bwd, &[&self.scorer_fc1, &b.d_scorer_gelu, &b.d_scorer_fc1], &[m * d], m * d));
+        s.push(g.step(self.k.bias_grad, &[&b.d_scorer_fc1, gr("scorer.fc1.bias")], &[m, d], d));
+        s.push(g.step(self.k.matmul_dw, &[&b.d_scorer_fc1, &self.scorer_ln, gr("scorer.fc1.weight")], &[m, d, d], d * d));
+        s.push(g.step(self.k.matmul_dx, &[&b.d_scorer_fc1, self.w("scorer.fc1.weight"), &b.d_scorer_ln], &[m, d, d, 0], m * d));
+        s.push(block::ln_stats_fwd(g, &ln, &self.gathered, &b.mean_m, &b.inv_m, d, m, self.cfg.eps));
+        s.push(g.step(self.k.ln_dgamma, &[&b.d_scorer_ln, &self.gathered, &b.mean_m, &b.inv_m, gr("scorer.norm.weight")], &[d, m], d));
+        s.push(g.step(self.k.ln_dbeta, &[&b.d_scorer_ln, gr("scorer.norm.bias")], &[d, m], d));
+        s.push(block::layernorm_dx_bwd(g, &ln, &self.gathered, self.w("scorer.norm.weight"), &b.d_scorer_ln, &b.d_gathered, d, m, self.cfg.eps));
+        // Marker gather's adjoint: scatter each option's grad back onto its
+        // own `[MASK]` row of `dx[head_layers]`. ACCUMULATES.
+        s.push(block::emb_bwd_step(g, &eb, &self.marker_rows, None, &b.d_gathered, top, m, d, self.cap_rows));
+
+        // ---- act_head: Linear -> GELU -> Linear (BIASED), fed
+        // concat(pooled, feats) - the DETACH: only `pooled`'s share of
+        // `d_concat` continues backward, the feature columns' share is
+        // computed and discarded. See the module doc's "act_head detach"
+        // note. ----
+        s.push(g.step(self.k.bias_grad, &[&b.d_act_logits, gr("act.fc2.bias")], &[q, na], na));
+        s.push(g.step(self.k.matmul_dw, &[&b.d_act_logits, &self.act_gelu, gr("act.fc2.weight")], &[q, ah, na], ah * na));
+        s.push(g.step(self.k.matmul_dx, &[&b.d_act_logits, self.w("act.fc2.weight"), &b.d_act_gelu], &[q, ah, na, 0], q * ah));
+        s.push(g.step(self.k.gelu_erf_bwd, &[&self.act_fc1, &b.d_act_gelu, &b.d_act_fc1], &[q * ah], q * ah));
+        s.push(g.step(self.k.bias_grad, &[&b.d_act_fc1, gr("act.fc1.bias")], &[q, ah], ah));
+        s.push(g.step(self.k.matmul_dw, &[&b.d_act_fc1, &self.concat, gr("act.fc1.weight")], &[q, d + 4, ah], ah * (d + 4)));
+        s.push(g.step(self.k.matmul_dx, &[&b.d_act_fc1, self.w("act.fc1.weight"), &b.d_concat], &[q, d + 4, ah, 0], q * (d + 4)));
+        // The detach: keep only the first `d` (pooled) columns of the
+        // `[q, d+4]` gradient; the last 4 (features) columns are computed
+        // above and never read again.
+        s.push(g.step(self.k.concat_split, &[&b.d_concat, &b.d_pooled], &[q, d + 4, d, 0, 1, 1], q * d));
+        // Pooled [CLS] gather's adjoint. ACCUMULATES onto what the marker
+        // gather above already wrote.
+        s.push(block::emb_bwd_step(g, &eb, &self.cls_rows, None, &b.d_pooled, top, q, d, self.cap_rows));
+
+        // ---- the head_layers stack, walked bottom up ----
+        for l in (0..head_layers).rev() {
+            let lb = &self.layers[l];
+            let p = format!("head.{l}");
+            // `dx[i]` holds the grad of `x[i+1]`, so `dx[l]` is this layer's
+            // own incoming gradient - including `dx[head_layers - 1]`, which
+            // IS `top` (the same buffer the two gathers just scattered into).
+            let d_out = &b.dx[l];
+
+            // `x[l+1] = res1 + ff2`: addition fans `d_out` out unchanged to
+            // both the residual and the ff2 branch.
+            s.push(g.step(self.k.bias_grad, &[d_out, gr(&format!("{p}.ff2.bias"))], &[n, d], d));
+            s.push(g.step(self.k.matmul_dw, &[d_out, &lb.ff1_act, gr(&format!("{p}.ff2.weight"))], &[n, ff, d], d * ff));
+            s.push(g.step(self.k.matmul_dx, &[d_out, self.w(&format!("{p}.ff2.weight")), &b.d_ff1_act], &[n, ff, d, 0], n * ff));
+            // ReLU's backward reads the PRE-activation `ff1`, which M5's
+            // forward now keeps intact (see the module doc).
+            s.push(g.step(self.k.leaky_relu_bwd, &[&lb.ff1, &b.d_ff1_act, &b.d_ff1], &[n * ff, f(0.0)], n * ff));
+            s.push(g.step(self.k.bias_grad, &[&b.d_ff1, gr(&format!("{p}.ff1.bias"))], &[n, ff], ff));
+            s.push(g.step(self.k.matmul_dw, &[&b.d_ff1, &lb.xn2, gr(&format!("{p}.ff1.weight"))], &[n, d, ff], ff * d));
+            s.push(g.step(self.k.matmul_dx, &[&b.d_ff1, self.w(&format!("{p}.ff1.weight")), &b.d_xn2], &[n, d, ff, 0], n * d));
+
+            s.push(block::ln_stats_fwd(g, &ln, &lb.res1, &b.mean, &b.inv, d, n, self.cfg.eps));
+            s.push(g.step(self.k.ln_dgamma, &[&b.d_xn2, &lb.res1, &b.mean, &b.inv, gr(&format!("{p}.norm2.weight"))], &[d, n], d));
+            s.push(g.step(self.k.ln_dbeta, &[&b.d_xn2, gr(&format!("{p}.norm2.bias"))], &[d, n], d));
+            s.push(block::layernorm_dx_bwd(g, &ln, &lb.res1, self.w(&format!("{p}.norm2.weight")), &b.d_xn2, &b.d_tmp, d, n, self.cfg.eps));
+            s.push(g.step(self.k.add2, &[d_out, &b.d_tmp, &b.d_res1], &[n * d], n * d));
+
+            // `res1 = x[l] + attn_out`.
+            s.push(g.step(self.k.bias_grad, &[&b.d_res1, gr(&format!("{p}.attn.out_proj.bias"))], &[n, d], d));
+            s.push(g.step(self.k.matmul_dw, &[&b.d_res1, &lb.ctx, gr(&format!("{p}.attn.out_proj.weight"))], &[n, d, d], d * d));
+            s.push(g.step(self.k.matmul_dx, &[&b.d_res1, self.w(&format!("{p}.attn.out_proj.weight")), &b.d_ctx], &[n, d, d, 0], n * d));
+
+            // Plain full bidirectional self-attention backward - no RoPE, no
+            // window to undo, the SAME primitive `ModernBert`'s own
+            // FULL-attention layers use.
+            block::chunked_bidir_bwd(
+                g, &cross, None, &cross_bwd, heads, hd, d, &lb.qkv, 3 * d, 0, d, 2 * d, &b.d_ctx, &b.d_qkv, &self.scores, &self.probs, &b.d_scores, &self.spans, self.chunk, None, &mut s,
+            );
+
+            s.push(g.step(self.k.bias_grad, &[&b.d_qkv, gr(&format!("{p}.attn.in_proj.bias"))], &[n, 3 * d], 3 * d));
+            s.push(g.step(self.k.matmul_dw, &[&b.d_qkv, &lb.xn, gr(&format!("{p}.attn.in_proj.weight"))], &[n, d, 3 * d], 3 * d * d));
+            s.push(g.step(self.k.matmul_dx, &[&b.d_qkv, self.w(&format!("{p}.attn.in_proj.weight")), &b.d_xn], &[n, d, 3 * d, 0], n * d));
+
+            s.push(block::ln_stats_fwd(g, &ln, &self.x[l], &b.mean, &b.inv, d, n, self.cfg.eps));
+            s.push(g.step(self.k.ln_dgamma, &[&b.d_xn, &self.x[l], &b.mean, &b.inv, gr(&format!("{p}.norm1.weight"))], &[d, n], d));
+            s.push(g.step(self.k.ln_dbeta, &[&b.d_xn, gr(&format!("{p}.norm1.bias"))], &[d, n], d));
+            s.push(block::layernorm_dx_bwd(g, &ln, &self.x[l], self.w(&format!("{p}.norm1.weight")), &b.d_xn, &b.d_tmp, d, n, self.cfg.eps));
+
+            if l == 0 {
+                // `x[0] = hidden + type_emb[qtype]` - addition fans this
+                // layer's `x[l]`-share of the gradient straight through onto
+                // the TRUNK's own seed buffer, unchanged.
+                s.push(g.step(self.k.add2, &[&b.d_res1, &b.d_tmp, d_hidden_out], &[n * d], n * d));
+            } else {
+                s.push(g.step(self.k.add2, &[&b.d_res1, &b.d_tmp, &b.dx[l - 1]], &[n * d], n * d));
+            }
+        }
+
+        // `type_emb.weight`'s gradient: `type_row_ids` (one qtype id PER
+        // ROW, already built by `set_call` for the forward broadcast-gather)
+        // is exactly the index buffer `emb_bwd_step` wants - see the module
+        // doc's "Backward" section. Reads `d_hidden_out` AFTER the loop above
+        // has finished accumulating every layer's contribution into it.
+        s.push(block::emb_bwd_step(g, &eb, &self.type_row_ids, None, d_hidden_out, gr("type_emb.weight"), n, d, 3));
         s
     }
 }

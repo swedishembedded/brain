@@ -1406,6 +1406,7 @@ dependencies = [
  "brain-ltxv",
  "brain-minimaxmusic3",
  "brain-model",
+ "brain-modernbert",
  "brain-qwen3",
  "brain-qwen35",
  "brain-qwen35moe",
