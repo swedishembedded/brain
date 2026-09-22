@@ -39,7 +39,7 @@
 //! shipping it to a third party. If your team needs that, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use brain::{ConversionPipeline, ConversionSpec};
+use brain::{ConversionPipeline, ConversionSpec, DecisionPipeline, SalesConversation, Stages};
 
 struct Args {
     encoder: String,
@@ -119,13 +119,27 @@ fn require(path: &std::path::Path, what: &str, remedy: &str) {
     }
 }
 
+/// Rule 5 again, for a directory shape rather than a single file: a
+/// `decide`-shaped checkpoint has a root `config.json`; a Laya checkpoint has
+/// none (only a nested `encoder/config.json`) and is marked instead by a root
+/// `rl_agent_config.json` - see `brain::DecisionPipeline`'s own module doc.
+/// A cheap existence probe, not the SDK's real dispatch - it only rules out a
+/// missing/empty `--encoder DIR` before either loader below is tried.
+fn require_encoder_dir(dir: &str) {
+    let base = std::path::Path::new(dir);
+    if !base.join("config.json").is_file() && !base.join("rl_agent_config.json").is_file() {
+        eprintln!("salesagent: no encoder checkpoint at {dir}");
+        eprintln!(
+            "salesagent: run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR \
+             (a Laya checkpoint - convaiinnovations/laya - has rl_agent_config.json instead of config.json)"
+        );
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args = parse_args();
-    require(
-        &std::path::Path::new(&args.encoder).join("config.json"),
-        "encoder checkpoint",
-        "run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR",
-    );
+    require_encoder_dir(&args.encoder);
     require(
         &std::path::Path::new(&args.data).join("train.jsonl"),
         "sales conversation data",
@@ -161,7 +175,7 @@ fn main() {
 
     let spec = ConversionSpec::default()
         .train(train)
-        .eval(eval)
+        .eval(eval.clone())
         .warmup_steps(args.warmup)
         .policy_steps(args.policy)
         .calibration(200)
@@ -173,24 +187,105 @@ fn main() {
         require(std::path::Path::new(h), "head weights", "train first, or drop --head");
         builder = builder.head(h);
     }
-    let mut chain = brain::Flow::new(builder.load());
 
-    // Training is skipped when trained weights were supplied: the SAME chain
-    // serves both, because a stage that is not wanted is simply not in it.
-    if args.head_in.is_none() {
-        chain = chain.train(spec).evaluate().save(&args.save_to);
+    // `ConversionPipeline` is decide-only: it is hardcoded to `crates/decide`'s
+    // own encoder (`load_decide`, never `DecisionPipeline`'s architecture
+    // dispatch) because its whole method - supervised warm start, then
+    // policy-gradient, then fitting a 3-signal confidence router off the
+    // encoder's own internal layer representations - is a real, specific
+    // reading of two decide-shaped papers with no Laya equivalent. A
+    // Laya-shaped `--encoder DIR` therefore cannot load through it at all, by
+    // construction, not by a bug this sample could paper over. When that
+    // happens, fall back to `DecisionPipeline::route` - Laya's own noul
+    // question plus its act/escalate head, asked through the SAME SDK facade
+    // `resolve_decision_backend` already uses to tell the two architectures
+    // apart, rather than this sample sniffing the directory itself.
+    match builder.load() {
+        Ok(pipeline) => {
+            let mut chain = brain::Flow::new(Ok(pipeline));
+            // Training is skipped when trained weights were supplied: the
+            // SAME chain serves both, because a stage that is not wanted is
+            // simply not in it.
+            if args.head_in.is_none() {
+                chain = chain.train(spec).evaluate().save(&args.save_to);
+            }
+            let mut chain = chain.replay(replay);
+            if args.interactive {
+                println!(
+                    "\nsalesagent: type turns as `customer: ...` or `rep: ...` (bare text is the customer).\n\
+                     \x20           `reset` starts a new conversation; an empty line or ^D stops."
+                );
+                chain = chain.tui();
+            }
+            if let Err(e) = chain.report().finish() {
+                eprintln!("salesagent: {e}");
+                std::process::exit(1);
+            }
+        }
+        Err(conv_err) => match DecisionPipeline::builder(&args.encoder).load() {
+            Ok(mut pipe) if !pipe.supports_training() => {
+                println!(
+                    "salesagent: {} does not load through ConversionPipeline (decide-only - see the \
+                     note above main()) but IS a pretrained decision checkpoint, so this run scores \
+                     it zero-shot through DecisionPipeline::route instead of ConversionPipeline's own \
+                     supervised + policy-gradient training and router fit",
+                    args.encoder
+                );
+                run_laya_route(&mut pipe, &eval);
+            }
+            _ => {
+                eprintln!("salesagent: {conv_err}");
+                std::process::exit(1);
+            }
+        },
     }
-    let mut chain = chain.replay(replay);
-    if args.interactive {
-        println!(
-            "\nsalesagent: type turns as `customer: ...` or `rep: ...` (bare text is the customer).\n\
-             \x20           `reset` starts a new conversation; an empty line or ^D stops."
-        );
-        chain = chain.tui();
-    }
+}
 
-    if let Err(e) = chain.report().finish() {
-        eprintln!("salesagent: {e}");
-        std::process::exit(1);
+/// Score a Laya-backed pipeline's routing judgment on the same held-out
+/// conversations `ConversionPipeline::run_eval` would score, at each
+/// conversation's own final turn (the point the whole conversation is about -
+/// `ConversionPipeline::calibrate`'s own reasoning for the same choice).
+///
+/// Deliberately narrower than `ConversionPipeline`'s own evaluation: no
+/// per-turn trajectory, no router fit, no AUC-ROC - this backend has no
+/// training loop here to fit a router with (see `Stages::supports_training`),
+/// so what is reported is accuracy and Brier on the final-turn probability,
+/// directly comparable to the SAME two numbers `ConversionPipeline::run_eval`
+/// reports, plus the act head's own class distribution as extra context (its
+/// class-index labeling is not independently confirmed - see
+/// `brain::RouteVerdict`'s own doc).
+fn run_laya_route(pipe: &mut DecisionPipeline, eval: &[SalesConversation]) {
+    const QUESTION: &str = "will this sales conversation end in a closed deal";
+    let (mut hit, mut brier, mut acts, mut n) = (0usize, 0.0f32, [0usize; 2], 0usize);
+    for c in eval {
+        if c.is_empty() {
+            continue;
+        }
+        let state = c.prefix(c.len() - 1);
+        match pipe.route(&state, QUESTION) {
+            Ok(v) => {
+                n += 1;
+                let correct = (v.probability >= 0.5) == c.outcome;
+                hit += usize::from(correct);
+                let y = f32::from(c.outcome);
+                brier += (v.probability - y) * (v.probability - y);
+                if let Some(slot) = acts.get_mut(v.act_index) {
+                    *slot += 1;
+                }
+            }
+            Err(e) => eprintln!("salesagent: route failed on one conversation, skipping it: {e}"),
+        }
     }
+    println!(
+        "\n--- pipeline (Laya, zero-shot) ---\n  \
+         model: Laya decision head (no training loop exists for this backend yet)\n  \
+         accuracy {:.3} over {n} conversations (final turn only), Brier {:.3}\n  \
+         act head distribution: class0={} class1={} (class semantics not independently \
+         confirmed this session - see brain::RouteVerdict's own doc)\n\
+         ----------------\n",
+        hit as f32 / n.max(1) as f32,
+        brier / n.max(1) as f32,
+        acts[0],
+        acts[1],
+    );
 }

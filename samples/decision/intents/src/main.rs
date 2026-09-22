@@ -45,7 +45,7 @@
 use std::path::PathBuf;
 
 use brain::options::{Args, Hardware, ModelOptions, Options, SupervisedOptions};
-use brain::{DecisionPipeline, Device};
+use brain::{DecisionPipeline, Device, Stages};
 
 /// What the model is asked, on every example. Fixed for the run: what varies
 /// is the options, which is the point.
@@ -157,24 +157,36 @@ fn run() -> Result<(), String> {
     let before = score(&mut pipe, &data, &split.unseen, &options, s.train.eval, s.train.model.seed)?;
     println!("intents: before training, unseen-intent accuracy {:.1}%", before.accuracy * 100.0);
 
-    println!("intents: {} steps over {} examples", s.train.steps, train_rows.len());
-    let mut last = 0usize;
-    let loss = pipe
-        .train_choices(
-            &train_rows,
-            &options,
-            INSTRUCTIONS,
-            s.train.steps,
-            s.train.model.seed,
-            &mut |step, l| {
-                if step / 200 > last {
-                    last = step / 200;
-                    println!("  step {step:>6}  loss {l:.4}");
-                }
-            },
-        )
-        .map_err(|e| format!("{e}"))?;
-    println!("intents: final loss {loss:.4}");
+    // A backend that arrives pretrained with no training support in this SDK
+    // yet (Laya - see `Stages::supports_training`'s own doc) skips straight
+    // to scoring: `before` above already IS the number this run exists to
+    // validate for such a backend - its zero-shot reading of options it was
+    // never shown a brain-side gradient step on at all.
+    if pipe.supports_training() {
+        println!("intents: {} steps over {} examples", s.train.steps, train_rows.len());
+        let mut last = 0usize;
+        let loss = pipe
+            .train_choices(
+                &train_rows,
+                &options,
+                INSTRUCTIONS,
+                s.train.steps,
+                s.train.model.seed,
+                &mut |step, l| {
+                    if step / 200 > last {
+                        last = step / 200;
+                        println!("  step {step:>6}  loss {l:.4}");
+                    }
+                },
+            )
+            .map_err(|e| format!("{e}"))?;
+        println!("intents: final loss {loss:.4}");
+    } else {
+        println!(
+            "intents: this backend arrives pretrained with no training support in this SDK yet - \
+             skipping training and scoring the zero-shot pretrained model on all three splits"
+        );
+    }
 
     let seen = score(&mut pipe, &data, &split.seen, &options, s.train.eval, s.train.model.seed)?;
     let unseen =
@@ -193,8 +205,12 @@ fn run() -> Result<(), String> {
     unseen.row("intents NEVER trained on");
     control.row("  same, state shuffled");
 
-    pipe.save_head(&s.train.model.save).map_err(|e| format!("{e}"))?;
-    println!("\nintents: wrote {}", s.train.model.save);
+    if pipe.supports_training() {
+        pipe.save_head(&s.train.model.save).map_err(|e| format!("{e}"))?;
+        println!("\nintents: wrote {}", s.train.model.save);
+    } else {
+        println!("\nintents: no head to save - this backend trains nothing here (see above)");
+    }
 
     verdict(&seen, &unseen, &control);
     Ok(())

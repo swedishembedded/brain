@@ -81,6 +81,23 @@ pub trait Stages: Sized {
         "> "
     }
 
+    /// Whether THIS loaded pipeline's backend can be trained at all.
+    ///
+    /// Default `true`: every architecture that has been here could, until
+    /// [`crate::DecisionPipeline`]'s Laya arm - a pretrained-only backend
+    /// with a gradient-checked backward but no optimizer loop wired up yet
+    /// (see `crates/sdk/src/decision.rs`'s own module doc). A caller checks
+    /// this BEFORE calling [`Flow::train`], rather than calling it and
+    /// parsing the resulting error, because the two outcomes it wants -
+    /// train normally, or skip straight to evaluating what arrived already
+    /// trained - are genuinely different next stages to chain, not the same
+    /// code path with a swallowed failure. Overriding this is how an
+    /// architecture says so honestly instead of a sample having to sniff
+    /// which backend it got.
+    fn supports_training(&self) -> bool {
+        true
+    }
+
     /// Declare what the interactive stages decide between, for an
     /// architecture whose output space is part of the request. The default
     /// refuses, because for most architectures there is nothing to declare.
@@ -121,6 +138,22 @@ impl<P> Flow<P> {
 
     pub fn eval_report(&self) -> Option<&EvalReport> {
         self.eval.as_ref()
+    }
+
+    /// Whether the pipeline this chain is carrying supports [`Flow::train`] -
+    /// see [`Stages::supports_training`]'s own doc for why this exists as an
+    /// explicit query rather than [`Flow::train`] silently skipping itself.
+    ///
+    /// `false` on a chain that already failed: there is no live pipeline to
+    /// ask, and [`Flow::train`] on a failed chain is already a documented
+    /// no-op that preserves the original error, so `false` is never the
+    /// wrong answer to give here - it never causes a caller to skip a train
+    /// stage that would otherwise have run.
+    pub fn supports_training(&self) -> bool
+    where
+        P: Stages,
+    {
+        self.inner.as_ref().map(Stages::supports_training).unwrap_or(false)
     }
 
     /// Run `f` only while the chain is live, recording `note` either way.

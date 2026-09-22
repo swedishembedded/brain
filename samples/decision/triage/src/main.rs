@@ -109,13 +109,30 @@ fn require(path: &std::path::Path, what: &str, remedy: &str) {
     }
 }
 
+/// Rule 5 again, for a directory shape rather than a single file: a
+/// `decide`-shaped checkpoint has a root `config.json`; a Laya checkpoint has
+/// none (only a nested `encoder/config.json`) and is marked instead by a root
+/// `rl_agent_config.json` - see `brain::DecisionPipeline`'s own module doc.
+/// This is a cheap existence probe, not the SDK's real dispatch: it exists so
+/// a missing/empty `--encoder DIR` fails with a clear message instead of a
+/// confusing one from three layers down, not to duplicate `resolve_decision_
+/// backend`'s own directory-structure sniffing (which still runs for real
+/// inside `DecisionPipeline::builder(..).load()`).
+fn require_encoder_dir(dir: &str) {
+    let base = std::path::Path::new(dir);
+    if !base.join("config.json").is_file() && !base.join("rl_agent_config.json").is_file() {
+        eprintln!("triage: no encoder checkpoint at {dir}");
+        eprintln!(
+            "triage: run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR \
+             (a Laya checkpoint - convaiinnovations/laya - has rl_agent_config.json instead of config.json)"
+        );
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args = parse_args();
-    require(
-        &std::path::Path::new(&args.encoder).join("config.json"),
-        "encoder checkpoint",
-        "run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR",
-    );
+    require_encoder_dir(&args.encoder);
     require(
         &std::path::Path::new(&args.data).join("train.csv"),
         "BANKING77 data",
@@ -158,12 +175,22 @@ fn main() {
     }
     let mut chain = brain::Flow::new(flow.load());
 
-    // Training is skipped when trained weights were supplied: the SAME chain
-    // serves both, because a stage that is not wanted is simply not in it.
-    if args.head_in.is_none() {
+    // Training is skipped either when trained weights were supplied, or when
+    // this backend has no training support at all (Laya: pretrained-only,
+    // per `Flow::supports_training`'s own doc) - the SAME chain serves every
+    // case, because a stage that is not wanted is simply not in it. Either
+    // way `evaluate()` still runs, so a Laya-pointed run reports a real,
+    // comparable accuracy number instead of none.
+    if args.head_in.is_none() && chain.supports_training() {
         chain = chain.train(spec).evaluate().save(&args.save_to);
     } else {
-        chain = chain.with_question(INSTRUCTIONS, options);
+        if args.head_in.is_none() {
+            println!(
+                "triage: this backend arrives pretrained with no training support in this SDK yet \
+                 - evaluating it zero-shot instead of training"
+            );
+        }
+        chain = chain.with_question(INSTRUCTIONS, options).with_eval(spec.eval.clone()).evaluate();
     }
 
     let chain = match &args.ask {

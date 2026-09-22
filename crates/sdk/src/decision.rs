@@ -57,6 +57,17 @@
 //! pipeline returns a clear `Err` naming why (`crates/modernbert` has a
 //! gradient-checked backward primitive but no optimizer loop, loss function,
 //! or training CLI wiring yet - real future work, not a silent no-op).
+//! [`Stages::supports_training`] (`false` on the Laya arm) is how a caller
+//! checks this BEFORE calling [`Flow::train`]/[`DecisionPipeline::
+//! train_choices`], rather than calling it and parsing the error - see that
+//! trait method's own doc.
+//!
+//! **[`DecisionPipeline::route`] is the mirror-image asymmetry**: `Err` on
+//! the `Decide` arm, because `crates/decide` has no act/escalate head at all
+//! (see the architecture table in the plan this crate followed) - only Laya
+//! does. It surfaces `LayaHead::forward`'s own `act_logits`, which earlier
+//! milestones computed and discarded; see [`RouteVerdict`]'s own doc for what
+//! it returns and its honesty caveat about the act head's class order.
 //!
 //! **[`DecisionLimits`] (`cap_rows`/`cap_slots`/`max_span`/`overlap`) is a
 //! `decide`-specific windowing/packing concept and has NO effect on a
@@ -101,6 +112,29 @@ pub struct Choice {
     /// How concentrated the distribution is, on `[0, 1]`, independent of how
     /// many options there were.
     pub confidence: f32,
+}
+
+/// What [`DecisionPipeline::route`] returns: a probability plus Laya's own
+/// act/escalate head's judgment about it - `Err` on a `Decide`-backed
+/// pipeline, which has no such head (see this module's doc).
+#[derive(Clone, Debug)]
+pub struct RouteVerdict {
+    /// `P(true)` on the proposition, exactly [`DecisionPipeline::probability`]'s
+    /// own return value for the same call.
+    pub probability: f32,
+    /// The act head's own softmax, one entry per class (2 on the released
+    /// checkpoint: `act.fc2`'s output width, `rl_agent_config.json`'s
+    /// `act_costs` names one of them `"escalate"`). **Which INDEX is which
+    /// class was not independently confirmed against the real training code
+    /// this session** - `rl_common.py`'s own act-label order was not part of
+    /// what M3/M5 verified (they verified the head's math, not its output
+    /// LABELING). Treat `act_index`/`act_probabilities` as "class 0" vs
+    /// "class 1" until a future check pins the mapping, the same honesty bar
+    /// this module already applies to the unimplemented per-cardinality
+    /// temperature table.
+    pub act_probabilities: Vec<f32>,
+    /// `argmax(act_probabilities)`.
+    pub act_index: usize,
 }
 
 /// The encoder arrives pretrained and the head does not, so they move at
@@ -182,10 +216,12 @@ impl LayaBackend {
     }
 
     /// Run one packed `(state, question)` call through the trunk and head,
-    /// returning raw (unsoftmaxed) option logits. The act-head's own output
-    /// is discarded here - no SDK surface exposes it yet (M7's job, alongside
-    /// the sample that actually needs it).
-    fn score(&mut self, state: &str, q: &modernbert::Question) -> Result<Vec<f32>> {
+    /// returning raw (unsoftmaxed) option logits AND the act head's own raw
+    /// logits (`[n_act]` - always exactly one question per call here, see
+    /// this module's "Two architectures, one surface" doc). [`Self::score`]
+    /// and [`Self::route`] are both thin callers of this, so the two-wait
+    /// cross-`Gpu`-handle dispatch below exists in exactly one place.
+    fn score_raw(&mut self, state: &str, q: &modernbert::Question) -> Result<(Vec<f32>, Vec<f32>)> {
         let state = modernbert::State::Str(state.to_string());
         let (ids, markers) =
             modernbert::build_sequence(&self.tok, &self.cfg, &state, q, self.max_len, self.head_max_len, None, false);
@@ -212,9 +248,37 @@ impl LayaBackend {
         let arity = [markers.len()];
         let hidden = self.enc.hidden_buf();
         self.head.set_call(hidden, &spans, &qtype, &marker_rows, &arity);
-        let (logits, _act_logits) = self.head.forward();
+        let (logits, act_logits) = self.head.forward();
         self.head.poll_wait();
-        Ok(logits)
+        Ok((logits, act_logits))
+    }
+
+    /// [`Self::score_raw`], option logits only - [`Self::choose`]/
+    /// [`Self::probability`]'s own shared caller.
+    fn score(&mut self, state: &str, q: &modernbert::Question) -> Result<Vec<f32>> {
+        self.score_raw(state, q).map(|(logits, _act_logits)| logits)
+    }
+
+    /// [`DecisionPipeline::route`]'s own Laya-arm implementation: the noul
+    /// probability plus the act head's own softmax and argmax.
+    fn route(&mut self, state: &str, proposition: &str) -> Result<RouteVerdict> {
+        let q = modernbert::Question::Noul { ins: proposition.to_string(), false_text: None, true_text: None };
+        let (raw, act_raw) = self.score_raw(state, &q)?;
+        if raw.len() != 2 {
+            return Err(Error::Backend(format!(
+                "laya: a noul question must score exactly 2 options (false, true), got {}",
+                raw.len()
+            )));
+        }
+        let t = self.temperature_for(modernbert::QType::Noul);
+        let p = softmax(&scaled(&raw, t));
+        // The act head's own calibration is not the option head's - see
+        // `RouteVerdict`'s own doc: `rl_agent_config.json`'s temperature
+        // table is keyed by qtype/cardinality for the OPTION head, and names
+        // nothing for the act head, so no temperature is applied here.
+        let act_p = softmax(&act_raw);
+        let act_index = act_p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
+        Ok(RouteVerdict { probability: p[1], act_probabilities: act_p, act_index })
     }
 
     fn choose(&mut self, state: &str, instructions: &str, options: &[&str]) -> Result<Choice> {
@@ -376,6 +440,24 @@ impl DecisionPipeline {
         }
     }
 
+    /// The probability of `proposition` AND, on a Laya-backed pipeline, its
+    /// own act/escalate head's routing judgment about that call - `Err` on a
+    /// `Decide`-backed pipeline, which has no such head at all (see this
+    /// module's doc and [`RouteVerdict`]'s own doc for what the act half
+    /// means and its honesty caveat).
+    pub fn route(&mut self, state: &str, proposition: &str) -> Result<RouteVerdict> {
+        match &mut self.backend {
+            Backend::Decide(_) => Err(Error::Backend(
+                "route() needs Laya's own act/escalate head, which crates/decide has no equivalent \
+                 of - a Decide-backed DecisionPipeline has only choose/probability. A decide-backed \
+                 conversation router lives in brain::ConversionPipeline instead, which fits its own \
+                 semantic/convergence/learned signal ensemble on top of a trained Decide model."
+                    .into(),
+            )),
+            Backend::Laya(l) => l.route(state, proposition),
+        }
+    }
+
     /// Tell this pipeline what question its interactive stages ask, and over
     /// which options.
     ///
@@ -386,6 +468,16 @@ impl DecisionPipeline {
     pub fn set_question(&mut self, instructions: impl Into<String>, options: Vec<String>) {
         self.last_instructions = instructions.into();
         self.last_options = options;
+    }
+
+    /// Set what [`Flow::evaluate`]/[`Stages::run_eval`] scores next, WITHOUT
+    /// training - [`Stages::run_train`]'s own counterpart for a caller that
+    /// is skipping [`Flow::train`] (a backend [`Stages::supports_training`]
+    /// says cannot be trained here, or a pipeline already loaded from a
+    /// trained head) but still wants a real evaluation number rather than
+    /// none. See [`Flow::with_eval`] for the chain stage built on this.
+    pub fn set_eval(&mut self, eval: Vec<(String, usize)>) {
+        self.last_eval = eval;
     }
 
     /// Fine-tune on labelled examples: `(text, label)` pairs plus the option
@@ -537,6 +629,13 @@ impl Stages for DecisionPipeline {
         format!("decision model, {} options in the last call, {steps} training steps so far", self.last_options.len())
     }
 
+    fn supports_training(&self) -> bool {
+        // See LAYA_TRAINING_NOT_IMPLEMENTED and this module's doc: the Laya
+        // arm has a gradient-checked backward but no optimizer loop, loss
+        // function, or training CLI wiring yet.
+        !matches!(self.backend, Backend::Laya(_))
+    }
+
     fn run_train(&mut self, spec: &TrainSpec, log: &mut dyn FnMut(usize, f32)) -> Result<TrainReport> {
         let ex: Vec<(&str, usize)> = spec.examples.iter().map(|(t, l)| (t.as_str(), *l)).collect();
         let final_loss =
@@ -606,6 +705,26 @@ impl Stages for DecisionPipeline {
             out.push_str("\n       (low confidence - a real system would escalate this one)");
         }
         Ok(out)
+    }
+}
+
+impl Flow<DecisionPipeline> {
+    /// Set what [`Flow::evaluate`] scores next, without training - the chain
+    /// stage built on [`DecisionPipeline::set_eval`], for a caller that
+    /// checked [`Flow::supports_training`] (or already has a trained head)
+    /// and is skipping [`Flow::train`] but still wants a real evaluation
+    /// number. Added through the same seam [`Flow::stage`] documents
+    /// ([`Flow<ConversionPipeline>::replay`] is the other example) rather
+    /// than folded into [`Flow::with_question`]: the two travel together at
+    /// most call sites that need this, but `with_question` is shared by
+    /// every [`Stages`] architecture and most have no notion of a held-out
+    /// eval set shaped like this one's `(text, label)` pairs.
+    pub fn with_eval(self, eval: Vec<(String, usize)>) -> Flow<DecisionPipeline> {
+        let n = eval.len();
+        self.stage("eval set", move |p| {
+            p.set_eval(eval);
+            Ok(Some(format!("{n} held-out examples")))
+        })
     }
 }
 
