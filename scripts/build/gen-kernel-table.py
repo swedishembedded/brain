@@ -121,7 +121,14 @@ def cross_check(name, text, meta):
     if meta["quant"] == "q4" and "q4" not in name:
         errs.append("@quant q4 declared but the kernel name has no 'q4' marker")
 
-    if meta["opt"] == "5" and not (st["dp4a"] or "splitk" in name or st["regblock"]):
+    # A function-scope array in a work-group kernel IS a per-thread register
+    # block - that is the only thing such an array can be, and it is why the
+    # CPU JIT refuses one (see `kernelmeta.cpu`). Without this the ragged
+    # sibling of a `_reg` kernel (`flash_attn_bidir_spans`, whose `q0`/`o0`
+    # accumulators are that array) is read as having no register block purely
+    # because its NAME does not end in `_reg2`.
+    regblock = st["regblock"] or (st["localarray"] and (st["shared"] or st["barriers"]))
+    if meta["opt"] == "5" and not (st["dp4a"] or "splitk" in name or regblock):
         errs.append("@opt 5 but no register block, DP4A or split-K is present")
 
     # A barrier count stated in @how must match the CODE. The pre-4fbd112

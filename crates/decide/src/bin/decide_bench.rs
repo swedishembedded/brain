@@ -21,7 +21,12 @@
 //! GPU kernel performance work, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! Usage: decide_bench [options] [reps] [state-tokens]
+//! Usage: decide_bench [--gpu N] [--per-span] [options] [reps] [state-mult] [state-tokens]
+//!
+//! `--per-span` records the reverse attention one dispatch per span, the way
+//! it was before the ragged family existed, so the before and the after of
+//! that change are one process apart rather than one build apart - which is
+//! the only honest comparison on a box something else may be using.
 
 use std::time::Instant;
 
@@ -66,6 +71,11 @@ fn main() {
         gpu_core::devices::set_ambient_gpu(Some(idx));
         println!("pinned to GPU {idx}");
     }
+    // The BEFORE of this bench's own before/after: record the reverse
+    // attention one dispatch per span, the way it was before the ragged
+    // family existed. Same process, same card, same minute - which is the only
+    // way to compare on a box something else may be using.
+    let per_span = args.iter().position(|a| a == "--per-span").map(|i| args.remove(i)).is_some();
     let n_opts: usize = args.first().and_then(|a| a.parse().ok()).unwrap_or(OPTIONS.len());
     let reps: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(10);
     let state_mult: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1);
@@ -120,8 +130,17 @@ fn main() {
         req.cls_rows.len(),
     );
 
+    if per_span {
+        m.enc.set_fused_span_bwd(false);
+    }
+    println!(
+        "reverse attention: {}",
+        if per_span { "one dispatch per span (the old path)" } else { "one dispatch over all spans" }
+    );
+
     // Warm up: the first call records every tape and compiles nothing else.
-    for i in 0..states.len().max(2) {
+    let warmups = states.len().max(2);
+    for i in 0..warmups {
         step(&mut m, &states[i % states.len()], qs, &loss);
     }
 
@@ -160,6 +179,22 @@ fn main() {
 
     if let Some((h, mi, live)) = m.enc.gpu().step_cache_stats() {
         println!("\nstep cache: {h} hits, {mi} misses, {live} live entries");
+    }
+
+    // Per-step DEVICE traffic, not just time. A step that costs far more wall
+    // clock than its arithmetic is either re-recording bind groups on the host
+    // or draining the queue; these two counters tell which, and neither is
+    // visible in a per-kernel table.
+    for (label, g) in [("encoder", m.enc.gpu()), ("head", m.head.gpu())] {
+        if let Some(s) = g.stats() {
+            println!(
+                "{label} device traffic, per step: {:.0} submits, {:.0} dispatches, {:.0} bind groups, {:.0} writes",
+                s.submits as f64 / (reps + warmups) as f64,
+                s.dispatches as f64 / (reps + warmups) as f64,
+                s.bind_groups as f64 / (reps + warmups) as f64,
+                s.writes as f64 / (reps + warmups) as f64,
+            );
+        }
     }
 
     println!(
@@ -235,6 +270,8 @@ fn timed_step(m: &mut Decide, state: &str, qs: &[Question], loss: &LossConfig) -
     let t = lap(&mut out, "head.backward (device)", t);
 
     m.enc.prepare_reverse();
+    let t = lap(&mut out, "enc.prepare_reverse (record)", t);
+
     m.enc.backward_seeded();
     m.enc.poll_wait();
     let t = lap(&mut out, "enc.backward (device)", t);

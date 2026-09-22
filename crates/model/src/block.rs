@@ -1707,6 +1707,179 @@ pub fn flash_spans_table(heads: u32, spans: &[(u32, u32)]) -> Vec<u32> {
     t
 }
 
+// ---- ragged-span self-attention BACKWARD ------------------------------------
+
+/// Threads per workgroup every `*_spans` reverse kernel declares. A caller
+/// must size its grid from this and never from a figure of its own.
+pub const SPANS_BWD_WS: u32 = 64;
+
+/// The six ragged-span reverse kernels, resolved by NAME.
+///
+/// The reverse twin of [`flash_bidir_spans_step`]: one dispatch per kernel
+/// covers EVERY packed span, where [`chunked_bidir_bwd`] runs the same six
+/// per span and points each one at its span with a non-zero storage-binding
+/// offset. Two costs come off together. The dispatch count stops growing with
+/// the option count - a request with one state window and eighteen options is
+/// 114 per-span dispatches per layer against 6 here - and, because nothing is
+/// bound at an offset any more, the batch stops tripping `backend-wgpu`'s
+/// Intel ANV sliced-binding workaround, which serialises a whole flush into
+/// one queue submit and fence PER DISPATCH.
+///
+/// `None` when the device has not registered them, so a caller falls back to
+/// [`chunked_bidir_bwd`] rather than discovering it at dispatch time.
+#[derive(Clone, Copy, Debug)]
+pub struct SpansBwdIds {
+    pub scores: usize,
+    pub softmax: usize,
+    pub dscores: usize,
+    pub dq: usize,
+    pub dk: usize,
+    pub dv: usize,
+}
+
+impl SpansBwdIds {
+    pub fn resolve(g: &Gpu) -> Option<SpansBwdIds> {
+        Some(SpansBwdIds {
+            scores: g.kernel_index("attn_scores_spans")?,
+            softmax: g.kernel_index("attn_softmax_spans")?,
+            dscores: g.kernel_index("attn_bwd_dscores_spans")?,
+            dq: g.kernel_index("attn_bwd_dq_spans")?,
+            dk: g.kernel_index("attn_bwd_dk_spans")?,
+            dv: g.kernel_index("attn_bwd_dv_spans")?,
+        })
+    }
+}
+
+/// One ragged-span work table: `(row0, len, score_base, elem0)` per workgroup.
+///
+/// `per_wg` is how many of the kernel's units one workgroup owns and
+/// `units(len)` how many a span has, so the SAME builder produces all four
+/// tables the family needs - they differ only in what a unit is (a score
+/// element, a score row, or an output channel of the q/k/v gradient).
+fn spans_bwd_table(heads: u32, spans: &[(u32, u32)], per_wg: u32, units: impl Fn(u32) -> u32) -> Vec<u32> {
+    let mut t = Vec::new();
+    let mut sbase = 0u32;
+    for &(row0, len) in spans {
+        let n = units(len);
+        let mut e0 = 0u32;
+        while e0 < n {
+            t.extend_from_slice(&[row0, len, sbase, e0]);
+            e0 += per_wg;
+        }
+        sbase += heads * len * len;
+    }
+    t
+}
+
+/// The four work tables one set of spans needs, and the score-slab length
+/// they address.
+pub struct SpansBwdWork {
+    /// Score ELEMENTS, 64 per workgroup - `attn_scores_spans`.
+    pub qk: Vec<u32>,
+    /// Score ROWS, 64 per workgroup - `attn_softmax_spans`.
+    pub rows64: Vec<u32>,
+    /// Score ROWS, ONE per workgroup - `attn_bwd_dscores_spans`, which is
+    /// cooperative because every element of a row shares one reduction.
+    pub rows1: Vec<u32>,
+    /// q/k/v gradient channels, 64 per workgroup - `attn_bwd_d{q,k,v}_spans`.
+    pub hd: Vec<u32>,
+    /// Floats the `[span][head][query][key]` score slab occupies. A caller
+    /// with a smaller slab must fall back rather than truncate.
+    pub score_floats: u64,
+}
+
+/// Build the work tables for `spans`. Rebuilt only when the spans change,
+/// which is exactly when a recorded step list is rebuilt.
+pub fn spans_bwd_work(heads: u32, head_dim: u32, spans: &[(u32, u32)]) -> SpansBwdWork {
+    SpansBwdWork {
+        qk: spans_bwd_table(heads, spans, SPANS_BWD_WS, |l| heads * l * l),
+        rows64: spans_bwd_table(heads, spans, SPANS_BWD_WS, |l| heads * l),
+        rows1: spans_bwd_table(heads, spans, 1, |l| heads * l),
+        hd: spans_bwd_table(heads, spans, SPANS_BWD_WS, |l| heads * l * head_dim),
+        score_floats: spans.iter().map(|&(_, l)| heads as u64 * l as u64 * l as u64).sum(),
+    }
+}
+
+/// Table ENTRIES (four `u32` each) the worst case for these limits needs, in
+/// the order of [`SpansBwdWork`]'s fields, plus the score-slab floats.
+///
+/// The worst case is not "every row its own span" for every table: a table
+/// counted in score elements peaks when the spans are as LONG as they may be,
+/// and one counted per span peaks when they are as short. Both bounds are
+/// taken, so a buffer sized from this fits any packing of `cap_rows` rows.
+pub fn spans_bwd_capacity(heads: u32, head_dim: u32, cap_rows: u32, max_span: u32) -> ([usize; 4], u64) {
+    let (r, m, h, hd) = (cap_rows as u64, max_span as u64, heads as u64, head_dim as u64);
+    let cap = |units_total: u64| (units_total.div_ceil(u64::from(SPANS_BWD_WS)) + r) as usize;
+    (
+        [cap(h * m * r), cap(h * r), (h * r) as usize, cap(h * r * hd)],
+        h * m * r,
+    )
+}
+
+/// Record the whole span-local attention backward as SIX dispatches.
+///
+/// Same arithmetic as [`chunked_bidir_bwd`] with `chunk == len`: the scores
+/// and probabilities are recomputed from the cached `qkv`, then the softmax
+/// jacobian, then the three operand gradients. `d_qkv` needs no clear - a
+/// span's whole query axis is covered by one dispatch, so the key and value
+/// gradients ASSIGN rather than accumulate across chunks.
+#[allow(clippy::too_many_arguments)]
+pub fn spans_bidir_bwd(
+    g: &Gpu,
+    ids: &SpansBwdIds,
+    heads: u32,
+    head_dim: u32,
+    d_model: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    d_ctx: &DeviceBuffer,
+    d_qkv: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_scores: &DeviceBuffer,
+    work: &SpansBwdBufs,
+    counts: [u32; 4],
+    steps: &mut Vec<Step>,
+) {
+    let p = |n_wg: u32| [n_wg, heads, head_dim, stride, q_off, k_off, v_off, d_model];
+    let thr = |n_wg: u32| n_wg * SPANS_BWD_WS;
+    let [n_qk, n_rows64, n_rows1, n_hd] = counts;
+    steps.push(g.step(ids.scores, &[&work.qk, qkv, scores], &p(n_qk), thr(n_qk)));
+    steps.push(g.step(ids.softmax, &[&work.rows64, scores, probs], &p(n_rows64), thr(n_rows64)));
+    steps.push(g.step(ids.dscores, &[&work.rows1, d_ctx, qkv, probs, d_scores], &p(n_rows1), thr(n_rows1)));
+    steps.push(g.step(ids.dq, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), thr(n_hd)));
+    steps.push(g.step(ids.dk, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), thr(n_hd)));
+    steps.push(g.step(ids.dv, &[&work.hd, probs, d_ctx, d_qkv], &p(n_hd), thr(n_hd)));
+}
+
+/// Device-side homes for [`SpansBwdWork`]'s four tables, owned by the model
+/// because they change only when the spans do.
+pub struct SpansBwdBufs {
+    pub qk: DeviceBuffer,
+    pub rows64: DeviceBuffer,
+    pub rows1: DeviceBuffer,
+    pub hd: DeviceBuffer,
+}
+
+impl SpansBwdBufs {
+    /// Upload `w` and return each table's workgroup count, in the order
+    /// [`spans_bidir_bwd`] takes them.
+    pub fn upload(&self, g: &Gpu, w: &SpansBwdWork) -> [u32; 4] {
+        for (buf, t) in [(&self.qk, &w.qk), (&self.rows64, &w.rows64), (&self.rows1, &w.rows1), (&self.hd, &w.hd)] {
+            g.write(buf, t);
+        }
+        [
+            (w.qk.len() / 4) as u32,
+            (w.rows64.len() / 4) as u32,
+            (w.rows1.len() / 4) as u32,
+            (w.hd.len() / 4) as u32,
+        ]
+    }
+}
+
 /// Workgroup memory `flash_attn_cross_reg2` needs - the same tiles, hence the
 /// same figure, as [`FLASH_REG2_SHARED`]; named separately so a future rung of
 /// the cross ladder with different tiles cannot silently inherit this one.

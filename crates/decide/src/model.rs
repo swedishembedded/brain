@@ -45,6 +45,12 @@ use crate::config::EncoderConfig;
 /// span grows and the allocation stays bounded whatever a caller asks for.
 const SLAB_BUDGET: u64 = 256 << 20;
 
+/// Ceiling on the ragged reverse pass' score slab, in FLOATS. The bound
+/// `heads * max_span * cap_rows` is exact but grows with a capacity a caller
+/// may never use, so it is capped here and a request past the cap falls back
+/// to the per-span path instead of enlarging the model.
+const RAGGED_SLAB_FLOATS: u64 = 16 << 20;
+
 /// WebGPU's `min_storage_buffer_offset_alignment`. The span attention binds a
 /// VIEW of the fused qkv and of the context buffer starting at a span's first
 /// row, and a bound offset must be a multiple of this. It is a hardware
@@ -144,6 +150,22 @@ pub struct Encoder {
     layers: Vec<LayerBufs>,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
+    /// The ragged-span reverse kernels, when this device registered them.
+    /// `None` falls back to the per-span `block::chunked_bidir_bwd`.
+    spans_bwd: Option<block::SpansBwdIds>,
+    /// Their four work tables, rewritten whenever the spans change.
+    spans_work: block::SpansBwdBufs,
+    /// Workgroups each of those tables describes, for THIS set of spans.
+    spans_counts: [u32; 4],
+    /// Whether the current spans' score slab fits the allocation above. A
+    /// packing that does not is run by the per-span path rather than
+    /// truncated.
+    spans_fit: bool,
+    /// Opt-out, for the test that holds the two reverse passes against each
+    /// other. Nothing in production turns this off.
+    spans_bwd_on: bool,
+    /// Floats the score/probability/score-gradient slabs hold.
+    score_floats: u64,
     /// K for one span, transposed to key-minor. See [`block::KeyMinor`]: the
     /// scores kernel reads K with the key index as its fastest thread index,
     /// so it wants K laid out that way and this is where the transposed copy
@@ -228,7 +250,17 @@ impl Encoder {
         // `chunk` query rows at a time against a whole span's keys.
         let per_row = cfg.n_heads as u64 * max_span as u64 * 4;
         let chunk = ((SLAB_BUDGET / per_row.max(1)).max(1) as u32).min(max_span.max(1));
-        let slab = cfg.n_heads as u64 * chunk as u64 * max_span as u64;
+        // The score slab is sized for the RAGGED reverse pass, which holds
+        // every span's `[heads, len, len]` block at once where the chunked
+        // path holds one span's at a time. That is the whole price of running
+        // the reverse attention as six dispatches instead of six per span,
+        // and it is bounded: `sum len^2 <= max_span * rows`. The chunked path
+        // reads the same buffers and needs strictly less, so one allocation
+        // serves both and a request too big for it simply takes the old path.
+        let (work_cap, ragged) =
+            block::spans_bwd_capacity(cfg.n_heads, cfg.head_dim(), cap_rows, max_span);
+        let slab = (cfg.n_heads as u64 * chunk as u64 * max_span as u64)
+            .max(ragged.min(RAGGED_SLAB_FLOATS));
 
         let idbuf = |name: &str| {
             gpu.buffer(name, n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST)
@@ -268,6 +300,17 @@ impl Encoder {
             layers,
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
+            spans_bwd: block::SpansBwdIds::resolve(&gpu),
+            spans_work: block::SpansBwdBufs {
+                qk: gpu.storage(work_cap[0] as u64 * 4),
+                rows64: gpu.storage(work_cap[1] as u64 * 4),
+                rows1: gpu.storage(work_cap[2] as u64 * 4),
+                hd: gpu.storage(work_cap[3] as u64 * 4),
+            },
+            spans_counts: [0; 4],
+            spans_fit: false,
+            spans_bwd_on: true,
+            score_floats: slab,
             kt: gpu.storage(h * cfg.max_positions as u64),
             // One entry per workgroup, four u32 each. The worst case is every
             // row its own span, which is the most workgroups a given row
@@ -436,6 +479,14 @@ impl Encoder {
             // a row range that is not the one it was dispatched for.
             let table = block::flash_spans_table(self.cfg.n_heads, &self.spans);
             self.gpu.write(&self.flash_work, &table);
+            // The reverse pass' own span tables, on the same condition and for
+            // the same reason: a dispatch is sized from them, so they and the
+            // recorded steps must describe one set of spans.
+            let w = block::spans_bwd_work(self.cfg.n_heads, self.cfg.head_dim(), &self.spans);
+            self.spans_fit = w.score_floats <= self.score_floats;
+            if self.spans_fit {
+                self.spans_counts = self.spans_work.upload(&self.gpu, &w);
+            }
             self.steps = self.build_steps();
             self.records.0 += 1;
         }
@@ -736,6 +787,19 @@ impl Encoder {
         &self.spans
     }
 
+    /// Whether the reverse pass is running the FUSED ragged-span attention
+    /// backward rather than the per-span one.
+    pub fn fused_span_bwd(&self) -> bool {
+        self.spans_bwd.is_some() && self.spans_fit && self.spans_bwd_on
+    }
+
+    /// Force the per-span reverse attention back on, for the test that holds
+    /// the two against each other. The next reverse pass is re-recorded.
+    pub fn set_fused_span_bwd(&mut self, on: bool) {
+        self.spans_bwd_on = on;
+        self.reverse_stale = true;
+    }
+
     /// This half's device handle - what a profiler times its steps on.
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
@@ -859,33 +923,61 @@ impl Encoder {
             let (dx, dxt) = dx_gemm(n, h);
             s.push(g.step(dx, &[&bw.d_res_pre, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
 
-            // Per-span attention backward, recomputing each chunk's scores and
-            // probabilities from the cached qkv. `d_qkv` needs no clear: the
-            // first chunk of every span ASSIGNS its region and later chunks
-            // accumulate onto it.
-            block::chunked_bidir_bwd(
-                g,
-                &cross,
-                None,
-                &cross_bwd,
-                c.n_heads,
-                hd,
-                h,
-                &lb.qkv,
-                3 * h,
-                0,
-                h,
-                2 * h,
-                &bw.d_ctx,
-                &bw.d_qkv,
-                &self.scores,
-                &self.probs,
-                &bw.d_scores,
-                &self.spans,
-                self.chunk,
-                None,
-                &mut s,
-            );
+            // Span-local attention backward, recomputing the scores and
+            // probabilities from the cached qkv. `d_qkv` needs no clear: every
+            // region of it is ASSIGNED before it is read.
+            //
+            // ONE dispatch per kernel over every span where the device has the
+            // ragged family, which is what keeps the reverse pass' dispatch
+            // count independent of the option count - and, on an Intel GPU,
+            // what keeps it out of `backend-wgpu`'s sliced-binding
+            // serialisation. The per-span path stays as the fallback and is
+            // the same arithmetic.
+            match (&self.spans_bwd, self.spans_fit && self.spans_bwd_on) {
+                (Some(ids), true) => block::spans_bidir_bwd(
+                    g,
+                    ids,
+                    c.n_heads,
+                    hd,
+                    h,
+                    &lb.qkv,
+                    3 * h,
+                    0,
+                    h,
+                    2 * h,
+                    &bw.d_ctx,
+                    &bw.d_qkv,
+                    &self.scores,
+                    &self.probs,
+                    &bw.d_scores,
+                    &self.spans_work,
+                    self.spans_counts,
+                    &mut s,
+                ),
+                _ => block::chunked_bidir_bwd(
+                    g,
+                    &cross,
+                    None,
+                    &cross_bwd,
+                    c.n_heads,
+                    hd,
+                    h,
+                    &lb.qkv,
+                    3 * h,
+                    0,
+                    h,
+                    2 * h,
+                    &bw.d_ctx,
+                    &bw.d_qkv,
+                    &self.scores,
+                    &self.probs,
+                    &bw.d_scores,
+                    &self.spans,
+                    self.chunk,
+                    None,
+                    &mut s,
+                ),
+            }
 
             s.push(g.step(self.k.bias_grad, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
             let (dw, dwt) = dw_gemm(3 * h, h);

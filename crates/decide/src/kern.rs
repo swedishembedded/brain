@@ -89,6 +89,24 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
+    // The reverse twin of `flash_attn_bidir_spans`: the same six-kernel span
+    // attention backward, over EVERY span in one dispatch each instead of one
+    // dispatch per span per kernel per layer. Never indexed directly -
+    // `block::SpansBwdIds::resolve` finds them by name and `Encoder::
+    // rebuild_bwd` falls back to the per-span path when they are absent.
+    //
+    // The count is the point. At eighteen options a request is nineteen
+    // spans, so the per-span path records 114 attention dispatches per layer;
+    // this records 6. And because they address a span by DATA rather than by
+    // a non-zero storage-binding offset, the reverse pass stops tripping
+    // `backend-wgpu`'s Intel ANV sliced-binding workaround, which gives every
+    // dispatch in a serialised flush its own queue submit and fence.
+    ("attn_scores_spans", kernels::ATTN_SCORES_SPANS),
+    ("attn_softmax_spans", kernels::ATTN_SOFTMAX_SPANS),
+    ("attn_bwd_dscores_spans", kernels::ATTN_BWD_DSCORES_SPANS),
+    ("attn_bwd_dq_spans", kernels::ATTN_BWD_DQ_SPANS),
+    ("attn_bwd_dk_spans", kernels::ATTN_BWD_DK_SPANS),
+    ("attn_bwd_dv_spans", kernels::ATTN_BWD_DV_SPANS),
     // AdamW and its gradient-clipping stage.
     ("adamw", kernels::ADAMW),
     ("gradnorm_sq", kernels::GRADNORM_SQ),

@@ -94,6 +94,8 @@ pub const ATTN_BWD_DK_BIDIR: &str = include_str!("../wgsl/attn_bwd_dk_bidir.wgsl
 pub const ATTN_BWD_DK_CROSS: &str = include_str!("../wgsl/attn_bwd_dk_cross.wgsl");
 /// `wgsl/attn_bwd_dk_cross_acc.wgsl`
 pub const ATTN_BWD_DK_CROSS_ACC: &str = include_str!("../wgsl/attn_bwd_dk_cross_acc.wgsl");
+/// `wgsl/attn_bwd_dk_spans.wgsl`
+pub const ATTN_BWD_DK_SPANS: &str = include_str!("../wgsl/attn_bwd_dk_spans.wgsl");
 /// `wgsl/attn_bwd_dq.wgsl`
 pub const ATTN_BWD_DQ: &str = include_str!("../wgsl/attn_bwd_dq.wgsl");
 /// `wgsl/attn_bwd_dq_bias.wgsl`
@@ -102,6 +104,8 @@ pub const ATTN_BWD_DQ_BIAS: &str = include_str!("../wgsl/attn_bwd_dq_bias.wgsl")
 pub const ATTN_BWD_DQ_BIDIR: &str = include_str!("../wgsl/attn_bwd_dq_bidir.wgsl");
 /// `wgsl/attn_bwd_dq_cross.wgsl`
 pub const ATTN_BWD_DQ_CROSS: &str = include_str!("../wgsl/attn_bwd_dq_cross.wgsl");
+/// `wgsl/attn_bwd_dq_spans.wgsl`
+pub const ATTN_BWD_DQ_SPANS: &str = include_str!("../wgsl/attn_bwd_dq_spans.wgsl");
 /// `wgsl/attn_bwd_dscores.wgsl`
 pub const ATTN_BWD_DSCORES: &str = include_str!("../wgsl/attn_bwd_dscores.wgsl");
 /// `wgsl/attn_bwd_dscores_bidir.wgsl`
@@ -114,6 +118,8 @@ pub const ATTN_BWD_DSCORES_CROSS: &str = include_str!("../wgsl/attn_bwd_dscores_
 pub const ATTN_BWD_DSCORES_CROSS_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_cross_rows.wgsl");
 /// `wgsl/attn_bwd_dscores_rows.wgsl`
 pub const ATTN_BWD_DSCORES_ROWS: &str = include_str!("../wgsl/attn_bwd_dscores_rows.wgsl");
+/// `wgsl/attn_bwd_dscores_spans.wgsl`
+pub const ATTN_BWD_DSCORES_SPANS: &str = include_str!("../wgsl/attn_bwd_dscores_spans.wgsl");
 /// `wgsl/attn_bwd_dv.wgsl`
 pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 /// `wgsl/attn_bwd_dv_bidir.wgsl`
@@ -128,6 +134,8 @@ pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl
 pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
 /// `wgsl/attn_decode_scores_win.wgsl`
 pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
+/// `wgsl/attn_bwd_dv_spans.wgsl`
+pub const ATTN_BWD_DV_SPANS: &str = include_str!("../wgsl/attn_bwd_dv_spans.wgsl");
 /// `wgsl/attn_keypad_mask.wgsl`
 pub const ATTN_KEYPAD_MASK: &str = include_str!("../wgsl/attn_keypad_mask.wgsl");
 /// `wgsl/attn_prefix_mask.wgsl`
@@ -168,8 +176,12 @@ pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wg
 pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
 /// `wgsl/attn_scores_qk_kmask.wgsl`
 pub const ATTN_SCORES_QK_KMASK: &str = include_str!("../wgsl/attn_scores_qk_kmask.wgsl");
+/// `wgsl/attn_scores_spans.wgsl`
+pub const ATTN_SCORES_SPANS: &str = include_str!("../wgsl/attn_scores_spans.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
+/// `wgsl/attn_softmax_spans.wgsl`
+pub const ATTN_SOFTMAX_SPANS: &str = include_str!("../wgsl/attn_softmax_spans.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -1064,16 +1076,19 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dk_bidir", ATTN_BWD_DK_BIDIR),
     ("attn_bwd_dk_cross", ATTN_BWD_DK_CROSS),
     ("attn_bwd_dk_cross_acc", ATTN_BWD_DK_CROSS_ACC),
+    ("attn_bwd_dk_spans", ATTN_BWD_DK_SPANS),
     ("attn_bwd_dq", ATTN_BWD_DQ),
     ("attn_bwd_dq_bias", ATTN_BWD_DQ_BIAS),
     ("attn_bwd_dq_bidir", ATTN_BWD_DQ_BIDIR),
     ("attn_bwd_dq_cross", ATTN_BWD_DQ_CROSS),
+    ("attn_bwd_dq_spans", ATTN_BWD_DQ_SPANS),
     ("attn_bwd_dscores", ATTN_BWD_DSCORES),
     ("attn_bwd_dscores_bidir", ATTN_BWD_DSCORES_BIDIR),
     ("attn_bwd_dscores_bidir_rows", ATTN_BWD_DSCORES_BIDIR_ROWS),
     ("attn_bwd_dscores_cross", ATTN_BWD_DSCORES_CROSS),
     ("attn_bwd_dscores_cross_rows", ATTN_BWD_DSCORES_CROSS_ROWS),
     ("attn_bwd_dscores_rows", ATTN_BWD_DSCORES_ROWS),
+    ("attn_bwd_dscores_spans", ATTN_BWD_DSCORES_SPANS),
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
@@ -1089,6 +1104,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_relpos_drh", ATTN_RELPOS_DRH),
     ("attn_relpos_drw", ATTN_RELPOS_DRW),
     ("attn_relpos_qr", ATTN_RELPOS_QR),
+    ("attn_bwd_dv_spans", ATTN_BWD_DV_SPANS),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
@@ -1101,7 +1117,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
     ("attn_scores_qk_kmask", ATTN_SCORES_QK_KMASK),
+    ("attn_scores_spans", ATTN_SCORES_SPANS),
     ("attn_softmax", ATTN_SOFTMAX),
+    ("attn_softmax_spans", ATTN_SOFTMAX_SPANS),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
