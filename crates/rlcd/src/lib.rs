@@ -14,6 +14,16 @@
 //! - [`mod@scoring`] - proper scoring rules (focal + Brier) over a **target
 //!   distribution**, not just a gold index, so an exact oracle posterior
 //!   (0.6667, not "class 2") can be trained against directly.
+//! - [`mod@proper`] - the strictly-proper scoring rule the released
+//!   `convaiinnovations/laya` checkpoint's own training code uses
+//!   (`rl_common.py::proper_reward`: log + spherical, plus a ranked
+//!   probability term on ordinal questions). Coexists with [`mod@scoring`]
+//!   deliberately - see that module's doc for why an architecture must train
+//!   against the rule its own weights were fitted under.
+//! - [`mod@reinforce`] - the update rule that reward is actually used with:
+//!   REINFORCE with a group-mean baseline over Gaussian logit exploration,
+//!   plus an optional soft cross-entropy term. Transcribed from the only
+//!   published Laya training loop.
 //! - [`mod@cost`] - turning a probability into an action: cost matrices,
 //!   Bayes risk, decision regret, and value of information. A probability is
 //!   not an action; see that module's doc for why the two must stay separate
@@ -60,5 +70,7 @@
 pub mod atlas;
 pub mod cost;
 pub mod metrics;
+pub mod proper;
+pub mod reinforce;
 pub mod scoring;
 pub mod witness;
