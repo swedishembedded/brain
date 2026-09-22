@@ -125,15 +125,50 @@ runs, rather than being retrofitted onto a score that cannot see it.
 
 ## Milestones
 
-- [ ] **M1 - `crates/search`**: archive, niche, elite-on-time, operator trait,
-      bandit allocator, cascade. Leaf, gated by `check-crate-layers.sh`,
-      unit-tested with no engine and no GPU.
-- [ ] **M2 - UV-Max is a scorable thing**: `Mission::UvMax`, a prefix-computable
-      gauge whose terms are kills, secrets, exit and **negative elapsed tics**
-      (so the sum-to-final-score identity survives), and a `cell` whose
-      resolution is exact in the endgame.
-- [ ] **M3 - `doom search`**: discovery as its own subcommand. No encoder, no
-      head. Writes the archive and the verified solutions.
+- [x] **M1 - `crates/search`** (`96192c4f3`): archive keyed by
+      `Niche`, elite-on-cost within a niche, UCB1 allocator over gain per
+      second, evaluator cascade. Leaf, gated by `check-crate-layers.sh`, 26
+      spec tests, no engine and no GPU.
+- [x] **M2 - UV-Max is a scorable thing** (`79859abeb`): `Mission::UvMax` on
+      `report::Bar::UvMax`. **No time term in the score**, against the
+      original plan - a penalty that grows while the episode runs makes dying
+      the cheapest way to stop it, so time went to the archive's tiebreaker
+      instead. The exit is worth LESS than clearing (0.6 against 1.3), because
+      stepping on a DOOM exit ends the level and a bar that ranks
+      "sprinted out" above "cleared but still inside" teaches the search to
+      discard the trajectories worth keeping.
+- [x] **M3 - `doom search`** (`79859abeb`): discovery as its own subcommand,
+      no encoder loaded and no device opened. Top cascade rung replays a
+      claimed solution from the level's own start.
+### Measured so far, E1M1 at Ultra-Violence, 180 s, seed 1
+
+Every row is the same level, the same seed and the same budget. Best score is
+out of the 2.0 a completed category scores.
+
+| campaign | best | cells | x-cover | monsters-left buckets | steps |
+|---|---|---|---|---|---|
+| 60-step operators, niche without capability | 0.166 | 120 | 15 | 2 | 6 720 |
+| long teacher operators (`commit`/`chase`, 400 steps) | 0.193 | 73 | 12 | 2 | 12 988 |
+| ...plus weapons and health in the niche | **0.497** | 284 | **30** | **3** | 11 318 |
+
+0.497 is about 18 of E1M1's 29 monsters, against the scripted teacher's 6.
+Nothing has yet completed the category, so there is still no verified
+solution and no recording.
+
+Two things were learned rather than guessed, and both are recorded where a
+later reader will find them:
+
+- **The niche must hold capability, not the score's own terms**
+  (`.agents/knowledge/` #146). Dropping items from the niche because the
+  category does not count them also dropped the shotgun, and the archive
+  then deleted every armed state in favour of the faster unarmed one.
+- **Operator rates are only informative once the niche measures something
+  that matters.** With the position-heavy niche the four operators scored
+  1.88 to 2.75 gain/s and the allocator had nothing to choose between; with
+  capability axes they separated to 4.74 (`wander`) against 8.33 (`commit`),
+  and `commit` - 400 decisions of real play resumed from an archived cell -
+  is now clearly the one worth the budget.
+
 - [ ] **M4 - the `hunt` operator** and the engine support it needs (route to a
       named live monster / to an unfound secret sector).
 - [ ] **M5 - first verified UV-Max on one level**, replayed from the start.

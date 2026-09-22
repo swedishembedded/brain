@@ -65,12 +65,54 @@ const SAME_ACHIEVEMENT: f32 = 1e-4;
 /// almost nowhere and the archive stops growing.
 const REPEAT: f32 = 0.95;
 
-/// How often the teacher-guided operator takes the scripted player's own
-/// choice rather than a random one.
+/// One way of producing a candidate.
 ///
-/// Not 1.0, or the operator only ever finds what the teacher finds, and the
-/// teacher has never finished a level.
-const GUIDED: f32 = 0.85;
+/// Operators differ in only two things - how long they act for, and how often
+/// they take the scripted player's choice rather than a random one - and that
+/// is deliberate: a table of two numbers is something a campaign can be
+/// honest about, where four hand-written walk functions would drift into four
+/// slightly different definitions of what a walk is.
+///
+/// Which of them is worth running is [`Allocator`]'s problem, measured on
+/// archive gain per second. It is NOT settled here, and the first campaign
+/// showed why it cannot be: over 180 s on E1M1 the three original operators
+/// scored 3.75, 3.57 and 3.70 gain/s - indistinguishable, because all three
+/// walked 60 steps and 60 steps is not long enough to accomplish anything in
+/// a level full of monsters. Measured against that campaign, the scripted
+/// player playing straight through killed a monster every 244 decisions while
+/// the search managed one every 960: the search was four times LESS
+/// productive per step than simply playing. `commit` and `chase` are the
+/// response - long stretches of real play resumed from a cell the archive
+/// already reached, which is the thing a plain teacher run cannot do.
+struct Operator {
+    name: &'static str,
+    /// Decisions to take after returning to a cell.
+    walk: usize,
+    /// How often to take the scripted player's choice. Below 1.0 the walk
+    /// wanders off what the teacher would do, which is the only way to reach
+    /// something no teacher demonstrates; at 1.0 it is the teacher continuing
+    /// from somewhere the teacher could never have got to on its own.
+    guided: f32,
+    /// Set off from the best cell the archive holds rather than from a drawn
+    /// one. What makes an operator a LOCAL search on the best thing found so
+    /// far instead of a sample of the frontier.
+    from_best: bool,
+}
+
+const OPERATORS: [Operator; 4] = [
+    // Blind, and blind in a level full of things that shoot back is mostly
+    // dead - but it is the only operator that can produce an action no
+    // teacher and no policy would ever pick.
+    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false },
+    // Starts from somewhere plausible and wanders off it.
+    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false },
+    // A long stretch of real play from a drawn cell. Long enough to finish a
+    // firefight, clear a room and walk into the next one.
+    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false },
+    // The same, from the furthest-along cell there is: pushing the front of
+    // the search forward rather than filling in behind it.
+    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true },
+];
 
 /// What a search campaign found, and what it cost.
 pub struct Found {
@@ -171,10 +213,6 @@ pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
 /// assembled.
 const MAX_CHAIN: usize = 20_000;
 
-/// The operators. Each is one way of producing a candidate, and which of them
-/// is currently worth running is [`Allocator`]'s problem, not a schedule's.
-const OPERATORS: [&str; 3] = ["resume+repeat", "resume+teacher", "refine"];
-
 /// One search campaign against one loaded level.
 pub struct Campaign {
     archive: Archive<Trail>,
@@ -198,7 +236,7 @@ impl Campaign {
     pub fn new(slots: usize, seed: u64) -> Campaign {
         Campaign {
             archive: Archive::new(slots, SAME_ACHIEVEMENT),
-            alloc: Allocator::new(&OPERATORS),
+            alloc: Allocator::new(&OPERATORS.map(|o| o.name)),
             rng: Rng::new(seed),
             start: None,
             steps: 0,
@@ -270,17 +308,15 @@ impl Campaign {
     /// and HOW it chooses each action. Keeping that shape in one place is
     /// what stops three operators drifting into three slightly different
     /// definitions of what a walk is.
-    fn operate(&mut self, env: &mut DoomEnv, arm: usize, walk: usize, allowed: u32) -> Gain {
+    fn operate(&mut self, env: &mut DoomEnv, arm: usize, allowed: u32) -> Gain {
         let began = Instant::now();
         let mut gain = Gain::default();
+        let op = &OPERATORS[arm];
 
-        // WHERE to go back to. `refine` sets off from the furthest-along cell
-        // the archive holds rather than from a drawn one, which is what makes
-        // it a local search: it works on the best thing found so far instead
-        // of sampling the frontier.
-        let picked = match arm {
-            2 => self.archive.best().map(|e| (e.niche.clone(), e.slot)),
-            _ => self.archive.pick(&mut self.rng).map(|e| (e.niche.clone(), e.slot)),
+        let picked = if op.from_best {
+            self.archive.best().map(|e| (e.niche.clone(), e.slot))
+        } else {
+            self.archive.pick(&mut self.rng).map(|e| (e.niche.clone(), e.slot))
         };
         let Some((from, slot)) = picked else {
             gain.seconds = began.elapsed().as_secs_f64();
@@ -298,12 +334,12 @@ impl Campaign {
 
         let mut steps: Vec<String> = Vec::new();
         let mut last: Option<String> = None;
-        for _ in 0..walk {
+        for _ in 0..op.walk {
             let options = env.actions();
             if options.is_empty() {
                 break;
             }
-            let chose = self.choose(env, arm, &options, last.as_deref());
+            let chose = self.choose(env, op.guided, &options, last.as_deref());
             last = Some(options[chose].clone());
             steps.push(options[chose].clone());
             let (_, _, done) = env.step(chose);
@@ -378,23 +414,11 @@ impl Campaign {
     fn choose(
         &mut self,
         env: &mut DoomEnv,
-        arm: usize,
+        guided: f32,
         options: &[String],
         last: Option<&str>,
     ) -> usize {
-        let guided = match arm {
-            // Uniform random with repetition. Blind, and blind in a level
-            // full of things that shoot back is mostly dead - but it is the
-            // only operator that can produce an action no teacher and no
-            // policy would ever pick, which is the whole reason a search
-            // exists.
-            0 => false,
-            // Mostly the scripted player, sometimes not. Starts from
-            // somewhere plausible and wanders off it, which is the useful
-            // shape, and it costs a branch rather than a forward pass.
-            _ => self.rng.next_f32() < GUIDED,
-        };
-        if guided {
+        if guided > 0.0 && self.rng.next_f32() < guided {
             if let Some(i) = env.demo().filter(|i| *i < options.len()) {
                 return i;
             }
@@ -515,7 +539,6 @@ pub fn campaign(
     env: &mut DoomEnv,
     seed: u64,
     budget: Duration,
-    walk: usize,
     allowed: u32,
     every: Duration,
 ) -> Result<Found, String> {
@@ -526,7 +549,7 @@ pub fn campaign(
         "doom: searching {level} for {:.0}s, {} slots, operators: {}",
         budget.as_secs_f64(),
         env.slots(),
-        OPERATORS.join(", ")
+        OPERATORS.map(|o| o.name).join(", ")
     );
 
     let mut cascade: Cascade<Claim> = Cascade::new();
@@ -539,7 +562,7 @@ pub fn campaign(
 
     while began.elapsed() < budget {
         let arm = run.alloc.choose();
-        let gain = run.operate(env, arm, walk, allowed);
+        let gain = run.operate(env, arm, allowed);
         run.alloc.credit(arm, gain);
 
         // A completed category is checked the moment it is claimed, not at

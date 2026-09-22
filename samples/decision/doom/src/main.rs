@@ -90,8 +90,6 @@ pub struct Args {
     pub view: ViewOptions,
     /// `search`: wall clock per level, in seconds.
     pub search_budget: u64,
-    /// `search`: decisions an operator takes after returning to a cell.
-    pub walk: usize,
     /// `search`: where verified solutions are written.
     pub solutions: String,
 }
@@ -366,7 +364,6 @@ fn parse_args() -> Result<Args, String> {
         train,
         view,
         search_budget: args.usize_or("--search-budget", 600) as u64,
-        walk: args.usize_or("--walk", 60),
         solutions: args
             .take_str("--solutions")
             .unwrap_or_else(|| "out/doom-solutions.json".into()),
@@ -501,7 +498,6 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             &mut env,
             args.seed(),
             budget,
-            args.walk,
             allowed,
             Duration::from_secs(30),
         )?;

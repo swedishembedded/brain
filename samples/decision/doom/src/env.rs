@@ -1894,6 +1894,47 @@ fn key_mask(held: &[String]) -> i32 {
     mask
 }
 
+/// Which weapons are being carried, as a bitmask over DOOM's own slot
+/// numbers (1 fist/chainsaw, 2 pistol, 3 shotgun, 4 chaingun, 5 rocket
+/// launcher, 6 plasma, 7 BFG).
+///
+/// A weapon is a CAPABILITY, and the archive has to treat it exactly the way
+/// it treats a key. Picking a key up makes every cell reachable with it new;
+/// picking a shotgun up makes every fight winnable that was not. Without this
+/// axis, "standing in the courtyard with a shotgun" and "standing in the
+/// courtyard with a pistol" are one cell, the archive keeps whichever reached
+/// it in fewer tics - which is systematically the one that ran past the
+/// shotgun - and the search then repeatedly sets off from the weaker of the
+/// two and loses the fight it was sent to win.
+///
+/// This is the axis UV-Max most needed and the one it nearly lost: items do
+/// not count toward the category, so they were dropped from the niche
+/// wholesale. That is right for the SCORE and wrong for the niche, which is
+/// not a score - it is the question "is this a different kind of situation?",
+/// and holding a shotgun is about as different as a situation gets.
+fn weapon_mask(carried: &[obs::Weapon]) -> i32 {
+    let mut mask = 0;
+    for w in carried {
+        if (0..16).contains(&w.slot) {
+            mask |= 1 << w.slot;
+        }
+    }
+    mask
+}
+
+/// Health, in bands of twenty-five, capped at DOOM's own soulsphere ceiling.
+///
+/// Survivability is a behavioural dimension, not an objective - the UV-Max
+/// bar does not score health at all, and it should not, because a run is not
+/// better for ending healthy. But a SEARCH that cannot tell a healthy state
+/// from a nearly-dead one at the same spot keeps whichever is faster, and
+/// faster is systematically the one that skipped the fights. It then sets off
+/// from a state with nine health to clear a room, which is the search
+/// spending its budget on trajectories that were dead on arrival.
+fn health_band(health: i32) -> i32 {
+    (health.max(0) / 25).clamp(0, 8)
+}
+
 /// How many monsters are left, bucketed fine at the end and coarse at the
 /// start.
 ///
@@ -2081,6 +2122,8 @@ impl Env for DoomEnv {
             Mission::UvMax => {
                 parts.push(kills_left_bucket(l.kills, l.total_kills));
                 parts.push(l.secrets as i32);
+                parts.push(weapon_mask(&p.weapons));
+                parts.push(health_band(p.health));
             }
             // In tenths, because the counters run to a hundred and seventy-
             // seven on E1M6 and a cell per kill would be a cell per kill per
