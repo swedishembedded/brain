@@ -102,6 +102,16 @@ fast and scalable kernel - not a naive one.
    short-conv/attention encoder (GQA + QK-norm + RoPE, gated depthwise conv,
    tied MLM head, 8k context); imported 1:1, parity-gated per stage; chunked
    long-context inference. `brain lfm2 {import,fill-mask,embed}`.
+6c. **Laya decision model** (`crates/modernbert`) - convaiinnovations/laya:
+   ModernBERT-large backbone (pre-LN, GeGLU, per-layer-type RoPE) + Laya's
+   own 2-layer self-attention decision head (`[MASK]`-marker gather, scorer,
+   act/escalate head). Same `(state, question, options) -> P(answer)`
+   contract as `crates/decide`, a different backbone; no CLI of its own,
+   reached only via `brain::DecisionPipeline` (`decision` SDK feature), which
+   dispatches to either architecture. Real checkpoint imports and is
+   argmax-parity-tested against the Python reference; seeded backward through
+   the full head+trunk is gradient-checked, but is a trainable primitive with
+   no training loop wired on top yet. `.agents/roadmap/laya.md`.
 7. **Bottleneck autoencoder** (`crates/toyautoencoder`) - sequence → single
    compressed representation → MLP reconstruction, MSE head; gradient-checked.
 
