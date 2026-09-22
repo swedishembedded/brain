@@ -48,12 +48,18 @@ mission text is prepended to every option:
 Train with `--mix` and the mission is sampled per episode, so one policy has to
 read what it was asked to do.
 
+**Search, then compression.** Imitating a hand-written teacher cannot exceed
+that teacher, and no teacher worth writing by hand plays DOOM to 100%. So the
+loop has two halves: a search that keeps an archive of places reached and
+returns to them to explore further, and a cloning phase that compresses what
+the search found into weights. The archive is the durable artifact; the weights
+are a lossy compression of it. See [the search half](#the-search-half).
+
 **Realtime.** Measured on one Tesla P40, a decision is 28-33 ms end to end -
 about 28 ms of model and 5 ms of game - so the agent decides ~30 times a second,
-well above the rate a human plays at. See [what a decision
-costs](#what-a-decision-costs).
+well above the rate a human plays at.
 
-## What you need
+## Requirements
 
 Three things this sample cannot ship, and one script that fetches all of them:
 
@@ -87,24 +93,65 @@ For the encoder, any BERT-shaped checkpoint directory works (`config.json`,
 engine, the WAD and the encoder live is what you type on the command line, so a
 run is reproducible from its own invocation.
 
-## Running it
+## Quick start
 
 ```bash
 make samples/decision/doom/build
 make samples/decision/doom/run ARGS="probe --doom-bin … --wad … --encoder …"
 ```
 
+`probe` plays one scripted episode and exercises process, socket, observation,
+action, reward and frame with no trained policy. Run it first on a new machine:
+if it works, everything else is a matter of flags.
+
 Below, `$D` stands for those three flags. Every command works headless.
+
+## Commands
 
 | command | what it does |
 |---|---|
-| `probe` | one scripted episode. Run this first on a new machine: it exercises process, socket, observation, action, reward and frame with no trained policy |
-| `train` | warm-start on the scripted player, optionally DAgger, then PPO |
+| `probe` | one scripted episode, end to end, no policy |
+| `train` | warm-start on the scripted player, then search, self-imitation, DAgger or PPO |
 | `fit` | fit the head to the teacher and report how often it agrees - no reward, no critic |
 | `whatif` | go back to decisions and take a different one, to see what it was worth |
 | `eval` | score a policy and the scripted player on the **same** episodes |
 | `play` | run episodes showing every decision, optionally to an MP4 |
 | `bench` | time one decision against state length and option count |
+
+`doom --help` prints every flag, including the shared training flags from
+`brain`'s control pipeline.
+
+## Recipes
+
+### Score a policy on every level
+
+```bash
+DOOM_BIN=… WAD=… ENC=… DBIN=… ./scoreboard.sh out/scores.csv 0            # teacher
+DOOM_BIN=… WAD=… ENC=… DBIN=… ./scoreboard.sh out/scores.csv 1 head.safetensors
+```
+
+One row per level rather than one averaged number, because an average hides
+which levels moved. `STEPS` defaults to 3000: success here is every monster,
+every item, every secret and the way out, and at six hundred decisions the
+episode ends long before any of that is settled, so the number rewards whatever
+pays fastest and punishes anything that invests. `SKILL=3` is Ultra-Violence.
+
+`./plot-progress.py out/scores.csv out/plot/` draws progress per level per
+generation.
+
+### Search and compress
+
+```bash
+doom train $D --maps 1,2,3,4,5,6,7,8,9 --skill 3 --mission clear --reward gauge \
+  --max-steps 3000 --warmup 36 --warmup-keep 0.5 \
+  --explore 12 --explore-steps 60 --archive out/archive.json \
+  --self-imitate 6 --gauge 3 --save out/doom-policy.safetensors
+```
+
+`--explore` is the search half and `--self-imitate` is the compression half.
+`--archive` is what makes a run a *generation* rather than a fresh start:
+without it every run searches from nothing and a level solved once can be
+quietly lost again.
 
 ### Train on generated problems, keep the real levels for the exam
 
@@ -158,7 +205,7 @@ the ones the IWAD ships.
 A training run's own stdout is the chart: `./plot-run.py out/train.log docs/`
 draws return, wins and progress per iteration from the lines it prints.
 
-### Prove it generalizes, which is the only claim that matters
+### Prove it generalizes
 
 Train on some levels and score on one that was not among them.
 
@@ -184,9 +231,12 @@ doom play $D --head out/doom-policy.safetensors --play 4 --fps 35 --record out/r
 `--record` encodes every decision straight into an MP4 as it is drawn: raw
 frames piped to `ffmpeg`, so the memory cost is one frame however long the run.
 It captures one frame per game **tic** rather than per decision, so the motion
-is real-time rather than a slideshow.
+is real-time rather than a slideshow. Recording steps the game one tic at a time
+so every frame can be kept, which is not bit-identical to an unrecorded run -
+measured, 228 decisions against 226, same kills, same health, both finishing -
+so a recording is a close illustration of a run rather than the run itself.
 
-## How it is put together
+## How it works
 
 ```
 restful-doom  --apilockstep        the game, frozen between steps
@@ -201,7 +251,7 @@ src/env.rs       reward, missions, the scripted player
 src/view.rs      the inspector: frame + state + decision + reward
      |  brain::Env
      v
-brain::ControlPipeline            encoder + decision head, cloning/DAgger/PPO
+brain::ControlPipeline            encoder + decision head, search and cloning
 ```
 
 The engine side is in the DOOM repository rather than here: an HTTP layer that
@@ -242,7 +292,7 @@ Four details are load-bearing, and each was wrong once:
   else changed. Cloning a teacher that decides on history the policy cannot see
   teaches a mapping that does not exist.
 
-### What the agent is NOT told, and why that matters more
+### What the agent is not told, and why that matters more
 
 An agent handed the answer is not solving the problem, and the way that shows up
 is subtle: it plays well and learns nothing transferable. The route used to be a
@@ -270,15 +320,7 @@ the nearest cell with a step into somewhere unseen - and says so. The exit
 becomes the goal the moment it has been seen. `--full-map` restores the old
 behaviour as a control.
 
-What that costs, with the scripted player:
-
-| | with the whole map | seeing only what it has looked at |
-|---|---|---|
-| E1M1 | finishes, 156 decisions | **finishes, 247 decisions** |
-| E1M2 | finishes, 366 decisions | stalls two cells from the frontier |
-| E1M3 | finishes, 688 decisions | dies in the hellslime it explores into |
-
-### What it IS told: what it just saw
+### What it is told: what it just saw
 
 Fair play cuts the other way. If the observation is only what is in line of
 sight right now, then turning away from a medikit deletes it, and the only way
@@ -334,6 +376,14 @@ nothing else having to notice. A sector only a **switch** opens is also a wall,
 and the route leads to a standing spot in front of the switch that operates that
 sector's tag - found by flooding the exit's own island and sampling just off
 each of that sector's lines to see which island it borders.
+
+Steps the grid cannot walk but a player can cross are modelled rather than
+excluded. A **teleport** linedef is a portal edge: the two cells either side of
+one are geometrically as far apart as the level is wide, so the flood carries an
+explicit edge from the pad to its destination and the route can aim at a
+teleporter as a way of getting somewhere. A step too high to climb **onto or off
+a sector that moves** is a lift ride rather than a wall, since a player steps on
+at the bottom and off at the top, and the option says which it is.
 
 The route runs **through** shut doors on purpose, because a player opens them.
 So "the way out starts 7 degrees to your right" while the player cannot walk
@@ -406,16 +456,60 @@ learned the hard way:
   discovers nothing and earns nothing. The agent is not told that walls are bad;
   it is paid for finding out.
 
+### The search half
+
+Imitation cannot exceed its teacher, and this teacher does not finish a level at
+Ultra-Violence. Sampling from the policy does not fix that either: it only ever
+finds what is near what the policy already does. Reaching a strategy nobody
+demonstrated needs a search, and the one here follows Go-Explore.
+
+An **archive** holds the best trajectory found to each *cell*, where a cell is
+not a place but a coordinate of progress: where the player is, plus what has
+been achieved there. Two visits to the same doorway, one holding the blue key
+and one not, are different cells, because they are different positions in the
+problem. An exploring episode picks a cell, **returns to it by restoring the
+engine snapshot** rather than replaying the actions that led there, and then
+explores randomly from it, repeating each action with high probability so the
+walk covers ground instead of jittering.
+
+Four properties make the difference between a search and a random walk:
+
+- **Return is a restore, not a replay.** DOOM is deterministic given the same
+  inputs, but a replay of three hundred actions to reach a promising spot costs
+  three hundred steps every time and breaks the moment anything upstream
+  changes. A snapshot is one request.
+- **The archive outlives the level.** A snapshot carries its own episode, map
+  and skill, so it reloads its own level whatever is loaded. There is one
+  archive per level and one shared pool of slots, and a campaign that rotates
+  nine maps therefore compounds on all nine at once rather than restarting each
+  time the map changes.
+- **Selection is weighted, not uniform.** A cell is drawn with weight
+  `worth / sqrt(times_chosen + 1)`, so a cell that has been returned to often
+  loses priority and a cell that led somewhere good keeps it. Uniform selection
+  spends the budget on the hundreds of cells in the opening corridor.
+- **A fragment is scored on what it added.** The obvious mistake is to score a
+  fragment by the absolute progress where it ended, almost all of which was
+  inherited from the cell it resumed at - which teaches the policy that
+  wandering from a good position is good. Measured, fixing this moved a
+  generation from 0.46 to 0.73 and cut the decisions cloned per round from 2291
+  to 901.
+
+The cloning phase then compresses the archive into weights, imitating only the
+trajectories that beat what the policy already achieves. The weights are
+disposable; the archive is not.
+
 ### The player it has to beat
 
 A baseline that is merely broken makes a learned number unreadable, so the
 scripted player is a real one: fight what is in front of you, take what is under
 your nose, otherwise go wherever there is most room, preferring the way the exit
-lies, and when the last sixteen decisions have gone nowhere, commit to one
-direction for eight steps to break the cycle. It is still deliberately crude:
-greedy, no map, never retreats from a fight it is losing, never prioritises the
-enemy actually shooting at it, and does the same thing whatever the orders say.
-That last one is the headroom the learned policy is supposed to take.
+lies, circle-strafe rather than stand still in a firefight, switch to the best
+weapon you are carrying, and when the last sixteen decisions have gone nowhere,
+commit to one direction for eight steps to break the cycle. It is still
+deliberately crude: greedy, no map, never retreats from a fight it is losing,
+never prioritises the enemy actually shooting at it, and does the same thing
+whatever the orders say. That last one is the headroom the learned policy is
+supposed to take.
 
 Only its **best** episodes are cloned (`--warmup-keep`). A heuristic teacher is
 good in the situations it was written for and arbitrary everywhere else, and its
@@ -470,41 +564,47 @@ outcome, and the commonest one** - an episode that ends that way asks the engine
 what the route made of the spot it stopped in, there and then, while the level
 is still in the state that produced it.
 
-## What was measured
+## Results
 
-**The measurements have been reset.** Everything this section used to report
-was taken against an agent and a score that no longer exist, and a stale number
-presented as current is worse than no number at all. What changed, and why none
-of the old figures carry over:
+Every level of the shareware episode, at **Ultra-Violence**, 3000 decisions,
+mission `clear`, scored with the gauge. Generation 0 is the scripted teacher;
+each later generation searches with the archive it inherits and clones what the
+search found. Progress is per level, averaged over seed blocks.
 
-- **The score is now the definition of done.** It reads the level finished,
-  every monster killed, every item taken, every secret found - what DOOM's own
-  intermission screen reports. It used to read none of the last three, so a run
-  that sprinted past everything scored what a run that cleared the map scored.
-- **Finding the way out used to cost a run most of its score.** The route leads
-  to unexplored ground until the exit has been seen; the score read that as two
-  alternative branches and switched between them at the moment of discovery,
-  when none of the way to it had been covered. Measured on E1M7, the same
-  policy scored 0.48 stopped at 120 decisions and 0.00 allowed 900, having
-  ended closer to its goal.
-- **The agent could not choose a weapon.** It was told what was in its hands
-  and nothing about the rest of what it carried, and there was no option to
-  change, so every fight used whatever the last pickup left behind.
-- **It saw three enemies**, in engine order, so whatever was shooting at it
-  could be dropped in favour of three harmless ones standing nearer.
-- **Everything moved at walking pace**, and firing while moving could not be
-  expressed at all.
+| generation | M1 | M2 | M3 | M4 | M5 | M6 | M7 | M8 | M9 | summed | kills | exits |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 - scripted teacher | 0.27 | 0.09 | 0.01 | 0.10 | 0.01 | 0.15 | 0.00 | 0.54 | 0.02 | **1.18** | 58.8 | 0 |
+| 1 - searched, cloned | 0.36 | 0.10 | 0.01 | 0.06 | 0.01 | 0.02 | 0.01 | 0.14 | 0.02 | 0.73 | 50.4 | 0 |
+| 2 | 0.36 | 0.10 | 0.01 | 0.06 | 0.01 | 0.02 | 0.01 | 0.14 | 0.02 | 0.73 | 50.0 | 0 |
 
-Any of those alone would invalidate a comparison; together they mean the
-numbers were measuring a different problem. The reference bar is being
-remeasured from zero, on every level of the episode, at Ultra-Violence.
+Read honestly, that says three things.
 
-What survives is not numeric. It is the set of things that turned out to be
-true about the METHOD, each of which cost a measurement to find:
+**The loop runs end to end and the search half works.** An archive grows from 16
+to 175 entries over a campaign, cells reached per level rise across generations
+(E1M2: 29, 42, 53, 61 as the maps rotate), and the routing is correct on all
+nine levels for the first time - two lead to the exit, six to the key the exit
+actually needs, and E1M8 to the switch that opens its sealed room.
 
-- **Imitation cannot exceed its teacher**, and this teacher finishes one level
-  of nine under fair play. Cloning and DAgger produce a better and a more
-  robust copy of that; neither produces a mechanism for beating it.
+**On one level a learned policy beat the teacher.** E1M1, 0.27 to 0.36. That is
+the first time any policy here has done so, and it is one level.
+
+**Overall it did not, and nothing finishes a level.** Summed progress fell from
+1.18 to 0.73, and there are zero exits anywhere. Generation 2 is identical to
+generation 1 because no round beat what it was handed, so the selection step
+correctly returned its input unchanged. Neither difficulty nor budget is the
+wall: at skill 0 with 4000 decisions E1M1 still stalls at the same coordinate.
+
+What survives from every earlier measurement is not numeric. It is the set of
+things that turned out to be true about the method, each of which cost a
+measurement to find:
+
+- **Imitation cannot exceed its teacher.** Cloning and DAgger produce a better
+  and a more robust copy; neither produces a mechanism for beating it. This is
+  why the search half exists.
+- **An option nothing can ever take is worth auditing for.** Two of the
+  teacher's options - change weapon, circle-strafe - were constructible and
+  never once selected. Making them reachable roughly doubled the teacher's
+  kills, from 23.5 to 57.2 across nine levels; circle-strafe alone was +22%.
 - **A phase that selects its best round must include the policy it was handed**
   in that comparison, or a phase whose every round made things worse still
   adopts one of them.
@@ -517,62 +617,68 @@ true about the METHOD, each of which cost a measurement to find:
   one candidate and its own score moves; if it moves by more than the gap
   between candidates, no learner can recover a ranking from it. Measuring that
   noise is cheap and belongs beside any claim about how much room there is.
-- **Going back to a decision has to be a real snapshot**, not a replay of the
-  actions that led there. See below.
+- **One seed is not a measurement.** Four verdicts in this sample's history
+  reversed under a three-seed block. Nothing here is quoted from a single run.
 
+## Roadmap for the future
 
-## What is not claimed
+In rough order of how much each is currently costing.
 
-- **Nothing here has beaten the teacher yet.** Every phase this sample ships
-  is either imitation, whose ceiling is the teacher by construction, or an
-  outcome-fitted phase whose signal has not yet been shown to clear the noise
-  of measuring it. What the sample demonstrates today is an environment, an
-  observation and a policy that **imitates** a hand-written teacher.
-- **The teacher itself finishes one level of nine** under fair play, so it is a
-  bootstrap and not a path to a cleared episode. Beating it is necessary and
-  nowhere near sufficient.
-- **Generalization is not proven**, and no current number bears on it.
-- **Nothing has been measured at Ultra-Violence** until the reset above.
-- **"In sight" means line of sight, not field of view.** The engine reports a
-  thing when `P_CheckSight` can draw an unobstructed line to it, and that test
-  has no cone in it: a monster directly behind the player is reported exactly as
-  one in front. A player at the controls sees about ninety degrees. This is the
-  one place the observation gives MORE than a player has, it is inconsistent
-  with the burning-floor scan beside it - which does use a proper ninety-degree
-  fan - and it is why the memory matters less than it should: turning away from
-  a medikit does not currently lose it, only a wall does. This is the one place
-  left where the observation gives MORE than a player has, and it should be
-  narrowed to a cone.
-- **The route cannot be pointed at a remembered thing.** It floods from its own
-  goal, so "walk to where that medikit was" has to be a straight line, and the
-  option is withheld when there is no floor that way rather than routed round
-  the corner. In an open room this costs nothing; in a maze it is the difference
-  between a memory that can be acted on and one that can only be read.
-- **Only E1M1 is finished under fair play.** With the whole map handed to it the
-  scripted player finishes all three; seeing only what it has looked at, it
-  finishes E1M1 and not E1M2 or E1M3.
-- **E1M3 is not finished.** The scripted player crosses it - blue key at
-  decision 195, within 480 units of the exit at 531 - and then loses a fight.
-  That is a combat failure, not a routing one.
-- **The fighting policy and the finishing policy are different runs.**
-  `--arena` teaches fighting and `--curriculum` teaches finishing, and nothing
-  here yet trains one policy that does both.
-- **Teleporters are not in the route.** A teleport linedef moves the player
-  instantly and the distance field is over geometry, so the two cells either
-  side of one are as far apart as the level is wide. Nothing breaks when the
-  player steps on one - the field re-plans from where they land, which is what
-  happens to a player who walks onto a pad without knowing what it is - but the
-  route will never *aim* at a teleporter as a way of getting somewhere. Not
-  exercised end to end: the shareware episode puts the first ones in E1M5.
-- **`--record` does not reproduce a run exactly.** Recording steps the game one
-  tic at a time so every rendered frame can be kept. A recorded run now tracks
-  an unrecorded one closely and ends the same way - 228 decisions against 226,
-  same kills, same health, both finishing - but it is not bit-identical, so a
-  recording is a close illustration of a run and not the run itself.
-- The sentence encoder is frozen by default (`--train-encoder` to change it): a
-  few hundred high-variance policy gradients per iteration are not enough to
-  move 22M pretrained parameters anywhere useful, only enough to damage the
-  language understanding that made the option text readable.
+1. **Selection runs on too few episodes to be a selection.** `--gauge 3` keeps
+   the best of a generation on three episodes while per-episode spread is 0.0 to
+   0.5. The trace of selected scores across a fixed block oscillated 0.081,
+   0.039, 0.134, 0.078, 0.061 with no trend - that is choosing noise, and it is
+   the likeliest reason a search that demonstrably finds new ground produces a
+   policy that does not improve. The gauge budget needs raising substantially,
+   or the comparison needs to become a paired one on identical worlds.
+
+2. **The score saturates on the first subgoal.** Progress takes a running
+   maximum across *changing* subgoals, so an easy first key fills the measure
+   and crossing the rest of the level afterwards earns nothing. A means-goal
+   should be worth a bounded share and the exit the rest. Changing it invalidates
+   every generation measured so far, so it needs a full re-baseline with it.
+
+3. **Nothing finishes a level at Ultra-Violence.** The route reaches the right
+   goal on all nine; what is missing is surviving the walk there. The teacher
+   never retreats from a fight it is losing and never prioritises whatever is
+   actually shooting at it, and both of those were tried and measured *worse*
+   as written - so the fix is a real one, not the obvious one.
+
+4. **"In sight" means line of sight, not field of view.** The engine reports a
+   thing when `P_CheckSight` can draw an unobstructed line to it, and that test
+   has no cone in it: a monster directly behind the player is reported exactly
+   as one in front. A player at the controls sees about ninety degrees. This is
+   the one place the observation gives *more* than a player has, it is
+   inconsistent with the burning-floor scan beside it - which does use a proper
+   ninety-degree fan - and it is why the memory matters less than it should.
+   It should be narrowed to a cone.
+
+5. **The route cannot be pointed at a remembered thing.** It floods from its own
+   goal, so "walk to where that medikit was" is a straight line and the option is
+   withheld when there is no floor that way, rather than routed round the corner.
+   In an open room this costs nothing; in a maze it is the difference between a
+   memory that can be acted on and one that can only be read.
+
+6. **The navigation grid has no executable witness per edge.** A step is
+   admitted when a body fits at both ends and the height difference is
+   crossable, which is a necessary condition and not a sufficient one: it does
+   not prove `P_TryMove` actually executes the move along the body's real
+   trajectory rather than the centre ray, and it does not accumulate stair
+   height across a run of cells. Relaxing the collision checks to paper over the
+   difference is the wrong direction; each admitted edge should be provable.
+
+7. **One policy that both fights and finishes.** `--arena` teaches fighting and
+   `--curriculum` teaches finishing, and nothing here yet trains one policy that
+   does both.
+
+8. **Generalization is unproven.** The train-on-some, score-on-others recipe
+   exists and runs; no current number bears on whether what it learns transfers.
+
+The sentence encoder stays frozen by default (`--train-encoder` to change it),
+and that is a decision rather than a gap: a few hundred high-variance policy
+gradients per iteration are not enough to move 22M pretrained parameters
+anywhere useful, only enough to damage the language understanding that made the
+option text readable.
 
 ---
 
