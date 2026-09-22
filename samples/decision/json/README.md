@@ -122,6 +122,42 @@ model only the judgement call). When the question is outside what it knows,
 `confidence` is usually the tell: 0.85 on the banking routing above, 0.09 on
 the animal question it got wrong.
 
+## Getting a good answer out of it
+
+Two phrasing rules, each an A/B on the SAME state through this sample, because
+both cost nothing and both move the answer more than anything else does.
+
+**1. Give it prose, not a field dict.** `State::Json` is supported and
+faithful (the reference serializes a state the same way), but this checkpoint
+reads text, and a dict of field names reads badly:
+
+| one incident, two states | `noul` "should this wake the on-call engineer?" | `score` how bad |
+|---|---|---|
+| `{"alert": "checkout-api 5xx rate 38%", "duration_min": 12, "customers_affected": "all EU", "deploy_15min_ago": true}` | **0.000** | 1.36 of 3 (*degraded*) |
+| "The checkout API has been returning server errors for 38% of all requests for the last 12 minutes. Every customer in the EU is affected and cannot complete a purchase. A deploy went out 15 minutes ago." | **0.766** | 2.57 of 3 (*total outage*) |
+
+Same for "has the booking been completed?" over a transcript: 0.397 as a dict,
+**0.922** as a sentence. Serialize your state into a sentence or two and the
+same question starts answering.
+
+**2. Option and level text must DESCRIBE, not label.** The model scores option
+text against state text; a code name carries nothing to score.
+
+| question | options as labels | options as descriptions |
+|---|---|---|
+| which banking intent, for *"my card hasn't turned up yet and I ordered it two weeks ago"* | `card arrival: waiting for a physical card to be delivered` -> picks **`card lost`** at 0.993 | `card arrival: the card was ordered and has still not been delivered` / `card lost: the customer had the card and then lost it` -> picks **`card arrival`** at 0.890 |
+| how many stars for a positive review | `["one star", ..., "five stars"]` -> **0.87 of 4** | `["hated it and warns others away", ... "delighted and recommends it"]` -> 1.98 of 4 |
+
+The first pair is the difference between a wrong answer at 0.99 and a right
+one at 0.89, from editing the criteria alone. The second only halves the
+error - a rating is a judgement the model does not reliably make either way,
+and `confidence` stays under 0.2 for it, which is the signal to not act on it.
+
+**What stays hard, however it is phrased**: anything needing a chain of
+inference rather than a reading. "Is this lead worth a demo?" over a strong
+lead (1200 people, confirmed budget, an internal champion, no competitor)
+reads 0.12 as a dict and 0.26 as prose - both wrong, both low-confidence.
+
 ## A second measured run
 
 The same request with `--model minilm` returns the same SHAPE and a `confidence`
