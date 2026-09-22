@@ -137,6 +137,16 @@ impl Probe {
     fn head_cfg(&self) -> LayaConfig {
         LayaConfig::new(self.enc.cfg.d_model)
     }
+
+    /// One AdamW update of the HEAD's own parameters only (Laya M6) - the
+    /// trunk stays fixed, matching how this head is actually trained
+    /// (`RlcdSpec::freeze_encoder`-shaped: the encoder is frozen/pretrained,
+    /// only the from-scratch head learns). Exposed here rather than making
+    /// `Probe::head` public, since this is the one operation a training
+    /// convergence check on this probe actually needs.
+    pub fn adamw_step_head(&mut self, lr: f32, wd: f32, clip: Option<f32>) {
+        self.head.adamw_step(lr, wd, clip);
+    }
 }
 
 /// Build the probe on tiny configs with a fixed batch already set.

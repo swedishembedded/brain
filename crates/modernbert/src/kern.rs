@@ -105,6 +105,24 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // training recipe. An existing kernel (built for NCHW concat backward
     // elsewhere in the workspace; `H=W=1` here), not a new one.
     ("concat_split", kernels::CONCAT_SPLIT),
+    // AdamW and its gradient-clipping stage - registered so
+    // `LayaHead::adamw_step_scaled` (Laya M6) has a device-resident optimizer
+    // to step. Same five kernels `decide::kern::PIPELINES` registers for the
+    // same reason; see that list's own comment.
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    // The COOPERATIVE grad-norm pair - never indexed directly, `optim::Optim`
+    // resolves these by name and prefers them over the two single-thread
+    // kernels above wherever the device can run a workgroup barrier. Laya's
+    // head is far smaller than `decide`'s encoder (see `laya.rs`'s own
+    // parameter count), but registering the cooperative pair costs nothing
+    // and keeps this list one honest copy of `decide::kern::PIPELINES`'s
+    // reasoning rather than a smaller one nobody re-derived.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 macro_rules! ids {
@@ -160,4 +178,17 @@ ids! {
     leaky_relu => "leaky_relu",
     leaky_relu_bwd => "leaky_relu_bwd",
     concat_split => "concat_split",
+    adamw => "adamw",
+    gradnorm_sq => "gradnorm_sq",
+    grad_scale => "grad_scale",
+    clip_coef => "clip_coef",
+    grad_scale_buf => "grad_scale_buf",
+}
+
+impl Ids {
+    /// The optimizer's five kernel slots, in the order `optim::Optim::new`
+    /// takes them - see `decide::kern::Ids::optimizer`'s own doc.
+    pub fn optimizer(&self) -> optim::Optim {
+        optim::Optim::new(self.adamw, self.gradnorm_sq, self.grad_scale, self.clip_coef, self.grad_scale_buf)
+    }
 }

@@ -347,6 +347,13 @@ pub struct LayaHead {
     steps: Vec<Step>,
     act_steps: Vec<Step>,
     bwd: Option<Bwd>,
+    /// `Some` only when built with [`LayaHead::new_train_on`] - mirrors
+    /// `decide::decide::Decide`'s `enc_opt`/`head_opt` seam: an AdamW step is
+    /// this handle's own optimizer over this handle's own `ParamStore`, never
+    /// another handle's, since a submit on one is not ordered against a
+    /// submit on another.
+    opt: Option<optim::Optim>,
+    step: u32,
 }
 
 impl LayaHead {
@@ -464,6 +471,8 @@ impl LayaHead {
             steps: Vec::new(),
             act_steps: Vec::new(),
             bwd: None,
+            opt: None,
+            step: 0,
             gpu,
             cfg,
             ps,
@@ -497,6 +506,7 @@ impl LayaHead {
                 inv: st(n),
                 steps: Vec::new(),
             });
+            head.opt = Some(k.optimizer());
         }
         head
     }
@@ -714,6 +724,22 @@ impl LayaHead {
     /// [`LayaHead::backward`], which accumulates into them.
     pub fn zero_grads(&self) {
         self.ps.zero_grads(&self.gpu);
+    }
+
+    /// One AdamW update over this head's own `ParamStore`, on this head's own
+    /// device handle - see `decide::model::Encoder::adamw_step_scaled`'s own
+    /// doc for why "own handle" is load-bearing rather than a detail.
+    pub fn adamw_step(&mut self, lr: f32, wd: f32, clip: Option<f32>) {
+        self.adamw_step_scaled(lr, wd, clip, 1.0);
+    }
+
+    /// [`LayaHead::adamw_step`] with the accumulated gradient scaled - `1/n`
+    /// for a minibatch of `n`, so one learning rate survives a change of
+    /// batch size.
+    pub fn adamw_step_scaled(&mut self, lr: f32, wd: f32, clip: Option<f32>, scale: f32) {
+        let opt = self.opt.as_ref().expect("adamw_step on a head built with new_on, not new_train_on");
+        self.step += 1;
+        opt.step(&self.gpu, &self.ps, self.step, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
     }
 
     /// Read one parameter's current value.
