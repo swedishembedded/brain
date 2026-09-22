@@ -1323,6 +1323,123 @@ pub fn chunked_bidir_fwd_win(
     }
 }
 
+/// Backward of [`chunked_bidir_fwd_win`] - the windowed twin of
+/// [`chunked_bidir_bwd`]. **Needs no new gradient kernel**: it recomputes each
+/// chunk's scores/probs through the WINDOWED forward kernel
+/// (`cross_scores_win_step`) exactly as [`chunked_bidir_fwd_win`] itself does,
+/// then feeds the resulting `probs` into the SAME UNWINDOWED gradient kernels
+/// [`chunked_bidir_bwd`] uses (`CrossBwdIds`'s `dscores`/`dq`/`dk_acc`/
+/// `dv_acc`). That is sound because softmax's own adjoint,
+/// `dScores_j = P_j * (dP_j - sum_k P_k*dP_k)`, is already exactly zero
+/// wherever `P_j == 0` - which is exactly what the windowed forward kernel
+/// produces at every masked position, so an unwindowed gradient kernel fed a
+/// correctly-windowed `probs` naturally produces a zero gradient at every
+/// masked position with no windowing logic of its own. This is a real,
+/// verified property, not an assumed one - see
+/// `crates/model/tests/chunked_bidir_bwd_win.rs`'s own finite-difference
+/// check, which is what actually proves it rather than the reasoning above.
+///
+/// Every parameter matches [`chunked_bidir_bwd`] except the added `window`,
+/// the windowed score-kernel ids (`CrossWinIds`/`KeyMinorWin`) and the
+/// `softmax` kernel index passed explicitly rather than bundled into a
+/// `CrossIds` - there is no `rel` parameter, mirroring
+/// [`chunked_bidir_fwd_win`]'s own signature (no caller of the windowed path
+/// needs a relative-position bias yet).
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_bwd_win(
+    g: &Gpu,
+    fwd: &CrossWinIds,
+    softmax: usize,
+    km: Option<&KeyMinorWin>,
+    bwd: &CrossBwdIds,
+    window: u32,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    d_ctx: &DeviceBuffer,
+    d_qkv: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_scores: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let kv_row_off = row0 as u64 * stride as u64;
+        if let Some(km) = km {
+            // Once per span, outside the chunk loop - see [`KeyMinor`]'s own
+            // doc for why the transpose is hoisted this way. The transpose
+            // itself does not window (see [`KeyMinorWin`]'s own doc).
+            steps.push(g.step_sliced(
+                km.transpose,
+                &[qkv, km.kt],
+                &[(kv_row_off, 0), (0, 0)],
+                &[len, d_out, stride, k_off],
+                d_out * len,
+            ));
+        }
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let dc_off = (row0 + q0) as u64 * d_out as u64;
+            let p_qk = [1, heads, qn, len, head_dim, stride, stride, q_off, k_off];
+            let p_v = [1, heads, qn, len, head_dim, stride, v_off, d_out];
+            // Recompute this chunk's scores + probs through the WINDOWED
+            // forward kernel - the only difference from `chunked_bidir_bwd`.
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
+            steps.push(cross_scores_win_step(g, fwd, km, sa, q0, window, qkv, (q_row_off, 0), qkv, (kv_row_off, 0), scores));
+            steps.push(g.step(softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
+            // From here down, byte-for-byte `chunked_bidir_bwd`'s own body:
+            // the gradient kernels have no idea the probs they were handed
+            // came from a windowed softmax.
+            let (dsc_k, dsc_t) = dscores_variant(g, bwd, heads * qn, len);
+            steps.push(g.step_sliced(
+                dsc_k,
+                &[d_ctx, qkv, probs, d_scores],
+                &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],
+                &p_v,
+                dsc_t,
+            ));
+            steps.push(g.step_sliced(
+                bwd.dq,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (kv_row_off, 0), (q_row_off, 0)],
+                &p_qk,
+                heads * qn * head_dim,
+            ));
+            let acc = u32::from(q0 > 0);
+            let mut p_qk_acc = [0u32; 10];
+            p_qk_acc[..9].copy_from_slice(&p_qk);
+            p_qk_acc[9] = acc;
+            steps.push(g.step_sliced(
+                bwd.dk_acc,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (q_row_off, 0), (kv_row_off, 0)],
+                &p_qk_acc,
+                heads * len * head_dim,
+            ));
+            let mut p_v_acc = [0u32; 9];
+            p_v_acc[..8].copy_from_slice(&p_v);
+            p_v_acc[8] = acc;
+            steps.push(g.step_sliced(
+                bwd.dv_acc,
+                &[probs, d_ctx, d_qkv],
+                &[(0, 0), (dc_off, 0), (kv_row_off, 0)],
+                &p_v_acc,
+                heads * len * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
 /// The workspace-wide OUTER gate for asking any flash-attention family for a
 /// dispatch at all - the check every caller must make BEFORE it may even call
 /// [`flash_bidir_variant`] or [`flash_cross_supported`], both of which pick a
