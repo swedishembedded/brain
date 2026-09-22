@@ -93,6 +93,17 @@ impl Move {
         format!("turn the {} face {how}", self.face.name())
     }
 
+    /// The same turn in four words, for an option list that has to hold all
+    /// eighteen of them inside the model's own packed-sequence budget.
+    pub fn short(self) -> String {
+        let how = match self.quarters {
+            1 => "clockwise",
+            2 => "half turn",
+            _ => "anticlockwise",
+        };
+        format!("{} face {how}", self.face.name())
+    }
+
     pub fn inverse(self) -> Move {
         Move { face: self.face, quarters: 4 - self.quarters }
     }
@@ -144,12 +155,17 @@ impl Cube {
     }
 }
 
-/// Where each facelet sits in space, and which way it faces.
+/// Where each facelet sits in space, and which way it faces: the cell centre
+/// of its cubie, and the outward normal of the face it is on.
 ///
 /// `U` is +y, `R` +x, `F` +z. Within a face the stickers are read row by row
 /// as a person looking AT that face sees them, which fixes the two in-face
 /// directions listed here; everything else follows.
-fn geometry() -> [([i8; 3], [i8; 3]); 54] {
+///
+/// Public because the renderer draws from THIS, not from a second copy of
+/// the layout - a picture that disagrees with the cube it claims to show is
+/// worse than no picture.
+pub fn facelet_geometry() -> [([i8; 3], [i8; 3]); 54] {
     let mut g = [([0i8; 3], [0i8; 3]); 54];
     for face in Face::ALL {
         // (normal, direction of a column step, direction of a row step)
@@ -191,10 +207,17 @@ fn rotate(face: Face, v: [i8; 3]) -> [i8; 3] {
     }
 }
 
+/// The engine's own discrete quarter-turn rotation, for the renderer's test
+/// that an animation ends exactly where a move lands.
+#[cfg(test)]
+pub fn rotate_for_test(face: Face, v: [i8; 3]) -> [i8; 3] {
+    rotate(face, v)
+}
+
 /// For each face, where each facelet's sticker lands after one clockwise
 /// quarter turn of that face (a facelet outside the layer maps to itself).
 fn build_tables() -> [[usize; 54]; 6] {
-    let g = geometry();
+    let g = facelet_geometry();
     let mut tables = [[0usize; 54]; 6];
     for face in Face::ALL {
         let (axis, side) = match face {

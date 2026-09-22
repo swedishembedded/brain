@@ -18,6 +18,9 @@ direction"*, counting interventions:
    admissible meaning **provably on a shortest solution** - and counts an
    intervention whenever the model's own first choice was not.
 
+The planner describes nothing to the model. It supplies the cube, and it
+judges the answer; the model decides in between.
+
 So the cube is always solved, in the optimal number of moves, and the number
 this sample reports is not "it worked" but **how often the model's first pick
 was one the planner would have made**, against the chance rate for the same
@@ -30,13 +33,13 @@ brain pull convaiinnovations/laya           # once
 
 make samples/decision/rubiks/build
 ./target/release/sample-decision-rubiks --cubes 3 --scramble 6
-./target/release/sample-decision-rubiks --cubes 3 --scramble 6 --hints off
 ./target/release/sample-decision-rubiks --cubes 3 --scramble 4 --unassisted
+./target/release/sample-decision-rubiks --model minilm --train 2000 --eval 40
 ```
 
 `--model NAME|DIR` (`laya` by default), `--cubes`, `--scramble 1..8`,
-`--options` (candidates offered per turn), `--seed`, `--hints on|off`,
-`--unassisted`, `--quiet`, plus the usual `--device`/`--backend`.
+`--seed`, `--encode compact|rows`, `--head FILE`, `--unassisted`, `--quiet`,
+the training flags below, and the usual `--device`/`--backend`.
 
 ## What a run looks like
 
@@ -92,76 +95,99 @@ worst case wants Kociemba's two-phase algorithm with pattern databases, which
 is a different and much larger piece of work, and this sample does not claim
 it.
 
-## What the model contributes
+## What the model is asked
 
-Ten cubes, six-move scrambles, `convaiinnovations/laya` zero-shot, 57 turns
-decided in each configuration:
+Every turn it gets the **complete cube** - all 54 stickers, in a fixed order -
+and **all eighteen moves**, described identically:
 
-| | first pick on a shortest path | chance | mean confidence | cubes solved |
-|---|---|---|---|---|
-| options say what they do (`--hints on`) | **26%** (15 of 57) | 18% | 0.121 | 10 of 10, in 57 of 57 optimal moves |
-| options say only which turn they are (`--hints off`) | **11%** (6 of 57) | 18% | 0.076 | 10 of 10, in 57 of 57 optimal moves |
-| no shield (`--unassisted`, 4 cubes) | 26% (9 of 35) | 18% | 0.135 | **0 of 4** - 35 moves spent on cubes needing 16 |
+```text
+state    U:WWYWWWWWG R:RRRBRRRRO F:GGGOGGWGG D:YYRYYYYYB L:OOOOOOBOO B:BBBBBBGBY
+ask      Which turn brings this cube closer to solved?
+options  R: right face clockwise | R2: right face half turn | R': right face anticlockwise | ... (18)
+```
 
-Read that carefully, because it says three different things.
+Nothing in that text says which move helps. Whether one does is decided
+afterwards by the exact planner, and that verdict is used for exactly two
+things: as the LABEL when training a head, and as the SCORE when measuring
+one. It never reaches the model's input.
 
-**The cube is always solved, and that is the shield's doing, not the
-model's.** Ten of ten, in exactly the optimal number of moves, while the
-model's own first choice was admissible about a quarter of the time. Take the
-shield away and it is zero of four: the model walks cubes further from solved
-than they started, sometimes past the eight moves this planner can even
-measure.
+An earlier version of this sample annotated each option with the planner's
+own verdict ("one step closer to solved, 2 moves left"). Picking that is
+reading an oracle, not deciding anything, and it could never have constituted
+solving a cube. Two tests keep it out: one scans the option text for verdict
+words and for differences in shape, and one proves the state text is COMPLETE
+by parsing it back into a cube - a summary could not be inverted.
 
-**With the effect spelled out in the options it reads a little**: 26% against
-18% chance. Pooled over both hint-on runs (24 of 92 turns) that is a +8 point
-lift at roughly p = 0.02 one-sided - real, small, and not what anyone would
-call solving a cube. At 57 turns alone it is not distinguishable from chance,
-and this sample prints the chance rate next to the result precisely so that
-cannot be glossed over.
+## Training a head on cube decisions
 
-**Without the hints it is AT or below chance** (11% against 18%), which is
-the honest measure of what this checkpoint knows about a Rubik's cube: nothing.
-Its confidence says so too - 0.076 mean, on a scale where the same model
-routes a support ticket at 0.85.
+The labels are free. Walk AWAY from the solved cube and the move that undoes
+each step is, by construction, a move that gets closer - the standard
+backward-generation scheme, and it needs no solver. The one thing it can get
+wrong is a walk that doubles back on itself, after which "undo the last move"
+is still legal but no longer a shortest step, so each state is checked against
+the planner (`distance == steps taken`) and the walk is abandoned the moment
+that stops holding. The planner VERIFIES the label; it never produces it.
+That runs at **54,000 examples/s**, and depth is drawn with a curriculum
+weighted shallow, because the end of every solve is a shallow state.
 
-### Three things that were wrong before they were the model's fault
+```bash
+rubiks --model minilm --train 4000 --examples 8000 --scramble 2 --eval 40 --cubes 10 --unassisted
+```
 
-Each of these looked like "the model cannot read the options" and was not.
-Every one was found by sending the sample's own question through
-`samples/decision/json` and changing one thing at a time.
+`--train` trains, `--eval` scores held-out decisions (different seed) broken
+down by distance-from-solved, and the run then tries to solve cubes with no
+shield at all. Training needs a `decide`-shaped encoder (`--model minilm`): a
+Laya checkpoint ships its head pretrained and has no optimizer loop in this
+SDK yet, and the sample says so by name rather than failing obscurely.
 
-| what changed | P(the right option) |
-|---|---|
-| option = hint + the move spelled out again ("turn the right face a quarter turn clockwise") | 0.16 |
-| option = the hint alone, move identity left to the label | **0.61** |
-| state = per-face census ("top face 4/9 solved, right face 5/9 solved, ...") | 0.10 |
-| state = one short sentence | **0.52** |
+## What it does, and does not, do yet
 
-Boilerplate repeated across every option drowns the phrase that separates
-them; a wall of near-identical numeric clauses in the state competes with the
-options for the same packed sequence. Both are the caller's bug, not the
-model's, and both were worth more than any change to the model would have
-been.
+Measured on this box, `convaiinnovations/laya` zero-shot and a MiniLM head
+trained for 200 steps:
 
-The third one is the model's, and it is worth knowing: the SAME options that
-read at 0.52 behind a neutral state read at 0.12 once the state mentions a
-Rubik's cube. Its ability to read its options is not robust to the domain of
-the state - which is the argument for a design where a verifier, not the
-model, decides what actually gets played.
+| | first pick gets closer | chance |
+|---|---|---|
+| untrained head, held out | 1.7% | 5.9% |
+| head after 200 steps, held out | 3.3% | 6.1% |
+| the same head, on the states its own play walked into | **25%** | 7% |
+| **cubes solved unassisted** | **0 of 10** | - |
 
-## Why the options are drawn, not listed
+Read honestly: the model has learned SOMETHING - 25% against 7% over 120
+turns is far outside noise - and it is nowhere near enough to close a solve.
+The reason is not subtle. Training runs at **batch size one**, and one
+example gives a gradient estimate so noisy that the loss wanders (2.49, 1.07,
+2.82, 2.09, 2.87 against a chance level of ln 18 = 2.89) instead of
+descending. 200 steps is what 24 minutes buys here.
 
-A cube has eighteen moves, and offering all of them every turn would run the
-model's own packed-sequence budget out and silently shorten the option
-descriptions - which are the thing being read. So each turn offers a random
-subset (six by default) that always contains at least one admissible move, in
-random order.
+**The step is host-bound, not device-bound**: it costs ~2.4 s on this
+machine's Intel Arc iGPU and ~2.4 s on its 22-core CPU backend, and two
+numbers that equal cannot both be the arithmetic. For contrast
+`samples/decision/triage` records 24 ms/step on a Tesla P40 after an earlier
+optimisation pass. Batching examples - which the decide crate's own notes name
+as the next real win, and which fixes the gradient noise at the same time - is
+the work that has to land before this measurement means anything.
 
-That also keeps the question honest: a fixed list in a fixed order is a list
-whose right answer can be found by POSITION rather than by reading it, which
-is the one thing a decision model must not be allowed to do.
-`samples/decision/intents` is the sample that exists to test exactly that
-property.
+So: **the shield solves every cube, optimally, always. The model does not
+solve one yet.** Both numbers are printed by every run, side by side, which
+is the only arrangement in which the first is not mistaken for the second.
+
+## Watching it
+
+```bash
+rubiks --window                      # a real window, if there is a display
+rubiks --frames /tmp/frames --fps 12 # every frame as a PNG, headless
+rubiks --record run.mp4              # the same, encoded (needs ffmpeg)
+```
+
+The cube is drawn as what it is - 26 plastic cubies, each with a sticker on
+the faces that reach the surface - through a perspective camera, sorted back
+to front, with the turning layer animated through the same angle the engine's
+own move applies. It is drawn from `cube::facelet_geometry`, the same layout
+the engine turns, so the picture cannot drift out of agreement with the
+state; a test pins the end of every animation to where the discrete move
+lands. Beside it: the state the model was given, every option with its
+probability, which one it picked, which one was played, and the running
+counts.
 
 ## Cost
 

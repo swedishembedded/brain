@@ -11,7 +11,9 @@ publish = false
 [dependencies]
 # The ONLY brain dependency a sample may have is the SDK facade, and it must
 # NAME the surfaces it uses - see samples/README.md rules 1 and 2.
-brain = { workspace = true, features = ["decision"] }
+#   decision  DecisionPipeline: the model that picks a move
+#   viewport  the window, the 3D view of the cube, the PNG/MP4 dump
+brain = { workspace = true, features = ["decision", "viewport"] }
 
 [package.metadata.brain]
 max-brain-crates = 30
