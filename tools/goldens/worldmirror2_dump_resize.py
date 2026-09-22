@@ -9,10 +9,16 @@ taken from `crates/worldmirror2/src/dpt.rs`'s own dispatch: the refinenet
 upsample chain, the fractional 1.75x final upsample, the transposed
 convolutions that upsample the taps, and the strided and 7x7 convolutions.
 
-    python3 tools/goldens/worldmirror2_dump_resize.py /tmp/wm_resize
-    WM_RESIZE_GOLDEN=/tmp/wm_resize cargo test -p brain-worldmirror2 --test t17_resize_parity
+    WM_RESIZE_GOLDEN="$(mktemp -d)"
+    python3 tools/goldens/worldmirror2_dump_resize.py "$WM_RESIZE_GOLDEN"
+    WM_RESIZE_GOLDEN="$WM_RESIZE_GOLDEN" cargo test -p brain-worldmirror2 --test t17_resize_parity
+
+The output directory comes from the argument, else `$WM_RESIZE_GOLDEN` - the
+same variable the test reads, so the two cannot be pointed at different
+directories by accident. No machine path is baked in.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -79,4 +85,10 @@ def main(out: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/wm_resize"))
+    dest = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("WM_RESIZE_GOLDEN")
+    if not dest:
+        sys.exit(
+            "worldmirror2_dump_resize: no output directory - pass one as the first "
+            "argument, or set WM_RESIZE_GOLDEN to the directory the parity test reads"
+        )
+    main(Path(dest))

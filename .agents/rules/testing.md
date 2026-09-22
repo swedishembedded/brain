@@ -446,3 +446,14 @@ serialised-submit path the wgpu backend otherwise selects per adapter).
 environment, unlike `brain perf`):** `tools/bench/bench_qwen_inference.py`
 runs brain's CPU/GPU/NPU Qwen3 inference head-to-head against HF Transformers
 on the same prompt.
+
+## Test-only environment variables
+
+`BRAIN_TEST_CONFIG_FILLED`, `BRAIN_TEST_CONFIG_INHERITED`,
+`BRAIN_TEST_CONFIG_NUMBER`, `BRAIN_TEST_CONFIG_BOOL` are read only by
+`crates/cli/src/main.rs`'s own config-file tests, which write a config naming
+them and assert that the loader exported each one into the process
+environment with the right type. They configure nothing and no shipped code
+path reads them - they are here because `make check/scripts` requires every
+`BRAIN_*` variable read anywhere under `crates/` to be documented, and a
+test fixture's variable is documented by saying it is one.

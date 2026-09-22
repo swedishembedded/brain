@@ -38,6 +38,10 @@ brain serve --config config.yaml --openai
 | `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
 | `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |
+| `BRAIN_GPU_MAX_UNSYNCED_WORKGROUPS` | workgroups a backend may queue before forcing a host-synchronised flush; lower it on a driver that times out under long unsynchronised runs | 4096 |
+| `BRAIN_QWEN_STEP_CACHE` | `0` disables the Qwen capability path's recorded-step cache, re-recording every dispatch - an A/B seam for measuring what the recording buys | on |
+| `BRAIN_WM_RENDERER` | `software` or `accelerated`, forcing the world-model window's SDL renderer instead of letting it choose | chosen from the driver |
+| `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |
 | `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
 | `BRAIN_NPU_TURBO` | `1`/`yes` requests the Intel NPU's turbo clock during inference | off |
 
@@ -205,6 +209,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_QWEN3TTS_STREAM_WIN` | frames kept resident in the streaming decode window (rounds up to a multiple of the chunk size) | 32 |
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_QWEN3TTS_NPU_DEVICE` | OpenVINO device for the TTS NPU talker | auto |
+| `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default engine paths | unset (flags supply paths) |
 | `BRAIN_QWEN3ASR_WINDOW` / `BRAIN_QWEN3ASR_MAXNEW` | Qwen3-ASR window (s) / max tokens | 30 / 200 |
 | `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` | forecast horizon / sample count | 64 / 1 |
@@ -220,8 +225,10 @@ page under `docs/models/`.
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup | `$XDG_DATA_HOME/brain/models` |
+| `BRAIN_RUNTIME_DIR` | directory for `brain serve`'s runtime files (socket, pid) | `$XDG_RUNTIME_DIR/brain`, else `<tmpdir>/brain-<uid>` |
 | `BRAIN_PIPELINE_CACHE_DIR` | GPU pipeline/shader cache directory | backend default |
 | `BRAIN_OV_CACHE` | OpenVINO compiled-graph cache directory | `$TMPDIR/brain_ov_cache` |
+| `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 | `BRAIN_QWEN3TTS_RES` | resources base for `brain qwen3tts serve`'s default paths | unset |
 | `BRAIN_HUB_ENDPOINT` | additional allowed host for model downloads (checked before the standard `HF_ENDPOINT`), both as a base URL and as a redirect target - never a blanket "trust any redirect" | the standard hub host only |
 

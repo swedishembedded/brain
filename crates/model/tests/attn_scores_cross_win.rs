@@ -169,7 +169,11 @@ fn window_narrower_than_the_span_matches_host_oracle_and_masks_out_of_window_ent
     let s_plain = g.storage(n as u64);
     g.submit(&[&s_plain], &[g.step(plain, &[&q, &kv, &s_plain], &[1, heads, t, t, hd, dm, dm, 0, 0], n as u32)]);
     let unwindowed = g.read(&s_plain, n);
-    let masked_pos = (0 * t as usize + 0) * t as usize + (t as usize - 1);
+    // Spelled out as (head, query, key) rather than folded, so the index
+    // still says which entry it is - the zeros are the point, and writing
+    // them into the arithmetic is what clippy's `erasing_op` denies.
+    let (head, query, key) = (0usize, 0usize, t as usize - 1);
+    let masked_pos = (head * t as usize + query) * t as usize + key;
     assert!(
         (got[masked_pos] - unwindowed[masked_pos]).abs() > 1e30,
         "windowed and unwindowed scores must diverge at a masked position"

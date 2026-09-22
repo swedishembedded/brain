@@ -16,4 +16,10 @@ publish = false
 brain = { workspace = true, features = ["decision", "viewport"] }
 
 [package.metadata.brain]
-max-brain-crates = 30
+# The `viewport` surface is what the seven crates beyond a decision-only
+# sample's 27 are: `viewport` itself, plus `imaging`, `events`, `forecast`
+# (`forecast <- events <- imaging <- viewport`) and `wm-display`, `wm-core`,
+# `vision`. `samples/decision/doom` declares the same two surfaces and
+# measures the same 34 - this budget had simply never been raised to the
+# closure the sample already had.
+max-brain-crates = 34

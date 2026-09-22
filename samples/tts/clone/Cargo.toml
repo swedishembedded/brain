@@ -36,4 +36,8 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # worldmirror2 added it to every consumer of the audio surface at the same
 # time. Recorded rather than absorbed silently, which is what the budget is
 # for.
-max-brain-crates = 68
+#
+# 68 -> 69: `brain-rlcd` joined, by the same shape one level along - it
+# arrives `rlcd <- eval <- npu <- qwen3tts`, so re-exporting `rlcd::metrics`
+# from `eval` added it to every consumer of the audio surface.
+max-brain-crates = 69
