@@ -20,7 +20,7 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 use gpu_core::Gpu;
-use splat::orient::{apply, frame_from_cameras, transform_c2w, upright};
+use splat::orient::{apply, frame_from_cameras, level, transform_c2w, upright};
 use splat::quality::psnr;
 use splat::renderer::{GpuSplats, Renderer};
 use splat::types::{Camera, RenderOpts, Splats};
@@ -196,4 +196,69 @@ fn upright_moves_the_cameras_with_the_scene() {
         / moved_cams.len() as f64;
     let spread = ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min);
     assert!(spread < 0.1 * radius, "upright() left {spread:.3} of height spread on a {radius:.3} orbit");
+}
+
+/// A ground plane of surface-aligned discs, tilted by `deg` about +X.
+///
+/// Discs, not balls: the whole signal this reads is a gaussian's SHORTEST
+/// axis, which only means "surface normal" when the gaussian is flat.
+fn tilted_ground(n: usize, deg: f64) -> Splats {
+    let (s_, c_) = (deg.to_radians().sin(), deg.to_radians().cos());
+    let mut r = Lcg(0x91d);
+    let mut out = Splats::default();
+    for _ in 0..n {
+        let (x, z) = ((r.next() - 0.5) as f64 * 4.0, (r.next() - 0.5) as f64 * 4.0);
+        // plane through the origin with normal (0, -c, s) after tilting about X
+        let y = z * s_ / c_.max(1e-6) * c_;
+        out.means.extend_from_slice(&[x as f32, (y * 0.0 + z * s_) as f32, (z * c_) as f32]);
+        // the disc's local z on that normal: normal is (0, -cos, sin)
+        // quaternion taking +z onto it
+        let n3 = [0.0f64, -c_, s_];
+        let (ax, ay) = (-n3[1], n3[0]);
+        let sn = (ax * ax + ay * ay).sqrt();
+        let ang = n3[2].clamp(-1.0, 1.0).acos();
+        let (sh, ch) = ((ang * 0.5).sin(), (ang * 0.5).cos());
+        let q = if sn < 1e-9 { [1.0, 0.0, 0.0, 0.0] } else { [ch, ax / sn * sh, ay / sn * sh, 0.0] };
+        out.quats.extend_from_slice(&[q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]);
+        out.scales.extend_from_slice(&[0.05, 0.05, 0.006]);
+        out.opacities.push(0.9);
+        out.colors.extend_from_slice(&[0.5, 0.5, 0.5]);
+    }
+    out
+}
+
+/// Levelling reads the scene, not the path the photographer walked.
+///
+/// `frame_from_cameras` infers up from the camera ORBIT, which is only as
+/// good as the orbit: a handheld arc that rises, or covers a third of a
+/// circle, leaves the scene visibly tipped however rigid the transform was.
+/// The surface the capture is OF is a much better witness - a reconstruction
+/// aligns its gaussians to measured normals, so the dominant surface's normal
+/// IS the up the viewer expects - and reading it costs no forward pass.
+#[test]
+fn levelling_straightens_a_scene_its_cameras_could_not() {
+    for deg in [7.0f64, 18.0, 31.0] {
+        let s = tilted_ground(6000, deg);
+        // deliberately useless cameras: a short, rising arc
+        let cams: Vec<Camera> = (0..4)
+            .map(|i| {
+                let a = i as f64 * 0.12;
+                let m = [
+                    1.0, 0.0, 0.0, 3.0 * a.sin(),
+                    0.0, 1.0, 0.0, -1.0 - 0.4 * i as f64,
+                    0.0, 0.0, 1.0, 3.0 * a.cos(),
+                    0.0, 0.0, 0.0, 1.0,
+                ];
+                cam_from(&m, 64, 64)
+            })
+            .collect();
+
+        let (levelled, _) = level(&s, &cams);
+        assert_eq!(levelled.len(), s.len());
+        // the dominant plane's normal must now be world up (-Y)
+        let n = splat::orient::dominant_normal(&levelled, [0.0, -1.0, 0.0]).expect("a plane");
+        let off = (n[1].abs()).clamp(0.0, 1.0).acos().to_degrees();
+        assert!(off < 1.5, "a {deg} degree tilt was left {off:.2} degrees off level");
+        assert_eq!(levelled.scales, s.scales, "levelling must not reshape a gaussian");
+    }
 }

@@ -261,3 +261,165 @@ pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
         .collect();
     (apply(s, &r, &centre), moved)
 }
+
+/// The normal of the scene's dominant surface, refining `hint`.
+///
+/// A reconstruction that aligns its gaussians to measured normals makes every
+/// gaussian a flat disc lying IN the surface it came from, so the shortest of
+/// its three axes, rotated into the world, is that surface's normal. The
+/// ground of a capture is almost always its largest surface, which makes the
+/// area-weighted average of those normals a far better statement about which
+/// way is up than the path the photographer happened to walk.
+///
+/// Only gaussians already within 30 degrees of `hint` are counted, and the
+/// answer is a REFINEMENT of it rather than a search: a capture contains
+/// walls and railings whose normals are just as consistent as the floor's,
+/// and picking the globally dominant direction would cheerfully stand a scene
+/// on its side. Returns `None` when too little of the scene agrees with the
+/// hint to say anything.
+pub fn dominant_normal(s: &Splats, hint: [f64; 3]) -> Option<[f64; 3]> {
+    let hn = norm3(hint)?;
+    // Area-weighted orientation tensor, sum w n nT. A normal has no sign - a
+    // surface seen from either side is the same surface - so summing the
+    // normals themselves would cancel a plane against itself. The outer
+    // product does not care, and its principal axis is the direction the most
+    // surface agrees on.
+    let mut m = [0.0f64; 9];
+    let mut counted = 0usize;
+    for i in 0..s.len() {
+        let sc = &s.scales[i * 3..i * 3 + 3];
+        let (mut k, mut lo) = (0usize, sc[0]);
+        for (j, v) in sc.iter().enumerate() {
+            if *v < lo {
+                lo = *v;
+                k = j;
+            }
+        }
+        let longest = sc.iter().copied().fold(0.0f32, f32::max);
+        // a ball carries no normal, so let anisotropy weight it out
+        let flat = 1.0 - (lo / longest.max(1e-12)) as f64;
+        if flat <= 1e-3 {
+            continue;
+        }
+        let area = (sc[0] * sc[1] * sc[2]) as f64 / lo.max(1e-12) as f64;
+        let q = &s.quats[i * 4..i * 4 + 4];
+        let n = rotate_axis(&[q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64], k);
+        let w = area * flat * s.opacities[i] as f64;
+        for a in 0..3 {
+            for b in 0..3 {
+                m[a * 3 + b] += w * n[a] * n[b];
+            }
+        }
+        counted += 1;
+    }
+    if counted < 16 {
+        return None;
+    }
+    // principal axis by power iteration, started at the hint so a scene whose
+    // surfaces genuinely tie resolves towards the estimate already in hand
+    let mut v = hn;
+    for _ in 0..64 {
+        let nv = [
+            m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+            m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+            m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+        ];
+        match norm3(nv) {
+            Some(u) => v = u,
+            None => return None,
+        }
+    }
+    let d = v[0] * hn[0] + v[1] * hn[1] + v[2] * hn[2];
+    // A capture contains walls and railings whose normals are every bit as
+    // consistent as the floor's. Taking the largest of them and calling it up
+    // would stand the scene on its side, so past a right angle from the
+    // estimate in hand this declines rather than guesses.
+    if d.abs() < 0.5 {
+        return None;
+    }
+    Some(if d < 0.0 { [-v[0], -v[1], -v[2]] } else { v })
+}
+
+/// Re-frame a scene so its dominant surface is level, not merely so its
+/// cameras are.
+///
+/// [`upright`] first, because that is what puts the scene the right way UP and
+/// points it at the viewer; this then takes the residual tilt out using the
+/// scene's own geometry. Splitting it that way is what keeps the correction
+/// small and safe: the plane search never has to find the floor from nothing,
+/// only to agree with a camera estimate that is already close.
+///
+/// Falls back to [`upright`]'s answer when the scene has no surface to read,
+/// which is the honest outcome for a cloud of balls.
+pub fn level(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
+    let (mut sc, mut cm) = upright(s, cams);
+    let up = [0.0f64, -1.0, 0.0];
+    if let Some(n) = dominant_normal(&sc, up) {
+        let r = rotation_between(n, up);
+        sc = apply(&sc, &r, &[0.0; 3]);
+        cm = cm
+            .iter()
+            .map(|c| {
+                let m: [f64; 16] = std::array::from_fn(|i| c.c2w[i] as f64);
+                let t = transform_c2w(&m, &r, &[0.0; 3]);
+                Camera { c2w: std::array::from_fn(|i| t[i] as f32), ..*c }
+            })
+            .collect();
+    }
+    (sc, cm)
+}
+
+fn norm3(v: [f64; 3]) -> Option<[f64; 3]> {
+    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    (n > 1e-12).then(|| [v[0] / n, v[1] / n, v[2] / n])
+}
+
+/// Column `k` of the rotation matrix a wxyz quaternion describes, which is
+/// that local axis expressed in the world.
+fn rotate_axis(q: &[f64; 4], k: usize) -> [f64; 3] {
+    let n = (q.iter().map(|v| v * v).sum::<f64>()).sqrt().max(1e-12);
+    let (w, x, y, z) = (q[0] / n, q[1] / n, q[2] / n, q[3] / n);
+    match k {
+        0 => [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)],
+        1 => [2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)],
+        _ => [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)],
+    }
+}
+
+/// The shortest rotation taking unit `a` onto unit `b`, row-major 3x3.
+fn rotation_between(a: [f64; 3], b: [f64; 3]) -> [f64; 9] {
+    let v = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let c = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let s = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if s < 1e-12 {
+        // parallel, or exactly opposed - a half turn about any perpendicular
+        if c > 0.0 {
+            return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        }
+        let p = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let ax = norm3([
+            a[1] * p[2] - a[2] * p[1],
+            a[2] * p[0] - a[0] * p[2],
+            a[0] * p[1] - a[1] * p[0],
+        ])
+        .unwrap_or([1.0, 0.0, 0.0]);
+        return axis_angle(ax, std::f64::consts::PI);
+    }
+    axis_angle([v[0] / s, v[1] / s, v[2] / s], s.atan2(c))
+}
+
+fn axis_angle(k: [f64; 3], t: f64) -> [f64; 9] {
+    let (c, s) = (t.cos(), t.sin());
+    let v = 1.0 - c;
+    [
+        c + k[0] * k[0] * v,
+        k[0] * k[1] * v - k[2] * s,
+        k[0] * k[2] * v + k[1] * s,
+        k[1] * k[0] * v + k[2] * s,
+        c + k[1] * k[1] * v,
+        k[1] * k[2] * v - k[0] * s,
+        k[2] * k[0] * v - k[1] * s,
+        k[2] * k[1] * v + k[0] * s,
+        c + k[2] * k[2] * v,
+    ]
+}
