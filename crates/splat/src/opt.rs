@@ -243,6 +243,45 @@ pub struct FitCfg {
     /// frame, and no amount of moving gaussians reconciles two frames that
     /// disagree about where they were taken from.
     pub pose_lr: f32,
+    /// How far a gaussian may travel over the WHOLE fit, in multiples of its
+    /// own radius. <= 0 (the default) spends `lr` on positions directly.
+    ///
+    /// Off by default because only the caller knows whether the geometry it
+    /// passed in is worth preserving. A fit that starts from a sparse point
+    /// cloud has to let gaussians travel many radii to find a surface at all,
+    /// and budgeting it would only stop it converging; a fit that starts from
+    /// a feed-forward model's metric depth is in the opposite situation and
+    /// should set this.
+    ///
+    /// `p_geo` interleaves a position in world units, a LINEAR scale, and a
+    /// unit quaternion, and Adam's step is ~lr whatever the gradient is. So a
+    /// single `lr` is simultaneously a rounding error on the scene diagonal
+    /// and a large fraction of a small gaussian's own size, and which of those
+    /// it is depends on nothing but how finely the scene happens to be
+    /// tessellated. Budgeting the travel against the gaussian's own radius is
+    /// what makes one setting mean the same thing to a sparse scene of large
+    /// blobs and a dense one of small ones.
+    ///
+    /// A scene from a feed-forward model is already metric - every gaussian
+    /// sits on the surface it was unprojected from - so the honest budget is
+    /// about one radius: enough to settle onto the surface, not enough to
+    /// leave it. Measured on a real capture, an unbudgeted fit moved 94% of
+    /// gaussians more than three radii, which is the scene coming apart.
+    pub position_budget: f32,
+    /// Fractional change in a gaussian's size over the whole fit, as a
+    /// multiple of its own radius. <= 0 spends `lr` on scales directly.
+    ///
+    /// Unbudgeted, the same mismatch polarizes the scene rather than blurring
+    /// it: a third of a real capture collapsed past 2:1 while a quarter sat
+    /// pinned against `max_growth`. Holes and stray blobs are the two halves
+    /// of one defect.
+    pub scale_budget: f32,
+    /// Change in quaternion components over the whole fit. <= 0 spends `lr`
+    /// on rotations directly.
+    ///
+    /// A quaternion is already O(1), so this is the one geometry group a raw
+    /// `lr` UNDER-trains rather than over-trains.
+    pub rotation_budget: f32,
 }
 
 impl Default for FitCfg {
@@ -273,6 +312,9 @@ impl Default for FitCfg {
             mcmc_opacity_decay: 0.0,
             mcmc_noise: 1.0,
             pose_lr: 0.0,
+            position_budget: 0.0,
+            scale_budget: 0.0,
+            rotation_budget: 0.0,
         }
     }
 }
@@ -794,7 +836,34 @@ fn fit_stage(
         gpu.write(&d, &words);
         d
     };
-    let desc_geo = mk_desc(10 * n);
+    // Per-component learning rates for the packed gaussian, derived from the
+    // scene rather than configured in absolute units: a budget is a multiple
+    // of the MEDIAN gaussian's own radius, and Adam's step is ~lr, so
+    // `budget * radius / iters` is the per-step rate that spends exactly that
+    // budget over the fit. Median rather than mean because a reconstruction's
+    // size distribution has a long tail that a mean would let set the rate for
+    // everything else.
+    let (desc_geo, lr_pos) = {
+        let mut r: Vec<f32> = (0..n)
+            .map(|i| init.scales[i * 3..i * 3 + 3].iter().copied().fold(0.0f32, f32::max))
+            .collect();
+        r.sort_by(f32::total_cmp);
+        let rad = r.get(n / 2).copied().unwrap_or(0.0).max(1e-12);
+        let steps = cfg.iters.max(1) as f32;
+        let mult = |budget: f32, unit: f32| {
+            if budget > 0.0 && cfg.lr > 0.0 { budget * unit / steps / cfg.lr } else { 1.0 }
+        };
+        let (mp, ms, mq) = (
+            mult(cfg.position_budget, rad),
+            mult(cfg.scale_budget, rad),
+            mult(cfg.rotation_budget, 1.0),
+        );
+        let group = [mp, mp, mp, ms, ms, ms, mq, mq, mq, mq];
+        let words = kernels::adamw_desc_grouped(10 * n, 1.0, &group);
+        let d = gpu.storage(words.len() as u64);
+        gpu.write(&d, &words);
+        (d, cfg.lr * mp)
+    };
     let desc_op = mk_desc(n);
     let desc_col = mk_desc(3 * n);
     let desc_sh = mk_desc((3 * n * ksh).max(1));
@@ -1060,7 +1129,13 @@ fn fit_stage(
         // rides along on the readback the clamps already needed, so sampling
         // costs no extra transfer.
         if cfg.strategy == Densify::Mcmc {
-            crate::mcmc::add_noise(&mut geo, &op, cfg.mcmc_noise * cfg.lr, (it0 + it) as u64 + 1);
+            // Eq. 8's noise is proportional to the learning rate of the
+            // POSITIONS it perturbs, which is `lr_pos` and not `cfg.lr` - the
+            // two stopped being the same number when the geometry groups were
+            // budgeted separately. Scaled by the wrong one, the chain is
+            // shaken harder than it descends and relocation loses to the
+            // heuristic it is supposed to beat.
+            crate::mcmc::add_noise(&mut geo, &op, cfg.mcmc_noise * lr_pos, (it0 + it) as u64 + 1);
         }
         for i in 0..n {
             let lo = floor[i.min(floor.len() - 1)];
