@@ -1948,7 +1948,10 @@ impl Env for DoomEnv {
         keys.sort();
         let l = &self.state.level;
         let tenth = |got: u32, all: u32| {
-            if all <= 0 {
+            // `== 0`, not `<= 0`: these counters are unsigned, so the second
+            // is a comparison that can only ever be true one way, and clippy
+            // denies it.
+            if all == 0 {
                 0
             } else {
                 (got * 10 / all).clamp(0, 10)

@@ -30,4 +30,10 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # in BOTH qwen3tts and cosyvoice (`TtsPipeline` dispatches between them at
 # resolve time - see crates/sdk/src/tts.rs), which is why this is much
 # higher than a single-architecture sample's budget.
-max-brain-crates = 67
+#
+# 67 -> 68: `brain-recon` joined, and not through anything audio - it arrives
+# `recon <- worldmirror2 <- npu <- qwen3tts`, so the crate that added recon to
+# worldmirror2 added it to every consumer of the audio surface at the same
+# time. Recorded rather than absorbed silently, which is what the budget is
+# for.
+max-brain-crates = 68
