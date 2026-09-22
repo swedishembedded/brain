@@ -18,7 +18,7 @@ fn every_operator_is_tried_before_any_is_repeated() {
         let arm = a.choose();
         assert!(!seen[arm], "an operator was repeated before all had been tried");
         seen[arm] = true;
-        a.credit(arm, Gain { fresh: 0, improved: 0, seconds: 1.0 });
+        a.credit(arm, Gain { fresh: 0.0, improved: 0.0, seconds: 1.0 });
     }
     assert!(seen.iter().all(|s| *s));
 }
@@ -33,8 +33,8 @@ fn a_productive_operator_earns_more_of_the_budget() {
         let arm = a.choose();
         picks[arm] += 1;
         let gain = match arm {
-            0 => Gain { fresh: 3, improved: 1, seconds: 1.0 },
-            _ => Gain { fresh: 0, improved: 0, seconds: 1.0 },
+            0 => Gain { fresh: 3.0, improved: 1.0, seconds: 1.0 },
+            _ => Gain { fresh: 0.0, improved: 0.0, seconds: 1.0 },
         };
         a.credit(arm, gain);
     }
@@ -53,8 +53,8 @@ fn an_unproductive_operator_is_still_tried_occasionally() {
         let arm = a.choose();
         picks[arm] += 1;
         let gain = match arm {
-            0 => Gain { fresh: 3, improved: 1, seconds: 1.0 },
-            _ => Gain { fresh: 0, improved: 0, seconds: 1.0 },
+            0 => Gain { fresh: 3.0, improved: 1.0, seconds: 1.0 },
+            _ => Gain { fresh: 0.0, improved: 0.0, seconds: 1.0 },
         };
         a.credit(arm, gain);
     }
@@ -73,9 +73,30 @@ fn credit_is_per_second_not_per_call() {
         picks[arm] += 1;
         // Identical gain; the slow one takes twenty times as long to get it.
         let seconds = if arm == 0 { 1.0 } else { 20.0 };
-        a.credit(arm, Gain { fresh: 2, improved: 0, seconds });
+        a.credit(arm, Gain { fresh: 2.0, improved: 0.0, seconds });
     }
     assert!(picks[0] > picks[1] * 3, "the quick arm got {} against {}", picks[0], picks[1]);
+}
+
+/// The defect a real campaign exposed. An operator that produces a great many
+/// SHALLOW cells must not outrank one producing fewer DEEP ones.
+///
+/// Measured on `samples/decision/doom`: a wall-pressing operator generated
+/// 44 513 steps of cheap cells against a playing operator's 23 272, scored a
+/// comparable gain rate on a metric that counted every fresh niche as one,
+/// and took a third of the budget while the playing operator was the one
+/// actually advancing the frontier. Weighting an admission by how far along
+/// it is, relative to the best the archive holds, is what tells them apart.
+#[test]
+fn a_deep_niche_outranks_a_shallow_one() {
+    let deep = Gain { fresh: 1.0, improved: 0.0, seconds: 1.0 };
+    let shallow = Gain { fresh: 4.0 * 0.05, improved: 0.0, seconds: 1.0 };
+    assert!(
+        deep.value() > shallow.value(),
+        "four cells at the spawn ({:.3}) outranked one at the frontier ({:.3})",
+        shallow.value(),
+        deep.value()
+    );
 }
 
 /// An improved elite is worth something - it is how a time comes down once
@@ -83,10 +104,10 @@ fn credit_is_per_second_not_per_call() {
 /// that is the search reaching somewhere it has never been.
 #[test]
 fn a_fresh_niche_outranks_an_improved_one() {
-    let quicker = Gain { fresh: 1, improved: 0, seconds: 1.0 };
-    let refiner = Gain { fresh: 0, improved: 1, seconds: 1.0 };
+    let quicker = Gain { fresh: 1.0, improved: 0.0, seconds: 1.0 };
+    let refiner = Gain { fresh: 0.0, improved: 1.0, seconds: 1.0 };
     assert!(quicker.value() > refiner.value());
-    assert!(refiner.value() > Gain { fresh: 0, improved: 0, seconds: 1.0 }.value());
+    assert!(refiner.value() > Gain { fresh: 0.0, improved: 0.0, seconds: 1.0 }.value());
 }
 
 /// A zero-second measurement is a clock resolution artifact, not an infinitely
@@ -95,8 +116,8 @@ fn a_fresh_niche_outranks_an_improved_one() {
 #[test]
 fn a_zero_second_call_does_not_produce_an_infinite_rate() {
     let mut a = Allocator::new(&["instant", "normal"]);
-    a.credit(0, Gain { fresh: 1, improved: 0, seconds: 0.0 });
-    a.credit(1, Gain { fresh: 1, improved: 0, seconds: 1.0 });
+    a.credit(0, Gain { fresh: 1.0, improved: 0.0, seconds: 0.0 });
+    a.credit(1, Gain { fresh: 1.0, improved: 0.0, seconds: 1.0 });
     let rates = a.report();
     assert!(rates[0].rate.is_finite(), "a zero-second call produced {}", rates[0].rate);
 }
@@ -106,8 +127,8 @@ fn a_zero_second_call_does_not_produce_an_infinite_rate() {
 #[test]
 fn the_report_names_every_arm_with_its_draws_and_rate() {
     let mut a = Allocator::new(&["alpha", "beta"]);
-    a.credit(0, Gain { fresh: 4, improved: 0, seconds: 2.0 });
-    a.credit(1, Gain { fresh: 0, improved: 0, seconds: 1.0 });
+    a.credit(0, Gain { fresh: 4.0, improved: 0.0, seconds: 2.0 });
+    a.credit(1, Gain { fresh: 0.0, improved: 0.0, seconds: 1.0 });
     let r = a.report();
     assert_eq!(r.len(), 2);
     assert_eq!(r[0].name, "alpha");

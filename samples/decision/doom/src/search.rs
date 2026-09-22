@@ -467,9 +467,13 @@ impl Campaign {
             if let Some(cell) = env.cell() {
                 let worth = Worth::new(env.score(allowed).value(), env.cost());
                 let trail = Trail { from: Some(from.clone()), steps: steps.clone() };
+                // What the archive's best was BEFORE this admission, so a
+                // cell that advances the frontier is credited against the old
+                // frontier rather than against itself.
+                let top = self.archive.best().map(|e| e.worth.reached).unwrap_or(0.0);
                 match self.file(env, cell, worth, trail) {
-                    Admission::Fresh => gain.fresh += 1,
-                    Admission::Improved => gain.improved += 1,
+                    Admission::Fresh => gain.admitted(true, worth.reached, top),
+                    Admission::Improved => gain.admitted(false, worth.reached, top),
                     Admission::Rejected => {}
                 }
             }

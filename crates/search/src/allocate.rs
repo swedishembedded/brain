@@ -23,12 +23,24 @@
 //! that cannot see that spends the whole campaign on the expensive one.
 
 /// What one run of an operator bought.
+///
+/// `fresh` and `improved` are WEIGHTS rather than counts, and that is the
+/// whole point of them. Counting every new niche as one rewards whichever
+/// operator can manufacture the most cells, which is not the same operator as
+/// the one advancing the search. Measured on `samples/decision/doom`: a
+/// wall-pressing operator produced 44 513 steps of cheap cells around ground
+/// already covered against a playing operator's 23 272, scored a comparable
+/// rate on a per-count metric, and took a third of the budget while the
+/// playing operator was the one reaching new parts of the level.
+///
+/// So a caller credits each admission with how far along it is relative to
+/// the best the archive holds - see [`Gain::admitted`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Gain {
-    /// Niches nothing had reached before.
-    pub fresh: u32,
-    /// Niches already held, now reached better or faster.
-    pub improved: u32,
+    /// Niches nothing had reached before, weighted by depth.
+    pub fresh: f64,
+    /// Niches already held, now reached better or faster, weighted by depth.
+    pub improved: f64,
     /// What it cost in wall clock.
     pub seconds: f64,
 }
@@ -53,10 +65,34 @@ const EXPLORATION: f64 = std::f64::consts::SQRT_2;
 /// arm takes the entire remaining budget.
 const MIN_SECONDS: f64 = 1e-3;
 
+/// The least an admission may be credited with, however shallow.
+///
+/// Never zero. A cell at the level's front door is not worth much and it is
+/// not worth NOTHING - it is where a search that has not started yet has to
+/// begin, and an operator that only ever produces them would otherwise show a
+/// rate of exactly zero and be indistinguishable from one that produces no
+/// cells at all.
+const SHALLOWEST: f64 = 0.05;
+
 impl Gain {
+    /// Credit one admission, weighted by how far along the cell is relative
+    /// to the best the archive holds.
+    pub fn admitted(&mut self, fresh: bool, reached: f32, best: f32) {
+        let depth = if best > 0.0 {
+            (reached as f64 / best as f64).clamp(SHALLOWEST, 1.0)
+        } else {
+            SHALLOWEST
+        };
+        if fresh {
+            self.fresh += depth;
+        } else {
+            self.improved += depth;
+        }
+    }
+
     /// The scalar an arm is credited with, before dividing by time.
     pub fn value(&self) -> f64 {
-        FRESH_WORTH * self.fresh as f64 + IMPROVED_WORTH * self.improved as f64
+        FRESH_WORTH * self.fresh + IMPROVED_WORTH * self.improved
     }
 
     fn rate(&self) -> f64 {
