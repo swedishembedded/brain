@@ -254,6 +254,16 @@ pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
 /// archive and still feed the compression phase.
 const REHYDRATIONS: usize = 24;
 
+/// How many times [`Campaign::pick_reachable`] will redraw looking for a cell
+/// it can return to before falling back to the level's start.
+///
+/// Weighted selection already favours the frontier, so a handful of draws
+/// finds a live cell whenever a reasonable share of the archive is live. The
+/// bound exists for the opposite case - an archive that is almost entirely
+/// trails - where looping until one turns up would be an unbounded search
+/// inside what is supposed to be one unit of work.
+const PICK_TRIES: usize = 32;
+
 /// A hard cap on how long a reconstructed trail may be, in LINKS.
 ///
 /// A campaign that runs for hours can chain a very long way, and a trail
@@ -376,6 +386,12 @@ impl Campaign {
             self.archive.remove(&cell);
             return Err("the engine would not hold the level's starting state".into());
         }
+        // It was just held, so it is returnable in THIS process. Saying so
+        // matters most on a carried-in archive, where the offer above is
+        // refused (the cell is already there, reached at least as well) and
+        // the start would otherwise be the one cell the campaign cannot go
+        // back to.
+        self.live.insert(cell.clone());
         self.start = Some(cell);
         Ok(())
     }
@@ -406,6 +422,35 @@ impl Campaign {
         }
         self.live.insert(cell);
         verdict
+    }
+
+    /// Draw a cell the campaign can actually set off from.
+    ///
+    /// On a carried-in archive almost every cell is a trail with no snapshot
+    /// behind it, and rebuilding one is bounded (see [`REHYDRATIONS`]). Once
+    /// that budget is gone a plain draw returns an unreachable cell nearly
+    /// every time, and the campaign does NOTHING for the rest of its run
+    /// while reporting an archive full of cells - measured, a reloaded
+    /// campaign sat for 150 seconds with zero steps and zero resumes taken,
+    /// and would have sat there for the remaining eighty minutes.
+    ///
+    /// So: draw normally while there is budget to rebuild, and draw only from
+    /// what is returnable once there is not. The fallback is the level's own
+    /// start, which is always returnable, so the answer is never nothing.
+    fn pick_reachable(&mut self) -> Option<(Niche, usize, u32)> {
+        let rebuilding = self.rehydrations > 0;
+        for _ in 0..PICK_TRIES {
+            let drawn = self
+                .archive
+                .pick(&mut self.rng)
+                .map(|e| (e.niche.clone(), e.slot, e.generation))?;
+            if rebuilding || self.live.contains(&drawn.0) {
+                return Some(drawn);
+            }
+        }
+        let start = self.start.clone()?;
+        let e = self.archive.get(&start)?;
+        Some((start.clone(), e.slot, e.generation))
     }
 
     /// Return to a cell, rebuilding its snapshot first if this process never
@@ -457,9 +502,7 @@ impl Campaign {
         let picked = if op.from_best {
             self.archive.best().map(|e| (e.niche.clone(), e.slot, e.generation))
         } else {
-            self.archive
-                .pick(&mut self.rng)
-                .map(|e| (e.niche.clone(), e.slot, e.generation))
+            self.pick_reachable()
         };
         let Some((from, slot, from_gen)) = picked else {
             gain.seconds = began.elapsed().as_secs_f64();
