@@ -168,6 +168,9 @@ pub struct Archive<C> {
     cells: std::collections::HashMap<Niche, Elite<C>>,
     capacity: usize,
     tol: f32,
+    /// How sharply selection prefers achievement. See [`FOCUS`].
+    #[serde(default = "default_focus")]
+    focus: f32,
     /// The lowest slot never yet handed out. Slots below it are either live or
     /// on `free`.
     next_slot: usize,
@@ -183,9 +186,17 @@ impl<C> Archive<C> {
             cells: std::collections::HashMap::new(),
             capacity,
             tol,
+            focus: FOCUS,
             next_slot: 0,
             free: Vec::new(),
         }
+    }
+
+    /// Change how sharply selection prefers achievement, for a caller that
+    /// wants illumination (low) rather than a push toward one goal (high).
+    pub fn focused(mut self, focus: f32) -> Archive<C> {
+        self.focus = focus;
+        self
     }
 
     pub fn capacity(&self) -> usize {
@@ -268,7 +279,7 @@ impl<C> Archive<C> {
         let top = self.top_reached();
         self.cells
             .values()
-            .map(|e| (e.niche.clone(), weight(e, top)))
+            .map(|e| (e.niche.clone(), weight(e, top, self.focus)))
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(n, _)| n)
     }
@@ -288,7 +299,7 @@ impl<C> Archive<C> {
         }
         let top = self.top_reached();
         let weights: Vec<(Niche, f64)> =
-            self.cells.values().map(|e| (e.niche.clone(), weight(e, top) as f64)).collect();
+            self.cells.values().map(|e| (e.niche.clone(), weight(e, top, self.focus) as f64)).collect();
         let total: f64 = weights.iter().map(|(_, w)| *w).sum();
         let mut u = rng.next_f64() * total;
         let mut chosen = weights[weights.len() - 1].0.clone();
@@ -327,6 +338,10 @@ impl<C> Archive<C> {
     }
 }
 
+fn default_focus() -> f32 {
+    FOCUS
+}
+
 /// A `HashMap<Niche, _>` keyed by a tuple, on the wire as the list of its
 /// values. See the field's own comment for why.
 mod cells_as_list {
@@ -360,6 +375,22 @@ mod cells_as_list {
     }
 }
 
+/// How sharply selection prefers a cell that has achieved more.
+///
+/// The weight below used to be `1 + reached/top`, a range of exactly two: the
+/// best cell in the archive was drawn twice as often as one that had achieved
+/// nothing at all. That is far too flat to push a frontier. A campaign that
+/// has been running a while holds thousands of cells of which a handful are
+/// near the goal, so a twofold preference spreads almost the whole budget
+/// over ground already covered - measured on the doom campaign, two runs held
+/// their best score for 800 seconds while the archive grew from 649 cells to
+/// 1028, finding new places the whole time and advancing not at all.
+///
+/// Exponential in the shortfall instead. At 4.0 a cell at half the best's
+/// achievement is drawn about a seventh as often, and one at a quarter about
+/// a twentieth - a real preference, and still never zero.
+pub const FOCUS: f32 = 4.0;
+
 /// How likely a cell is to be drawn, and to survive an eviction.
 ///
 /// Two measures at once, and both are needed. `1/sqrt(visits + 1)` is
@@ -370,13 +401,14 @@ mod cells_as_list {
 /// nothing achieved is drawn exactly as often as one deep in with most of the
 /// level cleared, and only the second can lead anywhere new.
 ///
-/// So the achievement multiplies it, normalised against the best cell held.
-/// The `1.0 +` keeps a cell that has achieved nothing in the draw rather than
-/// cutting it off - that is where a search which has not started yet has to
-/// begin, and a weight of zero would make it unreachable forever.
-fn weight<C>(e: &Elite<C>, top: f32) -> f32 {
-    let worth = 1.0 + (e.worth.reached / top).clamp(0.0, 1.0);
-    worth / ((e.visits as f32) + 1.0).sqrt()
+/// So achievement multiplies it, normalised against the best cell held and
+/// falling off exponentially below it (see [`FOCUS`]). It never reaches zero,
+/// which matters: a cell that has achieved nothing is where a search that has
+/// not started yet has to begin, and a stepping stone that looks worthless is
+/// exactly what a quality-diversity archive exists to keep.
+fn weight<C>(e: &Elite<C>, top: f32, focus: f32) -> f32 {
+    let short = 1.0 - (e.worth.reached / top).clamp(0.0, 1.0);
+    (-focus * short).exp() / ((e.visits as f32) + 1.0).sqrt()
 }
 
 impl<C: Serialize + for<'de> Deserialize<'de>> Archive<C> {

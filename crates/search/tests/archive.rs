@@ -118,6 +118,73 @@ fn selection_favours_the_rarely_visited() {
     assert!(least > 0, "a cell was never drawn at all");
 }
 
+/// A twofold preference for the best cell cannot push a frontier. An archive
+/// that has been running a while holds thousands of cells of which a handful
+/// are near the goal, so a flat preference spends almost the whole budget on
+/// ground already covered - measured on the doom campaign, two runs held
+/// their best score for 800 seconds while the archive grew from 649 to 1028
+/// cells, finding new places the whole time and advancing not at all.
+#[test]
+fn selection_strongly_prefers_what_has_achieved_most() {
+    let mut a: Archive<u32> = Archive::new(2048, TOL);
+    // One cell at the goal, and two hundred that got a quarter of the way -
+    // roughly the shape a real campaign settles into.
+    a.offer(niche(&[0, 0]), Worth::new(1.0, 100), 0);
+    for i in 1..=200 {
+        a.offer(niche(&[i, 1]), Worth::new(0.25, 100), i as u32);
+    }
+    let mut rng = Rng::new(5);
+    let mut leader = 0u32;
+    for _ in 0..4_000 {
+        if a.pick(&mut rng).expect("not empty").niche.parts()[1] == 0 {
+            leader += 1;
+        }
+    }
+    // Uniform-by-worth would give the single deep cell about 1 draw in 130.
+    // It has to do far better than that to be a frontier the search pushes.
+    assert!(
+        leader > 4_000 / 40,
+        "the one cell near the goal took only {leader} of 4000 draws against 200 shallow ones"
+    );
+
+    // The same archive with the preference turned off, as the control - so
+    // this test demonstrates the difference rather than asserting a number
+    // that some other weighting might also happen to clear.
+    let mut flat: Archive<u32> = Archive::new(2048, TOL).focused(0.0);
+    flat.offer(niche(&[0, 0]), Worth::new(1.0, 100), 0);
+    for i in 1..=200 {
+        flat.offer(niche(&[i, 1]), Worth::new(0.25, 100), i as u32);
+    }
+    let mut rng = Rng::new(5);
+    let mut flat_leader = 0u32;
+    for _ in 0..4_000 {
+        if flat.pick(&mut rng).expect("not empty").niche.parts()[1] == 0 {
+            flat_leader += 1;
+        }
+    }
+    assert!(
+        leader > flat_leader * 3,
+        "preferring achievement barely changed anything: {leader} against a flat {flat_leader}"
+    );
+}
+
+/// ...and never at the cost of cutting the shallow ones off. A stepping stone
+/// that looks worthless is exactly what an archive like this exists to keep.
+#[test]
+fn a_far_worse_cell_is_still_drawn() {
+    let mut a: Archive<u32> = Archive::new(16, TOL);
+    a.offer(niche(&[0]), Worth::new(1.0, 100), 0);
+    a.offer(niche(&[1]), Worth::new(0.01, 100), 1);
+    let mut rng = Rng::new(7);
+    let mut poor = 0;
+    for _ in 0..4_000 {
+        if a.pick(&mut rng).expect("not empty").niche.parts()[0] == 1 {
+            poor += 1;
+        }
+    }
+    assert!(poor > 20, "the weak cell was effectively cut off: {poor} of 4000");
+}
+
 /// A cell that led somewhere good keeps priority over one that achieved
 /// nothing - but the one that achieved nothing stays in the draw, because
 /// that is where a search that has not started yet has to begin.
