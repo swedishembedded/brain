@@ -116,12 +116,12 @@
 //! **[`DecisionPipeline::inner`] returns `Option<&mut Decide>`, not
 //! `&mut Decide`** - a Laya-backed pipeline has no `Decide` to hand back.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub use decide::banking77::Banking77;
 
 use decide::banking77::OptionSampler;
-use decide::decide::{Decide, Example, Limits};
+use decide::decide::{Decide, Limits};
 use decide::loss::{softmax, LossConfig};
 use decide::primitives::confidence;
 
@@ -229,6 +229,12 @@ const LAYA_SIGMA_END: f32 = 0.1;
 
 pub struct DecisionPipeline {
     backend: Backend,
+    /// The checkpoint directory this pipeline was loaded from.
+    ///
+    /// A decision model is not complete without its tokenizer, and a loaded
+    /// tokenizer does not retain its source, so a full save reads it back
+    /// from here - see [`DecisionPipeline::save_model`].
+    source: PathBuf,
     /// The option set and question the last training stage used, so the
     /// interactive stages need no second copy of them.
     last_options: Vec<String>,
@@ -658,6 +664,19 @@ impl DecisionPipeline {
     /// option at all - and it then cannot answer a question whose options it
     /// has not seen, which is the one thing this model is for.
     ///
+    /// `batch` examples are accumulated into each optimizer step, and the
+    /// summed gradient is rescaled by `1/batch` so one learning rate means
+    /// the same thing at any batch size. `steps` therefore counts OPTIMIZER
+    /// UPDATES and the run spends `steps * batch` examples.
+    ///
+    /// **A batch of one is a measurement problem, not a speed one.** One
+    /// decision's gradient is a very noisy estimate of the objective's, so
+    /// the loss wanders rather than descending and AdamW's moment estimates
+    /// track the noise. Measured on this repo's own Rubik's-cube sample
+    /// (`samples/decision/rubiks`), whose labels come from an exact planner
+    /// and whose held-out accuracy is therefore exactly checkable: see that
+    /// sample's README for the batch-size table.
+    ///
     /// Returns the mean loss over the last tenth of the run.
     ///
     /// **Both arms train, and the option sampling above is shared** - what
@@ -681,11 +700,15 @@ impl DecisionPipeline {
         options: &[String],
         instructions: &str,
         steps: usize,
+        batch: usize,
         seed: u64,
         log: &mut dyn FnMut(usize, f32),
     ) -> Result<f32> {
         if examples.is_empty() {
             return Err(Error::MissingArgument("train_choices needs at least one example".into()));
+        }
+        if batch == 0 {
+            return Err(Error::MissingArgument("train_choices needs a batch of at least one example".into()));
         }
         let pool: Vec<usize> = (0..options.len()).collect();
         let sampler = OptionSampler::default();
@@ -695,48 +718,70 @@ impl DecisionPipeline {
         let mut tail_sum = 0.0f32;
 
         for step in 0..steps {
-            let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
-            if label >= options.len() {
-                return Err(Error::MissingArgument(format!(
-                    "example label {label} has no option text ({} supplied)",
-                    options.len()
-                )));
+            // The whole batch shares one optimizer update: zero once,
+            // accumulate `batch` gradients, step once with the sum rescaled
+            // to a mean. That cycle is `crates/decide`'s own, and its
+            // accumulation is gated there (`tests/minibatch.rs`) rather than
+            // re-proved here.
+            let progress = step as f32 / steps.max(1) as f32;
+            match &mut self.backend {
+                Backend::Decide(model) => model.zero_grads(),
+                Backend::Laya(b) => b.model.zero_grads(),
             }
-            // ONE sampler, one draw, both arms: each step scores its example
-            // against a random SUBSET of the options, always containing the
-            // correct one, at a random position.
-            let (drawn, gold) = sampler.draw(label, &pool, &mut rng);
-            let l = match &mut self.backend {
-                Backend::Decide(model) => {
-                    let q = Question::Choice {
-                        instructions: instructions.to_string(),
-                        options: drawn.iter().map(|&i| Opt::new(options[i].clone())).collect(),
-                    };
-                    model
-                        .train_step(&Example { state: text, question: &q, gold }, &loss_cfg, ENCODER_LR, HEAD_LR)
-                        .map_err(Error::Backend)?
+            let mut sum = 0.0f32;
+            for _ in 0..batch {
+                let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
+                if label >= options.len() {
+                    return Err(Error::MissingArgument(format!(
+                        "example label {label} has no option text ({} supplied)",
+                        options.len()
+                    )));
                 }
+                // ONE sampler, one draw, both arms: each example is scored
+                // against a random SUBSET of the options, always containing
+                // the correct one, at a random position.
+                let (drawn, gold) = sampler.draw(label, &pool, &mut rng);
+                sum += match &mut self.backend {
+                    Backend::Decide(model) => {
+                        let q = Question::Choice {
+                            instructions: instructions.to_string(),
+                            options: drawn.iter().map(|&i| Opt::new(options[i].clone())).collect(),
+                        };
+                        model
+                            .accumulate(text, &q, |scores| decide::loss::decision_loss(scores, gold, &loss_cfg))
+                            .map_err(Error::Backend)?
+                    }
+                    Backend::Laya(b) => {
+                        let q = modernbert::Question::Choice {
+                            ins: instructions.to_string(),
+                            options: drawn.iter().map(|&i| (options[i].clone(), None)).collect(),
+                        };
+                        let target = rlcd::proper::hard_target(drawn.len(), gold);
+                        let obj = rlcd::reinforce::RlcdObjective::default()
+                            .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
+                        b.model
+                            .accumulate(&State::Str(text.to_string()), &q, None, |scores| {
+                                // A `choice` question is not ordinal, so the
+                                // ranked-probability term does not apply -
+                                // the same gate `rl_common.py` puts on
+                                // `qtype`.
+                                rlcd::reinforce::rlcd_loss(scores, &target, false, &obj, &mut rng)
+                            })
+                            .map_err(Error::Backend)?
+                    }
+                };
+            }
+            let scale = 1.0 / batch as f32;
+            match &mut self.backend {
+                Backend::Decide(model) => model.adamw_scaled(ENCODER_LR, HEAD_LR, scale),
                 Backend::Laya(b) => {
-                    let q = modernbert::Question::Choice {
-                        ins: instructions.to_string(),
-                        options: drawn.iter().map(|&i| (options[i].clone(), None)).collect(),
-                    };
-                    let target = rlcd::proper::hard_target(drawn.len(), gold);
-                    let progress = step as f32 / steps.max(1) as f32;
-                    let obj = rlcd::reinforce::RlcdObjective::default()
-                        .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
+                    // The trunk is held fixed on this arm, so its rate is
+                    // never consulted - see this method's doc.
                     let lr = rlcd::reinforce::cosine_lr(LAYA_HEAD_LR, LAYA_HEAD_LR_MIN, progress);
-                    let state = State::Str(text.to_string());
-                    b.model
-                        .train_step_with(&state, &q, None, 0.0, lr, |scores| {
-                            // A `choice` question is not ordinal, so the
-                            // ranked-probability term does not apply - the
-                            // same gate `rl_common.py` puts on `qtype`.
-                            rlcd::reinforce::rlcd_loss(scores, &target, false, &obj, &mut rng)
-                        })
-                        .map_err(Error::Backend)?
+                    b.model.adamw_scaled(0.0, lr, scale);
                 }
-            };
+            }
+            let l = sum * scale;
             log(step, l);
             if step >= steps.saturating_sub(tail) {
                 tail_sum += l / tail as f32;
@@ -758,6 +803,38 @@ impl DecisionPipeline {
         match &self.backend {
             Backend::Decide(model) => model.save_head(path.as_ref()).map_err(Error::Backend),
             Backend::Laya(b) => b.model.save_head(path.as_ref()).map_err(Error::Backend),
+        }
+    }
+
+    /// Write the WHOLE model - weights, config and tokenizer - as a
+    /// checkpoint DIRECTORY that [`DecisionPipeline::builder`] loads back.
+    ///
+    /// The artifact [`DecisionPipeline::save_head`] cannot be. This arm
+    /// fine-tunes the encoder as well as the head, and a head-only file
+    /// naming a published encoder then no longer describes the model that
+    /// was measured - so `save_head` refuses, correctly, and this is what a
+    /// run that trained writes instead.
+    ///
+    /// Prefer `save_head` when the encoder was NOT trained: it is ~445k
+    /// floats against this one's ~23M, and re-importing a published encoder
+    /// is free.
+    pub fn save_model(&self, dir: impl AsRef<str>) -> Result<()> {
+        let dir = dir.as_ref();
+        match &self.backend {
+            Backend::Decide(model) => {
+                let tok = self.source.join("tokenizer.json");
+                let bytes = std::fs::read(&tok)
+                    .map_err(|e| Error::Backend(format!("read {}: {e}", tok.display())))?;
+                model.save_model(dir, &bytes).map_err(Error::Backend)
+            }
+            // The Laya arm holds its 395M trunk FIXED, so its head-only
+            // adapter always reproduces the model and there is nothing a
+            // whole-model copy would add but 1.6 GB.
+            Backend::Laya(_) => Err(Error::Backend(
+                "save_model is for an arm that fine-tunes its encoder; the Laya arm freezes its trunk, \
+                 so save_head already reproduces the model exactly"
+                    .into(),
+            )),
         }
     }
 
@@ -795,16 +872,33 @@ pub struct TrainSpec {
     pub examples: Vec<(String, usize)>,
     pub options: Vec<String>,
     pub instructions: String,
+    /// Optimizer UPDATES, not examples - a run spends `steps * batch` of
+    /// those.
     pub steps: usize,
+    /// Examples accumulated into each update. See
+    /// [`DecisionPipeline::train_choices`] for why the default is not one.
+    pub batch: usize,
     pub seed: u64,
     /// Held out for [`Flow::evaluate`]. Empty means evaluation reports nothing
     /// rather than inventing a split.
     pub eval: Vec<(String, usize)>,
 }
 
+/// What a caller who does not think about batching should get.
+///
+/// Large enough that a step's gradient is an estimate rather than a sample,
+/// small enough that a few hundred steps is still a few hundred steps' worth
+/// of wall clock on a single device.
+pub const DEFAULT_BATCH: usize = 16;
+
 impl TrainSpec {
     pub fn new(instructions: impl Into<String>) -> TrainSpec {
-        TrainSpec { instructions: instructions.into(), steps: 600, ..TrainSpec::default() }
+        TrainSpec {
+            instructions: instructions.into(),
+            steps: 600,
+            batch: DEFAULT_BATCH,
+            ..TrainSpec::default()
+        }
     }
 
     pub fn examples(mut self, examples: Vec<(String, usize)>) -> TrainSpec {
@@ -824,6 +918,11 @@ impl TrainSpec {
 
     pub fn steps(mut self, steps: usize) -> TrainSpec {
         self.steps = steps;
+        self
+    }
+
+    pub fn batch(mut self, batch: usize) -> TrainSpec {
+        self.batch = batch;
         self
     }
 
@@ -852,7 +951,7 @@ impl Stages for DecisionPipeline {
     fn run_train(&mut self, spec: &TrainSpec, log: &mut dyn FnMut(usize, f32)) -> Result<TrainReport> {
         let ex: Vec<(&str, usize)> = spec.examples.iter().map(|(t, l)| (t.as_str(), *l)).collect();
         let final_loss =
-            self.train_choices(&ex, &spec.options, &spec.instructions, spec.steps, spec.seed, log)?;
+            self.train_choices(&ex, &spec.options, &spec.instructions, spec.steps, spec.batch, spec.seed, log)?;
         // Remembered so `evaluate` and `ask` need no second copy of the
         // question: a chain should not make the caller repeat itself.
         self.last_options = spec.options.clone();
@@ -990,7 +1089,13 @@ impl DecisionPipelineBuilder {
     /// doc for what each arm trains, and with what objective).
     pub fn load(self) -> Result<DecisionPipeline> {
         let backend = resolve_decision_backend(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
-        Ok(DecisionPipeline { backend, last_options: Vec::new(), last_instructions: String::new(), last_eval: Vec::new() })
+        Ok(DecisionPipeline {
+            backend,
+            source: PathBuf::from(&self.dir),
+            last_options: Vec::new(),
+            last_instructions: String::new(),
+            last_eval: Vec::new(),
+        })
     }
 }
 
@@ -1010,13 +1115,36 @@ pub(crate) fn load_decide(
     let path = Path::new(dir);
     let cfg_json = std::fs::read_to_string(path.join("config.json"))
         .map_err(|e| Error::Backend(format!("read {dir}/config.json: {e}")))?;
-    let cfg = decide::import::config_from_hf(&cfg_json).map_err(Error::Backend)?;
     let weights = path.join("model.safetensors");
     let tensors = checkpoint::safetensors::read(
         weights.to_str().ok_or_else(|| Error::Backend("non-UTF-8 weights path".into()))?,
     )
     .map_err(|e| Error::Backend(format!("read {}: {e}", weights.display())))?;
-    let enc_init = decide::import::brain_init_from_hf(tensors, &cfg).map_err(Error::Backend)?;
+
+    // ONE load path for both conventions, and the FILE says which it is -
+    // a caller passes a directory, not a format. A published
+    // `sentence-transformers` checkpoint is named the Hugging Face way; one
+    // written by `Decide::save_model` (a model whose encoder has been
+    // trained, so a head-only adapter could not reproduce it) is named the
+    // way this crate names its own parameters, and carries its head in the
+    // same file.
+    let names: Vec<String> = tensors.iter().map(|t| t.name.clone()).collect();
+    let probe = decide::import::config_from_hf(&cfg_json)
+        .or_else(|_| decide::config::EncoderConfig::from_json_strict(&cfg_json))
+        .map_err(Error::Backend)?;
+    let naming = decide::import::sniff_naming(&names, &probe).map_err(Error::Backend)?;
+    let (cfg, enc_init, saved_head) = match naming {
+        decide::import::Naming::Hf => {
+            let cfg = decide::import::config_from_hf(&cfg_json).map_err(Error::Backend)?;
+            let enc = decide::import::brain_init_from_hf(tensors, &cfg).map_err(Error::Backend)?;
+            (cfg, enc, None)
+        }
+        decide::import::Naming::Brain => {
+            let cfg = decide::config::EncoderConfig::from_json_strict(&cfg_json).map_err(Error::Backend)?;
+            let (enc, rest) = decide::import::split_brain_tensors(tensors, &cfg).map_err(Error::Backend)?;
+            (cfg, enc, Some(rest))
+        }
+    };
 
     let tok_path = path.join("tokenizer.json");
     let tok = data::wordpiece::WordPiece::from_file(
@@ -1024,12 +1152,50 @@ pub(crate) fn load_decide(
     )
     .map_err(Error::Backend)?;
 
-    let head_init = match head {
-        Some(p) => {
+    let head_init = match (head, saved_head) {
+        // An explicitly supplied head wins over the one in the checkpoint:
+        // a caller naming a file means to use that file.
+        (Some(p), _) => {
             let t = checkpoint::safetensors::read(p).map_err(|e| Error::Backend(format!("read {p}: {e}")))?;
             t.into_iter().map(|x| (x.name, x.data)).collect()
         }
-        None => decide::init::init_head(&cfg, seed),
+        // A saved decision model carries the head it was trained with. It is
+        // checked against the head manifest rather than trusted, so a file
+        // missing one is a named error and not a silently re-initialized
+        // head - which would load, answer, and be a different model.
+        (None, Some(mut saved)) => {
+            let mut head_init = std::collections::HashMap::new();
+            for (name, shape) in decide::head::tensor_manifest(&cfg) {
+                let numel: usize = shape.iter().product();
+                match saved.remove(&name) {
+                    Some(v) if v.len() == numel => {
+                        head_init.insert(name, v);
+                    }
+                    Some(v) => {
+                        return Err(Error::Backend(format!(
+                            "{dir}: head parameter {name} has {} elements, expected {numel}",
+                            v.len()
+                        )))
+                    }
+                    None => {
+                        return Err(Error::Backend(format!(
+                            "{dir}: a decision checkpoint in this crate's own naming must carry its \
+                             head, and {name} is missing"
+                        )))
+                    }
+                }
+            }
+            // Coverage BOTH ways: a tensor in the file that no parameter
+            // claims is a checkpoint this code does not fully understand,
+            // and loading it anyway would quietly drop whatever it was.
+            if !saved.is_empty() {
+                let mut extra: Vec<&String> = saved.keys().collect();
+                extra.sort();
+                return Err(Error::Backend(format!("{dir}: {} unclaimed tensors: {extra:?}", extra.len())));
+            }
+            head_init
+        }
+        (None, None) => decide::init::init_head(&cfg, seed),
     };
 
     crate::device::resolve(device)?;

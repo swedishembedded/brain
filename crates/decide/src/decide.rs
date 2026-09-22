@@ -21,6 +21,7 @@
 //! express that directly, with no per-tensor multiplier to keep in sync.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use data::tokenizer::Tokenizer;
 use data::wordpiece::WordPiece;
@@ -770,6 +771,102 @@ impl Decide {
             ..Default::default()
         };
         checkpoint::save_carded(path, config, &tensors, &card);
+        Ok(())
+    }
+
+    /// Write the WHOLE model - encoder and head - as a checkpoint that loads
+    /// back through the ordinary path.
+    ///
+    /// [`Decide::save_head`] is the right artifact while the encoder has not
+    /// moved: it is 445k floats naming a published encoder, and it stays
+    /// small because re-importing that encoder is free. Training this arm
+    /// moves the encoder (`ENCODER_LR` on every step), and then a head-only
+    /// file genuinely cannot reproduce the model - so `save_head` refuses,
+    /// and this is what a run writes instead.
+    ///
+    /// The result is a DIRECTORY, not a file, because a decision model is
+    /// not complete without its tokenizer: the same text has to become the
+    /// same token ids, or the weights are being fed a different language
+    /// than the one they were fitted on. The caller supplies the tokenizer
+    /// bytes it loaded this model with, since a [`data::wordpiece::WordPiece`]
+    /// does not retain its source.
+    ///
+    /// Tensors are written in THIS crate's own names, which
+    /// [`crate::import::sniff_naming`] recognises, so nothing has to be told
+    /// out of band which convention the file uses.
+    pub fn save_model(&self, dir: &str, tokenizer_json: &[u8]) -> Result<(), String> {
+        let path = Path::new(dir);
+        std::fs::create_dir_all(path).map_err(|e| format!("create {dir}: {e}"))?;
+
+        let shapes: HashMap<String, Vec<usize>> = self
+            .cfg
+            .tensor_manifest()
+            .into_iter()
+            .chain(crate::head::tensor_manifest(&self.cfg))
+            .collect();
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(shapes.len());
+        let mut n_params = 0u64;
+        // The encoder's parameters, read back off the device in the manifest's
+        // own order so the file is deterministic.
+        for (name, shape) in self.cfg.tensor_manifest() {
+            let data = self.enc.read_weight(&name);
+            n_params += data.len() as u64;
+            tensors.push((name, shape.iter().map(|&d| d as u64).collect(), data));
+        }
+        // ...and the head's, from the one accessor that already knows how to
+        // read them.
+        for (name, data) in self.head.weights() {
+            let shape = shapes
+                .get(&name)
+                .map(|s| s.iter().map(|&d| d as u64).collect())
+                .unwrap_or_else(|| vec![data.len() as u64]);
+            n_params += data.len() as u64;
+            tensors.push((name, shape, data));
+        }
+
+        let p = &self.provenance;
+        let mut config = self.cfg.to_json();
+        if let Some(o) = config.as_object_mut() {
+            o.insert("head".into(), serde_json::json!("option-head"));
+            // Where the encoder STARTED. Not an `adapter_of`: these weights
+            // are no longer that encoder, and saying so would invite a reader
+            // to attach them to it.
+            o.insert("finetuned_from".into(), serde_json::json!(p.base));
+            if !p.task.is_null() {
+                o.insert("trained_for".into(), p.task.clone());
+            }
+        }
+        std::fs::write(
+            path.join("config.json"),
+            serde_json::to_vec_pretty(&config).map_err(|e| format!("{e}"))?,
+        )
+        .map_err(|e| format!("write {dir}/config.json: {e}"))?;
+
+        let (vendor, repo) = match p.id.split_once('/') {
+            Some((v, r)) => (Some(v.to_string()), Some(r.to_string())),
+            None => (None, None),
+        };
+        let card = checkpoint::st::ModelCard {
+            schema_version: 1,
+            id: if p.id.is_empty() { "decision-model".into() } else { p.id.clone() },
+            display_name: None,
+            family: "decide".into(),
+            architecture: Some("minilm-l6-decision".into()),
+            variant_of: (!p.base.is_empty()).then(|| p.base.clone()),
+            param_count: Some(n_params),
+            embedding_dim: Some(self.cfg.d_model as u64),
+            context_length: Some(self.cfg.max_positions as u64),
+            license: Some("Apache-2.0".into()),
+            vendor,
+            repo,
+            ..Default::default()
+        };
+        let weights = path.join("model.safetensors");
+        let weights = weights.to_str().ok_or("non-UTF-8 output path")?;
+        checkpoint::save_carded(weights, config, &tensors, &card);
+
+        std::fs::write(path.join("tokenizer.json"), tokenizer_json)
+            .map_err(|e| format!("write {dir}/tokenizer.json: {e}"))?;
         Ok(())
     }
 

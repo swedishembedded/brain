@@ -123,6 +123,38 @@ impl EncoderConfig {
         })
     }
 
+    /// Read a config this crate itself wrote, from its JSON text.
+    ///
+    /// Every field REQUIRED. [`EncoderConfig::from_json`] fills a missing one
+    /// from a default, which is right for a hand-written test fixture and
+    /// wrong for a checkpoint: a config that lost `n_layers` would load as a
+    /// six-layer model, mismatch the weights, and the first thing to notice
+    /// would be a shape error somewhere far away - or, if the numbers
+    /// happened to line up, nothing at all. See AGENTS.md, "Validate
+    /// everything crossing into brain from outside".
+    pub fn from_json_strict(text: &str) -> Result<EncoderConfig, String> {
+        let v: Value = serde_json::from_str(text).map_err(|e| format!("config: {e}"))?;
+        let u = |k: &str| -> Result<u32, String> {
+            v.get(k)
+                .and_then(Value::as_u64)
+                .map(|x| x as u32)
+                .ok_or_else(|| format!("config: missing or non-integer {k:?}"))
+        };
+        Ok(EncoderConfig {
+            vocab: u("vocab")?,
+            max_positions: u("max_positions")?,
+            d_model: u("d_model")?,
+            n_layers: u("n_layers")?,
+            n_heads: u("n_heads")?,
+            d_ff: u("d_ff")?,
+            type_vocab: u("type_vocab")?,
+            eps: v
+                .get("eps")
+                .and_then(Value::as_f64)
+                .ok_or("config: missing or non-numeric \"eps\"")? as f32,
+        })
+    }
+
     pub fn from_json(v: &Value) -> EncoderConfig {
         let u = |k: &str, d: u32| v.get(k).and_then(Value::as_u64).map(|x| x as u32).unwrap_or(d);
         EncoderConfig {

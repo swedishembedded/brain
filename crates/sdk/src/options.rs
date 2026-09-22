@@ -109,8 +109,12 @@ impl Options for ModelOptions {
 #[derive(Clone, Debug)]
 pub struct SupervisedOptions {
     pub model: ModelOptions,
-    /// Optimizer steps.
+    /// Optimizer steps. A run spends `steps * batch` examples.
     pub steps: usize,
+    /// Examples accumulated into each optimizer step. One is what makes a
+    /// loss wander instead of descend - see
+    /// [`crate::decision::DecisionPipeline::train_choices`].
+    pub batch: usize,
     /// Examples held back from training and scored afterwards.
     pub eval: usize,
 }
@@ -118,12 +122,13 @@ pub struct SupervisedOptions {
 #[cfg(feature = "decision")]
 impl SupervisedOptions {
     pub fn new(model: ModelOptions) -> SupervisedOptions {
-        SupervisedOptions { model, steps: 2000, eval: 500 }
+        SupervisedOptions { model, steps: 2000, batch: crate::decision::DEFAULT_BATCH, eval: 500 }
     }
 
     pub fn take_over(mut self, args: &mut Args) -> Result<SupervisedOptions, String> {
         self.model = self.model.take_over(args)?;
         self.steps = args.usize_or("--steps", self.steps);
+        self.batch = args.usize_or("--batch", self.batch);
         self.eval = args.usize_or("--eval", self.eval);
         Ok(self)
     }
@@ -137,6 +142,7 @@ impl Options for SupervisedOptions {
 
     fn help() -> &'static str {
         "  --steps N           optimizer steps
+  --batch N           examples per optimizer step
   --eval N            examples to score afterwards"
     }
 }

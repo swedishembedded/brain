@@ -150,6 +150,78 @@ impl QkvJoin {
     }
 }
 
+/// Which naming convention a checkpoint's tensors are written in.
+///
+/// A caller passes a PATH, not a format: which convention a file uses is a
+/// fact about the file, and asking the caller to declare it is asking them
+/// to be right about something the file already says. The same reasoning
+/// `qwen3::import::Naming` follows for GGUF-vs-safetensors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    /// As released by `sentence-transformers` / Hugging Face:
+    /// `encoder.layer.0.attention.self.query.weight`, q/k/v separate.
+    Hf,
+    /// As this crate names its own parameters: `blocks.0.qkv.weight`, q/k/v
+    /// fused. What [`crate::decide::Decide::save_model`] writes.
+    Brain,
+}
+
+/// Read the convention off the tensor names themselves.
+///
+/// Errs rather than guessing when the names match neither, because a
+/// defaulted guess here is a whole model silently loaded from the wrong
+/// mapping - the tensors are shape-compatible often enough for that to
+/// produce a model that runs.
+pub fn sniff_naming(names: &[String], cfg: &EncoderConfig) -> Result<Naming, String> {
+    let brain: std::collections::HashSet<String> =
+        cfg.tensor_manifest().into_iter().map(|(n, _)| n).collect();
+    if names.iter().any(|n| brain.contains(n)) {
+        return Ok(Naming::Brain);
+    }
+    if names.iter().any(|n| hf_to_brain(n).is_some()) {
+        return Ok(Naming::Hf);
+    }
+    let sample: Vec<&String> = names.iter().take(4).collect();
+    Err(format!(
+        "import: {} tensors match neither this crate's own names nor the Hugging Face \
+         encoder layout (first few: {sample:?})",
+        names.len()
+    ))
+}
+
+/// Take an already-read tensor list written in THIS crate's own names and
+/// check it against the encoder manifest.
+///
+/// The same two-way coverage [`brain_init_from_hf`] applies to an imported
+/// checkpoint: every encoder parameter present exactly once at the right
+/// element count. Tensors outside the encoder manifest are returned
+/// separately rather than rejected - a saved decision model carries its head
+/// in the same file, and the head's manifest belongs to `crate::head`, not
+/// here.
+pub fn split_brain_tensors(
+    tensors: Vec<checkpoint::safetensors::StTensor>,
+    cfg: &EncoderConfig,
+) -> Result<(HashMap<String, Vec<f32>>, HashMap<String, Vec<f32>>), String> {
+    let mut seen: HashMap<String, Vec<f32>> = HashMap::new();
+    for t in tensors {
+        if seen.insert(t.name.clone(), t.data).is_some() {
+            return Err(format!("import: duplicate tensor {}", t.name));
+        }
+    }
+    let mut enc: HashMap<String, Vec<f32>> = HashMap::new();
+    for (name, shape) in cfg.tensor_manifest() {
+        let numel: usize = shape.iter().product();
+        let data = seen
+            .remove(&name)
+            .ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;
+        if data.len() != numel {
+            return Err(format!("import: {name} element count {} != expected {numel}", data.len()));
+        }
+        enc.insert(name, data);
+    }
+    Ok((enc, seen))
+}
+
 /// Remap an already-read HF tensor list into brain's `name -> f32` init map,
 /// with two-way coverage: every brain parameter produced exactly once with the
 /// right element count, and no mapped HF tensor left over.

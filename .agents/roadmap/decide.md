@@ -230,7 +230,7 @@ verified **red** before the implementation lands.
 | 13 | Serving contract | manifest test; model reachable over `brain serve --dbus`; `examples/` script runs |
 | 14 | `Domain::Decision`, SDK `DecisionPipeline`, `/v1/systemone` | `make check/sdk-features`; wire-format round-trip test |
 | 15 | `samples/decision/triage` | `make check/samples`; closure within declared budget |
-| 16 | Docs, NOTICE, compliance, AGENTS.md rows, lessons.md entries | `make test/full` green, zero warnings |
+| 16 | Docs, NOTICE, compliance, AGENTS.md rows, .agents/knowledge/ entries | `make test/full` green, zero warnings |
 
 ## 9. Risks
 
@@ -248,33 +248,37 @@ verified **red** before the implementation lands.
 5. **B9's lost cross-window context.** Real, and measured by B11's ablation rather
    than argued about.
 
-## 10. Found defects (reproduced, NOT fixed here)
+## 10. Found defects
 
-1. **`train_choices` then `save_head` has never worked on this arm.**
+1. **`train_choices` then `save_head` has never worked on this arm.** FIXED.
    `Decide::new_on` leaves `frozen_encoder = false`, `DecisionPipeline::
    train_choices` trains the encoder at `ENCODER_LR` on every step, and
    `Decide::save_head` refuses (correctly, and for a good reason - see its
    own doc) to write a head-only adapter for a model whose encoder moved. So
    `samples/decision/triage --save` and `samples/decision/intents` both
-   report their accuracy and then fail at the write. Reproduced 2026-09-22
-   against the real `sentence-transformers/all-MiniLM-L6-v2` checkpoint:
+   reported their accuracy and then failed at the write. Reproduced
+   2026-09-22 against the real `sentence-transformers/all-MiniLM-L6-v2`
+   checkpoint.
 
-   ```text
-   cannot write <path>: the encoder was trained, and this format carries only
-   the head. Loading it back would attach the head to the PUBLISHED encoder,
-   which is not the model being saved
-   ```
+   Three fixes were listed here and none chosen, because two of them change
+   what the arm learns. The one taken is the third, which changes nothing
+   about training: **when the encoder has moved, the artifact grows to carry
+   it.** `Decide::save_model` / `DecisionPipeline::save_model` write a
+   complete checkpoint DIRECTORY - `config.json`, `model.safetensors` holding
+   the encoder AND head in this crate's own tensor names, and the
+   `tokenizer.json` the model was loaded with - which
+   `DecisionPipeline::builder(dir).load()` reads back through the same path
+   a published checkpoint takes. `load_decide` tells the two apart by
+   sniffing the tensor NAMES (`import::sniff_naming`), so a caller passes a
+   path and never a format; `EncoderConfig::from_json_strict` refuses a
+   config missing any field rather than defaulting it, and the head is
+   checked against its manifest both ways.
 
-   Deliberately NOT fixed in the Laya training milestone that found it,
-   because every available fix is a real design decision for THIS arm rather
-   than a mechanical repair, and two of the three change what the arm learns:
-
-   * freeze the encoder in `train_choices` (cheapest, and what the Laya arm
-     does) - but it changes this arm's measured accuracies, which are
-     published numbers;
-   * keep training the encoder and extend the artifact to carry it;
-   * keep both and make the caller choose, so `--save` implies a frozen
-     encoder and a trained-encoder run says so.
+   `save_head` keeps its refusal unchanged, and `crates/sdk/tests/
+   decision_persistence.rs` pins that it still refuses: a head-only file
+   genuinely cannot reproduce a model whose encoder moved, and weakening
+   that would trade a loud failure for a silent one. Prefer `save_head`
+   when the encoder was frozen - 445k floats against ~23M.
 
    The Laya arm avoids the defect by construction: its trunk is frozen and
    `LayaDecision::save_head` applies the same refusal to the mode where it

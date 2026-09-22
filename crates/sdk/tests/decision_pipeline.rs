@@ -373,6 +373,10 @@ fn laya_backed_pipeline_trains_saves_and_reloads_a_head() {
             &options,
             "which option applies",
             6,
+            // Batch ONE on purpose: this asserts the per-step log contract,
+            // so a step has to be an example. At a batch of one the loop is
+            // bit-identical to the per-example one it replaced.
+            1,
             7,
             &mut |_, l| {
                 assert!(l.is_finite(), "a training step reported a non-finite loss: {l}");
@@ -812,7 +816,11 @@ fn real_laya_checkpoint_head_training_improves_held_out_accuracy() {
     let mut first = 0.0f32;
     let mut n_first = 0usize;
     let tail = pipe
-        .train_choices(train, &options, INSTRUCTIONS, steps, 0x1A_2026, &mut |step, l| {
+        // Batch ONE, so this gate keeps measuring what it measured when its
+        // threshold was fitted: `LAYA_HEAD_LR` was chosen against a budget of
+        // one example per step over a few hundred steps, and changing the
+        // batch changes the run the number describes.
+        .train_choices(train, &options, INSTRUCTIONS, steps, 1, 0x1A_2026, &mut |step, l| {
             if step < steps / 10 + 1 {
                 first += l;
                 n_first += 1;

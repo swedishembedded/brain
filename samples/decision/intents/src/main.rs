@@ -164,7 +164,7 @@ fn run() -> Result<(), String> {
     // scoring instead, and then `before` IS the number - which is why this
     // sample asks rather than assuming.
     if pipe.supports_training() {
-        println!("intents: {} steps over {} examples", s.train.steps, train_rows.len());
+        println!("intents: {} steps of {} examples, over {} rows", s.train.steps, s.train.batch, train_rows.len());
         let mut last = 0usize;
         let loss = pipe
             .train_choices(
@@ -172,6 +172,7 @@ fn run() -> Result<(), String> {
                 &options,
                 INSTRUCTIONS,
                 s.train.steps,
+                s.train.batch,
                 s.train.model.seed,
                 &mut |step, l| {
                     if step / 200 > last {
