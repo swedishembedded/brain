@@ -256,7 +256,7 @@ New test `kernel_times_attributes_every_kind_above_the_query_pool_capacity`
 (8300 mixed dispatches, RED against the pre-fix code, GREEN after) pins the
 contract; the full `backend-vulkan`/`backend-cpu`/`gpu-core` suites and
 `cargo clippy --all-targets` stay green. Lesson recorded as
-`.agents/rules/lessons.md` #81. Commit `1e930207` (implementation + test).
+`.agents/knowledge/` #81. Commit `1e930207` (implementation + test).
 
 ### M0.4b - Hoisted `BRAIN_VK_SERIAL`/`BRAIN_VK_NO_SERIAL` out of `flush()`
 
@@ -681,7 +681,7 @@ unrelated to this change by dependency graph, not just by rerun: `flash_gate`
 is a pure addition and every migrated call site lives in `wan`/`lfm2`/
 `sdxlunet`/`ltxv`, none of which `t5`/`clip`/`sam2`/`vqgan`/`deepseekocr`/
 `unet`/`restore`/`supir`/`bf16_train` (the failing set) depend on. Recorded
-here rather than in `lessons.md` since the poisoning mechanism is inferred,
+here rather than in `.agents/knowledge/` since the poisoning mechanism is inferred,
 not yet root-caused to the level that rule expects.
 
 Found but out of scope for this pass: `flux1`, `flux2` and `minimaxmusic3`
@@ -3566,7 +3566,7 @@ commit time - not this milestone's code. `docs/reference/kernels.md`/
 `crates/kernels/src/lib.rs` regenerated via `make kernels-regen`/
 `make kernels-table`, each change isolated to this milestone's own row
 before committing (a shared, concurrently-edited generated file - see
-`lessons.md` #83/#84). **Commits**: four (kernel + registration; cost
+`.agents/knowledge/` #83/#84). **Commits**: four (kernel + registration; cost
 model; the selector/host-oracle seam + the workspace-wide field addition
 + its gate; this ledger entry + the kernel-catalogue row).
 

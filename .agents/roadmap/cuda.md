@@ -901,7 +901,7 @@ exists to make impossible.
 
 Every milestone owes the same repo obligations M0-M5 did: SPDX +
 `Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>` on every new
-file, a `.agents/rules/lessons.md` entry in the same commit as any
+file, a `.agents/knowledge/` entry in the same commit as any
 non-obvious finding, build only through the Makefile, zero warnings
 including pre-existing ones in touched files, and one self-contained commit
 per verified milestone on a linear history. No milestone may name a card,
@@ -967,7 +967,7 @@ again at the point it is used.
   the tuned kernel now takes. Anything else that looks slow on this backend is
   expected to be: see the refused-kernel list above - every fast GEMM and
   every flash-attention kernel is among them.
-- `.agents/rules/lessons.md` #107 (the `_v2` symbol-name trap in any `dlopen`ed
+- `.agents/knowledge/` #107 (the `_v2` symbol-name trap in any `dlopen`ed
   C API), #108 (why a CUDA ordinal is not an identity), #109 (why a ratchet
   that starts at zero cannot be a floor), #110 (`include_str!` proves registry
   -> file and never the reverse), #111 (record a skip where it happens), #112

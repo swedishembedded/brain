@@ -443,7 +443,7 @@ impl Glm {
         // `n_experts <= 64` via fixed-size `array<f32,64>` locals -- silently
         // out-of-bounds above that, which `GlmConfig::glm5_2()` (256 routed
         // experts) hit directly. Fixed by an array-free top-k rewrite
-        // (kernel-performance.md M5.7, lessons.md #35c);
+        // (kernel-performance M5.7);
         // `n_experts` no longer bounds any local array in that kernel. The
         // ONE bound that remains is `n_group` (`MAX_GROUP = 64u` there), a
         // genuinely different and much smaller quantity - every real config
@@ -1852,8 +1852,8 @@ mod rmsnorm_variant_agreement {
     }
 }
 
-/// `router_gate_sigmoid.wgsl`'s array-free rewrite (kernel-performance.md
-/// M5.7, lessons.md #35c) is gated at the kernel level in
+/// `router_gate_sigmoid.wgsl`'s array-free rewrite (kernel-performance
+/// M5.7) is gated at the kernel level in
 /// `crates/model/tests/router_gate_sigmoid_expert_cap.rs` (host-oracle
 /// correctness at 8/65/256 experts, grouped and ungrouped). This is the
 /// model-level half: the config the old `assert!` forbade outright must now

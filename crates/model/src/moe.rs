@@ -161,7 +161,7 @@ pub fn router_fwd_kind(
         RouterKind::Softmax { norm_topk_prob, routed_scaling, .. } => router_fwd(g, ids, shape, logits, gate, norm_topk_prob, routed_scaling),
         RouterKind::SigmoidNoAuxTc { n_group, topk_group, norm_topk_prob, routed_scaling } => {
             // `router_gate_sigmoid.wgsl` is array-free in `n_experts` since
-            // its M5.7 rewrite (lessons.md #35c) - the ONE
+            // its M5.7 rewrite - the ONE
             // bound left is `n_group` (`MAX_GROUP = 64u` there, a genuinely
             // different and much smaller quantity), asserted here rather
             // than in `router_bwd` alone so an inference-only caller (no

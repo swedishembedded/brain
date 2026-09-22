@@ -77,7 +77,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -576,9 +576,9 @@ hooks/install:
 # to invoke `make parity` by hand. It found exactly that failure mode twice
 # in one sitting once someone finally ran it (timesfm3's RMSNorm epsilon,
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
-# lessons.md`). Needs no external fixtures, so unlike `parity/strict` it
+# .agents/knowledge/`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check samples-manifest/check cuda-table/check wordpiece-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check samples-manifest/check knowledge-index/check cuda-table/check wordpiece-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -804,7 +804,7 @@ crates/%/run:
 # Regenerate docs/reference/kernels.md's catalogue from crates/kernels/wgsl/.
 # Every column is derived from the sources, so the table cannot be edited by
 # hand - and `kernels-table/check` is what stops it drifting silently, which
-# is the failure mode .agents/rules/lessons.md #29 records for the generator above.
+# is the failure mode .agents/knowledge/ #29 records for the generator above.
 kernels-table:
 	scripts/build/gen-kernel-table.py
 
@@ -826,6 +826,17 @@ samples-manifest:
 
 samples-manifest/check:
 	scripts/build/gen-samples-manifest.py --check
+
+# Regenerate `.agents/knowledge/index.md` from the findings beside it. The
+# knowledge base is one file per finding so that writing, citing and
+# superseding one is an edit to that finding rather than to a file every
+# other finding shares; the index is generated so it cannot drift from the
+# directory, and /check also fails when two entries claim one citation id.
+knowledge-index:
+	scripts/build/gen-knowledge-index.py
+
+knowledge-index/check:
+	scripts/build/gen-knowledge-index.py --check
 
 # Regenerate the NATIVE CUDA catalogue from crates/kernels-cuda's own registry.
 # A sibling of the WGSL pair above, not a mode of it: that generator derives

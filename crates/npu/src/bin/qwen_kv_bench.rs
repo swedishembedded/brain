@@ -356,9 +356,9 @@ fn bench_cap(o: &Opts, cfg: &QwenConfig) {
 /// timing sweep on it: a quant accuracy regression and a marshal/infer/
 /// readback measurement are two different questions, and burying the timing
 /// numbers behind a parity `exit(1)` would silently turn off this bin's only
-/// other job every time the quant path needs work (lessons.md #1 -- a gate
-/// that never runs is worse than no gate, and a gate that also takes its
-/// sibling measurement down with it is worse still).
+/// other job every time the quant path needs work: a gate that never runs is
+/// worse than no gate, and a gate that also takes its sibling measurement
+/// down with it is worse still.
 fn verify(o: &Opts, cfg: &QwenConfig) -> bool {
     let cap = o.verify_cap;
     let quant_label = format!("{:?}", o.verify_quant);

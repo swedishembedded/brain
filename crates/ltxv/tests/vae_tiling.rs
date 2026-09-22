@@ -70,7 +70,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 }
 
 /// `||got - want||_2 / ||want||_2` - the error cosine is blind to, since
-/// cosine is scale-invariant (lessons.md #2).
+/// cosine is scale-invariant: `got = 1.05 * want` scores cosine 1.0.
 fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     let (mut num, mut den) = (0.0f64, 0.0f64);
     for (x, y) in got.iter().zip(want) {

@@ -301,7 +301,7 @@ numbers found"). Full program from the approved plan, not just the gate:
   section used to instruct contributors to write cross-model findings
   *into* `docs/performance/overview.md`, which is exactly why the deleted
   800-line log accumulated there. Redirected: the generalizable
-  finding/lesson goes in this file (or `.agents/rules/lessons.md` if
+  finding/lesson goes in this file (or `.agents/knowledge/` if
   cross-cutting); the session log with real numbers goes in
   `.agents/roadmap/<model>.md`; `docs/` gets zero measured numbers, ever.
   Also fixed the header's claim about what `docs/performance/overview.md`
@@ -2345,7 +2345,7 @@ resolves its `(RegisterTiled, F32)` kernel by the fixed name `"matmul_reg2"`
 (`Ops`'s own doc comment: "it fixes ONE canonical name per `KernelVariant`").
 `qwen3`'s pre-B7 `linear_kernel`, however, deliberately dispatches
 `matmul_reg3` for this tier, NOT the real `matmul_reg2` - `.agents/rules/
-lessons.md` #17 ("`matmul_reg3` supersedes `matmul_reg2` - everywhere":
+.agents/knowledge/` #17 ("`matmul_reg3` supersedes `matmul_reg2` - everywhere":
 bit-identical output, 1.08x-1.30x faster across twelve measured shapes,
 "there is no shape where preferring `reg2` is correct" - the SAME lesson
 `crates/sdxlunet`/`crates/vae` already learned and fixed). Registering

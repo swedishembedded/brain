@@ -35,7 +35,7 @@ The repo already defines what "done" means. Finish against those definitions in
 dependency order - each phase is a prerequisite for trusting the next.
 
 1. **Truth** - the ledger must match the tree, or every estimate is wrong.
-2. **Gate** - `make test` must be green in one attempt. `lessons.md` §1: a gate
+2. **Gate** - `make test` must be green in one attempt. `.agents/knowledge/` §1: a gate
    that never runs is worse than no gate.
 3. **Contract** - a model that cannot be discovered, scheduled, batched and
    driven over D-Bus is incomplete, per the AGENTS.md invariant.
@@ -220,7 +220,7 @@ itself.
 mitigations tried and none effective. That is an **accepted, external** defect,
 not open work. Move it out of the "not yet done" framing into an explicit
 "accepted, external" section so nobody re-spends the day on it - and add it to
-`.agents/rules/lessons.md` if it is not already there, since it is exactly the
+`.agents/knowledge/` if it is not already there, since it is exactly the
 class that file exists for.
 
 ### 1.3 Exit criterion

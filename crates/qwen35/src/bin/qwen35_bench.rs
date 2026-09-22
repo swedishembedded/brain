@@ -207,9 +207,8 @@ fn rand_buf(g: &Gpu, rng: &mut Lcg, n: usize) -> DeviceBuffer {
 /// Run `f` `reps` times under device kernel timing, print a table sorted by
 /// time descending: `kernel | ms | calls | % of pass`. Falls back to a
 /// one-line notice when this backend cannot time kernels at all (the CPU
-/// JIT backend: `lessons.md` #31, host-bracketed timing inflates small
-/// kernels up to 29x, so it is not printed as if it were the same kind of
-/// number).
+/// JIT backend, where host-bracketed timing inflates small kernels up to 29x,
+/// so it is not printed as if it were the same kind of number).
 fn report(gpu: &Gpu, label: &str, reps: usize, mut f: impl FnMut()) {
     let stats0 = gpu.stats();
     let t0 = Instant::now();

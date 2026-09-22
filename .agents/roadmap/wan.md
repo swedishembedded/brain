@@ -718,7 +718,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
 
       `crates/wan/src/bin/wan_bench.rs`'s `dit`/`vae` modes host-bracketed
       per-kernel-KIND groups with a hardcoded `P40_FP32_TFLOPS = 11.76` and a
-      local `dit_flop()` formula - the exact anti-pattern `.agents/rules/lessons.md`
+      local `dit_flop()` formula - the exact anti-pattern `.agents/knowledge/`
       warns about. Rewritten onto `gpu_core::profile::profile` +
       `gpu_core::roof::ensure` + `gpu_core::cost::kernel_cost`, matching
       `vqgan_bench`'s `report()` shape; a `train` mode was added for the host

@@ -29,7 +29,15 @@
 #     stale (the check breaks, visibly), not a decorative citation that goes
 #     stale silently. That's the actual distinction this gate exists to
 #     enforce, so this small tree is the one place doing the opposite is
-#     correct.
+#     correct;
+#   - and it exempts scripts/build/gen-knowledge-index.py by name, for that
+#     same reason one step further: that script's INPUT is .agents/knowledge/
+#     and its OUTPUT is a file inside it, so the path is what the script
+#     operates on rather than something it refers to, and the generated file
+#     is itself an .agents/ document (which this gate has never restricted
+#     from linking to its neighbours). Named individually rather than
+#     exempting scripts/build/, which is full of ordinary generators that
+#     have no business citing a doc path.
 #
 # Usage:
 #   scripts/gates/check-no-doc-citations.sh              # scan the whole tree
@@ -40,13 +48,13 @@ set -u
 cd "$(dirname "$0")/../.."
 
 PATTERN='\.agents/|docs/[A-Za-z0-9_./-]+\.md'
-EXEMPT_RE='^scripts/(gates|hooks)/'
+EXEMPT_RE='^scripts/(gates|hooks)/|^scripts/build/gen-knowledge-index\.py:'
 
 if [ "$#" -gt 0 ]; then
   files=()
   for f in "$@"; do
     case "$f" in
-      scripts/gates/*|scripts/hooks/*) continue ;;
+      scripts/gates/*|scripts/hooks/*|scripts/build/gen-knowledge-index.py) continue ;;
       crates/*|scripts/*|tools/*|samples/*|brain-py/*) files+=("$f") ;;
     esac
   done

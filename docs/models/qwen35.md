@@ -125,7 +125,7 @@ What it does differently:
   (`SsmALogFix`) apply `gguf::import::ElemOp::LnNeg`. Importing verbatim
   makes the Gated-DeltaNet decay gate up to 260x too strong and the model
   stops integrating context - it was found by the real end-to-end gate, not
-  by any structural check. See `.agents/rules/lessons.md` #70.
+  by any structural check. See `.agents/knowledge/` #70.
 - **Text only, one sequence per dispatch, per-token prefill** - same shape as
   `crate::serve::Engine` and for the same reasons.
 

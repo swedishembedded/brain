@@ -126,7 +126,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 
 # Every dim that could be confused for another by an axis-order/shape bug is
-# a distinct number (lessons.md #4's "at the real config head_dim ==
+# a distinct number (at the real config head_dim ==
 # linear_key_head_dim == linear_value_head_dim == 128, a head-width/head-
 # count swap would pass at cosine 1.0" - this tiny config makes that class of
 # bug loud instead of silent). `full_attention_interval`/

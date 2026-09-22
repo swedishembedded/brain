@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Regression test for `router_gate_sigmoid.wgsl`'s array-free rewrite (see
-//! that file's header doc, and lessons.md #35c): correctness
+//! that file's header doc): correctness
 //! at `n_experts` values that exceed the kernel's former hard-coded
 //! `array<f32/bool, 64>` scratch (`s`/`choice`/`used`) - the exact bound
 //! `router_bwd_expert_cap.rs`/`router_gate_expert_cap.rs` already gate for

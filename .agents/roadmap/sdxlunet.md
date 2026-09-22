@@ -43,7 +43,7 @@ ControlNet integration is wired via `Unet::new_controlled` /
       and `AutoencoderKL` record none of the new variants and are unchanged.
 
       Two forward changes train mode requires, both of which run fine and are
-      wrong (see `.agents/rules/lessons.md` #55): flash attention never
+      wrong (see `.agents/knowledge/` #55): flash attention never
       materialises the softmax its adjoint binds, so a recording builder takes
       the materialised path regardless of device; and each attention SITE needs
       its own `probs` slab, where the eval graph shared one.

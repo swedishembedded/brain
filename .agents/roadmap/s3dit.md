@@ -121,7 +121,7 @@ replaced by a slice of chocolate cake, everything else held fixed).
 checkpoint panicked on its first attempt at `sampling [2/10]`: `buffer read:
 GPU submit did not complete within 30s (BRAIN_GPU_WAIT_S) -- device likely
 wedged` (the documented `BRAIN_GPU_WAIT_S` panic from `.agents/rules/
-lessons.md` #38, working as designed - it turned what used to be a silent
+.agents/knowledge/` #38, working as designed - it turned what used to be a silent
 hang into a clear, attributable error). `nvidia-smi` showed the card fully
 idle and healthy immediately after, so nothing was actually wedged: the
 first-ever heavy dispatch against a freshly-built 13 GB int8 DiT on a Tesla

@@ -132,8 +132,7 @@ pub struct PassProfile {
     /// True when per-kernel times are DEVICE times from timestamp queries
     /// written inside the production single compute pass. False means they are
     /// host-bracketed group times, which inflate small kernels by more than an
-    /// order of magnitude and
-    /// must not be used to attribute time between kernels (`lessons.md` #31).
+    /// order of magnitude and must not be used to attribute time between kernels.
     pub device_timed: bool,
 }
 
@@ -390,7 +389,8 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
     let total = best_of(gpu, steps, reps);
     let gs = groups(steps);
 
-    // DEVICE time where the backend can give it (`lessons.md` #31). One timed
+    // DEVICE time where the backend can give it - host-bracketed timing
+    // inflates a small kernel by more than an order of magnitude. One timed
     // submit of the WHOLE pass — same single compute pass as production — yields
     // per-kernel totals directly, so there is no group slicing, no drain per
     // group, and no launch+fence floor folded into a kernel's number.

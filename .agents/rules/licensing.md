@@ -110,4 +110,4 @@ row to `docs/compliance/third-party-models.md` in the same PR that adds the
 crate  -  same discipline as updating `AGENTS.md`'s model table), or roughly
 annually as a full sweep. Ledger findings in
 `.agents/roadmap/licensing-audit.md`, the same pattern as `.agents/rules/
-lessons.md`.
+.agents/knowledge/`.

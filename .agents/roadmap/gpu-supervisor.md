@@ -4,7 +4,7 @@ A killable, supervised owner for the device operations that cannot be
 cancelled. This is the designed successor to
 `backend_api::hardware::bounded`'s "time out and abandon the worker thread"
 fallback, written down after the cross-process device-init lock landed
-(`.agents/rules/lessons.md` #73, #74) and the question "what would an
+(`.agents/knowledge/` #73, #74) and the question "what would an
 Erlang/OTP system have done here" was asked and answered honestly.
 
 **Status: designed, not implemented.** Nothing in this file is code today.
@@ -12,7 +12,7 @@ What shipped instead is the smaller, complete fix it builds on: one shared
 cross-thread device-init lock plus one shared wall-clock bound, in
 `backend_api::hardware`, used by every crate that opens a device.
 
-The cross-process half of that lock was reverted (`.agents/rules/lessons.md`
+The cross-process half of that lock was reverted (`.agents/knowledge/`
 #79): a host-wide lock made one process's ordinary device work stall an
 unrelated process on unrelated, idle hardware. `device_init_lock` is
 in-process only now. Any future revival of cross-process coordination -

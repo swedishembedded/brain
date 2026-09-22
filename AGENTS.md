@@ -81,7 +81,7 @@ fast and scalable kernel - not a naive one.
    `[248320, 5120]` tables are 5.09 GB fp32, past `max_buffer_size` AND 2.4x
    the 2047 MiB storage-binding limit, so the embedding is read a row at a
    time from the mapping and the `lm_head` is INT8 (see
-   `.agents/rules/lessons.md` #69). No MTP on that path (MTP requires a whole
+   `.agents/knowledge/` #69). No MTP on that path (MTP requires a whole
    shard). The open defect is a GGUF-vs-safetensors weight difference, NOT
    the sharding, the int8 decode tape, or `ssm_a` (that one was found and
    fixed - lesson #70); see `.agents/roadmap/qwen35.md` M21 for the
@@ -119,7 +119,10 @@ fast and scalable kernel - not a naive one.
    REINFORCE with a group-mean baseline over `rlcd::proper`'s strictly proper
    scoring reward, transcribed from the only published Laya training loop,
    not invented here. `DecisionPipeline::train_choices`/`save_head` work on
-   both arms and `Stages::supports_training` is true for both. The 395M trunk
+   both arms and `Stages::supports_training` is true for both;
+   `train_choices` takes a BATCH size on both (one optimizer step per batch,
+   the sum rescaled to a mean - see `.agents/knowledge/` #141 for what
+   a batch of one was costing every caller). The 395M trunk
    is frozen by default and that is a memory decision before a tuning one
    (`Role::Trainable` would cost ~6.3 GB of moments); the act/escalate head
    is deliberately NOT trained, because no public Laya source defines its
@@ -325,7 +328,7 @@ fast and scalable kernel - not a naive one.
     `imgpipe` as the pipeline's `UPSCALE_MODEL` stage. **Training / backward
     done** (`crates/rrdbnet/src/train.rs`, gated by `gradcheck::check_rrdbnet`
     + `check_rrdbnet_elementwise`) - closing it found the SAME
-    `Builder::push_step`-past-the-tape defect `check_unet` closed (lessons.md
+    `Builder::push_step`-past-the-tape defect `check_unet` closed (.agents/knowledge/
     #55, #89), independently, on the LeakyReLU activation and the scaled
     residual.
 
@@ -399,7 +402,7 @@ fast and scalable kernel - not a naive one.
     (`crates/sdxlunet/src/train.rs`, gated by `gradcheck::check_unet` and
     `check_unet_conditioning_elementwise`) - which required teaching the shared
     `vae::blocks` tape to RECORD the transformer half rather than
-    `push_step` past it; see `.agents/rules/lessons.md` #55. *(No batching -
+    `push_step` past it; see `.agents/knowledge/` #55. *(No batching -
     every request is its own multi-step sample, see `resident_sdxl.rs`'s module
     docs for why.)*
 
@@ -981,7 +984,7 @@ front-end to depend on.
 | Task | Where |
 |---|---|
 | Architecture & crate graph | `.agents/rules/architecture.md` |
-| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`.agents/rules/lessons.md`** - read before designing a gate |
+| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`.agents/knowledge/index.md`** - the knowledge base's routing table: 146 findings, one file each, cited by a stable id (`#55`). Read before designing a gate, and before calling a number an architecture's ceiling |
 | Testing strategy + gradient-check gate | `.agents/rules/testing.md` |
 | **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`.agents/rules/porting.md`** - read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
@@ -994,7 +997,7 @@ front-end to depend on.
 | Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/introduction/hardware.md`; `crates/gpu-core/src/devices.rs` |
 | Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
 | Roofline probe (compute/bandwidth ceiling used for "% of roof") | `gpu_core::roof`; bounded by `BRAIN_ROOF_BUDGET_S` (default 10s); off by default on the CPU device class, force-run there with `BRAIN_NO_ROOF=0` |
-| GPU backend wait bound (Vulkan fence wait, wgpu `poll`, device creation) | `BRAIN_GPU_WAIT_S` (default 30s), parsed in exactly one place: `backend_api::hardware::wait_timeout`. A wedged submit or device creation panics naming which call site timed out instead of hanging the process forever; see `.agents/rules/lessons.md` #38, #73, #74 |
+| GPU backend wait bound (Vulkan fence wait, wgpu `poll`, device creation) | `BRAIN_GPU_WAIT_S` (default 30s), parsed in exactly one place: `backend_api::hardware::wait_timeout`. A wedged submit or device creation panics naming which call site timed out instead of hanging the process forever; see `.agents/knowledge/` #38, #73, #74 |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen3::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen3::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
@@ -1003,6 +1006,7 @@ front-end to depend on.
 | **Add/adjust/dispatch a WGSL kernel** | **`.agents/rules/kernels.md`** - read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
 | **Which kernels already exist** (before writing a new one) | the catalogue in **`docs/reference/kernels.md`** - every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`.agents/rules/kernels.md` §F** - the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `.agents/rules/porting.md` §10, case studies in `docs/performance/overview.md` |
+| **Save a trained decision model** (encoder MOVED, so a head-only adapter cannot reproduce it) | `Decide::save_model` / `DecisionPipeline::save_model` - a complete checkpoint DIRECTORY that `DecisionPipeline::builder(dir).load()` reads back; `decide::import::sniff_naming` tells a published HF checkpoint from one this crate wrote by the tensor NAMES, so a caller passes a path and never a format. `save_head` still refuses a moved encoder, on purpose |
 | MoE toy task / honest eval methodology | `README.md` |
 | **Gate a candidate model against an incumbent** (the sign test, the four bars, the frozen probe contract) - from ANY crate, including a model crate | `crates/promote` - `promote::{env,gate,stats,document}`; `rl::{env,gate}` and `bench::metrics::sign_test` re-export it, and `scripts/gates/check-crate-layers.sh` keeps it a leaf |
 | **Self-improvement / training regimes** (DPO, GRPO, distillation, replay, lineage, promote/reject gate; the reward-weighted-SFT loop this all builds on) | **`.agents/roadmap/self-improve.md`** - the ledger; `.agents/roadmap/gauntlet.md` for the procedural capability-acquisition benchmark built on top of it |
@@ -1386,7 +1390,7 @@ existing reward-weighted-SFT driver (`fit_weighted`, ATIF trajectory
 ingestion, the LoRA hot-swap cycle - all landed, see the roadmap for what's
 actually done vs. still TODO). **`.agents/roadmap/self-improve.md` is the
 ledger** - read it before touching training-loop code, the same way
-`.agents/rules/lessons.md` gates a new perf change.
+`.agents/knowledge/` gates a new perf change.
 
 The keystone result that ties it together: DPO, GRPO (with clipping and a
 KL-to-reference term), and top-K distillation all reduce **exactly** to the
@@ -1461,15 +1465,24 @@ a metric that isn't there was simply forgotten.
 
 - **Write down what you learned, in the same change.** When you find a
   non-obvious defect - something that was silently wrong, or a gate that was
-  green without running - add it to **`.agents/rules/lessons.md`** as part of the commit
+  green without running - add it to **`.agents/knowledge/`** as part of the commit
   that fixes it, with the number that proved it. Not later, not in a follow-up:
-  the reason is fresh exactly once, and every entry in that file is there because
+  the reason is fresh exactly once, and every entry there is there because
   it cost someone a day.
+
+  **One finding, one file** - `.agents/knowledge/<NNN>-<slug>.md`, starting with
+  `# <NNN>. <title>`, then `make knowledge-index`. The id is the citation key
+  the whole repository uses and it is never reused or renumbered, so `#55`
+  written today still resolves after the base is reorganised;
+  `make knowledge-index/check` (in `test/full`) fails if the index has drifted
+  or two entries claim one id. Start at **`.agents/knowledge/index.md`**, which
+  lists every entry with its title - it is the file to read when routing, not
+  the directory.
 
   Where it goes:
   | what you learned | where it belongs |
   |---|---|
-  | a cross-cutting defect class (a gate that lies, a metric that cannot see X) | `.agents/rules/lessons.md` |
+  | a cross-cutting defect class (a gate that lies, a metric that cannot see X) | a new file in `.agents/knowledge/` (index: `.agents/knowledge/index.md`) |
   | a kernel-authoring or optimisation rule, incl. a killed hypothesis | `.agents/rules/kernels.md` |
   | a step in porting a model that was not obvious | `.agents/rules/porting.md` |
   | a measured number about ONE model | the test that asserts it (a parity/gradcheck test's own assertion is the durable record - a number nothing checks is a number that silently goes stale) |
@@ -1801,7 +1814,7 @@ a metric that isn't there was simply forgotten.
   transformer half was emitted with `Builder::push_step`, i.e. it was not
   differentiable at all rather than merely un-gated. `check_controlnet` is
   unblocked by it, since ControlNet's trainable copy IS those same recorded
-  blocks. `check_rrdbnet` is now CLOSED too, and the identical bug (lessons.md
+  blocks. `check_rrdbnet` is now CLOSED too, and the identical bug (`.agents/knowledge/`
   #55, #89) was found there independently - `rrdbnet::model`'s LeakyReLU and
   scaled residual were also emitted with `Builder::push_step`, confirming this
   is a property of the escape hatch itself, not of transformer-shaped code. Do
@@ -2047,7 +2060,7 @@ a metric that isn't there was simply forgotten.
   becomes an in-process value - not scattered re-checks downstream, and not
   deferred to a separate, optional command a caller has to remember to run
   (a validator nothing calls automatically is equivalent to no validator: see
-  `.agents/rules/lessons.md` §1, "a gate that never runs is worse than no gate"). This
+  `.agents/knowledge/` #1, "a gate that never runs is worse than no gate"). This
   generalizes the WATERTIGHT-API rule above (network input is hostile) to
   every other boundary: file input is exactly as hostile as network input,
   it just fails later and quieter.

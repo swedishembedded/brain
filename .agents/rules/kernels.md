@@ -414,7 +414,7 @@ that kernel would have had in the real submit — on one backward pass the
 grouped sum inflated the true whole-pass time by roughly 50%. Use the
 table to RANK, and the whole-pass number to decide whether a fix worked. One
 change looked like a big win in the table and moved the whole pass by nothing;
-it was reverted (see `.agents/rules/lessons.md` #21).
+it was reverted (see `.agents/knowledge/` #21).
 
 **And profile at the width the model is actually RUN at.** A table taken at a
 convenient smaller shape is not a conservative version of the real one - it is
@@ -844,7 +844,7 @@ kind of finding belongs, so it stays found instead of being re-discovered:
 
 - **The generalizable finding/lesson itself** (a bug class, a kernel-selection
   fix, an insight that applies beyond one model) belongs in this file (or
-  `.agents/rules/lessons.md` if it's cross-cutting beyond kernels) the moment
+  `.agents/knowledge/` if it's cross-cutting beyond kernels) the moment
   it's confirmed - that is what the next author actually reads before writing
   a kernel.
 - **The session log with the real measured numbers behind it** (before/after

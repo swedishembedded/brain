@@ -42,7 +42,7 @@ therefore serialised nothing at all between two test processes on one card.
 It is now `backend_api::hardware::device_init_lock`, a `flock(2)` on a
 well-known file plus that mutex, taken by every crate that opens a device
 (`backend-wgpu`, `backend-vulkan`, `brain-vulkan`) rather than by one of
-them. See `.agents/rules/lessons.md` #73 and #74, and
+them. See `.agents/knowledge/` #73 and #74, and
 `.agents/roadmap/gpu-supervisor.md` for what that lock still cannot do.
 
 **Practical impact (updated)**: `make test` used to be unreliable end-to-end

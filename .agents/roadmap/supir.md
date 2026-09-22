@@ -247,7 +247,7 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       reach 1.40x the starting loss, which is what made
       `full_backbone_overfits_a_single_sample` fail deterministically at
       7.06e-1 -> 4.68e-1. Full sweep and the reasoning in
-      `.agents/rules/lessons.md` #66; the gates now assert both
+      `.agents/knowledge/` #66; the gates now assert both
       `last < 1e-4 * l0` and "no post-warm-up step above `l0`", so the
       regime is checked and not just the endpoint.)
       `check_controlnet` deliberately NOT closed in this pass -
@@ -317,7 +317,7 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       `docs/models/index.md` (both moved out of "Reserved, not started" into
       their real tables), `docs/models/imgpipe.md` (the new stage),
       `README.md`'s model list. `docs/manifest.txt` already carried both
-      pages' entries. Lesson recorded in `.agents/rules/lessons.md` (#63):
+      pages' entries. Lesson recorded in `.agents/knowledge/` (#63):
       `vae::VaeEncoder`/`VaeDecoder` are diffusers-NAMED, not merely
       diffusers-SHAPED, despite sitting on the genuinely generic
       `vae::blocks::Builder`/`BlockNames`.

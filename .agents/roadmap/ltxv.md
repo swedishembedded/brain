@@ -5946,7 +5946,7 @@ removed it. Re-derived here: 10243.4 ms is the correct pre-Phase-27 figure,
 for ONE call site (`adaln_single` in `forward_q_streamed_in`, once per
 forward - the AV `av_ca_*` families are on no production path), wrapping the
 timestep embedder plus the table GEMM plus the `ts_scaled` map. The comment is
-gone; the general lesson is `.agents/rules/lessons.md` #54.
+gone; the general lesson is `.agents/knowledge/` #54.
 
 **And `stage_time` nests.** `forward_q_streamed: adaLN-single table (host)`
 encloses the two `ada_layer_norm_single: ...` lines printed just above it
@@ -6050,7 +6050,7 @@ parity ladder runs text cross-attention at `context_len` 3, 4 and 6, and the
 K/V projections there pass `m = context_len`. Since the registration is what
 maps index 16, removing it would re-point every one of those at
 `kv_k_headt` - a live kernel with different bindings, which panics on a GPU
-backend and, per `.agents/rules/lessons.md` #53, silently reads out of bounds
+backend and, per `.agents/knowledge/` #53, silently reads out of bounds
 on `backend-cpu`.
 
 The same argument fails for the other diffusion crates too, checked rather

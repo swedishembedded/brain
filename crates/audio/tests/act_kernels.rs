@@ -5,8 +5,8 @@
 //! `BRAIN_DEVICE`-selected backend, defaulting to wgpu when a GPU is present
 //! and falling back to the CPU JIT otherwise) so the same test exercises both
 //! backends across machines - explicitly re-run with `BRAIN_DEVICE=cpu` for a
-//! GPU-free gate (per lessons.md #5: the kernel has no barriers/shared
-//! memory, so this is a belt-and-braces check, not one expected to diverge):
+//! GPU-free gate (the kernel has no barriers and no shared memory, so this
+//! is a belt-and-braces check, not one expected to diverge):
 //!   1. forward parity: GPU `elu` == the CPU reference oracle at values
 //!      spanning positive/negative/zero;
 //!   2. input grad: `elu_bwd` == central finite differences of a scalar loss

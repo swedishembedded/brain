@@ -37,7 +37,7 @@ structurally and never parity-claimed here.
 - [x] M5: text-only forward at tiny dims, climbing parity rungs 1-3 against the M2
   goldens (cosine + rel_l2 + max_abs at every stage).
 - [x] M6: backward + `gradcheck::check_qwen35` (both mixer types; wide init on
-  `in_proj_qkv`/`conv1d` from day one per lessons.md #40, plus a no-zero-FD
+  `in_proj_qkv`/`conv1d` from day one per .agents/knowledge/ #40, plus a no-zero-FD
   assertion so the same hollow-gradcheck failure mode cannot recur unnoticed).
 - [x] M7: MTP head (`Qwen35::run_mtp_forward`/`mtp_backward` in
   `crates/qwen35/src/model.rs`; `mtp.layers.0.*` is one full Gated-Attention
@@ -1444,7 +1444,7 @@ families - so a raw `qwen35`/`qwen35moe` GGUF, dropped into the model
 directory, was routed straight into a resident whose `Engine` cannot open
 GGUF bytes at all, instead of the actionable `brain import-gguf` hint. Fixed
 with a gate before the match, allowlisting only the families that read GGUF
-themselves; see lesson 64 in `.agents/rules/lessons.md`.
+themselves; see lesson 64 in `.agents/knowledge/`.
 
 ### M21 (PARTIAL): a resident that reads the Q8_0 GGUF directly, across two GPUs, with no fp32 intermediate
 
@@ -1496,7 +1496,7 @@ embedding is read one row at a time from the mapping
 `MmapSafetensors::tensor_f32_range`) and the head is INT8 via
 `stream::quantize_i8_rows` + `stream::head_logits_on`, both generalized out
 of `crate::stream`, which had already reached the same conclusion about the
-same two tensors. See `.agents/rules/lessons.md` #69.
+same two tensors. See `.agents/knowledge/` #69.
 
 **A real, measured import defect this found and fixed:** llama.cpp's
 converter stores `ssm_a = -exp(A_log)`, brain's `gdn_decay_gate.wgsl` wants

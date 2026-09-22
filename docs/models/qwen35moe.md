@@ -30,7 +30,7 @@ The importer un-transforms `ssm_a` on the way in (`A_log = ln(-ssm_a)`):
 llama.cpp's converter stores `-exp(A_log)` so `ggml_ssm_scan` can use it
 directly, while `model::gdn`'s decay gate implements the reference formula and
 wants the original `A_log`. That fix landed with the sibling `qwen35` GGUF
-resident, which found it on real weights - see `.agents/rules/lessons.md`
+resident, which found it on real weights - see `.agents/knowledge/`
 #70. **It has NOT been re-validated end to end on a real `qwen35moe`
 checkpoint** (none is available on the development box); the synthetic-fixture
 import test covers the transform, real generation does not.

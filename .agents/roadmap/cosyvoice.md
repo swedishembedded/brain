@@ -31,11 +31,11 @@ informs every phase below rather than being repeated here.
 
 ## Validation policy
 
-Per-stage cosine ≥ 0.9999 **and** asserted `rel_l2` (lessons.md #2 - cosine
+Per-stage cosine ≥ 0.9999 **and** asserted `rel_l2` (.agents/knowledge/ #2 - cosine
 alone cannot see a dropped scale factor) against real-weight goldens; exact
 integer token-id equality for the FSQ tokenizer (not cosine - these are
 indices); every gradcheck run on both `backend-wgpu` and `BRAIN_DEVICE=cpu`
-(lessons.md #5). This machine has 30 GB RAM and no discrete GPU - real-scale
+(.agents/knowledge/ #5). This machine has 30 GB RAM and no discrete GPU - real-scale
 residency gaps will be recorded honestly (as `minimaxmusic3` did), not
 silently skipped.
 
