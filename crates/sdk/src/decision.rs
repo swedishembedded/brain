@@ -84,6 +84,12 @@
 //! milestones computed and discarded; see [`RouteVerdict`]'s own doc for what
 //! it returns and its honesty caveat about the act head's class order.
 //!
+//! **The Laya arm is calibrated the way its own serving reference is**: both
+//! of `rl_agent_config.json`'s tables are applied, the per-(qtype,
+//! option-count) `temperature_by_options` first and the per-qtype
+//! `temperature` as the fallback, so published probabilities and confidences
+//! match `rl_agent_api.py` number for number rather than only in argmax.
+//!
 //! **[`DecisionLimits`] (`cap_rows`/`cap_slots`/`max_span`/`overlap`) is a
 //! `decide`-specific windowing/packing concept and has NO effect on a
 //! Laya-backed pipeline** - Laya always sizes and truncates to its own
@@ -229,20 +235,30 @@ struct LayaBackend {
     head_max_len: u32,
     /// Per-qtype (`choice`/`score`/`noul`, [`modernbert::QType::index`]
     /// order) serving calibration scalar, `rl_agent_config.json`'s own
-    /// `temperature` table. The per-cardinality-bucket override
-    /// (`rl_agent_config.json`'s `temperature_by_options`, keyed like
-    /// `"choice:3-5"`) is deliberately NOT applied here - a real, if minor,
-    /// gap: argmax (so `Choice::choice`/`Choice::index`) is unaffected by
-    /// any positive temperature, but `Choice::probabilities`/
-    /// `Choice::confidence` and `probability`'s own return value are
-    /// calibrated only to the coarser per-qtype scalar, not the finer
-    /// per-cardinality table the real `rl_agent_api.py` serving path also
-    /// consults.
+    /// `temperature` table - the FALLBACK, consulted only when
+    /// [`LayaBackend::temperature_by_options`] has no entry for this call's
+    /// own bucket.
     temperature: Vec<f32>,
+    /// `rl_agent_config.json`'s finer per-(qtype, option-count) table, keyed
+    /// by [`modernbert::temp_bucket`]. Consulted FIRST, which is what
+    /// `rl_agent_api.py` does - and it is not a detail: the released
+    /// checkpoint fits a 2-option choice at 1.9064 and an 11-or-more-option
+    /// one at 0.1006 against a per-qtype 1.6369, so reading only the scalar
+    /// publishes a distribution the reference never produces. Argmax is
+    /// unaffected by any positive temperature, which is exactly why this was
+    /// invisible until the two implementations were compared number by
+    /// number.
+    temperature_by_options: std::collections::HashMap<String, f32>,
 }
 
 impl LayaBackend {
-    fn temperature_for(&self, qtype: modernbert::QType) -> f32 {
+    /// The serving temperature for one call: the per-cardinality bucket if
+    /// the checkpoint fitted one, else the per-qtype scalar, else 1.0 - the
+    /// same ladder `rl_agent_api.py` walks.
+    fn temperature_for(&self, qtype: modernbert::QType, options: usize) -> f32 {
+        if let Some(t) = self.temperature_by_options.get(&modernbert::temp_bucket(qtype, options)) {
+            return *t;
+        }
         self.temperature.get(qtype.index() as usize).copied().unwrap_or(1.0)
     }
 
@@ -296,7 +312,10 @@ impl LayaBackend {
     fn ask(&mut self, state: &State, q: &Question) -> Result<Answer> {
         let mq = laya_question(q);
         let raw = self.score(state, &mq)?;
-        let p = softmax(&scaled(&raw, self.temperature_for(mq.qtype())));
+        // Calibrated by how many options were actually SCORED (markers that
+        // survived `build_sequence`'s budget), not by how many the caller
+        // asked about - the reference keys its bucket off the same count.
+        let p = softmax(&scaled(&raw, self.temperature_for(mq.qtype(), raw.len())));
         match q {
             Question::Choice { options, .. } => {
                 if p.len() != options.len() {
@@ -344,7 +363,7 @@ impl LayaBackend {
                 raw.len()
             )));
         }
-        let t = self.temperature_for(modernbert::QType::Noul);
+        let t = self.temperature_for(modernbert::QType::Noul, raw.len());
         let p = softmax(&scaled(&raw, t));
         // The act head's own calibration is not the option head's - see
         // `RouteVerdict`'s own doc: `rl_agent_config.json`'s temperature
@@ -1041,7 +1060,7 @@ fn load_laya(dir: &str, head: Option<&str>, device: &Device, _seed: u64) -> Resu
     let laya_head =
         modernbert::LayaHead::new_on(gpu, ckpt.laya_cfg.clone(), max_len, max_len, cap_markers, 1, &ckpt.head_init);
 
-    Ok(LayaBackend { enc, head: laya_head, tok, cfg: ckpt.cfg, max_len, head_max_len, temperature: ckpt.rl.temperature })
+    Ok(LayaBackend { enc, head: laya_head, tok, cfg: ckpt.cfg, max_len, head_max_len, temperature: ckpt.rl.temperature, temperature_by_options: ckpt.rl.temperature_by_options })
 }
 
 /// The encoder directory, as the Hugging Face reference it came from.

@@ -585,3 +585,69 @@ fn real_laya_checkpoint_answers_a_typed_multi_question_request() {
         other => panic!("expected a score, got {other:?}"),
     }
 }
+
+/// The Laya arm's published probabilities must be the REFERENCE
+/// implementation's, not merely the right argmax.
+///
+/// `rl_agent_config.json` carries two calibration tables: a per-qtype
+/// `temperature` and a finer `temperature_by_options` keyed by
+/// (qtype, option-count bucket), and `rl_agent_api.py` consults the finer one
+/// FIRST. They disagree on every `choice` the released checkpoint can be
+/// asked - 1.9064 at two options, 1.7602 at 3-5, 1.0000 at 6-10 and 0.1006
+/// past ten, against a per-qtype 1.6369 - so reading only the coarse scalar
+/// hands a caller a distribution the reference never produces. Argmax is
+/// unaffected by any positive temperature, which is exactly why this needs
+/// its own test: the answer looks right while the number a caller thresholds
+/// on is wrong.
+///
+/// The expected values here are what the real `rl_agent_api.py` printed for
+/// this exact request on this exact checkpoint (its own 4-decimal rounding),
+/// not a re-derivation. Skips cleanly when the checkpoint is absent.
+#[test]
+fn real_laya_choice_probabilities_match_the_reference_serving_calibration() {
+    use brain::decision::{Answer, Opt, Question, State};
+
+    let Some(dir) = brain_testutil::model_dir("convaiinnovations/laya") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull convaiinnovations/laya`"));
+        return;
+    }
+
+    let mut pipe = brain::DecisionPipeline::builder(&dir).load().unwrap();
+    let answers = pipe
+        .decide(
+            &State::Str("My card was stolen yesterday.".into()),
+            &[Question::Choice {
+                instructions: "Which banking topic is this?".into(),
+                options: vec![
+                    Opt::described("report stolen card", "the customer's card was lost or stolen"),
+                    Opt::described("exchange rate", "questions about currency conversion rates"),
+                    Opt::described("close account", "the customer wants to close their account"),
+                ],
+            }],
+        )
+        .expect("the laya arm must answer");
+
+    match &answers[0] {
+        Answer::Choice { choice, probabilities, confidence } => {
+            assert_eq!(choice, "report stolen card");
+            let want = [0.9688f32, 0.0177, 0.0135];
+            for ((name, got), expect) in probabilities.iter().zip(want) {
+                assert!(
+                    (got - expect).abs() < 1e-3,
+                    "{name}: {got} is not the reference's {expect} (a 3-option choice is calibrated at \
+                     temperature_by_options[\"choice:3-5\"] = 1.7602, not temperature[0] = 1.6369)"
+                );
+            }
+            assert!(
+                (confidence - 0.8543).abs() < 1e-3,
+                "confidence {confidence} is not the reference's 0.8543 - the coarse per-qtype temperature \
+                 reads 0.8858 here, which is what this test exists to catch"
+            );
+        }
+        other => panic!("expected a choice, got {other:?}"),
+    }
+}

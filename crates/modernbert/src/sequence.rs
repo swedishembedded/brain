@@ -87,6 +87,34 @@ impl QType {
     }
 }
 
+/// The key `rl_agent_config.json`'s `temperature_by_options` table is keyed
+/// by: the question type and which CARDINALITY BUCKET its option count falls
+/// in, exactly as the real `rl_common.py::temp_bucket` computes it.
+///
+/// A 2-option noul and a 20-option choice were calibrated separately after
+/// training, and the values genuinely differ (the released checkpoint fits
+/// `choice:2` at 1.9064, `choice:3-5` at 1.7602, `choice:6-10` at 1.0000 and
+/// `choice:11+` at 0.1006, against a per-qtype scalar of 1.6369). A caller
+/// that consults only the scalar gets the right argmax - no positive
+/// temperature can move that - and a distribution the reference never
+/// produces, which is the number a caller actually thresholds on.
+///
+/// `k <= 2` shares one bucket, matching the reference's own `"2" if k <= 2`:
+/// a one-option question is not a decision, and this keeps a degenerate call
+/// keyed somewhere real rather than out of the table.
+pub fn temp_bucket(qtype: QType, k: usize) -> String {
+    let size = if k <= 2 {
+        "2"
+    } else if k <= 5 {
+        "3-5"
+    } else if k <= 10 {
+        "6-10"
+    } else {
+        "11+"
+    };
+    format!("{}:{}", qtype.word(), size)
+}
+
 /// A minimal ordered JSON tree - see the module doc's "key order matters"
 /// section for why this exists instead of `serde_json::Value`. `Object`
 /// stores `(key, value)` pairs in caller-given order; nothing here re-sorts
@@ -536,5 +564,27 @@ mod tests {
         ]));
         assert_eq!(parsed.serialize(), built.serialize());
         assert_eq!(parsed.serialize(), r#"{"turn": 2, "actor": "customer"}"#);
+    }
+
+    /// The per-cardinality temperature key, reproduced from the real
+    /// `rl_common.py::temp_bucket` - a 2-option noul and a 20-option choice
+    /// were fitted separately, and looking the wrong bucket up silently
+    /// returns a DIFFERENT calibration rather than an error (the released
+    /// checkpoint's `choice:11+` is 0.1006 against a per-qtype 1.6369, a 16x
+    /// difference in how peaked the answer reads).
+    #[test]
+    fn temp_bucket_keys_match_the_reference_boundaries() {
+        assert_eq!(temp_bucket(QType::Noul, 2), "noul:2");
+        // `"2" if k <= 2` - a one-option question is not a decision, and the
+        // reference still keys it here rather than anywhere else.
+        assert_eq!(temp_bucket(QType::Choice, 1), "choice:2");
+        assert_eq!(temp_bucket(QType::Choice, 2), "choice:2");
+        assert_eq!(temp_bucket(QType::Choice, 3), "choice:3-5");
+        assert_eq!(temp_bucket(QType::Choice, 5), "choice:3-5");
+        assert_eq!(temp_bucket(QType::Choice, 6), "choice:6-10");
+        assert_eq!(temp_bucket(QType::Choice, 10), "choice:6-10");
+        assert_eq!(temp_bucket(QType::Choice, 11), "choice:11+");
+        assert_eq!(temp_bucket(QType::Choice, 255), "choice:11+");
+        assert_eq!(temp_bucket(QType::Score, 4), "score:3-5");
     }
 }

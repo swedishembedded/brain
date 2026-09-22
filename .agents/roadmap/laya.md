@@ -92,7 +92,25 @@ point the same `--encoder` flag at a Laya checkpoint instead.
       stdout built on it, with `--model` now a reusable `appopts::ModelChoice`
       group. Real-weight gated on both checkpoints
       (`crates/sdk/tests/decision_pipeline.rs`); the documented Jev routing
-      example answers `billing` at 0.9888 zero-shot.
+      example answers `billing` at 0.9840 zero-shot.
+- [x] **The Laya arm is calibrated the way its own serving reference is.**
+      `rl_agent_config.json` carries TWO tables and `rl_agent_api.py` reads
+      the finer one first: `temperature_by_options`, keyed
+      `(qtype, option-count bucket)` by `rl_common.py::temp_bucket`, then the
+      per-qtype `temperature` as a fallback. Only the scalar was applied
+      before, which is invisible in argmax (no positive temperature can move
+      it) and wrong in every published `choice` distribution - the released
+      checkpoint fits `choice:2` at 1.9064, `choice:3-5` at 1.7602,
+      `choice:6-10` at 1.0000 and `choice:11+` at 0.1006 against a per-qtype
+      1.6369, so a wide choice was being published up to 16x too peaked.
+      Found by running 22 fixed questions through BOTH this SDK and the real
+      `rl_agent_api.py` on the same checkpoint and diffing every number:
+      answers agreed 22/22 but 8 choice distributions differed. Now
+      `modernbert::temp_bucket` + `LayaBackend::temperature_for(qtype, k)`,
+      gated by `real_laya_choice_probabilities_match_the_reference_serving_
+      calibration` (the reference's own printed numbers, not a
+      re-derivation). Post-fix the same 22 cases agree to within 3.2e-4, and
+      an 11-point temperature sweep agrees to within 4.9e-4.
 
 ### Measured numbers (M7, `49c56c87a`)
 
@@ -185,11 +203,6 @@ normally across conversations.
       always uses the slower materialized `chunked_bidir_fwd_win` rung,
       even on a device where the fused path would otherwise be selected for
       full-attention layers - correct, but not the fast path.
-- [ ] **The Laya arm's calibration is partial**: `rl_agent_config.json`'s
-      per-qtype `temperature` table is applied; its finer
-      per-cardinality-bucket override table (`temperature_by_options`) is
-      not. Argmax is unaffected; `probability`/`confidence` are calibrated
-      only to the coarser per-qtype scalar.
 - [ ] **No public docs surface added for the whole decide/Laya decision
       family.** `crates/decide`/`DecisionPipeline` has zero presence in
       `docs/models/`, `docs/manifest.txt`, or `docs/using/sdk.md` today - a

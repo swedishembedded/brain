@@ -69,9 +69,9 @@ zero-shot on one Intel Arc iGPU:
 ```json
 {"model": "laya",
  "answers": {"is_urgent":   {"type": "noul", "noul": 0.780172},
-             "department":  {"type": "choice", "choice": "billing", "confidence": 0.936946,
-                             "probabilities": {"billing": 0.988779, "technical": 0.006124,
-                                               "sales": 0.005097}},
+             "department":  {"type": "choice", "choice": "billing", "confidence": 0.915133,
+                             "probabilities": {"billing": 0.983965, "technical": 0.008701,
+                                               "sales": 0.007335}},
              "frustration": {"type": "score", "score": 1.317004, "confidence": 0.375038,
                              "legend": {"0": "Calm", "1": "Frustrated", "2": "Very angry"},
                              "probabilities": {"0": 0.010521, "1": 0.661955, "2": 0.327524}}}}
@@ -79,6 +79,50 @@ zero-shot on one Intel Arc iGPU:
 
 Three questions nobody had written down when the model was loaded - a routing
 decision, an urgency check and a 3-level rubric - answered in one request.
+
+## What this checkpoint knows, and what it does not
+
+Measured, because the format working is not the same as the answer being right.
+22 fixed questions with obvious answers were put through this sample AND
+through Laya's own released Python serving code (`rl_agent_api.py`) on the same
+weights:
+
+- **22/22 identical answers, worst difference 3.2e-4 on any published number.**
+  So a wrong answer from this sample is the CHECKPOINT, not the port. (The
+  `temperature_by_options` calibration table the reference consults is applied
+  here too - see `brain::DecisionPipeline`'s own docs.)
+- **17/22 match the obvious human answer.** It is right on the decisions it was
+  trained for: which team owns a ticket, is this a refund request, did
+  something go wrong, is this an emergency, how bad was this experience. It is
+  wrong when the options are bare nouns carrying no relation to the state
+  ("dog" / "cat" / "fish" for *it barks and fetches sticks* comes back `fish`).
+
+A temperature sweep is the sharpest way to see the edge of it. One `score`
+question (`hot`..`freezing`), one `noul` ("Do I need a jacket?") and one
+`choice` (t-shirt / jacket / winter coat), asked at eleven temperatures:
+
+| deg C | 35 | 25 | 15 | 5 | 0 | -20 | -40 |
+|---|---|---|---|---|---|---|---|
+| `howcold` score (0 hot .. 4 freezing) | 1.79 | 1.70 | 1.77 | 2.03 | 3.61 | 3.57 | 3.55 |
+| `noul` need a jacket | 0.08 | 0.08 | 0.08 | 0.05 | 0.00 | 0.04 | 0.04 |
+| `choice` what to wear | t-shirt | t-shirt | t-shirt | t-shirt | t-shirt | t-shirt | t-shirt |
+
+The `score` question has a coarse sense of sign - above zero against below it -
+and no ordering inside either range. The other two are flat: it will tell you
+to wear a t-shirt at minus forty. The released Python reference produces those
+same numbers to within 5e-4, so this is the model, not the wiring.
+
+Read that as a boundary, not a defect: Laya is a System-1 decision model
+trained on agent and routing decisions over text, not a world model. Use it to
+choose among actions your system defines, to triage, and to decide whether to
+escalate. Do not ask it to do arithmetic, and do not put a threshold rule in
+the criteria (`"wear jacket": "if temperature is less than 8 degrees"` is
+comparing text, not numbers - compare the number in your own code and ask the
+model only the judgement call). When the question is outside what it knows,
+`confidence` is usually the tell: 0.85 on the banking routing above, 0.09 on
+the animal question it got wrong.
+
+## A second measured run
 
 The same request with `--model minilm` returns the same SHAPE and a `confidence`
 of 0.011 on the routing question, near-uniform probabilities, and a different
