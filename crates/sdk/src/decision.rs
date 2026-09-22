@@ -205,22 +205,26 @@ const HEAD_LR: f32 = 1e-3;
 /// ~7300 updates at an effective batch of 64;
 /// [`DecisionPipeline::train_choices`]'s contract is ONE example per step
 /// over a few hundred (the same contract the `Decide` arm has). AdamW's step
-/// is normalized, so what a run actually moves is roughly `lr * steps`
-/// (halved again by the cosine schedule both use). Matching the published
-/// run's own budget at a few hundred steps therefore lands near `3e-3`:
+/// is normalized, so what a run actually moves is roughly `lr * steps`,
+/// halved again by the cosine schedule both use - which puts the published
+/// run's own budget (`0.5 * 1e-4 * 7300 = 0.37`) near `1e-3` at 200 steps
+/// (`0.5 * 1e-3 * 200 = 0.10`, the same order).
+///
+/// **CHOSEN BY MEASUREMENT, not by that derivation**, which on its own
+/// argued for `3e-3` and would have been wrong. All three points are real
+/// runs of `real_laya_checkpoint_head_training_improves_held_out_accuracy`
+/// against the real 843 MB checkpoint, same task, head-only:
 ///
 /// ```text
-/// published:  0.5 * 1e-4 * 7300  = 0.37
-/// here:       0.5 * 3e-3 * 200   = 0.30
+/// 3e-4, 120 steps:  held-out 0.375 -> 0.375   (learning, far too slowly)
+/// 3e-3, 200 steps:  held-out 0.375 -> 0.125   (below chance: it damages
+///                                              the pretrained head)
+/// 1e-3, 200 steps:  held-out 0.350 -> 0.600   (chance 0.250)
 /// ```
 ///
-/// Measured, not only derived: at `3e-4` the real-weight gate in
-/// `crates/sdk/tests/decision_pipeline.rs` moved its training loss
-/// (1.4319 -> 1.1411 over 120 steps) but left held-out accuracy flat at
-/// 0.375, i.e. it was learning far too slowly to finish inside the step
-/// budget a caller of this API actually passes. The schedule SHAPE (cosine
-/// to a small floor, no warmup) is the published one.
-const LAYA_HEAD_LR: f32 = 3e-3;
+/// The schedule SHAPE (cosine to a small floor, no warmup) is the published
+/// one.
+const LAYA_HEAD_LR: f32 = 1e-3;
 const LAYA_HEAD_LR_MIN: f32 = 1e-6;
 /// Exploration noise, annealed linearly across the run - the published
 /// fine-tuning loop's own `0.4 -> 0.1`.

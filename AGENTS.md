@@ -110,9 +110,9 @@ fast and scalable kernel - not a naive one.
    reached only via `brain::DecisionPipeline` (`decision` SDK feature), which
    dispatches to either architecture. Real checkpoint imports and is
    argmax-parity-tested against the Python reference; seeded backward through
-   the full head+trunk is gradient-checked. **A training loop exists and is
-   gated** (its real-weight held-out-accuracy gate is deliberately red today
-   - see the ledger):
+   the full head+trunk is gradient-checked. **It TRAINS**, gated on the real
+   checkpoint at held-out accuracy 0.350 -> 0.600 against a chance of 0.250
+   on an arbitrary mapping it cannot guess:
    `modernbert::LayaDecision` composes trunk+head+tokenizer into one model
    with `score`/`accumulate`/`adamw_scaled`/`save_head` (the direct
    counterpart of `decide::decide::Decide`), driven by `rlcd::reinforce` -
