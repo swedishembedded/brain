@@ -415,6 +415,16 @@ impl LayaDecision {
         Ok(l)
     }
 
+    /// One head parameter's ACCUMULATED gradient.
+    ///
+    /// For a test that needs to see what a reverse pass actually added - the
+    /// minibatch claim ("`n` accumulations equal the sum of `n` steps") is a
+    /// property of every kernel in the path, not of the loop that calls them,
+    /// and a loss curve cannot distinguish a sum from its last term.
+    pub fn read_head_grad(&self, name: &str) -> Vec<f32> {
+        self.head.read_grad(name)
+    }
+
     /// Every head parameter, for snapshotting mid-run.
     pub fn head_weights(&self) -> Vec<(String, Vec<f32>)> {
         tensor_manifest(&self.laya_cfg)

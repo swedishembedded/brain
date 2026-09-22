@@ -118,7 +118,7 @@ mod music;
 #[cfg(feature = "decision")]
 pub mod decision;
 #[cfg(feature = "decision")]
-pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
+pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec, DEFAULT_TRAIN_BATCH};
 
 /// Learning to reach a known goal state by retracing random walks away from
 /// it - a policy rolled out with one forward pass per action and no search.

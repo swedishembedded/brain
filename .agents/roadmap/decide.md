@@ -293,6 +293,20 @@ verified **red** before the implementation lands.
 
 ## 10. Found defects
 
+### 10.1 FIXED - `train_choices` then `save_head` on this arm
+
+Fixed by the third option below: the caller chooses.
+`DecisionPipeline::set_encoder_frozen(true)` (or `TrainSpec::freeze_encoder`)
+trains the head alone and the run's head is writable;
+the default is unchanged, still fine-tunes the encoder, and `save_head` still
+refuses after it - which is what keeps this arm's published accuracies
+meaning what they say. Gated by
+`crates/sdk/tests/decision_pipeline.rs::a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot`,
+which holds BOTH directions: the default run's refusal names the encoder, and
+the frozen run's file loads back and reproduces its answer.
+
+The reproduction, kept because it is what the gate is written against:
+
 1. **`train_choices` then `save_head` has never worked on this arm.** FIXED.
    `Decide::new_on` leaves `frozen_encoder = false`, `DecisionPipeline::
    train_choices` trains the encoder at `ENCODER_LR` on every step, and
@@ -317,6 +331,17 @@ verified **red** before the implementation lands.
    config missing any field rather than defaulting it, and the head is
    checked against its manifest both ways.
 
+   Deliberately NOT fixed in the Laya training milestone that found it,
+   because every available fix is a real design decision for THIS arm rather
+   than a mechanical repair, and two of the three change what the arm learns:
+
+   * freeze the encoder in `train_choices` (cheapest, and what the Laya arm
+     does) - but it changes this arm's measured accuracies, which are
+     published numbers;
+   * keep training the encoder and extend the artifact to carry it;
+   * keep both and make the caller choose, so `--save` implies a frozen
+     encoder and a trained-encoder run says so. **This is what was done** -
+     see 10.1.
    `save_head` keeps its refusal unchanged, and `crates/sdk/tests/
    decision_persistence.rs` pins that it still refuses: a head-only file
    genuinely cannot reproduce a model whose encoder moved, and weakening

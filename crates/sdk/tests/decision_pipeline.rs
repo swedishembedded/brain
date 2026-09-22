@@ -463,6 +463,122 @@ fn real_minilm_checkpoint_still_answers_through_the_decide_arm() {
     assert!((sum - 1.0).abs() < 1e-3, "option probabilities must sum to 1, got {sum}");
 }
 
+/// `train_choices` then `save_head` must WORK on the decide arm, and the knob
+/// that makes it work is the one the caller sets.
+///
+/// This was a reproduced defect: the arm
+/// fine-tunes its encoder on every step by default, and a head-only adapter
+/// cannot reproduce a model whose encoder moved, so `save_head` refused after
+/// every training run this SDK could start. Both halves of the choice are
+/// gated here - the default still fine-tunes and is still refused, because
+/// that is what this arm's published accuracies were measured with, and the
+/// frozen run writes a file that loads back.
+#[test]
+fn a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot() {
+    let Some(dir) = brain_testutil::model_dir("sentence-transformers/all-MiniLM-L6-v2") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull sentence-transformers/all-MiniLM-L6-v2`"));
+        return;
+    }
+    const INSTRUCTIONS: &str = "which banking intent does this message express";
+    let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let train: &[(&str, usize)] = &[
+        ("I am still waiting on my replacement card", 0),
+        ("what rate did you use for the conversion", 1),
+        ("my pin stopped working at the machine", 2),
+    ];
+    let out = std::env::temp_dir().join(format!("brain-decide-head-{}.safetensors", std::process::id()));
+    let path = out.to_str().unwrap();
+
+    // The DEFAULT: the encoder is fine-tuned, and the head-only file is
+    // refused because it could not reproduce this model.
+    let mut live = brain::DecisionPipeline::builder(&dir).load().expect("real minilm");
+    assert!(!live.encoder_frozen(), "the decide arm fine-tunes its encoder by default");
+    live.train_choices(train, &options, INSTRUCTIONS, 3, 7, &mut |_, _| {}).expect("train");
+    assert!(live.encoder_was_trained());
+    let err = live.save_head(path).expect_err("a fine-tuned encoder must still refuse a head-only save");
+    assert!(format!("{err}").contains("encoder was trained"), "unexpected refusal: {err}");
+
+    // The CHOICE: freeze the encoder, and the same run produces a file.
+    let mut frozen = brain::DecisionPipeline::builder(&dir).load().expect("real minilm");
+    frozen.set_encoder_frozen(true).expect("the decide arm can freeze its encoder");
+    frozen.train_choices(train, &options, INSTRUCTIONS, 3, 7, &mut |_, _| {}).expect("train");
+    assert!(!frozen.encoder_was_trained(), "a frozen encoder must not have moved");
+    frozen.save_head(path).expect("a frozen-encoder run must be saveable");
+
+    let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let before = frozen.choose(train[0].0, INSTRUCTIONS, &refs).expect("choose");
+    let mut reloaded = brain::DecisionPipeline::builder(&dir)
+        .head(path)
+        .load()
+        .expect("a trained decide head must load back");
+    let after = reloaded.choose(train[0].0, INSTRUCTIONS, &refs).expect("choose");
+    assert_eq!(before.choice, after.choice, "the reloaded head answered differently");
+    for ((_, a), (_, b)) in before.probabilities.iter().zip(&after.probabilities) {
+        assert!((a - b).abs() < 1e-4, "reloaded probabilities differ: {a} vs {b}");
+    }
+    let _ = std::fs::remove_file(&out);
+}
+
+/// A minibatch must be the SAME training, only with less gradient noise: the
+/// SDK's batch knob is `decide::Decide::accumulate_batch` underneath, so what
+/// is gated here is the wiring - that a batch of `b` consumes `b` examples per
+/// step, logs once per step, and produces a model that still answers.
+///
+/// The gradient itself is held against `b` sequential steps in
+/// `crates/decide/tests/minibatch.rs`, where it can be compared buffer by
+/// buffer rather than through a loss.
+#[test]
+fn a_batched_run_consumes_a_batch_per_step_and_still_trains() {
+    let Some(dir) = brain_testutil::model_dir("sentence-transformers/all-MiniLM-L6-v2") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull sentence-transformers/all-MiniLM-L6-v2`"));
+        return;
+    }
+    const INSTRUCTIONS: &str = "which banking intent does this message express";
+    let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let train: &[(&str, usize)] = &[
+        ("I am still waiting on my replacement card", 0),
+        ("what rate did you use for the conversion", 1),
+        ("my pin stopped working at the machine", 2),
+    ];
+
+    let mut pipe = brain::DecisionPipeline::builder(&dir).load().expect("real minilm");
+    assert_eq!(pipe.batch_size(), brain::DEFAULT_TRAIN_BATCH);
+    pipe.set_batch_size(4);
+    assert_eq!(pipe.batch_size(), 4);
+
+    let mut logged = 0usize;
+    let tail = pipe
+        .train_choices(train, &options, INSTRUCTIONS, 5, 7, &mut |_, l| {
+            assert!(l.is_finite(), "a batched step reported a non-finite loss: {l}");
+            logged += 1;
+        })
+        .expect("a batched run must train");
+    // ONCE PER OPTIMIZER STEP, not once per example: `steps` keeps meaning
+    // steps, and the batch is what each of them accumulates over.
+    assert_eq!(logged, 5, "the log callback must fire once per optimizer step");
+    assert!(tail.is_finite());
+    assert_eq!(pipe.steps_taken(), 5, "a batch is one optimizer step, not one per example");
+
+    let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let a = pipe.choose(train[0].0, INSTRUCTIONS, &refs).expect("choose");
+    let sum: f32 = a.probabilities.iter().map(|(_, p)| p).sum();
+    assert!((sum - 1.0).abs() < 1e-3, "option probabilities must sum to 1, got {sum}");
+}
+
 /// The same real-weight proof for the NEW arm, against the real
 /// `convaiinnovations/laya` checkpoint M4 fetched. Skips cleanly when the
 /// checkpoint is absent from this checkout.

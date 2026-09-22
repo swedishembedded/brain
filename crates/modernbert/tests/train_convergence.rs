@@ -263,3 +263,83 @@ fn saving_a_head_whose_trunk_moved_is_refused() {
     let err = m.save_head("/dev/null").expect_err("should refuse");
     assert!(err.contains("trunk was trained"), "unhelpful refusal: {err}");
 }
+
+/// Accumulating a minibatch must equal summing its examples' gradients.
+///
+/// This is what `DecisionPipeline::train_choices` relies on when it batches
+/// the Laya arm: the trunk is frozen and re-encoded per example either way, so
+/// a batch here is `n` accumulations and one AdamW step. That is only the
+/// gradient it claims to be if NOTHING in the reverse pass assigns instead of
+/// adding - a property of every kernel in the path, not of the loop calling
+/// them. If one of them assigns, a minibatch silently becomes "the last
+/// example in it", which trains, converges, and is not what was asked for.
+///
+/// The objective is a DETERMINISTIC least-squares pull toward a fixed target
+/// rather than the REINFORCE one the pipeline uses: REINFORCE samples, so the
+/// same logits give different gradients on two calls and there would be
+/// nothing to compare. The accumulation property is a property of the reverse
+/// pass, which is identical either way.
+#[test]
+fn accumulating_a_minibatch_sums_its_examples_gradients() {
+    let Some(tok_path) = tokenizer_path() else {
+        brain_testutil::skip("Laya tokenizer absent - run `brain pull convaiinnovations/laya`");
+        return;
+    };
+    // Head-only, which is the mode the pipeline trains this arm in.
+    let mut m = small_model(&tok_path, 0x1A9A_2026, 0xA10A_0001, Training::HeadOnly);
+    let q = question();
+    let batch = &TRAIN[..3];
+    // A fixed pull per option index, so every example's gradient is a
+    // deterministic function of its own logits.
+    let objective = |logits: &[f32]| -> (f32, Vec<f32>) {
+        let d: Vec<f32> = logits.iter().enumerate().map(|(i, x)| x - i as f32 * 0.1).collect();
+        (0.5 * d.iter().map(|v| v * v).sum::<f32>(), d)
+    };
+    // One parameter is enough - the property is per-buffer - but take one
+    // from each end of the head so a path that skipped a whole stage shows.
+    const PARAMS: [&str; 2] = ["head.0.ff1.weight", "type_emb.weight"];
+
+    // Each example on its own, summed by hand.
+    let mut want: Vec<Vec<f32>> = PARAMS.iter().map(|_| Vec::new()).collect();
+    for (text, _) in batch {
+        m.zero_grads();
+        m.accumulate(&State::Str((*text).into()), &q, None, objective).expect("accumulate");
+        for (w, name) in want.iter_mut().zip(PARAMS) {
+            let g = m.read_head_grad(name);
+            if w.is_empty() {
+                *w = vec![0.0; g.len()];
+            }
+            for (acc, v) in w.iter_mut().zip(&g) {
+                *acc += v;
+            }
+        }
+    }
+
+    // All three accumulated into one gradient.
+    m.zero_grads();
+    for (text, _) in batch {
+        m.accumulate(&State::Str((*text).into()), &q, None, objective).expect("accumulate");
+    }
+
+    for (w, name) in want.iter().zip(PARAMS) {
+        let got = m.read_head_grad(name);
+        assert_eq!(got.len(), w.len(), "{name}");
+        let scale = w.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(scale > 0.0, "{name}: the reference gradient is all zero - this would prove nothing");
+        let worst = got.iter().zip(w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(
+            worst <= 2e-4 * scale,
+            "{name}: the accumulated gradient differs from the sum of its parts by {worst:.3e} (scale {scale:.3e})"
+        );
+    }
+
+    // ...and it must not merely equal the LAST example, which is what an
+    // assigning kernel anywhere in the path would produce.
+    let both = m.read_head_grad(PARAMS[0]);
+    m.zero_grads();
+    m.accumulate(&State::Str(batch[2].0.into()), &q, None, objective).expect("accumulate");
+    let last = m.read_head_grad(PARAMS[0]);
+    let scale = both.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+    let diff = both.iter().zip(&last).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(diff > 1e-5 * scale, "the minibatch gradient is indistinguishable from its last example");
+}

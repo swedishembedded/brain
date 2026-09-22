@@ -76,8 +76,14 @@
 //! | | `Decide` (MiniLM) | Laya (ModernBERT-large) |
 //! | --- | --- | --- |
 //! | objective | [`rlcd::scoring`] cross-entropy/focal/Brier, minimized directly | [`rlcd::reinforce`] REINFORCE with a group-mean baseline over [`rlcd::proper`]'s strictly proper reward |
-//! | what learns | encoder (2e-5) + head (1e-3) | the decision head only |
+//! | what learns | encoder (2e-5) + head (1e-3), or the head alone - the caller's choice, see [`DecisionPipeline::set_encoder_frozen`] | the decision head only; the trunk is always fixed |
+//! | a minibatch | ONE encoder pass over the whole batch (`decide::Decide::accumulate_batch`) | accumulation - the frozen trunk is re-encoded per example either way |
 //! | act/escalate head | none exists | NOT trained - no public source defines its objective |
+//!
+//! **Both arms take a minibatch** ([`DecisionPipeline::set_batch_size`]), and
+//! `steps` means OPTIMIZER STEPS on both: a run of `n` steps at batch `b` sees
+//! `n * b` examples. The default is one ([`DEFAULT_TRAIN_BATCH`]), which is
+//! what every number this repository publishes for these arms was measured at.
 //!
 //! Each arm trains against the rule its own released weights were fitted
 //! under, which is why this is two objectives rather than one. **The losses
@@ -197,14 +203,32 @@ pub struct RouteVerdict {
 const ENCODER_LR: f32 = 2e-5;
 const HEAD_LR: f32 = 1e-3;
 
+/// Examples one optimizer step accumulates over, on either arm.
+///
+/// **One**, and that is a default rather than a recommendation. A batch of one
+/// is what every number this repository publishes for these two arms was
+/// measured at, and AdamW's own state makes the batch size and the learning
+/// rate a pair: raising the batch without re-fitting the rate changes what a
+/// run converges to, not just how smoothly it gets there. Changing this
+/// constant would silently re-open every one of those numbers.
+///
+/// [`DecisionPipeline::set_batch_size`] is the opt-in, and the reason to take
+/// it is variance: a single transition's policy gradient is a very noisy
+/// estimate, and on the cube task the per-step loss oscillates across the
+/// whole range `[0.2, 5.0]` about `ln 18 = 2.89`. See that method for what a
+/// batch costs.
+pub const DEFAULT_TRAIN_BATCH: usize = 1;
+
 /// The Laya arm's own head learning rate, and the floor its cosine schedule
 /// anneals to.
 ///
 /// **Deliberately not the published Laya fine-tuning loop's `1e-4`**, and the
 /// difference is the step BUDGET rather than a disagreement. That loop takes
 /// ~7300 updates at an effective batch of 64;
-/// [`DecisionPipeline::train_choices`]'s contract is ONE example per step
-/// over a few hundred (the same contract the `Decide` arm has). AdamW's step
+/// [`DecisionPipeline::train_choices`]'s default is ONE example per step
+/// over a few hundred (the same default the `Decide` arm has, and the one
+/// this rate was fitted at - raising [`DecisionPipeline::set_batch_size`]
+/// re-opens it). AdamW's step
 /// is normalized, so what a run actually moves is roughly `lr * steps`,
 /// halved again by the cosine schedule both use - which puts the published
 /// run's own budget (`0.5 * 1e-4 * 7300 = 0.37`) near `1e-3` at 200 steps
@@ -244,6 +268,8 @@ pub struct DecisionPipeline {
     last_options: Vec<String>,
     last_instructions: String,
     last_eval: Vec<(String, usize)>,
+    /// Examples per optimizer step - see [`DEFAULT_TRAIN_BATCH`].
+    batch: usize,
 }
 
 /// Which architecture a loaded [`DecisionPipeline`] is actually running -
@@ -720,19 +746,13 @@ impl DecisionPipeline {
         let mut rng = data::rng::Rng::new(seed);
         let tail = (steps / 10).max(1);
         let mut tail_sum = 0.0f32;
+        let batch = self.batch.max(1);
 
         for step in 0..steps {
-            // The whole batch shares one optimizer update: zero once,
-            // accumulate `batch` gradients, step once with the sum rescaled
-            // to a mean. That cycle is `crates/decide`'s own, and its
-            // accumulation is gated there (`tests/minibatch.rs`) rather than
-            // re-proved here.
-            let progress = step as f32 / steps.max(1) as f32;
-            match &mut self.backend {
-                Backend::Decide(model) => model.zero_grads(),
-                Backend::Laya(b) => b.model.zero_grads(),
-            }
-            let mut sum = 0.0f32;
+            // The whole step's draws first, so the two arms consume the RNG
+            // in the same order and a batch of one stays bit-identical to the
+            // per-example loop this replaced.
+            let mut drawn = Vec::with_capacity(batch);
             for _ in 0..batch {
                 let (text, label) = examples[(rng.next_u64() % examples.len() as u64) as usize];
                 if label >= options.len() {
@@ -741,40 +761,75 @@ impl DecisionPipeline {
                         options.len()
                     )));
                 }
-                // ONE sampler, one draw, both arms: each example is scored
-                // against a random SUBSET of the options, always containing
-                // the correct one, at a random position.
-                let (drawn, gold) = sampler.draw(label, &pool, &mut rng);
-                sum += match &mut self.backend {
-                    Backend::Decide(model) => {
-                        let q = Question::Choice {
+                // ONE sampler, one draw per example, both arms: each example
+                // is scored against a random SUBSET of the options, always
+                // containing the correct one, at a random position.
+                let (opts, gold) = sampler.draw(label, &pool, &mut rng);
+                drawn.push((text, opts, gold));
+            }
+            let progress = step as f32 / steps.max(1) as f32;
+
+            // The whole batch shares ONE optimizer update: zero once,
+            // accumulate `batch` gradients, step once with the sum rescaled
+            // to a mean. That cycle is `crates/decide`'s own and is gated
+            // there (`tests/minibatch.rs`) rather than re-proved here. It is
+            // spelled out rather than delegated to `Decide::train_batch`,
+            // which is the same three calls wrapped up: inside this cycle
+            // that wrapper would zero and step a second time.
+            match &mut self.backend {
+                Backend::Decide(model) => model.zero_grads(),
+                Backend::Laya(b) => b.model.zero_grads(),
+            }
+
+            let sum = match &mut self.backend {
+                Backend::Decide(model) => {
+                    // ONE encoder pass for the whole batch: the examples are
+                    // packed side by side and the head reads each one's rows
+                    // by index, so the encoder's GEMMs get wider instead of
+                    // running again.
+                    let qs: Vec<Question> = drawn
+                        .iter()
+                        .map(|(_, opts, _)| Question::Choice {
                             instructions: instructions.to_string(),
-                            options: drawn.iter().map(|&i| Opt::new(options[i].clone())).collect(),
-                        };
-                        model
-                            .accumulate(text, &q, |scores| decide::loss::decision_loss(scores, gold, &loss_cfg))
-                            .map_err(Error::Backend)?
-                    }
-                    Backend::Laya(b) => {
+                            options: opts.iter().map(|&i| Opt::new(options[i].clone())).collect(),
+                        })
+                        .collect();
+                    let pack: Vec<(&str, &Question)> = drawn.iter().map(|(t, _, _)| *t).zip(&qs).collect();
+                    let gold: Vec<usize> = drawn.iter().map(|(_, _, g)| *g).collect();
+                    let losses = model
+                        .accumulate_batch(&pack, |i, scores| decide::loss::decision_loss(scores, gold[i], &loss_cfg))
+                        .map_err(Error::Backend)?;
+                    losses.iter().sum::<f32>()
+                }
+                Backend::Laya(b) => {
+                    // The trunk is frozen here, so there is no encoder pass
+                    // to share and a batch is accumulation - which is what
+                    // the published loop's own effective batch of 64 is.
+                    let obj = rlcd::reinforce::RlcdObjective::default()
+                        .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
+                    let mut sum = 0.0f32;
+                    for (text, opts, gold) in &drawn {
                         let q = modernbert::Question::Choice {
                             ins: instructions.to_string(),
-                            options: drawn.iter().map(|&i| (options[i].clone(), None)).collect(),
+                            options: opts.iter().map(|&i| (options[i].clone(), None)).collect(),
                         };
-                        let target = rlcd::proper::hard_target(drawn.len(), gold);
-                        let obj = rlcd::reinforce::RlcdObjective::default()
-                            .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
-                        b.model
-                            .accumulate(&State::Str(text.to_string()), &q, None, |scores| {
+                        let target = rlcd::proper::hard_target(opts.len(), *gold);
+                        let state = State::Str(text.to_string());
+                        sum += b
+                            .model
+                            .accumulate(&state, &q, None, |scores| {
                                 // A `choice` question is not ordinal, so the
                                 // ranked-probability term does not apply -
                                 // the same gate `rl_common.py` puts on
                                 // `qtype`.
                                 rlcd::reinforce::rlcd_loss(scores, &target, false, &obj, &mut rng)
                             })
-                            .map_err(Error::Backend)?
+                            .map_err(Error::Backend)?;
                     }
-                };
-            }
+                    sum
+                }
+            };
+
             let scale = 1.0 / batch as f32;
             match &mut self.backend {
                 Backend::Decide(model) => model.adamw_scaled(ENCODER_LR, HEAD_LR, scale),
@@ -852,6 +907,89 @@ impl DecisionPipeline {
         Ok(())
     }
 
+    /// How many examples one optimizer step accumulates over.
+    ///
+    /// `steps` stays the number of OPTIMIZER STEPS, so a run of `n` steps at
+    /// batch `b` sees `n * b` examples: raising this buys a less noisy
+    /// gradient with more data and more time, it does not redistribute a fixed
+    /// budget.
+    ///
+    /// What it costs differs by arm, because only one of them has an encoder
+    /// pass to share. On the `Decide` arm the batch is packed into ONE encoder
+    /// pass - the examples take disjoint rows and the head reads each one's by
+    /// index - so the encoder's GEMMs get wider instead of running again, and
+    /// the per-step optimizer cost is divided by the batch. On the Laya arm
+    /// the trunk is frozen and re-encoded per example anyway, so a batch there
+    /// is accumulation and costs proportionally.
+    ///
+    /// **Changing this changes what a run converges to.** AdamW normalizes its
+    /// step, so the batch size and the learning rate are a pair; a number
+    /// measured at one batch size is not a number at another. See
+    /// [`DEFAULT_TRAIN_BATCH`] for why the default is one.
+    pub fn set_batch_size(&mut self, batch: usize) {
+        self.batch = batch.max(1);
+    }
+
+    /// Examples per optimizer step.
+    pub fn batch_size(&self) -> usize {
+        self.batch
+    }
+
+    /// Hold the encoder fixed and train the HEAD alone.
+    ///
+    /// This is what makes [`DecisionPipeline::save_head`] possible on the
+    /// `Decide` arm, and it is a real choice rather than a flag: that arm's
+    /// artifact is a head-only adapter naming the encoder it attaches to, so a
+    /// run that fine-tuned the encoder cannot be written to one - the file
+    /// would load the head back onto the PUBLISHED encoder, which is not the
+    /// model that was trained. Training with the encoder live and then asking
+    /// to save is refused, correctly, by `decide::Decide::save_head`.
+    ///
+    /// So a caller picks: fine-tune the encoder (the default, and what this
+    /// arm's published accuracies were measured with) and keep the model in
+    /// the process that trained it, or freeze it and get a file. Freezing also
+    /// makes a step roughly a forward pass, since the encoder's reverse pass
+    /// is about two thirds of one.
+    ///
+    /// The Laya arm's trunk is ALWAYS frozen - at 395M parameters that is a
+    /// memory decision before it is a tuning one - so `true` is what it
+    /// already does and `false` is refused rather than silently ignored.
+    pub fn set_encoder_frozen(&mut self, frozen: bool) -> Result<()> {
+        match &mut self.backend {
+            Backend::Decide(model) => {
+                model.set_encoder_frozen(frozen);
+                Ok(())
+            }
+            Backend::Laya(_) if frozen => Ok(()),
+            Backend::Laya(_) => Err(Error::Backend(
+                "the Laya trunk is held fixed by construction - only its decision head trains here"
+                    .into(),
+            )),
+        }
+    }
+
+    /// Whether the trunk/encoder is being held fixed.
+    pub fn encoder_frozen(&self) -> bool {
+        match &self.backend {
+            Backend::Decide(model) => model.encoder_frozen(),
+            Backend::Laya(_) => true,
+        }
+    }
+
+    /// Whether an optimizer step has ever moved the encoder away from the
+    /// checkpoint it was imported from - and so whether
+    /// [`DecisionPipeline::save_head`] can still write a file that reproduces
+    /// this model. A caller deciding whether to OFFER a save needs the same
+    /// fact the refusal uses.
+    pub fn encoder_was_trained(&self) -> bool {
+        match &self.backend {
+            Backend::Decide(model) => model.encoder_was_trained(),
+            // `LayaDecision`'s mode is fixed for its whole life, so a trunk
+            // that is frozen never moved.
+            Backend::Laya(b) => !b.model.trunk_frozen(),
+        }
+    }
+
     /// Write the trained head to a brain `.safetensors`, for
     /// [`DecisionPipelineBuilder::head`] to load back.
     ///
@@ -924,12 +1062,20 @@ impl DecisionPipeline {
     }
 }
 
+/// The mean of a batch's per-example losses - what one optimizer step reports.
+fn mean(v: &[f32]) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.iter().sum::<f32>() / v.len() as f32
+}
+
 /// What a decision model needs in order to train: labelled examples, the
 /// option text each label maps to, and what the question asks.
 ///
 /// Owned rather than borrowed so a chain can be written as one expression
 /// without the caller keeping every intermediate alive.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TrainSpec {
     pub examples: Vec<(String, usize)>,
     pub options: Vec<String>,
@@ -941,6 +1087,11 @@ pub struct TrainSpec {
     /// [`DecisionPipeline::train_choices`] for why the default is not one.
     pub batch: usize,
     pub seed: u64,
+    /// Hold the encoder fixed and train the head alone. `false` fine-tunes it,
+    /// which is what this arm's published accuracies were measured with and
+    /// what makes [`DecisionPipeline::save_head`] refuse afterwards - see
+    /// [`DecisionPipeline::set_encoder_frozen`] for the choice.
+    pub freeze_encoder: bool,
     /// Held out for [`Flow::evaluate`]. Empty means evaluation reports nothing
     /// rather than inventing a split.
     pub eval: Vec<(String, usize)>,
@@ -952,6 +1103,20 @@ pub struct TrainSpec {
 /// small enough that a few hundred steps is still a few hundred steps' worth
 /// of wall clock on a single device.
 pub const DEFAULT_BATCH: usize = 16;
+impl Default for TrainSpec {
+    fn default() -> TrainSpec {
+        TrainSpec {
+            examples: Vec::new(),
+            options: Vec::new(),
+            instructions: String::new(),
+            steps: 0,
+            seed: 0,
+            batch: DEFAULT_BATCH,
+            freeze_encoder: false,
+            eval: Vec::new(),
+        }
+    }
+}
 
 impl TrainSpec {
     pub fn new(instructions: impl Into<String>) -> TrainSpec {
@@ -983,13 +1148,23 @@ impl TrainSpec {
         self
     }
 
-    pub fn batch(mut self, batch: usize) -> TrainSpec {
-        self.batch = batch;
+    pub fn seed(mut self, seed: u64) -> TrainSpec {
+        self.seed = seed;
         self
     }
 
-    pub fn seed(mut self, seed: u64) -> TrainSpec {
-        self.seed = seed;
+    /// Examples per optimizer step. See
+    /// [`DecisionPipeline::set_batch_size`].
+    pub fn batch(mut self, batch: usize) -> TrainSpec {
+        self.batch = batch.max(1);
+        self
+    }
+
+    /// Train the head alone, leaving the encoder as imported - which is what
+    /// makes the run's head saveable. See
+    /// [`DecisionPipeline::set_encoder_frozen`].
+    pub fn freeze_encoder(mut self, frozen: bool) -> TrainSpec {
+        self.freeze_encoder = frozen;
         self
     }
 }
@@ -1012,6 +1187,13 @@ impl Stages for DecisionPipeline {
 
     fn run_train(&mut self, spec: &TrainSpec, log: &mut dyn FnMut(usize, f32)) -> Result<TrainReport> {
         let ex: Vec<(&str, usize)> = spec.examples.iter().map(|(t, l)| (t.as_str(), *l)).collect();
+        self.set_batch_size(spec.batch);
+        // Only when asked: on the Laya arm `false` is the refusal case and it
+        // is already frozen, so a spec that never touched this must not turn
+        // into an error.
+        if spec.freeze_encoder {
+            self.set_encoder_frozen(true)?;
+        }
         let final_loss =
             self.train_choices(&ex, &spec.options, &spec.instructions, spec.steps, spec.batch, spec.seed, log)?;
         // Remembered so `evaluate` and `ask` need no second copy of the
@@ -1157,6 +1339,7 @@ impl DecisionPipelineBuilder {
             last_options: Vec::new(),
             last_instructions: String::new(),
             last_eval: Vec::new(),
+            batch: DEFAULT_TRAIN_BATCH,
         })
     }
 }

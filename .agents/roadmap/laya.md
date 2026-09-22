@@ -187,10 +187,25 @@ normally across conversations.
       **The head learning rate is the one number NOT taken from the
       reference**, and it says so: the published loop's `1e-4` is for an
       effective batch of 64 over thousands of updates, while
-      `train_choices`'s contract is one example per step over hundreds. The
+      `train_choices`'s DEFAULT is one example per step over hundreds. The
       SDK uses `3e-4` on a cosine schedule to a `1e-6` floor (the published
       schedule SHAPE, no warmup). Sigma anneals 0.4 -> 0.1 across the run as
       published.
+
+      **A minibatch is available and is NOT the default**
+      (`DecisionPipeline::set_batch_size`; on this arm it accumulates, since
+      a frozen trunk is re-encoded per example either way). It is not the
+      default because the rate above was fitted BY MEASUREMENT at a batch of
+      one - three real runs against the 843 MB checkpoint, recorded in
+      `LAYA_HEAD_LR`'s own doc, one of which (`3e-3`) drove held-out
+      accuracy BELOW chance. AdamW normalizes its step, so the batch size and
+      the rate are a pair: raising the batch without re-fitting the rate
+      quarters or eighths what a fixed step budget actually moves. Closing
+      the remaining gap to the published loop's effective batch of 64 is a
+      joint (batch, rate, steps) re-fit, and each point on it is a ~750 s
+      run. The accumulation itself is gated
+      (`crates/modernbert/tests/train_convergence.rs::
+      accumulating_a_minibatch_sums_its_examples_gradients`).
 
       **`crates/modernbert` gained the composition it was missing**:
       `modernbert::LayaDecision` (trunk + head + tokenizer as one model, with
