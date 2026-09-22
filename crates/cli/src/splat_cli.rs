@@ -7,8 +7,12 @@
 //!   brain splat render <scene.ply> --out img.ppm [--width N --height N]
 //!        [--eye x,y,z --target x,y,z --up x,y,z --fov D] [--depth] [--bg r,g,b]
 //!        [--aa | --inria-lowpass] [--naive]
-//!   brain splat fit    ... [--inria-lowpass]  # fit for an Inria-convention
+//!   brain splat fit    <scene.ply> --cameras <cams.json> --images <dir> --out F
+//!        [--iters N --lr R] [--inria-lowpass]  # fit for an Inria-convention
 //!        viewer (uncompensated dilation at 0.3) instead of the Mip filter
+//!        [--position-budget R --scale-budget R --rotation-budget R]
+//!        # how far geometry may move, in units of a gaussian's own radius;
+//!        # set these when the scene is already metric, 0 (default) = unbounded
 //!   brain splat merge  <a.ply,b.ply,...> --cameras <a.json,b.json,...>
 //!        --overlap K --out merged.ply [--cameras-out J] [--prune VOXEL]
 //!        # K = how many trailing frames of each chunk lead the next one
@@ -809,6 +813,23 @@ fn fit_cmd(argv: &[String]) {
     let max_growth = a.f32_or("--max-growth", 2.0);
     let max_needle = a.f32_or("--max-needle", 2.0);
     let max_flat = a.f32_or("--max-flat", 4.0);
+    // Radius-relative budgets for the three geometry groups: how far a
+    // gaussian may travel, resize or turn over the WHOLE run, measured in
+    // units of a median gaussian's own radius. `p_geo` packs a position in
+    // world units, a linear scale and a unit quaternion into one buffer, and
+    // Adam's step is ~lr regardless of gradient, so one rate cannot serve all
+    // three - at a rate small enough to be a rounding error on the scene
+    // diagonal it is still a sixth of a small gaussian's own radius.
+    //
+    // Set these when the scene is ALREADY metric, as a feed-forward
+    // reconstruction's is: then a gaussian should settle onto its surface and
+    // not leave it, and `--lr` becomes the appearance rate (the budget divides
+    // by it, so raising it cannot move a gaussian further than it already
+    // could). They are off by default because a fit from a sparse point cloud
+    // needs the opposite - there the geometry HAS to migrate a long way.
+    let position_budget = a.f32_or("--position-budget", FitCfg::default().position_budget);
+    let scale_budget = a.f32_or("--scale-budget", FitCfg::default().scale_budget);
+    let rotation_budget = a.f32_or("--rotation-budget", FitCfg::default().rotation_budget);
     let cfg = FitCfg {
         iters,
         lr,
@@ -825,6 +846,9 @@ fn fit_cmd(argv: &[String]) {
         max_growth,
         max_needle,
         max_flat,
+        position_budget,
+        scale_budget,
+        rotation_budget,
         ..Default::default()
     };
     let (fitted, refined, mse) =
