@@ -246,6 +246,26 @@ fn glyph(c: u8) -> [u8; 7] {
         b'.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04],
         b'/' => [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
         b'-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        // Punctuation an instrument panel cannot do without. A readout that
+        // prints "19.54 OF FULL SCALE" because it has no percent sign, or
+        // "/- 0.4" because it has no plus, is not a readout; it took a
+        // rendered panel to notice these were missing.
+        b'%' => [0x19, 0x1A, 0x02, 0x04, 0x08, 0x0B, 0x13],
+        b'+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        b'=' => [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
+        b'(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        b')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        b'[' => [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
+        b']' => [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
+        b'<' => [0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02],
+        b'>' => [0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08],
+        b',' => [0x00, 0x00, 0x00, 0x00, 0x06, 0x04, 0x08],
+        b';' => [0x00, 0x04, 0x00, 0x00, 0x06, 0x04, 0x08],
+        b'_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+        b'*' => [0x00, 0x15, 0x0E, 0x1F, 0x0E, 0x15, 0x00],
+        b'!' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04],
+        b'?' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        b'#' => [0x0A, 0x1F, 0x0A, 0x0A, 0x0A, 0x1F, 0x0A],
         _ => [0; 7], // space and anything unknown
     }
 }
@@ -558,5 +578,41 @@ mod panel_tests {
         pal[3..6].copy_from_slice(&[200, 0, 0]);
         blit_indexed(&mut buf, w, h, 0, 0, &src, 2, 2, &pal, 2);
         assert_eq!(px(&buf, w, 3, 3), [200, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::glyph;
+
+    /// Characters an instrument readout actually prints.
+    ///
+    /// Asserted as a set rather than left to be discovered, because a missing
+    /// glyph does not fail: it renders as a space, and the reader sees
+    /// "19.54 OF FULL SCALE" or "/- 0.4 KN" and assumes the program meant it.
+    const REQUIRED: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:./-%+=()[]<>,;_*!?#";
+
+    #[test]
+    fn every_character_a_readout_prints_has_a_glyph() {
+        for c in REQUIRED.bytes() {
+            let g = glyph(c);
+            assert!(g.iter().any(|row| *row != 0), "'{}' renders as a blank", c as char);
+            // Five columns per glyph: anything wider would overlap its
+            // neighbour, since the cell advance is fixed at six.
+            assert!(g.iter().all(|row| *row <= 0x1F), "'{}' is wider than five columns", c as char);
+        }
+    }
+
+    #[test]
+    fn a_space_and_an_unknown_character_stay_blank() {
+        assert_eq!(glyph(b' '), [0; 7]);
+        assert_eq!(glyph(b'~'), [0; 7]);
+    }
+
+    #[test]
+    fn lower_case_renders_as_upper_case() {
+        for (lo, up) in "abcxyz".bytes().zip("ABCXYZ".bytes()) {
+            assert_eq!(glyph(lo), glyph(up));
+        }
     }
 }
