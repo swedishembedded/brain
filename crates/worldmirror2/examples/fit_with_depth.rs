@@ -38,7 +38,12 @@ fn main() {
     let cams = read_cameras(&format!("{dir}/cameras.json"));
     let (w, h) = (heads.width, heads.height);
     let hw = (w * h) as usize;
-    let opts = AssembleOpts { edge_depth_rtol: 0.0, ..Default::default() };
+    // Every threshold stays at the reference's own value. `edge_depth_rtol`
+    // especially: a pixel straddling a silhouette gets a depth blended from
+    // the two surfaces either side and unprojects to neither, so disabling it
+    // hangs a combed fringe off every edge in the scene - which a fit cannot
+    // remove, because the fringe is where the depth prior says the surface is.
+    let opts = AssembleOpts::default();
     let (scene, cams, weights) = assemble_from(&heads, &cams, &opts);
     eprintln!("assembled {} gaussians (surface-align {})", scene.len(), opts.surface_align);
     let voxel: f32 = a.get(7).map_or(0.0011, |v| v.parse().unwrap());
