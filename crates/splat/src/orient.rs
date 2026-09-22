@@ -271,12 +271,15 @@ pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
 /// area-weighted average of those normals a far better statement about which
 /// way is up than the path the photographer happened to walk.
 ///
-/// Only gaussians already within 30 degrees of `hint` are counted, and the
-/// answer is a REFINEMENT of it rather than a search: a capture contains
-/// walls and railings whose normals are just as consistent as the floor's,
-/// and picking the globally dominant direction would cheerfully stand a scene
-/// on its side. Returns `None` when too little of the scene agrees with the
-/// hint to say anything.
+/// This is a heuristic with a PRECONDITION - that the capture contains one
+/// large flat thing - and it returns `None` rather than guessing when it
+/// cannot see one. An object photographed on its own has no such surface, and
+/// a scene whose largest surface is a wall has one that is not the floor;
+/// `hint` is what separates those two, so the answer stays a refinement of a
+/// camera estimate rather than an unanchored search.
+///
+/// It also cannot know that ground which really is sloped - a hillside, a
+/// ramp - is meant to be. Levelling such a scene makes it tidy and wrong.
 pub fn dominant_normal(s: &Splats, hint: [f64; 3]) -> Option<[f64; 3]> {
     let hn = norm3(hint)?;
     // Area-weighted orientation tensor, sum w n nT. A normal has no sign - a
@@ -328,6 +331,18 @@ pub fn dominant_normal(s: &Splats, hint: [f64; 3]) -> Option<[f64; 3]> {
             Some(u) => v = u,
             None => return None,
         }
+    }
+    // Is that axis actually DOMINANT, or merely the way the noise leans?
+    // Power iteration on a near-isotropic matrix converges just as confidently
+    // as on a rank-one one, so the vector alone says nothing. Its share of the
+    // total does: all the weight lies along one direction for a plane (ratio
+    // 1), and spreads evenly over three for a closed surface (ratio 1/3).
+    let trace = m[0] + m[4] + m[8];
+    let lambda = (0..3)
+        .map(|a| v[a] * (0..3).map(|b| m[a * 3 + b] * v[b]).sum::<f64>())
+        .sum::<f64>();
+    if trace <= 0.0 || lambda / trace < 0.55 {
+        return None;
     }
     let d = v[0] * hn[0] + v[1] * hn[1] + v[2] * hn[2];
     // A capture contains walls and railings whose normals are every bit as

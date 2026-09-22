@@ -262,3 +262,76 @@ fn levelling_straightens_a_scene_its_cameras_could_not() {
         assert_eq!(levelled.scales, s.scales, "levelling must not reshape a gaussian");
     }
 }
+
+/// A closed surface whose normals point everywhere, so nothing is dominant.
+fn ball_of_discs(n: usize) -> Splats {
+    let mut r = Lcg(0x2b1);
+    let mut out = Splats::default();
+    for _ in 0..n {
+        let th = (1.0 - 2.0 * r.next() as f64).clamp(-1.0, 1.0).acos();
+        let ph = r.next() as f64 * std::f64::consts::TAU;
+        let nv = [th.sin() * ph.cos(), th.cos(), th.sin() * ph.sin()];
+        out.means.extend_from_slice(&[nv[0] as f32, nv[1] as f32, nv[2] as f32]);
+        let (ax, ay) = (-nv[1], nv[0]);
+        let sn = (ax * ax + ay * ay).sqrt();
+        let ang = nv[2].clamp(-1.0, 1.0).acos();
+        let (sh, ch) = ((ang * 0.5).sin(), (ang * 0.5).cos());
+        let q = if sn < 1e-9 { [1.0, 0.0, 0.0, 0.0] } else { [ch, ax / sn * sh, ay / sn * sh, 0.0] };
+        out.quats.extend_from_slice(&[q[0] as f32, q[1] as f32, q[2] as f32, q[3] as f32]);
+        out.scales.extend_from_slice(&[0.05, 0.05, 0.006]);
+        out.opacities.push(0.9);
+        out.colors.extend_from_slice(&[0.5, 0.5, 0.5]);
+    }
+    out
+}
+
+/// A scene with no dominant surface has to say so.
+///
+/// Levelling is a heuristic with a precondition - that the capture CONTAINS a
+/// large flat thing - and an object photographed on its own does not meet it.
+/// The orientation tensor of a closed surface is nearly isotropic, and power
+/// iteration on an isotropic matrix still returns a confident-looking unit
+/// vector: it converges on whichever way the noise leans. Refusing is the only
+/// honest answer, and a silent wrong one is worse than a tilted scene because
+/// nothing downstream can tell it happened.
+#[test]
+fn a_scene_with_no_dominant_surface_is_refused() {
+    let ball = ball_of_discs(8000);
+    assert!(
+        splat::orient::dominant_normal(&ball, [0.0, -1.0, 0.0]).is_none(),
+        "levelling claimed to find a ground plane in a sphere"
+    );
+    // and `level` must then leave the scene as `upright` had it, not rotate
+    // it by whatever the noise said
+    let cams: Vec<Camera> = (0..6)
+        .map(|i| {
+            let a = i as f64 / 6.0 * std::f64::consts::TAU;
+            let m = [
+                1.0, 0.0, 0.0, 3.0 * a.sin(),
+                0.0, 1.0, 0.0, -1.2,
+                0.0, 0.0, 1.0, 3.0 * a.cos(),
+                0.0, 0.0, 0.0, 1.0,
+            ];
+            cam_from(&m, 64, 64)
+        })
+        .collect();
+    let (lv, _) = level(&ball, &cams);
+    let (up, _) = upright(&ball, &cams);
+    assert_eq!(lv.means, up.means, "a refused level must change nothing");
+
+    // the floor it is standing on, however, is still found
+    let mut floor = tilted_ground(9000, 12.0);
+    let n0 = floor.len();
+    for i in 0..ball.len() {
+        floor.means.extend_from_slice(&ball.means[i * 3..i * 3 + 3]);
+        floor.quats.extend_from_slice(&ball.quats[i * 4..i * 4 + 4]);
+        floor.scales.extend_from_slice(&ball.scales[i * 3..i * 3 + 3]);
+        floor.opacities.push(ball.opacities[i]);
+        floor.colors.extend_from_slice(&ball.colors[i * 3..i * 3 + 3]);
+    }
+    assert!(floor.len() > n0);
+    let n = splat::orient::dominant_normal(&floor, [0.0, -1.0, 0.0])
+        .expect("a floor with an object on it is still a floor");
+    let off = (n[1].abs()).clamp(0.0, 1.0).acos().to_degrees();
+    assert!((off - 12.0).abs() < 2.0, "the floor's 12 degree tilt read as {off:.2}");
+}
