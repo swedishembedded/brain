@@ -14,6 +14,13 @@
 //! - [`mod@scoring`] - proper scoring rules (focal + Brier) over a **target
 //!   distribution**, not just a gold index, so an exact oracle posterior
 //!   (0.6667, not "class 2") can be trained against directly.
+//! - [`mod@cost`] - turning a probability into an action: cost matrices,
+//!   Bayes risk, decision regret, and value of information. A probability is
+//!   not an action; see that module's doc for why the two must stay separate
+//!   functions rather than one learned policy.
+//! - [`mod@metrics`] - calibration metrics (ECE, AdaECE, classwise-ECE, NLL,
+//!   Brier, reliability bins, coverage-vs-accuracy, failure-AUROC) to audit
+//!   what [`mod@scoring`] trained.
 //!
 //! ## Why this is a crate and not a module of `brain-decide`
 //!
@@ -41,4 +48,6 @@
 //! needs expertise in calibrated decision-making under uncertainty, you can
 //! procure our services by sending an email to info@swedishembedded.com.
 
+pub mod cost;
+pub mod metrics;
 pub mod scoring;
