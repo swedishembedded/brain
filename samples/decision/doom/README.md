@@ -44,6 +44,7 @@ mission text is prepended to every option:
 | `clear` | kill everything, the exit can wait | kills weighted 1.5, exit 3 |
 | `speedrun` | reach the exit, fight only what blocks you | kills 0.2, exit 15 |
 | `survive` | stay alive, avoid damage | damage costs 4x, exit 5 |
+| `uvmax` | every monster, every secret, then the exit | the category itself - see below |
 
 Train with `--mix` and the mission is sampled per episode, so one policy has to
 read what it was asked to do.
@@ -110,6 +111,7 @@ Below, `$D` stands for those three flags. Every command works headless.
 
 | command | what it does |
 |---|---|
+| `search` | **discovery, with no model in it.** Finds solutions; loads no encoder and opens no device |
 | `probe` | one scripted episode, end to end, no policy |
 | `train` | warm-start on the scripted player, then search, self-imitation, DAgger or PPO |
 | `fit` | fit the head to the teacher and report how often it agrees - no reward, no critic |
@@ -455,6 +457,109 @@ learned the hard way:
   a patch of floor pays and the *n*-th pays `1/sqrt(n)`. Walking into a wall
   discovers nothing and earns nothing. The agent is not told that walls are bad;
   it is paid for finding out.
+
+### UV-Max, and searching for it
+
+`--mission uvmax` scores DOOM speedrunning's **Max** category at Ultra-
+Violence: every monster, every secret, then the exit. One number in `0..=2`,
+and `2.0` is exactly a completed category - which is what lets the search
+recognise a solution without knowing anything about DOOM.
+
+Items are not in it. The category does not require them, and scoring them
+ranks a run that swept up forty health bonuses above one that found the last
+secret.
+
+**The exit is worth less than clearing the level** (0.6 against 1.3), which is
+the opposite of every other mission here. Stepping on a DOOM exit ENDS the
+level: a run that leaves early has not taken a shortcut, it has destroyed its
+own episode with the work undone. A score that ranks "sprinted out" above
+"cleared but still inside" teaches the search to throw away exactly the
+trajectories worth keeping - measured, under the obvious weighting a full
+clear scored 1.00 against a sprint-to-exit's 1.10.
+
+**There is no time term in it**, and a speedrun is scored on time. A penalty
+that grows while the episode runs makes dying the cheapest way to stop it
+growing, and an agent paid that way learns to end its own run. Time is the
+ARCHIVE's tiebreaker instead: achievement decides which solutions are kept,
+tics decide between two that achieved the same thing, and the policy inherits
+the speed by being cloned from elites that are already time-minimal. You can
+watch it work in a campaign's own log - the best cell on E1M1 held its score
+of 0.956 while its time fell from 10 659 tics to 9 071.
+
+### Search as its own command
+
+```bash
+doom search $D --map 1 --skill 3 --mission uvmax --reward gauge   --search-budget 1800 --archive out/arc --solutions out/solutions.json
+```
+
+`search` is the SEARCH half of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, split
+out of the training pipeline it used to be a phase inside. It loads no
+encoder, opens no device and runs at engine speed - about 19 ms a decision
+against roughly 100 ms with a network in the loop, which is most of why a
+search budget buys anything.
+
+It hosts the workspace's `brain-search` crate: a quality-diversity archive, a
+bandit allocating budget between search operators on measured gain per second,
+and an evaluator cascade.
+
+**The contract that makes the result honest:**
+
+> Search may use snapshots. The artifact may not.
+
+Returning to a promising position by restoring an engine snapshot is what
+makes the search affordable. But a trajectory assembled out of restores is not
+a run anybody could play, so what a campaign PRODUCES is an action list from
+the level's own start, and it is not a solution until that list has been
+replayed from the start and has reproduced the same kills, secrets, exit and
+tic count. The engine is deterministic - two separate process launches on one
+seed agree bit for bit - which is what makes that a gate rather than a hope. A
+claim that does not replay is reported as a defect, never quietly dropped.
+
+**The operators**, and which one is worth the budget is measured, not chosen:
+
+```
+wander   60 decisions, uniformly random      the only one that can produce an
+                                             action no teacher would ever pick
+probe    60 decisions, mostly the teacher    plausible, then wandering off it
+commit   400 decisions of real play          long enough to finish a firefight
+chase    the same, from the best cell        pushes the front of the search
+frisk    200 decisions, half of them a push  the only way a secret is ever
+                                             found by someone not told where
+```
+
+**The niche** - what counts as "a different kind of situation" - is where the
+run stands, which keys and **weapons** it holds, its health band, how many
+monsters are left and how many secrets it has found. Weapons and health are
+load-bearing and were nearly left out: items do not count toward the category,
+so they were dropped wholesale, which also dropped the shotgun. Without a
+weapons axis "in the courtyard with a shotgun" and "in the courtyard with a
+pistol" are one cell, the archive keeps whichever got there in fewer tics -
+systematically the run that sprinted past the shotgun - and the search then
+sets off from the weaker one and loses the fight. Adding those two axes was
+worth 2.6x on an otherwise identical campaign.
+
+### Hunting what you saw
+
+A level is not cleared by what walks into you. Every way of fighting here
+reacted to what was in front of the player, so the last monsters of a level -
+the ones glimpsed once from a doorway - could never be gone back for.
+
+The memory made that impossible on purpose: a monster's exact position goes
+stale in ten decisions, because it has moved, and the way to where it was is
+the way to where it is not. That is right for aiming and wrong for hunting - a
+monster in a room is still in that room. So there is a second, coarser ledger:
+the REGION a live monster was seen in, forgotten on the same evidence an item
+is (the player went there and looked) rather than on a timer.
+
+Fair play holds. Nothing in it is a monster the agent was not already shown,
+and it is a room rather than a position precisely because claiming to know
+where the monster is NOW would be the lie the item memory is careful not to
+tell.
+
+Measured on E1M1 at Ultra-Violence, one seed, ~600 s: 0.607 without it against
+0.801 with, and the arm that hunted found the first secret any campaign had
+found - going back for a monster seen once takes the player into the corners
+and side rooms it otherwise walks past, which is where secrets are.
 
 ### The search half
 
