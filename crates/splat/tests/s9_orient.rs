@@ -20,7 +20,7 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 use gpu_core::Gpu;
-use splat::orient::{apply, frame_from_cameras, transform_c2w};
+use splat::orient::{apply, frame_from_cameras, transform_c2w, upright};
 use splat::quality::psnr;
 use splat::renderer::{GpuSplats, Renderer};
 use splat::types::{Camera, RenderOpts, Splats};
@@ -150,4 +150,50 @@ fn the_scene_comes_out_with_its_orbit_axis_vertical() {
     let rs: Vec<f64> = eyes.iter().map(|e| e[0].hypot(e[2])).collect();
     let off = rs.iter().cloned().fold(f64::MIN, f64::max) - rs.iter().cloned().fold(f64::MAX, f64::min);
     assert!(off < 0.1 * radius, "the origin is not the subject: camera distances vary by {off:.3}");
+}
+
+/// The whole re-framing in one call, which is how every caller wants it.
+///
+/// The two halves have to move TOGETHER or the result is worse than not
+/// straightening at all: a scene rotated into a new frame and handed back with
+/// the cameras it had before is a scene nobody can render. Composing them by
+/// hand at each call site is how that gets forgotten, so the composition is
+/// the library's job and this is the gate on it.
+#[test]
+fn upright_moves_the_cameras_with_the_scene() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let ks = Kernels::at(0);
+    let (w, h) = (96u32, 96u32);
+    let s = scene(400);
+    let mats = orbit(9);
+    let cams: Vec<Camera> = mats.iter().map(|m| cam_from(m, w, h)).collect();
+
+    let (moved, moved_cams) = upright(&s, &cams);
+    assert_eq!(moved_cams.len(), cams.len(), "a camera went missing");
+
+    // Same picture through the returned pair as through the originals.
+    let o = RenderOpts::default();
+    let mut ren = Renderer::new(&g, ks, s.len(), w, h, s.len() * 16);
+    let before = {
+        let gs = GpuSplats::upload(&g, &s);
+        ren.render(&g, &gs, &cams[3], &o);
+        ren.read_rgba(&g, w, h)
+    };
+    let after = {
+        let gs = GpuSplats::upload(&g, &moved);
+        ren.render(&g, &gs, &moved_cams[3], &o);
+        ren.read_rgba(&g, w, h)
+    };
+    let db = psnr(&before, &after);
+    assert!(db > 40.0, "upright() changed the picture by {db:.1} dB");
+
+    // And it straightened it: the orbit is level in the frame it hands back.
+    let ys: Vec<f64> = moved_cams.iter().map(|c| c.c2w[7] as f64).collect();
+    let radius = moved_cams
+        .iter()
+        .map(|c| (c.c2w[3] as f64).hypot(c.c2w[11] as f64))
+        .sum::<f64>()
+        / moved_cams.len() as f64;
+    let spread = ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(spread < 0.1 * radius, "upright() left {spread:.3} of height spread on a {radius:.3} orbit");
 }

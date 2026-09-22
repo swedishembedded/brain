@@ -22,7 +22,7 @@
 //! lands in a frame the next tool can use. If your team needs that, you can
 //! procure our services by sending an email to info@swedishembedded.com.
 
-use crate::types::Splats;
+use crate::types::{Camera, Splats};
 
 /// Rotation (row-major 3x3) and centre that map the scene into a frame whose
 /// vertical is the camera orbit's axis, pointing along `up_sign * Y`.
@@ -232,4 +232,32 @@ pub(crate) fn qmul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
         a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
         a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
     ]
+}
+
+/// Re-frame a scene and its cameras together, so the capture's own orbit axis
+/// becomes world up.
+///
+/// A feed-forward reconstruction lands in its FIRST frame's coordinates, so
+/// which way is up is whichever way that camera happened to be held - 63
+/// degrees off vertical on a real capture - and every viewer opens the scene
+/// tipped. Straightening it means moving the cameras by the same transform:
+/// they describe where the photographs were taken from, and a scene rotated
+/// out from under them is one nothing can render or score.
+///
+/// The pieces are [`frame_from_cameras`], [`apply`] and [`transform_c2w`], and
+/// the reason they are also available separately is that a caller holding
+/// poses in some other representation still needs the rotation. A caller
+/// holding a [`Camera`] wants this.
+pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
+    let mats: Vec<[f64; 16]> = cams.iter().map(|c| std::array::from_fn(|i| c.c2w[i] as f64)).collect();
+    let (r, centre) = frame_from_cameras(&mats, -1.0);
+    let moved = cams
+        .iter()
+        .zip(&mats)
+        .map(|(c, m)| {
+            let t = transform_c2w(m, &r, &centre);
+            Camera { c2w: std::array::from_fn(|i| t[i] as f32), ..*c }
+        })
+        .collect();
+    (apply(s, &r, &centre), moved)
 }
