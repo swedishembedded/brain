@@ -1,0 +1,22 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/learning/rlcd` -> `sample-learning-rlcd`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-learning-rlcd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: RLCD end to end - an executable Bayesian world, a model trained on its exact posteriors, and evaluation on calibration AND cost-sensitive decision regret, not accuracy alone."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. This one
+# uses `decision` and nothing else.
+brain = { workspace = true, features = ["decision"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# The same surface `samples/decision/triage` names, so the same budget.
+max-brain-crates = 30

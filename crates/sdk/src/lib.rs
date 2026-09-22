@@ -145,6 +145,21 @@ pub use conversion::{
     RoutingDecision, SalesConversation, SalesMessage, Verdict,
 };
 
+/// `brain::RlcdPipeline` - training a decision model directly against exact
+/// oracle posteriors (a soft target distribution, not a single gold index),
+/// and auditing it on calibration AND cost-sensitive decision regret. Its
+/// own surface because its training signal - a full distribution per
+/// example - is what no other pipeline here takes.
+#[cfg(feature = "decision")]
+pub mod rlcd;
+#[cfg(feature = "decision")]
+pub use rlcd::{
+    ada_ece, check_information_refinement, classwise_ece, coverage_accuracy, failure_auroc,
+    reliability_bins, witness_search, BayesAction, CostMatrix, DecisionContract, Distribution,
+    Learner, LossConfig, Observation, OracleKind, ReliabilityBin, RlcdExample, RlcdPipeline,
+    RlcdPipelineBuilder, RlcdSpec, WitnessFamily, World,
+};
+
 /// The stage chain every pipeline shares: `train`, `evaluate`, `save`, `ask`,
 /// `tui`, `report`, `finish`. Written once, adapted per architecture through
 /// [`flow::Stages`].

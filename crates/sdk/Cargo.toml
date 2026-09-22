@@ -88,7 +88,7 @@ vision = ["resolve", "imagetype", "dep:brain-clip", "dep:brain-yolov8", "dep:bra
 # this architecture has no model-store `ArchSpec`, so there is nothing for a
 # resolver to resolve a hub id against - and a decision model is two artifacts
 # (an imported encoder, a trained head) where a hub id names only the first.
-decision = ["device", "dep:brain-decide", "dep:brain-modernbert", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
+decision = ["device", "dep:brain-decide", "dep:brain-modernbert", "dep:brain-rlcd", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json"]
 # `brain::DocumentStudy` - teach a model a batch of documents and gate whether
 # it learned them. Architecture-agnostic machinery (`brain-rl` is generic over
 # `model::Model`), so the decoder crates it monomorphises for come with it.
@@ -208,6 +208,7 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-qwen35 = { workspace = true, optional = true }
 brain-qwen35moe = { workspace = true, optional = true }
 brain-rl = { workspace = true, optional = true }
+brain-rlcd = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
 brain-qwen3vl = { workspace = true, optional = true }

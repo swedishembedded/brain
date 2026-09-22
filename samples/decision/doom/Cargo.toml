@@ -31,4 +31,9 @@ libc = { workspace = true }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 33
+# 33 -> 34: the "decision" surface's dependency closure grew by exactly one
+# crate (brain-rlcd, a new leaf under brain-decide with no transitive
+# dependency of its own beyond brain-data, which brain-decide already
+# pulled) when RLCD's calibrated-decision objective moved out of
+# brain-decide into its own reusable crate.
+max-brain-crates = 34

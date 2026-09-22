@@ -31,6 +31,7 @@ samples/decision/triage/README.md
 samples/fly/interactive/README.md
 samples/imagegen/batch/README.md
 samples/imagegen/generate/README.md
+samples/learning/rlcd/README.md
 samples/python/api/openai-client/README.md
 samples/python/asr/bench-streams/README.md
 samples/python/asr/transcribe-mic/README.md
