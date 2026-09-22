@@ -813,6 +813,23 @@ impl DoomEnv {
             .map(|(i, (id, _, _))| (*id, paths.get(i).copied().flatten()))
             .collect();
         self.memory.routed(&answered);
+        // The same question again for unfinished business - places a live
+        // monster was seen and never gone back for. Asked separately because
+        // it is a different ledger with a different forget rule; see
+        // `memory::Haunt`. One extra route call per decision, and only when
+        // there is something outstanding.
+        let hunts = self.memory.hunts();
+        if !hunts.is_empty() {
+            let where_ = hunts.iter().map(|(_, x, y)| (*x, *y)).collect::<Vec<_>>();
+            let found = self.doom.route_to(&where_).unwrap_or_default();
+            let back: Vec<(i64, Option<crate::memory::Path>)> = hunts
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _, _))| (*id, found.get(i).copied().flatten()))
+                .collect();
+            self.memory.routed_hunts(&back);
+        }
+        self.state.unfinished = self.memory.unfinished(&self.state);
         self.state.recalled = self.memory.recall(&self.state);
         self.state.wounded = self.memory.wounded();
         self.state.came_from = self.came_from();
@@ -1265,6 +1282,23 @@ impl DoomEnv {
     pub fn level_counts(&self) -> (u32, u32, u32, u32) {
         let l = &self.state.level;
         (l.kills, l.total_kills, l.secrets, l.total_secrets)
+    }
+
+    /// The option that presses use against whatever is in front of the
+    /// player, if it is on offer.
+    ///
+    /// Always is, in practice - it is what keeps the option list non-empty in
+    /// a dead end - but it is asked for rather than assumed, because an
+    /// operator that indexes an option list on faith is one that silently
+    /// does something else the day the list changes.
+    ///
+    /// Exposed for the `frisk` search operator. DOOM's secrets are behind
+    /// walls that look almost like walls, and the only way anybody finds them
+    /// without being told where they are is to push on things. That is a
+    /// decision about DOOM, so it lives here rather than in the search, which
+    /// knows nothing about the game.
+    pub fn use_option(&self) -> Option<usize> {
+        self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
     /// The difficulty the episode is being played at. 3 is Ultra-Violence,
@@ -1735,7 +1769,9 @@ impl DoomEnv {
             // one surviving monster and the exit is the last thing a Max run
             // touches - stepping on it early ends the level with the work
             // undone.
-            Mission::UvMax => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
+            // Hunt after Grab, so a hurt player heals before it goes looking
+            // for a fight, and before Exit, because a Max run leaves LAST.
+            Mission::UvMax => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Hunt, Tag::Exit],
         };
 
         for tag in order {
@@ -1769,6 +1805,19 @@ impl DoomEnv {
                         .is_some_and(|e| e.route_bearing.is_some())
                         && !(by(Tag::Attack).is_some() && in_my_face)
                 }
+                // Whenever there is unfinished business and nothing is
+                // shooting at the player from close range. The option is only
+                // BUILT when there is a route to it or a clear line, so
+                // reaching it here already means the walk is real.
+                //
+                // This arm has to exist. The `_ => false` it was added to
+                // would have made Hunt an option that is constructed, offered
+                // and never once selected - which this sample has paid for
+                // twice already (change weapon and circle-strafe, both
+                // unreachable for a whole campaign; making them reachable
+                // roughly doubled the teacher's kills). `the_teacher_hunts_
+                // what_it_saw` is the check that says so.
+                Tag::Hunt => !in_my_face,
                 _ => false,
             };
             if take {

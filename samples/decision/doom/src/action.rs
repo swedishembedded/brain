@@ -68,6 +68,14 @@ pub enum Tag {
     Escape,
     /// Go back the way you came, along ground already walked.
     Fallback,
+    /// Go back for a monster seen earlier and never dealt with.
+    ///
+    /// Distinct from [`Tag::Attack`], which fights what is in front of the
+    /// player right now. A level is not cleared by fighting what comes to
+    /// you: the last monsters of a Max run are the ones glimpsed once from a
+    /// doorway, and going back for them is a decision nothing here could
+    /// express before.
+    Hunt,
     /// Operate the lift the route runs through, and wait for it.
     Ride,
     Exit,
@@ -356,6 +364,62 @@ pub fn options(state: &State) -> Vec<Option_> {
             },
             tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Grab,
+            room,
+        });
+    }
+
+    // --- hunt -------------------------------------------------------------
+    //
+    // Go back for a monster seen earlier and never dealt with. The option
+    // that "kill everything" needs and that nothing here could express: every
+    // other way of fighting reacts to what is in front of the player, and a
+    // level is not cleared by what walks into you. The last few monsters of a
+    // Max run are the ones glimpsed once from a doorway.
+    //
+    // Fair play holds. Nothing here is a monster the agent has not already
+    // been shown - the ledger is built from observations it was given, the
+    // same way `recalled` is - and it is a ROOM rather than a position,
+    // because a monster has moved since and claiming otherwise would be the
+    // lie the item memory is careful not to tell.
+    for r in state.unfinished.iter().take(2) {
+        let (bearing, room, leg, walk) = match r.path {
+            Some(p) => (
+                p.bearing,
+                p.clearance,
+                p.step.max(1),
+                format!(", {} units of walking", p.distance),
+            ),
+            None => (r.bearing, r.distance, r.distance, String::new()),
+        };
+        // Withheld when there is no route and no clear line either, for the
+        // same reason the recall options are: an option aimed through a wall
+        // is one the agent takes and does not move.
+        if r.path.is_none() && c.toward(r.bearing) < r.distance.min(300) {
+            continue;
+        }
+        let far_off = bearing.abs() > FACING_TOL;
+        out.push(Option_ {
+            text: if far_off {
+                format!(
+                    "go back and hunt down the {} you saw earlier, {} units {}{walk}",
+                    r.kind.to_lowercase(),
+                    r.distance,
+                    bearing_phrase(r.bearing)
+                )
+            } else {
+                format!(
+                    "go back and hunt down the {} you saw earlier, {} units ahead{walk}",
+                    r.kind.to_lowercase(),
+                    r.distance
+                )
+            },
+            commands: if far_off {
+                format!("[{}]", json_turn(state.facing(bearing)))
+            } else {
+                format!("[{{\"type\":\"forward\",\"amount\":{}}}]", walk_tics(leg))
+            },
+            tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
+            tag: Tag::Hunt,
             room,
         });
     }

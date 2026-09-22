@@ -97,21 +97,37 @@ struct Operator {
     /// one. What makes an operator a LOCAL search on the best thing found so
     /// far instead of a sample of the frontier.
     from_best: bool,
+    /// How often to press use against whatever is in front of the player,
+    /// ahead of anything else.
+    ///
+    /// The mechanism that finds SECRETS, and there is no other one. A DOOM
+    /// secret is a wall that opens when pushed and looks very nearly like a
+    /// wall that does not; nothing in the observation says which, and saying
+    /// which would be handing the agent the answer. What a player does is
+    /// push on things, so this does too. Measured before it existed, every
+    /// campaign on E1M1 found zero secrets - which makes the Max category
+    /// unreachable no matter how well the fighting goes.
+    press: f32,
 }
 
-const OPERATORS: [Operator; 4] = [
+const OPERATORS: [Operator; 5] = [
     // Blind, and blind in a level full of things that shoot back is mostly
     // dead - but it is the only operator that can produce an action no
     // teacher and no policy would ever pick.
-    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false },
+    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, press: 0.0 },
     // Starts from somewhere plausible and wanders off it.
-    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false },
+    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, press: 0.0 },
     // A long stretch of real play from a drawn cell. Long enough to finish a
     // firefight, clear a room and walk into the next one.
-    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false },
+    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, press: 0.0 },
     // The same, from the furthest-along cell there is: pushing the front of
     // the search forward rather than filling in behind it.
-    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true },
+    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, press: 0.0 },
+    // Walk about pressing on everything. Half the decisions are a push, the
+    // rest are the teacher moving on, which together is a player running
+    // their shoulder along the walls of a room - the only way a secret is
+    // ever found by someone who has not been told where it is.
+    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, press: 0.5 },
 ];
 
 /// What a search campaign found, and what it cost.
@@ -206,6 +222,18 @@ pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// How many cells read back off disk a campaign will pay to make returnable
+/// again.
+///
+/// Rehydrating one means REPLAYING its trail from the level's own start, at
+/// engine speed - for a cell deep in a level that is upwards of a thousand
+/// decisions, tens of seconds. Unbounded, a reloaded campaign would spend its
+/// whole budget rebuilding snapshots it then draws from twice. Bounded, it
+/// resumes the most promising handful and re-finds the rest, which it is
+/// quite good at: the trails that were not rehydrated are still in the
+/// archive and still feed the compression phase.
+const REHYDRATIONS: usize = 24;
+
 /// A hard cap on how long a reconstructed trail may be, in LINKS.
 ///
 /// A campaign that runs for hours can chain a very long way, and a trail
@@ -221,9 +249,24 @@ pub struct Campaign {
     /// The niche the level's own start sits in - where every chain terminates
     /// and the one cell that may have no parent.
     start: Option<Niche>,
+    /// The episode seed every replay has to use. A trail is only a way back
+    /// to a cell on the level it was walked on.
+    seed: u64,
     steps: usize,
     restores: usize,
     refused: usize,
+    /// Cells whose engine snapshot exists IN THIS PROCESS.
+    ///
+    /// An archive read back off disk carries trails, not snapshots - a
+    /// snapshot lives in the engine, and the engine that held it has exited.
+    /// So a reloaded cell is a place the search knows how to reach and cannot
+    /// yet return to, and the difference has to be tracked or `resume_from`
+    /// silently restores whatever the slot held last, which is some other
+    /// cell's state. That is the worst possible failure for a search: it
+    /// explores the wrong place and reports the right one.
+    live: std::collections::HashSet<Niche>,
+    /// How many more reloaded cells may be paid for. See [`Campaign::go_to`].
+    rehydrations: usize,
     /// Completed categories noticed during a walk, waiting to be replayed.
     ///
     /// Queued rather than verified on the spot because verifying RESTARTS the
@@ -239,10 +282,53 @@ impl Campaign {
             alloc: Allocator::new(&OPERATORS.map(|o| o.name)),
             rng: Rng::new(seed),
             start: None,
+            seed,
             steps: 0,
             restores: 0,
             refused: 0,
+            live: std::collections::HashSet::new(),
+            rehydrations: REHYDRATIONS,
             claims: Vec::new(),
+        }
+    }
+
+    /// Read an archive back off disk, if there is one.
+    ///
+    /// Its cells carry trails and no snapshots; see [`Campaign::live`]. What
+    /// this buys is a campaign that COMPOUNDS - without it, every run searches
+    /// from the level's front door again and a solution found once can be
+    /// quietly lost.
+    fn carry_in(&mut self, path: &str) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        match Archive::<Trail>::from_json(&text) {
+            Ok(was) => {
+                println!(
+                    "  carried in {} cells from {path}, best {:.3} - up to {} of them \
+                     will be walked back to, the rest are trails only",
+                    was.len(),
+                    was.best().map(|e| e.worth.reached).unwrap_or(0.0),
+                    REHYDRATIONS
+                );
+                self.archive = was;
+            }
+            // Said out loud rather than started fresh. An archive that will
+            // not parse is a campaign's whole history, and silently replacing
+            // it with an empty one is how a week of searching disappears.
+            Err(e) => println!("  {path} will not be read ({e}); searching from nothing"),
+        }
+    }
+
+    fn carry_out(&self, path: &str) {
+        if let Some(dir) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        match self.archive.to_json().and_then(|t| {
+            std::fs::write(path, t).map_err(|e| format!("{path}: {e}"))
+        }) {
+            Ok(()) => println!("  archive: {} cells to {path}", self.archive.len()),
+            Err(e) => println!("  the archive could NOT be written: {e}"),
         }
     }
 
@@ -298,7 +384,42 @@ impl Campaign {
             self.archive.remove(&cell);
             return Admission::Rejected;
         }
+        self.live.insert(cell);
         verdict
+    }
+
+    /// Return to a cell, rebuilding its snapshot first if this process never
+    /// held one.
+    ///
+    /// A refusal is reported and the cell is DROPPED, never papered over by
+    /// starting the level again: a search that quietly restarts is one that
+    /// explores the opening a thousand times and says it resumed.
+    fn go_to(&mut self, env: &mut DoomEnv, at: &Niche, slot: usize, allowed: u32) -> bool {
+        if self.live.contains(at) {
+            if env.resume_from(slot).is_some() {
+                return true;
+            }
+            self.refused += 1;
+            self.live.remove(at);
+            self.archive.remove(at);
+            return false;
+        }
+        // Read back off disk. The only way to stand where it stands is to
+        // walk there again from the level's own start.
+        if self.rehydrations == 0 {
+            return false;
+        }
+        self.rehydrations -= 1;
+        let Some(actions) = full_trail(&self.archive, at) else {
+            self.archive.remove(at);
+            return false;
+        };
+        if replay(env, self.seed, &actions, allowed).is_err() || !env.hold_at(slot) {
+            self.archive.remove(at);
+            return false;
+        }
+        self.live.insert(at.clone());
+        true
     }
 
     /// Run one operator once and report what it bought.
@@ -322,11 +443,7 @@ impl Campaign {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
         };
-        if env.resume_from(slot).is_none() {
-            // Reported, never papered over by starting the level again: a
-            // search that quietly restarts is one that explores the opening
-            // a thousand times and says it resumed.
-            self.refused += 1;
+        if !self.go_to(env, &from, slot, allowed) {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
         }
@@ -339,7 +456,7 @@ impl Campaign {
             if options.is_empty() {
                 break;
             }
-            let chose = self.choose(env, op.guided, &options, last.as_deref());
+            let chose = self.choose(env, op, &options, last.as_deref());
             last = Some(options[chose].clone());
             steps.push(options[chose].clone());
             let (_, _, done) = env.step(chose);
@@ -414,11 +531,16 @@ impl Campaign {
     fn choose(
         &mut self,
         env: &mut DoomEnv,
-        guided: f32,
+        op: &Operator,
         options: &[String],
         last: Option<&str>,
     ) -> usize {
-        if guided > 0.0 && self.rng.next_f32() < guided {
+        if op.press > 0.0 && self.rng.next_f32() < op.press {
+            if let Some(i) = env.use_option().filter(|i| *i < options.len()) {
+                return i;
+            }
+        }
+        if op.guided > 0.0 && self.rng.next_f32() < op.guided {
             if let Some(i) = env.demo().filter(|i| *i < options.len()) {
                 return i;
             }
@@ -541,8 +663,14 @@ pub fn campaign(
     budget: Duration,
     allowed: u32,
     every: Duration,
+    archive: Option<&str>,
 ) -> Result<Found, String> {
     let mut run = Campaign::new(env.slots(), seed);
+    // The archive comes in BEFORE the level is stood up, so the spawn cell is
+    // filed against whatever was carried in rather than into an empty map.
+    if let Some(path) = archive {
+        run.carry_in(path);
+    }
     run.seed_start(env, seed, allowed)?;
     let level = env.label().unwrap_or_else(|| "the level".into());
     println!(
@@ -627,6 +755,9 @@ pub fn campaign(
     }
 
     run.say(&level, began.elapsed(), &solved);
+    if let Some(path) = archive {
+        run.carry_out(path);
+    }
     for spent in run.alloc.report() {
         println!(
             "    {:<16} {:>5} draws, {:>7.1}s, {:.3} gain/s",

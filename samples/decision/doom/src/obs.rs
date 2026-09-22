@@ -68,6 +68,14 @@ pub struct State {
     /// this is the agent's memory, not the world's.
     #[serde(skip)]
     pub recalled: Vec<crate::memory::Recalled>,
+    /// Places a live monster was seen and has not been gone back for.
+    ///
+    /// Not part of the engine's reply - derived, like `recalled`, from what
+    /// the agent has already been shown. See `memory::Haunt` for why it is a
+    /// separate ledger from `recalled` rather than the same one with a longer
+    /// timer.
+    #[serde(skip)]
+    pub unfinished: Vec<crate::memory::Recalled>,
     /// Ids of things carrying less health than the most they have been seen
     /// with: the ones this player has been shooting. See
     /// [`crate::memory::Memory::wounded`].

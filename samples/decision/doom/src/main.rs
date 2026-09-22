@@ -494,12 +494,22 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let mut all: Vec<search::Solution> = Vec::new();
     for map in &args.maps {
         env.set_maps(vec![*map]);
+        // One archive FILE per level, because a trail is only a way back to a
+        // cell on the level it was walked on. A campaign that rotated maps
+        // through one file would carry E1M2's trails into E1M3 and replay
+        // them into a wall.
+        let carried = args
+            .train
+            .archive
+            .as_ref()
+            .map(|a| format!("{a}.E1M{map}.json"));
         let found = search::campaign(
             &mut env,
             args.seed(),
             budget,
             allowed,
             Duration::from_secs(30),
+            carried.as_deref(),
         )?;
         println!(
             "doom: {} cells, best {:.3} in {} tics, {} verified UV-Max",

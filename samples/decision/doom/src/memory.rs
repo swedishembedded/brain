@@ -152,9 +152,45 @@ struct Held {
     path: Option<Path>,
 }
 
+/// Somewhere a live monster was seen and has not been accounted for since.
+///
+/// A SECOND and much coarser memory than [`Held`], and the reason it exists
+/// is a distinction the sharp one gets right for the wrong purpose. A
+/// monster's exact position goes stale in ten decisions, correctly: it has
+/// moved, so the way to where it was is the way to where it is not, and
+/// aiming at the remembered spot aims at nothing.
+///
+/// But "there was a monster over there" does NOT go stale. A monster in a
+/// room is still in that room; even one that wandered is somewhere in the
+/// region it was seen in. For "reach the exit" that fact is worthless, which
+/// is why nothing here ever kept it. For UV-Max it is most of the task: the
+/// last few monsters of a level are the ones that were seen once, from a
+/// doorway, and never gone back for.
+///
+/// So this is kept at ROOM scale rather than at the monster's spot, and it is
+/// forgotten on the same evidence an item is - the player went there and
+/// looked - rather than on a timer.
+#[derive(Clone, Debug)]
+struct Haunt {
+    kind: String,
+    /// The centre of the region it was seen in, in map units.
+    x: f64,
+    y: f64,
+    path: Option<Path>,
+}
+
+/// Side of the region a haunt is filed under, in map units.
+///
+/// Room scale, not monster scale. Two sightings of the same monster from
+/// different doorways are one piece of unfinished business, and filing them
+/// separately would send the search to the same room twice.
+const HAUNT_UNITS: f64 = 256.0;
+
 #[derive(Clone, Default)]
 pub struct Memory {
     held: Vec<Held>,
+    /// Places live monsters were seen, at room scale. See [`Haunt`].
+    haunts: Vec<Haunt>,
     /// Whether something was picked up in the observation being folded in.
     took: bool,
 }
@@ -218,9 +254,98 @@ impl Memory {
         for (class, things) in seen {
             for t in things.iter() {
                 self.note(p, class, t);
+                if class == Class::Threat && t.health.is_none_or(|h| h > 0) {
+                    self.haunt(p, t);
+                }
             }
         }
         self.forget(p);
+        self.settle(p);
+    }
+
+    /// File the region a live monster was seen in as unfinished business.
+    fn haunt(&mut self, p: &Player, t: &Thing) {
+        let Some((x, y)) = place(p, t.bearing, t.distance) else {
+            return;
+        };
+        let region = |a: f64, b: f64| {
+            (a / HAUNT_UNITS).floor() == (b / HAUNT_UNITS).floor()
+        };
+        if let Some(h) = self.haunts.iter_mut().find(|h| region(h.x, x) && region(h.y, y)) {
+            // The freshest sighting wins the position, so a monster that is
+            // walking toward the player does not leave the marker behind it.
+            h.x = x;
+            h.y = y;
+            h.kind = t.kind.clone();
+            return;
+        }
+        self.haunts.push(Haunt { kind: t.kind.clone(), x, y, path: None });
+    }
+
+    /// Drop the regions the player has been to and looked at.
+    ///
+    /// The same evidence rule an item is forgotten on, and deliberately so:
+    /// being NEAR a place teaches nothing (a player on the far side of a wall
+    /// is within arm's length), having gone there and looked teaches that
+    /// whatever was there is not there now. A monster that is still about
+    /// will be seen again on the way, and files a fresh region when it is.
+    fn settle(&mut self, p: &Player) {
+        self.haunts.retain(|h| match from_here(p, h.x, h.y) {
+            Some((bearing, d)) if d <= HAUNT_UNITS as i32 => bearing.abs() > LOOKED,
+            _ => true,
+        });
+    }
+
+    /// Where the unfinished business is, in map units, for whoever can ask
+    /// the engine the way.
+    ///
+    /// The index into [`Memory::haunts`] stands in for an object id, because
+    /// a haunt is a PLACE rather than a thing - the monster that made it may
+    /// be dead, may have moved, or may never have had a stable id at all.
+    pub fn hunts(&self) -> Vec<(i64, f64, f64)> {
+        self.haunts
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i as i64, h.x, h.y))
+            .collect()
+    }
+
+    /// Fold routes to the haunts back in, by the index `hunts` handed out.
+    pub fn routed_hunts(&mut self, paths: &[(i64, Option<Path>)]) {
+        for (i, path) in paths {
+            if let Some(h) = self.haunts.get_mut(*i as usize) {
+                h.path = *path;
+            }
+        }
+    }
+
+    /// Unfinished business, placed from where the player is standing now.
+    ///
+    /// Nearest first, because the cheapest monster to go back for is the one
+    /// closest to hand, and a Max run is a sequence of exactly that decision.
+    pub fn unfinished(&self, state: &State) -> Vec<Recalled> {
+        let p = &state.player;
+        let mut out: Vec<Recalled> = self
+            .haunts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| {
+                let (bearing, distance) = from_here(p, h.x, h.y)?;
+                Some(Recalled {
+                    id: i as i64,
+                    kind: h.kind.clone(),
+                    class: Class::Threat,
+                    bearing,
+                    distance,
+                    health: None,
+                    ago: 0,
+                    path: h.path,
+                })
+            })
+            .collect();
+        out.sort_by_key(|r| r.distance);
+        out.truncate(MAX_RECALLED);
+        out
     }
 
     fn note(&mut self, p: &Player, class: Class, t: &Thing) {
@@ -360,6 +485,103 @@ mod tests {
 
     /// A state with one medikit dead ahead at 200 units, and one sergeant to
     /// the right at 300, from a player at the origin facing east.
+    /// The distinction this ledger exists for. A monster's exact position
+    /// goes stale in ten decisions, correctly - it has moved. That it WAS
+    /// over there does not, and for "kill everything" that is most of the
+    /// task: the last monsters of a level are the ones seen once from a
+    /// doorway and never gone back for.
+    #[test]
+    fn a_monster_seen_once_stays_unfinished_business_long_after_it_goes_stale() {
+        let mut m = Memory::new();
+        m.observe(&looking_at_both());
+        assert_eq!(m.unfinished(&looking_at_both()).len(), 1, "the sighting was not filed");
+
+        // Look away for far longer than a monster's own memory lasts.
+        let away = State::parse(&build(0, 0, 0, NOTHING)).unwrap();
+        for _ in 0..(MONSTER_MEMORY * 4) {
+            m.observe(&away);
+        }
+        assert!(
+            m.recall(&away).iter().all(|r| r.class != Class::Threat),
+            "the sharp memory of the monster should have gone stale"
+        );
+        assert_eq!(
+            m.unfinished(&away).len(),
+            1,
+            "but the fact that one was over there should not have"
+        );
+    }
+
+    /// Forgotten on evidence, not on a timer: the player went there and
+    /// looked. Being NEAR it teaches nothing - a player on the far side of a
+    /// wall is within arm's length - which is the same rule an item is
+    /// forgotten on, deliberately.
+    #[test]
+    fn unfinished_business_is_settled_by_going_there_and_looking() {
+        let mut m = Memory::new();
+        m.observe(&looking_at_both());
+        assert_eq!(m.unfinished(&looking_at_both()).len(), 1);
+
+        // Bearing -90 from a player at the origin facing east is world -90,
+        // so the sergeant is at roughly (0, -300).
+        //
+        // Walk to within fifty units of it but face the other way. That is
+        // the case the rule exists for: being near something teaches nothing
+        // about it.
+        let near_but_turned = State::parse(&build(0, -250, 90, NOTHING)).unwrap();
+        m.observe(&near_but_turned);
+        assert_eq!(
+            m.unfinished(&near_but_turned).len(),
+            1,
+            "standing near it with its back turned counted as having checked"
+        );
+
+        // Now look at where it was, and find nothing.
+        let looked = State::parse(&build(0, -250, -90, NOTHING)).unwrap();
+        m.observe(&looked);
+        assert!(m.unfinished(&looked).is_empty(), "going there and looking did not settle it");
+    }
+
+    /// Two sightings of one monster from two doorways are ONE piece of
+    /// unfinished business. Filed per sighting, the search would be sent to
+    /// the same room twice and the ledger would grow without bound while the
+    /// player stands still watching something pace about.
+    #[test]
+    fn sightings_in_one_region_are_one_piece_of_unfinished_business() {
+        let mut m = Memory::new();
+        let seen = |d: i32| {
+            State::parse(&build(
+                0,
+                0,
+                0,
+                &format!(
+                    r#""pickups":[],"threats":[{{"id":9,"type":"IMP","distance":{d},"bearing":0,"visible":true,"health":60,"targetingMe":false}}],"hazards":[]"#
+                ),
+            ))
+            .unwrap()
+        };
+        m.observe(&seen(300));
+        m.observe(&seen(320));
+        m.observe(&seen(280));
+        assert_eq!(m.unfinished(&seen(300)).len(), 1);
+    }
+
+    /// A corpse is not unfinished business. Filing one would send the search
+    /// back to a room it has already cleared, forever.
+    #[test]
+    fn a_dead_monster_is_not_filed() {
+        let mut m = Memory::new();
+        let corpse = State::parse(&build(
+            0,
+            0,
+            0,
+            r#""pickups":[],"threats":[{"id":9,"type":"IMP","distance":300,"bearing":0,"visible":true,"health":0,"targetingMe":false}],"hazards":[]"#,
+        ))
+        .unwrap();
+        m.observe(&corpse);
+        assert!(m.unfinished(&corpse).is_empty());
+    }
+
     fn looking_at_both() -> State {
         State::parse(&build(0, 0, 0, r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[{"id":9,"type":"FORMER HUMAN SERGEANT","distance":300,"bearing":-90,"visible":true,"health":30,"targetingMe":false}],"hazards":[]"#)).unwrap()
     }
