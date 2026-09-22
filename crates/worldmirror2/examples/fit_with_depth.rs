@@ -7,7 +7,7 @@
 //! dumped pass, reconcile the per-view depths against each other, and hand the
 //! result to the fit as an anchor along the one axis an RGB loss cannot see.
 //!
-//! Usage: fit_with_depth <heads-dir> <images-dir> <out.ply> [iters] [lr] [depth_weight] [holdout,csv]
+//! Usage: fit_with_depth <heads-dir> <images-dir> <out.ply> [iters] [lr] [depth_weight] [holdout,csv] [voxel]
 
 use splat::opt::{fit, FitCfg, TargetView};
 use splat::types::Camera;
@@ -41,7 +41,8 @@ fn main() {
     let opts = AssembleOpts { edge_depth_rtol: 0.0, ..Default::default() };
     let (scene, cams, weights) = assemble_from(&heads, &cams, &opts);
     eprintln!("assembled {} gaussians (surface-align {})", scene.len(), opts.surface_align);
-    let scene = splat::prune::voxel_merge(&scene, &weights, 0.0011, 0);
+    let voxel: f32 = a.get(7).map_or(0.0011, |v| v.parse().unwrap());
+    let scene = splat::prune::voxel_merge(&scene, &weights, voxel, 0);
     eprintln!("voxel fused -> {}", scene.len());
 
     let mut depth: Vec<Vec<f32>> = heads.gsd.iter().map(|g| g[..hw].iter().map(|v| v.exp()).collect()).collect();
