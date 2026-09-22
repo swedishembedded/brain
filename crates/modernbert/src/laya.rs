@@ -742,6 +742,12 @@ impl LayaHead {
         opt.step(&self.gpu, &self.ps, self.step, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
     }
 
+    /// The AdamW time index - what a resumed run must carry so the bias
+    /// correction stays continuous.
+    pub fn steps_taken(&self) -> u32 {
+        self.step
+    }
+
     /// Read one parameter's current value.
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.gpu.read(self.w(name), self.numel(name))

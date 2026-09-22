@@ -173,7 +173,15 @@ fn build_sequence_matches_the_real_python_reference() {
         let want_ids: Vec<u32> = case["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
         let want_markers: Vec<usize> = case["markers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
 
-        let (got_ids, got_markers) = modernbert::build_sequence(&tok, &cfg, &state, &q, max_len, head_max_len, None, false);
+        // `option_order` is the TRAINING-only path (`rl_common.py::
+        // encode_record` shuffles a non-score question's options so the model
+        // cannot answer from a position) - `null` in a case that does not
+        // exercise it.
+        let order: Option<Vec<usize>> = case["option_order"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_u64().unwrap() as usize).collect());
+        let (got_ids, got_markers) =
+            modernbert::build_sequence(&tok, &cfg, &state, &q, max_len, head_max_len, order.as_deref(), false);
         assert_eq!(got_ids, want_ids, "case {name}: ids");
         assert_eq!(got_markers, want_markers, "case {name}: markers");
         assert_eq!(got_markers.len(), q.render_options().len(), "case {name}: every option must get a marker (nothing was truncated away)");

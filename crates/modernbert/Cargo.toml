@@ -26,3 +26,8 @@ serde_json.workspace = true
 # `testutil::skip` - a parity fixture absent from this checkout is a skip,
 # not a failure; see `crates/diamond/tests/parity.rs` for the precedent.
 brain-testutil.workspace = true
+# `rlcd::reinforce` - the objective `tests/train_convergence.rs` drives
+# `LayaDecision`'s loop with. A dev-dependency deliberately: `crates/rlcd` is
+# a leaf below every model crate, but this crate's own datapath takes its
+# objective as a caller-supplied closure and so depends on no particular one.
+brain-rlcd.workspace = true

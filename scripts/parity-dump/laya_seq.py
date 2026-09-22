@@ -156,12 +156,13 @@ def main() -> None:
             return [to_ordered(x) for x in v]
         return v
 
-    def case(name, state, q, max_len=512, head_max_len=192):
-        ids, markers = build_sequence(hf_tok, state, q, max_len, head_max_len)
+    def case(name, state, q, max_len=512, head_max_len=192, option_order=None):
+        ids, markers = build_sequence(hf_tok, state, q, max_len, head_max_len, option_order=option_order)
         manifest["build_sequence_cases"].append({
             "name": name, "state": to_ordered(state),
             "question": {"t": q["t"], "ins": q["ins"], "crit": to_ordered(q.get("crit"))},
             "max_len": max_len, "head_max_len": head_max_len,
+            "option_order": option_order,
             "ids": ids, "markers": markers,
         })
 
@@ -210,6 +211,42 @@ def main() -> None:
         "string_state",
         "just a plain string state, not JSON",
         {"t": "choice", "ins": "Does this look like spam?", "crit": {"yes": "", "no": ""}},
+    )
+
+    # 6. option_order: the TRAINING-only path (`encode_record` shuffles a
+    # non-score question's options every epoch so the model cannot answer
+    # from a position). Untested until brain gained a training loop, and the
+    # one place the packing and the target can silently disagree: the packed
+    # option texts move but the marker list must move with them.
+    case(
+        "option_order_permuted_choice",
+        {"user": "bob", "last_message": "my card was swallowed by the atm"},
+        {"t": "choice", "ins": "What is the customer's primary intent?",
+         "crit": {"refund": "wants money back", "card issue": "a problem with a card",
+                  "complaint": "", "question": "asking for info"}},
+        option_order=[2, 0, 3, 1],
+    )
+
+    # 6b. the same permutation on the SHRINK path, where every option is
+    # truncated to `per` tokens - a shrink that ran before the permutation
+    # would truncate the wrong options.
+    case(
+        "option_order_permuted_shrink",
+        {"context": "a state blob with enough content to matter " * 4},
+        {"t": "choice", "ins": "Pick the single best matching category from the following long list of options",
+         "crit": many_opts},
+        option_order=[11, 3, 7, 0, 5, 9, 1, 10, 2, 8, 4, 6],
+    )
+
+    # 6c. the IDENTITY permutation must be byte-identical to passing none -
+    # otherwise `option_order` is doing something beyond reordering.
+    case(
+        "option_order_identity_choice",
+        {"user": "bob", "last_message": "my card was swallowed by the atm"},
+        {"t": "choice", "ins": "What is the customer's primary intent?",
+         "crit": {"refund": "wants money back", "card issue": "a problem with a card",
+                  "complaint": "", "question": "asking for info"}},
+        option_order=[0, 1, 2, 3],
     )
 
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1))

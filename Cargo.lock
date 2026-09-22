@@ -1712,6 +1712,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-rlcd",
  "brain-testutil",
  "serde",
  "serde_json",

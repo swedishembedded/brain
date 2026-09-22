@@ -232,6 +232,15 @@ pub struct ModernBert {
     /// the same name for the full reasoning (a decision loop cannot afford
     /// to record a backward it never runs).
     reverse_stale: bool,
+    /// `Some` only when built with [`ModernBert::new_train_on`] - the same
+    /// seam [`crate::laya::LayaHead`]'s own `opt` documents: an AdamW step is
+    /// THIS handle's optimizer over THIS handle's `ParamStore`, never
+    /// another handle's, since a submit on one is not ordered against a
+    /// submit on another.
+    opt: Option<optim::Optim>,
+    /// The AdamW time index, needed for bias correction and carried across a
+    /// resumed run.
+    step: u32,
 }
 
 impl ModernBert {
@@ -310,6 +319,8 @@ impl ModernBert {
         let cfg_layers = cfg.n_layers;
         let k = crate::kern::Ids::resolve(&gpu);
         let mut e = ModernBert {
+            opt: train.then(|| k.optimizer()),
+            step: 0,
             k,
             cap_rows,
             rows: 0,
@@ -432,6 +443,34 @@ impl ModernBert {
         assert!(!self.reverse_stale, "backward before prepare_reverse: the recorded reverse pass describes a different batch");
         let bw = self.bwd.as_ref().expect("backward on an inference build");
         self.gpu.submit(&[], &bw.steps);
+    }
+
+    /// One AdamW update over this trunk's own `ParamStore`, on this trunk's
+    /// own device handle - see [`ModernBert::adamw_step_scaled`].
+    pub fn adamw_step(&mut self, lr: f32, wd: f32, clip: Option<f32>) {
+        self.adamw_step_scaled(lr, wd, clip, 1.0);
+    }
+
+    /// [`ModernBert::adamw_step`] with the accumulated gradient scaled -
+    /// `1/n` for a minibatch of `n`, so one learning rate survives a change
+    /// of batch size.
+    ///
+    /// "This trunk's own handle" is load-bearing rather than a detail: the
+    /// trunk and the head hold SEPARATE `Gpu` handles onto one device
+    /// (`gpu.share()`), and an optimizer dispatch submitted on the wrong one
+    /// is not ordered against the backward that produced the gradient it
+    /// reads. See `crate::laya::LayaHead::adamw_step_scaled`'s own identical
+    /// note and `ModernBert::poll_wait`.
+    pub fn adamw_step_scaled(&mut self, lr: f32, wd: f32, clip: Option<f32>, scale: f32) {
+        let opt = self.opt.as_ref().expect("adamw_step on a trunk built with new_on, not new_train_on");
+        self.step += 1;
+        opt.step(&self.gpu, &self.ps, self.step, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
+    }
+
+    /// The AdamW time index - what a resumed run must carry so the bias
+    /// correction stays continuous.
+    pub fn steps_taken(&self) -> u32 {
+        self.step
     }
 
     /// Read one parameter's current value.

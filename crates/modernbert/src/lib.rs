@@ -26,6 +26,7 @@
 //! info@swedishembedded.com.
 
 pub mod config;
+pub mod decision;
 pub mod import;
 pub mod init;
 pub mod kern;
@@ -34,6 +35,7 @@ pub mod model;
 pub mod sequence;
 
 pub use config::ModernBertConfig;
+pub use decision::{LayaDecision, Provenance, Training, MAX_OPTIONS};
 pub use import::{import_dir, LayaCheckpoint};
 pub use laya::{LayaConfig, LayaHead};
 pub use model::ModernBert;
