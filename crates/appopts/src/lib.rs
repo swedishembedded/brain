@@ -33,7 +33,8 @@
 //! ```
 //!
 //! **Core groups live here** - the ones that mean the same thing whatever the
-//! application is, which today is [`Hardware`]. **Surface groups live with
+//! application is: [`Hardware`] (where a run may schedule) and [`ModelChoice`]
+//! (which model it runs). **Surface groups live with
 //! their surface**, in `brain::options`: the training knobs next to the
 //! decision pipeline they configure, the window flags next to the viewport.
 //! That split is deliberate. A group that needs a surface's types belongs
@@ -53,9 +54,11 @@
 
 pub mod args;
 pub mod hardware;
+pub mod model;
 
 pub use args::Args;
 pub use hardware::Hardware;
+pub use model::ModelChoice;
 
 /// A reusable group of command-line options.
 ///
