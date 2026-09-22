@@ -37,4 +37,4 @@ pub use config::ModernBertConfig;
 pub use import::{import_dir, LayaCheckpoint};
 pub use laya::{LayaConfig, LayaHead};
 pub use model::ModernBert;
-pub use sequence::{build_sequence, OrderedJson, QType, Question, State};
+pub use sequence::{build_sequence, write_json, OrderedJson, QType, Question, State};

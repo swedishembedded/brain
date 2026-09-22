@@ -17,6 +17,9 @@ brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true
 brain-data.workspace = true
+# `sequence::OrderedJson` implements `Deserialize` by hand - see its own doc
+# for why parsing through `serde_json::Value` would silently reorder keys.
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

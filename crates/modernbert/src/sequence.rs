@@ -117,6 +117,90 @@ impl OrderedJson {
     pub fn object(entries: Vec<(&str, OrderedJson)>) -> OrderedJson {
         OrderedJson::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
+
+    /// Read a JSON document, KEEPING the key order it was written in.
+    ///
+    /// [`write_json`]'s missing half. A request that arrives as text - over a
+    /// pipe, a socket, or out of a file - has to reach [`build_sequence`] as
+    /// the same bytes the Python reference would tokenize, and that is only
+    /// true if nothing between the wire and the tokenizer sorts an object's
+    /// keys. `serde_json::Value` does exactly that (this workspace
+    /// deliberately does not enable its `preserve_order` feature - see this
+    /// module's doc), so a parse through it would silently change what the
+    /// model reads.
+    ///
+    /// Deserializing into [`OrderedJson`] instead keeps document order for
+    /// free: `serde_json` yields an object's entries in the order it reads
+    /// them, and this type stores them that way.
+    pub fn parse(text: &str) -> Result<OrderedJson, String> {
+        serde_json::from_str(text).map_err(|e| e.to_string())
+    }
+}
+
+/// Order-preserving by construction: `MapAccess` hands entries over in the
+/// order they appear in the document, and [`OrderedJson::Object`] keeps them.
+/// Written by hand rather than derived because this enum is JSON's own shape,
+/// not a tagged Rust type - the same reason `serde_json::Value` implements it
+/// by hand.
+impl<'de> serde::Deserialize<'de> for OrderedJson {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<OrderedJson, D::Error> {
+        struct V;
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = OrderedJson;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any JSON value")
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Null)
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Null)
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Bool(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Number(v.into()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::Number(v.into()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<OrderedJson, E> {
+                // JSON has no NaN/Inf literal, so this only rejects a
+                // non-finite a non-JSON deserializer handed us.
+                serde_json::Number::from_f64(v)
+                    .map(OrderedJson::Number)
+                    .ok_or_else(|| serde::de::Error::custom("a JSON number must be finite"))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::String(v.to_string()))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<OrderedJson, E> {
+                Ok(OrderedJson::String(v))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<OrderedJson, A::Error> {
+                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(OrderedJson::Array(items))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<OrderedJson, A::Error> {
+                let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some((k, v)) = map.next_entry::<String, OrderedJson>()? {
+                    entries.push((k, v));
+                }
+                Ok(OrderedJson::Object(entries))
+            }
+        }
+
+        de.deserialize_any(V)
+    }
 }
 
 /// `json.dumps(v, ensure_ascii=False)`-equivalent formatting: `", "` between
@@ -166,7 +250,14 @@ pub enum State {
 }
 
 impl State {
-    fn serialize(&self) -> String {
+    /// The exact text `build_sequence` tokenizes: a `Str` state as-is, a
+    /// `Json` one through [`write_json`] (`json.dumps(..., ensure_ascii=
+    /// False)`'s own formatting). Public because a caller holding one of
+    /// these has to be able to hand the SAME bytes to a different backbone -
+    /// `brain::DecisionPipeline`'s decide arm takes a `&str` state - rather
+    /// than re-serializing it its own way and asking two models about two
+    /// different states.
+    pub fn serialize(&self) -> String {
         match self {
             State::Str(s) => s.clone(),
             State::Json(v) => {
@@ -382,5 +473,68 @@ mod tests {
         let mut out = String::new();
         write_json(&v, &mut out);
         assert_eq!(out, "\"café\""); // ensure_ascii=False: raw UTF-8, no \uXXXX
+    }
+
+    /// The half [`write_json`] was missing: reading a state back off the
+    /// wire. A caller who receives a request as TEXT (a JSON API, a file, a
+    /// pipe) must be able to hand its `state` to [`build_sequence`] and
+    /// tokenize the same bytes the Python reference would - which is only
+    /// true if the parse preserves the key order the sender wrote, since
+    /// `json.dumps` serializes a dict in insertion order. `serde_json`'s own
+    /// `Value` sorts its keys, so a round-trip through it would silently
+    /// tokenize something else.
+    #[test]
+    fn parse_preserves_key_order_through_a_round_trip() {
+        let text = r#"{"z": 1, "a": {"n": null, "m": [true, false]}, "b": "x"}"#;
+        let v = OrderedJson::parse(text).expect("valid JSON must parse");
+        let mut out = String::new();
+        write_json(&v, &mut out);
+        assert_eq!(out, r#"{"z": 1, "a": {"n": null, "m": [true, false]}, "b": "x"}"#);
+    }
+
+    #[test]
+    fn parse_reads_every_json_shape() {
+        let v = OrderedJson::parse(r#"{"s": "t", "i": -3, "f": 1.5, "b": true, "n": null, "a": [1, "two"]}"#).unwrap();
+        let OrderedJson::Object(entries) = &v else { panic!("expected an object, got {v:?}") };
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["s", "i", "f", "b", "n", "a"]);
+        assert_eq!(entries[0].1, OrderedJson::str("t"));
+        assert_eq!(entries[3].1, OrderedJson::Bool(true));
+        assert_eq!(entries[4].1, OrderedJson::Null);
+        let mut out = String::new();
+        write_json(&entries[5].1, &mut out);
+        assert_eq!(out, r#"[1, "two"]"#);
+    }
+
+    /// Non-ASCII survives the round trip verbatim, matching
+    /// `ensure_ascii=False` - the property the writer already has and the
+    /// reader must not undo.
+    #[test]
+    fn parse_round_trips_non_ascii_and_escapes() {
+        let v = OrderedJson::parse(r#"{"k": "caf\u00e9 \"q\"\n"}"#).unwrap();
+        let mut out = String::new();
+        write_json(&v, &mut out);
+        assert_eq!(out, "{\"k\": \"caf\u{e9} \\\"q\\\"\\n\"}");
+    }
+
+    /// A malformed request is an error a caller can report, not a panic.
+    #[test]
+    fn parse_rejects_malformed_json_with_a_message() {
+        let err = OrderedJson::parse("{\"a\": }").unwrap_err();
+        assert!(!err.is_empty(), "the error must say something");
+        assert!(OrderedJson::parse("").is_err());
+    }
+
+    /// A parsed state tokenizes as the state it came from: the reason the key
+    /// order matters at all.
+    #[test]
+    fn a_parsed_state_serializes_like_the_object_it_came_from() {
+        let parsed = State::Json(OrderedJson::parse(r#"{"turn": 2, "actor": "customer"}"#).unwrap());
+        let built = State::Json(OrderedJson::object(vec![
+            ("turn", OrderedJson::int(2)),
+            ("actor", OrderedJson::str("customer")),
+        ]));
+        assert_eq!(parsed.serialize(), built.serialize());
+        assert_eq!(parsed.serialize(), r#"{"turn": 2, "actor": "customer"}"#);
     }
 }
