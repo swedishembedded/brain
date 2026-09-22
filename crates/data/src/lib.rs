@@ -13,6 +13,7 @@
 //! Training reads a split back with [`loader::TokenDataset`] (token tasks) or
 //! [`binio::read_f32_bin`] (time series).
 
+pub mod base64;
 pub mod binio;
 pub mod chat;
 pub mod chat_template;

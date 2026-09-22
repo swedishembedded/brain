@@ -683,7 +683,7 @@ fn parse_normalizer(v: Option<&serde_json::Value>) -> Result<Vec<NormStep>, Stri
             let b64 = v["precompiled_charsmap"]
                 .as_str()
                 .ok_or("normalizer: Precompiled has no precompiled_charsmap string")?;
-            let raw = events::base64::decode(b64)
+            let raw = crate::base64::decode(b64)
                 .map_err(|e| format!("normalizer: Precompiled charsmap is not base64: {e}"))?;
             let p = Precompiled::from_charsmap(&raw).map_err(|e| format!("normalizer: {e}"))?;
             Ok(vec![NormStep::Precompiled(p)])
@@ -949,16 +949,16 @@ mod tests {
             })
         };
         assert!(with_map("!!!!").contains("not base64"));
-        assert!(with_map(&events::base64::encode(&[0u8, 0, 0])).contains("too short"));
+        assert!(with_map(&crate::base64::encode(&[0u8, 0, 0])).contains("too short"));
         // Header says the trie is 6 bytes: not a whole number of u32 units.
-        assert!(with_map(&events::base64::encode(&[6u8, 0, 0, 0, 1, 2, 3, 4, 5, 6]))
+        assert!(with_map(&crate::base64::encode(&[6u8, 0, 0, 0, 1, 2, 3, 4, 5, 6]))
             .contains("multiple of 4"));
         // Header says 64 bytes of trie but only 4 follow.
-        assert!(with_map(&events::base64::encode(&[64u8, 0, 0, 0, 1, 2, 3, 4]))
+        assert!(with_map(&crate::base64::encode(&[64u8, 0, 0, 0, 1, 2, 3, 4]))
             .contains("only 4"));
-        assert!(with_map(&events::base64::encode(&[0u8; 4])).contains("empty trie"));
+        assert!(with_map(&crate::base64::encode(&[0u8; 4])).contains("empty trie"));
         // A trie is present but the normalized blob is not UTF-8.
-        assert!(with_map(&events::base64::encode(&[4u8, 0, 0, 0, 0, 0, 0, 0, 0xFF]))
+        assert!(with_map(&crate::base64::encode(&[4u8, 0, 0, 0, 0, 0, 0, 0, 0xFF]))
             .contains("not UTF-8"));
     }
 
@@ -1088,7 +1088,7 @@ mod tests {
         let mut j: serde_json::Value = serde_json::from_str(&tiny_json()).unwrap();
         j["normalizer"] = serde_json::json!({"type": "Sequence", "normalizers": [
             {"type": "Precompiled",
-             "precompiled_charsmap": events::base64::encode(&tiny_charsmap())},
+             "precompiled_charsmap": crate::base64::encode(&tiny_charsmap())},
             {"type": "Strip", "strip_left": false, "strip_right": true},
             {"type": "Replace", "pattern": {"Regex": " {2,}"}, "content": "\u{2581}"}]});
         let t = UnigramTokenizer::from_json_bytes(j.to_string().as_bytes()).unwrap();

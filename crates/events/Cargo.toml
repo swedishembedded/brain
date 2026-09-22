@@ -12,3 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 serde_json.workspace = true
 brain-forecast.workspace = true
+# `pub use data::base64;` - the base64 codec moved here from this crate (see
+# lib.rs's own doc), so every existing `events::base64::*` caller is
+# unaffected. No cycle: brain-data does not depend on brain-events.
+brain-data.workspace = true
