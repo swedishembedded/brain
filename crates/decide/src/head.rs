@@ -32,6 +32,22 @@
 //! slot template starts with it. Mean pooling is what the released
 //! sentence-transformer head uses and is the natural thing to ablate against
 //! once a pooling kernel exists.
+//!
+//! **The state is named by ROW INDEX, not by a row range.** A call says which
+//! rows of the encoder's output are its state and which are its slots; both
+//! are gathered by index (`embed`) and both put their gradient back by index
+//! (`row_scatter` for the state, `emb_bwd` for the `[CLS]` rows). That is what
+//! lets ONE encoder pass carry several examples: example `b`'s state is a set
+//! of rows somewhere in the middle of the pack, and its head call reads
+//! exactly those.
+//!
+//! It is by INDEX rather than by binding the buffer at a row offset because a
+//! non-zero storage-binding offset is what commit `e494d47dd` removed from the
+//! encoder's reverse pass - on this repository's Intel iGPU the driver does
+//! not honour an in-command-buffer barrier across such a binding, so
+//! `backend-wgpu` has to give every dispatch in the batch its own queue submit
+//! and fence, and one sliced dispatch serialises the whole flush. A gather is
+//! two cheap dispatches; the offset cost 6.7x.
 
 use crate::Tensors;
 
@@ -70,6 +86,9 @@ struct Bwd {
     d_kv: DeviceBuffer,
     d_scores_attn: DeviceBuffer,
     d_cls: DeviceBuffer,
+    /// The state rows' gradient, in GATHERED order - scattered back onto the
+    /// encoder's seed buffer by index afterwards.
+    d_state: DeviceBuffer,
     mean: DeviceBuffer,
     inv: DeviceBuffer,
     steps: Vec<Step>,
@@ -80,10 +99,18 @@ pub struct Head {
     k: crate::kern::Ids,
     cfg: EncoderConfig,
     pub ps: ParamStore,
+    /// `emb_bwd` and its compact twin, so the `[CLS]` scatter costs one
+    /// invocation per (slot, channel) rather than per (table row, channel).
+    emb: block::EmbBwdIds,
     cap_rows: u32,
     cap_slots: u32,
-    /// Rows of encoder state this call attends over: `[0, state_rows)`.
-    state_rows: u32,
+    /// How many encoder rows this call attends over.
+    n_state: u32,
+    /// Which rows of the encoder's output they are, in attention order.
+    state_rows: DeviceBuffer,
+    /// The gathered state rows, `[n_state, H]` - what the key/value
+    /// projection reads.
+    state: DeviceBuffer,
     /// The slots' `[CLS]` row indices, one per option.
     n_slots: u32,
     cls_rows: DeviceBuffer,
@@ -120,13 +147,20 @@ impl Head {
         let slab = cfg.n_heads as u64 * s * r;
         let st = |w: u64| gpu.storage(w);
         let k = crate::kern::Ids::resolve(&gpu);
+        let emb = block::EmbBwdIds::resolve(&gpu, k.emb_bwd);
+        let idx = |name: &str, n: u64| {
+            gpu.buffer(name, n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST)
+        };
         let mut head = Head {
             k,
+            emb,
             cap_rows,
             cap_slots,
-            state_rows: cap_rows,
+            n_state: cap_rows,
+            state_rows: idx("state_rows", r),
+            state: st(r * h),
             n_slots: cap_slots,
-            cls_rows: gpu.buffer("cls_rows", s * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST),
+            cls_rows: idx("cls_rows", s),
             cls: st(s * h),
             q: st(s * h),
             kv: st(r * 2 * h),
@@ -156,6 +190,7 @@ impl Head {
                 d_kv: head.gpu.storage(r * 2 * h),
                 d_scores_attn: head.gpu.storage(slab),
                 d_cls: head.gpu.storage(s * h),
+                d_state: head.gpu.storage(r * h),
                 mean: head.gpu.storage(s),
                 inv: head.gpu.storage(s),
                 steps: Vec::new(),
@@ -172,26 +207,40 @@ impl Head {
         block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false)
     }
 
-    /// Point the head at one call: how many encoder rows are state, and which
-    /// row each slot's `[CLS]` sits on.
+    /// Point the head at one call: WHICH rows of `hidden` are this call's
+    /// state, and which row each slot's `[CLS]` sits on.
+    ///
+    /// Both are row indices into the SAME encoder output, so several calls may
+    /// share one encoder pass by naming disjoint rows of it - see the module
+    /// doc for why they are indices and not a bound offset. The rows named
+    /// here must be distinct, in both lists and between them: the reverse pass
+    /// gives each named row one owning invocation, and a repeated row would
+    /// race itself.
     pub fn set_call(
         &mut self,
         hidden: &DeviceBuffer,
         d_hidden_out: Option<&DeviceBuffer>,
-        state_rows: u32,
+        state_rows: &[u32],
         cls_rows: &[u32],
     ) {
-        assert!(state_rows <= self.cap_rows, "{state_rows} state rows > capacity {}", self.cap_rows);
+        assert!(
+            state_rows.len() <= self.cap_rows as usize,
+            "{} state rows > capacity {}",
+            state_rows.len(),
+            self.cap_rows
+        );
+        assert!(!state_rows.is_empty(), "a call needs at least one state row");
         assert!(cls_rows.len() <= self.cap_slots as usize, "{} slots > capacity {}", cls_rows.len(), self.cap_slots);
         assert!(!cls_rows.is_empty(), "a call needs at least one option");
+        self.gpu.write(&self.state_rows, state_rows);
         self.gpu.write(&self.cls_rows, cls_rows);
-        self.state_rows = state_rows;
+        self.n_state = state_rows.len() as u32;
         self.n_slots = cls_rows.len() as u32;
         // Rebuilt unconditionally: the step list holds the encoder's hidden
         // buffer, so a caller that swapped encoders would otherwise keep
         // dispatching against the old one.
         self.steps = self.build_steps(hidden);
-        self.rebuild_bwd(hidden, d_hidden_out);
+        self.rebuild_bwd(d_hidden_out);
     }
 
     /// Run the head over `hidden` (the encoder's `[rows, H]` output) and
@@ -271,7 +320,7 @@ impl Head {
     pub fn stage_norms(&self) -> Vec<(&'static str, f32)> {
         let h = self.cfg.d_model as usize;
         let s = self.n_slots as usize;
-        let r = self.state_rows as usize;
+        let r = self.n_state as usize;
         let n = |b: &DeviceBuffer, len: usize| -> f32 {
             self.gpu.read(b, len).iter().map(|v| v * v).sum::<f32>().sqrt()
         };
@@ -316,20 +365,22 @@ impl Head {
     fn build_steps(&self, hidden: &DeviceBuffer) -> Vec<Step> {
         let g = &self.gpu;
         let (h, hd) = (self.cfg.d_model, self.cfg.head_dim());
-        let (s, r, heads) = (self.n_slots, self.state_rows, self.cfg.n_heads);
+        let (s, r, heads) = (self.n_slots, self.n_state, self.cfg.n_heads);
         let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
         let mut st = vec![
             // Slot representations: gather each slot's [CLS] row out of the
             // encoder's hidden states. `embed` Params: [width, rows].
             g.step(self.k.embed, &[&self.cls_rows, hidden, &self.cls], &[h, s], s * h),
+            // ...and this call's state rows, the same way. See the module doc
+            // for why this is a gather rather than a bound row offset.
+            g.step(self.k.embed, &[&self.state_rows, hidden, &self.state], &[h, r], r * h),
         ];
         let (mk, mt) = self.gemm(s, h);
         st.push(g.dispatch(mk, &[&self.cls, self.w("head.wq.weight"), &self.q], &[s, h, h], mt));
         st.push(g.step(self.k.bias_add, &[&self.q, self.w("head.wq.bias")], &[s, h], s * h));
-        // The state's keys and values, from row 0 - the packer puts every
-        // window first and contiguously.
+        // The state's keys and values, off the gathered rows.
         let (mk, mt) = self.gemm(r, 2 * h);
-        st.push(g.dispatch(mk, &[hidden, self.w("head.wkv.weight"), &self.kv], &[r, h, 2 * h], mt));
+        st.push(g.dispatch(mk, &[&self.state, self.w("head.wkv.weight"), &self.kv], &[r, h, 2 * h], mt));
         st.push(g.step(self.k.bias_add, &[&self.kv, self.w("head.wkv.bias")], &[r, 2 * h], r * 2 * h));
 
         // Cross-attention: every option queries every state token.
@@ -358,7 +409,7 @@ impl Head {
         st
     }
 
-    fn rebuild_bwd(&mut self, hidden: &DeviceBuffer, d_hidden_out: Option<&DeviceBuffer>) {
+    fn rebuild_bwd(&mut self, d_hidden_out: Option<&DeviceBuffer>) {
         if self.bwd.is_none() {
             return;
         }
@@ -366,7 +417,7 @@ impl Head {
         // silently train the head alone, so the absence is refused rather than
         // defaulted.
         let out = d_hidden_out.expect("a trainable head needs the encoder's seed buffer");
-        let steps = self.build_bwd_steps(hidden, out);
+        let steps = self.build_bwd_steps(out);
         if let Some(b) = &mut self.bwd {
             b.steps = steps;
         }
@@ -376,31 +427,48 @@ impl Head {
         self.ps.zero_grads(&self.gpu);
     }
 
+    /// Zero the encoder's seed buffer, ONCE per encoder pass.
+    ///
+    /// It must be zeroed and this is the only thing that does it.
+    /// [`Self::backward`] writes only the rows its call names: the key/value
+    /// path ASSIGNS this call's state rows and the `[CLS]` scatter ACCUMULATES
+    /// onto one row per option. Every other row - a slot's non-`[CLS]` tokens,
+    /// alignment padding, and everything past this pack - is written by
+    /// neither, so without this it would still hold the previous step's
+    /// gradient, and the encoder's reverse pass reads the WHOLE buffer. The
+    /// result is a real gradient plus stale noise, which trains, and degrades
+    /// the encoder as it goes.
+    ///
+    /// SEPARATE FROM `backward` because a pass carrying several examples runs
+    /// `backward` once per example into the same buffer, and a clear riding on
+    /// each of them would leave only the last example's gradient. It is
+    /// submitted on the HEAD's handle, so it is ordered against the `backward`
+    /// calls that follow it there.
+    pub fn clear_seed(&self, d_hidden_out: &DeviceBuffer) {
+        self.gpu.submit(&[d_hidden_out], &[]);
+    }
+
     /// Seed with `dL/d(score)` (one per option, host-computed by the loss) and
-    /// run the reverse pass, which writes the encoder's seed buffer in place.
-    pub fn backward(&self, d_hidden_out: &DeviceBuffer, d_score: &[f32]) {
+    /// run the reverse pass, which ADDS this call's share into the encoder's
+    /// seed buffer.
+    ///
+    /// [`Self::clear_seed`] must have run on this buffer since the encoder's
+    /// forward pass; this call only writes the rows it owns.
+    /// The seed buffer is not a parameter here: the reverse pass was bound to
+    /// it by [`Self::set_call`], which is also where a caller says which rows
+    /// of it this call owns.
+    pub fn backward(&self, d_score: &[f32]) {
         let b = self.bwd.as_ref().expect("backward on an inference head");
         assert_eq!(d_score.len(), self.n_slots as usize, "one score gradient per option");
         self.gpu.write_f32(&b.d_score, d_score);
-        // CLEARED FIRST, and it must be. This pass writes only two parts of
-        // the encoder's seed buffer: the key/value path ASSIGNS the state rows
-        // `[0, state_rows)`, and the `[CLS]` scatter ACCUMULATES onto one row
-        // per option. Every other slot row is written by neither, so without
-        // this clear it would still hold the previous step's gradient - and
-        // the encoder's reverse pass reads the WHOLE buffer. The result is a
-        // real gradient plus stale noise, which trains, and degrades the
-        // encoder as it goes.
-        //
-        // The clear rides on this submit rather than a separate one so it is
-        // ordered against these steps on this handle, not racing them.
-        self.gpu.submit(&[d_hidden_out], &b.steps);
+        self.gpu.submit(&[], &b.steps);
     }
 
-    fn build_bwd_steps(&self, hidden: &DeviceBuffer, d_hidden_out: &DeviceBuffer) -> Vec<Step> {
+    fn build_bwd_steps(&self, d_hidden_out: &DeviceBuffer) -> Vec<Step> {
         let g = &self.gpu;
         let b = self.bwd.as_ref().expect("training mode only");
         let (h, hd) = (self.cfg.d_model, self.cfg.head_dim());
-        let (s, r, heads) = (self.n_slots, self.state_rows, self.cfg.n_heads);
+        let (s, r, heads) = (self.n_slots, self.n_state, self.cfg.n_heads);
         let ln = block::LayerNormIds::resolve(g, self.k.layernorm, self.k.ln_stats, self.k.layernorm_dx);
         let gr = |n: &str| self.ps.g(n);
         let dw = |m: u32, k: u32| block::pick_gemm(m as usize, k as usize, self.k.matmul_dw, self.k.matmul_dw_reg, false);
@@ -457,14 +525,41 @@ impl Head {
 
         st.push(g.step(self.k.bias_grad, &[&b.d_kv, gr("head.wkv.bias")], &[r, 2 * h], 2 * h));
         let (k, t) = dw(2 * h, h);
-        st.push(g.dispatch(k, &[&b.d_kv, hidden, gr("head.wkv.weight")], &[r, h, 2 * h], t));
+        st.push(g.dispatch(k, &[&b.d_kv, &self.state, gr("head.wkv.weight")], &[r, h, 2 * h], t));
         let (k, t) = dx(r, h);
-        st.push(g.dispatch(k, &[&b.d_kv, self.w("head.wkv.weight"), d_hidden_out], &[r, h, 2 * h, 0], t));
+        st.push(g.dispatch(k, &[&b.d_kv, self.w("head.wkv.weight"), &b.d_state], &[r, h, 2 * h, 0], t));
 
-        // The [CLS] gather's adjoint scatters each slot's grad back onto its
-        // own row of `d_hidden`, on top of what the key/value path assigned.
-        // `emb_bwd` ACCUMULATES, which is why that assign comes first.
-        st.push(g.step(self.k.emb_bwd, &[&self.cls_rows, &b.d_cls, d_hidden_out], &[s, h, self.cap_rows], self.cap_rows * h));
+        // Both gathers' adjoints, putting each row's gradient back where it
+        // was read from.
+        //
+        // The state's ASSIGNS (`row_scatter`, Params `[n_idx, d, n_rows_out]`)
+        // because the `dx` above assigned `d_state` in gathered order and no
+        // other path here writes a state row. The `[CLS]` scatter
+        // ACCUMULATES, which is why the assign comes first - and why a call
+        // must not name one row as both.
+        st.push(g.step(
+            self.k.row_scatter,
+            &[&self.state_rows, &b.d_state, d_hidden_out],
+            &[r, h, self.cap_rows],
+            r * h,
+        ));
+        // `emb_bwd_step` picks the compact twin, whose cost is
+        // `n_slots * H * n_slots` rather than the whole seed buffer's
+        // `cap_rows * H * n_slots`: at 4096 capacity the reference kernel
+        // spent 1.5M invocations proving that 4000-odd of them had nothing to
+        // add. The `[CLS]` rows are distinct and ascending by construction, so
+        // the index list IS its own `uniq` list.
+        st.push(block::emb_bwd_step(
+            g,
+            &self.emb,
+            &self.cls_rows,
+            Some((&self.cls_rows, s)),
+            &b.d_cls,
+            d_hidden_out,
+            s,
+            h,
+            self.cap_rows,
+        ));
         st
     }
 }

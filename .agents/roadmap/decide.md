@@ -165,6 +165,49 @@ latency in this space is single-setup, small-n, and none of it is on Pascal.
 
 ---
 
+### Minibatching: one encoder pass carries the whole batch
+
+`Decide::accumulate_batch` / `train_batch` pack `B` examples into ONE encoder
+pass - every state's windows first, then every example's option slots, which is
+the packer's existing ordering rule - and run the head once per example over
+it. The seam that makes it possible is that `Head::set_call` names its state
+and its slots by ROW INDEX rather than by a row offset, so example `b` reads
+exactly its own rows out of the middle of the pack; the gather is `embed` and
+the adjoints are `row_scatter` (state, assigns - the rows are disjoint) and
+`emb_bwd` (the `[CLS]` rows, accumulates). Addressing by index rather than by a
+bound offset is the same rule commit `e494d47dd` established for the reverse
+attention, and for the same reason - see `head.rs`'s module doc.
+
+`Head::clear_seed` is separate from `Head::backward` for this: the seed buffer
+is zeroed ONCE per encoder pass, and each example's reverse pass writes only
+the rows it owns.
+
+Two things follow that a caller can measure:
+
+* the fixed per-step cost (`zero_grads`, `adamw`, the queue drains between the
+  halves) is divided by `B`;
+* the encoder's GEMMs see `B` examples' rows at once, which is what a
+  dispatch-bound small state needs.
+
+`decide_bench --batch-scan` prints both, per step and per example. It is a
+measurement rather than a rule because which of the two dominates is a property
+of the card and of the shape.
+
+**The gradient is the same gradient**, and `crates/decide/tests/minibatch.rs`
+holds a batched pass against `B` sequential `accumulate` calls buffer by
+buffer, in both halves, with the encoder LIVE. A loss curve cannot make that
+distinction: a shared pass that dropped every example but the last would still
+fall and still converge.
+
+The SDK exposes it as `DecisionPipeline::set_batch_size`, where `steps` keeps
+meaning OPTIMIZER steps. The default is one, because AdamW normalizes its step
+and so ties the batch size to the learning rate: every accuracy published for
+either arm was measured at a batch of one, and the Laya arm's head rate in
+particular was fitted by measurement at that batch (see `LAYA_HEAD_LR`'s own
+doc for the three runs).
+
+---
+
 ## 6. Serving, SDK, sample
 
 - Full serving contract in the same change: capability manifest, resident adapter,

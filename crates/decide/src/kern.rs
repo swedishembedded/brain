@@ -19,6 +19,12 @@ use gpu_core::Gpu;
 /// Every kernel either half dispatches, forward and backward.
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
+    // The `embed` gather's inverse for UNIQUE indices, ASSIGNING rather than
+    // accumulating. The head reads its state rows out of the packed hidden
+    // states by index instead of by a row offset, so its reverse pass has to
+    // put them back the same way - see `Head::set_call` for why an offset is
+    // not an option on this card.
+    ("row_scatter", kernels::ROW_SCATTER),
     ("emb_bwd", kernels::EMB_BWD),
     // The compact twin of the scatter above, resolved by name through
     // `block::EmbBwdIds`. A call looks up at most a few hundred of this
@@ -149,6 +155,7 @@ macro_rules! ids {
 
 ids! {
     embed => "embed",
+    row_scatter => "row_scatter",
     emb_bwd => "emb_bwd",
     matmul => "matmul",
     matmul_reg3 => "matmul_reg3",

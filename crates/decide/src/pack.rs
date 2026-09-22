@@ -164,6 +164,13 @@ impl Packer {
         self.push(tokens, SEG_SLOT)
     }
 
+    /// The spans pushed so far, in order. What a caller building a MULTI-
+    /// example pack reads to learn which rows the state it just pushed
+    /// occupies, before the next one is appended.
+    pub fn spans(&self) -> &[(u32, u32)] {
+        &self.spans
+    }
+
     pub fn finish(self) -> Packed {
         Packed { ids: self.ids, types: self.types, spans: self.spans, windows: self.windows }
     }

@@ -21,7 +21,15 @@
 //! GPU kernel performance work, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! Usage: decide_bench [--gpu N] [--per-span] [options] [reps] [state-mult] [state-tokens]
+//! Usage: decide_bench [--gpu N] [--per-span] [--batch-scan] [options] [reps] [state-mult] [state-tokens]
+//!
+//! `--batch-scan` adds a table of what a MINIBATCH costs: one optimizer step
+//! over `B` examples packed into one encoder pass, against `B` times a
+//! single-example step. It is the measurement that decides a batch size, and
+//! it has to be a measurement: a batch divides the fixed per-step cost
+//! (`zero_grads`, `adamw`, two queue drains) by `B` while multiplying the
+//! encoder's rows by it, and which of those dominates is a property of the
+//! card and the shape, not of the arithmetic.
 //!
 //! `--per-span` records the reverse attention one dispatch per span, the way
 //! it was before the ragged family existed, so the before and the after of
@@ -76,6 +84,7 @@ fn main() {
     // family existed. Same process, same card, same minute - which is the only
     // way to compare on a box something else may be using.
     let per_span = args.iter().position(|a| a == "--per-span").map(|i| args.remove(i)).is_some();
+    let batch_scan = args.iter().position(|a| a == "--batch-scan").map(|i| args.remove(i)).is_some();
     let n_opts: usize = args.first().and_then(|a| a.parse().ok()).unwrap_or(OPTIONS.len());
     let reps: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(10);
     let state_mult: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1);
@@ -216,6 +225,52 @@ fn main() {
     for (label, steps) in [("head forward", m.head.fwd_steps()), ("head backward", m.head.bwd_steps())] {
         gpu_core::profile::profile(g, label, steps, reps).print_top(roofs, 12);
     }
+
+    if batch_scan {
+        batch_table(&mut m, &states, &q, &loss, reps);
+    }
+}
+
+/// What a minibatch costs, per step and per example.
+///
+/// The per-EXAMPLE column is the one to read: a batch is only worth taking if
+/// it buys a less noisy gradient for less than proportionally more time, and
+/// the whole reason it can is that the examples share one encoder pass.
+fn batch_table(m: &mut Decide, states: &[String], q: &Question, loss: &LossConfig, reps: usize) {
+    println!("\n=== minibatch scaling, best of {reps} ===");
+    println!("{:<8} {:>8} {:>12} {:>14} {:>10}", "batch", "rows", "min ms/step", "min ms/example", "vs batch 1");
+    println!("{}", "-".repeat(56));
+    let mut base = 0.0f64;
+    for b in [1usize, 2, 4, 8, 16] {
+        // Distinct states, so the pack is the ragged one a real batch is and
+        // not one layout repeated.
+        let picked: Vec<String> = (0..b).map(|i| states[i % states.len()].clone()).collect();
+        let batch: Vec<(&str, &Question)> = picked.iter().map(|s| (s.as_str(), q)).collect();
+        let gold = vec![0usize; b];
+        let rows = match m.pack_batch(&batch) {
+            Ok(r) => r.packed.ids.len(),
+            Err(e) => {
+                println!("{b:<8} {e}");
+                continue;
+            }
+        };
+        for _ in 0..2 {
+            m.train_batch(&batch, loss, &gold, 2e-5, 1e-3).expect("batch step");
+            drain(m);
+        }
+        let mut best = f64::MAX;
+        for _ in 0..reps {
+            let t0 = Instant::now();
+            m.train_batch(&batch, loss, &gold, 2e-5, 1e-3).expect("batch step");
+            drain(m);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let per = best / b as f64;
+        if b == 1 {
+            base = per;
+        }
+        println!("{b:<8} {rows:>8} {best:>12.1} {per:>14.1} {:>9.2}x", base / per.max(1e-9));
+    }
 }
 
 fn drain(m: &Decide) {
@@ -249,7 +304,7 @@ fn timed_step(m: &mut Decide, state: &str, qs: &[Question], loss: &LossConfig) -
     m.enc.poll_wait();
     let t = lap(&mut out, "enc.forward (device)", t);
 
-    m.head.set_call(m.enc.hidden_buf(), Some(m.enc.seed_buf()), req.state_rows, &req.cls_rows);
+    m.head.set_call(m.enc.hidden_buf(), Some(m.enc.seed_buf()), &req.state_row_idx(), &req.cls_rows);
     m.head.poll_wait();
     let t = lap(&mut out, "head.set_call (record)", t);
 
@@ -265,7 +320,8 @@ fn timed_step(m: &mut Decide, state: &str, qs: &[Question], loss: &LossConfig) -
     drain(m);
     let t = lap(&mut out, "zero_grads", t);
 
-    m.head.backward(m.enc.seed_buf(), &d_score);
+    m.head.clear_seed(m.enc.seed_buf());
+    m.head.backward(&d_score);
     m.head.poll_wait();
     let t = lap(&mut out, "head.backward (device)", t);
 

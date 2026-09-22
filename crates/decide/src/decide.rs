@@ -130,6 +130,52 @@ pub struct Request {
     pub state_rows: u32,
 }
 
+impl Request {
+    /// The rows the head attends over: every state window's rows, and nothing
+    /// else.
+    ///
+    /// Not `0..state_rows`, and the difference is alignment padding. A pad row
+    /// between two windows belongs to NO span, so the encoder never attends to
+    /// it and its hidden state is whatever the position-wise path makes of a
+    /// `[PAD]` - which the head must not read as state. The two are the same
+    /// list for every real checkpoint of this family, where
+    /// [`crate::pack::align_rows`] is 1 and no padding is ever emitted.
+    pub fn state_row_idx(&self) -> Vec<u32> {
+        row_idx(self.packed.window_spans())
+    }
+}
+
+/// Every row covered by `spans`, ascending.
+fn row_idx(spans: &[(u32, u32)]) -> Vec<u32> {
+    spans.iter().flat_map(|&(row0, len)| row0..row0 + len).collect()
+}
+
+/// Several examples laid out for ONE encoder pass.
+///
+/// Every example's state windows are packed first and every example's option
+/// slots after them, which is the packer's own ordering rule; what makes the
+/// pass shareable is that the head names its state and its slots by ROW
+/// INDEX, so example `b` reads exactly its own rows out of the middle of the
+/// pack. See [`Decide::accumulate_batch`].
+pub struct BatchRequest {
+    pub packed: crate::pack::Packed,
+    /// Per example, the rows of the pack its state occupies.
+    pub state_rows: Vec<Vec<u32>>,
+    /// Per example, its options' `[CLS]` rows.
+    pub cls_rows: Vec<Vec<u32>>,
+}
+
+impl BatchRequest {
+    /// Examples in this pack.
+    pub fn len(&self) -> usize {
+        self.state_rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state_rows.is_empty()
+    }
+}
+
 /// Device scratch for [`Features`] on their way back to the head.
 struct KeptBuf {
     buf: gpu_core::DeviceBuffer,
@@ -358,10 +404,11 @@ impl Decide {
         self.enc.poll_wait();
         // Disjoint field borrows: the head is taken mutably while the
         // encoder's buffers are read.
+        let rows = req.state_row_idx();
         if self.enc.is_trainable() {
-            self.head.set_call(self.enc.hidden_buf(), Some(self.enc.seed_buf()), req.state_rows, &req.cls_rows);
+            self.head.set_call(self.enc.hidden_buf(), Some(self.enc.seed_buf()), &rows, &req.cls_rows);
         } else {
-            self.head.set_call(self.enc.hidden_buf(), None, req.state_rows, &req.cls_rows);
+            self.head.set_call(self.enc.hidden_buf(), None, &rows, &req.cls_rows);
         }
         self.head.forward()
     }
@@ -381,9 +428,9 @@ impl Decide {
         let h = self.cfg.d_model as usize;
         let rows = req.packed.ids.len();
         let slab = self.enc.gpu().read(self.enc.hidden_buf(), rows * h);
-        let mut hidden = Vec::with_capacity((req.state_rows as usize + req.cls_rows.len()) * h);
-        hidden.extend_from_slice(&slab[..req.state_rows as usize * h]);
-        for &r in &req.cls_rows {
+        let state = req.state_row_idx();
+        let mut hidden = Vec::with_capacity((state.len() + req.cls_rows.len()) * h);
+        for &r in state.iter().chain(&req.cls_rows) {
             let at = r as usize * h;
             hidden.extend_from_slice(&slab[at..at + h]);
         }
@@ -391,7 +438,7 @@ impl Decide {
             scores,
             Features {
                 hidden,
-                state_rows: req.state_rows,
+                state_rows: state.len() as u32,
                 n_slots: req.cls_rows.len() as u32,
             },
         ))
@@ -429,17 +476,18 @@ impl Decide {
         self.enc.poll_wait();
         // The rows were compacted when they were kept: the state first, then
         // one row per option, so the slot rows are the ones after the state.
+        let state: Vec<u32> = (0..f.state_rows).collect();
         let cls: Vec<u32> = (0..f.n_slots).map(|i| f.state_rows + i).collect();
         // The head still needs somewhere to put its hidden-state gradient,
         // even though a frozen encoder never reads it - the same arrangement
         // the text path uses, and the reason the encoder's reverse pass is
         // simply not run rather than not wired.
         let seed = self.enc.is_trainable().then(|| self.enc.seed_buf());
-        self.head.set_call(&kept.buf, seed, f.state_rows, &cls);
+        self.head.set_call(&kept.buf, seed, &state, &cls);
         let scores = self.head.forward();
         let (l, d_score) = objective(&scores);
         assert_eq!(d_score.len(), scores.len(), "one score gradient per option");
-        self.head.backward(self.enc.seed_buf(), &d_score);
+        self.head.backward(&d_score);
         self.head.poll_wait();
         Ok(l)
     }
@@ -471,9 +519,10 @@ impl Decide {
         let kept = self.kept.as_ref().expect("just allocated");
         self.enc.gpu().write_f32(&kept.buf, &f.hidden);
         self.enc.poll_wait();
+        let state: Vec<u32> = (0..f.state_rows).collect();
         let cls: Vec<u32> = (0..f.n_slots).map(|i| f.state_rows + i).collect();
         let seed = self.enc.is_trainable().then(|| self.enc.seed_buf());
-        self.head.set_call(&kept.buf, seed, f.state_rows, &cls);
+        self.head.set_call(&kept.buf, seed, &state, &cls);
         Ok(self.head.forward())
     }
 
@@ -546,7 +595,13 @@ impl Decide {
 
         // The head writes its hidden-state gradient straight into the
         // encoder's seed buffer, so the two halves need no copy between them.
-        self.head.backward(self.enc.seed_buf(), &d_score);
+        // Zeroed first: `Head::backward` writes only the rows its call names,
+        // and the encoder's reverse pass reads the whole buffer. Skipped when
+        // the encoder is frozen, where nothing ever reads it.
+        if !self.frozen_encoder {
+            self.head.clear_seed(self.enc.seed_buf());
+        }
+        self.head.backward(&d_score);
         // The head and the encoder hold DIFFERENT handles to one device, and a
         // submit on one is not ordered against a submit on the other. The
         // encoder's reverse pass reads the seed buffer the head's reverse pass
@@ -564,6 +619,164 @@ impl Decide {
             self.enc.backward_seeded();
         }
         Ok(l)
+    }
+
+    /// Tokenize and pack SEVERAL examples into one encoder pass.
+    ///
+    /// The packer needs no special mode for this: every state is pushed before
+    /// any slot, which is its existing rule, and the result is just more ragged
+    /// spans - which is what the encoder has taken since commit `e494d47dd`.
+    /// What a batch costs over a single example is therefore rows, not passes.
+    pub fn pack_batch(&self, batch: &[(&str, &Question)]) -> Result<BatchRequest, String> {
+        if batch.is_empty() {
+            return Err("a batch needs at least one example".into());
+        }
+        for (_, q) in batch {
+            q.validate()?;
+        }
+        let pad = self.tok.token_to_id("[PAD]").unwrap_or(0);
+        let mut packer = Packer::new(&self.cfg, pad);
+
+        // Every state first - the packer refuses a state after a slot, and the
+        // head needs the window spans to lead so `Packed::window_spans` still
+        // names them.
+        let mut state_rows: Vec<Vec<u32>> = Vec::with_capacity(batch.len());
+        let mut first_window = 0usize;
+        for (state, _) in batch {
+            let ids = self.tok.encode(state);
+            if ids.is_empty() {
+                return Err("the state tokenized to nothing".into());
+            }
+            packer.push_state(&ids, self.limits.max_span, self.limits.overlap);
+            let spans = packer.spans();
+            state_rows.push(row_idx(&spans[first_window..]));
+            first_window = spans.len();
+        }
+
+        let mut cls_rows: Vec<Vec<u32>> = Vec::with_capacity(batch.len());
+        for (_, q) in batch {
+            let mut rows = Vec::new();
+            for slot in q.slots() {
+                let ids = self.tok.encode(&slot);
+                let ids = if ids.len() > self.limits.max_span as usize {
+                    ids[..self.limits.max_span as usize].to_vec()
+                } else {
+                    ids
+                };
+                let (row0, _) = packer.push_slot(&ids);
+                rows.push(row0);
+            }
+            cls_rows.push(rows);
+        }
+        let packed = packer.finish();
+        if packed.ids.len() > self.limits.cap_rows as usize {
+            return Err(format!(
+                "a batch of {} needs {} packed rows but this model was built for {} - raise \
+                 Limits::cap_rows or train at a smaller batch size",
+                batch.len(),
+                packed.ids.len(),
+                self.limits.cap_rows
+            ));
+        }
+        // Per CALL, not per pack: the head scores one example at a time, so
+        // what has to fit is the widest question in the batch.
+        if let Some(n) = cls_rows.iter().map(Vec::len).max() {
+            if n > self.limits.cap_slots as usize {
+                return Err(format!(
+                    "a question has {n} options but this model was built for {}",
+                    self.limits.cap_slots
+                ));
+            }
+        }
+        Ok(BatchRequest { packed, state_rows, cls_rows })
+    }
+
+    /// Forward and backward for a WHOLE MINIBATCH over ONE encoder pass,
+    /// accumulating into the parameter gradients without stepping.
+    ///
+    /// The same total arithmetic as calling [`Decide::accumulate`] once per
+    /// example, arranged so the encoder runs once: its GEMMs see `B` examples'
+    /// rows instead of one example's, which is where a small state stops being
+    /// dispatch-bound, and its reverse pass is recorded and submitted once
+    /// instead of `B` times.
+    ///
+    /// **It is the same gradient**, and that is a property of the pack rather
+    /// than of arithmetic luck: the examples occupy DISJOINT rows, attention
+    /// never crosses a span, and every parameter gradient in both halves
+    /// accumulates. `tests/minibatch.rs` holds it against `B` sequential
+    /// `accumulate` calls directly.
+    ///
+    /// `objective` is called once per example, in batch order, with that
+    /// example's raw option scores; it returns `(loss, dL/d(score))` exactly
+    /// as [`Decide::accumulate`]'s does. Returns one loss per example.
+    pub fn accumulate_batch(
+        &mut self,
+        batch: &[(&str, &Question)],
+        mut objective: impl FnMut(usize, &[f32]) -> (f32, Vec<f32>),
+    ) -> Result<Vec<f32>, String> {
+        let req = self.pack_batch(batch)?;
+        self.last_rows = req.packed.ids.len();
+        self.last_windows = req.packed.windows;
+        self.enc.set_batch(&req.packed.ids, &req.packed.types, &req.packed.spans);
+        self.enc.forward();
+        // The head holds a different handle to the same device; see
+        // `run_packed`'s own note on why this wait is not optional.
+        self.enc.poll_wait();
+
+        // ONCE for the pass, before any example writes into it. Each example's
+        // reverse pass owns only its own rows, so a clear riding on each of
+        // them would erase the ones before it - which is the whole reason
+        // `Head::clear_seed` is separate from `Head::backward`.
+        let trainable = self.enc.is_trainable();
+        if trainable && !self.frozen_encoder {
+            self.head.clear_seed(self.enc.seed_buf());
+        }
+        let seed = trainable.then(|| self.enc.seed_buf());
+
+        let mut losses = Vec::with_capacity(req.len());
+        for (i, (state_rows, cls_rows)) in req.state_rows.iter().zip(&req.cls_rows).enumerate() {
+            self.head.set_call(self.enc.hidden_buf(), seed, state_rows, cls_rows);
+            let scores = self.head.forward();
+            let (l, d_score) = objective(i, &scores);
+            if d_score.len() != scores.len() {
+                return Err(format!(
+                    "objective returned {} gradients for {} option scores on example {i}",
+                    d_score.len(),
+                    scores.len()
+                ));
+            }
+            self.head.backward(&d_score);
+            losses.push(l);
+        }
+        // The encoder's reverse pass reads the seed buffer every one of those
+        // wrote, on a different handle.
+        self.head.poll_wait();
+        if !self.frozen_encoder {
+            self.enc.prepare_reverse();
+            self.enc.backward_seeded();
+        }
+        Ok(losses)
+    }
+
+    /// One optimizer step over a whole minibatch: zero, accumulate, step.
+    ///
+    /// The gradient is the MEAN over the batch (`1/B`), so one learning rate
+    /// keeps its meaning as the batch size changes.
+    pub fn train_batch(
+        &mut self,
+        batch: &[(&str, &Question)],
+        loss: &LossConfig,
+        gold: &[usize],
+        enc_lr: f32,
+        head_lr: f32,
+    ) -> Result<Vec<f32>, String> {
+        if gold.len() != batch.len() {
+            return Err(format!("{} gold labels for {} examples", gold.len(), batch.len()));
+        }
+        self.zero_grads();
+        let losses = self.accumulate_batch(batch, |i, scores| decision_loss(scores, gold[i], loss))?;
+        self.adamw_scaled(enc_lr, head_lr, 1.0 / batch.len() as f32);
+        Ok(losses)
     }
 
     /// The encoder's mean-pooled sentence embedding of the state, for the call
