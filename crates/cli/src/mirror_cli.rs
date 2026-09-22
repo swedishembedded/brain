@@ -8,14 +8,13 @@
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
 //!         [--prune VOXEL]   (voxel-merge duplicates, try 0.002 for multi-view)
 //!         [--keep-camera-frame]  (write in frame 0's frame, not an upright one)
-//!   brain worldmirror2 demo   --weights F --images <…> [viewer flags] [--prune VOXEL]
 //!
 //! Inputs are P6 PPM images; any aspect ratio (the DINOv2 pos-embed is
 //! bicubic-interpolated for non-native grids, reference semantics).
 
 use gpu_core::Gpu;
 use worldmirror2::config::MirrorConfig;
-use worldmirror2::gaussians::{assemble, assemble_from, frame_maps, AssembleOpts, HeadOutputs, NormalSource, PositionSource};
+use worldmirror2::gaussians::{assemble, frame_maps, AssembleOpts, NormalSource, PositionSource};
 use worldmirror2::model::Mirror;
 use worldmirror2::preprocess;
 use splat::types::Splats;
@@ -26,11 +25,9 @@ pub fn run_mirror(argv: &[String]) {
     match argv.first().map(|s| s.as_str()) {
         Some("import") => import(&argv[1..]),
         Some("infer") => infer(&argv[1..]),
-        Some("demo") => demo(&argv[1..]),
-        Some("assemble") => assemble_cmd(&argv[1..]),
         Some("export-npu") => export_npu(&argv[1..]),
         other => {
-            eprintln!("usage: brain worldmirror2 <import|infer|demo|assemble|export-npu> ...  (got {other:?})");
+            eprintln!("usage: brain worldmirror2 <import|infer|export-npu> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -294,7 +291,6 @@ fn with_scene<R>(
     mask: Option<&str>,
     target: usize,
     frames_out: Option<&str>,
-    heads_out: Option<&str>,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
     let cfg = MirrorConfig::default();
@@ -347,18 +343,6 @@ fn with_scene<R>(
         eprintln!("conditioning on {s} known camera(s) from the pose prior");
     }
     model.forward_with_priors(&frames, s, hp, wp, priors.as_deref());
-    if let Some(dir) = heads_out {
-        let mut heads = HeadOutputs::read(model.gpu(), &model, s, w, h);
-        let hw = (w * h) as usize;
-        heads.rgb = (0..s).map(|fi| frames[fi * 3 * hw..(fi + 1) * 3 * hw].to_vec()).collect();
-        heads.save(dir).unwrap_or_else(|e| {
-            eprintln!("head dump failed: {e}");
-            std::process::exit(1);
-        });
-        let cams = worldmirror2::gaussians::decode_cameras(&model.cam_pred_raw(), s, w, h);
-        write_cameras_json(&format!("{dir}/cameras.json"), &cams);
-        eprintln!("wrote the forward pass to {dir}/ ({s} frame(s), re-assemble with `brain worldmirror2 assemble`)");
-    }
     let opts = AssembleOpts {
         min_opacity: min_op,
         max_depth,
@@ -615,9 +599,6 @@ fn infer(argv: &[String]) {
     // The frames as the model saw them, which is what a fit must be scored
     // against.
     let frames_out = a.take_str("--frames-out");
-    // The head outputs themselves, so which pixels become geometry can be
-    // re-decided without paying for the forward pass again.
-    let heads_out = a.take_str("--heads-out");
     // The model anchors the world to the FIRST frame - its c2w comes back as
     // the identity - so a scene written in that frame opens tipped by however
     // the camera happened to be held, 63 degrees on a real capture, with the
@@ -630,7 +611,7 @@ fn infer(argv: &[String]) {
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, frames_out.as_deref(), heads_out.as_deref(), |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, frames_out.as_deref(), |gpu, model, splats, cams, s, w, h| {
         let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(splats, cams));
         let (splats, cams) = match &reframed {
             Some((sp, cm)) => (sp, &cm[..]),
@@ -649,167 +630,6 @@ fn infer(argv: &[String]) {
         }
         println!("view: brain splat view {ply_path}");
     });
-}
-
-/// Rebuild a scene from a dumped forward pass, without the model.
-///
-/// Every threshold here decides which pixels become geometry, and the honest
-/// way to choose one is to try it and look. Through `infer` that costs a
-/// forward pass each time; here it costs seconds, so a setting that deletes a
-/// thin structure can be caught by measurement rather than by argument.
-fn assemble_cmd(argv: &[String]) {
-    let mut a = Args::new(argv);
-    let dir = a.positional().unwrap_or_else(|| {
-        eprintln!("usage: brain worldmirror2 assemble <heads-dir> [--out scene.ply] …");
-        std::process::exit(2);
-    });
-    let cams_path = a.str_or("--cameras", &format!("{dir}/cameras.json"));
-    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/assembled.ply"), "scene").to_string();
-    let min_op = a.f32_or("--min-opacity", 0.01);
-    let max_depth = a.f32_or("--max-depth", 0.0);
-    let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
-    let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
-    let fuse_rtol = a.f32_or("--fuse-depth", 0.05);
-    let min_support = a.u32_or("--min-support", 0) as u16;
-    let conf_pct = a.f32_or("--conf-percentile", 0.0);
-    // Lay each gaussian flat against its surface at this thickness ratio;
-    // 0 keeps the orientation the model predicted, which is not aligned to
-    // anything (see `AssembleOpts::surface_align`).
-    let surf = a.f32_or("--surface-align", 4.0);
-    let pos_from = position_source(a.take_str("--position-from").as_deref());
-    let nrm_from = normal_source(a.take_str("--normals-from").as_deref());
-    let prune_voxel = a.f32_or("--prune", 0.0);
-    let scale_q = a.f32_or("--max-scale-quantile", 0.98);
-    let keep_frame = a.take_flag("--keep-camera-frame");
-    a.finish();
-
-    let heads = HeadOutputs::load(&dir).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    });
-    let cams = crate::splat_cli::read_cameras(&cams_path);
-    if cams.len() != heads.len() {
-        eprintln!("{} has {} camera(s) but {dir} holds {} frame(s)", cams_path, cams.len(), heads.len());
-        std::process::exit(2);
-    }
-    let opts = AssembleOpts {
-        min_opacity: min_op,
-        max_depth,
-        gs_mask_threshold: gs_mask,
-        edge_depth_rtol: edge_rtol,
-        fuse_depth_rtol: fuse_rtol,
-        min_support,
-        conf_percentile: conf_pct,
-        surface_align: surf,
-        position_from: pos_from,
-        normals_from: nrm_from,
-    };
-    let (mut splats, cams, weights) = assemble_from(&heads, &cams, &opts);
-    println!("{} frame(s) -> {} gaussians", heads.len(), splats.len());
-    if prune_voxel > 0.0 {
-        let before = splats.len();
-        splats = splat::prune::voxel_merge(&splats, &weights, prune_voxel, 0);
-        println!("voxel fusion ({prune_voxel}): {before} -> {} gaussians", splats.len());
-    }
-    if scale_q > 0.0 && scale_q < 1.0 {
-        let before = splats.len();
-        splats = splat::prune::drop_largest_scales(&splats, scale_q);
-        println!("largest-scale rejection (q={scale_q}): {before} -> {} gaussians", splats.len());
-    }
-    let reframed = (!keep_frame && cams.len() >= 3).then(|| upright(&splats, &cams));
-    let (splats, cams) = match &reframed {
-        Some((sp, cm)) => (sp, &cm[..]),
-        None => (&splats, &cams[..]),
-    };
-    splat::ply::write(&out, splats).unwrap_or_else(|e| {
-        eprintln!("PLY write failed: {e}");
-        std::process::exit(1);
-    });
-    let cj = out.strip_suffix(".ply").map(|b| format!("{b}.cameras.json")).unwrap_or_else(|| format!("{out}.cameras.json"));
-    write_cameras_json(&cj, cams);
-    println!("wrote {out} ({} gaussians) + {cj}", splats.len());
-}
-
-fn demo(argv: &[String]) {
-    let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/mirror.safetensors");
-    let images = a.take_str("--images").unwrap_or_else(|| {
-        eprintln!("--images <dir|a.ppm,b.ppm,…> is required");
-        std::process::exit(2);
-    });
-    let width = a.u32_or("--width", 1280);
-    let height = a.u32_or("--height", 720);
-    let fov = a.f32_or("--fov", 60.0);
-    let frames_cap = a.opt_u32("--frames").map(|n| n as u64);
-    let min_op = a.f32_or("--min-opacity", 0.01);
-    let max_depth = a.f32_or("--max-depth", 0.0);
-    // Reference defaults. Fusion collapses the near-duplicate surfaces that
-    // overlapping views each predict at slightly different depths, and without
-    // it the scene is those duplicates stacked - which is what a viewer sees
-    // as translucent superposition.
-    let prune = a.f32_or("--prune", 0.002);
-    let gs_mask = a.f32_or("--gs-mask-threshold", 0.5);
-    let edge_rtol = a.f32_or("--edge-depth-threshold", 0.03);
-    // Settle the frames' disagreement about where the surface is before any of
-    // it becomes geometry. Pairs differing by more than this are an occlusion,
-    // not a disagreement, and averaging them invents a surface in neither.
-    let fuse_rtol = a.f32_or("--fuse-depth", 0.05);
-    // Keep a pixel only where other frames agree a surface is there. Where a
-    // depth map guesses - thin structures, silhouettes, anything dark or
-    // specular - the guess is consistent with the view that made it, so it
-    // projects correctly onto every training image and a fit never learns it
-    // is wrong. It shows up as a smear from everywhere else.
-    let min_support = a.u32_or("--min-support", 0) as u16;
-    // The depth head's own confidence is the only per-pixel quality estimate
-    // the model offers, and it does track where it is wrong.
-    let conf_pct = a.f32_or("--conf-percentile", 0.0);
-    // Lay each gaussian flat against its surface; the model's own orientation
-    // is not aligned to anything (see `AssembleOpts::surface_align`).
-    let surf = a.f32_or("--surface-align", 4.0);
-    let pos_from = position_source(a.take_str("--position-from").as_deref());
-    let nrm_from = normal_source(a.take_str("--normals-from").as_deref());
-    let scale_q = a.f32_or("--max-scale-quantile", 0.98);
-    // The reference's inference default, independent of the checkpoint's
-    // native grid. Roughly 3.4x the samples of 518 on a square image.
-    let target = a.usize_or("--target-size", 952);
-    // Known cameras, in the `cameras.json` shape `infer` writes. WorldMirror
-    // is an any-prior model: supplying these fills trunk rows that are
-    // otherwise zero.
-    let poses = a.take_str("--poses");
-    // Frame selection, for a capture longer than a handful of stills. A video
-    // gets a default cap because the trunk's global attention is quadratic in
-    // frame count; an explicit directory of photographs is left alone.
-    let sel = FrameSel {
-        stride: a.usize_or("--stride", 1),
-        max: a.usize_or("--max-frames", if is_video(&images) { 48 } else { 0 }),
-        fps: a.f32_or("--fps", 0.0) as f64,
-    };
-    let mask = a.take_str("--mask");
-
-    a.finish();
-
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, poses.as_deref(), gs_mask, edge_rtol, fuse_rtol, min_support, conf_pct, surf, pos_from, nrm_from, scale_q, &sel, mask.as_deref(), target, None, None, |_gpu, _model, splats, cams, _s, _w, _h| {
-        let init_cam = cams.first().map(|c| splat::types::Camera {
-            width,
-            height,
-            fx: c.fx * width as f32 / c.width as f32,
-            fy: c.fy * height as f32 / c.height as f32,
-            cx: width as f32 / 2.0,
-            cy: height as f32 / 2.0,
-            ..*c
-        });
-        (splats.clone(), init_cam)
-    });
-    crate::splat_cli::run_viewer(
-        &splats,
-        "brain worldmirror2 - WorldMirror-2",
-        width,
-        height,
-        fov,
-        [0.02, 0.02, 0.03],
-        frames_cap,
-        init_cam,
-    );
 }
 
 fn import(argv: &[String]) {

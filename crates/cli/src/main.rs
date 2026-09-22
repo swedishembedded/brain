@@ -290,8 +290,6 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mi
       [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X] [--prune VOXEL]
       Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
       maps). Any aspect ratio; --prune 0.002 voxel-merges multi-view duplicates.
-  brain worldmirror2 demo  --weights F --images <…> [--width N --height N --fov D]
-      infer + interactive fly-through of the reconstructed world.
 
 3D GAUSSIAN SPLATTING (scene viewer/renderer; crates/splat)
   brain splat info   <scene.ply>

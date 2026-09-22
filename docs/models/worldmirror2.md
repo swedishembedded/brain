@@ -37,9 +37,6 @@ brain worldmirror2 infer --weights out/mirror.safetensors --images photos/ --map
 
 # Fly through the result (WASD + mouse)
 brain splat view out/mirror/scene.ply
-
-# Or do both in one step: reconstruct, then open the interactive viewer
-brain worldmirror2 demo --weights out/mirror.safetensors --images photos/
 ```
 
 ## Turntable captures need a mask
@@ -122,7 +119,6 @@ normal-map PPM for inspection.
 | `--min-opacity X` | drop gaussians below this opacity when assembling the scene (default `0.01`) |
 | `--max-depth X` | drop gaussians beyond this depth (default: no limit) |
 | `--prune VOXEL` | voxel-merge duplicate gaussians across overlapping views - try `0.002` for multi-view scenes |
-| `--frames N` (`demo`) | cap the interactive viewer to N frames, for scripted/headless runs |
 | `--stride N` | use every Nth input frame |
 | `--max-frames N` | use at most N frames, spread ACROSS the capture rather than taking a prefix (default: unbounded for a directory, 48 for a video) |
 | `--fps X` | resample a video to X frames per second before selecting (default: the clip's own rate) |
