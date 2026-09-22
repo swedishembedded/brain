@@ -2897,6 +2897,9 @@ impl<E: Env> ControlPipeline<E> {
                 }
             }
 
+            // Where this walk starts from, so what it adds can be told from
+            // what it inherited. See the archive insert below.
+            let from_score = self.env.progress().unwrap_or(0.0);
             // What was done last, so it can be done again. See below.
             let mut last: Option<String> = None;
             for _ in 0..spec.explore_steps {
@@ -3013,7 +3016,26 @@ impl<E: Env> ControlPipeline<E> {
                         // search scored 0.02 against the policy's 0.18 every
                         // round, so nothing it found was ever kept and the
                         // whole half of the loop did nothing.
-                        opened.insert(cell.clone(), (scored, trail.clone()));
+                        // Only what this walk ADDED.
+                        //
+                        // A fragment's score is the progress of the run it
+                        // belongs to, and almost all of that was earned
+                        // before the walk started - it is inherited from the
+                        // cell it resumed at. So a purely random walk that
+                        // set off from somewhere good carried a good score,
+                        // cleared the bar for being worth imitating, and
+                        // taught the policy to wander. Measured: a generation
+                        // trained this way scored 0.46 against the teacher's
+                        // 1.18, with the teacher's best level falling from
+                        // 0.54 to 0.05.
+                        //
+                        // What is worth copying is a walk that got somewhere
+                        // its starting point had not. The cell is archived
+                        // either way - somewhere worth returning to is not
+                        // the same as something worth copying.
+                        if scored > from_score {
+                            opened.insert(cell.clone(), (scored, trail.clone()));
+                        }
                     }
                 }
                 if best.as_ref().is_none_or(|(v, _)| scored > *v) {
