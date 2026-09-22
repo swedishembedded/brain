@@ -1,0 +1,17 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/rubiks` -> `sample-decision-rubiks`.
+name = "sample-decision-rubiks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: a decision model drives a Rubik's cube solver - a deterministic planner describes the legal moves, the model picks, and a shield executes the best admissible pick, so the cube is always solved and the model's contribution is measured."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+brain = { workspace = true, features = ["decision"] }
+
+[package.metadata.brain]
+max-brain-crates = 30

@@ -26,6 +26,7 @@ samples/decision/arena/README.md
 samples/decision/doom/README.md
 samples/decision/intents/README.md
 samples/decision/json/README.md
+samples/decision/rubiks/README.md
 samples/decision/salesagent/README.md
 samples/decision/triage/README.md
 samples/fly/interactive/README.md
