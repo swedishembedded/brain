@@ -157,11 +157,12 @@ fn run() -> Result<(), String> {
     let before = score(&mut pipe, &data, &split.unseen, &options, s.train.eval, s.train.model.seed)?;
     println!("intents: before training, unseen-intent accuracy {:.1}%", before.accuracy * 100.0);
 
-    // A backend that arrives pretrained with no training support in this SDK
-    // yet (Laya - see `Stages::supports_training`'s own doc) skips straight
-    // to scoring: `before` above already IS the number this run exists to
-    // validate for such a backend - its zero-shot reading of options it was
-    // never shown a brain-side gradient step on at all.
+    // Both shipped backends train, so `before` above is the zero-shot
+    // baseline the trained run is measured AGAINST rather than the whole
+    // result. A backend that arrives pretrained with no training support at
+    // all (see `Stages::supports_training`'s own doc) skips straight to
+    // scoring instead, and then `before` IS the number - which is why this
+    // sample asks rather than assuming.
     if pipe.supports_training() {
         println!("intents: {} steps over {} examples", s.train.steps, train_rows.len());
         let mut last = 0usize;

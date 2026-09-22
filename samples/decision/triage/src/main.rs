@@ -176,17 +176,17 @@ fn main() {
     let mut chain = brain::Flow::new(flow.load());
 
     // Training is skipped either when trained weights were supplied, or when
-    // this backend has no training support at all (Laya: pretrained-only,
-    // per `Flow::supports_training`'s own doc) - the SAME chain serves every
+    // a backend has no training support at all (per `Flow::supports_training`'s
+    // own doc - both shipped backends do train) - the SAME chain serves every
     // case, because a stage that is not wanted is simply not in it. Either
-    // way `evaluate()` still runs, so a Laya-pointed run reports a real,
-    // comparable accuracy number instead of none.
+    // way `evaluate()` still runs, so a run that skipped training still
+    // reports a real, comparable accuracy number instead of none.
     if args.head_in.is_none() && chain.supports_training() {
         chain = chain.train(spec).evaluate().save(&args.save_to);
     } else {
         if args.head_in.is_none() {
             println!(
-                "triage: this backend arrives pretrained with no training support in this SDK yet \
+                "triage: this backend arrives pretrained with no training support in this SDK \
                  - evaluating it zero-shot instead of training"
             );
         }
