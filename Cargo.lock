@@ -1004,6 +1004,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-rlcd",
  "brain-testutil",
  "serde_json",
 ]
@@ -2101,6 +2102,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "brain-rlcd"
+version = "1.1.0"
+dependencies = [
+ "brain-data",
 ]
 
 [[package]]

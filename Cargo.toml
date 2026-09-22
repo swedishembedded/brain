@@ -45,6 +45,7 @@ default-members = [
     "crates/paramstore",
     "crates/optim",
     "crates/promote",
+    "crates/rlcd",
     "crates/atif",
     "crates/rl",
     "crates/data",
@@ -198,6 +199,7 @@ brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
 brain-promote = { path = "crates/promote" }
+brain-rlcd = { path = "crates/rlcd" }
 brain-atif = { path = "crates/atif" }
 brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }

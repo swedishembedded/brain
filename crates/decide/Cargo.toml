@@ -17,6 +17,9 @@ brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true
 brain-data.workspace = true
+# `loss.rs` re-exports the calibration objective from here now - see that
+# module's doc for why the math moved down to the leaf layer.
+brain-rlcd.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -1,0 +1,19 @@
+[package]
+name = "brain-rlcd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RLCD (reinforcement learning for calibrated decisions): proper scoring rules over soft targets, cost-sensitive decision theory (Bayes risk, regret, value of information), calibration metrics, and executable decision worlds - all model-agnostic. A LEAF crate by design, matching brain-promote: it depends on no model crate, so a layer-4 model crate (brain-decide, brain-modernbert, and any future decision-capable model) can compose calibrated-decision training without creating a dependency cycle."
+
+[lib]
+name = "rlcd"
+path = "src/lib.rs"
+
+[dependencies]
+# `data::rng::Lcg` - the deterministic seeded PRNG every randomized test in
+# this crate uses, so a fixed seed reproduces byte for byte, matching the
+# workspace convention (AGENTS.md's `data` row: "`rng::Lcg` for
+# tests/fixtures"). `brain-data` is a training-substrate crate with no model
+# in it, so depending on it keeps this crate reachable from every model
+# crate; see `crates/rlcd/src/lib.rs`.
+brain-data.workspace = true

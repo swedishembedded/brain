@@ -88,6 +88,20 @@ Six layers. Each may depend only on layers above it.
                            anything, so no caller changed and nothing is
                            duplicated; `scripts/gates/check-crate-layers.sh`
                            fails the build if this closure ever climbs.
+   rlcd                    RLCD (reinforcement learning for calibrated
+                           decisions): proper scoring rules over soft target
+                           distributions, and (as later work lands) cost
+                           matrices/Bayes risk/value-of-information and
+                           calibration metrics. A LEAF for the same reason as
+                           `promote`: this is pure `&[f32]` host arithmetic
+                           with no model dependency, but it used to live
+                           inside `brain-decide` (layer 4), so no OTHER
+                           decision-capable model crate (e.g. `modernbert`'s
+                           Laya head) could reach it without depending on a
+                           sibling model crate. `decide` re-exports it as
+                           `decide::loss` rather than owning it, so no caller
+                           changed and no logic exists twice; the same
+                           `check-crate-layers.sh` gate covers it.
 
  ─── 4. models ─────────────────────────────────────────────────────────────
    decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder  timeseries
