@@ -162,6 +162,12 @@ mod tests {
     ///
     /// `qtype` is `rl_common.py`'s own `QTYPES` index (0 choice, 1 score,
     /// 2 noul); only `1` is ordinal.
+    ///
+    /// The literals carry more digits than an `f32` holds ON PURPOSE: they
+    /// are the reference's own printed output, transcribed verbatim so the
+    /// table can be diffed against a re-run of the Python rather than
+    /// against someone's rounding of it.
+    #[allow(clippy::excessive_precision)]
     const GOLDEN: &[(&[f32], &[f32], u32, f32)] = &[
         (&[-0.29359, 1.572283, 1.893643], &[0.0, 1.0, 0.0], 0, -0.6373831629753113),
         (&[-2.228688, 3.38158], &[0.368373, 0.631627], 2, -1.7538396120071411),
@@ -210,8 +216,8 @@ mod tests {
         let t = hard_target(3, 0);
         // 1e-6 and 1e-9 are both past exp(-9.21) = 1e-4, so they must score
         // the SAME - an unclamped log score would separate them by ln(1000).
-        let a = proper_reward(&[1e-6f32, 0.5, 0.499999], &t, false, &cfg);
-        let b = proper_reward(&[1e-9f32, 0.5, 0.499999999], &t, false, &cfg);
+        let a = proper_reward(&[1e-6f32, 0.5, 0.499_999], &t, false, &cfg);
+        let b = proper_reward(&[1e-9f32, 0.5, 0.5], &t, false, &cfg);
         assert!((a - cfg.log_floor).abs() <= 1e-5, "reward {a} is not the floor");
         assert!((a - b).abs() <= 1e-5, "the floor did not bind: {a} vs {b}");
     }

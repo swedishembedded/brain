@@ -327,30 +327,31 @@ mod tests {
         }
     }
 
-    /// At `ce_weight = 0` the whole objective is the policy term, and its
-    /// gradient must NOT sum to zero the way a softmax-normalized loss's
-    /// does - the exploration density is over raw logits, not probabilities.
-    /// At `ce_weight > 0` the cross-entropy half alone does sum to zero.
-    /// Checking both is what stops the two halves from being silently
-    /// conflated.
+    /// BOTH halves must be shift-invariant, and for different reasons that
+    /// are easy to get half-right. The cross-entropy half is by construction
+    /// (`p - t` sums to zero). The policy half is only because the
+    /// exploration noise was zero-mean projected: its gradient is a weighted
+    /// sum of the sampled noise vectors, so dropping the projection would
+    /// give the update a common-mode component that changes no probability
+    /// and is pure variance. That makes this a real check on
+    /// [`explore`] rather than a restatement of the formula - which is why
+    /// the group here is a REAL drawn one, not the hand-built fixture the
+    /// finite-difference test uses.
     #[test]
-    fn the_cross_entropy_half_is_shift_invariant_and_the_policy_half_is_not() {
+    fn both_halves_of_the_gradient_are_shift_invariant() {
         let scores = [0.4f32, -1.2, 2.0, 0.1];
         let t = hard_target(4, 2);
-        let group = fixed_group(0.4);
-        let (_, d_ce_only) = {
-            let empty = Group { samples: vec![vec![0.0; 4]], advantage: vec![0.0], sigma: 0.4 };
-            policy_loss(&scores, &t, &empty, 1.0)
-        };
-        let sum_ce: f32 = d_ce_only.iter().sum();
+
+        let empty = Group { samples: vec![scores.to_vec()], advantage: vec![0.0], sigma: 0.4 };
+        let (_, d_ce) = policy_loss(&scores, &t, &empty, 1.0);
+        let sum_ce: f32 = d_ce.iter().sum();
         assert!(sum_ce.abs() <= 1e-5, "the cross-entropy gradient sums to {sum_ce}, not 0");
 
+        let mut rng = data::rng::Rng::new(0x51F7);
+        let group = explore(&scores, &t, false, &RlcdObjective::default(), &mut rng);
         let (_, d_rl) = policy_loss(&scores, &t, &group, 0.0);
         let sum_rl: f32 = d_rl.iter().sum();
-        assert!(
-            sum_rl.abs() > 1e-3,
-            "the policy gradient sums to {sum_rl}: it is behaving like a normalized loss"
-        );
+        assert!(sum_rl.abs() <= 1e-4, "the policy gradient sums to {sum_rl}, not 0");
     }
 
     /// The exploration noise must be zero-mean ACROSS OPTIONS on every single
