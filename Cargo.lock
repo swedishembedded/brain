@@ -417,6 +417,7 @@ dependencies = [
  "brain-model",
  "brain-modelref",
  "brain-modelstore",
+ "brain-modernbert",
  "brain-mujoco",
  "brain-neuro",
  "brain-qwen3",
