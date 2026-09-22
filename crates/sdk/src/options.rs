@@ -29,7 +29,7 @@
 //! # Ok(()) }
 //! ```
 
-pub use appopts::{help_of, Args, Hardware, Options};
+pub use appopts::{help_of, Args, Hardware, ModelChoice, Options};
 
 
 /// Where the model comes from and where it goes: the four flags every

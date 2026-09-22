@@ -44,14 +44,29 @@
 //!
 //! `choose`/`probability`/`set_question` and the [`Flow`]/[`Stages`]
 //! `train`/`evaluate`/`save`/`turn` chain answer the same way on either
-//! backend, because they mean the same thing for both. **One honest
-//! asymmetry**: `choose`/`probability` pass exactly ONE question at a time,
-//! so `Decide`'s state-encoded-once-many-questions-scored-cheaply economics
-//! never actually shows up through this surface on the `Decide` arm either -
-//! and on the Laya arm, every call re-encodes the whole packed
-//! `(state, question)` sequence through the trunk from scratch (a full
-//! ModernBERT-large forward per call), a real, different per-call cost from
-//! the `Decide` arm, stated here rather than hidden.
+//! backend, because they mean the same thing for both.
+//!
+//! ## Two shapes of call
+//!
+//! [`DecisionPipeline::choose`] and [`DecisionPipeline::probability`] are the
+//! one-question convenience: a `Choice` over plain option strings, or the
+//! probability of a proposition, about a state that is already a string.
+//!
+//! [`DecisionPipeline::decide`] is the full request both backends implement -
+//! several typed [`Question`]s about ONE [`State`], answered positionally.
+//! It is the only surface that reaches [`Question::Score`] at all, the only
+//! one where a `Choice`'s options carry the descriptions the model is meant
+//! to read, and the only one that takes structured state ([`State::Json`],
+//! key order preserved) rather than a string the caller flattened itself.
+//! `samples/decision/json` is a JEV-style JSON endpoint built on it.
+//!
+//! **One honest asymmetry, on both shapes**: `choose`/`probability` pass
+//! exactly one question, and on the Laya arm even `decide` does - every call
+//! re-encodes the whole packed `(state, question)` sequence through the trunk
+//! from scratch (a full ModernBERT-large forward per question), where the
+//! `Decide` arm encodes the state once and scores every question's options
+//! against that one encoding. That is a real, different per-call cost, stated
+//! here rather than hidden.
 //!
 //! **`train_choices`/`save_head` are `Decide`-only for now.** A Laya-backed
 //! pipeline returns a clear `Err` naming why (`crates/modernbert` has a
@@ -85,10 +100,26 @@ pub use decide::banking77::Banking77;
 use decide::banking77::OptionSampler;
 use decide::decide::{Decide, Example, Limits};
 use decide::loss::{softmax, LossConfig};
-use decide::primitives::{confidence, Answer, Opt, Question};
+use decide::primitives::confidence;
 
 pub use decide::banking77::Row;
 pub use decide::decide::Limits as DecisionLimits;
+/// The typed request vocabulary, shared by both backends: the three question
+/// types a caller may ask ([`Question::Choice`], [`Question::Score`],
+/// [`Question::Noul`]), the option they carry, and the answers they come back
+/// as. Re-exported rather than mirrored - one definition of what a decision
+/// request IS, with `crates/decide`'s own published limits
+/// ([`Question::validate`]) attached to it.
+pub use decide::primitives::{Answer, Opt, Question};
+/// A request's state: free text, or structured JSON whose key order is
+/// PRESERVED. Defined in `crates/modernbert` because Laya's own packed
+/// sequence is where the order first mattered (`json.dumps` writes a dict in
+/// insertion order; a sorted re-serialization tokenizes different bytes), and
+/// used on both arms here so one state reaches either backbone as the same
+/// text - see [`State::serialize`]. [`write_json`] is the matching writer
+/// (`json.dumps(..., ensure_ascii=False)`'s own formatting), for a caller
+/// rendering a response the same way it read the request.
+pub use modernbert::{write_json, OrderedJson, State};
 
 use crate::flow::{EvalReport, Flow, Stages, TrainReport};
 use crate::{Device, Error, Result};
@@ -221,10 +252,9 @@ impl LayaBackend {
     /// this module's "Two architectures, one surface" doc). [`Self::score`]
     /// and [`Self::route`] are both thin callers of this, so the two-wait
     /// cross-`Gpu`-handle dispatch below exists in exactly one place.
-    fn score_raw(&mut self, state: &str, q: &modernbert::Question) -> Result<(Vec<f32>, Vec<f32>)> {
-        let state = modernbert::State::Str(state.to_string());
+    fn score_raw(&mut self, state: &State, q: &modernbert::Question) -> Result<(Vec<f32>, Vec<f32>)> {
         let (ids, markers) =
-            modernbert::build_sequence(&self.tok, &self.cfg, &state, q, self.max_len, self.head_max_len, None, false);
+            modernbert::build_sequence(&self.tok, &self.cfg, state, q, self.max_len, self.head_max_len, None, false);
         if ids.is_empty() || markers.is_empty() {
             return Err(Error::Backend("laya: build_sequence produced no option markers for this question".into()));
         }
@@ -253,17 +283,61 @@ impl LayaBackend {
         Ok((logits, act_logits))
     }
 
-    /// [`Self::score_raw`], option logits only - [`Self::choose`]/
-    /// [`Self::probability`]'s own shared caller.
-    fn score(&mut self, state: &str, q: &modernbert::Question) -> Result<Vec<f32>> {
+    /// [`Self::score_raw`], option logits only - [`Self::ask`]'s own caller.
+    fn score(&mut self, state: &State, q: &modernbert::Question) -> Result<Vec<f32>> {
         self.score_raw(state, q).map(|(logits, _act_logits)| logits)
+    }
+
+    /// Answer ONE typed question about `state` - the Laya arm of
+    /// [`DecisionPipeline::decide`], and the single place this backend turns
+    /// scores into an [`Answer`]. [`Self::choose`]/[`Self::probability`] are
+    /// its callers, so the three question types cannot drift apart in how
+    /// they are calibrated.
+    fn ask(&mut self, state: &State, q: &Question) -> Result<Answer> {
+        let mq = laya_question(q);
+        let raw = self.score(state, &mq)?;
+        let p = softmax(&scaled(&raw, self.temperature_for(mq.qtype())));
+        match q {
+            Question::Choice { options, .. } => {
+                if p.len() != options.len() {
+                    return Err(Error::Backend(format!("laya: scored {} options for a {}-option choice", p.len(), options.len())));
+                }
+                Ok(Answer::Choice {
+                    choice: options[argmax(&p)].name.clone(),
+                    probabilities: options.iter().map(|o| o.name.clone()).zip(p.iter().copied()).collect(),
+                    confidence: confidence(&p),
+                })
+            }
+            Question::Score { levels, .. } => {
+                if p.len() != levels.len() {
+                    return Err(Error::Backend(format!("laya: scored {} levels for a {}-level score", p.len(), levels.len())));
+                }
+                // The 0-BASED expectation over level indices, the same
+                // reading `decide::primitives::Question::answer` applies -
+                // all the mass on the first level scores 0, not 1.
+                Ok(Answer::Score {
+                    score: p.iter().enumerate().map(|(i, &pi)| i as f32 * pi).sum(),
+                    legend: levels.clone(),
+                    confidence: confidence(&p),
+                    probabilities: p,
+                })
+            }
+            Question::Noul { .. } => {
+                if p.len() != 2 {
+                    return Err(Error::Backend(format!("laya: a noul question must score exactly 2 options (false, true), got {}", p.len())));
+                }
+                // render_options() puts the "true" reading at index 1 - see
+                // modernbert::sequence's own module doc.
+                Ok(Answer::Noul { noul: p[1] })
+            }
+        }
     }
 
     /// [`DecisionPipeline::route`]'s own Laya-arm implementation: the noul
     /// probability plus the act head's own softmax and argmax.
     fn route(&mut self, state: &str, proposition: &str) -> Result<RouteVerdict> {
         let q = modernbert::Question::Noul { ins: proposition.to_string(), false_text: None, true_text: None };
-        let (raw, act_raw) = self.score_raw(state, &q)?;
+        let (raw, act_raw) = self.score_raw(&State::Str(state.to_string()), &q)?;
         if raw.len() != 2 {
             return Err(Error::Backend(format!(
                 "laya: a noul question must score exactly 2 options (false, true), got {}",
@@ -285,37 +359,58 @@ impl LayaBackend {
         if options.is_empty() {
             return Err(Error::MissingArgument("choose needs at least one option".into()));
         }
-        let q = modernbert::Question::Choice {
-            ins: instructions.to_string(),
-            options: options.iter().map(|o| (o.to_string(), None)).collect(),
+        let q = Question::Choice {
+            instructions: instructions.to_string(),
+            options: options.iter().map(|o| Opt::new(*o)).collect(),
         };
-        let raw = self.score(state, &q)?;
-        let t = self.temperature_for(modernbert::QType::Choice);
-        let p = softmax(&scaled(&raw, t));
-        let index = p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0);
-        Ok(Choice {
-            choice: options[index].to_string(),
-            index,
-            probabilities: options.iter().map(|o| o.to_string()).zip(p.iter().copied()).collect(),
-            confidence: confidence(&p),
-        })
+        match self.ask(&State::Str(state.to_string()), &q)? {
+            Answer::Choice { choice, probabilities, confidence } => {
+                let index = argmax(&probabilities.iter().map(|(_, p)| *p).collect::<Vec<f32>>());
+                Ok(Choice { choice, index, probabilities, confidence })
+            }
+            other => Err(Error::Backend(format!("laya: a choice question answered as {other:?}"))),
+        }
     }
 
     fn probability(&mut self, state: &str, proposition: &str) -> Result<f32> {
-        let q = modernbert::Question::Noul { ins: proposition.to_string(), false_text: None, true_text: None };
-        let raw = self.score(state, &q)?;
-        if raw.len() != 2 {
-            return Err(Error::Backend(format!(
-                "laya: a noul question must score exactly 2 options (false, true), got {}",
-                raw.len()
-            )));
+        let q = Question::Noul { instructions: proposition.to_string(), yes: None, no: None };
+        match self.ask(&State::Str(state.to_string()), &q)? {
+            Answer::Noul { noul } => Ok(noul),
+            other => Err(Error::Backend(format!("laya: a noul question answered as {other:?}"))),
         }
-        let t = self.temperature_for(modernbert::QType::Noul);
-        let p = softmax(&scaled(&raw, t));
-        // render_options() puts the "true" reading at index 1 - see
-        // modernbert::sequence's own module doc.
-        Ok(p[1])
     }
+}
+
+/// The typed question, in Laya's own `render_options` vocabulary. One place,
+/// so the mapping (a `Choice`'s per-option description, a `Score`'s ordered
+/// levels, a `Noul`'s two criteria texts - `yes` is the TRUE reading) cannot
+/// be spelled differently by two callers.
+fn laya_question(q: &Question) -> modernbert::Question {
+    match q {
+        Question::Choice { instructions, options } => modernbert::Question::Choice {
+            ins: instructions.clone(),
+            options: options.iter().map(|o| (o.name.clone(), o.description.clone())).collect(),
+        },
+        Question::Score { instructions, levels } => {
+            modernbert::Question::Score { ins: instructions.clone(), options: levels.clone() }
+        }
+        Question::Noul { instructions, yes, no } => {
+            modernbert::Question::Noul { ins: instructions.clone(), false_text: no.clone(), true_text: yes.clone() }
+        }
+    }
+}
+
+/// First maximal index, so ties resolve to the option the caller listed
+/// first - `decide::primitives`' own convention, reproduced here because its
+/// `argmax` is private to that crate.
+fn argmax(p: &[f32]) -> usize {
+    let mut best = 0;
+    for (i, &v) in p.iter().enumerate() {
+        if v > p[best] {
+            best = i;
+        }
+    }
+    best
 }
 
 /// Divide raw scores by a serving-time temperature before the host softmax -
@@ -396,6 +491,50 @@ impl DecisionPipeline {
             device: Device::default(),
             limits: Limits::default(),
             seed: 0,
+        }
+    }
+
+    /// Answer several typed questions about ONE state, in the order asked.
+    ///
+    /// The full request shape both backends implement, and the one
+    /// [`DecisionPipeline::choose`]/[`DecisionPipeline::probability`] cannot
+    /// express: a [`Question::Score`] has no other surface at all, a
+    /// [`Question::Choice`]'s options can carry the descriptions the model is
+    /// meant to read, and the state may be structured
+    /// ([`State::Json`]) rather than a string the caller flattened itself.
+    ///
+    /// Every question is validated against
+    /// [`Question::validate`]'s published limits BEFORE any model runs, so a
+    /// malformed request coming off a wire is refused rather than tokenized.
+    ///
+    /// **What "one call" costs differs by arm, and this is the honest version
+    /// of the asymmetry this module's doc opens with.** The `Decide` arm
+    /// encodes the state ONCE and scores every question's options against
+    /// that encoding - the economics that architecture exists for, reachable
+    /// here and nowhere else in this SDK. The Laya arm re-packs and re-encodes
+    /// `(state, question)` per question (a full ModernBERT-large forward
+    /// each), because its head takes one question's option markers per call;
+    /// asking five questions costs five forwards there.
+    ///
+    /// Questions are independent either way: no answer conditions another,
+    /// and the order out is the order in.
+    pub fn decide(&mut self, state: &State, questions: &[Question]) -> Result<Vec<Answer>> {
+        for (i, q) in questions.iter().enumerate() {
+            q.validate().map_err(|e| Error::MissingArgument(format!("question {i}: {e}")))?;
+        }
+        match &mut self.backend {
+            Backend::Decide(model) => {
+                let answers = model.decide(&state.serialize(), questions).map_err(Error::Backend)?;
+                if answers.len() != questions.len() {
+                    return Err(Error::Backend(format!(
+                        "the model answered {} of {} questions",
+                        answers.len(),
+                        questions.len()
+                    )));
+                }
+                Ok(answers)
+            }
+            Backend::Laya(l) => questions.iter().map(|q| l.ask(state, q)).collect(),
         }
     }
 

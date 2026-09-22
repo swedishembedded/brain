@@ -40,6 +40,17 @@
 //! - [`real_laya_checkpoint_choose_and_probability_produce_real_numbers`]: the
 //!   same real-weight proof for the NEW arm, against the real downloaded
 //!   `convaiinnovations/laya` checkpoint. Skips cleanly when absent.
+//! - [`typed_questions_answer_one_per_question_on_the_synthetic_laya_fixture`]
+//!   and [`a_question_outside_the_published_limits_is_refused_by_name`]:
+//!   `DecisionPipeline::decide`, the typed multi-question request (a
+//!   `Choice` with descriptions, a `Score`, a `Noul`, over structured
+//!   `State::Json`) - one answer per question, in order, of the type asked,
+//!   and a request outside the published limits refused before any model
+//!   runs. `samples/decision/json` is the JSON endpoint built on it.
+//! - [`real_minilm_checkpoint_answers_a_typed_request_through_the_decide_arm`]
+//!   and [`real_laya_checkpoint_answers_a_typed_multi_question_request`]: the
+//!   same typed request through BOTH real checkpoints - one API, two
+//!   architectures. Skip cleanly when absent.
 
 use std::path::{Path, PathBuf};
 
@@ -401,4 +412,176 @@ fn real_laya_checkpoint_choose_and_probability_produce_real_numbers() {
 
     let p = pipe.probability("Customer: I want to speak to a manager immediately.", "Is the customer asking to escalate to a human or manager?").expect("laya probability against the real checkpoint");
     assert!((0.0..=1.0).contains(&p), "probability out of range: {p}");
+}
+
+/// One state, three typed questions, one answer each - the request shape a
+/// caller with a JSON front end (`samples/decision/json`) needs, and the one
+/// `choose`/`probability` alone cannot express: a `Score` has no surface at
+/// all, a `Choice`'s options cannot carry the descriptions the model is
+/// supposed to read, and a caller holding structured state has nowhere to put
+/// it but a string of its own devising.
+#[test]
+fn typed_questions_answer_one_per_question_on_the_synthetic_laya_fixture() {
+    use brain::decision::{Answer, OrderedJson, Question, State};
+
+    let root = scratch_root("laya-typed");
+    write_laya_fixture(&root);
+    let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
+
+    let state = State::Json(OrderedJson::parse(r#"{"ticket": "payments keep failing", "days": 3}"#).unwrap());
+    let questions = vec![
+        Question::Noul { instructions: "does this convey urgency".into(), yes: None, no: None },
+        Question::Choice {
+            instructions: "which team should handle this".into(),
+            options: vec![
+                brain::decision::Opt::described("billing", "payments, invoicing, refunds"),
+                brain::decision::Opt::new("technical"),
+                brain::decision::Opt::new("sales"),
+            ],
+        },
+        Question::Score {
+            instructions: "how frustrated is the customer".into(),
+            levels: vec!["calm".into(), "frustrated".into(), "very angry".into()],
+        },
+    ];
+
+    let answers = pipe.decide(&state, &questions).expect("a typed request must answer");
+    assert_eq!(answers.len(), 3, "one answer per question, no more and no fewer");
+
+    // In the order asked, and of the type asked - a caller keys its own
+    // results off position, so a reordered or retyped answer is silently
+    // wrong rather than loudly broken.
+    match &answers[0] {
+        Answer::Noul { noul } => assert!((0.0..=1.0).contains(noul), "noul out of range: {noul}"),
+        other => panic!("question 0 was a noul, got {other:?}"),
+    }
+    match &answers[1] {
+        Answer::Choice { choice, probabilities, confidence } => {
+            assert_eq!(probabilities.len(), 3);
+            let sum: f32 = probabilities.iter().map(|(_, p)| p).sum();
+            assert!((sum - 1.0).abs() < 1e-3, "choice probabilities must sum to 1, got {sum}");
+            assert!(["billing", "technical", "sales"].contains(&choice.as_str()), "the choice must name a supplied option, got {choice}");
+            assert!(probabilities.iter().all(|(n, _)| ["billing", "technical", "sales"].contains(&n.as_str())), "probabilities are keyed by the option NAME, never by the description the model read");
+            assert!((0.0..=1.0).contains(confidence));
+        }
+        other => panic!("question 1 was a choice, got {other:?}"),
+    }
+    match &answers[2] {
+        Answer::Score { score, legend, probabilities, confidence } => {
+            assert_eq!(legend, &["calm".to_string(), "frustrated".to_string(), "very angry".to_string()]);
+            assert_eq!(probabilities.len(), 3);
+            // 0-based expectation over the levels, so it can never leave them.
+            assert!((0.0..=2.0).contains(score), "score must lie on the level scale, got {score}");
+            assert!((0.0..=1.0).contains(confidence));
+        }
+        other => panic!("question 2 was a score, got {other:?}"),
+    }
+}
+
+/// A question outside the published limits is refused with the limit in the
+/// message, on both arms, BEFORE any model runs - a malformed request from a
+/// pipe must not reach the tokenizer.
+#[test]
+fn a_question_outside_the_published_limits_is_refused_by_name() {
+    use brain::decision::{Question, State};
+
+    let root = scratch_root("laya-limits");
+    write_laya_fixture(&root);
+    let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
+
+    let one_level = Question::Score { instructions: "how bad".into(), levels: vec!["only".into()] };
+    let err = pipe.decide(&State::Str("anything".into()), &[one_level]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("levels"), "the error must name what is wrong: {msg}");
+
+    let no_options = Question::Choice { instructions: "which".into(), options: vec![] };
+    let err = pipe.decide(&State::Str("anything".into()), &[no_options]).unwrap_err();
+    assert!(format!("{err}").contains("option"), "expected a message about the empty option list, got {err}");
+}
+
+/// The same typed request through the OTHER backbone: one API, two
+/// architectures, answered the same way - the property `DecisionPipeline`
+/// exists for. Skips cleanly when the checkpoint is absent.
+#[test]
+fn real_minilm_checkpoint_answers_a_typed_request_through_the_decide_arm() {
+    use brain::decision::{Answer, OrderedJson, Question, State};
+
+    let Some(dir) = brain_testutil::model_dir("sentence-transformers/all-MiniLM-L6-v2") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull sentence-transformers/all-MiniLM-L6-v2`"));
+        return;
+    }
+
+    let mut pipe = brain::DecisionPipeline::builder(&dir).load().unwrap();
+    let state = State::Json(OrderedJson::parse(r#"{"message": "my replacement card has not arrived"}"#).unwrap());
+    let answers = pipe
+        .decide(
+            &state,
+            &[
+                Question::Choice {
+                    instructions: "which banking intent does this message express".into(),
+                    options: vec![brain::decision::Opt::new("card arrival"), brain::decision::Opt::new("exchange rate")],
+                },
+                Question::Noul { instructions: "is the customer waiting on something".into(), yes: None, no: None },
+            ],
+        )
+        .expect("the decide arm must answer a typed request");
+    assert_eq!(answers.len(), 2);
+    assert!(matches!(answers[0], Answer::Choice { .. }));
+    assert!(matches!(answers[1], Answer::Noul { .. }));
+}
+
+/// And against the real Laya checkpoint, which is what the JSON sample runs
+/// by default. Skips cleanly when absent.
+#[test]
+fn real_laya_checkpoint_answers_a_typed_multi_question_request() {
+    use brain::decision::{Answer, Question, State};
+
+    let Some(dir) = brain_testutil::model_dir("convaiinnovations/laya") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull convaiinnovations/laya`"));
+        return;
+    }
+
+    let mut pipe = brain::DecisionPipeline::builder(&dir).load().unwrap();
+    let state = State::Str("Help! My payments have been failing for 3 days and nobody answers support.".into());
+    let answers = pipe
+        .decide(
+            &state,
+            &[
+                Question::Choice {
+                    instructions: "Which team should handle this?".into(),
+                    options: vec![
+                        brain::decision::Opt::described("billing", "payments, invoicing, refunds"),
+                        brain::decision::Opt::described("technical", "bugs, outages, integrations"),
+                        brain::decision::Opt::described("sales", "pricing, upgrades, new accounts"),
+                    ],
+                },
+                Question::Score {
+                    instructions: "How frustrated is the customer?".into(),
+                    levels: vec!["calm".into(), "frustrated".into(), "very angry".into()],
+                },
+            ],
+        )
+        .expect("the laya arm must answer a typed request");
+    assert_eq!(answers.len(), 2);
+    match &answers[0] {
+        // Not a calibration claim about this checkpoint - only that the
+        // routing question reaches it and comes back keyed by option name.
+        Answer::Choice { choice, .. } => assert!(["billing", "technical", "sales"].contains(&choice.as_str()), "got {choice}"),
+        other => panic!("expected a choice, got {other:?}"),
+    }
+    match &answers[1] {
+        Answer::Score { score, legend, .. } => {
+            assert_eq!(legend.len(), 3);
+            assert!((0.0..=2.0).contains(score), "score off the level scale: {score}");
+        }
+        other => panic!("expected a score, got {other:?}"),
+    }
 }
