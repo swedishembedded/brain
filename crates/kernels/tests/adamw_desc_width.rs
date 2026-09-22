@@ -52,4 +52,28 @@ fn the_learning_rate_multiplier_survives_the_u32_descriptor() {
     let d = kernels::adamw_desc(4096, 4.0);
     assert_eq!(d[0], 4096);
     assert_eq!(f32::from_bits(d[1]), 4.0);
+    assert_eq!(d[2], 0, "a uniform tensor must declare period 0, not fall off the end of the buffer");
+}
+
+/// The grouped descriptor's DYNAMIC tail, which the literal-subscript gate
+/// above cannot see: the kernel indexes `desc[3 + idx % period]`, so the
+/// buffer has to carry `period` words past the fixed header. One word short
+/// reads as zero, which is an lr of zero for one component of every packed
+/// unit - a fit whose positions train and whose scales silently do not.
+#[test]
+fn the_grouped_descriptor_carries_every_component() {
+    let g = [1.0f32, 0.5, 0.25];
+    let d = kernels::adamw_desc_grouped(90, 2.0, &g);
+    assert_eq!(d[0], 90);
+    assert_eq!(f32::from_bits(d[1]), 2.0);
+    assert_eq!(d[2] as usize, g.len());
+    assert_eq!(d.len(), 3 + g.len(), "kernel reads desc[3 + idx % period]");
+    for (k, want) in g.iter().enumerate() {
+        assert_eq!(f32::from_bits(d[3 + k]), *want);
+    }
+    assert_eq!(
+        kernels::adamw_desc_grouped(8, 1.0, &[]).len(),
+        kernels::adamw_desc(8, 1.0).len(),
+        "an empty group must be exactly the uniform descriptor"
+    );
 }

@@ -1552,8 +1552,20 @@ pub fn src(name: &str) -> &'static str {
 ///
 /// `lr_mult` is the tensor's LoRA+ learning-rate multiplier - `1.0` for an
 /// ordinary tensor.
-pub fn adamw_desc(numel: usize, lr_mult: f32) -> [u32; 2] {
-    [numel as u32, lr_mult.to_bits()]
+pub fn adamw_desc(numel: usize, lr_mult: f32) -> [u32; 3] {
+    [numel as u32, lr_mult.to_bits(), 0]
+}
+
+/// `adamw_desc` for an INTERLEAVED tensor, giving each component of the
+/// repeating unit its own learning-rate multiplier.
+///
+/// `group[k]` applies to every element whose index is `k` modulo
+/// `group.len()`, on top of `lr_mult`. An empty `group` is the uniform
+/// descriptor above.
+pub fn adamw_desc_grouped(numel: usize, lr_mult: f32, group: &[f32]) -> Vec<u32> {
+    let mut d = vec![numel as u32, lr_mult.to_bits(), group.len() as u32];
+    d.extend(group.iter().map(|v| v.to_bits()));
+    d
 }
 
 #[cfg(test)]

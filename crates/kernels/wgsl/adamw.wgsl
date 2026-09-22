@@ -32,6 +32,16 @@
 // is this tensor's LoRA+ learning-rate multiplier (`1.0` for an ordinary
 // tensor, so nothing here changes for a caller that never sets one) - both
 // written ONCE when the optimizer's dispatch graph is built and never again.
+//
+// `desc[2]` is an optional PERIOD, and `0` (what `adamw_desc` writes) means
+// the tensor is uniform and nothing below costs anything. A non-zero period
+// `P` makes `desc[3 + idx % P]` a second, per-component multiplier, so one
+// interleaved tensor can carry parameter groups whose natural magnitudes
+// differ. A 3D gaussian is the case this exists for: a position in world
+// units, a linear scale three orders of magnitude smaller, and a unit
+// quaternion share one packed buffer, and Adam's step is ~lr regardless of
+// the gradient, so a single lr that suits any one of them runs away with
+// the others. See `splat::opt`, which packs 10 floats per gaussian.
 // Every OTHER field this kernel reads (`p`, `coef`) is shared across every
 // parameter tensor's AdamW dispatch in a step, so `p` is a single uniform
 // buffer written once per step regardless of parameter count, not once per
@@ -64,7 +74,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let idx = gidx;
     if (idx >= desc[0]) { return; }
     let lrm = bitcast<f32>(desc[1]);
-    let lr = p.lr * lrm;
+    let period = desc[2];
+    var gm = 1.0;
+    if (period != 0u) { gm = bitcast<f32>(desc[3u + idx % period]); }
+    let lr = p.lr * lrm * gm;
     let g = grad[idx] * p.scale * coef[0];
     let mi = p.beta1 * m[idx] + (1.0 - p.beta1) * g;
     let vi = p.beta2 * v[idx] + (1.0 - p.beta2) * g * g;
