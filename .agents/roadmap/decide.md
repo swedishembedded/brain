@@ -247,3 +247,35 @@ verified **red** before the implementation lands.
 4. **D1 vs the headline number.** See section 3 - recorded up front.
 5. **B9's lost cross-window context.** Real, and measured by B11's ablation rather
    than argued about.
+
+## 10. Found defects (reproduced, NOT fixed here)
+
+1. **`train_choices` then `save_head` has never worked on this arm.**
+   `Decide::new_on` leaves `frozen_encoder = false`, `DecisionPipeline::
+   train_choices` trains the encoder at `ENCODER_LR` on every step, and
+   `Decide::save_head` refuses (correctly, and for a good reason - see its
+   own doc) to write a head-only adapter for a model whose encoder moved. So
+   `samples/decision/triage --save` and `samples/decision/intents` both
+   report their accuracy and then fail at the write. Reproduced 2026-09-22
+   against the real `sentence-transformers/all-MiniLM-L6-v2` checkpoint:
+
+   ```text
+   cannot write <path>: the encoder was trained, and this format carries only
+   the head. Loading it back would attach the head to the PUBLISHED encoder,
+   which is not the model being saved
+   ```
+
+   Deliberately NOT fixed in the Laya training milestone that found it,
+   because every available fix is a real design decision for THIS arm rather
+   than a mechanical repair, and two of the three change what the arm learns:
+
+   * freeze the encoder in `train_choices` (cheapest, and what the Laya arm
+     does) - but it changes this arm's measured accuracies, which are
+     published numbers;
+   * keep training the encoder and extend the artifact to carry it;
+   * keep both and make the caller choose, so `--save` implies a frozen
+     encoder and a trained-encoder run says so.
+
+   The Laya arm avoids the defect by construction: its trunk is frozen and
+   `LayaDecision::save_head` applies the same refusal to the mode where it
+   is not.

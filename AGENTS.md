@@ -110,8 +110,20 @@ fast and scalable kernel - not a naive one.
    reached only via `brain::DecisionPipeline` (`decision` SDK feature), which
    dispatches to either architecture. Real checkpoint imports and is
    argmax-parity-tested against the Python reference; seeded backward through
-   the full head+trunk is gradient-checked, but is a trainable primitive with
-   no training loop wired on top yet. `.agents/roadmap/laya.md`.
+   the full head+trunk is gradient-checked. **A training loop exists and is
+   gated** (its real-weight held-out-accuracy gate is deliberately red today
+   - see the ledger):
+   `modernbert::LayaDecision` composes trunk+head+tokenizer into one model
+   with `score`/`accumulate`/`adamw_scaled`/`save_head` (the direct
+   counterpart of `decide::decide::Decide`), driven by `rlcd::reinforce` -
+   REINFORCE with a group-mean baseline over `rlcd::proper`'s strictly proper
+   scoring reward, transcribed from the only published Laya training loop,
+   not invented here. `DecisionPipeline::train_choices`/`save_head` work on
+   both arms and `Stages::supports_training` is true for both. The 395M trunk
+   is frozen by default and that is a memory decision before a tuning one
+   (`Role::Trainable` would cost ~6.3 GB of moments); the act/escalate head
+   is deliberately NOT trained, because no public Laya source defines its
+   objective. `.agents/roadmap/laya.md`.
 7. **Bottleneck autoencoder** (`crates/toyautoencoder`) - sequence → single
    compressed representation → MLP reconstruction, MSE head; gradient-checked.
 

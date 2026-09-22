@@ -53,9 +53,9 @@ point the same `--encoder` flag at a Laya checkpoint instead.
 - [x] **Seeded backward and gradient check** (`a8fc68258`, `3c6ea6aa1`): a
       trainable `ModernBert`/`LayaHead` pair (`new_train_on`,
       `prepare_reverse`, `seed_buf`, `backward_seeded`), gradient-checked
-      against finite differences on both backends. This is a **primitive**,
-      not a training loop - see "not yet done" below, this is the single
-      most important line in this file.
+      against finite differences on both backends. A **primitive** at the
+      time, with no optimizer, loss or loop on top of it - M8 below is what
+      closed that.
 - [x] **SDK dispatch** (`b12e1142c`): `brain::DecisionPipeline` gains a
       private `Backend` enum (`Decide` / `Laya`), routed by a directory-shape
       sniff (`rl_agent_config.json` + `encoder/config.json` with
@@ -115,8 +115,8 @@ point the same `--encoder` flag at a Laya checkpoint instead.
 ### Measured numbers (M7, `49c56c87a`)
 
 `decide`/MiniLM trained this session at reduced step counts for time budget;
-Laya is zero-shot throughout (no training loop exists - see below). Same data
-both arms.
+Laya is zero-shot throughout - at M7 no training loop existed for it yet
+(M8 below). Same data both arms.
 
 | sample | decide/MiniLM | Laya (zero-shot) | chance |
 | --- | --- | --- | --- |
@@ -139,16 +139,153 @@ uncalibrated for synthetic B2B SaaS sales dialogue, far from its training
 distribution), not a code bug: the option-logit-derived `probability` moved
 normally across conversations.
 
+- [x] **The training loop (M8).** The single most important line in this
+      file's "not yet done" column for six milestones. The LOOP is built and
+      gated; its real-weight quality gate is still red (see the measured
+      numbers below, which lead with that).
+      `DecisionPipeline::train_choices`/`save_head` work on the Laya arm and
+      `Stages::supports_training` is true for it, so `triage`/`intents` train
+      against a Laya checkpoint exactly the way they already do against
+      MiniLM - they ask the pipeline rather than sniffing the directory, so
+      neither sample needed a code change to gain it.
+
+      **The objective is transcribed, not invented.** `rl_common.py` names
+      the reward (`proper_reward`) but not the update; the update was found
+      in the only PUBLIC Laya training loop, the DDP fine-tuning script
+      embedded in the project's own Kaggle notebook
+      (`laya_finetune_typed_decisions_2xT4_kaggle.ipynb`,
+      github.com/NandhaKishorM/laya), cross-read against the model card's
+      prose. Two new leaf modules hold it, below both decision model crates:
+
+      * `rlcd::proper` - `proper_reward` verbatim (log score + `w_sph` *
+        spherical, minus a ranked-probability term on ordinal questions, with
+        the `-9.21` log floor). It returns a REWARD and deliberately no
+        gradient, because the reference never differentiates it. Gated
+        against golden values produced by RUNNING the real Python under
+        torch 2.13 on this box (agreement to 2e-5 on six cases spanning all
+        three question types and both hard and soft targets), plus
+        strict-propriety and ordinal-ordering property tests.
+      * `rlcd::reinforce` - the update: `G` zero-mean-projected Gaussian
+        logit perturbations, scored with NO gradient, standardized by a group
+        mean and an unbiased std into a GRPO-style advantage, then
+        `-mean(adv * log p(sample | logits))` under the exploration density,
+        plus a soft cross-entropy term. `explore`/`policy_loss` split on
+        exactly the boundary the reference's own `torch.no_grad()` draws,
+        which is what makes the differentiable half finite-difference
+        checkable at all.
+
+      **What the public record does NOT pin down is recorded rather than
+      smoothed over.** `RlcdObjective::default` takes the published
+      fine-tuning loop's settings (`G=4`, sigma 0.4 -> 0.1, `w_sph=0.75`,
+      `ce_weight=1.0`) because that loop exists in source; the model card's
+      prose describes the ORIGINAL pretraining run differently (`G=8`, sigma
+      1.0 -> 0.3, `w_sph=0.5`, "pure policy gradient (zero supervised
+      cross-entropy loss)") and that script was never published, so it is
+      `RlcdObjective::pretrain` instead of the default. `rl_train.py` and
+      `evaluate.py` (which fitted `temperature`/`temperature_by_options`) are
+      both absent from every public source.
+
+      **The head learning rate is the one number NOT taken from the
+      reference**, and it says so: the published loop's `1e-4` is for an
+      effective batch of 64 over thousands of updates, while
+      `train_choices`'s contract is one example per step over hundreds. The
+      SDK uses `3e-4` on a cosine schedule to a `1e-6` floor (the published
+      schedule SHAPE, no warmup). Sigma anneals 0.4 -> 0.1 across the run as
+      published.
+
+      **`crates/modernbert` gained the composition it was missing**:
+      `modernbert::LayaDecision` (trunk + head + tokenizer as one model, with
+      `score`/`accumulate`/`adamw_scaled`/`train_step_with`/`save_head`), the
+      direct counterpart of `decide::decide::Decide`. Before it, the ONLY
+      assembly of a Laya model lived in the SDK, so this crate could not
+      train, evaluate or test one without the SDK on top of it. The SDK's
+      `LayaBackend` now holds one of these plus the serving calibration, and
+      owns nothing else about the architecture. `ModernBert` gained
+      `adamw_step_scaled` to match `LayaHead`'s (M6).
+
+      **Trunk training is a construction mode, not a runtime flag**
+      (`Training::{Off, HeadOnly, HeadAndTrunk}`), and that is a memory
+      decision before a tuning one: a `Role::Trainable` ModernBERT-large
+      trunk carries a gradient and two AdamW moments for each of its 395M
+      parameters, ~6.3 GB before any activation. `HeadOnly` is what the SDK
+      loads - the trunk stays `Role::Frozen` and the head's backward writes
+      its hidden-state gradient into a small scratch sink instead of the
+      trunk's seed buffer, so the head's reverse pass is identical in both
+      modes and only its consumer differs.
+
+      **The act/escalate head is deliberately NOT trained.** Its gradient
+      seed is zero on every step, so it comes back exactly as the checkpoint
+      shipped it. No public Laya source defines its objective: the published
+      loop's only act-head term is a `0.0 * act.sum()` no-op that exists to
+      give DDP a gradient path, and the cost matrix behind `act_costs`/
+      `cost_wrong_act` appears in prose only.
+
+### Measured numbers (M8)
+
+- **THE REAL-WEIGHT GATE IS CURRENTLY RED, and that is stated rather than
+  worked around.** `real_laya_checkpoint_head_training_improves_held_out_
+  accuracy` (SDK, slow lane, skip-if-absent) trains the real 843 MB
+  checkpoint head-only on a deliberately ARBITRARY mapping - four everyday
+  topics (finance / cooking / sport / weather) onto four meaningless option
+  names (`alpha`/`beta`/`gamma`/`delta`), 16 training sentences, 8 held-out
+  sentences that share only their TOPIC with the training ones, scored in
+  the canonical option order while training shuffles a sampled subset every
+  step. A pretrained decision model cannot guess that mapping, so zero-shot
+  sits near chance and there is real headroom; getting the held-out ones
+  right requires generalizing rather than memorizing.
+
+  The only run completed so far was at `LAYA_HEAD_LR = 3e-4`, and it FAILED
+  the gate: **training loss fell 1.4319 -> 1.1411 over 120 steps, held-out
+  accuracy stayed at 0.375** (chance 0.250, 8 held-out examples, 1916 s on
+  this box's integrated GPU). The loop is learning and far too slowly to
+  finish inside the step budget a caller of `train_choices` actually passes.
+  `LAYA_HEAD_LR` was therefore raised to `3e-3`, DERIVED rather than
+  measured: AdamW's step is normalized, so a run moves roughly `lr * steps`
+  (halved by the cosine schedule), and matching the published run's own
+  budget (`0.5 * 1e-4 * 7300 = 0.37`) at 200 steps gives
+  `0.5 * 3e-3 * 200 = 0.30`. **That rerun had not completed when this was
+  written** (~50 min per run here), so **"Laya training improves a real
+  checkpoint on held-out data" is NOT a claim this milestone makes yet.**
+  Everything below IS measured.
+
+- **Tiny random model, checkpoint-free** (`crates/modernbert/tests/
+  train_convergence.rs`, 4 layers, `d_model` 64, trunk+head, 200 steps, 8
+  arbitrary examples over 4 options): **loss 1.1165 -> 0.0000, accuracy
+  0.250 -> 1.000** against a chance of 0.250.
+- **A saved head reloads and reproduces the same logits** to 1e-4 on both
+  the tiny model and the real checkpoint, into a model whose head was seeded
+  differently - so what comes back came from the file.
+- **The RLCD objective optimizes what it claims to**, checkpoint-free:
+  descending it with NO cross-entropy help drives a bare score vector to
+  within L1 0.10 of a strictly-proper optimum it is only ever shown sampled
+  rewards of (`rlcd::reinforce`'s own unit test).
+
+### A measured architectural fact, recorded because it looks like a bug
+
+A RANDOM ModernBERT trunk cannot be frozen and still learn this task, and
+the reason is structural rather than a matter of learning rate: every option
+marker is the SAME `[MASK]` token, ModernBERT has no learned position table
+(position reaches the model only through RoPE, inside attention), and at
+random init attention is near-uniform - so all `k` markers arrive at the
+head as nearly the same vector and no head can tell the options apart.
+Measured at `d_model` 64: a frozen random trunk returns the four option
+logits as `[0.030221, 0.030220, 0.030218, 0.030210]` and 1200 steps move
+accuracy from 2/8 to 3/8, while unfreezing the trunk reaches 8/8 within 100.
+This is also why `Training::HeadOnly` is nevertheless right for the REAL
+checkpoint, whose trunk already separates them.
+
+Separately, a tiny random model trained with SHUFFLED option orders settles
+at exactly `ln 4` - a perfectly uniform report, which IS the optimal answer
+for a model that cannot read option text. That is a capability limit of a
+64-wide 4-layer model on eight examples, not a wiring fault: the permuted
+packing itself is now gated against the real Python reference
+(`build_sequence`'s `option_order` path, previously uncovered - three new
+cases covering a permutation, the same permutation on the option-shrinking
+path, and the identity permutation, which must be byte-identical to passing
+none).
+
 ## Not yet done
 
-- [ ] **No training loop.** M5 shipped a gradient-checked, trainable backward
-      *primitive* through the full head and trunk - not a reimplementation of
-      Laya's own RLCD/REINFORCE training procedure, and no optimizer, loss,
-      or training-loop wiring sits on top of that primitive. A
-      Laya-pointed `triage`/`intents`/`salesagent` run today gets a clean
-      `LAYA_TRAINING_NOT_IMPLEMENTED` error from `.train()`/`train_choices`,
-      not a panic and not a silent no-op - callers must check
-      `supports_training()` first.
 - [ ] **English root checkpoint only.** The multilingual Laya variant is a
       genuinely different backbone (mmBERT-base, not ModernBERT-large), not a
       config variant of what shipped here. The typed-decisions checkpoint is
@@ -176,14 +313,24 @@ normally across conversations.
       bug caught while fixing the first), MiniLM fetches its 4 files (87
       MiB) verbatim with no tensor rewrite (`load_decide` needs the raw HF
       files, so `decide` joined `PASSTHROUGH_TRANSFORMERS_FAMILIES`).
-- [ ] **The act/escalate head's class-order semantics are unconfirmed.**
-      Only the head's *math* was parity-tested against the real checkpoint
-      (M3/M5) - which index means "escalate" vs "continue" was never
-      independently checked against the real `rl_common.py`. `RouteVerdict`
-      deliberately exposes `act_index`/`act_probabilities` neutrally rather
-      than naming a (possibly wrong) `ActDecision::Escalate` variant. A
-      caller that wants to print "escalate" instead of "class 1" must
-      confirm the order against the reference first.
+- [ ] **The act/escalate head is UNTRAINED here, and its class order is now
+      documented but still unenforced.** M8's research settled the order:
+      index 0 is "act" and index 1 is "escalate". The evidence is three-way -
+      the project's own write-up states the head outputs
+      `[P(act), P(escalate)]`, its architecture diagram labels the same, and
+      the serving reference on this box reads slot 0 for the field it names
+      `act_probability` (`rl_agent_api.py`: `ext = {"act_probability":
+      float(act[r, 0])}`). The published cost matrix behind the config is
+      +1.0 for a correct action, -3.0 for a wrong one (`cost_wrong_act`) and
+      -0.5 flat for escalating (`act_costs["escalate"]`), which breaks even
+      at `P(correct) > 0.625`. What is still open: `RouteVerdict` continues
+      to expose `act_index`/`act_probabilities` neutrally rather than naming
+      an `ActDecision::Escalate` variant, because nothing in this workspace
+      ENFORCES the order, and a multi-key `act_costs` would have an index
+      order resting entirely on Python dict-insertion order with no public
+      code to verify it against. Training the head is separately out of
+      scope - see M8 above for why (no public source defines its
+      objective).
 - [ ] **`samples/decision/salesagent` reaches Laya through a different path
       than `triage`/`intents`.** `salesagent` is built on `ConversionPipeline`
       (`crates/sdk/src/conversion.rs`), which is decide-only by construction
@@ -196,8 +343,10 @@ normally across conversations.
       `DecisionPipeline::route` for a zero-shot score, through the same
       architecture-dispatch seam, not directory sniffing in the sample. A
       real Laya equivalent of `ConversionPipeline` (a `repr_snapshot`
-      analog for the router's signals, a real training loop) is unbuilt and
-      not scoped here.
+      analog for the router's signals) is unbuilt and not scoped here.
+      M8 closed the "real training loop" half of that sentence, but NOT the
+      `ConversionPipeline` half: `salesagent` still reaches Laya only
+      through `DecisionPipeline::route`, zero-shot.
 - [ ] **The fused `flash_attn_bidir_spans` kernel's windowing was
       deliberately deferred** (M1). Every local-attention layer therefore
       always uses the slower materialized `chunked_bidir_fwd_win` rung,
