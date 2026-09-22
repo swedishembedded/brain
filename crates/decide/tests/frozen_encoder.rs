@@ -131,3 +131,42 @@ fn kept_features_are_refused_on_a_trainable_encoder() {
     m.set_encoder_frozen(false);
     assert!(m.accumulate_kept(&kept, |sc| (0.0, vec![0.0; sc.len()])).is_err());
 }
+
+/// A head-only checkpoint is refused exactly when the ENCODER MOVED, which is
+/// not the same question as which way the freeze switch is pointing now.
+///
+/// Both directions have bitten. Refusing on the switch alone refused a model
+/// that had never been trained at all - an inference build cannot move its
+/// encoder, so its head is a perfectly reproducible artifact - and it would
+/// equally have ACCEPTED a run that fine-tuned the encoder and then froze it,
+/// which is the case the refusal exists for.
+#[test]
+fn a_head_only_save_is_refused_only_once_the_encoder_has_actually_moved() {
+    let Some(mut m) = tiny_model(false) else { return };
+    let path = std::env::temp_dir().join(format!("decide-head-{}.safetensors", std::process::id()));
+    let path = path.to_str().expect("utf-8 temp path");
+
+    assert!(!m.encoder_was_trained());
+    m.save_head(path).expect("an untrained encoder is still the published one");
+
+    // Freezing the encoder keeps that true however much the HEAD learns.
+    let ce = decide::loss::LossConfig::cross_entropy();
+    let q = question();
+    m.set_encoder_frozen(true);
+    m.train_step(&decide::Example { state: "hp 40 ammo 2", question: &q, gold: 0 }, &ce, 2e-5, 1e-3)
+        .expect("train step");
+    assert!(!m.encoder_was_trained());
+    m.save_head(path).expect("a frozen encoder is still the published one");
+
+    // One step with it live, and the file can no longer reproduce the model -
+    // freezing again afterwards does not launder that.
+    m.set_encoder_frozen(false);
+    m.train_step(&decide::Example { state: "hp 40 ammo 2", question: &q, gold: 0 }, &ce, 2e-5, 1e-3)
+        .expect("train step");
+    assert!(m.encoder_was_trained());
+    assert!(m.save_head(path).is_err());
+    m.set_encoder_frozen(true);
+    assert!(m.save_head(path).is_err(), "freezing after the fact does not restore the encoder");
+
+    let _ = std::fs::remove_file(path);
+}

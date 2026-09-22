@@ -80,6 +80,14 @@ pub struct Decide {
     head_opt: Option<optim::Optim>,
     step: u32,
     frozen_encoder: bool,
+    /// Whether an optimizer step has ever been applied to the ENCODER.
+    ///
+    /// What [`Decide::save_head`] refuses on, and it has to be this rather
+    /// than the flag above: a run that fine-tunes the encoder and then freezes
+    /// it still has an encoder that no longer matches the published one, and a
+    /// model that was never trained at all has one that does - and the flag
+    /// alone reads both backwards.
+    encoder_moved: bool,
     /// How many leading spans of the last call were state windows - what
     /// `state_embedding` has to pool over.
     last_windows: usize,
@@ -222,6 +230,7 @@ impl Decide {
             head_opt: train.then(|| ids.optimizer()),
             step: 0,
             frozen_encoder: false,
+            encoder_moved: false,
             last_windows: 1,
             last_rows: 0,
             kept: None,
@@ -644,6 +653,7 @@ impl Decide {
         if let Some(o) = &self.enc_opt {
             if !self.frozen_encoder {
                 self.enc.adamw_step_scaled(o, t, enc_lr, 0.01, Some(1.0), scale);
+                self.encoder_moved = true;
             }
         }
         if let Some(o) = &self.head_opt {
@@ -700,7 +710,7 @@ impl Decide {
         // would select a policy on its measured score, write this, and the
         // next run would inherit a different policy under the same name and
         // go on comparing it against that score.
-        if !self.frozen_encoder {
+        if self.encoder_moved {
             return Err(format!(
                 "cannot write {path}: the encoder was trained, and this format \
                  carries only the head. Loading it back would attach the head to \
@@ -765,6 +775,13 @@ impl Decide {
 
     /// Whether the encoder's weights are held still. A caller that wants to
     /// keep the encoder's output and reuse it has to know.
+    /// Whether an optimizer step has ever moved the encoder away from the
+    /// checkpoint it was imported from - and so whether a head-only save can
+    /// still reproduce this model.
+    pub fn encoder_was_trained(&self) -> bool {
+        self.encoder_moved
+    }
+
     pub fn encoder_is_frozen(&self) -> bool {
         self.frozen_encoder
     }
