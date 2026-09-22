@@ -103,6 +103,15 @@ pub struct Path {
 /// Something out of sight, placed from where the player is standing now.
 #[derive(Clone, Debug)]
 pub struct Recalled {
+    /// The map-object id this memory is of.
+    ///
+    /// Not read when the memory is rendered - the observation names things by
+    /// WHAT they are and where, never by id, because an id is a handle into
+    /// one level's object table and a policy given one would be memorising a
+    /// map. It is carried so that a caller resolving a recalled thing back to
+    /// the live object (asking the engine for a route to it) has the handle
+    /// to do it with.
+    #[allow(dead_code)]
     pub id: i64,
     pub kind: String,
     pub class: Class,
@@ -110,8 +119,17 @@ pub struct Recalled {
     /// same convention the engine uses for what IS in sight.
     pub bearing: i32,
     pub distance: i32,
+    /// What it had when last seen. The comparison against the best it was
+    /// ever seen with is made inside the memory (that is what "the one you
+    /// have been hitting" is derived from), so the raw figure does not reach
+    /// the observation.
+    #[allow(dead_code)]
     pub health: Option<i32>,
-    /// Decisions since it was last seen.
+    /// Decisions since it was last seen. Staleness is applied inside the
+    /// memory - a monster is forgotten after ten decisions out of sight -
+    /// rather than reported, because "I last saw it nine decisions ago" is
+    /// not something a player knows as a number.
+    #[allow(dead_code)]
     pub ago: u32,
     /// The way back to it, when someone has asked the engine. `None` when
     /// nobody asked, or when there is no walkable way there.

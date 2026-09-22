@@ -236,6 +236,18 @@ impl<C> Archive<C> {
         Admission::Fresh
     }
 
+    /// Drop a cell, returning its host slot to the pool.
+    ///
+    /// For the case where the archive and the host disagree: the archive has
+    /// filed a cell the host then refused to hold state for, so returning to
+    /// it would restore some OTHER cell's state and explore the wrong place
+    /// while reporting the right one. Dropping it is the honest repair.
+    pub fn remove(&mut self, niche: &Niche) -> Option<Elite<C>> {
+        let gone = self.cells.remove(niche)?;
+        self.free.push(gone.slot);
+        Some(gone)
+    }
+
     /// The cell with the lowest selection weight - what an eviction takes.
     fn weakest(&self) -> Option<Niche> {
         let top = self.top_reached();

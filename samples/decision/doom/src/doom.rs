@@ -387,23 +387,13 @@ impl Doom {
             .unwrap_or_default())
     }
 
-    /// Hold the state the level is in right now, to come back to.
+    /// Hold the world in a numbered slot.
     ///
     /// Not a replay of the actions that led here: the observation reads which
     /// lines the RENDERER has drawn, and rendering is not part of the
     /// deterministic simulation, so a replayed prefix arrives at the same
     /// player with a different idea of what has been seen. The savegame
     /// format archives line flags, so this does not.
-    pub fn snapshot(&mut self) -> std::io::Result<String> {
-        self.snapshot_at(0)
-    }
-
-    /// Put back what [`Doom::snapshot`] held.
-    pub fn restore(&mut self) -> std::io::Result<String> {
-        self.restore_from(0)
-    }
-
-    /// Hold the world in a numbered slot.
     ///
     /// A counterfactual needs one slot - go back to THIS decision. A search
     /// that returns to promising places needs thousands, because the whole

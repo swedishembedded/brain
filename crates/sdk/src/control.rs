@@ -248,17 +248,42 @@ pub trait Env {
         0
     }
 
-    /// A coarse name for WHERE the run is, for an archive to key on.
+    /// A coarse coordinate for WHERE the run is, for an archive to key on.
     ///
     /// The one piece of judgement a search like this needs, and it wants to
-    /// be as free of the game as possible: two states with the same name are
-    /// treated as the same place and only one of them is kept. Position
-    /// rounded to a grid plus what the player is CARRYING is enough, and the
-    /// carrying half is what matters - picking up a key makes every cell
-    /// reachable with it new, so the search files them and goes on from
+    /// be as free of the game as possible: two states with the same
+    /// coordinate are treated as the same place and only one of them is kept.
+    /// Position rounded to a grid plus what the player is CARRYING is enough,
+    /// and the carrying half is what matters - picking up a key makes every
+    /// cell reachable with it new, so the search files them and goes on from
     /// there. Nothing has to tell it that keys open doors.
-    fn cell(&self) -> Option<String> {
+    ///
+    /// A [`search::Niche`] rather than a string, because that is what the
+    /// archive this feeds is keyed by. It used to be a `String`, which meant
+    /// an environment built a coordinate, printed it, and the archive treated
+    /// the printed form as opaque - so per-axis coverage ("is the search still
+    /// finding new KINDS of situation, or only new squares of floor?") could
+    /// not be asked at all without parsing the name back apart.
+    fn cell(&self) -> Option<search::Niche> {
         None
+    }
+
+    /// What reaching the current state COST, in whatever unit this environment
+    /// is finally judged on minimising - elapsed game time for a speedrun,
+    /// wall clock, energy, money.
+    ///
+    /// Distinct from the score, and the archive keeps both: the score decides
+    /// which solutions are worth keeping, this decides between two that
+    /// achieved the same thing. That separation is what lets a search produce
+    /// a FAST solution without a time term in the reward, which is worth
+    /// avoiding - a penalty that grows while an episode runs makes ending the
+    /// episode the cheapest way to stop it growing.
+    ///
+    /// Zero by default, which makes every candidate an equal-cost tie and
+    /// reduces the archive to pure quality-diversity. That is the right
+    /// behaviour for an environment with no meaningful notion of cost.
+    fn cost(&self) -> u64 {
+        0
     }
 }
 
@@ -678,9 +703,6 @@ pub struct ValueFit {
 /// carries no opinion about which action was right - only a number per
 /// candidate, measured by playing the run out and scoring it.
 struct Probe {
-    /// What kind of situation it came from, for the breakdown. See
-    /// [`Env::label`].
-    label: Option<String>,
     /// The objective this decision was taken under, for the same reason a
     /// [`Demo`] carries one: a probe is replayed, and replaying it against
     /// whatever objective the environment holds later asks a different
@@ -1006,7 +1028,7 @@ pub struct ControlPipeline<E: Env> {
     /// back up - so archives for different levels coexist.
     explored: std::collections::HashMap<
         String,
-        std::collections::HashMap<String, (usize, f32, u32)>,
+        std::collections::HashMap<search::Niche, (usize, f32, u32)>,
     >,
     /// The next engine slot nobody is using. Shared across worlds: the slots
     /// are one pool however many archives point into it.
@@ -2148,7 +2170,6 @@ impl<E: Env> ControlPipeline<E> {
                                 belief.fill(flat);
                             }
                             probes.push(Probe {
-                                label: self.env.label(),
                                 objective: self.env.objective(),
                                 observation: obs.clone(),
                                 options: options.clone(),
@@ -2743,7 +2764,7 @@ impl<E: Env> ControlPipeline<E> {
         }
         let mut best: Option<(f32, Vec<Demo>)> = None;
         // cell -> the best trail that reached it this round
-        let mut opened: std::collections::HashMap<String, (f32, Vec<Demo>)> =
+        let mut opened: std::collections::HashMap<search::Niche, (f32, Vec<Demo>)> =
             std::collections::HashMap::new();
         let (mut steps, mut restores) = (0usize, 0usize);
         // Cells whose slot was taken to hold a better one. See below.
@@ -2856,7 +2877,7 @@ impl<E: Env> ControlPipeline<E> {
                     .values()
                     .map(|(_, v, _)| *v)
                     .fold(f32::MIN_POSITIVE, f32::max) as f64;
-                let weights: Vec<(&String, f64)> = seen
+                let weights: Vec<(&search::Niche, f64)> = seen
                     .iter()
                     .map(|(c, (_, v, n))| {
                         let worth = 1.0 + (*v as f64 / top).clamp(0.0, 1.0);

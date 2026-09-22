@@ -406,6 +406,13 @@ impl Burning {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Event {
+    /// When it happened. Part of the wire schema and therefore required:
+    /// under `deny_unknown_fields` a field that is dropped here makes every
+    /// reply from the engine fail to parse. Nothing reads it - an event is
+    /// consumed in the decision it arrived on, so "when" is always "just
+    /// now" - and it is kept rather than skipped because the schema is what
+    /// versions the two sides together.
+    #[allow(dead_code)]
     pub tic: i64,
     #[serde(rename = "type")]
     pub kind: String,

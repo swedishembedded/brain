@@ -145,6 +145,16 @@ pub use conversion::{
     RoutingDecision, SalesConversation, SalesMessage, Verdict,
 };
 
+/// `brain::search` - the discovery runtime, re-exported unchanged.
+///
+/// A sample or a downstream consumer may depend only on this facade, so the
+/// search half of `SEARCH -> VERIFY -> SELECT -> COMPRESS` has to be reachable
+/// through it. Re-exported rather than wrapped: `brain-search` is a leaf that
+/// knows nothing of models or devices, and anything this file added around it
+/// would be a second spelling of an archive.
+#[cfg(feature = "decision")]
+pub use search;
+
 /// `brain::RlcdPipeline` - training a decision model directly against exact
 /// oracle posteriors (a soft target distribution, not a single gold index),
 /// and auditing it on calibration AND cost-sensitive decision regret. Its

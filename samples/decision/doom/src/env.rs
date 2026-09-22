@@ -53,6 +53,7 @@
 use std::sync::{Arc, Mutex};
 
 use brain::decision::Rng;
+use brain::search::Niche;
 use brain::Env;
 
 use crate::action::{self, Option_, Tag};
@@ -102,16 +103,36 @@ pub enum Mission {
     Speedrun,
     /// Come out alive. Damage hurts far more than anything else pays.
     Survive,
+    /// DOOM speedrunning's Max category at Ultra-Violence: every monster,
+    /// every secret, then the exit - and in the fewest tics that admits.
+    ///
+    /// The one mission whose bar is not [`report::Bar::Standard`], because it
+    /// is not a weighting of the same things: items do not count, health does
+    /// not count, and lasting does not count. Either the level was taken
+    /// completely apart and left, or the run failed the category.
+    UvMax,
 }
 
 impl Mission {
-    pub const ALL: [Mission; 3] = [Mission::Clear, Mission::Speedrun, Mission::Survive];
+    pub const ALL: [Mission; 4] =
+        [Mission::Clear, Mission::Speedrun, Mission::Survive, Mission::UvMax];
 
     pub fn name(self) -> &'static str {
         match self {
             Mission::Clear => "clear",
             Mission::Speedrun => "speedrun",
             Mission::Survive => "survive",
+            Mission::UvMax => "uvmax",
+        }
+    }
+
+    /// Which definition of "how far did this run get" the mission is scored
+    /// on. Every mission but UV-Max is a weighting of the same terms and
+    /// shares one bar; UV-Max is a different question and has its own.
+    pub fn bar(self) -> crate::report::Bar {
+        match self {
+            Mission::UvMax => crate::report::Bar::UvMax,
+            _ => crate::report::Bar::Standard,
         }
     }
 
@@ -133,6 +154,11 @@ impl Mission {
             Mission::Survive => {
                 "Your orders: stay alive. Avoid damage, take cover and heal before you \
                  take risks. Which of these is the best next move?"
+            }
+            Mission::UvMax => {
+                "Your orders: kill every single enemy on this level and find every \
+                 secret, then leave by the exit, as fast as you can. Nothing counts \
+                 unless all of it is done. Which of these is the best next move?"
             }
         }
     }
@@ -192,6 +218,22 @@ impl Mission {
                 exit: 5.0,
                 explore: 0.05,
                 approach: 0.01,
+            },
+            // Only reachable under `--reward shaped`, which UV-Max is not
+            // meant to be run with: the whole point of the category is that
+            // the run is kept on `Bar::UvMax`, and `--reward gauge` is what
+            // makes the return equal it. These weights are the shaped
+            // approximation for a caller who asks for the combination
+            // anyway - kills dominant, items worth nothing because the
+            // category does not count them, exploration high because every
+            // secret has to be walked into to be found.
+            Mission::UvMax => Weights {
+                kill: 2.0,
+                item: 0.0,
+                hurt: 0.02,
+                exit: 10.0,
+                explore: 0.15,
+                approach: 0.02,
             },
         }
     }
@@ -678,10 +720,6 @@ impl DoomEnv {
     /// per episode from this list. Overrides `set_maps`.
     pub fn set_scenarios(&mut self, names: Vec<String>) {
         self.scenarios = names;
-    }
-
-    pub fn scenarios(&self) -> &[String] {
-        &self.scenarios
     }
 
     /// Turn the reverse curriculum on. See [`Curriculum`].
@@ -1214,7 +1252,26 @@ impl DoomEnv {
     /// still readable when it did not finish. See [`crate::report::Score`].
     pub fn score(&self, allowed: u32) -> crate::report::Score {
         self.progress
-            .score(self.state.outcome == "exited", allowed)
+            .score(self.state.outcome == "exited", allowed, self.mission.bar())
+    }
+
+    /// The level's own kill and secret counters: `(kills, total, secrets,
+    /// total)`.
+    ///
+    /// What a UV-Max is reported against, and read from the engine's state
+    /// rather than recomputed here - DOOM's intermission screen and this have
+    /// to agree or the category is being scored against something other than
+    /// the game's own definition of it.
+    pub fn level_counts(&self) -> (u32, u32, u32, u32) {
+        let l = &self.state.level;
+        (l.kills, l.total_kills, l.secrets, l.total_secrets)
+    }
+
+    /// The difficulty the episode is being played at. 3 is Ultra-Violence,
+    /// which is the `UV` in UV-Max - a time set at any other skill is not in
+    /// the category at all.
+    pub fn skill(&self) -> u32 {
+        self.cfg.skill
     }
 
     /// What the route makes of where the player is standing, asked only when
@@ -1674,6 +1731,11 @@ impl DoomEnv {
             Mission::Clear => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
             Mission::Speedrun => &[Tag::Exit, Tag::Circle, Tag::Attack, Tag::Grab],
             Mission::Survive => &[Tag::Grab, Tag::Circle, Tag::Attack, Tag::Exit],
+            // Fighting first, like `clear`, because the category is failed by
+            // one surviving monster and the exit is the last thing a Max run
+            // touches - stepping on it early ends the level with the work
+            // undone.
+            Mission::UvMax => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
         };
 
         for tag in order {
@@ -1791,6 +1853,66 @@ impl DoomEnv {
             }
         }
         best.map(|(_, i)| i).or_else(|| by(Tag::Use)).or(Some(0))
+    }
+}
+
+/// Side of an archive cell, in map units.
+///
+/// 128 is four of the engine's own route cells and about a corridor and a
+/// half, so shuffling on the spot is the same place and walking into the next
+/// room is not.
+const CELL_UNITS: i32 = 128;
+
+/// DOOM's six keys, in the engine's own `cards[]` order (`api_agent.c`), so a
+/// set of them is one integer rather than a sorted string join.
+///
+/// Order is the contract: a mask is compared against masks in an archive that
+/// outlives the process, so a key moving between bits would silently re-file
+/// every cell that was ever reached carrying one.
+const KEYS: [&str; 6] = [
+    "blue keycard",
+    "yellow keycard",
+    "red keycard",
+    "blue skull key",
+    "yellow skull key",
+    "red skull key",
+];
+
+/// What the player is carrying, as a bitmask over [`KEYS`].
+///
+/// An unrecognised key name is ignored rather than guessed at. That is the
+/// safe direction: it merges two states that should have been distinct, which
+/// costs the search some resolution, where inventing a bit would file one
+/// state under a coordinate nothing else ever produces.
+fn key_mask(held: &[String]) -> i32 {
+    let mut mask = 0;
+    for k in held {
+        if let Some(bit) = KEYS.iter().position(|name| name.eq_ignore_ascii_case(k)) {
+            mask |= 1 << bit;
+        }
+    }
+    mask
+}
+
+/// How many monsters are left, bucketed fine at the end and coarse at the
+/// start.
+///
+/// A uniform bucketing cannot serve UV-Max. In tenths, 27 of 29 kills and 28
+/// of 29 are the same cell - and those two states are exactly where the
+/// category is won or lost, because the last few monsters are the ones that
+/// are hard to find and hard to reach. At the other end, an axis with a
+/// distinct value for each of E1M6's 177 monsters would multiply the archive
+/// by 177 for ground the search covers anyway on its way through.
+///
+/// So: exact while the count is small enough to matter, in eights above that.
+fn kills_left_bucket(killed: u32, total: u32) -> i32 {
+    /// Below this many monsters left, every count is its own cell.
+    const ENDGAME: u32 = 8;
+    let left = total.saturating_sub(killed);
+    if left <= ENDGAME {
+        left as i32
+    } else {
+        (ENDGAME + 1 + (left - ENDGAME) / ENDGAME) as i32
     }
 }
 
@@ -1941,32 +2063,52 @@ impl Env for DoomEnv {
     /// E1M6 and a cell per kill would be a cell per kill per square of floor.
     /// Tenths multiply the archive by at most ten and still make progress
     /// somewhere the search can be sent.
-    fn cell(&self) -> Option<String> {
+    fn cell(&self) -> Option<Niche> {
         let p = &self.state.player;
         let (x, y) = (p.x?, p.y?);
-        let mut keys = p.keys.clone();
-        keys.sort();
         let l = &self.state.level;
-        let tenth = |got: u32, all: u32| {
-            // `== 0`, not `<= 0`: these counters are unsigned, so the second
-            // is a comparison that can only ever be true one way, and clippy
-            // denies it.
-            if all == 0 {
-                0
-            } else {
-                (got * 10 / all).clamp(0, 10)
+        let mut parts = vec![
+            self.cfg.map as i32,
+            x.div_euclid(CELL_UNITS),
+            y.div_euclid(CELL_UNITS),
+            key_mask(&p.keys),
+        ];
+        match self.mission {
+            // UV-Max is decided in the endgame, so that is where the archive
+            // needs its resolution. Items are left out entirely: the category
+            // does not count them, and an axis the goal cannot see multiplies
+            // the archive without ever pointing the search anywhere.
+            Mission::UvMax => {
+                parts.push(kills_left_bucket(l.kills, l.total_kills));
+                parts.push(l.secrets as i32);
             }
-        };
-        Some(format!(
-            "{}:{}:{}:{}:{}{}{}",
-            self.cfg.map,
-            x.div_euclid(128),
-            y.div_euclid(128),
-            keys.join("+"),
-            tenth(l.kills, l.total_kills),
-            tenth(l.items, l.total_items),
-            tenth(l.secrets, l.total_secrets)
-        ))
+            // In tenths, because the counters run to a hundred and seventy-
+            // seven on E1M6 and a cell per kill would be a cell per kill per
+            // square of floor.
+            _ => {
+                let tenth = |got: u32, all: u32| {
+                    // `== 0`, not `<= 0`: these counters are unsigned, so the
+                    // second is a comparison that can only ever be true one
+                    // way, and clippy denies it.
+                    if all == 0 {
+                        0
+                    } else {
+                        (got * 10 / all).clamp(0, 10) as i32
+                    }
+                };
+                parts.push(tenth(l.kills, l.total_kills));
+                parts.push(tenth(l.items, l.total_items));
+                parts.push(tenth(l.secrets, l.total_secrets));
+            }
+        }
+        Some(Niche::new(&parts))
+    }
+
+    /// Elapsed game time, in tics - the unit a DOOM speedrun is scored in, at
+    /// 35 to the second. What the archive breaks a tie on when two
+    /// trajectories reached the same niche having achieved the same thing.
+    fn cost(&self) -> u64 {
+        self.state.level.tic.max(0) as u64
     }
 
     fn resume(&mut self) -> Option<String> {

@@ -101,6 +101,61 @@ const KILLS_WORTH: f32 = 0.5;
 const ITEMS_WORTH: f32 = 0.25;
 const SECRETS_WORTH: f32 = 0.25;
 
+/// Which definition of "how far did this run get" a [`Score`] is read on.
+///
+/// Two genuinely different tasks, not two tunings of one. The standard bar
+/// asks how far along a level a run got and treats finishing as the thing;
+/// UV-Max asks whether it took the level completely apart on the way out, and
+/// scores nothing else at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bar {
+    /// Route progress, health, lasting, and the haul - the scale every
+    /// mission before UV-Max is kept on. See [`Score::value`].
+    #[default]
+    Standard,
+    /// DOOM speedrunning's Max category: **every** monster and **every**
+    /// secret, then the exit. Items are not in it, which is not an oversight
+    /// on this side - the category does not require them, and scoring them
+    /// would rank a run that swept up forty health bonuses above one that
+    /// found the last secret.
+    UvMax,
+}
+
+/// What kills are worth on the UV-Max bar, against secrets and against
+/// getting out.
+///
+/// Kills lead because they are the bulk of the work and the thing that kills
+/// back; secrets are next because a level hides two or three of them and
+/// missing one fails the category exactly as surely as missing a monster; the
+/// route term is small and exists only so that a run which has not yet killed
+/// anything can still tell "walked halfway across the level" from "stood
+/// still". They sum with the exit to exactly 2.0, so
+///
+/// ```text
+/// value() == 2.0   <=>   100% kills, 100% secrets, level exited
+/// ```
+///
+/// which is the whole category expressed as one comparison, and is what makes
+/// "is this run a UV-Max" a question the search can answer without knowing
+/// anything about DOOM.
+///
+/// **The exit is worth LESS than clearing the level**, which is the opposite
+/// of the standard bar and is the one weight here that is load-bearing rather
+/// than a judgement. Stepping on an exit ENDS a DOOM level: a run that leaves
+/// early has not taken a shortcut, it has destroyed its own episode with the
+/// work undone. A search whose score ranks "walked out having done nothing"
+/// above "killed everything but has not left yet" is a search that will keep
+/// finding the first and discarding the second, and the second is one step
+/// from a Max while the first is worthless to the category. Measured against
+/// an earlier weighting (exit 1.0, kills 0.6, secrets 0.3), a full clear that
+/// had not yet exited scored 1.00 against a sprint-to-exit's 1.10 - the wrong
+/// way round, caught by `leaving_outranks_any_amount_of_clearing` before any
+/// campaign was run on it.
+const UVMAX_KILLS: f32 = 0.80;
+const UVMAX_SECRETS: f32 = 0.50;
+const UVMAX_ROUTE: f32 = 0.10;
+const UVMAX_EXIT: f32 = 0.60;
+
 /// What a run took off a level, each as a fraction of what the level held.
 ///
 /// All three are monotone counters, which is what lets them live in a score
@@ -132,6 +187,12 @@ impl Haul {
 /// unless one of them happened to finish.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Score {
+    /// Which definition of "how far did it get" [`Score::value`] applies.
+    /// Carried on the score rather than passed to `value()` so that a score
+    /// cannot be produced under one bar and read under another - which is
+    /// exactly the "trained on one number, kept on another" defect the gauge
+    /// exists to prevent.
+    pub bar: Bar,
     pub finished: bool,
     /// Fraction of the way to a goal worth walking to - the exit, or the key
     /// or switch that opens it. `None` when the route only ever led to
@@ -143,6 +204,12 @@ pub struct Score {
     /// Decisions survived, as a fraction of those allowed.
     pub lasted: f32,
     /// Distinct patches of floor entered.
+    ///
+    /// Not part of any bar - ground covered is not an achievement, because
+    /// the frontier moves every time it is reached - but it is what the
+    /// end-of-episode line reports when a run stalled, and it is read from
+    /// the [`Progress`] this is built from rather than from here.
+    #[allow(dead_code)]
     pub seen: usize,
     /// What the run took off the level: kills, items and secrets, each as a
     /// fraction of what the level held. This is three quarters of what DOOM
@@ -174,6 +241,50 @@ impl Score {
     /// closer to its goal than it did at 120. Under `--reward gauge` that is
     /// a large negative payment for the one decision that found the exit.
     pub fn value(&self) -> f32 {
+        match self.bar {
+            Bar::Standard => self.standard(),
+            Bar::UvMax => self.uvmax(),
+        }
+    }
+
+    /// DOOM's Max category, as one number in `0.0..=2.0`.
+    ///
+    /// Every term is either a monotone counter or a running maximum, so the
+    /// value exists after every decision and never falls - which is what lets
+    /// [`Gauge`] pay each decision the difference and still have the episode's
+    /// undiscounted return come out at exactly the final score.
+    ///
+    /// **There is no time term, deliberately.** A speedrun is scored on
+    /// elapsed time, and the obvious move is to subtract it here - but a
+    /// penalty that grows for as long as the episode runs makes dying the
+    /// cheapest way to stop it growing, and an agent paid this way learns to
+    /// end its own run. Time belongs in the SEARCH instead, where the archive
+    /// keeps, per niche, whichever trajectory reached it in the fewest tics
+    /// (`search::archive`): achievement decides which solutions are kept, time
+    /// decides between equal ones, and the policy inherits the speed by being
+    /// cloned from elites that are already time-minimal rather than by being
+    /// paid for it.
+    fn uvmax(&self) -> f32 {
+        // Getting out means the route was walked to its end, whatever the
+        // last goal happened to be. Without this an exited run can score
+        // below 2.0 because the route was re-targeting when the level ended.
+        let route = if self.finished { 1.0 } else { self.toward.unwrap_or(0.0) };
+        UVMAX_EXIT * f32::from(u8::from(self.finished))
+            + UVMAX_KILLS * self.haul.kills.clamp(0.0, 1.0)
+            + UVMAX_SECRETS * self.haul.secrets.clamp(0.0, 1.0)
+            + UVMAX_ROUTE * route.clamp(0.0, 1.0)
+    }
+
+    /// Whether this run IS a UV-Max: every monster, every secret, and out.
+    ///
+    /// Asked of the counters directly rather than by comparing [`Score::value`]
+    /// against 2.0, because a float equality on a weighted sum is not the
+    /// place to decide whether a campaign has met its goal.
+    pub fn is_uvmax(&self) -> bool {
+        self.finished && self.haul.kills >= 1.0 && self.haul.secrets >= 1.0
+    }
+
+    fn standard(&self) -> f32 {
         // Health is a TIEBREAKER over ground already covered, not a discount
         // on it. Walking most of the way to the exit and then dying does not
         // un-walk it, and failing to finish is already the difference between
@@ -334,8 +445,9 @@ impl Progress {
     ///
     /// `allowed` is the decision budget the episode was given, so that
     /// "lasted" means a fraction rather than a count.
-    pub fn score(&self, finished: bool, allowed: u32) -> Score {
+    pub fn score(&self, finished: bool, allowed: u32, bar: Bar) -> Score {
         Score {
+            bar,
             finished,
             toward: self.had_route.then_some(self.toward_best),
             alive: if self.killed_by.is_some() {
@@ -444,6 +556,157 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
+    /// UV-Max is exactly 2.0 and nothing short of it is. The whole category
+    /// as one comparison, which is what lets the search recognise a solution
+    /// without knowing anything about DOOM.
+    #[test]
+    fn a_uvmax_run_scores_exactly_two() {
+        let done = Score {
+            bar: Bar::UvMax,
+            finished: true,
+            toward: Some(1.0),
+            alive: 0.01,
+            lasted: 1.0,
+            seen: 40,
+            haul: Haul { kills: 1.0, items: 0.0, secrets: 1.0 },
+        };
+        assert!((done.value() - 2.0).abs() < 1e-6, "a UV-Max scored {:.4}", done.value());
+        assert!(done.is_uvmax());
+    }
+
+    /// Missing ONE secret fails the category, and the score has to say so.
+    /// A run that killed everything and walked out is not a Max.
+    #[test]
+    fn missing_a_secret_is_not_a_uvmax() {
+        let nearly = Score {
+            bar: Bar::UvMax,
+            finished: true,
+            toward: Some(1.0),
+            alive: 1.0,
+            lasted: 0.5,
+            seen: 40,
+            haul: Haul { kills: 1.0, items: 1.0, secrets: 2.0 / 3.0 },
+        };
+        assert!(!nearly.is_uvmax());
+        assert!(nearly.value() < 2.0);
+    }
+
+    /// Items are not part of Max, so hoovering them up must not move the
+    /// score at all. Scoring them would rank a run that swept forty health
+    /// bonuses above one that found the last secret.
+    #[test]
+    fn items_do_not_count_toward_uvmax() {
+        let base = Haul { kills: 0.5, items: 0.0, secrets: 0.5 };
+        let hoarder = Haul { items: 1.0, ..base };
+        let of = |haul| Score {
+            bar: Bar::UvMax,
+            finished: false,
+            toward: Some(0.4),
+            alive: 1.0,
+            lasted: 0.3,
+            seen: 10,
+            haul,
+        };
+        assert_eq!(of(base).value(), of(hoarder).value());
+    }
+
+    /// The gauge identity: every term is monotone, so the value can only ever
+    /// rise as an episode runs. If it can fall, a decision is paid a negative
+    /// for something that already happened and the sum stops being the score.
+    #[test]
+    fn the_uvmax_bar_never_falls_as_a_run_continues() {
+        let step = |k: f32, s: f32, t: f32, fin: bool| Score {
+            bar: Bar::UvMax,
+            finished: fin,
+            toward: Some(t),
+            alive: 1.0,
+            lasted: 0.0,
+            seen: 0,
+            haul: Haul { kills: k, items: 0.0, secrets: s },
+        };
+        let run = [
+            step(0.0, 0.0, 0.0, false),
+            step(0.0, 0.0, 0.3, false),
+            step(0.2, 0.0, 0.3, false),
+            step(0.2, 0.5, 0.6, false),
+            step(0.9, 0.5, 0.9, false),
+            step(1.0, 1.0, 0.9, false),
+            step(1.0, 1.0, 1.0, true),
+        ];
+        for pair in run.windows(2) {
+            assert!(
+                pair[1].value() >= pair[0].value() - 1e-6,
+                "the bar fell from {:.4} to {:.4}",
+                pair[0].value(),
+                pair[1].value()
+            );
+        }
+        assert!((run[run.len() - 1].value() - 2.0).abs() < 1e-6);
+    }
+
+    /// An episode starts at zero on this bar, which is the other half of the
+    /// identity: `sum of differences = M(h_T) - M(h_0) = M(h_T)`.
+    #[test]
+    fn the_uvmax_bar_starts_at_zero() {
+        let fresh = Score { bar: Bar::UvMax, ..Score::default() };
+        assert_eq!(fresh.value(), 0.0);
+    }
+
+    /// Killing outranks finding a secret, and both outrank walking about.
+    /// The ordering a runner would give, which is what the weights encode.
+    #[test]
+    fn the_uvmax_bar_ranks_kills_over_secrets_over_ground() {
+        let of = |k: f32, s: f32, t: f32| Score {
+            bar: Bar::UvMax,
+            finished: false,
+            toward: Some(t),
+            alive: 1.0,
+            lasted: 0.5,
+            seen: 5,
+            haul: Haul { kills: k, items: 0.0, secrets: s },
+        };
+        assert!(of(1.0, 0.0, 0.0).value() > of(0.0, 1.0, 0.0).value());
+        assert!(of(0.0, 1.0, 0.0).value() > of(0.0, 0.0, 1.0).value());
+    }
+
+    /// Clearing the level outranks walking out of it, because stepping on a
+    /// DOOM exit ENDS the level: a run that leaves with the work undone has
+    /// destroyed its own episode, and one that cleared everything but has not
+    /// left yet is a single decision from a Max. A bar that ranks these the
+    /// other way round teaches the search to throw away exactly the
+    /// trajectories worth keeping.
+    #[test]
+    fn clearing_outranks_leaving_early() {
+        let cleared_stuck = Score {
+            bar: Bar::UvMax,
+            finished: false,
+            toward: Some(1.0),
+            alive: 1.0,
+            lasted: 1.0,
+            seen: 60,
+            haul: Haul { kills: 1.0, items: 1.0, secrets: 1.0 },
+        };
+        let out_empty = Score {
+            bar: Bar::UvMax,
+            finished: true,
+            toward: Some(1.0),
+            alive: 1.0,
+            lasted: 0.1,
+            seen: 5,
+            haul: Haul::default(),
+        };
+        assert!(cleared_stuck.value() < 2.0);
+        assert!(
+            out_empty.value() < cleared_stuck.value(),
+            "sprinting out ({:.2}) beat a full clear ({:.2})",
+            out_empty.value(),
+            cleared_stuck.value()
+        );
+        // ...but neither is a Max, and that is the point of `is_uvmax`.
+        assert!(!cleared_stuck.is_uvmax());
+        assert!(!out_empty.is_uvmax());
+    }
+
     use super::*;
 
     /// Whatever a run scored, that is what it was paid - no more, no less.
@@ -483,6 +746,7 @@ mod tests {
         // most of it and died; the other barely left the spawn and lived.
         // Return puts them within noise of each other; this has to not.
         let nearly = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.9),
             alive: 0.0,
@@ -491,6 +755,7 @@ mod tests {
             haul: Haul::default(),
         };
         let barely = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.1),
             alive: 1.0,
@@ -509,6 +774,7 @@ mod tests {
     #[test]
     fn finishing_outranks_any_amount_of_getting_close() {
         let finished = Score {
+            bar: Bar::Standard,
             finished: true,
             toward: Some(1.0),
             alive: 0.01,
@@ -517,6 +783,7 @@ mod tests {
             haul: Haul::default(),
         };
         let close = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.99),
             alive: 1.0,
@@ -538,6 +805,7 @@ mod tests {
         // health-gathering: no exit, so no route to make progress against.
         // Surviving longer is the only thing that separates two runs.
         let long = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: None,
             alive: 0.8,
@@ -553,6 +821,7 @@ mod tests {
         assert!(long.value() > short.value());
         // But it cannot outrank a run that actually went somewhere.
         let went = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.95),
             alive: 0.5,
@@ -576,6 +845,7 @@ mod tests {
     #[test]
     fn a_run_that_fought_and_died_beats_one_that_stood_still_unharmed() {
         let idle = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.28),
             alive: 1.0,
@@ -601,6 +871,7 @@ mod tests {
     #[test]
     fn health_still_separates_two_runs_that_achieved_the_same() {
         let hurt = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.5),
             alive: 0.1,
@@ -630,6 +901,7 @@ mod tests {
     #[test]
     fn a_full_clear_outranks_a_bare_exit() {
         let bare = Score {
+            bar: Bar::Standard,
             finished: true,
             toward: Some(1.0),
             alive: 1.0,
@@ -655,6 +927,7 @@ mod tests {
     #[test]
     fn what_a_run_cleared_counts_even_when_it_did_not_finish() {
         let empty = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: Some(0.3),
             alive: 1.0,
@@ -668,13 +941,14 @@ mod tests {
         };
         assert!(fought.value() > empty.value());
         // But it never reaches a run that actually got out.
-        let out = Score { finished: true, ..empty };
+        let out = Score { bar: Bar::Standard, finished: true, ..empty };
         assert!(out.value() > fought.value(), "not finishing outranked finishing");
     }
 
     #[test]
     fn discovering_the_way_out_never_costs_a_run_anything() {
         let before = Score {
+            bar: Bar::Standard,
             finished: false,
             toward: None,
             alive: 1.0,
@@ -704,7 +978,7 @@ mod tests {
             p.note(&goal_state(0, 0, 64, Some("unexplored")));
             p.note(&goal_state(0, 0, 0, Some("unexplored")));
         }
-        let s = p.score(false, 100);
+        let s = p.score(false, 100, Bar::Standard);
         assert!(
             s.toward.is_none(),
             "there was never a goal worth measuring against"

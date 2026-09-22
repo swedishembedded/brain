@@ -41,6 +41,7 @@ mod frame;
 mod memory;
 mod obs;
 mod report;
+mod search;
 mod view;
 
 use brain::options::{Args as Args_, ControlOptions, Hardware, Options, ViewOptions};
@@ -87,6 +88,12 @@ pub struct Args {
     pub hardware: Hardware,
     pub train: ControlOptions,
     pub view: ViewOptions,
+    /// `search`: wall clock per level, in seconds.
+    pub search_budget: u64,
+    /// `search`: decisions an operator takes after returning to a cell.
+    pub walk: usize,
+    /// `search`: where verified solutions are written.
+    pub solutions: String,
 }
 
 impl Args {
@@ -233,7 +240,9 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench"].contains(&command.as_str()) {
+    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench", "search"]
+        .contains(&command.as_str())
+    {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
     }
 
@@ -252,7 +261,12 @@ fn parse_args() -> Result<Args, String> {
     train.warmup_episodes = 12;
     train.warmup_epochs = 6;
     let train = train.take_over(&mut args)?;
-    if train.encoder.is_empty() {
+    // `search` runs no model at all - that is the point of it being its own
+    // command - so it must not demand the one flag whose only purpose is to
+    // load one. Requiring it anyway would be an encoder loaded, a gigabyte of
+    // weights paged in, and a device opened, for a program that never calls
+    // a forward pass.
+    if train.encoder.is_empty() && command != "search" {
         return Err(
             "--encoder DIR is required: it is the pretrained sentence encoder the \
                     policy reads with (`brain pull sentence-transformers/all-MiniLM-L6-v2` \
@@ -351,6 +365,11 @@ fn parse_args() -> Result<Args, String> {
         hardware,
         train,
         view,
+        search_budget: args.usize_or("--search-budget", 600) as u64,
+        walk: args.usize_or("--walk", 60),
+        solutions: args
+            .take_str("--solutions")
+            .unwrap_or_else(|| "out/doom-solutions.json".into()),
     };
     args.finish();
     Ok(parsed)
@@ -368,9 +387,10 @@ fn run() -> Result<(), String> {
 
     let paths = Paths::resolve(args.doom_bin.as_deref(), args.wad.as_deref())
         .map_err(|m| format!("{m}"))?;
-    if !std::path::Path::new(args.encoder())
-        .join("config.json")
-        .exists()
+    if args.command != "search"
+        && !std::path::Path::new(args.encoder())
+            .join("config.json")
+            .exists()
     {
         return Err(format!(
             "no sentence encoder at {}\n  run `brain pull sentence-transformers/all-MiniLM-L6-v2`, \
@@ -429,12 +449,96 @@ fn run() -> Result<(), String> {
         "probe" => view::probe(env, &args),
         "play" => view::play(env, &args),
         "bench" => view::bench(env, &args),
+        "search" => discover(env, &args),
         "eval" => evaluate(env, &args),
         "fit" => fit(env, &args),
         "whatif" => whatif(env, &args),
         "value" => value(env, &args),
         _ => train(env, &args),
     }
+}
+
+/// Search for solutions, with no model in the loop.
+///
+/// The first half of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, as its own
+/// command rather than as a phase inside a training run. Two things follow
+/// from that separation and neither is cosmetic:
+///
+/// - it loads no encoder and opens no device, so it runs at engine speed
+///   (~19 ms a decision here against roughly 100 ms with a network in the
+///   loop), which is most of why a search budget buys anything at all;
+/// - what it produces is a VERIFIED action list per level, replayed from the
+///   level's own start. That artifact is what the compression phase is then
+///   fitted to, and it outlives every set of weights ever trained from it.
+///
+/// One campaign per level, because the archive, the snapshot slots and the
+/// category are all per level - a run that rotates maps compounds on none of
+/// them.
+fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
+    use std::time::Duration;
+
+    if args.mission != env::Mission::UvMax {
+        println!(
+            "doom: searching under orders {:?}; --mission uvmax is what scores the \
+             category this command exists for",
+            args.mission.name()
+        );
+    }
+    if args.cfg.skill != 3 {
+        println!(
+            "doom: skill {} - a time set anywhere but Ultra-Violence (--skill 3) is \
+             not in the UV-Max category at all",
+            args.cfg.skill
+        );
+    }
+
+    let budget = Duration::from_secs(args.search_budget);
+    let allowed = args.max_steps() as u32;
+    let mut all: Vec<search::Solution> = Vec::new();
+    for map in &args.maps {
+        env.set_maps(vec![*map]);
+        let found = search::campaign(
+            &mut env,
+            args.seed(),
+            budget,
+            args.walk,
+            allowed,
+            Duration::from_secs(30),
+        )?;
+        println!(
+            "doom: {} cells, best {:.3} in {} tics, {} verified UV-Max",
+            found.cells,
+            found.best,
+            found.best_tics,
+            found.solved.len()
+        );
+        all.extend(found.solved);
+    }
+
+    if all.is_empty() {
+        println!(
+            "doom: no verified UV-Max. The archive is what the campaign produced; \
+             run it again with --archive to carry it into the next generation."
+        );
+    } else {
+        // Best per level, by tics - the archive keeps one elite per NICHE and
+        // several niches can hold a complete category, so the fastest has to
+        // be chosen across them rather than assumed unique.
+        all.sort_by(|a, b| a.level.cmp(&b.level).then(a.tics.cmp(&b.tics)));
+        all.dedup_by(|a, b| a.level == b.level);
+        if let Some(dir) = std::path::Path::new(&args.solutions).parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let text = serde_json::to_string_pretty(&all)
+            .map_err(|e| format!("the solutions will not serialise: {e}"))?;
+        std::fs::write(&args.solutions, text)
+            .map_err(|e| format!("{}: {e}", args.solutions))?;
+        println!("doom: wrote {} verified solution(s) to {}", all.len(), args.solutions);
+        for s in &all {
+            println!("    {} {} ({} tics, {} decisions)", s.level, s.clock(), s.tics, s.actions.len());
+        }
+    }
+    Ok(())
 }
 
 /// Warm-start on the scripted player, then improve it with PPO.
