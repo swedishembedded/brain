@@ -169,8 +169,14 @@ later reader will find them:
   and `commit` - 400 decisions of real play resumed from an archived cell -
   is now clearly the one worth the budget.
 
-- [ ] **M4 - the `hunt` operator** and the engine support it needs (route to a
-      named live monster / to an unfound secret sector).
+- [x] **M4 - hunting and frisking** (`afd7e4bcc`). Not the operator the plan
+      described: routing to an unfound SECRET would be an oracle, and so
+      would routing to a monster nobody has seen. Both are fair play
+      instead - `Tag::Hunt` goes back for a monster the agent actually saw
+      (a coarse room-scale ledger, `memory::Haunt`), and `frisk` presses on
+      walls, which is how anybody finds a DOOM secret without being told
+      where one is. The engine needed nothing new: `API_RouteTo` already
+      existed.
 - [ ] **M5 - first verified UV-Max on one level**, replayed from the start.
 - [ ] **M6 - `refine`/`splice`**: minimise tics on a solved level.
 - [ ] **M7 - compression**: clone the verified set; both arms measured.
