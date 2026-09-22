@@ -26,6 +26,10 @@
 //!   [`atlas::DecisionContract`], the explicit record of what a decision task
 //!   means. [`atlas::check_information_refinement`] is what catches an oracle
 //!   that silently conditioned on hidden state.
+//! - [`mod@witness`] - exhaustively searching a [`atlas::World`] for cases
+//!   where a [`witness::Learner`]'s induced action disagrees with the
+//!   oracle's, and expanding each into a corrective family rather than a
+//!   bare failing example.
 //!
 //! ## Why this is a crate and not a module of `brain-decide`
 //!
@@ -57,3 +61,4 @@ pub mod atlas;
 pub mod cost;
 pub mod metrics;
 pub mod scoring;
+pub mod witness;
