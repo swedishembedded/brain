@@ -39,10 +39,17 @@ pub struct Recorder {
 
 impl Recorder {
     /// Start encoding `width` x `height` RGB frames at `fps` into `path`.
-    pub fn start(path: impl AsRef<Path>, width: u32, height: u32, fps: u32) -> Result<Recorder, String> {
+    pub fn start(
+        path: impl AsRef<Path>,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<Recorder, String> {
         if !imaging::video::ffmpeg_available() {
-            return Err("ffmpeg is not on PATH; install it to record (the run continues without)"
-                .to_string());
+            return Err(
+                "ffmpeg is not on PATH; install it to record (the run continues without)"
+                    .to_string(),
+            );
         }
         let path = path.as_ref().to_path_buf();
         if let Some(dir) = path.parent() {
@@ -63,7 +70,12 @@ impl Recorder {
             // - browsers, phones, QuickTime - silently refuses anything else,
             // and a recording nobody can play is not a recording.
             .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"])
-            .args(["-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+            .args([
+                "-pix_fmt",
+                "yuv420p",
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            ])
             .arg(&path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -71,7 +83,15 @@ impl Recorder {
             .spawn()
             .map_err(|e| format!("spawning ffmpeg: {e}"))?;
         let stdin = child.stdin.take();
-        Ok(Recorder { child, stdin, path, width, height, frames: 0, broken: false })
+        Ok(Recorder {
+            child,
+            stdin,
+            path,
+            width,
+            height,
+            frames: 0,
+            broken: false,
+        })
     }
 
     /// Append one frame. `rgb` must be `width * height * 3` bytes.
@@ -175,7 +195,11 @@ mod tests {
         // NOT Default: that resamples to 1fps and caps at 32 frames, which is
         // right for feeding a few seconds to a multimodal model and wrong for
         // asking "did every frame I wrote come back".
-        let opts = imaging::video::VideoDecodeOpts { fps: None, max_frames: 0 };
+        let opts = imaging::video::VideoDecodeOpts {
+            fps: None,
+            max_frames: 0,
+            ..Default::default()
+        };
         let decoded =
             imaging::video::decode_frames_rgb8(&out, &opts).expect("the recording decodes");
         assert_eq!(decoded.len(), 20, "every frame written came back");

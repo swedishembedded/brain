@@ -20,7 +20,11 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Canvas {
-        Canvas { pixels: vec![0u8; (width * height * 3) as usize], width, height }
+        Canvas {
+            pixels: vec![0u8; (width * height * 3) as usize],
+            width,
+            height,
+        }
     }
 
     pub fn width(&self) -> u32 {
@@ -35,6 +39,56 @@ impl Canvas {
         &self.pixels
     }
 
+    /// The buffer, writable.
+    ///
+    /// Here so that an application can bring its OWN renderer - a rasteriser, a
+    /// software 3D view, an antialiased plot - and still get it on screen, into
+    /// a screenshot and into a recording through the same path as everything
+    /// else. Without it, a sample that needs a primitive this canvas does not
+    /// have must either grow one here or fork the whole presentation layer,
+    /// and neither is right: not every drawing an application wants belongs in
+    /// a shared canvas.
+    ///
+    /// Row-major RGB8, `width * height * 3` bytes. [`Canvas::blit_rgb`] is the
+    /// safe way to composite a finished image; this is for a renderer that
+    /// wants to write in place.
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
+
+    /// Composite a row-major RGB8 image at `(x, y)`, clipped to the canvas.
+    ///
+    /// The counterpart to [`Canvas::blit_indexed`] for an application that has
+    /// rendered true colour rather than palette indices. Clipping rather than
+    /// panicking on an out-of-bounds placement: a panel laid out for one window
+    /// size being shown in another is a layout bug, and it should look wrong
+    /// rather than take the process down.
+    pub fn blit_rgb(&mut self, x: i32, y: i32, src: &[u8], sw: u32, sh: u32) {
+        debug_assert_eq!(
+            src.len(),
+            (sw * sh * 3) as usize,
+            "blit_rgb source is not sw*sh*3"
+        );
+        if sw == 0 || sh == 0 {
+            return;
+        }
+        for row in 0..sh as i32 {
+            let dy = y + row;
+            if dy < 0 || dy >= self.height as i32 {
+                continue;
+            }
+            let x0 = x.max(0);
+            let x1 = (x + sw as i32).min(self.width as i32);
+            if x1 <= x0 {
+                continue;
+            }
+            let src_off = ((row as u32 * sw + (x0 - x) as u32) * 3) as usize;
+            let dst_off = ((dy as u32 * self.width + x0 as u32) * 3) as usize;
+            let len = ((x1 - x0) as usize) * 3;
+            self.pixels[dst_off..dst_off + len].copy_from_slice(&src[src_off..src_off + len]);
+        }
+    }
+
     pub fn clear(&mut self, c: [u8; 3]) {
         for px in self.pixels.chunks_exact_mut(3) {
             px.copy_from_slice(&c);
@@ -47,7 +101,17 @@ impl Canvas {
 
     /// Fill, but letting what is underneath show through. `alpha` 0..=255.
     pub fn shade(&mut self, x: i32, y: i32, w: u32, h: u32, c: [u8; 3], alpha: u8) {
-        viz::blend_rect(&mut self.pixels, self.width, self.height, x, y, w, h, c, alpha);
+        viz::blend_rect(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            w,
+            h,
+            c,
+            alpha,
+        );
     }
 
     pub fn outline(&mut self, x: i32, y: i32, w: u32, h: u32, c: [u8; 3]) {
@@ -83,11 +147,32 @@ impl Canvas {
     }
 
     pub fn bar(&mut self, x: i32, y: i32, w: u32, h: u32, frac: f32, fg: [u8; 3], track: [u8; 3]) {
-        viz::bar(&mut self.pixels, self.width, self.height, x, y, w, h, frac, fg, track);
+        viz::bar(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            w,
+            h,
+            frac,
+            fg,
+            track,
+        );
     }
 
     pub fn plot(&mut self, x: i32, y: i32, w: u32, h: u32, series: &[f32], c: [u8; 3]) {
-        viz::plot(&mut self.pixels, self.width, self.height, x, y, w, h, series, c);
+        viz::plot(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            x,
+            y,
+            w,
+            h,
+            series,
+            c,
+        );
     }
 
     /// Draw an indexed image through its palette, scaled up by whole pixels.
@@ -169,5 +254,42 @@ mod tests {
         assert_eq!(Canvas::fit_scale(320, 200, 960, 600), 3);
         assert_eq!(Canvas::fit_scale(320, 200, 100, 100), 1);
         assert_eq!(Canvas::fit_scale(0, 0, 100, 100), 1);
+    }
+
+    #[test]
+    fn blit_rgb_copies_what_it_is_given() {
+        let mut c = Canvas::new(4, 3);
+        c.clear([0, 0, 0]);
+        let src = vec![9u8; 2 * 2 * 3];
+        c.blit_rgb(1, 1, &src, 2, 2);
+        let at = |x: u32, y: u32| c.pixels()[((y * 4 + x) * 3) as usize];
+        assert_eq!(at(1, 1), 9);
+        assert_eq!(at(2, 2), 9);
+        assert_eq!(at(0, 0), 0);
+        assert_eq!(at(3, 1), 0);
+    }
+
+    #[test]
+    fn blit_rgb_clips_instead_of_panicking() {
+        // A panel laid out for one window size being drawn in another is a
+        // layout bug. It should look wrong, not take the process down.
+        let mut c = Canvas::new(4, 4);
+        let src = vec![7u8; 3 * 3 * 3];
+        for (x, y) in [(-2, -2), (3, 3), (-10, 1), (1, -10), (100, 100)] {
+            c.blit_rgb(x, y, &src, 3, 3);
+        }
+        assert_eq!(
+            c.pixels()[0],
+            7,
+            "the overlapping corner should have been drawn"
+        );
+        assert_eq!(c.pixels().len(), 4 * 4 * 3);
+    }
+
+    #[test]
+    fn a_caller_can_draw_through_pixels_mut() {
+        let mut c = Canvas::new(2, 1);
+        c.pixels_mut()[3] = 200;
+        assert_eq!(c.pixels()[3], 200);
     }
 }

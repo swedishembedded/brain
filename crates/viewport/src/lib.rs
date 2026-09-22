@@ -40,8 +40,11 @@ pub mod record;
 pub use canvas::Canvas;
 pub use record::Recorder;
 
+use wm_display::keymap::{Key, KeySet, UxKey};
 use wm_display::sink::{FrameSink, Hud};
 use wm_display::window::SdlWindow;
+
+pub use wm_display::keymap::{Key as InputKey, KeySet as InputKeys, UxKey as InputAction};
 
 /// Why a window could not be opened. Never fatal by itself: [`Viewport::open`]
 /// falls back to a canvas with no window, because a run on a build server
@@ -54,6 +57,8 @@ pub struct Viewport {
     window: Option<SdlWindow>,
     title: String,
     recorder: Option<Recorder>,
+    /// Keys held at the end of the previous pump, for edge detection.
+    previous_keys: KeySet,
     /// Why there is no window, if there isn't one. Reported once by the
     /// caller; a silent fallback to headless is how a run ends up with nobody
     /// noticing the display never came up.
@@ -61,6 +66,12 @@ pub struct Viewport {
 }
 
 /// What the user did since the last pump.
+///
+/// The four named flags cover what most samples need. An application with more
+/// than four actions reads [`Input::keys`] and [`Input::just_pressed`] instead:
+/// a sample that offers a panel of controls should not have to pick which four
+/// of them matter, and should not have to fork the presentation layer to get
+/// the fifth.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
     pub quit: bool,
@@ -70,7 +81,56 @@ pub struct Input {
     pub next: bool,
     /// `p`, as "save what I am looking at".
     pub screenshot: bool,
+    /// Every key held at the end of this pump.
+    ///
+    /// Level-triggered: right for "while held", wrong for "when pressed".
+    pub keys: KeySet,
+    /// Keys that went down during this pump.
+    ///
+    /// Edge-triggered, which is what a button does. Derived here rather than by
+    /// every caller keeping its own previous [`Input::keys`] and diffing, since
+    /// that is the same three lines written differently in each of them and
+    /// wrong in one.
+    pub just_pressed: Vec<Key>,
+    /// Higher-level actions the window layer recognised: pause, reset, cycle
+    /// view, quality up and down, step once, screenshot.
+    pub actions: Vec<UxKey>,
+    /// Mouse wheel clicks since the last pump, positive away from the user.
+    pub wheel: i32,
 }
+
+impl Input {
+    /// Was this key pressed during this pump?
+    pub fn pressed(&self, k: Key) -> bool {
+        self.just_pressed.contains(&k)
+    }
+
+    /// Is this key held right now?
+    pub fn held(&self, k: Key) -> bool {
+        self.keys.contains(KeySet::of(&[k]))
+    }
+
+    /// Did the window layer report this action during this pump?
+    pub fn did(&self, a: UxKey) -> bool {
+        self.actions.contains(&a)
+    }
+}
+
+/// Every key the window layer can report, for [`Input::pressed`] and
+/// [`Input::held`].
+pub const KEYS: [Key; 11] = [
+    Key::W,
+    Key::A,
+    Key::S,
+    Key::D,
+    Key::Space,
+    Key::Up,
+    Key::Down,
+    Key::Left,
+    Key::Right,
+    Key::Shift,
+    Key::C,
+];
 
 impl Viewport {
     /// Open a window of `width` x `height`, or fall back to a canvas alone.
@@ -92,6 +152,7 @@ impl Viewport {
             window,
             title: title.to_string(),
             recorder: None,
+            previous_keys: KeySet::empty(),
             headless_because: why,
         })
     }
@@ -103,6 +164,7 @@ impl Viewport {
             window: None,
             title: String::new(),
             recorder: None,
+            previous_keys: KeySet::empty(),
             headless_because: Some("asked for a headless run".into()),
         }
     }
@@ -121,8 +183,12 @@ impl Viewport {
     /// absent ffmpeg is an error the caller can report and carry on from
     /// rather than a reason to stop.
     pub fn record(&mut self, path: impl AsRef<std::path::Path>, fps: u32) -> Result<(), String> {
-        self.recorder =
-            Some(Recorder::start(path, self.canvas.width(), self.canvas.height(), fps.max(1))?);
+        self.recorder = Some(Recorder::start(
+            path,
+            self.canvas.width(),
+            self.canvas.height(),
+            fps.max(1),
+        )?);
         Ok(())
     }
 
@@ -141,8 +207,16 @@ impl Viewport {
             r.frame(self.canvas.pixels());
         }
         if let Some(w) = self.window.as_mut() {
-            let hud = Hud { model: self.title.clone(), ..Hud::default() };
-            w.frame(self.canvas.pixels(), self.canvas.width(), self.canvas.height(), &hud);
+            let hud = Hud {
+                model: self.title.clone(),
+                ..Hud::default()
+            };
+            w.frame(
+                self.canvas.pixels(),
+                self.canvas.width(),
+                self.canvas.height(),
+                &hud,
+            );
         }
     }
 
@@ -153,13 +227,30 @@ impl Viewport {
             return Input::default();
         };
         let raw = w.pump();
-        let mut out = Input { quit: raw.quit, ..Input::default() };
+        let just_pressed: Vec<Key> = KEYS
+            .iter()
+            .copied()
+            .filter(|k| {
+                let one = KeySet::of(&[*k]);
+                raw.pressed.contains(one) && !self.previous_keys.contains(one)
+            })
+            .collect();
+        self.previous_keys = raw.pressed;
+
+        let mut out = Input {
+            quit: raw.quit,
+            keys: raw.pressed,
+            just_pressed,
+            actions: raw.ux.clone(),
+            wheel: raw.wheel,
+            ..Input::default()
+        };
         for ux in raw.ux {
             match ux {
-                wm_display::keymap::UxKey::Quit => out.quit = true,
-                wm_display::keymap::UxKey::Pause => out.pause = true,
-                wm_display::keymap::UxKey::Reset => out.next = true,
-                wm_display::keymap::UxKey::Screenshot => out.screenshot = true,
+                UxKey::Quit => out.quit = true,
+                UxKey::Pause => out.pause = true,
+                UxKey::Reset => out.next = true,
+                UxKey::Screenshot => out.screenshot = true,
                 _ => {}
             }
         }
