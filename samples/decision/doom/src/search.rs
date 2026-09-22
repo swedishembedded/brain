@@ -97,6 +97,17 @@ struct Operator {
     /// one. What makes an operator a LOCAL search on the best thing found so
     /// far instead of a sample of the frontier.
     from_best: bool,
+    /// Sweep walls: alternate pressing use with a sidestep, so the player
+    /// runs along a wall testing it rather than pressing on one spot.
+    ///
+    /// Pressing use finds a secret only when the player happens to be facing
+    /// the right wall, and a level has a great many walls. Measured on E1M1,
+    /// pressing alone found one secret of three across campaigns totalling
+    /// well over an hour, and the archive shows why the rest matter: 54 cells
+    /// reached a state with ONE monster left and none ever cleared the level,
+    /// so the monsters that are missing are behind the secrets that are
+    /// missing.
+    sweep: bool,
     /// How often to press use against whatever is in front of the player,
     /// ahead of anything else.
     ///
@@ -114,20 +125,20 @@ const OPERATORS: [Operator; 5] = [
     // Blind, and blind in a level full of things that shoot back is mostly
     // dead - but it is the only operator that can produce an action no
     // teacher and no policy would ever pick.
-    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, press: 0.0 },
+    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, sweep: false, press: 0.0 },
     // Starts from somewhere plausible and wanders off it.
-    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, press: 0.0 },
+    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, sweep: false, press: 0.0 },
     // A long stretch of real play from a drawn cell. Long enough to finish a
     // firefight, clear a room and walk into the next one.
-    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, press: 0.0 },
+    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, sweep: false, press: 0.0 },
     // The same, from the furthest-along cell there is: pushing the front of
     // the search forward rather than filling in behind it.
-    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, press: 0.0 },
+    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, sweep: false, press: 0.0 },
     // Walk about pressing on everything. Half the decisions are a push, the
     // rest are the teacher moving on, which together is a player running
     // their shoulder along the walls of a room - the only way a secret is
     // ever found by someone who has not been told where it is.
-    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, press: 0.5 },
+    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, sweep: true, press: 0.5 },
 ];
 
 /// What a search campaign found, and what it cost.
@@ -609,6 +620,16 @@ impl Campaign {
         last: Option<&str>,
     ) -> usize {
         if op.press > 0.0 && self.rng.next_f32() < op.press {
+            // Press, then slide along and press again. `last` is what the
+            // walk just did, so alternating on it is what turns a repeated
+            // push on one spot into a sweep of the wall.
+            let pressed_last = last.is_some_and(|l| Some(l) == env.use_text().as_deref());
+            if op.sweep && pressed_last {
+                let sides = env.sidestep_options();
+                if let Some(i) = sides.first().filter(|i| **i < options.len()) {
+                    return *i;
+                }
+            }
             if let Some(i) = env.use_option().filter(|i| *i < options.len()) {
                 return i;
             }

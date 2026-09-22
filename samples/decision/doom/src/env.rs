@@ -1301,6 +1301,34 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
+    /// The exact text of the press-on-what-is-in-front option, so a caller
+    /// can tell whether that is what it just did without matching on a
+    /// sentence it would have to keep in step by hand.
+    pub fn use_text(&self) -> Option<String> {
+        self.use_option().map(|i| self.opts[i].text.clone())
+    }
+
+    /// An option that moves the player sideways without turning, if one is
+    /// on offer.
+    ///
+    /// Half of a wall sweep. Pressing use finds a secret only if the player
+    /// is facing the right wall, and a level has a great many walls; what
+    /// finds one is running along them. A sidestep keeps the player FACING
+    /// what they are pressing on while moving them along it, which a turn
+    /// does not - turn and walk and the wall being tested changes every step
+    /// in a way nothing tracks.
+    ///
+    /// Which side, when both are on offer, is the caller's to decide, so this
+    /// returns them in the order the option list holds them.
+    pub fn sidestep_options(&self) -> Vec<usize> {
+        self.opts
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.tag == action::Tag::Sidestep)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// The difficulty the episode is being played at. 3 is Ultra-Violence,
     /// which is the `UV` in UV-Max - a time set at any other skill is not in
     /// the category at all.
