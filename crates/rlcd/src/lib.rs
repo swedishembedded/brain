@@ -21,6 +21,11 @@
 //! - [`mod@metrics`] - calibration metrics (ECE, AdaECE, classwise-ECE, NLL,
 //!   Brier, reliability bins, coverage-vs-accuracy, failure-AUROC) to audit
 //!   what [`mod@scoring`] trained.
+//! - [`mod@atlas`] - the [`atlas::World`] seam an executable probabilistic
+//!   world implements to produce EXACT oracle targets, and
+//!   [`atlas::DecisionContract`], the explicit record of what a decision task
+//!   means. [`atlas::check_information_refinement`] is what catches an oracle
+//!   that silently conditioned on hidden state.
 //!
 //! ## Why this is a crate and not a module of `brain-decide`
 //!
@@ -48,6 +53,7 @@
 //! needs expertise in calibrated decision-making under uncertainty, you can
 //! procure our services by sending an email to info@swedishembedded.com.
 
+pub mod atlas;
 pub mod cost;
 pub mod metrics;
 pub mod scoring;
