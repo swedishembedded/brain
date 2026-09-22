@@ -68,14 +68,31 @@
 //! against that one encoding. That is a real, different per-call cost, stated
 //! here rather than hidden.
 //!
-//! **`train_choices`/`save_head` are `Decide`-only for now.** A Laya-backed
-//! pipeline returns a clear `Err` naming why (`crates/modernbert` has a
-//! gradient-checked backward primitive but no optimizer loop, loss function,
-//! or training CLI wiring yet - real future work, not a silent no-op).
-//! [`Stages::supports_training`] (`false` on the Laya arm) is how a caller
-//! checks this BEFORE calling [`Flow::train`]/[`DecisionPipeline::
-//! train_choices`], rather than calling it and parsing the error - see that
-//! trait method's own doc.
+//! **`train_choices`/`save_head` work on BOTH arms**, and the option
+//! sampling, the `(text, label)` contract, the per-step `log` callback and
+//! the mean-tail-loss return are shared. What genuinely differs is the
+//! objective and what moves:
+//!
+//! | | `Decide` (MiniLM) | Laya (ModernBERT-large) |
+//! | --- | --- | --- |
+//! | objective | [`rlcd::scoring`] cross-entropy/focal/Brier, minimized directly | [`rlcd::reinforce`] REINFORCE with a group-mean baseline over [`rlcd::proper`]'s strictly proper reward |
+//! | what learns | encoder (2e-5) + head (1e-3) | the decision head only |
+//! | act/escalate head | none exists | NOT trained - no public source defines its objective |
+//!
+//! Each arm trains against the rule its own released weights were fitted
+//! under, which is why this is two objectives rather than one. **The losses
+//! are therefore not comparable between arms**; only each arm's own trend
+//! over a run is.
+//!
+//! The Laya trunk is held fixed, and at 395M parameters that is a memory
+//! decision before it is a tuning one - see `modernbert::decision`'s module
+//! doc and [`DecisionPipeline::save_head`], which refuses to write a
+//! head-only file for a model whose trunk moved.
+//!
+//! [`Stages::supports_training`] is `true` on both arms now. It is kept
+//! rather than removed because it is the general seam a future
+//! pretrained-only backend reuses, and a caller that checks it before
+//! [`Flow::train`] is doing the right thing whatever is behind it.
 //!
 //! **[`DecisionPipeline::route`] is the mirror-image asymmetry**: `Err` on
 //! the `Decide` arm, because `crates/decide` has no act/escalate head at all
@@ -180,12 +197,35 @@ pub struct RouteVerdict {
 const ENCODER_LR: f32 = 2e-5;
 const HEAD_LR: f32 = 1e-3;
 
-/// Why [`DecisionPipeline::train_choices`]/[`DecisionPipeline::save_head`]
-/// refuse on a Laya-backed pipeline - see this module's doc.
-const LAYA_TRAINING_NOT_IMPLEMENTED: &str = "Laya training is not yet implemented in this SDK - \
-    crates/modernbert has a gradient-checked backward primitive (a seeded backward through the head \
-    into the trunk) but no optimizer loop, loss function, or training CLI wiring yet; only inference \
-    (choose/probability) is available for a Laya-backed DecisionPipeline";
+/// The Laya arm's own head learning rate, and the floor its cosine schedule
+/// anneals to.
+///
+/// **Deliberately not the published Laya fine-tuning loop's `1e-4`**, and the
+/// difference is the step BUDGET rather than a disagreement. That loop takes
+/// ~7300 updates at an effective batch of 64;
+/// [`DecisionPipeline::train_choices`]'s contract is ONE example per step
+/// over a few hundred (the same contract the `Decide` arm has). AdamW's step
+/// is normalized, so what a run actually moves is roughly `lr * steps`
+/// (halved again by the cosine schedule both use). Matching the published
+/// run's own budget at a few hundred steps therefore lands near `3e-3`:
+///
+/// ```text
+/// published:  0.5 * 1e-4 * 7300  = 0.37
+/// here:       0.5 * 3e-3 * 200   = 0.30
+/// ```
+///
+/// Measured, not only derived: at `3e-4` the real-weight gate in
+/// `crates/sdk/tests/decision_pipeline.rs` moved its training loss
+/// (1.4319 -> 1.1411 over 120 steps) but left held-out accuracy flat at
+/// 0.375, i.e. it was learning far too slowly to finish inside the step
+/// budget a caller of this API actually passes. The schedule SHAPE (cosine
+/// to a small floor, no warmup) is the published one.
+const LAYA_HEAD_LR: f32 = 3e-3;
+const LAYA_HEAD_LR_MIN: f32 = 1e-6;
+/// Exploration noise, annealed linearly across the run - the published
+/// fine-tuning loop's own `0.4 -> 0.1`.
+const LAYA_SIGMA_START: f32 = 0.4;
+const LAYA_SIGMA_END: f32 = 0.1;
 
 pub struct DecisionPipeline {
     backend: Backend,
@@ -213,26 +253,22 @@ enum Backend {
     Laya(Box<LayaBackend>),
 }
 
-/// The Laya (`convaiinnovations/laya`) backend: a ModernBERT-large trunk
-/// plus its own decision head, both frozen/inference-only at this SDK layer
-/// (see [`DecisionPipeline::train_choices`]'s Laya arm for why training is
-/// out of scope for this milestone).
+/// The Laya (`convaiinnovations/laya`) backend: `crates/modernbert`'s own
+/// trunk+head+tokenizer composition, plus the SERVING CALIBRATION this SDK
+/// owns on top of it. Trunk frozen, head trainable - see
+/// [`DecisionPipeline::train_choices`]'s Laya arm.
 ///
 /// **`choose`/`probability` pass exactly ONE question at a time** (the same
 /// SDK contract the `Decide` arm has), so `crates/modernbert`'s trunk is
 /// re-encoded from scratch on every call - see this module's doc, "Two
 /// architectures, one surface", for the honest cost statement this implies.
 struct LayaBackend {
-    enc: modernbert::ModernBert,
-    head: modernbert::LayaHead,
-    tok: data::qwen_tokenizer::QwenBpe,
-    cfg: modernbert::ModernBertConfig,
-    /// `rl_agent_config.json`'s own `max_len`/`head_max_len` - Laya ALWAYS
-    /// truncates to these, read once at import time; see
-    /// [`DecisionPipelineBuilder::limits`]'s own doc for why a
-    /// caller-supplied [`Limits`] has no effect on this arm.
-    max_len: u32,
-    head_max_len: u32,
+    /// The trunk, head and tokenizer as one model - `crates/modernbert`'s own
+    /// composition, the direct counterpart of the [`Decide`] this enum's
+    /// other arm holds. This SDK owns the CALIBRATION below and nothing else
+    /// about the architecture, which is what lets `crates/modernbert` train
+    /// and test a Laya model without the SDK on top of it.
+    model: modernbert::LayaDecision,
     /// Per-qtype (`choice`/`score`/`noul`, [`modernbert::QType::index`]
     /// order) serving calibration scalar, `rl_agent_config.json`'s own
     /// `temperature` table - the FALLBACK, consulted only when
@@ -269,34 +305,7 @@ impl LayaBackend {
     /// and [`Self::route`] are both thin callers of this, so the two-wait
     /// cross-`Gpu`-handle dispatch below exists in exactly one place.
     fn score_raw(&mut self, state: &State, q: &modernbert::Question) -> Result<(Vec<f32>, Vec<f32>)> {
-        let (ids, markers) =
-            modernbert::build_sequence(&self.tok, &self.cfg, state, q, self.max_len, self.head_max_len, None, false);
-        if ids.is_empty() || markers.is_empty() {
-            return Err(Error::Backend("laya: build_sequence produced no option markers for this question".into()));
-        }
-        let rows = ids.len() as u32;
-        let spans = [(0u32, rows)];
-        self.enc.set_batch(&ids, &spans);
-        self.enc.forward();
-        // Cross-`Gpu`-handle synchronization: `enc`/`head` hold SEPARATE `Gpu`
-        // handles onto the same device (`gpu.share()`), so a `submit` on one
-        // is not ordered against a `submit` on the other - `crates/modernbert`
-        // M5's own gradcheck probe hit exactly this (a missing wait here reads
-        // a stale/partial hidden state and produces plausible-but-wrong
-        // numbers, not a crash). MUST NOT be removed - see
-        // `modernbert::ModernBert::poll_wait`'s own doc and
-        // `decide::decide::Decide::run_packed`'s identical, independently
-        // discovered precedent.
-        self.enc.poll_wait();
-
-        let marker_rows: Vec<u32> = markers.iter().map(|&m| m as u32).collect();
-        let qtype = [q.qtype().index()];
-        let arity = [markers.len()];
-        let hidden = self.enc.hidden_buf();
-        self.head.set_call(hidden, &spans, &qtype, &marker_rows, &arity);
-        let (logits, act_logits) = self.head.forward();
-        self.head.poll_wait();
-        Ok((logits, act_logits))
+        self.model.score(state, q, None).map_err(Error::Backend)
     }
 
     /// [`Self::score_raw`], option logits only - [`Self::ask`]'s own caller.
@@ -650,6 +659,22 @@ impl DecisionPipeline {
     /// has not seen, which is the one thing this model is for.
     ///
     /// Returns the mean loss over the last tenth of the run.
+    ///
+    /// **Both arms train, and the option sampling above is shared** - what
+    /// differs is the objective, because the two checkpoints were fitted
+    /// under different ones and a model should be trained against the rule
+    /// its own weights came from. The `Decide` arm minimizes
+    /// [`rlcd::scoring`]'s cross-entropy/focal/Brier objective directly. The
+    /// Laya arm runs [`rlcd::reinforce`]'s REINFORCE-with-a-group-baseline
+    /// over [`rlcd::proper`]'s strictly proper scoring reward, with the
+    /// published loop's own annealed exploration and cosine learning rate.
+    /// The returned losses are therefore NOT comparable across arms; only
+    /// each arm's own trend over a run is.
+    ///
+    /// On the Laya arm the 395M trunk is held FIXED and only the decision
+    /// head learns - see `modernbert::decision`'s module doc for the three
+    /// reasons, and [`DecisionPipeline::save_head`] for the one that makes it
+    /// load-bearing rather than a tuning choice.
     pub fn train_choices(
         &mut self,
         examples: &[(&str, usize)],
@@ -659,12 +684,6 @@ impl DecisionPipeline {
         seed: u64,
         log: &mut dyn FnMut(usize, f32),
     ) -> Result<f32> {
-        let model = match &mut self.backend {
-            Backend::Decide(model) => model,
-            // Real, deliberate gap - not a silent no-op: see
-            // LAYA_TRAINING_NOT_IMPLEMENTED and this module's doc.
-            Backend::Laya(_) => return Err(Error::Backend(LAYA_TRAINING_NOT_IMPLEMENTED.into())),
-        };
         if examples.is_empty() {
             return Err(Error::MissingArgument("train_choices needs at least one example".into()));
         }
@@ -683,14 +702,41 @@ impl DecisionPipeline {
                     options.len()
                 )));
             }
+            // ONE sampler, one draw, both arms: each step scores its example
+            // against a random SUBSET of the options, always containing the
+            // correct one, at a random position.
             let (drawn, gold) = sampler.draw(label, &pool, &mut rng);
-            let q = Question::Choice {
-                instructions: instructions.to_string(),
-                options: drawn.iter().map(|&i| Opt::new(options[i].clone())).collect(),
+            let l = match &mut self.backend {
+                Backend::Decide(model) => {
+                    let q = Question::Choice {
+                        instructions: instructions.to_string(),
+                        options: drawn.iter().map(|&i| Opt::new(options[i].clone())).collect(),
+                    };
+                    model
+                        .train_step(&Example { state: text, question: &q, gold }, &loss_cfg, ENCODER_LR, HEAD_LR)
+                        .map_err(Error::Backend)?
+                }
+                Backend::Laya(b) => {
+                    let q = modernbert::Question::Choice {
+                        ins: instructions.to_string(),
+                        options: drawn.iter().map(|&i| (options[i].clone(), None)).collect(),
+                    };
+                    let target = rlcd::proper::hard_target(drawn.len(), gold);
+                    let progress = step as f32 / steps.max(1) as f32;
+                    let obj = rlcd::reinforce::RlcdObjective::default()
+                        .at(rlcd::reinforce::anneal(LAYA_SIGMA_START, LAYA_SIGMA_END, progress));
+                    let lr = rlcd::reinforce::cosine_lr(LAYA_HEAD_LR, LAYA_HEAD_LR_MIN, progress);
+                    let state = State::Str(text.to_string());
+                    b.model
+                        .train_step_with(&state, &q, None, 0.0, lr, |scores| {
+                            // A `choice` question is not ordinal, so the
+                            // ranked-probability term does not apply - the
+                            // same gate `rl_common.py` puts on `qtype`.
+                            rlcd::reinforce::rlcd_loss(scores, &target, false, &obj, &mut rng)
+                        })
+                        .map_err(Error::Backend)?
+                }
             };
-            let l = model
-                .train_step(&Example { state: text, question: &q, gold }, &loss_cfg, ENCODER_LR, HEAD_LR)
-                .map_err(Error::Backend)?;
             log(step, l);
             if step >= steps.saturating_sub(tail) {
                 tail_sum += l / tail as f32;
@@ -702,12 +748,25 @@ impl DecisionPipeline {
     /// Write the trained head to a brain `.safetensors`, for
     /// [`DecisionPipelineBuilder::head`] to load back.
     ///
-    /// `Err` on a Laya-backed pipeline - see [`LAYA_TRAINING_NOT_IMPLEMENTED`]
-    /// and this module's doc.
+    /// Both arms write a head-only adapter naming the checkpoint it attaches
+    /// to; the two files are different formats for different architectures
+    /// and are not interchangeable, which is why each carries its own
+    /// `architecture`/`adapter.kind` in its card. Feed either back through
+    /// [`DecisionPipelineBuilder::head`] alongside the matching checkpoint
+    /// directory.
     pub fn save_head(&self, path: impl AsRef<str>) -> Result<()> {
         match &self.backend {
             Backend::Decide(model) => model.save_head(path.as_ref()).map_err(Error::Backend),
-            Backend::Laya(_) => Err(Error::Backend(LAYA_TRAINING_NOT_IMPLEMENTED.into())),
+            Backend::Laya(b) => b.model.save_head(path.as_ref()).map_err(Error::Backend),
+        }
+    }
+
+    /// How many optimizer steps this pipeline has taken - the AdamW time
+    /// index, on whichever arm is loaded.
+    pub fn steps_taken(&self) -> u32 {
+        match &self.backend {
+            Backend::Decide(model) => model.steps_taken(),
+            Backend::Laya(b) => b.model.steps_taken(),
         }
     }
 
@@ -778,20 +837,16 @@ impl Stages for DecisionPipeline {
     type TrainSpec = TrainSpec;
 
     fn describe(&self) -> String {
-        let steps = match &self.backend {
-            Backend::Decide(model) => model.steps_taken(),
-            // No training loop exists for this arm yet (see this module's
-            // doc), so there is nothing to have counted.
-            Backend::Laya(_) => 0,
-        };
+        let steps = self.steps_taken();
         format!("decision model, {} options in the last call, {steps} training steps so far", self.last_options.len())
     }
 
     fn supports_training(&self) -> bool {
-        // See LAYA_TRAINING_NOT_IMPLEMENTED and this module's doc: the Laya
-        // arm has a gradient-checked backward but no optimizer loop, loss
-        // function, or training CLI wiring yet.
-        !matches!(self.backend, Backend::Laya(_))
+        // Both architectures train now. Kept as an explicit `true` rather
+        // than removed: this is the general seam a future pretrained-only
+        // backend reuses (see this module's doc), and a caller that checks it
+        // is doing the right thing whatever is behind it.
+        true
     }
 
     fn run_train(&mut self, spec: &TrainSpec, log: &mut dyn FnMut(usize, f32)) -> Result<TrainReport> {
@@ -895,8 +950,13 @@ pub struct DecisionPipelineBuilder {
 }
 
 impl DecisionPipelineBuilder {
-    /// Trained head weights, as written by `decide`'s training loop. Without
-    /// this the head is random and the model's answers are noise.
+    /// Trained head weights, as written by [`DecisionPipeline::save_head`].
+    ///
+    /// The two arms mean slightly different things by this, because their
+    /// checkpoints do. On the `Decide` arm the head is RANDOM without it and
+    /// the model's answers are noise. A Laya checkpoint SHIPS a trained head,
+    /// so this REPLACES a working one - which is also why a head file from
+    /// the wrong architecture is refused by name rather than ignored.
     pub fn head(mut self, path: impl AsRef<str>) -> DecisionPipelineBuilder {
         self.head = Some(path.as_ref().to_string());
         self
@@ -925,10 +985,9 @@ impl DecisionPipelineBuilder {
         self
     }
 
-    /// Build a model ready to answer. Trainable on the `Decide` arm, so the
-    /// same object a caller loads is the one it can fine-tune (see this
-    /// module's doc for the Laya arm's own, narrower, inference-only
-    /// contract).
+    /// Build a model ready to answer, and to fine-tune: on BOTH arms the
+    /// same object a caller loads is the one it can train (see this module's
+    /// doc for what each arm trains, and with what objective).
     pub fn load(self) -> Result<DecisionPipeline> {
         let backend = resolve_decision_backend(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
         Ok(DecisionPipeline { backend, last_options: Vec::new(), last_instructions: String::new(), last_eval: Vec::new() })
@@ -1027,18 +1086,19 @@ fn is_laya_dir(dir: &Path) -> bool {
 /// `limits` plays no part here (see [`DecisionPipelineBuilder::limits`]'s own
 /// doc) - Laya always sizes and truncates to `rl_agent_config.json`'s own
 /// `max_len`/`head_max_len`, read at import time. `seed` likewise: unlike
-/// `load_decide`, there is no fresh-random-head path here to seed - a
-/// Laya-backed pipeline has exactly one head, the one the checkpoint shipped
-/// (see [`LAYA_TRAINING_NOT_IMPLEMENTED`] for why no trained-head file format
-/// exists yet either).
+/// `load_decide`, there is no fresh-random-head path to seed here - a Laya
+/// checkpoint SHIPS a trained head, so `head` REPLACES it rather than
+/// replacing a random initialization.
+///
+/// Built [`modernbert::Training::HeadOnly`], so the same object a
+/// caller loads is the one it can fine-tune, exactly as on the `Decide` arm.
+/// That mode is not a tuning preference at this size: a `Role::Trainable`
+/// ModernBERT-large trunk would carry a gradient and two AdamW moments for
+/// every one of its 395M parameters (~6.3 GB of device memory) before a
+/// single activation, so making the trunk trainable *by default* would turn
+/// loading a Laya pipeline for INFERENCE into an out-of-memory failure on
+/// most hardware. See `modernbert::decision`'s own module doc.
 fn load_laya(dir: &str, head: Option<&str>, device: &Device, _seed: u64) -> Result<LayaBackend> {
-    if head.is_some() {
-        return Err(Error::Backend(
-            "a Laya-backed DecisionPipeline has no trained-head file format yet (train_choices/save_head \
-             are not implemented) - do not call .head(path) when loading a Laya checkpoint directory"
-                .into(),
-        ));
-    }
     let ckpt = modernbert::import_dir(dir).map_err(Error::Backend)?;
 
     let tok_path = Path::new(dir).join("tokenizer").join("tokenizer.json");
@@ -1047,20 +1107,61 @@ fn load_laya(dir: &str, head: Option<&str>, device: &Device, _seed: u64) -> Resu
     )
     .map_err(Error::Backend)?;
 
+    // A supplied head is folded into the init map rather than written after
+    // construction, so a reloaded pipeline is built the same way a fresh one
+    // is - one construction path, no "loaded" state a later `set_weights`
+    // could half-apply.
+    let mut head_init = ckpt.head_init;
+    if let Some(p) = head {
+        let trained = modernbert::LayaDecision::read_head_file(p).map_err(Error::Backend)?;
+        for (name, v) in trained {
+            match head_init.get(&name) {
+                Some(existing) if existing.len() != v.len() => {
+                    return Err(Error::Backend(format!(
+                        "{p}: tensor {name} has {} floats, this checkpoint's head wants {}",
+                        v.len(),
+                        existing.len()
+                    )))
+                }
+                // An unknown name is a `decide` head, or a head for a
+                // different `d_model` - either way not this architecture's.
+                None => {
+                    return Err(Error::Backend(format!(
+                        "{p}: tensor {name} is not a Laya decision-head parameter - is this a \
+                         `decide` head file rather than a Laya one?"
+                    )))
+                }
+                Some(_) => {}
+            }
+            head_init.insert(name, v);
+        }
+    }
+
     crate::device::resolve(device)?;
     let gpu = gpu_core::Gpu::new(modernbert::kern::PIPELINES);
     let max_len = ckpt.rl.max_len;
-    let head_max_len = ckpt.rl.head_max_len;
-    let enc = modernbert::ModernBert::new_on(gpu.share(), ckpt.cfg.clone(), max_len, max_len, &ckpt.encoder_init);
-    // One question per call (see this module's "Shared honestly" doc), but
-    // the full published option range (`decide::primitives::MAX_OPTIONS`) so
-    // a Laya-backed pipeline answers exactly as wide a `choose` as the
-    // `Decide` arm does.
-    let cap_markers = decide::primitives::MAX_OPTIONS as u32;
-    let laya_head =
-        modernbert::LayaHead::new_on(gpu, ckpt.laya_cfg.clone(), max_len, max_len, cap_markers, 1, &ckpt.head_init);
+    let model = modernbert::LayaDecision::new_on(
+        gpu,
+        ckpt.cfg,
+        ckpt.laya_cfg,
+        tok,
+        max_len,
+        ckpt.rl.head_max_len,
+        &ckpt.encoder_init,
+        &head_init,
+        modernbert::Training::HeadOnly,
+    );
+    let mut model = model;
+    model.set_provenance(modernbert::Provenance {
+        base: base_reference(Path::new(dir)),
+        ..Default::default()
+    });
 
-    Ok(LayaBackend { enc, head: laya_head, tok, cfg: ckpt.cfg, max_len, head_max_len, temperature: ckpt.rl.temperature, temperature_by_options: ckpt.rl.temperature_by_options })
+    Ok(LayaBackend {
+        model,
+        temperature: ckpt.rl.temperature,
+        temperature_by_options: ckpt.rl.temperature_by_options,
+    })
 }
 
 /// The encoder directory, as the Hugging Face reference it came from.

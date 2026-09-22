@@ -28,9 +28,15 @@
 //!   whole chain (sniff -> `modernbert::import_dir` -> `build_sequence` ->
 //!   trunk forward -> head forward -> host softmax) actually works, endpoint
 //!   to endpoint, without needing the real 843 MB checkpoint.
-//! - [`laya_backed_pipeline_refuses_training_with_a_typed_error`]: the
-//!   deliberate M6 gap - `train_choices`/`save_head` on a Laya-backed
-//!   pipeline are a clean `Err`, never a panic or a silent no-op.
+//! - [`laya_backed_pipeline_trains_saves_and_reloads_a_head`] and
+//!   [`a_head_file_from_the_other_architecture_is_refused_by_name`]: the
+//!   training CONTRACT on the Laya arm - `supports_training` is true,
+//!   `train_choices` runs and logs a finite loss per step, `save_head`
+//!   writes a head that `DecisionPipelineBuilder::head` loads back and that
+//!   reproduces the same answer, and a head from the OTHER architecture is
+//!   refused by name. That a run actually learns is measured separately, on
+//!   real weights, by
+//!   [`real_laya_checkpoint_head_training_improves_held_out_accuracy`].
 //! - [`real_minilm_checkpoint_still_answers_through_the_decide_arm`]: THE
 //!   PRIMARY SAFETY BAR - `load_decide` is byte-identical after this
 //!   milestone, so a real `sentence-transformers/all-MiniLM-L6-v2` checkpoint
@@ -336,25 +342,96 @@ fn laya_synthetic_fixture_choose_and_probability_produce_real_numbers() {
     assert!((0.0..=1.0).contains(&p), "probability out of range: {p}");
 }
 
+/// The MECHANICS of the Laya training contract, on a synthetic fixture: a
+/// `Flow` reports the arm as trainable, `train_choices` runs and reports a
+/// finite loss, `save_head` writes a real file, and that file loads back
+/// through `DecisionPipelineBuilder::head` and reproduces the SAME answer.
+///
+/// Deliberately NOT a claim that the fixture learned anything - it cannot.
+/// Its trunk is random, every option marker is the same `[MASK]` token, and
+/// a random ModernBERT maps them all to nearly the same hidden state, so a
+/// frozen-trunk head has nothing to tell the options apart by (measured in
+/// `crates/modernbert/tests/train_convergence.rs`). That a run LEARNS is what
+/// the real-weight test below measures, on the real trunk. Splitting the two
+/// is the point: this one runs everywhere in seconds and would catch a
+/// broken save/load path or a panicking loop, which is most of what can
+/// regress.
 #[test]
-fn laya_backed_pipeline_refuses_training_with_a_typed_error() {
-    let root = scratch_root("laya-training-gap");
+fn laya_backed_pipeline_trains_saves_and_reloads_a_head() {
+    use brain::flow::Stages;
+
+    let root = scratch_root("laya-training");
     write_laya_fixture(&root);
     let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
+    assert!(pipe.supports_training(), "the Laya arm trains now");
 
-    let err = pipe.train_choices(&[("hello", 0)], &["a".to_string(), "b".to_string()], "pick one", 1, 0, &mut |_, _| {}).unwrap_err();
+    let options: Vec<String> = ["alpha", "beta", "gamma"].iter().map(|s| s.to_string()).collect();
+    let mut seen = 0usize;
+    let loss = pipe
+        .train_choices(
+            &[("a short state string", 0), ("another state entirely", 2)],
+            &options,
+            "which option applies",
+            6,
+            7,
+            &mut |_, l| {
+                assert!(l.is_finite(), "a training step reported a non-finite loss: {l}");
+                seen += 1;
+            },
+        )
+        .expect("the laya arm must train");
+    assert_eq!(seen, 6, "the log callback must fire once per step");
+    assert!(loss.is_finite(), "mean tail loss is not finite: {loss}");
+    assert!(pipe.steps_taken() > 0, "training reported no steps");
+
+    let before = pipe.choose("a short state string", "which option applies", &["alpha", "beta", "gamma"]).unwrap();
+
+    // Written OUTSIDE the checkpoint directory on purpose: `import_dir`
+    // treats every `.safetensors` in the directory as part of the
+    // checkpoint, so a head dropped next to `model.safetensors` makes the
+    // directory unloadable. Head files are adapters and belong elsewhere -
+    // which is what `samples/decision/*` already do (`out/<name>-head.
+    // safetensors`).
+    let save_path = std::env::temp_dir().join(format!("brain-laya-head-{}.safetensors", std::process::id()));
+    pipe.save_head(save_path.to_str().unwrap()).expect("save_head");
+    assert!(save_path.exists(), "save_head wrote nothing");
+
+    let mut reloaded = brain::DecisionPipeline::builder(root.to_str().unwrap())
+        .head(save_path.to_str().unwrap())
+        .load()
+        .expect("a saved Laya head must load back");
+    let after = reloaded.choose("a short state string", "which option applies", &["alpha", "beta", "gamma"]).unwrap();
+    let _ = std::fs::remove_file(&save_path);
+
+    assert_eq!(before.choice, after.choice, "a reloaded head chose differently");
+    for ((n1, p1), (n2, p2)) in before.probabilities.iter().zip(&after.probabilities) {
+        assert_eq!(n1, n2);
+        assert!((p1 - p2).abs() <= 1e-4, "{n1}: {p1} vs {p2} after a save/load round trip");
+    }
+}
+
+/// A `decide` head is not a Laya head. Loading one into the other arm must
+/// say so by name rather than produce a model that answers plausible
+/// nonsense.
+#[test]
+fn a_head_file_from_the_other_architecture_is_refused_by_name() {
+    let root = scratch_root("laya-wrong-head");
+    write_laya_fixture(&root);
+    let bogus = std::env::temp_dir().join(format!("brain-not-a-laya-head-{}.safetensors", std::process::id()));
+    write_hf_safetensors_f32(&bogus, &[("encoder.layer.0.attention.self.query.weight".to_string(), vec![2, 2], vec![0.0; 4])]);
+
+    let err = brain::DecisionPipeline::builder(root.to_str().unwrap())
+        .head(bogus.to_str().unwrap())
+        .load()
+        .expect_err("a foreign head must be refused");
     match err {
-        brain::Error::Backend(msg) => assert!(msg.to_lowercase().contains("not yet implemented"), "expected a clear not-yet-implemented message, got: {msg}"),
+        brain::Error::Backend(msg) => assert!(
+            msg.contains("not a Laya decision-head parameter"),
+            "unhelpful refusal: {msg}"
+        ),
         other => panic!("expected Error::Backend, got {other:?}"),
     }
-
-    let save_path = root.join("should-not-be-written.safetensors");
-    let err = pipe.save_head(save_path.to_str().unwrap()).unwrap_err();
-    match err {
-        brain::Error::Backend(msg) => assert!(msg.to_lowercase().contains("not yet implemented"), "expected a clear not-yet-implemented message, got: {msg}"),
-        other => panic!("expected Error::Backend, got {other:?}"),
-    }
-    assert!(!save_path.exists(), "save_head must not write anything on the Laya arm");
+    let _ = std::fs::remove_file(&bogus);
 }
 
 /// THE PRIMARY SAFETY BAR: `load_decide` is byte-identical after this
@@ -650,4 +727,131 @@ fn real_laya_choice_probabilities_match_the_reference_serving_calibration() {
         }
         other => panic!("expected a choice, got {other:?}"),
     }
+}
+
+/// THE MEASURED CLAIM: head training on the REAL `convaiinnovations/laya`
+/// checkpoint makes the model better on examples it never trained on.
+///
+/// The task is a deliberately ARBITRARY mapping - four everyday topics onto
+/// four meaningless option names (`alpha`/`beta`/`gamma`/`delta`). That is
+/// what makes the number honest in both directions: a pretrained decision
+/// model cannot guess it, so the zero-shot score is near chance and there is
+/// real headroom; and the held-out sentences share only their TOPIC with the
+/// training ones, so getting them right requires generalizing from the
+/// examples rather than memorizing them.
+///
+/// Held-out accuracy is scored in the CANONICAL option order, while training
+/// shuffles a sampled subset every step (`OptionSampler`), so a model that
+/// learned "the answer is at index 2" scores at chance here.
+///
+/// Skips cleanly when the 843 MB checkpoint is absent, like every other
+/// real-weight test in this file.
+#[test]
+#[ignore = "slow: ~200 real ModernBERT-large training steps - run via `make test/slow`"]
+fn real_laya_checkpoint_head_training_improves_held_out_accuracy() {
+    let Some(dir) = brain_testutil::model_dir("convaiinnovations/laya") else {
+        brain_testutil::skip("no models directory resolvable");
+        return;
+    };
+    if !std::path::Path::new(&dir).join("model.safetensors").exists() {
+        brain_testutil::skip(&format!("{dir}/model.safetensors absent - run `brain pull convaiinnovations/laya`"));
+        return;
+    }
+
+    const INSTRUCTIONS: &str = "which bucket does this record belong in";
+    let options: Vec<String> = ["alpha", "beta", "gamma", "delta"].iter().map(|s| s.to_string()).collect();
+    // 0 = finance, 1 = cooking, 2 = sport, 3 = weather - arbitrarily.
+    let train: &[(&str, usize)] = &[
+        ("the invoice is thirty days overdue", 0),
+        ("quarterly revenue beat the forecast", 0),
+        ("we wrote down the receivable last month", 0),
+        ("the audit found a discrepancy in the ledger", 0),
+        ("simmer the sauce for twenty minutes", 1),
+        ("preheat the oven before baking", 1),
+        ("fold the egg whites into the batter", 1),
+        ("season the stock with bay and thyme", 1),
+        ("he scored in the final minute", 2),
+        ("the match went to extra time", 2),
+        ("she broke the national record in the relay", 2),
+        ("the referee awarded a penalty", 2),
+        ("the wind is picking up outside", 3),
+        ("heavy rain all afternoon", 3),
+        ("frost is expected overnight", 3),
+        ("the storm made landfall at dawn", 3),
+    ];
+    let held_out: &[(&str, usize)] = &[
+        ("the balance sheet shows a larger provision", 0),
+        ("cash flow improved after the refinancing", 0),
+        ("whisk the butter and sugar until pale", 1),
+        ("let the dough rest for an hour", 1),
+        ("the striker was substituted at half time", 2),
+        ("their goalkeeper saved three shots", 2),
+        ("fog is reducing visibility on the coast", 3),
+        ("temperatures will drop below freezing", 3),
+    ];
+
+    let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let score = |pipe: &mut brain::DecisionPipeline| -> f32 {
+        let mut hit = 0;
+        for (text, label) in held_out {
+            let a = pipe.choose(text, INSTRUCTIONS, &refs).expect("choose");
+            if a.index == *label {
+                hit += 1;
+            }
+        }
+        hit as f32 / held_out.len() as f32
+    };
+
+    let mut pipe = brain::DecisionPipeline::builder(&dir).load().expect("real laya checkpoint");
+    let before = score(&mut pipe);
+
+    // Fixed rather than configurable: a gate whose step budget a runner can
+    // change is not a gate, and every BRAIN_* env var read from this
+    // workspace has to be documented as real configuration.
+    let steps = 200usize;
+    let mut first = 0.0f32;
+    let mut n_first = 0usize;
+    let tail = pipe
+        .train_choices(train, &options, INSTRUCTIONS, steps, 0x1A_2026, &mut |step, l| {
+            if step < steps / 10 + 1 {
+                first += l;
+                n_first += 1;
+            }
+        })
+        .expect("the laya arm must train on real weights");
+    let first = first / n_first.max(1) as f32;
+
+    let after = score(&mut pipe);
+    println!(
+        "laya head training ({steps} steps): loss {first:.4} -> {tail:.4};  held-out accuracy \
+         {before:.3} -> {after:.3}  (chance {:.3}, {} held-out examples)",
+        1.0 / options.len() as f32,
+        held_out.len()
+    );
+
+    assert!(tail.is_finite() && first.is_finite(), "loss went non-finite: {first} -> {tail}");
+    assert!(tail < first, "loss did not fall over the run: {first:.4} -> {tail:.4}");
+    assert!(
+        after > before,
+        "held-out accuracy did not improve: {before:.3} -> {after:.3} (chance {:.3})",
+        1.0 / options.len() as f32
+    );
+    // Chance is 0.25 on four options. A run that merely got luckier would not
+    // clear a majority of a held-out set it never saw.
+    assert!(after >= 0.75, "held-out accuracy {after:.3} is too low to call this trained");
+
+    // ... and what was trained must survive a save/load round trip on real
+    // weights too, not only on the synthetic fixture.
+    let out = std::env::temp_dir().join(format!("brain-real-laya-head-{}.safetensors", std::process::id()));
+    pipe.save_head(out.to_str().unwrap()).expect("save_head on real weights");
+    let mut reloaded = brain::DecisionPipeline::builder(&dir)
+        .head(out.to_str().unwrap())
+        .load()
+        .expect("a trained real Laya head must load back");
+    let reloaded_acc = score(&mut reloaded);
+    let _ = std::fs::remove_file(&out);
+    assert!(
+        (reloaded_acc - after).abs() < 1e-6,
+        "a reloaded head scored {reloaded_acc:.3}, not the {after:.3} that was saved"
+    );
 }

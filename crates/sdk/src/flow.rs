@@ -83,10 +83,13 @@ pub trait Stages: Sized {
 
     /// Whether THIS loaded pipeline's backend can be trained at all.
     ///
-    /// Default `true`: every architecture that has been here could, until
-    /// [`crate::DecisionPipeline`]'s Laya arm - a pretrained-only backend
-    /// with a gradient-checked backward but no optimizer loop wired up yet
-    /// (see `crates/sdk/src/decision.rs`'s own module doc). A caller checks
+    /// Default `true`, and every architecture here today returns it -
+    /// including both of [`crate::DecisionPipeline`]'s arms, since the Laya
+    /// arm gained a real training loop. It stays because it is the general
+    /// shape for a backend that arrives pretrained with nothing to train
+    /// here (a quantized/distilled export, a hub-imported checkpoint with no
+    /// brain-side training path), and because a caller that asks is doing
+    /// the right thing whatever is behind it. A caller checks
     /// this BEFORE calling [`Flow::train`], rather than calling it and
     /// parsing the resulting error, because the two outcomes it wants -
     /// train normally, or skip straight to evaluating what arrived already
