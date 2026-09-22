@@ -426,6 +426,50 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // copy of the same four pairs.
         roles: ZimageRecipe::ROLES,
     },
+    // Laya (`convaiinnovations/laya`): a ModernBERT-large backbone plus a
+    // from-scratch decision head, imported by `crates/modernbert::import::
+    // import_dir`. Its checkpoint has NO root `config.json` at all --
+    // `TransformersRecipe` requires one and never claims it -- only a nested
+    // `encoder/config.json` plus a root `rl_agent_config.json`. That pair is
+    // distinctive enough alone (no other known repo shape ships both), same
+    // reasoning as `qwen3tts`'s own nested-signature row above; no `repos`
+    // pin needed (the registry-wide ambiguity test confirms no collision).
+    //
+    // NAMED files, not `files: &[]` - confirmed the hard way: the empty-list
+    // "fetch the whole listing" form pulled the real repo's `multilingual/`
+    // and `typed-decisions/` variant subdirectories too (a further ~900 MB),
+    // which are explicitly out of scope (this crate's importer only ever
+    // targets the English root checkpoint - the multilingual variant is a
+    // different backbone entirely, mmBERT-base not ModernBERT-large, and the
+    // typed-decisions variant is untested). This repo's real file set is
+    // fully known
+    // (verified against the live repo this session - including a real, full
+    // `brain pull` run against it - not just its file LISTING), so it is
+    // named exactly, the same as `deepseek2ocr-gguf`/`timesfm3` above. NO
+    // `tokenizer/special_tokens_map.json`: the repo does not actually ship
+    // one (a 404, confirmed live) - `crates/modernbert::import::import_dir`
+    // does not need it either, reading special-token ids from
+    // `tokenizer.json`'s own `added_tokens` instead.
+    //
+    // `roles: &[("dir", ".")]` names the directory itself, matching
+    // `import_dir`'s own signature (a directory path, not a single file) --
+    // `crates/modernbert` reads this downloaded directory verbatim, no
+    // brain-format tensor rewrite, the same shape
+    // `PASSTHROUGH_TRANSFORMERS_FAMILIES`'s rows use for their own crates.
+    FilesRecipe {
+        id: "laya",
+        family: "modernbert",
+        signature: &["rl_agent_config.json", "encoder/config.json"],
+        repos: &[],
+        files: &[
+            "rl_agent_config.json",
+            "model.safetensors",
+            "encoder/config.json",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+        ],
+        roles: &[("dir", ".")],
+    },
 ];
 
 /// The `(family, roles)` a [`FilesRecipe::id`] carries, for the finish-side
@@ -1078,6 +1122,92 @@ mod tests {
         let (family, roles) = files_recipe_roles("flux2").unwrap();
         assert_eq!(family, "flux2");
         assert_eq!(roles, ZimageRecipe::ROLES);
+    }
+
+    /// `convaiinnovations/laya`'s real top-level listing (verified this
+    /// session against the live repo): no root `config.json` at all, so
+    /// `TransformersRecipe` never claims it; the nested `encoder/config.json`
+    /// + root `rl_agent_config.json` pair is what the `laya` row keys on.
+    fn laya_listing() -> Vec<String> {
+        [
+            ".gitattributes",
+            "README.md",
+            "email_utils.py",
+            "rl_agent_api.py",
+            "rl_agent_config.json",
+            "rl_common.py",
+            "model.safetensors",
+            "encoder/config.json",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn laya_repo_resolves_to_the_laya_recipe_and_fetches_only_its_named_files() {
+        let listing = laya_listing();
+        let r = ModelRef::new("convaiinnovations", "laya", None);
+        let picked = select(recipes(), &r, &listing).unwrap();
+        assert_eq!(picked.id(), "laya", "a repo with no root config.json but a nested encoder/config.json + rl_agent_config.json must resolve to the laya recipe, not the transformers catch-all");
+
+        let hub = crate::hub::FakeHub::new();
+        let files: Vec<String> = picked.artifacts(&r, &listing, &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert_eq!(
+            files,
+            vec![
+                "rl_agent_config.json",
+                "model.safetensors",
+                "encoder/config.json",
+                "tokenizer/tokenizer.json",
+                "tokenizer/tokenizer_config.json",
+            ],
+            "named files only - NOT the whole listing, which would also pull the out-of-scope multilingual/typed-decisions variants"
+        );
+
+        let (family, roles) = files_recipe_roles("laya").unwrap();
+        assert_eq!(family, "modernbert");
+        assert_eq!(roles, &[("dir", ".")]);
+    }
+
+    /// The out-of-scope variant subdirectories a real pull must NOT fetch -
+    /// the exact regression this recipe's `files: &[]` -> named-files fix
+    /// exists to prevent.
+    #[test]
+    fn laya_recipe_does_not_fetch_the_multilingual_or_typed_decisions_variants() {
+        let mut listing = laya_listing();
+        listing.extend(
+            [
+                "multilingual/rl_agent_config.json",
+                "multilingual/model.safetensors",
+                "multilingual/encoder/config.json",
+                "multilingual/tokenizer/tokenizer.json",
+                "typed-decisions/encoder/config.json",
+                "typed-decisions/model.safetensors",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+        let r = ModelRef::new("convaiinnovations", "laya", None);
+        let hub = crate::hub::FakeHub::new();
+        let picked = select(recipes(), &r, &listing).unwrap();
+        assert_eq!(picked.id(), "laya");
+        let files: Vec<String> = picked.artifacts(&r, &listing, &hub).unwrap().into_iter().map(|a| a.file).collect();
+        assert!(files.iter().all(|f| !f.starts_with("multilingual/") && !f.starts_with("typed-decisions/")), "must not fetch the out-of-scope variants: {files:?}");
+    }
+
+    /// A bare transformers-shaped repo (root `config.json`, no
+    /// `rl_agent_config.json`) must still resolve to the catch-all, not the
+    /// `laya` recipe - the signature's two-file requirement is genuinely
+    /// exclusive, not merely typical.
+    #[test]
+    fn an_ordinary_transformers_repo_does_not_misclassify_as_laya() {
+        let listing: Vec<String> = ["config.json", "model.safetensors", "tokenizer.json"].into_iter().map(String::from).collect();
+        let r = ModelRef::new("sentence-transformers", "all-MiniLM-L6-v2", None);
+        let picked = select(recipes(), &r, &listing).unwrap();
+        assert_eq!(picked.id(), "transformers");
     }
 
     /// A recipe that matches every listing, at whatever [`Specificity`] tier

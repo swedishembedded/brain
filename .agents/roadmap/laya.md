@@ -121,18 +121,24 @@ normally across conversations.
       position table allows up to 8192, but the released checkpoint was
       never trained to use it - `build_sequence` truncates/refuses at 512,
       it does not extrapolate.
-- [ ] **`brain pull convaiinnovations/laya` does not work.** No
-      `crates/modelstore` recipe recognizes this checkpoint's directory
-      layout (`encoder/config.json` + `rl_agent_config.json` +
-      `tokenizer/tokenizer.json`, no root `config.json`) - the planner fails
-      with `"no config.json in repo"` before any download starts (found in
-      M4). Worked around by hand-fetching the five needed files into the
-      same `Store::repo_dir` path `brain pull` would have used. A second,
-      separate gap in the same area: `brain pull
-      sentence-transformers/all-MiniLM-L6-v2` (the `crates/decide` MiniLM
-      checkpoint) fails too, with `"unsupported architecture BertModel"`
-      (found in M7). Neither is fixed - both are real `crates/modelstore`
-      recipe-coverage gaps, out of this plan's scope.
+- [x] **`brain pull` now works for both checkpoints this work depends on.**
+      Found broken during M4 (`convaiinnovations/laya`: no recipe recognized
+      its directory layout - `encoder/config.json` + `rl_agent_config.json`,
+      no root `config.json` - "no config.json in repo") and M7
+      (`sentence-transformers/all-MiniLM-L6-v2`: "unsupported architecture
+      BertModel"), worked around by hand at the time, fixed properly as a
+      small separate follow-up (pull-side only, `crates/modelstore/src/
+      recipe.rs` + `crates/arch/src/lib.rs` + `crates/loader/src/supply.rs`
+      - deliberately NOT the serving-side `ArchSpec`/`crates/catalog`
+      registry, which would give `crates/decide`/`crates/modernbert` a real
+      CLI-servable surface neither had before and this plan never scoped).
+      Verified with real, fresh `brain pull` runs for both: Laya now fetches
+      exactly the 5 files needed (807 MiB, not the ~1.7 GiB a naive
+      whole-listing fetch would have pulled in the out-of-scope
+      `multilingual`/`typed-decisions` variant subdirectories - a second real
+      bug caught while fixing the first), MiniLM fetches its 4 files (87
+      MiB) verbatim with no tensor rewrite (`load_decide` needs the raw HF
+      files, so `decide` joined `PASSTHROUGH_TRANSFORMERS_FAMILIES`).
 - [ ] **The act/escalate head's class-order semantics are unconfirmed.**
       Only the head's *math* was parity-tested against the real checkpoint
       (M3/M5) - which index means "escalate" vs "continue" was never

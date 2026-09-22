@@ -463,7 +463,8 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
 /// directory, but `deepseek2ocr` composes four checkpoints out of one
 /// directory and calls that role `dir`
 /// (`deepseek2ocr::spec::Deepseek2ocrSpec`).
-const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[(&str, &str)] = &[("qwen3vl", "weights"), ("nemotronasr", "weights"), ("deepseek2ocr", "dir")];
+const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[(&str, &str)] =
+    &[("qwen3vl", "weights"), ("nemotronasr", "weights"), ("deepseek2ocr", "dir"), ("decide", "dir")];
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
 /// Reads `<dir>/config.json` to pick the specific qwen/glm/lfm/gpt importer

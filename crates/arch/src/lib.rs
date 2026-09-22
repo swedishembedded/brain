@@ -260,6 +260,7 @@ pub const ARCHS: &[Arch] = &[
         Decision,
         Brain,
         "brain-decide",
+        hf: &["BertModel"],
         default_ref: Some("sentence-transformers/all-MiniLM-L6-v2")
     ),
     // -- Text decoders --------------------------------------------------
@@ -878,6 +879,16 @@ mod tests {
         assert_eq!(by_hf("Qwen3OmniMoeForConditionalGeneration").map(|a| a.id), Some("qwen3omnimoe"));
         assert_eq!(by_hf("Qwen3ForCausalLM").map(|a| a.id), Some("qwen3"));
         assert_eq!(by_hf("totally-unknown"), None);
+    }
+
+    #[test]
+    fn by_hf_bert_model_routes_to_decide() {
+        // `sentence-transformers/all-MiniLM-L6-v2`'s own `config.json`
+        // declares `architectures: ["BertModel"]` - without this row,
+        // `brain pull` rejected it as an unsupported architecture before a
+        // single weight byte downloaded, even though `crates/decide`'s own
+        // importer already handles exactly this checkpoint shape.
+        assert_eq!(by_hf("BertModel").map(|a| a.id), Some("decide"));
     }
 
     #[test]
