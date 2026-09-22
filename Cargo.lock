@@ -1711,6 +1711,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",
+ "serde",
  "serde_json",
 ]
 
@@ -5615,6 +5616,14 @@ name = "sample-decision-intents"
 version = "1.1.0"
 dependencies = [
  "brain",
+]
+
+[[package]]
+name = "sample-decision-json"
+version = "1.1.0"
+dependencies = [
+ "brain",
+ "serde_json",
 ]
 
 [[package]]

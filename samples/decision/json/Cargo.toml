@@ -1,0 +1,27 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/json` -> `sample-decision-json`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-decision-json"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: a JEV-style JSON decision endpoint on stdin/stdout - typed questions (choice/score/noul) about one state, answered by a local decision model."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. This one
+# uses `decision` and nothing else.
+brain = { workspace = true, features = ["decision"] }
+# Third-party is unrestricted (rule 1). Only for building the response's
+# numbers: `brain::decision::OrderedJson` carries a `serde_json::Number`, and
+# how many decimals a probability is printed to is this sample's presentation
+# choice, not the SDK's.
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# The same surface `samples/decision/triage` names, so the same budget.
+max-brain-crates = 30

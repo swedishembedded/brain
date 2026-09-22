@@ -75,6 +75,25 @@ point the same `--encoder` flag at a Laya checkpoint instead.
       `DecisionPipeline::route(state, proposition) -> RouteVerdict` surfaces
       the act/escalate head, `Err` on the `Decide` arm.
 
+- [x] **The typed request surface, and a JSON endpoint on it**:
+      `DecisionPipeline::decide(&State, &[Question]) -> Vec<Answer>` answers
+      several typed questions about one state on BOTH arms, reusing
+      `decide::primitives`' own `Question`/`Answer`/`Opt` vocabulary (now
+      re-exported from the SDK) rather than mirroring it. It is the only SDK
+      surface that reaches `Question::Score` at all, the only one where a
+      `Choice`'s options carry the descriptions the model reads, and the only
+      one taking structured state - `modernbert::OrderedJson` gained a
+      key-order-PRESERVING `parse` (the half `write_json` was missing; a
+      `serde_json::Value` round-trip sorts, and would tokenize different
+      bytes). The Laya arm's `choose`/`probability` are now callers of one
+      typed `ask`, so the three question types cannot drift apart in
+      calibration. `samples/decision/json` is a JEV-style
+      (`{state, questions{type, instructions, criteria}}`) endpoint on stdin/
+      stdout built on it, with `--model` now a reusable `appopts::ModelChoice`
+      group. Real-weight gated on both checkpoints
+      (`crates/sdk/tests/decision_pipeline.rs`); the documented Jev routing
+      example answers `billing` at 0.9888 zero-shot.
+
 ### Measured numbers (M7, `49c56c87a`)
 
 `decide`/MiniLM trained this session at reduced step counts for time budget;
