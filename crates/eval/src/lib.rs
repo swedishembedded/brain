@@ -12,6 +12,13 @@
 //!   held-out tail and check exact string equality. This is the honest
 //!   "did it actually learn the rule" number, not perplexity.
 
+/// Calibration metrics for a decision model's probability output (ECE,
+/// AdaECE, classwise-ECE, NLL, Brier, reliability bins, coverage-vs-accuracy,
+/// failure-AUROC) - re-exported from the leaf layer (`crates/rlcd`) rather
+/// than owned here, so a sample can use them without this crate's own
+/// heavier dependency closure.
+pub use rlcd::metrics as calibration;
+
 pub mod detection;
 pub mod mlm;
 pub mod tts;
