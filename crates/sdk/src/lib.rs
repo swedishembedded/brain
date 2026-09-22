@@ -154,10 +154,10 @@ pub use conversion::{
 pub mod rlcd;
 #[cfg(feature = "decision")]
 pub use rlcd::{
-    ada_ece, check_information_refinement, classwise_ece, coverage_accuracy, failure_auroc,
-    reliability_bins, witness_search, BayesAction, CostMatrix, DecisionContract, Distribution,
-    Learner, LossConfig, Observation, OracleKind, ReliabilityBin, RlcdExample, RlcdPipeline,
-    RlcdPipelineBuilder, RlcdSpec, WitnessFamily, World,
+    ada_ece, bayes_action, bayes_risk, check_information_refinement, classwise_ece,
+    coverage_accuracy, failure_auroc, regret, reliability_bins, voi, witness_search, BayesAction,
+    CostMatrix, DecisionContract, Distribution, Learner, LossConfig, Observation, OracleKind,
+    ReliabilityBin, RlcdExample, RlcdPipeline, RlcdPipelineBuilder, RlcdSpec, WitnessFamily, World,
 };
 
 /// The stage chain every pipeline shares: `train`, `evaluate`, `save`, `ask`,

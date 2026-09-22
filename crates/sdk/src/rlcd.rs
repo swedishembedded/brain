@@ -43,8 +43,8 @@
 //! that tells apart a learned belief from a learned policy.
 
 use decide::decide::{Decide, Limits};
+use decide::policy::{choice_loss, Act, PolicyConfig};
 use decide::primitives::{confidence, Opt, Question};
-use rlcd::cost::{bayes_action, regret};
 use rlcd::metrics::{brier_score, ece, nll};
 use rlcd::scoring::{decision_loss_soft, softmax};
 
@@ -56,7 +56,7 @@ use crate::{Device, Error, Result};
 // directly - a sample may name only the `brain` SDK facade as its brain
 // dependency (see `samples/README.md`'s rules), never an engine crate.
 pub use rlcd::atlas::{check_information_refinement, DecisionContract, Distribution, Observation, OracleKind, World};
-pub use rlcd::cost::{BayesAction, CostMatrix};
+pub use rlcd::cost::{bayes_action, bayes_risk, regret, voi, BayesAction, CostMatrix};
 pub use rlcd::metrics::{ada_ece, classwise_ece, coverage_accuracy, failure_auroc, reliability_bins, ReliabilityBin};
 pub use rlcd::scoring::LossConfig;
 pub use rlcd::witness::{search as witness_search, Learner, WitnessFamily};
@@ -65,6 +65,14 @@ pub use rlcd::witness::{search as witness_search, Learner, WitnessFamily};
 /// discriminative rates every `decide`-backed pipeline in this SDK uses.
 const ENCODER_LR: f32 = 2e-5;
 const HEAD_LR: f32 = 1e-3;
+
+/// `train_voi_policy`'s own, lower rate - matching `ConversionPipeline`'s
+/// established precedent (its `POLICY_HEAD_LR` is likewise below its
+/// supervised `HEAD_LR`): a policy-gradient update is far noisier than a
+/// supervised one, and a fresh head committing to a near-deterministic
+/// answer off a handful of single-sample REINFORCE updates leaves little
+/// room for exploration to correct an early mistake.
+const VOI_HEAD_LR: f32 = 1e-4;
 
 /// One training or evaluation example: a rendered state, and the EXACT
 /// target distribution over `RlcdSpec::options` an oracle assigned it.
@@ -171,6 +179,13 @@ pub struct RlcdPipeline {
     question: Option<Question>,
     eval: Vec<RlcdExample>,
     eval_costs: Vec<(String, CostMatrix)>,
+    /// The meta-decision question `train_voi_policy` trains and
+    /// `voi_policy_action` queries - `{block, release, inspect}` by
+    /// construction (see `train_voi_policy`'s own doc). Separate from
+    /// `question`: a calibrated belief and a policy over what to DO about it
+    /// are two different heads answering two different questions of the same
+    /// state, not one repurposed as the other.
+    voi_question: Option<Question>,
 }
 
 impl std::fmt::Debug for RlcdPipeline {
@@ -213,6 +228,139 @@ impl RlcdPipeline {
         let p = self.probability(state)?;
         Ok(bayes_action(&p, costs))
     }
+
+    /// Train a LEARNED policy over `{act_now=0, inspect=1}` at `states` (each
+    /// a rendering of "no evidence yet"), through `decide::policy`'s
+    /// clipped-choice objective - an evidence-gathering decision, not a
+    /// probability, so it is graded by return (`decide::policy::choice_loss`'s
+    /// own doc explains why that is the right objective here and
+    /// [`crate::flow`]'s calibrated belief is graded by a proper scoring rule
+    /// instead).
+    ///
+    /// **Only the evidence-gathering decision is learned.** What "act now"
+    /// MEANS - block or release - is the CLOSED-FORM Bayes action on the
+    /// prior (`rlcd::cost::bayes_action`, stage 2, already solved exactly),
+    /// computed once and fixed for the whole run - not a second thing left
+    /// for the policy to also get right. An earlier version of this function
+    /// folded both decisions into one three-way choice `{block, release,
+    /// inspect}` and the terminal sub-choice was observed to sometimes
+    /// converge to the WRONG one (a real run picked "release" under costs
+    /// where "block" was strictly cheaper) even after raising exploration -
+    /// a single-example online REINFORCE loop over a handful of states is
+    /// good at learning ONE boundary, not two compounded ones, and stage 2
+    /// never needed learning in the first place.
+    ///
+    /// The reward per step is an exact Monte Carlo estimate built ONLY from
+    /// what `world: &impl World` already exposes (no new oracle machinery):
+    /// sample a true outcome `y ~ prior`; `act_now` realizes
+    /// `costs.get(bayes_action(prior, costs).action, y)`; `inspect`
+    /// additionally samples which observation the true world would reveal
+    /// GIVEN `y` - the joint the world implies, `P(o|y) = posterior_o[y] *
+    /// P(o) / prior[y]` by Bayes, derivable from `Observation::posterior`/
+    /// `probability` alone - pays `query_cost`, and then takes the
+    /// CLOSED-FORM Bayes action on what was revealed.
+    ///
+    /// Gate this against `rlcd::cost::voi` on the SAME `world`/`costs`/
+    /// `query_cost` (see `samples/learning/rlcd`'s own measured run): as
+    /// training converges, `voi_policy_action`'s answer should track the
+    /// sign of `voi()` - `inspect` when positive, `act_now` when not.
+    #[allow(clippy::too_many_arguments)]
+    pub fn train_voi_policy(
+        &mut self,
+        states: &[String],
+        world: &impl World,
+        costs: &CostMatrix,
+        query_cost: f32,
+        steps: usize,
+        seed: u64,
+    ) -> Result<TrainReport> {
+        if states.is_empty() {
+            return Err(Error::MissingArgument("no states to train the VOI policy on".into()));
+        }
+        let q = Question::Choice {
+            instructions: "should more evidence be gathered before deciding what to do".into(),
+            options: vec![Opt::new("act now"), Opt::new("inspect")],
+        };
+        let prior = world.prior();
+        let obs = world.observations();
+        let act_now_action = bayes_action(&prior, costs).action;
+        let cfg = PolicyConfig::default();
+        let mut rng = data::rng::Rng::new(seed);
+        // A running baseline (EMA), not a per-batch mean: this pipeline
+        // trains one example per step, matching every other RlcdPipeline
+        // training loop, so there is no batch to center advantages against.
+        let mut baseline = 0.0f32;
+        let (mut tail, tail_n) = (0.0f32, (steps / 10).max(1));
+        for step in 0..steps {
+            let state = &states[rng.gen_range_inclusive(0, states.len() as i64 - 1) as usize];
+            let y = sample_categorical(&prior, &mut rng);
+
+            let scores = self.model.score(state, std::slice::from_ref(&q)).map_err(Error::Backend)?;
+            let p = softmax(&scores[0]);
+            let action = sample_categorical(&p, &mut rng);
+
+            let reward = voi_policy_reward(action, y, act_now_action, &obs, costs, query_cost, &mut rng);
+
+            // Advantage against the baseline BEFORE this step's own reward
+            // folds into it - using the just-observed reward to compute its
+            // own baseline would leak part of the signal being centered.
+            let act = Act { old_prob: p[action], action, advantage: reward - baseline };
+            baseline = 0.9 * baseline + 0.1 * reward;
+            let l = self
+                .model
+                .train_step_with(state, &q, ENCODER_LR, VOI_HEAD_LR, |s| choice_loss(s, &act, &cfg))
+                .map_err(Error::Backend)?;
+            if step + tail_n >= steps {
+                tail += l / tail_n as f32;
+            }
+        }
+        self.voi_question = Some(q);
+        Ok(TrainReport { steps, final_loss: tail, seconds: 0.0 })
+    }
+
+    /// The learned policy's own action at `state` - `(action, probabilities)`
+    /// with `action` indexing `{act_now, inspect}` per
+    /// [`RlcdPipeline::train_voi_policy`]'s own doc.
+    pub fn voi_policy_action(&mut self, state: &str) -> Result<(usize, Vec<f32>)> {
+        let q = self.voi_question.clone().ok_or_else(|| Error::MissingArgument("train_voi_policy before querying its action".into()))?;
+        let scores = self.model.score(state, std::slice::from_ref(&q)).map_err(Error::Backend)?;
+        let p = softmax(&scores[0]);
+        let action = p.iter().enumerate().fold((0, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) }).0;
+        Ok((action, p))
+    }
+}
+
+/// One Monte Carlo reward sample for [`RlcdPipeline::train_voi_policy`]'s
+/// `{act_now=0, inspect=1}` choice, given a true outcome `y` already sampled
+/// from `world.prior()` and `act_now_action` (the closed-form Bayes action on
+/// the prior, fixed for the whole run) - see that function's own doc for the
+/// full derivation. Factored out so the reward computation is checkable on
+/// its own, independent of the neural policy that consumes it.
+fn voi_policy_reward(action: usize, y: usize, act_now_action: usize, obs: &[Observation], costs: &CostMatrix, query_cost: f32, rng: &mut data::rng::Rng) -> f32 {
+    if action == 0 {
+        return -costs.get(act_now_action, y);
+    }
+    // P(o | y) unnormalized: posterior_o[y] * P(o). Bayes' theorem's
+    // denominator (prior[y]) is a constant over the choice of o, so it is
+    // omitted rather than divided out.
+    let weights: Vec<f32> = obs.iter().map(|o| o.posterior[y] * o.probability).collect();
+    let revealed = &obs[sample_categorical(&weights, rng)];
+    let follow_up = bayes_action(&revealed.posterior, costs).action;
+    -query_cost - costs.get(follow_up, y)
+}
+
+/// Sample an index from `weights` (need not sum to 1 - normalized here).
+fn sample_categorical(weights: &[f32], rng: &mut data::rng::Rng) -> usize {
+    let total: f32 = weights.iter().sum();
+    assert!(total > 0.0, "sample_categorical: weights sum to {total}, nothing to sample");
+    let mut draw = rng.uniform(0.0, total as f64) as f32;
+    for (i, &w) in weights.iter().enumerate() {
+        if draw < w {
+            return i;
+        }
+        draw -= w;
+    }
+    weights.len() - 1 // floating-point rounding at the boundary, not a logic error
 }
 
 impl Stages for RlcdPipeline {
@@ -362,7 +510,7 @@ impl RlcdPipelineBuilder {
 
     pub fn load(self) -> Result<RlcdPipeline> {
         let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
-        Ok(RlcdPipeline { model, question: None, eval: Vec::new(), eval_costs: Vec::new() })
+        Ok(RlcdPipeline { model, question: None, eval: Vec::new(), eval_costs: Vec::new(), voi_question: None })
     }
 }
 
@@ -374,5 +522,59 @@ mod tests {
     fn argmax_picks_the_largest_and_the_first_on_a_tie() {
         assert_eq!(argmax(&[0.1, 0.7, 0.2]), 1);
         assert_eq!(argmax(&[0.5, 0.5]), 0);
+    }
+
+    #[test]
+    fn sample_categorical_matches_its_weights_over_many_draws() {
+        let mut rng = data::rng::Rng::new(7);
+        let weights = [0.8f32, 0.2];
+        let n = 200_000;
+        let ones = (0..n).filter(|_| sample_categorical(&weights, &mut rng) == 1).count();
+        let rate = ones as f64 / n as f64;
+        assert!((rate - 0.2).abs() < 0.01, "sampled rate {rate:.4} should be close to 0.2");
+    }
+
+    /// The worked example this crate's design was built around: `P(fault) =
+    /// 0.2`, diagnostic `P(+|fault) = 0.8` / `P(+|healthy) = 0.1`, costs
+    /// `(C_FP, C_FN) = (1, 10)`. Verifies `voi_policy_reward`'s expected
+    /// value per action matches the closed-form numbers `rlcd::cost`'s own
+    /// test suite gates - independent of the neural policy that trains
+    /// against it, and independent of `bayes_risk`/`voi` (this recomputes
+    /// the same numbers a different way, as a cross-check).
+    #[test]
+    fn voi_policy_reward_matches_the_worked_example_in_expectation() {
+        let obs = vec![
+            Observation { name: "diagnostic: positive".into(), probability: 0.24, posterior: vec![1.0 / 3.0, 2.0 / 3.0] },
+            Observation { name: "diagnostic: negative".into(), probability: 0.76, posterior: vec![18.0 / 19.0, 1.0 / 19.0] },
+        ];
+        let costs = CostMatrix::binary(1.0, 10.0);
+        let prior = [0.8f32, 0.2];
+        let mut rng = data::rng::Rng::new(11);
+        let n = 200_000;
+
+        let mut mean_reward = |action: usize, act_now_action: usize, query_cost: f32| -> f64 {
+            let mut total = 0.0f64;
+            for _ in 0..n {
+                let y = sample_categorical(&prior, &mut rng);
+                total += voi_policy_reward(action, y, act_now_action, &obs, &costs, query_cost, &mut rng) as f64;
+            }
+            total / n as f64
+        };
+
+        // act_now = block (the actual closed-form answer at this prior):
+        // E[cost] = 0.8*1 + 0.2*0 = 0.8, reward = -0.8
+        assert!((mean_reward(0, 0, 0.0) - (-0.8)).abs() < 0.01, "act_now=block: {}", mean_reward(0, 0, 0.0));
+        // act_now = release (never the real closed-form answer here, but the
+        // function must not hard-code which action "act now" means):
+        // E[cost] = 0.8*0 + 0.2*10 = 2.0, reward = -2.0
+        assert!((mean_reward(0, 1, 0.0) - (-2.0)).abs() < 0.02, "act_now=release: {}", mean_reward(0, 1, 0.0));
+        // inspect at query_cost=0: E[cost] = 0.48 (the worked example's own
+        // number), reward = -0.48, regardless of act_now_action.
+        assert!((mean_reward(1, 0, 0.0) - (-0.48)).abs() < 0.01, "inspect: {}", mean_reward(1, 0, 0.0));
+
+        // The real closed-form act_now (block) is strictly better than the
+        // wrong one (release) would have been - confirms the function reads
+        // act_now_action rather than silently assuming an index.
+        assert!(mean_reward(0, 0, 0.0) > mean_reward(0, 1, 0.0), "the real act_now action must beat the wrong one");
     }
 }

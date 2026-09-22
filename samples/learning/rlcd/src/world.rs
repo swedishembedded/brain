@@ -121,6 +121,14 @@ pub fn examples() -> (Vec<RlcdExample>, Vec<RlcdExample>) {
     (train, eval)
 }
 
+/// Every phrasing of the "no evidence yet" class - what
+/// `RlcdPipeline::train_voi_policy` trains and evaluates the meta-decision
+/// (block/release/inspect) on, since that decision is only ever made before
+/// any query result is in hand.
+pub fn no_evidence_states() -> Vec<String> {
+    NO_EVIDENCE_TEMPLATES.iter().map(|&s| s.to_string()).collect()
+}
+
 /// The canonical (first) phrasing of an evidence class, keyed by the SAME
 /// name `witness::search` labels its candidate points with. An
 /// [`Observation`] carries no text of its own (only its exact posterior), so

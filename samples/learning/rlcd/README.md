@@ -51,6 +51,18 @@ an ordinary classifier demo happens around that chain:
    where the model's induced action disagrees with the Bayes-optimal one -
    the action, not the probability: two beliefs that differ numerically but
    agree on every action of interest are not a decision failure.
+5. **A LEARNED evidence-acquisition policy** (`RlcdPipeline::train_voi_policy`)
+   is trained, through `decide::policy`'s clipped-choice objective, to decide
+   `{act_now, inspect}` BEFORE any query result is in - the one part of this
+   pipeline that is genuinely reinforcement learning rather than a proper
+   scoring rule, because choosing an action is exactly the case where
+   maximizing return is the right objective (see that function's own doc).
+   Only the evidence-gathering decision is learned; what "act now" MEANS
+   (block or release) stays the closed-form Bayes action from stage 2, fixed
+   for the run - not a second thing the policy also has to get right. Gated
+   against `rlcd::cost::voi`'s closed-form answer for the SAME world and
+   costs: a real run in this repo tracks the oracle's own answer as it flips
+   sign across two tested cost regimes.
 
 ## Run it
 
@@ -62,7 +74,10 @@ make samples/learning/rlcd/run ARGS="--steps 400"
 ```
 
 That checks the world, trains, evaluates, saves the head, audits for
-witnesses, and drops into a prompt. Reuse trained weights without retraining:
+witnesses, trains the evidence-acquisition policy, and drops into a prompt.
+`--query-cost` moves the closed-form VOI boundary - try `--query-cost 1.0` to
+see the learned policy flip from `inspect` to `act now` along with it. Reuse
+trained weights without retraining:
 
 ```bash
 make samples/learning/rlcd/run ARGS="--head out/rlcd-head.safetensors --ask 'The diagnostic test came back positive.'"
@@ -121,6 +136,38 @@ ask: "The inspection turned up a positive fault indicator."  (HELD OUT)
   healthy 0.374  faulty 0.626                    exact answer: 0.333 / 0.667
 ```
 
+Stage 3, 600 policy-gradient steps against a Monte Carlo reward built from the
+world's own numbers, at two query costs that put the closed-form VOI boundary
+on opposite sides of zero (`--voi-steps 600`, safety-critical costs):
+
+```
+--query-cost 0.05  (VOI = 0.2700 > 0, oracle: inspect)
+  trained 600 steps, final loss 0.0401
+    "The device has not been inspected yet."  -> inspect  (p = [0.005, 0.995])
+    ... (all 8 no-evidence phrasings)
+  learned policy picked "inspect" on 8/8 no-evidence phrasings (oracle-optimal: inspect)
+
+--query-cost 1.0   (VOI = -0.6800 < 0, oracle: act now)
+  trained 600 steps, final loss 0.0070
+    "The device has not been inspected yet."  -> act now  (p = [0.992, 0.008])
+    ... (all 8 no-evidence phrasings)
+  learned policy picked "inspect" on 0/8 no-evidence phrasings (oracle-optimal: act now)
+```
+
+The policy flips with the oracle, at high confidence, in both directions -
+not a single run that happens to land on the majority class. What "act now"
+MEANS (block or release) is never learned: it is `bayes_action` on the prior,
+fixed for the run, so the terminal decision cannot be wrong by construction
+- an earlier version of this function let the policy also choose BETWEEN
+block and release as a three-way `{block, release, inspect}` head, and a
+real run converged that sub-choice to the wrong one (`release` under costs
+where `block` was strictly cheaper) even after raising exploration; the fix
+was removing the thing that could be learned wrong, not tuning around it.
+The reward is a Monte Carlo estimate of realized cost (see
+`train_voi_policy`'s own doc for the exact derivation), sampled fresh every
+step, so the loss value itself is noisy by construction; the number that
+matters is the policy's own action, not the loss trajectory.
+
 ## What is not claimed
 
 - **This is a toy world, not a real diagnostic model.** 18 training examples
@@ -130,12 +177,12 @@ ask: "The inspection turned up a positive fault indicator."  (HELD OUT)
 - **Synthetic correctness is conditional on the world model.** The oracle is
   exact WITHIN the stated Bayesian world (`P(fault)=0.2`, the two likelihoods)
   and says nothing about any real device.
-- **No learned evidence-acquisition policy.** Deciding WHETHER to run the
-  diagnostic before acting (`rlcd::cost::voi`, gated in `brain-rlcd`'s own
-  test suite against this exact world) is closed-form here, not demonstrated
-  as a trained policy in this sample - `rlcd::atlas`'s worked-example numbers
-  cover that case, this sample's own scope stops at stages 1-2 (calibrated
-  belief, then closed-form action).
+- **The learned policy was tested at two query costs, not swept over a grid.**
+  It tracks the oracle's flip at `query_cost` 0.05 (VOI positive) and 1.0
+  (VOI negative), both at high confidence - a real, reproducible result, not
+  a general claim that it tracks `voi()` continuously across arbitrary costs;
+  it was not evaluated near the exact boundary itself, where a genuinely
+  uncertain policy would be the CORRECT answer, not a failure.
 - **The Laya decision backbone cannot train through this pipeline yet.**
   `RlcdPipeline` trains through `crates/decide` only; passing a Laya
   checkpoint's directory fails fast with a clear message rather than a

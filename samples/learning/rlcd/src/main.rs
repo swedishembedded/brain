@@ -51,13 +51,15 @@
 
 mod world;
 
-use brain::{check_information_refinement, witness_search, CostMatrix, Flow, Learner, LossConfig, Observation, RlcdPipeline, RlcdSpec};
+use brain::{check_information_refinement, witness_search, CostMatrix, Flow, Learner, LossConfig, Observation, RlcdPipeline, RlcdSpec, World};
 
 struct Args {
     encoder: String,
     head_in: Option<String>,
     save_to: String,
     steps: usize,
+    voi_steps: usize,
+    query_cost: f32,
     ask: Option<String>,
 }
 
@@ -70,6 +72,8 @@ fn parse_args() -> Args {
         head_in: None,
         save_to: "out/rlcd-head.safetensors".into(),
         steps: 400,
+        voi_steps: 600,
+        query_cost: 0.05,
         ask: None,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -81,10 +85,12 @@ fn parse_args() -> Args {
             "--head" => a.head_in = Some(next()),
             "--save" => a.save_to = next(),
             "--steps" => a.steps = next().parse().unwrap_or(a.steps),
+            "--voi-steps" => a.voi_steps = next().parse().unwrap_or(a.voi_steps),
+            "--query-cost" => a.query_cost = next().parse().unwrap_or(a.query_cost),
             "--ask" => a.ask = Some(next()),
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: rlcd [--encoder DIR] [--head FILE] [--save FILE] [--steps N] [--ask STATE]\n\n\
+                    "usage: rlcd [--encoder DIR] [--head FILE] [--save FILE] [--steps N] [--voi-steps N] [--query-cost F] [--ask STATE]\n\n\
                      Without --head: trains on the device-diagnosis world, evaluates, saves, audits.\n\
                      With --head:    skips training and audits those weights directly.\n\
                      Without --ask:  reads states from stdin until end of input, after the audit."
@@ -226,6 +232,44 @@ fn main() {
             }
         }
     }
+
+    println!("\n--- stage 3: a LEARNED evidence-acquisition policy ---");
+    let query_cost = args.query_cost;
+    let voi_value = brain::voi(
+        &world::DiagnosisWorld.prior(),
+        &audit_costs,
+        &world::DiagnosisWorld.observations().iter().map(|o| o.probability).collect::<Vec<_>>(),
+        &world::DiagnosisWorld.observations().iter().map(|o| o.posterior.clone()).collect::<Vec<_>>(),
+        query_cost,
+    );
+    let oracle_meta_action = if voi_value > 0.0 { "inspect" } else { "act now" };
+    println!("  closed-form VOI = {voi_value:.4} -> oracle says: {oracle_meta_action}");
+
+    let no_evidence = world::no_evidence_states();
+    match pipeline.train_voi_policy(&no_evidence, &world::DiagnosisWorld, &audit_costs, query_cost, args.voi_steps, 29) {
+        Ok(r) => println!("  trained {} steps, final loss {:.4}", r.steps, r.final_loss),
+        Err(e) => {
+            eprintln!("rlcd: VOI policy training failed: {e}");
+            std::process::exit(1);
+        }
+    }
+    let mut inspect_votes = 0usize;
+    for state in &no_evidence {
+        match pipeline.voi_policy_action(state) {
+            Ok((action, p)) => {
+                let name = ["act now", "inspect"][action];
+                if name == "inspect" {
+                    inspect_votes += 1;
+                }
+                println!("    {state:?} -> {name}  (p = [{:.3}, {:.3}])", p[0], p[1]);
+            }
+            Err(e) => eprintln!("rlcd: voi_policy_action({state:?}) failed: {e}"),
+        }
+    }
+    println!(
+        "  learned policy picked \"inspect\" on {inspect_votes}/{} no-evidence phrasings (oracle-optimal: {oracle_meta_action})",
+        no_evidence.len()
+    );
 
     // ---- resume the chain for interactive inference -----------------------
     let chain = Flow::new(Ok(pipeline));
