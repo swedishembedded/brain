@@ -181,6 +181,24 @@ fn an_improved_elite_keeps_its_slot() {
     assert_eq!(a.get(&niche(&[5, 5])).unwrap().slot, slot);
 }
 
+/// A cell that is improved says so, so that a caller which recorded a
+/// trajectory as "resume at this cell, then..." can tell that the cell it
+/// recorded against is gone. Without it the caller reconstructs a
+/// plausible-looking sequence that no longer describes anything.
+#[test]
+fn an_improved_cell_reports_a_new_generation() {
+    let mut a: Archive<&str> = Archive::new(8, TOL);
+    a.offer(niche(&[1]), Worth::new(0.5, 900), "slow");
+    assert_eq!(a.get(&niche(&[1])).unwrap().generation, 0);
+    a.offer(niche(&[1]), Worth::new(0.5, 100), "fast");
+    assert_eq!(a.get(&niche(&[1])).unwrap().generation, 1);
+    // A REFUSED offer is not a change, so it must not move the generation -
+    // or every chained trajectory is invalidated by an offer that changed
+    // nothing.
+    a.offer(niche(&[1]), Worth::new(0.5, 999), "slower");
+    assert_eq!(a.get(&niche(&[1])).unwrap().generation, 1);
+}
+
 /// The best cell by achievement, then by time. What a campaign reports and
 /// what the compression phase clones first.
 #[test]

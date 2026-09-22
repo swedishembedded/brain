@@ -187,3 +187,4 @@ What belongs where:
 | 144 | Make the states declared, not the exceptions listed | [`144-make-the-states-declared-not-the-exceptions-listed.md`](144-make-the-states-declared-not-the-exceptions-listed.md) |
 | 145 | A held-out split drawn like the training set cannot see a skewed curriculum | [`145-a-held-out-split-drawn-like-the-training-set-cannot-see-a.md`](145-a-held-out-split-drawn-like-the-training-set-cannot-see-a.md) |
 | 146 | A quality-diversity niche must hold CAPABILITY, not just the score's own terms | [`146-a-quality-diversity-niche-must-hold-capability-not-just-the.md`](146-a-quality-diversity-niche-must-hold-capability-not-just-the.md) |
+| 147 | A chained trajectory is only valid against the VERSION of its parent | [`147-a-chained-trajectory-is-only-valid-against-the-version-of-its.md`](147-a-chained-trajectory-is-only-valid-against-the-version-of-its.md) |

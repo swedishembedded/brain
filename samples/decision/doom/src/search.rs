@@ -189,6 +189,19 @@ impl Solution {
 pub struct Trail {
     /// The cell this one was reached from. `None` for the level's own start.
     pub from: Option<Niche>,
+    /// Which VERSION of that cell, so a stale chain is caught rather than
+    /// reconstructed.
+    ///
+    /// The archive replaces a cell's contents whenever a better way of
+    /// reaching it turns up. These steps were recorded after resuming the
+    /// version that was there at the time, and they only continue THAT state:
+    /// splice them onto a different prefix and the sequence describes nothing
+    /// that ever happened. The replay gate would catch it - that is what the
+    /// gate is for - but only after paying for a whole episode to find out,
+    /// and a rehydration would burn one of its bounded attempts on a trail
+    /// that cannot work.
+    #[serde(default)]
+    pub from_generation: u32,
     /// What was done after resuming there.
     pub steps: Vec<String>,
 }
@@ -204,6 +217,7 @@ pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
     let mut seen = std::collections::HashSet::new();
     let mut chain: Vec<&Trail> = Vec::new();
     let mut here = Some(at.clone());
+    let mut want: Option<u32> = None;
     while let Some(n) = here {
         if !seen.insert(n.clone()) {
             return None;
@@ -212,7 +226,13 @@ pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
             return None;
         }
         let e = archive.get(&n)?;
+        // The link is only good against the version of this cell that the
+        // child was recorded after. See `Trail::from_generation`.
+        if want.is_some_and(|g| g != e.generation) {
+            return None;
+        }
         chain.push(&e.what);
+        want = Some(e.what.from_generation);
         here = e.what.from.clone();
     }
     let mut out = Vec::new();
@@ -435,11 +455,13 @@ impl Campaign {
         let op = &OPERATORS[arm];
 
         let picked = if op.from_best {
-            self.archive.best().map(|e| (e.niche.clone(), e.slot))
+            self.archive.best().map(|e| (e.niche.clone(), e.slot, e.generation))
         } else {
-            self.archive.pick(&mut self.rng).map(|e| (e.niche.clone(), e.slot))
+            self.archive
+                .pick(&mut self.rng)
+                .map(|e| (e.niche.clone(), e.slot, e.generation))
         };
-        let Some((from, slot)) = picked else {
+        let Some((from, slot, from_gen)) = picked else {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
         };
@@ -466,7 +488,11 @@ impl Campaign {
             }
             if let Some(cell) = env.cell() {
                 let worth = Worth::new(env.score(allowed).value(), env.cost());
-                let trail = Trail { from: Some(from.clone()), steps: steps.clone() };
+                let trail = Trail {
+                    from: Some(from.clone()),
+                    from_generation: from_gen,
+                    steps: steps.clone(),
+                };
                 // What the archive's best was BEFORE this admission, so a
                 // cell that advances the frontier is credited against the old
                 // frontier rather than against itself.

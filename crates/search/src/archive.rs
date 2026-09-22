@@ -123,6 +123,19 @@ pub struct Elite<C> {
     /// weight, so a cell that has been explored from often loses priority to
     /// one that has not.
     pub visits: u32,
+    /// How many times this cell's contents have been REPLACED by a better
+    /// way of reaching it.
+    ///
+    /// For callers that chain: a trajectory recorded as "resume at cell P,
+    /// then do these things" is only meaningful against the P that was there
+    /// when it was recorded. Improve P and every trajectory hanging off it
+    /// describes a continuation of a state that no longer exists - it will
+    /// not replay, and without a way to notice that, a caller reconstructs a
+    /// plausible-looking sequence that silently does something else.
+    ///
+    /// A counter rather than a timestamp, because the question is only ever
+    /// "is this the same one I saw", and a counter answers it with no clock.
+    pub generation: u32,
     /// The host-side resource this cell's state occupies - a snapshot slot on
     /// a game engine, an index into a pool of saved states. The archive owns
     /// its allocation so that an eviction frees a slot the next cell reuses:
@@ -208,6 +221,7 @@ impl<C> Archive<C> {
             // selection rule this is unexplored ground when it is not.
             held.worth = worth;
             held.what = what;
+            held.generation += 1;
             return Admission::Improved;
         }
         let slot = match self.free.pop() {
@@ -232,7 +246,8 @@ impl<C> Archive<C> {
                 None => return Admission::Rejected,
             },
         };
-        self.cells.insert(niche.clone(), Elite { niche, worth, what, visits: 0, slot });
+        self.cells
+            .insert(niche.clone(), Elite { niche, worth, what, visits: 0, generation: 0, slot });
         Admission::Fresh
     }
 
