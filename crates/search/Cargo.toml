@@ -1,0 +1,21 @@
+[package]
+name = "brain-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The model-agnostic discovery runtime: a quality-diversity archive that keeps the FASTEST elite of every behavioural niche, a set of search operators with a bandit allocating budget between them on measured gain per second, and an evaluator cascade that runs its expensive rung only on candidates that survived the cheap ones. A LEAF crate by design - it knows nothing of models, accelerators or environments, so a sample, a model crate or the SDK can all host a search without dragging the training stack in."
+
+[lib]
+name = "search"
+path = "src/lib.rs"
+
+[dependencies]
+# `data::rng::Rng` - the shared SplitMix64 generator. Selection out of the
+# archive and every stochastic operator draw come from it, so a search is
+# reproducible from its seed. `brain-data` is a training-substrate crate with
+# no model in it, which is what keeps this crate a leaf.
+brain-data.workspace = true
+# The archive is the durable artifact of a campaign: it outlives the weights
+# and has to survive a process exit, so it serialises.
+serde.workspace = true
+serde_json.workspace = true
