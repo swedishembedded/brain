@@ -1923,7 +1923,18 @@ impl DoomEnv {
             } else {
                 200
             }),
-            exit_routed: self
+            // A BEARING IS NOT A DESTINATION. The engine supplies a route
+            // bearing whenever it can route anywhere at all, and while the
+            // way out is unknown that bearing leads to the frontier - so
+            // testing for one made "head for the exit" the answer to every
+            // decision on a level whose exit had never been seen. Measured on
+            // E1M1: taken on 375 of 400 decisions, none of which could reach
+            // an exit, and the escape that shoves at walls when the ground
+            // has all been walked was never once reached.
+            exit_routed: way_out_known(
+                self.state.exit.is_some(),
+                self.state.exit.as_ref().and_then(|e| e.goal.as_deref()),
+            ) && self
                 .state
                 .exit
                 .as_ref()
@@ -1987,7 +1998,11 @@ impl DoomEnv {
         // Nowhere new for a long time and no route to anywhere either: the
         // level is not saying where to go and walking is not finding out.
         // Try the walls.
-        let out_of_ideas = self.stale >= STALE_TRY_THE_WALLS && self.state.exit.is_none();
+        let out_of_ideas = self.stale >= STALE_TRY_THE_WALLS
+            && !way_out_known(
+                self.state.exit.is_some(),
+                self.state.exit.as_ref().and_then(|e| e.goal.as_deref()),
+            );
         if self.stuck >= 3 || out_of_ideas || best.is_none() {
             let mut ways: Vec<usize> = Vec::new();
             if let Some(i) = by(Tag::Use) {
@@ -2132,6 +2147,24 @@ fn every_field_of_an_option_either_replays_or_cannot_change_the_run(o: &Option_)
         // player ranks the options it was offered; a replay is not choosing.
         room: _,
     } = o;
+}
+
+/// Whether the level has actually told the player where the way out is.
+///
+/// An exit block being PRESENT is not that answer, and reading it as one
+/// switches off the escape that handles a room whose only way on is a switch.
+/// The engine returns a block whenever it can route anywhere at all; when the
+/// way out has not been found the block it returns says `goal: "unexplored"`,
+/// which is a route to the edge of what has been seen and an admission that
+/// the exit is not among it. Measured on E1M1: the block is present on 375 of
+/// 400 decisions and every single one of them says "unexplored", so a test for
+/// `exit.is_none()` fired on 22 decisions where the player was out of ideas on
+/// 247 of them.
+///
+/// A key colour or "switch" DOES count as knowing: those name a real subgoal
+/// on the way to a known exit, and walking to them is progress.
+fn way_out_known(exit_present: bool, goal: Option<&str>) -> bool {
+    exit_present && goal != Some("unexplored")
 }
 
 /// What the scripted player is told to prefer, in order, under each set of
@@ -2808,6 +2841,54 @@ mod teacher_tests {
                 );
             }
         }
+    }
+
+    /// A route to the frontier is the level saying it does NOT know the way
+    /// out. Reading it as a way out disables the one escape that gets a
+    /// player past a room whose exit is a switch on its wall.
+    #[test]
+    fn a_route_to_unexplored_ground_is_not_a_known_way_out() {
+        // What the engine sends once the exit has been found, or once it has
+        // found the key or switch that stands between: a real subgoal.
+        assert!(way_out_known(true, None), "a route to the exit itself");
+        assert!(way_out_known(true, Some("switch")), "a switch on the way out");
+        assert!(way_out_known(true, Some("blue")), "a key on the way out");
+        // And what it sends while the exit is still unknown. The block is
+        // present, so `exit.is_some()` is true and says nothing.
+        assert!(
+            !way_out_known(true, Some("unexplored")),
+            "a route to the edge of what has been seen is an admission that \
+             the way out has not been found"
+        );
+        assert!(!way_out_known(false, None), "no route at all");
+    }
+
+    /// The same question decides whether "head for the exit" is a move at
+    /// all. Both readings have to agree, or the teacher heads for an exit it
+    /// has not found and never reaches the branch that goes looking.
+    #[test]
+    fn heading_for_the_exit_needs_an_exit_that_has_been_found() {
+        let found = Moment {
+            mission: Mission::Speedrun,
+            threat_near: false,
+            hurt_badly: false,
+            within_reach: false,
+            exit_routed: true,
+            attack_offered: false,
+            in_my_face: false,
+            secrets_left: false,
+        };
+        assert!(takes(Tag::Exit, &found));
+        assert!(
+            !takes(
+                Tag::Exit,
+                &Moment {
+                    exit_routed: false,
+                    ..found
+                }
+            ),
+            "a bearing at the frontier is not a way out to head for"
+        );
     }
 
     /// A Max run is not finished with a secret outstanding, and going to
