@@ -14,6 +14,9 @@ publish = false
 #   decision  DecisionPipeline: the model that picks a move
 #   viewport  the window, the 3D view of the cube, the PNG/MP4 dump
 brain = { workspace = true, features = ["decision", "viewport"] }
+# The recorded fit is JSON, so the settings only this sample knows can be
+# merged into what the SDK already writes into the checkpoint.
+serde_json.workspace = true
 
 [package.metadata.brain]
 # The `viewport` surface is what the seven crates beyond a decision-only

@@ -787,7 +787,65 @@ impl DecisionPipeline {
                 tail_sum += l / tail as f32;
             }
         }
+
+        // Record the fit, so the checkpoint this run saves can answer "which
+        // run produced this?". The architecture already in `config.json`
+        // cannot: every model in this family shares it, so two runs that
+        // differed in every setting that mattered write identical configs.
+        // A published number whose recipe was lost can be neither defended
+        // nor discarded, which is the whole cost this field exists to avoid.
+        if let Backend::Decide(model) = &mut self.backend {
+            let mut p = model.provenance().clone();
+            p.task = serde_json::json!({
+                "task": "choice",
+                "steps": steps,
+                "batch": batch,
+                "examples": examples.len(),
+                "options": options.len(),
+                "seed": seed,
+                "final_loss": tail_sum,
+            });
+            model.set_provenance(p);
+        }
         Ok(tail_sum)
+    }
+
+    /// Add caller-side settings to the fit [`Self::train_choices`] recorded,
+    /// for the ones only the caller knows.
+    ///
+    /// `train_choices` sees steps, batch and seed; it cannot see what the
+    /// examples ARE. For a curriculum-generating caller that is the setting
+    /// most worth keeping - a policy only learns the distances it was shown,
+    /// so two runs identical in every SDK-visible parameter can differ
+    /// entirely in what they can do. Keys merge into the recorded object and
+    /// overwrite on collision, so a caller can correct a name it owns.
+    ///
+    /// Call after training; a fit that does not exist yet has nothing to
+    /// merge into and is refused by name rather than silently dropped.
+    pub fn record_fit(&mut self, extra: &serde_json::Value) -> Result<()> {
+        let Backend::Decide(model) = &mut self.backend else {
+            return Err(Error::MissingArgument(
+                "record_fit is for the arm that fine-tunes its encoder; the Laya arm freezes its \
+                 trunk and saves no model of its own"
+                    .into(),
+            ));
+        };
+        let Some(add) = extra.as_object() else {
+            return Err(Error::MissingArgument(
+                "record_fit takes a JSON object of settings to merge".into(),
+            ));
+        };
+        let mut p = model.provenance().clone();
+        let Some(task) = p.task.as_object_mut() else {
+            return Err(Error::MissingArgument(
+                "record_fit has no fit to add to - call it after train_choices".into(),
+            ));
+        };
+        for (k, v) in add {
+            task.insert(k.clone(), v.clone());
+        }
+        model.set_provenance(p);
+        Ok(())
     }
 
     /// Write the trained head to a brain `.safetensors`, for

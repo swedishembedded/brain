@@ -74,6 +74,16 @@ impl Encoding {
             other => Err(format!("--encode {other}: expected grid, compact or rows")),
         }
     }
+
+    /// The spelling [`Encoding::parse`] accepts, so a run that records its
+    /// encoding names it the same way the flag that selected it did.
+    pub fn name(self) -> &'static str {
+        match self {
+            Encoding::Grid => "grid",
+            Encoding::Compact => "compact",
+            Encoding::Rows => "rows",
+        }
+    }
 }
 
 /// The letter a sticker is written as: the face it belongs on when solved.
@@ -332,6 +342,15 @@ mod tests {
     /// held-out split drawn the same way is skewed the same way and reports
     /// it as fine. Only driving the policy reveals it - which is far too late
     /// and far too slow to be the thing that catches it.
+    /// A recorded encoding has to be readable back, or the provenance names
+    /// a setting nobody can act on.
+    #[test]
+    fn every_encoding_name_parses_back_to_itself() {
+        for e in [Encoding::Grid, Encoding::Compact, Encoding::Rows] {
+            assert_eq!(Encoding::parse(e.name()), Ok(e), "{} did not round-trip", e.name());
+        }
+    }
+
     #[test]
     fn examples_are_balanced_across_the_distances_a_solve_meets() {
         let solver = Solver::new(4);

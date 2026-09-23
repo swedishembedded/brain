@@ -134,3 +134,42 @@ fn save_head_still_refuses_a_moved_encoder() {
     assert!(format!("{err}").contains("encoder was trained"), "unhelpful refusal: {err}");
     let _ = std::fs::remove_file(&path);
 }
+
+/// A saved model records the fit that made it, not only the architecture it
+/// shares with every sibling.
+///
+/// This is the defect knowledge #151 is about: a published solve-rate table
+/// whose training command was never written down anywhere, so the run could
+/// not be reproduced, defended or discarded. Architecture is not provenance -
+/// every model in this family has the same architecture, so a `config.json`
+/// carrying only `n_layers` and `d_model` cannot distinguish two runs that
+/// differ in every way that mattered.
+#[test]
+fn a_saved_model_records_the_fit_that_made_it() {
+    let Some(dir) = checkpoint() else { return };
+    let out = scratch("decision-fit");
+
+    let opts = options();
+    let mut pipe = DecisionPipeline::builder(&dir).load().expect("load");
+    let data = examples();
+    let ex: Vec<(&str, usize)> = data.iter().map(|(t, l)| (t.as_str(), *l)).collect();
+    pipe.train_choices(&ex, &opts, INSTRUCTIONS, 8, 4, 0x5A_1E, &mut |_, _| {}).expect("train");
+    pipe.save_model(out.to_str().unwrap()).expect("save");
+
+    let text = std::fs::read_to_string(out.join("config.json")).expect("config.json");
+    let cfg: serde_json::Value = serde_json::from_str(&text).expect("config.json parses");
+    let fit = cfg
+        .get("trained_for")
+        .unwrap_or_else(|| panic!("a trained model saved no record of its fit: {text}"));
+
+    // The settings that change the result, and the seed that makes the run
+    // repeatable. Without these the checkpoint cannot answer "which run?".
+    for key in ["steps", "batch", "examples", "seed"] {
+        assert!(fit.get(key).is_some(), "the saved fit does not record {key:?}: {fit}");
+    }
+    assert_eq!(fit["steps"], 8, "recorded a step count the run did not use");
+    assert_eq!(fit["batch"], 4, "recorded a batch the run did not use");
+    assert_eq!(fit["examples"], data.len(), "recorded an example count the run did not use");
+
+    let _ = std::fs::remove_dir_all(&out);
+}

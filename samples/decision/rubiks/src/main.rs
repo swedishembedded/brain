@@ -209,6 +209,16 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
         trained.as_secs_f32(),
         1000.0 * trained.as_secs_f32() / s.train.max(1) as f32
     );
+    // The curriculum is this sample's own setting and the SDK cannot see it,
+    // but it decides what the policy can do: a run only learns the distances
+    // it was shown. Recording it is what lets a later reader tell two
+    // otherwise-identical runs apart.
+    pipe.record_fit(&serde_json::json!({
+        "scramble": s.scramble,
+        "encoding": s.encoding.name(),
+    }))
+    .map_err(|e| format!("{e}"))?;
+
     // A fine-tuned ENCODER is most of what this run produced - the head
     // alone would attach to the published encoder and not be this model - so
     // the whole thing is written, and it is fatal if it cannot be. A run
