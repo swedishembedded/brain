@@ -453,6 +453,26 @@ const STALE_TRY_THE_WALLS: u32 = 12;
 /// Decisions to hold one direction for once circling is detected. Long enough
 /// to clear the cycle's own diameter at the walking speed one decision buys.
 const COMMIT_STEPS: u32 = 8;
+/// How many decisions a goal gets to show it is working.
+///
+/// The teacher's other guard against repeating itself is keyed on the player
+/// having stopped MOVING, and the failure it misses is the one where the
+/// player moves the whole time and arrives nowhere. Measured on E1M2 at the
+/// medium skill set: `Grab` chosen on 1548 of 2000 decisions for a total of
+/// ONE item picked up - a visible thing it could not reach, re-offered every
+/// decision because walking at it changed nothing about it being there. On
+/// E1M4, `Exit` chosen 1131 times without the route ever getting shorter.
+///
+/// So each goal is watched against the one number it exists to move, and a
+/// goal that has not moved its own number in this many decisions is set
+/// aside. Forty is about fifteen seconds of play: long enough to walk the
+/// length of a room and open a door at the end of it, short enough that two
+/// futile goals cannot eat an episode between them.
+const FUTILE: u32 = 40;
+/// How long a goal that failed to deliver stays set aside. Long enough for
+/// whatever else the teacher does instead to reach somewhere new, which is
+/// what makes the next attempt a different attempt rather than the same one.
+const SET_ASIDE: u32 = 60;
 
 /// What the agent just did, for the window and the transcript.
 ///
@@ -556,6 +576,20 @@ pub struct DoomEnv {
     stuck: u32,
     /// Decisions since the player last walked somewhere new. See `visit`.
     stale: u32,
+    /// Decisions spent going for an item without the item count rising, and
+    /// how long `Grab` is set aside once that ran out. See [`FUTILE`].
+    grab_futile: u32,
+    grab_aside: u32,
+    /// The same for heading somewhere: decisions spent without the route to
+    /// it ever getting shorter, and the rest that follows.
+    exit_futile: u32,
+    exit_aside: u32,
+    /// The shortest the route has ever been this episode. What `exit_futile`
+    /// is measured against - a goal is delivering if it is beating its own
+    /// best, not if it merely moved.
+    best_path: Option<i32>,
+    /// Items carried at the last decision, to notice one being picked up.
+    had_items: u32,
     /// The kinds of thing already tried since the player last moved.
     tried: std::collections::HashSet<Tag>,
     /// The last few positions, for noticing that the player is going round in
@@ -654,6 +688,12 @@ impl DoomEnv {
             last_pos: None,
             stuck: 0,
             stale: 0,
+            grab_futile: 0,
+            grab_aside: 0,
+            exit_futile: 0,
+            exit_aside: 0,
+            best_path: None,
+            had_items: 0,
             tried: std::collections::HashSet::new(),
             recent: std::collections::VecDeque::new(),
             trail: std::collections::VecDeque::new(),
@@ -1228,6 +1268,23 @@ impl DoomEnv {
         if self.stuck == 0 {
             self.tried.clear();
         }
+        // Did each goal move the number it exists to move? An item picked up
+        // is Grab working; a route shorter than it has ever been is heading
+        // somewhere working. Anything else is the goal failing to deliver,
+        // however busy the player looked doing it.
+        if self.state.level.items > self.had_items {
+            self.grab_futile = 0;
+        }
+        self.had_items = self.state.level.items;
+        let path = self.state.exit.as_ref().and_then(|e| e.path_distance);
+        if let Some(d) = path {
+            if self.best_path.is_none_or(|b| d < b) {
+                self.best_path = Some(d);
+                self.exit_futile = 0;
+            }
+        }
+        self.grab_aside = self.grab_aside.saturating_sub(1);
+        self.exit_aside = self.exit_aside.saturating_sub(1);
         self.last_pos = Some(pos);
         self.recent.push_back(pos);
         if self.recent.len() > CIRCLE_WINDOW {
@@ -1538,6 +1595,12 @@ impl DoomEnv {
         self.last_pos = None;
         self.stuck = 0;
         self.stale = 0;
+        self.grab_futile = 0;
+        self.grab_aside = 0;
+        self.exit_futile = 0;
+        self.exit_aside = 0;
+        self.best_path = None;
+        self.had_items = 0;
         self.tried.clear();
         self.recent.clear();
         self.trail.clear();
@@ -1642,6 +1705,12 @@ impl DoomEnv {
     /// The bookkeeping now advances from what was actually EXECUTED, in
     /// [`DoomEnv::note_executed`], which is what "have I tried this" and "am
     /// I committed to a direction" were always supposed to mean.
+    /// What KIND of thing an offered option is. For telling what a run spent
+    /// its decisions doing, which the text alone cannot answer at a glance.
+    pub fn tag_of(&self, i: usize) -> Option<Tag> {
+        self.opts.get(i).map(|o| o.tag)
+    }
+
     pub fn scripted(&mut self) -> Option<usize> {
         let saved = (self.tried.clone(), self.commit, self.commit_tag);
         let pick = self.scripted_inner();
@@ -1678,6 +1747,26 @@ impl DoomEnv {
     /// teacher's next suggestion account for it exactly as the teacher's own
     /// step would have.
     fn note_executed(&mut self, tag: Tag) {
+        // A goal is charged only for the decisions actually SPENT on it, and
+        // is set aside when it has spent enough without delivering. Cleared
+        // on the way in, so a goal that comes back and works starts even.
+        match tag {
+            Tag::Grab => {
+                self.grab_futile += 1;
+                if self.grab_futile >= FUTILE {
+                    self.grab_futile = 0;
+                    self.grab_aside = SET_ASIDE;
+                }
+            }
+            Tag::Exit => {
+                self.exit_futile += 1;
+                if self.exit_futile >= FUTILE {
+                    self.exit_futile = 0;
+                    self.exit_aside = SET_ASIDE;
+                }
+            }
+            _ => {}
+        }
         if self.opts.iter().all(|o| self.tried.contains(&o.tag)) {
             self.tried.clear();
         }
@@ -1713,23 +1802,35 @@ impl DoomEnv {
         let threat_near = self.state.threat_within(600);
         // Close enough that walking past it means taking hits the whole way.
         let in_my_face = self.state.threat_within(300);
-        let underfoot = |d: i32| {
-            self.state
-                .pickups
-                .iter()
-                .any(|p| p.visible && p.distance < d)
-                // One it saw a moment ago counts too, and at a longer reach:
-                // the whole point of remembering it is that going back for it
-                // is now a thing that can be decided rather than stumbled on.
-                || self
-                    .state
-                    .recalled
-                    .iter()
-                    .any(|r| {
-                        r.class != crate::memory::Class::Threat
-                            && r.distance < d * 3
-                            && self.state.worth_taking_kind(&r.kind)
-                    })
+        // Something worth stopping for, and the two halves are not the same
+        // question.
+        //
+        // In SIGHT and close is free: the player is walking past it, taking it
+        // costs one decision and no detour, and an item taken on the way is
+        // pure profit.
+        //
+        // REMEMBERED and three rooms back is a journey, and a journey has to
+        // earn itself. Going back for it was allowed unconditionally, at three
+        // times the reach - six hundred units under any orders but speedrun -
+        // and because `Grab` outranks heading for the way out under `clear`
+        // and under UV-Max, a level with items lying about never produced any
+        // other decision. Measured on E1M1: `Grab` taken on 307 of 600
+        // decisions, more than every other kind put together, twelve items
+        // collected, none of the six monsters killed, and the eastern half of
+        // the level - which is where they and the exit are - never entered.
+        //
+        // So the journey is for when the player NEEDS it, which is what
+        // `hurt_badly` already says, and a medkit remembered two rooms back is
+        // exactly the thing to break off for when on thirty health. What it is
+        // not is a reason to cross the level for an armour bonus with the way
+        // out still unfound.
+        let in_sight = |d: i32| self.state.pickups.iter().any(|p| p.visible && p.distance < d);
+        let remembered = |d: i32| {
+            self.state.recalled.iter().any(|r| {
+                r.class != crate::memory::Class::Threat
+                    && r.distance < d * 3
+                    && self.state.worth_taking_kind(&r.kind)
+            })
         };
 
         // Standing in slime: anywhere else will do, and the exit route is
@@ -1918,11 +2019,12 @@ impl DoomEnv {
             mission: self.mission,
             threat_near,
             hurt_badly,
-            within_reach: underfoot(if self.mission == Mission::Speedrun {
-                100
-            } else {
-                200
-            }),
+            within_reach: {
+                let reach = if self.mission == Mission::Speedrun { 100 } else { 200 };
+                in_sight(reach) || (hurt_badly && remembered(reach))
+            },
+            grab_set_aside: self.grab_aside > 0,
+            exit_set_aside: self.exit_aside > 0,
             // A BEARING IS NOT A DESTINATION. The engine supplies a route
             // bearing whenever it can route anywhere at all, and while the
             // way out is unknown that bearing leads to the frontier - so
@@ -2218,6 +2320,10 @@ struct Moment {
     /// The engine gave a real route to the exit, rather than a heading
     /// through a wall.
     exit_routed: bool,
+    /// Set while a goal has been tried long enough without moving its own
+    /// number. See [`FUTILE`].
+    grab_set_aside: bool,
+    exit_set_aside: bool,
     attack_offered: bool,
     /// Something alive within 300 units: close enough that walking past it
     /// means taking hits the whole way.
@@ -2237,7 +2343,10 @@ struct Moment {
 fn takes(tag: Tag, m: &Moment) -> bool {
     match tag {
         Tag::Circle | Tag::Attack => m.threat_near,
-        Tag::Grab => m.hurt_badly || m.within_reach,
+        // Being hurt still overrides a rest: the reason to break off for a
+        // medkit does not stop being true because the last one was out of
+        // reach.
+        Tag::Grab => m.hurt_badly || (m.within_reach && !m.grab_set_aside),
         // Only with a real route. Without one the option aims down a straight
         // line through walls, and taking it is the behaviour this whole
         // exercise exists to stop demonstrating.
@@ -2248,7 +2357,9 @@ fn takes(tag: Tag, m: &Moment) -> bool {
         // crossed the whole of E1M1 with one kill, taking fire the entire
         // way. A speedrunner shoots what is in their face and then runs;
         // anything further off is not worth the ammunition.
-        Tag::Exit => m.exit_routed && !(m.attack_offered && m.in_my_face),
+        Tag::Exit => {
+            m.exit_routed && !m.exit_set_aside && !(m.attack_offered && m.in_my_face)
+        }
         // Whenever there is unfinished business and nothing is shooting at
         // the player from close range. The option is only BUILT when there is
         // a route to it or a clear line, so reaching here already means the
@@ -2338,6 +2449,12 @@ fn snapshot_carries_every_field_of_the_run(env: &DoomEnv) {
         last_pos: _,
         stuck: _,
         stale: _,
+        grab_futile: _,
+        grab_aside: _,
+        exit_futile: _,
+        exit_aside: _,
+        best_path: _,
+        had_items: _,
         tried: _,
         recent: _,
         visited: _,
@@ -2486,6 +2603,12 @@ impl Env for DoomEnv {
                 last_pos: self.last_pos,
                 stuck: self.stuck,
                 stale: self.stale,
+                grab_futile: self.grab_futile,
+                grab_aside: self.grab_aside,
+                exit_futile: self.exit_futile,
+                exit_aside: self.exit_aside,
+                best_path: self.best_path,
+                had_items: self.had_items,
                 tried: self.tried.clone(),
                 recent: self.recent.clone(),
                 visited: self.visited.clone(),
@@ -2608,6 +2731,12 @@ impl Env for DoomEnv {
         self.last_pos = held.last_pos;
         self.stuck = held.stuck;
         self.stale = held.stale;
+        self.grab_futile = held.grab_futile;
+        self.grab_aside = held.grab_aside;
+        self.exit_futile = held.exit_futile;
+        self.exit_aside = held.exit_aside;
+        self.best_path = held.best_path;
+        self.had_items = held.had_items;
         self.tried = held.tried;
         self.recent = held.recent;
         self.visited = held.visited;
@@ -2645,6 +2774,17 @@ struct Held {
     last_pos: Option<(i32, i32)>,
     stuck: u32,
     stale: u32,
+    /// Which goals have been tried without delivering, and for how much
+    /// longer they stand set aside. Part of the run for the same reason
+    /// `trail` is: the option list depends on them, so a restore that
+    /// dropped them would offer a different set of options than the one
+    /// that was held, and the trajectory could not be replayed.
+    grab_futile: u32,
+    grab_aside: u32,
+    exit_futile: u32,
+    exit_aside: u32,
+    best_path: Option<i32>,
+    had_items: u32,
     tried: std::collections::HashSet<Tag>,
     recent: std::collections::VecDeque<(i32, i32)>,
     visited: std::collections::HashMap<(i32, i32), u32>,
@@ -2798,7 +2938,7 @@ mod teacher_tests {
             Mission::Survive,
             Mission::UvMax,
         ] {
-            for bits in 0..(1u8 << 7) {
+            for bits in 0..(1u16 << 9) {
                 out.push(Moment {
                     mission,
                     threat_near: bits & 1 != 0,
@@ -2808,6 +2948,8 @@ mod teacher_tests {
                     attack_offered: bits & 16 != 0,
                     in_my_face: bits & 32 != 0,
                     secrets_left: bits & 64 != 0,
+                    grab_set_aside: bits & 128 != 0,
+                    exit_set_aside: bits & 256 != 0,
                 });
             }
         }
@@ -2874,6 +3016,8 @@ mod teacher_tests {
             hurt_badly: false,
             within_reach: false,
             exit_routed: true,
+            grab_set_aside: false,
+            exit_set_aside: false,
             attack_offered: false,
             in_my_face: false,
             secrets_left: false,
@@ -2891,6 +3035,108 @@ mod teacher_tests {
         );
     }
 
+    /// Picking things up outranks heading for the way out under `clear` and
+    /// under UV-Max, so whatever makes it eligible decides what the whole
+    /// episode is spent doing. It has to mean "on the way", or the run is a
+    /// shopping trip.
+    #[test]
+    fn stopping_for_an_item_is_for_one_on_the_way_or_one_you_need() {
+        let walking = Moment {
+            mission: Mission::Clear,
+            threat_near: false,
+            hurt_badly: false,
+            within_reach: false,
+            exit_routed: true,
+            grab_set_aside: false,
+            exit_set_aside: false,
+            attack_offered: false,
+            in_my_face: false,
+            secrets_left: false,
+        };
+        assert!(
+            !takes(Tag::Grab, &walking),
+            "nothing in sight and not hurt: keep going"
+        );
+        assert!(
+            takes(
+                Tag::Grab,
+                &Moment {
+                    within_reach: true,
+                    ..walking
+                }
+            ),
+            "something underfoot is free to take"
+        );
+        assert!(
+            takes(
+                Tag::Grab,
+                &Moment {
+                    hurt_badly: true,
+                    ..walking
+                }
+            ),
+            "hurt: a detour for health earns itself"
+        );
+        // And with nothing on offer to stop for, heading for the way out is
+        // what is left - which is the decision the shopping trip displaced.
+        assert!(takes(Tag::Exit, &walking));
+    }
+
+    /// The teacher's other guard against repeating itself asks whether the
+    /// player has stopped MOVING. The failure it cannot see is the one where
+    /// the player moves the whole time and arrives nowhere - a visible item
+    /// it cannot reach, a route that never gets shorter. A goal that has been
+    /// given its decisions and moved nothing is set aside.
+    #[test]
+    fn a_goal_that_delivers_nothing_is_set_aside() {
+        let m = Moment {
+            mission: Mission::Clear,
+            threat_near: false,
+            hurt_badly: false,
+            within_reach: true,
+            exit_routed: true,
+            grab_set_aside: false,
+            exit_set_aside: false,
+            attack_offered: false,
+            in_my_face: false,
+            secrets_left: false,
+        };
+        assert!(takes(Tag::Grab, &m) && takes(Tag::Exit, &m), "both on offer");
+        assert!(
+            !takes(
+                Tag::Grab,
+                &Moment {
+                    grab_set_aside: true,
+                    ..m
+                }
+            ),
+            "an item that never gets picked up stops being a reason to go"
+        );
+        assert!(
+            !takes(
+                Tag::Exit,
+                &Moment {
+                    exit_set_aside: true,
+                    ..m
+                }
+            ),
+            "a way out that never gets closer stops being a way to head"
+        );
+        // Needing it overrides the rest: the reason to break off for a medkit
+        // does not stop being true because the last one was out of reach.
+        assert!(
+            takes(
+                Tag::Grab,
+                &Moment {
+                    grab_set_aside: true,
+                    hurt_badly: true,
+                    ..m
+                }
+            ),
+            "hurt outranks a rest"
+        );
+    }
+
     /// A Max run is not finished with a secret outstanding, and going to
     /// look is the only thing that finds one. Fighting still comes first.
     #[test]
@@ -2901,6 +3147,8 @@ mod teacher_tests {
             hurt_badly: false,
             within_reach: false,
             exit_routed: true,
+            grab_set_aside: false,
+            exit_set_aside: false,
             attack_offered: false,
             in_my_face: false,
             secrets_left: true,

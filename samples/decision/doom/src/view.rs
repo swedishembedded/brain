@@ -975,6 +975,11 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     env.start(args.seed());
 
     println!("doom: scripted probe, {} decisions", args.max_steps());
+    // What the run spent its decisions on. A teacher that never finishes a
+    // level is doing SOMETHING with every one of them, and which kind of
+    // thing it is cannot be read off the outcome - "0 of 6 kills" says
+    // equally well that it fought badly and that it never went looking.
+    let mut chose: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total = 0.0f32;
     // How often the player had something out of sight worth remembering. A
     // plumbing check: if this is zero, the memory is not reaching the model
@@ -982,6 +987,9 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let mut recalled = 0usize;
     for step in 0..args.max_steps() {
         let Some(a) = env.scripted() else { break };
+        if let Some(t) = env.tag_of(a) {
+            *chose.entry(format!("{t:?}")).or_insert(0usize) += 1;
+        }
         let (r, done) = env.apply(a, Vec::new());
         if let Some(f) = &env.fault {
             return Err(f.clone());
@@ -1009,6 +1017,14 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     // The last one is the interesting one: by then the player has been
     // somewhere, and has something to remember about where it has been.
     show_what_the_model_reads(&env, "at the end")?;
+    println!(
+        "doom: what the teacher chose: {}",
+        chose
+            .iter()
+            .map(|(t, n)| format!("{t} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!(
         "doom: probe finished, return {total:+.2}; something was remembered on \
          {recalled} decisions"
