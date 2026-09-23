@@ -232,6 +232,28 @@ impl Cubies {
     }
 
     /// One bit per slot: which piece is in it, turned which way.
+    /// The same twenty slots [`Cubies::write`] one-hots, as `(piece,
+    /// orientation)` pairs - corners first, then edges.
+    ///
+    /// Exactly the model's input, read out rather than encoded, so anything
+    /// showing "what the model was given" is showing the thing itself and
+    /// not a second description that could drift from it.
+    pub fn read(&self, cube: &Cube) -> Vec<(usize, usize)> {
+        let mut out = Vec::with_capacity(CORNERS + EDGES);
+        for facelets in self.corners.iter() {
+            let piece = piece_wearing(&self.corner_of_colours, colours(cube, facelets));
+            let reference = self.corner_reference[piece];
+            let twist = facelets.iter().position(|&f| cube.0[f] == reference).expect("reference colour");
+            out.push((piece, twist));
+        }
+        for facelets in self.edges.iter() {
+            let piece = piece_wearing(&self.edge_of_colours, colours(cube, facelets));
+            let flip = usize::from(cube.0[facelets[0]] != self.edge_reference[piece]);
+            out.push((piece, flip));
+        }
+        out
+    }
+
     fn write(&self, cube: &Cube, out: &mut [f32]) {
         for (slot, facelets) in self.corners.iter().enumerate() {
             let piece = piece_wearing(&self.corner_of_colours, colours(cube, facelets));

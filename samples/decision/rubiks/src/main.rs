@@ -1068,17 +1068,35 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
     println!("rubiks: {} macros, every small element of the cube group", library.len());
 
     let train = args.usize_or("--macro-train", 0);
-    let net = if train > 0 {
+    let macro_save = args.take_str("--macro-save");
+    let macro_load = args.take_str("--macro-load");
+    if let Some(path) = &macro_load {
+        println!("chooser: loading {path}");
+    }
+    let net = if let Some(path) = &macro_load {
+        Some(brain::solve::Net::load(path, 512).map_err(|e| e.to_string())?)
+    } else if train > 0 {
         Some(train_chooser(
             &book,
             train,
             args.usize_or("--macro-steps", 4000),
             args.usize_or("--macro-rounds", 1),
+            args.usize_or("--macro-width", 6),
             seed,
         )?)
     } else {
         None
     };
+    if let (Some(n), Some(path)) = (net.as_ref(), &macro_save) {
+        let fit = serde_json::json!({
+            "task": "macro-chooser-cost-to-go",
+            "labelled_by": "solving from each candidate under the library tiebreak",
+            "starts": train, "steps": args.usize_or("--macro-steps", 4000),
+            "candidates_per_state": args.usize_or("--macro-width", 6), "seed": seed,
+        });
+        n.save(path, &fit).map_err(|e| e.to_string())?;
+        println!("chooser: written to {path}");
+    }
     if net.is_some() || args.take_flag("--macro-compare") {
         compare(&book, net.as_ref(), args.usize_or("--macro-eval", 200), scramble, seed);
     }
@@ -1090,9 +1108,35 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
 
     for index in 0..cubes {
         let (start, scrambled_by) = cube::scramble(scramble, seed ^ (index as u64 * 0x9E37));
-        let played = book
-            .play(&start)
-            .ok_or_else(|| format!("cube {index}: no macro improved the measure"))?;
+        // Every choice below is the model's. The library still decides which
+        // macros are ADMISSIBLE - that is legal-move generation, and it is
+        // what keeps the solve guaranteed however the model ranks them - but
+        // no hand-written tiebreak runs, and there is no fallback: if the
+        // model is asked and cannot answer, the run fails rather than
+        // quietly reverting to the rule it is meant to replace.
+        let spc = space::CubeSpace::new();
+        let played = match net.as_ref() {
+            Some(n) => {
+                let space = space::CubeSpace::new();
+                let mut c = start;
+                let mut picks = Vec::new();
+                while !c.is_solved() {
+                    let ranked = chooser::rank(&space, &book, n, &c);
+                    let (i, _, _) = *ranked
+                        .first()
+                        .ok_or_else(|| format!("cube {index}: the model found no admissible macro"))?;
+                    picks.push(i);
+                    c = book.apply(&c, i);
+                    if picks.len() > macros::MACRO_BUDGET {
+                        return Err(format!("cube {index}: the measure did not fall"));
+                    }
+                }
+                picks
+            }
+            None => book
+                .play(&start)
+                .ok_or_else(|| format!("cube {index}: no macro improved the measure"))?,
+        };
 
         let moves: usize = played.iter().map(|&i| library[i].moves.len()).sum();
         total_moves += moves;
@@ -1112,14 +1156,64 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
             for (n, &i) in played.iter().enumerate() {
                 let mac = &library[i];
                 let (p, h, d) = macros::measure(&cube);
+                let driven_by_model = net.is_some();
+                // What the model was GIVEN: the twenty cubie slots it reads,
+                // as (piece, orientation). Read out of the same decoder that
+                // builds its one-hot, so this cannot drift from the input.
+                let context = |c: &Cube| -> String {
+                    let slots = space::cubies().read(c);
+                    let corner: Vec<String> =
+                        slots[..8].iter().map(|(p, o)| format!("{p}.{o}")).collect();
+                    let edge: Vec<String> =
+                        slots[8..].iter().map(|(p, o)| format!("{p}.{o}")).collect();
+                    format!("corners {}  edges {}", corner.join(" "), edge.join(" "))
+                };
+                // What the model ANSWERED: its predicted total for each
+                // admissible macro, cheapest first.
+                let predictions = |c: &Cube| -> Vec<view::Row> {
+                    let Some(n) = net.as_ref() else { return Vec::new() };
+                    let ranked = chooser::rank(&spc, &book, n, c);
+                    if ranked.is_empty() {
+                        return Vec::new();
+                    }
+                    let lo = ranked.first().map(|r| r.1).unwrap_or(0.0);
+                    let hi = ranked.last().map(|r| r.1).unwrap_or(lo + 1.0);
+                    ranked
+                        .iter()
+                        .take(14)
+                        .map(|(idx, score, moves)| view::Row {
+                            name: format!("{moves:>2}"),
+                            // 46 characters is what the panel shows before
+                            // it clips, and the predicted total is the part
+                            // that must survive, so the name yields to it.
+                            detail: format!(
+                                "{:<26} predicts {score:>5.1} moves",
+                                truncate_name(&library[*idx].name, 26)
+                            ),
+                            // Cheapest fills the bar; the spread is over the
+                            // whole admissible set, not the shown fourteen.
+                            probability: if hi > lo { 1.0 - (score - lo) / (hi - lo) } else { 1.0 },
+                            admissible: false,
+                        })
+                        .collect()
+                };
                 let panel = |c: &Cube, note: String| Panel {
-                    model: "macro library".into(),
-                    driver: Some("no planner, no model: a monotone measure decides".into()),
+                    model: if driven_by_model { "cubenet chooser".into() } else { "macro library".into() },
+                    driver: Some(
+                        if driven_by_model {
+                            "the model ranks every admissible macro; no hand rule, no fallback".into()
+                        } else {
+                            "no planner, no model: a monotone measure decides".to_string()
+                        },
+                    ),
                     planner: false,
                     cube_index: index,
                     cubes,
                     home: macros::home_cubies(c),
-                    state: note,
+                    state: if driven_by_model { context(c) } else { note.clone() },
+                    rows: predictions(c),
+                    picked: driven_by_model.then_some(0),
+                    played: driven_by_model.then_some(0),
                     history: history.clone(),
                     turns: n,
                     solved,
@@ -1145,7 +1239,7 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
                 }
             }
             let done = Panel {
-                model: "macro library".into(),
+                model: if net.is_some() { "cubenet chooser".into() } else { "macro library".into() },
                 driver: Some("every cube reachable, every solve bounded".into()),
                 planner: false,
                 cube_index: index,
@@ -1180,6 +1274,7 @@ fn train_chooser(
     episodes: usize,
     steps: usize,
     rounds: usize,
+    per_state: usize,
     seed: u64,
 ) -> Result<brain::solve::Net, String> {
     use brain::solve::data::Rng;
@@ -1197,6 +1292,38 @@ fn train_chooser(
     let mut tb = vec![0.0f32; batch as usize];
     let labels = vec![0u32; batch as usize];
 
+    // Train on the CANDIDATES, labelled by solving from each under the hand
+    // rule. Rounds are kept for the older trajectory-fitted path, but the
+    // candidate set is what the chooser is actually asked about.
+    {
+        let t0 = std::time::Instant::now();
+        let (features, to_go) =
+            chooser::gather(&space, book, episodes, per_state, 40, seed ^ 0x5A5A);
+        let rows = to_go.len();
+        println!(
+            "chooser: {rows} candidate states labelled in {:.0}s (mean {:.0} moves to go)",
+            t0.elapsed().as_secs_f32(),
+            to_go.iter().sum::<f32>() / rows.max(1) as f32
+        );
+        for step in 0..steps * rounds.max(1) {
+            for r in 0..batch as usize {
+                let k = rng.below(rows);
+                fb[r * width..(r + 1) * width].copy_from_slice(&features[k * width..(k + 1) * width]);
+                tb[r] = to_go[k];
+            }
+            net.zero_grads();
+            net.load_batch(&fb, &labels);
+            net.accumulate_with_value(&tb, 1.0);
+            let t = step as f32 / (steps * rounds.max(1)).max(1) as f32;
+            let lr = 3e-4 * (0.05 + 0.95 * 0.5 * (1.0 + (std::f32::consts::PI * t).cos()));
+            net.adamw(step as u32 + 1, lr, 0.0);
+            if (step + 1) % 1000 == 0 {
+                println!("  step {:>5}  value mse {:.2}", step + 1, net.value_loss(&tb));
+            }
+        }
+        return Ok(net);
+    }
+    #[allow(unreachable_code)]
     for round in 0..rounds.max(1) {
         // Round 0 has no chooser to improve on, so it explores freely. Later
         // rounds follow what has been learned, keeping a fifth of the choices
@@ -1254,6 +1381,37 @@ fn compare(book: &macros::Playbook, net: Option<&brain::solve::Net>, cubes: usiz
     if let Some(n) = net {
         let (s, m, k) = chooser::measure(&space, book, Some(n), cubes, scramble, seed, false);
         println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "learned cost-to-go", s, cubes, m, k);
+
+        // Paired on identical cubes. Two means a move apart prove nothing
+        // when one chooser's own mean moves by four between runs; the
+        // difference per cube is the only thing that can settle it.
+        let rule = chooser::lengths(&space, book, None, cubes, scramble, seed, false);
+        let model = chooser::lengths(&space, book, Some(n), cubes, scramble, seed, false);
+        let (mean, se) = chooser::paired(&model, &rule);
+        println!("----------------------------------------------------------------");
+        println!(
+            "model minus rule, per cube: {mean:+.2} moves, standard error {se:.2} ({:.1} sigma)",
+            if se > 0.0 { mean.abs() / se } else { 0.0 }
+        );
+        println!(
+            "{}",
+            if mean.abs() < 2.0 * se {
+                "  inside two standard errors: the two are not distinguishable here"
+            } else if mean < 0.0 {
+                "  the model is shorter by more than two standard errors"
+            } else {
+                "  the hand rule is shorter by more than two standard errors"
+            }
+        );
     }
     println!("----------------------------------------------------------------");
+}
+
+/// Trim a macro's name to fit a panel row, keeping the end that says which
+/// setup it was conjugated by.
+fn truncate_name(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    format!("{}..", &s[..n.saturating_sub(2)])
 }

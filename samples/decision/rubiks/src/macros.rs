@@ -851,6 +851,31 @@ fn build_library() -> Vec<Macro> {
         }
     }
 
+    // Short raw sequences, which the commutator family cannot express.
+    //
+    // Every macro above preserves everything already solved, which is what
+    // an endgame needs and what an OPENING does not: at the start nothing is
+    // solved, so there is nothing to protect, and paying eight moves to
+    // place one cubie is waste. A face turn that happens to bring three
+    // cubies home costs one move. The measure still decides admissibility,
+    // so these cannot break the guarantee - they only give it cheaper ways
+    // to be satisfied.
+    for a in Move::all() {
+        kept.push(Macro { name: notation(&[a]), moves: vec![a] });
+        for b in Move::all() {
+            if a.face == b.face {
+                continue;
+            }
+            kept.push(Macro { name: notation(&[a, b]), moves: vec![a, b] });
+            for c in Move::all() {
+                if b.face == c.face {
+                    continue;
+                }
+                kept.push(Macro { name: notation(&[a, b, c]), moves: vec![a, b, c] });
+            }
+        }
+    }
+
     // Shortest first, but every parity-flipping macro last: one of them is
     // admissible whenever the corner permutation is odd, so ordering them
     // first would play one on every cube instead of only when nothing
@@ -923,9 +948,34 @@ mod tests {
             assert_eq!(sets.len(), slot_sets, "{what} land on {slot_sets} sets of slots");
             total += macros;
         }
-        assert_eq!(library().len(), total, "the library is those five families and nothing else");
-        let classes: HashSet<Class> = library().iter().map(|m| class(&effect_of(&m.moves))).collect();
-        assert_eq!(classes.len(), library().len(), "one macro per effect class");
+        // The five families are the part that makes the library COMPLETE:
+        // they are what can always be aimed at whatever remains. Beside them
+        // sit short raw sequences, which are the part that makes it CHEAP.
+        // Both counts are asserted, so neither can quietly change.
+        let raw = library().iter().filter(|m| m.moves.len() <= 3).count();
+        assert_eq!(raw, 18 + 18 * 15 + 18 * 15 * 15, "every one, two and three turn sequence");
+        assert_eq!(library().len(), total + raw, "the library is those families and the short turns");
+    }
+
+    /// A short raw sequence is not a small element of the group - a single
+    /// face turn moves eight cubies - so it can never be aimed at three
+    /// specific pieces. It earns its place by being cheap where nothing is
+    /// solved yet, and the measure is what decides when that is true.
+    #[test]
+    fn the_short_sequences_are_short_and_the_families_are_surgical() {
+        // Each family is asserted on the property that earns its place, and
+        // on nothing else. A raw sequence is cheap and indiscriminate; a
+        // commutator is expensive and surgical. Asserting surgery of the raw
+        // ones would just be a number chosen to pass.
+        for m in library() {
+            let touched = support(&effect_of(&m.moves)).count_ones();
+            if m.moves.len() <= 3 {
+                assert!(touched >= 8, "{} touches only {touched} cubies", m.name);
+            } else {
+                assert!(m.moves.len() >= 8, "{} is neither short nor a family member", m.name);
+                assert!((2..=4).contains(&touched), "{} disturbs {touched} cubies", m.name);
+            }
+        }
     }
 
     /// Every macro leaves at least sixteen of the twenty cubies exactly as
@@ -934,7 +984,7 @@ mod tests {
     /// at four slots, and could not be aimed at the cubies that need it.
     #[test]
     fn a_macro_disturbs_at_most_four_cubies() {
-        for m in library() {
+        for m in library().iter().filter(|m| m.moves.len() > 3) {
             let touched = support(&effect_of(&m.moves)).count_ones();
             assert!((2..=4).contains(&touched), "{} disturbs {touched} cubies", m.name);
         }

@@ -116,6 +116,37 @@ pub fn episode_with(
 /// `macro length + V(child)` is the whole rule. A value that is merely
 /// ORDERED correctly is enough - the absolute numbers never matter, only
 /// which child looks nearest.
+/// Every admissible macro with what the model predicts it costs, cheapest
+/// first: `macro length + V(state after it)`.
+///
+/// The same computation [`choose`] makes, kept rather than reduced to its
+/// winner, so a run can show what the model was asked and what it answered.
+pub fn rank(space: &CubeSpace, book: &Playbook, net: &Net, cube: &Cube) -> Vec<(usize, f32, usize)> {
+    let cands = book.improving_all(cube);
+    let width = space.feature_len();
+    let rows = net.rows as usize;
+    let mut out: Vec<(usize, f32, usize)> = Vec::with_capacity(cands.len());
+    let mut i = 0;
+    while i < cands.len() {
+        let take = (cands.len() - i).min(rows);
+        let mut f = vec![0.0f32; rows * width];
+        for j in 0..take {
+            let child = book.apply(cube, cands[i + j].index);
+            space.write_features(&child, &mut f[j * width..(j + 1) * width]);
+        }
+        let v = net.value_of(&f);
+        for j in 0..take {
+            let c = cands[i + j];
+            let solved = book.apply(cube, c.index).is_solved();
+            let score = c.moves as f32 + if solved { 0.0 } else { v[j].max(0.0) };
+            out.push((c.index, score, c.moves));
+        }
+        i += take;
+    }
+    out.sort_by(|a, b| a.1.total_cmp(&b.1));
+    out
+}
+
 pub fn choose(space: &CubeSpace, book: &Playbook, net: &Net, cube: &Cube) -> Option<usize> {
     let cands = book.improving_all(cube);
     if cands.is_empty() {
@@ -145,6 +176,62 @@ pub fn choose(space: &CubeSpace, book: &Playbook, net: &Net, cube: &Cube) -> Opt
         i += take;
     }
     best.map(|(_, i)| i)
+}
+
+/// Per-cube solve lengths, so two choosers can be compared on the SAME
+/// cubes rather than on two means.
+///
+/// A difference of a move or two between means is inside the spread a single
+/// chooser shows between runs, so a mean-versus-mean comparison cannot
+/// support a claim either way. Paired lengths can: the cubes are identical,
+/// so the variance of the DIFFERENCE is what matters, and it is far smaller
+/// than the variance of either chooser's lengths.
+pub fn lengths(
+    space: &CubeSpace,
+    book: &Playbook,
+    net: Option<&Net>,
+    cubes: usize,
+    scramble: usize,
+    seed: u64,
+    random: bool,
+) -> Vec<f32> {
+    let mut rng = Rng::new(seed);
+    let mut out = Vec::with_capacity(cubes);
+    for i in 0..cubes {
+        let (mut cube, _) = cube::scramble(scramble, seed ^ (i as u64 * 0x9E37));
+        let mut used = 0usize;
+        let mut steps = 0usize;
+        while !cube.is_solved() && steps <= macros::MACRO_BUDGET {
+            let pick = match net {
+                Some(n) => choose(space, book, n, &cube),
+                None => {
+                    let c = book.improving_all(&cube);
+                    if c.is_empty() {
+                        None
+                    } else if random {
+                        Some(c[rng.below(c.len())].index)
+                    } else {
+                        Some(c.iter().min_by_key(|x| (-x.home, x.cost, x.moves)).expect("non-empty").index)
+                    }
+                }
+            };
+            let Some(pick) = pick else { break };
+            used += book.moves_of(pick);
+            cube = book.apply(&cube, pick);
+            steps += 1;
+        }
+        out.push(if cube.is_solved() { used as f32 } else { f32::NAN });
+    }
+    out
+}
+
+/// Mean paired difference `a - b`, and the standard error of that mean.
+pub fn paired(a: &[f32], b: &[f32]) -> (f32, f32) {
+    let d: Vec<f32> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+    let n = d.len().max(1) as f32;
+    let mean = d.iter().sum::<f32>() / n;
+    let var = d.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / (n - 1.0).max(1.0);
+    (mean, (var / n).sqrt())
 }
 
 /// Solve `cubes` and report the mean moves, under whichever chooser is given.
@@ -203,4 +290,77 @@ pub fn measure(
 /// clearer than adding a switch to turn the policy term off.
 pub fn config(space: &CubeSpace, d_model: u32, d_ff: u32, blocks: u32) -> Config {
     Config { in_dim: space.feature_len() as u32, d_model, d_ff, blocks, moves: 1 }
+}
+
+
+/// Moves to solve `cube` under the library's own tiebreak. CPU only, and
+/// fast enough to be used as a LABEL rather than as a baseline.
+pub fn cost_under_rule(book: &Playbook, cube: &Cube) -> Option<usize> {
+    let mut c = *cube;
+    let mut moves = 0usize;
+    let mut steps = 0usize;
+    while !c.is_solved() {
+        let cands = book.improving_all(&c);
+        let pick = cands.iter().min_by_key(|x| (-x.home, x.cost, x.moves))?;
+        moves += pick.moves;
+        c = book.apply(&c, pick.index);
+        steps += 1;
+        if steps > macros::MACRO_BUDGET {
+            return None;
+        }
+    }
+    Some(moves)
+}
+
+/// Training data for a chooser: the CHILDREN it will be asked to rank, each
+/// labelled with what it actually costs.
+///
+/// This is the correction knowledge 153 exists for. Fitting cost-to-go on the
+/// states a policy VISITS produces a value that is excellent on the
+/// trajectory and useless off it - and every candidate the chooser rejects is
+/// off it by construction. So the states recorded here are the candidates
+/// themselves, including the rejected ones.
+///
+/// Each is labelled by solving FROM it under the hand-written rule. That
+/// makes the label exact rather than bootstrapped, and it makes the resulting
+/// chooser one step of policy improvement over that rule: picking the
+/// successor with the least `macro length + cost-to-go under the rule` is,
+/// where the value is right, no worse than the rule itself.
+pub fn gather(
+    space: &CubeSpace,
+    book: &Playbook,
+    starts: usize,
+    per_state: usize,
+    scramble: usize,
+    seed: u64,
+) -> (Vec<f32>, Vec<f32>) {
+    let width = space.feature_len();
+    let mut rng = Rng::new(seed);
+    let mut features: Vec<f32> = Vec::new();
+    let mut labels: Vec<f32> = Vec::new();
+
+    for i in 0..starts {
+        let (mut cube, _) = cube::scramble(scramble, seed ^ (i as u64 * 0x9E37));
+        let mut steps = 0usize;
+        while !cube.is_solved() && steps <= macros::MACRO_BUDGET {
+            let cands = book.improving_all(&cube);
+            if cands.is_empty() {
+                break;
+            }
+            // A sample of the candidates, not just the one the rule takes.
+            for _ in 0..per_state.min(cands.len()) {
+                let c = cands[rng.below(cands.len())];
+                let child = book.apply(&cube, c.index);
+                let Some(cost) = cost_under_rule(book, &child) else { continue };
+                let base = features.len();
+                features.resize(base + width, 0.0);
+                space.write_features(&child, &mut features[base..base + width]);
+                labels.push(cost as f32);
+            }
+            let pick = cands.iter().min_by_key(|x| (-x.home, x.cost, x.moves)).expect("non-empty");
+            cube = book.apply(&cube, pick.index);
+            steps += 1;
+        }
+    }
+    (features, labels)
 }
