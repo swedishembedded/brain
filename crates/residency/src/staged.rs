@@ -284,3 +284,188 @@ mod tests {
         assert_ne!(s.served(), &served, "commit is the one that must move it");
     }
 }
+
+/// Dropping a resident instance so the next request rebuilds.
+///
+/// A trait rather than a direct [`crate::executor::Executor`] reference so
+/// the transitions can be tested for what they EVICT without a device, a
+/// model or a dispatcher: the property that matters here is which instance
+/// goes, and getting that backwards is the whole hazard.
+pub trait Evictor {
+    /// Drop the instance named by `key`. `false` if it was not resident, or
+    /// if a job is running against it.
+    fn evict(&self, key: &InstanceKey) -> bool;
+}
+
+impl Evictor for crate::executor::Executor {
+    fn evict(&self, key: &InstanceKey) -> bool {
+        crate::executor::Executor::evict(self, key.clone())
+    }
+}
+
+use crate::InstanceKey;
+
+/// A [`StagedSlot`] driven against live residency.
+///
+/// Two versions are two [`InstanceKey`]s, so both can be resident at once
+/// and a request can be addressed to either. That is the part the existing
+/// hot-swap could not do: it mutates the version a single key rebuilds from,
+/// so the old one is gone the moment the new one exists and there is nothing
+/// left to compare against or fall back to.
+///
+/// **A transition evicts at most one instance, and never the wrong one.** A
+/// commit drops what was being served, because the candidate has replaced
+/// it. A rollback drops the candidate, because it was refused. A REFUSED
+/// transition drops nothing at all - if staging a second candidate could
+/// evict the first, the refusal would be more destructive than the action.
+pub struct StagedResident<E: Evictor> {
+    slot: StagedSlot,
+    model: String,
+    evictor: E,
+}
+
+impl<E: Evictor> StagedResident<E> {
+    pub fn new(model: impl Into<String>, served: Version, evictor: E) -> StagedResident<E> {
+        StagedResident { slot: StagedSlot::new(served), model: model.into(), evictor }
+    }
+
+    /// The key a version is resident under. The version IS the config part,
+    /// which is what lets two of them coexist.
+    pub fn key_for(&self, v: &Version) -> InstanceKey {
+        InstanceKey::new(self.model.as_str(), v.as_str())
+    }
+
+    pub fn served(&self) -> &Version {
+        self.slot.served()
+    }
+
+    pub fn staged(&self) -> Option<&Version> {
+        self.slot.staged()
+    }
+
+    /// The key requests should currently be addressed to.
+    pub fn serving_key(&self) -> InstanceKey {
+        self.key_for(self.slot.served())
+    }
+
+    /// The key to validate against, once something is on trial.
+    pub fn candidate_key(&self) -> Option<InstanceKey> {
+        self.slot.staged().map(|v| self.key_for(v))
+    }
+
+    /// Put `candidate` on trial. Evicts nothing: the candidate becomes
+    /// resident when something is first addressed to its key, and what is
+    /// served is untouched either way.
+    pub fn stage(&mut self, candidate: Version) -> Result<(), StageError> {
+        self.slot.stage(candidate)
+    }
+
+    /// Accept the candidate. It becomes what is served, and the version it
+    /// replaced is evicted, since nothing will address it again.
+    pub fn commit(&mut self) -> Result<Swap, StageError> {
+        let swap = self.slot.commit()?;
+        self.evictor.evict(&self.key_for(&swap.from));
+        Ok(swap)
+    }
+
+    /// Reject the candidate. It is evicted; what is served is untouched, and
+    /// in particular is NOT evicted - it has been answering throughout and
+    /// has no reason to rebuild.
+    pub fn rollback(&mut self) -> Result<Swap, StageError> {
+        let swap = self.slot.rollback()?;
+        self.evictor.evict(&self.key_for(&swap.candidate));
+        Ok(swap)
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records what it was asked to drop, so a transition can be checked for
+    /// which instance it evicted rather than merely that it evicted one.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl Evictor for &Recorder {
+        fn evict(&self, key: &InstanceKey) -> bool {
+            self.0.lock().expect("not poisoned").push(key.config.clone());
+            true
+        }
+    }
+
+    fn v(s: &str) -> Version {
+        Version(s.to_string())
+    }
+
+    fn evicted(r: &Recorder) -> Vec<String> {
+        r.0.lock().expect("not poisoned").clone()
+    }
+
+    /// Two versions are two keys, which is the property the existing
+    /// hot-swap lacks: it rebuilds one key from a changed file, so the old
+    /// version stops existing the moment the new one does.
+    #[test]
+    fn a_candidate_is_addressable_alongside_what_is_served() {
+        let rec = Recorder::default();
+        let mut s = StagedResident::new("qwen", v("adapter-1"), &rec);
+        assert_eq!(s.candidate_key(), None);
+
+        s.stage(v("adapter-2")).expect("stage");
+        let serving = s.serving_key();
+        let candidate = s.candidate_key().expect("on trial");
+        assert_ne!(serving, candidate, "the two versions must be separately addressable");
+        assert_eq!(serving.config, "adapter-1");
+        assert_eq!(candidate.config, "adapter-2");
+        assert!(evicted(&rec).is_empty(), "staging must not evict anything");
+    }
+
+    /// A commit drops what it replaced, and only that.
+    #[test]
+    fn a_commit_evicts_the_version_it_replaced() {
+        let rec = Recorder::default();
+        let mut s = StagedResident::new("qwen", v("adapter-1"), &rec);
+        s.stage(v("adapter-2")).expect("stage");
+        let swap = s.commit().expect("commit");
+
+        assert!(swap.changed());
+        assert_eq!(evicted(&rec), vec!["adapter-1".to_string()], "a commit must drop the OLD version, not the new one");
+        assert_eq!(s.serving_key().config, "adapter-2");
+    }
+
+    /// V17's half that matters: a rollback drops the candidate and leaves
+    /// what is served resident and answering. Evicting the served version
+    /// here would make a refused candidate cost a rebuild of the one that
+    /// was working.
+    #[test]
+    fn a_rollback_evicts_the_candidate_and_never_what_is_served() {
+        let rec = Recorder::default();
+        let mut s = StagedResident::new("qwen", v("adapter-1"), &rec);
+        let serving_before = s.serving_key();
+        s.stage(v("adapter-2")).expect("stage");
+        let swap = s.rollback().expect("rollback");
+
+        assert!(!swap.changed());
+        assert_eq!(evicted(&rec), vec!["adapter-2".to_string()], "a rollback must drop the CANDIDATE");
+        assert_eq!(s.serving_key(), serving_before, "and must leave the served key exactly as it was");
+        assert_eq!(s.candidate_key(), None);
+    }
+
+    /// A refusal must be the least destructive outcome, not the most: if a
+    /// rejected second candidate could evict the first, refusing would cost
+    /// more than accepting.
+    #[test]
+    fn a_refused_transition_evicts_nothing() {
+        let rec = Recorder::default();
+        let mut s = StagedResident::new("qwen", v("adapter-1"), &rec);
+        assert!(s.commit().is_err());
+        assert!(s.rollback().is_err());
+        assert!(s.stage(v("adapter-1")).is_err());
+        s.stage(v("adapter-2")).expect("stage");
+        assert!(s.stage(v("adapter-3")).is_err());
+
+        assert!(evicted(&rec).is_empty(), "refusals evicted {:?}", evicted(&rec));
+        assert_eq!(s.staged(), Some(&v("adapter-2")), "and left the one on trial in place");
+    }
+}

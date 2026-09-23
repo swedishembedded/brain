@@ -735,8 +735,34 @@ second candidate while one is on trial (`commit` would be ambiguous and
 success lets a caller believe a swap happened), and staging what is already
 served. `Swap::changed()` is false after every rollback for the same reason.
 
-Commit 2 is the `Executor` binding: activating the candidate under its own
-`InstanceKey`, validating against it, and evicting it on rollback.
+**Commit 2 of 2 DONE 2026-09-23.** `StagedResident` drives the slot against
+live residency: two versions are two `InstanceKey`s, so both are resident
+and each is separately addressable, which is exactly what the existing
+hot-swap could not do.
+
+The tests check WHICH instance each transition evicts, not merely that one
+was evicted, because getting that backwards is the whole hazard. A commit
+drops what it replaced; a rollback drops the candidate and leaves the served
+key untouched; a REFUSED transition drops nothing, since a refusal that
+evicted the incumbent would cost more than accepting.
+
+**The enabler was in `crates/cli`, and it had a trap.**
+`QwenResident::instance_key` returned a constant, so one model meant one
+instance and a version could only be applied by destroying the previous one.
+Keying on the adapter fixes that - but `spawn_adapter_watcher` captured the
+key ONCE at startup, which is correct only while the key is constant. From
+the second swap onward it would have evicted nothing and served a stale
+adapter forever, silently. `swap_in_adapter` now reads the key before
+writing the adapter and takes no key parameter, and the watcher's `pending`
+is an `Option<InstanceKey>` rather than a `bool`, because a deferred
+eviction must remember which instance it owes.
+
+**Found on the way, and not ours:** the live hot-swap test was already
+failing on `origin/main`. `WgslProvider::threads` returned `n * 64` for the
+workgroup-cooperative variant - right total, wrong unit - and upstream's own
+guard refuses that. It is the generic lowering path, so it was not one
+operator's problem. Fixed by making `threads`/`fixed_threads` return a
+`Dispatch`, the same shape as the `dscores_variant` fix.
 
 **R9 - the run directory. DONE 2026-09-23.**
 `crates/audit`'s `run` module: manifest, state, an append-only ledger, and
