@@ -116,22 +116,22 @@ const SLOT_STATES: usize = 24;
 /// is twenty chances to transpose a digit and get a slot map that encodes
 /// something plausible which is not a cube, and a policy trained on it would
 /// still converge on its own broken picture.
-struct Cubies {
+pub struct Cubies {
     /// Corner slot -> its three facelets, reference facelet first and the
     /// other two following it around the corner (see [`Cubies::derive`]).
-    corners: [[usize; 3]; CORNERS],
+    pub corners: [[usize; 3]; CORNERS],
     /// Edge slot -> its two facelets, reference facelet first.
-    edges: [[usize; 2]; EDGES],
+    pub edges: [[usize; 2]; EDGES],
     /// Colour set, as a bitmask of the six colours, -> the piece wearing it.
     /// Each cubie carries a unique set of colours, so the set a slot shows
     /// IS the identity of the piece currently in it, whatever its twist.
-    corner_of_colours: [u8; 64],
-    edge_of_colours: [u8; 64],
+    pub corner_of_colours: [u8; 64],
+    pub edge_of_colours: [u8; 64],
     /// Piece -> the colour it carries on its own reference facelet at home.
     /// Finding that colour among a slot's facelets is what reads off the
     /// orientation.
-    corner_reference: [u8; CORNERS],
-    edge_reference: [u8; EDGES],
+    pub corner_reference: [u8; CORNERS],
+    pub edge_reference: [u8; EDGES],
 }
 
 fn cross(a: [i8; 3], b: [i8; 3]) -> [i8; 3] {
@@ -268,7 +268,7 @@ fn colours(cube: &Cube, facelets: &[usize]) -> u8 {
     facelets.iter().fold(0u8, |mask, &f| mask | 1 << cube.0[f])
 }
 
-fn cubies() -> &'static Cubies {
+pub fn cubies() -> &'static Cubies {
     static CUBIES: OnceLock<Cubies> = OnceLock::new();
     CUBIES.get_or_init(Cubies::derive)
 }

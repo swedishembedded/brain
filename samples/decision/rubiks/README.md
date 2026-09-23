@@ -214,6 +214,59 @@ out: one scans the option text for verdict words and for differences in shape,
 and one proves the state text is complete by parsing it back into a cube - a
 summary could not be inverted.
 
+## Solving the cubes the planner cannot see
+
+The shield's promise stops where the planner's does: eight moves. A cube
+scrambled forty turns deep sits around eighteen moves from solved, so the
+exact planner cannot describe a single legal step of its solution.
+`macros.rs` is a second guarantee of a different shape - no planner, no
+distance oracle, no search over states. Only a measure that moves one way and
+an action set rich enough that something always moves it:
+
+```text
+Phi = (corner-permutation parity, 20 - home cubies, displacement)
+```
+
+compared lexicographically, where a cubie is *home* when it is in its own
+slot the right way round, and *displacement* charges 1 for a piece that is in
+its slot misoriented and 2 for one in the wrong slot. Phi ranges over a
+finite set whose only minimum is the solved cube, so a run of
+strictly-decreasing macros has to end at it. That is the whole termination
+argument, and it bounds a solve at 1722 macros without measuring anything.
+
+The actions are generated, not typed in: five base algorithms that disturb
+two to four cubies each, conjugated by every setup of up to four turns and
+reduced to the shortest macro of each effect class. What comes out is not a
+sample of the cube's small elements but all of them - every one of the 112
+three-cycles of corners, all 440 three-cycles of edges, all 56 corner-twist
+pairs, all 66 edge-flip pairs and a corner-and-edge swap for each of the 28
+pairs of corners, 702 macros in total. The test asserts those counts, because
+a generator that reached 412 of the 440 edge cycles solved 96% of cubes and
+stopped dead on the rest.
+
+Measured over 2000 cubes scrambled by 40 random moves, plus the solved cube,
+every single turn, and one state manufactured from each of the 702 macros:
+
+| per solve | mean | worst |
+|---|---|---|
+| macros | 12.8 | 17 |
+| moves | 204 | 281 |
+
+Two findings the tests keep rather than hide:
+
+- **A strict "more cubies home" rule is not enough.** Under it alone, 14 of
+  20 random cubes walk into a state where no macro in the library puts
+  another cubie home - three pieces that need cycling into their slots while
+  still misoriented gain nothing. That is what the displacement tie-breaker
+  is for, and it carries under 2% of the macros played.
+- **Parity is not optional.** Every commutator is an even permutation of the
+  corners and conjugating one keeps it even, so a library built only from
+  commutators leaves corner parity invariant - and half of all scrambles are
+  odd. Those cubes are not hard for such a library, they are unreachable. One
+  base algorithm with an odd corner permutation fixes it, and because parity
+  leads the measure it is spent exactly once on an odd cube and is
+  inadmissible ever after.
+
 ## What the model is asked
 
 Every turn it gets the **complete cube** - all 54 stickers, in a fixed order -

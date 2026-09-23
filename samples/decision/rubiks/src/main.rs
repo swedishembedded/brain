@@ -40,6 +40,7 @@ mod search;
 mod view;
 mod space;
 mod learned;
+mod macros;
 
 use std::path::{Path, PathBuf};
 
