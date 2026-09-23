@@ -69,6 +69,20 @@ Implement `capability::Action` for each action and advertise them in a
   inside the `Invocation` through the executor, so `residency::Job` needs nothing.
   Reference: `zimage::caps` `text2image` + `lora_train`
   (`pipeline::HotPipeline::generate`, `finetune::run`).
+  - **One exception, and it is a reporting rule, not an opt-out.** An action that
+    has already streamed partial output to the caller (per-token `delta` progress)
+    does not throw that output away: it completes with `Ok(Outcome)` carrying the
+    partial text and reports `finish_reason: "cancelled"`. It must never report
+    `"stop"`, which is an EOS: a caller cannot tell a truncated answer from a
+    finished one. `qwen3::chat::SeqState::finish` is the one implementation, shared
+    by every chat model. An action that has produced nothing yet still fails with
+    `Err("cancelled")`.
+  - A token that is accepted and never polled is worse than no token, because a
+    caller builds request lifetime on it and then waits for a generation that will
+    run to `max_new` regardless. `scripts/gates/check-cancellable-actions.sh` is the
+    ratchet: it carries the list of models that currently ignore cancellation and
+    fails when a new streaming action joins them. A new model must not be added to
+    that list.
 
 ### 2. Residency — be scheduled, budgeted, swappable
 Add a `residency::ResidentModel` adapter under `crates/cli/src/resident_*.rs` and

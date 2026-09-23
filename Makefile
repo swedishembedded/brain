@@ -501,6 +501,12 @@ test/slow:
 # - the layering in .agents/rules/architecture.md is otherwise unenforced, and
 # one violation there is not a style problem but a hard Cargo cycle that only
 # surfaces at the next call site.
+# check-cancellable-actions.sh is a RATCHET, not a rule: every action is handed
+# a cancel token whether or not it honours one, so a caller that builds request
+# lifetime on cancellation cannot tell from the manifest which models will
+# actually stop. The script carries the list of models that knowingly ignore it
+# and fails when a new streaming action joins them (or when a listed one starts
+# polling and the list goes stale).
 check/scripts:
 	bash scripts/gates/check-scripts.sh
 	bash scripts/gates/check-env-docs.sh
@@ -514,6 +520,7 @@ check/scripts:
 	bash scripts/gates/check-kernel-selection.sh
 	bash scripts/gates/check-multi-gpu-sharding.sh
 	bash scripts/gates/check-crate-layers.sh
+	bash scripts/gates/check-cancellable-actions.sh
 
 # SPDX/copyright header gate: every Rust/C/Python/shell/Makefile/WGSL/...
 # source file must carry exactly one "SPDX-License-Identifier: Apache-2.0"

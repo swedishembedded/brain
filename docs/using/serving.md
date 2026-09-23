@@ -78,9 +78,61 @@ reach it:
   same scheduler, the same batching, and the same cancellation semantics.
   There is no separate code path or separate behavior per transport.
 
+## Cancellation, deadlines and concurrency
+
 Long-running actions - multi-minute generation, training - are cancellable
 mid-flight from any transport that supports it (D-Bus `Cancel`, or closing
-the client connection over HTTP).
+the client connection over HTTP). What that guarantees, precisely:
+
+- **Cancellation is cooperative and polled.** A model checks the request's
+  cancel flag between its own steps: one decode token, one denoise step, one
+  item of a batch. Nothing checks it *inside* a step, so a step already in
+  flight always completes. On a healthy device that is milliseconds; a step
+  wedged in a driver call is not interruptible at all from here.
+- **Not every model honours it.** The flag rides on every request, so an
+  action that ignores it looks exactly like one that honours it, and a client
+  cancelling such a generation simply waits for it to finish. The models that
+  ignore it are listed in `scripts/gates/check-cancellable-actions.sh`, which
+  fails the build if a new one joins them. The Qwen3 family (including the
+  batched serving engine), the image/video generators, the SUPIR/splat
+  pipelines and every LoRA trainer honour it; several of the vision-language
+  and audio models on that list do not.
+- **A cancelled generation says so.** It returns the text it had produced,
+  with `finish_reason: "cancelled"` - never `"stop"`, which would make a
+  truncated answer indistinguishable from a finished one. Over the
+  OpenAI-shaped surfaces that value is collapsed into OpenAI's own `stop`
+  (their enum has no other slot for it) and survives verbatim under
+  `native_finish_reason`. A non-generating action that had produced nothing
+  yet fails with `cancelled` instead.
+- **There is no request timeout.** `max_tokens` bounds the WORK a request
+  does, not its duration; admission deadlines bound the wait to *start*, not
+  the run itself (see **Admission and backpressure** above). A caller that
+  needs a wall-clock bound cancels from its own timer, within the limits
+  above. The longest uninterruptible stretch is not a decode step but a
+  model's FIRST activation: reading the checkpoint and building it on the
+  device happens before any step loop exists to poll a cancel from, and takes
+  minutes for a real model. That is what
+  `BRAIN_COLD_BUILD_ADMIT_DEADLINE_MS` exists for.
+- **One model serves one request at a time** unless it is on the paged-KV
+  batching engine, which explicitly batches concurrent sequences. Concurrent
+  requests for the same non-batched model are serialized by that model, so
+  the second one's latency includes the first one's. This is a property of
+  the model, not of the transport: it is the same in-process, over HTTP and
+  over D-Bus.
+
+The same applies to a host that skips the transports entirely and drives
+`capability::Registry` in-process. That interface does not serialize
+anything of its own: an action may be entered concurrently and is responsible
+for its own state. `crates/capability/src/lib.rs` documents the contract,
+and `crates/capability/tests/contracts.rs` pins it.
+
+The one promise brain does NOT make here is a typed failure. An action
+returns `Result<Outcome, String>`, so "unknown model", "context exceeded",
+"out of memory" and "the device fell over" are distinguishable only by their
+wording, and the HTTP layer separates the cases it must (a 400 for a prompt
+past capacity, a 404 for an unknown model) by matching that wording. A caller
+outside brain should treat any other error as opaque and retryable at its own
+discretion, not parse it.
 
 ## Readiness for scripted startup
 
