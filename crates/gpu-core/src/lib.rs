@@ -1736,6 +1736,11 @@ mod wasm_facade {
         pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
             let expanded = crate::upgrade::expand(kernels, false);
             let kernels: &[(&str, &str)] = expanded.as_deref().unwrap_or(kernels);
+            // The one place this facade sees kernel SOURCE, so - as in the
+            // native `Gpu::expanded` - it is where each kernel's thread
+            // mapping is read. Without it `Dispatch::Workgroups` would find no
+            // recorded workgroup size here and quietly multiply by one.
+            crate::register_kernel_grids(kernels);
             let inner = WgpuBackend::new_async(kernels).await;
             let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
             let upgrades = crate::upgrade::resolve(&names, &Backend::caps(&inner));
@@ -1762,13 +1767,65 @@ mod wasm_facade {
         pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {
             self.write(buf, bytemuck::cast_slice(data))
         }
+        /// See the native facade's `Gpu::dispatch`. Kept in step with it so a
+        /// model states its dispatch unit once and compiles for either target.
+        pub fn dispatch(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], grid: crate::Dispatch) -> Step {
+            let threads = self.threads_for(kind, grid);
+            self.step_unchecked(kind, bufs, params, threads)
+        }
+        /// [`Self::dispatch`] for a kernel reading bound sub-ranges.
+        pub fn dispatch_sliced(
+            &self,
+            kind: usize,
+            bufs: &[&DeviceBuffer],
+            offsets: &[(u64, u64)],
+            params: &[u32],
+            grid: crate::Dispatch,
+        ) -> Step {
+            let threads = self.threads_for(kind, grid);
+            self.step_sliced_unchecked(kind, bufs, offsets, params, threads)
+        }
+        /// This handle's thread mapping for kernel slot `kind`.
+        pub fn kernel_grid_at(&self, kind: usize) -> Option<crate::KernelGrid> {
+            self.names.get(kind).and_then(|n| crate::kernel_grid(n))
+        }
+        fn threads_for(&self, kind: usize, grid: crate::Dispatch) -> u32 {
+            match grid {
+                crate::Dispatch::Threads(n) => n,
+                crate::Dispatch::Workgroups(n) => {
+                    n.saturating_mul(self.kernel_grid_at(kind).map(|g| g.wg_size).unwrap_or(1))
+                }
+            }
+        }
+        /// Panic if `kind` names a kernel whose threads share one item - the
+        /// native facade's `refuse_cooperative`, for the same reason.
+        fn refuse_cooperative(&self, kind: usize) {
+            if let Some(g) = self.kernel_grid_at(kind) {
+                assert!(
+                    !g.cooperative,
+                    "kernel '{}' is workgroup-cooperative ({} threads per workgroup share one item), \
+                     so a raw thread count cannot describe its dispatch. Use \
+                     dispatch(kind, bufs, params, Dispatch::Workgroups(items)).",
+                    self.names.get(kind).map(String::as_str).unwrap_or("?"),
+                    g.wg_size
+                );
+            }
+        }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            self.refuse_cooperative(kind);
+            self.step_unchecked(kind, bufs, params, threads)
+        }
+        fn step_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             Backend::step(&self.inner, k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+            self.refuse_cooperative(kind);
+            self.step_sliced_unchecked(kind, bufs, offsets, params, threads)
+        }
+        fn step_sliced_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
             Backend::step_sliced(&self.inner, k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
