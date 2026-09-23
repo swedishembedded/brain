@@ -37,6 +37,14 @@ pub mod routing;
 pub mod salesconv;
 pub mod value;
 
+/// Parameter tensors by name, holding every element in row-major order.
+///
+/// The shape is not carried alongside: every consumer already knows it from
+/// [`EncoderConfig::tensor_manifest`] or [`head::manifest`], and the element
+/// count is checked against that manifest at the boundary. A map that also
+/// carried shapes would give two sources of truth for one fact.
+pub type Tensors = std::collections::HashMap<String, Vec<f32>>;
+
 pub use config::EncoderConfig;
 pub use decide::{Decide, Example, Limits};
 pub use model::Encoder;

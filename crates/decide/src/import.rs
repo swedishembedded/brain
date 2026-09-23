@@ -25,6 +25,7 @@
 //! BERT's tanh CLS head, which sentence-transformers does not use and this
 //! model does not either (it mean-pools).
 
+use crate::Tensors;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -201,14 +202,14 @@ pub fn sniff_naming(names: &[String], cfg: &EncoderConfig) -> Result<Naming, Str
 pub fn split_brain_tensors(
     tensors: Vec<checkpoint::safetensors::StTensor>,
     cfg: &EncoderConfig,
-) -> Result<(HashMap<String, Vec<f32>>, HashMap<String, Vec<f32>>), String> {
-    let mut seen: HashMap<String, Vec<f32>> = HashMap::new();
+) -> Result<(Tensors, Tensors), String> {
+    let mut seen: Tensors = HashMap::new();
     for t in tensors {
         if seen.insert(t.name.clone(), t.data).is_some() {
             return Err(format!("import: duplicate tensor {}", t.name));
         }
     }
-    let mut enc: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut enc: Tensors = HashMap::new();
     for (name, shape) in cfg.tensor_manifest() {
         let numel: usize = shape.iter().product();
         let data = seen
@@ -228,8 +229,8 @@ pub fn split_brain_tensors(
 pub fn brain_init_from_hf(
     tensors: Vec<checkpoint::safetensors::StTensor>,
     cfg: &EncoderConfig,
-) -> Result<HashMap<String, Vec<f32>>, String> {
-    let mut brain: HashMap<String, Vec<f32>> = HashMap::new();
+) -> Result<Tensors, String> {
+    let mut brain: Tensors = HashMap::new();
     let mut joins: HashMap<(u32, bool), QkvJoin> = HashMap::new();
     let mut unmapped: Vec<String> = Vec::new();
     for t in tensors {
@@ -253,7 +254,7 @@ pub fn brain_init_from_hf(
     if !unmapped.is_empty() {
         return Err(format!("import: {} unmapped HF tensors: {unmapped:?}", unmapped.len()));
     }
-    let mut init: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut init: Tensors = HashMap::new();
     for (name, shape) in cfg.tensor_manifest() {
         let numel: usize = shape.iter().product();
         let data = brain.remove(&name).ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;

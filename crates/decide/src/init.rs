@@ -14,6 +14,7 @@
 //! architecture - and the finite-difference check perturbs them regardless, so
 //! leaving them at 1 costs no coverage.
 
+use crate::Tensors;
 use std::collections::HashMap;
 
 use data::rng::Rng;
@@ -31,17 +32,17 @@ fn is_bias(name: &str) -> bool {
     name.ends_with(".bias")
 }
 
-pub fn init_weights(cfg: &EncoderConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+pub fn init_weights(cfg: &EncoderConfig, seed: u64) -> Tensors {
     fill(cfg.tensor_manifest(), seed)
 }
 
 /// The head's weights. Always fresh: the head has no pretrained counterpart,
 /// which is exactly why it takes a larger learning rate than the encoder.
-pub fn init_head(cfg: &EncoderConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+pub fn init_head(cfg: &EncoderConfig, seed: u64) -> Tensors {
     fill(crate::head::tensor_manifest(cfg), seed)
 }
 
-fn fill(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> HashMap<String, Vec<f32>> {
+fn fill(manifest: Vec<(String, Vec<usize>)>, seed: u64) -> Tensors {
     let mut rng = Rng::new(seed);
     let mut w = HashMap::new();
     for (name, shape) in manifest {

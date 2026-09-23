@@ -33,7 +33,7 @@
 //! sentence-transformer head uses and is the natural thing to ablate against
 //! once a pooling kernel exists.
 
-use std::collections::HashMap;
+use crate::Tensors;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
@@ -106,7 +106,7 @@ impl Head {
         cfg: EncoderConfig,
         cap_rows: u32,
         cap_slots: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &Tensors,
         train: bool,
     ) -> Head {
         let role = if train { Role::Trainable } else { Role::Frozen };

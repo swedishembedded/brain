@@ -20,6 +20,7 @@
 //! starts from noise, so they take different learning rates. Two optimizers
 //! express that directly, with no per-tensor multiplier to keep in sync.
 
+use crate::Tensors;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -195,8 +196,8 @@ impl Decide {
         cfg: EncoderConfig,
         tok: WordPiece,
         limits: Limits,
-        enc_init: &HashMap<String, Vec<f32>>,
-        head_init: &HashMap<String, Vec<f32>>,
+        enc_init: &Tensors,
+        head_init: &Tensors,
         train: bool,
     ) -> Decide {
         let ids = kern::Ids::resolve(&gpu);

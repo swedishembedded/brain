@@ -32,7 +32,7 @@
 //! device cost, and a caller whose spans are stable (the realtime path, whose
 //! window size and option set repeat) rebuilds nothing.
 
-use std::collections::HashMap;
+use crate::Tensors;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 use model::block;
@@ -200,7 +200,7 @@ impl Encoder {
         cfg: EncoderConfig,
         cap_rows: u32,
         max_span: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &Tensors,
     ) -> Encoder {
         Encoder::build(gpu, cfg, cap_rows, max_span, init, false)
     }
@@ -217,7 +217,7 @@ impl Encoder {
         cfg: EncoderConfig,
         cap_rows: u32,
         max_span: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &Tensors,
     ) -> Encoder {
         Encoder::build(gpu, cfg, cap_rows, max_span, init, true)
     }
@@ -227,7 +227,7 @@ impl Encoder {
         cfg: EncoderConfig,
         cap_rows: u32,
         max_span: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &Tensors,
         train: bool,
     ) -> Encoder {
         assert!(
