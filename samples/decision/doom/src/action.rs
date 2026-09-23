@@ -42,6 +42,16 @@ pub struct Option_ {
     /// TEXT for the first integer, which worked only because no monster in
     /// DOOM has a digit in its name.
     pub room: i32,
+    /// How far along this option's direction the floor starts burning, when
+    /// it does, and `None` when the way is clear.
+    ///
+    /// The model reads this in the text. The teacher cannot read text without
+    /// scraping it - which is exactly what `room` exists to stop - and floor
+    /// damage is the single commonest way a run ends: three of nine levels
+    /// killed the scripted player in nukage or hellslime, one of them after
+    /// choosing "get off the burning floor" 189 times and still drowning in
+    /// it. Getting OUT is a poor second to not walking in.
+    pub fire: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -207,6 +217,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: ARM_TICS,
             tag: Tag::Arm,
             room: 0,
+            fire: None,
         });
     }
 
@@ -241,6 +252,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: FIGHT_TICS,
             tag: Tag::Attack,
             room: 0,
+            fire: None,
         });
 
         // Circle-strafing: keep firing while crossing the line of fire.
@@ -275,6 +287,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     ),
                     tics: FIGHT_TICS,
                     tag: Tag::Circle,
+                    fire: None,
                     room,
                 });
             }
@@ -323,6 +336,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
             tag: Tag::Grab,
             room: p.distance,
+            fire: None,
         });
     }
 
@@ -392,6 +406,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             },
             tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Grab,
+            fire: None,
             room,
         });
     }
@@ -448,6 +463,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             },
             tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Hunt,
+            fire: None,
             room,
         });
     }
@@ -475,6 +491,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: FIGHT_TICS,
             tag: Tag::Face,
             room: c.toward(*bearing),
+            fire: None,
         });
     }
 
@@ -529,6 +546,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             },
             tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Frisk,
+            fire: None,
             room,
         });
     }
@@ -543,13 +561,16 @@ pub fn options(state: &State) -> Vec<Option_> {
     // corridor ahead is nukage; they look at it.
     // Whether walking a given way, for a given distance, goes into any patch
     // of burning floor the player can see.
-    let hot = |bearing: i32, distance: i32| match state
-        .burning_floor
-        .iter()
-        .filter(|b| b.in_the_way(bearing, distance))
-        .min_by_key(|b| b.distance)
-    {
-        Some(b) => format!(", and the floor starts burning {} units along", b.distance),
+    let fire = |bearing: i32, distance: i32| {
+        state
+            .burning_floor
+            .iter()
+            .filter(|b| b.in_the_way(bearing, distance))
+            .min_by_key(|b| b.distance)
+            .map(|b| b.distance)
+    };
+    let hot = |bearing: i32, distance: i32| match fire(bearing, distance) {
+        Some(d) => format!(", and the floor starts burning {d} units along"),
         None => String::new(),
     };
     if c.ahead >= MIN_ROOM {
@@ -563,6 +584,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Advance,
             room: c.ahead,
+            fire: fire(0, c.ahead),
         });
     }
     if c.ahead_left >= MIN_ROOM {
@@ -579,6 +601,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Explore,
             room: c.ahead_left,
+            fire: fire(-45, c.ahead_left),
         });
     }
     if c.ahead_right >= MIN_ROOM {
@@ -595,6 +618,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Explore,
             room: c.ahead_right,
+            fire: fire(45, c.ahead_right),
         });
     }
     if c.behind >= MIN_ROOM {
@@ -607,6 +631,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Retreat,
             room: c.behind,
+            fire: fire(180, c.behind),
         });
     }
 
@@ -636,6 +661,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: walk_tics(d.distance),
             tag: Tag::Escape,
             room: d.distance,
+            fire: None,
         });
     }
 
@@ -674,6 +700,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: RIDE_TICS,
                 tag: Tag::Ride,
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
+                fire: None,
             });
         }
 
@@ -723,6 +750,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 },
                 tag: Tag::Exit,
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
+                fire: fire(bearing, away),
             });
         } else if e.distance.is_some_and(|d| d <= USE_RANGE) {
             // Close enough to press. Face the exit ITSELF, not the route,
@@ -740,6 +768,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: FIGHT_TICS,
                 tag: Tag::Exit,
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
+                fire: fire(bearing, away),
             });
         } else if bearing.abs() > FACING_TOL {
             out.push(Option_ {
@@ -751,6 +780,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: FIGHT_TICS,
                 tag: Tag::Exit,
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
+                fire: fire(bearing, away),
             });
         } else {
             // As far as the next waypoint, not a fixed stride.
@@ -761,6 +791,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: walk_tics(step),
                 tag: Tag::Exit,
                 room: e.route_clearance.or(e.clearance).unwrap_or(0),
+                fire: fire(bearing, away),
             });
         }
     }
@@ -796,6 +827,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
                 tag: Tag::Explore,
                 room: f.clearance,
+                fire: fire(f.bearing, f.distance),
             });
         }
     }
@@ -827,6 +859,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: if far_off { FIGHT_TICS } else { MOVE_TICS },
             tag: Tag::Fallback,
             room: away,
+            fire: None,
         });
     }
 
@@ -846,6 +879,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Sidestep,
             room: c.left,
+            fire: fire(-90, c.left),
         });
     }
     if c.right >= MIN_ROOM {
@@ -859,6 +893,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: MOVE_TICS,
             tag: Tag::Sidestep,
             room: c.right,
+            fire: fire(90, c.right),
         });
     }
 
@@ -903,6 +938,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                 tics: MOVE_TICS,
                 tag: Tag::Clear,
                 room: 0,
+                fire: None,
             });
         } else if b.kind == "thing" {
             let what = b.what.as_deref().unwrap_or("it").to_lowercase();
@@ -917,6 +953,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: FIGHT_TICS,
                     tag: Tag::Clear,
                     room: 0,
+                    fire: None,
                 });
             } else {
                 out.push(Option_ {
@@ -929,6 +966,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: FIGHT_TICS,
                     tag: Tag::Clear,
                     room: 0,
+                    fire: None,
                 });
             }
         }
@@ -948,6 +986,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: walk_tics(sw.distance),
                     tag: Tag::Switch,
                     room: sw.distance,
+                    fire: None,
                 });
             } else if sw.bearing.abs() > AIM_TOL {
                 out.push(Option_ {
@@ -960,6 +999,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: FIGHT_TICS,
                     tag: Tag::Switch,
                     room: 0,
+                    fire: None,
                 });
             } else {
                 out.push(Option_ {
@@ -972,6 +1012,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: DOOR_TICS,
                     tag: Tag::Switch,
                     room: 0,
+                    fire: None,
                 });
             }
         }
@@ -987,6 +1028,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: FIGHT_TICS,
                     tag: Tag::Open,
                     room: 0,
+                    fire: None,
                 });
             } else {
                 out.push(Option_ {
@@ -999,6 +1041,7 @@ pub fn options(state: &State) -> Vec<Option_> {
                     tics: DOOR_TICS,
                     tag: Tag::Open,
                     room: 0,
+                    fire: None,
                 });
             }
         }
@@ -1030,6 +1073,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         tics: MOVE_TICS,
         tag: Tag::Use,
         room: 0,
+        fire: None,
     });
 
     // --- look around ------------------------------------------------------
@@ -1043,6 +1087,7 @@ pub fn options(state: &State) -> Vec<Option_> {
         tics: FIGHT_TICS,
         tag: Tag::Explore,
         room: 0,
+        fire: None,
     });
 
     // --- run --------------------------------------------------------------
@@ -1070,6 +1115,7 @@ pub fn options(state: &State) -> Vec<Option_> {
             tics: o.tics,
             tag: o.tag,
             room: o.room,
+            fire: None,
         })
         .collect();
     out.extend(sprints);
@@ -1426,6 +1472,11 @@ mod tests {
             .find(|o| o.tag == Tag::Retreat)
             .expect("somewhere to back off to");
         assert!(!back.text.contains("burning"), "{}", back.text);
+        // And the same fact as a NUMBER, because the teacher cannot read the
+        // sentence. Floor damage ends three of the nine levels' runs, and a
+        // fact only the model can see is one the teacher walks into.
+        assert_eq!(fwd.fire, Some(96), "forward walks into it, 96 units along");
+        assert_eq!(back.fire, None, "backing away does not");
 
         let text = crate::obs::render(&state(seen), crate::obs::History::default());
         assert!(text.contains("BURNING FLOOR in sight"), "{text}");

@@ -2028,11 +2028,17 @@ impl DoomEnv {
             // A BEARING IS NOT A DESTINATION. The engine supplies a route
             // bearing whenever it can route anywhere at all, and while the
             // way out is unknown that bearing leads to the frontier - so
-            // testing for one made "head for the exit" the answer to every
-            // decision on a level whose exit had never been seen. Measured on
-            // E1M1: taken on 375 of 400 decisions, none of which could reach
-            // an exit, and the escape that shoves at walls when the ground
-            // has all been walked was never once reached.
+            // testing for one alone made "head for the exit" the answer to
+            // every decision on a level whose exit had never been seen.
+            // Measured on E1M1: taken on 375 of 400 decisions, none of which
+            // could reach an exit, and the escape that shoves at walls once
+            // the ground has all been walked was never once reached.
+            //
+            // Heading for the frontier is still what happens - the ranking
+            // below scores the exit option 400 above anything else that goes
+            // somewhere - but it happens where being out of ideas can also be
+            // noticed. Letting the orders take it directly instead was tried
+            // and measured worse: E1M1 finished in 759 decisions against 305.
             exit_routed: way_out_known(
                 self.state.exit.is_some(),
                 self.state.exit.as_ref().and_then(|e| e.goal.as_deref()),
@@ -2045,11 +2051,36 @@ impl DoomEnv {
             in_my_face,
             secrets_left: self.state.level.secrets < self.state.level.total_secrets,
         };
+        // THE ORDERS DECIDE THE ORDER, with one thing held back: a way on
+        // that walks into burning floor.
+        //
+        // Not refused - held. A level whose way on crosses a channel of
+        // nukage has to be crossable, and on E1M3 or E1M5 that is most of
+        // them, so a flat refusal is a player standing on the bank until the
+        // decisions run out. What it stops is taking the wet way while a dry
+        // one is on offer, which is the case that was killing runs: floor
+        // damage ends three of the nine, and by the time "get off the burning
+        // floor" is the decision the player is already losing health every
+        // tic - on E1M5 that option was chosen 189 times and the run still
+        // drowned with no kills.
+        //
+        // Once already standing in it, wading on is exactly right: the way
+        // out of a channel is the far bank, and hesitating in the middle is
+        // the worst of both.
+        let mut wet: Option<usize> = None;
         for tag in orders(self.mission) {
             let Some(i) = by(*tag) else { continue };
             if takes(*tag, &moment) {
+                if self.opts[i].fire.is_some() && !self.state.player.standing_in_damage {
+                    wet = wet.or(Some(i));
+                    continue;
+                }
                 return Some(i);
             }
+        }
+        if let Some(i) = wet {
+            // Nothing dry was takeable. The wet way is the way.
+            return Some(i);
         }
 
         // Somewhere to go. Every movement option carries the clearance it was
@@ -2064,6 +2095,25 @@ impl DoomEnv {
                 Tag::Exit => o.room + 400,
                 Tag::Advance | Tag::Retreat | Tag::Explore => o.room,
                 _ => 0,
+            };
+            // Ground that burns is not ground to walk. Floor damage kills the
+            // scripted player on three of the nine levels, and by the time
+            // "get off the burning floor" is the decision it is already
+            // losing health every tic - on E1M5 that option was taken 189
+            // times and the run still drowned in nukage with no kills.
+            //
+            // Not a refusal, a price. A level whose way on crosses a channel
+            // of slime has to be crossable, and the option that does it is
+            // still here and still the best thing on offer once everything
+            // dry has been tried. What it stops is wading when there is a dry
+            // way round, which is the case that was killing runs.
+            let score = match o.fire {
+                Some(d) if !self.state.player.standing_in_damage => {
+                    // Cheaper the further off the fire starts: a patch 300
+                    // units along may never be reached at all.
+                    score / 4 + d / 8
+                }
+                _ => score,
             };
             // Backing away is a last resort: it is how a greedy walker
             // oscillates in place, one step forward and one step back forever.
@@ -2248,6 +2298,7 @@ fn every_field_of_an_option_either_replays_or_cannot_change_the_run(o: &Option_)
         // How much room the act was built from. Read only when the scripted
         // player ranks the options it was offered; a replay is not choosing.
         room: _,
+        fire: _,
     } = o;
 }
 
@@ -3220,6 +3271,7 @@ mod recording_tests {
             tics: 6,
             tag: Tag::Grab,
             room: 320,
+            fire: None,
         };
         let just_advance = Option_ { tag: Tag::Advance, ..walk_to_the_gun.clone() };
         assert_eq!(
@@ -3244,6 +3296,7 @@ mod recording_tests {
             tics: 6,
             tag: Tag::Advance,
             room: 320,
+            fire: None,
         };
         let b = Option_ { text: "walk forward, 288 units of open floor ahead".into(), room: 288, ..a.clone() };
         assert_eq!(recorded(&a), recorded(&b));
