@@ -400,6 +400,48 @@ const PICK_TRIES: usize = 32;
 /// heavily weighted toward whatever the search happened to do most of.
 const KEEP_DECISIONS: usize = 20_000;
 
+/// What a walk is allowed to teach.
+///
+/// A decision is offered here because the archive admitted the cell it
+/// reached. That says the decision was informative to the SEARCH; it does not
+/// say it was good play, and the two come apart exactly where it costs most.
+/// A step into a nukage pit reaches floor nobody has stood on, so it is
+/// always admitted - and a policy fitted to those steps learns to walk into
+/// pits. So a walk's decisions are held until the walk stops, and are kept
+/// only if it was still alive when it did.
+///
+/// A death is the one ending that is certainly a mistake and whose mistake
+/// cannot be located: the fatal choice may have been the last one or the one
+/// four hundred decisions earlier that spent the health. Nothing from such a
+/// walk is offered as an example.
+#[derive(Default)]
+struct Lessons {
+    kept: Vec<Demonstration>,
+    /// This walk's decisions, not yet earned.
+    pending: Vec<Demonstration>,
+}
+
+impl Lessons {
+    fn offer(&mut self, d: Demonstration) {
+        self.pending.push(d);
+    }
+
+    /// The walk stopped without dying. Past the cap the oldest go, because
+    /// the newest come from further along and are the ones a policy most
+    /// needs.
+    fn survived(&mut self) {
+        self.kept.append(&mut self.pending);
+        if self.kept.len() > KEEP_DECISIONS {
+            let drop = self.kept.len() - KEEP_DECISIONS;
+            self.kept.drain(0..drop);
+        }
+    }
+
+    fn died(&mut self) {
+        self.pending.clear();
+    }
+}
+
 /// What a campaign writes to disk: the archive and the vocabulary its trails
 /// are spelled in.
 ///
@@ -460,7 +502,7 @@ pub struct Campaign {
     /// run, which is a level played start to finish: the fragments teach a
     /// policy what to do in a situation, and only a whole run teaches it
     /// what the situations are in the order they come.
-    learned: Vec<Demonstration>,
+    lessons: Lessons,
     /// Which of [`OPERATORS`] this campaign may draw, by index.
     ///
     /// An operator that needs something the campaign was not given - a
@@ -515,7 +557,7 @@ impl Campaign {
             refused: 0,
             live: std::collections::HashSet::new(),
             rehydrations: REHYDRATIONS,
-            learned: Vec::new(),
+            lessons: Lessons::default(),
             arms,
             searched: 0,
             claims: Vec::new(),
@@ -884,19 +926,10 @@ impl Campaign {
         Some(env.look())
     }
 
-    /// Keep a decision for the compression phase, bounded.
-    ///
-    /// A long campaign admits tens of thousands of cells, and a training set
-    /// is not better for being unbounded - it is just slower to fit and more
-    /// heavily weighted toward whatever the search happened to do most of.
-    /// Past the cap the oldest go, because the newest come from further along
-    /// and are the ones a policy most needs.
+    /// Offer a decision to the compression phase. Whether it is kept depends
+    /// on how the walk it belongs to ends - see [`Lessons`].
     fn keep(&mut self, d: Demonstration) {
-        self.learned.push(d);
-        if self.learned.len() > KEEP_DECISIONS {
-            let drop = self.learned.len() - KEEP_DECISIONS;
-            self.learned.drain(0..drop);
-        }
+        self.lessons.offer(d);
     }
 
     /// Run one operator once and report what it bought.
@@ -1041,6 +1074,15 @@ impl Campaign {
                 }
                 break;
             }
+        }
+        // What this walk may teach, decided by how it ended. A fault is the
+        // game itself breaking, not the player making a mistake - but the
+        // state it left behind cannot be scored, so it teaches nothing
+        // either.
+        if env.fault().is_none() && env.score(allowed).alive > 0.0 {
+            self.lessons.survived();
+        } else {
+            self.lessons.died();
         }
         gain.seconds = began.elapsed().as_secs_f64();
         gain
@@ -1466,6 +1508,10 @@ pub fn campaign(
                     for d in played.drain(..) {
                         run.keep(d);
                     }
+                    // A run that was replayed from the level's own start and
+                    // finished it is the one trajectory whose survival is not
+                    // in question.
+                    run.lessons.survived();
                 }
                 // A claim the replay does not reproduce is a DEFECT, not a
                 // near miss: the search reached that state by restoring
@@ -1514,12 +1560,80 @@ pub fn campaign(
         best.map(|e| e.worth.reached).unwrap_or(0.0),
         best.map(|e| e.worth.cost).unwrap_or(0),
     );
-    println!("    {} decisions kept for training", run.learned.len());
+    println!("    {} decisions kept for training", run.lessons.kept.len());
     Ok(Found {
         cells,
         best: reached,
         best_tics: cost,
         solved,
-        learned: run.learned,
+        learned: run.lessons.kept,
     })
+}
+
+#[cfg(test)]
+mod lesson_tests {
+    use super::*;
+
+    fn a_decision(n: usize) -> Demonstration {
+        Demonstration {
+            objective: "speedrun".into(),
+            observation: format!("decision {n}"),
+            options: vec!["walk forward".into(), "turn around".into()],
+            action: n % 2,
+        }
+    }
+
+    /// The archive admits a step into a nukage pit, because the floor under
+    /// it is floor nobody has stood on. That is the search working. It is not
+    /// an example of how to play, and a policy fitted to it learns to walk
+    /// into pits.
+    #[test]
+    fn a_walk_that_died_teaches_nothing() {
+        let mut lessons = Lessons::default();
+        for n in 0..5 {
+            lessons.offer(a_decision(n));
+        }
+        lessons.died();
+        assert!(lessons.kept.is_empty());
+    }
+
+    #[test]
+    fn a_walk_that_lived_teaches_every_decision_the_archive_admitted() {
+        let mut lessons = Lessons::default();
+        for n in 0..5 {
+            lessons.offer(a_decision(n));
+        }
+        lessons.survived();
+        assert_eq!(lessons.kept.len(), 5);
+        // And the next walk starts owing nothing.
+        lessons.died();
+        assert_eq!(lessons.kept.len(), 5);
+    }
+
+    /// One walk dying does not cost the walks that already earned their
+    /// place, and one walk living does not rescue a previous walk's death.
+    #[test]
+    fn walks_are_judged_one_at_a_time() {
+        let mut lessons = Lessons::default();
+        lessons.offer(a_decision(1));
+        lessons.survived();
+        lessons.offer(a_decision(2));
+        lessons.offer(a_decision(3));
+        lessons.died();
+        lessons.offer(a_decision(4));
+        lessons.survived();
+        let said: Vec<&str> = lessons.kept.iter().map(|d| d.observation.as_str()).collect();
+        assert_eq!(said, vec!["decision 1", "decision 4"]);
+    }
+
+    #[test]
+    fn the_training_set_is_capped_and_the_oldest_go_first() {
+        let mut lessons = Lessons::default();
+        for n in 0..KEEP_DECISIONS + 10 {
+            lessons.offer(a_decision(n));
+        }
+        lessons.survived();
+        assert_eq!(lessons.kept.len(), KEEP_DECISIONS);
+        assert_eq!(lessons.kept[0].observation, "decision 10");
+    }
 }
