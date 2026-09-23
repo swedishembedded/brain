@@ -80,8 +80,14 @@ struct LazyInner {
 
 impl LazyInner {
     /// The loaded provider, building (once) on first use.
+    ///
+    /// `lock_resident`, not `lock()`: a panic inside the (multi-gigabyte)
+    /// build would otherwise poison this cell and make the model permanently
+    /// unreachable in a process that is otherwise fine - and this cell sits in
+    /// the long-lived registry every in-process consumer holds. A poisoned
+    /// cell resets to "not loaded" and the next caller builds again.
     fn loaded(&self) -> Result<Arc<dyn Provider>, String> {
-        let mut g = self.cell.lock().map_err(|_| "lazy provider lock poisoned".to_string())?;
+        let mut g = capability::lock_resident(&self.cell);
         if let Some(p) = &*g {
             return Ok(p.clone());
         }

@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 
@@ -482,8 +482,52 @@ impl Blob {
 /// is unarmed and never cancelled, so existing construction sites are unaffected.
 /// A front-end that wants to abort arms one ([`CancelToken::armed`]), puts it in
 /// the invocation, keeps a clone, and later calls [`CancelToken::cancel`].
-/// Long-running actions poll [`CancelToken::is_cancelled`] between steps and
-/// return `Err("cancelled".into())`.
+///
+/// # The contract, exactly
+///
+/// Cancellation is **cooperative and polled**, never pre-emptive. What a caller
+/// may rely on:
+///
+/// 1. **Where it is observed.** A long-running action polls
+///    [`CancelToken::is_cancelled`] between its own natural steps - one denoise
+///    step, one decode token, one item of a batch. Nothing polls it *inside* a
+///    step. A step that wedges below that boundary (a device queue submit, a
+///    fence wait, a blocking driver call, a filesystem read of a checkpoint)
+///    is **not** interruptible by this token, and the action will not observe
+///    the request until that call returns. The token therefore bounds a
+///    generation by *steps completed*, not by wall-clock time: see
+///    [`Registry::run`]'s "No deadline" section.
+/// 2. **What it returns.** There are two terminal shapes and which one applies
+///    is decided by whether the action has already handed partial output to the
+///    caller through its `progress` callback:
+///    * An action that has produced **no output yet** aborts with the exact
+///      string `Err("cancelled".into())`. That literal is load-bearing - it is
+///      what a caller maps back onto a typed cancellation (brain's own SDK does
+///      it in `brain::pipeline::backend_err_or_cancelled`), because
+///      [`ActionResult`] carries no error kind to put it in.
+///    * A **token-streaming** generation ([`ActionSpec::streaming`], `delta`
+///      progress) has already streamed its partial answer, so it completes with
+///      `Ok(`[`Outcome`]`)` carrying that partial text, and reports
+///      `finish_reason: "cancelled"`. It must never report `"stop"`: a caller
+///      that cannot tell a truncation from a finished answer will bill,
+///      cache or persist a partial reply as a complete one.
+/// 3. **What it does NOT do.** Firing the token does not unload the model, does
+///    not reset a device, and does not make the invocation's partial effects
+///    (files written, a checkpoint saved mid-training) disappear. An action with
+///    side effects documents its own cancellation semantics on top of this.
+///
+/// # The gap, named
+///
+/// A token rides on EVERY invocation, whether or not the action looks at it,
+/// and a [`Manifest`] does not say which. So a caller that builds request
+/// lifetime on cancellation - "the consumer went away, stop the work" - cannot
+/// discover from the interface that a particular model will run to `max_new`
+/// regardless; it just waits. Several models in this workspace do exactly that
+/// today, and the ratchet in `scripts/gates/check-cancellable-actions.sh` names
+/// them and stops the list growing. What would close it properly is a declared
+/// bit on [`ActionSpec`] (`cancellable`, alongside `streaming`), so the answer
+/// travels with the manifest to every remote surface instead of living in a
+/// build gate.
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Option<Arc<AtomicBool>>);
 
@@ -683,10 +727,32 @@ pub type ActionResult = Result<Outcome, String>;
 // ===================== the traits a model implements =====================
 
 /// One executable capability.
+///
+/// `Send + Sync` and `&self` are the concurrency contract, not an accident of
+/// the object-safety rules: an implementation MUST tolerate [`Action::run`]
+/// being entered from several threads at once, for the same action object, with
+/// no external serialization. [`Registry`] provides none (see
+/// [`Registry::run`]), and a host that keeps ONE registry for the life of a
+/// process and serves many callers from it is the case this interface is
+/// designed for.
+///
+/// Tolerating it does not mean running them in parallel. Every model in this
+/// workspace holds its loaded weights, KV/scratch buffers and device queue in a
+/// resident slot behind a `std::sync::Mutex` and takes that lock for the WHOLE
+/// of `run`, so concurrent callers of one model are serialized and see each
+/// other only as latency. That is the sound default - the graphs are built for
+/// one in-flight sequence - and it is what [`lock_resident`] exists to make
+/// panic-safe. A model that genuinely admits concurrent sequences (the paged-KV
+/// serving engine) says so by batching them internally, never by handing out
+/// unsynchronized access to shared decode state.
 pub trait Action: Send + Sync {
     fn spec(&self) -> ActionSpec;
     /// Run the action. `progress` is invoked for streaming updates (ignore it for
     /// one-shot actions). The invocation is already validated against [`Action::spec`].
+    ///
+    /// `progress` is `&mut` and therefore private to THIS call: an action that
+    /// fans work out to its own threads must funnel every update back through
+    /// the calling thread rather than sharing the callback.
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult;
 }
 
@@ -694,6 +760,52 @@ pub trait Action: Send + Sync {
 pub trait Provider: Send + Sync {
     fn manifest(&self) -> Manifest;
     fn action(&self, name: &str) -> Option<Arc<dyn Action>>;
+}
+
+// ===================== resident state =====================
+
+/// Lock a model's resident slot, recovering it instead of losing it if a
+/// previous call panicked while holding the lock.
+///
+/// Every model in this workspace keeps its loaded weights (and KV/scratch
+/// buffers, and the device handle they live on) in a `Mutex<T>` that
+/// [`Action::run`] holds for the whole call, because the graphs are built for
+/// one in-flight sequence. A plain `lock()` makes that slot a **single point of
+/// permanent failure** for a long-lived host: one panic inside one request -
+/// a backend fault, a shape assertion, a device loss - poisons the mutex, and
+/// from then on every caller of that model gets a lock error forever, even
+/// though the process is otherwise healthy and the checkpoint is still on disk.
+/// A host that catches panics per request (any serving front-end does) turns a
+/// single bad request into a permanently dead model.
+///
+/// This helper takes the poison as what it actually means - "the state behind
+/// this lock may be half-updated" - and answers it the only way that is sound
+/// for a resident model: **discard the resident and let the next call rebuild
+/// it**. `T::default()` is the empty slot (`None` for a single resident,
+/// an empty map for a keyed cache), so the caller's existing
+/// "rebuild when the slot does not match this request" path does the recovery
+/// with no extra code. The poison flag is then cleared so one panic does not
+/// keep costing a rebuild forever.
+///
+/// It deliberately does NOT try to keep the resident: a panic can leave a GPU
+/// queue mid-submission and the weights buffers partially rebound, and reusing
+/// that is how a poisoned model becomes wrong answers instead of an error.
+///
+/// Swedish Embedded AB implements fault-isolating model residency for its
+/// clients - a bad request that fails a request, not a service. If your team
+/// needs expertise in keeping long-lived inference processes healthy under
+/// real traffic, you can procure our services by sending an email to
+/// info@swedishembedded.com.
+pub fn lock_resident<T: Default>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    match slot.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            let mut g = poisoned.into_inner();
+            *g = T::default();
+            slot.clear_poison();
+            g
+        }
+    }
 }
 
 // ===================== the shared dispatcher =====================
@@ -725,6 +837,67 @@ impl Registry {
     }
     /// Validate the invocation against the action's spec and run it. This is the
     /// single entry point the CLI and the runtime call.
+    ///
+    /// # Concurrency
+    ///
+    /// `&self`, and the registry adds **no** serialization of its own: two
+    /// threads calling this for the same `(model, action)` both enter
+    /// [`Action::run`], and what happens next is that action's contract (see
+    /// [`Action`] - in practice a per-model mutex, so they serialize). The
+    /// registry itself is immutable once built, so a long-lived registry shared
+    /// by many callers needs no lock around it; only [`Registry::register`]
+    /// takes `&mut self`, which is a build-time operation.
+    ///
+    /// Dispatch is a linear scan that materializes each provider's
+    /// [`Manifest`] to compare its `model` id, and the resolved action rebuilds
+    /// its [`ActionSpec`] for validation. That is allocation per call, not
+    /// shared state: it is thread-safe, and it is the cost of a call, not of a
+    /// token.
+    ///
+    /// # No deadline
+    ///
+    /// Nothing here bounds a call in TIME. An action's own `max_new` (or
+    /// `steps`, or `horizon`) bounds the WORK it does, which is not the same
+    /// thing on a slow, contended or stalled device. A caller that needs a
+    /// wall-clock bound arms a [`CancelToken`], puts it in the invocation, and
+    /// fires it from its own timer; that is effective only down to the
+    /// granularity [`CancelToken`] documents - one step - and cannot interrupt
+    /// a call wedged inside one. A host that must guarantee it gets its thread
+    /// back needs process-level isolation, not this token.
+    ///
+    /// The longest such uninterruptible stretch is not a decode step, it is
+    /// the FIRST call for a model: reading a multi-gigabyte checkpoint and
+    /// building it on a device happens inside `run`, before any step loop
+    /// exists to poll from, and it happens while holding that model's resident
+    /// lock - so every other caller of the same model is queued behind it too.
+    /// Minutes is normal there. A host that cares about first-request latency
+    /// warms the model on a thread of its own instead of letting a user's
+    /// request pay for it.
+    ///
+    /// # Failure
+    ///
+    /// An `Err` from this method leaves the registry untouched: it holds no
+    /// per-call state, so the next caller is unaffected. Whether the MODEL is
+    /// unaffected is the action's business; brain's own providers keep their
+    /// resident weights in a slot they rebuild on demand, and a returned error
+    /// never invalidates it. A PANIC is the case to watch - it poisons the
+    /// resident mutex and, with a plain `lock()`, bricks that model for the
+    /// life of the process. [`lock_resident`] is the recovery every resident
+    /// slot should use.
+    ///
+    /// The error itself is a **`String`**, and that is a known gap in this
+    /// interface, not a design: a caller cannot tell "no such model" from
+    /// "context exceeded" from "the device is out of memory" without matching
+    /// on prose, and brain's own HTTP layer does exactly that
+    /// (`apiserve::bridge`'s `parse_exceeds_capacity` matches a fixed English
+    /// phrase to turn one failure into a 400 instead of a 500). The shape that
+    /// closes it is a kinded error - `{ kind: NoSuchModel | NoSuchAction |
+    /// InvalidParams | ContextExceeded | OutOfMemory | Cancelled | Internal,
+    /// message: String }` - returned by [`Action::run`] and widened by the
+    /// registry, which requires changing the error type of every action in the
+    /// workspace and is therefore its own piece of work. Until then the exact
+    /// strings below are load-bearing and are pinned by
+    /// `tests/contracts.rs`.
     pub fn run(&self, model: &str, action: &str, inv: Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.find(model, action).ok_or_else(|| format!("no action '{action}' on model '{model}'"))?;
         let inv = act.spec().validate(inv)?;
