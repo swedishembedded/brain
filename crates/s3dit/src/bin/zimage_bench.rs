@@ -115,11 +115,11 @@ fn main() {
             for &(inp, out) in &linears {
                 let (m, kdim, n) = (t as u32, inp as u32, out as u32);
                 // forward y[m,n] = x[m,k] @ W[n,k]^T
-                steps_f.push(gpu.step(K_FWD, &[&xb, &wb, &yb], &[m, kdim, n], d128(t) * d128(out) * 256));
+                steps_f.push(gpu.dispatch(K_FWD, &[&xb, &wb, &yb], &[m, kdim, n], gpu_core::Dispatch::Workgroups(d128(t) * d128(out))));
                 // dX[m,k] = dY[m,n] @ W[n,k]
-                steps_b.push(gpu.step(K_DX, &[&dyb, &wb, &dxb], &[m, kdim, n, 0], d128(t) * d128(inp) * 256));
+                steps_b.push(gpu.dispatch(K_DX, &[&dyb, &wb, &dxb], &[m, kdim, n, 0], gpu_core::Dispatch::Workgroups(d128(t) * d128(inp))));
                 // dW[n,k] += dY[m,n]^T @ X[m,k]
-                steps_b.push(gpu.step(K_DW, &[&dyb, &xb, &dwb], &[m, kdim, n], d128(out) * d128(inp) * 256));
+                steps_b.push(gpu.dispatch(K_DW, &[&dyb, &xb, &dwb], &[m, kdim, n], gpu_core::Dispatch::Workgroups(d128(out) * d128(inp))));
             }
         };
         for _ in 0..cfg.n_refiner_layers {

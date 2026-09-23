@@ -771,7 +771,7 @@ impl Flux2Model {
 
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         let (kind, threads) = model::block::gemm_variant(self.gemm_tier(), m, n);
-        self.gpu.step(kind, &[x, w, o], &[m, k, n], threads)
+        self.gpu.dispatch(kind, &[x, w, o], &[m, k, n], threads)
     }
 
     /// Sliced matmul: read rows `xr0..xr0+m` of `x`, write rows `or0..or0+m` of
@@ -916,7 +916,7 @@ impl Flux2Model {
         let rows = m * nh;
         let (kind, threads) =
             model::block::rms_variant(&self.gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, hd);
-        self.gpu.step_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd, rows, f(EPS)], threads)
+        self.gpu.dispatch_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd, rows, f(EPS)], threads)
     }
 
     /// Joint attention over `bsz` samples of `n` rows each. Both the flash and

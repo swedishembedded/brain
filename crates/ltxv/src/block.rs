@@ -421,7 +421,7 @@ fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, b: O
         model::block::GemmVariants::Reference(K_MATMUL)
     };
     let (kind, threads) = model::block::gemm_variant(variant, m, n);
-    s.push(gpu.step(kind, &[x, w, out], &[m, k, n], threads));
+    s.push(gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads));
     if let Some(b) = b {
         s.push(gpu.step(K_BIAS_ADD, &[out, b], &[m, n], m * n));
     }
@@ -452,9 +452,9 @@ fn attn_scores_kt(gpu: &Gpu, s: &mut Vec<Step>, q: &DeviceBuffer, k: &DeviceBuff
 fn attn_softmax(gpu: &Gpu, s: &mut Vec<Step>, scores: &DeviceBuffer, probs: &DeviceBuffer, heads: u32, nq: u32, nk: u32) {
     let (sk, st) = model::block::softmax_variant(gpu, K_ATTN_SOFTMAX, Some(K_SOFTMAX_ROWS), heads * nq, nk);
     if sk == K_SOFTMAX_ROWS {
-        s.push(gpu.step(sk, &[scores, probs], &[heads * nq, nk], st));
+        s.push(gpu.dispatch(sk, &[scores, probs], &[heads * nq, nk], st));
     } else {
-        s.push(gpu.step(sk, &[scores, probs], &[1, heads, nq, nk], st));
+        s.push(gpu.dispatch(sk, &[scores, probs], &[1, heads, nq, nk], st));
     }
 }
 
@@ -625,7 +625,7 @@ fn attn_context_materialized(
 /// row.
 fn rmsnorm(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) {
     let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM_EPS, Some(K_RMSNORM_ROWS), rows, dim);
-    s.push(gpu.step(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
+    s.push(gpu.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
 }
 
 fn mul(gpu: &Gpu, s: &mut Vec<Step>, a: &DeviceBuffer, b: &DeviceBuffer, y: &DeviceBuffer, n: u32) {

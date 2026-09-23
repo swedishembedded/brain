@@ -368,10 +368,10 @@ type Bufs6 = (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuff
 
 fn run_dyn(g: &Gpu, name: &str, sc: &Scenario, bufs: &Bufs6) -> Vec<f32> {
     let (xq, wq, sx, wsm, wd, xgs) = bufs;
-    let threads = (sc.m as u32).div_ceil(128) * (sc.n as u32).div_ceil(128) * 256;
+    let tiles = (sc.m as u32).div_ceil(128) * (sc.n as u32).div_ceil(128);
     let params = [sc.m as u32, sc.k as u32, sc.n as u32];
     let out = g.storage((sc.m * sc.n) as u64);
-    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, threads)]);
+    g.submit(&[], &[g.dispatch(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, gpu_core::Dispatch::Workgroups(tiles))]);
     g.read(&out, sc.m * sc.n)
 }
 
@@ -380,7 +380,7 @@ fn run_gemv(g: &Gpu, name: &str, sc: &Scenario, bufs: &Bufs6) -> Vec<f32> {
     assert!(sc.m <= 32, "matmul_kq_gemv requires m <= 32 (got {})", sc.m);
     let params = [sc.m as u32, sc.k as u32, sc.n as u32];
     let out = g.storage((sc.m * sc.n) as u64);
-    g.submit(&[], &[g.step(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, sc.n as u32 * 64)]);
+    g.submit(&[], &[g.dispatch(idx(g, name), &[xq, wq, sx, wsm, wd, xgs, &out], &params, gpu_core::Dispatch::Workgroups(sc.n as u32))]);
     g.read(&out, sc.m * sc.n)
 }
 

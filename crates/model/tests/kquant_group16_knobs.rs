@@ -203,14 +203,14 @@ fn matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel() {
     let (_, xq, sx) = upload_activation(&g, 0xD11_0000, m, k);
     let (_, wq, sw) = upload_weight(&g, 0xD11_1111, n, k, 32);
 
-    let threads = ((m as u32).div_ceil(128)) * ((n as u32).div_ceil(128)) * 256;
+    let tiles = ((m as u32).div_ceil(128)) * ((n as u32).div_ceil(128));
     let params = [m as u32, (k / 4) as u32, n as u32];
 
     let out_new = g.storage((m * n) as u64);
     let out_orig = g.storage((m * n) as u64);
     let steps = [
-        g.step(idx(&g, "matmul_i8_dyn"), &[&xq, &wq, &sx, &sw, &out_new], &params, threads),
-        g.step(idx(&g, "matmul_i8_dyn_orig"), &[&xq, &wq, &sx, &sw, &out_orig], &params, threads),
+        g.dispatch(idx(&g, "matmul_i8_dyn"), &[&xq, &wq, &sx, &sw, &out_new], &params, gpu_core::Dispatch::Workgroups(tiles)),
+        g.dispatch(idx(&g, "matmul_i8_dyn_orig"), &[&xq, &wq, &sx, &sw, &out_orig], &params, gpu_core::Dispatch::Workgroups(tiles)),
     ];
     g.submit(&[], &steps);
     let got_new = g.read(&out_new, m * n);
@@ -233,10 +233,10 @@ fn matmul_i8_dyn_qpg1_group16_matches_host_oracle() {
     let (codes_x, xq, sx) = upload_activation(&g, 0x671_0000, m, k);
     let (codes_w, wq, sw) = upload_weight(&g, 0x671_1111, n, k, 16);
 
-    let threads = ((m as u32).div_ceil(128)) * ((n as u32).div_ceil(128)) * 256;
+    let tiles = ((m as u32).div_ceil(128)) * ((n as u32).div_ceil(128));
     let params = [m as u32, (k / 4) as u32, n as u32];
     let out = g.storage((m * n) as u64);
-    g.submit(&[], &[g.step(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, threads)]);
+    g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(tiles))]);
     let got = g.read(&out, m * n);
 
     let sx_h = g.read(&sx, m);
@@ -257,7 +257,7 @@ fn matmul_i8_gemv_wpg4_group16_matches_host_oracle() {
 
     let params = [m as u32, (k / 4) as u32, n as u32];
     let out = g.storage((m * n) as u64);
-    g.submit(&[], &[g.step(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, n as u32 * 64)]);
+    g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))]);
     let got = g.read(&out, m * n);
 
     let sx_h = g.read(&sx, m);
@@ -282,7 +282,7 @@ fn matmul_i8_gemv_reg_wpg4_group16_matches_host_oracle() {
 
     let params = [m as u32, (k / 4) as u32, n as u32];
     let out = g.storage((m * n) as u64);
-    g.submit(&[], &[g.step(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, n as u32 * 64)]);
+    g.submit(&[], &[g.dispatch(idx(&g, name), &[&xq, &wq, &sx, &sw, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))]);
     let got = g.read(&out, m * n);
 
     let sx_h = g.read(&sx, m);

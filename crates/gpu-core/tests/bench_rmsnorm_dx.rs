@@ -112,8 +112,8 @@ fn rel(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Min-of-`reps` wall clock for one dispatch (warm-up submitted first).
-fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], threads: u32, reps: usize) -> f64 {
-    let s = gpu.step(kind, bufs, p, threads);
+fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], grid: gpu_core::Dispatch, reps: usize) -> f64 {
+    let s = gpu.dispatch(kind, bufs, p, grid);
     gpu.submit(&[], &[s]);
     gpu.poll_wait();
     let mut best = f64::INFINITY;
@@ -122,7 +122,7 @@ fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], thr
         // 4 back-to-back dispatches so launch overhead is amortised, as in
         // `bench_layernorm`/`bench_backward`; the reported time is per
         // dispatch.
-        let steps: Vec<_> = (0..4).map(|_| gpu.step(kind, bufs, p, threads)).collect();
+        let steps: Vec<_> = (0..4).map(|_| gpu.dispatch(kind, bufs, p, grid)).collect();
         gpu.submit(&[], &steps);
         gpu.poll_wait();
         best = best.min(t.elapsed().as_secs_f64() / 4.0);
@@ -159,8 +159,8 @@ fn bench_rmsnorm_dx() {
         let bufs_a: Vec<&gpu_core::DeviceBuffer> = vec![&xb, &wb, &dyb, &dxa];
         let bufs_b: Vec<&gpu_core::DeviceBuffer> = vec![&xb, &wb, &dyb, &dxb_out];
 
-        let ta = time(&g, dx, &bufs_a, &p, rows, reps);
-        let tb = time(&g, dxr, &bufs_b, &p, rows * 64, reps);
+        let ta = time(&g, dx, &bufs_a, &p, gpu_core::Dispatch::Threads(rows), reps);
+        let tb = time(&g, dxr, &bufs_b, &p, gpu_core::Dispatch::Workgroups(rows), reps);
         let (ra, rb) = (g.read(&dxa, n), g.read(&dxb_out, n));
         let diff = rel(&ra, &rb);
         println!(

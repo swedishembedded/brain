@@ -137,7 +137,7 @@ fn step_buf_shaped_result_is_byte_identical_to_step() {
         gpu.submit(
             &[],
             &[
-                gpu.step(K_GEMV, &[&xb, &wb, &via_step], &[m, k, n], n * 64),
+                gpu.dispatch(K_GEMV, &[&xb, &wb, &via_step], &[m, k, n], gpu_core::Dispatch::Workgroups(n)),
                 gpu.step_buf_shaped(K_GEMV, &ubuf, &[&xb, &wb, &via_buf], &[m, k, n], n * 64),
             ],
         );

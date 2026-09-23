@@ -165,13 +165,13 @@ impl<'a> RowEmit<'a> {
         m: usize,
         d: usize,
     ) {
-        let (kind, threads) = ln_variant(self.g, self.k.ln, Some(self.k.ln_rows), m as u32, d as u32);
-        s.push(self.g.step_sliced(
+        let (kind, grid) = ln_variant(self.g, self.k.ln, Some(self.k.ln_rows), m as u32, d as u32);
+        s.push(self.g.dispatch_sliced(
             kind,
             &[x, gamma, beta, y],
             &[rows(xr0, m, d), (0, 0), (0, 0), rows(yr0, m, d)],
             &[d as u32, m as u32, fbits(self.eps)],
-            threads,
+            grid,
         ));
     }
 
@@ -190,13 +190,13 @@ impl<'a> RowEmit<'a> {
         k: usize,
         n: usize,
     ) {
-        let (kind, threads) = gemm_variant(self.tier, m as u32, n as u32);
-        s.push(self.g.step_sliced(
+        let (kind, grid) = gemm_variant(self.tier, m as u32, n as u32);
+        s.push(self.g.dispatch_sliced(
             kind,
             &[x, w, y],
             &[rows(xr0, m, k), (0, 0), rows(yr0, m, n)],
             &[m as u32, k as u32, n as u32],
-            threads,
+            grid,
         ));
         if let Some(b) = bias {
             s.push(self.g.step_sliced(

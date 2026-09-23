@@ -209,15 +209,15 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
 ];
 
-fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
+fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m, n, MATMUL, MATMUL_REG3, naive)
 }
-fn dx_kernel(m: u32, k: u32) -> (usize, u32) {
+fn dx_kernel(m: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
 }
-fn dw_kernel(nrows: u32, k: u32) -> (usize, u32) {
+fn dw_kernel(nrows: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_LFM2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(nrows as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, naive)
 }
@@ -882,7 +882,7 @@ impl Lfm {
     /// (row-thirds of the conv mixer's fused `in_proj`).
     fn sliced_linear(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, r0: u32, nout: u32, k: u32, out: &DeviceBuffer, m: u32) {
         let (mk, mt) = linear_kernel(m as usize, nout as usize);
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             mk,
             &[x, self.w(wname), out],
             &[(0, 0), (r0 as u64 * k as u64, nout as u64 * k as u64), (0, 0)],
@@ -935,11 +935,11 @@ impl Lfm {
         let p = |name: &str| format!("blocks.{l}.{name}");
 
         let (mk, mt) = linear_kernel(n as usize, hq as usize);
-        s.push(self.gpu.step(mk, &[xn1, self.w(&p("attn.wq.weight")), &ab.q_pre], &[n, d, hq], mt));
+        s.push(self.gpu.dispatch(mk, &[xn1, self.w(&p("attn.wq.weight")), &ab.q_pre], &[n, d, hq], mt));
         let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-        s.push(self.gpu.step(mk, &[xn1, self.w(&p("attn.wk.weight")), &ab.k_pre], &[n, d, hkv], mt));
+        s.push(self.gpu.dispatch(mk, &[xn1, self.w(&p("attn.wk.weight")), &ab.k_pre], &[n, d, hkv], mt));
         let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-        s.push(self.gpu.step(mk, &[xn1, self.w(&p("attn.wv.weight")), &ab.v], &[n, d, hkv], mt));
+        s.push(self.gpu.dispatch(mk, &[xn1, self.w(&p("attn.wv.weight")), &ab.v], &[n, d, hkv], mt));
         // Per-head QK-RMSNorm (head_dim rows), then RoPE in place.
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.q_pre, self.w(&p("attn.q_norm.weight")), &ab.q, hd, n * nh, eps));
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.k_pre, self.w(&p("attn.k_norm.weight")), &ab.k, hd, n * nkv, eps));
@@ -979,12 +979,12 @@ impl Lfm {
         let p = |name: &str| format!("blocks.{l}.{name}");
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &cb.xmid, self.w(&p("ln2.weight")), &cb.xn2, d, n, eps));
         let (mk, mt) = linear_kernel(n as usize, ff as usize);
-        s.push(self.gpu.step(mk, &[&cb.xn2, self.w(&p("mlp.gate.weight")), &cb.gate_pre], &[n, d, ff], mt));
+        s.push(self.gpu.dispatch(mk, &[&cb.xn2, self.w(&p("mlp.gate.weight")), &cb.gate_pre], &[n, d, ff], mt));
         let (mk, mt) = linear_kernel(n as usize, ff as usize);
-        s.push(self.gpu.step(mk, &[&cb.xn2, self.w(&p("mlp.up.weight")), &cb.up], &[n, d, ff], mt));
+        s.push(self.gpu.dispatch(mk, &[&cb.xn2, self.w(&p("mlp.up.weight")), &cb.up], &[n, d, ff], mt));
         s.push(self.gpu.step(SILU_MUL, &[&cb.gate_pre, &cb.up, &cb.h], &[n * ff], n * ff));
         let (mk, mt) = linear_kernel(n as usize, d as usize);
-        s.push(self.gpu.step(mk, &[&cb.h, self.w(&p("mlp.down.weight")), mlp_out], &[n, ff, d], mt));
+        s.push(self.gpu.dispatch(mk, &[&cb.h, self.w(&p("mlp.down.weight")), mlp_out], &[n, ff, d], mt));
         s.push(self.gpu.step(ADD2, &[&cb.xmid, mlp_out, out], &[n * d], n * d));
     }
 
@@ -1105,13 +1105,13 @@ impl Lfm {
                         }
                     }
                     let (mk, mt) = linear_kernel(n as usize, d as usize);
-                    s.push(self.gpu.step(mk, &[&ab.ctx, self.w(&p("attn.wo.weight")), mixer_out], &[n, hq, d], mt));
+                    s.push(self.gpu.dispatch(mk, &[&ab.ctx, self.w(&p("attn.wo.weight")), mixer_out], &[n, hq, d], mt));
                 }
                 LayerType::Conv => {
                     let cb = conv.expect("conv bufs");
                     self.emit_conv_mixer(&mut s, l, &common.xn1, cb, b_use);
                     let (mk, mt) = linear_kernel(n as usize, d as usize);
-                    s.push(self.gpu.step(mk, &[&cb.gated, self.w(&p("conv.out_proj.weight")), mixer_out], &[n, d, d], mt));
+                    s.push(self.gpu.dispatch(mk, &[&cb.gated, self.w(&p("conv.out_proj.weight")), mixer_out], &[n, d, d], mt));
                 }
             }
             s.push(self.gpu.step(ADD2, &[res_of(l), mixer_out, &common.xmid], &[n * d], n * d));
@@ -1146,7 +1146,7 @@ impl Lfm {
                 let head = c.head_weight();
                 if tiles.len() == 1 {
                     let (mk, mt) = linear_kernel(n as usize, v as usize);
-                    s.push(self.gpu.step(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
+                    s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
                 } else {
                     for &(v0, cnt) in &tiles {
                         s.push(self.gpu.step_sliced(
@@ -1187,9 +1187,9 @@ impl Lfm {
     #[allow(clippy::too_many_arguments)]
     fn lin_bwd(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         let (bk, bt) = dw_kernel(nout, k);
-        s.push(self.gpu.step(bk, &[d_out, x, self.ps.g(wname)], &[m, k, nout], bt));
+        s.push(self.gpu.dispatch(bk, &[d_out, x, self.ps.g(wname)], &[m, k, nout], bt));
         let (bk, bt) = dx_kernel(m, k);
-        s.push(self.gpu.step(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
+        s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
     }
 
     /// Backward for a row-sliced linear (the conv mixer's in_proj thirds):
@@ -1198,9 +1198,9 @@ impl Lfm {
     fn sliced_lin_bwd(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, r0: u32, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         let sl = (r0 as u64 * k as u64, nout as u64 * k as u64);
         let (bk, bt) = dw_kernel(nout, k);
-        s.push(self.gpu.step_sliced(bk, &[d_out, x, self.ps.g(wname)], &[(0, 0), (0, 0), sl], &[m, k, nout], bt));
+        s.push(self.gpu.dispatch_sliced(bk, &[d_out, x, self.ps.g(wname)], &[(0, 0), (0, 0), sl], &[m, k, nout], bt));
         let (bk, bt) = dx_kernel(m, k);
-        s.push(self.gpu.step_sliced(bk, &[d_out, self.w(wname), dx], &[(0, 0), sl, (0, 0)], &[m, k, nout, acc], bt));
+        s.push(self.gpu.dispatch_sliced(bk, &[d_out, self.w(wname), dx], &[(0, 0), sl, (0, 0)], &[m, k, nout, acc], bt));
     }
 
     /// RMSNorm backward via the shared eps-aware builder.
@@ -1242,9 +1242,9 @@ impl Lfm {
             s.push(self.gpu.step(CE_STATS, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g], &[cap, v, IGNORE], cap));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&hg.logits_g, &hg.sup_targets, &hg.ce_stats_g, &hg.d_logits_g], cap * v));
             let (bk, bt) = dw_kernel(v, d);
-            s.push(self.gpu.step(bk, &[&hg.d_logits_g, &hg.probe_h, self.ps.g(head)], &[cap, d, v], bt));
+            s.push(self.gpu.dispatch(bk, &[&hg.d_logits_g, &hg.probe_h, self.ps.g(head)], &[cap, d, v], bt));
             let (bk, bt) = dx_kernel(cap, d);
-            s.push(self.gpu.step(bk, &[&hg.d_logits_g, self.w(head), &hg.d_probe_h], &[cap, d, v, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&hg.d_logits_g, self.w(head), &hg.d_probe_h], &[cap, d, v, 0], bt));
             s.push(self.gpu.step(ROW_SCATTER, &[&hg.sup_idx_scatter, &hg.d_probe_h, &bw.d_xn], &[cap, d, n], cap * d));
         } else {
             // Two-pass CE gradient (per-row stats then per-element grad): the
@@ -1252,9 +1252,9 @@ impl Lfm {
             s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &bw.ce_stats], &[n, v, IGNORE], n));
             s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &bw.ce_stats, &bw.d_logits], n * v));
             let (bk, bt) = dw_kernel(v, d);
-            s.push(self.gpu.step(bk, &[&bw.d_logits, &self.xn_final, self.ps.g(head)], &[n, d, v], bt));
+            s.push(self.gpu.dispatch(bk, &[&bw.d_logits, &self.xn_final, self.ps.g(head)], &[n, d, v], bt));
             let (bk, bt) = dx_kernel(n, d);
-            s.push(self.gpu.step(bk, &[&bw.d_logits, self.w(head), &bw.d_xn], &[n, d, v, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&bw.d_logits, self.w(head), &bw.d_xn], &[n, d, v, 0], bt));
         }
         self.trunk_backward_steps(&mut s);
         s

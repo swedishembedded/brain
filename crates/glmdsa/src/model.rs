@@ -717,7 +717,7 @@ impl Glm {
         // m=8 and its lead grows all the way to m=127, bit-identical throughout. `pick_gemm` owns the rule so this cannot drift again.
         let naive = std::env::var("BRAIN_GLMDSA_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
         let (mk, mt) = model::block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, naive);
-        s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
+        s.push(self.gpu.dispatch(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
 
     /// Backward for `y = x·Wᵀ`: weight grad (if trainable) + input grad into `dx`
@@ -751,7 +751,7 @@ impl Glm {
     /// agreeing to ~3e-6) - gated by `rmsnorm_variant_agreement`.
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
         let (kind, threads) = model::block::rms_variant(&self.gpu, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
-        s.push(self.gpu.step(kind, &[x, self.w(wname), out], &[dim, rows, f(model::block::RMSNORM_EPS)], threads));
+        s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(model::block::RMSNORM_EPS)], threads));
     }
 
     /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then

@@ -97,8 +97,8 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
         let swb = g.storage_init("sw", &sw);
         let out = g.storage((m * n) as u64);
 
-        let st_gemv = vec![g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
-        let st_reg = vec![g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
+        let st_gemv = vec![g.dispatch(k_gemv, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
+        let st_reg = vec![g.dispatch(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
         let t_gemv = gpu_core::profile::best_of(&g, &st_gemv, REPS);
         let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
         let bytes = u64::from(n) * u64::from(k) / 8 + u64::from(n) * u64::from(k) / 32 * 4; // packed weight + scales, dominant term
@@ -157,8 +157,8 @@ fn gemv_vs_gemv_reg_at_qwen35_decode_shapes() {
         let swb = g.storage_init("sw", &sw);
         let out = g.storage((m * n) as u64);
 
-        let st_gemv = vec![g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
-        let st_reg = vec![g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], n * 64)];
+        let st_gemv = vec![g.dispatch(k_gemv, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
+        let st_reg = vec![g.dispatch(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
         let t_gemv = gpu_core::profile::best_of(&g, &st_gemv, REPS);
         let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
         let bytes = u64::from(n) * u64::from(k) / 8 + u64::from(n) * u64::from(k) / 32 * 4;
@@ -217,10 +217,10 @@ fn dyn_vs_dyn_reg_across_prefill_rows() {
         g.write(&wqb, &wq);
         let swb = g.storage_init("sw", &sw);
         let out = g.storage((m * n) as u64);
-        let tile_threads = m.div_ceil(128) * n.div_ceil(128) * 256;
+        let tile_wgs = m.div_ceil(128) * n.div_ceil(128);
 
         let st_dyn = vec![g.step(k_dyn, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], m * n)];
-        let st_reg = vec![g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], tile_threads)];
+        let st_reg = vec![g.dispatch(k_reg, &[&xq, &wqb, &sx, &swb, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(tile_wgs))];
         let t_dyn = gpu_core::profile::best_of(&g, &st_dyn, REPS);
         let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
         let int_ops = 8u64 * u64::from(m) * u64::from(k) * u64::from(n);

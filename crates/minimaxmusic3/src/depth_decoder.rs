@@ -674,7 +674,7 @@ fn kernel_ids() -> KernelIds {
 /// contain as the epsilon.
 fn rms_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, rows: u32, d: u32) -> Step {
     let (kind, threads) = block::rms_variant(gpu, K_RMSNORM_EPS, Some(K_RMSNORM_ROWS), rows, d);
-    gpu.step(kind, &[x, w, out], &[d, rows, f(RMS_EPS)], threads)
+    gpu.dispatch(kind, &[x, w, out], &[d, rows, f(RMS_EPS)], threads)
 }
 
 /// `out = x @ Wᵀ` for `x: [m,k]`, `w: [n,k]` - through the shared
@@ -689,7 +689,7 @@ fn linear_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer
         GemmVariants::Reference(K_MATMUL)
     };
     let (kind, threads) = block::gemm_variant(variant, m, n);
-    gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads)
 }
 
 /// One layer's weights on the device, plus that layer's own KV pool.

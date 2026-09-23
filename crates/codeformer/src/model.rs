@@ -516,7 +516,7 @@ fn matmul(
     let y = b.act((m * n) as u64);
     let (kind, threads) =
         block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false);
-    let step = b.gpu().step(kind, &[x, wgt, &y], &[m, k, n], threads);
+    let step = b.gpu().dispatch(kind, &[x, wgt, &y], &[m, k, n], threads);
     b.push_step(step);
     y
 }

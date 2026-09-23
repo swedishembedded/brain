@@ -83,10 +83,10 @@ fn time(
     kind: usize,
     bufs: &[&gpu_core::DeviceBuffer],
     p: &[u32],
-    threads: u32,
+    grid: gpu_core::Dispatch,
     reps: usize,
 ) -> f64 {
-    let s = gpu.step(kind, bufs, p, threads);
+    let s = gpu.dispatch(kind, bufs, p, grid);
     gpu.submit(&[], &[s]);
     gpu.poll_wait();
     let mut best = f64::INFINITY;
@@ -94,7 +94,7 @@ fn time(
         let t = std::time::Instant::now();
         // 4 back-to-back dispatches so launch overhead is amortised; the
         // reported time is per dispatch.
-        let steps: Vec<_> = (0..4).map(|_| gpu.step(kind, bufs, p, threads)).collect();
+        let steps: Vec<_> = (0..4).map(|_| gpu.dispatch(kind, bufs, p, grid)).collect();
         gpu.submit(&[], &steps);
         gpu.poll_wait();
         best = best.min(t.elapsed().as_secs_f64() / 4.0);
@@ -118,8 +118,8 @@ fn bench_max_abs_row() {
         let a = gpu.storage((m * 4) as u64);
         let b = gpu.storage((m * 4) as u64);
 
-        let t_ref = time(&gpu, 0, &[&x, &a], &[m, k], m, 8);
-        let t_coop = time(&gpu, 1, &[&x, &b], &[m, k], m * 64, 8);
+        let t_ref = time(&gpu, 0, &[&x, &a], &[m, k], gpu_core::Dispatch::Threads(m), 8);
+        let t_coop = time(&gpu, 1, &[&x, &b], &[m, k], gpu_core::Dispatch::Workgroups(m), 8);
 
         // `max` is exact and associative, so splitting a row across 64 lanes
         // cannot change the answer. BIT-identical is the contract, not "close":
@@ -164,7 +164,7 @@ fn max_abs_rows_matches_reference_exactly() {
         let a = gpu.storage((m * 4) as u64);
         let b = gpu.storage((m * 4) as u64);
         let s0 = gpu.step(0, &[&xb, &a], &[m, k], m);
-        let s1 = gpu.step(1, &[&xb, &b], &[m, k], m * 64);
+        let s1 = gpu.dispatch(1, &[&xb, &b], &[m, k], gpu_core::Dispatch::Workgroups(m));
         gpu.submit(&[], &[s0, s1]);
         assert_eq!(gpu.read(&a, m as usize), gpu.read(&b, m as usize), "{m}x{k}");
     }

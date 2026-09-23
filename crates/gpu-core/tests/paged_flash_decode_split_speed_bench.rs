@@ -170,18 +170,18 @@ fn triad_steps(g: &Gpu, bufs: &[gpu_core::DeviceBuffer], fx: &Fixture) -> Vec<gp
 fn flash_steps(g: &Gpu, bufs: &[gpu_core::DeviceBuffer], fx: &Fixture) -> Vec<gpu_core::Step> {
     let (qb, poolk, poolv, btb, sl, ctx_flash) = (&bufs[0], &bufs[1], &bufs[2], &bufs[3], &bufs[4], &bufs[8]);
     let p = &fx.flash_params;
-    let threads = p[0] * p[1] * 64; // batch * n_heads * 64
-    vec![g.step(3, &[qb, poolk, poolv, btb, sl, ctx_flash], p, threads)]
+    // One workgroup per (batch, head).
+    vec![g.dispatch(3, &[qb, poolk, poolv, btb, sl, ctx_flash], p, gpu_core::Dispatch::Workgroups(p[0] * p[1]))]
 }
 fn split_steps(g: &Gpu, bufs: &[gpu_core::DeviceBuffer], fx: &Fixture) -> Vec<gpu_core::Step> {
     let (qb, poolk, poolv, btb, sl) = (&bufs[0], &bufs[1], &bufs[2], &bufs[3], &bufs[4]);
     let (part_m, part_l, part_o, ctx_split) = (&bufs[10], &bufs[11], &bufs[12], &bufs[9]);
     let sp = &fx.split_params;
-    let split_threads = sp[0] * sp[1] * fx.n_splits * 64; // batch * n_heads * n_splits * 64
+    let split_wgs = sp[0] * sp[1] * fx.n_splits; // one workgroup per (batch, head, split)
     let cp = &fx.combine_params;
     let combine_threads = cp[0] * cp[1] * 128; // batch * n_heads * 128
     vec![
-        g.step(5, &[qb, poolk, poolv, btb, sl, part_m, part_l, part_o], sp, split_threads),
+        g.dispatch(5, &[qb, poolk, poolv, btb, sl, part_m, part_l, part_o], sp, gpu_core::Dispatch::Workgroups(split_wgs)),
         g.step(6, &[part_m, part_l, part_o, ctx_split], cp, combine_threads),
     ]
 }

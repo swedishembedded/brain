@@ -325,7 +325,7 @@ fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Proj, out: &Device
             let sx = gpu.storage(m as u64);
             s.push(gpu.step(K_MAX_ABS_ROW, &[x, &sx], &[m, k], m));
             s.push(gpu.step(K_QUANT_PACK, &[x, &sx, &xq], &[m, k], m * k / 4));
-            s.push(gpu.step(K_MATMUL_I8_DYN, &[&xq, wb, &sx, sw, out], &[m, k / 4, n], m.div_ceil(128) * n.div_ceil(128) * 256));
+            s.push(gpu.dispatch(K_MATMUL_I8_DYN, &[&xq, wb, &sx, sw, out], &[m, k / 4, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))));
         }
     }
 }

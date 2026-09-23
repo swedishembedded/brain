@@ -46,14 +46,14 @@ fn rel(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Min-of-`reps` wall clock for one dispatch (warm-up submitted first).
-fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], threads: u32, reps: usize) -> f64 {
-    let s = gpu.step(kind, bufs, p, threads);
+fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], grid: gpu_core::Dispatch, reps: usize) -> f64 {
+    let s = gpu.dispatch(kind, bufs, p, grid);
     gpu.submit(&[], &[s]);
     gpu.poll_wait();
     let mut best = f64::INFINITY;
     for _ in 0..reps {
         let t = std::time::Instant::now();
-        let steps: Vec<_> = (0..4).map(|_| gpu.step(kind, bufs, p, threads)).collect();
+        let steps: Vec<_> = (0..4).map(|_| gpu.dispatch(kind, bufs, p, grid)).collect();
         gpu.submit(&[], &steps);
         gpu.poll_wait();
         best = best.min(t.elapsed().as_secs_f64() / 4.0);
@@ -110,8 +110,8 @@ fn bench_attn_bwd_dscores_causal_and_bidir() {
                 )
             };
 
-            let ta = time(&g, a, &bufs_a, &p, rows, reps);
-            let tb = time(&g, b, &bufs_b, &p, rows * 64, reps);
+            let ta = time(&g, a, &bufs_a, &p, gpu_core::Dispatch::Threads(rows), reps);
+            let tb = time(&g, b, &bufs_b, &p, gpu_core::Dispatch::Workgroups(rows), reps);
             let n = (bsz * n_heads * t * t) as usize;
             let diff = rel(&g.read(&da, n), &g.read(&db, n));
             println!(
@@ -148,8 +148,8 @@ fn bench_attn_bwd_dscores_cross() {
         let db = g.storage((bsz * n_heads * t_dec * t_enc) as u64);
         let p = [bsz, n_heads, t_dec, t_enc, hd, kv_stride, v_off, d_model];
 
-        let ta = time(&g, 0, &[&d_out, &kv, &probs, &da], &p, rows, reps);
-        let tb = time(&g, 1, &[&d_out, &kv, &probs, &db], &p, rows * 64, reps);
+        let ta = time(&g, 0, &[&d_out, &kv, &probs, &da], &p, gpu_core::Dispatch::Threads(rows), reps);
+        let tb = time(&g, 1, &[&d_out, &kv, &probs, &db], &p, gpu_core::Dispatch::Workgroups(rows), reps);
         let n = (bsz * n_heads * t_dec * t_enc) as usize;
         let diff = rel(&g.read(&da, n), &g.read(&db, n));
         println!(

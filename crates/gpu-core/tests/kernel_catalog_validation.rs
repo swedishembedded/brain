@@ -197,14 +197,15 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
     let b = fill(n * k, 2);
     let want_f32 = matmul_abt(&a, &b, m, k, n);
 
-    for (name, threads) in
-        [("matmul", (m * n) as u32), ("matmul_reg2", (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)]
-    {
+    for (name, grid) in [
+        ("matmul", gpu_core::Dispatch::Threads((m * n) as u32)),
+        ("matmul_reg2", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32)),
+    ] {
         let Some(kind) = gpu.kernel_index(name) else { panic!("{name}: not registered") };
         let ab = gpu.storage_init("a", &a);
         let bb = gpu.storage_init("b", &b);
         let ob = gpu.storage((m * n) as u64);
-        let s = gpu.step(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], threads);
+        let s = gpu.dispatch(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], grid);
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, m * n);
         let (dabs, drel) = diff(&want_f32, &got);
@@ -217,8 +218,8 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let ab = gpu.storage_init("a", &a);
         let bb = gpu.storage_init("b", &b);
         let ob = gpu.storage((m * n) as u64);
-        let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
-        let s = gpu.step(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], threads);
+        let tiles = (m.div_ceil(128) * n.div_ceil(128)) as u32;
+        let s = gpu.dispatch(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(tiles));
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, m * n);
         let (dabs, drel) = diff(&want_f32, &got);
@@ -236,8 +237,8 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let ab = gpu.storage_init("a", &a);
         let bb = gpu.storage_init("b", &b);
         let ob = gpu.storage((m * n) as u64);
-        let threads = (m.div_ceil(64) * n.div_ceil(64) * 256) as u32;
-        let s = gpu.step(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], threads);
+        let tiles = (m.div_ceil(64) * n.div_ceil(64)) as u32;
+        let s = gpu.dispatch(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(tiles));
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, m * n);
         let (dabs, drel) = diff(&want_f32, &got);
@@ -256,9 +257,14 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let sxb = gpu.storage_init("sx", &sx);
         let swb = gpu.storage_init("sw", &sw);
         let ob = gpu.storage((m * n) as u64);
-        let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
+        let tiles = (m.div_ceil(128) * n.div_ceil(128)) as u32;
         if let Some(kind) = gpu.kernel_index("matmul_i8_dyn") {
-            let s = gpu.step(kind, &[&xb, &wb, &sxb, &swb, &ob], &[m as u32, (k / 4) as u32, n as u32], threads);
+            let s = gpu.dispatch(
+                kind,
+                &[&xb, &wb, &sxb, &swb, &ob],
+                &[m as u32, (k / 4) as u32, n as u32],
+                gpu_core::Dispatch::Workgroups(tiles),
+            );
             gpu.submit(&[], &[s]);
             let got = gpu.read(&ob, m * n);
             let (dabs, drel) = diff(&want, &got);
@@ -296,8 +302,7 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let ab = gpu.storage_init("a", &da);
         let bb = gpu.storage_init("b", &db8);
         let ob = gpu.storage((dm * dn) as u64);
-        let threads = (dn * 64) as u32;
-        let s = gpu.step(kind, &[&ab, &bb, &ob], &[dm as u32, dk as u32, dn as u32], threads);
+        let s = gpu.dispatch(kind, &[&ab, &bb, &ob], &[dm as u32, dk as u32, dn as u32], gpu_core::Dispatch::Workgroups(dn as u32));
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, dm * dn);
         let (dabs, drel) = diff(&want_gemv, &got);
@@ -315,8 +320,12 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let swb = gpu.storage_init("sw", &sw);
         let ob = gpu.storage((dm * dn) as u64);
         let kind = gpu.kernel_index("matmul_i8_gemv").expect("matmul_i8_gemv registered");
-        let threads = (dn * 64) as u32;
-        let s = gpu.step(kind, &[&xb, &wb, &sxb, &swb, &ob], &[dm as u32, (dk / 4) as u32, dn as u32], threads);
+        let s = gpu.dispatch(
+            kind,
+            &[&xb, &wb, &sxb, &swb, &ob],
+            &[dm as u32, (dk / 4) as u32, dn as u32],
+            gpu_core::Dispatch::Workgroups(dn as u32),
+        );
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, dm * dn);
         let (dabs, drel) = diff(&want, &got);
@@ -334,8 +343,12 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
         let swb = gpu.storage_init("sw", &sw);
         let ob = gpu.storage((dm * dn) as u64);
         let kind = gpu.kernel_index("matmul_q4_gemv").expect("matmul_q4_gemv registered");
-        let threads = (dn * 64) as u32;
-        let s = gpu.step(kind, &[&xb, &wb, &sxb, &swb, &ob], &[dm as u32, dk as u32, dn as u32], threads);
+        let s = gpu.dispatch(
+            kind,
+            &[&xb, &wb, &sxb, &swb, &ob],
+            &[dm as u32, dk as u32, dn as u32],
+            gpu_core::Dispatch::Workgroups(dn as u32),
+        );
         gpu.submit(&[], &[s]);
         let got = gpu.read(&ob, dm * dn);
         let (dabs, drel) = diff(&want, &got);

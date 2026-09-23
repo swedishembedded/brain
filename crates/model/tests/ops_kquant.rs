@@ -196,10 +196,10 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     let params = [m as u32, k as u32, n as u32];
     let bufs: [&DeviceBuffer; 7] = [scr.xq_for(k as u32), wq2, &scr.sx, wsm2, wd2, &xgs, &out_want];
     if m <= 32 {
-        want_steps.push(g.step(idx(g, gemv_kname), &bufs, &params, n as u32 * 64));
+        want_steps.push(g.dispatch(idx(g, gemv_kname), &bufs, &params, gpu_core::Dispatch::Workgroups(n as u32)));
     } else {
-        let threads = (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256;
-        want_steps.push(g.step(idx(g, dyn_kname), &bufs, &params, threads));
+        let tiles = (m as u32).div_ceil(128) * (n as u32).div_ceil(128);
+        want_steps.push(g.dispatch(idx(g, dyn_kname), &bufs, &params, gpu_core::Dispatch::Workgroups(tiles)));
     }
     g.submit(&[], &want_steps);
     let want = g.read(&out_want, m * n);

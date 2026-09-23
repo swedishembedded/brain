@@ -359,7 +359,7 @@ impl ClipText {
         self.ps.w(name)
     }
 
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, T_MATMUL, T_MATMUL_REG3, false)
     }
 
@@ -368,7 +368,7 @@ impl ClipText {
     /// `matmul_{dx,dw}_reg` share `matmul_reg3`'s 128x128 / 256-thread shape and
     /// are bit-compatible with the naive kernels). `matmul_dw` writes `[n,k]`
     /// and `matmul_dx` writes `[m,k]`, so each passes its own output dims.
-    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
+    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(rows as usize, cols as usize, naive, reg, false)
     }
 
@@ -414,7 +414,7 @@ impl ClipText {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, 3 * h);
-            s.push(g.step(mk, &[&lb.ln1, self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
+            s.push(g.dispatch(mk, &[&lb.ln1, self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
             // `bias_add` Params: [m, n]; bufs [out(rw), bias].
             s.push(g.step(T_BIAS_ADD, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
 
@@ -427,7 +427,7 @@ impl ClipText {
             s.push(g.step(T_APPLY, &[&lb.probs, &lb.qkv, &lb.ctx], &[b, c.heads, t, hd, 3 * h, 2 * h, h], b * c.heads * t * hd));
 
             let (mk, mt) = self.gemm(n, h);
-            s.push(g.step(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
+            s.push(g.dispatch(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
             s.push(g.step(T_BIAS_ADD, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
             s.push(g.step(T_ADD2, &[&self.x[l], &lb.attn_out, &lb.res], &[n * h], n * h));
 
@@ -443,11 +443,11 @@ impl ClipText {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, inter);
-            s.push(g.step(mk, &[&lb.ln2, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, inter], mt));
+            s.push(g.dispatch(mk, &[&lb.ln2, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, inter], mt));
             s.push(g.step(T_BIAS_ADD, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, inter], n * inter));
             s.push(g.step(act, &[&lb.h, &lb.h_act], &[n * inter], n * inter));
             let (mk, mt) = self.gemm(n, h);
-            s.push(g.step(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, inter, h], mt));
+            s.push(g.dispatch(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, inter, h], mt));
             s.push(g.step(T_BIAS_ADD, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
             s.push(g.step(T_ADD2, &[&lb.res, &lb.mlp_out, &self.x[l + 1]], &[n * h], n * h));
         }
@@ -469,7 +469,7 @@ impl ClipText {
         if let Some(te) = &self.text_embeds {
             let p = c.projection.expect("text_embeds without projection dim");
             let (mk, mt) = self.gemm(b, p);
-            s.push(g.step(mk, &[&self.pooled, self.w("text_projection.weight"), te], &[b, h, p], mt));
+            s.push(g.dispatch(mk, &[&self.pooled, self.w("text_projection.weight"), te], &[b, h, p], mt));
         }
         s
     }
@@ -519,10 +519,10 @@ impl ClipText {
             // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] - ACCUMULATES.
             // Forward was `text_embeds[b, p] = pooled[b, h] @ Wproj[p, h]^T`.
             let (dw, dwt) = self.bwd_gemm(te_dim, h, T_MATMUL_DW, T_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.seed_out, &self.pooled, gr("text_projection.weight")], &[b, h, te_dim], dwt));
+            s.push(g.dispatch(dw, &[&bw.seed_out, &self.pooled, gr("text_projection.weight")], &[b, h, te_dim], dwt));
             // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
             let (dx, dxt) = self.bwd_gemm(b, h, T_MATMUL_DX, T_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.seed_out, self.w("text_projection.weight"), &bw.d_pooled], &[b, h, te_dim, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.seed_out, self.w("text_projection.weight"), &bw.d_pooled], &[b, h, te_dim, 0], dxt));
         } else {
             // No projection: the tower output IS `pooled`.
             // `region_copy` Params: [rows, width, row_stride, off] - whole buffer.
@@ -556,17 +556,17 @@ impl ClipText {
             // `bias_grad` Params: [m, n]; bufs [dy, dbias] - one thread per feature.
             s.push(g.step(T_BIAS_GRAD, &[d_out, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
             let (dw, dwt) = self.bwd_gemm(h, inter, T_MATMUL_DW, T_MATMUL_DW_REG);
-            s.push(g.step(dw, &[d_out, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, inter, h], dwt));
+            s.push(g.dispatch(dw, &[d_out, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, inter, h], dwt));
             let (dx, dxt) = self.bwd_gemm(n, inter, T_MATMUL_DX, T_MATMUL_DX_REG);
-            s.push(g.step(dx, &[d_out, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, inter, h, 0], dxt));
+            s.push(g.dispatch(dx, &[d_out, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, inter, h, 0], dxt));
             // The activation backward reads the PRE-activation `h` (post-bias),
             // never `h_act`. Params: a single `total`; bufs [x, dout, dx].
             s.push(g.step(act_bwd, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * inter], n * inter));
             s.push(g.step(T_BIAS_GRAD, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, inter], inter));
             let (dw, dwt) = self.bwd_gemm(inter, h, T_MATMUL_DW, T_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_h, &lb.ln2, gr(&format!("{p}.fc1.weight"))], &[n, h, inter], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_h, &lb.ln2, gr(&format!("{p}.fc1.weight"))], &[n, h, inter], dwt));
             let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_branch], &[n, h, inter, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_branch], &[n, h, inter, 0], dxt));
             s.push(block::ln_stats_fwd(g, &ln, &lb.res, &bw.mean, &bw.inv, h, n, c.eps));
             s.push(g.step(T_LN_DGAMMA, &[&bw.d_branch, &lb.res, &bw.mean, &bw.inv, gr(&format!("{p}.ln2.weight"))], &[h, n], h));
             s.push(g.step(T_LN_DBETA, &[&bw.d_branch, gr(&format!("{p}.ln2.bias"))], &[h, n], h));
@@ -577,9 +577,9 @@ impl ClipText {
             // ---- attention branch ----
             s.push(g.step(T_BIAS_GRAD, &[&bw.d_res, gr(&format!("{p}.proj.bias"))], &[n, h], h));
             let (dw, dwt) = self.bwd_gemm(h, h, T_MATMUL_DW, T_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_res, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_res, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
             let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_res, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_res, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
             // Causal attention backward. The dscores/dv pair carries the v-region
             // params `[.., v_off, d_model]`, the dq/dk pair the q/k-region params
             // `[.., q_off, k_off]` - the same split `gpt2::model` dispatches. All
@@ -593,9 +593,9 @@ impl ClipText {
             s.push(g.step(T_ATTN_DK, &[&bw.d_scores, &lb.qkv, &bw.d_qkv], &pqk, b * c.heads * t * hd));
             s.push(g.step(T_BIAS_GRAD, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
             let (dw, dwt) = self.bwd_gemm(3 * h, h, T_MATMUL_DW, T_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_qkv, &lb.ln1, gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_qkv, &lb.ln1, gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
             let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, h, 3 * h, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, h, 3 * h, 0], dxt));
             s.push(block::ln_stats_fwd(g, &ln, &self.x[l], &bw.mean, &bw.inv, h, n, c.eps));
             s.push(g.step(T_LN_DGAMMA, &[&bw.d_branch, &self.x[l], &bw.mean, &bw.inv, gr(&format!("{p}.ln1.weight"))], &[h, n], h));
             s.push(g.step(T_LN_DBETA, &[&bw.d_branch, gr(&format!("{p}.ln1.bias"))], &[h, n], h));
@@ -926,7 +926,7 @@ impl EvaVision {
     fn k(&self, v: usize) -> usize {
         self.kernels[v]
     }
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, self.k(V_MATMUL), self.k(V_MATMUL_REG3), false)
     }
 
@@ -1026,7 +1026,7 @@ impl EvaVision {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, 3 * w);
-            s.push(g.step(mk, &[&bb.norm1, self.w(&format!("{p}.qkv.weight")), &bb.qkv], &[n, w, 3 * w], mt));
+            s.push(g.dispatch(mk, &[&bb.norm1, self.w(&format!("{p}.qkv.weight")), &bb.qkv], &[n, w, 3 * w], mt));
             s.push(g.step(self.k(V_BIAS_ADD), &[&bb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * w], n * 3 * w));
 
             // 2D RoPE on q and k, EXCLUDING the cls token: bind the fused qkv at
@@ -1063,7 +1063,7 @@ impl EvaVision {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, w);
-            s.push(g.step(mk, &[&bb.inner_ln, self.w(&format!("{p}.proj.weight")), &bb.attn_proj], &[n, w, w], mt));
+            s.push(g.dispatch(mk, &[&bb.inner_ln, self.w(&format!("{p}.proj.weight")), &bb.attn_proj], &[n, w, w], mt));
             s.push(g.step(self.k(V_BIAS_ADD), &[&bb.attn_proj, self.w(&format!("{p}.proj.bias"))], &[n, w], n * w));
             s.push(g.step(self.k(V_ADD2), &[&self.x[l], &bb.attn_proj, &bb.res], &[n * w], n * w));
 
@@ -1080,10 +1080,10 @@ impl EvaVision {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, m);
-            s.push(g.step(mk, &[&bb.norm2, self.w(&format!("{p}.w1.weight")), &bb.w1], &[n, w, m], mt));
+            s.push(g.dispatch(mk, &[&bb.norm2, self.w(&format!("{p}.w1.weight")), &bb.w1], &[n, w, m], mt));
             s.push(g.step(self.k(V_BIAS_ADD), &[&bb.w1, self.w(&format!("{p}.w1.bias"))], &[n, m], n * m));
             let (mk, mt) = self.gemm(n, m);
-            s.push(g.step(mk, &[&bb.norm2, self.w(&format!("{p}.w2.weight")), &bb.w2], &[n, w, m], mt));
+            s.push(g.dispatch(mk, &[&bb.norm2, self.w(&format!("{p}.w2.weight")), &bb.w2], &[n, w, m], mt));
             s.push(g.step(self.k(V_BIAS_ADD), &[&bb.w2, self.w(&format!("{p}.w2.bias"))], &[n, m], n * m));
             // `silu_mul` Params: a SINGLE `total` (not [rows, cols]).
             s.push(g.step(self.k(V_SILU_MUL), &[&bb.w1, &bb.w2, &bb.swiglu], &[n * m], n * m));
@@ -1099,7 +1099,7 @@ impl EvaVision {
                 c.eps,
             ));
             let (mk, mt) = self.gemm(n, w);
-            s.push(g.step(mk, &[&bb.ffn_ln, self.w(&format!("{p}.w3.weight")), &bb.mlp_out], &[n, m, w], mt));
+            s.push(g.dispatch(mk, &[&bb.ffn_ln, self.w(&format!("{p}.w3.weight")), &bb.mlp_out], &[n, m, w], mt));
             s.push(g.step(self.k(V_BIAS_ADD), &[&bb.mlp_out, self.w(&format!("{p}.w3.bias"))], &[n, w], n * w));
             s.push(g.step(self.k(V_ADD2), &[&bb.res, &bb.mlp_out, &self.x[l + 1]], &[n * w], n * w));
         }
@@ -1119,7 +1119,7 @@ impl EvaVision {
         // `norm(x)[:, 0]`. Row `si*seq` is a multiple of 64 floats (w = 1024).
         for si in 0..b as u64 {
             let (mk, mt) = self.gemm(1, c.embed_dim);
-            s.push(g.step_sliced(
+            s.push(g.dispatch_sliced(
                 mk,
                 &[&self.norm_out, self.w("head.weight"), &self.head_out],
                 &[(si * seq as u64 * w as u64, 0), (0, 0), (si * c.embed_dim as u64, 0)],

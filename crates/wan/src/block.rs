@@ -484,7 +484,7 @@ impl Sel {
 /// `out = x·Wᵀ + b`, through the shared GEMM selection rule.
 fn linear(gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, x: &DeviceBuffer, w: &Linear, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
     let (kind, threads) = model::block::gemm_variant(sel.gemm, m, n);
-    s.push(gpu.step(kind, &[x, &w.w, out], &[m, k, n], threads));
+    s.push(gpu.dispatch(kind, &[x, &w.w, out], &[m, k, n], threads));
     s.push(gpu.step(K_BIAS_ADD, &[out, &w.b], &[m, n], m * n));
 }
 
@@ -497,7 +497,7 @@ fn linear(gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, x: &DeviceBuffer, w: &Linear,
 /// different scalar for every head and still produce a plausible-looking video.
 fn qk_norm(gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, rows: u32, dim: u32, eps: f32) {
     let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM_EPS, sel.rms_rows, rows, dim);
-    s.push(gpu.step(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
+    s.push(gpu.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
 }
 
 /// Cross-attention from `t` query rows into `te` text keys/values, query-chunked
@@ -535,9 +535,9 @@ fn push_cross(
         ));
         let (sk, st) = model::block::softmax_variant(gpu, K_XSOFTMAX, sel.softmax_rows, nh * qn, te);
         if sk == K_SOFTMAX_ROWS {
-            s.push(gpu.step(sk, &[&scr.xscores, &scr.xprobs], &[nh * qn, te], st));
+            s.push(gpu.dispatch(sk, &[&scr.xscores, &scr.xprobs], &[nh * qn, te], st));
         } else {
-            s.push(gpu.step(sk, &[&scr.xscores, &scr.xprobs], &[1, nh, qn, te], st));
+            s.push(gpu.dispatch(sk, &[&scr.xscores, &scr.xprobs], &[1, nh, qn, te], st));
         }
         s.push(gpu.step_sliced(
             K_XAPPLY,

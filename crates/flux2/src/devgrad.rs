@@ -642,7 +642,7 @@ impl BlockDev {
         let d = self.d;
         let off = self.sl(r0 * d, m * d);
         let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN, self.coop.then_some(K_LN_ROWS), m as u32, d as u32);
-        self.gpu.step_sliced(kind, &[x, self.g("ones"), self.g("zeros"), o], &[off, (0, 0), (0, 0), off], &[d as u32, m as u32, f(EPS)], threads)
+        self.gpu.dispatch_sliced(kind, &[x, self.g("ones"), self.g("zeros"), o], &[off, (0, 0), (0, 0), off], &[d as u32, m as u32, f(EPS)], threads)
     }
 
     /// Affine-free LayerNorm backward - same binding list and Params as the
@@ -650,7 +650,7 @@ impl BlockDev {
     fn ln_dx(&self, x: &DeviceBuffer, xoff: (u64, u64), dy: &DeviceBuffer, off: (u64, u64), dx: &DeviceBuffer, m: usize) -> Step {
         let d = self.d;
         let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN_DX, self.coop.then_some(K_LN_DX_ROWS), m as u32, d as u32);
-        self.gpu.step_sliced(kind, &[x, self.g("ones"), dy, dx], &[xoff, (0, 0), off, off], &[d as u32, m as u32, f(EPS)], threads)
+        self.gpu.dispatch_sliced(kind, &[x, self.g("ones"), dy, dx], &[xoff, (0, 0), off, off], &[d as u32, m as u32, f(EPS)], threads)
     }
 
     /// One head's softmax over its contiguous `[n, n]` score block. The
@@ -661,7 +661,7 @@ impl BlockDev {
     fn softmax_head(&self, off: (u64, u64), n: usize) -> Step {
         let bufs = [self.g("scores"), self.g("probs")];
         if self.coop {
-            self.gpu.step_sliced(K_SOFTMAX_ROWS, &bufs, &[off, off], &[n as u32, n as u32], (n * 64) as u32)
+            self.gpu.dispatch_sliced(K_SOFTMAX_ROWS, &bufs, &[off, off], &[n as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32))
         } else {
             self.gpu.step_sliced(K_SOFTMAX, &bufs, &[off, off], &[1, 1, n as u32], n as u32)
         }
@@ -687,7 +687,7 @@ impl BlockDev {
         let off = self.sl(r0 * d, m * d);
         let rows = (m * nh) as u32;
         let (kind, threads) = model::block::rms_variant(&self.gpu, K_RMS, Some(K_RMS_ROWS), rows, hd as u32);
-        self.gpu.step_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd as u32, rows, f(EPS)], threads)
+        self.gpu.dispatch_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd as u32, rows, f(EPS)], threads)
     }
 
     /// QK-RMSNorm backward over rows `r0..r0+m`: `gw += dnorm`, `dx` written.

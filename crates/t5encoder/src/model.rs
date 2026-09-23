@@ -285,7 +285,7 @@ impl T5Encoder {
         self.ps.w(name)
     }
 
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
     }
 
@@ -300,7 +300,7 @@ impl T5Encoder {
         let (kind, threads) =
             block::rms_variant(&self.gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, d);
         // `rmsnorm_eps` / `rmsnorm_rows` Params: [d_model, rows, eps(f32 bits)].
-        self.gpu.step(kind, &[x, w, out], &[d, rows, f(self.cfg.eps)], threads)
+        self.gpu.dispatch(kind, &[x, w, out], &[d, rows, f(self.cfg.eps)], threads)
     }
 
     fn build_steps(&self) -> Vec<Step> {
@@ -361,7 +361,7 @@ impl T5Encoder {
             s.push(self.rmsnorm(&self.x[l], self.w(&format!("{p}.attn_norm.weight")), &bb.attn_norm, n));
 
             let (mk, mt) = self.gemm(n, 3 * inner);
-            s.push(g.step(
+            s.push(g.dispatch(
                 mk,
                 &[&bb.attn_norm, self.w(&format!("{p}.qkv.weight")), &bb.qkv],
                 &[n, d, 3 * inner],
@@ -397,23 +397,23 @@ impl T5Encoder {
             ));
 
             let (mk, mt) = self.gemm(n, d);
-            s.push(g.step(mk, &[&bb.ctx, self.w(&format!("{p}.o.weight")), &bb.attn_out], &[n, inner, d], mt));
+            s.push(g.dispatch(mk, &[&bb.ctx, self.w(&format!("{p}.o.weight")), &bb.attn_out], &[n, inner, d], mt));
             // `add2` Params: a single `total`. The residual is UNSCALED — T5
             // does not rescale the stream at a block boundary.
             s.push(g.step(K_ADD2, &[&self.x[l], &bb.attn_out, &bb.res], &[n * d], n * d));
 
             s.push(self.rmsnorm(&bb.res, self.w(&format!("{p}.ff_norm.weight")), &bb.ff_norm, n));
             let (mk, mt) = self.gemm(n, ff);
-            s.push(g.step(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_0.weight")), &bb.wi0], &[n, d, ff], mt));
+            s.push(g.dispatch(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_0.weight")), &bb.wi0], &[n, d, ff], mt));
             let (mk, mt) = self.gemm(n, ff);
-            s.push(g.step(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_1.weight")), &bb.wi1], &[n, d, ff], mt));
+            s.push(g.dispatch(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_1.weight")), &bb.wi1], &[n, d, ff], mt));
             // `gelu` Params: a single `total` — the tanh form, == HF `gelu_new`.
             s.push(g.step(K_GELU, &[&bb.wi0, &bb.act], &[n * ff], n * ff));
             // `mul` Params: a single `n`. GEGLU is documented in its header as
             // exactly this composition (gelu into a fresh SSA buffer, then mul).
             s.push(g.step(K_MUL, &[&bb.act, &bb.wi1, &bb.gated], &[n * ff], n * ff));
             let (mk, mt) = self.gemm(n, d);
-            s.push(g.step(mk, &[&bb.gated, self.w(&format!("{p}.wo.weight")), &bb.ff_out], &[n, ff, d], mt));
+            s.push(g.dispatch(mk, &[&bb.gated, self.w(&format!("{p}.wo.weight")), &bb.ff_out], &[n, ff, d], mt));
             s.push(g.step(K_ADD2, &[&bb.res, &bb.ff_out, &self.x[l + 1]], &[n * d], n * d));
         }
 

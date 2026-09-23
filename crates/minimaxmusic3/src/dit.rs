@@ -191,7 +191,7 @@ pub(crate) fn linear_step(gpu: &Gpu, ids: GemmIds, x: &DeviceBuffer, w: &DeviceB
         block::GemmVariants::Reference(ids.reference)
     };
     let (kind, threads) = block::gemm_variant(variant, m, n);
-    gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads)
 }
 
 /// This module's own indices for [`linear_step`].

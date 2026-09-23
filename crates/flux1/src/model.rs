@@ -658,7 +658,7 @@ impl Flux1Model {
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
         let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN, Some(K_LN_ROWS), m, d);
-        self.gpu.step_sliced(
+        self.gpu.dispatch_sliced(
             kind,
             &[x, &self.scr.ln_gamma, &self.scr.ln_beta, o],
             &[off, (0, 0), (0, 0), off],
@@ -707,7 +707,7 @@ impl Flux1Model {
         let rows = m * nh;
         let (kind, threads) =
             model::block::rms_variant(&self.gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, hd);
-        self.gpu.step_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd, rows, f(self.cfg.norm_eps)], threads)
+        self.gpu.dispatch_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd, rows, f(self.cfg.norm_eps)], threads)
     }
 
     /// RoPE + pack + joint bidirectional attention over the whole `n`-row slab.

@@ -327,13 +327,13 @@ impl T5Trainer {
         self.ps.w(name)
     }
 
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
     }
 
     /// Backward-GEMM kernel + threads, picked on the OUTPUT dims — the same
     /// policy `block::pick_gemm` implements for the forward.
-    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
+    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(rows as usize, cols as usize, naive, reg, false)
     }
 
@@ -344,7 +344,7 @@ impl T5Trainer {
         let d = self.cfg.d_model;
         let (kind, threads) =
             block::rms_variant(&self.gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, d);
-        self.gpu.step(kind, &[x, w, out], &[d, rows, f(self.cfg.eps)], threads)
+        self.gpu.dispatch(kind, &[x, w, out], &[d, rows, f(self.cfg.eps)], threads)
     }
 
     fn build_steps(&self) -> Vec<Step> {
@@ -384,7 +384,7 @@ impl T5Trainer {
             s.push(self.rmsnorm(&self.x[l], self.w(&format!("{p}.attn_norm.weight")), &bb.attn_norm, n));
 
             let (mk, mt) = self.gemm(n, 3 * inner);
-            s.push(g.step(
+            s.push(g.dispatch(
                 mk,
                 &[&bb.attn_norm, self.w(&format!("{p}.qkv.weight")), &bb.qkv],
                 &[n, d, 3 * inner],
@@ -408,18 +408,18 @@ impl T5Trainer {
             ));
 
             let (mk, mt) = self.gemm(n, d);
-            s.push(g.step(mk, &[&bb.ctx, self.w(&format!("{p}.o.weight")), &bb.attn_out], &[n, inner, d], mt));
+            s.push(g.dispatch(mk, &[&bb.ctx, self.w(&format!("{p}.o.weight")), &bb.attn_out], &[n, inner, d], mt));
             s.push(g.step(K_ADD2, &[&self.x[l], &bb.attn_out, &bb.res], &[n * d], n * d));
 
             s.push(self.rmsnorm(&bb.res, self.w(&format!("{p}.ff_norm.weight")), &bb.ff_norm, n));
             let (mk, mt) = self.gemm(n, ff);
-            s.push(g.step(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_0.weight")), &bb.wi0], &[n, d, ff], mt));
+            s.push(g.dispatch(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_0.weight")), &bb.wi0], &[n, d, ff], mt));
             let (mk, mt) = self.gemm(n, ff);
-            s.push(g.step(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_1.weight")), &bb.wi1], &[n, d, ff], mt));
+            s.push(g.dispatch(mk, &[&bb.ff_norm, self.w(&format!("{p}.wi_1.weight")), &bb.wi1], &[n, d, ff], mt));
             s.push(g.step(K_GELU, &[&bb.wi0, &bb.act], &[n * ff], n * ff));
             s.push(g.step(K_MUL, &[&bb.act, &bb.wi1, &bb.gated], &[n * ff], n * ff));
             let (mk, mt) = self.gemm(n, d);
-            s.push(g.step(mk, &[&bb.gated, self.w(&format!("{p}.wo.weight")), &bb.ff_out], &[n, ff, d], mt));
+            s.push(g.dispatch(mk, &[&bb.gated, self.w(&format!("{p}.wo.weight")), &bb.ff_out], &[n, ff, d], mt));
             s.push(g.step(K_ADD2, &[&bb.res, &bb.ff_out, &self.x[l + 1]], &[n * d], n * d));
         }
 
@@ -477,10 +477,10 @@ impl T5Trainer {
             // ---- FFN branch: x_{l+1} = res + gated @ Wo^T ----
             // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] — ACCUMULATES.
             let (dw, dwt) = self.bwd_gemm(d, ff, K_MATMUL_DW, K_MATMUL_DW_REG);
-            s.push(g.step(dw, &[d_out, &bb.gated, gr(&format!("{p}.wo.weight"))], &[n, ff, d], dwt));
+            s.push(g.dispatch(dw, &[d_out, &bb.gated, gr(&format!("{p}.wo.weight"))], &[n, ff, d], dwt));
             // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
             let (dx, dxt) = self.bwd_gemm(n, ff, K_MATMUL_DX, K_MATMUL_DX_REG);
-            s.push(g.step(dx, &[d_out, self.w(&format!("{p}.wo.weight")), &bw.d_gated], &[n, ff, d, 0], dxt));
+            s.push(g.dispatch(dx, &[d_out, self.w(&format!("{p}.wo.weight")), &bw.d_gated], &[n, ff, d, 0], dxt));
 
             // gated = act * wi1  ->  d_act = d_gated*wi1, d_wi1 = d_gated*act.
             // `mul` Params: a single `n`; the mul backward IS `mul` (its header).
@@ -491,13 +491,13 @@ impl T5Trainer {
             s.push(g.step(K_GELU_BWD, &[&bb.wi0, &bw.d_act, &bw.d_wi0], &[n * ff], n * ff));
 
             let (dw, dwt) = self.bwd_gemm(ff, d, K_MATMUL_DW, K_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_wi0, &bb.ff_norm, gr(&format!("{p}.wi_0.weight"))], &[n, d, ff], dwt));
-            s.push(g.step(dw, &[&bw.d_wi1, &bb.ff_norm, gr(&format!("{p}.wi_1.weight"))], &[n, d, ff], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_wi0, &bb.ff_norm, gr(&format!("{p}.wi_0.weight"))], &[n, d, ff], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_wi1, &bb.ff_norm, gr(&format!("{p}.wi_1.weight"))], &[n, d, ff], dwt));
             // Both projections read the SAME `ff_norm`, so its grad is a sum:
             // wi_0 assigns (accumulate = 0), wi_1 adds (accumulate = 1).
             let (dx, dxt) = self.bwd_gemm(n, d, K_MATMUL_DX, K_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_wi0, self.w(&format!("{p}.wi_0.weight")), &bw.d_branch], &[n, d, ff, 0], dxt));
-            s.push(g.step(dx, &[&bw.d_wi1, self.w(&format!("{p}.wi_1.weight")), &bw.d_branch], &[n, d, ff, 1], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_wi0, self.w(&format!("{p}.wi_0.weight")), &bw.d_branch], &[n, d, ff, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_wi1, self.w(&format!("{p}.wi_1.weight")), &bw.d_branch], &[n, d, ff, 1], dxt));
 
             s.extend(block::rmsnorm_eps_bwd(
                 g,
@@ -519,9 +519,9 @@ impl T5Trainer {
 
             // ---- attention branch: res = x_l + ctx @ Wo^T ----
             let (dw, dwt) = self.bwd_gemm(d, inner, K_MATMUL_DW, K_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_res, &bb.ctx, gr(&format!("{p}.o.weight"))], &[n, inner, d], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_res, &bb.ctx, gr(&format!("{p}.o.weight"))], &[n, inner, d], dwt));
             let (dx, dxt) = self.bwd_gemm(n, inner, K_MATMUL_DX, K_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_res, self.w(&format!("{p}.o.weight")), &bw.d_ctx], &[n, inner, d, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_res, self.w(&format!("{p}.o.weight")), &bw.d_ctx], &[n, inner, d, 0], dxt));
 
             // `attn_bwd_dscores_bidir` / `attn_bwd_dv_bidir` Params:
             //   [bsz, n_heads, tcols, head_dim, qkv_stride, v_off, d_model]
@@ -541,9 +541,9 @@ impl T5Trainer {
             s.push(g.step(K_AXPY, &[&bw.d_bias_acc, &bw.d_bias_blk], &[heads * tt, f(1.0)], heads * tt));
 
             let (dw, dwt) = self.bwd_gemm(3 * inner, d, K_MATMUL_DW, K_MATMUL_DW_REG);
-            s.push(g.step(dw, &[&bw.d_qkv, &bb.attn_norm, gr(&format!("{p}.qkv.weight"))], &[n, d, 3 * inner], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_qkv, &bb.attn_norm, gr(&format!("{p}.qkv.weight"))], &[n, d, 3 * inner], dwt));
             let (dx, dxt) = self.bwd_gemm(n, d, K_MATMUL_DX, K_MATMUL_DX_REG);
-            s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, d, 3 * inner, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, d, 3 * inner, 0], dxt));
 
             s.extend(block::rmsnorm_eps_bwd(
                 g,

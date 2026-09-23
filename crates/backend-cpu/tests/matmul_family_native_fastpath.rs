@@ -166,12 +166,25 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
         let b: Vec<f32> = (0..n * k).map(|_| seed.scaled(0.5)).collect();
         let want = matmul_abt(&a, &b, m, k, n);
 
-        for name in ["matmul", "matmul_tiled", "matmul_reg", "matmul_reg2", "matmul_reg3", "matmul_reg4"] {
+        // Each kernel is dispatched in ITS OWN unit: one thread per output
+        // element for the reference, one workgroup per output tile for the
+        // tiled family (32x32 for `matmul_tiled`, 128x128 for the register
+        // family). The CPU fast paths derive their work from Params and
+        // ignore the grid, but stating the wrong grid here would make this
+        // file pass while the same call on a GPU wrote part of the output.
+        for (name, grid) in [
+            ("matmul", gpu_core::Dispatch::Threads((m * n) as u32)),
+            ("matmul_tiled", gpu_core::Dispatch::Workgroups((m.div_ceil(32) * n.div_ceil(32)) as u32)),
+            ("matmul_reg", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32)),
+            ("matmul_reg2", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32)),
+            ("matmul_reg3", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32)),
+            ("matmul_reg4", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32)),
+        ] {
             let ab = gpu.storage_init("a", &a);
             let bb = gpu.storage_init("b", &b);
             let ob = gpu.storage((m * n) as u64);
             let kind = gpu.kernel_index(name).expect("registered above");
-            let steps = vec![gpu.step(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], (m * n) as u32)];
+            let steps = vec![gpu.dispatch(kind, &[&ab, &bb, &ob], &[m as u32, k as u32, n as u32], grid)];
             gpu.submit(&[], &steps);
             let got = gpu.read(&ob, m * n);
             let w = worst_abs(&got, &want);
@@ -213,22 +226,30 @@ fn backward_matmul_family_native_fastpath_matches_scalar_reference() {
         let wb = gpu.storage_init("w", &w);
         let xb = gpu.storage_init("x", &x);
 
-        for name in ["matmul_dx", "matmul_dx_reg"] {
+        // `matmul_dx_reg` tiles its `[m, k]` output 128x128 per workgroup.
+        for (name, grid) in [
+            ("matmul_dx", gpu_core::Dispatch::Threads((m * k) as u32)),
+            ("matmul_dx_reg", gpu_core::Dispatch::Workgroups((m.div_ceil(128) * k.div_ceil(128)) as u32)),
+        ] {
             let dxb = gpu.storage((m * k) as u64);
             let kind = gpu.kernel_index(name).expect("registered above");
             // acc=0 (overwrite, not accumulate).
             let steps =
-                vec![gpu.step(kind, &[&dyb, &wb, &dxb], &[m as u32, k as u32, n as u32, 0], (m * k) as u32)];
+                vec![gpu.dispatch(kind, &[&dyb, &wb, &dxb], &[m as u32, k as u32, n as u32, 0], grid)];
             gpu.submit(&[], &steps);
             let got = gpu.read(&dxb, m * k);
             let w_ = worst_abs(&got, &want_dx);
             assert!(w_ < TOL, "{name} m={m} k={k} n={n}: worst|Δ|={w_} >= {TOL}");
         }
 
-        for name in ["matmul_dw", "matmul_dw_reg"] {
+        // `matmul_dw_reg` tiles its `[n, k]` output 128x128 per workgroup.
+        for (name, grid) in [
+            ("matmul_dw", gpu_core::Dispatch::Threads((n * k) as u32)),
+            ("matmul_dw_reg", gpu_core::Dispatch::Workgroups((n.div_ceil(128) * k.div_ceil(128)) as u32)),
+        ] {
             let dwb = gpu.storage((n * k) as u64);
             let kind = gpu.kernel_index(name).expect("registered above");
-            let steps = vec![gpu.step(kind, &[&dyb, &xb, &dwb], &[m as u32, k as u32, n as u32], (n * k) as u32)];
+            let steps = vec![gpu.dispatch(kind, &[&dyb, &xb, &dwb], &[m as u32, k as u32, n as u32], grid)];
             gpu.submit(&[], &steps);
             let got = gpu.read(&dwb, n * k);
             let w_ = worst_abs(&got, &want_dw);
@@ -345,8 +366,13 @@ fn grouped_matmul_native_fastpath_matches_per_expert_reference() {
 
         let kind = gpu.kernel_index("matmul_reg3_grouped").expect("registered above");
         let worst_case_tiles = e as u32 + (rows as u32).div_ceil(128);
-        let threads = worst_case_tiles * (n as u32).div_ceil(128) * 256;
-        let steps = vec![gpu.step(kind, &[&xb, &wb, &ob, &rs, &rc, &ts], &[k as u32, n as u32, e as u32], threads)];
+        let tiles = worst_case_tiles * (n as u32).div_ceil(128);
+        let steps = vec![gpu.dispatch(
+            kind,
+            &[&xb, &wb, &ob, &rs, &rc, &ts],
+            &[k as u32, n as u32, e as u32],
+            gpu_core::Dispatch::Workgroups(tiles),
+        )];
         gpu.submit(&[], &steps);
         let got = gpu.read(&ob, rows * n);
         let d = worst_abs(&got, &want);

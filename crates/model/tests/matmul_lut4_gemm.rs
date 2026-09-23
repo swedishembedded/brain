@@ -93,7 +93,7 @@ fn check_lut4(lut: &[f32; 16], kernel_name: &str, seed: u64) {
     let swb = g.storage_init("sw", &sw);
 
     let out = g.storage((m * n) as u64);
-    let steps = [g.step(k_lut, &[&xq, &wqb, &sx, &swb, &out], &[m as u32, k as u32, n as u32], n as u32 * 64)];
+    let steps = [g.dispatch(k_lut, &[&xq, &wqb, &sx, &swb, &out], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32))];
     g.submit(&[], &steps);
     let got = g.read(&out, m * n);
 
@@ -156,8 +156,8 @@ fn nf4_and_f4e2m1_diverge_on_the_same_weight_bits_different_codebooks_different_
     let out_nf4 = g.storage((m * n) as u64);
     let out_f4 = g.storage((m * n) as u64);
     let steps = [
-        g.step(k_nf4, &[&xq, &wqb_nf4, &sx, &swb_nf4, &out_nf4], &[m as u32, k as u32, n as u32], n as u32 * 64),
-        g.step(k_f4, &[&xq, &wqb_f4, &sx, &swb_f4, &out_f4], &[m as u32, k as u32, n as u32], n as u32 * 64),
+        g.dispatch(k_nf4, &[&xq, &wqb_nf4, &sx, &swb_nf4, &out_nf4], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32)),
+        g.dispatch(k_f4, &[&xq, &wqb_f4, &sx, &swb_f4, &out_f4], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32)),
     ];
     g.submit(&[], &steps);
     let got_nf4 = g.read(&out_nf4, m * n);

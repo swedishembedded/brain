@@ -232,7 +232,7 @@ fn gemm_step(
     const TILE: u32 = 128;
     match reg {
         Some(i) if m >= TILE && n >= TILE => {
-            g.step(i, &[x, w, out], &[m, kdim, n], m.div_ceil(TILE) * n.div_ceil(TILE) * 256)
+            g.dispatch(i, &[x, w, out], &[m, kdim, n], gpu_core::Dispatch::Workgroups(m.div_ceil(TILE) * n.div_ceil(TILE)))
         }
         _ => g.step(k.matmul_rows, &[x, w, out], &[m, kdim, n], m.div_ceil(8) * n),
     }
@@ -264,7 +264,7 @@ fn gemm_step_cached(
     const TILE: u32 = 128;
     match reg {
         Some(i) if m >= TILE && n >= TILE => {
-            g.step(i, &[x, w, out], &[m, kdim, n], m.div_ceil(TILE) * n.div_ceil(TILE) * 256)
+            g.dispatch(i, &[x, w, out], &[m, kdim, n], gpu_core::Dispatch::Workgroups(m.div_ceil(TILE) * n.div_ceil(TILE)))
         }
         _ => g.step(k.matmul, &[x, w, out], &[m, kdim, n], m * n),
     }
@@ -2009,7 +2009,7 @@ impl RelPos<'_> {
         let seg = self.drh_seg();
         let per = 64 / seg;
         let p_h = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw, seg];
-        steps.push(g.step(self.ids.drh, &[d_scores, b.d_rel_h], &p_h, (heads * qn * self.kh).div_ceil(per) * 64));
+        steps.push(g.dispatch(self.ids.drh, &[d_scores, b.d_rel_h], &p_h, gpu_core::Dispatch::Workgroups((heads * qn * self.kh).div_ceil(per))));
         let p_w = [heads, qn, kn, q0, self.span_qn(), self.kh, self.kw];
         steps.push(g.step(self.ids.drw, &[d_scores, b.d_rel_w], &p_w, heads * qn * self.kw));
     }

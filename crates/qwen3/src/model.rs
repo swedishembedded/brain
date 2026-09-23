@@ -361,7 +361,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
 /// a quantized form nothing ever reads - a measurable prefill-throughput
 /// regression for zero benefit. Embedding/LM-head dispatch is explicitly
 /// listed as still-legitimately-manual in B7's own scope.
-fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
+fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     // `matmul_reg3` = `matmul_reg2` with the shared-memory bank conflicts
     // removed: identical tiling and identical K accumulation order, therefore
@@ -431,11 +431,11 @@ fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) -> u64 {
     }
 }
 
-fn dx_kernel_bw(m: u32, k: u32) -> (usize, u32) {
+fn dx_kernel_bw(m: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
 }
-fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, u32) {
+fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     block::pick_gemm(nrows as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, naive)
 }
@@ -1254,7 +1254,7 @@ impl Qwen {
     /// runtime-eps twin is handed here.
     fn rms_step(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
         if self.coop {
-            self.gpu.step(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(1e-6)], rows * 64)
+            self.gpu.dispatch(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(1e-6)], gpu_core::Dispatch::Workgroups(rows))
         } else {
             block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows)
         }
@@ -1285,7 +1285,7 @@ impl Qwen {
         let rows = a.b * a.n_heads * a.t;
         let p = [a.b, a.n_heads, a.n_kv_heads, a.t, a.head_dim, a.group()];
         let softmax = if self.coop {
-            self.gpu.step(SOFTMAX_ROWS, &[&self.scores, probs], &[rows, a.t], rows * 64)
+            self.gpu.dispatch(SOFTMAX_ROWS, &[&self.scores, probs], &[rows, a.t], gpu_core::Dispatch::Workgroups(rows))
         } else {
             self.gpu.step(ATTN_SOFTMAX, &[&self.scores, probs], &[a.b, a.n_heads, a.t], rows)
         };
@@ -1388,30 +1388,30 @@ impl Qwen {
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad, so the adapter scale is folded into the private scratch.
                 let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.step(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
+                s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
                 // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
                 s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
                 let (bk, bt) = dw_kernel_bw(nout, r);
-                s.push(self.gpu.step(bk, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], bt));
+                s.push(self.gpu.dispatch(bk, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], bt));
                 // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
                 let (bk, bt) = dx_kernel_bw(m, r);
-                s.push(self.gpu.step(bk, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], bt));
+                s.push(self.gpu.dispatch(bk, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], bt));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
                 let (bk, bt) = dw_kernel_bw(r, k);
-                s.push(self.gpu.step(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
+                s.push(self.gpu.dispatch(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
                 let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.step(bk, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], bt));
+                s.push(self.gpu.dispatch(bk, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], bt));
             }
             None => {
                 if self.trainable(wname) {
                     let (bk, bt) = dw_kernel_bw(nout, k);
-                    s.push(self.gpu.step(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
+                    s.push(self.gpu.dispatch(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
                 }
                 let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.step(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
+                s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
             }
         }
     }
@@ -1506,7 +1506,7 @@ impl Qwen {
             .iter()
             .map(|&(v0, cnt)| {
                 let (mk, mt) = block::gemm_variant(block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 }, 1, cnt);
-                self.gpu.step_sliced(
+                self.gpu.dispatch_sliced(
                     mk,
                     &[&self.xn_final, self.w(head), out],
                     &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (v0 as u64, cnt as u64)],
@@ -1700,7 +1700,7 @@ impl Qwen {
         let head = c.head_weight();
         if tiles.len() == 1 && tiles[0] == (0, v) {
             let (mk, mt) = linear_kernel(n as usize, v as usize);
-            s.push(self.gpu.step(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
+            s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
         } else {
             for &(v0, cnt) in &tiles {
                 s.push(self.gpu.step_sliced(
@@ -1792,10 +1792,10 @@ impl Qwen {
             };
             if self.trainable(head) {
                 let (bk, bt) = dw_kernel_bw(v, d);
-                s.push(self.gpu.step(bk, &[d_logits_bw, &self.xn_final, self.g(head)], &[n, d, v], bt));
+                s.push(self.gpu.dispatch(bk, &[d_logits_bw, &self.xn_final, self.g(head)], &[n, d, v], bt));
             }
             let (bk, bt) = dx_kernel_bw(n, d);
-            s.push(self.gpu.step(bk, &[d_logits_bw, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
@@ -2526,7 +2526,7 @@ impl Qwen {
         let fast = g.caps().workgroup_reductions;
         let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32| {
             if fast {
-                s.push(g.step(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(1e-6)], rows * 64));
+                s.push(g.dispatch(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)));
             } else {
                 s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows));
             }

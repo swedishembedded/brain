@@ -128,8 +128,8 @@ fn real_work_can_never_beat_the_roof() {
     let wb = g.storage_init("w", &fill(n * k, 2));
     let ob = g.storage((m * n) as u64);
     let params = [m as u32, k as u32, n as u32];
-    let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
-    let step = g.step(0, &[&xb, &wb, &ob], &params, threads);
+    let tiles = (m.div_ceil(128) * n.div_ceil(128)) as u32;
+    let step = g.dispatch(0, &[&xb, &wb, &ob], &params, gpu_core::Dispatch::Workgroups(tiles));
     let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
 
     // Ramp and measure in one loop: the best single dispatch over a window of

@@ -391,7 +391,7 @@ impl Encoder {
     /// and loses wherever it does not, which is the rule rather than a table
     /// to memorise: below that point its better arithmetic intensity has
     /// nowhere to be spent.
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         let (kind, threads) =
             block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false);
         // `pick_gemm` answers "is this worth tiling at all", against a
@@ -401,9 +401,12 @@ impl Encoder {
         }
         match block::gemm_tile(m, n, &self.gpu.caps()) {
             block::GemmTile::Wide => (self.k.matmul_reg3, threads),
-            block::GemmTile::Narrow => {
-                (self.k.matmul_reg3_64, m.div_ceil(64) * n.div_ceil(64) * 256)
-            }
+            // A 64x64 tile, so the tile COUNT differs from `pick_gemm`'s even
+            // though the workgroup size does not.
+            block::GemmTile::Narrow => (
+                self.k.matmul_reg3_64,
+                gpu_core::Dispatch::Workgroups(m.div_ceil(64) * n.div_ceil(64)),
+            ),
         }
     }
 
@@ -602,7 +605,7 @@ impl Encoder {
             let p = format!("blocks.{l}");
 
             let (mk, mt) = self.gemm(n, 3 * h);
-            s.push(g.step(mk, &[&self.x[l], self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
+            s.push(g.dispatch(mk, &[&self.x[l], self.w(&format!("{p}.qkv.weight")), &lb.qkv], &[n, h, 3 * h], mt));
             s.push(g.step(self.k.bias_add, &[&lb.qkv, self.w(&format!("{p}.qkv.bias"))], &[n, 3 * h], n * 3 * h));
 
             // Self-attention within each span, independently. q/k/v live at
@@ -663,7 +666,7 @@ impl Encoder {
             }
 
             let (mk, mt) = self.gemm(n, h);
-            s.push(g.step(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
+            s.push(g.dispatch(mk, &[&lb.ctx, self.w(&format!("{p}.proj.weight")), &lb.attn_out], &[n, h, h], mt));
             s.push(g.step(self.k.bias_add, &[&lb.attn_out, self.w(&format!("{p}.proj.bias"))], &[n, h], n * h));
             // POST-LayerNorm: the residual is added first and normalized after.
             s.push(g.step(self.k.add2, &[&self.x[l], &lb.attn_out, &lb.res_pre], &[n * h], n * h));
@@ -680,11 +683,11 @@ impl Encoder {
             ));
 
             let (mk, mt) = self.gemm(n, ff);
-            s.push(g.step(mk, &[&lb.res, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, ff], mt));
+            s.push(g.dispatch(mk, &[&lb.res, self.w(&format!("{p}.fc1.weight")), &lb.h], &[n, h, ff], mt));
             s.push(g.step(self.k.bias_add, &[&lb.h, self.w(&format!("{p}.fc1.bias"))], &[n, ff], n * ff));
             s.push(g.step(self.k.gelu_erf, &[&lb.h, &lb.h_act], &[n * ff], n * ff));
             let (mk, mt) = self.gemm(n, h);
-            s.push(g.step(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, ff, h], mt));
+            s.push(g.dispatch(mk, &[&lb.h_act, self.w(&format!("{p}.fc2.weight")), &lb.mlp_out], &[n, ff, h], mt));
             s.push(g.step(self.k.bias_add, &[&lb.mlp_out, self.w(&format!("{p}.fc2.bias"))], &[n, h], n * h));
             s.push(g.step(self.k.add2, &[&lb.res, &lb.mlp_out, &lb.ffn_pre], &[n * h], n * h));
             s.push(block::layernorm_fwd(
@@ -898,17 +901,17 @@ impl Encoder {
             // `matmul_dx`  Params: [m, k, n, accumulate]; bufs [dy, w, dx].
             s.push(g.step(self.k.bias_grad, &[&bw.d_ffn_pre, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
             let (dw, dwt) = dw_gemm(h, ff);
-            s.push(g.step(dw, &[&bw.d_ffn_pre, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, ff, h], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_ffn_pre, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, ff, h], dwt));
             let (dx, dxt) = dx_gemm(n, ff);
-            s.push(g.step(dx, &[&bw.d_ffn_pre, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, ff, h, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_ffn_pre, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, ff, h, 0], dxt));
             // The activation backward reads the PRE-activation hidden, never
             // the activated one.
             s.push(g.step(self.k.gelu_erf_bwd, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * ff], n * ff));
             s.push(g.step(self.k.bias_grad, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, ff], ff));
             let (dw, dwt) = dw_gemm(ff, h);
-            s.push(g.step(dw, &[&bw.d_h, &lb.res, gr(&format!("{p}.fc1.weight"))], &[n, h, ff], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_h, &lb.res, gr(&format!("{p}.fc1.weight"))], &[n, h, ff], dwt));
             let (dx, dxt) = dx_gemm(n, h);
-            s.push(g.step(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_tmp], &[n, h, ff, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_tmp], &[n, h, ff, 0], dxt));
             s.push(g.step(self.k.add2, &[&bw.d_ffn_pre, &bw.d_tmp, &bw.d_res], &[n * h], n * h));
 
             // ---- LN1, then the attention branch ----
@@ -919,9 +922,9 @@ impl Encoder {
 
             s.push(g.step(self.k.bias_grad, &[&bw.d_res_pre, gr(&format!("{p}.proj.bias"))], &[n, h], h));
             let (dw, dwt) = dw_gemm(h, h);
-            s.push(g.step(dw, &[&bw.d_res_pre, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_res_pre, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
             let (dx, dxt) = dx_gemm(n, h);
-            s.push(g.step(dx, &[&bw.d_res_pre, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_res_pre, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
 
             // Span-local attention backward, recomputing the scores and
             // probabilities from the cached qkv. `d_qkv` needs no clear: every
@@ -981,9 +984,9 @@ impl Encoder {
 
             s.push(g.step(self.k.bias_grad, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
             let (dw, dwt) = dw_gemm(3 * h, h);
-            s.push(g.step(dw, &[&bw.d_qkv, &self.x[l], gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
+            s.push(g.dispatch(dw, &[&bw.d_qkv, &self.x[l], gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
             let (dx, dxt) = dx_gemm(n, h);
-            s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_tmp], &[n, h, 3 * h, 0], dxt));
+            s.push(g.dispatch(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_tmp], &[n, h, 3 * h, 0], dxt));
             // `res_pre = x + attn_out`: the block input receives the residual
             // pass-through AND the attention branch.
             s.push(g.step(self.k.add2, &[&bw.d_res_pre, &bw.d_tmp, &bw.dx[l]], &[n * h], n * h));

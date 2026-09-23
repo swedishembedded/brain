@@ -116,7 +116,7 @@ fn mm_shapes(cfg: &Flux2Config, nt: u32, ni: u32) -> Vec<(u32, u32, u32, u32, &'
 }
 
 fn mm_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
-    gpu.step(K_MM, &[x, w, o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+    gpu.dispatch(K_MM, &[x, w, o], &[m, k, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)))
 }
 
 fn bench_mm(gpu: &Gpu, reps: usize) {
@@ -327,7 +327,7 @@ fn build_replay(gpu: &Gpu, cfg: &Flux2Config, nt: u32, ni: u32) -> (Replay, f64)
     }
 
     let mm = |steps: &mut Vec<Step>, flop: &mut f64, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, kk: u32, nn: u32| {
-        steps.push(gpu.step(kmm, &[x, w, o], &[m, kk, nn], m.div_ceil(128) * nn.div_ceil(128) * 256));
+        steps.push(gpu.dispatch(kmm, &[x, w, o], &[m, kk, nn], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * nn.div_ceil(128))));
         *flop += 2.0 * m as f64 * kk as f64 * nn as f64;
     };
     // Sliced matmul, exactly as `Flux2Model::mm_rows`.
@@ -335,7 +335,7 @@ fn build_replay(gpu: &Gpu, cfg: &Flux2Config, nt: u32, ni: u32) -> (Replay, f64)
         let m = r1 - r0;
         let xo = (r0 as u64 * kk as u64, m as u64 * kk as u64);
         let oo = (r0 as u64 * nn as u64, m as u64 * nn as u64);
-        steps.push(gpu.step_sliced(kmm, &[x, w, o], &[xo, (0, 0), oo], &[m, kk, nn], m.div_ceil(128) * nn.div_ceil(128) * 256));
+        steps.push(gpu.dispatch_sliced(kmm, &[x, w, o], &[xo, (0, 0), oo], &[m, kk, nn], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * nn.div_ceil(128))));
         *flop += 2.0 * m as f64 * kk as f64 * nn as f64;
     };
     let ln_rows = |steps: &mut Vec<Step>, x: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32| {
@@ -364,9 +364,9 @@ fn build_replay(gpu: &Gpu, cfg: &Flux2Config, nt: u32, ni: u32) -> (Replay, f64)
     let flash = |steps: &mut Vec<Step>, flop: &mut f64| {
         let nwg = nh * n.div_ceil(64);
         if baseline_flash {
-            steps.push(gpu.step(K_FLASH, &[&qkv, &ctx], &[1, nh, n, hd, 3 * d, 0, d, 2 * d, d], nwg * 64));
+            steps.push(gpu.dispatch(K_FLASH, &[&qkv, &ctx], &[1, nh, n, hd, 3 * d, 0, d, 2 * d, d], gpu_core::Dispatch::Workgroups(nwg)));
         } else {
-            steps.push(gpu.step(K_SPLIT, &[&qkv, &ctx], &[1, nh, n, hd, 3 * d, 0, d, 2 * d, d], nwg * 256));
+            steps.push(gpu.dispatch(K_SPLIT, &[&qkv, &ctx], &[1, nh, n, hd, 3 * d, 0, d, 2 * d, d], gpu_core::Dispatch::Workgroups(nwg)));
         }
         *flop += 4.0 * n as f64 * n as f64 * d as f64;
     };
@@ -378,7 +378,7 @@ fn build_replay(gpu: &Gpu, cfg: &Flux2Config, nt: u32, ni: u32) -> (Replay, f64)
     {
         let xo = (0u64, ni as u64 * cin as u64);
         let oo = (nt as u64 * d as u64, ni as u64 * d as u64);
-        steps.push(gpu.step_sliced(kmm, &[&tok_in, &w_imgin, &x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256));
+        steps.push(gpu.dispatch_sliced(kmm, &[&tok_in, &w_imgin, &x0], &[xo, (0, 0), oo], &[ni, cin, d], gpu_core::Dispatch::Workgroups(ni.div_ceil(128) * d.div_ceil(128))));
         flop += 2.0 * ni as f64 * cin as f64 * d as f64;
     }
 
@@ -469,7 +469,7 @@ fn build_replay(gpu: &Gpu, cfg: &Flux2Config, nt: u32, ni: u32) -> (Replay, f64)
     {
         let xo = (nt as u64 * d as u64, ni as u64 * d as u64);
         let oo = (0u64, ni as u64 * cin as u64);
-        steps.push(gpu.step_sliced(kmm, &[&n1, &w_final, &out], &[xo, (0, 0), oo], &[ni, d, cin], ni.div_ceil(128) * cin.div_ceil(128) * 256));
+        steps.push(gpu.dispatch_sliced(kmm, &[&n1, &w_final, &out], &[xo, (0, 0), oo], &[ni, d, cin], gpu_core::Dispatch::Workgroups(ni.div_ceil(128) * cin.div_ceil(128))));
         flop += 2.0 * ni as f64 * d as f64 * cin as f64;
     }
     if let Some((kk, ss, st)) = open.take() {
@@ -702,7 +702,7 @@ fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec
     let mut s: Vec<Step> = Vec::new();
     let mut flop = 0.0f64;
     let mm = |s: &mut Vec<Step>, flop: &mut f64, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, kk: u32, nn: u32| {
-        s.push(gpu.step(kmm, &[x, w, o], &[n, kk, nn], n.div_ceil(128) * nn.div_ceil(128) * 256));
+        s.push(gpu.dispatch(kmm, &[x, w, o], &[n, kk, nn], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * nn.div_ceil(128))));
         *flop += 2.0 * n as f64 * kk as f64 * nn as f64;
     };
     let quant = |s: &mut Vec<Step>, x: &DeviceBuffer, kk: u32| {
@@ -710,14 +710,14 @@ fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec
         s.push(gpu.step(T_QPACK, &[x, &sx, &xq], &[n, kk], n * kk / 4));
     };
     let mm8 = |s: &mut Vec<Step>, flop: &mut f64, pw: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, kk: u32, nn: u32| {
-        s.push(gpu.step(T_MM8, &[&xq, pw, &sx, sw, o], &[n, kk / 4, nn], n.div_ceil(128) * nn.div_ceil(128) * 256));
+        s.push(gpu.dispatch(T_MM8, &[&xq, pw, &sx, sw, o], &[n, kk / 4, nn], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * nn.div_ceil(128))));
         *flop += 2.0 * n as f64 * kk as f64 * nn as f64;
     };
     let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, g: &DeviceBuffer, o: &DeviceBuffer, dim: u32, rows: u32| {
         if base {
             s.push(gpu.step(T_RMS, &[x, g, o], &[dim, rows], rows));
         } else {
-            s.push(gpu.step(T_RMS_ROWS, &[x, g, o], &[dim, rows, f(1e-6)], rows * 64));
+            s.push(gpu.dispatch(T_RMS_ROWS, &[x, g, o], &[dim, rows, f(1e-6)], gpu_core::Dispatch::Workgroups(rows)));
         }
     };
 
@@ -743,7 +743,7 @@ fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec
         if base {
             s.push(gpu.step(T_SOFTMAX, &[&scores, &probs], &[1, nh, t], nh * t));
         } else {
-            s.push(gpu.step(T_SM_ROWS, &[&scores, &probs], &[nh * t, t], nh * t * 64));
+            s.push(gpu.dispatch(T_SM_ROWS, &[&scores, &probs], &[nh * t, t], gpu_core::Dispatch::Workgroups(nh * t)));
         }
         s.push(gpu.step(T_APPLY, &[&probs, &v, &ctx], &ap, nh * t * hd));
         // scores+apply FLOP (causal: t(t+1)/2 pairs, 2 FLOP each, both passes).
@@ -909,7 +909,7 @@ fn main() {
                 for kind in [K_MM, K_MM3] {
                     let o = gpu.storage(m as u64 * n as u64);
                     let st: Vec<Step> = (0..4)
-                        .map(|_| gpu.step(kind, &[&x, &w, &o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256))
+                        .map(|_| gpu.dispatch(kind, &[&x, &w, &o], &[m, k, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))))
                         .collect();
                     ts.push(time_steps(&gpu, &st, reps) / 4.0);
                     out.push(gpu.read(&o, (m.min(64) * n) as usize));

@@ -169,7 +169,7 @@ impl Timesfm3 {
         self.w.get(name).unwrap_or_else(|| panic!("timesfm3: unbound weight {name}"))
     }
 
-    fn gemm(&self, m: usize, n: usize) -> (usize, u32) {
+    fn gemm(&self, m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m, n, MATMUL, MATMUL_REG3, false)
     }
 
@@ -177,7 +177,7 @@ impl Timesfm3 {
     /// `[out_features, in_features]`), no bias.
     fn linear(&self, x: &DeviceBuffer, weight_name: &str, out: &DeviceBuffer, m: usize, k: usize, n: usize) -> gpu_core::Step {
         let (kind, threads) = self.gemm(m, n);
-        self.gpu.step(kind, &[x, self.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
+        self.gpu.dispatch(kind, &[x, self.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
     }
 
     /// `rms_variant` picks between the reference (one thread per row) and the
@@ -202,7 +202,7 @@ impl Timesfm3 {
     fn rmsnorm(&self, x: &DeviceBuffer, weight: &DeviceBuffer, out: &DeviceBuffer, dim: usize, rows: usize) -> gpu_core::Step {
         let coop = Some(RMSNORM_ROWS);
         let (kind, threads) = block::rms_variant(&self.gpu, RMSNORM_EPS, coop, rows as u32, dim as u32);
-        self.gpu.step(kind, &[x, weight, out], &[dim as u32, rows as u32, f(self.cfg.rms_norm_eps)], threads)
+        self.gpu.dispatch(kind, &[x, weight, out], &[dim as u32, rows as u32, f(self.cfg.rms_norm_eps)], threads)
     }
 
     fn rmsnorm_named(&self, x: &DeviceBuffer, weight_name: &str, out: &DeviceBuffer, dim: usize, rows: usize) -> gpu_core::Step {
@@ -245,9 +245,9 @@ impl Timesfm3 {
         let probs = self.gpu.storage((bsz * h * tcols * tcols) as u64);
         let (sk, st) = block::softmax_variant(&self.gpu, ATTN_SOFTMAX_FULL, Some(SOFTMAX_ROWS), (bsz * h * tcols) as u32, tcols as u32);
         let softmax_step = if sk == SOFTMAX_ROWS {
-            self.gpu.step(sk, &[&scores, &probs], &[(bsz * h * tcols) as u32, tcols as u32], st)
+            self.gpu.dispatch(sk, &[&scores, &probs], &[(bsz * h * tcols) as u32, tcols as u32], st)
         } else {
-            self.gpu.step(sk, &[&scores, &probs], &[bsz as u32, h as u32, tcols as u32], st)
+            self.gpu.dispatch(sk, &[&scores, &probs], &[bsz as u32, h as u32, tcols as u32], st)
         };
         vec![
             self.gpu.step(

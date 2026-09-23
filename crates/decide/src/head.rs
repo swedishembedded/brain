@@ -168,7 +168,7 @@ impl Head {
         self.ps.w(n)
     }
 
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, self.k.matmul, self.k.matmul_reg3, false)
     }
 
@@ -324,12 +324,12 @@ impl Head {
             g.step(self.k.embed, &[&self.cls_rows, hidden, &self.cls], &[h, s], s * h),
         ];
         let (mk, mt) = self.gemm(s, h);
-        st.push(g.step(mk, &[&self.cls, self.w("head.wq.weight"), &self.q], &[s, h, h], mt));
+        st.push(g.dispatch(mk, &[&self.cls, self.w("head.wq.weight"), &self.q], &[s, h, h], mt));
         st.push(g.step(self.k.bias_add, &[&self.q, self.w("head.wq.bias")], &[s, h], s * h));
         // The state's keys and values, from row 0 - the packer puts every
         // window first and contiguously.
         let (mk, mt) = self.gemm(r, 2 * h);
-        st.push(g.step(mk, &[hidden, self.w("head.wkv.weight"), &self.kv], &[r, h, 2 * h], mt));
+        st.push(g.dispatch(mk, &[hidden, self.w("head.wkv.weight"), &self.kv], &[r, h, 2 * h], mt));
         st.push(g.step(self.k.bias_add, &[&self.kv, self.w("head.wkv.bias")], &[r, 2 * h], r * 2 * h));
 
         // Cross-attention: every option queries every state token.
@@ -353,7 +353,7 @@ impl Head {
             self.cfg.eps,
         ));
         let (mk, mt) = self.gemm(s, 1);
-        st.push(g.step(mk, &[&self.out, self.w("head.score.weight"), &self.score], &[s, h, 1], mt));
+        st.push(g.dispatch(mk, &[&self.out, self.w("head.score.weight"), &self.score], &[s, h, 1], mt));
         st.push(g.step(self.k.bias_add, &[&self.score, self.w("head.score.bias")], &[s, 1], s));
         st
     }
@@ -410,9 +410,9 @@ impl Head {
         // ---- scorer ----
         st.push(g.step(self.k.bias_grad, &[&b.d_score, gr("head.score.bias")], &[s, 1], 1));
         let (k, t) = dw(1, h);
-        st.push(g.step(k, &[&b.d_score, &self.out, gr("head.score.weight")], &[s, h, 1], t));
+        st.push(g.dispatch(k, &[&b.d_score, &self.out, gr("head.score.weight")], &[s, h, 1], t));
         let (k, t) = dx(s, h);
-        st.push(g.step(k, &[&b.d_score, self.w("head.score.weight"), &b.d_out], &[s, h, 1, 0], t));
+        st.push(g.dispatch(k, &[&b.d_score, self.w("head.score.weight"), &b.d_out], &[s, h, 1, 0], t));
 
         // ---- LayerNorm ----
         st.push(block::ln_stats_fwd(g, &ln, &self.sum, &b.mean, &b.inv, h, s, self.cfg.eps));
@@ -451,15 +451,15 @@ impl Head {
         // ---- projections ----
         st.push(g.step(self.k.bias_grad, &[&b.d_q_total, gr("head.wq.bias")], &[s, h], h));
         let (k, t) = dw(h, h);
-        st.push(g.step(k, &[&b.d_q_total, &self.cls, gr("head.wq.weight")], &[s, h, h], t));
+        st.push(g.dispatch(k, &[&b.d_q_total, &self.cls, gr("head.wq.weight")], &[s, h, h], t));
         let (k, t) = dx(s, h);
-        st.push(g.step(k, &[&b.d_q_total, self.w("head.wq.weight"), &b.d_cls], &[s, h, h, 0], t));
+        st.push(g.dispatch(k, &[&b.d_q_total, self.w("head.wq.weight"), &b.d_cls], &[s, h, h, 0], t));
 
         st.push(g.step(self.k.bias_grad, &[&b.d_kv, gr("head.wkv.bias")], &[r, 2 * h], 2 * h));
         let (k, t) = dw(2 * h, h);
-        st.push(g.step(k, &[&b.d_kv, hidden, gr("head.wkv.weight")], &[r, h, 2 * h], t));
+        st.push(g.dispatch(k, &[&b.d_kv, hidden, gr("head.wkv.weight")], &[r, h, 2 * h], t));
         let (k, t) = dx(r, h);
-        st.push(g.step(k, &[&b.d_kv, self.w("head.wkv.weight"), d_hidden_out], &[r, h, 2 * h, 0], t));
+        st.push(g.dispatch(k, &[&b.d_kv, self.w("head.wkv.weight"), d_hidden_out], &[r, h, 2 * h, 0], t));
 
         // The [CLS] gather's adjoint scatters each slot's grad back onto its
         // own row of `d_hidden`, on top of what the key/value path assigned.

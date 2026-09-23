@@ -691,7 +691,7 @@ impl SamEncoder {
     /// per-output-element naive kernel: the register-tiled sibling
     /// (`matmul_reg3`) was registered by every other model in this crate's own
     /// composite (`crates/clip`, `crates/deepseekv2`) but never wired in here.
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, self.ids.matmul, self.ids.matmul_reg3, false)
     }
 
@@ -771,7 +771,7 @@ impl SamEncoder {
             _ => &b.ln1,
         };
         let (mk, mt) = self.gemm(ar, 3 * c);
-        steps.push(g.step(mk, &[attn_in, w("attn.qkv.weight"), &b.qkv], &[ar, c, 3 * c], mt));
+        steps.push(g.dispatch(mk, &[attn_in, w("attn.qkv.weight"), &b.qkv], &[ar, c, 3 * c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.qkv, w("attn.qkv.bias")], &[ar, 3 * c], ar * 3 * c));
 
         let rel = b.relpos(&self.ids, false);
@@ -782,7 +782,7 @@ impl SamEncoder {
         );
 
         let (mk, mt) = self.gemm(ar, c);
-        steps.push(g.step(mk, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], mt));
+        steps.push(g.dispatch(mk, &[&b.ctx, w("attn.proj.weight"), &b.proj], &[ar, c, c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.proj, w("attn.proj.bias")], &[ar, c], ar * c));
         let branch: &DeviceBuffer = match &b.win {
             Some(wi) => {
@@ -795,11 +795,11 @@ impl SamEncoder {
 
         steps.push(block::layernorm_fwd(g, &self.ids.ln, &b.res, w("norm2.weight"), w("norm2.bias"), &b.ln2, c, rows, cfg.eps));
         let (mk, mt) = self.gemm(rows, m);
-        steps.push(g.step(mk, &[&b.ln2, w("mlp.fc1.weight"), &b.h], &[rows, c, m], mt));
+        steps.push(g.dispatch(mk, &[&b.ln2, w("mlp.fc1.weight"), &b.h], &[rows, c, m], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.h, w("mlp.fc1.bias")], &[rows, m], rows * m));
         steps.push(g.step(self.ids.gelu, &[&b.h, &b.h2], &[rows * m], rows * m));
         let (mk, mt) = self.gemm(rows, c);
-        steps.push(g.step(mk, &[&b.h2, w("mlp.fc2.weight"), &b.mlp_out], &[rows, m, c], mt));
+        steps.push(g.dispatch(mk, &[&b.h2, w("mlp.fc2.weight"), &b.mlp_out], &[rows, m, c], mt));
         steps.push(g.step(self.ids.bias_add, &[&b.mlp_out, w("mlp.fc2.bias")], &[rows, c], rows * c));
         steps.push(g.step(self.ids.add2, &[&b.res, &b.mlp_out, &b.out], &[rows * c], rows * c));
         g.submit(&[&b.ln1], &steps);

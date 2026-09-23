@@ -76,8 +76,8 @@ fn run(gpu: &Gpu, m: u32, k: u32, n: u32) -> (Vec<f32>, Vec<f32>) {
     gpu.submit(
         &[],
         &[
-            gpu.step(K_GEMV, &[&xb, &wb, &a], &[m, k, n], n * 64),
-            gpu.step(K_REF, &[&xb, &wb, &b], &[m, k, n], n * 64),
+            gpu.dispatch(K_GEMV, &[&xb, &wb, &a], &[m, k, n], gpu_core::Dispatch::Workgroups(n)),
+            gpu.dispatch(K_REF, &[&xb, &wb, &b], &[m, k, n], gpu_core::Dispatch::Workgroups(n)),
         ],
     );
     gpu.poll_wait();

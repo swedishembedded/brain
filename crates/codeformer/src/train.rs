@@ -350,17 +350,17 @@ impl CodeTransformerTrainer {
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
     }
-    fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
+    fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
     }
-    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
+    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(rows as usize, cols as usize, naive, reg, false)
     }
 
     /// `y = x @ W^T + b`, the shape every `nn.Linear` in this transformer has.
     fn linear(&self, s: &mut Vec<Step>, p: &str, m: u32, k: u32, n: u32, x: &DeviceBuffer, y: &DeviceBuffer) {
         let (kind, threads) = self.gemm(m, n);
-        s.push(self.gpu.step(kind, &[x, self.w(&format!("{p}.weight")), y], &[m, k, n], threads));
+        s.push(self.gpu.dispatch(kind, &[x, self.w(&format!("{p}.weight")), y], &[m, k, n], threads));
         // `bias_add` Params: [m, n]; bufs [out(rw), bias].
         s.push(self.gpu.step(K_BIAS_ADD, &[y, self.w(&format!("{p}.bias"))], &[m, n], m * n));
     }
@@ -385,10 +385,10 @@ impl CodeTransformerTrainer {
         s.push(self.gpu.step(K_BIAS_GRAD, &[dy, gr(&format!("{p}.bias"))], &[m, n], n));
         // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] — ACCUMULATES.
         let (dw, dwt) = self.bwd_gemm(n, k, K_MATMUL_DW, K_MATMUL_DW_REG);
-        s.push(self.gpu.step(dw, &[dy, x, gr(&format!("{p}.weight"))], &[m, k, n], dwt));
+        s.push(self.gpu.dispatch(dw, &[dy, x, gr(&format!("{p}.weight"))], &[m, k, n], dwt));
         // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
         let (dxk, dxt) = self.bwd_gemm(m, k, K_MATMUL_DX, K_MATMUL_DX_REG);
-        s.push(self.gpu.step(dxk, &[dy, self.w(&format!("{p}.weight")), dx], &[m, k, n, acc], dxt));
+        s.push(self.gpu.dispatch(dxk, &[dy, self.w(&format!("{p}.weight")), dx], &[m, k, n, acc], dxt));
     }
 
     fn build_steps(&self) -> Vec<Step> {
@@ -467,7 +467,7 @@ impl CodeTransformerTrainer {
             eps,
         ));
         let (mk, mt) = self.gemm(t, k);
-        s.push(g.step(mk, &[&self.ln_out, self.w("idx_pred_layer.1.weight"), &self.logits], &[t, e, k], mt));
+        s.push(g.dispatch(mk, &[&self.ln_out, self.w("idx_pred_layer.1.weight"), &self.logits], &[t, e, k], mt));
         // `ce_value` Params: [n_rows, vocab]; bufs [logits, targets(u32), out].
         // Per-row loss; the host sums and divides — the mean CE.
         s.push(g.step(K_CE_VALUE, &[&self.logits, &self.targets, &self.ce], &[t, k], t));
@@ -504,9 +504,9 @@ impl CodeTransformerTrainer {
 
         // ---- idx_pred_layer: biasless head, then its LayerNorm ----
         let (dw, dwt) = self.bwd_gemm(k, e, K_MATMUL_DW, K_MATMUL_DW_REG);
-        s.push(g.step(dw, &[&bw.d_logits, &self.ln_out, gr("idx_pred_layer.1.weight")], &[t, e, k], dwt));
+        s.push(g.dispatch(dw, &[&bw.d_logits, &self.ln_out, gr("idx_pred_layer.1.weight")], &[t, e, k], dwt));
         let (dx, dxt) = self.bwd_gemm(t, e, K_MATMUL_DX, K_MATMUL_DX_REG);
-        s.push(g.step(dx, &[&bw.d_logits, self.w("idx_pred_layer.1.weight"), &bw.d_branch], &[t, e, k, 0], dxt));
+        s.push(g.dispatch(dx, &[&bw.d_logits, self.w("idx_pred_layer.1.weight"), &bw.d_branch], &[t, e, k, 0], dxt));
 
         let last = c.n_layers as usize;
         s.push(block::ln_stats_fwd(g, &ln, &self.x[last], &bw.mean, &bw.inv, e, t, eps));

@@ -335,7 +335,7 @@ impl MtpModel {
     /// One `out[m,n] = x[m,k] @ w[n,k]^T` dispatch through [`Self::gemm_tier`].
     fn mm(&self, tier: block::GemmVariants, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         let (kind, threads) = block::gemm_variant(tier, m, n);
-        self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+        self.gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads)
     }
 
     fn only_fwd_ids() -> KernelIds {

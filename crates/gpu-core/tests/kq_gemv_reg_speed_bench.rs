@@ -181,7 +181,7 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let wd = storage_u32(&g, &pack_wd(&d_super, &dmin_super, n as usize, ng.div_ceil(GPS)));
             let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m as usize, k as usize, GROUP));
             let out = g.storage((m * n) as u64);
-            let ramp_steps = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
+            let ramp_steps = vec![g.dispatch(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
             ramp(&g, &ramp_steps, Duration::from_secs(3));
         }
 
@@ -214,8 +214,8 @@ fn gemv_vs_gemv_reg_across_decode_rows() {
             let xgs = g.storage_init("xgs", &host_group_sums(&codes_x, m as usize, k as usize, GROUP));
             let out = g.storage((m * n) as u64);
 
-            let st_gemv = vec![g.step(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
-            let st_reg = vec![g.step(k_reg, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], n * 64)];
+            let st_gemv = vec![g.dispatch(k_gemv, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
+            let st_reg = vec![g.dispatch(k_reg, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(n))];
             let t_gemv = gpu_core::profile::best_of(&g, &st_gemv, REPS);
             let t_reg = gpu_core::profile::best_of(&g, &st_reg, REPS);
             // Dominant traffic: packed weight codes + M14's packed (wsm,wd)

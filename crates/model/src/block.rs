@@ -167,8 +167,8 @@ pub const RMSNORM_EPS: f32 = 1e-6;
 /// variant-agreement test against a HOST reference.
 pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
     let coop = (k.rmsnorm_rows != UNREGISTERED).then_some(k.rmsnorm_rows);
-    let (kind, threads) = rms_variant(g, k.rmsnorm, coop, rows, dim);
-    g.step(kind, &[x, w, out], &[dim, rows, f(RMSNORM_EPS)], threads)
+    let (kind, grid) = rms_variant(g, k.rmsnorm, coop, rows, dim);
+    g.dispatch(kind, &[x, w, out], &[dim, rows, f(RMSNORM_EPS)], grid)
 }
 
 /// RMSNorm backward: always the input grad (`dx`); the gain grad (`gw`, needing
@@ -197,8 +197,8 @@ pub fn rmsnorm_bwd(
         s.push(g.step(k.rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim));
     }
     let coop = (k.rmsnorm_dx_rows != UNREGISTERED).then_some(k.rmsnorm_dx_rows);
-    let (kind, threads) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);
-    s.push(g.step(kind, &[x, w, dy, dx], &[dim, rows], threads));
+    let (kind, grid) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);
+    s.push(g.dispatch(kind, &[x, w, dy, dx], &[dim, rows], grid));
     s
 }
 
@@ -867,9 +867,8 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
 /// contract `gqa_fwd`/`gqa_scores.wgsl`/`gqa_apply.wgsl` share.
 pub fn flash_gqa_causal_fwd(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer) -> Step {
     const BR: u32 = 64; // query rows per workgroup - matches the kernel's own BR
-    const WS: u32 = 256; // threads per workgroup - matches the kernel's own workgroup_size(256) (BR * LANES)
     let nwg = a.b * a.n_heads * a.t.div_ceil(BR);
-    g.step(kernel, &[q, k, v, ctx], &a.params(), nwg * WS)
+    g.dispatch(kernel, &[q, k, v, ctx], &a.params(), gpu_core::Dispatch::Workgroups(nwg))
 }
 
 /// The single-token incremental-decode twin of [`gqa_attn_sublayer_fwd`]:
@@ -1651,14 +1650,14 @@ pub fn flash_bidir_spans_step(
 ) -> Step {
     assert!(head_dim <= 128, "flash_attn_bidir_spans: head_dim {head_dim} > 128");
     let nwg = flash_spans_workgroups(heads, spans);
-    g.step(
+    g.dispatch(
         kind,
         &[qkv, ctx, work],
         // `bsz`, `n_heads` and `tcols` are carried for layout compatibility
         // with the rest of the family; this kernel reads its span, head and
         // tile from `work` and ignores them.
         &[1, heads, 0, head_dim, stride, q_off, k_off, v_off, d_out],
-        nwg * FLASH_SPANS_WS,
+        gpu_core::Dispatch::Workgroups(nwg),
     )
 }
 
@@ -2080,7 +2079,7 @@ pub fn gemm_bidir_fwd(
             for h in 0..heads {
                 let (mk, mt) = pick_gemm(qn as usize, len as usize, k.matmul, k.matmul_reg, force_naive);
                 // scores[h] = q_pack[h][q0..q0+qn] · k_pack[h]ᵀ   ([qn,hd]·[len,hd]ᵀ)
-                steps.push(g.step_sliced(
+                steps.push(g.dispatch_sliced(
                     mk,
                     &[packs, packs, scores],
                     &[(h as u64 * hstride + q0 as u64 * hd as u64, 0), (seg + h as u64 * hstride, 0), (h as u64 * sp_stride, 0)],
@@ -2092,12 +2091,12 @@ pub fn gemm_bidir_fwd(
             // head's contiguous [qn,len] sub-range, so the head-to-head padding gap
             // (needed for the matmul writes above) stays invisible to it.
             for h in 0..heads {
-                steps.push(g.step_sliced(k.softmax_rows, &[scores, probs], &[(h as u64 * sp_stride, 0), (h as u64 * sp_stride, 0)], &[qn, len], qn * 64));
+                steps.push(g.dispatch_sliced(k.softmax_rows, &[scores, probs], &[(h as u64 * sp_stride, 0), (h as u64 * sp_stride, 0)], &[qn, len], gpu_core::Dispatch::Workgroups(qn)));
             }
             for h in 0..heads {
                 let (mk, mt) = pick_gemm(qn as usize, hd as usize, k.matmul, k.matmul_reg, force_naive);
                 // ctx_pack[h][q0..] = probs[h] · V[h]   (A·Bᵀ with B = vᵀ[hd,len])
-                steps.push(g.step_sliced(
+                steps.push(g.dispatch_sliced(
                     mk,
                     &[probs, packs, ctx_pack],
                     &[(h as u64 * sp_stride, 0), (2 * seg + h as u64 * hstride, 0), (h as u64 * hstride + q0 as u64 * hd as u64, 0)],
@@ -2428,7 +2427,7 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 /// (`Op::RmsNorm`) keyed on `DeviceCaps`, never on a backend name; the `*_rows`
 /// kernels are `@workgroup_size(64)`, at or below the WebGPU floor of 256, so
 /// no `max_workgroup_size` gate is needed on top of it.
-pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
+pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
     match coop {
@@ -2436,9 +2435,11 @@ pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d:
             if gpu_core::select::DefaultSelector.select(Op::RmsNorm, shape, &g.caps())
                 == KernelVariant::WorkgroupPerOutput =>
         {
-            (i, rows * 64)
+            // One workgroup per row, counted in ROWS: the cooperative kernel's
+            // own workgroup size is the device's to apply, not this seam's.
+            (i, gpu_core::Dispatch::Workgroups(rows))
         }
-        _ => (reference, rows),
+        _ => (reference, gpu_core::Dispatch::Threads(rows)),
     }
 }
 
@@ -2634,7 +2635,7 @@ impl LayerNormIds {
 /// sub-ranges (`Gpu::step_sliced`). Both shapes have to share ONE selection
 /// rule - a second copy is a place a model silently keeps the slow kernel,
 /// the most expensive class of defect there is.
-pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
+pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
     match coop {
@@ -2642,9 +2643,11 @@ pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: 
             if gpu_core::select::DefaultSelector.select(Op::LayerNorm, shape, &g.caps())
                 == KernelVariant::WorkgroupPerOutput =>
         {
-            (i, rows * 64)
+            // One workgroup per row; the `* 64` this used to carry was a copy
+            // of the `*_rows` kernels' `@workgroup_size` living at the seam.
+            (i, gpu_core::Dispatch::Workgroups(rows))
         }
-        _ => (reference, rows),
+        _ => (reference, gpu_core::Dispatch::Threads(rows)),
     }
 }
 
@@ -2665,7 +2668,7 @@ pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: 
 /// own `Params` already uses), `cols` is the key axis being softmaxed over.
 /// `softmax_rows.wgsl` is `@workgroup_size(64)`, at or below the WebGPU
 /// floor, so no `max_workgroup_size` gate is needed on top of the seam.
-pub fn softmax_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, cols: u32) -> (usize, u32) {
+pub fn softmax_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, cols: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: cols, k: 0, dtype: Dtype::F32 };
     match coop {
@@ -2673,9 +2676,10 @@ pub fn softmax_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32
             if gpu_core::select::DefaultSelector.select(Op::Softmax, shape, &g.caps())
                 == KernelVariant::WorkgroupPerOutput =>
         {
-            (i, rows * 64)
+            // `softmax_rows` gives one workgroup one row.
+            (i, gpu_core::Dispatch::Workgroups(rows))
         }
-        _ => (reference, rows),
+        _ => (reference, gpu_core::Dispatch::Threads(rows)),
     }
 }
 
@@ -2707,7 +2711,7 @@ pub const PAGED_SCORES_PER_WORKGROUP: u32 = 16;
 /// GEMMs, the packed-int8 KV kernels are plain scalar WGSL, portable to
 /// every backend); a caller dispatching the packed-int8 KV trio always
 /// uses it unconditionally, with no `*_variant` seam needed on that side.
-pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batch_heads: u32, cap: u32) -> (usize, u32) {
+pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batch_heads: u32, cap: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: batch_heads, n: cap, k: 0, dtype: Dtype::F32 };
     let total = batch_heads.saturating_mul(cap);
@@ -2716,9 +2720,13 @@ pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batc
             if gpu_core::select::DefaultSelector.select(Op::PagedAttention, shape, &g.caps())
                 == KernelVariant::WorkgroupPerOutput =>
         {
-            (i, total.div_ceil(PAGED_SCORES_PER_WORKGROUP) * 64)
+            // Workgroups, not threads: this kernel owns
+            // `PAGED_SCORES_PER_WORKGROUP` scores per workgroup, so the count
+            // of workgroups is the only figure this seam can state without
+            // also restating the kernel's `@workgroup_size`.
+            (i, gpu_core::Dispatch::Workgroups(total.div_ceil(PAGED_SCORES_PER_WORKGROUP)))
         }
-        _ => (reference, total),
+        _ => (reference, gpu_core::Dispatch::Threads(total)),
     }
 }
 
@@ -2768,8 +2776,8 @@ pub fn layernorm_fwd(
     rows: u32,
     eps: f32,
 ) -> Step {
-    let (kind, threads) = ln_variant(g, k.layernorm, k.layernorm_rows, rows, d);
-    g.step(kind, &[x, gamma, beta, out], &[d, rows, f(eps)], threads)
+    let (kind, grid) = ln_variant(g, k.layernorm, k.layernorm_rows, rows, d);
+    g.dispatch(kind, &[x, gamma, beta, out], &[d, rows, f(eps)], grid)
 }
 
 /// LayerNorm forward, WEIGHT-ONLY: `y = (x-mean)/sqrt(var+eps) * gamma`, no
@@ -2797,8 +2805,8 @@ pub fn ln_stats_fwd(
     rows: u32,
     eps: f32,
 ) -> Step {
-    let (kind, threads) = ln_variant(g, k.ln_stats, k.ln_stats_rows, rows, d);
-    g.step(kind, &[x, mean, inv], &[d, rows, f(eps)], threads)
+    let (kind, grid) = ln_variant(g, k.ln_stats, k.ln_stats_rows, rows, d);
+    g.dispatch(kind, &[x, mean, inv], &[d, rows, f(eps)], grid)
 }
 
 /// LayerNorm backward w.r.t. `x` (mean/inv recomputed from `x`).
@@ -2813,8 +2821,8 @@ pub fn layernorm_dx_bwd(
     rows: u32,
     eps: f32,
 ) -> Step {
-    let (kind, threads) = ln_variant(g, k.layernorm_dx, k.layernorm_dx_rows, rows, d);
-    g.step(kind, &[x, gamma, dy, dx], &[d, rows, f(eps)], threads)
+    let (kind, grid) = ln_variant(g, k.layernorm_dx, k.layernorm_dx_rows, rows, d);
+    g.dispatch(kind, &[x, gamma, dy, dx], &[d, rows, f(eps)], grid)
 }
 
 /// Fallback per-binding budget (f32 words) for tiling an embedding / lm_head
@@ -3017,17 +3025,23 @@ pub fn gemm_tile(m: u32, n: u32, caps: &DeviceCaps) -> GemmTile {
     }
 }
 
-pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
+pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, gpu_core::Dispatch) {
     if force_naive {
-        return (naive, (m * n) as u32);
+        return (naive, gpu_core::Dispatch::Threads((m * n) as u32));
     }
     let shape = select::OpShape { m: m as u32, n: n as u32, k: 0, dtype: select::Dtype::F32 };
     let chosen = select::candidates(select::Op::MatMul, shape, &fast_tier_caps())
         .into_iter()
         .find(|v| *v != KernelVariant::WorkgroupPerOutput);
     match chosen {
-        Some(KernelVariant::RegisterTiled) => (reg2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32),
-        _ => (naive, (m * n) as u32),
+        // One workgroup per 128x128 output tile. Returned as a COUNT OF
+        // TILES rather than of threads: the register-tiled kernels are
+        // workgroup-cooperative, so multiplying by the workgroup size is the
+        // device's job, not each of this function's hundred-odd callers'.
+        Some(KernelVariant::RegisterTiled) => {
+            (reg2, gpu_core::Dispatch::Workgroups((m.div_ceil(128) * n.div_ceil(128)) as u32))
+        }
+        _ => (naive, gpu_core::Dispatch::Threads((m * n) as u32)),
     }
 }
 
@@ -3088,17 +3102,19 @@ pub enum GemmVariants {
 /// `WorkgroupPerOutput` AND the model registered a GEMV kernel; every other
 /// case (no GEMV registered, or `m` past the decode regime, regardless of `n`)
 /// uses `tiled`, exactly as before.
-pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
+pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
     match v {
-        GemmVariants::Reference(k) => (k, m * n),
+        GemmVariants::Reference(k) => (k, gpu_core::Dispatch::Threads(m * n)),
         GemmVariants::Fast { gemv, tiled } => {
             let shape = select::OpShape { m, n, k: 0, dtype: select::Dtype::F32 };
             let head = select::candidates(select::Op::MatMul, shape, &fast_tier_caps())
                 .into_iter()
                 .next();
             match (gemv, head) {
-                (Some(g), Some(KernelVariant::WorkgroupPerOutput)) => (g, n * 64),
-                _ => (tiled, m.div_ceil(128) * n.div_ceil(128) * 256),
+                // One workgroup per output column, and one per 128x128 output
+                // tile: both cooperative, both counted in their own unit.
+                (Some(g), Some(KernelVariant::WorkgroupPerOutput)) => (g, gpu_core::Dispatch::Workgroups(n)),
+                _ => (tiled, gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))),
             }
         }
     }
@@ -3130,10 +3146,13 @@ pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
 /// caller adopting the GEMV keeps its existing selection for every other
 /// shape, byte for byte, instead of also silently changing which kernel its
 /// non-decode shapes take.
-pub fn gemv_tier(g: &Gpu, m: u32, n: u32) -> Option<u32> {
+pub fn gemv_tier(g: &Gpu, m: u32, n: u32) -> Option<gpu_core::Dispatch> {
     let shape = select::OpShape { m, n, k: 0, dtype: select::Dtype::F32 };
     match select::candidates(select::Op::MatMul, shape, &g.caps()).into_iter().next() {
-        Some(KernelVariant::WorkgroupPerOutput) => Some(n * 64),
+        // One workgroup per output column, as the variant's name says. Given
+        // as a workgroup count rather than `n * 64` so the caller never
+        // restates the kernel's own workgroup size.
+        Some(KernelVariant::WorkgroupPerOutput) => Some(gpu_core::Dispatch::Workgroups(n)),
         _ => None,
     }
 }
@@ -3492,44 +3511,46 @@ mod tests {
         let (naive, reg2) = (2usize, 9usize);
         // Below GEMM_TILE_MIN_ROWS (8): naive, at the table's own m values.
         for m in [1usize, 2, 4, 7] {
-            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (naive, (m * 2560) as u32), "m={m}");
+            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (naive, gpu_core::Dispatch::Threads((m * 2560) as u32)), "m={m}");
         }
         // At and above it: the tile.
         for m in [8usize, 12, 32, 33, 77, 512] {
-            let want_threads = (m.div_ceil(128) * 2560usize.div_ceil(128) * 256) as u32;
-            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (reg2, want_threads), "m={m}");
+            let want_tiles = (m.div_ceil(128) * 2560usize.div_ceil(128)) as u32;
+            assert_eq!(pick_gemm(m, 2560, naive, reg2, false), (reg2, gpu_core::Dispatch::Workgroups(want_tiles)), "m={m}");
         }
         // A narrow n keeps the naive kernel even at a large m.
-        assert_eq!(pick_gemm(512, 64, naive, reg2, false), (naive, (512 * 64) as u32));
+        assert_eq!(pick_gemm(512, 64, naive, reg2, false), (naive, gpu_core::Dispatch::Threads((512 * 64) as u32)));
         // `force_naive` overrides the shape entirely.
-        assert_eq!(pick_gemm(512, 2560, naive, reg2, true), (naive, (512 * 2560) as u32));
+        assert_eq!(pick_gemm(512, 2560, naive, reg2, true), (naive, gpu_core::Dispatch::Threads((512 * 2560) as u32)));
     }
 
     /// Pins the three arms and, in particular, the `m <= 32` precondition the
     /// GEMV kernels state in their headers: violating it is silently wrong
     /// output, not a crash, so the bound belongs in the selector and nowhere
-    /// else. Thread counts are pinned too - they are the kernels' documented
-    /// dispatch geometry (one workgroup per output column; one 256-thread
-    /// workgroup per 128x128 output tile), not free parameters.
+    /// else. The dispatch UNIT is pinned too - one workgroup per output
+    /// column for the GEMV, one per 128x128 output tile for the register
+    /// tile, one thread per output element for the reference - because that
+    /// unit is the kernels' documented geometry, not a free parameter.
     #[test]
     fn gemm_variant_routes_skinny_m_to_the_gemv_kernel() {
+        use gpu_core::Dispatch::{Threads, Workgroups};
         let fast = GemmVariants::Fast { gemv: Some(7), tiled: 9 };
-        assert_eq!(gemm_variant(fast, 1, 3072), (7, 3072 * 64));
-        assert_eq!(gemm_variant(fast, 32, 3072), (7, 3072 * 64));
+        assert_eq!(gemm_variant(fast, 1, 3072), (7, Workgroups(3072)));
+        assert_eq!(gemm_variant(fast, 32, 3072), (7, Workgroups(3072)));
         // One row past the kernel's stated limit: the tile takes over.
-        assert_eq!(gemm_variant(fast, 33, 3072), (9, 24 * 256));
-        assert_eq!(gemm_variant(fast, 512, 3072), (9, 4 * 24 * 256));
+        assert_eq!(gemm_variant(fast, 33, 3072), (9, Workgroups(24)));
+        assert_eq!(gemm_variant(fast, 512, 3072), (9, Workgroups(4 * 24)));
 
         // A model that never registered the GEMV kernel keeps the tiled arm at
         // every M - this is what makes the migration of an existing user
         // provably behaviour-preserving before the kernel is added.
         let no_gemv = GemmVariants::Fast { gemv: None, tiled: 9 };
-        assert_eq!(gemm_variant(no_gemv, 1, 3072), (9, 24 * 256));
-        assert_eq!(gemm_variant(no_gemv, 512, 3072), (9, 4 * 24 * 256));
+        assert_eq!(gemm_variant(no_gemv, 1, 3072), (9, Workgroups(24)));
+        assert_eq!(gemm_variant(no_gemv, 512, 3072), (9, Workgroups(4 * 24)));
 
         // The reference tier ignores both fast kernels at every shape.
-        assert_eq!(gemm_variant(GemmVariants::Reference(2), 1, 3072), (2, 3072));
-        assert_eq!(gemm_variant(GemmVariants::Reference(2), 512, 3072), (2, 512 * 3072));
+        assert_eq!(gemm_variant(GemmVariants::Reference(2), 1, 3072), (2, Threads(3072)));
+        assert_eq!(gemm_variant(GemmVariants::Reference(2), 512, 3072), (2, Threads(512 * 3072)));
     }
 
     /// The tiling rule, against the budget rather than against a device - the

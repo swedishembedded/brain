@@ -876,7 +876,7 @@ fn fold_delta(w: &mut [f32], a: &[f32], b: &[f32], r: usize, inn: usize, scale: 
 /// `[out_features, in_features]`), no bias, weight read from `ps`.
 fn linear(g: &Gpu, ps: &ParamStore, x: &DeviceBuffer, weight_name: &str, out: &DeviceBuffer, m: usize, k: usize, n: usize) -> Step {
     let (kind, threads) = block::pick_gemm(m, n, K_MATMUL, K_MATMUL_REG3, false);
-    g.step(kind, &[x, ps.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
+    g.dispatch(kind, &[x, ps.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
 }
 
 /// The reference index is `rmsnorm_eps`, never the fixed-1e-6 `rmsnorm` - see
@@ -885,7 +885,7 @@ fn linear(g: &Gpu, ps: &ParamStore, x: &DeviceBuffer, weight_name: &str, out: &D
 fn rmsnorm_w(g: &Gpu, x: &DeviceBuffer, weight: &DeviceBuffer, out: &DeviceBuffer, dim: usize, rows: usize, eps: f32) -> Step {
     let coop = Some(K_RMSNORM_ROWS);
     let (kind, threads) = block::rms_variant(g, K_RMSNORM_EPS, coop, rows as u32, dim as u32);
-    g.step(kind, &[x, weight, out], &[dim as u32, rows as u32, f(eps)], threads)
+    g.dispatch(kind, &[x, weight, out], &[dim as u32, rows as u32, f(eps)], threads)
 }
 
 fn rmsnorm(g: &Gpu, ps: &ParamStore, x: &DeviceBuffer, weight_name: &str, out: &DeviceBuffer, dim: usize, rows: usize, eps: f32) -> Step {
@@ -913,9 +913,9 @@ fn attention(g: &Gpu, cfg: &Timesfm3Config, q: &DeviceBuffer, k: &DeviceBuffer, 
     let scores = g.storage((bsz * h * tcols * tcols) as u64);
     let (sk, st) = block::softmax_variant(g, K_ATTN_SOFTMAX_FULL, Some(K_SOFTMAX_ROWS), (bsz * h * tcols) as u32, tcols as u32);
     let softmax_step = if sk == K_SOFTMAX_ROWS {
-        g.step(sk, &[&scores, probs], &[(bsz * h * tcols) as u32, tcols as u32], st)
+        g.dispatch(sk, &[&scores, probs], &[(bsz * h * tcols) as u32, tcols as u32], st)
     } else {
-        g.step(sk, &[&scores, probs], &[bsz as u32, h as u32, tcols as u32], st)
+        g.dispatch(sk, &[&scores, probs], &[bsz as u32, h as u32, tcols as u32], st)
     };
     vec![
         g.step(

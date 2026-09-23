@@ -275,13 +275,13 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
         g.submit(&[], &[g.step(idx(&g, moe_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &gate, &out_moe], &params, (m * n) as u32)]);
         let got_moe = g.read(&out_moe, m * n);
 
-        let tile_threads = (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256;
+        let tile_wgs = (m as u32).div_ceil(128) * (n as u32).div_ceil(128);
         let out_dyn = g.storage((m * n) as u64);
-        g.submit(&[], &[g.step(idx(&g, dyn_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_dyn], &[m as u32, k as u32, n as u32], tile_threads)]);
+        g.submit(&[], &[g.dispatch(idx(&g, dyn_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_dyn], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(tile_wgs))]);
         let got_dyn = g.read(&out_dyn, m * n);
 
         let out_gemv = g.storage((m * n) as u64);
-        g.submit(&[], &[g.step(idx(&g, gemv_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64)]);
+        g.submit(&[], &[g.dispatch(idx(&g, gemv_name), &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out_gemv], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32))]);
         let got_gemv = g.read(&out_gemv, m * n);
 
         assert_matches_oracle(&format!("moe_linear_gated_kq vs oracle CODE_BITS={bits}"), &got_moe, &want);

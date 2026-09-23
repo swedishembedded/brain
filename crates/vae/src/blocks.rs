@@ -1532,7 +1532,7 @@ impl<'a> Builder<'a> {
         let w = self.dev(&w_name);
         let y = self.act((m as u64) * (n as u64));
         let (kind, threads) = model::block::pick_gemm(m as usize, n as usize, self.xf().matmul, self.xf().matmul_reg, false);
-        self.steps.push(self.gpu.step(kind, &[x, &w, &y], &[m, k, n], threads));
+        self.steps.push(self.gpu.dispatch(kind, &[x, &w, &y], &[m, k, n], threads));
         let b_name = bias.then(|| format!("{prefix}.bias"));
         if let Some(bn) = &b_name {
             let bb = self.dev(bn);

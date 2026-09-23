@@ -62,7 +62,7 @@ fn gemm_throughput_vs_batch_rows() {
             let m = b * 1536;
             let x = gpu.storage(m as u64 * k as u64);
             let o = gpu.storage(m as u64 * n as u64);
-            let step = gpu.step(k_mm, &[&x, &w, &o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256);
+            let step = gpu.dispatch(k_mm, &[&x, &w, &o], &[m, k, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)));
             let mut best = f64::INFINITY;
             for _ in 0..3 {
                 let t0 = std::time::Instant::now();

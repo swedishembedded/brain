@@ -343,7 +343,7 @@ pub fn expert_fwd_tiered(
         // address an expert's matrix inside a shared per-projection bank.
         if w_off == 0 {
             if let Some((kid, threads)) = linear_gated_gemv.zip(crate::block::gemv_tier(g, m, n)) {
-                return g.step(kid, &[x, w, gate, out], &[m, k, n, e, e_idx], threads);
+                return g.dispatch(kid, &[x, w, gate, out], &[m, k, n, e, e_idx], threads);
             }
         }
         g.step(ids.linear_gated, &[x, w, gate, out], &[m, k, n, e, e_idx, w_off], m * n)
@@ -932,9 +932,9 @@ pub fn shared_expert_fwd_tiered(
     let mm = |xin: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, k: u32, n: u32| {
         let (kid, threads) = match matmul_gemv.zip(crate::block::gemv_tier(g, rows, n)) {
             Some((kid, threads)) => (kid, threads),
-            None => (ids.matmul, rows * n),
+            None => (ids.matmul, gpu_core::Dispatch::Threads(rows * n)),
         };
-        g.step(kid, &[xin, w, o], &[rows, k, n], threads)
+        g.dispatch(kid, &[xin, w, o], &[rows, k, n], threads)
     };
     let mut steps = vec![
         mm(x, gate_w, scratch.gate_pre, d_model, shared_ff),
@@ -1194,7 +1194,7 @@ pub fn shared_expert_fwd_i8(
     out: &DeviceBuffer,
 ) -> Vec<Step> {
     let mm8 = |xq: &DeviceBuffer, sx: &DeviceBuffer, w: Lin8, out: &DeviceBuffer, kg: u32, n: u32| {
-        g.step(ids.matmul_i8, &[xq, w.wq, sx, w.sw, out], &[rows, kg, n], rows.div_ceil(128) * n.div_ceil(128) * 256)
+        g.dispatch(ids.matmul_i8, &[xq, w.wq, sx, w.sw, out], &[rows, kg, n], gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)))
     };
     let mut steps = vec![
         mm8(xq, sx, gate_w, scratch.gate_pre, d_model / 4, shared_ff),
@@ -1400,7 +1400,7 @@ pub fn expert_fwd_compact(
     g.write(&scratch.idx, &rows);
     let lin = |x_in: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
         let (kid, threads) = crate::block::pick_gemm(count as usize, n as usize, ids.gemm_naive, ids.gemm_tiled, false);
-        g.step(kid, &[x_in, w, out], &[count, k, n], threads)
+        g.dispatch(kid, &[x_in, w, out], &[count, k, n], threads)
     };
     let steps = vec![
         g.step(ids.gather, &[&scratch.idx, x, &scratch.x_compact], &[d, count], count * d),
@@ -1542,7 +1542,7 @@ pub fn expert_fwd_compact_layer(
         steps.push(g.step_sliced(ids.gather, &[&scratch.idx, x, &scratch.x_compact], &[idx_slice, full, full], &[d, count], count * d));
         let lin = |x_in: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32, steps: &mut Vec<Step>| {
             let (kid, threads) = crate::block::pick_gemm(count as usize, n as usize, ids.gemm_naive, ids.gemm_tiled, false);
-            steps.push(g.step(kid, &[x_in, w, out], &[count, k, n], threads));
+            steps.push(g.dispatch(kid, &[x_in, w, out], &[count, k, n], threads));
         };
         lin(&scratch.x_compact, gate_w, &scratch.gate_pre, d, ff, &mut steps);
         lin(&scratch.x_compact, up_w, &scratch.up, d, ff, &mut steps);

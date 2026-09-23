@@ -194,7 +194,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
 /// gated in `brain-gpu-core`'s `bench_matmul` and by `gradcheck` — so this only
 /// ever changes speed, never results. `BRAIN_GPT2_NAIVE_MM=1` forces the naive
 /// kernel (A/B comparison + a fallback if a driver ever mishandles the tile).
-fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
+fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
     // `matmul_reg3` (software-pipelined) is the default; `BRAIN_GPT2_REG1=1`
     // selects the non-pipelined `matmul_reg` for A/B comparison.
@@ -686,23 +686,23 @@ impl Gpt {
             // attention
             s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
             let (mk, mt) = linear_kernel(n as usize, (3 * d) as usize);
-            s.push(self.gpu.step(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
+            s.push(self.gpu.dispatch(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
             s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d], b_use * c.n_heads * t_use * t_use));
             s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
             s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
             let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(mk, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], mt));
+            s.push(self.gpu.dispatch(mk, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // MLP: fc -> GELU -> proj
             s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
             let (mk, mt) = linear_kernel(n as usize, ff as usize);
-            s.push(self.gpu.step(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
+            s.push(self.gpu.dispatch(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
             s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[n * ff], n * ff));
             let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(mk, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], mt));
+            s.push(self.gpu.dispatch(mk, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("mlp.proj.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
         }
@@ -714,7 +714,7 @@ impl Gpt {
         let last = c.n_layers as usize;
         s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
         let (mk, mt) = linear_kernel(n as usize, v as usize);
-        s.push(self.gpu.step(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
+        s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
     }

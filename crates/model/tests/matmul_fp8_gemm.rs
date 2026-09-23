@@ -151,7 +151,7 @@ fn check_fp8(kernel_name: &str, decode: fn(u8) -> f32, n: usize, k: usize, seed:
     let out = g.storage((m * n) as u64);
 
     let params = [m as u32, k as u32, n as u32, cb as u32];
-    let steps = [g.step(k_idx, &[&x, &wqb, &scaleb, &out], &params, n as u32 * 64)];
+    let steps = [g.dispatch(k_idx, &[&x, &wqb, &scaleb, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))];
     g.submit(&[], &steps);
     let got = g.read(&out, m * n);
 
@@ -226,8 +226,8 @@ fn f8e4m3_and_f8e5m2_kernels_diverge_on_the_same_bytes() {
     let cb = model::fp8::scale_shape(n, k, 128).1 as u32;
     let params = [m as u32, k as u32, n as u32, cb];
     let steps = [
-        g.step(k_e4, &[&x, &wqb, &scaleb, &out_e4], &params, n as u32 * 64),
-        g.step(k_e5, &[&x, &wqb, &scaleb, &out_e5], &params, n as u32 * 64),
+        g.dispatch(k_e4, &[&x, &wqb, &scaleb, &out_e4], &params, gpu_core::Dispatch::Workgroups(n as u32)),
+        g.dispatch(k_e5, &[&x, &wqb, &scaleb, &out_e5], &params, gpu_core::Dispatch::Workgroups(n as u32)),
     ];
     g.submit(&[], &steps);
     let got_e4 = g.read(&out_e4, m * n);

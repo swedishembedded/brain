@@ -590,7 +590,7 @@ fn gemm_bwd_mode(device: Option<&str>, reps: usize) {
             let rc = u64::from(n) * u64::from(k);
             let part = gpu.storage(rc * u64::from(slices));
             let st = [
-                gpu.step(ks, &[&dy, &x, &part], &[m, k, n, slices], slices * tiles * 256),
+                gpu.dispatch(ks, &[&dy, &x, &part], &[m, k, n, slices], gpu_core::Dispatch::Workgroups(slices * tiles)),
                 gpu.step(kr, &[&part, &dw], &[n * k, slices, 1], (n * k).div_ceil(64) * 64),
             ];
             row(&gpu, roofs, m, k, n, site, &format!("matmul_dw_reg_splitk s={slices}"), &st, flops, reps);
@@ -615,7 +615,7 @@ fn gemm_bwd_mode(device: Option<&str>, reps: usize) {
         let tiles = m.div_ceil(128) * n.div_ceil(128);
         println!("  (un-split tile grid: {tiles} workgroups)");
         if let Some(ki) = gpu.kernel_index("matmul_reg3") {
-            let st = [gpu.step(ki, &[&x, &w, &out], &[m, k, n], tiles * 256)];
+            let st = [gpu.dispatch(ki, &[&x, &w, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles))];
             row(&gpu, roofs, m, k, n, site, "matmul_reg3", &st, flops, reps);
         }
         let (Some(ks), Some(kr)) = (gpu.kernel_index("matmul_reg3_splitk"), gpu.kernel_index("dw_splitk_reduce")) else {
@@ -627,7 +627,7 @@ fn gemm_bwd_mode(device: Option<&str>, reps: usize) {
             }
             let part = gpu.storage(u64::from(m) * u64::from(n) * u64::from(slices));
             let st = [
-                gpu.step(ks, &[&x, &w, &part], &[m, k, n, slices], slices * tiles * 256),
+                gpu.dispatch(ks, &[&x, &w, &part], &[m, k, n, slices], gpu_core::Dispatch::Workgroups(slices * tiles)),
                 // acc = 0: a forward GEMM owns its output and ASSIGNS.
                 gpu.step(kr, &[&part, &out], &[m * n, slices, 0], (m * n).div_ceil(64) * 64),
             ];
@@ -699,7 +699,7 @@ fn oracle_bwd(gpu: &Gpu) {
         gpu.submit(
             &[],
             &[
-                gpu.step(ks, &[&dyb, &bb, &part], &[m, k, n, slices], slices * tiles * 256),
+                gpu.dispatch(ks, &[&dyb, &bb, &part], &[m, k, n, slices], gpu_core::Dispatch::Workgroups(slices * tiles)),
                 gpu.step(kr, &[&part, &out], &[n * k, slices, 1], (n * k).div_ceil(64) * 64),
             ],
         );

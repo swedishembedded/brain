@@ -190,8 +190,8 @@ impl I8Scratch {
 pub fn mm_rows_off(g: &Gpu, tier: GemmVariants, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
     let xo = (xr0 as u64 * k as u64, m as u64 * k as u64);
     let oo = (ooff, m as u64 * n as u64);
-    let (kind, threads) = gemm_variant(tier, m, n);
-    g.step_sliced(kind, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], threads)
+    let (kind, grid) = gemm_variant(tier, m, n);
+    g.dispatch_sliced(kind, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], grid)
 }
 
 /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
@@ -206,8 +206,8 @@ pub fn mm8_rows_off(g: &Gpu, i8_tier: GemmVariants, scr: &I8Scratch, wq: &Device
     let xo = (xr0 as u64 * kg, m as u64 * kg);
     let so = (xr0 as u64, m as u64);
     let oo = (ooff, m as u64 * n as u64);
-    let (kind, threads) = gemm_variant(i8_tier, m, n);
-    g.step_sliced(kind, &[scr.xq_for(k), wq, &scr.sx, sw, o], &[xo, (0, 0), so, (0, 0), oo], &[m, k / 4, n], threads)
+    let (kind, grid) = gemm_variant(i8_tier, m, n);
+    g.dispatch_sliced(kind, &[scr.xq_for(k), wq, &scr.sx, sw, o], &[xo, (0, 0), so, (0, 0), oo], &[m, k / 4, n], grid)
 }
 
 /// Int4 (q4, W4A8) DP4A matmul over pre-quantized rows `xr0..xr0+m` of the
@@ -250,10 +250,10 @@ pub fn mm4_rows_off(g: &Gpu, q4_tier: GemmVariants, scr: &I8Scratch, wq: &Device
     let xo = (xr0 as u64 * kg, m as u64 * kg);
     let so = (xr0 as u64, m as u64);
     let oo = (ooff, m as u64 * n as u64);
-    let (kind, tile_threads) = gemm_variant(q4_tier, m, n);
-    let threads = match q4_tier {
-        GemmVariants::Fast { tiled, .. } if kind == tiled => m * n,
-        _ => tile_threads,
+    let (kind, tile_grid) = gemm_variant(q4_tier, m, n);
+    let grid = match q4_tier {
+        GemmVariants::Fast { tiled, .. } if kind == tiled => gpu_core::Dispatch::Threads(m * n),
+        _ => tile_grid,
     };
-    g.step_sliced(kind, &[scr.xq_for(k), wq, &scr.sx, sw, o], &[xo, (0, 0), so, (0, 0), oo], &[m, k, n], threads)
+    g.dispatch_sliced(kind, &[scr.xq_for(k), wq, &scr.sx, sw, o], &[xo, (0, 0), so, (0, 0), oo], &[m, k, n], grid)
 }

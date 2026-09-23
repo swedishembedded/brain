@@ -95,7 +95,7 @@ fn dense_expert_step(
 ) {
     let lin = |x_in: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
         let (kid, threads) = pick_gemm(m as usize, n as usize, matmul, matmul_reg3, false);
-        g.step(kid, &[x_in, w, out], &[m, k, n], threads)
+        g.dispatch(kid, &[x_in, w, out], &[m, k, n], threads)
     };
     g.submit(
         &[],

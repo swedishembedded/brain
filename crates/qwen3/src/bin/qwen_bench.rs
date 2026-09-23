@@ -519,8 +519,8 @@ pub fn gemm8_ab(m: u32, k: u32, n: u32, reps: usize) {
     let swb = gpu.storage_init("sw", &sw);
     let out = gpu.storage((m * n) as u64);
 
-    let tiles = m.div_ceil(128) * n.div_ceil(128) * 256;
-    let st = vec![gpu.step(ki, &[&xb, &wb, &sxb, &swb, &out], &[m, kg, n], tiles)];
+    let tiles = m.div_ceil(128) * n.div_ceil(128);
+    let st = vec![gpu.dispatch(ki, &[&xb, &wb, &sxb, &swb, &out], &[m, kg, n], gpu_core::Dispatch::Workgroups(tiles))];
     let t = gpu_core::profile::best_of(&gpu, &st, reps);
     let got = gpu.read(&out, (m * n) as usize);
 

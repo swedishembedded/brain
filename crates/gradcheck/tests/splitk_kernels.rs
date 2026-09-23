@@ -120,7 +120,7 @@ fn dw_reg_and_tn_accumulate_the_exact_weight_gradient() {
 
     for (name, buf) in [("matmul_dw_reg", &a), ("matmul_dw_reg_tn", &at)] {
         let out = g.storage_init("dw", &prior);
-        g.submit(&[], &[g.step(idx(&g, name), &[buf, &b, &out], &[m as u32, k as u32, n as u32], (tiles * 256) as u32)]);
+        g.submit(&[], &[g.dispatch(idx(&g, name), &[buf, &b, &out], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(tiles as u32))]);
         g.poll_wait();
         let got = g.read(&out, n * k);
         assert_close(name, &got, &want, 1e-3);
@@ -155,7 +155,7 @@ fn dw_splitk_plus_reduce_matches_the_oracle_with_a_ragged_tail_slice() {
     g.submit(
         &[],
         &[
-            g.step(idx(&g, "matmul_dw_reg_splitk"), &[&a, &b, &part], &[m as u32, k as u32, n as u32, slices as u32], (slices * tiles * 256) as u32),
+            g.dispatch(idx(&g, "matmul_dw_reg_splitk"), &[&a, &b, &part], &[m as u32, k as u32, n as u32, slices as u32], gpu_core::Dispatch::Workgroups((slices * tiles) as u32)),
             g.step(idx(&g, "dw_splitk_reduce"), &[&part, &dw], &[rc as u32, slices as u32, 1], rc.div_ceil(64) as u32 * 64),
         ],
     );
@@ -191,7 +191,7 @@ fn fwd_splitk_plus_reduce_matches_the_oracle_and_assigns() {
     g.submit(
         &[],
         &[
-            g.step(idx(&g, "matmul_reg3_splitk"), &[&xb, &wb, &part], &[m as u32, k as u32, n as u32, slices as u32], (slices * tiles * 256) as u32),
+            g.dispatch(idx(&g, "matmul_reg3_splitk"), &[&xb, &wb, &part], &[m as u32, k as u32, n as u32, slices as u32], gpu_core::Dispatch::Workgroups((slices * tiles) as u32)),
             g.step(idx(&g, "dw_splitk_reduce"), &[&part, &out], &[mn as u32, slices as u32, 0], mn.div_ceil(64) as u32 * 64),
         ],
     );

@@ -147,7 +147,7 @@ fn gn_ab(reps: usize) {
         gpu.submit(&[], &[gpu.step(k_ser, &[&xb, &s_ser], &[1, c, h, w, g, eps], g)]);
         let s_wg = gpu.storage(2 * g as u64);
         if coop {
-            gpu.submit(&[], &[gpu.step(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], g * 256)]);
+            gpu.submit(&[], &[gpu.dispatch(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], gpu_core::Dispatch::Workgroups(g))]);
         }
         let part = gpu.storage(2 * g as u64 * P as u64);
         let s_2 = gpu.storage(2 * g as u64);
@@ -182,7 +182,7 @@ fn gn_ab(reps: usize) {
 
         let s_wg = gpu.storage(2 * g as u64);
         let t_wg = if coop {
-            best_of(&gpu, &[gpu.step(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], g * 256)], reps)
+            best_of(&gpu, &[gpu.dispatch(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], gpu_core::Dispatch::Workgroups(g))], reps)
         } else {
             f64::NAN
         };
@@ -363,7 +363,7 @@ fn dwtn_ab(reps: usize) {
             gpu.write_f32(&ab, a_host);
             gpu.write_f32(&xb, &x);
             gpu.write_f32(&ob, &vec![0.0f32; (n * k) as usize]); // it ACCUMULATES
-            gpu.submit(&[], &[gpu.step(ki, &[&ab, &xb, &ob], &[m, k, n], n.div_ceil(128) * k.div_ceil(128) * 256)]);
+            gpu.submit(&[], &[gpu.dispatch(ki, &[&ab, &xb, &ob], &[m, k, n], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * k.div_ceil(128)))]);
             gpu.poll_wait();
             let got = gpu.read(&ob, (n * k) as usize);
             let err = got.iter().zip(&want).map(|(a, b)| (*a as f64 - b).abs()).fold(0.0f64, f64::max);
@@ -382,7 +382,7 @@ fn dwtn_ab(reps: usize) {
             gpu.write_f32(&ob, &vec![0.0f32; (n * k) as usize]);
             let tiles = n.div_ceil(128) * k.div_ceil(128);
             gpu.submit(&[], &[
-                gpu.step(k_sk, &[&ab, &xb, &pb], &[m, k, n, slices], slices * tiles * 256),
+                gpu.dispatch(k_sk, &[&ab, &xb, &pb], &[m, k, n, slices], gpu_core::Dispatch::Workgroups(slices * tiles)),
                 gpu.step(k_rd, &[&pb, &ob], &[n * k, slices], (n * k).div_ceil(64) * 64),
             ]);
             gpu.poll_wait();
@@ -410,9 +410,9 @@ fn dwtn_ab(reps: usize) {
         let dy = gpu.storage((cout as u64) * hw); // [m,n] and [n,m] are the same size
         let col = gpu.storage(hw * cinkk);
         let dw = gpu.storage((cout as u64) * cinkk);
-        let threads = n.div_ceil(128) * kk.div_ceil(128) * 256;
-        let t_a = best_of(&gpu, &[gpu.step(k_dw, &[&dy, &col, &dw], &[m, kk, n], threads)], reps);
-        let t_b = best_of(&gpu, &[gpu.step(k_tn, &[&dy, &col, &dw], &[m, kk, n], threads)], reps);
+        let tiles = n.div_ceil(128) * kk.div_ceil(128);
+        let t_a = best_of(&gpu, &[gpu.dispatch(k_dw, &[&dy, &col, &dw], &[m, kk, n], gpu_core::Dispatch::Workgroups(tiles))], reps);
+        let t_b = best_of(&gpu, &[gpu.dispatch(k_tn, &[&dy, &col, &dw], &[m, kk, n], gpu_core::Dispatch::Workgroups(tiles))], reps);
         let tiles = n.div_ceil(128) * kk.div_ceil(128);
         // bytes: dY + col read, dW read-modify-write.
         let bytes = 4.0 * ((m as f64 * n as f64) + (m as f64 * kk as f64) + 2.0 * (n as f64 * kk as f64));
@@ -429,7 +429,7 @@ fn dwtn_ab(reps: usize) {
             }
             let pb = gpu.storage((slices as u64) * (n as u64) * (kk as u64));
             let t = best_of(&gpu, &[
-                gpu.step(k_sk, &[&dy, &col, &pb], &[m, kk, n, slices], slices * tiles * 256),
+                gpu.dispatch(k_sk, &[&dy, &col, &pb], &[m, kk, n, slices], gpu_core::Dispatch::Workgroups(slices * tiles)),
                 gpu.step(k_rd, &[&pb, &dw], &[n * kk, slices], (n * kk).div_ceil(64) * 64),
             ], reps);
             print!("  s={slices}:{:.1}", t * 1e3);

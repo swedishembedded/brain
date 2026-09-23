@@ -144,7 +144,7 @@ const M_GELU_ERF: usize = 12;
 /// bit-identical guarantee as `model::vit`'s block linears.
 fn patch_embed_step(g: &Gpu, naive: usize, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, n: u32, pv: u32, c: u32) -> Step {
     match g.kernel_index("matmul_reg3") {
-        Some(i) if n >= 128 && c >= 128 => g.step(i, &[x, w, out], &[n, pv, c], n.div_ceil(128) * c.div_ceil(128) * 256),
+        Some(i) if n >= 128 && c >= 128 => g.dispatch(i, &[x, w, out], &[n, pv, c], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * c.div_ceil(128))),
         _ => g.step(naive, &[x, w, out], &[n, pv, c], n * c),
     }
 }
@@ -585,7 +585,7 @@ impl PatchMerger {
         // one-thread-per-output `matmul` was what dispatched them.
         let reg = g.kernel_index("matmul_reg3");
         let gemm = |m: u32, kdim: u32, nn: u32, a: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer| match reg {
-            Some(i) if m >= 128 && nn >= 128 => g.step(i, &[a, wt, out], &[m, kdim, nn], m.div_ceil(128) * nn.div_ceil(128) * 256),
+            Some(i) if m >= 128 && nn >= 128 => g.dispatch(i, &[a, wt, out], &[m, kdim, nn], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * nn.div_ceil(128))),
             _ => g.step(M_MATMUL, &[a, wt, out], &[m, kdim, nn], m * nn),
         };
         let inp = g.storage_init("mrg.in", x);

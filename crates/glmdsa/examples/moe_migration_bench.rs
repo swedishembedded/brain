@@ -110,9 +110,9 @@ fn main() {
     let (k1, t1) = pick_gemm(SEQ_LEN as usize, MOE_FF as usize, matmul, matmul_reg3, false);
     let (k2, t2) = pick_gemm(SEQ_LEN as usize, D_MODEL as usize, matmul, matmul_reg3, false);
     let dense_steps = [
-        g.step(k1, &[&x_dense, &gate_w, &gate_pre_d], &[SEQ_LEN, D_MODEL, MOE_FF], t1),
-        g.step(k1, &[&x_dense, &up_w, &up_d], &[SEQ_LEN, D_MODEL, MOE_FF], t1),
-        g.step(k2, &[&up_d, &down_w, &out_d], &[SEQ_LEN, MOE_FF, D_MODEL], t2),
+        g.dispatch(k1, &[&x_dense, &gate_w, &gate_pre_d], &[SEQ_LEN, D_MODEL, MOE_FF], t1),
+        g.dispatch(k1, &[&x_dense, &up_w, &up_d], &[SEQ_LEN, D_MODEL, MOE_FF], t1),
+        g.dispatch(k2, &[&up_d, &down_w, &out_d], &[SEQ_LEN, MOE_FF, D_MODEL], t2),
     ];
     let dense_time = best_of(&g, &dense_steps);
 
@@ -136,9 +136,9 @@ fn main() {
     let (ck2, ct2) = pick_gemm(rows_per_expert as usize, D_MODEL as usize, matmul, matmul_reg3, false);
     let compact_steps = [
         g.step(embed, &[&idx_buf, &x_compact_src, &x_compact], &[D_MODEL, rows_per_expert], rows_per_expert * D_MODEL),
-        g.step(ck1, &[&x_compact, &gate_w, &gate_pre_c], &[rows_per_expert, D_MODEL, MOE_FF], ct1),
-        g.step(ck1, &[&x_compact, &up_w, &up_c], &[rows_per_expert, D_MODEL, MOE_FF], ct1),
-        g.step(ck2, &[&up_c, &down_w, &out_c], &[rows_per_expert, MOE_FF, D_MODEL], ct2),
+        g.dispatch(ck1, &[&x_compact, &gate_w, &gate_pre_c], &[rows_per_expert, D_MODEL, MOE_FF], ct1),
+        g.dispatch(ck1, &[&x_compact, &up_w, &up_c], &[rows_per_expert, D_MODEL, MOE_FF], ct1),
+        g.dispatch(ck2, &[&up_c, &down_w, &out_c], &[rows_per_expert, MOE_FF, D_MODEL], ct2),
         g.step(scatter, &[&idx_buf, &gate_dense_all, &out_c, &acc_c], &[rows_per_expert, D_MODEL, 1, 0, 0], rows_per_expert * D_MODEL),
     ];
     let compact_time = best_of(&g, &compact_steps);

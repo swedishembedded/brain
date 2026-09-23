@@ -621,7 +621,7 @@ pub(crate) fn build_block_steps(
     // matmul (native AVX2 fast path; the JIT can't compile reg_gemm's barrier).
     let mm = |x: &DeviceBuffer, wt: &DeviceBuffer, o: &DeviceBuffer, m: u32, kk: u32, n: u32| {
         if reg_gemm {
-            gpu.step(K_MATMUL_REG3, &[x, wt, o], &[m, kk, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+            gpu.dispatch(K_MATMUL_REG3, &[x, wt, o], &[m, kk, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)))
         } else {
             gpu.step(K_MATMUL, &[x, wt, o], &[m, kk, n], m * n)
         }
@@ -822,7 +822,7 @@ pub(crate) fn build_block_steps_i8(
     };
     // out = dequant(xq @ wᵀ): dynamic activation scale i8.sx × per-channel wp.1.
     let mm8 = |s: &mut Vec<Step>, xq: &DeviceBuffer, wp: &(DeviceBuffer, DeviceBuffer), o: &DeviceBuffer, k: u32, n: u32| {
-        s.push(gpu.step(K_MATMUL_I8, &[xq, &wp.0, &i8.sx, &wp.1, o], &[t, k / 4, n], t.div_ceil(128) * n.div_ceil(128) * 256));
+        s.push(gpu.dispatch(K_MATMUL_I8, &[xq, &wp.0, &i8.sx, &wp.1, o], &[t, k / 4, n], gpu_core::Dispatch::Workgroups(t.div_ceil(128) * n.div_ceil(128))));
     };
 
     // attention

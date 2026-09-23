@@ -146,7 +146,7 @@ fn matmul_q4_gemv_matches_fp32_oracle_and_matches_dyn() {
     let out_gemv = g.storage((m * n) as u64);
     let out_dyn = g.storage((m * n) as u64);
     let steps = [
-        g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64),
+        g.dispatch(k_gemv, &[&xq, &wqb, &sx, &swb, &out_gemv], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32)),
         g.step(k_dyn, &[&xq, &wqb, &sx, &swb, &out_dyn], &[m as u32, k as u32, n as u32], (m * n) as u32),
     ];
     g.submit(&[], &steps);
@@ -203,8 +203,8 @@ fn matmul_q4_gemv_reg_is_byte_identical_to_gemv_across_the_mreg_ladder() {
         let out_gemv = g.storage((m * n) as u64);
         let out_reg = g.storage((m * n) as u64);
         let steps = [
-            g.step(k_gemv, &[&xq, &wqb, &sx, &swb, &out_gemv], &[m as u32, k as u32, n as u32], n as u32 * 64),
-            g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], n as u32 * 64),
+            g.dispatch(k_gemv, &[&xq, &wqb, &sx, &swb, &out_gemv], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32)),
+            g.dispatch(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(n as u32)),
         ];
         g.submit(&[], &steps);
         let got_gemv = g.read(&out_gemv, m * n);
@@ -247,10 +247,10 @@ fn matmul_q4_dyn_reg_matches_fp32_oracle_and_is_bit_identical_to_dyn() {
 
         let out_dyn = g.storage((m * n) as u64);
         let out_reg = g.storage((m * n) as u64);
-        let tile_threads = (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256;
+        let tile_wgs = (m as u32).div_ceil(128) * (n as u32).div_ceil(128);
         let steps = [
             g.step(k_dyn, &[&xq, &wqb, &sx, &swb, &out_dyn], &[m as u32, k as u32, n as u32], (m * n) as u32),
-            g.step(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], tile_threads),
+            g.dispatch(k_reg, &[&xq, &wqb, &sx, &swb, &out_reg], &[m as u32, k as u32, n as u32], gpu_core::Dispatch::Workgroups(tile_wgs)),
         ];
         g.submit(&[], &steps);
         let got_dyn = g.read(&out_dyn, m * n);

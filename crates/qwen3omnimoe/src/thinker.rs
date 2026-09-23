@@ -411,7 +411,7 @@ pub fn lm_head_fwd_i8(g: &Gpu, ids: &LmHeadIds8, lm_head_w: model::moe::Lin8, hi
     let sx = g.storage(n as u64);
     let mut steps = quant_rows_steps(g, QuantRows { kernels: ids.quant, x: hidden, sx: &sx, xq: &xq, xgs: None }, 0, n, d).to_vec();
     let out = g.storage((n * vocab) as u64);
-    steps.push(g.step(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], n.div_ceil(128) * vocab.div_ceil(128) * 256));
+    steps.push(g.dispatch(ids.matmul_i8, &[&xq, lm_head_w.wq, &sx, lm_head_w.sw, &out], &[n, d / 4, vocab], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * vocab.div_ceil(128))));
     g.submit(&[], &steps);
     out
 }

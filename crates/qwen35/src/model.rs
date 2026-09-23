@@ -458,7 +458,7 @@ const RMS_EPS: f32 = 1e-6;
 /// bit-identity.
 pub fn rms_step(g: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
     let (kind, threads) = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
-    g.step(kind, &[x, w, out], &[dim, rows, f(RMS_EPS)], threads)
+    g.dispatch(kind, &[x, w, out], &[dim, rows, f(RMS_EPS)], threads)
 }
 
 pub(crate) fn kernel_ids() -> KernelIds {

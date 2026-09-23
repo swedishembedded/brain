@@ -1008,7 +1008,7 @@ impl DeepseekV2 {
             Some(threads) => (MATMUL_GEMV, threads),
             None => block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, false),
         };
-        s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
+        s.push(self.gpu.dispatch(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
 
     /// Backward of `y = x·Wᵀ`: weight grad (when trainable) then input grad into

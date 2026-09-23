@@ -425,7 +425,7 @@ impl BlockDev {
     /// `y = x·Wᵀ + b` through the shared training-shaped GEMM selection rule.
     fn linear(&self, s: &mut Vec<Step>, x: &str, w: &str, bias: &str, y: &str, m: usize, k: usize, n: usize) {
         let (kind, threads) = model::block::pick_gemm(m, n, K_MM, K_MM_REG, false);
-        s.push(self.gpu.step(kind, &[self.g(x), self.g(w), self.g(y)], &[m as u32, k as u32, n as u32], threads));
+        s.push(self.gpu.dispatch(kind, &[self.g(x), self.g(w), self.g(y)], &[m as u32, k as u32, n as u32], threads));
         s.push(self.gpu.step(K_BIAS_ADD, &[self.g(y), self.g(bias)], &[m as u32, n as u32], (m * n) as u32));
     }
 
@@ -434,9 +434,9 @@ impl BlockDev {
     fn linear_bwd(&self, s: &mut Vec<Step>, dy: &str, x: &str, w: &str, gw: &str, gb: &str, dx: &str, m: usize, k: usize, n: usize) {
         s.push(self.gpu.step(K_BIAS_GRAD, &[self.g(dy), self.g(gb)], &[m as u32, n as u32], n as u32));
         let (dwk, dwt) = model::block::pick_gemm(n, k, K_MM_DW, K_MM_DW_REG, false);
-        s.push(self.gpu.step(dwk, &[self.g(dy), self.g(x), self.g(gw)], &[m as u32, k as u32, n as u32], dwt));
+        s.push(self.gpu.dispatch(dwk, &[self.g(dy), self.g(x), self.g(gw)], &[m as u32, k as u32, n as u32], dwt));
         let (dxk, dxt) = model::block::pick_gemm(m, k, K_MM_DX, K_MM_DX_REG, false);
-        s.push(self.gpu.step(dxk, &[self.g(dy), self.g(w), self.g(dx)], &[m as u32, k as u32, n as u32, 0], dxt));
+        s.push(self.gpu.dispatch(dxk, &[self.g(dy), self.g(w), self.g(dx)], &[m as u32, k as u32, n as u32, 0], dxt));
     }
 
     fn ln_fwd(&self, x: &str, gamma: &str, beta: &str, out: &str, rows: usize) -> Step {
@@ -447,7 +447,7 @@ impl BlockDev {
     /// head split, so a per-head inverse would be a different function.
     fn rms_fwd(&self, x: &str, w: &str, out: &str, rows: usize) -> Step {
         let (kind, threads) = model::block::rms_variant(&self.gpu, K_RMS, Some(K_RMS_ROWS), rows as u32, self.dim as u32);
-        self.gpu.step(kind, &[self.g(x), self.g(w), self.g(out)], &[self.dim as u32, rows as u32, f(self.eps)], threads)
+        self.gpu.dispatch(kind, &[self.g(x), self.g(w), self.g(out)], &[self.dim as u32, rows as u32, f(self.eps)], threads)
     }
 
     fn rms_bwd(&self, s: &mut Vec<Step>, x: &str, w: &str, dy: &str, dx: &str, inv: &str, gw: &str, rows: usize) {
@@ -487,7 +487,7 @@ impl BlockDev {
         let (nq, nk) = (nq as u32, nk as u32);
         s.push(self.gpu.step(K_SCORES, &[self.g(q), self.g(k), self.g(scores)], &[1, nh, nq, nk, hd, dim, dim, 0, 0], nh * nq * nk));
         if self.gpu.caps().workgroup_reductions {
-            s.push(self.gpu.step(K_SOFTMAX_ROWS, &[self.g(scores), self.g(probs)], &[nh * nq, nk], nh * nq * 64));
+            s.push(self.gpu.dispatch(K_SOFTMAX_ROWS, &[self.g(scores), self.g(probs)], &[nh * nq, nk], gpu_core::Dispatch::Workgroups(nh * nq)));
         } else {
             s.push(self.gpu.step(K_SOFTMAX, &[self.g(scores), self.g(probs)], &[1, nh, nq, nk], nh * nq));
         }
@@ -669,7 +669,7 @@ impl BlockDev {
             let (out, inn) = target_dims(name, self.dim, self.ffn);
             let d = if name.starts_with("ff") { &l.dff } else { &l.dsq };
             let (kind, threads) = model::block::pick_gemm(out, inn, K_MM, K_MM_REG, false);
-            s.push(self.gpu.step(kind, &[&l.bs[name], &l.at[name], d], &[out as u32, l.r as u32, inn as u32], threads));
+            s.push(self.gpu.dispatch(kind, &[&l.bs[name], &l.at[name], d], &[out as u32, l.r as u32, inn as u32], threads));
             let n = (out * inn) as u32;
             s.push(self.gpu.step(K_ADD2, &[self.wsl(name), d, &l.eff[name]], &[n], n));
         }
@@ -686,9 +686,9 @@ impl BlockDev {
             let (out, inn) = target_dims(name, self.dim, self.ffn);
             let dw = self.wsl(&format!("g_{name}"));
             let (kb, tb) = model::block::pick_gemm(out, l.r, K_MM, K_MM_REG, false);
-            s.push(self.gpu.step(kb, &[dw, &l.a[name], &l.gb[name]], &[out as u32, inn as u32, l.r as u32], tb));
+            s.push(self.gpu.dispatch(kb, &[dw, &l.a[name], &l.gb[name]], &[out as u32, inn as u32, l.r as u32], tb));
             let (ka, ta) = model::block::pick_gemm(l.r, inn, K_MM_DW, K_MM_DW_REG, false);
-            s.push(self.gpu.step(ka, &[&l.bs[name], dw, &l.ga[name]], &[out as u32, inn as u32, l.r as u32], ta));
+            s.push(self.gpu.dispatch(ka, &[&l.bs[name], dw, &l.ga[name]], &[out as u32, inn as u32, l.r as u32], ta));
         }
         s
     }

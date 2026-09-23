@@ -28,6 +28,83 @@ pub use backend_api::{
 };
 pub use backend_api::select;
 
+/// How a kernel's threads map onto the work it is given.
+///
+/// Read off the WGSL itself rather than declared by hand: `@workgroup_size`
+/// is in every shader, and a kernel that calls `workgroupBarrier` is one
+/// whose threads COOPERATE on a single item - a row, a tile - so its
+/// dispatch has to be counted in workgroups, not in threads.
+///
+/// That distinction used to live only in prose in each shader's header,
+/// which left every one of several thousand dispatch sites to re-derive
+/// it. A site that got it wrong dispatched too few workgroups, the kernel
+/// wrote part of its output, and nothing anywhere could notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KernelGrid {
+    /// Threads per workgroup: the product of every `@workgroup_size` axis.
+    pub wg_size: u32,
+    /// Whether the threads of one workgroup cooperate on one item.
+    pub cooperative: bool,
+}
+
+/// What a caller is counting when it dispatches.
+///
+/// The caller states the UNIT and the device does the arithmetic, so
+/// multiplying an item count by a workgroup size - the step that goes
+/// wrong silently - is no longer the caller's to perform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dispatch {
+    /// One thread per item: `n` threads are dispatched.
+    Threads(u32),
+    /// One WORKGROUP per item: `n * wg_size` threads are dispatched.
+    Workgroups(u32),
+}
+
+static KERNEL_GRIDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, KernelGrid>>> =
+    std::sync::OnceLock::new();
+
+fn grid_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, KernelGrid>> {
+    KERNEL_GRIDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Parse a shader's thread mapping out of its own source.
+pub fn parse_kernel_grid(src: &str) -> KernelGrid {
+    let mut wg_size = 1u32;
+    if let Some(i) = src.find("@workgroup_size(") {
+        let rest = &src[i + "@workgroup_size(".len()..];
+        if let Some(j) = rest.find(')') {
+            for part in rest[..j].split(',') {
+                let d: u32 = part.trim().parse().unwrap_or(1);
+                wg_size = wg_size.saturating_mul(d.max(1));
+            }
+        }
+    }
+    // `var<workgroup>` alone would over-report: a kernel can use scratch
+    // without its threads sharing an item. A barrier means they do.
+    let cooperative = src.contains("workgroupBarrier");
+    KernelGrid { wg_size: wg_size.max(1), cooperative }
+}
+
+/// Record each kernel's thread mapping under its name.
+///
+/// Keyed by name because every constructor funnels through
+/// [`Gpu::expanded`] while the handle keeps only names. A name arriving
+/// twice with different sources keeps the first reading rather than
+/// flipping between them.
+pub(crate) fn register_kernel_grids(kernels: &[(&str, &str)]) {
+    let mut reg = grid_registry().lock().unwrap_or_else(|e| e.into_inner());
+    for (name, src) in kernels {
+        reg.entry(name.to_string()).or_insert_with(|| parse_kernel_grid(src));
+    }
+}
+
+/// The recorded mapping for a kernel name, if one was ever registered.
+pub fn kernel_grid(name: &str) -> Option<KernelGrid> {
+    grid_registry().lock().unwrap_or_else(|e| e.into_inner()).get(name).copied()
+}
+
+
+
 /// Per-kernel FLOP/int-OPS/bytes formulas + step-list accounting (offline
 /// `Gpu::cost_of`, online `Gpu::ops_counters`).
 pub mod cost;
@@ -510,10 +587,15 @@ mod native_facade {
         /// about) - it can never dispatch them, since it reports
         /// `workgroup_reductions: false`.
         fn expanded<'a>(kernels: &'a [(&'a str, &'a str)], cpu_jit: bool) -> std::borrow::Cow<'a, [(&'a str, &'a str)]> {
-            match crate::upgrade::expand(kernels, cpu_jit) {
+            let out = match crate::upgrade::expand(kernels, cpu_jit) {
                 Some(v) => std::borrow::Cow::Owned(v),
                 None => std::borrow::Cow::Borrowed(kernels),
-            }
+            };
+            // Every constructor funnels through here, and this is the only
+            // place a handle ever sees kernel SOURCE. Read each one's thread
+            // mapping now, so `dispatch` can check it later from a name.
+            crate::register_kernel_grids(&out);
+            out
         }
         /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
         /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
@@ -1182,7 +1264,66 @@ mod native_facade {
         /// exactly that), and an appended pipeline slot would index past the end
         /// of it. Which kernel physically ran is the backend's record -
         /// `BRAIN_PROFILE=1` names the real pipeline.
+        /// Dispatch, with the caller stating what it is counting.
+        ///
+        /// Prefer this to [`Gpu::step`] everywhere; for a cooperative kernel
+        /// it is the only correct entry point, and [`Gpu::step`] refuses
+        /// those outright.
+        pub fn dispatch(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], grid: crate::Dispatch) -> Step {
+            let threads = match grid {
+                crate::Dispatch::Threads(n) => n,
+                crate::Dispatch::Workgroups(n) => {
+                    n.saturating_mul(self.kernel_grid_at(kind).map(|g| g.wg_size).unwrap_or(1))
+                }
+            };
+            self.step_unchecked(kind, bufs, params, threads)
+        }
+
+        /// [`Gpu::dispatch`] for a kernel reading bound sub-ranges.
+        pub fn dispatch_sliced(
+            &self,
+            kind: usize,
+            bufs: &[&DeviceBuffer],
+            offsets: &[(u64, u64)],
+            params: &[u32],
+            grid: crate::Dispatch,
+        ) -> Step {
+            let threads = match grid {
+                crate::Dispatch::Threads(n) => n,
+                crate::Dispatch::Workgroups(n) => {
+                    n.saturating_mul(self.kernel_grid_at(kind).map(|g| g.wg_size).unwrap_or(1))
+                }
+            };
+            self.step_sliced(kind, bufs, offsets, params, threads)
+        }
+
+        /// This handle's thread mapping for kernel slot `kind`.
+        pub fn kernel_grid_at(&self, kind: usize) -> Option<crate::KernelGrid> {
+            self.names.get(kind).and_then(|n| crate::kernel_grid(n))
+        }
+
+        /// Dispatch a raw thread count.
+        ///
+        /// REFUSES workgroup-cooperative kernels. Their threads share one
+        /// item, so passing an item count here dispatches `items / wg_size`
+        /// workgroups and leaves most of the output unwritten - a defect with
+        /// no symptom at the call site, and none in any loss either, because
+        /// training reads those buffers through a different kernel.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            if let Some(g) = self.kernel_grid_at(kind) {
+                assert!(
+                    !g.cooperative,
+                    "kernel '{}' is workgroup-cooperative ({} threads per workgroup share one item), \
+                     so a raw thread count cannot describe its dispatch. Use \
+                     dispatch(kind, bufs, params, Dispatch::Workgroups(items)).",
+                    self.names.get(kind).map(String::as_str).unwrap_or("?"),
+                    g.wg_size
+                );
+            }
+            self.step_unchecked(kind, bufs, params, threads)
+        }
+
+        fn step_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
             // See `enable_step_cache`: OFF is one relaxed load, and a hit
             // returns the dispatch the miss below would have built. The lock

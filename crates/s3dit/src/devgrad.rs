@@ -234,7 +234,7 @@ impl BlockDev {
     fn fwd_steps(&self, t: usize) -> Vec<Step> {
         let (dim, nh, hd, hidden, half) = (self.dim, self.nh, self.hd, self.hidden, self.half);
         let g = |n: &str| self.g(n);
-        let mm = |a: &str, wt: &str, o: &str, m: usize, kk: usize, n: usize| self.gpu.step(K_MM, &[g(a), g(wt), g(o)], &[m as u32, kk as u32, n as u32], d128(m) * d128(n) * 256);
+        let mm = |a: &str, wt: &str, o: &str, m: usize, kk: usize, n: usize| self.gpu.dispatch(K_MM, &[g(a), g(wt), g(o)], &[m as u32, kk as u32, n as u32], gpu_core::Dispatch::Workgroups(d128(m) * d128(n)));
         let rms = |x: &str, wt: &str, o: &str, dm: usize, rows: usize| self.gpu.step(K_RMS, &[g(x), g(wt), g(o)], &[dm as u32, rows as u32, f(EPS)], rows as u32);
         let td = t * dim;
         let ap = [1u32, nh as u32, t as u32, hd as u32, (3 * dim) as u32];
@@ -270,8 +270,8 @@ impl BlockDev {
         let g = |n: &str| self.g(n);
         let td = t * dim;
         let th = t * hidden;
-        let lin_dx = |dy: &str, wt: &str, dx: &str, inp: usize, out: usize| self.gpu.step(K_DX, &[g(dy), g(wt), g(dx)], &[t as u32, inp as u32, out as u32, 0], d128(t) * d128(inp) * 256);
-        let lin_dw = |dy: &str, xin: &str, dw: &str, inp: usize, out: usize| self.gpu.step(K_DW, &[g(dy), g(xin), g(dw)], &[t as u32, inp as u32, out as u32], d128(out) * d128(inp) * 256);
+        let lin_dx = |dy: &str, wt: &str, dx: &str, inp: usize, out: usize| self.gpu.dispatch(K_DX, &[g(dy), g(wt), g(dx)], &[t as u32, inp as u32, out as u32, 0], gpu_core::Dispatch::Workgroups(d128(t) * d128(inp)));
+        let lin_dw = |dy: &str, xin: &str, dw: &str, inp: usize, out: usize| self.gpu.dispatch(K_DW, &[g(dy), g(xin), g(dw)], &[t as u32, inp as u32, out as u32], gpu_core::Dispatch::Workgroups(d128(out) * d128(inp)));
         let rinv = |x: &str, inv: &str, dm: usize, rows: usize| self.gpu.step(K_RINV, &[g(x), g(inv)], &[dm as u32, rows as u32, f(EPS)], rows as u32);
         let rdw = |dy: &str, x: &str, inv: &str, dw: &str, dm: usize, rows: usize| self.gpu.step(K_RDW, &[g(dy), g(x), g(inv), g(dw)], &[dm as u32, rows as u32], dm as u32);
         let rdx = |x: &str, wt: &str, dy: &str, dx: &str, dm: usize, rows: usize| self.gpu.step(K_RDX, &[g(x), g(wt), g(dy), g(dx)], &[dm as u32, rows as u32, f(EPS)], rows as u32);

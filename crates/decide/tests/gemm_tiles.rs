@@ -49,8 +49,8 @@ fn the_two_tilings_compute_the_same_matmul() {
         gpu.submit(
             &[],
             &[
-                gpu.step(k.matmul_reg3, &[&x, &w, &a], &[m, kk, n], m.div_ceil(128) * n.div_ceil(128) * 256),
-                gpu.step(k.matmul_reg3_64, &[&x, &w, &b], &[m, kk, n], m.div_ceil(64) * n.div_ceil(64) * 256),
+                gpu.dispatch(k.matmul_reg3, &[&x, &w, &a], &[m, kk, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))),
+                gpu.dispatch(k.matmul_reg3_64, &[&x, &w, &b], &[m, kk, n], gpu_core::Dispatch::Workgroups(m.div_ceil(64) * n.div_ceil(64))),
             ],
         );
         gpu.poll_wait();

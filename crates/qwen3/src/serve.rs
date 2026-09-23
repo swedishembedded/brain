@@ -1418,7 +1418,7 @@ impl Engine {
     /// the shape is in that regime. Same contract, same result.
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         let (kind, threads) = block::gemm_variant(self.gemm_tier(), m, n);
-        self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+        self.gpu.dispatch(kind, &[x, w, out], &[m, k, n], threads)
     }
 
     /// Whether a `[n, k]` fp32 weight fits ONE storage binding on this device.
@@ -1483,7 +1483,7 @@ impl Engine {
             // kernel exists), so it is ONE dispatch, no fold.
             Some(sched) if sched.tile == TileShape::Narrow64 => {
                 let tiles64 = m.div_ceil(64) * n.div_ceil(64);
-                s.push(self.gpu.step(MATMUL_REG3_64, &[x, w, out], &[m, k, n], tiles64 * 256));
+                s.push(self.gpu.dispatch(MATMUL_REG3_64, &[x, w, out], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles64)));
             }
             Some(sched) => {
                 let tiles = m.div_ceil(128) * n.div_ceil(128);
@@ -1831,11 +1831,11 @@ impl Engine {
             match s.tile {
                 TileShape::Narrow64 => {
                     let tiles64 = m.div_ceil(64) * n.div_ceil(64);
-                    vec![gpu.step(MATMUL_REG3_64, &[x, w, &out], &[m, k, n], tiles64 * 256)]
+                    vec![gpu.dispatch(MATMUL_REG3_64, &[x, w, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles64))]
                 }
-                TileShape::Wide128 if s.split_k <= 1 => vec![gpu.step(MATMUL_REG3, &[x, w, &out], &[m, k, n], tiles * 256)],
+                TileShape::Wide128 if s.split_k <= 1 => vec![gpu.dispatch(MATMUL_REG3, &[x, w, &out], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles))],
                 TileShape::Wide128 => vec![
-                    gpu.step(MATMUL_REG3_SPLITK, &[x, w, part], &[m, k, n, s.split_k], s.split_k * tiles * 256),
+                    gpu.dispatch(MATMUL_REG3_SPLITK, &[x, w, part], &[m, k, n, s.split_k], gpu_core::Dispatch::Workgroups(s.split_k * tiles)),
                     gpu.step(SPLITK_REDUCE, &[part, &out], &[m * n, s.split_k, 0], (m * n).div_ceil(64) * 64),
                 ],
             }
@@ -1857,7 +1857,7 @@ impl Engine {
         let g = &self.gpu;
         let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
         match self.selector.select(Op::RmsNorm, shape, &self.caps) {
-            KernelVariant::WorkgroupPerOutput => g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], rows * 64),
+            KernelVariant::WorkgroupPerOutput => g.dispatch(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)),
             _ => g.step(RMSNORM, &[x, w, out], &[d, rows], rows),
         }
     }
@@ -2212,7 +2212,7 @@ impl Engine {
                     // `caps.workgroup_reductions` check - this engine registers
                     // both kernels unconditionally, so `coop` is always `Some`.
                     let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
-                    s.push(g.step(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
+                    s.push(g.dispatch(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
                     s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                     s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
                 }
@@ -4429,9 +4429,9 @@ mod tests {
             let w = g.storage((n * k) as u64);
             let part = g.storage((SPLITK_MAX_SLICES * m * n) as u64); // unused by either candidate here, kept for a uniform call shape
             let tiles128 = m.div_ceil(128) * n.div_ceil(128);
-            let wide_steps = [g.step(MATMUL_REG3, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], tiles128 * 256)];
+            let wide_steps = [g.dispatch(MATMUL_REG3, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles128))];
             let tiles64 = m.div_ceil(64) * n.div_ceil(64);
-            let narrow_steps = [g.step(MATMUL_REG3_64, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], tiles64 * 256)];
+            let narrow_steps = [g.dispatch(MATMUL_REG3_64, &[&x, &w, &g.storage((m * n) as u64)], &[m, k, n], gpu_core::Dispatch::Workgroups(tiles64))];
             ramp(&wide_steps, std::time::Duration::from_secs(2));
             ramp(&narrow_steps, std::time::Duration::from_secs(2));
             let best_of_5 = |s: Schedule| -> f64 {

@@ -161,7 +161,7 @@ fn gemm_ids() -> crate::dit::GemmIds {
 /// bit-identical there by construction.
 fn dx_step(gpu: &Gpu, dy: &DeviceBuffer, w: &DeviceBuffer, dx: &DeviceBuffer, m: u32, k: u32, n: u32, accumulate: u32) -> gpu_core::Step {
     let (kind, threads) = block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, false);
-    gpu.step(kind, &[dy, w, dx], &[m, k, n, accumulate], threads)
+    gpu.dispatch(kind, &[dy, w, dx], &[m, k, n, accumulate], threads)
 }
 
 /// `dW[n,k] += dY[m,n] . X[m,k]`. ACCUMULATES - both variants do, which is the
@@ -170,7 +170,7 @@ fn dx_step(gpu: &Gpu, dy: &DeviceBuffer, w: &DeviceBuffer, dx: &DeviceBuffer, m:
 /// see [`dx_step`].
 fn dw_step(gpu: &Gpu, dy: &DeviceBuffer, x: &DeviceBuffer, dw: &DeviceBuffer, m: u32, k: u32, n: u32) -> gpu_core::Step {
     let (kind, threads) = block::pick_gemm(n as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, false);
-    gpu.step(kind, &[dy, x, dw], &[m, k, n], threads)
+    gpu.dispatch(kind, &[dy, x, dw], &[m, k, n], threads)
 }
 
 fn ln_ids() -> LayerNormIds {

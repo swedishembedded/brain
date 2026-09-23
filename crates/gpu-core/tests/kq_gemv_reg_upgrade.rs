@@ -141,7 +141,7 @@ fn run(g: &Gpu, name: &str, m: usize, k: usize, n: usize, bits: u32, seed: u64) 
 
     let idx = g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"));
     let params = [m as u32, k as u32, n as u32];
-    g.submit(&[], &[g.step(idx, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &params, n as u32 * 64)]);
+    g.submit(&[], &[g.dispatch(idx, &[&xq, &wq, &sxb, &wsm, &wd, &xgs, &out], &params, gpu_core::Dispatch::Workgroups(n as u32))]);
     g.poll_wait();
     g.read(&out, m * n)
 }

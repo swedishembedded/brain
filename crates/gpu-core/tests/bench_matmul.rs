@@ -402,7 +402,7 @@ fn bench_matmul_quant() {
         kind: usize,
         in_bufs: &[&gpu_core::DeviceBuffer],
         params: &[u32],
-        threads: u32,
+        grid: gpu_core::Dispatch,
         out: &gpu_core::DeviceBuffer,
         out_len: usize,
         reps: usize,
@@ -413,13 +413,13 @@ fn bench_matmul_quant() {
         // mismatch, not a compile error.
         let mut bufs: Vec<&gpu_core::DeviceBuffer> = in_bufs.to_vec();
         bufs.push(out);
-        let s = gpu.step(kind, &bufs, params, threads);
+        let s = gpu.dispatch(kind, &bufs, params, grid);
         gpu.submit(&[], &[s]);
         gpu.poll_wait();
         let mut best = f64::INFINITY;
         for _ in 0..reps {
             let t0 = std::time::Instant::now();
-            let s = gpu.step(kind, &bufs, params, threads);
+            let s = gpu.dispatch(kind, &bufs, params, grid);
             gpu.submit(&[], &[s]);
             gpu.poll_wait();
             best = best.min(t0.elapsed().as_secs_f64());
@@ -442,9 +442,18 @@ fn bench_matmul_quant() {
         let sxb = wgpu.storage_init("sx", &sx);
         let swb = wgpu.storage_init("sw", &sw);
         let ob = wgpu.storage((m * n) as u64);
-        let tiles = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
+        let tiles = (m.div_ceil(128) * n.div_ceil(128)) as u32;
         let ki = wgpu.kernel_index("matmul_i8_dyn").expect("registered above");
-        let (got, t) = time_kernel(wgpu, ki, &[&xb, &wb, &sxb, &swb], &[m as u32, (k / 4) as u32, n as u32], tiles, &ob, m * n, reps);
+        let (got, t) = time_kernel(
+            wgpu,
+            ki,
+            &[&xb, &wb, &sxb, &swb],
+            &[m as u32, (k / 4) as u32, n as u32],
+            gpu_core::Dispatch::Workgroups(tiles),
+            &ob,
+            m * n,
+            reps,
+        );
         let (dabs, drel) = diff(&want, &got);
         let gops = 2.0 * m as f64 * k as f64 * n as f64 / t / 1e9;
         println!(
@@ -462,7 +471,7 @@ fn bench_matmul_quant() {
         let (xq, sx, xi) = quant_act(&x, m, k); // W4A8: activations stay int8
         let (wq, sw, wi) = quant_weight(&w, n, k, 8, 7.0); // weights are int4
         let want = host_group_gemm(&xi, &wi, &sx, &sw, m, k, n);
-        let threads = (m * n) as u32;
+        let grid = gpu_core::Dispatch::Threads((m * n) as u32);
 
         for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
             let xb = g.storage(xq.len() as u64);
@@ -473,7 +482,7 @@ fn bench_matmul_quant() {
             let swb = g.storage_init("sw", &sw);
             let ob = g.storage((m * n) as u64);
             let ki = g.kernel_index("matmul_q4_dyn").expect("registered above");
-            let (got, t) = time_kernel(g, ki, &[&xb, &wb, &sxb, &swb], &[m as u32, k as u32, n as u32], threads, &ob, m * n, reps);
+            let (got, t) = time_kernel(g, ki, &[&xb, &wb, &sxb, &swb], &[m as u32, k as u32, n as u32], grid, &ob, m * n, reps);
             let (dabs, drel) = diff(&want, &got);
             let gops = 2.0 * m as f64 * k as f64 * n as f64 / t / 1e9;
             println!(
@@ -495,7 +504,7 @@ fn bench_matmul_quant() {
         let (wq4, sw4, wi4) = quant_weight(&w4, n, k, 8, 7.0);
         let want8 = host_group_gemm(&xi, &wi8, &sx, &sw8, m, k, n);
         let want4 = host_group_gemm(&xi, &wi4, &sx, &sw4, m, k, n);
-        let threads = (n * 64) as u32;
+        let grid = gpu_core::Dispatch::Workgroups(n as u32);
 
         for (label, g) in [("cpu", cpu), ("gpu", wgpu)] {
             let xb = g.storage(xq.len() as u64);
@@ -508,7 +517,7 @@ fn bench_matmul_quant() {
             let ob8 = g.storage((m * n) as u64);
             let ki8 = g.kernel_index("matmul_i8_gemv").expect("registered above");
             let (got8, t8) =
-                time_kernel(g, ki8, &[&xb, &wb8, &sxb, &swb8], &[m as u32, (k / 4) as u32, n as u32], threads, &ob8, m * n, reps);
+                time_kernel(g, ki8, &[&xb, &wb8, &sxb, &swb8], &[m as u32, (k / 4) as u32, n as u32], grid, &ob8, m * n, reps);
             let (d8abs, d8rel) = diff(&want8, &got8);
 
             let wb4 = g.storage(wq4.len() as u64);
@@ -516,7 +525,7 @@ fn bench_matmul_quant() {
             let swb4 = g.storage_init("sw4", &sw4);
             let ob4 = g.storage((m * n) as u64);
             let ki4 = g.kernel_index("matmul_q4_gemv").expect("registered above");
-            let (got4, t4) = time_kernel(g, ki4, &[&xb, &wb4, &sxb, &swb4], &[m as u32, k as u32, n as u32], threads, &ob4, m * n, reps);
+            let (got4, t4) = time_kernel(g, ki4, &[&xb, &wb4, &sxb, &swb4], &[m as u32, k as u32, n as u32], grid, &ob4, m * n, reps);
             let (d4abs, d4rel) = diff(&want4, &got4);
 
             println!(

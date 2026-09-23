@@ -120,7 +120,7 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
             let y_comp = gpu.storage(total as u64);
             let composed = vec![
                 gpu.step(K_NCHW_NLC, &[&xb, &xt], &[total as u32, c as u32, hw as u32], total as u32),
-                gpu.step(K_LN_ROWS, &[&xt, &gb, &bb, &yt], &[c as u32, rows, f(eps)], rows * 64),
+                gpu.dispatch(K_LN_ROWS, &[&xt, &gb, &bb, &yt], &[c as u32, rows, f(eps)], gpu_core::Dispatch::Workgroups(rows)),
                 gpu.step(
                     K_NLC_NCHW,
                     &[&yt, &y_comp],
