@@ -356,10 +356,37 @@ means. Following a growing corpus needs an append-only document identity
 rather than an index; that is a different mechanism and R1 refuses the unsafe
 case by name instead of pretending to handle it.
 
-**R2 - probes, and the three probe families.** Frozen spans, paraphrase
-variants, counterfactual variants, all selected by a pure function of the
-content hash, with a blind fraction. Plus the per-episode zero-shot column.
-Tests: V1, V3, V10, V13 assertions above.
+**R2 - probes, and the three probe families. DONE 2026-09-23.**
+`crates/audit`'s `bank` module. A probe is held-out LINE CONTINUATION: some
+lines are withheld from training and become the questions, with the lines
+before them as the prompt, so verification is an exact match and never a
+judge. Eight tests, red before green.
+
+**Only two of the three families can be built without a model, and the crate
+says so instead of pretending.** `Literal` and `Counterfactual` are built
+here; `Paraphrase` needs to know what the text MEANS, which is either a
+model or a corpus that generated itself and kept its own semantics.
+`ProbeSet::coverage` reports zero paraphrase coverage rather than letting a
+run quietly claim a control it never had. The sample's generated tool is
+exactly the corpus that CAN supply them, which is a further reason the
+battery lives there and not here.
+
+**Correction to this file's own V13.** A pure-hash selection does not on its
+own answer probe-selection gaming: it is the selection RULE that can be
+biased, not merely its reproducibility, and a rule that prefers easy lines
+stays perfectly deterministic while making everything pass. So a
+`SpanSelector` exists to be audited rather than trusted - a second draw is
+taken uniformly from the lines it REJECTED, both are withheld from training,
+and `selection_bias` reports selected-minus-blind pass rate. Tested as a
+pair.
+
+Containment is substring, not equality, because real text restates itself in
+ways a synthetic curriculum never does. A property worth knowing before it
+looks like flakiness: a refusal is about THIS DRAW, not the episode in the
+abstract, so the same file can build cleanly at one seed and be refused at
+another. Recorded in the module doc.
+
+V1, V3, V10 and V13 each have their fire and their stay-silent test.
 
 **R3 - the adapter pool, its working set, and its archive.** Pool on disk, one
 file per adapter carrying its own optimiser moments (moments belong to the

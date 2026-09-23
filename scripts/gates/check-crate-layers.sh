@@ -71,9 +71,17 @@ for leaf in $LEAF_CRATES; do
     # only ones this rule is about (a third-party crate carries no layer).
     closure=$(echo "$tree" | awk '{print $1}' | grep '^brain' | sort -u)
     bad=""
+    # A leaf may appear in another leaf's closure. That is not a loophole: a
+    # leaf is, by this gate's own definition, a crate whose whole closure is
+    # already within layers 1-3, and every leaf is checked here independently
+    # - so `brain-audit -> brain-promote` is transitively still below the
+    # model layer. Cargo rejects an actual cycle between two of them on its
+    # own. What this permits is reuse between leaves, which is the
+    # alternative to each one growing its own copy of the other's contract.
+    allowed=" $(echo "$LAYER_1_TO_3" | tr '\n' ' ') $(echo "$LEAF_CRATES") "
     for dep in $closure; do
         [ "$dep" = "$leaf" ] && continue
-        case " $(echo "$LAYER_1_TO_3" | tr '\n' ' ') " in
+        case "$allowed" in
         *" $dep "*) ;;
         *) bad="$bad $dep" ;;
         esac

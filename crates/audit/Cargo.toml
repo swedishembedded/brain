@@ -14,6 +14,13 @@ path = "src/lib.rs"
 # order this crate draws is seeded from it rather than from a fresh local
 # copy, per that module's own rule.
 brain-data.workspace = true
+# `promote::document::normalize` - the ONE definition of how much latitude an
+# exact match gets. The containment check here compares normalised text, and a
+# second normaliser in this crate would be a second answer to that question
+# that drifts from the gate's. `brain-promote` is itself a leaf, so depending
+# on it keeps this crate's closure below the model layer; the layering gate
+# permits leaf-on-leaf for exactly that reason.
+brain-promote.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Episode identity is a digest of the episode's own bytes.

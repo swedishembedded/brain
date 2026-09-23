@@ -33,4 +33,5 @@
 //! auditable rather than merely optimistic, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+pub mod bank;
 pub mod stream;
