@@ -36,6 +36,7 @@
 pub mod bank;
 pub mod growth;
 pub mod pool;
+pub mod reader;
 pub mod reservoir;
 pub mod schedule;
 pub mod stream;

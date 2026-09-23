@@ -572,6 +572,36 @@ a problem now, and a lifetime average would hide it for a long time. A
 part-window returns `None` rather than a rate, so the oracle's cost is never
 paid on the strength of the first few episodes of a run.
 
+**The reader loop. DONE 2026-09-23**, and not a milestone this file had,
+because the plan treated it as plumbing that would fall out of the parts.
+
+`crates/audit`'s `reader` module ties all six together: screen, one forward
+pass, freeze the probes, the evidence precondition, then train and gate.
+Eight tests against a fake learner, red before green.
+
+**It is generic over a `Learner` seam rather than over a model**, and that
+is the decision that matters. Everything model-touching is four methods: a
+forward pass, a training run, a decode per arm, and the oracle. Behind a
+trait, the ORCHESTRATION - which is where the mistakes are - stays in a
+crate with no device and no weights and a suite that runs in a sixth of a
+second. It is the seam this workspace already uses for a scheduler generic
+over a decoder and a study generic over an environment; the binding to a
+real model is a thin implementation above this crate.
+
+**A precondition on the oracle that neither M3 nor R7 had.** The oracle
+bounds what a schedule could have achieved over what the reader has LEARNED,
+so a run that has promoted NOTHING has nothing for it to bound. Such a run
+looks exactly like a stalled one by promote rate, and asking would spend a
+full training run to be told nothing useful. Found because the obvious test
+(a reader that promotes nothing must ask why) failed: the guard was right
+and the test modelled a case that cannot arise. A real stall is a run that
+promoted for a while and then stopped, and both are now tested.
+
+The headline property is asserted end to end: over sixty episodes the audit
+cost of a step never exceeds the budget while the bank grows past forty and
+the reported detection latency grows with it. That is the whole claim of
+this design in one test.
+
 **R8 - serve while learning, staged.** The forcing function for the
 `stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
 recorded as missing from `crates/residency`. Tests: a promoted adapter changes
