@@ -46,6 +46,11 @@ impl Config {
             ]);
         }
         v.extend([("head.weight".into(), vec![d, m]), ("head.bias".into(), vec![m])]);
+        // The cost-to-go head. One scalar, sharing the trunk with the policy:
+        // "which move" and "how far from the goal" are the same question
+        // asked two ways, and a representation good enough for one is good
+        // enough for the other.
+        v.extend([("value.weight".into(), vec![d, 1]), ("value.bias".into(), vec![1])]);
         v
     }
 

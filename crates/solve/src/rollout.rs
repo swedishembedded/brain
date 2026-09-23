@@ -62,11 +62,25 @@ pub struct Rollout {
     pub temperature: f32,
     /// Seed for that sampling. A run is reproducible or it is not evidence.
     pub seed: u64,
+    /// How many independent sampled rollouts to try before giving up.
+    ///
+    /// Still no search: there is no frontier, no priority queue and no
+    /// heuristic over candidates. Each attempt is one rollout of the policy
+    /// from the ORIGINAL state, differing only in its draw, and the first to
+    /// reach the goal wins. What it buys is the difference between one
+    /// sample from the policy and the policy's distribution: independent
+    /// attempts at rate `p` succeed at `1 - (1-p)^k`, so a policy that
+    /// solves a tenth of the time solves two thirds of the time in ten
+    /// tries - and every attempt is the same batched forward passes.
+    ///
+    /// Only meaningful with a non-zero temperature: repeating a greedy
+    /// rollout reproduces it exactly.
+    pub attempts: usize,
 }
 
 impl Default for Rollout {
     fn default() -> Rollout {
-        Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: 1 }
+        Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: 1, attempts: 1 }
     }
 }
 
@@ -75,6 +89,38 @@ impl Default for Rollout {
 /// Instances that finish early stop consuming moves but keep their row, which
 /// wastes a fraction of each pass and buys a graph whose shape never changes.
 pub fn solve_batch<S: StateSpace>(
+    space: &S,
+    net: &Net,
+    starts: &[S::State],
+    how: Rollout,
+) -> Vec<Outcome> {
+    let mut best: Vec<Outcome> = Vec::new();
+    for attempt in 0..how.attempts.max(1) {
+        let mut pass = how;
+        // A fresh draw per attempt; identical otherwise. Derived from the
+        // caller's seed so the whole thing stays reproducible.
+        pass.seed = how.seed.wrapping_add(attempt as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        let got = attempt_batch(space, net, starts, pass);
+        if best.is_empty() {
+            best = got;
+        } else {
+            for (b, g) in best.iter_mut().zip(got) {
+                // Keep a solve, and prefer the shorter of two.
+                match (&b, &g) {
+                    (Outcome::Stuck(_), Outcome::Solved(_)) => *b = g,
+                    (Outcome::Solved(x), Outcome::Solved(y)) if y.len() < x.len() => *b = g,
+                    _ => {}
+                }
+            }
+        }
+        if best.iter().all(|o| o.solved()) {
+            break;
+        }
+    }
+    best
+}
+
+fn attempt_batch<S: StateSpace>(
     space: &S,
     net: &Net,
     starts: &[S::State],
@@ -161,6 +207,106 @@ pub fn solve_batch<S: StateSpace>(
             last[r] = Some(best);
             if space.is_goal(&states[r]) {
                 done[r] = true;
+            }
+        }
+    }
+
+    played
+        .into_iter()
+        .zip(done)
+        .map(|(m, ok)| if ok { Outcome::Solved(m) } else { Outcome::Stuck(m) })
+        .collect()
+}
+
+/// Roll out by COST-TO-GO: evaluate every legal successor and step to the
+/// one the value head thinks is nearest the goal.
+///
+/// Why this beats rolling out the policy directly: a policy has to name the
+/// right move blind, and a greedy chain of such names has to be right every
+/// single turn, so its solve rate is roughly its per-move accuracy raised to
+/// the solution length. Here each turn is a COMPARISON between concrete
+/// successors, so an error in `V` only matters when it reorders two real
+/// options - and the states being compared are one move apart, which is
+/// exactly where a learned value is most reliable.
+///
+/// It is still not a search. There is no frontier, no priority queue, no
+/// backtracking and no accumulated path cost: one move is chosen, played, and
+/// never reconsidered. What it uses beyond the network is the space's own
+/// transition function, which any agent acting in a space already has.
+///
+/// Cost is one batched forward pass over `instances * moves` states per turn,
+/// which is why instances are rolled out together.
+pub fn solve_batch_by_value<S: StateSpace>(
+    space: &S,
+    net: &Net,
+    starts: &[S::State],
+    how: Rollout,
+) -> Vec<Outcome> {
+    let rows = net.rows as usize;
+    let width = space.feature_len();
+    let n_moves = space.moves();
+
+    let mut states: Vec<S::State> = starts.to_vec();
+    let mut played: Vec<Vec<usize>> = vec![Vec::new(); starts.len()];
+    let mut done: Vec<bool> = states.iter().map(|s| space.is_goal(s)).collect();
+    let mut last: Vec<Option<usize>> = vec![None; starts.len()];
+    let mut features = vec![0.0f32; rows * width];
+
+    for _ in 0..how.max_steps {
+        if done.iter().all(|&d| d) {
+            break;
+        }
+        let mut cand: Vec<(usize, usize, S::State)> = Vec::new();
+        for r in 0..states.len() {
+            if done[r] {
+                continue;
+            }
+            for m in 0..n_moves {
+                if how.forbid_redundant && last[r].is_some_and(|l| space.redundant(l, m)) {
+                    continue;
+                }
+                cand.push((r, m, space.apply(&states[r], m)));
+            }
+        }
+        if cand.is_empty() {
+            break;
+        }
+
+        let mut vals = vec![0.0f32; cand.len()];
+        let mut i = 0;
+        while i < cand.len() {
+            let take = (cand.len() - i).min(rows);
+            features.iter_mut().for_each(|f| *f = 0.0);
+            for j in 0..take {
+                space.write_features(&cand[i + j].2, &mut features[j * width..(j + 1) * width]);
+            }
+            let v = net.value_of(&features);
+            vals[i..i + take].copy_from_slice(&v[..take]);
+            i += take;
+        }
+
+        let mut best: Vec<Option<(f32, usize, S::State)>> = (0..states.len()).map(|_| None).collect();
+        for (idx, (r, m, child)) in cand.into_iter().enumerate() {
+            // Reaching the goal is not a prediction to be weighed against
+            // others: it ends the instance, so it wins outright however the
+            // value head scores it.
+            let v = if space.is_goal(&child) { f32::NEG_INFINITY } else { vals[idx] };
+            let better = best[r].as_ref().map(|(bv, _, _)| v < *bv).unwrap_or(true);
+            if better {
+                best[r] = Some((v, m, child));
+            }
+        }
+        for r in 0..states.len() {
+            if done[r] {
+                continue;
+            }
+            if let Some((_, m, child)) = best[r].take() {
+                states[r] = child;
+                played[r].push(m);
+                last[r] = Some(m);
+                if space.is_goal(&states[r]) {
+                    done[r] = true;
+                }
             }
         }
     }

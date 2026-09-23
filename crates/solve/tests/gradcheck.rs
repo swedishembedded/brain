@@ -21,6 +21,21 @@ fn tiny() -> Config {
     Config { in_dim: 9, d_model: 6, d_ff: 5, blocks: 2, moves: 4 }
 }
 
+/// Value targets for the fixture: a spread of plausible cost-to-go numbers.
+fn value_targets(rows: u32) -> Vec<f32> {
+    let mut rng = solve::data::Rng::new(0xBEEF);
+    // Small on purpose. Real training targets run to the walk depth, but a
+    // squared error of ~150 against a cross-entropy of ~3 would make the
+    // finite difference measure the value term and nothing else, and would
+    // hide a wrong policy gradient completely.
+    (0..rows).map(|_| 0.25 * rng.below(8) as f32).collect()
+}
+
+/// How heavily the value head is weighted against the policy in the checks
+/// below. Not 1.0: with both at equal weight a mistake in one can be masked
+/// by the other's much larger gradient.
+const VALUE_WEIGHT: f32 = 1.0;
+
 fn fixture(cfg: &Config, rows: u32) -> (Vec<f32>, Vec<u32>) {
     let mut rng = solve::data::Rng::new(0xC0FFEE);
     let mut x = vec![0.0f32; (rows * cfg.in_dim) as usize];
@@ -33,14 +48,19 @@ fn fixture(cfg: &Config, rows: u32) -> (Vec<f32>, Vec<u32>) {
     (x, labels)
 }
 
+/// The FULL objective, both heads. Checking only the policy term would leave
+/// every value parameter unverified, and a value head that trains on a wrong
+/// gradient still produces confident numbers - they simply do not rank the
+/// successors correctly, which is invisible until a rollout fails.
 fn loss_at(net: &Net, w: &HashMap<String, Vec<f32>>, x: &[f32], y: &[u32]) -> f32 {
     for (n, v) in w {
         net.set_weight(n, v);
     }
+    let t = value_targets(net.rows);
     net.zero_grads();
     net.load_batch(x, y);
-    net.accumulate();
-    net.loss()
+    net.accumulate_with_value(&t, VALUE_WEIGHT);
+    net.loss() + VALUE_WEIGHT * net.value_loss(&t)
 }
 
 #[test]
@@ -100,12 +120,13 @@ fn gradients_accumulate_across_batches() {
     let w = init_weights(&cfg, 11);
     let net = Net::from_weights(cfg.clone(), rows, &w);
 
+    let vt = value_targets(rows);
     net.zero_grads();
     net.load_batch(&x, &y);
-    net.accumulate();
+    net.accumulate_with_value(&vt, VALUE_WEIGHT);
     let once = net.grad("head.weight");
 
-    net.accumulate();
+    net.accumulate_with_value(&vt, VALUE_WEIGHT);
     let twice = net.grad("head.weight");
 
     for (a, b) in once.iter().zip(&twice) {

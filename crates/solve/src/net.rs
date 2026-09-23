@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -43,6 +43,8 @@ pub struct Net {
     logits: DeviceBuffer,
     probs: DeviceBuffer,
     ce: DeviceBuffer,
+    value: DeviceBuffer,
+    d_value: DeviceBuffer,
 
     d_logits: DeviceBuffer,
     d_res: Vec<DeviceBuffer>,
@@ -92,6 +94,8 @@ impl Net {
             logits: st(n * m),
             probs: st(n * m),
             ce: st(n),
+            value: st(n),
+            d_value: st(n),
             d_logits: st(n * m),
             d_res: (0..=blocks).map(|_| st(n * d)).collect(),
             d_skip: st(n * d),
@@ -133,26 +137,29 @@ impl Net {
         let gemm = |m: u32, out: u32| pick_gemm(m as usize, out as usize, K_MATMUL, K_MATMUL_REG, false);
 
         let (k, th) = gemm(n, d);
-        s.push(g.step(k, &[&self.x, self.w("stem.weight"), &self.stem_pre], &[n, i, d], th));
+        s.push(g.dispatch(k, &[&self.x, self.w("stem.weight"), &self.stem_pre], &[n, i, d], th));
         s.push(g.step(K_BIAS_ADD, &[&self.stem_pre, self.w("stem.bias")], &[n, d], n * d));
         s.push(g.step(K_GELU, &[&self.stem_pre, &self.res[0]], &[n * d], n * d));
 
         for b in 0..c.blocks as usize {
             let p = |x: &str| format!("blocks.{b}.{x}");
             let (k, th) = gemm(n, ff);
-            s.push(g.step(k, &[&self.res[b], self.w(&p("up.weight")), &self.up_pre[b]], &[n, d, ff], th));
+            s.push(g.dispatch(k, &[&self.res[b], self.w(&p("up.weight")), &self.up_pre[b]], &[n, d, ff], th));
             s.push(g.step(K_BIAS_ADD, &[&self.up_pre[b], self.w(&p("up.bias"))], &[n, ff], n * ff));
             s.push(g.step(K_GELU, &[&self.up_pre[b], &self.up_act[b]], &[n * ff], n * ff));
             let (k, th) = gemm(n, d);
-            s.push(g.step(k, &[&self.up_act[b], self.w(&p("down.weight")), &self.down[b]], &[n, ff, d], th));
+            s.push(g.dispatch(k, &[&self.up_act[b], self.w(&p("down.weight")), &self.down[b]], &[n, ff, d], th));
             s.push(g.step(K_BIAS_ADD, &[&self.down[b], self.w(&p("down.bias"))], &[n, d], n * d));
             s.push(g.step(K_ADD2, &[&self.res[b], &self.down[b], &self.res[b + 1]], &[n * d], n * d));
         }
 
         let last = &self.res[c.blocks as usize];
         let (k, th) = gemm(n, m);
-        s.push(g.step(k, &[last, self.w("head.weight"), &self.logits], &[n, d, m], th));
+        s.push(g.dispatch(k, &[last, self.w("head.weight"), &self.logits], &[n, d, m], th));
         s.push(g.step(K_BIAS_ADD, &[&self.logits, self.w("head.bias")], &[n, m], n * m));
+        let (k, th) = gemm(n, 1);
+        s.push(g.dispatch(k, &[last, self.w("value.weight"), &self.value], &[n, d, 1], th));
+        s.push(g.step(K_BIAS_ADD, &[&self.value, self.w("value.bias")], &[n, 1], n));
         if with_loss {
             s.push(g.step(K_CE_VALUE, &[&self.logits, &self.targets, &self.ce], &[n, m], n));
         } else {
@@ -161,7 +168,7 @@ impl Net {
             // `rows * 64` threads to get `rows` workgroups. Asking for `rows`
             // covers only the first `rows / 64` of them and leaves the rest
             // holding whatever was in the buffer.
-            s.push(g.step(K_SOFTMAX, &[&self.logits, &self.probs], &[n, m], n * 64));
+            s.push(g.dispatch(K_SOFTMAX, &[&self.logits, &self.probs], &[n, m], Dispatch::Workgroups(n)));
         }
         s
     }
@@ -179,9 +186,17 @@ impl Net {
         // already the batch MEAN gradient.
         let mut s = vec![
             g.step(K_CE_GRAD, &[&self.logits, &self.targets, &self.d_logits], &[n, m], n * m),
-            { let (k, th) = dw(m, d); g.step(k, &[&self.d_logits, &self.res[last], self.g("head.weight")], &[n, d, m], th) },
+            { let (k, th) = dw(m, d); g.dispatch(k, &[&self.d_logits, &self.res[last], self.g("head.weight")], &[n, d, m], th) },
             g.step(K_BIAS_GRAD, &[&self.d_logits, self.g("head.bias")], &[n, m], m),
-            { let (k, th) = dx(n, d); g.step(k, &[&self.d_logits, self.w("head.weight"), &self.d_res[last]], &[n, d, m, 0], th) },
+            { let (k, th) = dx(n, d); g.dispatch(k, &[&self.d_logits, self.w("head.weight"), &self.d_res[last]], &[n, d, m, 0], th) },
+            // The value head's own gradient, arriving from the host. Its dX
+            // ACCUMULATES into the same buffer the policy head just wrote
+            // (the trailing 1), because the trunk is shared and must receive
+            // the sum of what both heads ask of it. Writing instead of
+            // accumulating here would silently discard the policy's half.
+            { let (k, th) = dw(1, d); g.dispatch(k, &[&self.d_value, &self.res[last], self.g("value.weight")], &[n, d, 1], th) },
+            g.step(K_BIAS_GRAD, &[&self.d_value, self.g("value.bias")], &[n, 1], 1),
+            { let (k, th) = dx(n, d); g.dispatch(k, &[&self.d_value, self.w("value.weight"), &self.d_res[last]], &[n, d, 1, 1], th) },
         ];
 
         for b in (0..blocks).rev() {
@@ -190,15 +205,15 @@ impl Net {
             // both the block's output and the skip unchanged.
             s.push(g.step(K_BIAS_GRAD, &[&self.d_res[b + 1], self.g(&p("down.bias"))], &[n, d], d));
             let (k, th) = dw(d, ff);
-            s.push(g.step(k, &[&self.d_res[b + 1], &self.up_act[b], self.g(&p("down.weight"))], &[n, ff, d], th));
+            s.push(g.dispatch(k, &[&self.d_res[b + 1], &self.up_act[b], self.g(&p("down.weight"))], &[n, ff, d], th));
             let (k, th) = dx(n, ff);
-            s.push(g.step(k, &[&self.d_res[b + 1], self.w(&p("down.weight")), &self.d_up_act], &[n, ff, d, 0], th));
+            s.push(g.dispatch(k, &[&self.d_res[b + 1], self.w(&p("down.weight")), &self.d_up_act], &[n, ff, d, 0], th));
             s.push(g.step(K_GELU_BWD, &[&self.up_pre[b], &self.d_up_act, &self.d_up_pre], &[n * ff], n * ff));
             s.push(g.step(K_BIAS_GRAD, &[&self.d_up_pre, self.g(&p("up.bias"))], &[n, ff], ff));
             let (k, th) = dw(ff, d);
-            s.push(g.step(k, &[&self.d_up_pre, &self.res[b], self.g(&p("up.weight"))], &[n, d, ff], th));
+            s.push(g.dispatch(k, &[&self.d_up_pre, &self.res[b], self.g(&p("up.weight"))], &[n, d, ff], th));
             let (k, th) = dx(n, d);
-            s.push(g.step(k, &[&self.d_up_pre, self.w(&p("up.weight")), &self.d_skip], &[n, d, ff, 0], th));
+            s.push(g.dispatch(k, &[&self.d_up_pre, self.w(&p("up.weight")), &self.d_skip], &[n, d, ff, 0], th));
             // ...and the skip path is the other half of that sum. Written to
             // a separate buffer first because a kernel that read and wrote
             // one buffer in the same dispatch would race.
@@ -208,7 +223,7 @@ impl Net {
         s.push(g.step(K_GELU_BWD, &[&self.stem_pre, &self.d_res[0], &self.d_stem], &[n * d], n * d));
         s.push(g.step(K_BIAS_GRAD, &[&self.d_stem, self.g("stem.bias")], &[n, d], d));
         let (k, th) = dw(d, i);
-        s.push(g.step(k, &[&self.d_stem, &self.x, self.g("stem.weight")], &[n, i, d], th));
+        s.push(g.dispatch(k, &[&self.d_stem, &self.x, self.g("stem.weight")], &[n, i, d], th));
         s
     }
 
@@ -221,6 +236,11 @@ impl Net {
         self.gpu.write(&self.targets, labels);
     }
 
+    /// The cost-to-go the value head currently predicts for the loaded batch.
+    pub fn values(&self) -> Vec<f32> {
+        self.gpu.read(&self.value, self.rows as usize)
+    }
+
     /// Forward + backward for the loaded batch.
     ///
     /// Reads NOTHING back. A device read is a synchronisation point, and at
@@ -231,8 +251,37 @@ impl Net {
     /// Gradients ACCUMULATE; the caller zeroes once per optimizer step, which
     /// is what lets several batches make one update.
     pub fn accumulate(&self) {
+        self.accumulate_with_value(&[], 0.0);
+    }
+
+    /// Forward + backward, fitting the value head to `targets` as well.
+    ///
+    /// The value gradient is formed on the HOST. Mean squared error over one
+    /// scalar per row is `rows` subtractions, so a kernel for it would buy
+    /// nothing, and the alternative - keeping a target buffer on the device -
+    /// would trade this readback for an upload of the same size. An empty
+    /// `targets` trains the policy alone.
+    pub fn accumulate_with_value(&self, targets: &[f32], weight: f32) {
         self.gpu.submit(&[], &self.fwd);
+        let n = self.rows as usize;
+        let mut d = vec![0.0f32; n];
+        if !targets.is_empty() && weight > 0.0 {
+            assert_eq!(targets.len(), n, "one value target per row");
+            let v = self.values();
+            // d/dv of  w * mean_i (v_i - t_i)^2
+            let scale = 2.0 * weight / n as f32;
+            for i in 0..n {
+                d[i] = scale * (v[i] - targets[i]);
+            }
+        }
+        self.gpu.write_f32(&self.d_value, &d);
         self.gpu.submit(&[], &self.bwd);
+    }
+
+    /// Mean squared error of the value head against `targets`, for reporting.
+    pub fn value_loss(&self, targets: &[f32]) -> f32 {
+        let v = self.values();
+        v.iter().zip(targets).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() / v.len().max(1) as f32
     }
 
     /// Mean cross-entropy of the batch last run through [`Net::accumulate`].
@@ -252,11 +301,21 @@ impl Net {
     /// Move probabilities for a batch of states. No label, no loss, no
     /// search - one forward pass is the whole inference path.
     pub fn policy(&self, features: &[f32]) -> Vec<f32> {
+        self.forward(features);
+        self.gpu.read(&self.probs, (self.rows * self.cfg.moves) as usize)
+    }
+
+    /// Cost-to-go for a batch of states. One forward pass, no label.
+    pub fn value_of(&self, features: &[f32]) -> Vec<f32> {
+        self.forward(features);
+        self.values()
+    }
+
+    fn forward(&self, features: &[f32]) {
         let need = (self.rows * self.cfg.in_dim) as usize;
         assert_eq!(features.len(), need, "features must be rows x in_dim");
         self.gpu.write_f32(&self.x, features);
         self.gpu.submit(&[], &self.infer);
-        self.gpu.read(&self.probs, (self.rows * self.cfg.moves) as usize)
     }
 
     /// Overwrite one parameter in place. Exists for the gradient check,

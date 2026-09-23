@@ -141,6 +141,7 @@ fn parse() -> Result<(Settings, bool), String> {
     let eval = args.usize_or("--eval", 0);
     let unassisted = args.take_flag("--unassisted");
     let quiet = args.take_flag("--quiet");
+    let attempts = args.usize_or("--net-attempts", 1);
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
     args.finish();
@@ -845,11 +846,14 @@ fn net_main(argv: &[String]) -> Result<(), String> {
         eval_cubes: args.usize_or("--net-eval-cubes", 200),
         eval_scramble: args.usize_or("--net-eval-scramble", 40),
         checkpoint: None,
+        refresh: args.usize_or("--net-refresh", 200),
+        value_weight: args.usize_or("--net-value-micro", 50_000) as f32 / 1e6,
     };
     let cubes = args.usize_or("--cubes", 500);
     let scramble = args.usize_or("--scramble", 40);
     let save = args.take_str("--net-save");
     let load = args.take_str("--net-load");
+    let attempts = args.usize_or("--net-attempts", 1);
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
 
@@ -883,15 +887,37 @@ fn net_main(argv: &[String]) -> Result<(), String> {
     println!("\n----------------------------------------------------------------");
     println!("            no search at inference: one forward pass per move");
     println!("----------------------------------------------------------------");
-    println!("{:>9}  {:>14}  {:>14}  {:>10}", "scramble", "greedy", "sampled T=0.3", "ms/cube");
+    println!(
+        "{:>9}  {:>14}  {:>14}  {:>10}",
+        "scramble",
+        "policy greedy",
+        "value lookahead".to_string(),
+        "ms/cube"
+    );
     for d in [4usize, 8, 12, 16, 20, 26, scramble] {
         let g = learned::measure_with(
             &net, cubes, d, 0x5014ED,
-            brain::solve::Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: 7 },
+            brain::solve::Rollout {
+                max_steps: 64,
+                forbid_redundant: true,
+                temperature: 0.0,
+                seed: 7,
+                attempts: 1,
+            },
         );
-        let s = learned::measure_with(
-            &net, cubes, d, 0x5014ED,
-            brain::solve::Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.3, seed: 7 },
+        let s = learned::measure_how(
+            &net,
+            cubes,
+            d,
+            0x5014ED,
+            brain::solve::Rollout {
+                max_steps: 64,
+                forbid_redundant: true,
+                temperature: 0.0,
+                seed: 7,
+                attempts: 1,
+            },
+            true,
         );
         println!(
             "{:>9}  {:>6} ({:>3.0}%)  {:>6} ({:>3.0}%)  {:>10.2}",
