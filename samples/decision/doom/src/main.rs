@@ -94,6 +94,12 @@ pub struct Args {
     pub solutions: String,
     /// `search`/`learn`: where the decisions worth imitating are kept.
     pub lessons: String,
+    /// `gate`: the head currently in service, which `--head` must beat.
+    pub incumbent: Option<String>,
+    /// `gate`: how much of the score the candidate has to win by.
+    pub min_effect: f64,
+    /// `gate`: how far the candidate may fall behind on any ONE level.
+    pub max_block_drop: f64,
 }
 
 impl Args {
@@ -121,7 +127,18 @@ impl Args {
 fn usage() -> String {
     format!(
         "\
-usage: doom <train|eval|fit|whatif|value|play|probe|bench> [options]
+usage: doom <search|learn|gate|train|eval|fit|whatif|value|play|probe|bench> [options]
+
+  search   look for solutions with NO model in the loop: a quality-diversity
+           archive, a bandit allocating budget between search operators on
+           measured gain per second, and a cascade that replays a claimed
+           solution from the level's own start before believing it. Give it
+           --head as well and the trained policy joins the operators as a
+           proposal distribution, which is what makes the loop a loop
+  learn    fit a head to the decisions a search kept. Needs no engine
+  gate     play --head and --incumbent over the SAME episodes and decide,
+           by paired sign test, whether the candidate may replace the one in
+           service. Exits 3 on a reject so a loop can branch on it
 
   train    warm-start on the scripted player, then improve it by PPO
   eval     score a policy and the scripted player on the SAME episodes
@@ -142,6 +159,16 @@ usage: doom <train|eval|fit|whatif|value|play|probe|bench> [options]
   play     run episodes and show every decision as it is made
   probe    one scripted episode, for artifacts and for checking the plumbing
   bench    time one decision against state length and option count
+
+searching, compressing and selecting
+  --search-budget N   wall clock per level, in seconds                  [600]
+  --archive PATH      carry an archive in and out, so generations compound.
+                      One file per level: `PATH.E1M<n>.json`
+  --solutions PATH    where verified runs are written
+  --lessons PATH      where the decisions worth imitating are kept
+  --incumbent PATH    `gate`: the head already in service
+  --min-effect F      `gate`: score the candidate must win by             [0.05]
+  --max-block-drop F  `gate`: how far it may fall behind on any ONE level [0.10]
 
 the game (no path is ever baked in, and nothing is read from the environment)
   --doom-bin PATH     the restful-doom binary   [found on $PATH]
@@ -240,7 +267,10 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench", "search", "learn"]
+    if ![
+        "train", "eval", "fit", "whatif", "value", "play", "probe", "bench", "search", "learn",
+        "gate",
+    ]
         .contains(&command.as_str())
     {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
@@ -266,7 +296,10 @@ fn parse_args() -> Result<Args, String> {
     // load one. Requiring it anyway would be an encoder loaded, a gigabyte of
     // weights paged in, and a device opened, for a program that never calls
     // a forward pass.
-    if train.encoder.is_empty() && command != "search" {
+    // `search` is the exception, and only while it searches on its own: with
+    // `--head` it asks a policy what to do, and a policy is read with an
+    // encoder like any other.
+    if train.encoder.is_empty() && (command != "search" || train.head.is_some()) {
         return Err(
             "--encoder DIR is required: it is the pretrained sentence encoder the \
                     policy reads with (`brain pull sentence-transformers/all-MiniLM-L6-v2` \
@@ -372,6 +405,9 @@ fn parse_args() -> Result<Args, String> {
         lessons: args
             .take_str("--lessons")
             .unwrap_or_else(|| "out/doom-lessons.jsonl".into()),
+        incumbent: args.take_str("--incumbent"),
+        min_effect: args.f32_or("--min-effect", 0.05) as f64,
+        max_block_drop: args.f32_or("--max-block-drop", 0.10) as f64,
     };
     args.finish();
     Ok(parsed)
@@ -396,7 +432,7 @@ fn run() -> Result<(), String> {
 
     let paths = Paths::resolve(args.doom_bin.as_deref(), args.wad.as_deref())
         .map_err(|m| format!("{m}"))?;
-    if args.command != "search"
+    if (args.command != "search" || args.head().is_some())
         && !std::path::Path::new(args.encoder())
             .join("config.json")
             .exists()
@@ -424,23 +460,11 @@ fn run() -> Result<(), String> {
         }
     );
 
-    let game = Doom::start(
-        &paths,
-        &args.cfg,
-        args.transcript.as_ref().map(Into::into),
-        args.engine_log.as_ref().map(Into::into),
-    )
-    .map_err(|e| format!("could not start the game: {e}"))?;
-    println!("doom: engine up on port {}, lockstep", game.port);
-    let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
-    env.set_maps(args.maps.clone());
-    env.set_scenarios(args.scenarios.clone());
-    env.set_max_steps(args.max_steps());
-    env.set_approach(args.approach);
-    env.set_payment(args.payment);
-    env.set_arena(args.arena);
-    env.set_curriculum(args.curriculum);
-    env.set_start_distance(args.start_distance);
+    if args.command == "gate" {
+        return judge(&paths, &args);
+    }
+
+    let env = stand_up(&paths, args.maps.clone(), &args)?;
     if args.curriculum {
         println!(
             "doom: reverse curriculum - episodes start {} units of walking from the exit",
@@ -465,6 +489,166 @@ fn run() -> Result<(), String> {
         "value" => value(env, &args),
         _ => train(env, &args),
     }
+}
+
+/// Score one head over one level's episodes, on an engine of its own.
+fn rehearse(
+    paths: &Paths,
+    args: &Args,
+    head: &str,
+    map: u32,
+    seeds: &[u64],
+) -> Result<view::Score, String> {
+    let env = stand_up(paths, vec![map], args)?;
+    let mut pipe = ControlPipeline::builder(args.encoder(), env)
+        .head(head)
+        .seed(args.seed())
+        .device(args.device())
+        .load()
+        .map_err(|e| format!("{e}"))?;
+    let mut timing = view::Timing::default();
+    view::score_policy(&mut pipe, seeds, args.max_steps(), None, &mut timing)
+}
+
+/// Decide whether a newly trained policy may replace the one in service.
+///
+/// The SELECT step of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, and the one
+/// a loop that improves itself cannot run without. Without a gate a
+/// generation that produced a worse policy is adopted exactly as readily as
+/// one that produced a better one, so the loop has no ratchet: it wanders,
+/// and the wandering is invisible because the only number anybody looks at
+/// is the newest one. This sample has measured four verdicts reverse under a
+/// three-seed block, which is how big that hazard is here.
+///
+/// The decision itself is `brain::promote::gate` - a paired sign test and
+/// four bars over already-scored episodes, shared with every other thing in
+/// this workspace that promotes a checkpoint. What is specific to DOOM is
+/// only what a "score" is (UV-Max progress) and what a "block" is (a level).
+///
+/// Exits 0 on a promote and 3 on a reject, so a shell loop can branch on it
+/// without parsing anything.
+fn judge(paths: &Paths, args: &Args) -> Result<(), String> {
+    let candidate = args
+        .head()
+        .ok_or("--head PATH is the candidate: the policy that wants to go into service")?
+        .clone();
+    let incumbent = args
+        .incumbent
+        .clone()
+        .ok_or("--incumbent PATH is the policy already in service, which --head must beat")?;
+
+    // Per episode, and the SAME episodes for both arms in the same order.
+    // The comparison is paired; means are not enough to decide it. See
+    // `view::Score::per_episode`.
+    let seeds: Vec<u64> = (0..args.eval_episodes as u64).map(|i| args.seed() + i).collect();
+    println!(
+        "doom: gating {candidate} against {incumbent} over {} levels x {} episodes",
+        args.maps.len(),
+        seeds.len()
+    );
+
+    let mut cand: Vec<f64> = Vec::new();
+    let mut held: Vec<f64> = Vec::new();
+    // One block per LEVEL. A candidate that wins on average by learning E1M1
+    // and forgetting E1M3 is not an improvement, and the pooled mean cannot
+    // see the difference - this is the bar that can.
+    let mut blocks: Vec<(f64, f64)> = Vec::new();
+    let (mut cand_spread, mut held_spread) = (0.0f64, 0.0f64);
+    for map in &args.maps {
+        println!("\ndoom: E1M{map}, candidate");
+        let c = rehearse(paths, args, &candidate, *map, &seeds)?;
+        c.print("candidate");
+        println!("doom: E1M{map}, incumbent");
+        let h = rehearse(paths, args, &incumbent, *map, &seeds)?;
+        h.print("incumbent");
+        if c.per_episode.len() != h.per_episode.len() {
+            return Err(format!(
+                "E1M{map}: the arms played {} and {} episodes - a paired test needs the same ones",
+                c.per_episode.len(),
+                h.per_episode.len()
+            ));
+        }
+        blocks.push((c.progress as f64, h.progress as f64));
+        cand.extend(c.per_episode.iter().map(|v| *v as f64));
+        held.extend(h.per_episode.iter().map(|v| *v as f64));
+        cand_spread += c.entropy as f64;
+        held_spread += h.entropy as f64;
+    }
+    let levels = args.maps.len().max(1) as f64;
+
+    let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+    let report = brain::promote::gate::gate(
+        &brain::promote::gate::GateInput {
+            candidate_scores: &cand,
+            incumbent_scores: &held,
+            // The anchor suite here IS the levels, so the pooled anchor is
+            // the same data the effect size is computed from and its check
+            // is subsumed by that one. It is passed anyway because
+            // `GateReport` is meant to carry every number that fed the
+            // decision; the bar that does the work is `max_block_drop`.
+            anchor_candidate: mean(&cand),
+            anchor_incumbent: mean(&held),
+            entropy_candidate: cand_spread / levels,
+            entropy_incumbent: held_spread / levels,
+            anchor_blocks: &blocks,
+        },
+        &brain::promote::gate::GateConfig {
+            min_effect_size: args.min_effect,
+            max_block_drop: args.max_block_drop,
+            // Subsumed, per the comment above: a bar of infinity is honest
+            // about a check that has nothing of its own to check.
+            anchor_budget: f64::INFINITY,
+            ..Default::default()
+        },
+    );
+
+    println!(
+        "\ndoom: {} of {} paired episodes favour the candidate (p {:.4}), \
+         score {:+.3}, worst level {:+.3}, entropy ratio {:.2}",
+        report.k_wins,
+        report.n_discordant,
+        report.p_value,
+        report.effect_size,
+        -report.worst_block_delta,
+        report.entropy_ratio
+    );
+    match report.decision {
+        brain::promote::gate::Decision::Promote => {
+            println!("doom: PROMOTE - {candidate} goes into service");
+            Ok(())
+        }
+        brain::promote::gate::Decision::Reject(why) => {
+            println!("doom: REJECT - {why:?}; {incumbent} stays in service");
+            std::process::exit(3);
+        }
+    }
+}
+
+/// Start an engine and configure an environment over it.
+///
+/// Its own function because `gate` needs TWO: the candidate and the incumbent
+/// have to play the same episodes, and a `ControlPipeline` owns its
+/// environment, so the only way to score both without one of them reading a
+/// world the other has already changed is to give each its own game.
+fn stand_up(paths: &Paths, maps: Vec<u32>, args: &Args) -> Result<DoomEnv, String> {
+    let game = Doom::start(
+        paths,
+        &args.cfg,
+        args.transcript.as_ref().map(Into::into),
+        args.engine_log.as_ref().map(Into::into),
+    )
+    .map_err(|e| format!("could not start the game: {e}"))?;
+    println!("doom: engine up on port {}, lockstep", game.port);
+    let mut env = DoomEnv::new(game, args.cfg.clone(), args.mission, args.mix);
+    env.set_maps(maps);
+    env.set_scenarios(args.scenarios.clone());
+    env.set_max_steps(args.max_steps());
+    env.set_approach(args.approach);
+    env.set_payment(args.payment);
+    env.set_arena(args.arena);
+    env.set_curriculum(args.curriculum);
+    env.set_start_distance(args.start_distance);
+    Ok(env)
 }
 
 /// Search for solutions, with no model in the loop.
@@ -501,6 +685,34 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
         );
     }
 
+    // The trained policy as the search's PROPOSAL DISTRIBUTION, when one was
+    // given. This is the half of `SEARCH -> COMPRESS -> better SEARCH` that
+    // makes it a loop: without it a campaign is exactly as good as the
+    // scripted player it was written with and gets no better when the model
+    // does, so each generation starts from where the last one started.
+    //
+    // Built over `NoGame` because the SEARCH owns the real environment and
+    // cannot hand it over. That is why the objective has to travel with the
+    // question - see `ControlPipeline::policy_for`.
+    let mut mind = match args.head() {
+        Some(h) => {
+            let pipe = ControlPipeline::builder(args.encoder(), NoGame)
+                .head(h)
+                .seed(args.seed())
+                .device(args.device())
+                .load()
+                .map_err(|e| format!("{e}"))?;
+            println!("doom: proposing with the policy in {h} as well as the scripted player");
+            Some(pipe)
+        }
+        None => None,
+    };
+    let mut think = mind.as_mut().map(|pipe| {
+        move |objective: &str, reading: &str, options: &[String]| -> Option<Vec<f32>> {
+            pipe.policy_for(objective, reading, options).ok()
+        }
+    });
+
     let budget = Duration::from_secs(args.search_budget);
     let allowed = args.max_steps() as u32;
     let mut all: Vec<search::Solution> = Vec::new();
@@ -523,6 +735,7 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             allowed,
             Duration::from_secs(30),
             carried.as_deref(),
+            think.as_mut().map(|f| f as &mut search::Proposer<'_>),
         )?;
         println!(
             "doom: {} cells, best {:.3} in {} tics, {} verified UV-Max",
@@ -539,8 +752,15 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
         if let Some(dir) = std::path::Path::new(&args.lessons).parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        // One JSON object per line, so a campaign can append to a set that
-        // already exists and a reader never has to hold the whole file.
+        // One JSON object per line, APPENDED to whatever is already there.
+        //
+        // Appended because generations compound. With `--archive` carried in,
+        // a later campaign only files the cells it newly reached, so its
+        // `learned` set is the increment and not the whole of what the search
+        // knows. Overwriting would therefore fit each generation's policy to
+        // a shrinking slice of the archive that produced it, and the longer
+        // the loop ran the less the policy would be trained on. Deleting the
+        // file is how a caller asks for a fresh set.
         let mut out = String::new();
         for d in &lessons {
             out.push_str(
@@ -548,8 +768,14 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             );
             out.push('\n');
         }
-        std::fs::write(&args.lessons, out).map_err(|e| format!("{}: {e}", args.lessons))?;
-        println!("doom: wrote {} decisions to {}", lessons.len(), args.lessons);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&args.lessons)
+            .map_err(|e| format!("{}: {e}", args.lessons))?;
+        f.write_all(out.as_bytes()).map_err(|e| format!("{}: {e}", args.lessons))?;
+        println!("doom: added {} decisions to {}", lessons.len(), args.lessons);
     }
 
     if all.is_empty() {

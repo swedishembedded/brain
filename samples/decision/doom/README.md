@@ -111,7 +111,9 @@ Below, `$D` stands for those three flags. Every command works headless.
 
 | command | what it does |
 |---|---|
-| `search` | **discovery, with no model in it.** Finds solutions; loads no encoder and opens no device |
+| `search` | **discovery.** Finds solutions; with no `--head` it loads no encoder and opens no device, and with one the policy joins the operators as a proposal distribution |
+| `learn` | fit a head to the decisions a search kept. Needs no engine and no WAD |
+| `gate` | play two heads over the **same** episodes and decide, by paired sign test, whether the candidate may replace the one in service |
 | `probe` | one scripted episode, end to end, no policy |
 | `train` | warm-start on the scripted player, then search, self-imitation, DAgger or PPO |
 | `fit` | fit the head to the teacher and report how often it agrees - no reward, no critic |
@@ -154,6 +156,29 @@ doom train $D --maps 1,2,3,4,5,6,7,8,9 --skill 3 --mission clear --reward gauge 
 `--archive` is what makes a run a *generation* rather than a fresh start:
 without it every run searches from nothing and a level solved once can be
 quietly lost again.
+
+### The loop that improves itself
+
+```bash
+DOOM_BIN=… WAD=… ENC=… DBIN=… ./improve.sh 10 1800
+```
+
+`SEARCH -> COMPRESS -> SELECT -> better SEARCH`, ten generations of it, across
+every level of the episode. It is three commands in a loop and each one can be
+run on its own:
+
+```bash
+doom search $D --maps 1,2,3,4,5,6,7,8,9 --skill 3 --mission uvmax --reward gauge \
+  --max-steps 3000 --search-budget 1800 \
+  --archive out/arc --lessons out/lessons.jsonl \
+  --head out/serving.safetensors --encoder $ENC   # omit both to search alone
+doom learn --encoder $ENC --lessons out/lessons.jsonl --save out/gen4.safetensors
+doom gate  $D --maps 1,2,3,4,5,6,7,8,9 --skill 3 --mission uvmax --encoder $ENC \
+  --head out/gen4.safetensors --incumbent out/serving.safetensors
+```
+
+See [Running the loop](#running-the-loop) for what compounds between
+generations and what does not.
 
 ### Train on generated problems, keep the real levels for the exam
 
@@ -560,6 +585,117 @@ Measured on E1M1 at Ultra-Violence, one seed, ~600 s: 0.607 without it against
 0.801 with, and the arm that hunted found the first secret any campaign had
 found - going back for a monster seen once takes the player into the corners
 and side rooms it otherwise walks past, which is where secrets are.
+
+### Searching for secrets instead of hoping for them
+
+A DOOM secret is a wall that opens when pushed and looks very nearly like a
+wall that does not. Nothing in the observation says which, and saying which
+would be handing the agent the answer - so the only fair mechanism is the one
+a player uses: go somewhere you have not tried, and push on things.
+
+Pushing on things was already here and it was not a search. The operator
+pressed use wherever the player happened to be standing, so most of its budget
+went on re-testing wall it had already tested; measured, campaigns totalling
+well over an hour on E1M1 found one secret of three. The archive then deleted
+what searching it had done, because a trajectory that had pushed on forty
+walls and one that had pushed on none were the same cell and the archive keeps
+whichever arrived in fewer tics - which is always the one that did not search.
+
+Three changes, and all three are about MEMORY rather than about DOOM:
+
+- **A ledger of walls pushed on** (`memory::Sweep`), at spot-and-facing
+  resolution, carried in the engine snapshot like everything else the agent
+  remembers. A wall already pushed teaches nothing by being pushed again, so
+  the sweep slides along to the next piece of wall instead.
+- **Rooms not yet searched are a frontier**, filed the way monsters seen and
+  never gone back for are. A room the player has STOOD IN and never pushed on
+  is a destination derived from the run's own history - the option is "go and
+  search the walls of a room you have not searched yet", routed by the engine
+  like any other walk. A room retires when its walls have been tested, not
+  when the player walks through it: looking at a wall is no evidence about
+  what is behind it, which is exactly the rule a monster sighting DOES retire
+  on, and why this is a separate ledger.
+- **How much has been searched is part of the archive's name for a
+  situation.** Two runs standing in the same room with the same monsters dead
+  are not in the same situation when one of them is part-way through testing
+  its walls. Without that axis the archive throws the searching away at the
+  next admission.
+
+The scripted player ranks the search after fighting and hunting and before
+leaving, and only while the level still owes a secret - the counter is on the
+player's own status bar, so "0 of 3" is not being told anything.
+
+Measured on E1M1 at Ultra-Violence, 600 s, one seed: **0.690 before, 0.817
+with the ledger**, and 133 distinct walls tested against effectively none. The
+bandit moved with it - `frisk` went from the third-best operator to the best,
+and took a third of all the draws.
+
+One thing cost more than it looks like it should have. Asking the engine to
+route to the new frontier was a THIRD round trip per decision, and a round
+trip is most of what a decision costs with no model in the loop: it took the
+search from about 13 ms a decision to about 41 and threw away more than the
+frontier was worth. All three ledgers now ask in one call. A frontier costs
+what it costs to ask about, which is a separate decision from whether it is
+the right frontier.
+
+### Closing the loop: the policy as a search operator
+
+`search --head PATH` puts the trained policy in among the search operators, as
+a proposal distribution drawn from rather than an argmax taken. That is the
+half of `SEARCH -> COMPRESS -> better SEARCH` that makes it a loop. Without it
+a campaign is exactly as good as the scripted player it was written with and
+gets no better when the model does, so every generation starts from where the
+last one started.
+
+Sampled, not greedy, on purpose: a deterministic policy resumed from the same
+archived cell walks the same way every time, so as a search operator it would
+be worth exactly one evaluation per cell.
+
+The operator is only offered when a policy was actually supplied. An arm that
+silently degrades into a different operator still reports its gain under its
+own name, and the bandit then spends real budget comparing an operator with a
+copy of another one.
+
+### Deciding whether the new policy is better
+
+```bash
+doom gate --head out/gen4.safetensors --incumbent out/serving.safetensors \
+          --maps 1,2,3 --skill 3 --mission uvmax --eval-episodes 12
+```
+
+Both arms play the SAME episodes in the same order, and the decision is
+`brain::promote::gate` - a paired sign test plus four bars, shared with every
+other thing in this workspace that promotes a checkpoint. Two means cannot
+decide it: a candidate that wins hugely on one seed and loses everywhere else
+is indistinguishable from one that wins consistently, and this sample has
+already watched four verdicts reverse under a three-seed block.
+
+One block per level, so a candidate that wins on average by learning E1M1 and
+forgetting E1M3 is refused. It exits 3 on a reject, which is what lets a loop
+branch on it without parsing anything.
+
+Without a gate the loop has no ratchet: a generation that produced a worse
+policy is adopted exactly as readily as one that produced a better one, and
+nothing notices, because the only number anybody looks at is the newest one.
+
+### Running the loop
+
+```bash
+DOOM_BIN=… WAD=… ENC=… DBIN=… ./improve.sh 10 1800
+```
+
+Ten generations, thirty minutes of search per level per generation. Each one
+searches (resuming from the archive the last generation left, and proposing
+with the policy it trained), fits a head to every decision any campaign has
+ever kept, and then has to WIN a paired comparison before going into service.
+
+Two files per level compound across generations: the archive, which is where
+the search has been, and the lessons, which is what it learnt on the way.
+Lessons are APPENDED rather than rewritten - with an archive carried in, a
+campaign only files the cells it newly reached, so rewriting would fit each
+generation to a shrinking slice of the archive that produced it. A rejected
+generation still leaves both files better than it found them; only the weights
+are refused.
 
 ### The search half
 

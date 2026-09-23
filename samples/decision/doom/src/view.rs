@@ -96,6 +96,20 @@ pub struct Score {
     /// two runs that both fell short are indistinguishable by return and
     /// separable by this.
     pub progress: f32,
+    /// Each episode's own progress, in the order the seeds were played.
+    ///
+    /// The mean cannot be gated on. Deciding whether one policy beats
+    /// another is a PAIRED comparison over the same episodes - see
+    /// `brain::promote::gate` - and two means carry no pairing, so a
+    /// candidate that wins big on one seed and loses everywhere else is
+    /// indistinguishable from one that wins consistently.
+    pub per_episode: Vec<f32>,
+    /// Mean entropy of the policy's distribution over the decisions it made,
+    /// in nats. Zero for an arm that has no distribution (the scripted
+    /// player), and the collapse detector for one that does: a policy that
+    /// has learned to emit one option whatever it is shown scores well on a
+    /// task it happens to fit and has stopped being a policy.
+    pub entropy: f32,
 }
 
 impl Score {
@@ -147,6 +161,8 @@ struct Tally {
     steps: f32,
     floor: f32,
     progress: f32,
+    each: Vec<f32>,
+    entropy: f32,
     n: usize,
 }
 
@@ -163,11 +179,20 @@ impl Tally {
             steps: 0.0,
             floor: 0.0,
             progress: 0.0,
+            each: Vec::new(),
+            entropy: 0.0,
             n: 0,
         }
     }
 
-    fn add(&mut self, env: &mut DoomEnv, total: f32, steps: usize, allowed: usize) {
+    fn add(
+        &mut self,
+        env: &mut DoomEnv,
+        total: f32,
+        steps: usize,
+        allowed: usize,
+        entropy: f32,
+    ) {
         let s = env.state();
         self.ret += total;
         self.game += env.extrinsic();
@@ -179,6 +204,8 @@ impl Tally {
         self.floor += env.floor_damage() as f32;
         let got = env.score(allowed as u32);
         self.progress += got.value();
+        self.each.push(got.value());
+        self.entropy += entropy;
         self.n += 1;
         println!(
             "  {} ep {:<2} {total:+7.2}  progress {:.2}  {}",
@@ -207,6 +234,8 @@ impl Tally {
             steps: self.steps / n,
             floor_damage: self.floor / n,
             progress: self.progress / n,
+            entropy: self.entropy / n,
+            per_episode: self.each,
         }
     }
 }
@@ -240,7 +269,7 @@ pub fn score_scripted(
                 break;
             }
         }
-        tally.add(env, total, steps, max_steps);
+        tally.add(env, total, steps, max_steps, 0.0);
     }
     Ok(tally.finish())
 }
@@ -280,6 +309,9 @@ pub fn score_policy(
         let mut rng = brain::decision::Rng::new(0x5eed_d00d ^ seed);
         let mut observation = pipe.env_mut().start(seed);
         let (mut total, mut steps) = (0.0f32, 0usize);
+        // Summed over the episode's decisions and averaged at the end. The
+        // gate's collapse check reads it; see `Score::entropy`.
+        let mut spread = 0.0f32;
         for _ in 0..max_steps {
             let options: Vec<String> = pipe
                 .env()
@@ -297,6 +329,11 @@ pub fn score_policy(
                 .policy(&observation, &options)
                 .map_err(|e| format!("{e}"))?;
             timing.policy_ns += t0.elapsed().as_nanos();
+            spread += probs
+                .iter()
+                .filter(|p| **p > 0.0)
+                .map(|p| -p * p.ln())
+                .sum::<f32>();
             let mut u = rng.next_f32();
             let mut chosen = probs.len() - 1;
             for (i, p) in probs.iter().enumerate() {
@@ -325,7 +362,13 @@ pub fn score_policy(
                 break;
             }
         }
-        tally.add(pipe.env_mut(), total, steps, max_steps);
+        tally.add(
+            pipe.env_mut(),
+            total,
+            steps,
+            max_steps,
+            if steps > 0 { spread / steps as f32 } else { 0.0 },
+        );
         if let Some(v) = viewer.as_deref_mut() {
             v.episode_done();
         }

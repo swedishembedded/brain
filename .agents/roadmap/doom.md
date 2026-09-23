@@ -177,10 +177,53 @@ later reader will find them:
       walls, which is how anybody finds a DOOM secret without being told
       where one is. The engine needed nothing new: `API_RouteTo` already
       existed.
-- [ ] **M5 - first verified UV-Max on one level**, replayed from the start.
-- [ ] **M6 - `refine`/`splice`**: minimise tics on a solved level.
-- [ ] **M7 - compression**: clone the verified set; both arms measured.
-- [ ] **M8 - post-training**: policy rollouts as a search operator.
+- [x] **M5 - the loop closes.** Four gaps, named by what was actually missing
+      rather than by phase:
+
+      1. **Searching for secrets was hoping for them.** `frisk` pressed use
+         wherever the player stood, so most of its budget re-tested wall it
+         had already tested, and the archive deleted what searching it had
+         done because a trajectory that pushed on forty walls and one that
+         pushed on none were the same cell. Now: a ledger of walls pushed on
+         (`memory::Sweep`, spot-and-facing, carried in the snapshot), rooms
+         stood in but never pushed on as a routed frontier (`Tag::Frisk`),
+         and walls-tested as an axis of the niche. A room retires on WORK
+         DONE, not on being walked through - looking at a wall is no evidence
+         about what is behind it, which is the rule a monster sighting does
+         retire on and why it is a separate ledger.
+      2. **Nothing fed the policy back into the search.** `search --head`
+         adds the `pursue` operator: the trained policy as a proposal
+         distribution, sampled rather than argmaxed (a deterministic policy
+         resumed from the same cell walks the same way every time). The arm
+         is not offered at all without a policy, because an arm that
+         degrades into a different operator files its gain under the wrong
+         name and corrupts the allocation.
+      3. **Nothing decided whether a new policy was better.** `doom gate`
+         plays candidate and incumbent over the same episodes and hands the
+         paired scores to `brain::promote::gate` - the workspace's own sign
+         test and four bars, now re-exported through the SDK. One block per
+         level, so winning on average by learning E1M1 and forgetting E1M3
+         is refused. Exits 3 on a reject.
+      4. **Scale.** `improve.sh` runs generations across all nine levels;
+         lessons are APPENDED, because with an archive carried in a campaign
+         only files the cells it newly reached, so rewriting fitted each
+         generation to a shrinking slice of the archive that produced it.
+
+      And one defect found by measuring rather than by reading: asking the
+      engine for routes to the new frontier was a third round trip per
+      decision and took the search from ~13 ms to ~24 ms a decision - half
+      the campaign. All three ledgers now ask in ONE call, which left the
+      search faster than it was before the frontier existed.
+
+      The teacher's gate is now a pure function (`env::takes` over
+      `env::Moment`) with `every_option_the_orders_rank_can_actually_be_taken`
+      enumerating the table against it. An option that is built, offered,
+      ranked and never selectable has cost this sample three campaigns
+      (change weapon, circle-strafe, hunt); nothing short of enumeration
+      catches the fourth.
+- [ ] **M6 - first verified UV-Max on one level**, replayed from the start.
+- [ ] **M7 - `refine`/`splice`**: minimise tics on a solved level.
+- [ ] **M8 - compression at scale**: both model arms measured head to head.
 - [ ] **M9 - the nine recordings.**
 
 Each milestone lands with its measurement. A milestone with no number beside it

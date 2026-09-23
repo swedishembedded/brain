@@ -135,32 +135,67 @@ struct Operator {
     /// campaign on E1M1 found zero secrets - which makes the Max category
     /// unreachable no matter how well the fighting goes.
     press: f32,
+    /// How often to take a draw from the trained policy's distribution.
+    ///
+    /// The operator that closes the loop. Every other one here proposes with
+    /// machinery written by hand, so a campaign is exactly as good as what
+    /// was written and gets no better when the policy does. With this arm
+    /// the search's proposal distribution improves as the model improves,
+    /// and the model improves from what the search finds - which is the only
+    /// reason to compress a search into a model at all.
+    ///
+    /// A DRAW rather than the argmax, deliberately. A deterministic policy
+    /// resumed from the same cell walks the same way every time, so as a
+    /// search operator it would be worth exactly one evaluation per cell.
+    /// Sampled, it is a proposal distribution, which is what a policy is
+    /// actually good for here.
+    policy: f32,
 }
 
-const OPERATORS: [Operator; 6] = [
+const OPERATORS: [Operator; 7] = [
     // Blind, and blind in a level full of things that shoot back is mostly
     // dead - but it is the only operator that can produce an action no
     // teacher and no policy would ever pick.
-    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
+    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, leave: 0.0, sweep: false, press: 0.0, policy: 0.0 },
     // Starts from somewhere plausible and wanders off it.
-    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
+    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, leave: 0.0, sweep: false, press: 0.0, policy: 0.0 },
     // A long stretch of real play from a drawn cell. Long enough to finish a
     // firefight, clear a room and walk into the next one.
-    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
+    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, leave: 0.0, sweep: false, press: 0.0, policy: 0.0 },
     // The same, from the furthest-along cell there is: pushing the front of
     // the search forward rather than filling in behind it.
-    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, leave: 0.0, sweep: false, press: 0.0 },
-    // Walk about pressing on everything. Half the decisions are a push, the
-    // rest are the teacher moving on, which together is a player running
-    // their shoulder along the walls of a room - the only way a secret is
-    // ever found by someone who has not been told where it is.
-    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, leave: 0.0, sweep: true, press: 0.5 },
+    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, leave: 0.0, sweep: false, press: 0.0, policy: 0.0 },
+    // Walk about pushing on walls. Half the decisions are a push, the rest
+    // are the teacher moving on, which together is a player running their
+    // shoulder along the walls of a room - the only way a secret is ever
+    // found by someone who has not been told where one is. What makes it a
+    // SEARCH rather than a coin flip is the ledger it pushes against: see
+    // `memory::Sweep` and `Campaign::choose`.
+    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, leave: 0.0, sweep: true, press: 0.5, policy: 0.0 },
     // Play on from the furthest-along cell there is, and take the way out
     // when one is offered. The only operator that can produce a FINISHED
     // level, which is what the verification rung exists to check and what
     // the compression phase is supposed to be fitted to.
-    Operator { name: "leave", walk: 400, guided: 1.0, from_best: true, leave: 0.4, sweep: false, press: 0.0 },
+    Operator { name: "leave", walk: 400, guided: 1.0, from_best: true, leave: 0.4, sweep: false, press: 0.0, policy: 0.0 },
+    // The trained policy playing on from a cell the archive already reached.
+    //
+    // Only drawn when a campaign was actually given a policy - see
+    // `Campaign::arms`. `guided` sits at 1.0 behind it so a proposal the
+    // model cannot answer falls back to the scripted player rather than to
+    // noise: an arm that silently turns into `wander` when the backend
+    // errors files `wander`'s gain under this arm's name, and the allocator
+    // then spends its budget on a measurement of something else.
+    Operator { name: "pursue", walk: 400, guided: 1.0, from_best: false, leave: 0.0, sweep: false, press: 0.0, policy: 1.0 },
 ];
+
+/// What a trained policy would do here: a distribution over the options on
+/// offer, given the objective they were offered under.
+///
+/// A closure rather than a model, because the search must not know what a
+/// model is. It hosts a proposal distribution; where one comes from is the
+/// caller's business, which is what keeps `crates/search` free of both the
+/// engine and the GPU.
+pub type Proposer<'a> = dyn FnMut(&str, &str, &[String]) -> Option<Vec<f32>> + 'a;
 
 /// What a search campaign found, and what it cost.
 pub struct Found {
@@ -313,7 +348,6 @@ const WITNESS_EVERY: usize = 8;
 /// trustworthy and where they stop being so.
 const AUDIT_SAMPLES: usize = 6;
 
-
 /// How many cells read back off disk a campaign will pay to make returnable
 /// again.
 ///
@@ -400,6 +434,19 @@ pub struct Campaign {
     /// copying; the rest of what a search does is mostly the walk that did
     /// not work, and fitting a policy to that teaches it to wander.
     learned: Vec<Demonstration>,
+    /// Which of [`OPERATORS`] this campaign may draw, by index.
+    ///
+    /// An operator that needs something the campaign was not given - a
+    /// policy, today - is left OUT rather than degraded into a different
+    /// operator. A disabled arm that quietly behaves like `wander` still
+    /// reports its gain under its own name, and the allocator then spends
+    /// real budget comparing an operator against a copy of another one.
+    arms: Vec<usize>,
+    /// The most walls any one trajectory has pushed on, so that "the search
+    /// is looking for secrets" is a number rather than a hope. A high-water
+    /// mark, because the live figure belongs to whichever cell was restored
+    /// last and says nothing about the campaign.
+    searched: usize,
     /// Completed categories noticed during a walk, waiting to be replayed.
     ///
     /// Queued rather than verified on the spot because verifying RESTARTS the
@@ -409,10 +456,20 @@ pub struct Campaign {
 }
 
 impl Campaign {
-    pub fn new(slots: usize, seed: u64) -> Campaign {
+    /// `with_policy` says whether a proposal distribution will be supplied.
+    /// Without one the policy arm is not offered at all - see
+    /// [`Campaign::arms`].
+    pub fn new(slots: usize, seed: u64, with_policy: bool) -> Campaign {
+        let arms: Vec<usize> = OPERATORS
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| with_policy || o.policy == 0.0)
+            .map(|(i, _)| i)
+            .collect();
+        let names: Vec<&'static str> = arms.iter().map(|i| OPERATORS[*i].name).collect();
         Campaign {
             archive: Archive::new(slots, SAME_ACHIEVEMENT),
-            alloc: Allocator::new(&OPERATORS.map(|o| o.name)),
+            alloc: Allocator::new(&names),
             rng: Rng::new(seed),
             start: None,
             seed,
@@ -424,8 +481,42 @@ impl Campaign {
             live: std::collections::HashSet::new(),
             rehydrations: REHYDRATIONS,
             learned: Vec::new(),
+            arms,
+            searched: 0,
             claims: Vec::new(),
         }
+    }
+
+    /// The operators this campaign is drawing between, for its opening line.
+    fn operators(&self) -> String {
+        self.arms.iter().map(|i| OPERATORS[*i].name).collect::<Vec<_>>().join(", ")
+    }
+
+    /// An index drawn from `weights`, which are the policy's probabilities.
+    ///
+    /// Drawn with the CAMPAIGN's own generator, so a search seeded the same
+    /// way makes the same draws: the policy is a distribution, and where the
+    /// randomness that resolves it comes from is a property of the search.
+    fn draw(&mut self, weights: &[f32]) -> Option<usize> {
+        let total: f32 = weights.iter().filter(|w| w.is_finite() && **w > 0.0).sum();
+        // `<= 0.0` first so a NaN total falls through to the finite check
+        // rather than being compared into a silent `true`.
+        if total <= 0.0 || !total.is_finite() {
+            return None;
+        }
+        let mut point = self.rng.next_f32() * total;
+        for (i, w) in weights.iter().enumerate() {
+            if !w.is_finite() || *w <= 0.0 {
+                continue;
+            }
+            point -= *w;
+            if point <= 0.0 {
+                return Some(i);
+            }
+        }
+        // Floating-point arithmetic can leave `point` a hair above zero after
+        // the last subtraction. The last positive weight is the answer.
+        weights.iter().rposition(|w| w.is_finite() && *w > 0.0)
     }
 
     /// The index of an option sentence, adding it to the vocabulary if this
@@ -501,7 +592,10 @@ impl Campaign {
         if let Some(dir) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let kept = Kept { vocab: self.vocab.clone(), archive: self.archive.clone() };
+        let kept = Kept {
+            vocab: self.vocab.clone(),
+            archive: self.archive.clone(),
+        };
         match serde_json::to_string(&kept)
             .map_err(|e| format!("{e}"))
             .and_then(|t| std::fs::write(path, t).map_err(|e| format!("{path}: {e}")))
@@ -639,13 +733,7 @@ impl Campaign {
     /// A cell the engine will not hold is REMOVED rather than kept: an
     /// archive entry whose snapshot does not exist is one that returns to
     /// some other cell's state and then reports having explored this one.
-    fn file(
-        &mut self,
-        env: &mut DoomEnv,
-        cell: Niche,
-        worth: Worth,
-        trail: Trail,
-    ) -> Admission {
+    fn file(&mut self, env: &mut DoomEnv, cell: Niche, worth: Worth, trail: Trail) -> Admission {
         let verdict = self.archive.offer(cell.clone(), worth, trail);
         if verdict == Admission::Rejected {
             return verdict;
@@ -754,10 +842,16 @@ impl Campaign {
     /// and HOW it chooses each action. Keeping that shape in one place is
     /// what stops three operators drifting into three slightly different
     /// definitions of what a walk is.
-    fn operate(&mut self, env: &mut DoomEnv, arm: usize, allowed: u32) -> Gain {
+    fn operate(
+        &mut self,
+        env: &mut DoomEnv,
+        arm: usize,
+        allowed: u32,
+        mut propose: Option<&mut Proposer<'_>>,
+    ) -> Gain {
         let began = Instant::now();
         let mut gain = Gain::default();
-        let op = &OPERATORS[arm];
+        let op = &OPERATORS[self.arms[arm]];
 
         let picked = if op.from_best {
             self.archive.best().map(|e| (e.niche.clone(), e.slot))
@@ -791,7 +885,14 @@ impl Campaign {
             if options.is_empty() {
                 break;
             }
-            let chose = self.choose(env, op, &options, last.as_deref());
+            let chose = self.choose(
+                env,
+                op,
+                &options,
+                last.as_deref(),
+                &here_and_now,
+                propose.as_deref_mut(),
+            );
             // Captured BEFORE the step, because a decision is a question
             // about the state it was asked in and that state is about to
             // stop existing. Whether it is worth keeping is decided a few
@@ -807,6 +908,7 @@ impl Campaign {
             let (next, _, done) = env.step(chose);
             here_and_now = next;
             self.steps += 1;
+            self.searched = self.searched.max(env.walls_tested());
             if env.fault().is_some() {
                 break;
             }
@@ -828,7 +930,10 @@ impl Campaign {
                 whole.extend_from_slice(&steps);
                 let mut seen = marked.clone();
                 seen.extend_from_slice(&marks);
-                let trail = Trail { steps: whole, marks: seen };
+                let trail = Trail {
+                    steps: whole,
+                    marks: seen,
+                };
                 // What the archive's best was BEFORE this admission, so a
                 // cell that advances the frontier is credited against the old
                 // frontier rather than against itself.
@@ -856,7 +961,10 @@ impl Campaign {
                     // finished the level.
                     let mut whole = prefix.clone();
                     whole.extend_from_slice(&steps);
-                    if let Some(actions) = self.spell(&Trail { steps: whole, marks: Vec::new() }) {
+                    if let Some(actions) = self.spell(&Trail {
+                        steps: whole,
+                        marks: Vec::new(),
+                    }) {
                         self.claims.push(Claim {
                             actions,
                             claimed: ended,
@@ -878,6 +986,7 @@ impl Campaign {
     /// in a room producing a new square of floor every few steps. The axes
     /// are the niche's own: map, x, y, keys, monsters left, secrets found.
     fn say(&self, level: &str, elapsed: Duration, solved: &[Solution]) {
+        let walls = self.searched;
         let cover = self
             .archive
             .coverage()
@@ -887,7 +996,7 @@ impl Campaign {
             .join("/");
         let best = self.archive.best();
         println!(
-            "  {level} {:>5.0}s: {} cells (cover {}), best {:.3} in {} tics,              {} steps, {} resumes, {} verified",
+            "  {level} {:>5.0}s: {} cells (cover {}), best {:.3} in {} tics, {walls} walls, {} steps, {} resumes, {} verified",
             elapsed.as_secs_f64(),
             self.archive.len(),
             cover,
@@ -906,24 +1015,51 @@ impl Campaign {
         op: &Operator,
         options: &[String],
         last: Option<&str>,
+        reading: &str,
+        mut propose: Option<&mut Proposer<'_>>,
     ) -> usize {
+        // The policy first, when this arm has one: everything below is a
+        // fallback for a proposal that could not be made.
+        if op.policy > 0.0 && self.rng.next_f32() < op.policy {
+            let asked = propose
+                .as_mut()
+                .and_then(|f| f(&env.objective(), reading, options))
+                .filter(|p| p.len() == options.len());
+            if let Some(i) = asked.and_then(|p| self.draw(&p)) {
+                return i;
+            }
+        }
         if op.leave > 0.0 && self.rng.next_f32() < op.leave {
             if let Some(i) = env.exit_option().filter(|i| *i < options.len()) {
                 return i;
             }
         }
         if op.press > 0.0 && self.rng.next_f32() < op.press {
-            // Press, then slide along and press again. `last` is what the
-            // walk just did, so alternating on it is what turns a repeated
-            // push on one spot into a sweep of the wall.
-            let pressed_last = last.is_some_and(|l| Some(l) == env.use_text().as_deref());
-            if op.sweep && pressed_last {
-                let sides = env.sidestep_options();
-                if let Some(i) = sides.first().filter(|i| **i < options.len()) {
-                    return *i;
+            // A wall this run has already pushed on teaches nothing by being
+            // pushed again. So a sweep that finds one slides along to the
+            // next piece of wall, and when there is nowhere left to slide to
+            // it sets off for a room that has never been searched at all.
+            //
+            // This is the whole difference between pressing use and
+            // SEARCHING. Measured without the ledger, campaigns totalling
+            // well over an hour on E1M1 found one secret of three: an
+            // alternation driven by "did I press last time" re-tests the
+            // same wall as soon as anything else happens in between, and in
+            // a level full of monsters something always does.
+            if env.pressed_here() {
+                if op.sweep {
+                    if let Some(i) = env
+                        .sidestep_options()
+                        .first()
+                        .filter(|i| **i < options.len())
+                    {
+                        return *i;
+                    }
                 }
-            }
-            if let Some(i) = env.use_option().filter(|i| *i < options.len()) {
+                if let Some(i) = env.frisk_option().filter(|i| *i < options.len()) {
+                    return i;
+                }
+            } else if let Some(i) = env.use_option().filter(|i| *i < options.len()) {
                 return i;
             }
         }
@@ -1128,8 +1264,9 @@ pub fn campaign(
     allowed: u32,
     every: Duration,
     archive: Option<&str>,
+    mut propose: Option<&mut Proposer<'_>>,
 ) -> Result<Found, String> {
-    let mut run = Campaign::new(env.slots(), seed);
+    let mut run = Campaign::new(env.slots(), seed, propose.is_some());
     // The archive comes in BEFORE the level is stood up, so the spawn cell is
     // filed against whatever was carried in rather than into an empty map.
     if let Some(path) = archive {
@@ -1147,9 +1284,8 @@ pub fn campaign(
         "doom: searching {level} for {:.0}s, {} slots, operators: {}",
         budget.as_secs_f64(),
         env.slots(),
-        OPERATORS.map(|o| o.name).join(", ")
+        run.operators()
     );
-
 
     let began = Instant::now();
     let mut said = Instant::now();
@@ -1158,7 +1294,7 @@ pub fn campaign(
 
     while began.elapsed() < budget {
         let arm = run.alloc.choose();
-        let gain = run.operate(env, arm, allowed);
+        let gain = run.operate(env, arm, allowed, propose.as_deref_mut());
         run.alloc.credit(arm, gain);
 
         // A completed category is checked the moment it is claimed, not at
@@ -1249,5 +1385,11 @@ pub fn campaign(
         best.map(|e| e.worth.cost).unwrap_or(0),
     );
     println!("    {} decisions kept for training", run.learned.len());
-    Ok(Found { cells, best: reached, best_tics: cost, solved, learned: run.learned })
+    Ok(Found {
+        cells,
+        best: reached,
+        best_tics: cost,
+        solved,
+        learned: run.learned,
+    })
 }

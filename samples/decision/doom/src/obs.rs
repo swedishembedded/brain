@@ -76,6 +76,14 @@ pub struct State {
     /// timer.
     #[serde(skip)]
     pub unfinished: Vec<crate::memory::Recalled>,
+    /// Rooms the player has stood in and never pushed on the walls of.
+    ///
+    /// Derived, like `unfinished`, from the agent's own history and not from
+    /// the level: it says where this run has and has not SEARCHED, which is
+    /// a fact about the run. Where the secrets actually are is not in here
+    /// and must not be - being told that would be being given the answer.
+    #[serde(skip)]
+    pub unfrisked: Vec<crate::memory::Recalled>,
     /// Ids of things carrying less health than the most they have been seen
     /// with: the ones this player has been shooting. See
     /// [`crate::memory::Memory::wounded`].

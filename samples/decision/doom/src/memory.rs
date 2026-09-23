@@ -186,11 +186,60 @@ struct Haunt {
 /// separately would send the search to the same room twice.
 const HAUNT_UNITS: f64 = 256.0;
 
+/// Side of the region wall-testing is tallied over, in map units. Room
+/// scale, the same as a haunt's, because "go and search that room" is the
+/// grain at which the question is worth asking.
+const SWEEP_UNITS: f64 = 256.0;
+
+/// Distinct walls pushed on inside one region before it counts as searched.
+///
+/// A number, not a proof: nothing here knows how many walls a room has, and
+/// nothing can without being handed the level. What it buys is that the
+/// frontier DRAINS - a room pushed on this many times stops being offered,
+/// so the search moves on instead of sweeping the first room forever.
+const SWEPT: u32 = 12;
+
+/// How finely one push is remembered, in map units. A DOOM linedef is 8 to
+/// 128 units long; at 64 the ledger distinguishes the pieces of wall a
+/// sidestep actually moves between without filing every step as new.
+const PRESS_UNITS: f64 = 64.0;
+
+/// Facings one spot is divided into, so that standing in a corner and
+/// turning is testing two walls rather than pushing one twice.
+const FACINGS: i32 = 8;
+
+/// A region of the level and how much of its walls this run has pushed on.
+///
+/// The counterpart of [`Haunt`] for secrets, and a separate ledger for a
+/// concrete reason: a haunt retires on EVIDENCE (went there, looked, saw
+/// nothing), and there is no such evidence about a wall. A wall that has
+/// not been pushed looks exactly like a wall that has. So this one retires
+/// on WORK DONE instead, which is the only thing the agent can actually
+/// observe about its own searching.
+#[derive(Clone)]
+struct Sweep {
+    x: f64,
+    y: f64,
+    /// Distinct walls pushed on here. Distinct, because pressing use two
+    /// hundred times against one spot tests one wall.
+    tried: u32,
+    path: Option<Path>,
+}
+
 #[derive(Clone, Default)]
 pub struct Memory {
     held: Vec<Held>,
     /// Places live monsters were seen, at room scale. See [`Haunt`].
     haunts: Vec<Haunt>,
+    /// Regions stood in and how thoroughly searched. See [`Sweep`].
+    swept: Vec<Sweep>,
+    /// Which walls have been pushed on: a bit per facing, per spot.
+    ///
+    /// A mask rather than a set of `(spot, facing)` because this is cloned
+    /// into every engine snapshot the search holds, and a search holds
+    /// thousands. Eight facings fit in a byte, so a run that has pushed on
+    /// a thousand walls costs a few kilobytes a snapshot instead of tens.
+    pressed: std::collections::HashMap<(i32, i32), u8>,
     /// Whether something was picked up in the observation being folded in.
     took: bool,
 }
@@ -261,6 +310,7 @@ impl Memory {
         }
         self.forget(p);
         self.settle(p);
+        self.stood_in(p);
     }
 
     /// File the region a live monster was seen in as unfinished business.
@@ -268,10 +318,12 @@ impl Memory {
         let Some((x, y)) = place(p, t.bearing, t.distance) else {
             return;
         };
-        let region = |a: f64, b: f64| {
-            (a / HAUNT_UNITS).floor() == (b / HAUNT_UNITS).floor()
-        };
-        if let Some(h) = self.haunts.iter_mut().find(|h| region(h.x, x) && region(h.y, y)) {
+        let region = |a: f64, b: f64| (a / HAUNT_UNITS).floor() == (b / HAUNT_UNITS).floor();
+        if let Some(h) = self
+            .haunts
+            .iter_mut()
+            .find(|h| region(h.x, x) && region(h.y, y))
+        {
             // The freshest sighting wins the position, so a monster that is
             // walking toward the player does not leave the marker behind it.
             h.x = x;
@@ -279,7 +331,12 @@ impl Memory {
             h.kind = t.kind.clone();
             return;
         }
-        self.haunts.push(Haunt { kind: t.kind.clone(), x, y, path: None });
+        self.haunts.push(Haunt {
+            kind: t.kind.clone(),
+            x,
+            y,
+            path: None,
+        });
     }
 
     /// Drop the regions the player has been to and looked at.
@@ -294,6 +351,165 @@ impl Memory {
             Some((bearing, d)) if d <= HAUNT_UNITS as i32 => bearing.abs() > LOOKED,
             _ => true,
         });
+    }
+
+    /// Which piece of wall the player is standing in front of: a spot and a
+    /// facing, both coarse enough that shuffling does not invent new walls.
+    fn wall(p: &Player) -> Option<((i32, i32), u8)> {
+        let (x, y, a) = (p.x?, p.y?, p.angle?);
+        let spot = (
+            (x as f64 / PRESS_UNITS).floor() as i32,
+            (y as f64 / PRESS_UNITS).floor() as i32,
+        );
+        Some((spot, 1u8 << (a.rem_euclid(360) * FACINGS / 360)))
+    }
+
+    /// File the region the player is standing in as somewhere whose walls
+    /// could be searched.
+    ///
+    /// Unconditionally, including regions already filed - a region is only
+    /// ever added here, never retired by being walked through, because
+    /// walking through a room is not evidence about its walls.
+    fn stood_in(&mut self, p: &Player) {
+        let (Some(x), Some(y)) = (p.x, p.y) else {
+            return;
+        };
+        let (x, y) = (x as f64, y as f64);
+        let region = |a: f64, b: f64| (a / SWEEP_UNITS).floor() == (b / SWEEP_UNITS).floor();
+        if self.swept.iter().any(|s| region(s.x, x) && region(s.y, y)) {
+            return;
+        }
+        self.swept.push(Sweep {
+            x,
+            y,
+            tried: 0,
+            path: None,
+        });
+    }
+
+    /// Has the wall in front of the player already been pushed on?
+    ///
+    /// What turns pressing use from a coin flip into a search: a sweep that
+    /// can tell moves along to a wall it has not tested, and one that cannot
+    /// re-tests the wall it is standing at for as long as its budget lasts.
+    pub fn pressed_here(&self, state: &State) -> bool {
+        Memory::wall(&state.player)
+            .is_some_and(|(spot, bit)| self.pressed.get(&spot).is_some_and(|m| m & bit != 0))
+    }
+
+    /// Record that the wall in front of the player has been pushed on.
+    ///
+    /// Only a wall never pushed before counts toward its region's tally, so
+    /// a region retires when its walls have been SEARCHED rather than when
+    /// the use key has been pressed enough times.
+    pub fn press(&mut self, state: &State) {
+        let p = &state.player;
+        let Some((spot, bit)) = Memory::wall(p) else {
+            return;
+        };
+        let mask = self.pressed.entry(spot).or_insert(0);
+        if *mask & bit != 0 {
+            return;
+        }
+        *mask |= bit;
+        self.stood_in(p);
+        let (Some(x), Some(y)) = (p.x, p.y) else {
+            return;
+        };
+        let (x, y) = (x as f64, y as f64);
+        let region = |a: f64, b: f64| (a / SWEEP_UNITS).floor() == (b / SWEEP_UNITS).floor();
+        if let Some(s) = self
+            .swept
+            .iter_mut()
+            .find(|s| region(s.x, x) && region(s.y, y))
+        {
+            s.tried += 1;
+        }
+    }
+
+    /// Distinct walls this run has pushed on.
+    ///
+    /// The archive's measure of how thoroughly a trajectory has SEARCHED, as
+    /// opposed to how far it has got. Two runs standing in the same room
+    /// having killed the same monsters are not in the same situation when
+    /// one of them has tested forty walls, and an archive that cannot see
+    /// the difference keeps whichever arrived sooner - which is exactly the
+    /// one that did no searching.
+    pub fn tested(&self) -> usize {
+        self.pressed.values().map(|m| m.count_ones() as usize).sum()
+    }
+
+    /// The nearest regions stood in whose walls have not been searched, in
+    /// map units, for whoever can ask the engine the way. The index stands
+    /// in for an id, as it does for a haunt, because a region is a place
+    /// rather than a thing.
+    ///
+    /// NEAREST, and no more of them than an option list can hold. This
+    /// ledger grows with every room the player walks into and never shrinks
+    /// except by being searched, so asking the engine to route to all of it
+    /// costs more every decision - measured, routing the whole frontier cut
+    /// the search's throughput roughly in half, which is a far larger loss
+    /// than any secret it could have found. The far ones are also the ones
+    /// `unfrisked` would drop anyway.
+    pub fn unswept(&self, state: &State) -> Vec<(i64, f64, f64)> {
+        let p = &state.player;
+        let mut open: Vec<(i64, f64, f64, i32)> = self
+            .swept
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.tried < SWEPT)
+            .filter_map(|(i, s)| {
+                let (_, distance) = from_here(p, s.x, s.y)?;
+                (distance >= SWEEP_UNITS as i32).then_some((i as i64, s.x, s.y, distance))
+            })
+            .collect();
+        open.sort_by_key(|r| r.3);
+        open.truncate(MAX_RECALLED);
+        open.into_iter().map(|(i, x, y, _)| (i, x, y)).collect()
+    }
+
+    /// Fold routes to the unsearched regions back in, by the index
+    /// `unswept` handed out.
+    pub fn routed_sweeps(&mut self, paths: &[(i64, Option<Path>)]) {
+        for (i, path) in paths {
+            if let Some(s) = self.swept.get_mut(*i as usize) {
+                s.path = *path;
+            }
+        }
+    }
+
+    /// Somewhere else whose walls are worth searching, placed from where the
+    /// player is standing now, nearest first.
+    ///
+    /// Not the region being stood in: the way to push on the walls here is
+    /// to push on them, and offering a walk to where the player already is
+    /// is an option that spends a decision going nowhere.
+    pub fn unfrisked(&self, state: &State) -> Vec<Recalled> {
+        let p = &state.player;
+        let mut out: Vec<Recalled> = self
+            .swept
+            .iter()
+            .filter(|s| s.tried < SWEPT)
+            .filter_map(|s| {
+                let (bearing, distance) = from_here(p, s.x, s.y)?;
+                if distance < SWEEP_UNITS as i32 {
+                    return None;
+                }
+                Some(Recalled {
+                    id: 0,
+                    kind: "unsearched walls".to_string(),
+                    class: Class::Pickup,
+                    bearing,
+                    distance,
+                    health: None,
+                    ago: 0,
+                    path: s.path,
+                })
+            })
+            .collect();
+        out.sort_by_key(|r| r.distance);
+        out.truncate(MAX_RECALLED);
+        out
     }
 
     /// Where the unfinished business is, in map units, for whoever can ask
@@ -392,9 +608,7 @@ impl Memory {
             // away. Two things count - having picked something up while
             // standing on it, and having looked where it was and not seen it.
             match from_here(p, h.x, h.y) {
-                Some((bearing, d)) if d <= REACHED => {
-                    !(took || bearing.abs() <= LOOKED)
-                }
+                Some((bearing, d)) if d <= REACHED => !(took || bearing.abs() <= LOOKED),
                 Some(_) => true,
                 // Nothing to place it against, so nothing was learned.
                 None => true,
@@ -783,11 +997,30 @@ mod path_tests {
     #[test]
     fn a_route_answered_for_reaches_the_recalled_thing() {
         let mut m = seen_then_turned_away();
-        m.routed(&[(7, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }))]);
+        m.routed(&[(
+            7,
+            Some(Path {
+                bearing: -40,
+                distance: 330,
+                clearance: 256,
+                step: 128,
+            }),
+        )]);
         let state = State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap();
         let r = m.recall(&state);
-        let kit = r.iter().find(|r| r.id == 7).expect("the medikit is remembered");
-        assert_eq!(kit.path, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }));
+        let kit = r
+            .iter()
+            .find(|r| r.id == 7)
+            .expect("the medikit is remembered");
+        assert_eq!(
+            kit.path,
+            Some(Path {
+                bearing: -40,
+                distance: 330,
+                clearance: 256,
+                step: 128
+            })
+        );
         // And the straight line is still there and still different: 180 off
         // the nose at 200 units, against a 330-unit walk starting 40 to the
         // left. Offering only one of the two would be losing information.
@@ -800,10 +1033,21 @@ mod path_tests {
     #[test]
     fn a_thing_not_answered_for_loses_the_route_it_had() {
         let mut m = seen_then_turned_away();
-        m.routed(&[(7, Some(Path { bearing: -40, distance: 330, clearance: 256, step: 128 }))]);
+        m.routed(&[(
+            7,
+            Some(Path {
+                bearing: -40,
+                distance: 330,
+                clearance: 256,
+                step: 128,
+            }),
+        )]);
         m.routed(&[]);
         let state = State::parse(&super::tests::build(0, 0, 180, super::tests::NOTHING)).unwrap();
-        assert_eq!(m.recall(&state).iter().find(|r| r.id == 7).unwrap().path, None);
+        assert_eq!(
+            m.recall(&state).iter().find(|r| r.id == 7).unwrap().path,
+            None
+        );
     }
 }
 
@@ -863,5 +1107,115 @@ mod expiry_tests {
         )).unwrap());
         m.observe(&State::parse(&super::tests::build(-200, 0, 0, super::tests::NOTHING)).unwrap());
         assert!(still_there(&m));
+    }
+}
+
+#[cfg(test)]
+mod frisk_tests {
+    use super::*;
+
+    fn at(x: i32, y: i32, angle: i32) -> State {
+        State::parse(&super::tests::build(x, y, angle, super::tests::NOTHING)).unwrap()
+    }
+
+    /// The whole point of the ledger. A wall pushed on once is a wall this
+    /// run knows about, and a search that cannot tell the difference spends
+    /// its budget pushing the same wall over and over.
+    #[test]
+    fn a_wall_that_has_been_pushed_on_is_known_to_have_been_pushed_on() {
+        let mut m = Memory::new();
+        let here = at(0, 0, 0);
+        assert!(!m.pressed_here(&here), "nothing has been pushed yet");
+        m.press(&here);
+        assert!(m.pressed_here(&here));
+        // The same spot facing the other way is a DIFFERENT wall, and the
+        // one a sweep is about to move on to.
+        assert!(!m.pressed_here(&at(0, 0, 180)));
+    }
+
+    /// Far enough along a wall is a different piece of wall. A ledger that
+    /// could not tell would retire a whole room after a single push.
+    #[test]
+    fn sliding_along_a_wall_reaches_a_piece_of_it_that_is_untested() {
+        let mut m = Memory::new();
+        m.press(&at(0, 0, 0));
+        assert!(!m.pressed_here(&at(200, 0, 0)));
+    }
+
+    /// The rule a haunt does NOT follow, and the reason this is a second
+    /// ledger rather than a field on the first: looking at where a monster
+    /// was is evidence it has gone, and looking at a wall is no evidence at
+    /// all about what is behind it.
+    #[test]
+    fn walking_through_a_room_does_not_test_its_walls() {
+        let mut m = Memory::new();
+        m.observe(&at(0, 0, 0));
+        m.observe(&at(64, 0, 90));
+        assert_eq!(m.unswept(&at(600, 0, 0)).len(), 1, "still worth coming back to push on");
+    }
+
+    /// And pushing on enough of them does.
+    #[test]
+    fn pushing_on_enough_of_a_rooms_walls_retires_it() {
+        let mut m = Memory::new();
+        m.observe(&at(0, 0, 0));
+        for i in 0..SWEPT as i32 {
+            // A different piece of wall each time, which is what a sweep
+            // actually is.
+            m.press(&at((i % 4) * 64, (i / 4) * 64, 0));
+        }
+        assert!(m.unswept(&at(600, 0, 0)).is_empty(), "its walls have been tested");
+    }
+
+    /// Pushing the same wall again is one wall tested, not two.
+    #[test]
+    fn pushing_the_same_wall_again_tests_nothing_new() {
+        let mut m = Memory::new();
+        m.observe(&at(0, 0, 0));
+        for _ in 0..SWEPT * 2 {
+            m.press(&at(0, 0, 0));
+        }
+        assert_eq!(m.tested(), 1);
+        assert_eq!(m.unswept(&at(600, 0, 0)).len(), 1, "one wall is not a swept room");
+    }
+
+    /// The frontier has to leave here to be routed to, exactly as unfinished
+    /// business does: the way to a room is not the heading to it.
+    #[test]
+    fn untested_rooms_are_offered_for_routing_and_take_their_answers() {
+        let mut m = Memory::new();
+        m.observe(&at(0, 0, 0));
+        m.observe(&at(600, 0, 0));
+        let open = m.unswept(&at(600, 0, 0));
+        assert_eq!(open.len(), 1, "the room being stood in is not routed to");
+        let path = Path {
+            bearing: -40,
+            distance: 700,
+            clearance: 256,
+            step: 128,
+        };
+        assert_eq!(open[0].0, 0, "the far one");
+        m.routed_sweeps(&[(open[0].0, Some(path))]);
+
+        let back = m.unfrisked(&at(600, 0, 0));
+        assert_eq!(
+            back.len(),
+            1,
+            "the room being stood in is not somewhere to go"
+        );
+        assert_eq!(back[0].path, Some(path));
+    }
+
+    /// What the archive counts. Two runs standing in the same place having
+    /// killed the same monsters are not in the same situation when one has
+    /// tested forty walls and the other none - and an archive that cannot
+    /// see the difference keeps the faster one, which deletes the search.
+    #[test]
+    fn walls_tested_counts_distinct_walls() {
+        let mut m = Memory::new();
+        m.press(&at(0, 0, 0));
+        m.press(&at(0, 0, 90));
+        m.press(&at(0, 0, 0));
+        assert_eq!(m.tested(), 2);
     }
 }

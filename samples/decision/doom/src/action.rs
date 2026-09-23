@@ -76,6 +76,14 @@ pub enum Tag {
     /// doorway, and going back for them is a decision nothing here could
     /// express before.
     Hunt,
+    /// Go and push on the walls of a room this run has never searched.
+    ///
+    /// The only mechanism that finds a DOOM secret without being told where
+    /// one is, made into a DESTINATION rather than a reflex. Pressing use
+    /// wherever the player happens to be standing is a coin flip against a
+    /// level's worth of wall; going to a room whose walls this run has not
+    /// tested, and testing them, is a search. See `memory::Sweep`.
+    Frisk,
     /// Operate the lift the route runs through, and wait for it.
     Ride,
     Exit,
@@ -235,7 +243,10 @@ pub fn options(state: &State) -> Vec<Option_> {
         // strafe into a wall is just standing still while being shot.
         if t.targeting_me == Some(true) && circling < CIRCLE_TARGETS {
             circling += 1;
-            for (name, key, room) in [("left", "strafe-left", c.left), ("right", "strafe-right", c.right)] {
+            for (name, key, room) in [
+                ("left", "strafe-left", c.left),
+                ("right", "strafe-right", c.right),
+            ] {
                 if room < MIN_ROOM {
                     continue;
                 }
@@ -330,7 +341,12 @@ pub fn options(state: &State) -> Vec<Option_> {
         let (bearing, room, leg, walk) = match r.path {
             // As far as the next waypoint, not the whole way: the bearing
             // points a few cells along and the path turns after that.
-            Some(p) => (p.bearing, p.clearance, p.step.max(1), format!(", {} units of walking", p.distance)),
+            Some(p) => (
+                p.bearing,
+                p.clearance,
+                p.step.max(1),
+                format!(", {} units of walking", p.distance),
+            ),
             None => (r.bearing, r.distance, r.distance, String::new()),
         };
         // Face first, then walk, as everything else that goes somewhere
@@ -420,6 +436,62 @@ pub fn options(state: &State) -> Vec<Option_> {
             },
             tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
             tag: Tag::Hunt,
+            room,
+        });
+    }
+
+    // Somewhere to go and search for a secret.
+    //
+    // Fair play, and the line is worth being exact about: this is built from
+    // rooms the player has STOOD IN and a tally of pushes the player itself
+    // made. Nothing in it comes from the level's secret sectors, and nothing
+    // in it says a secret is there - only that this run has not looked. A
+    // level has a great many walls and no observation distinguishes the one
+    // that opens, so what a player does is go somewhere they have not tried
+    // and try it, which is what this offers.
+    //
+    // Only when there is a secret left to find: the counter is on the
+    // player's own status bar, so knowing "0 of 3" is not being told
+    // anything, and offering a wall search on a level with none left is
+    // spending decisions on nothing.
+    let secrets_left = state.level.secrets < state.level.total_secrets;
+    for r in state.unfrisked.iter().take(1).filter(|_| secrets_left) {
+        let (bearing, room, leg, walk) = match r.path {
+            Some(p) => (
+                p.bearing,
+                p.clearance,
+                p.step.max(1),
+                format!(", {} units of walking", p.distance),
+            ),
+            None => (r.bearing, r.distance, r.distance, String::new()),
+        };
+        // Withheld with no route and no clear line, for the same reason the
+        // hunt and recall options are: a heading through a wall is an option
+        // the agent takes and does not move.
+        if r.path.is_none() && c.toward(r.bearing) < r.distance.min(300) {
+            continue;
+        }
+        let far_off = bearing.abs() > FACING_TOL;
+        out.push(Option_ {
+            text: if far_off {
+                format!(
+                    "go and search the walls of a room you have not searched yet, {} units {}{walk}",
+                    r.distance,
+                    bearing_phrase(r.bearing)
+                )
+            } else {
+                format!(
+                    "go and search the walls of a room you have not searched yet, {} units ahead{walk}",
+                    r.distance
+                )
+            },
+            commands: if far_off {
+                format!("[{}]", json_turn(state.facing(bearing)))
+            } else {
+                format!("[{{\"type\":\"forward\",\"amount\":{}}}]", walk_tics(leg))
+            },
+            tics: if far_off { FIGHT_TICS } else { walk_tics(leg) },
+            tag: Tag::Frisk,
             room,
         });
     }
@@ -1020,6 +1092,73 @@ mod tests {
             path,
         }];
         s
+    }
+
+    /// A room this run has stood in and never pushed on the walls of, with
+    /// a route to it.
+    fn somewhere_unsearched(path: Option<crate::memory::Path>) -> State {
+        let mut s = state(NOTHING);
+        s.unfrisked = vec![crate::memory::Recalled {
+            id: 0,
+            kind: "unsearched walls".into(),
+            class: crate::memory::Class::Pickup,
+            bearing: 180,
+            distance: 600,
+            health: None,
+            ago: 0,
+            path,
+        }];
+        s
+    }
+
+    /// What turns pressing use from a coin flip into a search.
+    ///
+    /// The ledger is only worth keeping if the agent can act on it, and
+    /// acting on it means being able to say "go to a room you have not
+    /// searched" - a destination derived from the run's own history, not
+    /// from where the level's secrets actually are.
+    #[test]
+    fn a_room_whose_walls_were_never_searched_is_somewhere_to_be_sent() {
+        assert!(
+            !options(&state(NOTHING)).iter().any(|o| o.tag == Tag::Frisk),
+            "offered a wall search with nowhere unsearched to go"
+        );
+        let routed = options(&somewhere_unsearched(Some(crate::memory::Path {
+            bearing: -90,
+            distance: 700,
+            clearance: 256,
+            step: 128,
+        })));
+        assert!(
+            routed.iter().any(|o| o.tag == Tag::Frisk),
+            "nowhere to go and search"
+        );
+    }
+
+    /// And a heading through a wall is not a way to get there, exactly as
+    /// for going back to a remembered thing.
+    #[test]
+    fn an_unsearched_room_behind_a_wall_is_not_offered_as_a_straight_line() {
+        assert!(
+            !options(&somewhere_unsearched(None))
+                .iter()
+                .any(|o| o.tag == Tag::Frisk),
+            "a straight line into a wall was offered as a way to go searching"
+        );
+    }
+
+    /// With every secret already found there is nothing to search for, and
+    /// the decisions are better spent.
+    #[test]
+    fn nothing_is_searched_for_on_a_level_with_no_secrets_left() {
+        let mut s = somewhere_unsearched(Some(crate::memory::Path {
+            bearing: -90,
+            distance: 700,
+            clearance: 256,
+            step: 128,
+        }));
+        s.level.secrets = s.level.total_secrets;
+        assert!(!options(&s).iter().any(|o| o.tag == Tag::Frisk));
     }
 
     /// The gap this closes: with no way to ask for a route, going back for

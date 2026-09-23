@@ -93,7 +93,6 @@ impl Payment {
     }
 }
 
-
 /// What the agent is being told to do this episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mission {
@@ -114,8 +113,12 @@ pub enum Mission {
 }
 
 impl Mission {
-    pub const ALL: [Mission; 4] =
-        [Mission::Clear, Mission::Speedrun, Mission::Survive, Mission::UvMax];
+    pub const ALL: [Mission; 4] = [
+        Mission::Clear,
+        Mission::Speedrun,
+        Mission::Survive,
+        Mission::UvMax,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -799,37 +802,48 @@ impl DoomEnv {
     /// the agent was actually shown.
     fn remember(&mut self) {
         self.memory.observe(&self.state);
-        // And ask the engine the way back to each of them, so that "go back
-        // for the medikit you saw" is a walk round the corner rather than a
-        // heading into the wall the corner is made of. A failed call leaves
-        // every path `None`, which is the straight-line behaviour and not a
-        // wrong route.
+        // And ask the engine the way back to each place worth going to, so
+        // that "go back for the medikit you saw" is a walk round the corner
+        // rather than a heading into the wall the corner is made of. A failed
+        // call leaves every path `None`, which is the straight-line behaviour
+        // and not a wrong route.
+        //
+        // THREE ledgers, ONE call. A remembered thing, a monster seen and
+        // never gone back for, and a room whose walls have never been pushed
+        // on are three different questions with three different forget rules
+        // (see `memory::Haunt` and `memory::Sweep`), but they are the same
+        // question to the engine: how do I get there from here. Asked
+        // separately they were three round trips per decision, and a round
+        // trip is most of what a decision costs when there is no model in the
+        // loop - measured, the third one alone took the search from about 13
+        // to about 24 milliseconds a decision, which is half the campaign.
         let goals = self.memory.goals();
-        let places: Vec<(f64, f64)> = goals.iter().map(|(_, x, y)| (*x, *y)).collect();
-        let paths = self.doom.route_to(&places).unwrap_or_default();
-        let answered: Vec<(i64, Option<crate::memory::Path>)> = goals
-            .iter()
-            .enumerate()
-            .map(|(i, (id, _, _))| (*id, paths.get(i).copied().flatten()))
-            .collect();
-        self.memory.routed(&answered);
-        // The same question again for unfinished business - places a live
-        // monster was seen and never gone back for. Asked separately because
-        // it is a different ledger with a different forget rule; see
-        // `memory::Haunt`. One extra route call per decision, and only when
-        // there is something outstanding.
         let hunts = self.memory.hunts();
-        if !hunts.is_empty() {
-            let where_ = hunts.iter().map(|(_, x, y)| (*x, *y)).collect::<Vec<_>>();
-            let found = self.doom.route_to(&where_).unwrap_or_default();
-            let back: Vec<(i64, Option<crate::memory::Path>)> = hunts
-                .iter()
+        let open = self.memory.unswept(&self.state);
+        let places: Vec<(f64, f64)> = goals
+            .iter()
+            .chain(hunts.iter())
+            .chain(open.iter())
+            .map(|(_, x, y)| (*x, *y))
+            .collect();
+        // Nothing to ask about is not a question worth a round trip.
+        let paths = if places.is_empty() {
+            Vec::new()
+        } else {
+            self.doom.route_to(&places).unwrap_or_default()
+        };
+        // Each ledger takes back its own slice, in the order it was asked in.
+        let answered = |from: usize, of: &[(i64, f64, f64)]| -> Vec<(i64, Option<crate::memory::Path>)> {
+            of.iter()
                 .enumerate()
-                .map(|(i, (id, _, _))| (*id, found.get(i).copied().flatten()))
-                .collect();
-            self.memory.routed_hunts(&back);
-        }
+                .map(|(i, (id, _, _))| (*id, paths.get(from + i).copied().flatten()))
+                .collect()
+        };
+        self.memory.routed(&answered(0, &goals));
+        self.memory.routed_hunts(&answered(goals.len(), &hunts));
+        self.memory.routed_sweeps(&answered(goals.len() + hunts.len(), &open));
         self.state.unfinished = self.memory.unfinished(&self.state);
+        self.state.unfrisked = self.memory.unfrisked(&self.state);
         self.state.recalled = self.memory.recall(&self.state);
         self.state.wounded = self.memory.wounded();
         self.state.came_from = self.came_from();
@@ -1123,6 +1137,13 @@ impl DoomEnv {
         // The teacher's memory advances from what actually happened, not from
         // having been asked. See `DoomEnv::scripted`.
         self.note_executed(opt.tag);
+        // Which wall was pushed on is a fact about where the player was
+        // standing when they pushed, so it has to be filed BEFORE the step:
+        // afterwards the player has moved and the spot in the ledger would
+        // be the one they ended up at. See `memory::Sweep`.
+        if opt.tag == action::Tag::Use {
+            self.memory.press(&self.state);
+        }
         // While recording, the step is run ONE TIC AT A TIME so every rendered
         // frame can be kept. The engine's key handling is unchanged by the
         // split - `forward` holds its key for a countdown of tics and the turn
@@ -1359,11 +1380,28 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Exit)
     }
 
-    /// The exact text of the press-on-what-is-in-front option, so a caller
-    /// can tell whether that is what it just did without matching on a
-    /// sentence it would have to keep in step by hand.
-    pub fn use_text(&self) -> Option<String> {
-        self.use_option().map(|i| self.opts[i].text.clone())
+    /// Has the wall the player is facing already been pushed on by this run?
+    ///
+    /// For the `frisk` search operator, which is the difference between
+    /// pushing on walls and searching for a secret. Measured before the
+    /// ledger existed: campaigns totalling well over an hour on E1M1 found
+    /// one secret of three, because a sweep with no memory spends most of
+    /// its budget re-testing wall it has already tested.
+    pub fn pressed_here(&self) -> bool {
+        self.memory.pressed_here(&self.state)
+    }
+
+    /// The option that goes to a room this run has never searched, if one is
+    /// on offer. The goal-directed half of finding a secret; `use_option` is
+    /// the local half.
+    pub fn frisk_option(&self) -> Option<usize> {
+        self.opts.iter().position(|o| o.tag == action::Tag::Frisk)
+    }
+
+    /// Distinct walls this run has pushed on. Reported by a campaign so that
+    /// "the search is looking" is a number rather than a hope.
+    pub fn walls_tested(&self) -> usize {
+        self.memory.tested()
     }
 
     /// An option that moves the player sideways without turning, if one is
@@ -1847,66 +1885,27 @@ impl DoomEnv {
         // They only exist when something is actually shooting at the player
         // and there is room to move to that side, so preferring them cannot
         // fire at nothing or strafe into a wall.
-        let order: &[Tag] = match self.mission {
-            Mission::Clear => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
-            Mission::Speedrun => &[Tag::Exit, Tag::Circle, Tag::Attack, Tag::Grab],
-            Mission::Survive => &[Tag::Grab, Tag::Circle, Tag::Attack, Tag::Exit],
-            // Fighting first, like `clear`, because the category is failed by
-            // one surviving monster and the exit is the last thing a Max run
-            // touches - stepping on it early ends the level with the work
-            // undone.
-            // Hunt after Grab, so a hurt player heals before it goes looking
-            // for a fight, and before Exit, because a Max run leaves LAST.
-            Mission::UvMax => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Hunt, Tag::Exit],
+        let moment = Moment {
+            mission: self.mission,
+            threat_near,
+            hurt_badly,
+            within_reach: underfoot(if self.mission == Mission::Speedrun {
+                100
+            } else {
+                200
+            }),
+            exit_routed: self
+                .state
+                .exit
+                .as_ref()
+                .is_some_and(|e| e.route_bearing.is_some()),
+            attack_offered: by(Tag::Attack).is_some(),
+            in_my_face,
+            secrets_left: self.state.level.secrets < self.state.level.total_secrets,
         };
-
-        for tag in order {
+        for tag in orders(self.mission) {
             let Some(i) = by(*tag) else { continue };
-            let take = match tag {
-                Tag::Circle | Tag::Attack => threat_near,
-                Tag::Grab => {
-                    hurt_badly
-                        || underfoot(if self.mission == Mission::Speedrun {
-                            100
-                        } else {
-                            200
-                        })
-                }
-                // Only when the engine gave a real route. Without one the
-                // option aims down a straight line through walls, and taking
-                // it is the behaviour this whole exercise exists to stop
-                // demonstrating.
-                //
-                // And not with something shooting at you from close range.
-                // Under `speedrun` the exit is first in the order and a route
-                // almost always exists, so the exit won every single decision
-                // and the teacher crossed the whole of E1M1 with one kill,
-                // taking fire the entire way. A speedrunner shoots what is in
-                // their face and then runs; anything further off is not worth
-                // the ammunition.
-                Tag::Exit => {
-                    self.state
-                        .exit
-                        .as_ref()
-                        .is_some_and(|e| e.route_bearing.is_some())
-                        && !(by(Tag::Attack).is_some() && in_my_face)
-                }
-                // Whenever there is unfinished business and nothing is
-                // shooting at the player from close range. The option is only
-                // BUILT when there is a route to it or a clear line, so
-                // reaching it here already means the walk is real.
-                //
-                // This arm has to exist. The `_ => false` it was added to
-                // would have made Hunt an option that is constructed, offered
-                // and never once selected - which this sample has paid for
-                // twice already (change weapon and circle-strafe, both
-                // unreachable for a whole campaign; making them reachable
-                // roughly doubled the teacher's kills). `the_teacher_hunts_
-                // what_it_saw` is the check that says so.
-                Tag::Hunt => !in_my_face,
-                _ => false,
-            };
-            if take {
+            if takes(*tag, &moment) {
                 return Some(i);
             }
         }
@@ -2068,6 +2067,123 @@ fn weapon_mask(carried: &[obs::Weapon]) -> i32 {
 /// spending its budget on trajectories that were dead on arrival.
 fn health_band(health: i32) -> i32 {
     (health.max(0) / 25).clamp(0, 8)
+}
+
+/// What the scripted player is told to prefer, in order, under each set of
+/// orders.
+///
+/// A free function rather than a `match` inside the decision so that the
+/// table and the gate below it can be checked against each other. See
+/// [`takes`].
+fn orders(mission: Mission) -> &'static [Tag] {
+    match mission {
+        Mission::Clear => &[Tag::Circle, Tag::Attack, Tag::Grab, Tag::Exit],
+        Mission::Speedrun => &[Tag::Exit, Tag::Circle, Tag::Attack, Tag::Grab],
+        Mission::Survive => &[Tag::Grab, Tag::Circle, Tag::Attack, Tag::Exit],
+        // Fighting first, like `clear`, because the category is failed by one
+        // surviving monster and the exit is the last thing a Max run touches -
+        // stepping on it early ends the level with the work undone.
+        //
+        // Hunt after Grab, so a hurt player heals before going looking for a
+        // fight. Frisk after Hunt, because a monster that has been seen is a
+        // surer thing than a wall that might open. Both before Exit, because
+        // a Max run leaves LAST.
+        Mission::UvMax => &[
+            Tag::Circle,
+            Tag::Attack,
+            Tag::Grab,
+            Tag::Hunt,
+            Tag::Frisk,
+            Tag::Exit,
+        ],
+    }
+}
+
+/// What the scripted player knows about the moment it is deciding in.
+///
+/// Split out from the decision so that [`takes`] is a pure function of it.
+/// The decision itself reads a live environment and a live engine, which is
+/// why the thing that actually goes wrong here had never been tested: an
+/// option can be built, offered, ranked by [`orders`] and still be
+/// unselectable, because its arm in the gate was never written.
+#[derive(Clone, Copy, Debug)]
+struct Moment {
+    mission: Mission,
+    /// Something alive within 600 units.
+    threat_near: bool,
+    hurt_badly: bool,
+    /// Something worth picking up close enough to be worth the detour.
+    within_reach: bool,
+    /// The engine gave a real route to the exit, rather than a heading
+    /// through a wall.
+    exit_routed: bool,
+    attack_offered: bool,
+    /// Something alive within 300 units: close enough that walking past it
+    /// means taking hits the whole way.
+    in_my_face: bool,
+    secrets_left: bool,
+}
+
+/// Whether the scripted player takes `tag` in this moment.
+///
+/// Every tag any mission's [`orders`] rank needs an arm here, and
+/// `every_option_the_orders_rank_can_actually_be_taken` fails if one does
+/// not. The bug it guards is specific and this sample has paid for it three
+/// times - change weapon, circle-strafe and hunt were each built, offered
+/// and never once selectable, and making each of them reachable moved the
+/// teacher's measured kills. The `_ => false` arm is what makes adding a tag
+/// to the table above silently produce a fourth.
+fn takes(tag: Tag, m: &Moment) -> bool {
+    match tag {
+        Tag::Circle | Tag::Attack => m.threat_near,
+        Tag::Grab => m.hurt_badly || m.within_reach,
+        // Only with a real route. Without one the option aims down a straight
+        // line through walls, and taking it is the behaviour this whole
+        // exercise exists to stop demonstrating.
+        //
+        // And not with something shooting at you from close range. Under
+        // `speedrun` the exit is first in the order and a route almost always
+        // exists, so the exit won every single decision and the teacher
+        // crossed the whole of E1M1 with one kill, taking fire the entire
+        // way. A speedrunner shoots what is in their face and then runs;
+        // anything further off is not worth the ammunition.
+        Tag::Exit => m.exit_routed && !(m.attack_offered && m.in_my_face),
+        // Whenever there is unfinished business and nothing is shooting at
+        // the player from close range. The option is only BUILT when there is
+        // a route to it or a clear line, so reaching here already means the
+        // walk is real.
+        Tag::Hunt => !m.in_my_face,
+        // Once the fighting and the hunting are done and the level still owes
+        // a secret. This is what makes the teacher a Max player rather than a
+        // clear player: a level with every monster dead and a secret missing
+        // is not finished, and until this arm existed nothing in the loop
+        // would go looking - every campaign on E1M1 found at most one secret
+        // of three, by walking into it.
+        Tag::Frisk => m.secrets_left && !m.threat_near && m.mission == Mission::UvMax,
+        _ => false,
+    }
+}
+
+/// How thoroughly this run has searched for a way through a wall, bucketed.
+///
+/// An axis of the archive's name for a situation, and the reason the frisk
+/// ledger is worth keeping at all. Two runs standing in the same room with
+/// the same monsters dead are not in the same situation when one of them has
+/// pushed on forty walls: they got there by doing different things, and only
+/// one of them is part-way through finding a secret. Named by position and
+/// kills alone, the archive keeps whichever arrived in fewer tics - which is
+/// always the one that did no searching, so every push the search ever made
+/// was thrown away at the next admission.
+///
+/// Four buckets, not a count: the point is to separate "has searched here"
+/// from "has not", not to file a cell per wall.
+fn searched_band(walls: usize) -> i32 {
+    match walls {
+        0 => 0,
+        1..=23 => 1,
+        24..=71 => 2,
+        _ => 3,
+    }
 }
 
 /// How many monsters are left, bucketed fine at the end and coarse at the
@@ -2256,29 +2372,32 @@ impl Env for DoomEnv {
         }
         // The client's own half of the state, kept beside the engine's. Half
         // a run restored is worse than none, because it looks like an answer.
-        self.slots.insert(slot, Held {
-            state: self.state.clone(),
-            opts: self.opts.clone(),
-            last_pos: self.last_pos,
-            stuck: self.stuck,
-            stale: self.stale,
-            tried: self.tried.clone(),
-            recent: self.recent.clone(),
-            visited: self.visited.clone(),
-            trail: self.trail.clone(),
-            commit: self.commit,
-            commit_tag: self.commit_tag,
-            total: self.total,
-            extrinsic: self.extrinsic,
-            floor_damage: self.floor_damage,
-            steps: self.steps,
-            exited: self.exited,
-            progress: self.progress.clone(),
-            memory: self.memory.clone(),
-            gauge: self.gauge,
-            approach_from: self.approach_from,
-            approach_goal: self.approach_goal.clone(),
-        });
+        self.slots.insert(
+            slot,
+            Held {
+                state: self.state.clone(),
+                opts: self.opts.clone(),
+                last_pos: self.last_pos,
+                stuck: self.stuck,
+                stale: self.stale,
+                tried: self.tried.clone(),
+                recent: self.recent.clone(),
+                visited: self.visited.clone(),
+                trail: self.trail.clone(),
+                commit: self.commit,
+                commit_tag: self.commit_tag,
+                total: self.total,
+                extrinsic: self.extrinsic,
+                floor_damage: self.floor_damage,
+                steps: self.steps,
+                exited: self.exited,
+                progress: self.progress.clone(),
+                memory: self.memory.clone(),
+                gauge: self.gauge,
+                approach_from: self.approach_from,
+                approach_goal: self.approach_goal.clone(),
+            },
+        );
         true
     }
 
@@ -2330,6 +2449,7 @@ impl Env for DoomEnv {
                 parts.push(l.secrets as i32);
                 parts.push(weapon_mask(&p.weapons));
                 parts.push(health_band(p.health));
+                parts.push(searched_band(self.memory.tested()));
             }
             // In tenths, because the counters run to a hundred and seventy-
             // seven on E1M6 and a cell per kill would be a cell per kill per
@@ -2546,5 +2666,123 @@ mod tests {
         for m in Mission::ALL {
             assert_eq!(Mission::parse(m.name()), Some(m));
         }
+    }
+}
+
+#[cfg(test)]
+mod teacher_tests {
+    use super::*;
+
+    /// Every combination of what the scripted player can know, so that
+    /// "is this option ever selectable" is answered by enumeration rather
+    /// than by argument.
+    fn every_moment() -> Vec<Moment> {
+        let mut out = Vec::new();
+        for mission in [
+            Mission::Clear,
+            Mission::Speedrun,
+            Mission::Survive,
+            Mission::UvMax,
+        ] {
+            for bits in 0..(1u8 << 7) {
+                out.push(Moment {
+                    mission,
+                    threat_near: bits & 1 != 0,
+                    hurt_badly: bits & 2 != 0,
+                    within_reach: bits & 4 != 0,
+                    exit_routed: bits & 8 != 0,
+                    attack_offered: bits & 16 != 0,
+                    in_my_face: bits & 32 != 0,
+                    secrets_left: bits & 64 != 0,
+                });
+            }
+        }
+        out
+    }
+
+    /// The one that keeps being wrong, and the reason `takes` is a function.
+    ///
+    /// An option can be built by `action::options`, offered to the policy,
+    /// ranked by `orders` - and still never selected by the teacher, because
+    /// the gate's `_ => false` arm answers for it. That has happened three
+    /// times here (change weapon, circle-strafe, hunt), each time for a whole
+    /// campaign, and each fix moved the teacher's measured kills. Nothing
+    /// short of enumerating the table against the gate catches the fourth.
+    #[test]
+    fn every_option_the_orders_rank_can_actually_be_taken() {
+        let moments = every_moment();
+        for mission in [
+            Mission::Clear,
+            Mission::Speedrun,
+            Mission::Survive,
+            Mission::UvMax,
+        ] {
+            for tag in orders(mission) {
+                assert!(
+                    moments
+                        .iter()
+                        .filter(|m| m.mission == mission)
+                        .any(|m| takes(*tag, m)),
+                    "{mission:?} ranks {tag:?} and no moment the teacher can be in takes it"
+                );
+            }
+        }
+    }
+
+    /// A Max run is not finished with a secret outstanding, and going to
+    /// look is the only thing that finds one. Fighting still comes first.
+    #[test]
+    fn the_teacher_goes_looking_for_secrets_once_the_fighting_is_done() {
+        let quiet = Moment {
+            mission: Mission::UvMax,
+            threat_near: false,
+            hurt_badly: false,
+            within_reach: false,
+            exit_routed: true,
+            attack_offered: false,
+            in_my_face: false,
+            secrets_left: true,
+        };
+        assert!(takes(Tag::Frisk, &quiet));
+        assert!(
+            !takes(
+                Tag::Frisk,
+                &Moment {
+                    secrets_left: false,
+                    ..quiet
+                }
+            ),
+            "nothing left to find"
+        );
+        assert!(
+            !takes(
+                Tag::Frisk,
+                &Moment {
+                    threat_near: true,
+                    ..quiet
+                }
+            ),
+            "searched walls under fire"
+        );
+        // And the orders put it ahead of leaving, because a Max run leaves last.
+        let order = orders(Mission::UvMax);
+        let at = |t: Tag| order.iter().position(|o| *o == t).expect("ranked");
+        assert!(at(Tag::Frisk) < at(Tag::Exit));
+        assert!(at(Tag::Attack) < at(Tag::Frisk));
+    }
+
+    /// The archive has to be able to see that a run has been searching, or
+    /// it keeps whichever run arrived soonest - which is always the one that
+    /// did not search.
+    #[test]
+    fn how_much_wall_has_been_searched_is_part_of_the_situation() {
+        assert_eq!(searched_band(0), 0);
+        assert_ne!(searched_band(0), searched_band(40));
+        assert_ne!(searched_band(1), searched_band(40));
+        assert_eq!(
+            searched_band(200),
+            searched_band(400),
+            "coarse once it is thorough"
+        );
     }
 }
