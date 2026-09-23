@@ -291,6 +291,11 @@ fn evaluate(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Resul
 ///
 /// Nothing here is required: with no `--window`, `--frames` or `--record`
 /// the stage is dark and the run is exactly the text one, at the same cost.
+struct ViewSettings<'a> {
+    view: &'a ViewOptions,
+    record: &'a Option<String>,
+}
+
 struct Stage {
     viewport: Option<Viewport>,
     fps: u32,
@@ -302,6 +307,13 @@ struct Stage {
 
 impl Stage {
     fn new(s: &Settings) -> Result<Stage, String> {
+        Stage::open(&s.view, &s.record)
+    }
+
+    /// The stage itself needs only the view flags, so both the option-scoring
+    /// run and the learned one open it the same way.
+    fn open(view: &ViewOptions, record: &Option<String>) -> Result<Stage, String> {
+        let s = ViewSettings { view, record };
         let wanted = s.view.window || s.view.frames.is_some() || s.record.is_some();
         if !wanted {
             return Ok(Stage { viewport: None, fps: s.view.fps, frames_dir: None, frame: 0, scene: Scene::default(), quit: false });
@@ -517,6 +529,7 @@ fn solve_one(
         let state = policy::state_text(&cube, s.encoding);
         let mut panel = Panel {
             model: s.model.name.clone(),
+            planner: true,
             cube_index: index,
             cubes: s.cubes,
             distance: d,
@@ -607,6 +620,7 @@ fn solve_one(
         if stage.on() {
             let panel = Panel {
                 model: s.model.name.clone(),
+                planner: true,
                 cube_index: index,
                 cubes: s.cubes,
                 distance: 0,
@@ -835,6 +849,8 @@ fn net_main(argv: &[String]) -> Result<(), String> {
     let scramble = args.usize_or("--scramble", 40);
     let save = args.take_str("--net-save");
     let load = args.take_str("--net-load");
+    let view = ViewOptions::take(&mut args)?;
+    let record = args.take_str("--record");
 
     let net = match &load {
         Some(p) => {
@@ -856,6 +872,10 @@ fn net_main(argv: &[String]) -> Result<(), String> {
             n
         }
     };
+
+    if view.window || view.frames.is_some() || record.is_some() {
+        record_learned(&net, cubes.min(12), scramble, &view, &record)?;
+    }
 
     println!("\n----------------------------------------------------------------");
     println!("            no search at inference: one forward pass per move");
@@ -881,5 +901,107 @@ fn net_main(argv: &[String]) -> Result<(), String> {
     println!("----------------------------------------------------------------");
     println!("(each row is {cubes} random cubes; a 40-move scramble is a uniformly");
     println!(" random cube, which is at most 20 moves from solved)");
+    Ok(())
+}
+
+/// Record the learned policy solving cubes, with no planner anywhere.
+fn record_learned(
+    net: &brain::solve::Net,
+    cubes: usize,
+    scramble: usize,
+    view: &ViewOptions,
+    record: &Option<String>,
+) -> Result<(), String> {
+    use brain::solve::StateSpace;
+    let space = space::CubeSpace::new();
+    let mut stage = Stage::open(view, record)?;
+    if !stage.on() {
+        return Ok(());
+    }
+    let mut solved = 0usize;
+    let mut turns = 0usize;
+
+    for index in 0..cubes {
+        let (mut cube, scrambled_by) = cube::scramble(scramble, 0xC0DE ^ index as u64);
+        let mut history: Vec<String> = Vec::new();
+        let mut last: Option<usize> = None;
+        let mut used = 0usize;
+
+        for _ in 0..64 {
+            if cube.is_solved() {
+                break;
+            }
+            let t = learned::ask(net, &space, &cube, last);
+            let m = space.move_at(t.picked);
+
+            // Every move, with the probability the policy gave it - the same
+            // eighteen options every turn, described alike.
+            let mut rows: Vec<view::Row> = (0..space.moves())
+                .map(|i| view::Row {
+                    name: space.move_at(i).notation(),
+                    detail: space.move_at(i).short(),
+                    probability: t.probabilities[i],
+                    admissible: false,
+                })
+                .collect();
+            rows.sort_by(|a, b| b.probability.total_cmp(&a.probability));
+            let picked_row = rows.iter().position(|r| r.name == m.notation());
+
+            let panel = Panel {
+                model: "cubenet".into(),
+                planner: false,
+                cube_index: index,
+                cubes,
+                home: cube.facelets_home(),
+                state: format!(
+                    "Scrambled by {} random moves. Move {} - no search.",
+                    scrambled_by.len(),
+                    used + 1
+                ),
+                rows,
+                picked: picked_row,
+                played: picked_row,
+                history: history.clone(),
+                turns,
+                chance: t.probabilities[t.picked],
+                solved,
+                unassisted: true,
+                ..Default::default()
+            };
+            stage.dwell(&cube, &panel, 0.30);
+            stage.turn(&cube, m, &panel);
+
+            cube = cube.apply(m);
+            history.push(m.notation());
+            last = Some(t.picked);
+            used += 1;
+            turns += 1;
+            if stage.quit {
+                return Ok(());
+            }
+        }
+
+        if cube.is_solved() {
+            solved += 1;
+        }
+        let panel = Panel {
+            model: "cubenet".into(),
+            planner: false,
+            cube_index: index,
+            cubes,
+            home: cube.facelets_home(),
+            state: if cube.is_solved() {
+                format!("Solved in {used} moves, from a {scramble}-move scramble.")
+            } else {
+                format!("Not solved after {used} moves.")
+            },
+            history: history.clone(),
+            turns,
+            solved,
+            unassisted: true,
+            ..Default::default()
+        };
+        stage.dwell(&cube, &panel, 1.6);
+    }
     Ok(())
 }

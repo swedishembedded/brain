@@ -76,6 +76,16 @@ pub struct Panel {
     pub interventions: usize,
     pub solved: usize,
     pub unassisted: bool,
+    /// Whether a planner is in the loop at all.
+    ///
+    /// The learned policy runs without one, so it has no notion of
+    /// admissibility and no exact distance to report. Drawing those fields
+    /// anyway would show a truthful-looking `0%` for a quantity that was
+    /// never measured, which is worse than leaving it out.
+    pub planner: bool,
+    /// Stickers already on their home face, when there is no planner to give
+    /// an exact distance. Progress that needs no search.
+    pub home: usize,
 }
 
 /// A camera: how far the cube is turned towards the viewer, and how far the
@@ -392,7 +402,11 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
     canvas.text(
         x,
         y,
-        &format!("cube {} of {}   {} from solved", panel.cube_index + 1, panel.cubes, moves(panel.distance)),
+        &if panel.planner {
+            format!("cube {} of {}   {} from solved", panel.cube_index + 1, panel.cubes, moves(panel.distance))
+        } else {
+            format!("cube {} of {}   {} of 54 stickers home", panel.cube_index + 1, panel.cubes, panel.home)
+        },
         1,
         DIM,
     );
@@ -411,9 +425,10 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
     for (i, row) in panel.rows.iter().enumerate() {
         let picked = panel.picked == Some(i);
         let played = panel.played == Some(i);
-        let ink = if picked { PICK } else if row.admissible { GOOD } else { INK };
+        let good = panel.planner && row.admissible;
+        let ink = if picked { PICK } else if good { GOOD } else { INK };
         canvas.text(x, y, &row.name, 1, ink);
-        canvas.text(x + 30, y, &truncate(&row.detail, 46), 1, if row.admissible { GOOD } else { DIM });
+        canvas.text(x + 30, y, &truncate(&row.detail, 46), 1, if good { GOOD } else { DIM });
         canvas.bar(x, y + lh(1) + 1, 360, 6, row.probability.clamp(0.0, 1.0), ink, TRACK);
         canvas.text(x + 372, y + lh(1) - 1, &format!("{:.2}", row.probability), 1, DIM);
         if played {
@@ -423,11 +438,14 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
     }
 
     y += 6;
+    // Both verdicts below are the PLANNER's. Without one there is nothing
+    // here that could know whether a pick was on a shortest path, and saying
+    // so anyway would put an unmeasured claim on the screen.
     if panel.thinking {
         canvas.text(x, y, "ASKING THE MODEL ...", 1, DIM);
-    } else if panel.shielded {
+    } else if panel.planner && panel.shielded {
         canvas.text(x, y, "SHIELD - FIRST PICK WAS NOT ON A SHORTEST PATH", 1, BAD);
-    } else if panel.picked.is_some() {
+    } else if panel.planner && panel.picked.is_some() {
         canvas.text(x, y, "THE MODEL'S OWN PICK WAS ON A SHORTEST PATH", 1, GOOD);
     }
     y += lh(1) + 14;
@@ -437,18 +455,25 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
     y += lh(1) + 4;
     canvas.text(x, y, &format!("turns decided        {}", panel.turns), 1, INK);
     y += lh(1);
-    canvas.text(
-        x,
-        y,
-        &format!("first pick admissible {:.0}%   (chance {:.0}%)", rate(panel.top_admissible), 100.0 * panel.chance),
-        1,
-        INK,
-    );
-    y += lh(1);
-    if panel.unassisted {
-        canvas.text(x, y, "no shield: the model plays its own pick", 1, BAD);
+    if panel.planner {
+        canvas.text(
+            x,
+            y,
+            &format!("first pick admissible {:.0}%   (chance {:.0}%)", rate(panel.top_admissible), 100.0 * panel.chance),
+            1,
+            INK,
+        );
+        y += lh(1);
+        if panel.unassisted {
+            canvas.text(x, y, "no shield: the model plays its own pick", 1, BAD);
+        } else {
+            canvas.text(x, y, &format!("shield interventions {}", panel.interventions), 1, INK);
+        }
     } else {
-        canvas.text(x, y, &format!("shield interventions {}", panel.interventions), 1, INK);
+        canvas.text(x, y, &format!("confidence in its pick {:.2}", panel.chance), 1, INK);
+        y += lh(1);
+        canvas.text(x, y, "no planner, no search: one forward pass per move", 1, BAD);
+        y += lh(1);
     }
     y += lh(1);
     canvas.text(x, y, &format!("cubes solved         {}", panel.solved), 1, INK);

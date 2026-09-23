@@ -144,3 +144,32 @@ pub fn measure_with(net: &Net, n: usize, scramble: usize, seed: u64, how: Rollou
     };
     Measured { solved, total: n, mean_moves, outcomes, starts, elapsed }
 }
+
+/// One cube's worth of policy output, for the renderer.
+pub struct Turn {
+    pub probabilities: Vec<f32>,
+    pub picked: usize,
+}
+
+/// Ask the policy about a single state. One forward pass; the rest of the
+/// batch is padding and is ignored.
+pub fn ask(net: &Net, space: &CubeSpace, cube: &Cube, forbid_after: Option<usize>) -> Turn {
+    let width = space.feature_len();
+    let mut features = vec![0.0f32; net.rows as usize * width];
+    space.write_features(cube, &mut features[..width]);
+    let probs = net.policy(&features);
+    let row = probs[..space.moves()].to_vec();
+
+    let mut picked = 0usize;
+    let mut best = f32::NEG_INFINITY;
+    for (m, &p) in row.iter().enumerate() {
+        if forbid_after.is_some_and(|l| space.redundant(l, m)) {
+            continue;
+        }
+        if p > best {
+            best = p;
+            picked = m;
+        }
+    }
+    Turn { probabilities: row, picked }
+}
