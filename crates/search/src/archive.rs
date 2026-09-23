@@ -171,6 +171,19 @@ pub struct Archive<C> {
     /// How sharply selection prefers achievement. See [`FOCUS`].
     #[serde(default = "default_focus")]
     focus: f32,
+    /// Which axes of a niche form the space whose EDGE is worth preferring,
+    /// and how strongly. Empty means the archive does not know of any, which
+    /// is the behaviour every caller had before there was a way to say.
+    ///
+    /// Named by the caller because this crate cannot know what an axis
+    /// MEANS. "One square of floor further on" is a frontier worth pushing;
+    /// "one more key held" is not a direction you can walk in, and counting
+    /// it as one would make a cell look lonely for a reason that has nothing
+    /// to do with exploring.
+    #[serde(default)]
+    edge_axes: Vec<usize>,
+    #[serde(default)]
+    edge: f32,
     /// The lowest slot never yet handed out. Slots below it are either live or
     /// on `free`.
     next_slot: usize,
@@ -187,8 +200,53 @@ impl<C> Archive<C> {
             capacity,
             tol,
             focus: FOCUS,
+            edge_axes: Vec::new(),
+            edge: 0.0,
             next_slot: 0,
             free: Vec::new(),
+        }
+    }
+
+    /// Prefer cells on the edge of the ground already reached, along the
+    /// named axes of the niche. See [`EDGE`].
+    ///
+    /// `axes` are indices into `Niche::parts`, and should be the ones a step
+    /// can actually move along - position, typically. Naming none leaves
+    /// selection exactly as it was.
+    pub fn exploring(mut self, axes: &[usize], edge: f32) -> Archive<C> {
+        self.edge_axes = axes.to_vec();
+        self.edge = edge;
+        self
+    }
+
+    /// How much of `at`'s immediate neighbourhood, along the axes that count,
+    /// is NOT in the archive: 0.0 when it is hemmed in on every side, 1.0
+    /// when nothing adjoins it.
+    fn loneliness(&self, at: &Niche) -> f32 {
+        if self.edge_axes.is_empty() {
+            return 0.0;
+        }
+        let mut possible = 0usize;
+        let mut absent = 0usize;
+        let mut parts = at.parts().to_vec();
+        for &axis in &self.edge_axes {
+            if axis >= parts.len() {
+                continue;
+            }
+            let was = parts[axis];
+            for step in [-1i32, 1] {
+                possible += 1;
+                parts[axis] = was.saturating_add(step);
+                if !self.cells.contains_key(&Niche::new(&parts)) {
+                    absent += 1;
+                }
+            }
+            parts[axis] = was;
+        }
+        if possible == 0 {
+            0.0
+        } else {
+            absent as f32 / possible as f32
         }
     }
 
@@ -298,8 +356,14 @@ impl<C> Archive<C> {
             return None;
         }
         let top = self.top_reached();
-        let weights: Vec<(Niche, f64)> =
-            self.cells.values().map(|e| (e.niche.clone(), weight(e, top, self.focus) as f64)).collect();
+        let weights: Vec<(Niche, f64)> = self
+            .cells
+            .values()
+            .map(|e| {
+                let w = weight(e, top, self.focus) * (1.0 + self.edge * self.loneliness(&e.niche));
+                (e.niche.clone(), w as f64)
+            })
+            .collect();
         let total: f64 = weights.iter().map(|(_, w)| *w).sum();
         let mut u = rng.next_f64() * total;
         let mut chosen = weights[weights.len() - 1].0.clone();
@@ -390,6 +454,22 @@ mod cells_as_list {
 /// achievement is drawn about a seventh as often, and one at a quarter about
 /// a twentieth - a real preference, and still never zero.
 pub const FOCUS: f32 = 4.0;
+
+/// How much a cell at the EDGE of what has been reached is preferred over one
+/// surrounded by cells already in the archive.
+///
+/// Go-Explore's own frontier term, adapted. Theirs adds `(2 - h)/10` to a
+/// cell's weight, where `h` counts how many horizontally-adjacent cells the
+/// archive already holds (Ecoffet et al., *First return, then explore*,
+/// Extended Data Table 1); a cell with neighbours on both sides is in the
+/// middle of ground already covered, and one with none is on the edge of it.
+///
+/// Multiplied here rather than added, so it composes with achievement the
+/// same way the visit count does, and bounded: a cell with every neighbour
+/// present is worth its plain weight, and one with none is worth this much
+/// more. Never zero either way - the edge is where a search should spend
+/// most of its budget, not all of it.
+pub const EDGE: f32 = 0.6;
 
 /// How likely a cell is to be drawn, and to survive an eviction.
 ///

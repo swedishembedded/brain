@@ -310,3 +310,67 @@ fn coverage_counts_distinct_values_per_axis() {
     a.offer(niche(&[2, 0, 7]), Worth::new(0.1, 1), 2);
     assert_eq!(a.coverage(), vec![3, 1, 1]);
 }
+
+/// A cell on the edge of the ground already reached is drawn more often than
+/// one hemmed in by cells the archive already holds.
+///
+/// Go-Explore's frontier term. Without it a search spends its budget in
+/// proportion to how much of a region it has already covered, which is
+/// exactly backwards: the middle of a swept room is the least likely place
+/// for anything new to be.
+#[test]
+fn the_edge_of_what_has_been_reached_is_preferred_to_the_middle_of_it() {
+    // A row of cells along axis 0, plus one standing on its own far away.
+    // Everything has achieved the same amount and been visited the same
+    // number of times, so selection has nothing else to go on.
+    let mut a: Archive<&str> = Archive::new(64, 1e-4).exploring(&[0], search::archive::EDGE);
+    for x in 0..5 {
+        a.offer(Niche::new(&[x, 0]), Worth::new(1.0, 10), "in the row");
+    }
+    a.offer(Niche::new(&[40, 0]), Worth::new(1.0, 10), "on its own");
+
+    let hemmed_in = Niche::new(&[2, 0]);
+    let alone = Niche::new(&[40, 0]);
+    assert_eq!(a.get(&hemmed_in).map(|e| e.visits), Some(0));
+    assert_eq!(a.get(&alone).map(|e| e.visits), Some(0));
+
+    let mut rng = Rng::new(7);
+    let (mut edge, mut middle) = (0, 0);
+    for _ in 0..4_000 {
+        let drawn = a.pick(&mut rng).map(|e| e.niche.clone()).expect("the archive is not empty");
+        if drawn == alone {
+            edge += 1;
+        } else if drawn == hemmed_in {
+            middle += 1;
+        }
+    }
+    assert!(
+        edge > middle,
+        "the lone cell was drawn {edge} times against the hemmed-in one's {middle}"
+    );
+}
+
+/// And an archive told of no axes selects exactly as it did before there was
+/// a way to tell it: this is an opt-in, not a change to every caller.
+#[test]
+fn naming_no_axes_leaves_selection_alone() {
+    let build = |axes: &[usize]| {
+        let mut a: Archive<&str> = Archive::new(64, 1e-4).exploring(axes, search::archive::EDGE);
+        for x in 0..5 {
+            a.offer(Niche::new(&[x, 0]), Worth::new(1.0, 10), "row");
+        }
+        a.offer(Niche::new(&[40, 0]), Worth::new(1.0, 10), "alone");
+        a
+    };
+    let mut plain = build(&[]);
+    let mut rng = Rng::new(7);
+    let mut lone = 0;
+    for _ in 0..4_000 {
+        if plain.pick(&mut rng).map(|e| e.niche.clone()) == Some(Niche::new(&[40, 0])) {
+            lone += 1;
+        }
+    }
+    // Six cells, all equal, no frontier term: about a sixth of the draws.
+    let share = lone as f32 / 4_000.0;
+    assert!((share - 1.0 / 6.0).abs() < 0.03, "share was {share}");
+}
