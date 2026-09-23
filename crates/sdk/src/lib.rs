@@ -192,7 +192,7 @@ pub use promote;
 pub mod rlcd;
 #[cfg(feature = "decision")]
 pub use rlcd::{
-    ada_ece, bayes_action, bayes_risk, check_information_refinement, classwise_ece,
+    ada_ece, bayes_action, bayes_risk, check_information_refinement, classwise_ece, confidence,
     coverage_accuracy, decision_loss, decision_loss_soft, ece, failure_auroc, regret,
     reliability_bins, voi, witness_search, Answer, BayesAction, CostMatrix, DecisionContract,
     Distribution, Features, Learner, LossConfig, Observation, OracleKind, Opt, Question,

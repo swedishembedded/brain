@@ -57,7 +57,7 @@ use rlcd::scoring::softmax;
 // into scope unqualified for the rest of this file, the same way
 // `CostMatrix`/`World` below already do.
 pub use decide::decide::Features;
-pub use decide::primitives::{Answer, Opt, Question};
+pub use decide::primitives::{confidence, Answer, Opt, Question};
 pub use rlcd::scoring::{decision_loss, decision_loss_soft};
 
 use crate::flow::{EvalReport, Flow, Stages, TrainReport};
