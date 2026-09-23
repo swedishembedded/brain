@@ -665,6 +665,29 @@ much latitude an exact match gets.
 both arms are scored from what would actually be served rather than from a
 freshly-trained in-memory instance.
 
+**The SDK surface `brain::ContinualReader`. DONE 2026-09-23**, feature
+`reader`. What the sample will depend on, per samples rule 1.
+
+**Two surfaces, and only one of them is the result.** `read` reports
+episodes, promotions, bank size and detection latency; that is plumbing.
+`battery` scores held-out tasks the CALLER froze before any reading, and the
+change in that score between two calls is the only thing that answers what
+the user can now do. A run whose promote rate rises while its battery stays
+flat has failed, and keeping the two as separate surfaces is what makes that
+visible rather than arithmetic nobody performs.
+
+The battery tasks are the caller's and this surface never invents them. A
+battery a reader chose for itself would be a reader marking its own
+homework.
+
+**It reuses the document study's `StudyArch` registry rather than growing a
+second copy**, which is the precedent `brain::Improve` already set: one
+registry, three architectures, two entry points. `StudyArch` and its impls
+widened from private to crate-visible; nothing else changed in the study.
+
+`--model` is resolved through `loader::model_dir` exactly as every other
+surface resolves one, so a reference not on disk is fetched.
+
 **R8 - serve while learning, staged.** The forcing function for the
 `stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
 recorded as missing from `crates/residency`. Tests: a promoted adapter changes

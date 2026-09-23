@@ -233,6 +233,16 @@ impl<L: Learner> Reader<L> {
         &self.learner
     }
 
+    /// The learner, mutably.
+    ///
+    /// A promotion is a decision the LOOP makes and the learner has to act
+    /// on: what the gate promoted is what must be served from the next
+    /// episode onward. The loop does not do it itself because what "serving"
+    /// means is the binding's business, not the policy's.
+    pub fn learner_mut(&mut self) -> &mut L {
+        &mut self.learner
+    }
+
     /// Episodes read so far, including those refused.
     pub fn episode(&self) -> u64 {
         self.episode

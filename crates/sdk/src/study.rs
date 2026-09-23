@@ -95,7 +95,7 @@ use rl::objective::grpo::{Grpo, GrpoConfig};
 /// qwen3::LoraCfg` and differ only in WHICH projections they target, which is
 /// exactly what [`StudyArch::lora`] returns. A per-architecture LoRA struct
 /// would be a copy of a struct three crates already share.
-trait StudyArch {
+pub(crate) trait StudyArch {
     type M: Model;
 
     /// This architecture's own LoRA overlay at `rank`/`alpha` - the four
@@ -113,7 +113,7 @@ trait StudyArch {
     fn study_config(base: &<Self::M as Model>::Config, lora: LoraCfg, block: u32) -> <Self::M as Model>::Config;
 }
 
-struct Qwen3;
+pub(crate) struct Qwen3;
 impl StudyArch for Qwen3 {
     type M = qwen3::model::Qwen;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
@@ -124,7 +124,7 @@ impl StudyArch for Qwen3 {
     }
 }
 
-struct Qwen35;
+pub(crate) struct Qwen35;
 impl StudyArch for Qwen35 {
     type M = qwen35::model::Qwen35;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
@@ -135,7 +135,7 @@ impl StudyArch for Qwen35 {
     }
 }
 
-struct Qwen35Moe;
+pub(crate) struct Qwen35Moe;
 impl StudyArch for Qwen35Moe {
     type M = qwen35moe::model::Qwen35;
     fn lora(rank: u32, alpha: f32) -> LoraCfg {
@@ -707,7 +707,7 @@ mod tests {
 /// the adapter card records as the base it derives from - which is why a
 /// bare file synthesizes a `local/<stem>` id rather than using the filename:
 /// the adapter ref grammar needs a `vendor/repo`.
-fn resolve_base(base: &str, store_root: Option<&Path>) -> std::result::Result<(PathBuf, PathBuf, String), String> {
+pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> std::result::Result<(PathBuf, PathBuf, String), String> {
     let path = Path::new(base);
     if path.is_dir() {
         // A `<root>/<vendor>/<repo>` checkout: the store itself knows which

@@ -135,6 +135,11 @@ pub use solve;
 /// promote - which no inference pipeline's shape can express.
 #[cfg(feature = "study")]
 pub mod study;
+
+#[cfg(feature = "reader")]
+pub mod reader;
+#[cfg(feature = "reader")]
+pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome};
 #[cfg(feature = "study")]
 pub use study::{
     Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,

@@ -95,6 +95,27 @@ pub struct Probe {
     pub baseline: Option<f64>,
 }
 
+impl Probe {
+    /// A probe that came from a caller rather than from an episode.
+    ///
+    /// A capability battery is frozen by whoever knows what the model is
+    /// supposed to be able to do, before any reading happens, and scored
+    /// through the same path an episode's own probes are. It carries no
+    /// baseline and is never blind: those distinctions belong to a draw made
+    /// FROM a document, and this was not.
+    pub fn for_battery(index: usize, prompt: &str, expected: &str) -> Probe {
+        Probe {
+            id: probe_id(&EpisodeId::of("battery"), ProbeFamily::Literal, index),
+            family: ProbeFamily::Literal,
+            prompt: prompt.to_string(),
+            expected: expected.to_string(),
+            line: index,
+            blind: false,
+            baseline: None,
+        }
+    }
+}
+
 /// How an episode is cut into questions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeConfig {

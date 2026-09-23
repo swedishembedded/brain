@@ -395,6 +395,7 @@ dependencies = [
  "brain-appopts",
  "brain-arch",
  "brain-audio",
+ "brain-audit",
  "brain-capability",
  "brain-checkpoint",
  "brain-clip",

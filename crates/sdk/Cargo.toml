@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "video", "multimodal", "auto", "viewport"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "reader", "video", "multimodal", "auto", "viewport"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -93,6 +93,12 @@ decision = ["device", "dep:brain-decide", "dep:brain-modernbert", "dep:brain-rlc
 # it learned them. Architecture-agnostic machinery (`brain-rl` is generic over
 # `model::Model`), so the decoder crates it monomorphises for come with it.
 study = ["device", "dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
+
+# --- `brain::ContinualReader`: a model that keeps reading a directory and can
+#     say what it gained and what that cost. Builds on `study`'s architecture
+#     registry rather than a second copy of it, so it selects the same
+#     dependencies plus the model-free reader policy.
+reader = ["study", "dep:brain-audit"]
 # `brain::TranscribePipeline` (qwen3-asr, offline, fixed window; nemotronasr's
 # streaming path needs a genuinely different call shape, a tracked future
 # extension, not folded in here) and `brain::TtsPipeline` (Qwen3-TTS
@@ -208,6 +214,7 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-qwen35 = { workspace = true, optional = true }
 brain-qwen35moe = { workspace = true, optional = true }
 brain-rl = { workspace = true, optional = true }
+brain-audit = { workspace = true, optional = true }
 brain-rlcd = { workspace = true, optional = true }
 brain-solve = { workspace = true, optional = true }
 brain-search = { workspace = true, optional = true }
