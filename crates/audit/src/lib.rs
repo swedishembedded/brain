@@ -34,6 +34,7 @@
 //! sending an email to info@swedishembedded.com.
 
 pub mod bank;
+pub mod growth;
 pub mod pool;
 pub mod reservoir;
 pub mod schedule;

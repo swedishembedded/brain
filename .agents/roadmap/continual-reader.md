@@ -540,10 +540,37 @@ episode that was never a candidate.
 the reservoir a question cannot alter the experiment: the same cycle asked
 twice gets the same mix, and drawing leaves what is retained untouched.
 
-**R7 - growth, triggered by the oracle.** M3's diagnosis table, asserted.
-Tests: an interference-shaped failure raises rehearsal and does not grow; a
-capacity-shaped failure grows; growth never fires on a healthy run. **Two
-commits** (oracle trigger, then the pool growth it drives).
+**R7 - growth, triggered by the oracle. DONE 2026-09-23.**
+`crates/audit`'s `growth` module. Nine tests, red before green.
+
+**Scoping correction: one commit, not two.** The planned second commit, "the
+pool growth it drives", is a single `Pool::admit` call in a reader loop that
+does not exist yet. Writing it now would be a call site with no caller, so
+it folds into the loop milestone instead. The decision machinery is the part
+that can stand on its own, and it is model-free.
+
+**M3's table gained a fourth row while being implemented, and then a fifth.**
+The oracle is supposed to bound the sequential run from above, so an oracle
+scoring BELOW it means the measurement is untrustworthy: an under-trained
+oracle, a mismatched probe set, a seed with too much variance. Both remedies
+are wrong under a broken measurement, so the action is `Hold` with a stated
+reason rather than being folded silently into "healthy". The fifth case is
+subtler and was caught only by noticing an untested branch: when BOTH arms
+fail and the oracle is still underneath, a plain "both failed" reading calls
+it saturation and grows the pool, but the ordering says the measurement is
+broken. Ordering wins, and a test now pins all three of that row's
+outcomes.
+
+**The cooldown governs growth only.** Raising rehearsal costs no memory, so
+putting the cheap remedy behind the expensive one's timer would leave a
+diagnosable problem untreated for the length of a cooldown it has nothing to
+do with.
+
+The promote rate is measured over a WINDOW, not the run. A reader that
+promoted well for a thousand episodes and has promoted nothing for fifty has
+a problem now, and a lifetime average would hide it for a long time. A
+part-window returns `None` rather than a rate, so the oracle's cost is never
+paid on the strength of the first few episodes of a run.
 
 **R8 - serve while learning, staged.** The forcing function for the
 `stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
