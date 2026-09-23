@@ -304,6 +304,82 @@ your own decision, you need three things:
    but the moment it reaches the model's input you are measuring a reading
    comprehension task instead.
 
+```bash
+rubiks --model minilm --train 1200 --batch 8 --freeze-encoder \
+       --examples 40000 --scramble 4 --eval 40 --save out/head.safetensors --cubes 0
+rubiks --model minilm --head out/head.safetensors --cubes 3 --solve-scramble 4 --search 32
+```
+
+`--batch N` is examples per optimizer step and `--freeze-encoder` trains the
+head alone - faster, and the only mode whose result can be SAVED, since a
+head-only file cannot honestly describe a model whose encoder moved.
+
+`--train` trains, `--eval` scores held-out decisions (different seed) broken
+down by distance-from-solved, and the run then tries to solve cubes with no
+shield at all. Training needs a `decide`-shaped encoder (`--model minilm`): a
+Laya checkpoint ships its head pretrained and has no optimizer loop in this
+SDK yet, and the sample says so by name rather than failing obscurely.
+
+## What it does, and does not, do yet
+
+Measured on this box (Intel Arc iGPU / 22-core CPU), a MiniLM head over the
+`decide` arm:
+
+| training | held-out first pick gets closer | 1 away | 2 away | saveable |
+|---|---|---|---|---|
+| untrained | 1.7% (chance 5.9%) | 5.9% | 0% | - |
+| 3500 steps, batch 1, encoder unfrozen, depth 2 | 28.3% (chance 6.2%) | 37.1% | 16.0% | **no** |
+| 1200 steps, **batch 8, encoder frozen**, depth 4 | **57.5%** (chance 6.3%) | **100%** | 45.5% | **yes** |
+
+Freezing the encoder and batching the step did not cost accuracy - it more
+than doubled it, because the same wall clock buys far more examples (17 ms
+per example against 269-1343 ms) and a batched gradient is not the
+one-example noise that made the loss wander. The frozen run also **saves**:
+`train_choices` fine-tuning the encoder is why a head-only file was refused,
+which had never worked on this arm at all until the save learned to refuse
+on whether the encoder MOVED rather than on whether it was unfrozen.
+
+**Solving, unassisted.** With `--search WIDTH` the model's probabilities rank
+a beam search over move sequences; the planner is never consulted, and
+`Cube::is_solved` is the only oracle.
+
+| scramble depth | beam | result |
+|---|---|---|
+| 2 | - (move by move) | 2 of 10, and 3 of 12 in the recorded run |
+| 4 | 32 | **2 of 3, each solved in the optimal 4 moves** |
+| 5 | 32 | 0 of 3 (339 states explored) |
+| 5 | **256** | 0 of 2 (**3603** states explored) |
+| 6 | 32 | 0 of 3 |
+| 8 | 32 | 0 of 1 |
+
+**The ceiling is the policy, not the search.** Ten times the search at depth 5
+changed nothing, which is what a heuristic that cannot rank moves five deep
+looks like - a wider beam only helps a policy that is nearly right. Getting
+past depth 4 wants a better policy (more steps, a deeper curriculum, or an
+encoder that has seen a cube), not more beam.
+
+So, plainly: **the shield solves every cube, optimally, always. The model
+solves four-move cubes on its own, and does not solve deeper ones yet.** Both
+numbers are printed by every run, side by side.
+
+## Watching it
+
+```bash
+rubiks --window                      # a real window, if there is a display
+rubiks --frames /tmp/frames --fps 12 # every frame as a PNG, headless
+rubiks --record run.mp4              # the same, encoded (needs ffmpeg)
+```
+
+The cube is drawn as what it is - 26 plastic cubies, each with a sticker on
+the faces that reach the surface - through a perspective camera, sorted back
+to front, with the turning layer animated through the same angle the engine's
+own move applies. It is drawn from `cube::facelet_geometry`, the same layout
+the engine turns, so the picture cannot drift out of agreement with the
+state; a test pins the end of every animation to where the discrete move
+lands. Beside it: the state the model was given, every option with its
+probability, which one it picked, which one was played, and the running
+counts.
+
 `search.rs` is the verifier, `policy.rs` is the state/option/label contract,
 and `main.rs` is the shield and the tally. Those three files are the parts you
 would rewrite; `cube.rs` and `view.rs` are the puzzle and its picture.

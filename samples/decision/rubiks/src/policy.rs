@@ -403,3 +403,146 @@ pub fn from_text(text: &str) -> Option<Cube> {
     }
     Some(cube)
 }
+
+/// A solution found by searching with the MODEL as the heuristic.
+pub struct Plan {
+    pub moves: Vec<Move>,
+    /// How many states the search scored - the cost of the plan, in model
+    /// calls, so a reader can see what the heuristic bought.
+    pub scored: usize,
+    /// Did it reach the solved cube, or is this the best it could do?
+    pub solved: bool,
+}
+
+/// Beam search over move sequences, ranked by the model's own log
+/// probabilities.
+///
+/// This is the part that lets a weak policy solve a cube it cannot solve
+/// greedily, and it is the standard shape: the network is a heuristic, the
+/// search is what turns a heuristic into a solution. Greedy play follows one
+/// line and dies on the first wrong step; a beam keeps `width` lines alive,
+/// so a policy that is right most of the time recovers from being wrong some
+/// of the time.
+///
+/// **The planner is not consulted.** Nothing in here asks how far from
+/// solved anything is - the ranking is the model's, and the only oracle is
+/// `Cube::is_solved`, which is the puzzle's own rule rather than a hint about
+/// it. A search that consulted the planner would be the planner solving the
+/// cube with the model watching.
+///
+/// `score` is supplied by the caller so this function needs no pipeline and
+/// can be tested against a known-good policy.
+pub fn beam_search(
+    start: &Cube,
+    width: usize,
+    depth: usize,
+    score: &mut dyn FnMut(&Cube) -> Vec<f32>,
+) -> Plan {
+    let all = Move::all();
+    // (cube, path, cumulative log-probability)
+    let mut beam: Vec<(Cube, Vec<Move>, f32)> = vec![(*start, Vec::new(), 0.0)];
+    let mut scored = 0usize;
+    let mut best: Option<(Vec<Move>, f32)> = None;
+
+    for _ in 0..depth {
+        let mut next: Vec<(Cube, Vec<Move>, f32)> = Vec::new();
+        for (cube, path, logp) in &beam {
+            if cube.is_solved() {
+                return Plan { moves: path.clone(), scored, solved: true };
+            }
+            let probs = score(cube);
+            scored += 1;
+            for (i, p) in probs.iter().enumerate() {
+                // A move that undoes the one just played can never be on a
+                // shortest path and doubles the branching factor.
+                if path.last().map(|m: &Move| m.face) == Some(all[i].face) {
+                    continue;
+                }
+                let mut child = path.clone();
+                child.push(all[i]);
+                let moved = cube.apply(all[i]);
+                let lp = logp + p.max(1e-9).ln();
+                if moved.is_solved() {
+                    return Plan { moves: child, scored, solved: true };
+                }
+                next.push((moved, child, lp));
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        // Keep the `width` most likely lines. Sorting by cumulative
+        // log-probability is what makes this the model's search rather than
+        // a breadth-first sweep wearing its coat.
+        next.sort_by(|a, b| b.2.total_cmp(&a.2));
+        next.truncate(width.max(1));
+        if let Some((_, path, lp)) = next.first() {
+            if best.as_ref().map(|(_, b)| *lp > *b).unwrap_or(true) {
+                best = Some((path.clone(), *lp));
+            }
+        }
+        beam = next;
+    }
+    Plan { moves: best.map(|(p, _)| p).unwrap_or_default(), scored, solved: false }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use crate::cube::scramble;
+    use crate::search::Solver;
+
+    /// With a policy that knows the answer, the search finds a real solution
+    /// - which is the check that the search itself is sound, separate from
+    /// any question about the model.
+    #[test]
+    fn a_perfect_policy_solves_through_the_search() {
+        let solver = Solver::new(4);
+        for seed in 0..6u64 {
+            let (cube, _) = scramble(7, seed + 3000);
+            let mut oracle = |c: &Cube| -> Vec<f32> {
+                let d = solver.distance(c, Solver::MAX_DEPTH).unwrap_or(0);
+                let good = admissible(&solver, c, d);
+                (0..18).map(|i| if good.contains(&i) { 1.0 } else { 0.0001 }).collect()
+            };
+            let plan = beam_search(&cube, 8, 10, &mut oracle);
+            assert!(plan.solved, "seed {seed}: a perfect policy did not solve through the search");
+            assert!(cube.apply_all(&plan.moves).is_solved(), "the plan does not solve the cube");
+        }
+    }
+
+    /// A beam recovers where greedy dies: a policy that is right most of the
+    /// time but puts its mass on a wrong move at one state still solves,
+    /// because the right line stays in the beam.
+    #[test]
+    fn the_beam_recovers_from_a_policy_that_is_sometimes_wrong() {
+        let solver = Solver::new(4);
+        let (cube, _) = scramble(5, 4242);
+        let d0 = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
+        let mut calls = 0usize;
+        let mut flaky = |c: &Cube| -> Vec<f32> {
+            calls += 1;
+            let d = solver.distance(c, Solver::MAX_DEPTH).unwrap_or(0);
+            let good = admissible(&solver, c, d);
+            // On the very first state it is confidently WRONG.
+            if calls == 1 {
+                return (0..18).map(|i| if good.contains(&i) { 0.01 } else { 1.0 }).collect();
+            }
+            (0..18).map(|i| if good.contains(&i) { 1.0 } else { 0.05 }).collect()
+        };
+        let plan = beam_search(&cube, 12, (d0 + 4) as usize, &mut flaky);
+        assert!(plan.solved, "the beam did not recover from one confident mistake");
+        assert!(cube.apply_all(&plan.moves).is_solved());
+    }
+
+    /// A useless policy does not accidentally solve a deep cube - otherwise
+    /// the search would be doing the work and the model's contribution could
+    /// not be read off the result.
+    #[test]
+    fn a_uniform_policy_does_not_solve_a_deep_cube_by_luck() {
+        let (cube, _) = scramble(8, 77);
+        let mut uniform = |_: &Cube| -> Vec<f32> { vec![1.0 / 18.0; 18] };
+        let plan = beam_search(&cube, 8, 8, &mut uniform);
+        assert!(!plan.solved, "a uniform policy solved an 8-move cube: the search is doing the deciding");
+    }
+}

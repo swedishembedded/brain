@@ -64,15 +64,26 @@ struct Settings {
     model: ModelChoice,
     cubes: usize,
     scramble: u8,
+    /// How deep the cubes that get SOLVED are scrambled, when that differs
+    /// from the depth the training data is drawn at - a policy is trained at
+    /// the depth it can learn and then watched on a harder cube.
+    solve_scramble: u8,
     seed: u64,
     encoding: policy::Encoding,
     head: Option<String>,
     train: usize,
     batch: usize,
+    /// Freeze the encoder and train the head alone. It is also what makes a
+    /// trained model SAVEABLE: a head-only file cannot honestly describe a
+    /// model whose encoder moved.
+    freeze: bool,
     examples: usize,
     save: String,
     eval: usize,
     unassisted: bool,
+    /// Beam width for model-guided search, or 0 for move-by-move play.
+    search: usize,
+    search_depth: usize,
     hardware: Hardware,
     view: ViewOptions,
     record: Option<String>,
@@ -94,15 +105,21 @@ model
 run
   --cubes N           cubes to solve                                  [3]
   --scramble N        moves in each scramble, 1..{}                    [6]
+  --solve-scramble N  depth of the cubes actually solved      [--scramble]
   --seed N            which cubes                                     [1]
   --encode WHICH      how the cube is written down: grid | compact | rows [grid]
   --head FILE         a trained decision head to answer with
+  --search WIDTH      plan the whole solution with a model-guided beam search
+                      of this width, then play it (0 = move by move)     [0]
+  --search-depth N    how many moves deep that search may look          [14]
   --unassisted        no shield: play the model's own pick, every turn
   --quiet             summary only
 
 train and measure
   --train N           train a head for N optimizer steps, then save it
   --batch N           labelled decisions per optimizer step           [{}]
+  --freeze-encoder    train the head alone - faster, and the only mode
+                      whose result can be SAVED and reloaded
   --examples N        labelled decisions to train on                  [4000]
   --save DIR          where the trained model goes             [out/rubiks-model]
   --eval N            score N held-out decisions and report
@@ -133,23 +150,30 @@ fn parse() -> Result<(Settings, bool), String> {
     let model = ModelChoice::new("laya").take_over(&mut args)?;
     let cubes = args.usize_or("--cubes", 3);
     let scramble = args.usize_or("--scramble", 6) as u8;
+    let solve_scramble = args.usize_or("--solve-scramble", scramble as usize) as u8;
     let seed = args.u64_or("--seed", 1);
     let encoding = policy::Encoding::parse(&args.str_or("--encode", "grid"))?;
     let head = args.take_str("--head");
     let train = args.usize_or("--train", 0);
-    let batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH);
+    let batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH).max(1);
+    let freeze = args.take_flag("--freeze-encoder");
     let examples = args.usize_or("--examples", 4000);
     let save = args.str_or("--save", "out/rubiks-model");
     let eval = args.usize_or("--eval", 0);
+    let search = args.usize_or("--search", 0);
+    let search_depth = args.usize_or("--search-depth", 14);
     let unassisted = args.take_flag("--unassisted");
     let quiet = args.take_flag("--quiet");
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
     args.finish();
+    if solve_scramble == 0 || solve_scramble > Solver::MAX_DEPTH {
+        return Err(format!("--solve-scramble must be 1..{}", Solver::MAX_DEPTH));
+    }
     if scramble == 0 || scramble > Solver::MAX_DEPTH {
         return Err(format!("--scramble must be 1..{} (this planner is exact, not heuristic)", Solver::MAX_DEPTH));
     }
-    Ok((Settings { model, cubes, scramble, seed, encoding, head, train, batch, examples, save, eval, unassisted, hardware, view, record }, quiet))
+    Ok((Settings { model, cubes, scramble, solve_scramble, seed, encoding, head, train, batch, freeze, examples, save, eval, unassisted, search, search_depth, hardware, view, record }, quiet))
 }
 
 fn main() {
@@ -207,6 +231,10 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
     // Timed, because "how long is one iteration" is the number that decides
     // whether anyone can experiment with this at all.
     let t0 = std::time::Instant::now();
+    if s.freeze {
+        pipe.set_encoder_frozen(true).map_err(|e| format!("{e}"))?;
+    }
+    pipe.set_batch_size(s.batch);
     let data = policy::examples(solver, s.examples, s.scramble, s.encoding, s.seed);
     let generated = t0.elapsed();
     let deepest = data.iter().map(|e| e.distance).max().unwrap_or(0);
@@ -334,8 +362,15 @@ impl Stage {
         if !wanted {
             return Ok(Stage { viewport: None, fps: s.view.fps, frames_dir: None, frame: 0, scene: Scene::default(), quit: false });
         }
-        let mut viewport = Viewport::open("brain - rubiks", view::WIDTH, view::HEIGHT).map_err(|e| format!("{e:?}"))?;
-        if let Some(why) = viewport.headless_because.clone() {
+        // A window is opened ONLY when one was asked for. Recording with a
+        // window up means a stray quit event ends the run and truncates the
+        // file mid-write - which is exactly what it did.
+        let mut viewport = if s.view.window {
+            Viewport::open("brain - rubiks", view::WIDTH, view::HEIGHT).map_err(|e| format!("{e:?}"))?
+        } else {
+            Viewport::headless(view::WIDTH, view::HEIGHT)
+        };
+        if let Some(why) = viewport.headless_because.clone().filter(|_| s.view.window) {
             // Said out loud: a run that quietly lost its window and wrote
             // nothing is the failure this message exists to prevent.
             eprintln!("rubiks: no window ({why}) - drawing to memory; --frames DIR or --record FILE still work");
@@ -441,7 +476,7 @@ fn run() -> Result<bool, String> {
     s.hardware.apply()?;
     eprintln!("rubiks: {} from {} on {}", s.model.name, dir, s.hardware.describe());
 
-    let solver = Solver::new(4.min(s.scramble));
+    let solver = Solver::new(4.min(s.scramble.max(s.solve_scramble)));
     eprintln!(
         "rubiks: planner holds every state within {} moves of solved ({} of them), exact to {} moves",
         solver.half(),
@@ -471,7 +506,11 @@ fn run() -> Result<bool, String> {
     let mut stage = Stage::new(&s)?;
     let mut tally = Tally::default();
     for i in 0..s.cubes {
-        solve_one(&mut pipe, &solver, &s, i, quiet, &mut tally, &mut stage)?;
+        if s.search > 0 {
+            solve_by_search(&mut pipe, &solver, &s, i, quiet, &mut tally, &mut stage)?;
+        } else {
+            solve_one(&mut pipe, &solver, &s, i, quiet, &mut tally, &mut stage)?;
+        }
         if stage.quit {
             eprintln!("rubiks: closed after {} of {} cubes", i + 1, s.cubes);
             break;
@@ -480,6 +519,146 @@ fn run() -> Result<bool, String> {
     stage.finish();
     report(&s, &tally);
     Ok(tally.solved == s.cubes)
+}
+
+/// Plan the whole solution with a model-guided beam search, then play it.
+///
+/// The counterpart to move-by-move play, and the mode that lets a policy
+/// solve a cube it cannot solve greedily: one wrong step does not end the
+/// attempt, because the beam keeps other lines alive. The model is the
+/// heuristic and `Cube::is_solved` is the only oracle - the planner is never
+/// asked which way is home, or this would be the planner's solve.
+///
+/// The path it finds is usually LONGER than the optimal one. That is the
+/// trade the search makes, and it is reported rather than hidden.
+fn solve_by_search(
+    pipe: &mut DecisionPipeline,
+    solver: &Solver,
+    s: &Settings,
+    index: usize,
+    quiet: bool,
+    tally: &mut Tally,
+    stage: &mut Stage,
+) -> Result<(), String> {
+    let seed = s.seed.wrapping_add(index as u64 * 7919);
+    let (cube, scramble_moves) = cube::scramble(s.solve_scramble as usize, seed);
+    let d0 = solver.distance(&cube, Solver::MAX_DEPTH).ok_or("a scramble landed out of the planner's range")?;
+    tally.optimal_moves += d0 as usize;
+    if !quiet {
+        println!(
+            "\ncube {} - scrambled by {}, {} from solved; planning with a beam of {}",
+            index + 1,
+            scramble_moves.iter().map(|m| m.notation()).collect::<Vec<_>>().join(" "),
+            plural(d0),
+            s.search
+        );
+    }
+
+    let options = policy::options();
+    let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let mut failed: Option<String> = None;
+    let planning = Panel {
+        model: s.model.name.clone(),
+        cube_index: index,
+        cubes: s.cubes,
+        distance: d0,
+        state: format!("Searching for a solution with a beam of {} lines, up to {} moves deep.", s.search, s.search_depth),
+        thinking: true,
+        unassisted: s.unassisted,
+        ..Panel::default()
+    };
+    stage.dwell(&cube, &planning, 0.6);
+
+    let started = std::time::Instant::now();
+    let plan = policy::beam_search(&cube, s.search, s.search_depth, &mut |c| {
+        if failed.is_some() {
+            return vec![1.0 / 18.0; 18];
+        }
+        match pipe.choose(&policy::state_text(c, s.encoding), policy::INSTRUCTIONS, &refs) {
+            Ok(a) => a.probabilities.iter().map(|(_, p)| *p).collect(),
+            Err(e) => {
+                failed = Some(format!("{e}"));
+                vec![1.0 / 18.0; 18]
+            }
+        }
+    });
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let planned = started.elapsed();
+    if !quiet {
+        println!(
+            "  searched {} states in {:.1}s -> {} in {} moves{}",
+            plan.scored,
+            planned.as_secs_f32(),
+            if plan.solved { "a solution" } else { "no solution" },
+            plan.moves.len(),
+            if plan.solved && plan.moves.len() > d0 as usize {
+                format!(" ({} longer than optimal)", plan.moves.len() - d0 as usize)
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    // Play it, one move at a time, so the video shows the solve rather than
+    // the search.
+    let mut playing = cube;
+    let mut history: Vec<String> = Vec::new();
+    for (i, m) in plan.moves.iter().enumerate() {
+        let left = solver.distance(&playing, Solver::MAX_DEPTH);
+        let panel = Panel {
+            model: s.model.name.clone(),
+            cube_index: index,
+            cubes: s.cubes,
+            distance: left.unwrap_or(0),
+            state: format!(
+                "Playing move {} of {} from a plan the model's own search found. {}",
+                i + 1,
+                plan.moves.len(),
+                match left {
+                    Some(d) => format!("{} from solved.", plural(d)),
+                    None => format!("more than {} moves from solved.", Solver::MAX_DEPTH),
+                }
+            ),
+            rows: vec![Row { name: m.notation(), detail: m.short(), probability: 1.0, admissible: true }],
+            picked: Some(0),
+            played: Some(0),
+            history: history.clone(),
+            turns: i,
+            solved: tally.solved,
+            unassisted: true,
+            ..Panel::default()
+        };
+        stage.dwell(&playing, &panel, 0.35);
+        stage.turn(&playing, *m, &panel);
+        playing = playing.apply(*m);
+        history.push(m.notation());
+        tally.turns += 1;
+    }
+
+    tally.moves_used += plan.moves.len();
+    if playing.is_solved() {
+        tally.solved += 1;
+        if !quiet {
+            println!("  solved in {} moves (optimal is {})\n{}", plan.moves.len(), d0, playing.net());
+        }
+        let done = Panel {
+            model: s.model.name.clone(),
+            cube_index: index,
+            cubes: s.cubes,
+            state: format!("Solved in {} moves. The optimal solution is {}.", plan.moves.len(), plural(d0)),
+            history,
+            solved: tally.solved,
+            turns: tally.turns,
+            unassisted: true,
+            ..Panel::default()
+        };
+        stage.dwell(&playing, &done, 2.5);
+    } else if !quiet {
+        println!("  NOT solved: the search found no solution within {} moves", s.search_depth);
+    }
+    Ok(())
 }
 
 fn solve_one(
@@ -492,7 +671,7 @@ fn solve_one(
     stage: &mut Stage,
 ) -> Result<(), String> {
     let seed = s.seed.wrapping_add(index as u64 * 7919);
-    let (mut cube, scramble_moves) = cube::scramble(s.scramble as usize, seed);
+    let (mut cube, scramble_moves) = cube::scramble(s.solve_scramble as usize, seed);
     let d0 = solver.distance(&cube, Solver::MAX_DEPTH).ok_or("a scramble landed out of the planner's range")?;
     tally.optimal_moves += d0 as usize;
     if !quiet {
