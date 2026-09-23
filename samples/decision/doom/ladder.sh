@@ -48,6 +48,13 @@ BUDGET=${BUDGET:-600}        # seconds of search per level per attempt
 ATTEMPTS=${ATTEMPTS:-6}      # turns of find/clone/prove before a rung is judged
 STEPS=${STEPS:-1500}         # decisions a proving episode is allowed
 
+# One seed for every attempt at a rung, and it is not a detail. A trail in
+# the archive is a list of actions replayed from the level's own start, and
+# the seed reaches the engine's reset - so an archive carried into a run with
+# a different seed holds trails that no longer lead where they say. Attempts
+# compound only while the seed is held still.
+SEARCH_SEED=${SEARCH_SEED:-1}
+
 # skill:mission, easiest first. Difficulty moves along two axes and they are
 # not interchangeable: skill changes how much of the level fights back,
 # mission changes what counts as having done it at all.
@@ -82,7 +89,7 @@ find_generation() {  # rung skill mission attempt work head
     timeout $((BUDGET + 200)) "$BIN" search \
       --doom-bin "$DOOM" --wad "$WAD" \
       --map "$m" --skill "$skill" --mission "$mission" --reward gauge \
-      --seed "$attempt" --search-budget "$BUDGET" \
+      --seed "$SEARCH_SEED" --search-budget "$BUDGET" \
       --archive "$work/arc" \
       --solutions "$work/sol-m$m.json" \
       --lessons "$work/lessons-m$m.jsonl" \
