@@ -404,6 +404,38 @@ pub fn from_text(text: &str) -> Option<Cube> {
     Some(cube)
 }
 
+/// May this move follow `last`, given the move before that?
+///
+/// Two rules, both SOUND rather than heuristic - they remove only sequences
+/// that cannot be part of any shortest solution, so nothing is lost:
+///
+/// 1. **Never the same face twice in a row.** `R R` is `R2`, `R R'` is
+///    nothing; either way a shorter sequence reaches the same cube.
+/// 2. **Opposite faces in a canonical order.** `U` and `D` commute, so `D U`
+///    and `U D` reach the same cube by different paths - allowing only one of
+///    the two orders halves that part of the tree without removing any state.
+///
+/// This is standard move pruning, and it is also the fix for the loop a
+/// memoryless greedy policy falls into: `B B B B` returns the cube to where
+/// it started, so a deterministic policy re-enters the same state and makes
+/// the same choice forever. Rule 1 alone breaks that fixed point.
+pub fn allowed(candidate: Move, last: Option<Face>) -> bool {
+    let Some(last) = last else { return true };
+    if candidate.face == last {
+        return false;
+    }
+    // Opposite pairs, smaller index first: U before D, R before L, F before B.
+    let opposite = |f: Face| match f {
+        Face::U => Face::D,
+        Face::D => Face::U,
+        Face::R => Face::L,
+        Face::L => Face::R,
+        Face::F => Face::B,
+        Face::B => Face::F,
+    };
+    !(opposite(candidate.face) == last && candidate.face.index() > last.index())
+}
+
 /// A solution found by searching with the MODEL as the heuristic.
 pub struct Plan {
     pub moves: Vec<Move>,
@@ -443,6 +475,13 @@ pub fn beam_search(
     let mut beam: Vec<(Cube, Vec<Move>, f32)> = vec![(*start, Vec::new(), 0.0)];
     let mut scored = 0usize;
     let mut best: Option<(Vec<Move>, f32)> = None;
+    // The closed set: a state reached by two different paths is one state,
+    // and expanding it twice spends beam width on a duplicate. This is the
+    // difference between tree search and graph search, and on a puzzle whose
+    // moves are reversible it is also what stops the beam from wandering in
+    // circles.
+    let mut seen: std::collections::HashSet<Cube> = std::collections::HashSet::new();
+    seen.insert(*start);
 
     for _ in 0..depth {
         let mut next: Vec<(Cube, Vec<Move>, f32)> = Vec::new();
@@ -453,9 +492,7 @@ pub fn beam_search(
             let probs = score(cube);
             scored += 1;
             for (i, p) in probs.iter().enumerate() {
-                // A move that undoes the one just played can never be on a
-                // shortest path and doubles the branching factor.
-                if path.last().map(|m: &Move| m.face) == Some(all[i].face) {
+                if !allowed(all[i], path.last().map(|m: &Move| m.face)) {
                     continue;
                 }
                 let mut child = path.clone();
@@ -464,6 +501,9 @@ pub fn beam_search(
                 let lp = logp + p.max(1e-9).ln();
                 if moved.is_solved() {
                     return Plan { moves: child, scored, solved: true };
+                }
+                if !seen.insert(moved) {
+                    continue;
                 }
                 next.push((moved, child, lp));
             }
@@ -533,6 +573,60 @@ mod search_tests {
         let plan = beam_search(&cube, 12, (d0 + 4) as usize, &mut flaky);
         assert!(plan.solved, "the beam did not recover from one confident mistake");
         assert!(cube.apply_all(&plan.moves).is_solved());
+    }
+
+    /// The rules remove only sequences that cannot be shortest, and they
+    /// remove the one that makes a memoryless policy loop.
+    #[test]
+    fn pruning_keeps_every_state_reachable_and_kills_the_loop() {
+        use crate::cube::Face;
+        let m = |f: Face, q: u8| Move { face: f, quarters: q };
+        // Rule 1: never the same face twice, whatever the amount.
+        for q in 1..=3u8 {
+            assert!(!allowed(m(Face::B, q), Some(Face::B)), "B after B must be pruned");
+        }
+        // Rule 2: opposite faces in one canonical order only.
+        assert!(allowed(m(Face::U, 1), Some(Face::D)) != allowed(m(Face::D, 1), Some(Face::U)));
+        // Everything else stays legal, or the search would lose solutions.
+        assert!(allowed(m(Face::R, 1), Some(Face::U)));
+        assert!(allowed(m(Face::F, 2), Some(Face::R)));
+        assert!(allowed(m(Face::U, 1), None));
+    }
+
+    /// The loop the videos showed: a policy that always wants the same face
+    /// used to play it forever, because four of them return the cube to
+    /// where it started and a memoryless policy then repeats itself. With
+    /// pruning it cannot, whatever it wants.
+    #[test]
+    fn a_policy_that_always_wants_one_face_cannot_play_it_twice() {
+        use crate::cube::Face;
+        let mut stuck = |_: &Cube| -> Vec<f32> {
+            Move::all().iter().map(|m| if m.face == Face::B { 1.0 } else { 0.0001 }).collect()
+        };
+        let (cube, _) = scramble(5, 12345);
+        let plan = beam_search(&cube, 4, 8, &mut stuck);
+        for pair in plan.moves.windows(2) {
+            assert_ne!(pair[0].face, pair[1].face, "the same face twice: {:?}", plan.moves);
+        }
+    }
+
+    /// A state reached two ways is one state. Without the closed set the
+    /// beam spends its width on duplicates.
+    #[test]
+    fn the_search_never_expands_the_same_state_twice() {
+        let (cube, _) = scramble(6, 99);
+        let mut uniform = |_: &Cube| -> Vec<f32> { vec![1.0 / 18.0; 18] };
+        let plan = beam_search(&cube, 64, 6, &mut uniform);
+        // Every state the plan walks through is distinct - a plan that
+        // revisited one would be carrying a cycle.
+        let mut walked = vec![cube];
+        let mut c = cube;
+        for m in &plan.moves {
+            c = c.apply(*m);
+            walked.push(c);
+        }
+        let unique: std::collections::HashSet<_> = walked.iter().collect();
+        assert_eq!(unique.len(), walked.len(), "the plan walks through a state twice");
     }
 
     /// A useless policy does not accidentally solve a deep cube - otherwise

@@ -50,7 +50,7 @@ use brain::options::{Args, Hardware, ModelChoice, Options, ViewOptions};
 use brain::viewport::Viewport;
 use brain::{DecisionPipeline, Device, Stages};
 
-use cube::{Cube, Move};
+use cube::{Cube, Face, Move};
 use search::Solver;
 use view::{Panel, Row, Scene};
 
@@ -696,6 +696,13 @@ fn solve_one(
     let cap = if s.unassisted { (d0 as usize * 3).max(12) } else { d0 as usize };
     let mut used = 0usize;
     let mut history: Vec<String> = Vec::new();
+    // The two guards a memoryless greedy policy needs, and neither consults
+    // the planner: sound move pruning, and the states this episode has
+    // already stood in. Without them a policy that likes one face plays it
+    // forever - four turns of a face return the cube to where it started.
+    let mut last: Option<Face> = None;
+    let mut visited: std::collections::HashSet<Cube> = std::collections::HashSet::new();
+    visited.insert(cube);
 
     let mut drifted = false;
     while !cube.is_solved() && used < cap && !stage.quit {
@@ -759,7 +766,20 @@ fn solve_one(
             .map_err(|e| format!("{e}"))?;
         let (pick, probs, confidence) = match &answers[0] {
             Answer::Choice { probabilities, confidence, .. } => {
-                let best = argmax(probabilities);
+                // The model ranks all eighteen; the two guards decide which
+                // of its preferences are legal to act on.
+                let legal: Vec<bool> = candidates
+                    .iter()
+                    .map(|m| policy::allowed(*m, last) && !visited.contains(&cube.apply(*m)))
+                    .collect();
+                let any = legal.iter().any(|l| *l);
+                let best = probabilities
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !any || legal[*i])
+                    .max_by(|a, b| a.1 .1.total_cmp(&b.1 .1))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 (best, probabilities.clone(), *confidence)
             }
             other => return Err(format!("expected a choice, got {other:?}")),
@@ -807,6 +827,8 @@ fn solve_one(
             );
         }
         cube = cube.apply(m);
+        last = Some(m.face);
+        visited.insert(cube);
         used += 1;
     }
 
