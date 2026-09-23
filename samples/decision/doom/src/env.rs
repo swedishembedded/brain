@@ -1680,6 +1680,22 @@ impl DoomEnv {
         Some((rel.round() as i32, dx.hypot(dy).round() as i32))
     }
 
+    /// Whether what the teacher is doing is working, by the only two
+    /// measures it has: is the player moving at all, and is any of the moving
+    /// reaching ground it has not already walked.
+    ///
+    /// The rotation below sets a KIND of thing aside once it has been tried
+    /// and nothing came of it. It used to ask only whether the player had
+    /// stopped moving, which misses the failure that actually ends most runs:
+    /// measured over nine levels at their easiest setting, seven of the nine
+    /// that failed ended STALLED - moving the whole time, covering no new
+    /// ground - and on those the teacher chose "walk forward into open floor"
+    /// for 875 of 1200 decisions, or rode the same lift 273 times. None of
+    /// that is stuck.
+    fn getting_nowhere(&self) -> bool {
+        getting_nowhere(self.stuck, self.stale)
+    }
+
     fn circling(&self) -> bool {
         if self.recent.len() < CIRCLE_WINDOW {
             return false;
@@ -1743,7 +1759,7 @@ impl DoomEnv {
         }
         let pick = self.choose();
         if let Some(i) = pick {
-            if self.stuck >= STUCK_TRY_SOMETHING_ELSE {
+            if self.getting_nowhere() {
                 if let Some(o) = self.opts.get(i) {
                     self.tried.insert(o.tag);
                 }
@@ -1782,7 +1798,7 @@ impl DoomEnv {
         if self.opts.iter().all(|o| self.tried.contains(&o.tag)) {
             self.tried.clear();
         }
-        if self.stuck >= STUCK_TRY_SOMETHING_ELSE {
+        if self.getting_nowhere() {
             self.tried.insert(tag);
         }
         // A commitment is kept only while it is being followed.
@@ -1803,9 +1819,21 @@ impl DoomEnv {
 
     fn choose(&mut self) -> Option<usize> {
         let stuck = self.stuck;
+        let stale = self.stale;
         let tried = &self.tried;
+        // Two ways of getting nowhere, and the rotation has to see both.
+        //
+        // STUCK is not moving, which is the one this was written for. STALE is
+        // moving perfectly well over ground already walked - and measured on
+        // the nine levels at their easiest setting, that is the commoner of
+        // the two by some way: seven of nine runs that failed ended stalled,
+        // and on those the teacher chose "walk forward into open floor" for
+        // 875 of 1200 decisions, or operated the same lift 273 times. Nothing
+        // about those decisions is stuck. The player is briskly going round in
+        // a circle, and a guard that only asks whether it moved cannot tell.
+        let exhausted = getting_nowhere(stuck, stale);
         let by = |tag: Tag| {
-            if stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&tag) {
+            if exhausted && tried.contains(&tag) {
                 return None;
             }
             self.opts.iter().position(|o| o.tag == tag)
@@ -1961,7 +1989,7 @@ impl DoomEnv {
                     .iter()
                     .position(|o| o.tag == Tag::Arm && o.text == want)
                 {
-                    if !(stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&Tag::Arm)) {
+                    if !(exhausted && tried.contains(&Tag::Arm)) {
                         return Some(i);
                     }
                 }
@@ -2100,7 +2128,7 @@ impl DoomEnv {
         // a fixed preference order.
         let mut best: Option<(i32, usize)> = None;
         for (i, o) in self.opts.iter().enumerate() {
-            if stuck >= STUCK_TRY_SOMETHING_ELSE && tried.contains(&o.tag) {
+            if exhausted && tried.contains(&o.tag) {
                 continue;
             }
             let score = match o.tag {
@@ -2312,6 +2340,18 @@ fn every_field_of_an_option_either_replays_or_cannot_change_the_run(o: &Option_)
         room: _,
         fire: _,
     } = o;
+}
+
+/// Whether what the teacher is doing is working, by the only two measures it
+/// has: is the player moving at all, and is any of that moving reaching ground
+/// it has not already walked.
+///
+/// `stuck` counts decisions the player has not moved for. `stale` counts
+/// decisions since it last set foot somewhere new. They are different
+/// failures and the rotation has to see both - it used to ask only the first,
+/// and the second is the one that ends most runs.
+fn getting_nowhere(stuck: u32, stale: u32) -> bool {
+    stuck >= STUCK_TRY_SOMETHING_ELSE || stale >= STALE_TRY_THE_WALLS
 }
 
 /// Whether the route is now measuring the way to somewhere ELSE.

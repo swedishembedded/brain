@@ -980,17 +980,29 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     // thing it is cannot be read off the outcome - "0 of 6 kills" says
     // equally well that it fought badly and that it never went looking.
     let mut chose: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    // Where a decision's time actually goes. `scripted` is the teacher
+    // choosing, which touches nothing outside this process; `apply` is the
+    // engine round trip AND building the observation and option list from
+    // what came back. Told apart, because "the run is slow" has been blamed
+    // on the engine twice and been wrong both times.
+    let (mut think_ns, mut act_ns) = (0u128, 0u128);
+    let mut decisions = 0usize;
     let mut total = 0.0f32;
     // How often the player had something out of sight worth remembering. A
     // plumbing check: if this is zero, the memory is not reaching the model
     // whatever its own tests say.
     let mut recalled = 0usize;
     for step in 0..args.max_steps() {
+        decisions += 1;
+        let t_think = std::time::Instant::now();
         let Some(a) = env.scripted() else { break };
+        think_ns += t_think.elapsed().as_nanos();
         if let Some(t) = env.tag_of(a) {
             *chose.entry(format!("{t:?}")).or_insert(0usize) += 1;
         }
+        let t_act = std::time::Instant::now();
         let (r, done) = env.apply(a, Vec::new());
+        act_ns += t_act.elapsed().as_nanos();
         if let Some(f) = &env.fault {
             return Err(f.clone());
         }
@@ -1017,6 +1029,12 @@ pub fn probe(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     // The last one is the interesting one: by then the player has been
     // somewhere, and has something to remember about where it has been.
     show_what_the_model_reads(&env, "at the end")?;
+    println!(
+        "doom: {:.1} ms per decision = {:.1} ms deciding + {:.1} ms acting",
+        (think_ns + act_ns) as f64 / 1e6 / decisions.max(1) as f64,
+        think_ns as f64 / 1e6 / decisions.max(1) as f64,
+        act_ns as f64 / 1e6 / decisions.max(1) as f64
+    );
     println!(
         "doom: what the teacher chose: {}",
         chose
