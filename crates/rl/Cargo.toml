@@ -24,6 +24,9 @@ brain-model.workspace = true
 # gate a candidate adapter without the cycle `brain-qwen3 -> brain-rl ->
 # brain-bench -> brain-qwen3`.
 brain-promote.workspace = true
+# `audit::reader::Learner` - the seam this crate binds to a real model, and
+# the model-free half of the continual reader it drives.
+brain-audit.workspace = true
 brain-data.workspace = true
 brain-checkpoint.workspace = true
 brain-atif.workspace = true

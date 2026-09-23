@@ -602,17 +602,40 @@ cost of a step never exceeds the budget while the bank grows past forty and
 the reported detection latency grows with it. That is the whole claim of
 this design in one test.
 
-**The `Learner` binding to a real model: NOT STARTED, reconnaissance done
-2026-09-23.** Recording the map so it is not rebuilt from scratch.
+**The `Learner` binding to a real model. DONE 2026-09-23.**
+`rl::reader::ModelLearner`, with two tests against the same tiny CPU-runnable
+Qwen3 fixture the document study uses.
 
-**One seam defect was found by attempting it, and is fixed.** `Learner` had
-`score` and `entropy` as separate methods. `improve::decode_checkpoint`
+**Two seam defects were found by attempting it, and both are fixed.**
+First: `Learner` had `score` and `entropy` as separate methods. `improve::decode_checkpoint`
 returns a score, a completion entropy and the completions from ONE pass, so
 a faithful implementation of the seam as written would have decoded every
 probe twice and made the degeneracy bar cost as much as the whole gate.
 `score` now returns a `Scored { scores, mean_entropy }`. No fake-based test
 could have caught this: the fake returns a constant, and only writing the
 real thing exposes it.
+
+Second: `joint_oracle` received the probes but not the rows, so it could not
+TRAIN - and training over everything is the only thing that makes it an
+upper bound. It now takes both. A fake that returns a constant hides this
+one just as completely.
+
+**And one real bug in the binding, caught by review rather than by test.**
+`adapter_bytes` hardcoded `rank: 1` into the adapter's `ModelCard`, and
+`device_adapter::fold_adapter_into` READS the rank from that card to perform
+the fold - so a rank-4 adapter would have folded silently wrongly rather
+than failing. The rank and alpha are now carried explicitly and a test
+asserts the card records them, because nothing else in the pipeline would
+have noticed.
+
+**A limitation left standing, deliberately and visibly.** `Learner::train`
+returns bytes rather than a result, so a training failure has nowhere to go.
+`ModelLearner` panics with a message naming what failed rather than
+returning empty bytes, because empty bytes would be admitted to the pool as
+a valid adapter and every later episode would route through nothing.
+Panicking in a long-running reader is still wrong; the right fix is a
+fallible seam and a verdict for it, which is a change to the loop's `Row`
+and not to this binding.
 
 **Where each method lands.**
 

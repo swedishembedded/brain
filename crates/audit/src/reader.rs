@@ -95,10 +95,15 @@ pub trait Learner {
     /// same way, from what would actually be served.
     fn score(&mut self, arm: Arm, probes: &[&Probe]) -> Scored;
 
-    /// Train ONE adapter jointly over everything learned so far and score it
-    /// on `probes`. The upper bound any schedule could have reached, and the
-    /// most expensive thing the reader ever does.
-    fn joint_oracle(&mut self, probes: &[&Probe]) -> f64;
+    /// Train ONE adapter jointly over `rows` - everything the reader has
+    /// learned - and score it on `probes`. The upper bound any schedule
+    /// could have reached, and the most expensive thing the reader ever
+    /// does.
+    ///
+    /// It takes the rows as well as the probes because it must TRAIN, not
+    /// merely evaluate. An oracle handed only the probes could not do the
+    /// one thing that makes it an upper bound.
+    fn joint_oracle(&mut self, rows: &[&str], probes: &[&Probe]) -> f64;
 }
 
 /// What happened to one episode.
@@ -405,7 +410,8 @@ impl<L: Learner> Reader<L> {
         self.growth.record(promoted);
         let (diagnosis, action) = if self.growth.oracle_due() && !self.bank.is_empty() {
             let bank_probes: Vec<&Probe> = self.bank.values().flat_map(|s| s.probes().iter()).collect();
-            let joint = self.learner.joint_oracle(&bank_probes);
+            let bank_rows: Vec<&str> = self.bank.values().flat_map(|s| s.trained_rows().iter().map(String::as_str)).collect();
+            let joint = self.learner.joint_oracle(&bank_rows, &bank_probes);
             let sequential = mean(&self.learner.score(Arm::Incumbent, &bank_probes).scores);
             let d = self.growth.diagnose(joint, sequential);
             let a = self.growth.act(d, self.cfg.reservoir.cap);
@@ -511,7 +517,7 @@ mod tests {
                 .collect();
             Scored { scores, mean_entropy: 2.0 }
         }
-        fn joint_oracle(&mut self, _probes: &[&Probe]) -> f64 {
+        fn joint_oracle(&mut self, _rows: &[&str], _probes: &[&Probe]) -> f64 {
             self.oracles += 1;
             self.oracle
         }

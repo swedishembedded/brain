@@ -2110,6 +2110,7 @@ name = "brain-rl"
 version = "1.1.0"
 dependencies = [
  "brain-atif",
+ "brain-audit",
  "brain-bench",
  "brain-checkpoint",
  "brain-data",
