@@ -57,12 +57,18 @@ impl WgslProvider {
     /// comment). `Op::MatMul`'s own `candidates()` never returns
     /// `SplitReduction`/`FusedFlash`, so those arms stay `unreachable!`
     /// exactly as they were at the old call site.
-    fn threads(v: KernelVariant, dt: Dtype, m: u32, n: u32) -> u32 {
+    fn threads(v: KernelVariant, dt: Dtype, m: u32, n: u32) -> crate::Dispatch {
+        use crate::Dispatch;
         let tile = || m.div_ceil(128) * n.div_ceil(128) * 256;
         match v {
-            KernelVariant::Reference => m * n,
-            KernelVariant::WorkgroupPerOutput => n * 64,
-            KernelVariant::RegisterTiled => tile(),
+            KernelVariant::Reference => Dispatch::Threads(m * n),
+            // One WORKGROUP per output column. `n * 64` is the same total and
+            // the wrong unit: the 64 threads share one output, so only the
+            // workgroup count describes the dispatch, and `Gpu::step_sliced`
+            // refuses the raw form rather than let a caller mean one and
+            // write the other.
+            KernelVariant::WorkgroupPerOutput => Dispatch::Workgroups(n),
+            KernelVariant::RegisterTiled => Dispatch::Threads(tile()),
             KernelVariant::PackedInt8 => match dt {
                 // `NF4`/`F4E2M1` (M8.5) are W4A8, physically packed exactly
                 // like `Q4` - a future register-tiled `PackedInt8` kernel for
@@ -70,7 +76,7 @@ impl WgslProvider {
                 // into this arm now even though no such kernel exists yet
                 // (only `matmul_q4_gemv_nf4`/`matmul_q4_gemv_f4e2m1`,
                 // `WorkgroupPerOutput`, do).
-                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => tile(),
+                Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => Dispatch::Threads(tile()),
                 // `select::candidates` never offers `PackedInt8` for an
                 // F32-family dtype (see this method's own doc comment) -
                 // this arm is unreachable in practice, kept only so the
@@ -81,7 +87,7 @@ impl WgslProvider {
                 // the `tile()` one above - they are a decode-to-f32 STORAGE
                 // tier (same family as `BF16`/`F16`), never `PackedInt8` in
                 // practice, for the identical reason.
-                Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => m * n,
+                Dtype::F32 | Dtype::BF16 | Dtype::F16 | Dtype::F8E4M3 | Dtype::F8E5M2 => Dispatch::Threads(m * n),
             },
             KernelVariant::SplitReduction => {
                 unreachable!("Op::MatMul's candidates() never returns SplitReduction")
@@ -105,18 +111,19 @@ impl WgslProvider {
     /// - `MoeExpertLinear` writes `[m, n]`,
     /// - `MatMulDx` writes `dX[m, k]`,
     /// - `MatMulDw` writes `dW[n, k]`.
-    fn fixed_threads(op: select::Op, shape: select::OpShape) -> u32 {
+    fn fixed_threads(op: select::Op, shape: select::OpShape) -> crate::Dispatch {
+        use crate::Dispatch;
         match op {
-            select::Op::Embed | select::Op::MoeExpertLinear => shape.m * shape.n,
-            select::Op::MatMulDx => shape.m * shape.k,
-            select::Op::MatMulDw => shape.n * shape.k,
+            select::Op::Embed | select::Op::MoeExpertLinear => Dispatch::Threads(shape.m * shape.n),
+            select::Op::MatMulDx => Dispatch::Threads(shape.m * shape.k),
+            select::Op::MatMulDw => Dispatch::Threads(shape.n * shape.k),
             other => unreachable!("wgsl::WgslProvider::fixed_threads: {other:?} is not a fixed-shape op"),
         }
     }
 
     /// The one dispatch body all of this provider's operators share: resolve
     /// a variant, bind it, bind every operand's own sub-range, push one step.
-    fn lower_one(&self, ctx: &mut LowerCtx, req: &OpRequest, threads: u32, variant: KernelVariant) -> Result<Lowered, String> {
+    fn lower_one(&self, ctx: &mut LowerCtx, req: &OpRequest, grid: crate::Dispatch, variant: KernelVariant) -> Result<Lowered, String> {
         let (kind, name) = (req.bind)(variant);
         if req.operands.last().map(|o| o.role) != Some(Role::Out) {
             return Err(format!(
@@ -127,7 +134,7 @@ impl WgslProvider {
         }
         let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
         let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
-        ctx.steps.push(ctx.gpu.step_sliced(kind, &bufs, &offsets, req.attrs, threads));
+        ctx.steps.push(ctx.gpu.dispatch_sliced(kind, &bufs, &offsets, req.attrs, grid));
         Ok(Lowered::new(1, vec![name]))
     }
 
@@ -340,7 +347,7 @@ mod tests {
         for dt in [Dtype::Q4, Dtype::Q4K, Dtype::Q8K] {
             assert_eq!(
                 WgslProvider::threads(KernelVariant::PackedInt8, dt, m, n),
-                expected_tile,
+                crate::Dispatch::Threads(expected_tile),
                 "{dt:?} must dispatch the tile formula, not m*n -- under-dispatching leaves real \
                  output elements never written (silent corruption, not a crash)"
             );
