@@ -445,7 +445,12 @@ impl Action for GenerateAction {
             Plan::Chat { req, .. } => (req.ids.len() + req.max_new) as u32,
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
-        let mut guard = self.hot.lock().map_err(|_| "qwen: hot model lock poisoned")?;
+        // `lock_resident`, not `lock()`: this mutex is held for the WHOLE of a
+        // generation, so one panicking request (a backend fault, a lost
+        // device) would otherwise poison it and make every later caller of
+        // this model fail for the life of the process. The resident the panic
+        // touched is discarded and the `!reuse` path below rebuilds it.
+        let mut guard = capability::lock_resident(&self.hot);
         let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
         if !reuse {
             *guard = None; // free the old resident weights before loading new
@@ -1114,7 +1119,7 @@ impl Action for EmbedAction {
         let text = input_text_for(inv, "qwen embed")?;
         let instruction = inv.get_str("instruction").filter(|s| !s.is_empty());
 
-        let mut guard = self.hot.lock().map_err(|_| "qwen embed: hot model lock poisoned")?;
+        let mut guard = capability::lock_resident(&self.hot); // see `GenerateAction::run`
         let tok_reusable = matches!(&*guard, Some(h) if h.tokenizer_path == tokenizer_path);
         if !tok_reusable {
             *guard = None;
@@ -1901,6 +1906,101 @@ mod tests {
         // the two defaults are tracked and applied independently.
         let err = reg.run(MODEL, "embed", Invocation::new().set("text", json!("hi")), &mut |_| {}).unwrap_err();
         assert!(err.contains("no tokenizer"), "got: {err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The chat path end to end on a tiny synthetic checkpoint plus the byte
+    /// tokenizer fixture - no real model, no `QWEN3_DIR`, so this actually
+    /// runs. It pins the three promises a host serving this action makes to
+    /// its own callers:
+    ///
+    /// 1. A cancelled generation STOPS - it does not run to completion into a
+    ///    consumer that has gone away.
+    /// 2. It SAYS it was cancelled. Reporting `"stop"` would make a truncated
+    ///    answer indistinguishable from a finished one.
+    /// 3. The streamed deltas and the returned text are the same text, and
+    ///    `completion_tokens` counts tokens the model really generated - the
+    ///    numbers somebody downstream bills on cannot be an estimate or
+    ///    disagree with what the caller was streamed.
+    #[test]
+    fn a_cancelled_chat_generation_stops_early_and_reports_cancellation() {
+        let dir = std::env::temp_dir().join(format!("qwen-caps-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The byte tokenizer spans ~96 ids and the rendered chat template is
+        // longer than `tiny`'s 12-token context, so both are widened.
+        let cfg = QwenConfig { vocab: 128, block_size: 256, max_position_embeddings: 256, ..QwenConfig::tiny() };
+        let ckpt = dir.join("model.safetensors");
+        write_tiny_checkpoint(&ckpt, &cfg, 7);
+        write_byte_tokenizer(&dir);
+
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+
+        const MAX_NEW: i64 = 24;
+        const CANCEL_AFTER: usize = 4;
+        let request = || {
+            Invocation::new()
+                .set("weights", json!(ckpt.to_str().unwrap()))
+                .set("tokenizer", json!(dir.join("tokenizer.json").to_str().unwrap()))
+                .set("messages", json!(json!([{"role": "user", "content": "hi"}]).to_string()))
+                .set("max_new", json!(MAX_NEW))
+                .set("temp", json!(0.0))
+                .set("seed", json!(1))
+        };
+
+        // Baseline: the same request, uncancelled, runs to `max_new`.
+        let mut full_deltas = String::new();
+        let full = reg
+            .run(
+                MODEL,
+                "generate",
+                request(),
+                &mut |p| {
+                    if let Some(d) = &p.delta {
+                        full_deltas.push_str(d);
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(full.outputs["finish_reason"], json!("length"), "an uncancelled run hits max_new");
+        assert_eq!(full.outputs["completion_tokens"], json!(MAX_NEW));
+
+        // Cancelled mid-stream, from the progress callback - exactly what a
+        // front-end does when the consumer of the stream disconnects.
+        let mut inv = request();
+        inv.cancel = CancelToken::armed();
+        let token = inv.cancel.clone();
+        let mut deltas = String::new();
+        let mut seen = 0usize;
+        let out = reg
+            .run(MODEL, "generate", inv, &mut |p| {
+                if let Some(d) = &p.delta {
+                    deltas.push_str(d);
+                    seen += 1;
+                    if seen == CANCEL_AFTER {
+                        token.cancel();
+                    }
+                }
+            })
+            .unwrap();
+
+        assert_eq!(out.outputs["finish_reason"], json!("cancelled"), "a cancelled generation must not report a finished one");
+        let completion = out.outputs["completion_tokens"].as_i64().unwrap();
+        assert!(completion < MAX_NEW, "generation must stop at the cancel, not run to max_new (got {completion})");
+        assert!(completion >= CANCEL_AFTER as i64, "everything already streamed is still accounted for");
+
+        // Counts are the model's own, not an estimate: the prompt count is the
+        // tokenizer's count of the rendered prompt, identical across both runs
+        // of the identical request.
+        assert_eq!(out.outputs["prompt_tokens"], full.outputs["prompt_tokens"]);
+        assert!(out.outputs["prompt_tokens"].as_i64().unwrap() > 0);
+
+        // Streamed text == returned text, for the cancelled run too.
+        let text = String::from_utf8(out.blobs["text"].bytes.clone()).unwrap();
+        assert_eq!(deltas, text, "a caller accumulating deltas must end up with exactly the returned text");
+        assert_eq!(out.outputs["text"], json!(text));
+        assert!(full_deltas.starts_with(&text), "the cancelled run is a prefix of the same greedy decode");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

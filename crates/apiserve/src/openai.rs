@@ -596,12 +596,13 @@ fn normalize_content_part_for_template(p: &Value) -> Value {
     }
 }
 
-/// Map the contract `finish_reason` to OpenAI's enum. There is no `stop_sequence`
-/// or `tool_choice_unmet` in OpenAI; both are reported as `stop` (a client
-/// enforcing a forced tool choice detects the unmet demand by the absent
+/// Map the contract `finish_reason` to OpenAI's enum. There is no `stop_sequence`,
+/// `tool_choice_unmet` or `cancelled` in OpenAI; all are reported as `stop` (a
+/// client enforcing a forced tool choice detects the unmet demand by the absent
 /// `tool_calls`; the contract value itself stays visible under
-/// `native_finish_reason`). `tool_calls` passes through unchanged (both the
-/// contract and OpenAI use that exact name).
+/// `native_finish_reason`, which is the ONLY place an OpenAI-shaped client can
+/// see that a reply was truncated by a cancel rather than finished). `tool_calls`
+/// passes through unchanged (both the contract and OpenAI use that exact name).
 fn finish_openai(fr: &str) -> &'static str {
     match fr {
         "length" => "length",

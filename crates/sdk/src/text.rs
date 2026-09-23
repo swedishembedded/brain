@@ -68,10 +68,18 @@ pub struct GeneratedText {
     pub prompt_tokens: u32,
     /// Tokens actually generated.
     pub completion_tokens: u32,
-    /// Why generation stopped: `"stop"` (EOS/cancellation), `"length"` (hit
-    /// `max_new_tokens`), `"stop_sequence"`, `"tool_calls"`, or
-    /// `"tool_choice_unmet"` - the exact vocabulary
-    /// `qwen3::chat::SeqState::finish` reports on the served path too.
+    /// Why generation stopped: `"stop"` (EOS), `"length"` (hit
+    /// `max_new_tokens`), `"stop_sequence"`, `"tool_calls"`,
+    /// `"tool_choice_unmet"`, or `"cancelled"` (the caller's
+    /// [`capability::CancelToken`] fired mid-generation - the text is then
+    /// PARTIAL, and this field is the only thing that says so) - the exact
+    /// vocabulary `qwen3::chat::SeqState::finish` reports on the served path
+    /// too. `"cancelled"` cannot occur through THIS pipeline:
+    /// [`TextGenerationPipeline::generate_with`] runs with an unarmed token
+    /// because it exposes no way to pass one, so a generation started here
+    /// runs to its own stop condition. It is listed because the value is part
+    /// of the shared vocabulary, and a caller matching on this field should
+    /// handle it rather than assume the set is closed.
     pub finish_reason: String,
 }
 

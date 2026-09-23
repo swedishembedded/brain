@@ -240,6 +240,33 @@ pub fn find_stop(text: &str, stops: &[String]) -> Option<usize> {
     stops.iter().filter(|s| text.ends_with(s.as_str())).map(|s| text.len() - s.len()).min()
 }
 
+/// One streaming step: what is safe to EMIT now, the new "printed" prefix, and
+/// where a stop string begins if this step completed one.
+///
+/// [`stream_delta`] alone answers "what is new", which is not the same question
+/// as "what may the caller see". A stop string is excluded from the final
+/// output ([`SeqState::finish`] truncates at `stop_at`), so emitting the delta
+/// that COMPLETES one hands a streaming caller text that the non-streaming
+/// caller never receives: accumulate the deltas of an SSE response and you got
+/// a different answer than the same request without `stream`. Deciding both
+/// here, in one place, is what keeps those two views of one generation equal.
+///
+/// The one case it cannot repair: a stop string that straddles back into text
+/// ALREADY sent (`printed` ends with its first half). Nothing can un-send that,
+/// so this emits nothing further and leaves the truncation to `finish` - the
+/// stream is then a prefix-superset of the final text by at most the part of
+/// the stop string that had already gone out.
+pub fn visible_delta(printed: &str, full: &str, stops: &[String]) -> (String, String, Option<usize>) {
+    let (delta, new_printed) = stream_delta(printed, full);
+    let stop_at = find_stop(&new_printed, stops);
+    let emit = match stop_at {
+        Some(idx) if idx >= printed.len() => new_printed[printed.len()..idx].to_string(),
+        Some(_) => String::new(),
+        None => delta,
+    };
+    (emit, new_printed, stop_at)
+}
+
 /// Read the four shared sampling params (with the spec defaults).
 ///
 /// `seed` is the one param that is NOT a fixed spec default: a request that
@@ -413,16 +440,20 @@ impl SeqState {
     /// Stream the delta between `all_tokens` (everything generated so far) and
     /// what has already been printed, honouring stop-strings and
     /// cancellation. Returns `true` once this sequence should stop.
+    ///
+    /// What reaches `progress` is [`visible_delta`]'s emit, not the raw new
+    /// text: a streaming caller must end up with exactly the text
+    /// [`SeqState::finish`] reports, never the stop string that finish cuts.
     pub fn advance(&mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> bool {
         let full = tok.decode(all_tokens);
-        let (delta, new_printed) = stream_delta(&self.printed, &full);
+        let (delta, new_printed, stop_at) = visible_delta(&self.printed, &full, &self.stops);
         self.printed = new_printed;
         if !delta.is_empty() {
             let mut evs = Vec::new();
             self.scan.push(&delta, &mut evs);
             emit_chat_events(&evs, progress, all_tokens.len() as u32, self.max_new as u32);
         }
-        if let Some(idx) = find_stop(&self.printed, &self.stops) {
+        if let Some(idx) = stop_at {
             self.stop_at = Some(idx);
             return true;
         }
@@ -446,7 +477,7 @@ impl SeqState {
         // flushed below, so a call closing only in the final held-back tail
         // still counts. A stop-string cut takes precedence (existing
         // behavior); a cancelled sequence is the caller's doing, not the
-        // model failing the constraint.
+        // model failing the constraint, and reports `"cancelled"`.
         let demanded = matches!(self.tool_choice, ToolChoice::Required | ToolChoice::Named(_));
         let (text, finish) = if let Some(idx) = self.stop_at {
             (self.printed[..idx].to_string(), "stop_sequence")
@@ -467,16 +498,17 @@ impl SeqState {
                 ToolChoice::Required => calls_present,
                 ToolChoice::Named(name) => self.scan.tool_calls().iter().any(|c| &c.name == name),
             };
-            // Precedence: an unmet demand outranks a mismatched tool call;
-            // a cancellation is the caller's doing and never reports
-            // tool_choice_unmet. tool_calls > cancelled > length > stop is
-            // the pre-existing order, kept.
+            // Precedence: cancellation outranks everything. It is the one
+            // outcome the caller ALREADY knows something about (it fired the
+            // token) and the one it must not confuse with a finished answer:
+            // reporting "stop" here made a truncation indistinguishable from
+            // an EOS, so a caller cached, billed or persisted a partial reply
+            // as a complete one. The scanned `tool_calls` are still attached
+            // below for a caller that wants them; they just no longer decide
+            // the reason. Then an unmet demand outranks a mismatched tool
+            // call, and tool_calls > length > stop as before.
             let reason = if self.cancelled {
-                if calls_present {
-                    "tool_calls"
-                } else {
-                    "stop"
-                }
+                "cancelled"
             } else if demanded && !met {
                 "tool_choice_unmet"
             } else if calls_present {
@@ -601,6 +633,43 @@ mod tests {
         assert!(!concat.contains('\u{FFFD}'));
     }
 
+    /// REGRESSION: a streaming caller must not be shown text that the final
+    /// outcome truncates away. A stop string is cut from the answer, so the
+    /// step that completes one may only emit what comes BEFORE it - otherwise
+    /// accumulating an SSE response's deltas yields a different answer than
+    /// the same request made without `stream`, and nothing downstream can
+    /// detect or repair that divergence.
+    #[test]
+    fn the_step_that_completes_a_stop_string_emits_only_the_text_before_it() {
+        let stops = vec!["END".to_string()];
+        // Ordinary step: nothing to withhold.
+        let (emit, printed, stop_at) = visible_delta("all ", "all don", &stops);
+        assert_eq!((emit.as_str(), printed.as_str(), stop_at), ("don", "all don", None));
+        // The stop string arrives whole in one step: nothing visible is added.
+        let (emit, printed, stop_at) = visible_delta("all done ", "all done END", &stops);
+        assert_eq!(emit, "", "the stop string itself is never streamed");
+        assert_eq!(printed, "all done END");
+        assert_eq!(stop_at, Some(9));
+        assert_eq!(&printed[..stop_at.unwrap()], "all done ", "what finish() reports is exactly what was streamed");
+        // The stop string arrives with visible text ahead of it in one step.
+        let (emit, printed, stop_at) = visible_delta("all ", "all done END", &stops);
+        assert_eq!(emit, "done ");
+        assert_eq!(&printed[..stop_at.unwrap()], "all done ");
+    }
+
+    /// The one case the stream cannot repair, pinned so it stays a KNOWN
+    /// boundary rather than a surprise: a stop string that straddles back into
+    /// text already sent. Those bytes are gone; the final text is still cut
+    /// correctly.
+    #[test]
+    fn a_stop_string_straddling_already_streamed_text_cannot_be_unsent() {
+        let stops = vec!["END".to_string()];
+        let (emit, printed, stop_at) = visible_delta("all doneEN", "all doneEND", &stops);
+        assert_eq!(emit, "", "nothing further is emitted once the cut is behind the stream");
+        assert_eq!(stop_at, Some(8));
+        assert_eq!(&printed[..stop_at.unwrap()], "all done", "the outcome is still truncated correctly");
+    }
+
     // ---- tool_choice (M2.2) ----
 
     /// Every `tool_choice` shape OpenAI's API and vLLM accept, absent/empty ->
@@ -723,10 +792,13 @@ mod tests {
     }
 
     /// A cancelled sequence is the caller's doing, not the model failing the
-    /// constraint: cancellation still wins over an unmet `tool_choice`
-    /// demand.
+    /// constraint: cancellation wins over an unmet `tool_choice` demand - and
+    /// it is REPORTED as cancellation. Reporting `"stop"` here (what this did
+    /// before) made a truncation indistinguishable from a finished answer, so
+    /// a caller that fired the token because its consumer went away could not
+    /// tell that the reply it holds is partial.
     #[test]
-    fn cancellation_wins_over_unmet_tool_choice() {
+    fn a_cancelled_sequence_reports_cancellation_not_stop() {
         let Some(tok) = real_tok() else { return };
         let req = req_with_tool_choice(&tok, "\"required\"").unwrap();
         let cancel = CancelToken::armed();
@@ -734,7 +806,7 @@ mod tests {
         cancel.cancel();
         assert!(seq.advance(&tok, &tok.encode("prose"), &mut |_| {}));
         let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {});
-        assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("stop"));
+        assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("cancelled"));
     }
 
     /// `preserve_thinking` threads through to the renderer, but it is the

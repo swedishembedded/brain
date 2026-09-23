@@ -39,6 +39,17 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   content_block_delta* → content_block_stop → message_delta → message_stop`; OpenAI/
   OpenRouter emit `chat.completion.chunk`s ending in `data: [DONE]`. Client disconnect
   cancels the running job (frees the lane).
+- **Token counts.** `usage` on a non-streaming reply is the served model's own
+  count: `input_tokens`/`prompt_tokens` is the tokenizer's count of the fully
+  rendered prompt (chat template and tool schemas included), and the output
+  count is the tokens the model actually generated. Two places are NOT that,
+  and a client sizing requests or billing on them should know it:
+  `POST /v1/messages/count_tokens` answers with a heuristic (content
+  characters / 4, no tokenizer), and the `input_tokens` in an Anthropic
+  stream's `message_start` is the same heuristic, because the real count is
+  not known until the model has rendered and encoded the prompt. The
+  non-streaming reply and the OpenAI-shaped `usage` chunk carry the real
+  numbers.
 - **Admission / backpressure:** a request that can't start on a lane within
   `BRAIN_ADMIT_DEADLINE_MS` gets **429** (`Retry-After`) - unless the request's own
   model is still cold-building (its first-ever activation, which can take well over a
