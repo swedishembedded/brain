@@ -31,7 +31,7 @@
 //! stay a smoke test, not a benchmark. Marked `#[ignore]`, matching every
 //! other real-weight test in this crate.
 //!
-//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: `BRAIN_QWEN3OMNIMOE_HF_DIR=[path/to/Qwen3-Omni-30B-A3B-Instruct] \
 //!         cargo test --release -p brain-omni --test video_generate_e2e -- --ignored --nocapture`
 
 use std::process::Command;
@@ -67,7 +67,7 @@ fn video_blob_generates_real_text_end_to_end() {
         .expect("spawning ffmpeg to encode the test clip");
     assert!(enc.status.success(), "encoding the test clip failed: {}", String::from_utf8_lossy(&enc.stderr));
 
-    let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 2 }).expect("decode_frames on a real clip must succeed");
+    let frames = decode_frames(&clip, &VideoDecodeOpts { fps: Some(2.0), max_frames: 2, spread: 0 }).expect("decode_frames on a real clip must succeed");
     assert_eq!(frames.len(), 2, "expected exactly 2 sampled frames");
     let _ = std::fs::remove_dir_all(&dir);
 

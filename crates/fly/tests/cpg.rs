@@ -156,18 +156,18 @@ fn the_circuit_is_silent_until_it_is_driven() {
     assert!(!quiet.is_rhythmic(0.3));
 }
 
-/// The whole-cord version of the same retraction, recorded rather than
-/// re-asserted.
-///
-/// This file also claimed that tonic DNg100 drive makes the leg motor pool
-/// oscillate at 16.67 Hz where a degree-matched shuffle rings at 125 Hz at
-/// every drive, and that a size-matched descending population is six times
-/// weaker. Under a physiological inhibitory reversal the best in-band strength
-/// DNg100 reaches is 0.201, and the size-matched control reaches 0.778 - the
-/// specificity is not merely weaker, it is reversed.
-///
-/// There is no whole-cord test here any more because there is nothing left to
-/// gate: the claim it was written to defend does not survive the correction,
-/// and a test that asserts the corrected negative would spend forty-five
-/// seconds a run to say what the isolated-circuit test above already says
-/// faster and more precisely.
+// The whole-cord version of the same retraction, recorded rather than
+// re-asserted.
+//
+// This file also claimed that tonic DNg100 drive makes the leg motor pool
+// oscillate at 16.67 Hz where a degree-matched shuffle rings at 125 Hz at
+// every drive, and that a size-matched descending population is six times
+// weaker. Under a physiological inhibitory reversal the best in-band strength
+// DNg100 reaches is 0.201, and the size-matched control reaches 0.778 - the
+// specificity is not merely weaker, it is reversed.
+//
+// There is no whole-cord test here any more because there is nothing left to
+// gate: the claim it was written to defend does not survive the correction,
+// and a test that asserts the corrected negative would spend forty-five
+// seconds a run to say what the isolated-circuit test above already says
+// faster and more precisely.

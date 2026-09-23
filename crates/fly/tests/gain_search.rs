@@ -33,7 +33,7 @@ fn unit_gains_reproduce_the_connectome_exactly() {
     // The wiring is the one a `Fly` would run, which is the point: the search
     // must produce a weight vector that network ACCEPTS, and building it from
     // the unpruned graph instead made `Fly::set_weights` reject it outright.
-    let wiring = fly::Wiring { weight_scale: 2.0, size_limit: None, min_synapses: 1, shuffle_seed: None };
+    let wiring = fly::Wiring { weight_scale: 2.0, size_limit: None, min_synapses: 1, shuffle_seed: None, inhibitory_gain: 1.0 };
     let s = GainSearch::new(&c, wiring);
     // The search must start from the imported connectome and nothing else. A
     // parameterisation whose neutral point is not the real graph makes every
@@ -45,7 +45,7 @@ fn unit_gains_reproduce_the_connectome_exactly() {
 #[test]
 fn a_zero_gain_silences_exactly_one_cell_type() {
     let c = fixture();
-    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None });
+    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None, inhibitory_gain: 1.0 });
     let groups = s.groups().to_vec();
     let desc = groups.iter().position(|g| g == "descending").expect("descending group");
     let intr = groups.iter().position(|g| g == "intrinsic_neuron").expect("intrinsic group");
@@ -86,7 +86,7 @@ fn a_zero_gain_silences_exactly_one_cell_type() {
 #[test]
 fn every_neuron_belongs_to_exactly_one_group() {
     let c = fixture();
-    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None });
+    let s = GainSearch::new(&c, fly::Wiring { weight_scale: 1.0, size_limit: None, min_synapses: 1, shuffle_seed: None, inhibitory_gain: 1.0 });
     // A neuron missing from the partition would have its edges fall through to
     // the default gain and be invisible to the search: the optimiser would be
     // unable to reach part of the graph and would report a ceiling that is too
