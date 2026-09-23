@@ -121,7 +121,11 @@ const MIN_ROOM: i32 = 64;
 const RUN_ROOM: i32 = 256;
 const CIRCLE_TARGETS: usize = 2;
 /// How far `use` reaches, in map units - DOOM's own USERANGE.
-const USE_RANGE: i32 = 64;
+///
+/// Shared with the wall ledger, which counts a push as having tested
+/// something only when there was something within this distance to test.
+/// See `memory::Memory::wall_in_reach`.
+pub const USE_RANGE: i32 = 64;
 /// Close enough to "facing it" that turning again would waste a decision.
 const FACING_TOL: i32 = 20;
 /// The same, for anything that is going to be pressed rather than walked at.

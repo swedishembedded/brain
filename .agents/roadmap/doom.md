@@ -265,7 +265,48 @@ later reader will find them:
       filed the result under another. That replay is checked against the
       trail's own witnesses now, and a cell that does not reproduce is
       dropped rather than used.
-- [ ] **M6 - first verified UV-Max on one level**, replayed from the start.
+- [x] **M6 - the first verified solutions.** Two on E1M1, replayed from the
+      level's own front door with no snapshot, no oracle and no teacher
+      underneath: **28/29 kills, 1/3 secrets, 1226 decisions, 12 444 tics
+      (5:55.54)**, and then a second one at **12 053 tics (5:44.37)**. Not
+      the category - one monster and two secrets short - but the first thing
+      this sample has ever produced that anybody could play back.
+
+      The time falling between the two is the archive working as designed:
+      the cascade admits a claim only if it beats the best verified run on
+      the category first and the clock second, so the run gets faster for as
+      long as the search runs without anything optimising for time.
+
+      What unblocked it, beyond the replay work above: **a push only counts
+      as testing a wall when there was a wall within DOOM's 64-unit use
+      range.** The ledger counted every press, so half the sweep operator's
+      decisions went on pressing air in the middle of rooms - and those
+      phantom tests retired rooms as searched, draining the frontier without
+      anything being searched. On E1M1 at 420 s, one seed:
+
+      | | counting every push | counting only pushes that reached |
+      |---|---|---|
+      | best, of 2.0 | 0.441 at 420 s | **1.039 at 117 s** |
+      | secrets | 0 | 1 |
+      | verified | 0 | **2** |
+      | walls "tested" | 174 | 19 |
+
+      And a verified run is now TRAINING DATA. The verification replay is a
+      complete level played start to finish and its decisions were being
+      thrown away; the search's own kept decisions are fragments that
+      advanced an archive, which teach a policy what to do in a situation
+      but not what the situations are in the order they come.
+
+      **Tried and reverted, measured:** steering the sweep at the nearest
+      wall when nothing is in reach. 0.331 by 93 s against 1.039, walls
+      tested flat after the first thirty seconds, and three times the
+      resumes because the walks ended early. Walking at the least room also
+      selects the ways backward, so the walk oscillates into a corner
+      instead of coming alongside a wall. Getting a searcher up against
+      walls is still open, and is the likeliest route to the two missing
+      secrets.
+- [ ] **M6a - the first verified UV-Max**: the last monster and the last two
+      secrets on E1M1, which the archive says are the same problem.
 - [ ] **M7 - `refine`/`splice`**: minimise tics on a solved level.
 - [ ] **M8 - compression at scale**: both model arms measured head to head.
 - [ ] **M9 - the nine recordings.**

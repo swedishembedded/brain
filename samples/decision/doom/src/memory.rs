@@ -208,6 +208,15 @@ const PRESS_UNITS: f64 = 64.0;
 /// turning is testing two walls rather than pushing one twice.
 const FACINGS: i32 = 8;
 
+/// How close a wall has to be for pushing on it to reach it, in map units.
+///
+/// DOOM's own `USERANGE`, shared with the option builder rather than spelled
+/// twice. It matters because a push that reaches nothing tests nothing:
+/// pressing use in the middle of a room is a decision spent, and counting it
+/// as a wall searched retires rooms that were never searched at all - it
+/// tells the archive a run has been looking when it has not.
+const IN_REACH: i32 = crate::action::USE_RANGE;
+
 /// A region of the level and how much of its walls this run has pushed on.
 ///
 /// The counterpart of [`Haunt`] for secrets, and a separate ledger for a
@@ -405,6 +414,12 @@ impl Memory {
         });
     }
 
+    /// Is there a wall close enough in front of the player for a push to
+    /// reach it? See [`IN_REACH`].
+    pub fn wall_in_reach(state: &State) -> bool {
+        state.clearance.ahead <= IN_REACH
+    }
+
     /// Has the wall in front of the player already been pushed on?
     ///
     /// What turns pressing use from a coin flip into a search: a sweep that
@@ -417,10 +432,19 @@ impl Memory {
 
     /// Record that the wall in front of the player has been pushed on.
     ///
+    /// Only a push that REACHED a wall counts. DOOM's use range is 64 units,
+    /// so a push made in the middle of a room touches nothing, and counting
+    /// it retires the room as searched on the strength of the agent having
+    /// walked about in it pressing air. Measured before this: 174 walls
+    /// "tested" on E1M1 and not one secret found.
+    ///
     /// Only a wall never pushed before counts toward its region's tally, so
     /// a region retires when its walls have been SEARCHED rather than when
     /// the use key has been pressed enough times.
     pub fn press(&mut self, state: &State) {
+        if state.clearance.ahead > IN_REACH {
+            return;
+        }
         let p = &state.player;
         let Some((spot, bit)) = Memory::wall(p) else {
             return;
@@ -1132,7 +1156,17 @@ mod expiry_tests {
 mod frisk_tests {
     use super::*;
 
+    /// Standing with a wall an arm's length in front, which is what a push
+    /// has to be for it to test anything. See `IN_REACH`.
     fn at(x: i32, y: i32, angle: i32) -> State {
+        let mut s =
+            State::parse(&super::tests::build(x, y, angle, super::tests::NOTHING)).unwrap();
+        s.clearance.ahead = 32;
+        s
+    }
+
+    /// The same spot with open floor in front of it.
+    fn in_the_open(x: i32, y: i32, angle: i32) -> State {
         State::parse(&super::tests::build(x, y, angle, super::tests::NOTHING)).unwrap()
     }
 
@@ -1158,6 +1192,25 @@ mod frisk_tests {
         let mut m = Memory::new();
         m.press(&at(0, 0, 0));
         assert!(!m.pressed_here(&at(200, 0, 0)));
+    }
+
+    /// A push that reaches nothing tests nothing.
+    ///
+    /// DOOM's use range is 64 units, so pressing use in the middle of a room
+    /// touches no wall. Counting it anyway retires rooms as searched on the
+    /// strength of the agent having walked about in them pressing air -
+    /// measured before this rule existed, 174 walls "tested" on E1M1 and not
+    /// one secret found.
+    #[test]
+    fn pushing_on_nothing_tests_nothing() {
+        let mut m = Memory::new();
+        m.observe(&in_the_open(0, 0, 0));
+        m.press(&in_the_open(0, 0, 0));
+        assert_eq!(m.tested(), 0, "there was no wall within reach");
+        assert_eq!(m.unswept(&at(600, 0, 0)).len(), 1, "the room is still unsearched");
+        // And the same spot with a wall in front of it does test one.
+        m.press(&at(0, 0, 0));
+        assert_eq!(m.tested(), 1);
     }
 
     /// The rule a haunt does NOT follow, and the reason this is a second

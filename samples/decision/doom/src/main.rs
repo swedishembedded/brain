@@ -737,8 +737,9 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             carried.as_deref(),
             think.as_mut().map(|f| f as &mut search::Proposer<'_>),
         )?;
+        let maxed = found.solved.iter().filter(|s| s.uvmax).count();
         println!(
-            "doom: {} cells, best {:.3} in {} tics, {} verified UV-Max",
+            "doom: {} cells, best {:.3} in {} tics, {} verified ({maxed} of them UV-Max)",
             found.cells,
             found.best,
             found.best_tics,
@@ -780,7 +781,7 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
 
     if all.is_empty() {
         println!(
-            "doom: no verified UV-Max. The archive is what the campaign produced; \
+            "doom: nothing verified. The archive is what the campaign produced; \
              run it again with --archive to carry it into the next generation."
         );
     } else {

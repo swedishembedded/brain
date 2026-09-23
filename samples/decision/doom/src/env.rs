@@ -1396,6 +1396,17 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Exit)
     }
 
+    /// Is there a wall close enough in front of the player for a push to
+    /// reach it?
+    ///
+    /// For the `frisk` search operator, and the difference between searching
+    /// a room and walking about in it pressing use. DOOM's use range is 64
+    /// units, so a push made anywhere else touches nothing and the decision
+    /// is better spent getting to a wall.
+    pub fn wall_in_reach(&self) -> bool {
+        crate::memory::Memory::wall_in_reach(&self.state)
+    }
+
     /// Has the wall the player is facing already been pushed on by this run?
     ///
     /// For the `frisk` search operator, which is the difference between

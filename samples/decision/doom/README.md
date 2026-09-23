@@ -625,7 +625,34 @@ The scripted player ranks the search after fighting and hunting and before
 leaving, and only while the level still owes a secret - the counter is on the
 player's own status bar, so "0 of 3" is not being told anything.
 
-Measured on E1M1 at Ultra-Violence, 600 s, one seed: **0.690 before, 0.817
+**A push only counts when it reached something.** DOOM's use range is 64
+units, so pressing use in the middle of a room touches no wall - and the
+ledger was counting those, which retired rooms as searched on the strength of
+the agent having walked about in them pressing air. Half the operator's
+decisions went on it. Measured on E1M1 at Ultra-Violence, 420 s, one seed:
+
+| | counting every push | counting only pushes that reached a wall |
+|---|---|---|
+| best score, of 2.0 | 0.441 at 420 s | **1.039 at 117 s** |
+| secrets found | 0 | 1 |
+| verified solutions | 0 | **2** |
+| "walls tested" | 174 | 19 |
+
+The walls number collapsing is the result, not a cost: the old 174 were
+pushes at nothing. Giving those decisions back to the walk is most of the
+gain.
+
+Nineteen real wall tests in seven minutes is honest and close to inert,
+though, and the reason is structural: every other option this agent has
+prefers SPACE, because space is where it is safe to walk, where the route
+goes and where a fight can be had. Left alone it rarely stands nose to wall.
+Steering the sweep at the nearest wall was tried and is WORSE - 0.331 by 93
+seconds against 1.039, with the count of walls actually tested flat after the
+first thirty - because walking at the least room also selects the ways
+backward, so the walk oscillates into a corner instead of coming alongside
+anything. Getting a searcher up against walls is still open.
+
+Measured earlier, on the ledger itself, at 600 s: **0.690 before, 0.817
 with the ledger**, and 133 distinct walls tested against effectively none. The
 bandit moved with it - `frisk` went from the third-best operator to the best,
 and took a third of all the draws.

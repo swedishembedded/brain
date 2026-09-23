@@ -232,6 +232,15 @@ pub struct Solution {
     pub secrets: u32,
     pub total_secrets: u32,
     pub score: f32,
+    /// Whether this is the CATEGORY - every monster, every secret, and out -
+    /// rather than merely a level finished.
+    ///
+    /// Recorded on the solution rather than recomputed by a reader, and
+    /// reported apart from the count of verified runs. A campaign that
+    /// verified two finishes and no Max saying "2 verified UV-Max" is a
+    /// claim nobody made; the whole point of a verification rung is that
+    /// what it reports is what happened.
+    pub uvmax: bool,
 }
 
 impl Solution {
@@ -435,7 +444,7 @@ pub struct Campaign {
     live: std::collections::HashSet<Niche>,
     /// How many more reloaded cells may be paid for. See [`Campaign::go_to`].
     rehydrations: usize,
-    /// Decisions the archive accepted, for the compression phase.
+    /// Decisions worth imitating, for the compression phase.
     ///
     /// What a search hands to training, and it is DECISIONS rather than
     /// trajectories on purpose. Behaviour cloning fits state-to-action, so
@@ -443,10 +452,14 @@ pub struct Campaign {
     /// solve a problem it does not have, since a walk starts from a restored
     /// snapshot and the way to that snapshot is not something the walk holds.
     ///
-    /// Only decisions that ADVANCED the archive are kept. A walk that reached
-    /// somewhere new or somewhere faster is one whose choices are worth
-    /// copying; the rest of what a search does is mostly the walk that did
-    /// not work, and fitting a policy to that teaches it to wander.
+    /// Two sources, and they are not the same thing. Decisions that ADVANCED
+    /// the archive - a walk that reached somewhere new or somewhere faster -
+    /// are the ones whose choices are worth copying; the rest of what a
+    /// search does is mostly the walk that did not work, and fitting a
+    /// policy to that teaches it to wander. And every decision of a VERIFIED
+    /// run, which is a level played start to finish: the fragments teach a
+    /// policy what to do in a situation, and only a whole run teaches it
+    /// what the situations are in the order they come.
     learned: Vec<Demonstration>,
     /// Which of [`OPERATORS`] this campaign may draw, by index.
     ///
@@ -728,7 +741,7 @@ impl Campaign {
                 bad += 1;
                 continue;
             };
-            match replay_checked(env, self.seed, &actions, allowed, &trail.marks) {
+            match replay_checked(env, self.seed, &actions, allowed, &trail.marks, None) {
                 Ok(got) if (got.value() - said).abs() <= SAME_ACHIEVEMENT => {
                     good += 1;
                     println!("    {n:>5} decisions -> {said:.3}, replays");
@@ -851,7 +864,7 @@ impl Campaign {
         // not lead to it. Verifying costs a position comparison every eighth
         // decision on a walk that is happening anyway, and a rehydration is
         // bounded to `REHYDRATIONS` a campaign.
-        if replay_checked(env, self.seed, &actions, allowed, &trail.marks).is_err()
+        if replay_checked(env, self.seed, &actions, allowed, &trail.marks, None).is_err()
             || !env.hold_at(slot)
         {
             self.archive.remove(at);
@@ -1092,7 +1105,30 @@ impl Campaign {
             // alternation driven by "did I press last time" re-tests the
             // same wall as soon as anything else happens in between, and in
             // a level full of monsters something always does.
-            if env.pressed_here() {
+            //
+            // And there has to be something within arm's length to push ON.
+            // DOOM's use range is 64 units, so a push made in the middle of
+            // a room reaches no wall, and the decision is better spent
+            // getting to one - which is what falling through to the scripted
+            // player does. Measured before this test existed: 174 walls
+            // "tested" across a campaign on E1M1 and not one secret found,
+            // because most of the pushing was done at nothing.
+            // Nothing within arm's length to push ON. DOOM's use range is
+            // 64 units, so a push made in the middle of a room reaches no
+            // wall - the decision is better spent on the walk, which is
+            // what falling through to the scripted player does.
+            //
+            // Steering at the nearest wall instead was tried and is worse:
+            // on the same level, seed and budget it scored 0.331 by 93
+            // seconds against 1.039, and its count of walls actually tested
+            // stopped rising after the first thirty seconds. Walking at the
+            // least room also selects the ways BACKWARD - a wall behind the
+            // player is near too - so the walk oscillates into a corner
+            // rather than coming alongside anything, and the walks ended
+            // early enough to triple the number of resumes.
+            if !env.wall_in_reach() {
+                // Let the walk carry on; it will pass a wall soon enough.
+            } else if env.pressed_here() {
                 if op.sweep {
                     if let Some(i) = env
                         .sidestep_options()
@@ -1172,6 +1208,7 @@ pub fn replay_checked(
     actions: &[String],
     allowed: u32,
     marks: &[Mark],
+    mut keep: Option<&mut Vec<Demonstration>>,
 ) -> Result<crate::report::Score, String> {
     env.reset(seed);
     if let Some(f) = env.fault() {
@@ -1223,6 +1260,24 @@ pub fn replay_checked(
                 offered.len()
             ));
         };
+        // Kept BEFORE the step, because a decision is a question about the
+        // state it was asked in and that state is about to stop existing.
+        //
+        // This is the one place a whole winning trajectory can be turned
+        // into training data. The search's own kept decisions are the ones
+        // that ADVANCED the archive, which is most of what is worth
+        // imitating and is not the same thing as the run that actually won:
+        // a verified solution is a complete level played start to finish,
+        // and every decision in it is one a policy asked to play the level
+        // start to finish will have to make.
+        if let Some(into) = keep.as_deref_mut() {
+            into.push(Demonstration {
+                objective: env.objective(),
+                observation: env.look(),
+                options: env.options().iter().map(|o| o.text.clone()).collect(),
+                action: chose,
+            });
+        }
         let (_, _, done) = env.step(chose);
         if let Some(f) = env.fault() {
             return Err(format!("the engine faulted at decision {i}: {f}"));
@@ -1361,7 +1416,15 @@ pub fn campaign(
             if let Verdict::Reject(_) = ladder.admit(&claim) {
                 continue;
             }
-            match replay_checked(env, seed, &claim.actions, allowed, &claim.marks) {
+            let mut played: Vec<Demonstration> = Vec::new();
+            match replay_checked(
+                env,
+                seed,
+                &claim.actions,
+                allowed,
+                &claim.marks,
+                Some(&mut played),
+            ) {
                 Ok(got) if got.finished => {
                     let l = env.level_counts();
                     let s = Solution {
@@ -1374,6 +1437,7 @@ pub fn campaign(
                         secrets: l.2,
                         total_secrets: l.3,
                         score: got.value(),
+                        uvmax: got.is_uvmax(),
                     };
                     println!(
                         "doom: VERIFIED {} on {level}: {}/{} kills, {}/{} secrets, \
@@ -1384,6 +1448,16 @@ pub fn campaign(
                     );
                     verified_best = (s.score, s.tics);
                     solved.push(s);
+                    // The complete winning run, as decisions. What the
+                    // compression phase is actually supposed to be fitted
+                    // to: not the fragments that advanced a search, but a
+                    // level played through. Through `keep` like everything
+                    // else, so the training set stays bounded - and last,
+                    // so that if the cap bites it is the search's older
+                    // fragments that go rather than the run that won.
+                    for d in played.drain(..) {
+                        run.keep(d);
+                    }
                 }
                 // A claim the replay does not reproduce is a DEFECT, not a
                 // near miss: the search reached that state by restoring
