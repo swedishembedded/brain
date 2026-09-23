@@ -495,7 +495,15 @@ impl Campaign {
             .collect();
         let names: Vec<&'static str> = arms.iter().map(|i| OPERATORS[*i].name).collect();
         Campaign {
-            archive: Archive::new(slots, SAME_ACHIEVEMENT),
+            // Axes 1 and 2 of the niche are the player's square of floor
+            // (see `DoomEnv::cell`), and they are the only two a step can
+            // actually move ALONG - so they are the ones whose edge means
+            // "nobody has been just past here". Preferring that edge is
+            // Go-Explore's frontier term; without it the budget is spent in
+            // proportion to how much of a region has already been covered,
+            // which is backwards, because the middle of a swept room is the
+            // least likely place for anything new to be.
+            archive: Archive::new(slots, SAME_ACHIEVEMENT).exploring(&[1, 2], brain::search::archive::EDGE),
             alloc: Allocator::new(&names),
             rng: Rng::new(seed),
             start: None,
