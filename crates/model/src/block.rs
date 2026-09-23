@@ -1399,7 +1399,7 @@ pub fn chunked_bidir_bwd_win(
             // the gradient kernels have no idea the probs they were handed
             // came from a windowed softmax.
             let (dsc_k, dsc_t) = dscores_variant(g, bwd, heads * qn, len);
-            steps.push(g.step_sliced(
+            steps.push(g.dispatch_sliced(
                 dsc_k,
                 &[d_ctx, qkv, probs, d_scores],
                 &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],
@@ -2230,7 +2230,7 @@ pub fn emb_bwd_step(
 /// one's (`gpu_core::upgrade`'s own bar #2).
 ///
 /// `rows` is `bsz * n_heads * t_dec`, the reference kernel's own thread count.
-pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize, u32) {
+pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: cols, k: 0, dtype: Dtype::F32 };
     match k.dscores_rows {
@@ -2238,9 +2238,14 @@ pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize
             if gpu_core::select::DefaultSelector.select(Op::AttnBwdDScores, shape, &g.caps())
                 == KernelVariant::WorkgroupPerOutput =>
         {
-            (i, rows * 64)
+            // One WORKGROUP per row, not `rows * wg_size` threads. The two
+            // dispatch the same total, but a cooperative kernel's threads
+            // share one output, so only the workgroup count describes it -
+            // and `Gpu::step` refuses the raw count rather than letting a
+            // caller mean one and write the other.
+            (i, gpu_core::Dispatch::Workgroups(rows))
         }
-        _ => (k.dscores, rows),
+        _ => (k.dscores, gpu_core::Dispatch::Threads(rows)),
     }
 }
 
@@ -2307,7 +2312,7 @@ pub fn chunked_bidir_bwd(
             steps.push(g.step(fwd.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
             // Softmax jacobian → d_scores (chunk-local).
             let (dsc_k, dsc_t) = dscores_variant(g, bwd, heads * qn, len);
-            steps.push(g.step_sliced(
+            steps.push(g.dispatch_sliced(
                 dsc_k,
                 &[d_ctx, qkv, probs, d_scores],
                 &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],

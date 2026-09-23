@@ -508,7 +508,7 @@ impl Head {
             self.k.dv_cross_acc,
         );
         let (dsc_k, dsc_t) = block::dscores_variant(g, &cross_bwd, heads * s, r);
-        st.push(g.step(dsc_k, &[&b.d_sum, &self.kv, &self.probs, &b.d_scores_attn], &p_v, dsc_t));
+        st.push(g.dispatch(dsc_k, &[&b.d_sum, &self.kv, &self.probs, &b.d_scores_attn], &p_v, dsc_t));
         st.push(g.step(self.k.dq_cross, &[&b.d_scores_attn, &self.kv, &b.d_q], &p_qk, heads * s * hd));
         st.push(g.step(self.k.dk_cross_acc, &[&b.d_scores_attn, &self.q, &b.d_kv], &p_qk_acc, heads * r * hd));
         st.push(g.step(self.k.dv_cross_acc, &[&self.probs, &b.d_sum, &b.d_kv], &p_v_acc, heads * r * hd));
