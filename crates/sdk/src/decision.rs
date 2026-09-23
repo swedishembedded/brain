@@ -1062,14 +1062,6 @@ impl DecisionPipeline {
     }
 }
 
-/// The mean of a batch's per-example losses - what one optimizer step reports.
-fn mean(v: &[f32]) -> f32 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    v.iter().sum::<f32>() / v.len() as f32
-}
-
 /// What a decision model needs in order to train: labelled examples, the
 /// option text each label maps to, and what the question asks.
 ///
