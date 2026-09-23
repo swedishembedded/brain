@@ -132,6 +132,41 @@ fn kept_features_are_refused_on_a_trainable_encoder() {
     assert!(m.accumulate_kept(&kept, |sc| (0.0, vec![0.0; sc.len()])).is_err());
 }
 
+/// `Features::from_parts` round-trips through the same three fields
+/// [`decide::decide::Features`] keeps privately, and a caller that rebuilds
+/// one from a kept `Features`'s own getters must see `accumulate_kept` score
+/// it identically - the whole reason `from_parts` exists is to let a caller
+/// EDIT specific rows (splicing in rows the encoder never produced) between
+/// reading a `Features` apart and handing a new one back.
+#[test]
+fn features_from_parts_round_trips_and_edited_rows_change_the_score() {
+    let Some(mut m) = tiny_model(true) else { return };
+    let q = question();
+    let state = "hp 40 ammo 2 | demon range 1";
+    let (from_text, kept) = m.score_keeping(state, &q).expect("score_keeping");
+
+    // Round-trip through the getters unchanged: same scores.
+    let rebuilt = decide::decide::Features::from_parts(kept.hidden().to_vec(), kept.state_rows(), kept.n_slots());
+    let rebuilt_scores = m.score_kept(&rebuilt).expect("score_kept on a round-tripped Features");
+    assert_eq!(from_text.len(), rebuilt_scores.len());
+    for (a, b) in from_text.iter().zip(&rebuilt_scores) {
+        assert!((a - b).abs() < 1e-5, "round-tripping Features changed the score: {a} vs {b}");
+    }
+
+    // Overwrite state row 0 with noise: the score must move, proving the
+    // head's cross-attention actually reads that row rather than some cached
+    // copy - the property a spliced-in row (an image patch, say) depends on.
+    let h = kept.hidden().len() / (kept.state_rows() + kept.n_slots()) as usize;
+    let mut edited = kept.hidden().to_vec();
+    for (i, v) in edited[..h].iter_mut().enumerate() {
+        *v = if i % 2 == 0 { 5.0 } else { -5.0 };
+    }
+    let edited = decide::decide::Features::from_parts(edited, kept.state_rows(), kept.n_slots());
+    let edited_scores = m.score_kept(&edited).expect("score_kept on an edited Features");
+    let moved: f32 = rebuilt_scores.iter().zip(&edited_scores).map(|(a, b)| (a - b).abs()).sum();
+    assert!(moved > 1e-3, "editing a state row did not move the score at all: {moved}");
+}
+
 /// A head-only checkpoint is refused exactly when the ENCODER MOVED, which is
 /// not the same question as which way the freeze switch is pointing now.
 ///

@@ -205,6 +205,19 @@ pub struct Features {
 }
 
 impl Features {
+    /// Build feature rows directly, for a caller that supplies state rows
+    /// from somewhere other than [`Decide::score_keeping`] - e.g. splicing
+    /// externally-produced rows ahead of a frozen encoder's own text rows, so
+    /// [`Decide::accumulate_kept`]'s head-only reverse pass can train a
+    /// projector feeding them without ever touching the encoder.
+    ///
+    /// `hidden` is `(state_rows + n_slots) * H` floats, state rows first,
+    /// exactly [`Self::hidden`]'s own layout - so a caller can round-trip a
+    /// kept `Features` through here after editing only its state rows.
+    pub fn from_parts(hidden: Vec<f32>, state_rows: u32, n_slots: u32) -> Features {
+        Features { hidden, state_rows, n_slots }
+    }
+
     /// Floats kept. What caching a rollout costs in memory.
     pub fn len(&self) -> usize {
         self.hidden.len()
@@ -212,6 +225,21 @@ impl Features {
 
     pub fn is_empty(&self) -> bool {
         self.hidden.is_empty()
+    }
+
+    /// Rows before the first option slot - see [`Self::from_parts`].
+    pub fn state_rows(&self) -> u32 {
+        self.state_rows
+    }
+
+    /// Option slots, one `[CLS]` row each, after the state rows.
+    pub fn n_slots(&self) -> u32 {
+        self.n_slots
+    }
+
+    /// The flat `(state_rows + n_slots) * H` slab, state rows first.
+    pub fn hidden(&self) -> &[f32] {
+        &self.hidden
     }
 }
 
