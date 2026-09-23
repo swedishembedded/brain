@@ -1301,6 +1301,34 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
+    /// Where the run is standing right now, as a witness a trail can carry.
+    ///
+    /// Position, facing and the level clock - the four numbers that say
+    /// whether two runs of the same actions are in the same place, and
+    /// nothing derived, so a mismatch names a fact about the simulation
+    /// rather than about anything this sample computed on top of it.
+    pub fn mark(&self, at: u32) -> Option<crate::search::Mark> {
+        Some(crate::search::Mark {
+            at,
+            x: self.state.player.x?,
+            y: self.state.player.y?,
+            angle: self.state.player.angle?,
+            tic: self.state.level.tic,
+        })
+    }
+
+    /// The option that heads for the way out, if one is on offer.
+    ///
+    /// For the `leave` search operator. The scripted player will not take it
+    /// under UV-Max orders while there is anything left to hunt, which is
+    /// correct for the category - a Max run leaves LAST - and is also why no
+    /// campaign had ever produced a trajectory that exits at all, so the
+    /// verification rung never fired once. A search needs to be able to reach
+    /// the ending even when the teacher would not choose it yet.
+    pub fn exit_option(&self) -> Option<usize> {
+        self.opts.iter().position(|o| o.tag == action::Tag::Exit)
+    }
+
     /// The exact text of the press-on-what-is-in-front option, so a caller
     /// can tell whether that is what it just did without matching on a
     /// sentence it would have to keep in step by hand.
@@ -2034,6 +2062,76 @@ fn kills_left_bucket(killed: u32, total: u32) -> i32 {
     }
 }
 
+/// Every field of [`DoomEnv`], sorted by hand into the ones a snapshot has to
+/// carry and the ones it must not.
+///
+/// Exhaustive on purpose - no `..` - so that adding a field to `DoomEnv`
+/// FAILS TO COMPILE until somebody says which side of the line it is on. That
+/// is the whole point of it, and it is here because the alternative was
+/// measured: `trail` (where the player has actually moved, which is what "fall
+/// back the way you came" is computed from) was left out of `Held`, so a
+/// restored run offered a different OPTION LIST than the one that had been
+/// held. The search never noticed - it restores and carries on - and the
+/// damage only showed up at the far end, where every trajectory that finished
+/// the level failed to replay from the level's own start, each at the same
+/// decision, naming an option the game no longer offered.
+///
+/// A list of exceptions rots; a declaration does not.
+#[allow(dead_code)]
+fn snapshot_carries_every_field_of_the_run(env: &DoomEnv) {
+    let DoomEnv {
+        // --- in `Held`: the run, which a snapshot restores -----------------
+        state: _,
+        opts: _,
+        last_pos: _,
+        stuck: _,
+        stale: _,
+        tried: _,
+        recent: _,
+        visited: _,
+        trail: _,
+        commit: _,
+        commit_tag: _,
+        total: _,
+        extrinsic: _,
+        floor_damage: _,
+        steps: _,
+        exited: _,
+        progress: _,
+        memory: _,
+        gauge: _,
+        approach_from: _,
+        approach_goal: _,
+        // --- not in `Held` -------------------------------------------------
+        // The engine itself, and the slots it holds - a snapshot cannot
+        // contain the thing that stores it.
+        doom: _,
+        slots: _,
+        // Configuration, fixed for the whole process: restoring it would let
+        // a snapshot silently change what the run is being asked to do.
+        cfg: _,
+        mission: _,
+        mission_mix: _,
+        maps: _,
+        scenarios: _,
+        max_steps: _,
+        payment: _,
+        approach_weight: _,
+        arena: _,
+        capture_frames: _,
+        frames_per_tic: _,
+        // Deliberately outlives an episode. See `Curriculum`.
+        curriculum: _,
+        // Which episode this is, which a restore must not rewind, and the
+        // engine fault that ended one - neither is part of the world.
+        episode: _,
+        fault: _,
+        // A warn-once latch and the viewer handle: process-wide, not a run.
+        warned_dropped: _,
+        inspect: _,
+    } = env;
+}
+
 impl Env for DoomEnv {
     /// How far this episode got, for picking which iteration to keep. See
     /// [`crate::report::Score`] for why return is not enough on its own.
@@ -2137,6 +2235,7 @@ impl Env for DoomEnv {
             tried: self.tried.clone(),
             recent: self.recent.clone(),
             visited: self.visited.clone(),
+            trail: self.trail.clone(),
             commit: self.commit,
             commit_tag: self.commit_tag,
             total: self.total,
@@ -2248,6 +2347,7 @@ impl Env for DoomEnv {
         self.tried = held.tried;
         self.recent = held.recent;
         self.visited = held.visited;
+        self.trail = held.trail;
         self.commit = held.commit;
         self.commit_tag = held.commit_tag;
         self.total = held.total;
@@ -2284,6 +2384,15 @@ struct Held {
     tried: std::collections::HashSet<Tag>,
     recent: std::collections::VecDeque<(i32, i32)>,
     visited: std::collections::HashMap<(i32, i32), u32>,
+    /// Where the player has actually MOVED, which is what "fall back the way
+    /// you came" is computed from.
+    ///
+    /// It was missing, and that is not a cosmetic omission: it is client
+    /// state the OPTION LIST depends on, so a restored run offered a
+    /// different set of options than the one that had been held, and a
+    /// trajectory recorded after a restore could not be replayed from the
+    /// level's own start. See `snapshot_carries_every_field_of_the_run`.
+    trail: std::collections::VecDeque<(i32, i32)>,
     commit: u32,
     commit_tag: Option<Tag>,
     total: f32,

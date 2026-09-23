@@ -97,6 +97,21 @@ struct Operator {
     /// one. What makes an operator a LOCAL search on the best thing found so
     /// far instead of a sample of the frontier.
     from_best: bool,
+    /// How often to head for the way out ahead of anything else.
+    ///
+    /// The scripted player will not leave under UV-Max orders while anything
+    /// is left to hunt - right for the category, since a Max run leaves last,
+    /// and the reason no campaign had ever produced a trajectory that exits.
+    /// The verification rung therefore never fired, and the one part of this
+    /// machine that turns a search into an artifact anybody can use had never
+    /// run at all.
+    ///
+    /// A search has to be able to reach the ending even from a state the
+    /// teacher would not end from. What is KEPT is still decided by the
+    /// score, where leaving early is worth less than clearing (0.6 against
+    /// 1.3), so an operator that leaves too soon produces cells the archive
+    /// files and does not prefer.
+    leave: f32,
     /// Sweep walls: alternate pressing use with a sidestep, so the player
     /// runs along a wall testing it rather than pressing on one spot.
     ///
@@ -121,24 +136,29 @@ struct Operator {
     press: f32,
 }
 
-const OPERATORS: [Operator; 5] = [
+const OPERATORS: [Operator; 6] = [
     // Blind, and blind in a level full of things that shoot back is mostly
     // dead - but it is the only operator that can produce an action no
     // teacher and no policy would ever pick.
-    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, sweep: false, press: 0.0 },
+    Operator { name: "wander", walk: 60, guided: 0.0, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
     // Starts from somewhere plausible and wanders off it.
-    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, sweep: false, press: 0.0 },
+    Operator { name: "probe", walk: 60, guided: 0.85, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
     // A long stretch of real play from a drawn cell. Long enough to finish a
     // firefight, clear a room and walk into the next one.
-    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, sweep: false, press: 0.0 },
+    Operator { name: "commit", walk: 400, guided: 1.0, from_best: false, leave: 0.0, sweep: false, press: 0.0 },
     // The same, from the furthest-along cell there is: pushing the front of
     // the search forward rather than filling in behind it.
-    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, sweep: false, press: 0.0 },
+    Operator { name: "chase", walk: 400, guided: 1.0, from_best: true, leave: 0.0, sweep: false, press: 0.0 },
     // Walk about pressing on everything. Half the decisions are a push, the
     // rest are the teacher moving on, which together is a player running
     // their shoulder along the walls of a room - the only way a secret is
     // ever found by someone who has not been told where it is.
-    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, sweep: true, press: 0.5 },
+    Operator { name: "frisk", walk: 200, guided: 1.0, from_best: false, leave: 0.0, sweep: true, press: 0.5 },
+    // Play on from the furthest-along cell there is, and take the way out
+    // when one is offered. The only operator that can produce a FINISHED
+    // level, which is what the verification rung exists to check and what
+    // the compression phase is supposed to be fitted to.
+    Operator { name: "leave", walk: 400, guided: 1.0, from_best: true, leave: 0.4, sweep: false, press: 0.0 },
 ];
 
 /// What a search campaign found, and what it cost.
@@ -188,70 +208,65 @@ impl Solution {
     }
 }
 
-/// How a cell was reached: the actions taken since its PARENT cell, and which
-/// cell that was.
+/// How a cell was reached: the whole way there, from the level's own start.
 ///
-/// Stored as a chain rather than as a whole trajectory per cell. A campaign
-/// holds thousands of cells and a trajectory runs to thousands of decisions;
-/// keeping a full action list in each would be hundreds of megabytes of
-/// almost entirely duplicated prefix. Walking the chain rebuilds the full list
-/// when one is actually needed, which is only ever at verification.
+/// ABSOLUTE, not relative, and this is the second design it has had. The first
+/// stored a chain - "resume at cell P, then do these things" - because a full
+/// list per cell looked like hundreds of megabytes of duplicated prefix. It
+/// does not work, and the reason is structural rather than a bug that could be
+/// fixed in place: an archive IMPROVES cells and EVICTS them, and a trajectory
+/// hanging off P is invalidated by either.
+///
+/// Measured before it was replaced: the best cell of an 1817-cell archive
+/// could not be traced back to the level's start at all, and neither could the
+/// best cell of a fresh 443-cell one. Every artifact the campaign existed to
+/// produce was unreachable, and nothing said so until an audit was written to
+/// ask - the search itself never notices, because it restores snapshots and
+/// carries happily on.
+///
+/// The duplication is paid for by INTERNING instead. An option's text is one
+/// of a few thousand distinct sentences, so a trail is a list of `u32` into a
+/// vocabulary the campaign owns: a thousand-decision trail is four kilobytes,
+/// and an 1800-cell archive holds single-digit megabytes of them. Nothing can
+/// go stale, because nothing points at anything that is allowed to change.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Trail {
-    /// The cell this one was reached from. `None` for the level's own start.
-    pub from: Option<Niche>,
-    /// Which VERSION of that cell, so a stale chain is caught rather than
-    /// reconstructed.
+    /// Indices into the campaign's vocabulary, from the level's own start.
+    pub steps: Vec<u32>,
+    /// Where the run actually WAS, every [`WITNESS_EVERY`] decisions.
     ///
-    /// The archive replaces a cell's contents whenever a better way of
-    /// reaching it turns up. These steps were recorded after resuming the
-    /// version that was there at the time, and they only continue THAT state:
-    /// splice them onto a different prefix and the sequence describes nothing
-    /// that ever happened. The replay gate would catch it - that is what the
-    /// gate is for - but only after paying for a whole episode to find out,
-    /// and a rehydration would burn one of its bounded attempts on a trail
-    /// that cannot work.
-    #[serde(default)]
-    pub from_generation: u32,
-    /// What was done after resuming there.
-    pub steps: Vec<String>,
+    /// A trail that does not replay is useless, and "does not replay" arrives
+    /// as a missing option sentence hundreds of decisions in - which says
+    /// that the two runs disagree and nothing about where they started to.
+    /// These are the witnesses that turn it into a measurement: the first
+    /// mark that disagrees is the first place the replay and the search
+    /// parted company, and by how far.
+    pub marks: Vec<Mark>,
 }
 
-/// The whole action list from the level's start, by walking the chain back.
-///
-/// Returns `None` on a chain that does not terminate at the start cell. That
-/// is not paranoia: an elite is replaced whenever a better route to its cell
-/// turns up, and nothing stops the better route passing THROUGH a cell whose
-/// own parent is the one being replaced - which closes a loop. A trail that
-/// loops would replay forever, so it is refused and the candidate is dropped.
-pub fn full_trail(archive: &Archive<Trail>, at: &Niche) -> Option<Vec<String>> {
-    let mut seen = std::collections::HashSet::new();
-    let mut chain: Vec<&Trail> = Vec::new();
-    let mut here = Some(at.clone());
-    let mut want: Option<u32> = None;
-    while let Some(n) = here {
-        if !seen.insert(n.clone()) {
-            return None;
-        }
-        if chain.len() > MAX_CHAIN {
-            return None;
-        }
-        let e = archive.get(&n)?;
-        // The link is only good against the version of this cell that the
-        // child was recorded after. See `Trail::from_generation`.
-        if want.is_some_and(|g| g != e.generation) {
-            return None;
-        }
-        chain.push(&e.what);
-        want = Some(e.what.from_generation);
-        here = e.what.from.clone();
-    }
-    let mut out = Vec::new();
-    for t in chain.iter().rev() {
-        out.extend(t.steps.iter().cloned());
-    }
-    Some(out)
+/// Where a run stood at one decision.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Mark {
+    pub at: u32,
+    pub x: i32,
+    pub y: i32,
+    pub angle: i32,
+    pub tic: i64,
 }
+
+/// How often a trail writes down where it was.
+///
+/// Often enough to localise a divergence to a handful of decisions, rare
+/// enough that the marks are a few percent of the trail's own size.
+const WITNESS_EVERY: usize = 8;
+
+/// How many trails an archive audit replays, spread across their lengths.
+///
+/// Each one costs a whole episode against the engine, so this is a handful
+/// rather than a sweep - enough to say whether the archive's artifacts are
+/// trustworthy and where they stop being so.
+const AUDIT_SAMPLES: usize = 6;
+
 
 /// How many cells read back off disk a campaign will pay to make returnable
 /// again.
@@ -275,12 +290,18 @@ const REHYDRATIONS: usize = 24;
 /// inside what is supposed to be one unit of work.
 const PICK_TRIES: usize = 32;
 
-/// A hard cap on how long a reconstructed trail may be, in LINKS.
+/// What a campaign writes to disk: the archive and the vocabulary its trails
+/// are spelled in.
 ///
-/// A campaign that runs for hours can chain a very long way, and a trail
-/// longer than any episode could execute is not a solution however it was
-/// assembled.
-const MAX_CHAIN: usize = 20_000;
+/// One file, never two. A trail is a list of indices, so an archive read back
+/// against a vocabulary that is not its own names DIFFERENT actions - and
+/// nothing downstream could catch it, because every index would still resolve
+/// to a perfectly good sentence and the replay would simply do something else.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Kept {
+    vocab: Vec<String>,
+    archive: Archive<Trail>,
+}
 
 /// One search campaign against one loaded level.
 pub struct Campaign {
@@ -293,6 +314,11 @@ pub struct Campaign {
     /// The episode seed every replay has to use. A trail is only a way back
     /// to a cell on the level it was walked on.
     seed: u64,
+    /// Every distinct option sentence the campaign has seen, so a trail is a
+    /// list of indices rather than a list of strings. See [`Trail`].
+    vocab: Vec<String>,
+    /// The reverse lookup, which is the only reason interning is cheap.
+    spoken: std::collections::HashMap<String, u32>,
     steps: usize,
     restores: usize,
     refused: usize,
@@ -324,6 +350,8 @@ impl Campaign {
             rng: Rng::new(seed),
             start: None,
             seed,
+            vocab: Vec::new(),
+            spoken: std::collections::HashMap::new(),
             steps: 0,
             restores: 0,
             refused: 0,
@@ -331,6 +359,32 @@ impl Campaign {
             rehydrations: REHYDRATIONS,
             claims: Vec::new(),
         }
+    }
+
+    /// The index of an option sentence, adding it to the vocabulary if this
+    /// is the first time it has come up.
+    fn intern(&mut self, text: &str) -> u32 {
+        if let Some(i) = self.spoken.get(text) {
+            return *i;
+        }
+        let i = self.vocab.len() as u32;
+        self.vocab.push(text.to_string());
+        self.spoken.insert(text.to_string(), i);
+        i
+    }
+
+    /// A trail as the sentences it is made of.
+    ///
+    /// Infallible, unlike the chain-walking it replaces: a trail holds the
+    /// whole way from the level's start and points at nothing that can be
+    /// improved or evicted out from under it. An index outside the vocabulary
+    /// can only mean a corrupt archive, and is reported as one.
+    fn spell(&self, trail: &Trail) -> Option<Vec<String>> {
+        trail
+            .steps
+            .iter()
+            .map(|i| self.vocab.get(*i as usize).cloned())
+            .collect()
     }
 
     /// Read an archive back off disk, if there is one.
@@ -343,8 +397,23 @@ impl Campaign {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
-        match Archive::<Trail>::from_json(&text) {
+        match serde_json::from_str::<Kept>(&text) {
             Ok(was) => {
+                // The vocabulary comes back FIRST and whole. A trail is a list
+                // of indices into it, so an archive read back against a
+                // different vocabulary would name different actions - which is
+                // not a corruption anything downstream could detect, because
+                // every index would still resolve to a perfectly good
+                // sentence. They are written and read as one file for exactly
+                // that reason.
+                self.spoken = was
+                    .vocab
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| (w.clone(), i as u32))
+                    .collect();
+                self.vocab = was.vocab;
+                let was = was.archive;
                 println!(
                     "  carried in {} cells from {path}, best {:.3} - up to {} of them \
                      will be walked back to, the rest are trails only",
@@ -365,10 +434,16 @@ impl Campaign {
         if let Some(dir) = std::path::Path::new(path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        match self.archive.to_json().and_then(|t| {
-            std::fs::write(path, t).map_err(|e| format!("{path}: {e}"))
-        }) {
-            Ok(()) => println!("  archive: {} cells to {path}", self.archive.len()),
+        let kept = Kept { vocab: self.vocab.clone(), archive: self.archive.clone() };
+        match serde_json::to_string(&kept)
+            .map_err(|e| format!("{e}"))
+            .and_then(|t| std::fs::write(path, t).map_err(|e| format!("{path}: {e}")))
+        {
+            Ok(()) => println!(
+                "  archive: {} cells and {} distinct options to {path}",
+                self.archive.len(),
+                self.vocab.len()
+            ),
             Err(e) => println!("  the archive could NOT be written: {e}"),
         }
     }
@@ -405,6 +480,90 @@ impl Campaign {
         self.live.insert(cell.clone());
         self.start = Some(cell);
         Ok(())
+    }
+
+    /// Replay the best trail the archive holds and check that it arrives
+    /// where the archive says it does.
+    ///
+    /// Always, never on request. An archive whose trails do not replay is an
+    /// archive whose ARTIFACTS ARE WORTHLESS - every solution it ever
+    /// produces will fail the same way - and the failure is invisible from
+    /// inside the search, which restores snapshots and carries happily on.
+    /// The damage shows up only at the far end, which is exactly the shape of
+    /// defect an optional gate is worst at catching: a gate that never runs
+    /// is worse than no gate, because it also removes the suspicion that
+    /// there was ever anything to check.
+    ///
+    /// It found a real one. `DoomEnv`'s `trail` - where the player has
+    /// actually moved, which the "fall back the way you came" option is
+    /// computed from - was not part of a snapshot, so a restored run offered
+    /// a different option list than the one that had been held, and every
+    /// trajectory that finished a level failed to replay at the same
+    /// decision, naming an option the game no longer offered.
+    ///
+    /// Costs one episode, once per campaign.
+    fn audit(&mut self, env: &mut DoomEnv, allowed: u32) {
+        // Shortest first, then a middling one, then the best. The order is
+        // the diagnosis: a SHORT trail is one walk straight off the level's
+        // start with no resuming in it, so if that fails the recording itself
+        // is wrong, and if only the long ones fail the fault is in what a
+        // resume restores. Reporting one number could not tell those apart.
+        let mut picked: Vec<(usize, f32, Trail)> = self
+            .archive
+            .iter()
+            .filter(|e| !e.what.steps.is_empty())
+            .map(|e| (e.what.steps.len(), e.worth.reached, e.what.clone()))
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        picked.sort_by_key(|(n, _, _)| *n);
+        // Spread across the LENGTHS, because length is what the diagnosis
+        // turns on: a short trail is one walk straight off the level's start
+        // with no resuming in it, so the shortest one that fails is the
+        // boundary between "the recording is wrong" and "what a resume
+        // restores is wrong".
+        let last = picked.len() - 1;
+        let mut sample: Vec<usize> = (0..AUDIT_SAMPLES)
+            .map(|i| last * i / (AUDIT_SAMPLES - 1).max(1))
+            .collect();
+        sample.dedup();
+
+        let (mut good, mut bad) = (0, 0);
+        for i in sample {
+            let (n, said, trail) = picked[i].clone();
+            let Some(actions) = self.spell(&trail) else {
+                println!("  archive audit: a trail names options outside the vocabulary");
+                bad += 1;
+                continue;
+            };
+            match replay_checked(env, self.seed, &actions, allowed, &trail.marks) {
+                Ok(got) if (got.value() - said).abs() <= SAME_ACHIEVEMENT => {
+                    good += 1;
+                    println!("    {n:>5} decisions -> {said:.3}, replays");
+                }
+                Ok(got) => {
+                    bad += 1;
+                    println!(
+                        "    {n:>5} decisions -> claims {said:.3}, REPLAYS TO {:.3}",
+                        got.value()
+                    );
+                }
+                Err(e) => {
+                    bad += 1;
+                    println!("    {n:>5} decisions -> WILL NOT REPLAY: {e}");
+                }
+            }
+        }
+        if bad == 0 {
+            println!("  archive audit: every sampled trail replays from the level's own start");
+        } else {
+            println!(
+                "  archive audit FAILED on {bad} of {} sampled trails. Until that is fixed \
+                 this archive cannot produce an artifact anybody can use.",
+                good + bad
+            );
+        }
     }
 
     /// File a state the search has just reached, holding the engine snapshot
@@ -448,20 +607,20 @@ impl Campaign {
     /// So: draw normally while there is budget to rebuild, and draw only from
     /// what is returnable once there is not. The fallback is the level's own
     /// start, which is always returnable, so the answer is never nothing.
-    fn pick_reachable(&mut self) -> Option<(Niche, usize, u32)> {
+    fn pick_reachable(&mut self) -> Option<(Niche, usize)> {
         let rebuilding = self.rehydrations > 0;
         for _ in 0..PICK_TRIES {
             let drawn = self
                 .archive
                 .pick(&mut self.rng)
-                .map(|e| (e.niche.clone(), e.slot, e.generation))?;
+                .map(|e| (e.niche.clone(), e.slot))?;
             if rebuilding || self.live.contains(&drawn.0) {
                 return Some(drawn);
             }
         }
         let start = self.start.clone()?;
         let e = self.archive.get(&start)?;
-        Some((start.clone(), e.slot, e.generation))
+        Some((start.clone(), e.slot))
     }
 
     /// Return to a cell, rebuilding its snapshot first if this process never
@@ -486,7 +645,7 @@ impl Campaign {
             return false;
         }
         self.rehydrations -= 1;
-        let Some(actions) = full_trail(&self.archive, at) else {
+        let Some(actions) = self.archive.get(at).and_then(|e| self.spell(&e.what)) else {
             self.archive.remove(at);
             return false;
         };
@@ -511,11 +670,11 @@ impl Campaign {
         let op = &OPERATORS[arm];
 
         let picked = if op.from_best {
-            self.archive.best().map(|e| (e.niche.clone(), e.slot, e.generation))
+            self.archive.best().map(|e| (e.niche.clone(), e.slot))
         } else {
             self.pick_reachable()
         };
-        let Some((from, slot, from_gen)) = picked else {
+        let Some((from, slot)) = picked else {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
         };
@@ -525,7 +684,13 @@ impl Campaign {
         }
         self.restores += 1;
 
-        let mut steps: Vec<String> = Vec::new();
+        // What it took to get to the cell this walk resumed at. Copied out
+        // once, because every cell the walk files carries the whole way from
+        // the level's start.
+        let prefix = self.archive.get(&from).map(|e| e.what.steps.clone()).unwrap_or_default();
+        let marked = self.archive.get(&from).map(|e| e.what.marks.clone()).unwrap_or_default();
+        let mut steps: Vec<u32> = Vec::new();
+        let mut marks: Vec<Mark> = Vec::new();
         let mut last: Option<String> = None;
         for _ in 0..op.walk {
             let options = env.actions();
@@ -534,19 +699,28 @@ impl Campaign {
             }
             let chose = self.choose(env, op, &options, last.as_deref());
             last = Some(options[chose].clone());
-            steps.push(options[chose].clone());
+            steps.push(self.intern(&options[chose]));
             let (_, _, done) = env.step(chose);
             self.steps += 1;
             if env.fault().is_some() {
                 break;
             }
+            let here = prefix.len() + steps.len();
+            if here % WITNESS_EVERY == 0 {
+                if let Some(m) = env.mark(here as u32) {
+                    marks.push(m);
+                }
+            }
             if let Some(cell) = env.cell() {
                 let worth = Worth::new(env.score(allowed).value(), env.cost());
-                let trail = Trail {
-                    from: Some(from.clone()),
-                    from_generation: from_gen,
-                    steps: steps.clone(),
-                };
+                // The whole way here from the level's own start: what it
+                // took to reach the cell this walk resumed at, plus what the
+                // walk has done since.
+                let mut whole = prefix.clone();
+                whole.extend_from_slice(&steps);
+                let mut seen = marked.clone();
+                seen.extend_from_slice(&marks);
+                let trail = Trail { steps: whole, marks: seen };
                 // What the archive's best was BEFORE this admission, so a
                 // cell that advances the frontier is credited against the old
                 // frontier rather than against itself.
@@ -559,16 +733,16 @@ impl Campaign {
             }
             if done {
                 let ended = env.score(allowed);
-                if ended.is_uvmax() {
-                    // The prefix that reached the cell this walk resumed at,
-                    // plus what the walk itself did. Built from the RESUMED
-                    // cell rather than from the one just filed: the archive
-                    // may have refused the terminal cell in favour of an
-                    // equally good one, and reading the trail back out would
-                    // then return a different trajectory than the one that
-                    // actually just finished the level.
-                    if let Some(mut actions) = full_trail(&self.archive, &from) {
-                        actions.extend(steps.iter().cloned());
+                if ended.finished {
+                    // The walk's own whole trajectory, taken from what it was
+                    // resumed with rather than read back out of the archive:
+                    // the terminal cell may have been refused in favour of an
+                    // equally good one, and reading the archive would then
+                    // hand back a different trajectory than the one that just
+                    // finished the level.
+                    let mut whole = prefix.clone();
+                    whole.extend_from_slice(&steps);
+                    if let Some(actions) = self.spell(&Trail { steps: whole, marks: Vec::new() }) {
                         self.claims.push(Claim {
                             actions,
                             claimed: ended,
@@ -619,6 +793,11 @@ impl Campaign {
         options: &[String],
         last: Option<&str>,
     ) -> usize {
+        if op.leave > 0.0 && self.rng.next_f32() < op.leave {
+            if let Some(i) = env.exit_option().filter(|i| *i < options.len()) {
+                return i;
+            }
+        }
         if op.press > 0.0 && self.rng.next_f32() < op.press {
             // Press, then slide along and press again. `last` is what the
             // walk just did, so alternating on it is what turns a repeated
@@ -687,11 +866,46 @@ pub fn replay(
     actions: &[String],
     allowed: u32,
 ) -> Result<crate::report::Score, String> {
+    replay_checked(env, seed, actions, allowed, &[])
+}
+
+/// [`replay`], checking the trail's own witnesses as it goes.
+///
+/// Reports the FIRST decision at which the replay stood somewhere the search
+/// did not, which is the only useful thing to know about a trail that does
+/// not reproduce. Without it the failure arrives as a missing option sentence
+/// three hundred decisions in, which says the two runs disagree and nothing
+/// whatever about where they began to.
+pub fn replay_checked(
+    env: &mut DoomEnv,
+    seed: u64,
+    actions: &[String],
+    allowed: u32,
+    marks: &[Mark],
+) -> Result<crate::report::Score, String> {
     env.reset(seed);
     if let Some(f) = env.fault() {
         return Err(format!("the engine faulted at the level's start: {f}"));
     }
+    let mut expect = marks.iter().peekable();
     for (i, want) in actions.iter().enumerate() {
+        if let Some(m) = expect.peek() {
+            if m.at as usize == i {
+                let m = expect.next().expect("peeked");
+                if let Some(now) = env.mark(i as u32) {
+                    if (now.x, now.y, now.angle) != (m.x, m.y, m.angle) {
+                        return Err(format!(
+                            "at decision {i} the replay stands at ({}, {}) facing {} on tic {}, \
+                             where the search stood at ({}, {}) facing {} on tic {} - \
+                             {} units apart",
+                            now.x, now.y, now.angle, now.tic,
+                            m.x, m.y, m.angle, m.tic,
+                            (((now.x - m.x) as f64).hypot((now.y - m.y) as f64)).round() as i64
+                        ));
+                    }
+                }
+            }
+        }
         let options = env.actions();
         let Some(chose) = options.iter().position(|o| o == want) else {
             return Err(format!(
@@ -721,26 +935,48 @@ pub struct Claim {
 /// Rung one: is this even a claim worth paying to check?
 ///
 /// Free, and it refuses the overwhelming majority. A campaign files thousands
-/// of cells and almost none of them are a completed category; replaying every
-/// one of them from the level start would be the entire budget.
+/// of cells and almost none of them finish the level; replaying every one of
+/// them from the level start would be the entire budget.
+///
+/// A FINISHED level is checked, not only a completed category. That is a
+/// deliberate widening: a Max is what the campaign is for, but a run that
+/// merely got out is a real artifact - it is the first thing the compression
+/// phase can be fitted to, and it is the only way to find out whether the
+/// verification path works at all before the category is within reach.
+/// Which of the two a verified run turned out to be is recorded on the
+/// solution rather than decided here.
 struct WorthChecking {
-    /// The best verified time so far. A claim no faster than this is not
-    /// worth an episode, however complete it is.
-    best: u64,
+    /// The best verified score so far, and the time that went with it. A
+    /// claim is worth an episode when it beats that on the category first
+    /// and on the clock second - the same ordering the archive keeps its
+    /// elites by, so the cascade and the archive cannot disagree about which
+    /// of two runs is better.
+    best_score: f32,
+    best_tics: u64,
 }
 
 impl Rung<Claim> for WorthChecking {
     fn name(&self) -> &str {
-        "is a uv-max, and faster than the best verified one"
+        "finished the level, and beat the best verified run"
     }
     fn check(&mut self, c: &Claim) -> Verdict {
-        if !c.claimed.is_uvmax() {
-            return Verdict::Reject("not a complete category".into());
+        if !c.claimed.finished {
+            return Verdict::Reject("did not finish the level".into());
         }
-        if c.claimed_tics >= self.best {
+        let scored = c.claimed.value();
+        if scored > self.best_score + SAME_ACHIEVEMENT {
+            return Verdict::Pass;
+        }
+        if scored < self.best_score - SAME_ACHIEVEMENT {
+            return Verdict::Reject(format!(
+                "{scored:.3} is behind the verified {:.3}",
+                self.best_score
+            ));
+        }
+        if c.claimed_tics >= self.best_tics {
             return Verdict::Reject(format!(
                 "{} tics is no better than the verified {}",
-                c.claimed_tics, self.best
+                c.claimed_tics, self.best_tics
             ));
         }
         Verdict::Pass
@@ -766,6 +1002,12 @@ pub fn campaign(
         run.carry_in(path);
     }
     run.seed_start(env, seed, allowed)?;
+    if archive.is_some() {
+        run.audit(env, allowed);
+        // The audit left the engine at the end of its own replayed episode,
+        // so the level has to be stood back up before the search resumes.
+        run.seed_start(env, seed, allowed)?;
+    }
     let level = env.label().unwrap_or_else(|| "the level".into());
     println!(
         "doom: searching {level} for {:.0}s, {} slots, operators: {}",
@@ -774,13 +1016,11 @@ pub fn campaign(
         OPERATORS.map(|o| o.name).join(", ")
     );
 
-    let mut cascade: Cascade<Claim> = Cascade::new();
-    cascade.push(Box::new(WorthChecking { best: u64::MAX }));
 
     let began = Instant::now();
     let mut said = Instant::now();
     let mut solved: Vec<Solution> = Vec::new();
-    let mut verified_best = u64::MAX;
+    let mut verified_best = (f32::MIN, u64::MAX);
 
     while began.elapsed() < budget {
         let arm = run.alloc.choose();
@@ -796,12 +1036,15 @@ pub fn campaign(
             // solutions are verified. Rebuilt rather than mutated so the bar
             // a claim is judged against is never stale.
             let mut ladder: Cascade<Claim> = Cascade::new();
-            ladder.push(Box::new(WorthChecking { best: verified_best }));
+            ladder.push(Box::new(WorthChecking {
+                best_score: verified_best.0,
+                best_tics: verified_best.1,
+            }));
             if let Verdict::Reject(_) = ladder.admit(&claim) {
                 continue;
             }
             match replay(env, seed, &claim.actions, allowed) {
-                Ok(got) if got.is_uvmax() => {
+                Ok(got) if got.finished => {
                     let l = env.level_counts();
                     let s = Solution {
                         level: level.clone(),
@@ -815,12 +1058,13 @@ pub fn campaign(
                         score: got.value(),
                     };
                     println!(
-                        "doom: VERIFIED a UV-Max on {level}: {}/{} kills, {}/{} secrets, \
+                        "doom: VERIFIED {} on {level}: {}/{} kills, {}/{} secrets, \
                          {} tics ({}), {} decisions, replayed from the level's own start",
+                        if got.is_uvmax() { "a UV-MAX" } else { "a finished level" },
                         s.kills, s.total_kills, s.secrets, s.total_secrets, s.tics, s.clock(),
                         s.actions.len()
                     );
-                    verified_best = s.tics;
+                    verified_best = (s.score, s.tics);
                     solved.push(s);
                 }
                 // A claim the replay does not reproduce is a DEFECT, not a
@@ -830,12 +1074,12 @@ pub fn campaign(
                 // whose claims do not replay is producing artifacts nobody
                 // can use and every other number it reports is suspect.
                 Ok(got) => println!(
-                    "doom: a claimed UV-Max did NOT replay - from the start it scored \
-                     {:.3} rather than 2.000. The search reached that state by restoring \
-                     snapshots; the action list does not reach it.",
+                    "doom: a claimed finish did NOT replay - from the level's own start \
+                     the same actions scored {:.3} and did not finish. The search reached \
+                     that state by restoring snapshots; the action list does not reach it.",
                     got.value()
                 ),
-                Err(e) => println!("doom: a claimed UV-Max could not be replayed: {e}"),
+                Err(e) => println!("doom: a claimed finish could not be replayed: {e}"),
             }
             // The replay left the engine at the end of its own episode, and
             // every snapshot the archive points at is still valid - they are
