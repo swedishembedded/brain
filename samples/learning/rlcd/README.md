@@ -190,8 +190,9 @@ matters is the policy's own action, not the loss trajectory.
 
 ## Cost
 
-29 brain crates, matching the other `decision`-surface samples: it names one
-surface and the SDK links only what that surface needs.
+The same closure as the other `decision`-surface samples: it names one
+surface and the SDK links only what that surface needs. The budget is
+enforced from `Cargo.toml` rather than repeated here, where it would drift.
 
 ---
 

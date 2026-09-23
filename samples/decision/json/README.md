@@ -193,8 +193,9 @@ named, before any model runs.
 
 ## Cost
 
-26 brain crates - it names one surface (`decision`) and the SDK links only what
-that surface needs, exactly like `samples/decision/triage`.
+It names one surface (`decision`) and the SDK links only what that surface
+needs, exactly like `samples/decision/triage`. The linked-crate budget is
+enforced from `Cargo.toml` rather than repeated here, where it would drift.
 
 ---
 

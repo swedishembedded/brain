@@ -257,9 +257,11 @@ would rewrite; `cube.rs` and `view.rs` are the puzzle and its picture.
 
 ## Cost
 
-36 brain crates. It names two surfaces where most samples in this directory
-name one: `decision` to score the options, and `viewport` because it draws the
-cube. Dropping the window and the recorder drops the second.
+It names two surfaces where most samples in this directory name one:
+`decision` to score the options, and `viewport` because it draws the cube.
+Dropping the window and the recorder drops the second. The linked-crate
+budget is enforced from `Cargo.toml`, which is where to read it - a count
+copied into prose drifts silently as the workspace grows.
 
 ---
 

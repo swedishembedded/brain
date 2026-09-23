@@ -98,8 +98,9 @@ architectural change rather than a kernel one.
 
 ## Cost
 
-26 brain crates, the fewest of any sample here, because it names one surface
-(`decision`) and the SDK links only what that surface needs.
+Among the smallest closures of any sample here, because it names one surface
+(`decision`) and the SDK links only what that surface needs. The budget is
+enforced from `Cargo.toml` rather than repeated here, where it would drift.
 
 ---
 
