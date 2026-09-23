@@ -14,7 +14,7 @@ brain-neuro.workspace = true
 # Already in this workspace's dependency graph transitively, so declaring it
 # directly costs no compile time. The alternative is asking every caller to
 # gunzip a 30 MB file by hand before loading it.
-flate2 = "1"
+flate2.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

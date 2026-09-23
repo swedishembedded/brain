@@ -21,6 +21,10 @@ brain-data.workspace = true
 # on it keeps this crate's closure below the model layer; the layering gate
 # permits leaf-on-leaf for exactly that reason.
 brain-promote.workspace = true
+# The T-A screen measures whether an episode compresses at all. Text that
+# does not is text with no structure to learn, and catching it here costs no
+# model time at all.
+flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # Episode identity is a digest of the episode's own bytes.

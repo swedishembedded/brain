@@ -356,6 +356,9 @@ sha2 = "0.10"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Deflate, for the cheap "is there any structure in this at all" screen in
+# `brain-audit` and the archive reader in `brain-connectome`.
+flate2 = "1"
 # YAML, for the captioned-image dataset's captions.yaml. serde_yaml is
 # ARCHIVED by its author and publishes as "0.9.34+deprecated"; serde_yaml_ng
 # is maintained but still binds dtolnay's equally-archived unsafe-libyaml.

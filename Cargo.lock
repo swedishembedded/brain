@@ -538,6 +538,7 @@ version = "1.1.0"
 dependencies = [
  "brain-data",
  "brain-promote",
+ "flate2",
  "serde",
  "serde_json",
  "sha2",

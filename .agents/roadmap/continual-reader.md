@@ -449,10 +449,41 @@ bit-identically where it would have without the round trip - with the
 contrast that makes it worth asserting: the same weights without their
 moments take a visibly different step.
 
-**R4 - the per-episode gate.** `promote::gate` unchanged, with a
-pre-registered config and R0's bars armed. Tests: V15 (random bytes rejected),
-a probe-flipping episode promoted, an anchor-regressing increment rejected by
-cause.
+**R4 - triage and the per-episode gate. DONE 2026-09-23.**
+`crates/audit`'s `triage` module: the four filters of Part 8, each naming the
+stage it stopped at, so the share of the stream reaching each is countable. A
+triage that passes everything to the gate is one that is not working, and the
+`stage()` accessor is what makes that measurable rather than asserted.
+
+`reader_gate_config()` is deliberately NOT a new set of numbers - it is
+`document_gate_config()`, per-block bar armed, because a reader is a
+continual learner in exactly the sense that config was pre-registered for. A
+test asserts the bar is in force HERE, not merely available, by collapsing
+one of twenty earlier episodes behind a healthy pooled mean.
+
+**A fourth filter this file did not have: an episode too small to be
+evidence.** An exact paired sign test reaches `p <= 0.05` only from five
+clean wins upward (`2^-5 = 0.031`), so an episode yielding fewer probes than
+that cannot produce a significant result however well the model did.
+Promoting on it would be promoting on a number that was never capable of
+being evidence. `MIN_EPISODE_PROBES = 12` leaves room to lose a few rather
+than requiring a perfect sweep of the minimum, and such an episode is
+ACCUMULATED for a later attempt rather than rejected.
+
+**Correction to Part 8's T-A.** That section said to reject text a cheap
+compressor cannot compress. Measured, that is wrong: deflate takes any text
+over a restricted alphabet towards `log2(symbols)/8` whether or not there is
+a pattern in it, so random base64 lands near 0.75 and random hex near 0.5
+while containing nothing to learn. The screen measures the deflated size
+against the text's OWN order-0 entropy instead, leaving how much compression
+found that the symbol frequencies alone did not. A test pins the separation
+AND asserts that a raw ratio would not have produced it, so the extra term
+cannot quietly become unnecessary without something failing.
+
+Also corrected: degenerate repetition (one line five hundred times) scores
+HIGH on structure and is correctly not a filter-A concern. It is caught at
+filter B, where a model that predicts it trivially reports a low loss. Each
+filter answers one question.
 
 **R5 - the bounded retention audit.** M2. Canary plus rotating schedule, the
 priority weighting, and the detection-latency computation. Tests: coverage
