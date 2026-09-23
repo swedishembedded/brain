@@ -669,6 +669,40 @@ mod tests {
         assert!(of(0.0, 1.0, 0.0).value() > of(0.0, 0.0, 1.0).value());
     }
 
+    /// The decision budget cannot move the UV-Max bar.
+    ///
+    /// `allowed` reaches the score only through `lasted`, and `lasted` is a
+    /// term of the STANDARD bar alone - the category is every monster, every
+    /// secret and the way out, none of which is a fraction of a budget. That
+    /// matters outside this file: `doom search --max-steps N` feeds `allowed`
+    /// into every score the archive keeps, so if the bar read it, two
+    /// campaigns given different budgets would be searching different
+    /// problems and their archives could not be compared.
+    ///
+    /// Recorded as a test because the inference was made the other way round
+    /// once, from a single pair of runs, and a six-hour campaign was stopped
+    /// on it. Run-to-run spread on this search is wide enough to produce that
+    /// gap on its own.
+    #[test]
+    fn the_decision_budget_cannot_move_the_uvmax_bar() {
+        // Part-way through an episode, because a run that has taken no
+        // decisions has `lasted` zero against any budget and the premise
+        // below would hold vacuously.
+        let part_way = Progress { steps: 70, health: 100, ..Progress::default() };
+        let tight = part_way.score(false, 140, Bar::UvMax);
+        let generous = part_way.score(false, 3000, Bar::UvMax);
+        assert_eq!(tight.value(), generous.value());
+        assert_ne!(
+            tight.lasted, generous.lasted,
+            "the premise: the budget DOES change what `lasted` reads"
+        );
+        // And the standard bar does read it, which is why the two are
+        // separate bars rather than one with a flag.
+        let a = part_way.score(false, 140, Bar::Standard);
+        let b = part_way.score(false, 3000, Bar::Standard);
+        assert_ne!(a.value(), b.value());
+    }
+
     /// Clearing the level outranks walking out of it, because stepping on a
     /// DOOM exit ENDS the level: a run that leaves with the work undone has
     /// destroyed its own episode, and one that cleared everything but has not
