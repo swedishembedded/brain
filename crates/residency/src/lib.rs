@@ -39,6 +39,7 @@ pub mod place;
 pub mod plan;
 pub mod runplan;
 pub mod scheduler;
+pub mod staged;
 pub mod supply;
 
 

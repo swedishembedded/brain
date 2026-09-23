@@ -711,10 +711,32 @@ battery reports two numbers - exact, and accepted by the tool - with a
 failure naming how it was wrong. A battery that can only report a count
 cannot report how the failures were wrong, and those are different results.
 
-**R8 - serve while learning, staged.** The forcing function for the
-`stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
-recorded as missing from `crates/residency`. Tests: a promoted adapter changes
-a live response without restart; V17. **Two commits.**
+**R8 - serve while learning, staged. Commit 1 of 2 DONE 2026-09-23.**
+`crates/residency`'s `staged` module: the state machine B7 recorded as
+missing. Eight tests.
+
+`Executor::evict` was already a safe one-way swap - it refuses to interrupt
+a running job, so nothing is torn mid-request - but once the swap has
+happened there is no way back except another swap, and by then the bad
+version has answered live traffic. A gate decides on frozen probes before
+publication, and a gate decides on evidence, which is not proof. So a
+version gets to be a CANDIDATE first: resident, addressable and answerable,
+while what is actually served carries on untouched.
+
+**`served` is written by exactly one method.** `stage` and `rollback`
+structurally cannot move it, which is what makes the rollback guarantee a
+property rather than a convention, and one test hammers every other
+transition asserting it never moves. A staging mechanism that can perturb
+what it was protecting has moved the risk rather than removed it.
+
+Three refusals rather than no-ops, each because silence would mislead: a
+second candidate while one is on trial (`commit` would be ambiguous and
+`rollback` destructive), committing or rolling back nothing (a silent
+success lets a caller believe a swap happened), and staging what is already
+served. `Swap::changed()` is false after every rollback for the same reason.
+
+Commit 2 is the `Executor` binding: activating the candidate under its own
+`InstanceKey`, validating against it, and evicting it on rollback.
 
 **R9 - the run directory. DONE 2026-09-23.**
 `crates/audit`'s `run` module: manifest, state, an append-only ledger, and
