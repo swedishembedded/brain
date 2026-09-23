@@ -73,6 +73,9 @@ struct Settings {
     head: Option<String>,
     train: usize,
     batch: usize,
+    /// Rounds of dataset aggregation: after each, part of the training set
+    /// is replaced by states the policy ITSELF walked into.
+    rounds: usize,
     /// Freeze the encoder and train the head alone. It is also what makes a
     /// trained model SAVEABLE: a head-only file cannot honestly describe a
     /// model whose encoder moved.
@@ -118,6 +121,8 @@ run
 train and measure
   --train N           train a head for N optimizer steps, then save it
   --batch N           labelled decisions per optimizer step           [{}]
+  --rounds N          rounds of training; after the first, half the data is
+                      states the policy itself walked into                [1]
   --freeze-encoder    train the head alone - faster, and the only mode
                       whose result can be SAVED and reloaded
   --examples N        labelled decisions to train on                  [4000]
@@ -156,6 +161,7 @@ fn parse() -> Result<(Settings, bool), String> {
     let head = args.take_str("--head");
     let train = args.usize_or("--train", 0);
     let batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH).max(1);
+    let rounds = args.usize_or("--rounds", 1).max(1);
     let freeze = args.take_flag("--freeze-encoder");
     let examples = args.usize_or("--examples", 4000);
     let save = args.str_or("--save", "out/rubiks-model");
@@ -173,7 +179,7 @@ fn parse() -> Result<(Settings, bool), String> {
     if scramble == 0 || scramble > Solver::MAX_DEPTH {
         return Err(format!("--scramble must be 1..{} (this planner is exact, not heuristic)", Solver::MAX_DEPTH));
     }
-    Ok((Settings { model, cubes, scramble, solve_scramble, seed, encoding, head, train, batch, freeze, examples, save, eval, unassisted, search, search_depth, hardware, view, record }, quiet))
+    Ok((Settings { model, cubes, scramble, solve_scramble, seed, encoding, head, train, batch, rounds, freeze, examples, save, eval, unassisted, search, search_depth, hardware, view, record }, quiet))
 }
 
 fn main() {
@@ -247,13 +253,58 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
         data.len() as f32 / generated.as_secs_f32().max(1e-6)
     );
     let options = policy::options();
+    let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+    let mut data = data;
+    let per_round = s.train / s.rounds.max(1);
+    for round in 1..=s.rounds {
+        if round > 1 {
+            // Half the set becomes states this policy actually visits. The
+            // other half stays backward-generated, so the shallow end it
+            // already knows does not decay while it learns the rest.
+            let want = data.len() / 2;
+            let mut failed: Option<String> = None;
+            let fresh = policy::on_policy_examples(solver, want, s.scramble, s.encoding, s.seed ^ round as u64, &mut |c| {
+                if failed.is_some() {
+                    return vec![1.0 / 18.0; 18];
+                }
+                match pipe.choose(&policy::state_text(c, s.encoding), policy::INSTRUCTIONS, &refs) {
+                    Ok(a) => a.probabilities.iter().map(|(_, p)| *p).collect(),
+                    Err(e) => {
+                        failed = Some(format!("{e}"));
+                        vec![1.0 / 18.0; 18]
+                    }
+                }
+            });
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            let mean: f32 = fresh.iter().map(|e| e.distance as f32).sum::<f32>() / fresh.len().max(1) as f32;
+            println!("rubiks: round {round}: {} of the set is now states the policy walked into (mean {mean:.1} from solved)", fresh.len());
+            data.truncate(data.len() - fresh.len());
+            data.extend(fresh);
+        }
+        train_rounds(pipe, s, &data, &options, per_round, round)?;
+    }
+    return Ok(());
+}
+
+/// One round of optimizer steps over `data`.
+fn train_rounds(
+    pipe: &mut DecisionPipeline,
+    s: &Settings,
+    data: &[policy::Example],
+    options: &[String],
+    steps: usize,
+    round: usize,
+) -> Result<(), String> {
     let examples: Vec<(&str, usize)> = data.iter().map(|e| (e.state.as_str(), e.label)).collect();
+    let _ = round;
     let mut last = 0usize;
     let started = std::time::Instant::now();
     let mut mark = started;
     let every = 25usize;
     let loss = pipe
-        .train_choices(&examples, &options, policy::INSTRUCTIONS, s.train, s.batch, s.seed, &mut |step, l| {
+        .train_choices(&examples, options, policy::INSTRUCTIONS, steps, s.batch, s.seed, &mut |step, l| {
             if step / every > last {
                 last = step / every;
                 let per = mark.elapsed().as_secs_f32() / every as f32;
@@ -266,7 +317,7 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
     println!(
         "rubiks: final loss {loss:.4} in {:.1}s ({:.0} ms/step)",
         trained.as_secs_f32(),
-        1000.0 * trained.as_secs_f32() / s.train.max(1) as f32
+        1000.0 * trained.as_secs_f32() / steps.max(1) as f32
     );
     // The curriculum is this sample's own setting and the SDK cannot see it,
     // but it decides what the policy can do: a run only learns the distances
