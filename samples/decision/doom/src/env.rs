@@ -588,6 +588,9 @@ pub struct DoomEnv {
     /// is measured against - a goal is delivering if it is beating its own
     /// best, not if it merely moved.
     best_path: Option<i32>,
+    /// The route's length at the last decision, to tell the goal moving apart
+    /// from the player moving. See [`goal_moved`].
+    last_path: Option<i32>,
     /// Items carried at the last decision, to notice one being picked up.
     had_items: u32,
     /// The kinds of thing already tried since the player last moved.
@@ -693,6 +696,7 @@ impl DoomEnv {
             exit_futile: 0,
             exit_aside: 0,
             best_path: None,
+            last_path: None,
             had_items: 0,
             tried: std::collections::HashSet::new(),
             recent: std::collections::VecDeque::new(),
@@ -1276,12 +1280,19 @@ impl DoomEnv {
             self.grab_futile = 0;
         }
         self.had_items = self.state.level.items;
-        let path = self.state.exit.as_ref().and_then(|e| e.path_distance);
-        if let Some(d) = path {
-            if self.best_path.is_none_or(|b| d < b) {
+        if let Some(d) = self.state.exit.as_ref().and_then(|e| e.path_distance) {
+            let walked = match self.last_pos {
+                Some(p) => (p.0 - pos.0).abs() + (p.1 - pos.1).abs(),
+                None => 0,
+            };
+            // A new goal is measured from scratch. Judging the walk to this
+            // frontier against the best distance to the last one is judging
+            // it against a different question, and it always loses.
+            if goal_moved(self.last_path, d, walked) || self.best_path.is_none_or(|b| d < b) {
                 self.best_path = Some(d);
                 self.exit_futile = 0;
             }
+            self.last_path = Some(d);
         }
         self.grab_aside = self.grab_aside.saturating_sub(1);
         self.exit_aside = self.exit_aside.saturating_sub(1);
@@ -1600,6 +1611,7 @@ impl DoomEnv {
         self.exit_futile = 0;
         self.exit_aside = 0;
         self.best_path = None;
+        self.last_path = None;
         self.had_items = 0;
         self.tried.clear();
         self.recent.clear();
@@ -2302,6 +2314,27 @@ fn every_field_of_an_option_either_replays_or_cannot_change_the_run(o: &Option_)
     } = o;
 }
 
+/// Whether the route is now measuring the way to somewhere ELSE.
+///
+/// A route can only get longer by as far as the player walked away from its
+/// goal. More than that and the goal itself has moved - which happens every
+/// time a frontier is reached and the next one, further off, becomes the
+/// thing to head for.
+///
+/// This has to be noticed or the guard that sets aside a goal which never
+/// delivers turns on the goal that IS delivering. The best distance ever seen
+/// is set against one goal; once the next goal is eight hundred units away,
+/// nothing can ever beat it again, so every decision toward the new frontier
+/// counts as making no progress and heading anywhere at all is set aside for
+/// the rest of the episode. Measured as the teacher stalling on levels it had
+/// been crossing perfectly well.
+///
+/// The slack is one cell either way, for a route that re-plans around a door
+/// opening or a lift arriving without the goal having changed at all.
+fn goal_moved(previous: Option<i32>, now: i32, walked: i32) -> bool {
+    previous.is_some_and(|p| now > p + walked + 64)
+}
+
 /// Whether the level has actually told the player where the way out is.
 ///
 /// An exit block being PRESENT is not that answer, and reading it as one
@@ -2505,6 +2538,7 @@ fn snapshot_carries_every_field_of_the_run(env: &DoomEnv) {
         exit_futile: _,
         exit_aside: _,
         best_path: _,
+        last_path: _,
         had_items: _,
         tried: _,
         recent: _,
@@ -2659,6 +2693,7 @@ impl Env for DoomEnv {
                 exit_futile: self.exit_futile,
                 exit_aside: self.exit_aside,
                 best_path: self.best_path,
+                last_path: self.last_path,
                 had_items: self.had_items,
                 tried: self.tried.clone(),
                 recent: self.recent.clone(),
@@ -2787,6 +2822,7 @@ impl Env for DoomEnv {
         self.exit_futile = held.exit_futile;
         self.exit_aside = held.exit_aside;
         self.best_path = held.best_path;
+        self.last_path = held.last_path;
         self.had_items = held.had_items;
         self.tried = held.tried;
         self.recent = held.recent;
@@ -2835,6 +2871,7 @@ struct Held {
     exit_futile: u32,
     exit_aside: u32,
     best_path: Option<i32>,
+    last_path: Option<i32>,
     had_items: u32,
     tried: std::collections::HashSet<Tag>,
     recent: std::collections::VecDeque<(i32, i32)>,
@@ -3131,6 +3168,28 @@ mod teacher_tests {
         // And with nothing on offer to stop for, heading for the way out is
         // what is left - which is the decision the shopping trip displaced.
         assert!(takes(Tag::Exit, &walking));
+    }
+
+    /// Reaching one frontier makes the next one the goal, and the next one
+    /// is further off. If that reads as "the route got longer", the guard
+    /// that sets aside a goal which never delivers fires on the goal that is
+    /// delivering, and the teacher stops heading anywhere for the rest of the
+    /// episode.
+    #[test]
+    fn a_route_that_lengthens_more_than_the_player_walked_is_a_new_goal() {
+        // Walking 40 units away from a goal 200 off leaves it about 240. That
+        // is the player moving, not the goal.
+        assert!(!goal_moved(Some(200), 240, 40));
+        // Standing still while the number jumps 200 to 900 is not something
+        // the player did.
+        assert!(goal_moved(Some(200), 900, 0));
+        // One cell of slack, for a route re-planned around a door that opened
+        // without the goal having changed.
+        assert!(!goal_moved(Some(200), 256, 0));
+        // Nothing to compare against yet.
+        assert!(!goal_moved(None, 900, 0));
+        // And getting CLOSER is never a new goal.
+        assert!(!goal_moved(Some(900), 200, 0));
     }
 
     /// The teacher's other guard against repeating itself asks whether the
