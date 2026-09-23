@@ -24,7 +24,7 @@
 //!
 //! ```text
 //! rubiks --cubes 3 --scramble 6
-//! rubiks --cubes 3 --scramble 6 --hints off   # options stop saying what they do
+//! rubiks --model minilm --train 8000 --batch 32 --eval 300   # fit a policy
 //! rubiks --cubes 3 --scramble 4 --unassisted  # no shield: does it solve anything?
 //! ```
 //!
@@ -64,6 +64,7 @@ struct Settings {
     encoding: policy::Encoding,
     head: Option<String>,
     train: usize,
+    batch: usize,
     examples: usize,
     save: String,
     eval: usize,
@@ -90,15 +91,16 @@ run
   --cubes N           cubes to solve                                  [3]
   --scramble N        moves in each scramble, 1..{}                    [6]
   --seed N            which cubes                                     [1]
-  --encode WHICH      how the cube is written down: compact | rows    [compact]
+  --encode WHICH      how the cube is written down: grid | compact | rows [grid]
   --head FILE         a trained decision head to answer with
   --unassisted        no shield: play the model's own pick, every turn
   --quiet             summary only
 
 train and measure
   --train N           train a head for N optimizer steps, then save it
+  --batch N           labelled decisions per optimizer step           [{}]
   --examples N        labelled decisions to train on                  [4000]
-  --save FILE         where the trained head goes  [out/rubiks-head.safetensors]
+  --save DIR          where the trained model goes             [out/rubiks-model]
   --eval N            score N held-out decisions and report
 
 view
@@ -110,6 +112,7 @@ hardware
 ",
         ModelChoice::help(),
         Solver::MAX_DEPTH,
+        brain::decision::DEFAULT_BATCH,
         ViewOptions::help(),
         Hardware::help()
     )
@@ -127,11 +130,12 @@ fn parse() -> Result<(Settings, bool), String> {
     let cubes = args.usize_or("--cubes", 3);
     let scramble = args.usize_or("--scramble", 6) as u8;
     let seed = args.u64_or("--seed", 1);
-    let encoding = policy::Encoding::parse(&args.str_or("--encode", "compact"))?;
+    let encoding = policy::Encoding::parse(&args.str_or("--encode", "grid"))?;
     let head = args.take_str("--head");
     let train = args.usize_or("--train", 0);
+    let batch = args.usize_or("--batch", brain::decision::DEFAULT_BATCH);
     let examples = args.usize_or("--examples", 4000);
-    let save = args.str_or("--save", "out/rubiks-head.safetensors");
+    let save = args.str_or("--save", "out/rubiks-model");
     let eval = args.usize_or("--eval", 0);
     let unassisted = args.take_flag("--unassisted");
     let quiet = args.take_flag("--quiet");
@@ -141,7 +145,7 @@ fn parse() -> Result<(Settings, bool), String> {
     if scramble == 0 || scramble > Solver::MAX_DEPTH {
         return Err(format!("--scramble must be 1..{} (this planner is exact, not heuristic)", Solver::MAX_DEPTH));
     }
-    Ok((Settings { model, cubes, scramble, seed, encoding, head, train, examples, save, eval, unassisted, hardware, view, record }, quiet))
+    Ok((Settings { model, cubes, scramble, seed, encoding, head, train, batch, examples, save, eval, unassisted, hardware, view, record }, quiet))
 }
 
 fn main() {
@@ -190,7 +194,7 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
     let mut mark = started;
     let every = 25usize;
     let loss = pipe
-        .train_choices(&examples, &options, policy::INSTRUCTIONS, s.train, s.seed, &mut |step, l| {
+        .train_choices(&examples, &options, policy::INSTRUCTIONS, s.train, s.batch, s.seed, &mut |step, l| {
             if step / every > last {
                 last = step / every;
                 let per = mark.elapsed().as_secs_f32() / every as f32;
@@ -205,14 +209,13 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
         trained.as_secs_f32(),
         1000.0 * trained.as_secs_f32() / s.train.max(1) as f32
     );
-    // Best effort, and loudly not fatal: `train_choices` fine-tunes the
-    // encoder as well as the head, and the head-only format refuses to
-    // pretend otherwise. The model is still trained IN THIS PROCESS, so the
-    // measuring that follows is of the thing that was just trained.
-    match pipe.save_head(&s.save) {
-        Ok(()) => println!("rubiks: head written to {}", s.save),
-        Err(e) => println!("rubiks: not saved ({e})\n        measuring in this process instead"),
-    }
+    // A fine-tuned ENCODER is most of what this run produced - the head
+    // alone would attach to the published encoder and not be this model - so
+    // the whole thing is written, and it is fatal if it cannot be. A run
+    // that trained for hours and then reported a number it could not hand
+    // back is the failure worth being loud about.
+    pipe.save_model(&s.save).map_err(|e| format!("saving to {}: {e}", s.save))?;
+    println!("rubiks: model written to {} - replay it with --model {}", s.save, s.save);
     Ok(())
 }
 
@@ -609,41 +612,13 @@ fn solve_one(
     Ok(())
 }
 
-/// The candidates offered this turn: a random subset that ALWAYS contains at
-/// least one admissible move, in random order.
+/// The model's best pick among the moves the planner vouches for.
 ///
-/// Two reasons, and the second is the one that matters. A cube has eighteen
-/// moves and the model's own packed sequence budget would silently shorten
-/// the option texts if all of them were offered - the descriptions are the
-/// thing being read, so they must arrive whole. And a fixed list in a fixed
-/// order is a list whose right answer can be found by POSITION rather than by
-/// reading it, which is the one thing a decision model must not be allowed to
-
-/// One option as the model sees it. With `--hints on` the planner says what
-/// the move does, which is the version of this question a model can answer by
-/// READING; with hints off it has the move and the cube and nothing else,
-/// which is the version that asks it to reason about a cube.
-///
-/// **A hint carries the decision and NOTHING else.** The identity of the
-/// move is the option's label, which comes back in the answer either way;
-/// the description is what the model weighs. Spelling the turn out again in
-/// every description ("turn the right face a quarter turn clockwise") adds
-/// ten tokens of near-identical boilerplate to all six options and drowns
-/// the one phrase that decides between them - measured, not guessed: the
-/// same six options with the boilerplate attached scored the right one at
-/// 0.16 (a flat distribution, confidence 0.03), and with the hint alone at
-/// 0.61 (confidence 0.30).
-///
-/// With `--hints off` the description is the turn itself, because then the
-/// turn IS all there is to say - that is the version that asks the model to
-
-/// The state, as one short sentence of prose.
-///
-/// It used to name every face's progress ("top face 4/9 solved, right face
-/// 5/9 solved, ..."), which is six near-identical numeric clauses and reads
-/// measurably worse - a wall of text in the state competes with the options
-/// for the same packed sequence. What survives is the one number that is
-
+/// The shield's whole content: it never proposes a move, it only declines to
+/// play one that is not on a shortest solution, and among those that are it
+/// plays whichever the model itself ranked highest. So the cube is solved
+/// optimally whatever the model says, and what the model contributed is
+/// still measurable - it is how often this had nothing to override.
 fn best_admissible(probs: &[(String, f32)], good: &[bool]) -> usize {
     probs
         .iter()

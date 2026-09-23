@@ -27,24 +27,51 @@ use crate::search::Solver;
 /// How the 54 stickers are written down for the model.
 ///
 /// A knob rather than a choice made once: which encoding a text encoder can
-/// actually learn from is an empirical question, and the point of having two
-/// is to answer it with a number instead of an opinion.
+/// actually learn from is an empirical question, and the point of having
+/// three is to answer it with a number instead of an opinion. The numbers
+/// are in this sample's README, and they are not close.
+///
+/// **The encoding decides whether the cube is legible at all.** The encoder
+/// is a WordPiece model: it cuts a run of letters at whatever boundaries its
+/// own vocabulary happens to have, so `WWYWWWWWG` and `WWWWWWWWW` become
+/// seven tokens and one. Pack the stickers into runs and a state's token
+/// COUNT moves with its content - every sticker after the first difference
+/// shifts row, and the learned position embedding, which is the only thing
+/// that says which sticker is which, is reading a different sticker at every
+/// row. The model is then being asked to read a cube it structurally cannot
+/// see. That is measured, not argued: `crates/decide/tests/state_tokenization.rs`
+/// holds both halves of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
+    /// One sticker, one token, at the row its own index names:
+    /// `U U U R R F D D D ...`, all 54, whitespace between every pair.
+    ///
+    /// Whitespace is what buys it - the tokenizer cuts on whitespace before
+    /// WordPiece runs, and a lone letter is in every vocabulary of this
+    /// family - so the stream is 54 tokens for EVERY cube and row `i` is
+    /// always sticker `i`. The face needs no label: which face a sticker
+    /// belongs to is a fixed function of its index, so the position
+    /// embedding already carries it.
+    Grid,
     /// Six runs of nine letters, the way a cube is usually written down:
     /// `U:WWWWWWWWW R:RRRRRRRRR ...`
+    ///
+    /// Kept as the control this sample's README compares against, not as a
+    /// recommendation.
     Compact,
-    /// The same 54 stickers as words and rows, which costs tokens and may
-    /// survive a word-piece tokenizer better: `top row WWW row WWY ...`
+    /// The same 54 stickers as words and rows, which costs tokens and was
+    /// the first attempt at surviving a word-piece tokenizer:
+    /// `top WWW WWY ...`. It does not - the runs are only shorter.
     Rows,
 }
 
 impl Encoding {
     pub fn parse(s: &str) -> Result<Encoding, String> {
         match s {
+            "grid" => Ok(Encoding::Grid),
             "compact" => Ok(Encoding::Compact),
             "rows" => Ok(Encoding::Rows),
-            other => Err(format!("--encode {other}: expected compact or rows")),
+            other => Err(format!("--encode {other}: expected grid, compact or rows")),
         }
     }
 }
@@ -59,6 +86,16 @@ fn letter(colour: u8) -> char {
 pub fn state_text(cube: &Cube, encoding: Encoding) -> String {
     let face_letters = |f: Face| -> String { (0..9).map(|i| letter(cube.0[f.index() * 9 + i])).collect() };
     match encoding {
+        Encoding::Grid => {
+            let mut out = String::with_capacity(54 * 2);
+            for (i, &c) in cube.0.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push(letter(c));
+            }
+            out
+        }
         Encoding::Compact => Face::ALL
             .iter()
             .map(|&f| format!("{}:{}", f.letter(), face_letters(f)))
@@ -110,12 +147,28 @@ pub struct Example {
     pub distance: u8,
 }
 
-/// Build labelled decisions by walking cubes home.
+/// Build labelled decisions by walking cubes home, BALANCED across distances.
 ///
-/// States are sampled ALONG optimal solutions rather than from fresh random
-/// scrambles, because that is the distribution a solve actually visits: a
-/// policy trained only on eight-move-deep states never sees the two-move-deep
-/// ones it will meet at the end of every run.
+/// States are sampled along optimal solutions, because walking a cube home is
+/// what makes a label free: the move that undoes each step is, by
+/// construction, a move that gets closer. The planner then verifies it.
+///
+/// **Balanced is the whole point, and it was learned the expensive way.**
+/// Walking home yields one state at every distance from the scramble depth
+/// down to 1, so a distance of 1 appears in every walk and the deepest
+/// distance appears only in the walks that started there. Left alone that is
+/// a roughly 5:1 shallow bias, and a policy fitted on it is excellent at the
+/// states it saw most and weak at the rest - measured on this sample, 100%
+/// at one move from solved against 44% at six.
+///
+/// That skew does not show up in a held-out score, because a held-out split
+/// drawn the same way is skewed the same way. It shows up when the policy
+/// DRIVES: a solve spends most of its turns at the deep end, so the run that
+/// scored 87% on held-out decisions picked a shortest move on 37% of the
+/// turns it actually took, and solved 9 cubes in 50. The fix is to stop
+/// letting the sampling method decide the curriculum - every distance gets
+/// the same quota, and a walk stops contributing to a distance once that
+/// quota is full.
 pub fn examples(solver: &Solver, count: usize, max_depth: u8, encoding: Encoding, seed: u64) -> Vec<Example> {
     let mut rng = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     let mut next = || {
@@ -124,12 +177,23 @@ pub fn examples(solver: &Solver, count: usize, max_depth: u8, encoding: Encoding
         rng ^= rng << 17;
         rng
     };
+    let buckets = max_depth as usize;
+    let quota = count.div_ceil(buckets);
+    let mut filled = vec![0usize; buckets + 1];
     let mut out = Vec::with_capacity(count);
     while out.len() < count {
-        let depth = 1 + (next() % max_depth as u64) as usize;
+        // Start where the data is still missing. Drawing the depth uniformly
+        // instead would keep re-walking the shallow states long after their
+        // quota was met, because every walk passes through them.
+        let wanted: Vec<usize> = (1..=buckets).filter(|&d| filled[d] < quota).collect();
+        if wanted.is_empty() {
+            break;
+        }
+        let depth = wanted[(next() % wanted.len() as u64) as usize];
         let (mut cube, _) = crate::cube::scramble(depth, next());
         // Walk this cube home, taking one labelled decision from each state
-        // on the way.
+        // on the way - but only banking the ones whose distance still has
+        // room.
         while let Some(d) = solver.distance(&cube, Solver::MAX_DEPTH) {
             if d == 0 || out.len() >= count {
                 break;
@@ -139,7 +203,11 @@ pub fn examples(solver: &Solver, count: usize, max_depth: u8, encoding: Encoding
                 break;
             }
             let pick = good[(next() % good.len() as u64) as usize];
-            out.push(Example { state: state_text(&cube, encoding), label: pick, distance: d });
+            let slot = d as usize;
+            if slot <= buckets && filled[slot] < quota {
+                filled[slot] += 1;
+                out.push(Example { state: state_text(&cube, encoding), label: pick, distance: d });
+            }
             cube = cube.apply(move_of(pick));
         }
     }
@@ -152,9 +220,42 @@ mod tests {
     use super::*;
     use crate::cube::scramble;
 
+    /// Every encoding this sample offers, so a new one cannot be added
+    /// without meeting the properties below.
+    const ALL: [Encoding; 3] = [Encoding::Grid, Encoding::Compact, Encoding::Rows];
+
+    /// THE property that makes the cube legible: the default encoding writes
+    /// 54 lone symbols with whitespace between them, so the tokenizer emits
+    /// one token per sticker and row `i` is sticker `i` for every cube.
+    ///
+    /// Asserted on the TEXT rather than on token ids because a sample may
+    /// only depend on the SDK, and the SDK does not publish a tokenizer. The
+    /// step from "lone whitespace-separated symbols" to "one token each" is
+    /// the tokenizer's own, and it is pinned where the tokenizer lives:
+    /// `crates/decide/tests/state_tokenization.rs`.
+    #[test]
+    fn the_grid_encoding_writes_one_lone_symbol_per_sticker() {
+        let mut lengths = std::collections::BTreeSet::new();
+        for seed in 0..40u64 {
+            let (cube, _) = scramble(8, seed);
+            let text = state_text(&cube, Encoding::Grid);
+            let symbols: Vec<&str> = text.split_whitespace().collect();
+            assert_eq!(symbols.len(), 54, "{text}");
+            for (i, s) in symbols.iter().enumerate() {
+                let mut chars = s.chars();
+                let c = chars.next().expect("a symbol");
+                assert!(chars.next().is_none(), "symbol {i} is {s:?}, not a lone character");
+                assert!(Face::ALL.iter().any(|f| f.letter() == c), "symbol {i} is {c:?}");
+            }
+            lengths.insert(symbols.len());
+        }
+        // The point of all of it: the length does not move with the content.
+        assert_eq!(lengths, std::collections::BTreeSet::from([54]));
+    }
+
     #[test]
     fn the_state_text_holds_every_sticker() {
-        for encoding in [Encoding::Compact, Encoding::Rows] {
+        for encoding in ALL {
             let text = state_text(&Cube::SOLVED, encoding);
             for f in Face::ALL {
                 let n = text.matches(f.letter()).count();
@@ -169,7 +270,7 @@ mod tests {
     /// being asked to distinguish states it cannot see apart.
     #[test]
     fn different_cubes_read_differently() {
-        for encoding in [Encoding::Compact, Encoding::Rows] {
+        for encoding in ALL {
             let mut seen = std::collections::HashSet::new();
             for seed in 0..40u64 {
                 let (cube, _) = scramble(6, seed);
@@ -200,7 +301,7 @@ mod tests {
     /// really proves it: read it back and get the same cube.
     #[test]
     fn a_written_cube_reads_back_identical() {
-        for encoding in [Encoding::Compact, Encoding::Rows] {
+        for encoding in ALL {
             for seed in 0..20u64 {
                 let (cube, _) = scramble(8, seed);
                 let text = state_text(&cube, encoding);
@@ -221,17 +322,33 @@ mod tests {
         }
     }
 
-    /// Examples must cover the shallow end too: a policy that has only seen
-    /// deep cubes has never seen the last move of a solve.
+    /// THE sampling property: every distance the policy will meet gets the
+    /// same amount of data.
+    ///
+    /// Walking cubes home yields one state at every distance from the
+    /// scramble depth down to 1, so distance 1 appears in every walk and the
+    /// deepest distance only in the walks that started there. A policy fitted
+    /// on that is good at the shallow states and weak at the deep ones, and a
+    /// held-out split drawn the same way is skewed the same way and reports
+    /// it as fine. Only driving the policy reveals it - which is far too late
+    /// and far too slow to be the thing that catches it.
     #[test]
-    fn examples_span_the_distances_a_solve_walks_through() {
+    fn examples_are_balanced_across_the_distances_a_solve_meets() {
         let solver = Solver::new(4);
-        let ex = examples(&solver, 200, 6, Encoding::Compact, 11);
-        let mut seen: Vec<u8> = ex.iter().map(|e| e.distance).collect();
-        seen.sort_unstable();
-        seen.dedup();
-        assert!(seen.contains(&1), "no one-move-from-solved states: {seen:?}");
-        assert!(seen.iter().any(|&d| d >= 4), "no deep states: {seen:?}");
+        let max_depth = 6u8;
+        let ex = examples(&solver, 600, max_depth, Encoding::Grid, 11);
+        assert_eq!(ex.len(), 600);
+        let mut per = std::collections::BTreeMap::new();
+        for e in &ex {
+            assert!(e.distance >= 1 && e.distance <= max_depth, "distance {} out of range", e.distance);
+            *per.entry(e.distance).or_insert(0usize) += 1;
+        }
+        assert_eq!(per.len(), max_depth as usize, "a distance got no examples at all: {per:?}");
+        let (lo, hi) = (per.values().min().copied().unwrap(), per.values().max().copied().unwrap());
+        // Equal up to the rounding of `count / buckets`, NOT merely "present":
+        // "at least one deep example" is what the skewed sampler already
+        // satisfied.
+        assert!(hi - lo <= 1, "distances are not balanced: {per:?}");
     }
 }
 
