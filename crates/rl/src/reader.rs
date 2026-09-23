@@ -257,8 +257,9 @@ impl<M: Model, T: Tokenizer> Learner for ModelLearner<'_, M, T> {
             })
             .collect();
         let verifier = ExactMatch { tok: self.tok };
-        let (scores, mean_entropy, _) = decode_checkpoint::<M>(self.path_of(arm), &tasks, &verifier, &self.rollout);
-        Scored { scores, mean_entropy }
+        let (scores, mean_entropy, completions) = decode_checkpoint::<M>(self.path_of(arm), &tasks, &verifier, &self.rollout);
+        let answers = completions.iter().map(|c| self.tok.decode(c)).collect();
+        Scored { scores, mean_entropy, answers }
     }
 
     fn joint_oracle(&mut self, rows: &[&str], probes: &[&Probe]) -> f64 {

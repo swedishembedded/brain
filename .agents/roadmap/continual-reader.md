@@ -688,6 +688,29 @@ widened from private to crate-visible; nothing else changed in the study.
 `--model` is resolved through `loader::model_dir` exactly as every other
 surface resolves one, so a reference not on disk is fetched.
 
+**The sample `samples/learning/reader`. DONE 2026-09-23.** Five verbs,
+nine labelled lanes, eight tests. Closure measured at 52 brain crates and
+the budget set to exactly that, so growth is a decision rather than absorbed
+slack.
+
+**Two problems the build surfaced, both real.**
+
+*The two tools shared command and flag names.* Drawing both from the same
+small word lists made collisions likely, and a shared `--depth` between them
+means learning one REINFORCES part of the other, so "did learning B destroy
+A" would have been measuring something other than retention.
+`Tool::generate_disjoint` constructs the second tool's vocabulary against
+the first's, and a test fails on any shared name.
+
+*The tool's grammar was not wired into scoring.* Clippy found it: `parse`
+and `Invalid` were dead outside the tests. The battery was scoring exact
+string match only, which is STRICTER than the tool itself, so a correct
+invocation with the flags in another order would have counted as a failure.
+`Scored` and `BatteryScore` now carry the model's actual answers, and the
+battery reports two numbers - exact, and accepted by the tool - with a
+failure naming how it was wrong. A battery that can only report a count
+cannot report how the failures were wrong, and those are different results.
+
 **R8 - serve while learning, staged.** The forcing function for the
 `stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
 recorded as missing from `crates/residency`. Tests: a promoted adapter changes

@@ -73,6 +73,15 @@ pub struct Scored {
     pub scores: Vec<f64>,
     /// Mean completion entropy over that pass, for the degeneracy bar.
     pub mean_entropy: f64,
+    /// What the model actually answered, in the same order.
+    ///
+    /// The gate needs only the scores, and the loop ignores these. They are
+    /// here because a caller scoring a CAPABILITY battery has to be able to
+    /// show what the model wrote: a battery that can only say how many
+    /// passed cannot say how the failures were wrong, and "it answered with
+    /// a flag that does not exist" and "it answered correctly in a different
+    /// order" are not the same result.
+    pub answers: Vec<String>,
 }
 
 /// Everything the loop needs a model for, and nothing else.
@@ -525,7 +534,8 @@ mod tests {
                     }
                 })
                 .collect();
-            Scored { scores, mean_entropy: 2.0 }
+            let answers = probes.iter().map(|p| p.expected.clone()).collect();
+            Scored { scores, mean_entropy: 2.0, answers }
         }
         fn joint_oracle(&mut self, _rows: &[&str], _probes: &[&Probe]) -> f64 {
             self.oracles += 1;

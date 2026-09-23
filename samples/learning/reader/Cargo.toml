@@ -1,0 +1,20 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/learning/reader` -> `sample-learning-reader`.
+name = "sample-learning-reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: a model that reads a directory continually, refuses what is not worth learning, and can say what it gained."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses. This one uses `reader` and nothing else.
+brain = { workspace = true, features = ["reader"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# The reader builds on the study's architecture registry, so it carries that
+# closure plus the model-free reader policy.
+max-brain-crates = 52

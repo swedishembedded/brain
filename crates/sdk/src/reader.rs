@@ -65,6 +65,10 @@ pub struct BatteryScore {
     /// Per task, in the order given, so a caller can show WHICH abilities
     /// were gained rather than only how many.
     pub per_task: Vec<bool>,
+    /// What the model actually answered. A battery that can only report a
+    /// count cannot report HOW the failures were wrong, and a caller with
+    /// its own grammar can check acceptance rather than only exact match.
+    pub answers: Vec<String>,
 }
 
 impl BatteryScore {
@@ -327,5 +331,5 @@ fn battery_for<A: StudyArch>(i: &Inputs, tasks: &[BatteryTask]) -> Result<Batter
     let refs: Vec<&audit::bank::Probe> = probes.iter().collect();
     let scored = learner.score(Arm::Incumbent, &refs);
     let per_task: Vec<bool> = scored.scores.iter().map(|s| *s >= 1.0).collect();
-    Ok(BatteryScore { passed: per_task.iter().filter(|p| **p).count(), total: tasks.len(), per_task })
+    Ok(BatteryScore { passed: per_task.iter().filter(|p| **p).count(), total: tasks.len(), per_task, answers: scored.answers })
 }
