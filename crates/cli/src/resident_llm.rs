@@ -841,8 +841,21 @@ impl ResidentModel for QwenResident {
         Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
             .with_max_context_tokens(self.ctx as u64)
     }
+    /// Keyed on the ADAPTER, not a constant.
+    ///
+    /// The manager holds one instance per key, so a constant here means one
+    /// instance per model and a version change can only be applied by
+    /// destroying what was there: `set_adapter` then `evict`, after which
+    /// the old version no longer exists to compare against or fall back to.
+    /// Naming the adapter makes two versions two instances, which is what
+    /// `residency::staged` needs in order to validate a candidate while the
+    /// incumbent keeps answering.
+    ///
+    /// A resident with no adapter keys on `"base"`, so the common case is
+    /// one instance exactly as before.
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(self.id.as_str(), "default")
+        let adapter = self.adapter.read().unwrap_or_else(|e| e.into_inner());
+        InstanceKey::new(self.id.as_str(), adapter.as_deref().unwrap_or("base"))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);

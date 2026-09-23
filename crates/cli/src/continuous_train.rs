@@ -37,9 +37,15 @@ use residency::{Executor, InstanceKey, ResidentModel};
 /// request is in flight and `evict` refused rather than tearing down a
 /// running lane, which is exactly the pinned-safety contract that makes a
 /// mid-request swap harmless.
-pub fn swap_in_adapter(resident: &QwenResident, key: &InstanceKey, executor: &Executor, adapter: &Path) -> bool {
+pub fn swap_in_adapter(resident: &QwenResident, executor: &Executor, adapter: &Path) -> bool {
+    // The key is read BEFORE the write, and that ordering is the contract
+    // now that a resident may key on the adapter it is pointing at
+    // (`QwenResident::instance_key`). What has to be evicted is the instance
+    // built from the OLD value; asking afterwards would name the new one,
+    // which is not resident yet, and leave the stale instance serving.
+    let stale = resident.instance_key("generate", &Invocation::new());
     resident.set_adapter(adapter.to_str().map(str::to_string));
-    executor.evict(key.clone())
+    executor.evict(stale)
 }
 
 /// How often [`AdapterWatcher`] looks at its directory. Small enough that a
@@ -97,19 +103,20 @@ impl Drop for AdapterWatcher {
 pub fn spawn_adapter_watcher(dir: Option<&Path>, resident: Option<Arc<QwenResident>>, executor: &Executor) -> Option<AdapterWatcher> {
     let dir = dir?.to_path_buf();
     let resident = resident?;
-    // The resident's own answer to "which instance serves me", not a locally
-    // rebuilt `InstanceKey`: the variant string is the resident's business
-    // and a second spelling of it here would silently evict nothing the day
-    // it changed.
-    let key = resident.instance_key("generate", &Invocation::new());
+    // Asked of the resident each time rather than captured once: the
+    // variant string is the resident's business, and a resident that keys on
+    // its current adapter answers differently after every swap. A key held
+    // for the life of the process would name the instance that was resident
+    // at startup and silently evict nothing from the second swap onward.
+    let model = resident.instance_key("generate", &Invocation::new()).model;
     let stop = Arc::new(AtomicBool::new(false));
     let swaps = Arc::new(AtomicU64::new(0));
     let executor = executor.clone();
     let (t_stop, t_swaps) = (stop.clone(), swaps.clone());
-    eprintln!("brain serve: watching {} for promoted LoRA adapters ({})", dir.display(), key.model);
+    eprintln!("brain serve: watching {} for promoted LoRA adapters ({model})", dir.display());
     let join = std::thread::Builder::new()
         .name("brain-adapter-watch".to_string())
-        .spawn(move || watch_loop(&dir, &resident, &key, &executor, &t_stop, &t_swaps))
+        .spawn(move || watch_loop(&dir, &resident, &executor, &t_stop, &t_swaps))
         .ok()?;
     Some(AdapterWatcher { stop, swaps, join: Some(join) })
 }
@@ -125,15 +132,20 @@ pub fn spawn_adapter_watcher(dir: Option<&Path>, resident: Option<Arc<QwenReside
 /// gone - either evicted, or found not resident at all, which after the
 /// `set_adapter` above means every future activation already reads the new
 /// adapter and there is nothing left to drop.
-fn watch_loop(dir: &Path, resident: &QwenResident, key: &InstanceKey, executor: &Executor, stop: &AtomicBool, swaps: &AtomicU64) {
+fn watch_loop(dir: &Path, resident: &QwenResident, executor: &Executor, stop: &AtomicBool, swaps: &AtomicU64) {
     let mut applied: Option<PathBuf> = None;
-    let mut pending = false;
+    // The key whose instance is owed an eviction, captured at the moment the
+    // swap was applied. It cannot be re-derived later: by then the resident
+    // answers with the NEW adapter's key, and the instance still holding
+    // memory is the old one.
+    let mut pending: Option<InstanceKey> = None;
     while !stop.load(Ordering::SeqCst) {
         match rl::improve::latest_adapter(dir) {
             Ok(Some((_, path))) if applied.as_deref() != Some(path.as_path()) => {
-                pending = !swap_in_adapter(resident, key, executor, &path);
+                let stale = resident.instance_key("generate", &Invocation::new());
+                pending = (!swap_in_adapter(resident, executor, &path)).then_some(stale);
                 applied = Some(path);
-                if !pending {
+                if pending.is_none() {
                     swaps.fetch_add(1, Ordering::SeqCst);
                 }
             }
@@ -146,9 +158,11 @@ fn watch_loop(dir: &Path, resident: &QwenResident, key: &InstanceKey, executor: 
         // Short-circuit order is the contract, not a style choice: ask
         // whether anything stale is resident BEFORE attempting the eviction
         // (see `is_resident`).
-        if pending && (!is_resident(executor, key) || executor.evict(key.clone())) {
-            pending = false;
-            swaps.fetch_add(1, Ordering::SeqCst);
+        if let Some(stale) = pending.clone() {
+            if !is_resident(executor, &stale) || executor.evict(stale) {
+                pending = None;
+                swaps.fetch_add(1, Ordering::SeqCst);
+            }
         }
         std::thread::sleep(POLL);
     }
