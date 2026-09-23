@@ -824,7 +824,32 @@ learned" is actionable where "3%" is not. `seed_spread` reports a range
 rather than a standard deviation, since at three or four seeds a standard
 deviation carries more precision than evidence.
 
-**R11 - the acceptance run.** 3.3, asserted.
+**R11 - the acceptance block. DONE 2026-09-23.**
+`crates/audit`'s `acceptance` module: the eight clauses of 3.3 as a type, so
+a run cannot report a subset of them and call it a result. Ten tests.
+
+**The asymmetry is the point, and it is tested as a pair.** A spectacular
+run with one control that could not answer is REFUSED; a run that learned
+almost nothing, said so, and kept its controls intact is ACCEPTED. That is
+what pre-registration buys: what counts as an answer is fixed before anyone
+knows what the answer is, so a bigger number cannot buy its way past a
+control.
+
+Three clauses encode distinctions that are easy to lose. Clause 1 is about
+explicability rather than volume - one unexplained rejection fails it,
+because a refusal nobody can account for is one nobody can act on. Clause 3
+requires the per-block bar to have been ARMED, which is R0's defect restated
+as an acceptance condition: a clean BWT with the bar off is a number the run
+did not check. Clause 5 treats a detection latency of zero as an absent
+audit rather than an instant one.
+
+The table prints every clause either way, because a report listing only
+failures cannot be read as evidence that the rest were checked.
+
+**What remains before this can be RUN rather than evaluated:** the facts it
+takes are produced by a real reader over a real corpus, which needs the
+sample driven against a real `--model` for long enough to fill them. The
+block is the instrument; pointing it at a run is the next thing.
 
 ---
 
