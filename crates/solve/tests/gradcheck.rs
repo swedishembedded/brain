@@ -200,3 +200,49 @@ fn a_saved_policy_reloads_and_answers_identically() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// EVERY row of a batch gets a real distribution, not just the first few.
+///
+/// The row softmax is a workgroup-per-row kernel, so its dispatch must ask
+/// for one workgroup per row rather than one thread per row. Get that wrong
+/// and the first handful of rows are correct while the rest read whatever
+/// was in the buffer - and nothing upstream notices, because training reads
+/// the LOGITS and never this. The symptom is a policy that appears to have
+/// learned almost nothing, at a rate set by how many rows happened to be
+/// covered.
+#[test]
+fn every_row_of_a_batch_gets_its_own_softmax() {
+    let cfg = tiny();
+    // Comfortably more rows than one workgroup's worth of threads.
+    let rows = 300u32;
+    let net = Net::from_weights(cfg.clone(), rows, &init_weights(&cfg, 5));
+
+    // Identical input on every row, so every row must produce the same
+    // distribution - any row that was never written stands out.
+    let width = cfg.in_dim as usize;
+    let mut x = vec![0.0f32; rows as usize * width];
+    for r in 0..rows as usize {
+        x[r * width + 2] = 1.0;
+    }
+    let probs = net.policy(&x);
+    let m = cfg.moves as usize;
+
+    let first: Vec<f32> = probs[..m].to_vec();
+    let sum0: f32 = first.iter().sum();
+    assert!((sum0 - 1.0).abs() < 1e-4, "row 0 is not a distribution: sums to {sum0}");
+
+    for r in 0..rows as usize {
+        let row = &probs[r * m..(r + 1) * m];
+        let sum: f32 = row.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "row {r} of {rows} sums to {sum}, so it never received a softmax"
+        );
+        for (i, (a, b)) in row.iter().zip(&first).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "row {r} differs from row 0 at move {i} ({a} vs {b}) on identical input"
+            );
+        }
+    }
+}

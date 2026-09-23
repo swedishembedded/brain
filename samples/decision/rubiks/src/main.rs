@@ -844,6 +844,7 @@ fn net_main(argv: &[String]) -> Result<(), String> {
         eval_every: args.usize_or("--net-eval-every", 2000),
         eval_cubes: args.usize_or("--net-eval-cubes", 200),
         eval_scramble: args.usize_or("--net-eval-scramble", 40),
+        checkpoint: None,
     };
     let cubes = args.usize_or("--cubes", 500);
     let scramble = args.usize_or("--scramble", 40);
@@ -852,6 +853,8 @@ fn net_main(argv: &[String]) -> Result<(), String> {
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
 
+    let mut a = a;
+    a.checkpoint = save.clone();
     let net = match &load {
         Some(p) => {
             println!("cubenet: loading {p}");

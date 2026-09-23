@@ -27,6 +27,9 @@ pub struct TrainArgs {
     pub eval_every: usize,
     pub eval_cubes: usize,
     pub eval_scramble: usize,
+    /// Written at every eval, so a long run is inspectable while it runs and
+    /// survives being interrupted.
+    pub checkpoint: Option<String>,
 }
 
 pub fn config(a: &TrainArgs, space: &CubeSpace) -> Config {
@@ -53,6 +56,23 @@ fn lr_at(step: usize, steps: usize, peak: f32) -> f32 {
     peak * (0.05 + 0.95 * cos)
 }
 
+/// The deepest walk to draw at this point in training.
+///
+/// Uniform over `1..=depth` throughout - what ramps is the CEILING, not the
+/// distribution below it, so the shallow end is never starved. A policy has
+/// to be right near the goal before being right far from it is worth
+/// anything: every solve ends in the shallow states, and a run that spends
+/// its early capacity on states it cannot yet make progress from learns the
+/// average of many wrong answers.
+fn depth_at(step: usize, steps: usize, full: usize) -> usize {
+    let ramp = steps / 2;
+    if step >= ramp {
+        return full;
+    }
+    let t = step as f32 / ramp.max(1) as f32;
+    (2.0 + t * (full as f32 - 2.0)).round() as usize
+}
+
 pub fn train(a: &TrainArgs) -> Net {
     let space = CubeSpace::new();
     let cfg = config(a, &space);
@@ -65,8 +85,7 @@ pub fn train(a: &TrainArgs) -> Net {
         a.depth
     );
     let net = Net::new(cfg, a.rows, a.seed);
-    let walk = Walk { depth: a.depth, seed: a.seed ^ 0x5EED };
-    let mut rng = Rng::new(walk.seed);
+    let mut rng = Rng::new(a.seed ^ 0x5EED);
 
     let started = std::time::Instant::now();
     let mut mark = started;
@@ -74,6 +93,7 @@ pub fn train(a: &TrainArgs) -> Net {
     let mut window = 0.0f32;
 
     for step in 0..a.steps {
+        let walk = Walk { depth: depth_at(step, a.steps, a.depth), seed: 0 };
         let b = batch(&space, &walk, a.rows as usize, &mut rng);
         net.zero_grads();
         net.load_batch(&b.features, &b.labels);
@@ -85,19 +105,36 @@ pub fn train(a: &TrainArgs) -> Net {
             let per = mark.elapsed().as_secs_f32() / every as f32;
             mark = std::time::Instant::now();
             println!(
-                "  step {:>6}  loss {:.4}  {:.0} ms/step  {:.0} states/s",
+                "  step {:>6}  loss {:.4}  depth {:>2}  {:.0} ms/step  {:.0} states/s",
                 step + 1,
                 window,
+                depth_at(step, a.steps, a.depth),
                 per * 1000.0,
                 a.rows as f32 / per
             );
         }
         if a.eval_every > 0 && (step + 1) % a.eval_every == 0 {
-            let r = measure(&net, a.eval_cubes, a.eval_scramble, 0xE0A1 ^ step as u64);
-            println!(
-                "  eval  scramble {}: solved {}/{} ({:.0}%), mean {:.1} moves",
-                a.eval_scramble, r.solved, r.total, 100.0 * r.rate(), r.mean_moves
-            );
+            // Several depths, not one. A single deep number reads as a flat
+            // zero for most of a run while the frontier is in fact moving
+            // steadily outwards underneath it, which is the difference
+            // between "not working" and "not there yet".
+            let mut line = String::new();
+            for d in [3usize, 6, 9, 12, 16, 20, a.eval_scramble] {
+                let r = measure(&net, a.eval_cubes, d, 0xE0A1);
+                line.push_str(&format!(" {d}:{:.0}%", 100.0 * r.rate()));
+            }
+            println!("  eval solved by scramble depth -{line}");
+            if let Some(path) = &a.checkpoint {
+                let fit = serde_json::json!({
+                    "task": "cube-policy", "steps_done": step + 1, "steps": a.steps,
+                    "batch": a.rows, "walk_depth": a.depth, "d_model": a.d_model,
+                    "d_ff": a.d_ff, "blocks": a.blocks, "lr": a.lr, "seed": a.seed,
+                });
+                match net.save(path, &fit) {
+                    Ok(()) => println!("  saved {path}"),
+                    Err(e) => eprintln!("  checkpoint failed: {e}"),
+                }
+            }
         }
     }
     println!(

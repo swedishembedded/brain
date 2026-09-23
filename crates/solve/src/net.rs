@@ -156,7 +156,12 @@ impl Net {
         if with_loss {
             s.push(g.step(K_CE_VALUE, &[&self.logits, &self.targets, &self.ce], &[n, m], n));
         } else {
-            s.push(g.step(K_SOFTMAX, &[&self.logits, &self.probs], &[n, m], n));
+            // One WORKGROUP per row, not one thread: `softmax_rows` has 64
+            // threads cooperate on a row, so the dispatch has to ask for
+            // `rows * 64` threads to get `rows` workgroups. Asking for `rows`
+            // covers only the first `rows / 64` of them and leaves the rest
+            // holding whatever was in the buffer.
+            s.push(g.step(K_SOFTMAX, &[&self.logits, &self.probs], &[n, m], n * 64));
         }
         s
     }
