@@ -434,6 +434,7 @@ dependencies = [
  "brain-s3dit",
  "brain-sam2",
  "brain-search",
+ "brain-solve",
  "brain-testutil",
  "brain-timesfm3",
  "brain-viewport",
@@ -2294,6 +2295,20 @@ version = "1.1.0"
 dependencies = [
  "libc",
  "tokio",
+]
+
+[[package]]
+name = "brain-solve"
+version = "1.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -5660,6 +5675,7 @@ name = "sample-decision-rubiks"
 version = "1.1.0"
 dependencies = [
  "brain",
+ "serde_json",
 ]
 
 [[package]]
