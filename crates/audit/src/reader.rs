@@ -44,12 +44,15 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::bank::{Probe, ProbeConfig, ProbeSet, SpanSelector, UniformSelector};
 use crate::growth::{Action, Diagnosis, Growth, GrowthConfig};
 use crate::pool::{AdapterId, Pool, PoolConfig};
 use crate::reservoir::{Reservoir, ReservoirConfig};
 use crate::schedule::{block_drop_bar, AuditConfig, Schedule};
-use crate::stream::{Episode, EpisodeId};
+use crate::run::ReaderState;
+use crate::stream::{Cursor, Episode, EpisodeId};
 use crate::triage::{adjudicate, reach, reader_gate_config, screen, TriageConfig, Verdict};
 
 use promote::gate::GateInput;
@@ -125,7 +128,7 @@ pub struct Row {
     pub action: Option<Action>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReaderConfig {
     pub triage: TriageConfig,
     pub probes: ProbeConfig,
@@ -211,6 +214,57 @@ impl<L: Learner> Reader<L> {
 
     pub fn learner(&self) -> &L {
         &self.learner
+    }
+
+    /// Episodes read so far, including those refused.
+    pub fn episode(&self) -> u64 {
+        self.episode
+    }
+
+    /// Everything that must survive the process, ready to be written.
+    ///
+    /// `cursor` is where the STREAM got to, which the reader does not own:
+    /// it reads episodes it is handed, so the caller holding the stream is
+    /// the one that knows. Passing it through here keeps a run's position
+    /// and a run's knowledge in one file rather than two that can disagree.
+    pub fn state(&self, cursor: Option<Cursor>) -> ReaderState {
+        ReaderState {
+            schema: crate::run::SCHEMA,
+            bank: self.bank.clone(),
+            schedule: self.schedule.clone(),
+            reservoir: self.reservoir.clone(),
+            growth: self.growth.clone(),
+            episode: self.episode,
+            cursor,
+        }
+    }
+
+    /// Write everything that must survive the process: the pool's index and
+    /// the reader's own state, into `run`.
+    ///
+    /// One call rather than two deliberately. The reader mutates the pool
+    /// every step and holds its bank in memory, and those are two halves of
+    /// one thing: a state saved without its pool reopens pointing at
+    /// adapters whose index was never written. Making it impossible to do
+    /// half of it is worth more than the flexibility of separate calls.
+    pub fn checkpoint(&self, run: &crate::run::Run, cursor: Option<Cursor>) -> Result<(), crate::run::RunError> {
+        self.pool.save().map_err(|e| crate::run::RunError::Io(self.pool.root().to_path_buf(), e.to_string()))?;
+        run.save_state(&self.state(cursor))
+    }
+
+    /// Carry on from a saved state, as if the process had not stopped.
+    pub fn restore(cfg: ReaderConfig, learner: L, pool: Pool, state: ReaderState) -> Reader<L> {
+        Reader {
+            learner,
+            pool,
+            bank: state.bank,
+            schedule: state.schedule,
+            reservoir: state.reservoir,
+            growth: state.growth,
+            selector: Box::new(UniformSelector),
+            cfg,
+            episode: state.episode,
+        }
     }
 
     /// Read one episode.
@@ -614,6 +668,42 @@ mod tests {
             0,
             "a run that has promoted NOTHING has nothing for the oracle to bound, so asking would cost a full training run for a meaningless answer"
         );
+    }
+
+    /// The whole premise is a reader left running for days and stopped when
+    /// convenient. Stopping and resuming has to be invisible in the ledger.
+    #[test]
+    fn a_resumed_reader_carries_on_exactly_where_it_stopped() {
+        let unbroken = {
+            let d = Dir::new();
+            let mut r = reader(&d, Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() });
+            (0..10).map(|i| r.step(&episode(&format!("e{i}"), 50))).collect::<Vec<_>>()
+        };
+
+        let d = Dir::new();
+        let run = crate::run::Run::create(
+            &d.0,
+            &crate::run::Manifest { schema: crate::run::SCHEMA, model: "fake".to_string(), cfg: cfg() },
+        )
+        .expect("run");
+        let pool = Pool::create(&run.pool_root(), cfg().pool).expect("pool");
+        let mut r = Reader::new(cfg(), Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() }, pool);
+        let mut rows: Vec<Row> = (0..4).map(|i| r.step(&episode(&format!("e{i}"), 50))).collect();
+        let bank_before = r.bank_size();
+        r.checkpoint(&run, None).expect("checkpoint");
+        drop(r);
+
+        // A fresh process: nothing carried over but the directory.
+        let run = crate::run::Run::open(&d.0).expect("the run must reopen");
+        let saved = run.load_state().expect("load").expect("a checkpoint was written");
+        let pool = Pool::open(&run.pool_root()).expect("the pool must reopen");
+        let mut resumed = Reader::restore(cfg(), Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() }, pool, saved);
+        assert_eq!(resumed.episode(), 4);
+        assert_eq!(resumed.bank_size(), bank_before);
+        rows.extend((4..10).map(|i| resumed.step(&episode(&format!("e{i}"), 50))));
+
+        let shape = |v: &[Row]| v.iter().map(|w| (w.episode.clone(), w.outcome.stage(), w.audited)).collect::<Vec<_>>();
+        assert_eq!(shape(&rows), shape(&unbroken), "a stop and a resume must leave the same ledger as an unbroken run");
     }
 
     /// The reader is meant to be left running for days; the same seed over

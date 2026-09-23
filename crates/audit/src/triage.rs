@@ -89,6 +89,29 @@ impl Verdict {
         }
     }
 
+    /// The gate's own reason for a refusal, when there was one. A ledger
+    /// row carries it so "rejected" is never the whole story.
+    pub fn cause(&self) -> Option<&'static str> {
+        match self {
+            Verdict::Rejected(r) => match r.decision {
+                Decision::Reject(c) => Some(match c {
+                    promote::gate::Cause::NotSignificant { .. } => "not_significant",
+                    promote::gate::Cause::EffectTooSmall { .. } => "effect_too_small",
+                    promote::gate::Cause::AnchorRegressed { .. } => "anchor_regressed",
+                    promote::gate::Cause::BlockRegressed { .. } => "block_regressed",
+                    promote::gate::Cause::Degenerate { .. } => "degenerate",
+                }),
+                Decision::Promote => None,
+            },
+            Verdict::Unstructured(Unstructured::TooShort { .. }) => Some("too_short"),
+            Verdict::Unstructured(Unstructured::NoStructure { .. }) => Some("no_structure"),
+            Verdict::AlreadyKnown { .. } => Some("already_known"),
+            Verdict::OutOfReach { .. } => Some("out_of_reach"),
+            Verdict::TooSmallToGate { .. } => Some("too_small_to_gate"),
+            Verdict::Promoted(_) => None,
+        }
+    }
+
     /// Whether this episode should be offered again later. Only the deferral
     /// says yes: everything else is a decision.
     pub fn retry_later(&self) -> bool {

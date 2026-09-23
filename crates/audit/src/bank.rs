@@ -78,7 +78,7 @@ impl ProbeId {
 }
 
 /// One frozen question over an episode.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
     pub id: ProbeId,
     pub family: ProbeFamily,
@@ -163,7 +163,7 @@ pub enum BankError {
 type Result<T> = std::result::Result<T, BankError>;
 
 /// Every question frozen over one episode, plus the rows that may be trained.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProbeSet {
     episode: EpisodeId,
     probes: Vec<Probe>,

@@ -98,7 +98,7 @@ pub enum Action {
 }
 
 /// Promote history, and whether the oracle is worth asking.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Growth {
     cfg: GrowthConfig,
     recent: VecDeque<bool>,

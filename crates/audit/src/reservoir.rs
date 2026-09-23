@@ -38,8 +38,8 @@
 
 use std::collections::BTreeSet;
 
-use data::rng::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::stream::EpisodeId;
 use crate::triage::Verdict;
@@ -61,7 +61,7 @@ impl Default for ReservoirConfig {
 }
 
 /// One promoted episode's trainable rows, kept for rehearsal.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub episode: EpisodeId,
     pub rows: Vec<String>,
@@ -87,18 +87,24 @@ pub enum Offered {
 }
 
 /// A bounded, uniform sample of promoted episodes.
-#[derive(Clone, Debug)]
+///
+/// It carries no generator state. Every retention decision is a pure
+/// function of the configured seed and how many distinct promotions have
+/// been offered, which is what lets a reservoir be written to disk and
+/// resumed EXACTLY rather than approximately: there is no hidden position in
+/// a stream to restore, and a reservoir reloaded mid-run makes the same next
+/// decision it would have made without the interruption.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reservoir {
     cfg: ReservoirConfig,
     items: Vec<Entry>,
     held: BTreeSet<EpisodeId>,
     seen: u64,
-    rng: Rng,
 }
 
 impl Reservoir {
     pub fn new(cfg: ReservoirConfig) -> Reservoir {
-        Reservoir { cfg, items: Vec::new(), held: BTreeSet::new(), seen: 0, rng: Rng::new(cfg.seed) }
+        Reservoir { cfg, items: Vec::new(), held: BTreeSet::new(), seen: 0 }
     }
 
     /// Offer an episode and its trainable rows. Only a promoted one is ever
@@ -132,7 +138,7 @@ impl Reservoir {
         if self.cfg.cap == 0 {
             return Offered::Passed;
         }
-        let k = self.rng.next_u64() % self.seen;
+        let k = draw_u64(self.cfg.seed, self.seen) % self.seen;
         if (k as usize) < self.cfg.cap {
             let victim = self.items[k as usize].episode.clone();
             self.held.remove(&victim);
@@ -157,10 +163,9 @@ impl Reservoir {
         // Partial Fisher-Yates from a seed of the caller's choosing, so the
         // draw neither consumes nor depends on the reservoir's own generator
         // and asking twice gives the same answer.
-        let mut rng = Rng::new(seed);
         let take = rows.min(all.len());
         for i in 0..take {
-            let j = i + (rng.next_u64() % (all.len() - i) as u64) as usize;
+            let j = i + (draw_u64(seed, i as u64) % (all.len() - i) as u64) as usize;
             all.swap(i, j);
         }
         all.truncate(take);
@@ -189,6 +194,16 @@ impl Reservoir {
     pub fn rows(&self) -> usize {
         self.items.iter().map(|e| e.rows.len()).sum()
     }
+}
+
+/// A uniform draw derived from a seed and a counter rather than from a
+/// generator's position. Stateless on purpose: see [`Reservoir`].
+fn draw_u64(seed: u64, counter: u64) -> u64 {
+    let mut h = Sha256::new();
+    h.update(seed.to_le_bytes());
+    h.update(counter.to_le_bytes());
+    let d = h.finalize();
+    u64::from_le_bytes(d[..8].try_into().expect("sha256 yields 32 bytes"))
 }
 
 #[cfg(test)]

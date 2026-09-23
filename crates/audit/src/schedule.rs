@@ -92,7 +92,7 @@ impl Plan {
 }
 
 /// The bank of earlier episodes, and whose turn it is.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schedule {
     cfg: AuditConfig,
     order: Vec<EpisodeId>,

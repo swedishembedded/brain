@@ -607,11 +607,37 @@ this design in one test.
 recorded as missing from `crates/residency`. Tests: a promoted adapter changes
 a live response without restart; V17. **Two commits.**
 
-**R9 - the run directory.** One directory is the model: manifest, base
-reference, adapter pool, archive, reservoir, probe bank, gate ledger,
-retention matrix, audit schedule. Atomic write-then-rename throughout, best
-state rather than latest. Tests: an interrupted write leaves a loadable
-directory; a resumed run continues the same stream at the same episode.
+**R9 - the run directory. DONE 2026-09-23.**
+`crates/audit`'s `run` module: manifest, state, an append-only ledger, and
+the pool. Seven tests, red before green.
+
+**Correction: there is no best-versus-latest distinction, and that is not an
+omission.** This file inherited "best state rather than latest" from a
+design where training can silently degrade and a run must be able to fall
+back. Nothing ungated ever lands here: an adapter is written only after the
+gate promoted it against frozen probes and the earlier episodes' own blocks.
+The latest state IS the best one the reader has evidence for, and adding a
+rollback would be adding a remedy for a failure this design does not have.
+
+**A refactor persistence forced, and it improved the design.** The reservoir
+held a stateful generator, which cannot be round-tripped exactly. Its
+retention decision is now a pure function of the seed and how many distinct
+promotions have been offered, so a reservoir reloaded mid-run makes the same
+next decision it would have made uninterrupted. The uniformity test still
+passes, so nothing was traded for it.
+
+**`checkpoint` is one call rather than two, because the test caught the bug
+that makes it necessary.** The reader mutates the pool every step and holds
+its bank in memory; a state saved without the pool's index reopens pointing
+at adapters that were never indexed. The first resume test failed exactly
+that way. Saving half is now impossible rather than merely discouraged.
+
+The ledger's shape is deliberate rather than a serde dump of internal types:
+flat, versioned, and carrying a cause for every refusal, since it is the
+artefact someone greps months later and has to survive the internals being
+refactored underneath it. A torn trailing line is skipped rather than
+failing the read, and the next append heals the tear instead of compounding
+one lost row into two.
 
 **R10 - the adversarial and reproducibility suite.** T3 of 3.2: shuffled
 labels, order permutation, multi-seed, injections. Tests are the arms.

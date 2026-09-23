@@ -182,6 +182,12 @@ impl Pool {
         self.now
     }
 
+    /// Where this pool's files live, so a caller that has a pool can reopen
+    /// it without having kept the path it opened it with.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn entry(&self, id: &AdapterId) -> Option<&PoolEntry> {
         self.entries.get(id)
     }
