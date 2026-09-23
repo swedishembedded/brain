@@ -3113,6 +3113,27 @@ mod teacher_tests {
         }
     }
 
+    /// Most runs that fail do not get stuck, they stall: moving the whole
+    /// time and covering ground already walked. A rotation that only asks
+    /// whether the player moved cannot see that, and measured over nine
+    /// levels it is seven of the twenty-seven failures.
+    #[test]
+    fn going_nowhere_is_not_only_standing_still() {
+        assert!(!getting_nowhere(0, 0), "moving and finding new ground");
+        assert!(
+            getting_nowhere(STUCK_TRY_SOMETHING_ELSE, 0),
+            "pressed against a wall"
+        );
+        assert!(
+            getting_nowhere(0, STALE_TRY_THE_WALLS),
+            "walking briskly in a circle is going nowhere too"
+        );
+        assert!(!getting_nowhere(
+            STUCK_TRY_SOMETHING_ELSE - 1,
+            STALE_TRY_THE_WALLS - 1
+        ));
+    }
+
     /// A route to the frontier is the level saying it does NOT know the way
     /// out. Reading it as a way out disables the one escape that gets a
     /// player past a room whose exit is a switch on its wall.
