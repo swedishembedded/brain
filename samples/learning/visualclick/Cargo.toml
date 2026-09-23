@@ -1,0 +1,24 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/learning/visualclick` -> `sample-learning-visualclick`. The
+# Makefile's `samples/%/{build,run}` rules depend on that mapping;
+# `make check/samples` enforces it.
+name = "sample-learning-visualclick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Validation sample: can rows the encoder never produced (an image patch feature) drive a decision model's cross-attention head to a spatially grounded answer, against a text baseline and two ablations."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+#   decision  RlcdPipeline / Decide / Question / Features: the model and the
+#             splice seam this sample validates
+#   viewport  Canvas: headless, no-GPU rendering of the synthetic scenes
+brain = { workspace = true, features = ["decision", "viewport"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Matches samples/decision/doom's "decision" + "viewport" combination.
+max-brain-crates = 34
