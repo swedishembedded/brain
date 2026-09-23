@@ -125,6 +125,54 @@ clone() {  # rung mission attempt work
   return $rc
 }
 
+# The ceiling, checked before anything is spent climbing towards it.
+#
+# Five of the search's seven operators propose with the scripted teacher, and
+# the head is fitted to the decisions the search kept - so a teacher that
+# cannot finish a level cannot be compressed into a policy that can. Nothing
+# below this line can exceed it.
+#
+# This exists because it was missing. A whole week went into tuning the student
+# against 1/27 while the teacher scored ZERO kills on E1M1 at the setting a
+# commit had recorded it finishing in 261 decisions, and no step of the loop
+# ever asked. A ladder that gates only the student cannot see its own floor
+# fall out.
+#
+# Cheap on purpose: one episode a level, no encoder work, no GPU.
+teacher_gate() {  # rung skill mission work
+  local r=$1 skill=$2 mission=$3 work=$4 m pids=() finished=0 n
+  n=$(echo $MAPS | wc -w)
+  for m in $MAPS; do
+    "$BIN" probe --doom-bin "$DOOM" --wad "$WAD" --encoder "$ENC" \
+      --map "$m" --skill "$skill" --mission "$mission" --reward gauge \
+      --max-steps "$STEPS" --seed "$SEARCH_SEED" \
+      > "$LOGS/r$r-teacher-m$m.log" 2>&1 &
+    pids+=($!)
+  done
+  wait "${pids[@]}" 2>/dev/null
+  for m in $MAPS; do
+    local how
+    # `probe` says how the episode ended in its last line, from the game's
+    # own word for it - "exited" prints as "finished in N decisions", and
+    # that is the only ending that counts as doing the rung.
+    if grep -qE 'finished in [0-9]+ decisions' "$LOGS/r$r-teacher-m$m.log"; then
+      how=finished
+      finished=$((finished + 1))
+    elif grep -q 'died at decision' "$LOGS/r$r-teacher-m$m.log"; then
+      how=died
+    else
+      how=stalled
+    fi
+    say "$r" "$skill" "$mission" 0 teacher "$m" "$how"
+  done
+  note "rung $r: the TEACHER finished $finished/$n levels unaided"
+  if [ "$finished" -lt "$n" ]; then
+    note "rung $r: refusing to train - the teacher cannot do this rung itself, so no policy fitted to it can either"
+    note "         look at $LOGS/r$r-teacher-m*.log before spending search budget on this"
+    return 1
+  fi
+}
+
 # The bar. No search, no archive, no map it did not have to find: the head
 # plays, and either the level ends at the exit or it does not.
 prove() {  # rung skill mission attempt work
@@ -171,6 +219,9 @@ for (( r = FIRST; r <= LAST; r++ )); do
   work=out/ladder/r$r
   mkdir -p "$work"
   note "=== rung $r: skill $skill, $mission, levels $MAPS ==="
+  if ! teacher_gate "$r" "$skill" "$mission" "$work"; then
+    exit 1
+  fi
   passed=no
   for (( a = 1; a <= ATTEMPTS; a++ )); do
     find_generation "$r" "$skill" "$mission" "$a" "$work" "$work/policy.safetensors"
