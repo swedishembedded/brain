@@ -998,12 +998,12 @@ impl Conv {
             hw * cinkk,
         );
         // y[Cout, HW] = W[Cout, CinKK] . col[HW, CinKK]^T into conv_out (raw conv).
-        let reg_threads = cout.div_ceil(128) * hw.div_ceil(128) * 256;
-        let s_gemm = ctx.step(
+        let reg_tiles = cout.div_ceil(128) * hw.div_ceil(128);
+        let s_gemm = ctx.dispatch(
             ctx.ids.matmul_reg,
             &[ps.w(&self.names.weight), col, &self.conv_out],
             &[cout, cinkk, hw],
-            reg_threads,
+            gpu_core::Dispatch::Workgroups(reg_tiles),
         );
         // per-channel affine (BN-eval collapsed in `sb`) + SiLU (act=2): conv_out -> act.
         let s_epi = ctx.step(ctx.ids.conv_epilogue, &[&self.sb, &self.conv_out, &self.act], &[cout, hw, 2], cout * hw);

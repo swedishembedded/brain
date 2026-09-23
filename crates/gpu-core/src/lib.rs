@@ -1339,7 +1339,7 @@ mod native_facade {
                     n.saturating_mul(self.kernel_grid_at(kind).map(|g| g.wg_size).unwrap_or(1))
                 }
             };
-            self.step_sliced(kind, bufs, offsets, params, threads)
+            self.step_sliced_unchecked(kind, bufs, offsets, params, threads)
         }
 
         /// This handle's thread mapping for kernel slot `kind`.
@@ -1355,6 +1355,12 @@ mod native_facade {
         /// no symptom at the call site, and none in any loss either, because
         /// training reads those buffers through a different kernel.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            self.refuse_cooperative(kind);
+            self.step_unchecked(kind, bufs, params, threads)
+        }
+
+        /// Panic if `kind` names a kernel whose threads share one item.
+        fn refuse_cooperative(&self, kind: usize) {
             if let Some(g) = self.kernel_grid_at(kind) {
                 assert!(
                     !g.cooperative,
@@ -1365,7 +1371,6 @@ mod native_facade {
                     g.wg_size
                 );
             }
-            self.step_unchecked(kind, bufs, params, threads)
         }
 
         fn step_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
@@ -1457,7 +1462,18 @@ mod native_facade {
         pub fn step_cache_stats(&self) -> Option<(u64, u64, usize)> {
             self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|c| c.stats())
         }
+        /// [`Self::step`] for a kernel reading bound sub-ranges.
+        ///
+        /// REFUSES workgroup-cooperative kernels on the same terms and for the
+        /// same reason - a sliced dispatch under-covers its output exactly as
+        /// silently as a whole-buffer one, and the packed-span attention paths
+        /// that use this entry point are where the miscount is hardest to see.
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+            self.refuse_cooperative(kind);
+            self.step_sliced_unchecked(kind, bufs, offsets, params, threads)
+        }
+
+        fn step_sliced_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
             // here, so no alias check - wgpu validates the concrete ranges.
             //

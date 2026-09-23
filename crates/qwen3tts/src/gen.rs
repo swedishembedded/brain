@@ -422,11 +422,11 @@ impl TalkerGen {
     fn qk_norm_rope_base(&self, s: &mut Vec<Step>, ids: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, hd: u32, heads: u32, n: u32, theta: f32) {
         let g = &self.gpu;
         if g.caps().workgroup_reductions {
-            s.push(g.step(
+            s.push(g.dispatch(
                 QKNORM_ROPE_BASE_FUSED,
                 &[x, w, out],
                 &[n * heads, heads, hd, gpu_core::f(1e-6), gpu_core::f(theta), n],
-                n * heads * 64,
+                gpu_core::Dispatch::Workgroups(n * heads),
             ));
         } else {
             s.push(block::rmsnorm_fwd(g, ids, x, w, out, hd, n * heads));

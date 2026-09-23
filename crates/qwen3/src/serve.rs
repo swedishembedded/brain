@@ -1488,11 +1488,11 @@ impl Engine {
             Some(sched) => {
                 let tiles = m.div_ceil(128) * n.div_ceil(128);
                 let part = self.splitk_part.as_ref().expect("split-K chosen without a scratch buffer");
-                s.push(self.gpu.step(
+                s.push(self.gpu.dispatch(
                     MATMUL_REG3_SPLITK,
                     &[x, w, part],
                     &[m, k, n, sched.split_k],
-                    sched.split_k * tiles * 256,
+                    gpu_core::Dispatch::Workgroups(sched.split_k * tiles),
                 ));
                 // acc = 0: a forward GEMM owns its output and ASSIGNS, so the
                 // destination needs no clear (unlike a parameter gradient).
@@ -1665,17 +1665,17 @@ impl Engine {
             self.selector.select(Op::MatMul, shape, &self.caps)
         };
         match variant {
-            KernelVariant::WorkgroupPerOutput => s.push(self.gpu.step(
+            KernelVariant::WorkgroupPerOutput => s.push(self.gpu.dispatch(
                 MATMUL_I8_GEMV,
                 &[scratch.xq_for(k), w, &scratch.sx, sw, out],
                 &[rows, k / 4, n],
-                n * 64,
+                gpu_core::Dispatch::Workgroups(n),
             )),
-            _ => s.push(self.gpu.step(
+            _ => s.push(self.gpu.dispatch(
                 MATMUL_I8_DYN,
                 &[scratch.xq_for(k), w, &scratch.sx, sw, out],
                 &[rows, k / 4, n],
-                rows.div_ceil(128) * n.div_ceil(128) * 256,
+                gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)),
             )),
         }
     }
@@ -1724,17 +1724,17 @@ impl Engine {
         const REPS: usize = 8;
         let out = gpu.storage(m as u64 * n as u64);
         let step = |_: usize| match variant {
-            KernelVariant::WorkgroupPerOutput => gpu.step(
+            KernelVariant::WorkgroupPerOutput => gpu.dispatch(
                 MATMUL_I8_GEMV,
                 &[scratch.xq_for(k), w, &scratch.sx, sw, &out],
                 &[m, k / 4, n],
-                n * 64,
+                gpu_core::Dispatch::Workgroups(n),
             ),
-            KernelVariant::PackedInt8 => gpu.step(
+            KernelVariant::PackedInt8 => gpu.dispatch(
                 MATMUL_I8_DYN,
                 &[scratch.xq_for(k), w, &scratch.sx, sw, &out],
                 &[m, k / 4, n],
-                m.div_ceil(128) * n.div_ceil(128) * 256,
+                gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128)),
             ),
             other => unreachable!("int8 candidates are GEMV or tile, got {other:?}"),
         };
@@ -1887,11 +1887,11 @@ impl Engine {
     fn rms_quant(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) {
         match &self.i8_scratch {
             Some(scratch) if self.caps.workgroup_reductions => {
-                s.push(self.gpu.step(
+                s.push(self.gpu.dispatch(
                     RMSNORM_QUANT_FUSED,
                     &[x, w, &scratch.sx, scratch.xq_for(d)],
                     &[d, rows, gpu_core::f(1e-6)],
-                    rows * 64,
+                    gpu_core::Dispatch::Workgroups(rows),
                 ));
             }
             _ => {
@@ -1921,11 +1921,11 @@ impl Engine {
             s.push(self.rms(x, w, out, hd, rows));
             s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
         } else if self.caps.workgroup_reductions {
-            s.push(g.step(
+            s.push(g.dispatch(
                 QKNORM_ROPE_FUSED,
                 &[x, w, &self.sc.pos_buf, out],
                 &[rows, heads, hd, gpu_core::f(1e-6), fb(theta)],
-                rows * 64,
+                gpu_core::Dispatch::Workgroups(rows),
             ));
         } else {
             s.push(self.rms(x, w, out, hd, rows));
@@ -1971,11 +1971,11 @@ impl Engine {
             s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
             s.push(g.step(KV_APPEND_B, &[out, &self.sc.blk_buf, &self.sc.off_buf, pool], &[b, heads * hd, block_size], rows * hd));
         } else if self.caps.workgroup_reductions {
-            s.push(g.step(
+            s.push(g.dispatch(
                 QKNORM_ROPE_APPEND_FUSED,
                 &[x, w, &self.sc.pos_buf, &self.sc.blk_buf, &self.sc.off_buf, out, pool],
                 &[rows, heads, hd, gpu_core::f(1e-6), fb(theta), block_size],
-                rows * 64,
+                gpu_core::Dispatch::Workgroups(rows),
             ));
         } else {
             s.push(self.rms(x, w, out, hd, rows));
@@ -2115,11 +2115,11 @@ impl Engine {
                     // @workgroup_size(256) its own launch shape (both pinned
                     // in its own WGSL header), identical to the fp32 twin.
                     let ntiles_q = b.div_ceil(64);
-                    s.push(g.step(
+                    s.push(g.dispatch(
                         PAGED_FLASH_PREFILL_I8,
                         &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
                         &[b, nh, nkv, hd, group, bs, mbt],
-                        nh * ntiles_q * 256,
+                        gpu_core::Dispatch::Workgroups(nh * ntiles_q),
                     ));
                 } else if fused {
                     // M2.7's split-key FlashDecode, ported to int8 KV: the
@@ -2134,11 +2134,11 @@ impl Engine {
                     // inputs vs the fp32 split kernel push a naive 3-output
                     // port over WebGPU's 8-storage-buffer floor).
                     let (n_splits, tiles_per_split) = decode_split_shape(cap);
-                    s.push(g.step(
+                    s.push(g.dispatch(
                         PAGED_FLASH_DECODE_SPLIT_I8,
                         &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
                         &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
-                        b * nh * n_splits * 64,
+                        gpu_core::Dispatch::Workgroups(b * nh * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
                 } else {
@@ -2177,11 +2177,11 @@ impl Engine {
                     // kernel's own tile size, @workgroup_size(256) its own
                     // launch shape (both pinned in its own WGSL header).
                     let ntiles_q = b.div_ceil(64);
-                    s.push(g.step(
+                    s.push(g.dispatch(
                         PAGED_FLASH_PREFILL,
                         &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx],
                         &[b, nh, nkv, hd, group, bs, mbt],
-                        nh * ntiles_q * 256,
+                        gpu_core::Dispatch::Workgroups(nh * ntiles_q),
                     ));
                 } else if fused {
                     // M2.7: split-key FlashDecode - the selector's decode
@@ -2194,11 +2194,11 @@ impl Engine {
                     // triad's three, and neither materialises a
                     // `[bsz, nh, cap]` scores/probs slab.
                     let (n_splits, tiles_per_split) = decode_split_shape(cap);
-                    s.push(g.step(
+                    s.push(g.dispatch(
                         PAGED_FLASH_DECODE_SPLIT,
                         &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_m, &sc.part_l, &sc.part_o],
                         &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
-                        b * nh * n_splits * 64,
+                        gpu_core::Dispatch::Workgroups(b * nh * n_splits),
                     ));
                     s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
                 } else {

@@ -129,6 +129,18 @@ impl<'g> Ctx<'g> {
     ) -> Step {
         self.gpu.step(kind, bufs, params, threads)
     }
+    /// [`Self::step`] for a kernel whose threads cooperate on one item, where
+    /// the caller counts workgroups and the device supplies the kernel's own
+    /// workgroup size - see [`gpu_core::Dispatch`].
+    pub fn dispatch(
+        &self,
+        kind: usize,
+        bufs: &[&gpu_core::DeviceBuffer],
+        params: &[u32],
+        grid: gpu_core::Dispatch,
+    ) -> Step {
+        self.gpu.dispatch(kind, bufs, params, grid)
+    }
 }
 
 #[cfg(test)]

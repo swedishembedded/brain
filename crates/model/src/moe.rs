@@ -1820,12 +1820,12 @@ pub fn expert_fwd_grouped(
     steps.push(g.step(ids.gather, &[&scratch.perm, x, &scratch.x_compact], &[d, compacted], compacted * d));
 
     let gemm = |w: &DeviceBuffer, x_in: &DeviceBuffer, out_buf: &DeviceBuffer, k: u32, n: u32, steps: &mut Vec<Step>| {
-        let threads = worst_case_tiles * n.div_ceil(128) * 256;
-        steps.push(g.step(
+        let tiles = worst_case_tiles * n.div_ceil(128);
+        steps.push(g.dispatch(
             ids.gemm_grouped,
             &[x_in, w, out_buf, &scratch.row_start, &scratch.row_count, &scratch.tile_start],
             &[k, n, e],
-            threads,
+            gpu_core::Dispatch::Workgroups(tiles),
         ));
     };
     gemm(gate_w_all, &scratch.x_compact, &scratch.gate_pre, d, ff, &mut steps);
