@@ -220,18 +220,58 @@ pub enum FactSplit {
 /// cycle makes the sign test EASIER to satisfy, not harder.
 pub const MIN_HELD_OUT_PROBES: usize = 48;
 
+/// How far a SINGLE earlier cycle's probe set may fall before a candidate is
+/// refused, independent of the pooled anchor mean.
+///
+/// [`crate::continual`-driven] studies already compute these blocks - one per
+/// earlier cycle, `MIN_HELD_OUT_PROBES` probes each - and before this
+/// constant existed they were computed and thrown away, leaving the pooled
+/// mean as the only retention bar.
+///
+/// A pooled mean goes blind as history grows, and that is the whole reason
+/// this bar exists. With `k` earlier cycles a block dropping `d` moves the
+/// pooled mean by only `d/k`, so the drop is invisible to
+/// [`GateConfig::anchor_budget`] as soon as `k >= d / anchor_budget`. At the
+/// default budget of 0.02 that is 15 cycles to hide losing 30% of one
+/// earlier cycle, and **50 cycles to destroy an entire earlier cycle without
+/// the pooled bar ever firing**. The longer a continual run goes, the less
+/// the pooled bar protects - which is precisely backwards.
+///
+/// The value is derived, not picked. A block mean over `MIN_HELD_OUT_PROBES`
+/// pass/fail probes has a sampling standard error of at most
+/// `0.5/sqrt(48) = 0.072`, so `0.20` sits about 2.8 standard errors out: far
+/// enough that ordinary per-cycle wobble cannot trip it, close enough that
+/// losing a fifth of an earlier cycle's facts is refused. It is
+/// pre-registered here rather than tuned per run.
+pub const MAX_BLOCK_DROP: f64 = 0.20;
+
 /// The pre-registered promote/reject thresholds for document learning.
 ///
-/// Pre-registered means fixed before the run, not tuned after seeing it. The
-/// one deliberate departure from [`GateConfig::default`] is
-/// `min_effect_size = 0.15` instead of `0.02`: `effect_size` is
-/// `mean(candidate.held_out) - mean(incumbent.held_out)` over the WHOLE
-/// scored set, so at the default floor a two percent wobble on a large probe
-/// set promotes. The claim being gated is "it learned the document", not "it
-/// moved". `alpha`, `anchor_budget` and `min_entropy_ratio` are the defaults
-/// and are not re-stated as magic numbers here.
+/// Pre-registered means fixed before the run, not tuned after seeing it. Two
+/// deliberate departures from [`GateConfig::default`]:
+///
+/// - `min_effect_size = 0.15` instead of `0.02`. `effect_size` is
+///   `mean(candidate.held_out) - mean(incumbent.held_out)` over the WHOLE
+///   scored set, so at the default floor a two percent wobble on a large
+///   probe set promotes. The claim being gated is "it learned the document",
+///   not "it moved".
+/// - `max_block_drop = MAX_BLOCK_DROP` instead of the default `INFINITY`,
+///   which is OFF. A document study is a CONTINUAL one: its anchor suite is
+///   exactly the earlier cycles' probe sets, in cycle order, and the study
+///   already hands the gate that block structure. Leaving the per-block bar
+///   off meant those blocks were computed and discarded, and the pooled
+///   anchor mean went blind to a single earlier cycle collapsing as soon as
+///   the run was long enough. See [`MAX_BLOCK_DROP`] for the arithmetic.
+///
+/// `alpha`, `anchor_budget` and `min_entropy_ratio` are the defaults and are
+/// not re-stated as magic numbers here.
+///
+/// A caller whose anchor suite has no block structure - a flat retained-skill
+/// tail rather than one block per earlier cycle, as `qwen3`'s `lora_gate`
+/// action has - passes an empty `GateInput::anchor_blocks` and is unaffected:
+/// the per-block bar cannot fire on blocks that were never supplied.
 pub fn document_gate_config() -> GateConfig {
-    GateConfig { min_effect_size: 0.15, ..GateConfig::default() }
+    GateConfig { min_effect_size: 0.15, max_block_drop: MAX_BLOCK_DROP, ..GateConfig::default() }
 }
 
 /// Normalised form of a row's text: trimmed, internal whitespace runs
@@ -811,6 +851,88 @@ mod tests {
         // The rejection must be about MAGNITUDE, not noise: the sign test
         // still cleared alpha.
         assert!(report.p_value <= document_gate_config().alpha, "p = {} should still clear alpha", report.p_value);
+    }
+
+    /// Per-block anchor scores for `k` earlier cycles, all healthy at
+    /// `incumbent` except cycle `bad`, which the candidate drops by `drop`.
+    fn blocks(k: usize, incumbent: f64, bad: usize, drop: f64) -> Vec<(f64, f64)> {
+        (0..k).map(|j| (if j == bad { incumbent - drop } else { incumbent }, incumbent)).collect()
+    }
+
+    /// The candidate clearly learned this cycle, the POOLED anchor mean is
+    /// healthy, and one earlier cycle has quietly lost a fifth of what it
+    /// knew. `run_study` already computes these blocks
+    /// (`continual::run_study` passes `anchor_block_len: eval_per_cycle`);
+    /// before this config armed the bar they were computed and discarded, so
+    /// the pooled mean was the only thing standing between a promote and a
+    /// silently destroyed earlier cycle.
+    #[test]
+    fn one_earlier_cycle_collapsing_behind_a_healthy_pooled_mean_does_not_promote() {
+        let mut candidate = vec![0.0f64; MIN_HELD_OUT_PROBES];
+        let incumbent = vec![0.0f64; MIN_HELD_OUT_PROBES];
+        // A real, large win on THIS cycle's own probes: 40 of 48 flip.
+        for c in candidate.iter_mut().take(40) {
+            *c = 1.0;
+        }
+        // Twenty earlier cycles at 0.9; cycle 3 drops to 0.60. The pooled
+        // mean moves by 0.30/20 = 0.015, INSIDE the 0.02 anchor budget, so
+        // the pooled bar cannot see it. Twenty cycles is not a contrived
+        // number: the recorded studies run twelve, and a continual reader
+        // runs hundreds.
+        let b = blocks(20, 0.9, 3, 0.30);
+        let pooled_candidate = b.iter().map(|(c, _)| c).sum::<f64>() / b.len() as f64;
+        let input = GateInput {
+            candidate_scores: &candidate,
+            incumbent_scores: &incumbent,
+            anchor_candidate: pooled_candidate,
+            anchor_incumbent: 0.9,
+            entropy_candidate: 2.0,
+            entropy_incumbent: 2.0,
+            anchor_blocks: &b,
+        };
+
+        // The pooled bar alone lets this through - that is what makes the
+        // per-block bar load-bearing rather than redundant.
+        assert_eq!(
+            gate(&GateInput { anchor_blocks: &[], ..input }, &document_gate_config()).decision,
+            Decision::Promote,
+            "the pooled anchor bar is expected to miss a single collapsed block - that is why the per-block bar exists"
+        );
+
+        match gate(&input, &document_gate_config()).decision {
+            Decision::Reject(Cause::BlockRegressed { block, delta, max_drop }) => {
+                assert_eq!(block, 3, "the report must name WHICH earlier cycle regressed");
+                assert!((delta - 0.30).abs() < 1e-12, "delta should be the block's own drop, got {delta}");
+                assert!((max_drop - MAX_BLOCK_DROP).abs() < 1e-12, "got {max_drop}");
+            }
+            other => panic!("expected Reject(BlockRegressed), got {other:?}"),
+        }
+    }
+
+    /// The other half of the pair. A bar that can only ever fire is not a
+    /// bar: ordinary per-cycle wobble, well inside the sampling error of a
+    /// 48-probe block mean, must promote.
+    #[test]
+    fn ordinary_per_block_wobble_still_promotes_under_the_document_gate_config() {
+        let mut candidate = vec![0.0f64; MIN_HELD_OUT_PROBES];
+        let incumbent = vec![0.0f64; MIN_HELD_OUT_PROBES];
+        for c in candidate.iter_mut().take(40) {
+            *c = 1.0;
+        }
+        // 0.06 is inside one standard error of a 48-probe Bernoulli mean
+        // (0.5/sqrt(48) = 0.072), so it is the instrument, not a regression.
+        let b = blocks(10, 0.9, 3, 0.06);
+        let pooled_candidate = b.iter().map(|(c, _)| c).sum::<f64>() / b.len() as f64;
+        let input = GateInput {
+            candidate_scores: &candidate,
+            incumbent_scores: &incumbent,
+            anchor_candidate: pooled_candidate,
+            anchor_incumbent: 0.9,
+            entropy_candidate: 2.0,
+            entropy_incumbent: 2.0,
+            anchor_blocks: &b,
+        };
+        assert_eq!(gate(&input, &document_gate_config()).decision, Decision::Promote);
     }
 
     /// [`FactBatch::new`] deduplicates the trained rows by their NORMALISED
