@@ -125,6 +125,30 @@ impl Pair {
         self.ma.is_empty() && self.va.is_empty()
     }
 
+    /// Whether this pair carries optimiser state, i.e. whether a further
+    /// [`Self::adam_step`] would CONTINUE a run or start one.
+    ///
+    /// It matters for a pool. [`Self::from_ab`] and
+    /// [`ExternalPair::add_delta`] build moment-free pairs on purpose - they
+    /// exist to fold a finished adapter, and nothing there will be stepped.
+    /// An adapter that will be trained further after a round trip through
+    /// disk must come back with its moments, or every re-admission restarts
+    /// its momentum while the run goes on looking healthy.
+    pub fn has_moments(&self) -> bool {
+        self.ma.len() == self.a.len() && self.mb.len() == self.b.len()
+    }
+
+    /// Give a moment-free pair fresh, zeroed optimiser state so it can be
+    /// stepped at all. This is a RESTART, not a resume: use it when starting
+    /// a new run from trained weights, never to paper over moments that
+    /// should have been persisted.
+    pub fn restart_moments(&mut self) {
+        self.ma = vec![0.0; self.a.len()];
+        self.va = vec![0.0; self.a.len()];
+        self.mb = vec![0.0; self.b.len()];
+        self.vb = vec![0.0; self.b.len()];
+    }
+
     /// `w += scale·B·A` in `W`'s `[out×in]` row-major layout.
     pub fn delta(&self, scale: f32, w: &mut [f32]) {
         self.delta_strided(scale, w, 0, self.inn, 0);
@@ -1367,5 +1391,103 @@ impl crate::adapter::AdapterKind for LoraPair {
             self.pair.b = data;
         }
         Ok(())
+    }
+}
+
+/// Saving an adapter so it can be TRAINED FURTHER, not merely folded.
+///
+/// [`device_adapter::save_adapter`] writes an adapter's weights and nothing
+/// else, which is exactly right for what it exists for: a finetune trains
+/// once, saves, and the result is folded or served. A pool is different.
+/// There, an adapter is written out when something else needs its slot and
+/// read back when it is wanted again, and in between it is expected to keep
+/// learning. An adapter that loses its Adam moments on every eviction
+/// restarts its momentum every time, and nothing in the run reports it.
+///
+/// The format is a SUPERSET of the existing one: the same `<key>.lora_a` /
+/// `<key>.lora_b` tensors plus `<key>.lora_a.m` and friends. Readers that
+/// select on the `.lora_a` suffix - `device_adapter::fold_adapter_into`
+/// does - do not match the moment tensors and are unaffected, so a pool
+/// adapter can still be folded by the ordinary path.
+pub mod resumable {
+    use checkpoint::st::{Adapter, ModelCard};
+
+    use super::Pair;
+
+    /// Write `pairs` with their optimiser state. `alpha` is recorded for the
+    /// benefit of the ordinary fold path; the rank is read off the pairs,
+    /// which must agree, since the file carries one rank for the adapter.
+    pub fn save(path: &str, pairs: &[(String, Pair)], alpha: f32, card_id: &str, base_id: &str, family: &str) -> std::io::Result<()> {
+        assert!(!pairs.is_empty(), "resumable::save: nothing to write");
+        let rank = pairs[0].1.r;
+        assert!(pairs.iter().all(|(_, p)| p.r == rank), "resumable::save: one file carries one rank, got a mixture");
+
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(pairs.len() * 6);
+        for (key, p) in pairs {
+            let (a_shape, b_shape) = (vec![p.r as u64, p.inn as u64], vec![p.out as u64, p.r as u64]);
+            tensors.push((format!("{key}.lora_a"), a_shape.clone(), p.a.clone()));
+            tensors.push((format!("{key}.lora_b"), b_shape.clone(), p.b.clone()));
+            if p.has_moments() {
+                tensors.push((format!("{key}.lora_a.m"), a_shape.clone(), p.ma.clone()));
+                tensors.push((format!("{key}.lora_a.v"), a_shape, p.va.clone()));
+                tensors.push((format!("{key}.lora_b.m"), b_shape.clone(), p.mb.clone()));
+                tensors.push((format!("{key}.lora_b.v"), b_shape, p.vb.clone()));
+            }
+        }
+
+        let mut card = ModelCard::new(card_id, family);
+        card.variant_of = Some(base_id.to_string());
+        card.adapter = Some(Adapter {
+            kind: "lora".to_string(),
+            rank: Some(rank as u32),
+            base: Some(base_id.to_string()),
+            alpha: Some(alpha),
+            targets: Some(pairs.iter().map(|(k, _)| k.clone()).collect()),
+            dataset_id: None,
+            per_target: None,
+        });
+        let config = serde_json::json!({ "rank": rank, "alpha": alpha, "resumable": true });
+        checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
+    }
+
+    /// Read back what [`save`] wrote, moments included where they were
+    /// written.
+    ///
+    /// A file saved from a moment-free pair loads as a moment-free pair
+    /// rather than as one with zeroed state: the two are different claims,
+    /// and only [`Pair::has_moments`] distinguishes "this can resume" from
+    /// "this would restart".
+    pub fn load(path: &str) -> std::io::Result<Vec<(String, Pair)>> {
+        let st = checkpoint::st::load_safetensors(path)?;
+        let rank = st
+            .card()
+            .and_then(|c| c.adapter.as_ref().and_then(|a| a.rank))
+            .unwrap_or_else(|| panic!("resumable::load: {path} carries no adapter rank")) as usize;
+
+        let mut keys: Vec<&str> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).collect();
+        keys.sort();
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let a = st.tensors.get(&format!("{key}.lora_a")).expect("checked by the filter above").clone();
+            let b = st
+                .tensors
+                .get(&format!("{key}.lora_b"))
+                .unwrap_or_else(|| panic!("resumable::load: {path} has {key}.lora_a with no matching .lora_b"))
+                .clone();
+            let inn = a.len() / rank;
+            let o = b.len() / rank;
+            let mut p = Pair::from_ab(o, inn, rank, a, b);
+            let m = |suffix: &str| st.tensors.get(&format!("{key}.{suffix}")).cloned();
+            if let (Some(ma), Some(va), Some(mb), Some(vb)) =
+                (m("lora_a.m"), m("lora_a.v"), m("lora_b.m"), m("lora_b.v"))
+            {
+                p.ma = ma;
+                p.va = va;
+                p.mb = mb;
+                p.vb = vb;
+            }
+            out.push((key.to_string(), p));
+        }
+        Ok(out)
     }
 }

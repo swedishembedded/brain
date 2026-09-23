@@ -422,6 +422,33 @@ other direction. Commit 2 closes it by having the pool's own file carry the
 moments alongside the weights, as a superset of the existing format so
 existing readers are unaffected.
 
+**Commit 2 of 2 DONE 2026-09-23**, and smaller than this file expected,
+because two thirds of it already existed.
+
+*Materialising a working set needed no new code.* `RuntimeLora::new` already
+merges every delta covering the same rectangle through `absorb`, so a working
+set is `RuntimeLora::new(selected.flat_map(|a| a.deltas()))` and nothing
+more. What was missing was a TEST: the identity
+`s1*B1*A1 + s2*B2*A2 = [s1B1|s2B2].[A1;A2]` is what makes a working set cost
+one correction instead of one per adapter, and it was documented and never
+measured. Three adapters of ranks 2, 4 and 3 now fold to exactly the sum of
+what each contributes alone, at merged rank 9, with the stay-silent half
+asserting that adapters over DIFFERENT rectangles stay separate so "merge"
+cannot quietly mean "merge everything". Stated honestly: those two are
+characterisation tests of correct existing code, not red-then-green.
+
+*The moments gap was real and is closed.* `lora::resumable::save`/`load`
+persist `ma/va/mb/vb` alongside the weights, and `Pair` gains `has_moments`
+and `restart_moments` so "this can resume" and "this would restart" are
+distinguishable rather than implied. The format is a superset: readers that
+select on the `.lora_a` suffix, which is what `fold_adapter_into` does, do
+not match `.lora_a.m` and are unaffected, so a pool adapter can still be
+folded by the ordinary path. The test is the property rather than the
+plumbing - after a save and a load the NEXT optimiser step lands
+bit-identically where it would have without the round trip - with the
+contrast that makes it worth asserting: the same weights without their
+moments take a visibly different step.
+
 **R4 - the per-episode gate.** `promote::gate` unchanged, with a
 pre-registered config and R0's bars armed. Tests: V15 (random bytes rejected),
 a probe-flipping episode promoted, an anchor-regressing increment rejected by
