@@ -86,6 +86,13 @@ pub struct Panel {
     /// Stickers already on their home face, when there is no planner to give
     /// an exact distance. Progress that needs no search.
     pub home: usize,
+    /// What is driving, when it is not a model scoring options.
+    ///
+    /// The macro library decides by a monotone measure and consults no
+    /// network at all, so the lines about confidence and forward passes
+    /// describe nothing. Rendering them anyway would put a number on screen
+    /// that was never computed.
+    pub driver: Option<String>,
 }
 
 /// A camera: how far the cube is turned towards the viewer, and how far the
@@ -469,6 +476,9 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
         } else {
             canvas.text(x, y, &format!("shield interventions {}", panel.interventions), 1, INK);
         }
+    } else if let Some(note) = &panel.driver {
+        canvas.text(x, y, note, 1, BAD);
+        y += lh(1);
     } else {
         canvas.text(x, y, &format!("confidence in its pick {:.2}", panel.chance), 1, INK);
         y += lh(1);

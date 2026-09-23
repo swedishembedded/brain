@@ -41,6 +41,7 @@ mod view;
 mod space;
 mod learned;
 mod macros;
+mod chooser;
 
 use std::path::{Path, PathBuf};
 
@@ -153,6 +154,20 @@ fn parse() -> Result<(Settings, bool), String> {
 }
 
 fn main() {
+    // The macro solver: no planner, no depth ceiling, no model required.
+    // Admissibility is "the measure went down", which is computable at any
+    // distance, so this is the only mode that can be pointed at a genuinely
+    // random cube.
+    let argv0: Vec<String> = std::env::args().skip(1).collect();
+    if argv0.iter().any(|a| a == "--macros") {
+        match macro_main(&argv0) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("rubiks: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     // The learned solver is a different pipeline end to end - its own
     // labels, its own network, and no planner in the loop - so it routes
     // before the option-scoring path rather than inside it.
@@ -1034,4 +1049,211 @@ fn record_learned(
         stage.dwell(&cube, &panel, 1.6);
     }
     Ok(())
+}
+
+/// Solve genuinely random cubes with the macro library, and optionally record it.
+fn macro_main(argv: &[String]) -> Result<(), String> {
+    let mut args = Args::new(argv);
+    let _ = args.take_flag("--macros");
+    let hardware = Hardware::take(&mut args)?;
+    hardware.apply()?;
+    let cubes = args.usize_or("--cubes", 1);
+    let scramble = args.usize_or("--scramble", 40);
+    let seed = args.u64_or("--seed", 1);
+    let view = ViewOptions::take(&mut args)?;
+    let record = args.take_str("--record");
+
+    let library = macros::library();
+    let book = macros::Playbook::new(library);
+    println!("rubiks: {} macros, every small element of the cube group", library.len());
+
+    let train = args.usize_or("--macro-train", 0);
+    let net = if train > 0 {
+        Some(train_chooser(
+            &book,
+            train,
+            args.usize_or("--macro-steps", 4000),
+            args.usize_or("--macro-rounds", 1),
+            seed,
+        )?)
+    } else {
+        None
+    };
+    if net.is_some() || args.take_flag("--macro-compare") {
+        compare(&book, net.as_ref(), args.usize_or("--macro-eval", 200), scramble, seed);
+    }
+
+    let mut stage = Stage::open(&view, &record)?;
+    let mut total_moves = 0usize;
+    let mut total_macros = 0usize;
+    let mut solved = 0usize;
+
+    for index in 0..cubes {
+        let (start, scrambled_by) = cube::scramble(scramble, seed ^ (index as u64 * 0x9E37));
+        let played = book
+            .play(&start)
+            .ok_or_else(|| format!("cube {index}: no macro improved the measure"))?;
+
+        let moves: usize = played.iter().map(|&i| library[i].moves.len()).sum();
+        total_moves += moves;
+        total_macros += played.len();
+
+        println!(
+            "\ncube {} - scrambled by {} random moves, solved by {} macros ({} moves)",
+            index + 1,
+            scrambled_by.len(),
+            played.len(),
+            moves
+        );
+
+        if stage.on() {
+            let mut cube = start;
+            let mut history: Vec<String> = Vec::new();
+            for (n, &i) in played.iter().enumerate() {
+                let mac = &library[i];
+                let (p, h, d) = macros::measure(&cube);
+                let panel = |c: &Cube, note: String| Panel {
+                    model: "macro library".into(),
+                    driver: Some("no planner, no model: a monotone measure decides".into()),
+                    planner: false,
+                    cube_index: index,
+                    cubes,
+                    home: macros::home_cubies(c),
+                    state: note,
+                    history: history.clone(),
+                    turns: n,
+                    solved,
+                    unassisted: true,
+                    ..Default::default()
+                };
+                let note = format!(
+                    "{} - {} moves. parity {p}, {h} of 20 home, displacement {d}.",
+                    mac.name,
+                    mac.moves.len()
+                );
+                stage.dwell(&cube, &panel(&cube, note.clone()), 0.35);
+                for m in &mac.moves {
+                    stage.turn(&cube, *m, &panel(&cube, note.clone()));
+                    cube = cube.apply(*m);
+                    if stage.quit {
+                        return Ok(());
+                    }
+                }
+                history.push(mac.name.clone());
+                if history.len() > 8 {
+                    history.remove(0);
+                }
+            }
+            let done = Panel {
+                model: "macro library".into(),
+                driver: Some("every cube reachable, every solve bounded".into()),
+                planner: false,
+                cube_index: index,
+                cubes,
+                home: 20,
+                state: format!("Solved. {} macros, {moves} moves, from a {scramble}-move scramble.", played.len()),
+                history: history.clone(),
+                turns: played.len(),
+                solved: solved + 1,
+                unassisted: true,
+                ..Default::default()
+            };
+            stage.dwell(&cube, &done, 2.5);
+            assert!(cube.is_solved(), "the run rendered a solve that did not solve");
+        }
+        solved += 1;
+    }
+
+    println!("\n----------------------------------------------------------------");
+    println!("cubes solved            {solved} of {cubes}");
+    println!("mean macros per solve   {:.1}", total_macros as f32 / cubes.max(1) as f32);
+    println!("mean moves per solve    {:.1}", total_moves as f32 / cubes.max(1) as f32);
+    println!("----------------------------------------------------------------");
+    Ok(())
+}
+
+/// Fit the cost-to-go the chooser ranks by.
+use brain::solve::StateSpace as _;
+
+fn train_chooser(
+    book: &macros::Playbook,
+    episodes: usize,
+    steps: usize,
+    rounds: usize,
+    seed: u64,
+) -> Result<brain::solve::Net, String> {
+    use brain::solve::data::Rng;
+    let space = space::CubeSpace::new();
+    let mut rng = Rng::new(seed ^ 0xC0DE);
+
+    // Labels come from finished solves, so they are exact rather than
+    // bootstrapped: every state is labelled with the moves that actually
+    // followed it.
+    let width = space.feature_len();
+    let batch = 512u32;
+    let cfg = chooser::config(&space, 512, 512, 4);
+    let net = brain::solve::Net::new(cfg, batch, seed);
+    let mut fb = vec![0.0f32; batch as usize * width];
+    let mut tb = vec![0.0f32; batch as usize];
+    let labels = vec![0u32; batch as usize];
+
+    for round in 0..rounds.max(1) {
+        // Round 0 has no chooser to improve on, so it explores freely. Later
+        // rounds follow what has been learned, keeping a fifth of the choices
+        // random so the value keeps seeing alternatives it must rank.
+        let driver = if round == 0 { None } else { Some(&net) };
+        let epsilon = if round == 0 { 1.0 } else { 0.2 };
+        let t0 = std::time::Instant::now();
+        let (mut features, mut to_go) = (Vec::new(), Vec::new());
+        for i in 0..episodes {
+            let (start, _) = cube::scramble(40, seed ^ 0xA5 ^ (round as u64 * 977) ^ (i as u64 * 0x9E37));
+            let Some(e) = chooser::episode_with(&space, book, &start, driver, epsilon, &mut rng) else {
+                return Err("a solve got stuck while gathering labels".into());
+            };
+            features.extend_from_slice(&e.features);
+            to_go.extend_from_slice(&e.to_go);
+        }
+        let rows = to_go.len();
+        println!(
+            "round {round}: {rows} states from {episodes} solves in {:.0}s, mean {:.0} moves to go",
+            t0.elapsed().as_secs_f32(),
+            to_go.iter().sum::<f32>() / rows.max(1) as f32
+        );
+
+        for step in 0..steps {
+            for r in 0..batch as usize {
+                let k = rng.below(rows);
+                fb[r * width..(r + 1) * width].copy_from_slice(&features[k * width..(k + 1) * width]);
+                tb[r] = to_go[k];
+            }
+            net.zero_grads();
+            net.load_batch(&fb, &labels);
+            net.accumulate_with_value(&tb, 1.0);
+            let t = step as f32 / steps.max(1) as f32;
+            let lr = 3e-4 * (0.05 + 0.95 * 0.5 * (1.0 + (std::f32::consts::PI * t).cos()));
+            net.adamw((round * steps + step) as u32 + 1, lr, 0.0);
+        }
+        println!("  value mse {:.2}", net.value_loss(&tb));
+    }
+    Ok(net)
+}
+
+/// Three choosers over the same admissible sets, on the same cubes.
+fn compare(book: &macros::Playbook, net: Option<&brain::solve::Net>, cubes: usize, scramble: usize, seed: u64) {
+    let space = space::CubeSpace::new();
+    println!("\n----------------------------------------------------------------");
+    println!("  choosing among a median of 59 admissible macros per step");
+    println!("  every chooser is guaranteed to solve; what differs is length");
+    println!("----------------------------------------------------------------");
+    println!("{:>22}  {:>8}  {:>10}  {:>8}", "chooser", "solved", "moves", "macros");
+
+    let (s, m, k) = chooser::measure(&space, book, None, cubes, scramble, seed, true);
+    println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "random admissible", s, cubes, m, k);
+    let (s, m, k) = chooser::measure(&space, book, None, cubes, scramble, seed, false);
+    println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "hand-written rule", s, cubes, m, k);
+    if let Some(n) = net {
+        let (s, m, k) = chooser::measure(&space, book, Some(n), cubes, scramble, seed, false);
+        println!("{:>22}  {:>4}/{:<3}  {:>10.1}  {:>8.1}", "learned cost-to-go", s, cubes, m, k);
+    }
+    println!("----------------------------------------------------------------");
 }

@@ -193,3 +193,4 @@ What belongs where:
 | 150 | What an action SENDS is not what an action MEANS | [`150-what-an-action-sends-is-not-what-an-action-means.md`](150-what-an-action-sends-is-not-what-an-action-means.md) |
 | 151 | A published number whose command was never recorded cannot be defended or discarded | [`151-a-published-number-whose-command-was-never-recorded-cannot-be.md`](151-a-published-number-whose-command-was-never-recorded-cannot-be.md) |
 | 152 | Making a signal accurate can break what relied on it being TOTAL | [`152-making-a-signal-accurate-can-break-what-relied-on-it-being-total.md`](152-making-a-signal-accurate-can-break-what-relied-on-it-being-total.md) |
+| 153 | A value that fits its own trajectory cannot rank the alternatives to it | [`153-a-value-that-fits-its-own-trajectory-cannot-rank-the.md`](153-a-value-that-fits-its-own-trajectory-cannot-rank-the.md) |

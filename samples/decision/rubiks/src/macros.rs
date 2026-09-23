@@ -328,6 +328,18 @@ struct Entry {
 /// this index on every call. Solving thousands of cubes against one fixed
 /// library - which is what establishing the guarantee takes - builds it once
 /// instead.
+/// One admissible macro, and what playing it would buy.
+#[derive(Clone, Copy, Debug)]
+pub struct Candidate {
+    pub index: usize,
+    /// Change in home cubies. Positive is progress.
+    pub home: i32,
+    /// Change in displacement. Negative is progress.
+    pub cost: i32,
+    pub moves: usize,
+    pub fixes_parity: bool,
+}
+
 pub struct Playbook {
     entries: Vec<Entry>,
     lengths: Vec<usize>,
@@ -359,6 +371,15 @@ impl Playbook {
     /// then the drop in displacement - and a parity-flipping macro, which
     /// beats both, gets played the moment parity is odd rather than being
     /// saved for the endgame where its damage costs the most.
+    /// Every macro that strictly decreases `Phi`, with what it gains.
+    ///
+    /// The set a chooser gets to choose FROM. Termination depends only on
+    /// picking something in here; which one is picked decides how long the
+    /// solve runs, and that is the decision worth learning.
+    pub fn improving_all(&self, cube: &Cube) -> Vec<Candidate> {
+        self.candidates(cube)
+    }
+
     fn improving(&self, cube: &Cube) -> Option<usize> {
         let cubies = crate::space::cubies();
         let state = cubies_of(cube);
@@ -399,6 +420,50 @@ impl Playbook {
             }
         }
         best.map(|(_, _, _, _, i)| i)
+    }
+
+    /// The same scan as [`Playbook::improving`], keeping every candidate
+    /// rather than only the winner.
+    fn candidates(&self, cube: &Cube) -> Vec<Candidate> {
+        let cubies = crate::space::cubies();
+        let state = cubies_of(cube);
+        let away = away_mask(&state);
+        let odd = parity(&corner_pieces(&state)) == 1;
+        let mut out = Vec::new();
+        for (i, e) in self.entries.iter().enumerate() {
+            let parity_after = usize::from(odd != e.flips_parity);
+            if parity_after > usize::from(odd) {
+                continue;
+            }
+            let fixes_parity = parity_after < usize::from(odd);
+            if !fixes_parity && e.support & away == 0 {
+                continue;
+            }
+            let (mut home, mut cost) = (0i32, 0i32);
+            let mut rest = e.support;
+            while rest != 0 {
+                let slot = rest.trailing_zeros() as usize;
+                rest &= rest - 1;
+                let before = slot_cost(cubies, slot, |f| cube.0[f]) as i32;
+                let after = slot_cost(cubies, slot, |f| cube.0[e.effect[f] as usize]) as i32;
+                home += i32::from(after == 0) - i32::from(before == 0);
+                cost += after - before;
+            }
+            if fixes_parity || home > 0 || (home == 0 && cost < 0) {
+                out.push(Candidate { index: i, home, cost, moves: self.lengths[i], fixes_parity });
+            }
+        }
+        out
+    }
+
+    /// How many turns macro `index` plays.
+    pub fn moves_of(&self, index: usize) -> usize {
+        self.lengths[index]
+    }
+
+    /// Apply macro `index` to `cube`.
+    pub fn apply(&self, cube: &Cube, index: usize) -> Cube {
+        with_effect(cube, &self.entries[index].effect)
     }
 
     /// Play improving macros until the cube is solved or nothing improves,
