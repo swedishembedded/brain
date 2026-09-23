@@ -38,6 +38,8 @@ mod cube;
 mod policy;
 mod search;
 mod view;
+mod space;
+mod learned;
 
 use std::path::{Path, PathBuf};
 
@@ -149,6 +151,19 @@ fn parse() -> Result<(Settings, bool), String> {
 }
 
 fn main() {
+    // The learned solver is a different pipeline end to end - its own
+    // labels, its own network, and no planner in the loop - so it routes
+    // before the option-scoring path rather than inside it.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.iter().any(|a| a == "--net") {
+        match net_main(&argv) {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("rubiks: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     match run() {
         Ok(true) => {}
         Ok(false) => std::process::exit(1),
@@ -793,4 +808,78 @@ mod tests {
             }
         }
     }
+}
+
+/// Train a policy on retraced walks and let it drive, with no planner and no
+/// search anywhere in the loop.
+fn net_main(argv: &[String]) -> Result<(), String> {
+    let mut args = Args::new(argv);
+    let _ = args.take_flag("--net");
+    let hardware = Hardware::take(&mut args)?;
+    hardware.apply()?;
+
+    let a = learned::TrainArgs {
+        steps: args.usize_or("--net-steps", 20000),
+        rows: args.usize_or("--net-batch", 1024) as u32,
+        depth: args.usize_or("--net-depth", 26),
+        d_model: args.usize_or("--net-width", 1024) as u32,
+        d_ff: args.usize_or("--net-ff", 2048) as u32,
+        blocks: args.usize_or("--net-blocks", 4) as u32,
+        lr: args.usize_or("--net-lr-micro", 600) as f32 / 1e6,
+        seed: args.u64_or("--seed", 1),
+        eval_every: args.usize_or("--net-eval-every", 2000),
+        eval_cubes: args.usize_or("--net-eval-cubes", 200),
+        eval_scramble: args.usize_or("--net-eval-scramble", 40),
+    };
+    let cubes = args.usize_or("--cubes", 500);
+    let scramble = args.usize_or("--scramble", 40);
+    let save = args.take_str("--net-save");
+    let load = args.take_str("--net-load");
+
+    let net = match &load {
+        Some(p) => {
+            println!("cubenet: loading {p}");
+            brain::solve::Net::load(p, a.rows).map_err(|e| e.to_string())?
+        }
+        None => {
+            let n = learned::train(&a);
+            if let Some(p) = &save {
+                let fit = serde_json::json!({
+                    "task": "cube-policy",
+                    "steps": a.steps, "batch": a.rows, "walk_depth": a.depth,
+                    "d_model": a.d_model, "d_ff": a.d_ff, "blocks": a.blocks,
+                    "lr": a.lr, "seed": a.seed,
+                });
+                n.save(p, &fit).map_err(|e| e.to_string())?;
+                println!("cubenet: written to {p}");
+            }
+            n
+        }
+    };
+
+    println!("\n----------------------------------------------------------------");
+    println!("            no search at inference: one forward pass per move");
+    println!("----------------------------------------------------------------");
+    println!("{:>9}  {:>14}  {:>14}  {:>10}", "scramble", "greedy", "sampled T=0.3", "ms/cube");
+    for d in [4usize, 8, 12, 16, 20, 26, scramble] {
+        let g = learned::measure_with(
+            &net, cubes, d, 0x5014ED,
+            brain::solve::Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.0, seed: 7 },
+        );
+        let s = learned::measure_with(
+            &net, cubes, d, 0x5014ED,
+            brain::solve::Rollout { max_steps: 64, forbid_redundant: true, temperature: 0.3, seed: 7 },
+        );
+        println!(
+            "{:>9}  {:>6} ({:>3.0}%)  {:>6} ({:>3.0}%)  {:>10.2}",
+            d,
+            g.solved, 100.0 * g.rate(),
+            s.solved, 100.0 * s.rate(),
+            1000.0 * g.elapsed.as_secs_f32() / g.total.max(1) as f32
+        );
+    }
+    println!("----------------------------------------------------------------");
+    println!("(each row is {cubes} random cubes; a 40-move scramble is a uniformly");
+    println!(" random cube, which is at most 20 moves from solved)");
+    Ok(())
 }

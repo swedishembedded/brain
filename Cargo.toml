@@ -199,6 +199,7 @@ brain-checkpoint = { path = "crates/checkpoint" }
 brain-gguf = { path = "crates/gguf" }
 brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
+brain-solve = { path = "crates/solve" }
 brain-promote = { path = "crates/promote" }
 brain-search = { path = "crates/search" }
 brain-rlcd = { path = "crates/rlcd" }

@@ -1,0 +1,20 @@
+[package]
+name = "brain-solve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Learn to reach a known goal state by retracing random walks away from it: a residual MLP policy trained on free labels, rolled out greedily with no search at inference."
+
+[lib]
+name = "solve"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+bytemuck.workspace = true
+serde_json.workspace = true

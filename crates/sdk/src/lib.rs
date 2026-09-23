@@ -120,6 +120,15 @@ pub mod decision;
 #[cfg(feature = "decision")]
 pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec};
 
+/// Learning to reach a known goal state by retracing random walks away from
+/// it - a policy rolled out with one forward pass per action and no search.
+///
+/// Re-exported whole rather than wrapped: a caller supplies its own
+/// `StateSpace`, so there is no pipeline here to hide behind a facade, and a
+/// partial re-export would just mean the sample importing half a crate.
+#[cfg(feature = "decision")]
+pub use solve;
+
 /// Teaching a model a batch of documents, and gating whether it learned them.
 /// Its own surface because the unit is a STUDY - train, score against a
 /// pre-registered bar, run a null-gate control beside it, publish only on a

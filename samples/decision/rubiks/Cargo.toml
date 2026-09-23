@@ -29,4 +29,6 @@ serde_json.workspace = true
 # raised, and the "decision" surface then gained brain-promote so a sample
 # can gate one checkpoint against another. This sample does not call it; it
 # links it because it names the surface.
-max-brain-crates = 36
+# 36 -> 37: the "decision" surface gained brain-solve, the learned-policy
+# trainer this sample's --net mode drives.
+max-brain-crates = 37
