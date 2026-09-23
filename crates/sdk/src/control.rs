@@ -300,6 +300,25 @@ pub trait Env {
 /// apart and could not be told apart at all. 200 halves that.
 pub const EVAL_SEEDS: std::ops::Range<u64> = 1_000_000..1_000_200;
 
+/// One decision worth imitating: what was being asked, what was seen, what
+/// could be done, and which of those was done.
+///
+/// The public form of a demonstration. A caller building one of these is
+/// answering "here is a decision I want the policy to be able to make", and
+/// the fields are in the order a reader needs them.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Demonstration {
+    /// The orders in force, which are part of the question: the same state
+    /// and options have a different right answer under different objectives.
+    pub objective: String,
+    pub observation: String,
+    pub options: Vec<String>,
+    /// Index into `options`. A decision naming an action that is not on its
+    /// own list is dropped rather than clamped - clamping would silently fit
+    /// the policy to a different action than the one that was taken.
+    pub action: usize,
+}
+
 /// One demonstration: the state, the options that were offered, and which of
 /// them the teacher took.
 /// One decision, with everything needed to reconstruct the question it was
@@ -2028,6 +2047,55 @@ impl<E: Env> ControlPipeline<E> {
     /// Public because a diagnostic needs a policy before it can measure
     /// anything, and there is no reason for each of them to hold its own
     /// slightly different idea of what cloning means.
+    /// One decision worth imitating, as a caller outside this crate can
+    /// describe it.
+    ///
+    /// The COMPRESS half of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, as a
+    /// public surface. A search runs as its own program - it has to, or every
+    /// search also pays for an encoder, a head and a policy gradient - so
+    /// what it finds arrives here as data rather than as a phase inside this
+    /// pipeline. Nothing about this type knows what the search was.
+    ///
+    /// Note what is NOT here: a trajectory. Behaviour cloning fits
+    /// state-to-action, so it wants DECISIONS, and requiring whole episodes
+    /// would force a search to solve a problem it does not otherwise have -
+    /// its walks start from restored snapshots, so the prefix that reached
+    /// them is not something it necessarily holds.
+    pub fn learn_from(
+        &mut self,
+        decisions: &[Demonstration],
+        spec: &ControlSpec,
+        log: &mut dyn FnMut(usize, f32),
+    ) -> Result<f32> {
+        // The same first line [`ControlPipeline::warm_start`] has, and for
+        // the same reason: whether the encoder is trainable is a property of
+        // the RUN, not of the call, and a fitting path that forgets to say so
+        // trains 22M pretrained parameters on a few hundred examples and then
+        // cannot be saved - the head-only checkpoint format would attach the
+        // head it wrote to the PUBLISHED encoder, which is no longer the
+        // model that was fitted.
+        self.model.set_encoder_frozen(spec.freeze_encoder);
+        let epochs = spec.warmup_epochs;
+        let demos: Vec<Demo> = decisions
+            .iter()
+            .filter(|c| c.action < c.options.len())
+            .map(|c| Demo {
+                objective: c.objective.clone(),
+                observation: c.observation.clone(),
+                options: c.options.clone(),
+                action: c.action,
+            })
+            .collect();
+        if demos.is_empty() {
+            return Err(Error::Backend(
+                "nothing to learn from: every decision named an action that is not on its                  own option list"
+                    .to_string(),
+            ));
+        }
+        let mut step = 0usize;
+        self.fit_demos(&demos, epochs, log, &mut step)
+    }
+
     pub fn warm_start(
         &mut self,
         spec: &ControlSpec,

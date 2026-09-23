@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use brain::decision::Rng;
 use brain::search::{Admission, Allocator, Archive, Cascade, Gain, Niche, Rung, Verdict, Worth};
+use brain::Demonstration;
 use brain::Env;
 
 use crate::env::DoomEnv;
@@ -168,6 +169,8 @@ pub struct Found {
     pub best_tics: u64,
     /// Verified UV-Max runs: replayed from the level's own start and confirmed.
     pub solved: Vec<Solution>,
+    /// The decisions that advanced the archive, for the compression phase.
+    pub learned: Vec<Demonstration>,
 }
 
 /// A trajectory that was replayed from the level start and reproduced what it
@@ -290,6 +293,13 @@ const REHYDRATIONS: usize = 24;
 /// inside what is supposed to be one unit of work.
 const PICK_TRIES: usize = 32;
 
+/// How many decisions a campaign hands to the compression phase.
+///
+/// Bounded because a long campaign admits tens of thousands and a training
+/// set is not better for being unbounded - only slower to fit, and more
+/// heavily weighted toward whatever the search happened to do most of.
+const KEEP_DECISIONS: usize = 20_000;
+
 /// What a campaign writes to disk: the archive and the vocabulary its trails
 /// are spelled in.
 ///
@@ -334,6 +344,19 @@ pub struct Campaign {
     live: std::collections::HashSet<Niche>,
     /// How many more reloaded cells may be paid for. See [`Campaign::go_to`].
     rehydrations: usize,
+    /// Decisions the archive accepted, for the compression phase.
+    ///
+    /// What a search hands to training, and it is DECISIONS rather than
+    /// trajectories on purpose. Behaviour cloning fits state-to-action, so
+    /// whole episodes buy it nothing - and requiring them would force this to
+    /// solve a problem it does not have, since a walk starts from a restored
+    /// snapshot and the way to that snapshot is not something the walk holds.
+    ///
+    /// Only decisions that ADVANCED the archive are kept. A walk that reached
+    /// somewhere new or somewhere faster is one whose choices are worth
+    /// copying; the rest of what a search does is mostly the walk that did
+    /// not work, and fitting a policy to that teaches it to wander.
+    learned: Vec<Demonstration>,
     /// Completed categories noticed during a walk, waiting to be replayed.
     ///
     /// Queued rather than verified on the spot because verifying RESTARTS the
@@ -357,6 +380,7 @@ impl Campaign {
             refused: 0,
             live: std::collections::HashSet::new(),
             rehydrations: REHYDRATIONS,
+            learned: Vec::new(),
             claims: Vec::new(),
         }
     }
@@ -629,32 +653,55 @@ impl Campaign {
     /// A refusal is reported and the cell is DROPPED, never papered over by
     /// starting the level again: a search that quietly restarts is one that
     /// explores the opening a thousand times and says it resumed.
-    fn go_to(&mut self, env: &mut DoomEnv, at: &Niche, slot: usize, allowed: u32) -> bool {
+    fn go_to(
+        &mut self,
+        env: &mut DoomEnv,
+        at: &Niche,
+        slot: usize,
+        allowed: u32,
+    ) -> Option<String> {
         if self.live.contains(at) {
-            if env.resume_from(slot).is_some() {
-                return true;
+            if let Some(seen) = env.resume_from(slot) {
+                return Some(seen);
             }
             self.refused += 1;
             self.live.remove(at);
             self.archive.remove(at);
-            return false;
+            return None;
         }
         // Read back off disk. The only way to stand where it stands is to
         // walk there again from the level's own start.
         if self.rehydrations == 0 {
-            return false;
+            return None;
         }
         self.rehydrations -= 1;
         let Some(actions) = self.archive.get(at).and_then(|e| self.spell(&e.what)) else {
             self.archive.remove(at);
-            return false;
+            return None;
         };
         if replay(env, self.seed, &actions, allowed).is_err() || !env.hold_at(slot) {
             self.archive.remove(at);
-            return false;
+            return None;
         }
         self.live.insert(at.clone());
-        true
+        // Walked back to rather than restored, so the observation is simply
+        // the one the replay ended on.
+        Some(env.look())
+    }
+
+    /// Keep a decision for the compression phase, bounded.
+    ///
+    /// A long campaign admits tens of thousands of cells, and a training set
+    /// is not better for being unbounded - it is just slower to fit and more
+    /// heavily weighted toward whatever the search happened to do most of.
+    /// Past the cap the oldest go, because the newest come from further along
+    /// and are the ones a policy most needs.
+    fn keep(&mut self, d: Demonstration) {
+        self.learned.push(d);
+        if self.learned.len() > KEEP_DECISIONS {
+            let drop = self.learned.len() - KEEP_DECISIONS;
+            self.learned.drain(0..drop);
+        }
     }
 
     /// Run one operator once and report what it bought.
@@ -678,11 +725,15 @@ impl Campaign {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
         };
-        if !self.go_to(env, &from, slot, allowed) {
+        let Some(resumed) = self.go_to(env, &from, slot, allowed) else {
             gain.seconds = began.elapsed().as_secs_f64();
             return gain;
-        }
+        };
         self.restores += 1;
+        // The observation the walk is about to decide on, carried forward
+        // from each step so a demonstration records what was actually READ
+        // rather than what the state looked like afterwards.
+        let mut here_and_now = resumed;
 
         // What it took to get to the cell this walk resumed at. Copied out
         // once, because every cell the walk files carries the whole way from
@@ -698,9 +749,20 @@ impl Campaign {
                 break;
             }
             let chose = self.choose(env, op, &options, last.as_deref());
+            // Captured BEFORE the step, because a decision is a question
+            // about the state it was asked in and that state is about to
+            // stop existing. Whether it is worth keeping is decided a few
+            // lines below, once the archive has said what it bought.
+            let asked = Demonstration {
+                objective: env.objective(),
+                observation: here_and_now.clone(),
+                options: options.clone(),
+                action: chose,
+            };
             last = Some(options[chose].clone());
             steps.push(self.intern(&options[chose]));
-            let (_, _, done) = env.step(chose);
+            let (next, _, done) = env.step(chose);
+            here_and_now = next;
             self.steps += 1;
             if env.fault().is_some() {
                 break;
@@ -726,8 +788,14 @@ impl Campaign {
                 // frontier rather than against itself.
                 let top = self.archive.best().map(|e| e.worth.reached).unwrap_or(0.0);
                 match self.file(env, cell, worth, trail) {
-                    Admission::Fresh => gain.admitted(true, worth.reached, top),
-                    Admission::Improved => gain.admitted(false, worth.reached, top),
+                    Admission::Fresh => {
+                        gain.admitted(true, worth.reached, top);
+                        self.keep(asked);
+                    }
+                    Admission::Improved => {
+                        gain.admitted(false, worth.reached, top);
+                        self.keep(asked);
+                    }
                     Admission::Rejected => {}
                 }
             }
@@ -1109,10 +1177,11 @@ pub fn campaign(
         );
     }
     let best = run.archive.best();
-    Ok(Found {
-        cells: run.archive.len(),
-        best: best.map(|e| e.worth.reached).unwrap_or(0.0),
-        best_tics: best.map(|e| e.worth.cost).unwrap_or(0),
-        solved,
-    })
+    let cells = run.archive.len();
+    let (reached, cost) = (
+        best.map(|e| e.worth.reached).unwrap_or(0.0),
+        best.map(|e| e.worth.cost).unwrap_or(0),
+    );
+    println!("    {} decisions kept for training", run.learned.len());
+    Ok(Found { cells, best: reached, best_tics: cost, solved, learned: run.learned })
 }

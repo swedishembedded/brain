@@ -92,6 +92,8 @@ pub struct Args {
     pub search_budget: u64,
     /// `search`: where verified solutions are written.
     pub solutions: String,
+    /// `search`/`learn`: where the decisions worth imitating are kept.
+    pub lessons: String,
 }
 
 impl Args {
@@ -238,7 +240,7 @@ fn parse_args() -> Result<Args, String> {
         std::process::exit(0);
     }
     let command = argv[0].clone();
-    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench", "search"]
+    if !["train", "eval", "fit", "whatif", "value", "play", "probe", "bench", "search", "learn"]
         .contains(&command.as_str())
     {
         return Err(format!("unknown command {command:?}\n\n{}", usage()));
@@ -367,6 +369,9 @@ fn parse_args() -> Result<Args, String> {
         solutions: args
             .take_str("--solutions")
             .unwrap_or_else(|| "out/doom-solutions.json".into()),
+        lessons: args
+            .take_str("--lessons")
+            .unwrap_or_else(|| "out/doom-lessons.jsonl".into()),
     };
     args.finish();
     Ok(parsed)
@@ -381,6 +386,13 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = parse_args()?;
+
+    // Before anything is resolved: `learn` reads a file and fits a head. It
+    // needs no engine and no WAD, and demanding them would make a command
+    // that does arithmetic on a file refuse to run without a copy of DOOM.
+    if args.command == "learn" {
+        return learn(&args);
+    }
 
     let paths = Paths::resolve(args.doom_bin.as_deref(), args.wad.as_deref())
         .map_err(|m| format!("{m}"))?;
@@ -492,6 +504,7 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
     let budget = Duration::from_secs(args.search_budget);
     let allowed = args.max_steps() as u32;
     let mut all: Vec<search::Solution> = Vec::new();
+    let mut lessons: Vec<brain::Demonstration> = Vec::new();
     for map in &args.maps {
         env.set_maps(vec![*map]);
         // One archive FILE per level, because a trail is only a way back to a
@@ -519,6 +532,24 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             found.solved.len()
         );
         all.extend(found.solved);
+        lessons.extend(found.learned);
+    }
+
+    if !lessons.is_empty() {
+        if let Some(dir) = std::path::Path::new(&args.lessons).parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        // One JSON object per line, so a campaign can append to a set that
+        // already exists and a reader never has to hold the whole file.
+        let mut out = String::new();
+        for d in &lessons {
+            out.push_str(
+                &serde_json::to_string(d).map_err(|e| format!("a decision will not serialise: {e}"))?,
+            );
+            out.push('\n');
+        }
+        std::fs::write(&args.lessons, out).map_err(|e| format!("{}: {e}", args.lessons))?;
+        println!("doom: wrote {} decisions to {}", lessons.len(), args.lessons);
     }
 
     if all.is_empty() {
@@ -544,6 +575,103 @@ fn discover(mut env: DoomEnv, args: &Args) -> Result<(), String> {
             println!("    {} {} ({} tics, {} decisions)", s.level, s.clock(), s.tics, s.actions.len());
         }
     }
+    Ok(())
+}
+
+/// The environment `learn` does not have.
+///
+/// Fitting a policy to decisions that were already made needs no game: the
+/// states, the options and the choices are all in the file. The pipeline is
+/// nevertheless generic over an environment, so this stands in for one, and
+/// it is deliberately inert rather than a half-working DOOM - a stub that
+/// quietly started an engine would make a command that needs no game take
+/// thirty seconds and a subprocess to do arithmetic.
+struct NoGame;
+
+impl brain::Env for NoGame {
+    fn reset(&mut self, _seed: u64) -> String {
+        String::new()
+    }
+    fn actions(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    fn step(&mut self, _action: usize) -> (String, f32, bool) {
+        (String::new(), 0.0, true)
+    }
+}
+
+/// Compress what the search found into weights.
+///
+/// The COMPRESS half of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, and its own
+/// command for the same reason `search` is: the two halves want completely
+/// different machines. A search wants engine steps and no forward pass; this
+/// wants a device, an encoder and no engine at all - it never starts the game.
+///
+/// What it fits is DECISIONS, not trajectories. Behaviour cloning learns
+/// state-to-action, so whole episodes buy it nothing, and demanding them
+/// would force the search to solve a problem it does not have: its walks
+/// begin at restored snapshots, and the way to a snapshot is not something a
+/// walk holds.
+fn learn(args: &Args) -> Result<(), String> {
+    let text = std::fs::read_to_string(&args.lessons).map_err(|e| {
+        format!(
+            "{}: {e}\n  `doom search --lessons FILE` is what writes one",
+            args.lessons
+        )
+    })?;
+    let mut decisions: Vec<brain::Demonstration> = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Named by LINE. A training set is exactly the kind of external input
+        // that must not be quietly repaired: a decision that will not parse is
+        // one the policy would otherwise be fitted to having guessed at.
+        decisions.push(
+            serde_json::from_str(line)
+                .map_err(|e| format!("{}:{}: {e}", args.lessons, n + 1))?,
+        );
+    }
+    if decisions.is_empty() {
+        return Err(format!("{} holds no decisions", args.lessons));
+    }
+    let offered: usize = decisions.iter().map(|d| d.options.len()).sum();
+    println!(
+        "doom: {} decisions from {}, {:.1} options each on average",
+        decisions.len(),
+        args.lessons,
+        offered as f64 / decisions.len() as f64
+    );
+
+    let spec = args.train.spec();
+    let mut pipe = ControlPipeline::builder(args.encoder(), NoGame)
+        .seed(args.seed())
+        .device(args.device());
+    if let Some(h) = args.head() {
+        pipe = pipe.head(h);
+    }
+    let mut pipe = pipe.load().map_err(|e| format!("{e}"))?;
+    pipe.describe(
+        "swedishembedded/minilm-l6-option-head-doom",
+        serde_json::json!({
+            "sample": "decision/doom",
+            "task": "choose the next action in DOOM from the options the game offers",
+            "fitted_to": "decisions a quality-diversity search kept because they advanced its archive",
+            "decisions": decisions.len(),
+            "epochs": spec.warmup_epochs,
+            "encoder": "frozen",
+        }),
+    );
+    let loss = pipe
+        .learn_from(&decisions, &spec, &mut |step, loss| {
+            if step % 20 == 0 {
+                println!("  step {step:>5}  loss {loss:.4}");
+            }
+        })
+        .map_err(|e| format!("{e}"))?;
+    println!("doom: final loss {loss:.4}");
+    pipe.save_head(&args.train.save).map_err(|e| format!("{e}"))?;
+    println!("doom: wrote {}", args.train.save);
     Ok(())
 }
 

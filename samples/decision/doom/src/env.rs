@@ -1301,6 +1301,15 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
+    /// The observation as the model would read it right now.
+    ///
+    /// The same text `reset` and `step` return, asked for without advancing
+    /// anything - for a caller that has just walked somewhere by replaying
+    /// and needs to know what it is looking at.
+    pub fn look(&self) -> String {
+        obs::render(&self.state, self.history())
+    }
+
     /// Where the run is standing right now, as a witness a trail can carry.
     ///
     /// Position, facing and the level clock - the four numbers that say
