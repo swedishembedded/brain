@@ -513,8 +513,32 @@ by the budget but not the canary, so an oversized `canary_blocks` overspent
 by 5x. An oversized canary now costs the canary, never the guarantee and
 never the budget.
 
-**R6 - the rehearsal reservoir.** M6. Tests: cap respected; duplicates do not
-double weight; the no-rehearsal arm runs and reports separately.
+**R6 - the bounded rehearsal reservoir. DONE 2026-09-23.**
+`crates/audit`'s `reservoir` module. Six tests, red before green.
+
+Vitter's Algorithm R over PROMOTED episodes only, capped, deduplicated by
+content. The admission rule lives in the reservoir rather than at each call
+site, so there is one place it can be got right: rehearsing something the
+gate refused would let a rejected episode influence every later cycle
+through the back door.
+
+**The test that earns its keep is the distribution one.** A cap and a dedup
+check pass equally well against the two easy wrong implementations, keep the
+first `cap` and keep the last `cap`, and both are actively harmful: a
+reservoir biased to the recent rehearses precisely the material least at
+risk of being forgotten, and one biased to the oldest never rehearses
+anything learned since. So uniformity is asserted on the mean held position
+over 2000 offers and eight seeds, with the failure message naming what each
+wrong answer would have produced.
+
+A duplicate deliberately does NOT advance the seen counter. That counter is
+the denominator the retention probability is drawn against, so counting a
+duplicate would lower every later episode's chance of being held, for an
+episode that was never a candidate.
+
+`draw` takes its own seed rather than advancing the reservoir's, so asking
+the reservoir a question cannot alter the experiment: the same cycle asked
+twice gets the same mix, and drawing leaves what is retained untouched.
 
 **R7 - growth, triggered by the oracle.** M3's diagnosis table, asserted.
 Tests: an interference-shaped failure raises rehearsal and does not grow; a
