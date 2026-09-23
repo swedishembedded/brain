@@ -1528,19 +1528,22 @@ pub struct FlashIds {
 /// each) + `part0` + `part1` (BC·RG·4·4 B each) at its BC=16, RG=64, HD=128.
 const FLASH_REG2_SHARED: u32 = 49152;
 
-/// The flash variant to dispatch on this device: `(kernel index, workgroup
-/// size, query rows per workgroup)`. The third element is NOT a constant across
-/// the family - `flash_attn_bidir_reg2` owns 128 query rows where the others
-/// own 64 - so a caller must size its grid from this and never from a BR of its
-/// own. Pure in its inputs: `caps` comes from `DeviceCaps`, so no backend name
-/// is consulted.
-pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32, u32) {
+/// The flash variant to dispatch on this device: `(kernel index, query rows
+/// per workgroup)`. BR is NOT a constant across the family -
+/// `flash_attn_bidir_reg2` owns 128 query rows where the others own 64 - so a
+/// caller must size its grid from this and never from a BR of its own. Pure in
+/// its inputs: `caps` comes from `DeviceCaps`, so no backend name is consulted.
+///
+/// The per-workgroup THREAD count this used to return as well is gone: it was
+/// the kernel's own `@workgroup_size` restated at the seam, which is exactly
+/// what `gpu_core::Dispatch::Workgroups` exists to stop a caller doing.
+pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32) {
     let wide = caps.max_workgroup_size >= 256;
     match (ids.reg2, ids.reg, ids.split) {
-        (Some(i), _, _) if wide && caps.workgroup_mem_bytes >= FLASH_REG2_SHARED => (i, 256, 128),
-        (_, Some(i), _) if wide => (i, 256, 64),
-        (_, _, Some(i)) if wide => (i, 256, 64),
-        _ => (ids.bidir, 64, 64),
+        (Some(i), _, _) if wide && caps.workgroup_mem_bytes >= FLASH_REG2_SHARED => (i, 128),
+        (_, Some(i), _) if wide => (i, 64),
+        (_, _, Some(i)) if wide => (i, 64),
+        _ => (ids.bidir, 64),
     }
 }
 
@@ -1568,13 +1571,13 @@ pub fn flash_bidir_step(
     ctx: &DeviceBuffer,
 ) -> Step {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    let (kind, ws, br) = flash_bidir_variant(ids, &g.caps());
+    let (kind, br) = flash_bidir_variant(ids, &g.caps());
     let nwg = bsz * heads * t.div_ceil(br);
-    g.step(
+    g.dispatch(
         kind,
         &[qkv, ctx],
         &[bsz, heads, t, head_dim, 3 * d_model, 0, d_model, 2 * d_model, d_model],
-        nwg * ws,
+        gpu_core::Dispatch::Workgroups(nwg),
     )
 }
 
@@ -1602,15 +1605,15 @@ pub fn flash_bidir_fwd(
     steps: &mut Vec<Step>,
 ) {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    let (kind, ws, br) = flash_bidir_variant(ids, &g.caps());
+    let (kind, br) = flash_bidir_variant(ids, &g.caps());
     for &(row0, len) in spans {
         let nwg = heads * len.div_ceil(br);
-        steps.push(g.step_sliced(
+        steps.push(g.dispatch_sliced(
             kind,
             &[qkv, ctx],
             &[(row0 as u64 * stride as u64, 0), (row0 as u64 * d_out as u64, 0)],
             &[1, heads, len, head_dim, stride, q_off, k_off, v_off, d_out],
-            nwg * ws,
+            gpu_core::Dispatch::Workgroups(nwg),
         ));
     }
 }

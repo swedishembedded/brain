@@ -370,13 +370,16 @@ fn bench_train(reps: usize, t: usize, te: usize) {
 /// so the grid is sized from each kernel's own BR rather than a shared
 /// constant.
 fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
-    const VARIANTS: [(&str, &str, u32, u32); 4] = [
-        ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR, 64, 64),
-        ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT, 256, 64),
-        ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG, 256, 64),
-        ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2, 256, 128),
+    // `(name, source, query rows per workgroup)`. BR is a real difference
+    // between these kernels; the workgroup SIZE each one declares is not this
+    // bench's to restate - `Dispatch::Workgroups` applies it.
+    const VARIANTS: [(&str, &str, u32); 4] = [
+        ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR, 64),
+        ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT, 64),
+        ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG, 64),
+        ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2, 128),
     ];
-    let ks: Vec<(&str, &str)> = VARIANTS.iter().map(|(n, s, _, _)| (*n, *s)).collect();
+    let ks: Vec<(&str, &str)> = VARIANTS.iter().map(|(n, s, _)| (*n, *s)).collect();
     let gpu = Gpu::new_wgpu(&ks);
     let c = gpu.caps();
     eprintln!("max_workgroup_size {} workgroup_mem {} B", c.max_workgroup_size, c.workgroup_mem_bytes);
@@ -400,10 +403,10 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
     let gf = 4.0 * t as f64 * t as f64 * d as f64 / 1e9;
     let mut refout: Option<Vec<f32>> = None;
     println!("\n{:<26} {:>10} {:>12} {:>9} {:>12} {:>11}", "kernel", "ms", "GFLOP/s", "% roof", "cosine", "max_abs");
-    for (idx, (name, _, ws, br)) in VARIANTS.iter().enumerate() {
+    for (idx, (name, _, br)) in VARIANTS.iter().enumerate() {
         let o = gpu.storage(t as u64 * d as u64);
         let nwg = nh * t.div_ceil(*br);
-        let st = vec![gpu.step(idx, &[&qkv, &o], &prm, nwg * ws)];
+        let st = vec![gpu.dispatch(idx, &[&qkv, &o], &prm, gpu_core::Dispatch::Workgroups(nwg))];
         let secs = best_of(&gpu, &st, reps);
         let got = gpu.read(&o, (t * d) as usize);
         let (cos, mx) = match &refout {

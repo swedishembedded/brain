@@ -866,10 +866,12 @@ fn main() {
             gpu.write(&qkv, bytemuck::cast_slice(&src));
             let prm = [1, nh, n, hd, 3 * d, 0, d, 2 * d, d];
             let mut res = Vec::new();
-            for (name, kind, ws) in [("flash_attn_bidir", K_FLASH, 64u32), ("flash_attn_bidir_split", K_SPLIT, 256u32)] {
+            // Both variants own 64 query rows per workgroup; their differing
+            // workgroup SIZES are the device's business, not this bench's.
+            for (name, kind) in [("flash_attn_bidir", K_FLASH), ("flash_attn_bidir_split", K_SPLIT)] {
                 let o = gpu.storage(n as u64 * d as u64);
                 let nwg = nh * n.div_ceil(64);
-                let st = vec![gpu.step(kind, &[&qkv, &o], &prm, nwg * ws)];
+                let st = vec![gpu.dispatch(kind, &[&qkv, &o], &prm, gpu_core::Dispatch::Workgroups(nwg))];
                 let t = time_steps(&gpu, &st, 5);
                 let gf = 4.0 * n as f64 * n as f64 * d as f64 / 1e9;
                 println!(
