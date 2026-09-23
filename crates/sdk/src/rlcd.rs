@@ -48,8 +48,17 @@
 
 use decide::decide::{Decide, Limits};
 use decide::policy::{choice_loss, Act, PolicyConfig};
-use decide::primitives::{Opt, Question};
-use rlcd::scoring::{decision_loss_soft, softmax};
+use rlcd::scoring::softmax;
+
+// Re-exported for a caller composing a non-text feature source (an image
+// embedding, say) against the same head this pipeline trains - see
+// `RlcdPipeline::model_mut`'s own doc for why that needs the raw model
+// rather than a widened pipeline surface. `pub use` also brings each name
+// into scope unqualified for the rest of this file, the same way
+// `CostMatrix`/`World` below already do.
+pub use decide::decide::Features;
+pub use decide::primitives::{Answer, Opt, Question};
+pub use rlcd::scoring::{decision_loss, decision_loss_soft};
 
 use crate::flow::{EvalReport, Flow, Stages, TrainReport};
 use crate::{Device, Error, Result};
@@ -61,7 +70,7 @@ use crate::{Device, Error, Result};
 pub use rlcd::atlas::{check_information_refinement, validate_distribution, DecisionContract, Distribution, Observation, OracleKind, World};
 pub use rlcd::cost::{bayes_action, bayes_risk, regret, voi, BayesAction, CostMatrix};
 pub use rlcd::metrics::{
-    ada_ece, classwise_ece, coverage_accuracy, failure_auroc, posterior_error, posterior_kl, reliability_bins, soft_ece, soft_nll, ReliabilityBin,
+    ada_ece, classwise_ece, coverage_accuracy, ece, failure_auroc, posterior_error, posterior_kl, reliability_bins, soft_ece, soft_nll, ReliabilityBin,
 };
 pub use rlcd::scoring::LossConfig;
 pub use rlcd::witness::{search as witness_search, Learner, WitnessFamily};
@@ -353,6 +362,17 @@ impl RlcdPipeline {
     /// held-out set so a loaded head can be re-measured rather than trusted.
     pub fn eval_set(&mut self, eval: Vec<RlcdExample>) {
         self.eval = eval;
+    }
+
+    /// The loaded model itself, for a caller driving `Decide` below this
+    /// pipeline's own `(state, target)` surface - e.g. training against
+    /// `Features` built from a non-text row source via `Features::from_parts`,
+    /// which `RlcdSpec`'s plain-text `RlcdExample` cannot express. Everything
+    /// `RlcdPipeline::builder` did (loading the checkpoint, resolving the
+    /// device, sizing `Limits`) already happened; this only hands back what
+    /// it built.
+    pub fn model_mut(&mut self) -> &mut Decide {
+        &mut self.model
     }
 
     /// The model's own belief over `spec.options` for a rendered `state` -
