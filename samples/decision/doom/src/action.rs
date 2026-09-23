@@ -76,6 +76,14 @@ pub enum Tag {
     /// doorway, and going back for them is a decision nothing here could
     /// express before.
     Hunt,
+    /// Turn to face a wall an arm's length away that has not been tried.
+    ///
+    /// The half of searching for a hidden door that was missing. `use`
+    /// reaches 64 units and only what the player FACES, and a player walks
+    /// corridors facing along them - so the walls are beside them the whole
+    /// time and never in front. Measured with only the pushing half: a
+    /// campaign tested nineteen walls in seven minutes.
+    Face,
     /// Go and push on the walls of a room this run has never searched.
     ///
     /// The only mechanism that finds a DOOM secret without being told where
@@ -444,6 +452,32 @@ pub fn options(state: &State) -> Vec<Option_> {
         });
     }
 
+    // A wall an arm's length away that this run has not pushed on, and the
+    // turn that would put it in front of the player.
+    //
+    // `use` reaches 64 units and only what the player faces. A player walks
+    // corridors facing along them, so the walls are beside them the whole
+    // way and never in front - which is why a search that could only push at
+    // what it happened to face tested nineteen walls in seven minutes.
+    //
+    // Fair play holds, and the line is the same one the room frontier is on:
+    // the clearance readings are the agent's own and the ledger is its own.
+    // Neither says a secret is behind any of these. They say there is a wall
+    // there and this run has not tried it.
+    let secrets_left = state.level.secrets < state.level.total_secrets;
+    for bearing in state.untried_walls.iter().take(2).filter(|_| secrets_left) {
+        out.push(Option_ {
+            text: format!(
+                "turn to face the wall {} you and try pushing on it",
+                bearing_phrase(*bearing)
+            ),
+            commands: format!("[{}]", json_turn(state.facing(*bearing))),
+            tics: FIGHT_TICS,
+            tag: Tag::Face,
+            room: c.toward(*bearing),
+        });
+    }
+
     // Somewhere to go and search for a secret.
     //
     // Fair play, and the line is worth being exact about: this is built from
@@ -458,7 +492,6 @@ pub fn options(state: &State) -> Vec<Option_> {
     // player's own status bar, so knowing "0 of 3" is not being told
     // anything, and offering a wall search on a level with none left is
     // spending decisions on nothing.
-    let secrets_left = state.level.secrets < state.level.total_secrets;
     for r in state.unfrisked.iter().take(1).filter(|_| secrets_left) {
         let (bearing, room, leg, walk) = match r.path {
             Some(p) => (
@@ -977,7 +1010,22 @@ pub fn options(state: &State) -> Vec<Option_> {
     // the situation where every movement option has been filtered out, so this
     // is also what keeps the list non-empty in a dead end.
     out.push(Option_ {
-        text: "push on the wall or door directly in front of you".into(),
+        // The sentence says whether the wall looks out of place, because the
+        // sentence is what a policy READS. A ledger the search consults is
+        // no use to a cloned model: it chooses among these words and nothing
+        // else, so a cue it cannot see is a cue it cannot learn. The search
+        // reads the same words, so both halves of the loop are looking at
+        // the same thing.
+        //
+        // It is the agent's own judgement from wall faces it has looked at -
+        // see `memory::Memory::odd_wall` - not a fact about the level, and
+        // it is wrong often. What it buys is an order to search in.
+        text: if state.odd_wall {
+            "push on the wall directly in front of you - it does not look like the others around here"
+                .into()
+        } else {
+            "push on the wall or door directly in front of you".into()
+        },
         commands: "[{\"type\":\"use\"},{\"type\":\"forward\",\"amount\":4}]".into(),
         tics: MOVE_TICS,
         tag: Tag::Use,
@@ -1096,6 +1144,29 @@ mod tests {
             path,
         }];
         s
+    }
+
+    /// The half that was missing. `use` reaches 64 units and only what the
+    /// player FACES, and a player walks corridors facing along them - so the
+    /// walls are beside them the whole way and never in front.
+    #[test]
+    fn a_wall_beside_the_player_can_be_turned_to_and_tried() {
+        let mut s = state(NOTHING);
+        assert!(!options(&s).iter().any(|o| o.tag == Tag::Face));
+        s.untried_walls = vec![90];
+        assert!(
+            options(&s).iter().any(|o| o.tag == Tag::Face),
+            "no way to turn and look at a wall an arm's length away"
+        );
+    }
+
+    /// With every secret already found there is nothing to turn for.
+    #[test]
+    fn no_wall_is_turned_to_on_a_level_with_no_secrets_left() {
+        let mut s = state(NOTHING);
+        s.untried_walls = vec![90];
+        s.level.secrets = s.level.total_secrets;
+        assert!(!options(&s).iter().any(|o| o.tag == Tag::Face));
     }
 
     /// A room this run has stood in and never pushed on the walls of, with

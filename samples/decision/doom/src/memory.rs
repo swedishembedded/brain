@@ -217,6 +217,26 @@ const FACINGS: i32 = 8;
 /// tells the archive a run has been looking when it has not.
 const IN_REACH: i32 = crate::action::USE_RANGE;
 
+/// How much rarer than the commonest wall face a face has to be before it
+/// counts as looking out of place.
+///
+/// A level is built from a handful of textures repeated over and over, so
+/// the ones a run keeps seeing are the ordinary ones. Eight times is a
+/// judgement, not a measurement: low enough that a genuinely unusual face
+/// stands out after a room or two, high enough that the second-commonest
+/// wall in a level does not.
+const ODD: u32 = 8;
+
+/// How much wall a run has to have looked at before it is entitled to call
+/// any of it unusual. Everything is unusual when you have seen three things.
+///
+/// Counted as LOOKS, not as distinct faces. A corridor built from one
+/// repeated texture offers a single distinct face however far you walk down
+/// it, so a run there would never form an opinion at all - and a run that
+/// has stared at the same wall forty times knows perfectly well what
+/// ordinary looks like around here.
+const ENOUGH_TO_JUDGE: u32 = 40;
+
 /// A region of the level and how much of its walls this run has pushed on.
 ///
 /// The counterpart of [`Haunt`] for secrets, and a separate ledger for a
@@ -242,6 +262,42 @@ pub struct Memory {
     haunts: Vec<Haunt>,
     /// Regions stood in and how thoroughly searched. See [`Sweep`].
     swept: Vec<Sweep>,
+    /// Wall faces this run has LOOKED at, and how often each.
+    ///
+    /// Keyed by what is drawn and where it is drawn - a texture together with
+    /// its alignment - so that both cues a player actually uses land in one
+    /// tally. An unusual texture is a rare key; an ordinary texture shoved
+    /// out of alignment with its neighbours is also a rare key, and that
+    /// second kind is most of how DOOM marks a secret door.
+    ///
+    /// The texture is stored as a hash rather than a name: nothing here ever
+    /// needs to know WHICH texture it is, only whether it has seen this one
+    /// before, and a collision would merely mean two textures look alike to
+    /// the agent. That keeps this cheap to clone into a snapshot.
+    looks: std::collections::HashMap<(u32, i32), u32>,
+    /// The wall pushed on this decision, waiting to hear what came of it.
+    ///
+    /// A push and its outcome arrive at different moments: where the player
+    /// was standing is only true BEFORE the step, and what the push came to
+    /// is only known after it. Holding the spot until the answer lands is
+    /// what lets the ledger record the two together.
+    pending: Option<((i32, i32), u8)>,
+    /// Walls this run has actually pushed ON - as opposed to spots it has
+    /// pushed AT, which `pressed` counts and which include the pushes that
+    /// met nothing.
+    ///
+    /// Kept apart because the two answer different questions. "Have I tried
+    /// here?" must say yes either way or the sweep loops; "have I searched
+    /// this room?" must say no when the pushes touched nothing, or a room
+    /// retires on the strength of the agent pressing air in it.
+    walls: u32,
+    /// Doors, switches and walls this run has actually made move.
+    ///
+    /// Capability, in the same sense as a key or a shotgun: a run that has
+    /// opened something can reach ground a run that has not, so the two are
+    /// not in the same situation even standing in the same place. An axis of
+    /// the archive's name for a situation - see `DoomEnv::cell`.
+    opened: u32,
     /// Which walls have been pushed on: a bit per facing, per spot.
     ///
     /// A mask rather than a set of `(spot, facing)` because this is cloned
@@ -299,11 +355,15 @@ impl Memory {
     /// No `..`: adding a ledger to this type fails to compile until somebody
     /// says whether a new episode inherits it.
     pub fn clear(&mut self) {
-        let Memory { held, haunts, swept, pressed, took } = self;
+        let Memory { held, haunts, swept, pressed, looks, pending, walls, opened, took } = self;
         held.clear();
         haunts.clear();
         swept.clear();
         pressed.clear();
+        looks.clear();
+        *pending = None;
+        *walls = 0;
+        *opened = 0;
         *took = false;
     }
 
@@ -338,6 +398,17 @@ impl Memory {
         self.forget(p);
         self.settle(p);
         self.stood_in(p);
+        self.look_at_the_wall(state);
+        // What the last push came to, from the engine rather than guessed
+        // at. See `Memory::pushed`.
+        if let Some(came_to) = state
+            .events
+            .iter()
+            .find(|e| e.kind == "push")
+            .map(|e| e.what.clone().unwrap_or_default())
+        {
+            self.pushed(state, &came_to);
+        }
     }
 
     /// File the region a live monster was seen in as unfinished business.
@@ -384,11 +455,16 @@ impl Memory {
     /// facing, both coarse enough that shuffling does not invent new walls.
     fn wall(p: &Player) -> Option<((i32, i32), u8)> {
         let (x, y, a) = (p.x?, p.y?, p.angle?);
+        Some(Memory::wall_at(x, y, a))
+    }
+
+    /// The same, for a place and a facing given rather than stood in.
+    fn wall_at(x: i32, y: i32, angle: i32) -> ((i32, i32), u8) {
         let spot = (
             (x as f64 / PRESS_UNITS).floor() as i32,
             (y as f64 / PRESS_UNITS).floor() as i32,
         );
-        Some((spot, 1u8 << (a.rem_euclid(360) * FACINGS / 360)))
+        (spot, 1u8 << (angle.rem_euclid(360) * FACINGS / 360))
     }
 
     /// File the region the player is standing in as somewhere whose walls
@@ -414,6 +490,50 @@ impl Memory {
         });
     }
 
+    /// One wall face, as the pair "what is drawn and where".
+    fn face(w: &crate::obs::Wall) -> (u32, i32) {
+        // FNV-1a over the three surfaces together: a two-sided line shows its
+        // upper or lower where a solid one shows its middle, and which of the
+        // three is doing the showing is not something worth distinguishing.
+        let mut h: u32 = 0x811c_9dc5;
+        for b in w.texture.bytes().chain(w.above.bytes()).chain(w.below.bytes()) {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        (h, w.offset)
+    }
+
+    /// Note what the player is looking at, so that "unlike the others" is
+    /// something this run can work out for itself later.
+    fn look_at_the_wall(&mut self, state: &State) {
+        if let Some(w) = &state.facing_wall {
+            *self.looks.entry(Memory::face(w)).or_insert(0) += 1;
+        }
+    }
+
+    /// Does the wall in front look unlike the ones this run has been seeing?
+    ///
+    /// The cue a player actually uses, and the whole reason the wall face is
+    /// in the observation at all. A level is built from a few textures
+    /// repeated everywhere; a wall that is not one of them, or is one of them
+    /// visibly out of step, is where a player pushes.
+    ///
+    /// It is a guess and it is allowed to be wrong. Nothing here knows what
+    /// is behind the wall, and plenty of odd-looking walls are just walls -
+    /// what this buys is an ORDER to search in, not an answer. The sweep
+    /// still tests everything it can reach.
+    pub fn odd_wall(&self, state: &State) -> bool {
+        let Some(w) = &state.facing_wall else {
+            return false;
+        };
+        if self.looks.values().copied().sum::<u32>() < ENOUGH_TO_JUDGE {
+            return false;
+        }
+        let seen = self.looks.get(&Memory::face(w)).copied().unwrap_or(0);
+        let usual = self.looks.values().copied().max().unwrap_or(0);
+        seen.saturating_mul(ODD) <= usual
+    }
+
     /// Is there a wall close enough in front of the player for a push to
     /// reach it? See [`IN_REACH`].
     pub fn wall_in_reach(state: &State) -> bool {
@@ -426,8 +546,49 @@ impl Memory {
     /// can tell moves along to a wall it has not tested, and one that cannot
     /// re-tests the wall it is standing at for as long as its budget lasts.
     pub fn pressed_here(&self, state: &State) -> bool {
-        Memory::wall(&state.player)
-            .is_some_and(|(spot, bit)| self.pressed.get(&spot).is_some_and(|m| m & bit != 0))
+        let p = &state.player;
+        match (p.x, p.y, p.angle) {
+            (Some(x), Some(y), Some(a)) => self.pressed_at(x, y, a),
+            _ => false,
+        }
+    }
+
+    /// The same question about a place and a facing the player is not in
+    /// yet - so that "turn and push on that" can be offered only when there
+    /// is something there this run has not already pushed on.
+    pub fn pressed_at(&self, x: i32, y: i32, angle: i32) -> bool {
+        let (spot, bit) = Memory::wall_at(x, y, angle);
+        self.pressed.get(&spot).is_some_and(|m| m & bit != 0)
+    }
+
+    /// Which way to turn to face a wall this run has not pushed on, within
+    /// reach of a push once turned.
+    ///
+    /// The half of searching for a hidden door that was missing. `use`
+    /// reaches only what the player FACES, and a player walks corridors
+    /// facing along them - so the walls are beside them, an arm's length
+    /// away, the whole time and never in front. Measured with only the
+    /// facing half: nineteen walls tested in seven minutes of campaign.
+    ///
+    /// Nothing here is level knowledge. The clearance readings are the
+    /// agent's own, the ledger is its own, and neither says a secret is
+    /// there - only that there is a wall it has not tried.
+    pub fn untried_walls(&self, state: &State) -> Vec<i32> {
+        let c = &state.clearance;
+        let p = &state.player;
+        let (Some(x), Some(y), Some(a)) = (p.x, p.y, p.angle) else {
+            return Vec::new();
+        };
+        // Already facing one: pushing is the act, not turning.
+        if c.ahead <= IN_REACH {
+            return Vec::new();
+        }
+        [(90, c.left), (-90, c.right), (180, c.behind)]
+            .into_iter()
+            .filter(|(_, gap)| *gap <= IN_REACH)
+            .map(|(bearing, _)| bearing)
+            .filter(|bearing| !self.pressed_at(x, y, a + bearing))
+            .collect()
     }
 
     /// Record that the wall in front of the player has been pushed on.
@@ -442,18 +603,44 @@ impl Memory {
     /// a region retires when its walls have been SEARCHED rather than when
     /// the use key has been pressed enough times.
     pub fn press(&mut self, state: &State) {
-        if state.clearance.ahead > IN_REACH {
-            return;
-        }
-        let p = &state.player;
-        let Some((spot, bit)) = Memory::wall(p) else {
+        self.pending = Memory::wall(&state.player);
+    }
+
+    /// Fold in what the engine said the push came to.
+    ///
+    /// The clearance reading was only ever a GUESS at whether a push would
+    /// reach anything: it is measured from the player's centre along their
+    /// facing, and `P_UseLines` traces its own line and can miss where the
+    /// probe hit. The engine knows which happened and the player hears it,
+    /// so the ledger takes the answer instead of the guess. Measured over
+    /// one short campaign: of 56 pushes the agent made, 21 reached nothing
+    /// at all, and every one of those was being filed as a wall tested.
+    fn pushed(&mut self, state: &State, came_to: &str) {
+        let Some((spot, bit)) = self.pending.take() else {
             return;
         };
+        if came_to == "worked" {
+            self.opened += 1;
+        }
+        // TRIED and TESTED are different, and conflating them cost a whole
+        // measured campaign. A push that reached nothing tested no wall - it
+        // must not retire a room as searched - but it is still a thing this
+        // run has now tried from this spot and facing, and forgetting that
+        // makes the spot eligible forever: `pressed_here` stays false, so
+        // the sweep pushes there again, and `untried_walls` keeps offering
+        // the turn to it. Measured with only the first half of this rule, a
+        // 420-second campaign tested seven walls against the baseline's
+        // thirty-eight and found no secret where the baseline found one.
         let mask = self.pressed.entry(spot).or_insert(0);
         if *mask & bit != 0 {
             return;
         }
         *mask |= bit;
+        if came_to == "nothing there" {
+            return;
+        }
+        self.walls += 1;
+        let p = &state.player;
         self.stood_in(p);
         let (Some(x), Some(y)) = (p.x, p.y) else {
             return;
@@ -469,6 +656,11 @@ impl Memory {
         }
     }
 
+    /// How many things this run has made move by pushing on them.
+    pub fn opened(&self) -> u32 {
+        self.opened
+    }
+
     /// Distinct walls this run has pushed on.
     ///
     /// The archive's measure of how thoroughly a trajectory has SEARCHED, as
@@ -478,7 +670,7 @@ impl Memory {
     /// the difference keeps whichever arrived sooner - which is exactly the
     /// one that did no searching.
     pub fn tested(&self) -> usize {
-        self.pressed.values().map(|m| m.count_ones() as usize).sum()
+        self.walls as usize
     }
 
     /// The nearest regions stood in whose walls have not been searched, in
@@ -1170,6 +1362,16 @@ mod frisk_tests {
         State::parse(&super::tests::build(x, y, angle, super::tests::NOTHING)).unwrap()
     }
 
+    /// Push on what is in front, and hear what came of it.
+    ///
+    /// Two calls, because that is how the two arrive: where the player was
+    /// standing is only true BEFORE the step, and what the push did is only
+    /// known after it.
+    fn push(m: &mut Memory, at: &State, came_to: &str) {
+        m.press(at);
+        m.pushed(at, came_to);
+    }
+
     /// The whole point of the ledger. A wall pushed on once is a wall this
     /// run knows about, and a search that cannot tell the difference spends
     /// its budget pushing the same wall over and over.
@@ -1178,7 +1380,7 @@ mod frisk_tests {
         let mut m = Memory::new();
         let here = at(0, 0, 0);
         assert!(!m.pressed_here(&here), "nothing has been pushed yet");
-        m.press(&here);
+        push(&mut m, &here, "solid");
         assert!(m.pressed_here(&here));
         // The same spot facing the other way is a DIFFERENT wall, and the
         // one a sweep is about to move on to.
@@ -1190,27 +1392,64 @@ mod frisk_tests {
     #[test]
     fn sliding_along_a_wall_reaches_a_piece_of_it_that_is_untested() {
         let mut m = Memory::new();
-        m.press(&at(0, 0, 0));
+        push(&mut m, &at(0, 0, 0), "solid");
         assert!(!m.pressed_here(&at(200, 0, 0)));
     }
 
-    /// A push that reaches nothing tests nothing.
+    /// A push that reached nothing tested nothing, and the ENGINE says which
+    /// it was.
     ///
-    /// DOOM's use range is 64 units, so pressing use in the middle of a room
-    /// touches no wall. Counting it anyway retires rooms as searched on the
-    /// strength of the agent having walked about in them pressing air -
-    /// measured before this rule existed, 174 walls "tested" on E1M1 and not
-    /// one secret found.
+    /// Clearance was only ever a guess at this: it is measured from the
+    /// player's centre along their facing, while `P_UseLines` traces its own
+    /// line and can miss where the probe hit. Measured over one short
+    /// campaign, of 56 pushes the agent made 21 reached nothing at all - and
+    /// counting those retires rooms as searched on the strength of the agent
+    /// having walked about in them pressing air.
     #[test]
-    fn pushing_on_nothing_tests_nothing() {
+    fn a_push_that_reached_nothing_tested_nothing() {
         let mut m = Memory::new();
         m.observe(&in_the_open(0, 0, 0));
-        m.press(&in_the_open(0, 0, 0));
-        assert_eq!(m.tested(), 0, "there was no wall within reach");
+        push(&mut m, &in_the_open(0, 0, 0), "nothing there");
+        assert_eq!(m.tested(), 0, "the push met no line at all");
         assert_eq!(m.unswept(&at(600, 0, 0)).len(), 1, "the room is still unsearched");
-        // And the same spot with a wall in front of it does test one.
-        m.press(&at(0, 0, 0));
+        // A push elsewhere that DID meet a wall tested one, wherever
+        // clearance thought the wall was.
+        push(&mut m, &in_the_open(200, 0, 0), "solid");
         assert_eq!(m.tested(), 1);
+    }
+
+    /// A push that reached nothing is still a push that was MADE, and
+    /// forgetting that is a loop.
+    ///
+    /// The bug this guards cost a whole measured campaign. Treating "reached
+    /// nothing" as "never tried" leaves `pressed_here` false, so the sweep
+    /// pushes at the same spot again and `untried_walls` keeps offering the
+    /// turn to it - measured, a 420-second campaign tested seven walls
+    /// against the baseline's thirty-eight, and found no secret where the
+    /// baseline found one.
+    ///
+    /// Tried and tested are different questions and the ledger has to answer
+    /// both: yes it has been tried, no it tested nothing.
+    #[test]
+    fn a_push_that_reached_nothing_was_still_tried_there() {
+        let mut m = Memory::new();
+        let spot = in_the_open(0, 0, 0);
+        push(&mut m, &spot, "nothing there");
+        assert!(m.pressed_here(&spot), "the sweep would push here forever");
+        assert_eq!(m.tested(), 0, "and it still searched no wall");
+    }
+
+    /// And a push that MADE SOMETHING MOVE is the discovery the whole sweep
+    /// exists for, so it is counted apart from the walls that did nothing.
+    #[test]
+    fn a_push_that_worked_is_remembered_as_a_thing_opened() {
+        let mut m = Memory::new();
+        assert_eq!(m.opened(), 0);
+        push(&mut m, &at(0, 0, 0), "solid");
+        assert_eq!(m.opened(), 0, "a solid wall opened nothing");
+        push(&mut m, &at(0, 0, 90), "worked");
+        assert_eq!(m.opened(), 1);
+        assert_eq!(m.tested(), 2, "both were walls the run has now tried");
     }
 
     /// The rule a haunt does NOT follow, and the reason this is a second
@@ -1233,7 +1472,7 @@ mod frisk_tests {
         for i in 0..SWEPT as i32 {
             // A different piece of wall each time, which is what a sweep
             // actually is.
-            m.press(&at((i % 4) * 64, (i / 4) * 64, 0));
+            push(&mut m, &at((i % 4) * 64, (i / 4) * 64, 0), "solid");
         }
         assert!(m.unswept(&at(600, 0, 0)).is_empty(), "its walls have been tested");
     }
@@ -1244,7 +1483,7 @@ mod frisk_tests {
         let mut m = Memory::new();
         m.observe(&at(0, 0, 0));
         for _ in 0..SWEPT * 2 {
-            m.press(&at(0, 0, 0));
+            push(&mut m, &at(0, 0, 0), "solid");
         }
         assert_eq!(m.tested(), 1);
         assert_eq!(m.unswept(&at(600, 0, 0)).len(), 1, "one wall is not a swept room");
@@ -1292,7 +1531,7 @@ mod frisk_tests {
             0,
             r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[{"id":9,"type":"IMP","distance":300,"bearing":0,"visible":true,"health":60,"targetingMe":false}],"hazards":[]"#,
         )).unwrap());
-        m.press(&at(0, 0, 0));
+        push(&mut m, &at(0, 0, 0), "solid");
         m.observe(&at(600, 0, 0));
         let far = at(2000, 2000, 0);
         assert!(m.tested() > 0 && !m.unswept(&far).is_empty() && !m.recall(&far).is_empty());
@@ -1305,6 +1544,44 @@ mod frisk_tests {
         assert!(m.unfinished(&far).is_empty(), "monsters from the last episode");
     }
 
+    /// The half that was missing, and the reason the ledger was honest and
+    /// nearly inert: `use` reaches only what the player FACES, and a player
+    /// walks corridors facing along them, so the walls are beside them an
+    /// arm's length away the whole time and never in front.
+    #[test]
+    fn a_wall_beside_the_player_is_somewhere_to_turn_and_push() {
+        let m = Memory::new();
+        let mut s = in_the_open(0, 0, 0);
+        s.clearance.left = 40;
+        s.clearance.right = 300;
+        s.clearance.behind = 300;
+        assert_eq!(m.untried_walls(&s), vec![90], "the wall on the left");
+    }
+
+    /// One already pushed on is not somewhere to turn: it has been tried,
+    /// and turning to try it again is the waste the ledger exists to stop.
+    #[test]
+    fn a_wall_already_pushed_on_is_not_somewhere_to_turn() {
+        let mut m = Memory::new();
+        push(&mut m, &at(0, 0, 90), "solid");
+        let mut s = in_the_open(0, 0, 0);
+        s.clearance.left = 40;
+        s.clearance.right = 300;
+        s.clearance.behind = 300;
+        assert!(m.untried_walls(&s).is_empty());
+    }
+
+    /// And with a wall already in front of them, pushing is the act rather
+    /// than turning away to a different one.
+    #[test]
+    fn nothing_to_turn_to_while_facing_a_wall_within_reach() {
+        let m = Memory::new();
+        let mut s = in_the_open(0, 0, 0);
+        s.clearance.ahead = 40;
+        s.clearance.left = 40;
+        assert!(m.untried_walls(&s).is_empty());
+    }
+
     /// What the archive counts. Two runs standing in the same place having
     /// killed the same monsters are not in the same situation when one has
     /// tested forty walls and the other none - and an archive that cannot
@@ -1312,9 +1589,80 @@ mod frisk_tests {
     #[test]
     fn walls_tested_counts_distinct_walls() {
         let mut m = Memory::new();
-        m.press(&at(0, 0, 0));
-        m.press(&at(0, 0, 90));
-        m.press(&at(0, 0, 0));
+        push(&mut m, &at(0, 0, 0), "solid");
+        push(&mut m, &at(0, 0, 90), "solid");
+        push(&mut m, &at(0, 0, 0), "solid");
         assert_eq!(m.tested(), 2);
+    }
+}
+
+#[cfg(test)]
+mod wall_tests {
+    use super::*;
+
+    fn looking_at(texture: &str, offset: i32) -> State {
+        let mut s =
+            State::parse(&super::tests::build(0, 0, 0, super::tests::NOTHING)).unwrap();
+        s.clearance.ahead = 32;
+        s.facing_wall = Some(crate::obs::Wall {
+            texture: texture.into(),
+            above: String::new(),
+            below: String::new(),
+            offset,
+            distance: 32,
+        });
+        s
+    }
+
+    /// The cue a player actually uses. A level is built from a handful of
+    /// textures repeated everywhere; one that is not among them is where a
+    /// player pushes.
+    #[test]
+    fn a_wall_unlike_the_ones_around_it_looks_odd() {
+        let mut m = Memory::new();
+        // Enough ordinary wall to have an opinion about what ordinary is.
+        for i in 0..40 {
+            m.observe(&looking_at("BROWN96", i % 2));
+        }
+        assert!(!m.odd_wall(&looking_at("BROWN96", 0)), "the usual wall is not odd");
+        assert!(m.odd_wall(&looking_at("SW1STRTN", 0)), "a wall seen nowhere else");
+    }
+
+    /// And the same texture shoved out of alignment is odd too, which is most
+    /// of how DOOM marks a secret door - a name-only signal would miss it.
+    #[test]
+    fn a_usual_texture_out_of_alignment_looks_odd() {
+        let mut m = Memory::new();
+        for _ in 0..40 {
+            m.observe(&looking_at("BROWN96", 0));
+        }
+        for i in 1..6 {
+            m.observe(&looking_at(&format!("OTHER{i}"), 0));
+        }
+        assert!(m.odd_wall(&looking_at("BROWN96", 37)), "the same wall, out of step");
+    }
+
+    /// Everything is unusual when you have seen three things, so a run that
+    /// has barely looked at anything keeps its opinions to itself.
+    #[test]
+    fn a_run_that_has_seen_almost_nothing_calls_nothing_odd() {
+        let mut m = Memory::new();
+        m.observe(&looking_at("BROWN96", 0));
+        assert!(!m.odd_wall(&looking_at("SW1STRTN", 0)));
+    }
+
+    /// And a new episode has no opinions at all.
+    #[test]
+    fn what_walls_looked_like_does_not_survive_the_episode() {
+        let mut m = Memory::new();
+        for _ in 0..40 {
+            m.observe(&looking_at("BROWN96", 0));
+        }
+        for i in 1..6 {
+            m.observe(&looking_at(&format!("OTHER{i}"), 0));
+        }
+        assert!(m.odd_wall(&looking_at("SW1STRTN", 0)));
+        m.clear();
+        assert!(!m.odd_wall(&looking_at("SW1STRTN", 0)), "last episode's walls");
     }
 }

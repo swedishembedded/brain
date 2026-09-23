@@ -63,6 +63,15 @@ pub struct State {
     /// that is in the observation because it might help is one nobody can
     /// measure the value of.
     pub unexplored: Option<Frontier>,
+    /// The wall face the player is looking at, as a player would see it.
+    ///
+    /// The surface, never the special. A human finds a DOOM secret by seeing
+    /// that a wall is unlike the ones beside it - a different texture, or the
+    /// same texture visibly out of alignment - and pushing on it. That cue
+    /// lives in the picture on the screen, and an agent reading structured
+    /// state had none of it, so it could only push on everything.
+    #[serde(rename = "facingWall")]
+    pub facing_wall: Option<Wall>,
     /// What the player saw a moment ago and can no longer see. Filled in by
     /// the environment from [`crate::memory::Memory`], not by the engine -
     /// this is the agent's memory, not the world's.
@@ -84,6 +93,20 @@ pub struct State {
     /// and must not be - being told that would be being given the answer.
     #[serde(skip)]
     pub unfrisked: Vec<crate::memory::Recalled>,
+    /// Which way to turn to face a wall within reach that this run has not
+    /// pushed on, as bearings.
+    ///
+    /// Derived from the agent's own clearance readings and its own ledger.
+    /// Neither says a secret is behind any of them - only that there is a
+    /// wall there this run has not tried. See
+    /// [`crate::memory::Memory::untried_walls`].
+    #[serde(skip)]
+    pub untried_walls: Vec<i32>,
+    /// Whether the wall in front looks unlike the ones this run has been
+    /// seeing. Derived by the agent from wall faces it has looked at - see
+    /// [`crate::memory::Memory::odd_wall`]. A guess, and allowed to be wrong.
+    #[serde(skip)]
+    pub odd_wall: bool,
     /// Ids of things carrying less health than the most they have been seen
     /// with: the ones this player has been shooting. See
     /// [`crate::memory::Memory::wounded`].
@@ -380,6 +403,29 @@ pub struct Frontier {
     pub distance: i32,
     pub bearing: i32,
     pub clearance: i32,
+}
+
+/// The visible face of the wall in front of the player.
+///
+/// What is DRAWN on it and where, and nothing about what it is for. The
+/// linedef's special, whether it is usable and what is behind it are all
+/// absent on purpose: those are the answer, and an agent given them is being
+/// told where the secrets are rather than finding them.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Wall {
+    /// The texture on the solid part of the wall, empty on a two-sided line
+    /// where the upper or lower is what shows.
+    pub texture: String,
+    pub above: String,
+    pub below: String,
+    /// How far the texture is shifted along the wall, in whole units.
+    ///
+    /// Load-bearing, and not a detail: a secret door is very often the SAME
+    /// texture as its neighbours with its alignment visibly out of step with
+    /// them. A signal built on the name alone would miss that whole class.
+    pub offset: i32,
+    pub distance: i32,
 }
 
 #[allow(dead_code)]

@@ -844,6 +844,8 @@ impl DoomEnv {
         self.memory.routed_sweeps(&answered(goals.len() + hunts.len(), &open));
         self.state.unfinished = self.memory.unfinished(&self.state);
         self.state.unfrisked = self.memory.unfrisked(&self.state);
+        self.state.untried_walls = self.memory.untried_walls(&self.state);
+        self.state.odd_wall = self.memory.odd_wall(&self.state);
         self.state.recalled = self.memory.recall(&self.state);
         self.state.wounded = self.memory.wounded();
         self.state.came_from = self.came_from();
@@ -2149,13 +2151,16 @@ fn orders(mission: Mission) -> &'static [Tag] {
         //
         // Hunt after Grab, so a hurt player heals before going looking for a
         // fight. Frisk after Hunt, because a monster that has been seen is a
-        // surer thing than a wall that might open. Both before Exit, because
-        // a Max run leaves LAST.
+        // surer thing than a wall that might open. Face before Frisk, because
+        // turning to a wall beside you is the same search as walking to
+        // another room to find one and costs a decision instead of a
+        // journey. All of them before Exit, because a Max run leaves LAST.
         Mission::UvMax => &[
             Tag::Circle,
             Tag::Attack,
             Tag::Grab,
             Tag::Hunt,
+            Tag::Face,
             Tag::Frisk,
             Tag::Exit,
         ],
@@ -2222,6 +2227,11 @@ fn takes(tag: Tag, m: &Moment) -> bool {
         // is not finished, and until this arm existed nothing in the loop
         // would go looking - every campaign on E1M1 found at most one secret
         // of three, by walking into it.
+        // Turning to a wall beside you is the same search as walking to
+        // another room to look for one, and costs a decision instead of a
+        // journey. The option is only BUILT for a wall this run has not
+        // already pushed on, so preferring it cannot become a loop.
+        Tag::Face => m.secrets_left && !m.threat_near && m.mission == Mission::UvMax,
         Tag::Frisk => m.secrets_left && !m.threat_near && m.mission == Mission::UvMax,
         _ => false,
     }
@@ -2513,6 +2523,14 @@ impl Env for DoomEnv {
                 parts.push(weapon_mask(&p.weapons));
                 parts.push(health_band(p.health));
                 parts.push(searched_band(self.memory.tested()));
+                // Things this run has made MOVE by pushing on them. A run
+                // that has opened a door can reach ground a run that has not
+                // cannot, so the two are not in the same situation standing
+                // in the same place - the same argument that puts keys and
+                // weapons on the name. Capped, because what matters is
+                // whether a run has been opening things, not the exact count
+                // on a level with many doors.
+                parts.push(self.memory.opened().min(6) as i32);
             }
             // In tenths, because the counters run to a hundred and seventy-
             // seven on E1M6 and a cell per kill would be a cell per kill per

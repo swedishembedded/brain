@@ -192,3 +192,4 @@ What belongs where:
 | 149 | A search frontier costs what it costs to ASK about | [`149-a-search-frontier-costs-what-it-costs-to-ask-about.md`](149-a-search-frontier-costs-what-it-costs-to-ask-about.md) |
 | 150 | What an action SENDS is not what an action MEANS | [`150-what-an-action-sends-is-not-what-an-action-means.md`](150-what-an-action-sends-is-not-what-an-action-means.md) |
 | 151 | A published number whose command was never recorded cannot be defended or discarded | [`151-a-published-number-whose-command-was-never-recorded-cannot-be.md`](151-a-published-number-whose-command-was-never-recorded-cannot-be.md) |
+| 152 | Making a signal accurate can break what relied on it being TOTAL | [`152-making-a-signal-accurate-can-break-what-relied-on-it-being-total.md`](152-making-a-signal-accurate-can-break-what-relied-on-it-being-total.md) |

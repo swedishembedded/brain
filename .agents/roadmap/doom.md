@@ -313,3 +313,26 @@ later reader will find them:
 
 Each milestone lands with its measurement. A milestone with no number beside it
 is not done.
+
+### Budget dominates, and the earlier tuning was done below it
+
+Measured on the way to something else, and it reframes several results
+above. The same binary, the same level, the same seed, two wall-clock
+budgets:
+
+| E1M1, seed 1 | 180 s | 420 s |
+|---|---|---|
+| best, of 2.0 | 0.221 | **1.011** |
+| secrets found | 0 | 1 |
+| verified solutions | 0 | **5** |
+
+A campaign compounds within itself - the archive it is building is the thing
+it draws from - so the return on wall clock is nothing like linear near the
+bottom. Every A/B run at 180 s was therefore comparing two searches in the
+region where neither had got going, and a change that helps a search that
+has warmed up could easily read as noise there. The `Face` block clears its
+sign test at 180 s and should be re-run at a budget where the baseline
+actually performs before its size is quoted for anything.
+
+It also says the plainest thing about reaching UV-Max: nothing measured so
+far has moved the needle as much as giving the search more time.

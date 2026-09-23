@@ -19,9 +19,9 @@
 # generation that produced a worse policy is adopted exactly as readily as one
 # that produced a better one, and nothing in the loop would ever notice.
 #
-# Everything compounds through two files per level: the archive (where the
-# search has been) and the lessons (what it learnt on the way). Delete `out/`
-# to start over.
+# Everything compounds through the archives (where each search has been, one
+# per level per seed) and the lessons (what all of them learnt, pooled into
+# one file). Delete `out/` to start over.
 #
 # usage: improve.sh <generations> [budget-seconds-per-level]
 #
@@ -42,6 +42,21 @@ BUDGET=${2:-1800}
 
 MAPS=${MAPS:-1,2,3,4,5,6,7,8,9}
 SKILL=${SKILL:-3}
+# How many independent searches to run per level per generation.
+#
+# Each gets its own archive, because a trail is only a way back to a cell on
+# the episode seed it was walked on - the seed reaches the engine, so the
+# monsters do different things and the same actions lead somewhere else.
+# Pooling the archives is therefore not an option; pooling what they LEARNT
+# is, and that is what the shared lessons file does.
+#
+# Worth doing because the spread between seeds is wide: measured on E1M1 at
+# one budget, the same binary scored 0.221 on one seed and 1.039 on another.
+# A single seed makes a generation's result hostage to that draw. Several
+# seeds buy independent draws at a rare event - a secret - at the cost of
+# each one searching less deeply, which is the right trade early and the
+# wrong one once a level is nearly solved.
+SEEDS=${SEEDS:-3}
 OUT=${OUT:-out}
 # Long enough for the category to be the thing being measured: E1M6 holds 177
 # monsters, and a short horizon scores whatever pays fastest instead.
@@ -63,18 +78,27 @@ for gen in $(seq 1 "$GENS"); do
   #     once there is one, which is the half that makes this a loop.
   PROPOSE=()
   [ -f "$SERVING" ] && PROPOSE=(--head "$SERVING" --encoder "$ENC")
-  "$DBIN" search \
-    --doom-bin "$DOOM_BIN" --wad "$WAD" \
-    --maps "$MAPS" --skill "$SKILL" --mission uvmax --reward gauge \
-    --max-steps "$STEPS" \
-    --search-budget "$BUDGET" \
-    --archive "$OUT/arc" \
-    --solutions "$OUT/solutions.json" \
-    --lessons "$OUT/lessons.jsonl" \
-    "${PROPOSE[@]}"
+  for seed in $(seq 1 "$SEEDS"); do
+    echo
+    echo "--- generation $gen, seed $seed of $SEEDS ---"
+    # One archive per seed, carried across generations under its own name.
+    # Solutions are written per seed too and pooled below, because the best
+    # run of a level may come from any of them.
+    "$DBIN" search \
+      --doom-bin "$DOOM_BIN" --wad "$WAD" \
+      --maps "$MAPS" --skill "$SKILL" --mission uvmax --reward gauge \
+      --max-steps "$STEPS" \
+      --seed "$seed" \
+      --search-budget "$BUDGET" \
+      --archive "$OUT/arc-s$seed" \
+      --solutions "$OUT/solutions-s$seed.json" \
+      --lessons "$OUT/lessons.jsonl" \
+      "${PROPOSE[@]}"
+  done
 
-  # --- COMPRESS. Every decision any campaign ever kept, not just this
-  #     generation's: the archive compounds, so the training set has to.
+  # --- COMPRESS. Every decision any campaign ever kept, from every seed and
+  #     every generation: the archives compound separately and what they
+  #     learnt pools here, which is the one place the seeds meet.
   "$DBIN" learn \
     --encoder "$ENC" \
     --lessons "$OUT/lessons.jsonl" \

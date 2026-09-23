@@ -730,6 +730,74 @@ The recording format change is breaking and cannot be repaired: every trail
 on disk is a list of indices into a vocabulary written the old way. Such an
 archive is refused on load and says so.
 
+### What a player can see, and what would be cheating
+
+The agent reads structured state, not pixels. That is mostly a help, and on
+one thing it was a crippling handicap: **the cue a human uses to find a DOOM
+secret is visual.** Players find them by noticing a wall that looks unlike
+the ones beside it - a different texture, or the same texture visibly out of
+alignment - and pushing on it. Our agent had none of that. It could only push
+on everything, and a level has several hundred wall faces.
+
+So the engine now reports two things it always knew and never said. Both are
+things a player perceives; the line between them and the answer is worth
+being exact about, because it is the line the whole exercise rests on.
+
+| Reported - a human perceives it | Not reported - it IS the answer |
+|---|---|
+| the texture names and alignment offset of the wall face in front | the linedef's special |
+| what a push came to: `solid`, `worked`, `nothing there` | whether a line is usable |
+| that the world changed after a push | where the secrets are |
+
+**The wall face.** `facingWall` carries what is drawn and where it is drawn,
+and nothing about what it is for. The offset is load-bearing rather than a
+detail: a secret door is very often the SAME texture as its neighbours with
+its alignment out of step, so a signal built on the name alone would miss a
+whole class of them.
+
+From that the agent works out for itself whether a wall looks out of place -
+it tallies the faces it has looked at, and calls one odd when it is far rarer
+than the commonest (`memory::Memory::odd_wall`). A level is built from a
+handful of textures repeated everywhere, so the ones a run keeps seeing are
+the ordinary ones. Measured over one episode: `STARTAN3` seventy-three times,
+blank twenty-one, and `DOOR3` once.
+
+It is a guess and it is allowed to be wrong. Plenty of odd-looking walls are
+just walls. What it buys is an ORDER to search in, not an answer, and the
+sweep still tests everything it can reach.
+
+The cue goes into the option's SENTENCE - "it does not look like the others
+around here" - because the sentence is what a policy reads. A ledger the
+search consults is no use to a cloned model: it chooses among words and
+nothing else, so a cue it cannot see is a cue it cannot learn.
+
+**What a push came to.** `P_UseSpecialLine` already returns whether the push
+fired, and `p_map.c` threw the answer away. A player does not: a solid wall
+answers with `sfx_noway` and a door that opens is seen and heard to open. It
+arrives as an event on the decision that DID it, which is the point - the
+secret counter does not move until the player walks into the sector several
+decisions later, by which time the credit lands on the wrong choice.
+
+Two things read it. The ledger takes the engine's verdict instead of guessing
+from clearance - measured, of 56 pushes in one short campaign **21 reached
+nothing at all**, and every one of those was being filed as a wall tested.
+And "things this run has opened" is an axis of the archive's niche, on the
+same argument that puts keys and weapons there: a run that has opened a door
+can reach ground a run that has not cannot, so the two are not in the same
+situation standing in the same place.
+
+### Preferring the edge of what has been reached
+
+Selection weight gained Go-Explore's frontier term. A cell with neighbours on
+every side is in the middle of ground already covered; one with none is on
+the edge of it, and the middle of a swept room is the least likely place for
+anything new to be.
+
+`Archive::exploring(&[1, 2], EDGE)` names WHICH axes of the niche count -
+`crates/search` cannot know what an axis means, and "one square of floor
+further on" is a direction you can walk in where "one more key held" is not.
+Naming none leaves selection exactly as it was.
+
 ### Closing the loop: the policy as a search operator
 
 `search --head PATH` puts the trained policy in among the search operators, as
