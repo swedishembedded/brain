@@ -34,4 +34,5 @@
 //! sending an email to info@swedishembedded.com.
 
 pub mod bank;
+pub mod pool;
 pub mod stream;

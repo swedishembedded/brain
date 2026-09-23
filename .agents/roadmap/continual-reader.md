@@ -388,12 +388,39 @@ another. Recorded in the module doc.
 
 V1, V3, V10 and V13 each have their fire and their stay-silent test.
 
-**R3 - the adapter pool, its working set, and its archive.** Pool on disk, one
-file per adapter carrying its own optimiser moments (moments belong to the
-adapter, never to the slot it occupied). Working set by concatenation. Retire
-to archive with a resurrection path. Tests: moments survive a swap round trip;
-an archived adapter resurrects and reproduces bit-identically; a resident
-adapter keeps its slot when demand reorders. **Two commits.**
+**R3 - the adapter pool, its working set, and its archive. Commit 1 of 2
+DONE 2026-09-23.**
+
+**Corrected placement.** This file put the pool in `crates/model` on the
+assumption it needed delta arithmetic. It does not: `model::lora::
+RuntimeDelta::absorb` already IS the rank concatenation
+(`s1*B1*A1 + s2*B2*A2 = [s1B1|s2B2].[A1;A2]`), and adapter persistence with
+`ModelCard` provenance already exists in `model::lora::device_adapter`. What
+did not exist is the bookkeeping: which adapters there are, which are active,
+which have gone unaddressed, and where a retired one went. All of that is
+model-free, so it landed in `crates/audit`'s `pool` module with fast tests and
+no device. Only the MATERIALISATION of a working set into a runtime
+correction needs `crates/model`, and that is commit 2.
+
+Seven tests. The three rules each have the pair that proves the rule is doing
+work: a resident keeps its slot when demand merely reorders (and loads
+nothing); a candidate displaces only when it is clear of `margin`, and does
+not when it is inside it; a newcomer is protected for its `dwell` however
+wanted the challenger, and displaceable immediately after. Retirement
+archives by rename and never deletes, an archived adapter resurrects byte for
+byte, and nothing currently resident can be retired at all.
+
+**Found while building it, and it changes commit 2: an adapter's Adam moments
+do not survive a round trip through its file today.** `model::lora::Pair`
+owns `ma/va/mb/vb`, but `device_adapter::save_adapter` writes only the
+`.lora_a`/`.lora_b` tensors and `Pair::from_ab` leaves the moments empty by
+design - correct for the one-shot finetune that path exists for, where a
+model trains, saves and folds once. In a POOL eviction is routine, so an
+adapter evicted and re-admitted would restart its optimiser state every time.
+That is the same failure this design named from the start, reached from the
+other direction. Commit 2 closes it by having the pool's own file carry the
+moments alongside the weights, as a superset of the existing format so
+existing readers are unaffected.
 
 **R4 - the per-episode gate.** `promote::gate` unchanged, with a
 pre-registered config and R0's bars armed. Tests: V15 (random bytes rejected),
