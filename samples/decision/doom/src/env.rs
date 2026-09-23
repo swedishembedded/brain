@@ -1301,6 +1301,25 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
+    /// What each option on offer would actually SEND to the game: the tic
+    /// count and the command list, as one canonical string.
+    ///
+    /// A trail records these rather than the option's sentence, because a
+    /// sentence does not determine an input. "go to ground nobody has looked
+    /// at yet, 352 units of walking ahead" carries the route's total
+    /// distance; the command carries the next waypoint's step, a different
+    /// number that appears in no sentence. Two states with different route
+    /// state produce the same sentence and different inputs - which is a
+    /// trajectory that cannot be replayed, and the search cannot notice,
+    /// because the search never replays anything.
+    ///
+    /// The engine itself is not at fault and was measured not to be:
+    /// restoring a snapshot and stepping on reproduces stepping on without
+    /// one, bit for bit at full fixed-point precision, momentum included.
+    pub fn inputs(&self) -> Vec<String> {
+        self.opts.iter().map(|o| format!("{}|{}", o.tics, o.commands)).collect()
+    }
+
     /// The observation as the model would read it right now.
     ///
     /// The same text `reset` and `step` return, asked for without advancing
@@ -1316,13 +1335,15 @@ impl DoomEnv {
     /// whether two runs of the same actions are in the same place, and
     /// nothing derived, so a mismatch names a fact about the simulation
     /// rather than about anything this sample computed on top of it.
-    pub fn mark(&self, at: u32) -> Option<crate::search::Mark> {
+    pub fn mark(&self, at: u32, read: &str) -> Option<crate::search::Mark> {
         Some(crate::search::Mark {
             at,
             x: self.state.player.x?,
             y: self.state.player.y?,
             angle: self.state.player.angle?,
             tic: self.state.level.tic,
+            read: crate::search::digest(read),
+            said: String::new(),
         })
     }
 

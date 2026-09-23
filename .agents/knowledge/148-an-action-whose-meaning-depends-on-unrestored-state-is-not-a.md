@@ -59,6 +59,45 @@ alternatives:
   explored on the strength of other walks' history, so it is being pointed at
   a frontier that is not its own.
 
+## What it turned out to be, in the end
+
+The sentence-versus-input problem above is real and was fixed. It was not the
+whole of it: the engine's snapshot restored the WORLD and not the things
+derived from it, and each missing piece was found by fixing the last one and
+watching the first divergence march later - decision 1, then 13, then 16,
+then 83.
+
+Five, and the shape of every one is the same:
+
+| missing | what it broke |
+|---|---|
+| the route's `visited` grid | "the nearest ground nobody has looked at" answered from where OTHER attempts had walked |
+| the API's `keys_down` / `target_angle` | a key held for a countdown of tics outlives a step by design, so it is part of the state a decision plays out from |
+| the game's own `gamekeydown` | the controller believed it held a key the game believed was up: a turn continued in one run and did not happen at all in the other |
+| Doom's `turnheld` | a turn accelerates the longer its key is held, so re-pressing made the first turn after a return a slow one |
+| the event-derivation baseline | events are a DIFF against the previous tic, and a restore moves the world to another moment - so it reported "took 1 damage" at full health |
+
+Measured before and after, on raw fixed-point state: 347 001 units and nine
+degrees apart, against identical in every field.
+
+## The measuring instrument mattered as much as the fixes
+
+None of this was visible through the observation API, which reports whole map
+units. A sixteenth of a unit of momentum is invisible there and is two units
+of position twenty tics later, so a divergence that has ALREADY HAPPENED
+reads as agreement until it is too large to diagnose - and by then it
+presents as "an option was not offered", three hundred decisions downstream.
+
+What made it tractable was a conformance endpoint exposing raw simulation
+state, and witnesses recorded in the trajectory itself:
+
+- position, facing and the clock localise the divergence to a few decisions;
+- a digest of the OBSERVATION distinguishes "the world differs" from "the
+  world agrees and what the agent makes of it does not", which are different
+  faults with different fixes;
+- keeping the observation TEXT for the first stretch turns the second into a
+  one-line diff, which is how "took 1 damage" at full health was found.
+
 ## How it was found, which is the transferable part
 
 An **always-on audit** at archive load: replay a sample of stored trails,

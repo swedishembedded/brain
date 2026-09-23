@@ -234,7 +234,9 @@ impl Solution {
 /// go stale, because nothing points at anything that is allowed to change.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Trail {
-    /// Indices into the campaign's vocabulary, from the level's own start.
+    /// Indices into the campaign's vocabulary - the INPUTS sent to the game,
+    /// from the level's own start. See `DoomEnv::inputs` for why the input
+    /// and not the option's sentence.
     pub steps: Vec<u32>,
     /// Where the run actually WAS, every [`WITNESS_EVERY`] decisions.
     ///
@@ -248,13 +250,54 @@ pub struct Trail {
 }
 
 /// Where a run stood at one decision.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Mark {
     pub at: u32,
     pub x: i32,
     pub y: i32,
     pub angle: i32,
     pub tic: i64,
+    /// A digest of the observation the agent READ at that decision.
+    ///
+    /// Position, facing and the clock are the simulation; this is everything
+    /// else, in one number - what is in sight, what is remembered, what the
+    /// route makes of where the player stands. Two runs whose observations
+    /// agree will make the same decision, so a digest that disagrees is the
+    /// first place they could possibly have parted company, whether the cause
+    /// was the world or the agent's own memory of it. Position alone cannot
+    /// say that: a run can stand in exactly the right place holding a
+    /// different idea of what it has seen.
+    #[serde(default)]
+    pub read: u64,
+    /// The observation itself, for the first few decisions only.
+    ///
+    /// A digest says THAT two runs read differently and never WHICH LINE, and
+    /// which line is the whole diagnosis - the memory of what has been seen,
+    /// the history the agent keeps, what the route makes of where it stands,
+    /// are three different faults. Kept only near the start, where a
+    /// divergence is still traceable, because the text is a hundred times the
+    /// size of the digest and a campaign holds thousands of trails.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub said: String,
+}
+
+/// How many decisions into a trail the observation text is kept beside its
+/// digest. See [`Mark::said`].
+const EXPLAIN_FIRST: u32 = 128;
+
+/// FNV-1a over the observation text.
+///
+/// A digest rather than the text: a trail carries a mark every few decisions
+/// and storing the prose would make the witnesses larger than the trail. It
+/// is a comparison, never a lookup, so collision resistance past "two
+/// different observations rarely collide" buys nothing.
+pub fn digest(text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
 }
 
 /// How often a trail writes down where it was.
@@ -760,7 +803,7 @@ impl Campaign {
                 action: chose,
             };
             last = Some(options[chose].clone());
-            steps.push(self.intern(&options[chose]));
+            steps.push(self.intern(&env.inputs()[chose]));
             let (next, _, done) = env.step(chose);
             here_and_now = next;
             self.steps += 1;
@@ -769,7 +812,10 @@ impl Campaign {
             }
             let here = prefix.len() + steps.len();
             if here % WITNESS_EVERY == 0 {
-                if let Some(m) = env.mark(here as u32) {
+                if let Some(mut m) = env.mark(here as u32, &here_and_now) {
+                    if m.at < EXPLAIN_FIRST {
+                        m.said = here_and_now.clone();
+                    }
                     marks.push(m);
                 }
             }
@@ -960,7 +1006,7 @@ pub fn replay_checked(
         if let Some(m) = expect.peek() {
             if m.at as usize == i {
                 let m = expect.next().expect("peeked");
-                if let Some(now) = env.mark(i as u32) {
+                if let Some(now) = env.mark(i as u32, &env.look()) {
                     if (now.x, now.y, now.angle) != (m.x, m.y, m.angle) {
                         return Err(format!(
                             "at decision {i} the replay stands at ({}, {}) facing {} on tic {}, \
@@ -971,14 +1017,34 @@ pub fn replay_checked(
                             (((now.x - m.x) as f64).hypot((now.y - m.y) as f64)).round() as i64
                         ));
                     }
+                    // Same place, same clock, different reading. The world
+                    // agrees and what the agent makes of it does not, which
+                    // is a different fault entirely and worth saying so.
+                    if m.read != 0 && now.read != m.read {
+                        // The world agrees and the reading does not, so the
+                        // difference is in what this side DERIVES from it -
+                        // the memory of what has been seen, the history line,
+                        // what the route makes of where the player stands.
+                        // Printed in full, because which LINE differs is the
+                        // whole diagnosis and a digest cannot say.
+                        return Err(format!(
+                            "at decision {i} the replay stands exactly where the search \
+                             stood - ({}, {}) facing {} on tic {} - and READS something \
+                             different there.\n--- the replay reads ---\n{}\n\
+                             --- the search read ---\n{}",
+                            now.x, now.y, now.angle, now.tic,
+                            env.look(),
+                            if m.said.is_empty() { "(not kept this far in)" } else { &m.said }
+                        ));
+                    }
                 }
             }
         }
-        let options = env.actions();
-        let Some(chose) = options.iter().position(|o| o == want) else {
+        let offered = env.inputs();
+        let Some(chose) = offered.iter().position(|o| o == want) else {
             return Err(format!(
-                "at decision {i} the game did not offer {want:?}; it offered {} options",
-                options.len()
+                "at decision {i} no option on offer sends {want:?}; {} were offered",
+                offered.len()
             ));
         };
         let (_, _, done) = env.step(chose);
