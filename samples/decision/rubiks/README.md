@@ -56,13 +56,12 @@ with no shield:
 ## What a run looks like
 
 ```text
-cube 1 - scrambled by D2 F D' U2 B (undone by B' U2 D F' D2), 5 moves from solved;
-         one optimal solution is B' U2 D F' D2
-   5 left | model picks B' turn the back face a quarter turn counter-clockwise  p=0.731 on a shortest path     | plays B'
-   4 left | model picks U2 turn the top face a half turn                        p=0.688 on a shortest path     | plays U2
-   3 left | model picks D  turn the bottom face a quarter turn clockwise        p=0.802 on a shortest path     | plays D
-   2 left | model picks F' turn the front face a quarter turn counter-clockwise p=0.774 on a shortest path     | plays F'
-   1 left | model picks R  turn the right face a quarter turn clockwise         p=0.210 NOT on a shortest path | plays D2
+cube 1 - scrambled by D2 F D' U2 B (undone by B' U2 D F' D2), 5 moves from solved; one optimal solution is B' U2 D F' D2
+   5 left | model picks B' turn the back face a quarter turn counter-clockwise p=0.915 on a shortest path | plays B'
+   4 left | model picks D' turn the bottom face a quarter turn counter-clockwise p=0.701 NOT on a shortest path | plays D
+   3 left | model picks D2 turn the bottom face a half turn p=0.386 NOT on a shortest path | plays U2
+   2 left | model picks F' turn the front face a quarter turn counter-clockwise p=0.980 on a shortest path | plays F'
+   1 left | model picks D2 turn the bottom face a half turn p=0.999 on a shortest path | plays D2
   solved in 5 moves (optimal is 5)
 ```
 
@@ -74,10 +73,11 @@ wanted, what the shield played, and the finished net.
 
 The labels are free. Walk *away* from a solved cube and the move that undoes
 each step is, by construction, a move that gets closer - so a cube is an
-endless supply of decisions with a known right answer, generated at over
-100,000/s on a CPU core. The planner *verifies* each label (a walk that doubles
-back is abandoned the moment "undo the last move" stops being a shortest step);
-it never produces one.
+endless supply of decisions with a known right answer, generated far faster
+than training consumes them: the whole 200,000-example set the command below
+uses is built in seconds, against a fit that then runs for over an hour. The
+planner *verifies* each label (a walk that doubles back is abandoned the moment
+"undo the last move" stops being a shortest step); it never produces one.
 
 ```bash
 ./target/release/sample-decision-rubiks --model minilm \
@@ -124,29 +124,31 @@ against an adversary that always names the worst option, and a test asserts it
 with no model in the loop.
 
 **Without the shield, the model drives.** A policy trained by the command
-above - a MiniLM encoder, ~20 minutes of labelled decisions, no search at
-inference and one forward pass per move - solves 200 random cubes per depth:
+above - a MiniLM encoder, an hour and a half of labelled decisions, no search
+at inference and one forward pass per move - solves 200 random cubes per depth:
 
 | scramble depth | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
-| solved, no shield | 100% | 100% | **98.5%** | 76% | 45% | 21% |
+| solved, no shield | 100% | 100% | **96%** | 78% | 45% | 16% |
 
-At three moves it is reliable, and it is not merely finishing - across 200
-cubes it played 611 moves where the optimal total was 581, so 96% of its own
-first picks were on a shortest path. Beyond that it degrades, for a reason
-worth understanding before you copy the pattern: **a greedy policy has to be
-right every turn.** Per-move accuracy falls with distance from solved (100% at
-one move, 96% at three, 72% at four, 26% at eight), and a *d*-move solve
-multiplies *d* of those together. Accuracy that looks respectable per decision
-is not the same as finishing.
+At three moves it is reliable, and beyond that it degrades for a reason worth
+understanding before you copy the pattern: **a greedy policy has to be right
+every turn.** The same run's held-out decisions show accuracy falling with
+distance from solved - 100% one move out, 94% at three, 78% at four, 44% at
+six - and a solve has to string a whole run of those together, every wrong turn
+moving the cube further out and drawing the next decision from the harder end
+of that curve. The gap between the two views is the whole point: 44% of
+individual decisions right at distance six, and 16% of six-move cubes
+finished. Accuracy that looks respectable per decision is not the same as
+finishing.
 
-Raising the deep end is a capacity question rather than a data one on this
-architecture: the state and the options never meet inside the encoder, only in
-the single cross-attention layer that scores them, so "would turning this face
-help" has one layer in which to be computed. Five times the training data at
-distance six moved that accuracy by six points. Solving a 20-move worst case
-is a different design - a value network with search, in the DeepCubeA shape -
-and this sample does not claim it.
+Where the deep end is capped is not something this sample establishes, but
+the architecture suggests where to look first: the state and the options never
+meet inside the encoder, only in the single cross-attention layer that scores
+them, so "would turning this face help" has exactly one layer in which to be
+computed. Solving a 20-move worst case is a
+different design - a value network with search, in the DeepCubeA shape - and
+this sample does not claim it.
 
 Which is the point of the shield. A model that is excellent near the goal and
 weak far from it is exactly the kind you can still ship, provided something
@@ -155,9 +157,11 @@ else holds the floor.
 ## Watching it
 
 ```bash
-rubiks --window                      # a real window, if there is a display
-rubiks --frames DIR --fps 12         # every frame as a PNG, headless
-rubiks --record run.mp4              # the same, encoded (needs ffmpeg)
+rubiks=./target/release/sample-decision-rubiks   # the shorthand below
+
+$rubiks --window                     # a real window, if there is a display
+$rubiks --frames DIR --fps 12        # every frame as a PNG, headless
+$rubiks --record run.mp4             # the same, encoded (needs ffmpeg)
 ```
 
 Both halves of the result above are worth watching, and both record headlessly
@@ -165,10 +169,10 @@ on a machine with no display:
 
 ```bash
 # the model driving, alone, on twelve random three-move cubes
-rubiks --model out/rubiks-model --cubes 12 --scramble 3 --unassisted --record solo.mp4
+$rubiks --model out/rubiks-model --cubes 12 --scramble 3 --unassisted --record solo.mp4
 
 # the shield carrying it at a depth the model cannot finish by itself
-rubiks --model out/rubiks-model --cubes 6 --scramble 8 --record shielded.mp4
+$rubiks --model out/rubiks-model --cubes 6 --scramble 8 --record shielded.mp4
 ```
 
 The cube is drawn as what it is - 26 plastic cubies, each with a sticker on the
@@ -194,8 +198,10 @@ has order 4, opposite faces commute and adjacent ones do not, the sexy move
 cube records the true distance of every state within four moves of it; a
 depth-limited search from the scramble only has to reach that shell. Because
 the sweep is complete, a state missing from it is known to be further than four
-moves away - which prunes the forward search and is the difference between this
-suite running in a tenth of a second and in twenty-five minutes.
+moves away. That turns the forward search from one that must reach the solved
+state into one that only has to reach the shell, halving the depth it explores
+of a tree that branches eighteen ways - which is what lets the whole suite,
+exact solutions and all, run in a fraction of a second.
 
 **The shield's promise is tested without a model in the loop.** Against an
 adversary that always names the option the planner likes least, every cube
@@ -251,8 +257,9 @@ would rewrite; `cube.rs` and `view.rs` are the puzzle and its picture.
 
 ## Cost
 
-34 brain crates - it names two surfaces (`decision`, `viewport`), like every
-other sample in this directory.
+36 brain crates. It names two surfaces where most samples in this directory
+name one: `decision` to score the options, and `viewport` because it draws the
+cube. Dropping the window and the recorder drops the second.
 
 ---
 
