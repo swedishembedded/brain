@@ -485,10 +485,33 @@ HIGH on structure and is correctly not a filter-A concern. It is caught at
 filter B, where a model that predicts it trivially reports a low loss. Each
 filter answers one question.
 
-**R5 - the bounded retention audit.** M2. Canary plus rotating schedule, the
-priority weighting, and the detection-latency computation. Tests: coverage
-completes within the computed interval; the latency number matches the
-schedule; eval decodes never exceed `B`.
+**R5 - the bounded retention audit. DONE 2026-09-23.**
+`crates/audit`'s `schedule` module. Nine tests, red before green.
+
+**Design change made while building it, and it matters.** M2 said the
+rotating half should carry a priority weighting. It must not. Anything that
+can reorder rotation can DELAY an episode, which turns an exact coverage
+guarantee into a hope, and the guarantee is the entire product here. So the
+two halves have one job each and neither touches the other's: rotation is
+strict round-robin and yields `L = ceil(N / rotating)` exactly, while the
+canary is where priority is spent and makes no coverage claim at all. Keeping
+them apart is what lets the reader be opportunistic without weakening the
+only thing it promises. Two tests hold that line: rotation covers the bank
+within the reported latency, and one tick FEWER does not, so `L` is tight
+rather than a comfortable over-estimate.
+
+**`MAX_BLOCK_DROP` re-derived, as R3 flagged.** `block_drop_bar(m)` returns
+the pre-registered 0.20 or two standard errors of the realised sample
+(`1/sqrt(m)`), whichever is looser. It can only loosen, never tighten: a
+thinner sample buys a shorter latency and pays for it in the smallest
+regression it can still see. Holding 0.20 against a 12 probe block would
+have rejected candidates for sampling noise, which is the classic way a
+tightened audit makes a system look worse than it is.
+
+**One real bug the tests caught**: the first implementation bounded rotation
+by the budget but not the canary, so an oversized `canary_blocks` overspent
+by 5x. An oversized canary now costs the canary, never the guarantee and
+never the budget.
 
 **R6 - the rehearsal reservoir.** M6. Tests: cap respected; duplicates do not
 double weight; the no-rehearsal arm runs and reports separately.

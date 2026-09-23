@@ -35,5 +35,6 @@
 
 pub mod bank;
 pub mod pool;
+pub mod schedule;
 pub mod stream;
 pub mod triage;
