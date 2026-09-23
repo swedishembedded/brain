@@ -66,6 +66,15 @@ pub enum Arm {
     Candidate,
 }
 
+/// What one decode pass over a set of probes yields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Scored {
+    /// One score per probe, in the order they were given.
+    pub scores: Vec<f64>,
+    /// Mean completion entropy over that pass, for the degeneracy bar.
+    pub mean_entropy: f64,
+}
+
 /// Everything the loop needs a model for, and nothing else.
 pub trait Learner {
     /// Mean loss of `text` under the CURRENT model. One forward pass, and
@@ -76,12 +85,15 @@ pub trait Learner {
     /// rehearsal mix. The bytes are what the pool stores.
     fn train(&mut self, rows: &[&str], seed: u64) -> Vec<u8>;
 
-    /// Score `probes` under `arm`, one score per probe in order. Both arms
-    /// must be decoded the same way from what would actually be served.
-    fn score(&mut self, arm: Arm, probes: &[&Probe]) -> Vec<f64>;
-
-    /// Mean completion entropy under `arm`, for the degeneracy bar.
-    fn entropy(&mut self, arm: Arm) -> f64;
+    /// Decode `probes` under `arm` once, returning both what the gate needs
+    /// from that pass.
+    ///
+    /// One method rather than two on purpose. A decode yields a score and a
+    /// completion entropy together, and asking for them separately makes a
+    /// correct implementation decode everything twice - the degeneracy bar
+    /// would cost as much as the whole gate. Both arms must be decoded the
+    /// same way, from what would actually be served.
+    fn score(&mut self, arm: Arm, probes: &[&Probe]) -> Scored;
 
     /// Train ONE adapter jointly over everything learned so far and score it
     /// on `probes`. The upper bound any schedule could have reached, and the
@@ -341,6 +353,8 @@ impl<L: Learner> Reader<L> {
 
         let incumbent = self.learner.score(Arm::Incumbent, &all);
         let candidate = self.learner.score(Arm::Candidate, &all);
+        let (incumbent_entropy, candidate_entropy) = (incumbent.mean_entropy, candidate.mean_entropy);
+        let (incumbent, candidate) = (incumbent.scores, candidate.scores);
         let n = own.len();
         let mut blocks: Vec<(f64, f64)> = Vec::with_capacity(audit_blocks.len());
         let mut at = n;
@@ -363,8 +377,8 @@ impl<L: Learner> Reader<L> {
                 incumbent_scores: &incumbent[..n],
                 anchor_candidate: mean_of_pairs(&blocks, |(c, _)| *c),
                 anchor_incumbent: mean_of_pairs(&blocks, |(_, i)| *i),
-                entropy_candidate: self.learner.entropy(Arm::Candidate),
-                entropy_incumbent: self.learner.entropy(Arm::Incumbent),
+                entropy_candidate: candidate_entropy,
+                entropy_incumbent: incumbent_entropy,
                 anchor_blocks: &blocks,
             },
             &self.cfg.triage,
@@ -392,7 +406,7 @@ impl<L: Learner> Reader<L> {
         let (diagnosis, action) = if self.growth.oracle_due() && !self.bank.is_empty() {
             let bank_probes: Vec<&Probe> = self.bank.values().flat_map(|s| s.probes().iter()).collect();
             let joint = self.learner.joint_oracle(&bank_probes);
-            let sequential = mean(&self.learner.score(Arm::Incumbent, &bank_probes));
+            let sequential = mean(&self.learner.score(Arm::Incumbent, &bank_probes).scores);
             let d = self.growth.diagnose(joint, sequential);
             let a = self.growth.act(d, self.cfg.reservoir.cap);
             (Some(d), Some(a))
@@ -479,11 +493,11 @@ mod tests {
             self.last_train_rows = rows.len();
             b"adapter".to_vec()
         }
-        fn score(&mut self, arm: Arm, probes: &[&Probe]) -> Vec<f64> {
+        fn score(&mut self, arm: Arm, probes: &[&Probe]) -> Scored {
             // The incumbent fails everything; the candidate flips `wins` of
             // the episode's own probes and matches on the rest, which is the
             // shape of an episode that taught something without cost.
-            probes
+            let scores = probes
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
@@ -494,10 +508,8 @@ mod tests {
                         Arm::Incumbent => 0.0,
                     }
                 })
-                .collect()
-        }
-        fn entropy(&mut self, _arm: Arm) -> f64 {
-            2.0
+                .collect();
+            Scored { scores, mean_entropy: 2.0 }
         }
         fn joint_oracle(&mut self, _probes: &[&Probe]) -> f64 {
             self.oracles += 1;

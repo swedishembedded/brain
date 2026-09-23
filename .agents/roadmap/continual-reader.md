@@ -602,6 +602,46 @@ cost of a step never exceeds the budget while the bank grows past forty and
 the reported detection latency grows with it. That is the whole claim of
 this design in one test.
 
+**The `Learner` binding to a real model: NOT STARTED, reconnaissance done
+2026-09-23.** Recording the map so it is not rebuilt from scratch.
+
+**One seam defect was found by attempting it, and is fixed.** `Learner` had
+`score` and `entropy` as separate methods. `improve::decode_checkpoint`
+returns a score, a completion entropy and the completions from ONE pass, so
+a faithful implementation of the seam as written would have decoded every
+probe twice and made the degeneracy bar cost as much as the whole gate.
+`score` now returns a `Scored { scores, mean_entropy }`. No fake-based test
+could have caught this: the fake returns a constant, and only writing the
+real thing exposes it.
+
+**Where each method lands.**
+
+| method | what it is |
+|---|---|
+| `score` | `improve::decode_checkpoint::<M>(arm_path, &tasks, &verifier, &greedy)`, which already returns exactly `Scored`'s two fields |
+| `train` | write a dataset directory, `model::fit::<M>(dir, cfg_with_lora, &opts, Some(out))`, then `lora::resumable::save` for the bytes the pool stores |
+| `loss` | a forward pass with targets over the episode's own tokens |
+| `joint_oracle` | the same as `train` over the whole bank, then `score` |
+
+**The one piece with a real choice in it is the dataset shape.**
+`data::chat::prepare_chat_samples` is what `rl::document` uses and it writes
+the masked dataset `model::load_dataset` prefers - but it is CHAT shaped,
+and a reader's rows are lines of a document rather than turns. Either the
+rows are presented as a degenerate one-turn chat, which makes the reader's
+training distribution disagree with how it will be prompted, or a plain
+token dataset is written with `data::binio::write_u32_bin` plus a
+`meta.json`. The second is right and is the work.
+
+A probe maps to `promote::env::Task` with the prompt tokenized and the
+expected string in `answer`; the verifier is exact match after
+`promote::document::normalize`, which is already the one definition of how
+much latitude an exact match gets.
+
+**Two arms means two checkpoints on disk**, incumbent and candidate, since
+`decode_checkpoint` loads from a path and the gate's own contract is that
+both arms are scored from what would actually be served rather than from a
+freshly-trained in-memory instance.
+
 **R8 - serve while learning, staged.** The forcing function for the
 `stage`/`validate`/`commit`/`rollback` API that `continuous-learning.md` B7
 recorded as missing from `crates/residency`. Tests: a promoted adapter changes
