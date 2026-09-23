@@ -326,10 +326,35 @@ Reject(BlockRegressed), got Promote`). The `Degenerate` half of this milestone
 was DROPPED after reading why the entropy arm is off: see L3b. It is replaced
 by the distinct-completions check in V14.
 
-**R1 - the episode stream.** Ordered, resumable, deterministic over a
-directory; binaries sniffed by content; an episode never spans two documents.
-Tests: same seed same sequence; binary skipped by content; no episode spans two
-documents.
+**R1 - the episode stream. DONE 2026-09-23.** Landed as the new leaf crate
+`crates/audit` (`brain-audit`) and its `stream` module, registered in
+`scripts/gates/check-crate-layers.sh` so the leaf property is machine-checked
+rather than intended. Eight tests, red before green.
+
+Four properties are decided there and nowhere else, each with its reason in
+the module doc: a document is read start to end and an episode never spans
+two; document order is a seeded permutation of the SORTED paths (`read_dir`
+order is not stable, so sorting first is what makes the seed the only source
+of order, and the order-permutation control arm is then "same corpus,
+different seed" rather than a second code path); text is decided by content
+and never by extension; and an episode's identity is the digest of its own
+bytes rather than of `(path, ordinal)`, because the questions identity
+answers later are "have I read this content before" and "is this already in
+the reservoir".
+
+Two of the eight tests are the fire/stay-silent pair this file asks for
+everywhere: a resume under the same corpus and config continues the
+uninterrupted sequence exactly, and a resume after `episode_chars` changed or
+the corpus grew is refused as `CursorMismatch` rather than silently reading a
+different stream. The binary test also asserts both halves - a text file named
+`.bin` is read, a binary file named `.txt` is skipped - since either half
+alone is equally consistent with an extension test.
+
+**Recorded, not built: the corpus is fixed for the life of a stream.** A
+`Cursor` is a document index, so a growing directory shifts what an index
+means. Following a growing corpus needs an append-only document identity
+rather than an index; that is a different mechanism and R1 refuses the unsafe
+case by name instead of pretending to handle it.
 
 **R2 - probes, and the three probe families.** Frozen spans, paraphrase
 variants, counterfactual variants, all selected by a pure function of the

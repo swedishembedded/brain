@@ -34,7 +34,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 
 # Crates that must remain usable from a layer-4 model crate.
-LEAF_CRATES="brain-promote brain-rlcd brain-search"
+LEAF_CRATES="brain-promote brain-rlcd brain-search brain-audit"
 
 # Layers 1-3 of .agents/rules/architecture.md: kernels + the architecture
 # registry, the accelerator seam, and the training substrate. Everything else

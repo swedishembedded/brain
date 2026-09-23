@@ -1,0 +1,23 @@
+[package]
+name = "brain-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The model-free core of a continual reader: the episode stream it reads, the probe bank it freezes, the bounded retention audit it runs against that bank, and the ledger it writes down. A LEAF crate by design - its whole closure is brain-data and below, so the model-driven loop in brain-rl can drive it without any model crate appearing in its dependencies."
+
+[lib]
+name = "audit"
+path = "src/lib.rs"
+
+[dependencies]
+# `data::rng::Rng` - the workspace's one SplitMix64 generator. The document
+# order this crate draws is seeded from it rather than from a fresh local
+# copy, per that module's own rule.
+brain-data.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Episode identity is a digest of the episode's own bytes.
+sha2.workspace = true
+# Named, `Display`-able variants for the stream's preconditions, matching
+# `promote::document::DocumentError`'s established convention.
+thiserror.workspace = true
