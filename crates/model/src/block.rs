@@ -1844,14 +1844,16 @@ pub fn spans_bidir_bwd(
     steps: &mut Vec<Step>,
 ) {
     let p = |n_wg: u32| [n_wg, heads, head_dim, stride, q_off, k_off, v_off, d_model];
-    let thr = |n_wg: u32| n_wg * SPANS_BWD_WS;
+    // Every kernel in this family owns one work item per WORKGROUP, and
+    // `counts` is already in that unit.
+    let wg = gpu_core::Dispatch::Workgroups;
     let [n_qk, n_rows64, n_rows1, n_hd] = counts;
-    steps.push(g.step(ids.scores, &[&work.qk, qkv, scores], &p(n_qk), thr(n_qk)));
-    steps.push(g.step(ids.softmax, &[&work.rows64, scores, probs], &p(n_rows64), thr(n_rows64)));
-    steps.push(g.step(ids.dscores, &[&work.rows1, d_ctx, qkv, probs, d_scores], &p(n_rows1), thr(n_rows1)));
-    steps.push(g.step(ids.dq, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), thr(n_hd)));
-    steps.push(g.step(ids.dk, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), thr(n_hd)));
-    steps.push(g.step(ids.dv, &[&work.hd, probs, d_ctx, d_qkv], &p(n_hd), thr(n_hd)));
+    steps.push(g.dispatch(ids.scores, &[&work.qk, qkv, scores], &p(n_qk), wg(n_qk)));
+    steps.push(g.dispatch(ids.softmax, &[&work.rows64, scores, probs], &p(n_rows64), wg(n_rows64)));
+    steps.push(g.dispatch(ids.dscores, &[&work.rows1, d_ctx, qkv, probs, d_scores], &p(n_rows1), wg(n_rows1)));
+    steps.push(g.dispatch(ids.dq, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), wg(n_hd)));
+    steps.push(g.dispatch(ids.dk, &[&work.hd, d_scores, qkv, d_qkv], &p(n_hd), wg(n_hd)));
+    steps.push(g.dispatch(ids.dv, &[&work.hd, probs, d_ctx, d_qkv], &p(n_hd), wg(n_hd)));
 }
 
 /// Device-side homes for [`SpansBwdWork`]'s four tables, owned by the model
@@ -1979,11 +1981,11 @@ pub fn flash_cross_step(
 ) -> Step {
     assert!(head_dim <= 128, "flash_attn_cross: head_dim {head_dim} > 128");
     let nwg = bsz * heads * nq.div_ceil(FLASH_CROSS_REG2_BR);
-    g.step(
+    g.dispatch(
         kind,
         &[q, k, v, ctx],
         &[bsz, heads, nq, nk, head_dim, lay.q_stride, lay.q_off, lay.k_stride, lay.k_off, lay.v_stride, lay.v_off, lay.d_out],
-        nwg * FLASH_CROSS_REG2_WS,
+        gpu_core::Dispatch::Workgroups(nwg),
     )
 }
 

@@ -67,11 +67,56 @@ fn grid_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String
     KERNEL_GRIDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Strip WGSL comments, so the reading below is of CODE and not of prose.
+///
+/// Load-bearing, not tidiness: eight shaders name `workgroupBarrier` only in
+/// their header, most of them to explain that they deliberately do NOT use
+/// one (`moe_linear_gated_i8` and its q4/kq siblings, `bias_grad_part`,
+/// `gn_dsum_part`, `prelu_bwd`, the two `gdn_chunk_*_cumsum_step`). Reading
+/// the raw text called every one of them cooperative, which would refuse a
+/// correct one-thread-per-item dispatch and invite the caller to "fix" it
+/// into a grid 64x too small.
+fn wgsl_code_only(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut it = src.chars().peekable();
+    // WGSL block comments nest, so this is a depth and not a flag.
+    let mut block = 0u32;
+    while let Some(c) = it.next() {
+        match (block, c, it.peek()) {
+            (_, '/', Some('*')) => {
+                it.next();
+                block += 1;
+            }
+            (d, '*', Some('/')) if d > 0 => {
+                it.next();
+                block -= 1;
+            }
+            // Newlines survive a comment so line-oriented reading still works.
+            (d, ch, _) if d > 0 => {
+                if ch == '\n' {
+                    out.push('\n');
+                }
+            }
+            (_, '/', Some('/')) => {
+                for ch in it.by_ref() {
+                    if ch == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            (_, ch, _) => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Parse a shader's thread mapping out of its own source.
 pub fn parse_kernel_grid(src: &str) -> KernelGrid {
+    let code = wgsl_code_only(src);
     let mut wg_size = 1u32;
-    if let Some(i) = src.find("@workgroup_size(") {
-        let rest = &src[i + "@workgroup_size(".len()..];
+    if let Some(i) = code.find("@workgroup_size(") {
+        let rest = &code[i + "@workgroup_size(".len()..];
         if let Some(j) = rest.find(')') {
             for part in rest[..j].split(',') {
                 let d: u32 = part.trim().parse().unwrap_or(1);
@@ -81,7 +126,7 @@ pub fn parse_kernel_grid(src: &str) -> KernelGrid {
     }
     // `var<workgroup>` alone would over-report: a kernel can use scratch
     // without its threads sharing an item. A barrier means they do.
-    let cooperative = src.contains("workgroupBarrier");
+    let cooperative = code.contains("workgroupBarrier");
     KernelGrid { wg_size: wg_size.max(1), cooperative }
 }
 
@@ -1869,6 +1914,28 @@ mod tests {
         let s1 = gpu.step(1, &[&x, &y], &[3], 3);
         gpu.submit(&[], &[s1]);
         assert_eq!(gpu.read(&y, 3), vec![5.0, 10.0, 15.0], "variant: SCALE=5");
+    }
+
+    /// A kernel's thread mapping is read from its CODE, never from its prose.
+    ///
+    /// The shaders that discuss `workgroupBarrier` in a header without using
+    /// one are not hypothetical: eight of them exist, and most say so exactly
+    /// because their one-thread-per-item shape is the interesting fact about
+    /// them. Calling those cooperative makes `Gpu::step` refuse a correct
+    /// dispatch, and the obvious way to satisfy it - counting the same number
+    /// in workgroups - asks for a grid 64x too small.
+    #[test]
+    fn a_barrier_named_only_in_a_comment_is_not_a_barrier() {
+        let prose = "// this kernel needs no workgroupBarrier(), unlike the tiled one\n\
+                     /* nor a /* nested */ one */\n\
+                     @compute @workgroup_size(64)\n\
+                     fn main() {}";
+        assert_eq!(crate::parse_kernel_grid(prose), crate::KernelGrid { wg_size: 64, cooperative: false });
+
+        let real = "// a tiled GEMM\n\
+                    @compute @workgroup_size(16, 16)\n\
+                    fn main() { workgroupBarrier(); }";
+        assert_eq!(crate::parse_kernel_grid(real), crate::KernelGrid { wg_size: 256, cooperative: true });
     }
 
     #[test]

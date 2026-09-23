@@ -607,13 +607,13 @@ pub fn flash_decode_bench(seq: u32, reps: usize) {
     let pr = gpu.storage((n_heads * cap) as u64);
     let ctx_ref = gpu.storage((n_heads * head_dim) as u64);
     let scores_total = batch * n_heads * cap;
-    let scores_threads = scores_total.div_ceil(model::block::PAGED_SCORES_PER_WORKGROUP) * 64;
+    let scores_wgs = scores_total.div_ceil(model::block::PAGED_SCORES_PER_WORKGROUP);
     let ref_steps = vec![
-        gpu.step(
+        gpu.dispatch(
             0,
             &[&qb, &poolk, &btb, &sl, &sc],
             &[batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs, scale.to_bits()],
-            scores_threads,
+            gpu_core::Dispatch::Workgroups(scores_wgs),
         ),
         gpu.step(1, &[&sc, &sl, &pr], &[batch, n_heads, cap], batch * n_heads),
         gpu.step(

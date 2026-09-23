@@ -76,7 +76,7 @@ struct Fixture {
     // triad
     triad_steps_params: (Vec<u32>, Vec<u32>, Vec<u32>),
     // shared decode inputs
-    scores_threads: u32,
+    scores_wgs: u32,
     // flash (unsplit)
     flash_params: Vec<u32>,
     // split
@@ -119,7 +119,7 @@ fn build(g: &Gpu, sh: &Shape, tiles_per_split: u32) -> (Fixture, Vec<gpu_core::D
     let ctx_split = g.storage((batch * n_heads * head_dim) as u64);
 
     let scores_total = batch * n_heads * cap;
-    let scores_threads = scores_total.div_ceil(PAGED_SCORES_PER_WORKGROUP) * 64;
+    let scores_wgs = scores_total.div_ceil(PAGED_SCORES_PER_WORKGROUP);
 
     let triad_p0 = vec![batch, n_heads, group, head_dim, bs, kv_stride, cap, mbs, scale.to_bits()];
     let triad_p1 = vec![batch, n_heads, cap];
@@ -143,7 +143,7 @@ fn build(g: &Gpu, sh: &Shape, tiles_per_split: u32) -> (Fixture, Vec<gpu_core::D
 
     let fx = Fixture {
         triad_steps_params: (triad_p0, triad_p1, triad_p2),
-        scores_threads,
+        scores_wgs,
         flash_params,
         split_params,
         combine_params,
@@ -162,7 +162,7 @@ fn triad_steps(g: &Gpu, bufs: &[gpu_core::DeviceBuffer], fx: &Fixture) -> Vec<gp
         (&bufs[0], &bufs[1], &bufs[2], &bufs[3], &bufs[4], &bufs[5], &bufs[6], &bufs[7]);
     let (p0, p1, p2) = &fx.triad_steps_params;
     vec![
-        g.step(0, &[qb, poolk, btb, sl, sc], p0, fx.scores_threads),
+        g.dispatch(0, &[qb, poolk, btb, sl, sc], p0, gpu_core::Dispatch::Workgroups(fx.scores_wgs)),
         g.step(1, &[sc, sl, pr], p1, p1[0] * p1[1]),
         g.step(2, &[pr, &bufs[2], btb, sl, ctx_triad], p2, p2[0] * p2[1] * p2[3]),
     ]
