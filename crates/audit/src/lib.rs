@@ -33,6 +33,7 @@
 //! auditable rather than merely optimistic, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+pub mod arms;
 pub mod bank;
 pub mod growth;
 pub mod pool;

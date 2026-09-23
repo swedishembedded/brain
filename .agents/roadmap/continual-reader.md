@@ -796,8 +796,33 @@ refactored underneath it. A torn trailing line is skipped rather than
 failing the read, and the next append heals the tear instead of compounding
 one lost row into two.
 
-**R10 - the adversarial and reproducibility suite.** T3 of 3.2: shuffled
-labels, order permutation, multi-seed, injections. Tests are the arms.
+**R10 - the adversarial and reproducibility suite. DONE 2026-09-23.**
+`crates/audit`'s `arms` module. Nine tests.
+
+Every headline a reader reports can be produced by a system that learned
+nothing: a gate promoting on noise still has a promote rate, a matrix over
+probes nobody could fail is still well formed, a battery scored after
+training on its own answers still improves. So the numbers are not the
+result; the numbers together with what the controls did are.
+
+**`Inconclusive` is its own outcome, and `defensible()` requires every arm
+to have PASSED rather than merely not failed.** An arm that could not answer
+tells a reader nothing, and counting it as a pass is precisely how a suite
+of controls becomes a suite of names. A run with NO arms is not defensible
+either, which is the case most likely to be mistaken for a clean one.
+
+**The shuffled-labels arm compares against the real arm, not against zero.**
+A gate that promotes nothing promotes nothing under shuffling too, and
+scoring that as a pass would certify a gate that is merely shut. Below a 10%
+real rate it returns `Inconclusive` carrying the counts.
+
+Order permutation compares the retention DIAGONAL rather than promote rates:
+two orders have no reason to promote the same episodes at the same moments,
+but the reader must end up able to do the same things. Injections name the
+episode that got through rather than a rate, because "this document was
+learned" is actionable where "3%" is not. `seed_spread` reports a range
+rather than a standard deviation, since at three or four seeds a standard
+deviation carries more precision than evidence.
 
 **R11 - the acceptance run.** 3.3, asserted.
 
