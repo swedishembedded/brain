@@ -420,6 +420,7 @@ dependencies = [
  "brain-modernbert",
  "brain-mujoco",
  "brain-neuro",
+ "brain-promote",
  "brain-qwen3",
  "brain-qwen35",
  "brain-qwen35moe",
@@ -431,6 +432,7 @@ dependencies = [
  "brain-rrdbnet",
  "brain-s3dit",
  "brain-sam2",
+ "brain-search",
  "brain-testutil",
  "brain-timesfm3",
  "brain-viewport",
@@ -2248,6 +2250,15 @@ dependencies = [
  "brain-modelstore",
  "brain-testutil",
  "brain-vae",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-search"
+version = "1.1.0"
+dependencies = [
+ "brain-data",
+ "serde",
  "serde_json",
 ]
 

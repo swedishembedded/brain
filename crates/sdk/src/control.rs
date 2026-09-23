@@ -1193,6 +1193,32 @@ impl<E: Env> ControlPipeline<E> {
         Ok(self.policy_and_feature(observation, options)?.0)
     }
 
+    /// The policy's distribution over options asked under a GIVEN objective,
+    /// rather than the one this pipeline's own environment would state.
+    ///
+    /// For a caller that holds the environment itself - a search driving its
+    /// own episodes and wanting the policy only as a proposal distribution.
+    /// Such a caller cannot hand the environment over, so its pipeline is
+    /// built over an inert one, and [`Self::policy`] would then ask the
+    /// question under the inert environment's objective. That is not a
+    /// cosmetic difference: the objective is part of the text the encoder
+    /// reads, so asking under the wrong one measures a policy nobody trained.
+    ///
+    /// The same reason [`Demonstration`] carries an objective of its own.
+    pub fn policy_for(
+        &mut self,
+        objective: &str,
+        observation: &str,
+        options: &[String],
+    ) -> Result<Vec<f32>> {
+        let q = self.question_for(objective, options);
+        let scores = self
+            .model
+            .score(observation, std::slice::from_ref(&q))
+            .map_err(Error::Backend)?;
+        Ok(decide::loss::softmax(&scores[0]))
+    }
+
     /// The distribution AND the state feature the critic reads, from one
     /// forward pass. Kept together because computing them apart would encode
     /// the observation twice per decision.

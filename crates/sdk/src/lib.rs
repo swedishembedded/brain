@@ -155,6 +155,18 @@ pub use conversion::{
 #[cfg(feature = "decision")]
 pub use search;
 
+/// `brain::promote` - the promote/reject decision, re-exported unchanged.
+///
+/// The SELECT half of `SEARCH -> VERIFY -> SELECT -> COMPRESS`, and the half
+/// a loop that trains itself cannot do without: a generation that produces a
+/// worse policy than the one before has to be REFUSED, or the loop has no
+/// ratchet and wanders. `brain-promote` is a leaf in the training-substrate
+/// layer that knows nothing of models - a paired sign test and four bars over
+/// already-scored episodes - so it is re-exported rather than wrapped, for
+/// the same reason `search` is.
+#[cfg(feature = "decision")]
+pub use promote;
+
 /// `brain::RlcdPipeline` - training a decision model directly against exact
 /// oracle posteriors (a soft target distribution, not a single gold index),
 /// and auditing it on calibration AND cost-sensitive decision regret. Its
