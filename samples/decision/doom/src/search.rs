@@ -320,6 +320,20 @@ pub struct Mark {
 /// digest. See [`Mark::said`].
 const EXPLAIN_FIRST: u32 = 128;
 
+/// Whether a written-down action names what it MEANT as well as what it
+/// sent.
+///
+/// An action is recorded as `tag|tics|commands` (see `DoomEnv::inputs`); it
+/// used to be recorded as `tics|commands`, which named two different acts
+/// whenever two options sent the same thing - and on E1M1 that was nearly
+/// every decision. The two forms are told apart by their first character: a
+/// tag name starts with a letter and a tic count with a digit. That is
+/// enough, because the only question being asked is whether a file predates
+/// the fix.
+fn names_an_act(written: &str) -> bool {
+    written.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
 /// FNV-1a over the observation text.
 ///
 /// A digest rather than the text: a trail carries a mark every few decisions
@@ -564,6 +578,22 @@ impl Campaign {
                 // every index would still resolve to a perfectly good
                 // sentence. They are written and read as one file for exactly
                 // that reason.
+                if let Some(stale) = was.vocab.iter().find(|w| !names_an_act(w)) {
+                    // Refused, not repaired and not silently carried. Every
+                    // trail in the file is a list of indices into this
+                    // vocabulary, so an archive whose actions were written
+                    // down before they named what they MEANT is one whose
+                    // every trail replays as a different run - and the
+                    // symptom of carrying it anyway is not an error, it is a
+                    // search reporting cells it cannot return to and
+                    // solutions it cannot verify. See `DoomEnv::inputs`.
+                    println!(
+                        "  {path} was written before an action recorded what it MEANT \
+                         ({stale:?} names no act), so none of its trails can be replayed. \
+                         Delete it and search again; nothing here can repair it."
+                    );
+                    return;
+                }
                 self.spoken = was
                     .vocab
                     .iter()
@@ -806,11 +836,24 @@ impl Campaign {
             return None;
         }
         self.rehydrations -= 1;
-        let Some(actions) = self.archive.get(at).and_then(|e| self.spell(&e.what)) else {
+        let Some(trail) = self.archive.get(at).map(|e| e.what.clone()) else {
             self.archive.remove(at);
             return None;
         };
-        if replay(env, self.seed, &actions, allowed).is_err() || !env.hold_at(slot) {
+        let Some(actions) = self.spell(&trail) else {
+            self.archive.remove(at);
+            return None;
+        };
+        // CHECKED, against the trail's own witnesses. A walk back that ends
+        // somewhere other than where the archive says it ends is the worst
+        // failure a search can have: it explores one place and reports
+        // another, and every cell it then files carries a trail that does
+        // not lead to it. Verifying costs a position comparison every eighth
+        // decision on a walk that is happening anyway, and a rehydration is
+        // bounded to `REHYDRATIONS` a campaign.
+        if replay_checked(env, self.seed, &actions, allowed, &trail.marks).is_err()
+            || !env.hold_at(slot)
+        {
             self.archive.remove(at);
             return None;
         }
@@ -961,12 +1004,15 @@ impl Campaign {
                     // finished the level.
                     let mut whole = prefix.clone();
                     whole.extend_from_slice(&steps);
+                    let mut seen = marked.clone();
+                    seen.extend_from_slice(&marks);
                     if let Some(actions) = self.spell(&Trail {
                         steps: whole,
-                        marks: Vec::new(),
+                        marks: seen.clone(),
                     }) {
                         self.claims.push(Claim {
                             actions,
+                            marks: seen,
                             claimed: ended,
                             claimed_tics: env.cost(),
                         });
@@ -1097,35 +1143,29 @@ fn same_again(prev: &str, options: &[String]) -> Option<usize> {
     options.iter().position(|o| words(o) == want)
 }
 
-/// Replay an action list from the level's own start and report what actually
-/// happened.
+/// Replay an action list from the level's own start, checking the trail's
+/// own witnesses as it goes, and report what actually happened.
 ///
 /// The expensive rung of the cascade, and the only one whose answer is worth
 /// anything to a human: everything above it reasons about states reached by
 /// restoring snapshots, which is not a run anybody could play. This is a
 /// whole episode against the engine, from the level's front door, taking only
-/// the actions in the list.
+/// the actions in the list. Search may use snapshots; the artifact may not.
 ///
 /// An option the list names and the game does not offer is a HARD failure,
 /// never a skip. The list is a claim about what the level does; a replay that
 /// silently walks past a missing option is one that verifies a different
 /// trajectory and reports success.
-pub fn replay(
-    env: &mut DoomEnv,
-    seed: u64,
-    actions: &[String],
-    allowed: u32,
-) -> Result<crate::report::Score, String> {
-    replay_checked(env, seed, actions, allowed, &[])
-}
-
-/// [`replay`], checking the trail's own witnesses as it goes.
 ///
-/// Reports the FIRST decision at which the replay stood somewhere the search
-/// did not, which is the only useful thing to know about a trail that does
-/// not reproduce. Without it the failure arrives as a missing option sentence
-/// three hundred decisions in, which says the two runs disagree and nothing
-/// whatever about where they began to.
+/// The witnesses are what make a failure actionable. It reports the FIRST
+/// decision at which the replay stood somewhere the search did not, or stood
+/// in exactly the right place and READ something different there - the only
+/// useful thing to know about a trail that does not reproduce, and two
+/// entirely different faults. Without them the failure arrives as a missing
+/// option three hundred decisions in, which says the two runs disagree and
+/// nothing whatever about where they began to.
+///
+/// An empty `marks` checks nothing on the way and reports only the outcome.
 pub fn replay_checked(
     env: &mut DoomEnv,
     seed: u64,
@@ -1197,6 +1237,14 @@ pub fn replay_checked(
 /// What a candidate solution claims, for the cascade to check.
 pub struct Claim {
     pub actions: Vec<String>,
+    /// Where the search stood on the way, every few decisions.
+    ///
+    /// Carried so that a claim which fails to replay says WHERE it parted
+    /// company rather than only that it scored less. A verification that can
+    /// only report the final number is a verification nobody can act on -
+    /// and this is the rung whose failures are the most expensive to
+    /// diagnose, because reaching one costs a whole campaign.
+    pub marks: Vec<Mark>,
     /// What the SEARCH believed, reached by restoring snapshots.
     pub claimed: crate::report::Score,
     pub claimed_tics: u64,
@@ -1313,7 +1361,7 @@ pub fn campaign(
             if let Verdict::Reject(_) = ladder.admit(&claim) {
                 continue;
             }
-            match replay(env, seed, &claim.actions, allowed) {
+            match replay_checked(env, seed, &claim.actions, allowed, &claim.marks) {
                 Ok(got) if got.finished => {
                     let l = env.level_counts();
                     let s = Solution {

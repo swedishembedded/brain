@@ -1322,8 +1322,8 @@ impl DoomEnv {
         self.opts.iter().position(|o| o.tag == action::Tag::Use)
     }
 
-    /// What each option on offer would actually SEND to the game: the tic
-    /// count and the command list, as one canonical string.
+    /// Each option on offer written down so that replaying it reproduces the
+    /// run: what it MEANS, how long it is held, and what it sends.
     ///
     /// A trail records these rather than the option's sentence, because a
     /// sentence does not determine an input. "go to ground nobody has looked
@@ -1334,11 +1334,27 @@ impl DoomEnv {
     /// trajectory that cannot be replayed, and the search cannot notice,
     /// because the search never replays anything.
     ///
+    /// THE TAG IS IN IT, and leaving it out is what blocked every verified
+    /// solution this sample ever claimed. A replay finds its action by
+    /// looking for the recording among the options on offer, so a recording
+    /// that names two of them picks whichever comes first - and on E1M1 that
+    /// happens on nearly every decision, because "walk toward the shotgun"
+    /// (`Grab`) and "advance" (`Advance`) both send `forward 8` for six
+    /// tics. The engine cannot tell the two apart and does not need to. This
+    /// side does: `apply` reads the tag, and the tag drives what the agent
+    /// counts as tried and what it has committed to following, both of which
+    /// are IN the observation. So the replay stood in exactly the right
+    /// place, on exactly the right tic, and read a different sentence there.
+    ///
+    /// The three fields here are exactly the three `DoomEnv::apply` reads off
+    /// an option - see `every_field_of_an_option_either_replays_or_cannot
+    /// _change_the_run`, which fails to compile if a fourth is added.
+    ///
     /// The engine itself is not at fault and was measured not to be:
     /// restoring a snapshot and stepping on reproduces stepping on without
     /// one, bit for bit at full fixed-point precision, momentum included.
     pub fn inputs(&self) -> Vec<String> {
-        self.opts.iter().map(|o| format!("{}|{}", o.tics, o.commands)).collect()
+        self.opts.iter().map(recorded).collect()
     }
 
     /// The observation as the model would read it right now.
@@ -2069,6 +2085,42 @@ fn health_band(health: i32) -> i32 {
     (health.max(0) / 25).clamp(0, 8)
 }
 
+/// How one option is written down so that replaying it reproduces the run.
+///
+/// See [`DoomEnv::inputs`] for why the tag is in here.
+fn recorded(o: &Option_) -> String {
+    format!("{:?}|{}|{}", o.tag, o.tics, o.commands)
+}
+
+/// Every field of an [`Option_`], sorted by hand into the ones a replay has
+/// to carry and the ones that cannot change what happens.
+///
+/// Exhaustive on purpose - no `..` - so that adding a field to `Option_`
+/// FAILS TO COMPILE until somebody says which side of the line it is on.
+/// That is the whole point of it, and it is here because the alternative was
+/// paid for in full: the tag was missing from the recording for the sample's
+/// entire history, and the symptom was a replay that stood in exactly the
+/// right place and read something different.
+#[allow(dead_code)]
+fn every_field_of_an_option_either_replays_or_cannot_change_the_run(o: &Option_) {
+    let Option_ {
+        // What `DoomEnv::apply` reads, and therefore what `recorded` has to
+        // name: the tag decides what the agent counts as tried and what it
+        // has committed to, the tics decide how long the input is held, the
+        // commands are the input.
+        tag: _,
+        tics: _,
+        commands: _,
+        // What the agent is SHOWN. A replay chooses by what an option does,
+        // not by how it is worded, so two wordings of the same act replay
+        // identically - which is what lets the sentences carry live numbers.
+        text: _,
+        // How much room the act was built from. Read only when the scripted
+        // player ranks the options it was offered; a replay is not choosing.
+        room: _,
+    } = o;
+}
+
 /// What the scripted player is told to prefer, in order, under each set of
 /// orders.
 ///
@@ -2784,5 +2836,58 @@ mod teacher_tests {
             searched_band(400),
             "coarse once it is thorough"
         );
+    }
+}
+
+/// What a recorded action has to name for a replay to reproduce the run.
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+
+    /// The one that blocked every verified solution this sample ever made.
+    ///
+    /// A replay finds its action by looking for the recording among the
+    /// options on offer. If two options record the same string the replay
+    /// takes whichever is listed first, and on E1M1 that happens on nearly
+    /// every decision: "walk toward the shotgun" and "advance" both send
+    /// `forward 8` for six tics. The engine agrees either way - position,
+    /// angle and tic came out identical - and the AGENT does not, because
+    /// the tag decides what it counts as tried and what it has committed to
+    /// following, and both of those are in the observation it reads next.
+    #[test]
+    fn two_acts_that_send_the_same_thing_are_not_the_same_recording() {
+        let walk_to_the_gun = Option_ {
+            text: "walk toward the shotgun, 200 units away".into(),
+            commands: r#"[{"type":"forward","amount":8}]"#.into(),
+            tics: 6,
+            tag: Tag::Grab,
+            room: 320,
+        };
+        let just_advance = Option_ { tag: Tag::Advance, ..walk_to_the_gun.clone() };
+        assert_eq!(
+            (walk_to_the_gun.tics, &walk_to_the_gun.commands),
+            (just_advance.tics, &just_advance.commands),
+            "the premise: the engine is sent the same thing either way"
+        );
+        assert_ne!(
+            recorded(&walk_to_the_gun),
+            recorded(&just_advance),
+            "a recording that names both is a recording that replays as either"
+        );
+    }
+
+    /// And two wordings of the SAME act are one recording, which is what
+    /// lets an option sentence carry live numbers.
+    #[test]
+    fn two_wordings_of_one_act_are_one_recording() {
+        let a = Option_ {
+            text: "walk forward, 320 units of open floor ahead".into(),
+            commands: r#"[{"type":"forward","amount":8}]"#.into(),
+            tics: 6,
+            tag: Tag::Advance,
+            room: 320,
+        };
+        let b = Option_ { text: "walk forward, 288 units of open floor ahead".into(), room: 288, ..a.clone() };
+        assert_eq!(recorded(&a), recorded(&b));
     }
 }

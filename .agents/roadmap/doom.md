@@ -221,6 +221,50 @@ later reader will find them:
       ranked and never selectable has cost this sample three campaigns
       (change weapon, circle-strafe, hunt); nothing short of enumeration
       catches the fourth.
+- [x] **M5a - a recorded action names what it MEANT** (knowledge #150). The
+      reason no claimed solution had ever replayed, and it was not the
+      engine. An action was written down as what it SENDS - `tics` and the
+      command list - and that named two different options on nearly every
+      decision of E1M1, because "walk toward the shotgun" (`Tag::Grab`) and
+      "advance" (`Tag::Advance`) both send `forward 8` held for six tics.
+      The replay took whichever came first, the simulation agreed completely
+      (identical position, angle and tic), and the AGENT did not, because
+      its own bookkeeping - what it has tried, what it is committed to
+      following - is keyed on the tag and is in the observation it reads
+      next.
+
+      Three rounds of engine determinism work preceded this, all of them
+      real bugs and none of them this one. Bit-exact simulation is necessary
+      and not sufficient: an agent whose state depends on the MEANING of its
+      action has extended the state past what the simulator holds.
+
+      Actions are now `tag|tics|commands`, which is exactly what
+      `DoomEnv::apply` reads off an option, guarded by an exhaustive
+      destructure that fails to compile when a field is added. Archives
+      written the old way are refused on load, loudly - they are lists of
+      indices into a vocabulary that named the wrong acts and nothing can
+      repair them.
+
+      A second cause sat behind it, and it was not about replay at all:
+      `Memory::clear` cleared only what was in sight, so every episode after
+      the first IN A PROCESS began holding the last one's monsters, rooms
+      and pushed-on walls. The visible half is an agent that remembers a
+      level it has not played. The expensive half is that a trajectory
+      replayed after another one is offered different options and diverges,
+      and nothing in the trajectory says why. It is an exhaustive
+      destructure now too.
+
+      **Measured, E1M1, 374-cell archive, six trails sampled by length:**
+      every one replays from the level's own start, the longest of them 1466
+      decisions. Before this the audit failed on four of six, and it had
+      never once passed.
+
+      This is also why generations never compounded: `go_to` rebuilds a
+      carried-in cell's snapshot by replaying its trail, and an ambiguous
+      replay landed somewhere else - so the search explored one place and
+      filed the result under another. That replay is checked against the
+      trail's own witnesses now, and a cell that does not reproduce is
+      dropped rather than used.
 - [ ] **M6 - first verified UV-Max on one level**, replayed from the start.
 - [ ] **M7 - `refine`/`splice`**: minimise tics on a solved level.
 - [ ] **M8 - compression at scale**: both model arms measured head to head.

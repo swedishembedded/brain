@@ -638,6 +638,71 @@ frontier was worth. All three ledgers now ask in one call. A frontier costs
 what it costs to ask about, which is a separate decision from whether it is
 the right frontier.
 
+### What a recorded action has to say
+
+> **Search may use snapshots. The artifact may not.**
+
+A trajectory is only an artifact if it replays from the level's own start.
+Replaying means finding, in the option list the agent is offered, the action
+that was written down - so what is written down has to name exactly one of
+them.
+
+It did not. An action was recorded as what it SENDS to the game, `tics` and
+the command list, and on E1M1 that named more than one option on nearly every
+decision: "walk toward the shotgun" and "advance" both send `forward 8` held
+for six tics. So does "head for the exit" down a corridor. The replay took
+whichever came first.
+
+The symptom pointed exactly away from the cause:
+
+```
+at decision 144 the replay stands exactly where the search stood -
+(169, -3315) facing 1 on tic 1601 - and READS something different there.
+```
+
+Position, angle and tic identical - the simulation agrees completely, because
+it was sent identical bytes and cannot tell the two acts apart. The AGENT
+disagrees, because its own bookkeeping is keyed on which act it took: what it
+counts as having tried, what it has committed to following for the next few
+decisions. All of that is in the observation it reads next.
+
+Three rounds of engine work went into determinism before this was found -
+snapshot fidelity, held keys, turn acceleration, the event ring - and every
+one of them was a real bug and none of them was this one. Bit-exact
+simulation is necessary and it is not sufficient: an agent whose state
+depends on the MEANING of its action has extended the state past what the
+simulator holds.
+
+An action is now recorded as `tag|tics|commands`, which is exactly the three
+fields `DoomEnv::apply` reads off an option -
+`every_field_of_an_option_either_replays_or_cannot_change_the_run`
+destructures `Option_` with no `..`, so adding a fourth fails to compile
+until somebody says which side of the line it is on.
+
+A second cause sat behind that one and was not about replay at all.
+`Memory::clear` - "a new episode is a new world" - cleared only what was in
+sight, so every episode after the first **in a process** began holding the
+last one's monsters, rooms and pushed-on walls. The visible half of that is
+an agent that remembers a level it has not played. The expensive half is that
+a trajectory replayed after another one is offered different options and
+diverges, for a reason nothing in the trajectory can reveal. Both `Option_`
+and `Memory` are destructured exhaustively now, so adding a field fails to
+compile until somebody says which side of the line it is on.
+
+**Measured on a 374-cell E1M1 archive, six trails sampled by length: every
+one replays from the level's own start, the longest 1466 decisions.** The
+audit had never passed before; it was failing four of six.
+
+That is also why generations never compounded. Rebuilding a carried-in cell's
+snapshot means replaying its trail, and an ambiguous replay landed somewhere
+else - so the search explored one place and filed the result under another.
+That replay is checked against the trail's own witnesses now, and a cell that
+does not reproduce is dropped instead of used.
+
+The recording format change is breaking and cannot be repaired: every trail
+on disk is a list of indices into a vocabulary written the old way. Such an
+archive is refused on load and says so.
+
 ### Closing the loop: the policy as a search operator
 
 `search --head PATH` puts the trained policy in among the search operators, as

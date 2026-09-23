@@ -276,8 +276,26 @@ impl Memory {
     }
 
     /// A new episode is a new world.
+    ///
+    /// ALL of it, and the exhaustive destructure is the point: this cleared
+    /// only what was in sight, so every episode after the first in a process
+    /// began holding the last one's monsters, the last one's rooms and the
+    /// last one's pushed-on walls. An agent that remembers a level it has
+    /// not played yet is the smaller half of that. The larger half is that a
+    /// trajectory replayed after another one starts with the other's memory,
+    /// so the same actions are offered different options and the replay
+    /// diverges - which is a trajectory that cannot be verified, for a
+    /// reason nothing in the trajectory could reveal.
+    ///
+    /// No `..`: adding a ledger to this type fails to compile until somebody
+    /// says whether a new episode inherits it.
     pub fn clear(&mut self) {
-        self.held.clear();
+        let Memory { held, haunts, swept, pressed, took } = self;
+        held.clear();
+        haunts.clear();
+        swept.clear();
+        pressed.clear();
+        *took = false;
     }
 
     /// Fold an observation in: refresh what is in view, age what is not, and
@@ -1204,6 +1222,34 @@ mod frisk_tests {
             "the room being stood in is not somewhere to go"
         );
         assert_eq!(back[0].path, Some(path));
+    }
+
+    /// Every episode after the first in a process began holding the last
+    /// one's memory, and the ledgers this file added made it worse rather
+    /// than causing it. The visible half is an agent that remembers a level
+    /// it has not played; the expensive half is that a trajectory replayed
+    /// after another one is offered different options and diverges, so it
+    /// cannot be verified - and nothing in the trajectory says why.
+    #[test]
+    fn a_new_episode_remembers_nothing_from_the_last_one() {
+        let mut m = Memory::new();
+        m.observe(&State::parse(&super::tests::build(
+            0,
+            0,
+            0,
+            r#""pickups":[{"id":7,"type":"Medikit","distance":200,"bearing":0,"visible":true}],"threats":[{"id":9,"type":"IMP","distance":300,"bearing":0,"visible":true,"health":60,"targetingMe":false}],"hazards":[]"#,
+        )).unwrap());
+        m.press(&at(0, 0, 0));
+        m.observe(&at(600, 0, 0));
+        let far = at(2000, 2000, 0);
+        assert!(m.tested() > 0 && !m.unswept(&far).is_empty() && !m.recall(&far).is_empty());
+
+        m.clear();
+
+        assert_eq!(m.tested(), 0, "walls pushed on in the last episode");
+        assert!(m.unswept(&far).is_empty(), "rooms stood in during the last episode");
+        assert!(m.recall(&far).is_empty(), "things seen in the last episode");
+        assert!(m.unfinished(&far).is_empty(), "monsters from the last episode");
     }
 
     /// What the archive counts. Two runs standing in the same place having
