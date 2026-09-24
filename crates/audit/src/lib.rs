@@ -40,6 +40,7 @@ pub mod growth;
 pub mod pool;
 pub mod reader;
 pub mod reservoir;
+pub mod retention;
 pub mod run;
 pub mod schedule;
 pub mod stream;

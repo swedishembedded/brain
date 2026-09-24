@@ -81,6 +81,11 @@ pub struct ReaderState {
     pub schedule: Schedule,
     pub reservoir: Reservoir,
     pub growth: Growth,
+    /// What earlier episodes still score. Carried across a stop so a
+    /// resumed run's backward transfer is about the whole run rather than
+    /// about the part of it since the last restart.
+    #[serde(default)]
+    pub retention: crate::retention::Retention,
     pub episode: u64,
     /// Where the stream had got to, so reading resumes rather than restarts.
     pub cursor: Option<Cursor>,
@@ -323,6 +328,7 @@ mod tests {
             schedule,
             reservoir: Reservoir::new(ReservoirConfig::default()),
             growth: Growth::new(Default::default()),
+            retention: Default::default(),
             episode,
             cursor: None,
         }

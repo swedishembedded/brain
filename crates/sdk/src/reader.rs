@@ -92,6 +92,25 @@ pub struct ReadOutcome {
     /// claiming nothing was forgotten.
     pub bank: usize,
     pub detection_latency: u64,
+    /// Backward transfer over the retention matrix: the mean, over every
+    /// earlier episode the audit schedule brought round again, of what it
+    /// scores now minus what it scored when it was learned. Negative is
+    /// forgetting.
+    ///
+    /// `None` when nothing has been re-observed yet, which is NOT the same
+    /// answer as zero. A run too short for the schedule to revisit anything
+    /// has no backward transfer to report, and reporting `0.0` there would
+    /// read as perfect retention - the most flattering number available and
+    /// the one least earned.
+    pub bwt: Option<f64>,
+    /// How many episodes carry a diagonal, and how many of those have been
+    /// scored again. The second is the weight [`ReadOutcome::bwt`] carries:
+    /// one observation and forty are not the same evidence.
+    pub retention_coverage: (usize, usize),
+    /// The largest drop any SINGLE earlier episode has taken, as a positive
+    /// magnitude. A healthy mean can hide one episode that collapsed, and
+    /// the per-block bar is about exactly that.
+    pub worst_block_drop: Option<f64>,
 }
 
 /// A model reading continually.
@@ -104,6 +123,8 @@ pub struct ContinualReader {
     rank: u32,
     alpha: Option<f32>,
     steps: u32,
+    /// The TRAINING window, in tokens. See [`ContinualReader::train_block`].
+    train_block: u32,
     until: Option<usize>,
     seed: u64,
     cfg: ReaderConfig,
@@ -114,6 +135,17 @@ impl std::fmt::Debug for ContinualReader {
         f.debug_struct("ContinualReader").field("model", &self.model).field("run_dir", &self.run_dir).finish_non_exhaustive()
     }
 }
+
+/// The default TRAINING window, in tokens - see
+/// [`ContinualReader::train_block`] for why this is not the model's own
+/// context length.
+///
+/// A reader's rows are LINES of a document. 1024 tokens is a window many
+/// times longer than any of them and still an eighth of the attention
+/// scratch a 2048 window would hold resident across every layer. Raise it
+/// for a corpus whose structure genuinely spans more than that, and expect
+/// to pay for it quadratically.
+const DEFAULT_TRAIN_BLOCK: u32 = 1024;
 
 /// One registry row, monomorphised for its `Model` impl.
 type ReadFn = fn(&Inputs) -> Result<ReadOutcome>;
@@ -140,6 +172,7 @@ struct Inputs<'a> {
     rank: u32,
     alpha: f32,
     steps: u32,
+    train_block: u32,
     until: Option<usize>,
     seed: u64,
     cfg: ReaderConfig,
@@ -159,6 +192,7 @@ impl ContinualReader {
             rank: 8,
             alpha: None,
             steps: 32,
+            train_block: DEFAULT_TRAIN_BLOCK,
             until: None,
             seed: 0,
             cfg: ReaderConfig::default(),
@@ -207,6 +241,22 @@ impl ContinualReader {
 
     pub fn steps(mut self, steps: u32) -> Self {
         self.steps = steps;
+        self
+    }
+
+    /// The window, in tokens, that an episode is TRAINED over. Capped at the
+    /// base model's own block size; a request above it is lowered rather
+    /// than refused, since a window longer than the model's context is not a
+    /// thing the model can be trained at.
+    ///
+    /// This is the reader's dominant memory term and it is quadratic: a
+    /// training build keeps every layer's attention scratch resident at once
+    /// (a backward pass reads all of them), so the cost is
+    /// `n_layers * n_heads * block^2`. At a 0.6B model's own 2048 that is
+    /// 7 GiB of attention probabilities alone, for documents whose lines are
+    /// tens of tokens long.
+    pub fn train_block(mut self, tokens: u32) -> Self {
+        self.train_block = tokens.max(1);
         self
     }
 
@@ -284,6 +334,7 @@ impl ContinualReader {
             rank: self.rank,
             alpha: self.alpha.unwrap_or(self.rank as f32 * 2.0),
             steps: self.steps,
+            train_block: self.train_block,
             until: self.until,
             seed: self.seed,
             cfg: self.cfg,
@@ -297,7 +348,9 @@ impl ContinualReader {
 fn learner_for<'a, A: StudyArch>(i: &'a Inputs<'a>) -> Result<ModelLearner<'a, A::M, QwenBpe>> {
     let c = checkpoint::load(i.base.to_str().unwrap_or_default());
     let base_cfg = <A::M as Model>::Config::from_json(&c.header["config"]);
-    let block = base_cfg.block_size();
+    // Never above what the model was built for: a training window longer
+    // than its context is not a window it has.
+    let block = i.train_block.min(base_cfg.block_size()).max(1);
     let cfg = A::study_config(&base_cfg, A::lora(i.rank, i.alpha), block);
     let fit = FitOpts { steps: i.steps, batch_size: 1, block_size: block, seed: i.seed, eval_interval: 0, eval_batches: 0, checkpoint_secs: 0, ..FitOpts::default() };
     let rollout = RolloutParams { max_new: 64, sample: SampleParams::greedy(), eos: None };
@@ -346,7 +399,16 @@ fn read_for<A: StudyArch>(i: &Inputs) -> Result<ReadOutcome> {
     }
 
     reader.checkpoint(i.run, Some(stream.cursor())).map_err(|e| Error::Backend(e.to_string()))?;
-    Ok(ReadOutcome { episodes, promoted, bank: reader.bank_size(), detection_latency: reader.detection_latency() })
+    let retention = reader.retention();
+    Ok(ReadOutcome {
+        episodes,
+        promoted,
+        bank: reader.bank_size(),
+        detection_latency: reader.detection_latency(),
+        bwt: retention.bwt(),
+        retention_coverage: retention.coverage(),
+        worst_block_drop: retention.worst_drop(),
+    })
 }
 
 fn battery_for<A: StudyArch>(i: &Inputs, tasks: &[BatteryTask]) -> Result<BatteryScore> {

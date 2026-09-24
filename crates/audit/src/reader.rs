@@ -50,6 +50,7 @@ use crate::bank::{Probe, ProbeConfig, ProbeSet, SpanSelector, UniformSelector};
 use crate::growth::{Action, Diagnosis, Growth, GrowthConfig};
 use crate::pool::{AdapterId, Pool, PoolConfig};
 use crate::reservoir::{Reservoir, ReservoirConfig};
+use crate::retention::Retention;
 use crate::schedule::{block_drop_bar, AuditConfig, Schedule};
 use crate::run::ReaderState;
 use crate::stream::{Cursor, Episode, EpisodeId};
@@ -192,6 +193,9 @@ pub struct Reader<L: Learner> {
     schedule: Schedule,
     reservoir: Reservoir,
     growth: Growth,
+    /// What earlier episodes still score. Fed from the audit blocks this
+    /// step already decodes, so the retention matrix costs no extra decode.
+    retention: Retention,
     selector: Box<dyn SpanSelector>,
     episode: u64,
 }
@@ -203,6 +207,7 @@ impl<L: Learner> Reader<L> {
             learner,
             pool,
             bank: BTreeMap::new(),
+            retention: Retention::default(),
             schedule: Schedule::new(cfg.audit),
             reservoir: Reservoir::new(cfg.reservoir),
             growth: Growth::new(cfg.growth),
@@ -228,6 +233,12 @@ impl<L: Learner> Reader<L> {
     }
 
     /// Episodes in the audit bank.
+    /// What earlier episodes still score, and the backward transfer over
+    /// it. Sparse by construction - see [`crate::retention`].
+    pub fn retention(&self) -> &Retention {
+        &self.retention
+    }
+
     pub fn bank_size(&self) -> usize {
         self.schedule.len()
     }
@@ -270,6 +281,7 @@ impl<L: Learner> Reader<L> {
             schedule: self.schedule.clone(),
             reservoir: self.reservoir.clone(),
             growth: self.growth.clone(),
+            retention: self.retention.clone(),
             episode: self.episode,
             cursor,
         }
@@ -297,6 +309,7 @@ impl<L: Learner> Reader<L> {
             schedule: state.schedule,
             reservoir: state.reservoir,
             growth: state.growth,
+            retention: state.retention,
             selector: Box::new(UniformSelector),
             cfg,
             episode: state.episode,
@@ -382,9 +395,16 @@ impl<L: Learner> Reader<L> {
         let n = own.len();
         let mut blocks: Vec<(f64, f64)> = Vec::with_capacity(audit_blocks.len());
         let mut at = n;
-        for (_, block) in &audit_blocks {
+        for (id, block) in &audit_blocks {
             let end = at + block.len();
-            blocks.push((mean(&candidate[at..end]), mean(&incumbent[at..end])));
+            let (c, i) = (mean(&candidate[at..end]), mean(&incumbent[at..end]));
+            blocks.push((c, i));
+            // `R[k][j]`, taken from the INCUMBENT arm: what this earlier
+            // episode scores against what is currently served. The candidate
+            // arm may not be promoted a few lines below, and a retention
+            // matrix built from scores that were then thrown away would
+            // describe a model nobody ever ran.
+            self.retention.observed(self.episode, id, i);
             at = end;
         }
 
@@ -422,6 +442,9 @@ impl<L: Learner> Reader<L> {
             self.reservoir.offer(&ep.id, probes.trained_rows(), &verdict);
             self.schedule.admit(ep.id.clone());
             self.bank.insert(ep.id.clone(), probes);
+            // `R[j][j]`: what it scored on its own probes under the arm that
+            // was actually promoted, at the moment it was promoted.
+            self.retention.learned(&ep.id, mean(&candidate[..n]));
         }
 
         // The growth question is asked of the promote rate, and only paid

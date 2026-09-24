@@ -674,17 +674,12 @@ pub fn acc(r: &[Vec<f64>]) -> f64 {
 /// `BWT = (1/(T-1)) Σ_{j<T} (R[T][j] - R[j][j])` - how much every earlier
 /// task moved, on average, between the moment it was learned and the end of
 /// the run. Negative is forgetting.
+///
+/// The one implementation lives in `audit::retention`, beside the SPARSE
+/// form a sampling reader needs. Two copies of a definition this short are
+/// how two arms of one claim quietly stop meaning the same thing.
 pub fn bwt(r: &[Vec<f64>]) -> f64 {
-    let t = r.len();
-    if t < 2 {
-        return 0.0;
-    }
-    let last = &r[t - 1];
-    let mut total = 0.0;
-    for j in 0..t - 1 {
-        total += last[j] - r[j][j];
-    }
-    total / (t - 1) as f64
+    audit::retention::bwt_dense(r)
 }
 
 /// NOT the literature's forward-transfer (FWT) metric, on purpose - Lopez-

@@ -203,6 +203,18 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
     println!("read {} episodes, promoted {}", out.episodes, out.promoted);
     println!("bank {} earlier episodes, detection latency {} episodes", out.bank, out.detection_latency);
     println!("what that means: any regression larger than the per-block bar is found within {} episodes.", out.detection_latency);
+
+    let (learned, revisited) = out.retention_coverage;
+    match out.bwt {
+        Some(bwt) => {
+            let worst = out.worst_block_drop.unwrap_or(0.0);
+            println!("bwt {bwt:+.4} over {revisited} of {learned} learned episodes revisited, worst single drop {worst:.4}");
+        }
+        // Said rather than left out. A run whose schedule never came back
+        // round has no backward transfer, and printing nothing there is how
+        // an unanswered clause gets read as a passed one.
+        None => println!("bwt UNMEASURED: {learned} episodes learned, none revisited yet - not a backward transfer of zero"),
+    }
     Ok(ExitCode::SUCCESS)
 }
 
