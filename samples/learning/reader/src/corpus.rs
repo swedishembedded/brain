@@ -23,7 +23,7 @@
 //! and nothing about whether it can REFUSE. Every lane carries a label, and
 //! the `selftest` verb checks each episode's verdict against it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Deterministic generator. A sample is self-contained and may not reach for
@@ -136,10 +136,50 @@ pub struct Outcome {
     pub lines: Vec<String>,
 }
 
-const STEMS: &[&str] = &["vex", "quil", "zorn", "plim", "drax", "fenn", "gorp", "hask"];
-const VERBS: &[&str] = &["sweep", "graft", "purge", "tally", "hoist", "splice", "render", "seal"];
-const NOUNS: &[&str] = &["depth", "window", "budget", "origin", "stride", "cutoff", "weight", "anchor"];
+const STEMS: &[&str] = &["vex", "quil", "zorn", "plim", "drax", "fenn", "gorp", "hask", "mubi", "tarn", "wold", "brim"];
+/// What a made-up tool's name ends in, so it reads like something someone
+/// shipped rather than like a placeholder with a counter after it.
+const TOOL_SUFFIXES: &[&str] = &["ctl", "kit", "adm", "svc", "fs", "d"];
+const VERBS: &[&str] =
+    &["sweep", "graft", "purge", "tally", "hoist", "splice", "render", "seal", "prune", "stage", "verify", "rebuild"];
+const NOUNS: &[&str] = &[
+    "depth", "window", "budget", "origin", "stride", "cutoff", "weight", "anchor", "margin", "offset", "retry", "shard",
+    "region", "bucket", "label", "quota",
+];
+/// The other half of a compound flag name. A real tool disambiguates
+/// `--depth` into `--max-depth` and `--keep-depth`, not into `--depth55`.
+const MODIFIERS: &[&str] =
+    &["max", "min", "keep", "skip", "force", "dry", "auto", "soft", "hard", "strict", "fast", "deep"];
 const PLACEHOLDERS: &[&str] = &["PATH", "COUNT", "TIME", "SIZE", "NAME"];
+
+/// A name not already in `used`, drawn from `simple` first and then from the
+/// compound space `modifier-simple`.
+///
+/// Bounded random draws, then a deterministic sweep of the whole space, so
+/// this terminates and stays reproducible. The compound space is what makes
+/// a numeric suffix unnecessary: 12 modifiers over 16 nouns is 208 plausible
+/// flag names, against the roughly 50 a pair of tools needs.
+fn fresh_name(rng: &mut Rng, used: &[String], simple: &[&str], modifiers: &[&str]) -> String {
+    for _ in 0..48 {
+        let candidate = if rng.next().is_multiple_of(3) {
+            rng.pick(simple).to_string()
+        } else {
+            format!("{}-{}", rng.pick(modifiers), rng.pick(simple))
+        };
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    for m in modifiers {
+        for w in simple {
+            let candidate = format!("{m}-{w}");
+            if !used.contains(&candidate) {
+                return candidate;
+            }
+        }
+    }
+    unreachable!("the compound space is far larger than any tool this generates")
+}
 
 impl Tool {
     /// Invent a tool. Deterministic in `seed`, so a run reproduces and two
@@ -161,15 +201,12 @@ impl Tool {
         let taken_commands: Vec<String> = others.iter().flat_map(|t| t.commands.iter().map(|c| c.name.clone())).collect();
         let taken_flags: Vec<String> = others.iter().flat_map(|t| t.commands.iter().flat_map(|c| c.flags.iter().map(|f| f.name.clone()))).collect();
         let mut rng = Rng::new(seed);
-        let name = format!("{}{}", rng.pick(STEMS), rng.next() % 10);
+        let name = format!("{}{}", rng.pick(STEMS), rng.pick(TOOL_SUFFIXES));
         let n_commands = 4 + (rng.next() % 3) as usize;
         let mut used_commands: Vec<String> = taken_commands;
         let mut commands = Vec::new();
         for _ in 0..n_commands {
-            let mut cmd = rng.pick(VERBS).to_string();
-            while used_commands.contains(&cmd) {
-                cmd = format!("{}{}", rng.pick(VERBS), rng.next() % 100);
-            }
+            let cmd = fresh_name(&mut rng, &used_commands, VERBS, NOUNS);
             used_commands.push(cmd.clone());
 
             // Enough flags that a SINGLE command's page is a document the
@@ -186,10 +223,7 @@ impl Tool {
             let mut used_flags: Vec<String> = taken_flags.iter().map(|f| f.trim_start_matches("--").to_string()).collect();
             let mut flags = Vec::new();
             for f in 0..n_flags {
-                let mut stem = rng.pick(NOUNS).to_string();
-                while used_flags.contains(&stem) {
-                    stem = format!("{}{}", rng.pick(NOUNS), rng.next() % 100);
-                }
+                let stem = fresh_name(&mut rng, &used_flags, NOUNS, MODIFIERS);
                 used_flags.push(stem.clone());
                 let takes_value = !rng.next().is_multiple_of(3);
                 let value = takes_value.then(|| rng.pick(PLACEHOLDERS).to_string());
@@ -204,7 +238,8 @@ impl Tool {
             // the grammar has a rule that cannot be guessed from the flag
             // names alone.
             let exclusive = if flags.len() >= 3 { vec![(1, 2)] } else { Vec::new() };
-            commands.push(Command { name: cmd.clone(), summary: format!("{cmd} the {} store", rng.pick(NOUNS)), flags, exclusive });
+            let action = cmd.replace('-', " ");
+            commands.push(Command { name: cmd.clone(), summary: format!("{action} the {} store", rng.pick(NOUNS)), flags, exclusive });
         }
         Tool { name, commands }
     }
@@ -230,7 +265,55 @@ impl Tool {
         for &(a, b) in &cmd.exclusive {
             out.push_str(&format!("  {} may not be given together with {}\n", cmd.flags[a].name, cmd.flags[b].name));
         }
+
+        // What a placeholder actually accepts. Without this the manual
+        // documents that `--depth` takes a TIME and never says what a TIME
+        // looks like, so a model reading it writes `--depth 5` and the tool
+        // refuses it - a task that cannot be learned from the material it is
+        // supposed to be learned from.
+        let used: BTreeSet<&str> = cmd.flags.iter().filter_map(|f| f.value.as_deref()).collect();
+        if !used.is_empty() {
+            out.push_str("values:\n");
+            for placeholder in &used {
+                out.push_str(&format!("  {placeholder} is {}\n", value_spec(placeholder)));
+            }
+        }
+
+        // Worked invocations, so the SHAPE of a command line is demonstrated
+        // and not only its grammar. Deliberately not the canonical one - see
+        // `Tool::examples`.
+        let examples = self.examples(cmd);
+        if !examples.is_empty() {
+            out.push_str("examples:\n");
+            for (invocation, what) in examples {
+                out.push_str(&format!("  {invocation}\n      {what}\n"));
+            }
+        }
         out
+    }
+
+    /// Worked invocations for a command, for its manual page.
+    ///
+    /// Every one of them uses at least one OPTIONAL flag, which keeps them
+    /// clear of the capability battery: the battery asks for the canonical
+    /// invocation, which is the required flags and nothing else, and a
+    /// manual that printed that answer would be teaching the test rather
+    /// than the tool. Demonstrating the form on other combinations is what
+    /// makes the canonical one derivable instead of memorable.
+    pub fn examples(&self, cmd: &Command) -> Vec<(String, String)> {
+        let required: Vec<&Flag> = cmd.flags.iter().filter(|f| f.required).collect();
+        let base: Vec<String> = required.iter().map(|f| spec_of(f)).collect();
+        let excluded: BTreeSet<&str> =
+            cmd.exclusive.iter().flat_map(|&(a, b)| [cmd.flags[a].name.as_str(), cmd.flags[b].name.as_str()]).collect();
+        cmd.flags
+            .iter()
+            .filter(|f| !f.required && !excluded.contains(f.name.as_str()))
+            .take(2)
+            .map(|f| {
+                let invocation = format!("{} {} {} {}", self.name, cmd.name, base.join(" "), spec_of(f));
+                (invocation.split_whitespace().collect::<Vec<&str>>().join(" "), format!("{}, and {}", cmd.summary, f.summary))
+            })
+            .collect()
     }
 
     /// Every manual page, in command order.
@@ -350,6 +433,87 @@ impl Tool {
         Ok((cmd, given))
     }
 
+    /// Why `question` is not a fair question for `answer`, or `None` when it
+    /// is.
+    ///
+    /// The check the answer being correct does NOT make unnecessary. A model
+    /// asked for several questions about one command drifts onto the other
+    /// flags it can see in the material, and the answer is attached
+    /// regardless - so "what command turns on weight44?" gets paired with a
+    /// command that sets origin55. Fluent, correctly formatted, and teaching
+    /// the model that the two are the same thing.
+    ///
+    /// Mechanical, from this tool's own vocabulary: every flag name the
+    /// question mentions must be one the answer actually sets. The
+    /// command's own store noun is exempt - "graft the anchor store" names
+    /// the store, not `--anchor`.
+    pub fn mismatch(&self, question: &str, answer: &str) -> Option<String> {
+        // Hyphens are part of a flag name, not punctuation: splitting on
+        // them turns `--force-label` into two words that match nothing, and
+        // every compound-named flag stops being checked.
+        let words: BTreeSet<String> = question
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map(|w| w.trim_matches('-'))
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+
+        // A raw placeholder in a question is never something a user would
+        // say: it has been copied out of the manual's syntax.
+        for p in PLACEHOLDERS {
+            if question.split_whitespace().any(|w| w.trim_matches(|c: char| !c.is_ascii_alphanumeric()) == *p) {
+                return Some(format!("the question quotes the placeholder {p:?} instead of a value"));
+            }
+        }
+
+        // A command is an instruction to DO something. A question asking
+        // what something is FOR cannot be answered by one, and a row that
+        // pairs them teaches the model to answer the wrong kind of question
+        // with a command line.
+        let lower = question.to_lowercase();
+        for asking in ["purpose of", "outcome of", "effect of", "what does", "available for", "affect the"] {
+            if lower.contains(asking) {
+                return Some(format!("asks what something IS ({asking:?}), which a command does not answer"));
+            }
+        }
+
+        let Ok((cmd, given)) = self.parse_into(answer) else {
+            return Some("the answer does not parse".to_string());
+        };
+        let set: BTreeSet<String> = given.keys().map(|k| k.trim_start_matches('-').to_lowercase()).collect();
+        let every_flag: BTreeSet<String> =
+            self.commands.iter().flat_map(|c| c.flags.iter()).map(|f| f.name.trim_start_matches('-').to_lowercase()).collect();
+
+        // The store noun is exempt only where it NAMES the store - "graft
+        // the anchor store". "set the anchor path" is about the flag, and
+        // exempting it there let a genuinely mismatched row through.
+        let store = noun_of(&cmd.summary);
+        let names_the_store = lower.contains(&format!("{store} store"));
+
+        for w in &words {
+            if !every_flag.contains(w) || set.contains(w) {
+                continue;
+            }
+            if *w == store && names_the_store {
+                continue;
+            }
+            return Some(format!("the question asks about {w:?}, which the answer does not set"));
+        }
+
+        // And the other direction. An answer that sets an OPTIONAL flag the
+        // question never asked for is teaching the model to volunteer it.
+        // Required flags are exempt: they are part of running the command at
+        // all, and no user asks for them by name.
+        for (flag, _) in given.iter() {
+            let bare = flag.trim_start_matches('-').to_lowercase();
+            let required = cmd.flags.iter().any(|f| f.name == *flag && f.required);
+            if !required && !words.contains(&bare) {
+                return Some(format!("the answer sets {bare:?}, which the question never asked for"));
+            }
+        }
+        None
+    }
+
     /// The capability battery: one task per subcommand, asked in words and
     /// answered with an invocation.
     ///
@@ -361,6 +525,31 @@ impl Tool {
             .iter()
             .map(|c| (format!("How do I {} with {}? Answer with the command only.\n", c.summary, self.name), self.canonical(c)))
             .collect()
+    }
+}
+
+/// One flag as it is written on a command line, with a real value where the
+/// flag wants one.
+fn spec_of(f: &Flag) -> String {
+    match &f.value {
+        Some(v) => format!("{} {}", f.name, value_for(v)),
+        None => f.name.clone(),
+    }
+}
+
+/// What a placeholder accepts, in the words the manual uses to teach it.
+///
+/// The one statement of each format. `value_is` enforces exactly these and
+/// `value_for` produces one of each, so what the manual promises, what the
+/// parser accepts and what an example shows cannot drift apart.
+fn value_spec(placeholder: &str) -> String {
+    match placeholder {
+        "PATH" => "an absolute path, beginning with a slash, like /var/data".to_string(),
+        "COUNT" => "a whole number, like 16".to_string(),
+        "TIME" => "a whole number and a unit, one of s m h d, like 7d or 30s".to_string(),
+        "SIZE" => "a whole number and a unit, one of K M G, like 64M".to_string(),
+        "NAME" => "a word of letters, digits, dashes or underscores, like main".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -709,6 +898,125 @@ mod tests {
         assert!(ok.lines.first().is_some_and(|l| l.starts_with(&t.name)), "{:?}", ok.lines);
     }
 
+    /// The corpus has to TEACH the task, or a refusal measures the corpus
+    /// rather than the model. Two halves.
+    ///
+    /// Every placeholder a command uses is explained in words, with a worked
+    /// value - `--depth TIME` alone never says what a TIME is, and a model
+    /// reading it writes `--depth 5`, which the tool then refuses.
+    ///
+    /// And what the manual promises, the parser accepts: the example value
+    /// for each placeholder is run through the real `value_is`, so the
+    /// documentation and the grammar cannot drift apart.
+    #[test]
+    fn the_manual_explains_every_value_format_it_uses_and_the_parser_agrees() {
+        let t = tool();
+        for cmd in &t.commands {
+            let page = t.man_page(cmd);
+            for f in cmd.flags.iter().filter_map(|f| f.value.as_deref()) {
+                assert!(page.contains(&format!("{f} is ")), "{} does not say what a {f} is:\n{page}", cmd.name);
+                assert!(
+                    value_is(f, &value_for(f)),
+                    "the manual's own example value for {f} ({:?}) is one the parser refuses",
+                    value_for(f)
+                );
+            }
+        }
+    }
+
+    /// Worked examples demonstrate the SHAPE of a command line, which is the
+    /// other half of what the manual has to teach. None of them may be the
+    /// canonical invocation itself: that is the capability battery's answer,
+    /// and a manual printing it would be teaching the test.
+    #[test]
+    fn every_example_runs_and_none_of_them_is_the_batterys_own_answer() {
+        let t = tool();
+        for cmd in &t.commands {
+            let canonical = t.canonical(cmd);
+            let examples = t.examples(cmd);
+            assert!(!examples.is_empty(), "{} has no worked example", cmd.name);
+            for (invocation, _) in &examples {
+                assert!(t.run(invocation).is_ok(), "the manual shows {invocation:?}, which does not run: {:?}", t.run(invocation));
+                assert_ne!(invocation, &canonical, "an example must not BE the answer the battery asks for");
+            }
+        }
+    }
+
+    /// The four ways a pairing goes wrong that the answer being correct does
+    /// nothing about.
+    ///
+    /// Derived from the tool, so the test keeps testing when the generator's
+    /// vocabulary changes.
+    #[test]
+    fn a_pairing_is_refused_when_the_question_and_the_answer_are_about_different_things() {
+        let t = Tool::generate(1);
+        let cmd = t.commands.iter().find(|c| c.flags.iter().filter(|f| !f.required).count() >= 2).expect("spare flags");
+        let canonical = t.canonical(cmd);
+        let store = noun_of(&cmd.summary);
+        let action = cmd.name.replace('-', " ");
+        let spare: Vec<&Flag> = cmd.flags.iter().filter(|f| !f.required).take(2).collect();
+        let unmentioned = spare[0].name.trim_start_matches('-');
+
+        // The fair baseline: asks for the command, names only the store.
+        assert_eq!(t.mismatch(&format!("What is the command to {action} the {store} store?"), &canonical), None);
+
+        // Asks what something IS; a command cannot answer that.
+        assert!(t.mismatch(&format!("What is the purpose of the {} {} command?", t.name, cmd.name), &canonical).is_some());
+
+        // Names a flag the answer does not set.
+        let other = t
+            .commands
+            .iter()
+            .flat_map(|c| c.flags.iter())
+            .find(|f| !cmd.flags.iter().any(|g| g.name == f.name))
+            .expect("another command has other flags");
+        let q = format!("What is the command to {action} the {store} store and turn on {}?", other.name.trim_start_matches('-'));
+        assert!(t.mismatch(&q, &canonical).is_some(), "{q:?} names a flag {canonical:?} does not set");
+
+        // The answer volunteers an optional flag nobody asked about.
+        let volunteered = format!("{canonical} {}", spare[0].name);
+        if t.parse(&volunteered).is_ok() && spare[0].value.is_none() {
+            let q = format!("What is the command to {action} the {store} store?");
+            assert!(t.mismatch(&q, &volunteered).is_some(), "the answer sets {unmentioned:?}, which {q:?} never asked for");
+        }
+
+        // A placeholder copied out of the manual is never a real question.
+        let valued = cmd.flags.iter().find(|f| f.value.is_some());
+        if let Some(f) = valued {
+            let p = f.value.clone().expect("valued");
+            let q = format!("What is the command to set the {} to {p}?", f.name.trim_start_matches('-'));
+            assert!(t.mismatch(&q, &canonical).is_some(), "{q:?} quotes the placeholder");
+        }
+    }
+
+    /// A made-up tool has to read like a real one. Names disambiguated with
+    /// a counter - `--origin55`, `--weight44` - are not flags anybody has
+    /// ever typed, and a corpus full of them is teaching the model a shape
+    /// it will never see again.
+    #[test]
+    fn no_generated_name_is_disambiguated_with_a_number() {
+        for seed in 1..8u64 {
+            let a = Tool::generate(seed);
+            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            for t in [&a, &b] {
+                for cmd in &t.commands {
+                    assert!(
+                        !cmd.name.chars().any(|c| c.is_ascii_digit()),
+                        "seed {seed}: subcommand {:?} is a counter, not a name",
+                        cmd.name
+                    );
+                    for f in &cmd.flags {
+                        assert!(
+                            !f.name.chars().any(|c| c.is_ascii_digit()),
+                            "seed {seed}: flag {:?} is a counter, not a name",
+                            f.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// The claim this whole sample rests on: the tool did not exist until
     /// the seed was drawn, so a model cannot already know it, and two seeds
     /// give two genuinely different tools rather than two spellings of one.
@@ -900,21 +1208,25 @@ mod tests {
 mod oracle {
     use super::*;
 
-    /// The oracle, on the answers a real Qwen3-0.6B actually produced for
-    /// this corpus, plus the two cases that separate EXECUTION from parsing.
+    /// The oracle, and the two cases that separate EXECUTION from parsing.
     ///
-    /// The third case is why this is run rather than parsed: `--cutoff
-    /// --depth 7d` is a perfectly valid invocation and is not the command
-    /// that was asked for. A grammar check passes it; running it does not.
-    /// The fourth is why the parser is strict about value SHAPE: `--depth
-    /// banana` is the same command with a value no real tool would take.
+    /// Built from the tool rather than from remembered strings: the cases
+    /// that matter are the CATEGORIES of wrong answer, and a test pinned to
+    /// one generated vocabulary stops testing anything the moment the
+    /// generator improves.
     #[test]
     fn running_a_candidate_separates_correct_from_merely_valid() {
         let t = Tool::generate(1);
-        assert_eq!(t.name, "hask0", "these are the answers a model gave for the seed-1 tool");
+        let cmd = t
+            .commands
+            .iter()
+            .find(|c| c.flags.iter().any(|f| !f.required && f.value.is_some()))
+            .expect("a command with an optional valued flag");
+        let canonical = t.canonical(cmd);
+        let spare = cmd.flags.iter().find(|f| !f.required && f.value.is_some()).expect("checked above");
 
-        let verdict = |reference: &str, candidate: &str| -> String {
-            match (t.run(reference), t.run(candidate)) {
+        let verdict = |candidate: &str| -> String {
+            match (t.run(&canonical), t.run(candidate)) {
                 (Ok(want), Ok(got)) if want == got => "correct".to_string(),
                 (Ok(_), Ok(_)) => "valid but different".to_string(),
                 (Ok(_), Err(e)) => format!("{e:?}"),
@@ -922,22 +1234,24 @@ mod oracle {
             }
         };
 
-        let graft = "hask0 graft --cutoff";
-        assert_eq!(verdict(graft, "hask0 graft --cutoff"), "correct");
-        assert_eq!(verdict(graft, "hask0 graft anchor store"), "UnexpectedValue(\"anchor\")");
-        assert_eq!(
-            verdict(graft, "hask0 graft --cutoff --depth 7d"),
-            "valid but different",
-            "a valid invocation that does something else is not the answer, and only running it says so"
-        );
-        assert_eq!(
-            verdict(graft, "hask0 graft --cutoff --depth banana"),
-            "BadValue { flag: \"--depth\", wants: \"TIME\", got: \"banana\" }"
-        );
+        assert_eq!(verdict(&canonical), "correct");
 
-        let splice = "hask0 splice --anchor 16";
-        assert_eq!(verdict(splice, "hask0 splice --anchor 16"), "correct");
-        assert_eq!(verdict(splice, "haskell0 --splice budget-store"), "NotThisTool");
-        assert_eq!(verdict(splice, "hask0 splice --anchor sixteen"), "BadValue { flag: \"--anchor\", wants: \"COUNT\", got: \"sixteen\" }");
+        // Valid, runs, and is not the command that was asked for. Only
+        // running it says so - it parses exactly as well as the canonical.
+        let extra = format!("{canonical} {} {}", spare.name, value_for(spare.value.as_deref().expect("valued")));
+        assert!(t.parse(&extra).is_ok(), "the premise: {extra:?} is a perfectly valid invocation");
+        assert_eq!(verdict(&extra), "valid but different");
+
+        // A value of the wrong shape, which a tool that took any word would
+        // have called correct.
+        let bad = format!("{canonical} {} banana!!", spare.name);
+        assert!(matches!(t.run(&bad), Err(Invalid::BadValue { .. })), "{:?}", t.run(&bad));
+
+        // Not this tool at all.
+        assert_eq!(verdict(&format!("not{canonical}")), "NotThisTool");
+
+        // The required flags missing.
+        let bare = format!("{} {}", t.name, cmd.name);
+        assert!(matches!(t.run(&bare), Err(Invalid::MissingRequired(_))), "{:?}", t.run(&bare));
     }
 }

@@ -108,6 +108,152 @@ pub struct Reply {
     pub pairs: usize,
 }
 
+/// An answer already known to be right, and the material it came from.
+///
+/// The other way round from [`Distil`], and the stronger one wherever the
+/// caller's domain can produce correct answers mechanically. A model asked to
+/// invent both halves invents wrong answers in the right format - measured on
+/// the reader sample, 26 of 28 generated commands were refused by the tool
+/// that would have to run them, and the 2 that passed answered a different
+/// question than the one they were paired with. A model asked only to PHRASE
+/// a question for an answer that is already correct cannot produce a wrong
+/// answer at all.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Known {
+    /// Stable identity, so a training row points back at what produced it.
+    pub id: String,
+    /// The source material the question should be answerable from.
+    pub context: String,
+    /// Correct by construction, in the caller's domain.
+    pub answer: String,
+    /// What the answer DOES, in the caller's words. The model is phrasing a
+    /// question for this, so a vague intent produces a vague question.
+    pub intent: String,
+}
+
+/// The default phrasing instruction. Names nothing domain-specific, so a
+/// caller should replace it with one that does.
+pub const DEFAULT_PHRASING: &str = "\
+Write questions a user would ask, whose answer is exactly the answer above. \
+Ask for the OUTCOME in plain words - never quote the answer itself, and never \
+mention its syntax. Reply with nothing but questions, one per line, each \
+beginning with `Q: `.";
+
+/// Asks a model to phrase questions for answers that are already known right.
+pub struct Phrase {
+    model: TextGenerationPipeline,
+    instruction: String,
+    per_known: usize,
+    max_new: u32,
+    seed: u64,
+}
+
+impl Phrase {
+    pub fn with(model: TextGenerationPipeline) -> Phrase {
+        Phrase { model, instruction: DEFAULT_PHRASING.to_string(), per_known: 3, max_new: 200, seed: 0 }
+    }
+
+    pub fn instruction(mut self, text: impl Into<String>) -> Self {
+        self.instruction = text.into();
+        self
+    }
+
+    pub fn per_known(mut self, n: usize) -> Self {
+        self.per_known = n.max(1);
+        self
+    }
+
+    pub fn max_new_tokens(mut self, n: u32) -> Self {
+        self.max_new = n.max(1);
+        self
+    }
+
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// What the model is asked, for one known answer.
+    pub fn prompt_for(&self, k: &Known) -> String {
+        format!(
+            "Reference material:\n\n---\n{}\n---\n\nAnswer: {}\nWhat it does: {}\n\n{}\n\nWrite up to {} questions.",
+            k.context, k.answer, k.intent, self.instruction, self.per_known
+        )
+    }
+
+    /// One [`Reply`] per known answer, always - see [`Distil::ask`].
+    pub fn ask(&self, known: &[Known]) -> Result<Vec<Reply>> {
+        let mut out = Vec::with_capacity(known.len());
+        for (i, k) in known.iter().enumerate() {
+            let prompt = self.prompt_for(k);
+            let opts = TextGenerationOptions::new()
+                .max_new_tokens(self.max_new)
+                .temperature(0.0)
+                .thinking(false)
+                .seed(self.seed.wrapping_add(i as u64));
+            let raw = self.model.generate_with(&prompt, opts)?.text;
+            let pairs = parse_questions(&raw).len();
+            out.push(Reply { passage: k.id.clone(), prompt, raw, pairs });
+        }
+        Ok(out)
+    }
+
+    /// Ask, and pair each question with the answer it was phrased for.
+    ///
+    /// The pairing is by construction rather than by the model's say-so,
+    /// which is the whole point: the answer cannot drift from the question.
+    pub fn generate(&self, known: &[Known]) -> Result<Vec<Candidate>> {
+        let replies = self.ask(known)?;
+        let mut out = Vec::new();
+        for (k, reply) in known.iter().zip(&replies) {
+            for question in parse_questions(&reply.raw).into_iter().take(self.per_known) {
+                out.push(Candidate {
+                    passage: k.id.clone(),
+                    question,
+                    answer: k.answer.clone(),
+                    raw: reply.raw.clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The `Q:` lines of a reply, in order.
+pub fn parse_questions(raw: &str) -> Vec<String> {
+    raw.lines()
+        .filter_map(|l| strip_marker(l.trim(), "Q:"))
+        .filter(|q| !q.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `question` gives its own answer away.
+///
+/// A question quoting the answer is not a training row - the model learns to
+/// copy from the prompt, and every score taken on it is about that. Compared
+/// on a normalised form so that spacing and case cannot hide it.
+///
+/// The same rule `promote::document::FactBatch` already applies between a
+/// probe question and the fact it is asked about, applied one stage earlier
+/// so the row is never built rather than refused later.
+pub fn leaks_answer(question: &str, answer: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<&str>>().join(" ").to_lowercase();
+    let (q, a) = (norm(question), norm(answer));
+    if a.is_empty() {
+        return false;
+    }
+    if q.contains(&a) {
+        return true;
+    }
+    // Also the answer's distinctive words, stripped of the punctuation that
+    // carries no meaning: a question naming every one of them has given the
+    // answer away whether or not it kept the dashes.
+    let bare = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+    let words: Vec<String> = a.split(' ').map(bare).filter(|w| w.len() > 2).collect();
+    !words.is_empty() && words.iter().all(|w| q.contains(w.as_str()))
+}
+
 /// What a caller's checker decided about one candidate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
@@ -396,5 +542,25 @@ mod tests {
         let r = Reply { passage: "p1".into(), prompt: "ask".into(), raw: "no pairs here".into(), pairs: 0 };
         assert_eq!(parse_pairs(&r.passage, &r.raw).len(), r.pairs, "the count is of what the parser found");
         assert!(!r.prompt.is_empty(), "and the prompt is kept, since it is not recoverable afterwards");
+    }
+
+    /// Questions come out; the answer is attached by construction and never
+    /// read from what the model wrote.
+    #[test]
+    fn questions_are_paired_with_the_answer_they_were_phrased_for() {
+        let raw = "Q: How do I graft the anchor store?\nQ: What turns on the cutoff?\nsome trailing prose\n";
+        let qs = parse_questions(raw);
+        assert_eq!(qs, ["How do I graft the anchor store?", "What turns on the cutoff?"]);
+    }
+
+    /// A question that quotes its own answer teaches copying from the
+    /// prompt, and every score taken on it is about that.
+    #[test]
+    fn a_question_that_gives_away_its_answer_is_detected() {
+        assert!(leaks_answer("What does hask0 graft --cutoff do?", "hask0 graft --cutoff"));
+        assert!(leaks_answer("What does  HASK0   GRAFT  --CUTOFF  do?", "hask0 graft --cutoff"), "spacing and case must not hide it");
+        assert!(leaks_answer("With graft and cutoff on hask0, what happens?", "hask0 graft --cutoff"), "every distinctive word is still giving it away");
+        assert!(!leaks_answer("How do I graft the anchor store?", "hask0 graft --cutoff"));
+        assert!(!leaks_answer("anything", ""));
     }
 }

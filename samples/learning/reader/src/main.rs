@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use brain::artifact;
-use brain::qa::{self, Candidate, Distil, Passage, Verdict};
+use brain::qa::{self, Candidate, Distil, Known, Passage, Phrase, Verdict};
 use brain::{BatteryTask, ContinualReader, LedgerFacts, TextGenerationPipeline};
 use corpus::{Expect, Tool};
 
@@ -73,6 +73,11 @@ usage: sample-learning-reader <verb> [options]
         said about each passage, including the ones that yielded nothing),
         candidates.jsonl (the pairs read out of those), checked.jsonl (what
         the tool said about each) and accepted.jsonl (what survived).
+
+  phrase   --corpus DIR --out DIR --model REF [--seed N] [--per-answer N]
+        the distil stage done the other way round, and the one that yields
+        a training set: the TOOL supplies the answers, which makes them
+        correct by construction, and the model only phrases the questions.
 
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
@@ -144,6 +149,7 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
         "battery" => battery(&mut a),
         "read" => read(&mut a),
         "distil" => distil(&mut a),
+        "phrase" => phrase(&mut a),
         "report" => report(&mut a),
         "selftest" => selftest(&mut a),
         other => Err(format!("unknown verb {other:?}\n\n{USAGE}")),
@@ -411,6 +417,111 @@ fn distil(a: &mut Args) -> Result<ExitCode, String> {
     println!("\nwrote {}", out_dir.display());
     if kept.is_empty() {
         println!("nothing survived verification: there is no training set here, and that is the result");
+        return Ok(ExitCode::FAILURE);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Every command the tool can be asked to run, with the invocation that does
+/// it - built by the tool, so correct by construction.
+///
+/// The canonical invocation of each subcommand, plus one variant per optional
+/// flag. Each is RUN here before it is offered, so a defect in the generator
+/// is caught before it becomes a training row rather than after.
+fn answerable(tool: &Tool) -> Vec<Known> {
+    let mut out = Vec::new();
+    for cmd in &tool.commands {
+        let page = tool.man_page(cmd);
+        let mut wanted: Vec<(String, String)> = vec![(tool.canonical(cmd), cmd.summary.clone())];
+        for (invocation, what) in tool.examples(cmd) {
+            wanted.push((invocation, what));
+        }
+        for (invocation, intent) in wanted {
+            // The tool built it; the tool has to accept it. A goal that does
+            // not run is a bug here, not a wrong answer, and it must never
+            // reach a training set.
+            if tool.run(&invocation).is_err() {
+                continue;
+            }
+            out.push(Known { id: cmd.name.clone(), context: page.clone(), answer: invocation, intent });
+        }
+    }
+    out
+}
+
+fn phrase(a: &mut Args) -> Result<ExitCode, String> {
+    let corpus_dir = a.path("--corpus", "corpus");
+    let out_dir = a.path("--out", "phrased");
+    let model = a.take("--model").ok_or("phrase needs --model")?;
+    let seed = a.number("--seed", 1)?;
+    let per_answer = a.number("--per-answer", 3)? as usize;
+    a.finish()?;
+    let _ = &corpus_dir;
+
+    let (tool, _) = tools(seed);
+
+    // Stage 1: the answers, from the tool rather than from a model.
+    let known = answerable(&tool);
+    artifact::write_jsonl(out_dir.join("known.jsonl"), &known).map_err(|e| e.to_string())?;
+    println!("answers   {:>4}  built by the tool and verified to run", known.len());
+
+    // Stage 2: the questions. This is all the model is trusted with, and it
+    // is the half it cannot get wrong in a way that reaches the weights.
+    let pipeline = TextGenerationPipeline::from_pretrained(&model).map_err(|e| e.to_string())?;
+    let phrasing = Phrase::with(pipeline).seed(seed).per_known(per_answer).instruction(format!(
+        "Write questions a user of the {} tool would ask, whose answer is exactly the command above. \
+         Ask for the OUTCOME in plain words - what the user wants to achieve. Never quote the command, \
+         never name its flags, and never mention {}. Reply with nothing but questions, one per line, \
+         each beginning with `Q: `.",
+        tool.name, tool.name
+    ));
+    let replies = phrasing.ask(&known).map_err(|e| e.to_string())?;
+    artifact::write_jsonl(out_dir.join("replies.jsonl"), &replies).map_err(|e| e.to_string())?;
+    let candidates = phrasing.generate(&known).map_err(|e| e.to_string())?;
+    artifact::write_jsonl(out_dir.join("candidates.jsonl"), &candidates).map_err(|e| e.to_string())?;
+    println!("questions {:>4}  phrased for them", candidates.len());
+
+    // Stage 3: what is left to check. The answer is correct already, so this
+    // is about the QUESTION: it must not give the answer away, and it must
+    // actually be a question.
+    let checked = qa::check_all(candidates, &|c: &Candidate| {
+        if qa::leaks_answer(&c.question, &c.answer) {
+            return Verdict::Reject { reason: "the question quotes its own answer".to_string() };
+        }
+        if !c.question.ends_with('?') {
+            return Verdict::Reject { reason: "not a question".to_string() };
+        }
+        // The answer being correct does not make the PAIRING correct. A
+        // model asked for several questions about one command drifts onto
+        // the other flags in front of it, and the answer is attached
+        // regardless.
+        if let Some(why) = tool.mismatch(&c.question, &c.answer) {
+            return Verdict::Reject { reason: why };
+        }
+        match tool.run(&c.answer) {
+            Ok(outcome) => Verdict::Accept { evidence: outcome.lines.last().cloned().unwrap_or_default() },
+            Err(why) => Verdict::Reject { reason: format!("the ANSWER does not run, which is a defect here: {why:?}") },
+        }
+    });
+    artifact::write_jsonl(out_dir.join("checked.jsonl"), &checked).map_err(|e| e.to_string())?;
+    let (kept, tally) = qa::accepted(&checked);
+    artifact::write_jsonl(out_dir.join("accepted.jsonl"), &kept).map_err(|e| e.to_string())?;
+    println!("training  {:>4}  of {} rows survived ({:.0}%)", tally.accepted, tally.offered, tally.rate() * 100.0);
+
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for c in checked.iter() {
+        if let Verdict::Reject { reason } = &c.verdict {
+            *reasons.entry(reason.clone()).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = reasons.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    for (reason, n) in ranked.iter().take(6) {
+        println!("  refused {n:>3}  {reason}");
+    }
+    println!("\nwrote {}", out_dir.display());
+    if kept.is_empty() {
+        println!("nothing survived: there is no training set here, and that is the result");
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
