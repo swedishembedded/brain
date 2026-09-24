@@ -30,7 +30,7 @@ command below writes relative paths - a corpus, run directories, transcripts
 
 ### What is already true
 
-`brain-audit` (92 tests), `brain-residency` (110), `brain-promote` (35), the
+`brain-audit` (100 tests), `brain-residency` (110), `brain-promote` (35), the
 sample (11), the SDK record surfaces (4) and `rl`'s `reader_learner` (4,
 `--features qwen3`, needs a device) all pass. The instrument is built.
 `RunFacts` has only ever been filled in by hand.
@@ -88,6 +88,11 @@ number is then meaningless.
         --model Qwen/Qwen3-0.6B --seed 1 | tee read.txt
     $READER report --run-dir run-a/ | tee report.txt
 
+`read` reports backward transfer over the retention matrix when the audit
+schedule has revisited anything, and prints UNMEASURED when it has not. Ten
+episodes may well not be enough for it to come round; that is a fact about
+the run's length, and it is reported rather than defaulted to zero.
+
 ### Step 4: the result
 
     $READER battery --model Qwen/Qwen3-0.6B --run-dir run-a/ --seed 1 \
@@ -127,38 +132,35 @@ Then, for the arms the sample can already run:
   scores (`audit::arms::seed_spread`). Regenerating the corpus at seeds 2, 3
   and 4 instead would measure how hard three DIFFERENT invented tools are,
   which is not a noise floor for this one.
+- **null gate**: `read --null-gate S` into its own run directory. A coin
+  decides what carries forward while the real gate still runs and is still
+  recorded, so the two arms' promote rates are directly comparable. Compare
+  the ledger's `carried` column, not its `promoted` one - `promoted` is what
+  the gate said under both arms, which is the point.
+- **shuffled labels**: `read --shuffled-labels S` into its own run
+  directory. Each episode is trained on its own rows and gated against
+  another episode's frozen probes, so it should promote at chance. A rate
+  near the real arm's means the gate is responding to the training run
+  happening rather than to what it taught.
 - **injections**: `selftest` already checks these. It must exit zero.
 
-### Step 6: what you will have to build to finish the block
+### Step 6: the one clause still unbuilt
 
-Four things cannot be filled by running the sample as it stands, and this is
-stated plainly so you do not report them as passed:
+Three of the four things that used to be missing are run modes now, and are
+in Step 5 above. What remains:
 
-1. **The null-gate arm** is not a run mode for the reader. `audit::triage`
-   decides with `promote::gate`; a null arm means running the same stream
-   with a coin instead. The mechanism exists one layer over:
-   `rl::continual::GatePolicy::CoinFlip` and `rl::document::study`, which
-   already runs a gated arm and a null-gate arm as a pair and reports
-   `arm_separation()`. Clause 1 needs that pairing brought to the reader,
-   not written again.
-2. **The retention matrix** is not built by the reader at all, so BWT cannot
-   be surfaced from it. `rl::continual::bwt` computes BWT over an `R`
-   matrix, and `rl::continual::run_study` is what builds one; `audit::reader`
-   scores each episode's probes but never assembles them into a matrix, and
-   `ReadOutcome` reports `bank` and `detection_latency` only. Clause 3 needs
-   the matrix produced first and then exposed - it is not a field that is
-   already there and unexported.
-3. **The shuffled-labels arm** is not a run mode. It means training each
-   episode against another episode's frozen probes.
-4. **Serving while reading.** The block's preamble asks for N episodes read
-   "in one process that also served requests throughout". Nothing connects
-   the reader to `brain-residency`; a read serves nothing. Either wire it or
-   report the run as not having met the preamble.
+**Serving while reading.** The block's preamble asks for N episodes read "in
+one process that also served requests throughout". Nothing connects the
+reader to `brain-residency`; a read serves nothing. Report the run as not
+having met the preamble, and say so rather than letting a run that never
+served read as one that did.
 
-`audit::arms` already has the scoring functions (`shuffled_labels`,
-`order_permutation`, `seed_spread`, `injections`) and
-`audit::acceptance::Acceptance::evaluate` assembles the verdict. What is
-missing is the plumbing that produces their inputs from a real run.
+`audit::arms` has the scoring (`shuffled_labels`, `order_permutation`,
+`seed_spread`, `injections`) and `audit::acceptance::Acceptance::evaluate`
+assembles the verdict from `RunFacts`. Fill `RunFacts` from what the run
+actually produced: `bwt` and `worst_block_drop` from `ReadOutcome`,
+`null_gate_promoted` from the null arm's own ledger (its `carried` column,
+not its `promoted` one), the battery numbers from Steps 2 and 4.
 
 ### Step 7: report
 
