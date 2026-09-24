@@ -52,6 +52,8 @@
 //! with an audit trail from source line to training row, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::text::{TextGenerationOptions, TextGenerationPipeline};
@@ -252,6 +254,110 @@ pub fn leaks_answer(question: &str, answer: &str) -> bool {
     let bare = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
     let words: Vec<String> = a.split(' ').map(bare).filter(|w| w.len() > 2).collect();
     !words.is_empty() && words.iter().all(|w| q.contains(w.as_str()))
+}
+
+/// A training set and the held-out questions that will judge it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Split {
+    pub train: Vec<Candidate>,
+    pub probe: Vec<Candidate>,
+}
+
+impl Split {
+    /// Why this split cannot be trusted, or `None`.
+    ///
+    /// Two properties, both of which a split can lose by accident and
+    /// neither of which shows up as anything but a flattering number:
+    ///
+    /// - no probe question may also be trained on, or the probe is a recall
+    ///   test of something the model was shown;
+    /// - every probe's answer must be one the training half also teaches, or
+    ///   the probe is asking about material the model never saw and the
+    ///   score is about the split rather than the model.
+    pub fn defect(&self) -> Option<String> {
+        let trained: BTreeSet<&str> = self.train.iter().map(|c| c.question.as_str()).collect();
+        if let Some(leaked) = self.probe.iter().find(|c| trained.contains(c.question.as_str())) {
+            return Some(format!("the probe question {:?} is also trained on", leaked.question));
+        }
+        let taught: BTreeSet<&str> = self.train.iter().map(|c| c.answer.as_str()).collect();
+        if let Some(orphan) = self.probe.iter().find(|c| !taught.contains(c.answer.as_str())) {
+            return Some(format!("the probe answer {:?} is never taught by the training half", orphan.answer));
+        }
+        None
+    }
+}
+
+/// Hold out `per_answer` phrasings of each answer as probes, training on the
+/// rest.
+///
+/// Split by PHRASING rather than by answer, which is what makes the probe a
+/// test of generalisation instead of recall: the model is trained to produce
+/// an answer from one wording and asked for it from another it has never
+/// seen. Splitting by answer instead would ask about a command the training
+/// half never mentioned, which measures nothing about what was learned.
+///
+/// An answer with too few phrasings to spare one contributes only to
+/// training - dropping it would throw away a correct row to satisfy a ratio.
+///
+/// `seed` chooses WHICH phrasing is held out. Taking the first is
+/// deterministic and wrong: a generator emits its phrasings in a consistent
+/// order, so the first of every group is the same STYLE of question, and the
+/// probe set ends up made entirely of one phrasing that the training half
+/// then never contains. That measures something real but not what it claims
+/// to, and nothing about the split's shape says so.
+pub fn split_by_phrasing(rows: &[Candidate], per_answer: usize, seed: u64) -> Split {
+    let mut by_answer: BTreeMap<&str, Vec<&Candidate>> = BTreeMap::new();
+    for r in rows {
+        by_answer.entry(r.answer.as_str()).or_default().push(r);
+    }
+    let mut split = Split::default();
+    for (group_index, (_, group)) in by_answer.into_iter().enumerate() {
+        let spare = group.len().saturating_sub(1).min(per_answer);
+        // A rotation seeded per group: reproducible, and uncorrelated with
+        // the order the generator happened to write them in.
+        let start = mix(seed, group_index as u64) as usize % group.len().max(1);
+        for (i, c) in group.iter().enumerate() {
+            let rotated = (i + group.len() - start) % group.len();
+            if rotated < spare {
+                split.probe.push((*c).clone());
+            } else {
+                split.train.push((*c).clone());
+            }
+        }
+    }
+    split
+}
+
+/// SplitMix64 over `(seed, index)`, so a group's choice is reproducible and
+/// independent of its neighbours'.
+fn mix(seed: u64, index: u64) -> u64 {
+    let mut z = seed.wrapping_add(index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Write `rows` as the chat records `data::chat::ChatSample::from_jsonl`
+/// reads: the question as an untrained user turn, the answer as the trained
+/// assistant turn.
+///
+/// Only the ANSWER is supervised. A row that trained on its own prompt would
+/// teach the model to produce questions, and the loss would be dominated by
+/// text the model is never asked to write.
+pub fn write_chat_jsonl(path: impl AsRef<std::path::Path>, rows: &[Candidate]) -> Result<()> {
+    let records: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "messages": [
+                    { "role": "user", "content": c.question, "train": false },
+                    { "role": "assistant", "content": c.answer, "train": true },
+                ],
+                "tools": [],
+            })
+        })
+        .collect();
+    crate::artifact::write_jsonl(path, &records)
 }
 
 /// What a caller's checker decided about one candidate.
@@ -562,5 +668,80 @@ mod tests {
         assert!(leaks_answer("With graft and cutoff on hask0, what happens?", "hask0 graft --cutoff"), "every distinctive word is still giving it away");
         assert!(!leaks_answer("How do I graft the anchor store?", "hask0 graft --cutoff"));
         assert!(!leaks_answer("anything", ""));
+    }
+
+    /// Split by PHRASING: the probe asks for something the training half
+    /// teaches, in words it never used.
+    #[test]
+    fn a_split_holds_out_a_phrasing_not_an_answer() {
+        let rows = vec![
+            candidate("how do I graft?", "tool graft --on"),
+            candidate("what grafts?", "tool graft --on"),
+            candidate("what grafts it?", "tool graft --on"),
+            candidate("how do I prune?", "tool prune --deep"),
+        ];
+        let split = split_by_phrasing(&rows, 1, 7);
+        assert_eq!(split.probe.len(), 1, "one phrasing of the answer that has spares");
+        assert_eq!(split.train.len(), 3);
+        assert_eq!(split.defect(), None);
+        // The lone-phrasing answer stays in training rather than being
+        // dropped to satisfy a ratio.
+        assert!(split.train.iter().any(|c| c.answer == "tool prune --deep"));
+    }
+
+    /// The two ways a split flatters itself, both caught.
+    #[test]
+    fn a_split_that_leaks_or_orphans_says_so() {
+        let shared = candidate("how do I graft?", "tool graft --on");
+        let leaked = Split { train: vec![shared.clone()], probe: vec![shared] };
+        assert!(leaked.defect().expect("leak").contains("also trained on"));
+
+        let orphan = Split {
+            train: vec![candidate("how do I graft?", "tool graft --on")],
+            probe: vec![candidate("how do I prune?", "tool prune --deep")],
+        };
+        assert!(orphan.defect().expect("orphan").contains("never taught"));
+    }
+
+    /// Only the answer is supervised.
+    #[test]
+    fn a_chat_row_trains_on_the_answer_and_not_on_the_question() {
+        let dir = std::env::temp_dir().join(format!("brain-qa-chat-{}", std::process::id()));
+        let path = dir.join("train.jsonl");
+        write_chat_jsonl(&path, &[candidate("how do I graft?", "tool graft --on")]).expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let row: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+        assert_eq!(row["messages"][0]["role"], "user");
+        assert_eq!(row["messages"][0]["train"], false, "the question is context, never the target");
+        assert_eq!(row["messages"][1]["role"], "assistant");
+        assert_eq!(row["messages"][1]["train"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The held-out phrasing must not always be the same STYLE of question.
+    ///
+    /// A generator writes its phrasings in a consistent order, so holding
+    /// out the first of every group builds a probe set made entirely of one
+    /// wording - and a training half that never contains it. The split then
+    /// measures phrasing transfer while reporting itself as a held-out
+    /// sample, and nothing about its shape says which.
+    #[test]
+    fn the_held_out_phrasing_is_not_always_the_first_one() {
+        let rows: Vec<Candidate> = (0..8)
+            .flat_map(|a| {
+                ["what is the command", "how do i", "what flags"]
+                    .iter()
+                    .map(move |style| candidate(&format!("{style} for answer {a}?"), &format!("tool run --n {a}")))
+                    .collect::<Vec<Candidate>>()
+            })
+            .collect();
+        let split = split_by_phrasing(&rows, 1, 3);
+        assert_eq!(split.probe.len(), 8, "one per answer");
+        let styles: BTreeSet<&str> =
+            split.probe.iter().map(|c| c.question.split(" for answer").next().unwrap_or("")).collect();
+        assert!(styles.len() > 1, "every probe is the same wording: {styles:?}");
+        assert_eq!(split.defect(), None);
+        // Still reproducible.
+        assert_eq!(split_by_phrasing(&rows, 1, 3), split);
     }
 }

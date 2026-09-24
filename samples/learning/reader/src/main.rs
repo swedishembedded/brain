@@ -34,6 +34,7 @@ use std::process::ExitCode;
 
 use brain::artifact;
 use brain::qa::{self, Candidate, Distil, Known, Passage, Phrase, Verdict};
+use brain::qa::Split;
 use brain::{BatteryTask, ContinualReader, LedgerFacts, TextGenerationPipeline};
 use corpus::{Expect, Tool};
 
@@ -78,6 +79,11 @@ usage: sample-learning-reader <verb> [options]
         the distil stage done the other way round, and the one that yields
         a training set: the TOOL supplies the answers, which makes them
         correct by construction, and the model only phrases the questions.
+
+  sft      --in DIR --out DIR [--held-out N] [--seed N]
+        turn the verified pairs into a training set and the held-out
+        questions that will judge it. Splits by PHRASING, so the probe asks
+        for something the training half teaches, in words it never used.
 
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
@@ -150,6 +156,7 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
         "read" => read(&mut a),
         "distil" => distil(&mut a),
         "phrase" => phrase(&mut a),
+        "sft" => sft(&mut a),
         "report" => report(&mut a),
         "selftest" => selftest(&mut a),
         other => Err(format!("unknown verb {other:?}\n\n{USAGE}")),
@@ -470,9 +477,11 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
     let pipeline = TextGenerationPipeline::from_pretrained(&model).map_err(|e| e.to_string())?;
     let phrasing = Phrase::with(pipeline).seed(seed).per_known(per_answer).instruction(format!(
         "Write questions a user of the {} tool would ask, whose answer is exactly the command above. \
-         Ask for the OUTCOME in plain words - what the user wants to achieve. Never quote the command, \
-         never name its flags, and never mention {}. Reply with nothing but questions, one per line, \
-         each beginning with `Q: `.",
+         Every question must ASK FOR A COMMAND - begin each one with \"What is the command to\", \
+         \"How do I\" or \"What flags are required to\". Never ask what something is, what it does, \
+         or what its default is: the answer is a command, so the question must be a request for one. \
+         Name only what the command actually sets. Never quote the command itself and never mention {}. \
+         Reply with nothing but questions, one per line, each beginning with `Q: `.",
         tool.name, tool.name
     ));
     let replies = phrasing.ask(&known).map_err(|e| e.to_string())?;
@@ -524,6 +533,41 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
         println!("nothing survived: there is no training set here, and that is the result");
         return Ok(ExitCode::FAILURE);
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn sft(a: &mut Args) -> Result<ExitCode, String> {
+    let in_dir = a.path("--in", "phrased");
+    let out_dir = a.path("--out", "sft");
+    let held_out = a.number("--held-out", 1)? as usize;
+    let seed = a.number("--seed", 1)?;
+    a.finish()?;
+
+    let accepted: Vec<Candidate> =
+        artifact::read_jsonl(in_dir.join("accepted.jsonl")).map_err(|e| format!("{}: {e}", in_dir.display()))?;
+    if accepted.is_empty() {
+        return Err(format!("{}: no verified pairs to build a training set from", in_dir.display()));
+    }
+
+    let split: Split = qa::split_by_phrasing(&accepted, held_out, seed);
+    // Refused rather than reported: a split with either defect produces a
+    // number that looks like learning and is not.
+    if let Some(defect) = split.defect() {
+        return Err(format!("this split cannot be trusted: {defect}"));
+    }
+
+    qa::write_chat_jsonl(out_dir.join("train.jsonl"), &split.train).map_err(|e| e.to_string())?;
+    qa::write_chat_jsonl(out_dir.join("probe.jsonl"), &split.probe).map_err(|e| e.to_string())?;
+    artifact::write_jsonl(out_dir.join("split.jsonl"), &[&split]).map_err(|e| e.to_string())?;
+
+    println!("train     {:>4}  rows, answer supervised and question masked", split.train.len());
+    println!("probe     {:>4}  held-out phrasings of answers the training half teaches", split.probe.len());
+    let answers: BTreeMap<&str, usize> = split.train.iter().fold(BTreeMap::new(), |mut m, c| {
+        *m.entry(c.answer.as_str()).or_default() += 1;
+        m
+    });
+    println!("covering  {:>4}  distinct commands", answers.len());
+    println!("\nwrote {}", out_dir.display());
     Ok(ExitCode::SUCCESS)
 }
 

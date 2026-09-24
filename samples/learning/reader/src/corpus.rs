@@ -159,21 +159,26 @@ const PLACEHOLDERS: &[&str] = &["PATH", "COUNT", "TIME", "SIZE", "NAME"];
 /// this terminates and stays reproducible. The compound space is what makes
 /// a numeric suffix unnecessary: 12 modifiers over 16 nouns is 208 plausible
 /// flag names, against the roughly 50 a pair of tools needs.
-fn fresh_name(rng: &mut Rng, used: &[String], simple: &[&str], modifiers: &[&str]) -> String {
+fn fresh_name(rng: &mut Rng, used: &[String], simple: &[&str], modifiers: &[&str], forbidden: &BTreeSet<String>) -> String {
+    // A candidate is out if any WORD of it is spoken for. `--skip-budget`
+    // beside `budget-rebuild` collides on `budget`, which is enough to make
+    // "set the budget" and "budget rebuild" ambiguous even though the two
+    // names differ.
+    let clashes = |c: &str| c.split('-').any(|w| forbidden.contains(w));
     for _ in 0..48 {
         let candidate = if rng.next().is_multiple_of(3) {
             rng.pick(simple).to_string()
         } else {
             format!("{}-{}", rng.pick(modifiers), rng.pick(simple))
         };
-        if !used.contains(&candidate) {
+        if !used.contains(&candidate) && !clashes(&candidate) {
             return candidate;
         }
     }
     for m in modifiers {
         for w in simple {
             let candidate = format!("{m}-{w}");
-            if !used.contains(&candidate) {
+            if !used.contains(&candidate) && !clashes(&candidate) {
                 return candidate;
             }
         }
@@ -206,7 +211,7 @@ impl Tool {
         let mut used_commands: Vec<String> = taken_commands;
         let mut commands = Vec::new();
         for _ in 0..n_commands {
-            let cmd = fresh_name(&mut rng, &used_commands, VERBS, NOUNS);
+            let cmd = fresh_name(&mut rng, &used_commands, VERBS, NOUNS, &BTreeSet::new());
             used_commands.push(cmd.clone());
 
             // Enough flags that a SINGLE command's page is a document the
@@ -220,10 +225,17 @@ impl Tool {
             let n_flags = 6 + (rng.next() % 4) as usize;
             // Seeded with every flag name any other tool uses, so the two
             // tools' vocabularies cannot overlap at all.
+            // Seeded with every flag name any other tool uses, so the two
+            // tools' vocabularies cannot overlap at all - AND with this
+            // command's own name, so no flag can share a word with the
+            // command it belongs to. `quota-hoist` beside `--quota` is
+            // ambiguous in a way no reader can resolve: "set the quota" and
+            // "quota hoist" name different things with the same word.
             let mut used_flags: Vec<String> = taken_flags.iter().map(|f| f.trim_start_matches("--").to_string()).collect();
+            let own_words: BTreeSet<String> = cmd.split('-').map(str::to_string).collect();
             let mut flags = Vec::new();
             for f in 0..n_flags {
-                let stem = fresh_name(&mut rng, &used_flags, NOUNS, MODIFIERS);
+                let stem = fresh_name(&mut rng, &used_flags, NOUNS, MODIFIERS, &own_words);
                 used_flags.push(stem.clone());
                 let takes_value = !rng.next().is_multiple_of(3);
                 let value = takes_value.then(|| rng.pick(PLACEHOLDERS).to_string());
@@ -466,15 +478,17 @@ impl Tool {
             }
         }
 
-        // A command is an instruction to DO something. A question asking
-        // what something is FOR cannot be answered by one, and a row that
-        // pairs them teaches the model to answer the wrong kind of question
-        // with a command line.
+        // A command is an instruction to DO something, so the question has
+        // to ASK for one. Stated as what a question must contain rather
+        // than as a list of what it must not: the ways of asking what
+        // something IS are endless - "what is the purpose of", "how does it
+        // work", "what action does it perform", "what is the default" - and
+        // a list of them is a list that is always one phrasing out of date.
         let lower = question.to_lowercase();
-        for asking in ["purpose of", "outcome of", "effect of", "what does", "available for", "affect the"] {
-            if lower.contains(asking) {
-                return Some(format!("asks what something IS ({asking:?}), which a command does not answer"));
-            }
+        const ASKS_FOR_A_COMMAND: [&str; 7] =
+            ["command", "how do i", "how can i", "how should i", "what flags", "which flags", "what options should"];
+        if !ASKS_FOR_A_COMMAND.iter().any(|m| lower.contains(m)) {
+            return Some("does not ask for a command, so a command does not answer it".to_string());
         }
 
         let Ok((cmd, given)) = self.parse_into(answer) else {
@@ -489,12 +503,39 @@ impl Tool {
         // exempting it there let a genuinely mismatched row through.
         let store = noun_of(&cmd.summary);
         let names_the_store = lower.contains(&format!("{store} store"));
+        // A subcommand's own name is not a flag mention. `quota-hoist`
+        // shares a word with `--quota`, so a question naming the command
+        // read as one asking for the flag - and an answer that set it was
+        // then accepted for a question that never asked.
+        // The command's own words, and only where the question actually
+        // NAMES the command - the same rule the store noun gets. Exempting
+        // them everywhere fixed `quota-hoist` being read as `--quota` and
+        // immediately broke the other direction: "how do I set the quota to
+        // 7d?" became a question that had not asked for anything.
+        let spoken = cmd.name.replace('-', " ");
+        let names_the_command = lower.contains(&spoken) || lower.contains(&cmd.name);
+        let command_words: BTreeSet<String> =
+            if names_the_command { cmd.name.split('-').map(str::to_lowercase).collect() } else { BTreeSet::new() };
+        // Subtracted once, so BOTH directions agree about what was asked
+        // for. Filtering only the forward check left the reverse one - "the
+        // answer sets something the question never asked about" - still
+        // reading the command name as a request.
+        let asked: BTreeSet<&String> = words.iter().filter(|w| !command_words.contains(*w)).collect();
 
-        for w in &words {
-            if !every_flag.contains(w) || set.contains(w) {
+        for w in &asked {
+            // A hyphenated token is this tool's flag shape. One that is not
+            // a flag at all is a name the model invented - `--hard-cutoff`
+            // for a tool that has no such thing - and a question built on
+            // invented terminology teaches the model that it exists. The
+            // earlier check could not see these: it only compared against
+            // REAL flag names, so a hallucinated one passed untouched.
+            if w.contains('-') && !every_flag.contains(*w) {
+                return Some(format!("the question names {w:?}, which is not a flag this tool has"));
+            }
+            if !every_flag.contains(*w) || set.contains(*w) {
                 continue;
             }
-            if *w == store && names_the_store {
+            if **w == store && names_the_store {
                 continue;
             }
             return Some(format!("the question asks about {w:?}, which the answer does not set"));
@@ -507,7 +548,7 @@ impl Tool {
         for (flag, _) in given.iter() {
             let bare = flag.trim_start_matches('-').to_lowercase();
             let required = cmd.flags.iter().any(|f| f.name == *flag && f.required);
-            if !required && !words.contains(&bare) {
+            if !required && !asked.contains(&bare) {
                 return Some(format!("the answer sets {bare:?}, which the question never asked for"));
             }
         }
@@ -960,8 +1001,16 @@ mod tests {
         // The fair baseline: asks for the command, names only the store.
         assert_eq!(t.mismatch(&format!("What is the command to {action} the {store} store?"), &canonical), None);
 
-        // Asks what something IS; a command cannot answer that.
-        assert!(t.mismatch(&format!("What is the purpose of the {} {} command?", t.name, cmd.name), &canonical).is_some());
+        // Asks what something IS. The whitelist refuses it for what it does
+        // NOT ask, which is what makes this robust to the phrasing.
+        for asking in [
+            "What is the purpose of sealing?",
+            "How does the flag work?",
+            "What action does it perform?",
+            "What is the default margin?",
+        ] {
+            assert!(t.mismatch(asking, &canonical).is_some(), "{asking:?} does not ask for a command");
+        }
 
         // Names a flag the answer does not set.
         let other = t
@@ -986,6 +1035,107 @@ mod tests {
             let p = f.value.clone().expect("valued");
             let q = format!("What is the command to set the {} to {p}?", f.name.trim_start_matches('-'));
             assert!(t.mismatch(&q, &canonical).is_some(), "{q:?} quotes the placeholder");
+        }
+    }
+
+    /// Two ways a question goes wrong that naming real flags correctly does
+    /// not rule out, both from rows a model actually produced.
+    #[test]
+    fn an_invented_flag_name_and_a_question_about_a_value_are_both_refused() {
+        let t = Tool::generate(1);
+        let cmd = &t.commands[0];
+        let canonical = t.canonical(cmd);
+
+        // A flag this tool does not have. The check that compares against
+        // REAL flag names cannot see this one, because it is not one.
+        let invented = "What flags are required to set the hard-cutoff?";
+        assert!(t.mismatch(invented, &canonical).is_some(), "{invented:?} names a flag that does not exist");
+
+        // Asking for a VALUE, answered with a command.
+        let value_q = "What is the default margin for the pruning operation?";
+        assert!(t.mismatch(value_q, &canonical).is_some(), "{value_q:?} asks for a default, which a command does not give");
+        // And the shapes that DO ask for one are kept.
+        let store = noun_of(&cmd.summary);
+        let action = cmd.name.replace('-', " ");
+        for good in [
+            format!("What is the command to {action} the {store} store?"),
+            format!("How do I {action} the {store} store?"),
+            format!("What flags are required to {action} the {store} store?"),
+        ] {
+            assert_eq!(t.mismatch(&good, &canonical), None, "{good:?} asks for a command");
+        }
+
+        // And a real, well-formed compound flag the answer does set is fine.
+        let real = cmd.flags.iter().find(|f| f.name.contains('-')).map(|f| f.name.trim_start_matches('-').to_string());
+        if let Some(flag) = real {
+            let spec = cmd.flags.iter().find(|f| f.name.trim_start_matches('-') == flag).expect("found above");
+            let answer = if spec.required { canonical.clone() } else { format!("{canonical} {}", spec_of(spec)) };
+            if t.parse(&answer).is_ok() {
+                let q = format!("What is the command to turn on {flag}?");
+                assert_eq!(t.mismatch(&q, &answer), None, "{q:?} names a real flag the answer sets");
+            }
+        }
+    }
+
+    /// A subcommand whose name shares a word with a flag: naming the command
+    /// is not asking for the flag.
+    ///
+    /// Found by reading the rows - `quota-hoist` and `--quota` - and it let
+    /// an answer through that set a flag its question never asked about.
+    #[test]
+    fn a_command_name_that_contains_a_flag_word_is_not_read_as_asking_for_the_flag() {
+        let t = Tool::generate(1);
+        let Some(cmd) = t
+            .commands
+            .iter()
+            .find(|c| c.name.split('-').any(|w| c.flags.iter().any(|f| f.name.trim_start_matches('-') == w)))
+        else {
+            return; // this seed drew no such collision
+        };
+        let shared = cmd.name.split('-').find(|w| cmd.flags.iter().any(|f| f.name.trim_start_matches('-') == *w)).expect("found above");
+        let flag = cmd.flags.iter().find(|f| f.name.trim_start_matches('-') == shared).expect("found above");
+        if flag.required {
+            return; // a required flag is exempt anyway; not this test's case
+        }
+        let action = cmd.name.replace('-', " ");
+        let store = noun_of(&cmd.summary);
+        let question = format!("What is the command to {action} the {store} store?");
+        let over = format!("{} {}", t.canonical(cmd), spec_of(flag));
+        if t.parse(&over).is_ok() {
+            assert!(
+                t.mismatch(&question, &over).is_some(),
+                "{question:?} names the command, not the flag, so {over:?} sets {shared:?} unasked"
+            );
+        }
+    }
+
+    /// No flag may share a word with the command it belongs to.
+    ///
+    /// `quota-hoist` beside `--quota` cannot be read unambiguously: "set the
+    /// quota" and "quota hoist the weight store" name different things with
+    /// the same word, and a checker resolving it one way gets the other
+    /// wrong. Removed at the source rather than parsed around.
+    #[test]
+    fn no_flag_shares_a_word_with_its_own_command() {
+        for seed in 1..8u64 {
+            let a = Tool::generate(seed);
+            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            for t in [&a, &b] {
+                for cmd in &t.commands {
+                    let words: BTreeSet<&str> = cmd.name.split('-').collect();
+                    for f in &cmd.flags {
+                        for part in f.name.trim_start_matches('-').split('-') {
+                            assert!(
+                                !words.contains(part),
+                                "seed {seed}: {} {} has {} - the word {part:?} means two things",
+                                t.name,
+                                cmd.name,
+                                f.name
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
