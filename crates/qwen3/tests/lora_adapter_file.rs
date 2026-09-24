@@ -125,3 +125,46 @@ fn folding_the_adapter_into_the_base_reproduces_the_live_lora_forward() {
         "folded-base forward does not match the live unfolded LoRA forward: mean abs diff {mean_abs_diff:.6}"
     );
 }
+
+/// Train, save a full checkpoint, reload it, and extract the adapter - the
+/// order `brain qwen3 finetune --lora` actually does it in, and the one
+/// nothing covered.
+///
+/// `Model::param_names` is the OPTIMISED set: trainable plus offload, never
+/// frozen. An inference build freezes everything, adapters included, so a
+/// checkpoint reloaded that way carries its adapters and reports none, and
+/// `save_adapter` fails with "no .lora_a/.lora_b tensors in the param store"
+/// on a file that visibly contains 392 of them. The reload has to be the
+/// shape that gives the adapters a trainable role.
+#[test]
+fn an_adapter_survives_a_full_checkpoint_round_trip() {
+    if skip() {
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+        return;
+    }
+    let (trained, _x) = trained_model();
+    let dir = tmp("roundtrip");
+    let full = dir.join("full.safetensors");
+    trained.save(full.to_str().expect("utf-8 path"));
+    drop(trained);
+
+    let reader = checkpoint::weightio::WeightReader::open(full.to_str().expect("utf-8 path")).expect("reopen");
+    let cfg = QwenConfig::from_json(&reader.config());
+    assert!(cfg.lora.is_some(), "the saved config must carry the adapter shape, or nothing below can work");
+    let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+    let block = cfg.block_size;
+    let reloaded = Qwen::new_shard(cfg, 1, block, &reader, true, shard);
+    drop(reader);
+
+    let adapter = dir.join("adapter.safetensors");
+    qwen3::lora::save_adapter(adapter.to_str().expect("utf-8 path"), &reloaded, "test/adapter", "test/base", None)
+        .expect("a reloaded LoRA checkpoint must still yield its adapter");
+
+    let st = checkpoint::st::load_safetensors(adapter.to_str().expect("utf-8 path")).expect("read back");
+    assert!(!st.tensors.is_empty(), "the adapter file is empty");
+    assert!(
+        st.tensors.keys().all(|k| k.ends_with(".lora_a") || k.ends_with(".lora_b")),
+        "{:?}",
+        st.tensors.keys().collect::<Vec<&String>>()
+    );
+}

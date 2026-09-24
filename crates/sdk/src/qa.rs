@@ -360,6 +360,32 @@ pub fn write_chat_jsonl(path: impl AsRef<std::path::Path>, rows: &[Candidate]) -
     crate::artifact::write_jsonl(path, &records)
 }
 
+/// Read back what [`write_chat_jsonl`] wrote.
+///
+/// The inverse, so a later stage does not have to know the wire shape to
+/// consume it. A record without both turns is an error naming its position
+/// rather than a row with an empty question or an empty answer, either of
+/// which scores as a failure that is really a malformed file.
+pub fn read_chat_jsonl(path: impl AsRef<std::path::Path>) -> Result<Vec<Candidate>> {
+    let rows: Vec<serde_json::Value> = crate::artifact::read_jsonl(path)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let turn = |role: &str| -> Option<String> {
+            row["messages"]
+                .as_array()?
+                .iter()
+                .find(|m| m["role"] == role)
+                .and_then(|m| m["content"].as_str())
+                .map(str::to_string)
+        };
+        let (Some(question), Some(answer)) = (turn("user"), turn("assistant")) else {
+            return Err(crate::Error::Backend(format!("record {}: a chat row needs a user turn and an assistant turn", i + 1)));
+        };
+        out.push(Candidate { passage: String::new(), question, answer, raw: String::new() });
+    }
+    Ok(out)
+}
+
 /// What a caller's checker decided about one candidate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
@@ -743,5 +769,25 @@ mod tests {
         assert_eq!(split.defect(), None);
         // Still reproducible.
         assert_eq!(split_by_phrasing(&rows, 1, 3), split);
+    }
+
+    /// The inverse of the writer, so a later stage need not know the wire
+    /// shape - and a malformed record is named rather than read as a row
+    /// with an empty question.
+    #[test]
+    fn chat_rows_read_back_as_what_was_written() {
+        let dir = std::env::temp_dir().join(format!("brain-qa-roundtrip-{}", std::process::id()));
+        let path = dir.join("rows.jsonl");
+        let rows = vec![candidate("how do I graft?", "tool graft --on"), candidate("what prunes?", "tool prune --deep")];
+        write_chat_jsonl(&path, &rows).expect("write");
+        let back = read_chat_jsonl(&path).expect("read");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].question, "how do I graft?");
+        assert_eq!(back[0].answer, "tool graft --on");
+
+        std::fs::write(&path, "{\"messages\":[{\"role\":\"user\",\"content\":\"q\",\"train\":false}]}\n").expect("write");
+        let err = read_chat_jsonl(&path).expect_err("a half record must be refused");
+        assert!(format!("{err}").contains("record 1"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

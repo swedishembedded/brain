@@ -913,7 +913,21 @@ fn finetune_lora(args: &[String]) {
     };
     println!("trained: loss {l0:.4} -> {l1:.4}");
 
-    let reloaded = Qwen::load_inference(full_ckpt_out.to_str().unwrap_or_default(), 1, block);
+    // Reloaded with the adapters TRAINABLE, not as an inference build.
+    //
+    // `Model::param_names` is the optimised set - trainable plus offload,
+    // never frozen - and an inference build freezes everything, adapters
+    // included. A checkpoint reloaded that way carries its adapters and
+    // reports none, so `save_adapter` fails with "no .lora_a/.lora_b tensors
+    // in the param store" against a file that visibly holds hundreds of
+    // them, at the very end of a training run that worked.
+    let reloaded = {
+        let reader = checkpoint::weightio::WeightReader::open(full_ckpt_out.to_str().unwrap_or_default())
+            .unwrap_or_else(|e| panic!("cannot reopen {}: {e}", full_ckpt_out.display()));
+        let cfg = qwen3::QwenConfig::from_json(&reader.config());
+        let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+        Qwen::new_shard(cfg, 1, block, &reader, true, shard)
+    };
     if let Err(e) = qwen3::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &reloaded, &full_ref_str, &base_id, dataset_id.as_deref())
     {
         eprintln!("save_adapter: {e}");

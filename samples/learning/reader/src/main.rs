@@ -85,6 +85,11 @@ usage: sample-learning-reader <verb> [options]
         questions that will judge it. Splits by PHRASING, so the probe asks
         for something the training half teaches, in words it never used.
 
+  score    --probes DIR --model REF [--adapter PATH] [--max-new N]
+        ask the held-out questions and RUN each answer. A reply counts only
+        when running it produces the same observable result as running the
+        reference - the measurement the whole pipeline exists to make.
+
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
 
@@ -157,6 +162,7 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
         "distil" => distil(&mut a),
         "phrase" => phrase(&mut a),
         "sft" => sft(&mut a),
+        "score" => score(&mut a),
         "report" => report(&mut a),
         "selftest" => selftest(&mut a),
         other => Err(format!("unknown verb {other:?}\n\n{USAGE}")),
@@ -568,6 +574,51 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
     });
     println!("covering  {:>4}  distinct commands", answers.len());
     println!("\nwrote {}", out_dir.display());
+    Ok(ExitCode::SUCCESS)
+}
+
+fn score(a: &mut Args) -> Result<ExitCode, String> {
+    let probes_dir = a.path("--probes", "sft");
+    let model = a.take("--model").ok_or("score needs --model")?;
+    let adapter = a.take("--adapter");
+    let seed = a.number("--seed", 1)?;
+    let max_new = a.number("--max-new", 96)? as u32;
+    a.finish()?;
+
+    let (tool, _) = tools(seed);
+    let rows: Vec<Candidate> =
+        qa::read_chat_jsonl(probes_dir.join("probe.jsonl")).map_err(|e| format!("{}: {e}", probes_dir.display()))?;
+    if rows.is_empty() {
+        return Err(format!("{}: no held-out probes to score", probes_dir.display()));
+    }
+
+    let mut builder = TextGenerationPipeline::builder(&model);
+    if let Some(path) = &adapter {
+        builder = builder.adapter(path);
+        println!("serving {model} with {path}");
+    }
+    let pipeline = builder.load().map_err(|e| e.to_string())?;
+    let mut passed = 0usize;
+    for row in &rows {
+        let (question, expected) = (&row.question, &row.answer);
+        let opts = brain::TextGenerationOptions::new().max_new_tokens(max_new).temperature(0.0).thinking(false).seed(seed);
+        let reply = pipeline.generate_with(question, opts).map_err(|e| e.to_string())?.text;
+        let got = command_in(&reply, &tool);
+
+        // Running is what decides. An answer that parses and does something
+        // else is wrong, and only executing both says so.
+        let verdict = match (tool.run(expected), tool.run(&got)) {
+            (Ok(want), Ok(have)) if want == have => {
+                passed += 1;
+                "pass".to_string()
+            }
+            (Ok(_), Ok(_)) => "valid, different command".to_string(),
+            (Ok(_), Err(why)) => format!("{why:?}"),
+            (Err(why), _) => return Err(format!("the expected answer {expected:?} does not run: {why:?}")),
+        };
+        println!("  {verdict:<28} want {expected:<48} got {got:?}");
+    }
+    println!("\nscore {passed}/{} on held-out questions, every answer executed", rows.len());
     Ok(ExitCode::SUCCESS)
 }
 

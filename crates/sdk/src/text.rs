@@ -217,6 +217,7 @@ impl TextGenerationPipeline {
     pub fn builder(weights_path: impl AsRef<str>) -> TextGenerationPipelineBuilder {
         TextGenerationPipelineBuilder {
             weights: weights_path.as_ref().to_string(),
+            adapter: None,
             tokenizer: None,
             device: Device::default(),
             capacity: DEFAULT_CAPACITY,
@@ -283,6 +284,7 @@ const DEFAULT_CAPACITY: u32 = 4096;
 /// `.capacity(...)` are the only knobs this milestone exposes.
 pub struct TextGenerationPipelineBuilder {
     weights: String,
+    adapter: Option<String>,
     tokenizer: Option<String>,
     device: Device,
     capacity: u32,
@@ -302,6 +304,23 @@ impl TextGenerationPipelineBuilder {
 
     pub fn device(mut self, device: Device) -> Self {
         self.device = device;
+        self
+    }
+
+    /// Serve `weights` with a LoRA adapter folded into it.
+    ///
+    /// Without this a caller can train an adapter with this engine and has
+    /// no way to serve it through this surface, which makes the whole
+    /// fine-tune unmeasurable from here. The delta is folded into the base
+    /// tensors at load (`qwen3::lora::fold_adapter_into`), which is what
+    /// `Qwen::from_tensors_decode` exists for; rank and alpha come from the
+    /// adapter's own `ModelCard` rather than from the caller, so an adapter
+    /// cannot be served at a shape it was not trained at.
+    ///
+    /// It costs a whole-model host copy that the streaming path avoids -
+    /// paid once, at load.
+    pub fn adapter(mut self, path: impl Into<String>) -> Self {
+        self.adapter = Some(path.into());
         self
     }
 
@@ -346,7 +365,7 @@ impl TextGenerationPipelineBuilder {
     ///    budget (within whatever step 1 already narrowed the ambient
     ///    selection to) and builds the inference-only model.
     pub fn load(self) -> Result<TextGenerationPipeline> {
-        let TextGenerationPipelineBuilder { weights, tokenizer, device, capacity, download_policy } = self;
+        let TextGenerationPipelineBuilder { weights, adapter, tokenizer, device, capacity, download_policy } = self;
 
         crate::device::apply(&device)?;
 
@@ -393,11 +412,26 @@ impl TextGenerationPipelineBuilder {
         // applied host-side - and its KV cache is the only thing that scales
         // with the context at all.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-        let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
-            qwen3::Qwen::from_reader_decode(&reader, capacity)
-        })
-        .map_err(Error::Backend)?;
-        drop(reader);
+        let model = if let Some(path) = &adapter {
+            // Folded on the host, then built decode-shaped from the result -
+            // the one path `from_tensors_decode` exists for.
+            drop(reader);
+            let base = checkpoint::load(&weights);
+            let mut tensors = base.by_role("");
+            qwen3::lora::fold_adapter_into(&mut tensors, path).map_err(|e| Error::Backend(format!("{path}: {e}")))?;
+            let folded = cfg.clone();
+            qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
+                qwen3::Qwen::from_tensors_decode(folded.clone(), &tensors, capacity)
+            })
+            .map_err(Error::Backend)?
+        } else {
+            let built = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
+                qwen3::Qwen::from_reader_decode(&reader, capacity)
+            })
+            .map_err(Error::Backend)?;
+            drop(reader);
+            built
+        };
 
         Ok(TextGenerationPipeline { model, tok, capacity })
     }
