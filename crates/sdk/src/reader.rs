@@ -266,8 +266,12 @@ impl ContinualReader {
         let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
 
         let manifest = Manifest { schema: SCHEMA, model: self.model.clone(), cfg: self.cfg };
+        // Reopened under the model the run was created with, never another:
+        // what a run has promoted is folded into THAT checkpoint, so serving
+        // it from a different base would report one model's learning as
+        // another's.
         let run = if self.run_dir.join("manifest.json").exists() {
-            Run::open(&self.run_dir).map_err(|e| Error::Backend(e.to_string()))?
+            Run::open_for(&self.run_dir, &self.model).map_err(|e| Error::Backend(e.to_string()))?
         } else {
             Run::create(&self.run_dir, &manifest).map_err(|e| Error::Backend(e.to_string()))?
         };

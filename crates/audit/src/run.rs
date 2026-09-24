@@ -137,6 +137,8 @@ pub enum RunError {
     NotARun(PathBuf),
     #[error("{path} was written by schema {found}, this build speaks schema {expected} - the state would be half-understood rather than read")]
     Schema { path: PathBuf, found: u32, expected: u32 },
+    #[error("{root} was read with {recorded:?} and is being reopened with {asked:?} - its probes, its baselines and what it has promoted are all about the first, so the two cannot be compared")]
+    ModelMismatch { root: PathBuf, recorded: String, asked: String },
 }
 
 type Result<T> = std::result::Result<T, RunError>;
@@ -167,6 +169,21 @@ impl Run {
         let m = run.manifest()?;
         if m.schema != SCHEMA {
             return Err(RunError::Schema { path, found: m.schema, expected: SCHEMA });
+        }
+        Ok(run)
+    }
+
+    /// Reopen a run that must belong to `model`.
+    ///
+    /// A run directory carries the checkpoint its promotions were folded
+    /// into and the baselines its probes were scored against. Reopening it
+    /// under a different model would compare one model's numbers with
+    /// another's, so this refuses by name rather than reading on.
+    pub fn open_for(root: &Path, model: &str) -> Result<Run> {
+        let run = Run::open(root)?;
+        let recorded = run.manifest()?.model;
+        if recorded != model {
+            return Err(RunError::ModelMismatch { root: root.to_path_buf(), recorded, asked: model.to_string() });
         }
         Ok(run)
     }
@@ -407,6 +424,19 @@ mod tests {
         let d = Dir::new();
         std::fs::create_dir_all(&d.0).expect("mkdir");
         assert!(matches!(Run::open(&d.0), Err(RunError::NotARun(_))));
+    }
+
+    /// A run's promotions and baselines belong to the model it was read
+    /// with, so reopening it under another one is refused by name. The
+    /// stay-silent half is that the same model reopens it.
+    #[test]
+    fn a_run_reopened_under_a_different_model_is_refused() {
+        let d = Dir::new();
+        Run::create(&d.0, &manifest()).expect("create");
+        let err = Run::open_for(&d.0, "qwen3:4b").expect_err("a different model must be refused");
+        assert!(matches!(err, RunError::ModelMismatch { .. }), "{err}");
+        assert!(err.to_string().contains("qwen3:0.6b") && err.to_string().contains("qwen3:4b"), "the message must name both: {err}");
+        Run::open_for(&d.0, "qwen3:0.6b").expect("the model it was read with reopens it");
     }
 
     /// A ledger row is the artefact someone reads months later, so a
