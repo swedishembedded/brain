@@ -87,6 +87,53 @@ pub enum Invalid {
     MissingValue(String),
     UnexpectedValue(String),
     Exclusive(String, String),
+    /// The flag takes a value of a particular shape and got something else.
+    /// Distinct from [`Invalid::MissingValue`]: the model DID supply one,
+    /// and a tool that accepted `--depth banana` because it accepted any
+    /// word would call a wrong answer right.
+    BadValue { flag: String, wants: String, got: String },
+    /// The same flag twice. A real tool either refuses this or silently
+    /// keeps one of them; refusing is the only one of those that cannot
+    /// quietly accept an answer nobody meant.
+    RepeatedFlag(String),
+}
+
+/// Whether `value` is the shape `placeholder` names.
+///
+/// The strictness the whole verification rests on. A parser that accepts any
+/// word as any value reports a model that wrote `--depth banana` as having
+/// answered correctly, and every number built on that is inflated.
+fn value_is(placeholder: &str, value: &str) -> bool {
+    let digits_then = |suffixes: &str| {
+        let split = value.find(|c: char| !c.is_ascii_digit()).unwrap_or(value.len());
+        let (n, unit) = value.split_at(split);
+        !n.is_empty() && unit.len() == 1 && suffixes.contains(unit)
+    };
+    match placeholder {
+        "PATH" => value.starts_with('/') && value.len() > 1,
+        "COUNT" => !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()),
+        "TIME" => digits_then("smhd"),
+        "SIZE" => digits_then("KMG"),
+        "NAME" => !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        // An unknown placeholder is a defect in the generator, not in the
+        // answer: accept rather than fail every invocation that uses it.
+        _ => true,
+    }
+}
+
+/// What running a command did, as the tool reports it.
+///
+/// **Nothing here touches anything outside this struct.** The tool has no
+/// filesystem, no network and no state that outlives the call, which is what
+/// makes it safe to execute a language model's guess: the worst a wrong
+/// answer can do is produce a different transcript.
+///
+/// Deterministic in the parsed invocation and nothing else, so two
+/// invocations that MEAN the same thing compare equal - flag order does not
+/// matter - and two that differ in anything the tool acts on do not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub lines: Vec<String>,
 }
 
 const STEMS: &[&str] = &["vex", "quil", "zorn", "plim", "drax", "fenn", "gorp", "hask"];
@@ -209,6 +256,37 @@ impl Tool {
     /// Does the tool accept this? The verifier, and the whole reason the
     /// claim is checkable: a parser, never a second model's opinion.
     pub fn parse(&self, invocation: &str) -> Result<(), Invalid> {
+        self.parse_into(invocation).map(|_| ())
+    }
+
+    /// Run `invocation` and report what it did.
+    ///
+    /// The oracle the whole pipeline rests on: a generated answer is correct
+    /// when running it produces the same observable result as running the
+    /// reference, which is a stronger claim than "it looks similar" and a
+    /// different one from "it parses". `hask0 graft --cutoff --depth 7d`
+    /// parses and is not the same command as `hask0 graft --cutoff`.
+    ///
+    /// Safe to call on anything a model produced: see [`Outcome`].
+    pub fn run(&self, invocation: &str) -> Result<Outcome, Invalid> {
+        let (cmd, given) = self.parse_into(invocation)?;
+        let mut lines = vec![format!("{} {}: begin", self.name, cmd.name)];
+        // Sorted by flag name, so the transcript is a function of WHAT was
+        // asked for and not of the order it was written in.
+        for (name, value) in &given {
+            lines.push(match value {
+                Some(v) => format!("  set {name} = {v}"),
+                None => format!("  enable {name}"),
+            });
+        }
+        lines.push(format!("{} {}: {} option(s) applied to the {} store", self.name, cmd.name, given.len(), noun_of(&cmd.summary)));
+        Ok(Outcome { lines })
+    }
+
+    /// Parse, returning the command and the flags actually given, in name
+    /// order. The single place an invocation is understood; [`Tool::parse`]
+    /// and [`Tool::run`] are both this.
+    fn parse_into(&self, invocation: &str) -> Result<(&Command, BTreeMap<String, Option<String>>), Invalid> {
         let mut words = invocation.split_whitespace();
         match words.next() {
             Some(w) if w == self.name => {}
@@ -218,6 +296,7 @@ impl Tool {
         let cmd = self.command(&cmd_name).ok_or(Invalid::UnknownCommand(cmd_name))?;
 
         let mut seen: Vec<usize> = Vec::new();
+        let mut given: BTreeMap<String, Option<String>> = BTreeMap::new();
         let rest: Vec<&str> = words.collect();
         let mut i = 0;
         while i < rest.len() {
@@ -226,12 +305,25 @@ impl Tool {
                 return Err(Invalid::UnexpectedValue(word.to_string()));
             }
             let idx = cmd.flags.iter().position(|f| f.name == word).ok_or_else(|| Invalid::UnknownFlag(word.to_string()))?;
+            if seen.contains(&idx) {
+                return Err(Invalid::RepeatedFlag(word.to_string()));
+            }
             seen.push(idx);
-            match cmd.flags[idx].value {
-                Some(_) => {
+            match &cmd.flags[idx].value {
+                Some(placeholder) => {
                     let next = rest.get(i + 1);
                     match next {
-                        Some(v) if !v.starts_with("--") => i += 2,
+                        Some(v) if !v.starts_with("--") => {
+                            if !value_is(placeholder, v) {
+                                return Err(Invalid::BadValue {
+                                    flag: word.to_string(),
+                                    wants: placeholder.clone(),
+                                    got: (*v).to_string(),
+                                });
+                            }
+                            given.insert(word.to_string(), Some((*v).to_string()));
+                            i += 2;
+                        }
                         _ => return Err(Invalid::MissingValue(word.to_string())),
                     }
                 }
@@ -239,6 +331,7 @@ impl Tool {
                     if rest.get(i + 1).is_some_and(|v| !v.starts_with("--")) {
                         return Err(Invalid::UnexpectedValue(word.to_string()));
                     }
+                    given.insert(word.to_string(), None);
                     i += 1;
                 }
             }
@@ -254,7 +347,7 @@ impl Tool {
                 return Err(Invalid::Exclusive(cmd.flags[a].name.clone(), cmd.flags[b].name.clone()));
             }
         }
-        Ok(())
+        Ok((cmd, given))
     }
 
     /// The capability battery: one task per subcommand, asked in words and
@@ -269,6 +362,13 @@ impl Tool {
             .map(|c| (format!("How do I {} with {}? Answer with the command only.\n", c.summary, self.name), self.canonical(c)))
             .collect()
     }
+}
+
+/// The noun a command's summary names ("graft the anchor store" -> "anchor"),
+/// so a transcript says which store it acted on.
+fn noun_of(summary: &str) -> String {
+    let words: Vec<&str> = summary.split_whitespace().collect();
+    words.iter().position(|w| *w == "store").and_then(|i| i.checked_sub(1)).map(|i| words[i].to_string()).unwrap_or_else(|| "default".to_string())
 }
 
 /// A plausible value for a placeholder, so a canonical invocation is a thing
@@ -523,6 +623,92 @@ mod tests {
         assert!(short.is_empty(), "these lanes are under the reader's {} char floor: {short:?}", brain::MIN_EPISODE_CHARS);
     }
 
+    /// The strictness the whole verification rests on. A tool that took any
+    /// word as any value would report `--depth banana` as a correct answer,
+    /// and every number built on it would be inflated.
+    #[test]
+    fn a_value_of_the_wrong_shape_is_refused_and_the_right_shape_is_not() {
+        let t = tool();
+        // One command with a valued flag of each placeholder kind the
+        // generator can draw, exercised through the real parser.
+        for cmd in &t.commands {
+            for f in cmd.flags.iter().filter(|f| f.value.is_some()) {
+                let want = f.value.clone().expect("valued");
+                let required: Vec<String> = cmd
+                    .flags
+                    .iter()
+                    .filter(|r| r.required && r.name != f.name)
+                    .map(|r| match &r.value {
+                        Some(v) => format!("{} {}", r.name, value_for(v)),
+                        None => r.name.clone(),
+                    })
+                    .collect();
+                let base = format!("{} {} {}", t.name, cmd.name, required.join(" "));
+                let good = format!("{base} {} {}", f.name, value_for(&want));
+                let bad = format!("{base} {} banana!!", f.name);
+                if t.parse(&good).is_err() {
+                    continue; // an exclusivity rule collided; not this test's subject
+                }
+                match t.parse(&bad) {
+                    Err(Invalid::BadValue { wants, .. }) => assert_eq!(wants, want),
+                    // NAME genuinely accepts most words; it is the one
+                    // placeholder a nonsense token can legitimately satisfy.
+                    other => assert_eq!(want, "NAME", "{} {} took {bad:?}: {other:?}", cmd.name, f.name),
+                }
+            }
+        }
+    }
+
+    /// The same flag twice is refused rather than silently reduced to one.
+    #[test]
+    fn a_repeated_flag_is_refused() {
+        let t = tool();
+        let cmd = &t.commands[0];
+        let req = cmd.flags.iter().find(|f| f.required).expect("one required flag");
+        let spec = match &req.value {
+            Some(v) => format!("{} {}", req.name, value_for(v)),
+            None => req.name.clone(),
+        };
+        let twice = format!("{} {} {spec} {spec}", t.name, cmd.name);
+        assert!(matches!(t.parse(&twice), Err(Invalid::RepeatedFlag(_))), "got {:?}", t.parse(&twice));
+    }
+
+    /// The oracle: running is what decides, and it decides on MEANING. Flag
+    /// order is not meaning; an extra flag is.
+    #[test]
+    fn running_the_same_command_two_ways_gives_one_result_and_a_different_command_does_not() {
+        let t = tool();
+        let cmd = t.commands.iter().find(|c| c.flags.iter().filter(|f| !f.required).count() >= 2).expect("a command with spare flags");
+        let req = cmd.flags.iter().find(|f| f.required).expect("required");
+        let req_spec = match &req.value {
+            Some(v) => format!("{} {}", req.name, value_for(v)),
+            None => req.name.clone(),
+        };
+        let spare: Vec<&Flag> = cmd.flags.iter().filter(|f| !f.required && f.value.is_none()).take(2).collect();
+        if spare.len() < 2 {
+            return;
+        }
+        let a = format!("{} {} {req_spec} {} {}", t.name, cmd.name, spare[0].name, spare[1].name);
+        let b = format!("{} {} {} {} {req_spec}", t.name, cmd.name, spare[1].name, spare[0].name);
+        let less = format!("{} {} {req_spec} {}", t.name, cmd.name, spare[0].name);
+        if t.parse(&a).is_err() || t.parse(&less).is_err() {
+            return; // exclusivity collision; the pair above is not this test's subject
+        }
+        assert_eq!(t.run(&a).expect("runs"), t.run(&b).expect("runs"), "flag order is not meaning");
+        assert_ne!(t.run(&a).expect("runs"), t.run(&less).expect("runs"), "an extra flag IS meaning");
+    }
+
+    /// Running is safe on anything: the tool has no state outside its own
+    /// return value, which is what lets a model's guess be executed at all.
+    #[test]
+    fn running_an_invalid_invocation_reports_why_and_does_nothing_else() {
+        let t = tool();
+        assert!(t.run("rm -rf /").is_err());
+        assert!(t.run("").is_err());
+        let ok = t.run(&t.canonical(&t.commands[0])).expect("the canonical invocation runs");
+        assert!(ok.lines.first().is_some_and(|l| l.starts_with(&t.name)), "{:?}", ok.lines);
+    }
+
     /// The claim this whole sample rests on: the tool did not exist until
     /// the seed was drawn, so a model cannot already know it, and two seeds
     /// give two genuinely different tools rather than two spellings of one.
@@ -707,5 +893,51 @@ mod tests {
         // other: the tool name alone guarantees it.
         let (_, answer) = &a.battery()[0];
         assert_eq!(b.parse(answer), Err(Invalid::NotThisTool));
+    }
+}
+
+#[cfg(test)]
+mod oracle {
+    use super::*;
+
+    /// The oracle, on the answers a real Qwen3-0.6B actually produced for
+    /// this corpus, plus the two cases that separate EXECUTION from parsing.
+    ///
+    /// The third case is why this is run rather than parsed: `--cutoff
+    /// --depth 7d` is a perfectly valid invocation and is not the command
+    /// that was asked for. A grammar check passes it; running it does not.
+    /// The fourth is why the parser is strict about value SHAPE: `--depth
+    /// banana` is the same command with a value no real tool would take.
+    #[test]
+    fn running_a_candidate_separates_correct_from_merely_valid() {
+        let t = Tool::generate(1);
+        assert_eq!(t.name, "hask0", "these are the answers a model gave for the seed-1 tool");
+
+        let verdict = |reference: &str, candidate: &str| -> String {
+            match (t.run(reference), t.run(candidate)) {
+                (Ok(want), Ok(got)) if want == got => "correct".to_string(),
+                (Ok(_), Ok(_)) => "valid but different".to_string(),
+                (Ok(_), Err(e)) => format!("{e:?}"),
+                (Err(e), _) => panic!("the reference itself is invalid: {e:?}"),
+            }
+        };
+
+        let graft = "hask0 graft --cutoff";
+        assert_eq!(verdict(graft, "hask0 graft --cutoff"), "correct");
+        assert_eq!(verdict(graft, "hask0 graft anchor store"), "UnexpectedValue(\"anchor\")");
+        assert_eq!(
+            verdict(graft, "hask0 graft --cutoff --depth 7d"),
+            "valid but different",
+            "a valid invocation that does something else is not the answer, and only running it says so"
+        );
+        assert_eq!(
+            verdict(graft, "hask0 graft --cutoff --depth banana"),
+            "BadValue { flag: \"--depth\", wants: \"TIME\", got: \"banana\" }"
+        );
+
+        let splice = "hask0 splice --anchor 16";
+        assert_eq!(verdict(splice, "hask0 splice --anchor 16"), "correct");
+        assert_eq!(verdict(splice, "haskell0 --splice budget-store"), "NotThisTool");
+        assert_eq!(verdict(splice, "hask0 splice --anchor sixteen"), "BadValue { flag: \"--anchor\", wants: \"COUNT\", got: \"sixteen\" }");
     }
 }
