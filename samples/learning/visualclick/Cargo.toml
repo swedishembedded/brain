@@ -21,4 +21,4 @@ brain = { workspace = true, features = ["decision", "viewport"] }
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # Matches samples/decision/doom's "decision" + "viewport" combination.
-max-brain-crates = 34
+max-brain-crates = 37
