@@ -39,6 +39,17 @@ fn p_fault_given_negative() -> f32 {
 /// `RlcdSpec::options` is built from this.
 pub const OUTCOME_NAMES: [&str; 2] = ["healthy", "faulty"];
 
+/// Action names, matching `CostMatrix::binary`'s action-row order -
+/// `RlcdSpec::actions` is built from this.
+///
+/// A SEPARATE index space from [`OUTCOME_NAMES`], and deliberately listed
+/// next to it so the difference is visible: `CostMatrix::binary` puts the
+/// conservative action first (block a device, paying `C_FP` if it was
+/// healthy) while the outcomes put the benign one first. Index 0 therefore
+/// means "block" here and "healthy" there, and the two must never be
+/// substituted for one another.
+pub const ACTION_NAMES: [&str; 2] = ["block", "release"];
+
 pub struct DiagnosisWorld;
 
 impl World for DiagnosisWorld {

@@ -107,6 +107,17 @@ pub struct RlcdSpec {
     pub loss: LossConfig,
     pub steps: usize,
     pub seed: u64,
+    /// Names for the ACTION index space of [`RlcdSpec::eval_costs`], in
+    /// `CostMatrix` row order - e.g. `["block", "release"]`.
+    ///
+    /// **A different index space from [`RlcdSpec::options`]**, which names
+    /// OUTCOMES. A cost matrix need not even be square, and where it is, the
+    /// two orders are unrelated: `CostMatrix::binary` puts the conservative
+    /// action ("block") at index 0 while a natural outcome order puts the
+    /// benign outcome ("healthy") there, so borrowing the outcome name for
+    /// an action does not merely read oddly - it prints the OPPOSITE of what
+    /// the model decided. Empty means actions are reported by index.
+    pub actions: Vec<String>,
     /// Named cost matrices [`Flow::evaluate`] reports decision regret
     /// against. Kept OUT of training on purpose: regret measured against a
     /// cost matrix the model never trained under is what shows the model
@@ -134,6 +145,7 @@ impl Default for RlcdSpec {
             loss: LossConfig::cross_entropy(),
             steps: 1000,
             seed: 0,
+            actions: Vec::new(),
             eval_costs: Vec::new(),
             freeze_encoder: false,
         }
@@ -169,6 +181,10 @@ impl RlcdSpec {
         self.seed = seed;
         self
     }
+    pub fn actions(mut self, actions: Vec<String>) -> RlcdSpec {
+        self.actions = actions;
+        self
+    }
     pub fn eval_costs(mut self, eval_costs: Vec<(String, CostMatrix)>) -> RlcdSpec {
         self.eval_costs = eval_costs;
         self
@@ -183,6 +199,9 @@ pub struct RlcdPipeline {
     model: Decide,
     question: Option<Question>,
     eval: Vec<RlcdExample>,
+    /// Names for the cost matrices' ACTION index space - see
+    /// [`RlcdSpec::actions`] for why this cannot be `question`'s options.
+    actions: Vec<String>,
     eval_costs: Vec<(String, CostMatrix)>,
     /// The meta-decision question `train_voi_policy` trains and
     /// `voi_policy_action` queries - `{block, release, inspect}` by
@@ -388,6 +407,22 @@ impl Stages for RlcdPipeline {
                 )));
             }
         }
+        for (name, costs) in &spec.eval_costs {
+            if costs.n_outcomes() != spec.options.len() {
+                return Err(Error::MissingArgument(format!(
+                    "cost matrix {name:?} scores {} outcomes, but {} options were declared",
+                    costs.n_outcomes(),
+                    spec.options.len()
+                )));
+            }
+            if !spec.actions.is_empty() && costs.n_actions() != spec.actions.len() {
+                return Err(Error::MissingArgument(format!(
+                    "cost matrix {name:?} has {} actions, but {} action names were declared",
+                    costs.n_actions(),
+                    spec.actions.len()
+                )));
+            }
+        }
         self.model.set_encoder_frozen(spec.freeze_encoder);
         let q = self.question(spec);
         let mut rng = data::rng::Rng::new(spec.seed);
@@ -404,6 +439,7 @@ impl Stages for RlcdPipeline {
         }
         self.question = Some(q);
         self.eval = spec.eval.clone();
+        self.actions = spec.actions.clone();
         self.eval_costs = spec.eval_costs.clone();
         Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0 })
     }
@@ -472,7 +508,7 @@ impl Stages for RlcdPipeline {
         }
         if let Some((name, costs)) = self.eval_costs.first() {
             let action = bayes_action(&p, costs);
-            lines.push(format!("  Bayes action under \"{name}\": {} (risk {:.4})", options[action.action].name, action.risk));
+            lines.push(format!("  Bayes action under \"{name}\": {} (risk {:.4})", action_name(&self.actions, action.action), action.risk));
         }
         Ok(lines.join("\n"))
     }
@@ -480,6 +516,13 @@ impl Stages for RlcdPipeline {
     fn turn_prompt(&self) -> &str {
         "state> "
     }
+}
+
+/// What to call action `i`. Falls back to the index rather than to an
+/// outcome name: an unnamed action is unhelpful, a MISNAMED one is worse
+/// than unhelpful - see [`RlcdSpec::actions`].
+fn action_name(actions: &[String], i: usize) -> String {
+    actions.get(i).cloned().unwrap_or_else(|| format!("action {i}"))
 }
 
 fn argmax(v: &[f32]) -> usize {
@@ -519,13 +562,30 @@ impl RlcdPipelineBuilder {
 
     pub fn load(self) -> Result<RlcdPipeline> {
         let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
-        Ok(RlcdPipeline { model, question: None, eval: Vec::new(), eval_costs: Vec::new(), voi_question: None })
+        Ok(RlcdPipeline { model, question: None, eval: Vec::new(), actions: Vec::new(), eval_costs: Vec::new(), voi_question: None })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this exists to prevent: under `CostMatrix::binary` action 0
+    /// is "block" while outcome 0 is "healthy", so naming an action from the
+    /// outcome list reports the opposite of the decision. A model believing
+    /// `P(faulty) = 0.635` under symmetric costs BLOCKS, and the sample
+    /// printed "healthy".
+    #[test]
+    fn an_action_is_named_from_the_action_list_not_the_outcome_list() {
+        let outcomes = ["healthy".to_string(), "faulty".to_string()];
+        let actions = ["block".to_string(), "release".to_string()];
+        let belief = [0.365f32, 0.635];
+        let chosen = bayes_action(&belief, &CostMatrix::binary(1.0, 1.0)).action;
+        assert_eq!(chosen, 0, "more likely faulty than not, under equal costs, is a block");
+        assert_eq!(action_name(&actions, chosen), "block");
+        assert_ne!(action_name(&actions, chosen), outcomes[chosen], "the two index spaces must not be interchangeable");
+        assert_eq!(action_name(&[], 1), "action 1", "an unnamed action reports its index, never an outcome");
+    }
 
     #[test]
     fn argmax_picks_the_largest_and_the_first_on_a_tie() {

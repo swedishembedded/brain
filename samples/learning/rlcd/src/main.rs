@@ -175,6 +175,11 @@ fn main() {
         // save_head refuses to write a head-only checkpoint over a moved
         // encoder anyway (see RlcdSpec::freeze_encoder's own doc).
         .freeze_encoder(true)
+        // The cost matrices' ACTION names, which are not the outcome names
+        // above: `CostMatrix::binary` orders actions (block, release) while
+        // the outcomes are (healthy, faulty), so index 0 means "block" here
+        // and "healthy" there.
+        .actions(world::ACTION_NAMES.iter().map(|s| s.to_string()).collect())
         .eval_costs(vec![
             ("symmetric".into(), CostMatrix::binary(1.0, 1.0)),
             ("safety-critical".into(), CostMatrix::binary(1.0, 10.0)),
