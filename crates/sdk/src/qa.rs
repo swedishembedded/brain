@@ -141,6 +141,11 @@ Ask for the OUTCOME in plain words - never quote the answer itself, and never \
 mention its syntax. Reply with nothing but questions, one per line, each \
 beginning with `Q: `.";
 
+/// Sampling temperature used when a caller asks for several passes and has
+/// not chosen one. High enough to get different wordings, low enough that
+/// they stay about the command they were asked about.
+pub const DEFAULT_PHRASING_TEMPERATURE: f32 = 0.8;
+
 /// Asks a model to phrase questions for answers that are already known right.
 pub struct Phrase {
     model: TextGenerationPipeline,
@@ -148,11 +153,21 @@ pub struct Phrase {
     per_known: usize,
     max_new: u32,
     seed: u64,
+    temperature: f32,
+    passes: usize,
 }
 
 impl Phrase {
     pub fn with(model: TextGenerationPipeline) -> Phrase {
-        Phrase { model, instruction: DEFAULT_PHRASING.to_string(), per_known: 3, max_new: 200, seed: 0 }
+        Phrase {
+            model,
+            instruction: DEFAULT_PHRASING.to_string(),
+            per_known: 3,
+            max_new: 200,
+            seed: 0,
+            temperature: 0.0,
+            passes: 1,
+        }
     }
 
     pub fn instruction(mut self, text: impl Into<String>) -> Self {
@@ -175,6 +190,27 @@ impl Phrase {
         self
     }
 
+    /// How many times to ask about each answer, pooling what comes back.
+    ///
+    /// Greedy decoding returns ONE reply for a prompt, so asking again at
+    /// the same temperature returns the same words: a second pass at
+    /// temperature 0 is wasted compute that yields no new phrasing. More
+    /// than one pass therefore implies sampling, and [`Phrase::temperature`]
+    /// is raised to a default if the caller left it at zero.
+    ///
+    /// Each pass is seeded from the run's seed, so the whole set reproduces.
+    pub fn passes(mut self, n: usize) -> Self {
+        self.passes = n.max(1);
+        self
+    }
+
+    /// Sampling temperature. `0.0` is greedy - reproducible, and identical
+    /// on every pass.
+    pub fn temperature(mut self, t: f32) -> Self {
+        self.temperature = t.max(0.0);
+        self
+    }
+
     /// What the model is asked, for one known answer.
     pub fn prompt_for(&self, k: &Known) -> String {
         format!(
@@ -185,17 +221,22 @@ impl Phrase {
 
     /// One [`Reply`] per known answer, always - see [`Distil::ask`].
     pub fn ask(&self, known: &[Known]) -> Result<Vec<Reply>> {
-        let mut out = Vec::with_capacity(known.len());
+        // More than one pass only produces new phrasings if the decode is
+        // not greedy; asking twice at temperature 0 returns the same words.
+        let temperature = if self.passes > 1 && self.temperature <= 0.0 { DEFAULT_PHRASING_TEMPERATURE } else { self.temperature };
+        let mut out = Vec::with_capacity(known.len() * self.passes);
         for (i, k) in known.iter().enumerate() {
             let prompt = self.prompt_for(k);
-            let opts = TextGenerationOptions::new()
-                .max_new_tokens(self.max_new)
-                .temperature(0.0)
-                .thinking(false)
-                .seed(self.seed.wrapping_add(i as u64));
-            let raw = self.model.generate_with(&prompt, opts)?.text;
-            let pairs = parse_questions(&raw).len();
-            out.push(Reply { passage: k.id.clone(), prompt, raw, pairs });
+            for pass in 0..self.passes {
+                let opts = TextGenerationOptions::new()
+                    .max_new_tokens(self.max_new)
+                    .temperature(temperature)
+                    .thinking(false)
+                    .seed(self.seed.wrapping_add(i as u64).wrapping_add((pass as u64).wrapping_mul(0x9E37_79B9)));
+                let raw = self.model.generate_with(&prompt, opts)?.text;
+                let pairs = parse_questions(&raw).len();
+                out.push(Reply { passage: k.id.clone(), prompt: prompt.clone(), raw, pairs });
+            }
         }
         Ok(out)
     }
@@ -206,19 +247,32 @@ impl Phrase {
     /// which is the whole point: the answer cannot drift from the question.
     pub fn generate(&self, known: &[Known]) -> Result<Vec<Candidate>> {
         let replies = self.ask(known)?;
-        let mut out = Vec::new();
-        for (k, reply) in known.iter().zip(&replies) {
-            for question in parse_questions(&reply.raw).into_iter().take(self.per_known) {
-                out.push(Candidate {
-                    passage: k.id.clone(),
-                    question,
-                    answer: k.answer.clone(),
-                    raw: reply.raw.clone(),
-                });
-            }
-        }
-        Ok(out)
+        Ok(pair_replies(known, &replies, self.per_known))
     }
+}
+
+/// Attach each reply's questions to the answer that reply was phrased for.
+///
+/// Matched by id, never by position: with more than one pass there are more
+/// replies than answers, and zipping the two would attach the wrong answer to
+/// every question after the first pass - producing pairs that are
+/// individually well-formed, execute cleanly, and answer a different question
+/// than the one they are filed under.
+pub fn pair_replies(known: &[Known], replies: &[Reply], per_known: usize) -> Vec<Candidate> {
+    let by_id: BTreeMap<&str, &Known> = known.iter().map(|k| (k.id.as_str(), k)).collect();
+    let mut out = Vec::new();
+    for reply in replies {
+        let Some(k) = by_id.get(reply.passage.as_str()) else { continue };
+        for question in parse_questions(&reply.raw).into_iter().take(per_known) {
+            out.push(Candidate {
+                passage: k.id.clone(),
+                question,
+                answer: k.answer.clone(),
+                raw: reply.raw.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// The `Q:` lines of a reply, in order.
@@ -990,5 +1044,43 @@ mod tests {
             kept.iter().all(|c| c.question != "which one?"),
             "a question with two answers is dropped whole: one of them is wrong and nothing here knows which"
         );
+    }
+
+    /// With more than one pass there are more replies than answers, and
+    /// zipping them positionally attaches the wrong answer to every question
+    /// after the first pass. Matched by id instead.
+    #[test]
+    fn several_passes_keep_each_question_with_the_answer_it_was_phrased_for() {
+        let known = [
+            Known { id: "a".into(), context: String::new(), answer: "tool graft --on".into(), intent: String::new() },
+            Known { id: "b".into(), context: String::new(), answer: "tool prune --deep".into(), intent: String::new() },
+        ];
+        // Two passes over two answers: four replies, interleaved a,a,b,b.
+        let replies = [
+            Reply { passage: "a".into(), prompt: String::new(), raw: "Q: how do I graft?".into(), pairs: 1 },
+            Reply { passage: "a".into(), prompt: String::new(), raw: "Q: what grafts it?".into(), pairs: 1 },
+            Reply { passage: "b".into(), prompt: String::new(), raw: "Q: how do I prune?".into(), pairs: 1 },
+            Reply { passage: "b".into(), prompt: String::new(), raw: "Q: what prunes it?".into(), pairs: 1 },
+        ];
+        let out = pair_replies(&known, &replies, 3);
+        assert_eq!(out.len(), 4, "every pass contributes its questions");
+        for c in &out {
+            let expected = if c.question.contains("graft") { "tool graft --on" } else { "tool prune --deep" };
+            assert_eq!(c.answer, expected, "{:?} got the wrong answer", c.question);
+        }
+    }
+
+    /// A reply naming an answer that is not in `known` is dropped rather than
+    /// filed under whichever answer happens to sit at its index.
+    #[test]
+    fn a_reply_for_an_unknown_answer_is_dropped() {
+        let known = [Known { id: "a".into(), context: String::new(), answer: "tool graft --on".into(), intent: String::new() }];
+        let replies = [
+            Reply { passage: "a".into(), prompt: String::new(), raw: "Q: how do I graft?".into(), pairs: 1 },
+            Reply { passage: "gone".into(), prompt: String::new(), raw: "Q: how do I prune?".into(), pairs: 1 },
+        ];
+        let out = pair_replies(&known, &replies, 3);
+        assert_eq!(out.len(), 1, "only the reply whose answer is known survives");
+        assert_eq!(out[0].answer, "tool graft --on");
     }
 }

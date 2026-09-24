@@ -76,6 +76,7 @@ usage: sample-learning-reader <verb> [options]
         the tool said about each) and accepted.jsonl (what survived).
 
   phrase   --corpus DIR --out DIR --model REF [--seed N] [--per-answer N]
+           [--passes N] [--temperature T]
         the distil stage done the other way round, and the one that yields
         a training set: the TOOL supplies the answers, which makes them
         correct by construction, and the model only phrases the questions.
@@ -461,14 +462,18 @@ fn answerable(tool: &Tool) -> Vec<Known> {
         for (invocation, what) in tool.examples(cmd) {
             wanted.push((invocation, what));
         }
-        for (invocation, intent) in wanted {
+        for (n, (invocation, intent)) in wanted.into_iter().enumerate() {
             // The tool built it; the tool has to accept it. A goal that does
             // not run is a bug here, not a wrong answer, and it must never
             // reach a training set.
             if tool.run(&invocation).is_err() {
                 continue;
             }
-            out.push(Known { id: cmd.name.clone(), context: page.clone(), answer: invocation, intent });
+            // One id per ANSWER, not per command: a command contributes its
+            // canonical invocation and one per optional flag, and an id they
+            // shared would make several answers indistinguishable to
+            // anything downstream that groups by it.
+            out.push(Known { id: format!("{}#{n}", cmd.name), context: page.clone(), answer: invocation, intent });
         }
     }
     out
@@ -480,6 +485,11 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
     let model = a.take("--model").ok_or("phrase needs --model")?;
     let seed = a.number("--seed", 1)?;
     let per_answer = a.number("--per-answer", 3)? as usize;
+    // Greedy decoding returns one reply per prompt, so distinct phrasings
+    // need sampling and more than one pass. Seeded per pass, so the whole
+    // set still reproduces.
+    let passes = a.number("--passes", 1)? as usize;
+    let temperature = a.take("--temperature").map(|v| v.parse::<f32>().map_err(|e| format!("--temperature: {e}"))).transpose()?;
     a.finish()?;
     let _ = &corpus_dir;
 
@@ -493,7 +503,11 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
     // Stage 2: the questions. This is all the model is trusted with, and it
     // is the half it cannot get wrong in a way that reaches the weights.
     let pipeline = TextGenerationPipeline::from_pretrained(&model).map_err(|e| e.to_string())?;
-    let phrasing = Phrase::with(pipeline).seed(seed).per_known(per_answer).instruction(format!(
+    let mut phrasing = Phrase::with(pipeline).seed(seed).per_known(per_answer).passes(passes);
+    if let Some(t) = temperature {
+        phrasing = phrasing.temperature(t);
+    }
+    let phrasing = phrasing.instruction(format!(
         "Write questions a user of the {} tool would ask, whose answer is exactly the command above. \
          Every question must ASK FOR A COMMAND - begin each one with \"What is the command to\", \
          \"How do I\" or \"What flags are required to\". Never ask what something is, what it does, \
@@ -646,12 +660,22 @@ fn score(a: &mut Args) -> Result<ExitCode, String> {
         builder = builder.adapter(path);
         println!("serving {model} with {path}");
     }
+    // Load and answer are timed separately: one is paid once per process,
+    // the other once per question, and a single total hides which.
+    let loading = std::time::Instant::now();
     let pipeline = builder.load().map_err(|e| e.to_string())?;
+    let load_secs = loading.elapsed().as_secs_f64();
     let mut passed = 0usize;
+    let mut answer_ms: Vec<f64> = Vec::with_capacity(rows.len());
+    let mut completion_tokens = 0u32;
     for row in &rows {
         let (question, expected) = (&row.question, &row.answer);
         let opts = brain::TextGenerationOptions::new().max_new_tokens(max_new).temperature(0.0).thinking(false).seed(seed);
-        let reply = pipeline.generate_with(question, opts).map_err(|e| e.to_string())?.text;
+        let asked = std::time::Instant::now();
+        let generated = pipeline.generate_with(question, opts).map_err(|e| e.to_string())?;
+        answer_ms.push(asked.elapsed().as_secs_f64() * 1000.0);
+        completion_tokens += generated.completion_tokens;
+        let reply = generated.text;
         let got = command_in(&reply, &tool);
 
         // Running is what decides. An answer that parses and does something
@@ -668,6 +692,24 @@ fn score(a: &mut Args) -> Result<ExitCode, String> {
         println!("  {verdict:<28} want {expected:<48} got {got:?}");
     }
     println!("\nscore {passed}/{} on held-out questions, every answer executed", rows.len());
+    if !answer_ms.is_empty() {
+        let mut sorted = answer_ms.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mean = answer_ms.iter().sum::<f64>() / answer_ms.len() as f64;
+        let median = sorted[sorted.len() / 2];
+        let total: f64 = answer_ms.iter().sum::<f64>() / 1000.0;
+        println!(
+            "load {load_secs:.1} s, then {:.0} ms per answer on average ({:.0} ms median, {:.0} ms slowest), \
+             {total:.1} s for all {} questions",
+            mean,
+            median,
+            sorted.last().copied().unwrap_or(0.0),
+            answer_ms.len()
+        );
+        if total > 0.0 {
+            println!("{completion_tokens} completion tokens, {:.1} tokens/s", completion_tokens as f64 / total);
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
