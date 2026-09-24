@@ -205,6 +205,8 @@ pub mod flow;
 pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
 #[cfg(feature = "resolve")]
+#[cfg(feature = "text")]
+pub mod artifact;
 mod resolve_policy;
 #[cfg(feature = "image")]
 mod restore;
@@ -212,6 +214,8 @@ mod restore;
 mod segment;
 #[cfg(feature = "text")]
 mod text;
+#[cfg(feature = "text")]
+pub mod qa;
 #[cfg(feature = "audio")]
 mod tts;
 #[cfg(feature = "image")]
