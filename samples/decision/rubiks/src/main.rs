@@ -143,7 +143,6 @@ fn parse() -> Result<(Settings, bool), String> {
     let eval = args.usize_or("--eval", 0);
     let unassisted = args.take_flag("--unassisted");
     let quiet = args.take_flag("--quiet");
-    let attempts = args.usize_or("--net-attempts", 1);
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
     args.finish();
@@ -558,6 +557,7 @@ fn solve_one(
                     name: m.notation(),
                     detail: m.short(),
                     probability: 0.0,
+                    readout: None,
                     admissible: adm,
                 })
                 .collect(),
@@ -869,7 +869,6 @@ fn net_main(argv: &[String]) -> Result<(), String> {
     let scramble = args.usize_or("--scramble", 40);
     let save = args.take_str("--net-save");
     let load = args.take_str("--net-load");
-    let attempts = args.usize_or("--net-attempts", 1);
     let view = ViewOptions::take(&mut args)?;
     let record = args.take_str("--record");
 
@@ -986,6 +985,7 @@ fn record_learned(
                     name: space.move_at(i).notation(),
                     detail: space.move_at(i).short(),
                     probability: t.probabilities[i],
+                    readout: None,
                     admissible: false,
                 })
                 .collect();
@@ -1176,23 +1176,27 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
                     if ranked.is_empty() {
                         return Vec::new();
                     }
-                    let lo = ranked.first().map(|r| r.1).unwrap_or(0.0);
-                    let hi = ranked.last().map(|r| r.1).unwrap_or(lo + 1.0);
-                    ranked
+                    let shown: Vec<_> = ranked.iter().take(14).collect();
+                    // The bar spans the rows ON SCREEN. Normalising against
+                    // the whole admissible set - often several hundred -
+                    // left every visible row bunched near the top of the
+                    // scale, because the visible rows ARE the top.
+                    let lo = shown.first().map(|r| r.1).unwrap_or(0.0);
+                    let hi = shown.last().map(|r| r.1).unwrap_or(lo + 1.0);
+                    shown
                         .iter()
-                        .take(14)
                         .map(|(idx, score, moves)| view::Row {
                             name: format!("{moves:>2}"),
-                            // 46 characters is what the panel shows before
-                            // it clips, and the predicted total is the part
-                            // that must survive, so the name yields to it.
+                            // 46 characters is what the panel shows before it
+                            // clips, so the name yields to the prediction.
                             detail: format!(
-                                "{:<26} predicts {score:>5.1} moves",
-                                truncate_name(&library[*idx].name, 26)
+                                "{:<30} costs {moves:>2} then",
+                                truncate_name(&library[*idx].name, 30)
                             ),
-                            // Cheapest fills the bar; the spread is over the
-                            // whole admissible set, not the shown fourteen.
                             probability: if hi > lo { 1.0 - (score - lo) / (hi - lo) } else { 1.0 },
+                            // The model's actual answer, in moves. Not a
+                            // probability, so it is not printed as one.
+                            readout: Some(format!("{score:>5.1}")),
                             admissible: false,
                         })
                         .collect()
@@ -1211,6 +1215,9 @@ fn macro_main(argv: &[String]) -> Result<(), String> {
                     cubes,
                     home: macros::home_cubies(c),
                     state: if driven_by_model { context(c) } else { note.clone() },
+                    options_header: driven_by_model.then(|| {
+                        "EVERY ADMISSIBLE MACRO, AND THE TOTAL MOVES THE MODEL PREDICTS".to_string()
+                    }),
                     rows: predictions(c),
                     picked: driven_by_model.then_some(0),
                     played: driven_by_model.then_some(0),

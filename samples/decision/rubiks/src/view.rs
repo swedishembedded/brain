@@ -52,7 +52,14 @@ const STICKER: [[u8; 3]; 6] = [
 pub struct Row {
     pub name: String,
     pub detail: String,
+    /// How full this row's bar is drawn, 0 to 1. For the decision model this
+    /// IS a probability; for anything else it is only a bar length, and the
+    /// number printed beside it comes from [`Row::readout`].
     pub probability: f32,
+    /// What to print at the right of the bar. `None` prints
+    /// [`Row::probability`] as a probability, which is only honest when it
+    /// is one.
+    pub readout: Option<String>,
     pub admissible: bool,
 }
 
@@ -86,6 +93,9 @@ pub struct Panel {
     /// Stickers already on their home face, when there is no planner to give
     /// an exact distance. Progress that needs no search.
     pub home: usize,
+    /// Replaces the OPTIONS heading, for a panel whose rows are not a
+    /// probability distribution over supplied options.
+    pub options_header: Option<String>,
     /// What is driving, when it is not a model scoring options.
     ///
     /// The macro library decides by a monotone measure and consults no
@@ -427,7 +437,7 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
     }
     y += 12;
 
-    canvas.text(x, y, "OPTIONS - SUPPLIED AT RUN TIME", 1, DIM);
+    canvas.text(x, y, panel.options_header.as_deref().unwrap_or("OPTIONS - SUPPLIED AT RUN TIME"), 1, DIM);
     y += lh(1) + 6;
     for (i, row) in panel.rows.iter().enumerate() {
         let picked = panel.picked == Some(i);
@@ -437,7 +447,8 @@ pub fn draw(canvas: &mut Canvas, cube: &Cube, scene: &Scene, panel: &Panel) {
         canvas.text(x, y, &row.name, 1, ink);
         canvas.text(x + 30, y, &truncate(&row.detail, 46), 1, if good { GOOD } else { DIM });
         canvas.bar(x, y + lh(1) + 1, 360, 6, row.probability.clamp(0.0, 1.0), ink, TRACK);
-        canvas.text(x + 372, y + lh(1) - 1, &format!("{:.2}", row.probability), 1, DIM);
+        let readout = row.readout.clone().unwrap_or_else(|| format!("{:.2}", row.probability));
+        canvas.text(x + 372, y + lh(1) - 1, &readout, 1, DIM);
         if played {
             canvas.text(x - 14, y, ">", 1, INK);
         }
@@ -623,7 +634,7 @@ mod tests {
             cubes: 1,
             distance: 5,
             state: "A scrambled Rubik's cube with 30 of its 54 stickers in place.".into(),
-            rows: vec![Row { name: "R2".into(), detail: "one step closer".into(), probability: 0.4, admissible: true }],
+            rows: vec![Row { name: "R2".into(), detail: "one step closer".into(), probability: 0.4, readout: None, admissible: true }],
             picked: Some(0),
             played: Some(0),
             ..Panel::default()

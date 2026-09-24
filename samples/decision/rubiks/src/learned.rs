@@ -212,7 +212,7 @@ pub fn train(a: &TrainArgs) -> Net {
     let started = std::time::Instant::now();
     let mut mark = started;
     let every = 100usize;
-    let mut window = 0.0f32;
+    let mut window;
 
     for step in 0..a.steps {
         let depth = depth_at(step, a.steps, a.depth);

@@ -347,9 +347,18 @@ pub fn gather(
             if cands.is_empty() {
                 break;
             }
-            // A sample of the candidates, not just the one the rule takes.
-            for _ in 0..per_state.min(cands.len()) {
-                let c = cands[rng.below(cands.len())];
+            // Half from the head of the rule's own ranking, half uniform.
+            //
+            // A uniform sample over hundreds of candidates spends almost all
+            // its budget on options no chooser would consider, and the
+            // decision only ever turns on the ordering near the TOP. But a
+            // head-only sample would never show the model what a bad option
+            // looks like, so it could not tell that the head is good.
+            let mut order: Vec<usize> = (0..cands.len()).collect();
+            order.sort_by_key(|&i| (-cands[i].home, cands[i].cost, cands[i].moves));
+            let head = per_state.min(cands.len()) / 2;
+            for k in 0..per_state.min(cands.len()) {
+                let c = if k < head { cands[order[k]] } else { cands[rng.below(cands.len())] };
                 let child = book.apply(&cube, c.index);
                 let Some(cost) = cost_under_rule(book, &child) else { continue };
                 let base = features.len();
