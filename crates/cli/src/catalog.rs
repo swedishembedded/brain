@@ -44,7 +44,6 @@
 
 use std::sync::Arc;
 
-use brain_modelstore::resolve::ArchSpec;
 use capability::{Assembly, Manifest, Provider};
 use catalog::{ModelEntry, ResidentCtor};
 use residency::ResidentModel;
@@ -155,21 +154,25 @@ pub fn models() -> Vec<ModelEntry> {
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::chronos2_manifest,
         provider: |_assembly: &Assembly| Err("chronos-2 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string()),
+        spec: None,
         resident: catalog::resident!(crate::resident_forecast::Chronos2Resident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::fincast_manifest,
         provider: |_assembly: &Assembly| Err("fincast has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string()),
+        spec: None,
         resident: catalog::resident!(crate::resident_forecast::FincastResident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::kronos_manifest,
         provider: |_assembly: &Assembly| Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
+        spec: None,
         resident: catalog::resident!(crate::resident_forecast::KronosResident::from_env),
     });
     entries.push(ModelEntry {
         manifest: crate::resident_forecast::timesfm3_manifest,
         provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set, or the resolver (`brain timesfm3 predict ...`)".to_string()),
+        spec: None,
         resident: catalog::resident!(crate::resident_forecast::Timesfm3Resident::from_env),
     });
     // 3D Gaussian Splatting (render/fit): unlike every entry above, it needs
@@ -180,6 +183,7 @@ pub fn models() -> Vec<ModelEntry> {
     entries.push(ModelEntry {
         manifest: splat::caps::manifest,
         provider: catalog::always!(splat::caps::SplatProvider::new()),
+        spec: None,
         resident: catalog::resident!(crate::resident_splat::SplatResident::from_env),
     });
     // WorldMirror-2 multi-view 3D reconstruction. Same shape as GLM/qwen3.5
@@ -193,19 +197,21 @@ pub fn models() -> Vec<ModelEntry> {
     entries.push(ModelEntry {
         manifest: worldmirror2::caps::manifest,
         provider: catalog::always!(worldmirror2::caps::WorldMirror2Provider::new()),
+        spec: None,
         resident: catalog::resident!(crate::resident_worldmirror2::WorldMirror2Resident::from_env),
     });
     // No-weights utility models, listed by `brain caps` but served (over
     // D-Bus/HTTP) directly from `resident.rs::build_executor`, which pushes
     // them as stateless residents itself rather than through this list -
     // hence `resident: None` here, exactly as before this file existed.
-    entries.push(ModelEntry { manifest: crate::imageops::manifest, provider: catalog::always!(crate::imageops::ImageOps), resident: None });
+    entries.push(ModelEntry { manifest: crate::imageops::manifest, provider: catalog::always!(crate::imageops::ImageOps), spec: None, resident: None });
     entries.push(ModelEntry {
         manifest: || {
             use capability::Provider as _;
             crate::caps_cli::DemoModel.manifest()
         },
         provider: catalog::always!(crate::caps_cli::DemoModel),
+        spec: None,
         resident: None,
     });
     entries
@@ -216,117 +222,34 @@ pub fn manifests() -> Vec<Manifest> {
     models().into_iter().map(|e| (e.manifest)()).collect()
 }
 
-/// A placeholder [`Assembly`] for a caller that has none - every entry not
-/// listed in [`resolver_spec_for`] ignores the argument today (see
-/// `catalog::ModelEntry::provider`'s doc).
+/// A placeholder [`Assembly`] for a caller that has none - an entry with no
+/// `catalog::ModelEntry::spec` ignores the argument (see that field's doc).
 fn empty_assembly() -> Assembly {
     Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
 }
 
-/// `(arch name, ArchSpec)` for every catalog model id whose `ModelEntry::provider`
-/// actually reads the [`Assembly`] it is called with - [`resolved_assembly_for`]
-/// resolves a real one for these through the model-store resolver instead of
-/// [`empty_assembly`]. FLUX.2 is not listed here: it reaches its own
-/// resolver-backed weights through `crate::flux2_cli`'s dedicated command,
-/// never through this generic `brain do` path, so its catalog entry keeps
-/// building from `empty_assembly` here (a pre-existing gap this migration
-/// does not change).
-fn resolver_spec_for(model_id: &str) -> Option<(&'static str, Box<dyn ArchSpec>)> {
-    if model_id == s3dit::caps::MODEL {
-        return Some(("s3dit", Box::new(s3dit::spec::S3ditSpec)));
-    }
-    if model_id == cosyvoice::caps::MODEL {
-        return Some(("cosyvoice", Box::new(cosyvoice::spec::CosyVoiceSpec)));
-    }
-    if model_id == minimaxmusic3::caps::MODEL {
-        return Some(("minimaxmusic3", Box::new(minimaxmusic3::spec::MinimaxMusic3Spec)));
-    }
-    if model_id == qwen35::caps::MODEL {
-        return Some(("qwen35", Box::new(qwen35::spec::Qwen35Spec)));
-    }
-    if model_id == qwen3::caps::MODEL {
-        return Some(("qwen3", Box::new(qwen3::spec::Qwen3Spec)));
-    }
-    if model_id == qwen3vl::caps::MODEL {
-        return Some(("qwen3vl", Box::new(qwen3vl::spec::Qwen3VlSpec)));
-    }
-    if model_id == fastvlm::caps::MODEL {
-        return Some(("fastvlm", Box::new(fastvlm::spec::FastvlmSpec)));
-    }
-    if model_id == moondream3::caps::MODEL {
-        return Some(("moondream3", Box::new(moondream3::spec::Moondream3Spec)));
-    }
-    if model_id == deepseek2ocr::caps::MODEL {
-        return Some(("deepseek2ocr", Box::new(deepseek2ocr::spec::Deepseek2ocrSpec)));
-    }
-    if model_id == sam2::caps::MODEL {
-        return Some(("sam2", Box::new(sam2::spec::Sam2Spec)));
-    }
-    if model_id == codeformer::caps::MODEL {
-        return Some(("codeformer", Box::new(codeformer::spec::CodeFormerSpec)));
-    }
-    if model_id == rrdbnet::caps::MODEL {
-        return Some(("rrdbnet", Box::new(rrdbnet::spec::RrdbnetSpec)));
-    }
-    if model_id == scrfd::caps::MODEL {
-        return Some(("scrfd", Box::new(scrfd::spec::ScrfdSpec)));
-    }
-    if model_id == arcface::caps::MODEL {
-        return Some(("arcface", Box::new(arcface::spec::ArcFaceSpec)));
-    }
-    if model_id == clip::caps::MODEL {
-        return Some(("clip", Box::new(clip::spec::ClipSpec)));
-    }
-    if model_id == florence2::caps::MODEL {
-        return Some(("florence2", Box::new(florence2::spec::Florence2Spec)));
-    }
-    if model_id == flux1::caps::MODEL {
-        return Some(("flux1", Box::new(flux1::spec::Flux1Spec)));
-    }
-    if model_id == pulid::caps::MODEL {
-        return Some(("pulid", Box::new(pulid::spec::PulidSpec)));
-    }
-    if model_id == vqgan::caps::MODEL {
-        return Some(("vqgan", Box::new(vqgan::spec::VqganSpec)));
-    }
-    if model_id == sdxlunet::caps::MODEL {
-        return Some(("sdxlunet", Box::new(sdxlunet::spec::SdxlunetSpec)));
-    }
-    if model_id == controlnet::caps::MODEL {
-        return Some(("controlnet", Box::new(controlnet::spec::ControlnetSpec)));
-    }
-    if model_id == t5encoder::caps::MODEL {
-        return Some(("t5encoder", Box::new(t5encoder::spec::T5encoderSpec)));
-    }
-    if model_id == nemotronasr::caps::MODEL {
-        return Some(("nemotronasr", Box::new(nemotronasr::spec::NemotronAsrSpec)));
-    }
-    if model_id == qwen3asr::caps::MODEL {
-        return Some(("qwen3asr", Box::new(qwen3asr::spec::Qwen3AsrSpec)));
-    }
-    if model_id == flux2::caps::MODEL {
-        return Some(("flux2", Box::new(flux2::spec::Flux2Spec)));
-    }
-    if model_id == wan::caps::MODEL {
-        return Some(("wan", Box::new(wan::spec::WanSpec)));
-    }
-    None
-}
-
-/// [`resolver_spec_for`] plus the actual resolve, collapsed to one `Result`
-/// so both [`provider`] and [`multi_residents`] share the same choke point
-/// instead of each re-deriving "look up the spec, then resolve it" - `Some`
-/// only for a model [`resolver_spec_for`] actually names; `None` means "this
-/// model's weights are not resolver-based at all", so the caller falls back
-/// to [`empty_assembly`].
+/// [`catalog::resolver_spec_for`] plus the actual resolve, collapsed to one
+/// `Result` so both [`provider`] and [`multi_residents`] share the same choke
+/// point instead of each re-deriving "look up the spec, then resolve it" -
+/// `Some` only for a model whose catalog entry carries a spec; `None` means
+/// "this model's weights are not resolver-based at all", so the caller falls
+/// back to [`empty_assembly`].
+///
+/// The spec table itself lives on the catalog ENTRY
+/// (`catalog::ModelEntry::spec`), not here: this crate resolves in its own
+/// vocabulary (the `--models-dir` flag and `--<role>` overrides
+/// `crate::resolver_cli` adds on top of `brain_modelstore::default_root`),
+/// but WHICH architecture a model's weights come from is a property of the
+/// entry, and a second copy of that mapping in this file is exactly what
+/// went stale before.
 fn resolved_assembly_for(model: &str) -> Option<Result<Assembly, String>> {
-    let (arch, spec) = resolver_spec_for(model)?;
-    Some(crate::resolver_cli::try_resolve(arch, spec.as_ref(), &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string()))
+    let (arch, spec) = catalog::resolver_spec_for(model)?;
+    Some(crate::resolver_cli::try_resolve(arch, spec, &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string()))
 }
 
 /// Build a runnable provider for `model`, or say why not.
 ///
-/// A model listed in [`resolver_spec_for`] gets a REAL, resolver-built
+/// A model whose catalog entry carries a spec gets a REAL, resolver-built
 /// `Assembly` (scanning the models directory, same as `brain <arch> …`'s own
 /// dedicated commands) - an `Ambiguous`/`Missing` outcome, or no models
 /// directory at all, becomes this function's own `Err` (never an "unknown
@@ -413,11 +336,11 @@ mod tests {
     /// assembly it resolved itself, so a migrated architecture works from the
     /// command line as soon as its `ModelEntry.provider` reads one. Every
     /// other caller - D-Bus, HTTP, `build_executor` - goes through
-    /// [`provider`] instead, which resolves via [`resolver_spec_for`] and
-    /// falls back to [`empty_assembly`] for anything absent from it.
+    /// [`provider`] instead, which resolves via [`catalog::resolver_spec_for`]
+    /// and falls back to [`empty_assembly`] for anything absent from it.
     ///
-    /// So an entry whose provider reads a role while its model is missing
-    /// from `resolver_spec_for` is broken in exactly one direction: fine on
+    /// So an entry whose provider reads a role while its model carries no
+    /// `catalog::ModelEntry::spec` is broken in exactly one direction: fine on
     /// the CLI, "assembly 'local/…' has no <role> role" when served. This
     /// asserts the two agree, by CONSTRUCTING every listed model against an
     /// empty assembly and requiring that anything which needs a role is
@@ -433,13 +356,13 @@ mod tests {
                 Err(e) => e.contains("has no") && e.contains("role"),
                 Ok(_) => false,
             };
-            if needs_role && resolver_spec_for(&id).is_none() {
+            if needs_role && catalog::resolver_spec_for(&id).is_none() {
                 unregistered.push(id);
             }
         }
         assert!(
             unregistered.is_empty(),
-            "these models build their provider from an Assembly but have no resolver_spec_for entry, so every served surface hands them an empty one: {unregistered:?}"
+            "these models build their provider from an Assembly but their catalog entry carries no spec, so every served surface hands them an empty one: {unregistered:?}"
         );
     }
 
@@ -448,7 +371,7 @@ mod tests {
     /// rather than at a user's first run.
     ///
     /// 1. **Resolver-backed** - the provider reads a role off the `Assembly`,
-    ///    and `resolver_spec_for` supplies a real one. Nothing to configure:
+    ///    and its catalog entry's `spec` supplies a real one. Nothing to configure:
     ///    the checkpoint is found by scanning the model store.
     /// 2. **Weights as an action parameter** - the provider needs none, and
     ///    the action declares a `host_env` param the caller may pass
@@ -502,7 +425,7 @@ mod tests {
                 continue;
             }
             // State 1: the provider needs a resolved role, and gets one.
-            if resolver_spec_for(&id).is_some() {
+            if catalog::resolver_spec_for(&id).is_some() {
                 continue;
             }
             // State 2: some action names a host-side weights param.

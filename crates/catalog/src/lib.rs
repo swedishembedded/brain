@@ -37,7 +37,12 @@
 //!
 //! A model's static [`Manifest`] and its weight-free-to-construct
 //! [`Provider`] never reference anything CLI-local, so every entry below
-//! carries both. A model's **residency adapter** (the `ResidentModel`/
+//! carries both - and, for an architecture whose provider reads an
+//! [`Assembly`], the [`ArchSpec`] its weights resolve through
+//! ([`ModelEntry::spec`]), so [`provider`] can resolve a real one by model
+//! name with no CLI in the loop.
+//!
+//! A model's **residency adapter** (the `ResidentModel`/
 //! `MultiDeviceResidentModel` impl `brain serve` schedules onto a GPU/RAM/disk
 //! budget) is a different story for about twenty of them: those adapters
 //! (`crate::resident_sam2::Sam2Resident` and its siblings) are defined in
@@ -58,6 +63,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use brain_modelstore::resolve::{describe_ambiguity, describe_missing, ArchSpec, Resolution};
 use capability::{Action, ActionResult, ActionSpec, Assembly, Invocation, Manifest, Progress, Provider};
 use residency::ResidentModel;
 
@@ -173,6 +179,12 @@ pub type SingleCtor = fn() -> Option<Arc<dyn ResidentModel>>;
 /// one.
 pub type MultiCtor = fn(&Assembly, &[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
 
+/// An architecture's resolver spec, as an entry NAMES it: `(arch name,
+/// spec)`. A `&'static` reference rather than a `Box`, because every
+/// [`ArchSpec`] in the tree is a unit struct - an entry names the
+/// architecture it belongs to, it does not own one.
+pub type ArchRef = (&'static str, &'static dyn ArchSpec);
+
 /// One served model. `provider` and `manifest` describe the SAME model by
 /// construction - that is the whole point of the type. See the module doc for
 /// why `resident` is `None` here for the models whose adapter is CLI-local.
@@ -182,14 +194,35 @@ pub struct ModelEntry {
     /// Build something runnable from an already-resolved [`Assembly`]. `Err`
     /// carries the model's OWN "set BRAIN_…" message, so a caller never sees
     /// a generic one. FLUX.2's entry was the first to build its `Provider`
-    /// from it (`crates/cli/src/catalog.rs`'s `resolved_assembly_for`/
-    /// `provider_from_assembly` is what actually resolves or threads one
-    /// through for it and for every architecture migrated onto the resolver
-    /// since, `sam2`/`rrdbnet`/`nemotronasr`/`qwen3asr` - single `weights`-role
-    /// architectures, via [`Assembly::role_path`] - included); every entry
-    /// not yet migrated still ignores the argument and reads `BRAIN_*` env
-    /// vars instead, per the module doc.
+    /// from it; ~26 entries read one today, single `weights`-role
+    /// architectures via [`Assembly::role_path`] included, and each of those
+    /// names its architecture in [`ModelEntry::spec`] so [`provider`]
+    /// resolves a real assembly to hand it. An entry with no `spec` ignores
+    /// the argument and reads `BRAIN_*` env vars instead, per the module doc.
+    ///
+    /// This fn may therefore assume its argument is either a resolved
+    /// assembly or an empty one; when it is empty and a needed role is
+    /// absent, the resulting role-shaped `Err` is [`provider`]'s to
+    /// translate, never a by-name caller's to read.
     pub provider: fn(&Assembly) -> Result<Arc<dyn Provider>, String>,
+    /// The model-store architecture this entry's weights resolve through,
+    /// for an entry whose `provider` READS the [`Assembly`] it is handed:
+    /// `(the resolver's arch name, that architecture's spec)`. [`provider`]
+    /// resolves a real one with it, so a caller that knows only the model's
+    /// name reaches the same weights the resolver-backed commands do.
+    ///
+    /// `None` means the entry genuinely ignores its argument (an
+    /// [`always!`]/[`from_env!`] entry, or one whose checkpoint is a
+    /// per-invocation action param) - such an entry is built from
+    /// `empty_assembly` exactly as before.
+    ///
+    /// It lives ON the entry rather than in a lookup table beside it because
+    /// a table beside it is precisely what drifted: for a long while
+    /// [`provider`] handed EVERY entry an empty assembly, including the ~21
+    /// that had since been migrated onto the resolver, so each of them
+    /// answered a by-name caller with a missing-role complaint about an
+    /// internal data structure instead of constructing.
+    pub spec: Option<ArchRef>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
     /// configured"; a `None` field means "no adapter exists yet" OR "the
@@ -210,9 +243,16 @@ macro_rules! always {
 }
 
 /// Shorthand: a provider built from env, with the model's own error message.
-/// Ignores the [`Assembly`] [`ModelEntry::provider`] is called with - still
-/// env-only, same as before this parameter existed.
+/// Ignores the [`Assembly`] [`ModelEntry::provider`] is called with - an
+/// entry using this one is, by definition, not resolver-migrated, so its
+/// [`ModelEntry::spec`] is `None` and [`provider`] never resolves for it.
 #[macro_export]
+macro_rules! from_env {
+    ($ctor:path, $msg:literal) => {
+        |_assembly: &$crate::__reexport::Assembly| $ctor().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn $crate::__reexport::Provider>).ok_or($msg.to_string())
+    };
+}
+
 /// The DIRECTORY holding a role's resolved artifact.
 ///
 /// A spec's role resolves to the file the resolver actually classified (an
@@ -231,12 +271,6 @@ pub fn role_dir(assembly: &Assembly, role: &str) -> Result<String, String> {
     p.parent()
         .map(|d| d.to_string_lossy().into_owned())
         .ok_or_else(|| format!("{role}: {path} has no parent directory"))
-}
-
-macro_rules! from_env {
-    ($ctor:path, $msg:literal) => {
-        |_assembly: &$crate::__reexport::Assembly| $ctor().map(|p| std::sync::Arc::new(p) as std::sync::Arc<dyn $crate::__reexport::Provider>).ok_or($msg.to_string())
-    };
 }
 
 /// Shorthand: a single-device residency adapter built from env.
@@ -287,19 +321,20 @@ pub fn models() -> Vec<ModelEntry> {
                 let paths = s3dit::pipeline::Paths::from_assembly(assembly)?;
                 Ok(Arc::new(s3dit::caps::ZImageProvider::from_paths(paths)) as Arc<dyn Provider>)
             },
+            spec: Some(("s3dit", &s3dit::spec::S3ditSpec)),
             resident: None, // ZImageResident::from_env is Result-shaped; registered directly in crates/cli/src/resident.rs
         },
-        // FLUX.2 is the first entry whose provider actually reads the
-        // Assembly it is called with - `flux2::pipeline::Paths::from_assembly`
-        // instead of the `BRAIN_FLUX2_*` variables every other entry here
-        // still uses (see the module doc: only this one architecture is
-        // migrated to the resolver in this stage).
+        // FLUX.2 was the FIRST entry whose provider reads the Assembly it is
+        // called with - `flux2::pipeline::Paths::from_assembly` instead of the
+        // `BRAIN_FLUX2_*` variables - and is no longer the only one: ~26
+        // entries here are resolver-migrated now, each naming its own `spec`.
         ModelEntry {
             manifest: flux2::caps::manifest,
             provider: |assembly: &Assembly| {
                 let paths = flux2::pipeline::Paths::from_assembly(assembly)?;
                 Ok(Arc::new(flux2::caps::Flux2Provider::new(paths)) as Arc<dyn Provider>)
             },
+            spec: Some(("flux2", &flux2::spec::Flux2Spec)),
             resident: None,
         },
         // Wan2.1 text-to-video. Like flux2, the provider builds its weight
@@ -313,6 +348,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let paths = wan::pipeline::Paths::from_assembly(assembly)?;
                 Ok(Arc::new(wan::caps::WanProvider::from_paths(paths)) as Arc<dyn Provider>)
             },
+            spec: Some(("wan", &wan::spec::WanSpec)),
             resident: None,
         },
         // LTX-2.5 text-to-video: a smoke-test pipeline (real VAE +
@@ -323,6 +359,7 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: ltxv::caps::manifest,
             provider: always!(ltxv::caps::LtxvProvider::new()),
+            spec: None,
             resident: None,
         },
         // `weights`/`tokenizer` are resolved through `qwen3::spec::Qwen3Spec`
@@ -335,6 +372,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
                 Ok(Arc::new(qwen3::caps::QwenProvider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
             },
+            spec: Some(("qwen3", &qwen3::spec::Qwen3Spec)),
             resident: None,
         },
         // GLM-5.2. Same shape as qwen3 above: `weights` is a per-invocation
@@ -347,6 +385,7 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: glmdsa::caps::manifest,
             provider: always!(glmdsa::caps::GlmProvider::new()),
+            spec: None,
             resident: None,
         },
         // Qwen3.5-35B-A3B: like qwen3, `weights` is a per-invocation action
@@ -358,6 +397,7 @@ pub fn models() -> Vec<ModelEntry> {
         ModelEntry {
             manifest: qwen35moe::caps::manifest,
             provider: always!(qwen35moe::caps::Qwen35Provider::new()),
+            spec: None,
             resident: None,
         },
         // Qwen3.8-27B dense hybrid GDN/GQA decoder: `weights`/`tokenizer` are
@@ -373,11 +413,13 @@ pub fn models() -> Vec<ModelEntry> {
                 let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
                 Ok(Arc::new(qwen35::caps::Qwen35Provider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
             },
+            spec: Some(("qwen35", &qwen35::spec::Qwen35Spec)),
             resident: None,
         },
         ModelEntry {
             manifest: lfm2::caps::manifest,
             provider: always!(lfm2::caps::LfmProvider::new()),
+            spec: None,
             resident: None,
         },
         // FastVLM: `weights` is resolved through `fastvlm::spec::FastvlmSpec`
@@ -391,11 +433,13 @@ pub fn models() -> Vec<ModelEntry> {
                 let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
                 Ok(Arc::new(fastvlm::caps::FastVlmProvider::new(weights)) as Arc<dyn Provider>)
             },
+            spec: Some(("fastvlm", &fastvlm::spec::FastvlmSpec)),
             resident: None,
         },
         ModelEntry {
             manifest: llava::caps::manifest,
             provider: always!(llava::caps::LlavaProvider::new()),
+            spec: None,
             resident: None,
         },
         // `weights` is resolved through `qwen3vl::spec::Qwen3VlSpec` (see that
@@ -407,16 +451,19 @@ pub fn models() -> Vec<ModelEntry> {
                 let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
                 Ok(Arc::new(qwen3vl::caps::QwenVlProvider::new(weights)) as Arc<dyn Provider>)
             },
+            spec: Some(("qwen3vl", &qwen3vl::spec::Qwen3VlSpec)),
             resident: None, // qwen3vl's own residency adapter (crates/cli/src/resident_qwen3vl.rs) is CLI-local and out of this migration's scope
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,
             provider: always!(yolov8::caps::YoloProvider::new()),
+            spec: None,
             resident: None,
         },
         ModelEntry {
             manifest: zipdepth::caps::manifest,
             provider: always!(zipdepth::caps::DepthProvider::new()),
+            spec: None,
             resident: None,
         },
         // The imaging models carry their weights path in the provider (from a
@@ -434,6 +481,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let weights = assembly.role_path("weights")?;
                 Ok(Arc::new(sam2::caps::Sam2Provider::new(weights)) as Arc<dyn Provider>)
             },
+            spec: Some(("sam2", &sam2::spec::Sam2Spec)),
             resident: None,
         },
         ModelEntry {
@@ -442,6 +490,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = role_dir(assembly, "weights")?;
                 Ok(Arc::new(scrfd::caps::ScrfdProvider::new(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("scrfd", &scrfd::spec::ScrfdSpec)),
             resident: None,
         },
         ModelEntry {
@@ -450,6 +499,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = role_dir(assembly, "weights")?;
                 Ok(Arc::new(florence2::caps::Florence2Provider::new(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("florence2", &florence2::spec::Florence2Spec)),
             resident: None,
         },
         ModelEntry {
@@ -458,6 +508,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = role_dir(assembly, "weights")?;
                 Ok(Arc::new(arcface::caps::ArcFaceProvider::new(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("arcface", &arcface::spec::ArcFaceSpec)),
             resident: None,
         },
         ModelEntry {
@@ -466,6 +517,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let weights = assembly.role_path("weights")?;
                 Ok(Arc::new(vqgan::caps::VqganProvider::new(weights)) as Arc<dyn Provider>)
             },
+            spec: Some(("vqgan", &vqgan::spec::VqganSpec)),
             resident: None,
         },
         ModelEntry {
@@ -486,6 +538,7 @@ pub fn models() -> Vec<ModelEntry> {
                 // eagerly to classify the checkpoint's derived variant.
                 Ok(Arc::new(codeformer::caps::RestoreProvider::new(weights)) as Arc<dyn Provider>)
             },
+            spec: Some(("codeformer", &codeformer::spec::CodeFormerSpec)),
             resident: None,
         },
         ModelEntry {
@@ -505,6 +558,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let gpu = gpu_core::Gpu::new(&rrdbnet::KERNELS);
                 rrdbnet::caps::load(&weights, gpu).map(|s| Arc::new(rrdbnet::caps::UpscaleProvider::new(s)) as Arc<dyn Provider>)
             },
+            spec: Some(("rrdbnet", &rrdbnet::spec::RrdbnetSpec)),
             resident: None,
         },
         ModelEntry {
@@ -513,6 +567,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = role_dir(assembly, "towers")?;
                 Ok(Arc::new(clip::caps::ClipProvider::new(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("clip", &clip::spec::ClipSpec)),
             resident: None,
         },
         ModelEntry {
@@ -521,6 +576,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let root = assembly.role_path("root")?;
                 Ok(Arc::new(t5encoder::caps::T5encoderProvider::new(root)) as Arc<dyn Provider>)
             },
+            spec: Some(("t5encoder", &t5encoder::spec::T5encoderSpec)),
             resident: None,
         },
         ModelEntry {
@@ -529,6 +585,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let root = assembly.role_path("root")?;
                 Ok(Arc::new(sdxlunet::caps::SdxlProvider::new(root)) as Arc<dyn Provider>)
             },
+            spec: Some(("sdxlunet", &sdxlunet::spec::SdxlunetSpec)),
             resident: None,
         },
         ModelEntry {
@@ -538,6 +595,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let control = assembly.role_path("control")?;
                 Ok(Arc::new(controlnet::caps::ControlnetProvider::new(sdxl, control)) as Arc<dyn Provider>)
             },
+            spec: Some(("controlnet", &controlnet::spec::ControlnetSpec)),
             resident: None,
         },
         // SUPIR photo-realistic restoration: a frozen SDXL backbone
@@ -557,6 +615,7 @@ pub fn models() -> Vec<ModelEntry> {
                 }
                 Ok(Arc::new(supir::caps::RestoreProvider::with_registry(paths.backbone_root, paths.supir_ckpt, Arc::new(supir_registry()))) as Arc<dyn Provider>)
             },
+            spec: None,
             resident: None,
         },
         ModelEntry {
@@ -565,6 +624,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = role_dir(assembly, "root")?;
                 Ok(Arc::new(flux1::caps::Flux1Provider::new(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("flux1", &flux1::spec::Flux1Spec)),
             resident: None,
         },
         ModelEntry {
@@ -581,6 +641,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let bisenet = role_dir(assembly, "bisenet")?;
                 Ok(Arc::new(pulid::caps::PulidProvider::new(flux1, pulid_w, arcface, clip, bisenet)) as Arc<dyn Provider>)
             },
+            spec: Some(("pulid", &pulid::spec::PulidSpec)),
             resident: None,
         },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
@@ -597,6 +658,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = deepseek2ocr::spec::dir_from_assembly(assembly)?;
                 deepseek2ocr::caps::DeepseekOcrProvider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr: resolved dir does not hold both shipped GGUFs".to_string())
             },
+            spec: Some(("deepseek2ocr", &deepseek2ocr::spec::Deepseek2ocrSpec)),
             resident: None,
         },
         // DeepSeek-OCR-2: v1's successor. Same decoder (`crates/deepseek2`,
@@ -611,6 +673,7 @@ pub fn models() -> Vec<ModelEntry> {
                 deepseekocr2::caps::DeepseekOcr2Provider::from_env,
                 "set BRAIN_DEEPSEEKOCR2_DIR to a directory holding mmproj-deepseek-ocr-2-q8_0.gguf + deepseek-ocr-2-q8_0.gguf"
             ),
+            spec: None,
             resident: None,
         },
         // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
@@ -625,16 +688,19 @@ pub fn models() -> Vec<ModelEntry> {
                 let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned());
                 Ok(Arc::new(moondream3::caps::Moondream3Provider::new().with_default_dir(dir)) as Arc<dyn Provider>)
             },
+            spec: Some(("moondream3", &moondream3::spec::Moondream3Spec)),
             resident: None,
         },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
             provider: |_assembly: &Assembly| Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),
+            spec: None,
             resident: None,
         },
         ModelEntry {
             manifest: qwen3tts::caps::manifest,
             provider: always!(qwen3tts::caps::TtsProvider::new()),
+            spec: None,
             resident: None,
         },
         // MiniMax Music 3. Like flux2, its six roles live in the provider
@@ -648,6 +714,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let paths = minimaxmusic3::generate::Paths::from_assembly(assembly)?;
                 Ok(Arc::new(minimaxmusic3::caps::MinimaxMusic3Provider::new(paths)) as Arc<dyn Provider>)
             },
+            spec: Some(("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec)),
             resident: None,
         },
         // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/
@@ -664,6 +731,7 @@ pub fn models() -> Vec<ModelEntry> {
                 let paths = cosyvoice::pipeline::CosyVoicePaths::from_assembly(assembly)?;
                 Ok(Arc::new(cosyvoice::caps::CosyVoiceProvider::new(paths)) as Arc<dyn Provider>)
             },
+            spec: Some(("cosyvoice", &cosyvoice::spec::CosyVoiceSpec)),
             resident: None,
         },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the
@@ -682,6 +750,7 @@ pub fn models() -> Vec<ModelEntry> {
                     }),
                 )) as Arc<dyn Provider>)
             },
+            spec: Some(("nemotronasr", &nemotronasr::spec::NemotronAsrSpec)),
             resident: None,
         },
         ModelEntry {
@@ -697,6 +766,7 @@ pub fn models() -> Vec<ModelEntry> {
                     }),
                 )) as Arc<dyn Provider>)
             },
+            spec: Some(("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)),
             resident: None,
         },
     ]
@@ -713,22 +783,17 @@ fn stage_registry() -> capability::Registry {
     let mut inner = capability::Registry::new();
     for e in models() {
         let id = (e.manifest)().model;
-        // Only the models a stage can actually name today. `sam2`/`rrdbnet`/
-        // `codeformer` are resolver-migrated - their own provider reads a
-        // real Assembly's `weights` role (see this file's `models()`), so a
-        // real one - when an explicit models directory is opted into, see
-        // `resolved_stage_assembly`'s own doc - stands in for the env var
-        // each used to read.
-        let assembly = if id == imgpipe::SEGMENT_MODEL {
-            resolved_stage_assembly("sam2", &sam2::spec::Sam2Spec)
-        } else if id == imgpipe::UPSCALE_MODEL {
-            resolved_stage_assembly("rrdbnet", &rrdbnet::spec::RrdbnetSpec)
-        } else if id == imgpipe::RESTORE_MODEL {
-            resolved_stage_assembly("codeformer", &codeformer::spec::CodeFormerSpec)
-        } else {
+        // Only the models a stage can actually name today, and only through
+        // their OWN `ModelEntry::spec` - all three are resolver-migrated, so
+        // a real Assembly (when an explicit models directory is opted into,
+        // see `resolved_assembly`'s own doc) stands in for the env var each
+        // used to read. A stage whose model resolves to nothing is skipped,
+        // exactly as an absent `BRAIN_*` var used to make `from_env!` skip it.
+        if ![imgpipe::SEGMENT_MODEL, imgpipe::UPSCALE_MODEL, imgpipe::RESTORE_MODEL].contains(&id.as_str()) {
             continue;
-        };
-        if let Some(a) = assembly {
+        }
+        let Some((arch, spec)) = e.spec else { continue };
+        if let Ok(a) = resolved_assembly(arch, spec) {
             if let Ok(p) = (e.provider)(&a) {
                 inner.register(p);
             }
@@ -737,11 +802,12 @@ fn stage_registry() -> capability::Registry {
     inner
 }
 
-/// A resolver-migrated stage model's real [`Assembly`], scanned from an
-/// EXPLICITLY opted-into models directory - `None` when none is published/set,
-/// the directory is unreadable, or `arch` simply does not resolve there (an
-/// unconfigured stage is skipped, same as an absent `BRAIN_*` var used to make
-/// `from_env!` skip it).
+/// A resolver-migrated model's real [`Assembly`], scanned from an EXPLICITLY
+/// opted-into models directory - `Err` carries WHY not, in words a caller can
+/// act on (no store configured, nothing published for this architecture, or
+/// more than one candidate with nothing to pick between them), because by
+/// name is how most consumers of this crate reach a model and "it did not
+/// resolve" is not an answer any of them can do anything with.
 ///
 /// Deliberately [`brain_modelstore::explicit_models_root`], NOT
 /// [`brain_modelstore::default_root`]: this runs as a side effect of
@@ -756,20 +822,53 @@ fn stage_registry() -> capability::Registry {
 /// minimal: no override flags, no `--models-dir` support, and silent rather
 /// than printing/exiting on `Ambiguous`/`Missing`, since nothing upstream of
 /// a pipeline stage can act on either outcome anyway.
-fn resolved_stage_assembly(arch: &str, spec: &dyn brain_modelstore::resolve::ArchSpec) -> Option<Assembly> {
-    let root = brain_modelstore::explicit_models_root()?;
+///
+/// Scans on every call, deliberately: the store is a directory a user adds
+/// files to while a long-lived process is running, so a memoized inventory
+/// would answer "no weights" for a checkpoint that is now there. The repeat
+/// cost is what `brain_modelstore::inventory`'s own on-disk cache absorbs.
+fn resolved_assembly(arch: &str, spec: &dyn ArchSpec) -> Result<Assembly, String> {
+    let Some(root) = brain_modelstore::explicit_models_root() else {
+        return Err("no model store is configured (publish a data root, or set BRAIN_MODELS_DIR or XDG_DATA_HOME)".to_string());
+    };
     let records = brain_modelstore::inventory::scan(&root);
-    let specs: [&dyn brain_modelstore::resolve::ArchSpec; 1] = [spec];
+    let specs: [&dyn ArchSpec; 1] = [spec];
     match brain_modelstore::resolve::resolve(arch, &records, &specs, &std::collections::BTreeMap::new()) {
-        brain_modelstore::resolve::Resolution::Resolved(a) => Some(*a),
-        _ => None,
+        Resolution::Resolved(a) => Ok(*a),
+        // The resolver's own rendering of both non-terminal outcomes, not a
+        // reworded one: `Missing` carries each unsatisfied role's OWN doc
+        // string (what that architecture wants published) and `Ambiguous`
+        // every real candidate. Neither is collapsed into a pick here - only
+        // a human can answer an ambiguity (see `brain_modelstore::resolve`).
+        Resolution::Ambiguous(a) => Err(format!("{} (searched {})", one_line(&describe_ambiguity(&a)), root.display())),
+        Resolution::Missing(m) => Err(format!("{} (searched {})", one_line(&describe_missing(&m)), root.display())),
     }
 }
 
-/// A placeholder [`Assembly`] for a caller that has none - every entry but
-/// FLUX.2's own ignores the argument entirely (see [`ModelEntry::provider`]'s
-/// doc), so this stands in wherever no real, resolver-built one is in hand
-/// yet.
+/// The resolver's own multi-line rendering, on one line: these reasons are
+/// carried inside a single-sentence `Err` string, which is what a caller
+/// logs or shows.
+fn one_line(s: &str) -> String {
+    s.trim().replace('\n', "; ")
+}
+
+/// The message a by-name caller gets when a resolver-migrated model's weights
+/// are not on this machine.
+///
+/// The rule it keeps: if the weights are absent, say THAT - never that some
+/// [`Assembly`] "has no `<role>` role", which describes this crate's own
+/// plumbing to somebody who never passed an assembly in, and reads as "the
+/// catalog is broken" rather than "the weights are missing". Named per model,
+/// because the caller asked for a model.
+fn weights_unavailable(model: &str, arch: &str, why: &str) -> String {
+    format!("{model}: no weights available on this machine - {why}. Publish {arch}'s weights to the model store, or set BRAIN_MODELS_DIR to a store that holds them")
+}
+
+/// A placeholder [`Assembly`] for an entry that reads none: an
+/// [`always!`]/[`from_env!`] entry, or one whose checkpoint is a
+/// per-invocation action param. Every entry that DOES read one carries a
+/// [`ModelEntry::spec`], and [`provider`] resolves a real assembly for it
+/// instead of passing this.
 fn empty_assembly() -> Assembly {
     Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() }
 }
@@ -815,18 +914,48 @@ pub fn serving_manifests() -> Vec<Manifest> {
 
 /// Build a runnable provider for `model`, or say why not.
 ///
-/// Calls the entry's provider with an [`empty_assembly`]: every entry but
-/// FLUX.2's own ignores the argument (see [`ModelEntry::provider`]'s doc), so
-/// this stays the plain by-name lookup every existing caller already has. A
-/// caller holding a real, resolver-built [`Assembly`] for an architecture
-/// that reads it uses the entry's `provider` fn directly instead.
+/// This is how every consumer of this crate other than `brain-cli` reaches a
+/// model, so it does the resolving itself: an entry carrying a
+/// [`ModelEntry::spec`] is built from a REAL [`Assembly`] scanned out of an
+/// explicitly opted-into model store ([`resolved_assembly`]), which is what
+/// makes a model whose weights ARE published constructible by name. A caller
+/// that already holds a resolver-built assembly (`brain-cli`, which resolves
+/// with its own `--models-dir`/override vocabulary) calls the entry's own
+/// [`ModelEntry::provider`] with it instead, so it never resolves twice.
+///
+/// When nothing resolves, an entry that needs no role at construction still
+/// builds - and one that does fails with [`weights_unavailable`]'s message,
+/// never with a complaint about an empty [`Assembly`]'s roles.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
-            return (e.provider)(&empty_assembly());
+            let Some((arch, spec)) = e.spec else { return (e.provider)(&empty_assembly()) };
+            return match resolved_assembly(arch, spec) {
+                Ok(a) => (e.provider)(&a),
+                // Nothing resolved. The entry still gets its chance with an
+                // empty assembly, because "resolver-migrated" does not mean
+                // "needs weights to CONSTRUCT" - the decoder LMs take their
+                // checkpoint as a per-request action param and build fine
+                // without one. Only an entry that genuinely needed a role
+                // fails here, and for exactly one reason: the weights are
+                // not on this machine. That reason replaces its role-shaped
+                // complaint about a structure the caller never passed in.
+                Err(why) => (e.provider)(&empty_assembly()).map_err(|_| weights_unavailable(model, arch, &why)),
+            };
         }
     }
     Err(format!("unknown model '{model}' (see `brain caps`)"))
+}
+
+/// The resolver architecture and spec a catalog model's weights come from, or
+/// `None` for a model whose entry reads no [`Assembly`] at all.
+///
+/// The ONE place this mapping lives (it is [`ModelEntry::spec`], read by id),
+/// so a caller that resolves in its own vocabulary - `brain-cli`, with its
+/// `--models-dir` flag and `--<role>` overrides - shares the catalog's table
+/// instead of keeping a second one that can drift from it.
+pub fn resolver_spec_for(model: &str) -> Option<ArchRef> {
+    models().into_iter().find(|e| (e.manifest)().model == model).and_then(|e| e.spec)
 }
 
 #[cfg(test)]
@@ -845,18 +974,112 @@ mod tests {
         assert!(ids.len() > 10, "the catalog looks truncated ({} entries)", ids.len());
     }
 
+    /// Serializes the tests that publish a data root: the published root is
+    /// process-global (`brain_modelstore::publish_data_root`), so two tests
+    /// setting it concurrently would each see the other's store.
+    fn store_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A data root of this test's own, with its models directory created and
+    /// empty - never a developer's real store.
+    fn tmp_data_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("brain-catalog-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(brain_modelstore::models_dir_in(&root)).expect("create the test store's models directory");
+        root
+    }
+
+    /// A SAM 2.1 `tiny` checkpoint, as far as `sam2::spec` can tell: that spec
+    /// recognizes the released size from the trunk patch-embedding conv's own
+    /// output-channel count (96 = tiny), read from the header, so a file
+    /// carrying that ONE tensor resolves exactly as a real release does - at
+    /// 56 kB instead of 150 MB, with no weights on this machine.
+    fn publish_sam2_tiny(root: &std::path::Path) {
+        let models = brain_modelstore::models_dir_in(root);
+        let path = models.join("sam2_hiera_tiny.safetensors");
+        let tensors = vec![("image_encoder.trunk.patch_embed.proj.weight".to_string(), vec![96u64, 3, 7, 7], vec![0f32; 96 * 3 * 7 * 7])];
+        checkpoint::save(&path.to_string_lossy(), serde_json::json!({}), &tensors);
+    }
+
+    /// The vocabulary of this crate's own plumbing. An [`Assembly`] is how the
+    /// catalog threads resolved weight paths INTO an entry; a caller that
+    /// asked for a model by name never passed one and can do nothing with a
+    /// complaint about its roles. Such a message reaching them means the
+    /// construction failed for a STRUCTURAL reason - the catalog never
+    /// resolved an assembly at all - and is describing an internal data
+    /// structure instead of saying the weights are absent. Banned on the
+    /// message, because the message is what a caller sees, exactly as
+    /// "unknown model" already is.
+    fn is_structural(e: &str) -> bool {
+        e.contains("unknown model") || e.contains("assembly")
+    }
+
     /// THE DRIFT THIS FILE EXISTS TO KILL: every model listed here must be
     /// constructible by name. It may legitimately fail for want of weights - 
     /// what it must never do is answer "unknown model" for something it just
-    /// advertised.
+    /// advertised, or blame its own [`Assembly`]'s missing roles: both are
+    /// structural failures of the catalog rather than an honest "this machine
+    /// has no weights for that model", and both read to a caller as "the
+    /// model is broken". The second is what this test used to miss entirely:
+    /// as entries migrated onto the resolver their providers started READING
+    /// the assembly, and by-name construction - which handed them an empty
+    /// one - began failing for ~21 of them with `assembly '' has no <role>
+    /// role`, which this assertion happily accepted.
     #[test]
     fn every_listed_model_is_constructible_by_name() {
+        // An EMPTY store of this test's own, published as the data root: the
+        // hardest case (nothing resolves anywhere), and it keeps the run off a
+        // developer's real model store even when BRAIN_MODELS_DIR or
+        // XDG_DATA_HOME point at one.
+        let _g = store_lock();
+        let empty = tmp_data_root("no-weights");
+        brain_modelstore::publish_data_root(Some(empty.clone()));
+        let mut structural = Vec::new();
         for m in manifests() {
-            match provider(&m.model) {
-                Ok(_) => {}
-                Err(e) => assert!(!e.contains("unknown model"), "'{}' is listed but cannot be built: {e}", m.model),
+            if let Err(e) = provider(&m.model) {
+                if is_structural(&e) {
+                    structural.push(format!("{}: {e}", m.model));
+                }
             }
         }
+        brain_modelstore::publish_data_root(None);
+        let _ = std::fs::remove_dir_all(&empty);
+        assert!(structural.is_empty(), "{} listed model(s) cannot be built for a structural reason:\n{}", structural.len(), structural.join("\n"));
+    }
+
+    /// The other half of the same contract, and the one no amount of "it did
+    /// not say unknown model" can stand in for: a model whose weights ARE
+    /// published must actually CONSTRUCT through [`provider`], and one whose
+    /// weights are absent must be told so in those words.
+    ///
+    /// `sam2` stands for the ~21 resolver-migrated entries here because its
+    /// provider only holds the resolved path (no device, no checkpoint read),
+    /// so this stays a catalog test rather than a model one.
+    #[test]
+    fn a_published_model_constructs_by_name_and_an_absent_one_says_the_weights_are_missing() {
+        let _g = store_lock();
+
+        let published = tmp_data_root("published");
+        publish_sam2_tiny(&published);
+        brain_modelstore::publish_data_root(Some(published.clone()));
+        let built = provider(sam2::caps::MODEL);
+        let published_err = built.err();
+
+        let absent = tmp_data_root("absent");
+        brain_modelstore::publish_data_root(Some(absent.clone()));
+        let absent_err = provider(sam2::caps::MODEL).err();
+
+        brain_modelstore::publish_data_root(None);
+        let _ = std::fs::remove_dir_all(&published);
+        let _ = std::fs::remove_dir_all(&absent);
+
+        assert!(published_err.is_none(), "published sam2 weights must construct by name, got: {}", published_err.unwrap_or_default());
+        let e = absent_err.expect("sam2 with nothing published must NOT construct");
+        assert!(!is_structural(&e), "absent weights must not be reported structurally: {e}");
+        assert!(e.contains(sam2::caps::MODEL), "the message must name the model the caller asked for: {e}");
+        assert!(e.contains("weights"), "the message must say it is the WEIGHTS that are missing: {e}");
     }
 
     /// `crates/imgpipe` names its stage models by STRING, because it links no

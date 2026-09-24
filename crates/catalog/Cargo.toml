@@ -51,3 +51,10 @@ brain-minimaxmusic3.workspace = true
 brain-cosyvoice.workspace = true
 brain-nemotronasr.workspace = true
 brain-qwen3asr.workspace = true
+
+[dev-dependencies]
+# Writing the tiny header-shaped checkpoint the store-backed construction test
+# publishes (`checkpoint::save`), and its config object. Both are already in
+# this crate's dependency graph through the model crates above.
+brain-checkpoint.workspace = true
+serde_json.workspace = true
