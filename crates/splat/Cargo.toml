@@ -15,7 +15,12 @@ brain-kernels.workspace = true
 # `caps.rs` - the serving contract's capability surface.
 brain-capability.workspace = true
 serde_json.workspace = true
+# `backend_cpu::par` - the workspace's one rayon seam, for the row-parallel
+# SSIM window passes in `loss.rs`.
+brain-backend-cpu.workspace = true
 
 [dev-dependencies]
 bytemuck.workspace = true
 brain-imaging.workspace = true
+# `data::rng::Lcg` - the one deterministic test PRNG (tests only).
+brain-data.workspace = true

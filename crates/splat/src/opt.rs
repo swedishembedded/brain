@@ -14,6 +14,8 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu};
 
+use crate::isp::{Encoding, Isp, IspCfg};
+use crate::loss::{photometric, PixelLoss};
 use crate::renderer::{BwdScratch, GpuSplats, Renderer, SplatGrads};
 use crate::types::{Camera, Mode, RenderOpts, Splats};
 use crate::Kernels;
@@ -282,6 +284,18 @@ pub struct FitCfg {
     /// A quaternion is already O(1), so this is the one geometry group a raw
     /// `lr` UNDER-trains rather than over-trains.
     pub rotation_budget: f32,
+    /// The photometric objective. [`PixelLoss::Mse`] (the default) is what
+    /// `fit` has always minimised; [`PixelLoss::gaussian_splatting`] is the
+    /// L1 + D-SSIM objective 3DGS is defined with, which charges a blurred
+    /// edge far more than the same energy spread as an offset. What the fit
+    /// REPORTS is this objective, so a run's numbers are only comparable with
+    /// another run's under the same loss.
+    pub loss: PixelLoss,
+    /// Fit a photometric camera model (exposure, white balance, vignetting,
+    /// response) alongside the scene - see [`crate::isp`]. `None` (the
+    /// default) compares renders with photographs directly, as `fit` always
+    /// did.
+    pub isp: Option<IspCfg>,
 }
 
 impl Default for FitCfg {
@@ -315,6 +329,8 @@ impl Default for FitCfg {
             position_budget: 0.0,
             scale_budget: 0.0,
             rotation_budget: 0.0,
+            loss: PixelLoss::Mse,
+            isp: None,
         }
     }
 }
@@ -346,12 +362,49 @@ pub struct TargetView {
     /// normalizer too, so the reported MSE stays the MSE of the pixels that
     /// were actually supervised.
     pub mask: Option<Vec<f32>>,
+    /// Which physical camera took this view, for the parts of the camera
+    /// model that belong to the lens and sensor rather than the shot
+    /// (vignetting, response curve). 0 unless the capture mixes cameras.
+    pub sensor: usize,
+    /// Exposure of this view in log2 stops relative to the others, when it is
+    /// KNOWN (EXIF shutter/ISO/aperture, a bracket's EV offset). The camera
+    /// model then fits a residual around it instead of discovering it.
+    pub exposure: f32,
+    /// How `rgb` is encoded; consulted by a scene-linear fit only.
+    pub encoding: Encoding,
 }
 
 impl TargetView {
     /// A view supervised by its colours alone - what `fit` has always done.
     pub fn new(cam: Camera, rgb: Vec<f32>) -> TargetView {
-        TargetView { cam, rgb, depth: None, depth_conf: None, mask: None }
+        TargetView {
+            cam,
+            rgb,
+            depth: None,
+            depth_conf: None,
+            mask: None,
+            sensor: 0,
+            exposure: 0.0,
+            encoding: Encoding::Srgb,
+        }
+    }
+
+    /// Declare this view's exposure, in log2 stops relative to the capture.
+    pub fn with_exposure(mut self, ev: f32) -> TargetView {
+        self.exposure = ev;
+        self
+    }
+
+    /// Declare which physical camera took this view.
+    pub fn with_sensor(mut self, sensor: usize) -> TargetView {
+        self.sensor = sensor;
+        self
+    }
+
+    /// Declare how this view's pixels are encoded.
+    pub fn with_encoding(mut self, encoding: Encoding) -> TargetView {
+        self.encoding = encoding;
+        self
     }
 
     /// Add a depth prior `[W*H]` (0 = no data) and, optionally, how much to
@@ -368,19 +421,28 @@ impl TargetView {
         self
     }
 
-    /// Per-pixel loss weight, 1 where no mask was given.
-    fn weight(&self, i: usize) -> f32 {
-        self.mask.as_ref().map_or(1.0, |m| m[i])
-    }
-
-    /// Sum of the per-pixel weights: the loss normalizer, so a masked fit's
-    /// MSE is comparable with an unmasked one's.
-    fn weight_sum(&self, px: usize) -> f64 {
-        match &self.mask {
-            None => px as f64,
-            Some(m) => m.iter().take(px).map(|v| *v as f64).sum(),
+    /// The per-pixel supervision weight a fit uses for this view: the mask,
+    /// times the camera model's clipped-pixel weight when there is one.
+    /// `None` = every pixel counts fully.
+    fn weights(&self, isp: Option<&Isp>) -> Option<Vec<f32>> {
+        let clip = isp.filter(|i| i.cfg().clip > 0.0).map(|i| i.clip_weight(&self.rgb));
+        match (&self.mask, clip) {
+            (None, c) => c,
+            (Some(m), None) => Some(m.clone()),
+            (Some(m), Some(c)) => Some(m.iter().zip(&c).map(|(a, b)| a * b).collect()),
         }
     }
+}
+
+/// Everything a fit produces.
+pub struct FitResult {
+    pub scene: Splats,
+    /// The cameras, refined when `pose_lr > 0`.
+    pub cams: Vec<Camera>,
+    /// The objective at the last iteration.
+    pub loss: f32,
+    /// The fitted camera model, when [`FitCfg::isp`] asked for one.
+    pub isp: Option<Isp>,
 }
 
 /// Fit `init` against the targets; returns the optimized scene and the final
@@ -400,15 +462,45 @@ pub fn fit_bundle(
     cfg: &FitCfg,
     on_step: &mut dyn FnMut(usize, f32) -> bool,
 ) -> (Splats, Vec<Camera>, f32) {
-    fit_inner(gpu, ks, init, targets, cfg, on_step)
+    let r = fit_full(gpu, ks, init, targets, cfg, on_step);
+    (r.scene, r.cams, r.loss)
 }
 
 pub fn fit(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, f32) {
-    let (s, _, l) = fit_inner(gpu, ks, init, targets, cfg, on_step);
-    (s, l)
+    let r = fit_full(gpu, ks, init, targets, cfg, on_step);
+    (r.scene, r.loss)
 }
 
-fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg: &FitCfg, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, Vec<Camera>, f32) {
+/// Fit the scene, and whatever else `cfg` asks to be fitted with it - the
+/// cameras' poses, the photometric camera model - returning all of it.
+pub fn fit_full(
+    gpu: &Gpu,
+    ks: Kernels,
+    init: &Splats,
+    targets: &[TargetView],
+    cfg: &FitCfg,
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> FitResult {
+    let mut isp = cfg.isp.map(|c| {
+        let views: Vec<(usize, f32, Encoding)> = targets.iter().map(|t| (t.sensor, t.exposure, t.encoding)).collect();
+        Isp::new(c, &views)
+    });
+    let (scene, cams, loss) = fit_inner(gpu, ks, init, targets, cfg, &mut isp, on_step);
+    if let (Some(i), true) = (&isp, cfg.log_every > 0) {
+        print!("fit: camera model\n{}", i.summary());
+    }
+    FitResult { scene, cams, loss, isp }
+}
+
+fn fit_inner(
+    gpu: &Gpu,
+    ks: Kernels,
+    init: &Splats,
+    targets: &[TargetView],
+    cfg: &FitCfg,
+    isp: &mut Option<Isp>,
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> (Splats, Vec<Camera>, f32) {
     assert!(!targets.is_empty());
     // Fit in a frame where the scene is about one unit across.
     //
@@ -429,19 +521,18 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
         let scaled_init = rescale_scene(init, k);
         let scaled: Vec<TargetView> = targets
             .iter()
-            .map(|t| TargetView {
-                cam: rescale_cam(&t.cam, k),
-                rgb: t.rgb.clone(),
+            .map(|t| {
+                let mut v = t.clone();
+                v.cam = rescale_cam(&t.cam, k);
                 // A depth prior is in world units, so it rescales with the
                 // world. Carrying it through unscaled would have the depth
                 // term anchor the scene to a distance the normalization just
                 // moved, which is a silent, total corruption of the fit.
-                depth: t.depth.as_ref().map(|d| d.iter().map(|v| v * k).collect()),
-                depth_conf: t.depth_conf.clone(),
-                mask: t.mask.clone(),
+                v.depth = t.depth.as_ref().map(|d| d.iter().map(|v| v * k).collect());
+                v
             })
             .collect();
-        let (s, c, l) = fit_inner(gpu, ks, &scaled_init, &scaled, cfg, on_step);
+        let (s, c, l) = fit_inner(gpu, ks, &scaled_init, &scaled, cfg, isp, on_step);
         return (
             rescale_scene(&s, 1.0 / k),
             c.iter().map(|c| rescale_cam(c, 1.0 / k)).collect(),
@@ -470,7 +561,7 @@ fn fit_inner(gpu: &Gpu, ks: Kernels, init: &Splats, targets: &[TargetView], cfg:
         let iters = stage_len.min(cfg.iters - done);
         let (next, l, grad, aborted) = {
             let mut tap = |it: usize, mse: f32| seen(it, mse, on_step);
-            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, iters, done, &mut tap)
+            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, isp, iters, done, &mut tap)
         };
         scene = next;
         loss = l;
@@ -720,6 +811,7 @@ fn fit_stage(
     targets: &[TargetView],
     cams: &mut [Camera],
     cfg: &FitCfg,
+    isp: &mut Option<Isp>,
     iters: usize,
     it0: usize,
     on_step: &mut dyn FnMut(usize, f32) -> bool,
@@ -879,6 +971,10 @@ fn fit_stage(
         gpu.submit(&[], &[s]);
     };
 
+    // Per-view supervision weights (mask x clipped pixels), fixed for the
+    // stage: both are properties of the photographs, not of the scene.
+    let weights: Vec<Option<Vec<f32>>> = targets.iter().map(|t| t.weights(isp.as_ref())).collect();
+
     let mut last_loss = 0.0f32;
     // Step-size backoff state: see where `rises` is updated below.
     let mut lr_scale = 1.0f32;
@@ -961,27 +1057,30 @@ fn fit_stage(
             let tm = std::time::Instant::now();
             let mut d = vec![0.0f32; px * 4];
             // The mask divides out of the normalizer as well as multiplying
-            // into the loss, so the number reported is the MSE of the pixels
+            // into the loss, so the number reported is the loss of the pixels
             // that were actually supervised - comparable with an unmasked run
             // rather than diluted by however much of the frame was excluded.
-            let wsum = t.weight_sum(px);
+            let wts = weights[vi].as_deref();
+            let wsum = wts.map_or(px as f64, |m| m.iter().map(|&v| v as f64).sum());
             if wsum <= 0.0 {
                 continue; // this view's mask keeps nothing
             }
-            let scale = (2.0 / (wsum * 3.0)) as f32;
-            let mut lsum = 0.0f64;
-            for i in 0..px {
-                let m = t.weight(i);
-                if m == 0.0 {
-                    continue;
-                }
-                for c in 0..3 {
-                    let diff = img[i * 4 + c] - t.rgb[i * 3 + c];
-                    lsum += (m * diff * diff) as f64;
-                    d[i * 4 + c] = scale * m * diff;
+            let rgb = crate::renderer::rgba_to_rgb(&img);
+            let mut g3 = vec![0.0f32; px * 3];
+            let (w_px, h_px) = (cam.width as usize, cam.height as usize);
+            match isp.as_mut() {
+                None => loss_sum += photometric(cfg.loss, &rgb, &t.rgb, wts, w_px, h_px, &mut g3),
+                Some(model) => {
+                    // The render is radiance; the photograph is what this
+                    // view's camera made of it.
+                    let pred = model.forward(vi, &cam, &rgb);
+                    loss_sum += photometric(cfg.loss, &pred, &t.rgb, wts, w_px, h_px, &mut g3);
+                    g3 = model.backward(vi, &cam, &rgb, &g3);
                 }
             }
-            loss_sum += lsum / (wsum * 3.0);
+            for i in 0..px {
+                d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
+            }
             // The depth term, on the SAME normalizer, so `depth_weight` reads
             // as a ratio against RGB rather than as a number whose meaning
             // depends on how much of the frame carries a depth prior.
@@ -992,7 +1091,7 @@ fn fit_stage(
                 let mut vdn = vec![0.0f32; px];
                 let mut dsum = 0.0f64;
                 for i in 0..px {
-                    let w = t.weight(i) * t.depth_conf.as_ref().map_or(1.0, |c| c[i]);
+                    let w = wts.map_or(1.0, |m| m[i]) * t.depth_conf.as_ref().map_or(1.0, |c| c[i]);
                     if w <= 0.0 || tgt[i] <= 0.0 {
                         continue; // masked out, distrusted, or no prior here
                     }
@@ -1067,6 +1166,9 @@ fn fit_stage(
                 gpu.submit(&[], &[e]);
                 gpu.submit(&[&grads.d_colors], &[]);
             }
+        }
+        if let Some(model) = isp.as_mut() {
+            model.step((it0 + it) as f32 / cfg.iters.max(1) as f32);
         }
         // Adam's bias correction counts from the start of THIS stage, because
         // its moments do too: m and v are fresh buffers per stage, and pairing
@@ -1195,7 +1297,7 @@ fn fit_stage(
         prev_loss = last_loss;
         let global = it0 + it;
         if cfg.log_every > 0 && (global.is_multiple_of(cfg.log_every) || global + 1 == cfg.iters) {
-            println!("fit iter {global:4}: mse {last_loss:.6}");
+            println!("fit iter {global:4}: loss {last_loss:.6}");
         }
         if !on_step(global, last_loss) {
             aborted = true;
