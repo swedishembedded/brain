@@ -205,9 +205,9 @@ pub use rlcd::{
 pub mod flow;
 pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
-#[cfg(feature = "resolve")]
 #[cfg(feature = "text")]
 pub mod artifact;
+#[cfg(feature = "resolve")]
 mod resolve_policy;
 #[cfg(feature = "image")]
 mod restore;
