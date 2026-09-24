@@ -5671,6 +5671,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-decision-patterns"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
 name = "sample-decision-rubiks"
 version = "1.1.0"
 dependencies = [

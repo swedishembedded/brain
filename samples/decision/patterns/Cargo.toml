@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/decision/patterns` -> `sample-decision-patterns`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-decision-patterns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: one pretrained decision model (Laya, or a crates/decide encoder), demonstrated across nine production decision patterns - routing, guardrails, tool-call gating, triage, reranking, evals, bulk labeling, real-time control, and a confidence gate - each generating its own data and reporting real measured accuracy."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2.
+#   decision  DecisionPipeline / Question / Opt / Answer: the one surface
+#             every pattern here is built from, on either backend it loads.
+brain = { workspace = true, features = ["decision"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# The same surface samples/decision/json names, so the same budget.
+max-brain-crates = 30
