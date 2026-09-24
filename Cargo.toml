@@ -145,6 +145,7 @@ default-members = [
     "crates/gemma4",
     "crates/zipdepth",
     "crates/splat",
+    "crates/sfm",
     "crates/recon",
     "crates/worldmirror2",
     "crates/capture",
@@ -317,6 +318,7 @@ brain-ltxv = { path = "crates/ltxv" }
 brain-gemma4 = { path = "crates/gemma4" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
+brain-sfm = { path = "crates/sfm" }
 brain-recon = { path = "crates/recon" }
 brain-worldmirror2 = { path = "crates/worldmirror2" }
 brain-capture = { path = "crates/capture" }
