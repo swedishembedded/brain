@@ -359,7 +359,10 @@ pub fn write(dir: &Path, a: &Tool, b: &Tool) -> std::io::Result<BTreeMap<String,
     put("rare/a-seldom.txt", &a.man_page(rare), Expect::Promote, &mut labels)?;
 
     let json: String = serde_json_labels(&labels);
-    std::fs::write(dir.join("labels.json"), json)?;
+    // Dot-prefixed so the reader's own stream does not read the answer
+    // key as a document - see `audit::stream`'s rule 5. A corpus that
+    // contained its own labels would be a corpus with the answers in it.
+    std::fs::write(dir.join(LABELS), json)?;
     Ok(labels)
 }
 
@@ -370,8 +373,11 @@ pub fn write(dir: &Path, a: &Tool, b: &Tool) -> std::io::Result<BTreeMap<String,
 /// very documents a finished run was about, and under the wrong seed it
 /// would replace them with another tool's while still reporting a verdict.
 /// The labels on disk belong to the corpus that was actually read.
+/// The answer key's file name.
+pub const LABELS: &str = ".labels.json";
+
 pub fn labels(dir: &Path) -> std::io::Result<BTreeMap<String, Expect>> {
-    let path = dir.join("labels.json");
+    let path = dir.join(LABELS);
     let raw = std::fs::read_to_string(&path)?;
     let mut out = BTreeMap::new();
     for line in raw.lines() {
@@ -435,7 +441,7 @@ mod tests {
 
         let empty = dir.join("empty");
         std::fs::create_dir_all(&empty).expect("mkdir");
-        std::fs::write(empty.join("labels.json"), "{}\n").expect("write");
+        std::fs::write(empty.join(LABELS), "{}\n").expect("write");
         assert!(labels(&empty).is_err(), "a corpus with no labels must say so rather than check nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -586,7 +592,7 @@ mod tests {
         for rel in labels.keys() {
             assert!(dir.join(rel).exists(), "{rel} is labelled but was not written");
         }
-        assert!(dir.join("labels.json").exists());
+        assert!(dir.join(LABELS).exists());
 
         let noise = std::fs::read_to_string(dir.join("noise/payload.txt")).expect("noise");
         assert!(noise.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/'), "the noise lane must be valid text, or the STREAM refuses it and triage is never exercised");

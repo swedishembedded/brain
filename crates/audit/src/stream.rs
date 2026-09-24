@@ -21,6 +21,13 @@
 //! 3. **Binary is decided by content, never by extension.** Extensions lie in
 //!    both directions, and a reader pointed at a real directory meets both: a
 //!    `.txt` holding a core dump, a `.bin` holding a manual page.
+//! 5. **Dot-prefixed names are not content.** A reader is pointed at a real
+//!    directory, and real directories hold `.git/`, editor swap files, and
+//!    `.env`. Reading those is not merely wasteful: a reader that trained on
+//!    a `.env` would absorb its secrets into weights nobody can grep. It is
+//!    a test on the NAME, so the file is never opened, and every skip is
+//!    reported as [`Skipped::Hidden`] rather than silently dropped.
+//!
 //! 4. **An episode's identity is the digest of its own bytes.** Not of
 //!    `(path, ordinal)`: the questions that identity has to answer later are
 //!    "have I read this content before" (so a re-stated document costs one
@@ -110,12 +117,15 @@ pub enum Skipped {
     Empty(PathBuf),
     /// It could not be read at all. The reason is the OS's own.
     Unreadable(PathBuf, String),
+    /// Its name, or a directory on its path, begins with a dot. See this
+    /// module's rule 5.
+    Hidden(PathBuf),
 }
 
 impl Skipped {
     pub fn path(&self) -> &Path {
         match self {
-            Skipped::NotText(p) | Skipped::Empty(p) | Skipped::Unreadable(p, _) => p,
+            Skipped::NotText(p) | Skipped::Empty(p) | Skipped::Unreadable(p, _) | Skipped::Hidden(p) => p,
         }
     }
 }
@@ -175,12 +185,14 @@ impl EpisodeStream {
             return Err(StreamError::NotADirectory(root.to_path_buf()));
         }
         let mut found = Vec::new();
-        walk(root, root, &mut found)?;
+        let mut hidden = Vec::new();
+        walk(root, root, &mut found, &mut hidden)?;
+        hidden.sort();
         // Sorted BEFORE the seed touches it - see this module's rule 2.
         found.sort();
 
         let mut docs = Vec::new();
-        let mut skipped = Vec::new();
+        let mut skipped: Vec<Skipped> = hidden.into_iter().map(Skipped::Hidden).collect();
         for rel in found {
             match std::fs::read(root.join(&rel)) {
                 Err(e) => skipped.push(Skipped::Unreadable(rel, e.to_string())),
@@ -330,18 +342,32 @@ fn is_text(head: &[u8]) -> bool {
 }
 
 /// Every file under `dir`, as paths relative to `root`.
-fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, hidden: &mut Vec<PathBuf>) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(|e| StreamError::Root(dir.to_path_buf(), e.to_string()))?;
     for entry in entries {
         let entry = entry.map_err(|e| StreamError::Root(dir.to_path_buf(), e.to_string()))?;
         let path = entry.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        if is_hidden(&entry.file_name()) {
+            hidden.push(rel);
+            continue;
+        }
         if path.is_dir() {
-            walk(root, &path, out)?;
+            walk(root, &path, out, hidden)?;
         } else {
-            out.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            out.push(rel);
         }
     }
     Ok(())
+}
+
+/// Whether a directory entry's own name marks it as not-content.
+///
+/// See this module's rule 5. Dot-prefixed is the one convention every
+/// platform this runs on agrees about, and it is a NAME test rather than a
+/// content test because the point is to not open the file at all.
+fn is_hidden(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy().starts_with('.')
 }
 
 /// Digest of everything that decides which episodes exist and in what order.
@@ -572,5 +598,27 @@ mod tests {
         let n = cut(&long, 100);
         assert!(long.is_char_boundary(n), "the cut must land on a character boundary");
         assert_eq!(long[..n].chars().count(), 100, "and must take the whole window when no line break exists");
+    }
+
+    /// Rule 5. A corpus is a real directory, and real directories hold
+    /// things that are not the corpus: version control, editor droppings,
+    /// and secrets. The secret is the one that matters - a reader that
+    /// trained on a `.env` would absorb it into weights nobody can grep - so
+    /// this is a test on the NAME and the file is never opened.
+    #[test]
+    fn dot_prefixed_names_are_not_read_and_the_skip_is_reported() {
+        let c = Corpus::new("hidden");
+        c.file("manual.txt", &lines("manual", 60));
+        c.file(".env", b"AWS_SECRET_ACCESS_KEY=hunter2\n");
+        c.file(".git/config", b"[core]\n\trepositoryformatversion = 0\n");
+        c.file("notes/.swp.txt", &lines("swap", 60));
+
+        let s = EpisodeStream::open(c.path(), StreamConfig::default()).expect("stream");
+        assert_eq!(s.documents(), [PathBuf::from("manual.txt")], "only the corpus is the corpus");
+
+        let hidden: Vec<&Path> = s.skipped().iter().filter(|x| matches!(x, Skipped::Hidden(_))).map(|x| x.path()).collect();
+        assert!(hidden.contains(&Path::new(".env")), "the skip is reported, not silent: {hidden:?}");
+        assert!(hidden.contains(&Path::new(".git")), "a dot DIRECTORY is skipped whole, without being walked into");
+        assert!(hidden.contains(&Path::new("notes/.swp.txt")), "and a dot file anywhere below the root: {hidden:?}");
     }
 }

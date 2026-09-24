@@ -121,6 +121,16 @@ impl Verdict {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TriageConfig {
+    /// The shortest episode the structure measure can still judge.
+    ///
+    /// Not a taste threshold: `structure` compares deflate against the
+    /// text's own symbol entropy, and deflate finds nothing the frequencies
+    /// did not until it has several hundred bytes to work with. Below this a
+    /// real manual page and random base64 both score zero, so a lower floor
+    /// does not admit more documents - it refuses short ones as
+    /// UNSTRUCTURED, which is a claim about the text rather than about the
+    /// measure. Calibrated in
+    /// `the_length_floor_is_where_structure_can_still_tell_text_from_noise`.
     pub min_chars: usize,
     /// How far compression must beat the text's own symbol entropy before
     /// the text counts as structured. See [`structure`].
@@ -143,7 +153,7 @@ pub const MIN_EPISODE_PROBES: usize = 12;
 
 impl Default for TriageConfig {
     fn default() -> Self {
-        TriageConfig { min_chars: 64, min_structure: 0.15, known_below: 0.20, reach_above: 4.0, min_probes: MIN_EPISODE_PROBES }
+        TriageConfig { min_chars: 640, min_structure: 0.15, known_below: 0.20, reach_above: 4.0, min_probes: MIN_EPISODE_PROBES }
     }
 }
 
@@ -274,6 +284,27 @@ mod tests {
         (0..n).map(|i| format!("--flag{i:03} VALUE   set the {i:03} option to VALUE\n")).collect()
     }
 
+    /// A manual page whose lines do NOT all share one template.
+    ///
+    /// `manual` repeats a single sentence with a counter in it, which
+    /// deflate reduces far harder than real documentation - it scores 0.45
+    /// at 256 bytes where a real page scores 0.00. A length floor calibrated
+    /// against it would be calibrated against the easiest input there is,
+    /// and would pass while every real short document was refused.
+    fn varied_manual(n: usize) -> String {
+        const VERBS: [&str; 8] = ["set", "limit", "select", "restrict", "report", "override", "resolve", "expand"];
+        const NOUNS: [&str; 8] = ["window", "cutoff", "depth", "origin", "stride", "weight", "anchor", "budget"];
+        let mut rng = Rng::new(7);
+        (0..n)
+            .map(|i| {
+                let v = VERBS[(rng.next_u64() % 8) as usize];
+                let a = NOUNS[(rng.next_u64() % 8) as usize];
+                let b = NOUNS[(rng.next_u64() % 8) as usize];
+                format!("  --{a}-{b} VALUE   {v} the {a} of the {b} to VALUE, position {i}\n")
+            })
+            .collect()
+    }
+
     /// Valid UTF-8 with no structure in it: what a base64 payload or a key
     /// block looks like to a reader. The stream's binary screen passes it,
     /// because it contains no NUL and decodes cleanly.
@@ -322,6 +353,52 @@ mod tests {
             other => panic!("expected NoStructure, got {other:?} (noise scores {})", structure(&noise)),
         }
         assert!(matches!(screen("short", &cfg), Some(Unstructured::TooShort { .. })));
+    }
+
+    /// `min_chars` is the length at which `structure` can still tell text
+    /// from noise, and nothing shorter.
+    ///
+    /// Deflate needs several hundred bytes before it finds anything a text's
+    /// own symbol frequencies did not, so below that a real manual page and
+    /// random base64 BOTH score exactly zero. With a floor under that range
+    /// every short document was refused as having no structure - a claim
+    /// about the text, when the truth was that the screen could not see it.
+    /// `TooShort` says the second thing, and is the honest answer.
+    #[test]
+    fn the_length_floor_is_where_structure_can_still_tell_text_from_noise() {
+        let cfg = TriageConfig::default();
+        let n = cfg.min_chars;
+        let page: String = varied_manual(40).chars().take(n).collect();
+        let noise = high_entropy(n, 17);
+        assert!(
+            structure(&page) > cfg.min_structure,
+            "at the floor ({n} chars) a realistic manual page must still clear min_structure {}, got {}",
+            cfg.min_structure,
+            structure(&page)
+        );
+        assert!(
+            structure(&noise) < cfg.min_structure,
+            "and noise at the same length must not, got {}",
+            structure(&noise)
+        );
+
+        // Below the floor the screen must say it cannot tell rather than
+        // that there is nothing there.
+        let short: String = varied_manual(40).chars().take(n - 1).collect();
+        assert!(
+            matches!(screen(&short, &cfg), Some(Unstructured::TooShort { .. })),
+            "a page one character under the floor is TooShort, not NoStructure"
+        );
+
+        // And the floor is not arbitrary: well under it the measure has
+        // nothing to say about EITHER input. That is the range a lower floor
+        // was admitting, and refusing as unstructured.
+        let quarter: String = varied_manual(40).chars().take(n / 4).collect();
+        assert_eq!(
+            structure(&quarter),
+            structure(&high_entropy(n / 4, 19)),
+            "well under the floor a manual page and noise are indistinguishable, which is why the floor is where it is"
+        );
     }
 
     /// A raw compression ratio cannot separate these two, which is why the
