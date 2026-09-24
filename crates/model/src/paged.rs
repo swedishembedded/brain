@@ -827,11 +827,11 @@ mod flash_tests {
 
         // --- one fused dispatch, no scores/probs buffer at all ---
         let ctx_flash_buf = g.storage((batch * hq) as u64);
-        let fsteps = vec![g.step(
+        let fsteps = vec![g.dispatch(
             3,
             &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
             &[batch, nh, nkv, hd, group, bs, max_bt],
-            batch * nh * 64, // 64 = paged_flash_decode's own @workgroup_size
+            gpu_core::Dispatch::Workgroups(batch * nh),
         )];
         g.submit(&[], &fsteps);
         let ctx_flash = g.read(&ctx_flash_buf, (batch * hq) as usize);
@@ -931,11 +931,11 @@ mod flash_tests {
         let part_m = g.storage((batch * nh * n_splits) as u64);
         let part_l = g.storage((batch * nh * n_splits) as u64);
         let part_o = g.storage((batch * nh * n_splits * hd) as u64);
-        let split_steps = vec![g.step(
+        let split_steps = vec![g.dispatch(
             5,
             &[&qb, &poolk, &poolv, &bt, &sl, &part_m, &part_l, &part_o],
             &[batch, nh, nkv, hd, group, bs, max_bt, n_splits, tiles_per_split],
-            batch * nh * n_splits * 64, // 64 = paged_flash_decode_split's own @workgroup_size
+            gpu_core::Dispatch::Workgroups(batch * nh * n_splits),
         )];
         g.submit(&[], &split_steps);
 
@@ -1043,11 +1043,11 @@ mod flash_tests {
         let n_splits = max_ntiles.div_ceil(tiles_per_split);
 
         let part = g.storage((batch * nh * n_splits * part_stride) as u64);
-        let split_steps = vec![g.step(
+        let split_steps = vec![g.dispatch(
             9,
             &[&qb, &poolk, &poolv, &scales_k, &scales_v, &bt, &sl, &part],
             &[batch, nh, nkv, hd, group, bs, max_bt, n_splits, tiles_per_split],
-            batch * nh * n_splits * 64, // 64 = paged_flash_decode_split_i8's own @workgroup_size
+            gpu_core::Dispatch::Workgroups(batch * nh * n_splits),
         )];
         g.submit(&[], &split_steps);
 
@@ -1163,11 +1163,11 @@ mod flash_tests {
 
         // --- ground truth: the fp32 fused kernel ---
         let ctx_fp32_buf = g.storage((batch * hq) as u64);
-        let fp32_steps = vec![g.step(
+        let fp32_steps = vec![g.dispatch(
             3,
             &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
             &[batch, nh, nkv, hd, group, bs, max_bt],
-            batch * nh * 64,
+            gpu_core::Dispatch::Workgroups(batch * nh),
         )];
         g.submit(&[], &fp32_steps);
         let ctx_fp32 = g.read(&ctx_fp32_buf, (batch * hq) as usize);
@@ -1183,11 +1183,11 @@ mod flash_tests {
         let scales_v = g.storage_init("sv", &sv);
 
         let ctx_i8_buf = g.storage((batch * hq) as u64);
-        let i8_steps = vec![g.step(
+        let i8_steps = vec![g.dispatch(
             4,
             &[&qb, &poolk_i8, &poolv_i8, &scales_k, &scales_v, &bt, &sl, &ctx_i8_buf],
             &[batch, nh, nkv, hd, group, bs, max_bt],
-            batch * nh * 64,
+            gpu_core::Dispatch::Workgroups(batch * nh),
         )];
         g.submit(&[], &i8_steps);
         let ctx_i8 = g.read(&ctx_i8_buf, (batch * hq) as usize);
@@ -1257,11 +1257,11 @@ mod flash_tests {
         g.write(&sl, &lens);
 
         let ctx_fp32_buf = g.storage((batch * hq) as u64);
-        let fp32_steps = vec![g.step(
+        let fp32_steps = vec![g.dispatch(
             0,
             &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
             &[batch, nh, nkv, hd, group, bs, max_bt],
-            batch * nh * 64,
+            gpu_core::Dispatch::Workgroups(batch * nh),
         )];
         g.submit(&[], &fp32_steps);
         let ctx_fp32 = g.read(&ctx_fp32_buf, (batch * hq) as usize);
@@ -1277,11 +1277,11 @@ mod flash_tests {
         g.write(&poolv_bf16, &pv_bf16);
 
         let ctx_bf16_buf = g.storage((batch * hq) as u64);
-        let bf16_steps = vec![g.step(
+        let bf16_steps = vec![g.dispatch(
             1,
             &[&qb, &poolk_bf16, &poolv_bf16, &bt, &sl, &ctx_bf16_buf],
             &[batch, nh, nkv, hd, group, bs, max_bt],
-            batch * nh * 64,
+            gpu_core::Dispatch::Workgroups(batch * nh),
         )];
         g.submit(&[], &bf16_steps);
         let ctx_bf16 = g.read(&ctx_bf16_buf, (batch * hq) as usize);
@@ -1386,11 +1386,11 @@ mod flash_tests {
         // --- one fused dispatch per (head, query-tile), no scores/probs at all ---
         let ctx_flash_buf = g.storage((cc * hq) as u64);
         let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill's own tile size
-        let fsteps = vec![g.step(
+        let fsteps = vec![g.dispatch(
             3,
             &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
             &[cc, nh, nkv, hd, group, bs, max_bt],
-            nh * ntiles_q * 256, // 256 = paged_flash_prefill's own @workgroup_size
+            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
         )];
         g.submit(&[], &fsteps);
         let ctx_flash = g.read(&ctx_flash_buf, (cc * hq) as usize);
@@ -1496,11 +1496,11 @@ mod flash_tests {
         // --- the fused int8 dispatch, no scores/probs at all ---
         let ctx_i8_buf = g.storage((cc * hq) as u64);
         let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill_i8's own tile size
-        let fused = vec![g.step(
+        let fused = vec![g.dispatch(
             3,
             &[&qb, &poolk_i8, &poolv_i8, &scales_k, &scales_v, &bt, &sl, &ctx_i8_buf],
             &[cc, nh, nkv, hd, group, bs, max_bt],
-            nh * ntiles_q * 256, // 256 = its own @workgroup_size
+            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
         )];
         g.submit(&[], &fused);
         let ctx_i8 = g.read(&ctx_i8_buf, (cc * hq) as usize);
@@ -1514,11 +1514,11 @@ mod flash_tests {
         let poolk_f32 = g.storage_init("pk", &pk);
         let poolv_f32 = g.storage_init("pv", &pv);
         let ctx_fp32_buf = g.storage((cc * hq) as u64);
-        let fp32 = vec![g.step(
+        let fp32 = vec![g.dispatch(
             4,
             &[&qb, &poolk_f32, &poolv_f32, &bt, &sl, &ctx_fp32_buf],
             &[cc, nh, nkv, hd, group, bs, max_bt],
-            nh * ntiles_q * 256,
+            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
         )];
         g.submit(&[], &fp32);
         let ctx_fp32 = g.read(&ctx_fp32_buf, (cc * hq) as usize);
@@ -1617,11 +1617,11 @@ mod flash_tests {
         // as two 128-wide fragments, no scores/probs at all ---
         let ctx_flash_buf = g.storage((cc * hq) as u64);
         let ntiles_q = cc.div_ceil(64); // BR = paged_flash_prefill_hd256's own tile size
-        let fsteps = vec![g.step(
+        let fsteps = vec![g.dispatch(
             3,
             &[&qb, &poolk, &poolv, &bt, &sl, &ctx_flash_buf],
             &[cc, nh, nkv, hd, group, bs, max_bt],
-            nh * ntiles_q * 256, // 256 = paged_flash_prefill_hd256's own @workgroup_size
+            gpu_core::Dispatch::Workgroups(nh * ntiles_q),
         )];
         g.submit(&[], &fsteps);
         let ctx_flash = g.read(&ctx_flash_buf, (cc * hq) as usize);
