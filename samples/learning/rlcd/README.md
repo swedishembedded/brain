@@ -249,6 +249,15 @@ matters is the policy's own action, not the loss trajectory.
   a general claim that it tracks `voi()` continuously across arbitrary costs;
   it was not evaluated near the exact boundary itself, where a genuinely
   uncertain policy would be the CORRECT answer, not a failure.
+- **`--head` is fine-tuning, not an exact resume.** The artifact carries the
+  head's weights and the task contract, not AdamW's moments, the step
+  counter or the sampler's RNG state. Continuing training from a reloaded
+  head is a legitimate new run over existing weights - it is not a
+  bit-identical continuation of the interrupted one, and `steps so far`
+  restarts at 0. Training further on new phrasings also needs the earlier
+  ones mixed back in and both sets evaluated separately: a frozen encoder
+  constrains what can move, it does not preserve what the head already
+  answered.
 - **The Laya decision backbone cannot train through this pipeline yet.**
   `RlcdPipeline` trains through `crates/decide` only; passing a Laya
   checkpoint's directory fails fast with a clear message rather than a
