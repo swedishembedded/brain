@@ -749,7 +749,11 @@ fn finetune_lora(args: &[String]) {
     let mut steps = 500u32;
     let mut lr = 5e-5f32;
     let mut batch = 4u32;
-    let mut block = 1024u32;
+    // Unset means "fit the row to the data": one example per row, so a row
+    // only has to be as long as the longest example. Left at a fixed 1024 a
+    // 42-token example spends 96% of every row, and every attention score in
+    // it, on padding.
+    let mut block: Option<u32> = None;
     let mut seed = 1234u64;
     let mut models_dir: Option<String> = None;
     let mut dataset_id: Option<String> = None;
@@ -765,7 +769,7 @@ fn finetune_lora(args: &[String]) {
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
             "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
-            "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
+            "--block" => block = val(args, &mut i, "--block").parse().ok().or(block),
             "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--dataset-id" => dataset_id = Some(val(args, &mut i, "--dataset-id")),
@@ -874,10 +878,30 @@ fn finetune_lora(args: &[String]) {
     }
 
     let scratch = std::env::temp_dir().join(format!("brain-qwen-lora-train-{}", std::process::id()));
-    if let Err(e) = data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, vocab, &scratch) {
-        eprintln!("preparing training data: {e}");
-        return;
-    }
+    let prepared = match data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, vocab, &scratch) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("preparing training data: {e}");
+            return;
+        }
+    };
+    // A row holds one example, so it need only be as long as the longest one.
+    // Explicit --block still wins, but must still fit the data.
+    let block = match block {
+        Some(b) if (b as usize) < prepared.longest_example => {
+            eprintln!(
+                "--block {b} is shorter than the longest example ({} tokens); it would train on a cut-off answer",
+                prepared.longest_example
+            );
+            return;
+        }
+        Some(b) => b,
+        None => {
+            let fitted = prepared.longest_example as u32;
+            println!("row sized to the data: --block {fitted} (longest example {} tokens)", prepared.longest_example);
+            fitted
+        }
+    };
 
     println!(
         "training LoRA adapter {full_ref_str} (rank={rank} alpha={alpha}) on {} train / {} val samples, {steps} steps...",

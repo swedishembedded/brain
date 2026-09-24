@@ -419,16 +419,40 @@ pub fn prepare_chat_samples(
     tmpl: &ChatTemplate,
     vocab: usize,
     dir: &Path,
-) -> Result<(), PrepareError> {
+) -> Result<Prepared, PrepareError> {
     std::fs::create_dir_all(dir).map_err(PrepareError::Io)?;
     let (train_ids, train_mask) = encode_sample_split(train, tok, tmpl).map_err(PrepareError::Template)?;
     let (val_ids, val_mask) = encode_sample_split(val, tok, tmpl).map_err(PrepareError::Template)?;
+    let longest = longest_example(&train_ids).max(longest_example(&val_ids));
     binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids).map_err(PrepareError::Io)?;
     binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask).map_err(PrepareError::Io)?;
     binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids).map_err(PrepareError::Io)?;
     binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask).map_err(PrepareError::Io)?;
     std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab)).map_err(PrepareError::Io)?;
-    Ok(())
+    Ok(Prepared { longest_example: longest })
+}
+
+/// The longest `ENDOFTEXT`-terminated record in a prepared stream, including
+/// its separator. A trailing unterminated record counts as one.
+fn longest_example(ids: &[u32]) -> usize {
+    let mut longest = 0usize;
+    let mut start = 0usize;
+    for (i, &t) in ids.iter().enumerate() {
+        if t == ENDOFTEXT {
+            longest = longest.max(i + 1 - start);
+            start = i + 1;
+        }
+    }
+    longest.max(ids.len() - start)
+}
+
+/// What [`prepare_chat_samples`] measured while writing, so a caller can size
+/// a training row to the data instead of guessing. A row shorter than
+/// `longest_example` cannot hold its example, and one much longer than it is
+/// mostly padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prepared {
+    pub longest_example: usize,
 }
 
 #[derive(Debug)]

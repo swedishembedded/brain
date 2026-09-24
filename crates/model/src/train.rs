@@ -253,9 +253,11 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         block_size: opts.block_size as usize,
         mask_before_token: if has_token_mask { None } else { mask_id },
         mask_per_line: opts.mask_per_line,
-        // A token-masked chat dataset aligns windows to the `<|endoftext|>` example
-        // separator so each window starts at an example.
-        align_to_lines: opts.align_to_lines || has_token_mask,
+        // A token-masked chat dataset is sampled one example per row instead
+        // (see below), which supersedes aligning a long window to an example
+        // start: the window used to START at an example and then run on
+        // through two dozen more.
+        align_to_lines: opts.align_to_lines && !has_token_mask,
         newline_token: if has_token_mask { Some(data::chat::ENDOFTEXT) } else { newline_id },
     };
     // A split shorter than `block_size` has no valid sampling window at all
@@ -278,16 +280,49 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         }
         Ok(())
     };
-    too_short("train", &train_tok)?;
-    too_short("validation", &val_tok)?;
 
-    let mk = |tok: Vec<u32>, mask: Option<Vec<bool>>| match mask {
-        Some(m) if m.len() == tok.len() => TokenDataset::new_with_mask(tok, m, &batch_cfg),
-        _ => TokenDataset::new(tok, &batch_cfg),
+    // A chat/tool-call dataset carries a token mask AND `<|endoftext|>`
+    // example separators, so its examples can be told apart and each given a
+    // row of its own. Packing them into a shared window instead lets one
+    // example attend to its neighbours' answers - which, for short
+    // instruction-tuning examples, is most of the row - so the model can
+    // drive both training and held-out loss down by copying rather than
+    // learning, and neither number then says anything about how it will do on
+    // a single question at serving time.
+    let mk = |label: &str, tok: Vec<u32>, mask: Option<Vec<bool>>| -> std::io::Result<TokenDataset> {
+        let (tok, mask) = match mask {
+            // One example per row needs no window at all, so it is the one
+            // path that does not care how long the split is.
+            Some(m) if m.len() == tok.len() && has_token_mask && !tok.is_empty() => {
+                match TokenDataset::new_examples(tok, m, data::chat::ENDOFTEXT, &batch_cfg) {
+                    Ok(d) => return Ok(d),
+                    // Examples too long to be rows of their own: this is
+                    // document-scale data, where a window IS the unit of
+                    // training and packing is not the problem it is for short
+                    // instruction-tuning examples. Fall back, but say so -
+                    // silently windowing a dataset that should have been one
+                    // example per row is the defect this branch exists to
+                    // make visible.
+                    Err(e) => {
+                        println!("{label}: {e}; sampling windows across examples instead");
+                        let (tok, m) = e.returned();
+                        (tok, Some(m))
+                    }
+                }
+            }
+            other => (tok, other),
+        };
+        // Every remaining path draws windows, which needs a split longer than
+        // one of them.
+        too_short(label, &tok)?;
+        Ok(match mask {
+            Some(m) if m.len() == tok.len() => TokenDataset::new_with_mask(tok, m, &batch_cfg),
+            _ => TokenDataset::new(tok, &batch_cfg),
+        })
     };
     Ok(Loaded {
-        train: mk(train_tok, train_mask),
-        val: mk(val_tok, val_mask),
+        train: mk("train", train_tok, train_mask)?,
+        val: mk("validation", val_tok, val_mask)?,
         vocab,
         batch_cfg,
         itos,
@@ -853,6 +888,52 @@ mod tests {
         assert!(msg.contains("train"), "{msg}");
         assert!(msg.contains("10"), "{msg}");
         assert!(msg.contains("64"), "{msg}");
+    }
+
+    /// A chat/tool-call dataset (token mask + `<|endoftext|>` separators) must
+    /// load one example per row. Packed into a shared window instead, short
+    /// instruction-tuning examples see each other's answers: with 42-token
+    /// examples and a 1024-token row, two dozen question/answer pairs share a
+    /// row and half of them find their own answer already written out earlier
+    /// in it. The model can then drive train AND held-out loss to near zero by
+    /// copying, and both numbers stop predicting anything about answering one
+    /// question with nothing else in context.
+    #[test]
+    fn a_masked_chat_dataset_loads_one_example_per_row() {
+        let dir = tmp("chat-one-per-row");
+        // Four 5-token examples: two prompt tokens, two supervised, separator.
+        let mut tokens: Vec<u32> = Vec::new();
+        let mut mask: Vec<bool> = Vec::new();
+        for e in 0..4u32 {
+            tokens.extend_from_slice(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3, data::chat::ENDOFTEXT]);
+            mask.extend_from_slice(&[false, false, true, true, false]);
+        }
+        binio::write_u32_bin(&dir.join("train.u32.bin"), &tokens).unwrap();
+        binio::write_mask_bin(&dir.join("train.mask.bin"), &mask).unwrap();
+        binio::write_u32_bin(&dir.join("val.u32.bin"), &tokens).unwrap();
+        binio::write_mask_bin(&dir.join("val.mask.bin"), &mask).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(200000)).unwrap();
+
+        // A row twice the length of an example: the old stream-window sampler
+        // would have filled the rest of it with the following examples.
+        let opts = FitOpts { block_size: 10, batch_size: 8, ..Default::default() };
+        let (train, _val, cfg, _vocab) = load_dataset(&dir, &opts).expect("load");
+        assert_eq!(train.example_count(), Some(4), "example boundaries must be recovered");
+
+        let mut rng = data::rng::Rng::new(3);
+        for _ in 0..20 {
+            let (x, y) = train.get_batch(&cfg, &mut rng);
+            for b in 0..cfg.batch_size {
+                let row = &x[b * 10..(b + 1) * 10];
+                let base = row[0];
+                assert_eq!(&row[..4], &[base, base + 1, base + 2, base + 3], "row {row:?} is not one example");
+                // Past its own separator the row is padding, and padding is
+                // never a target.
+                for t in 3..10 {
+                    assert_eq!(y[b * 10 + t], data::loader::IGNORE, "row {row:?} supervises position {t}");
+                }
+            }
+        }
     }
 
     #[test]

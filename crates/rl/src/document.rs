@@ -262,7 +262,9 @@ impl<'a> Curriculum for DocumentCurriculum<'a> {
                 record(env, row)
             })
             .collect();
-        data::chat::prepare_chat_samples(&samples, &[], self.tok, self.tmpl, self.vocab, out_dir).map_err(std::io::Error::other)
+        data::chat::prepare_chat_samples(&samples, &[], self.tok, self.tmpl, self.vocab, out_dir)
+            .map(|_| ())
+            .map_err(std::io::Error::other)
     }
 
     /// `None`: the token-level `train.mask.bin` [`Self::write_sft_dataset`]
