@@ -105,15 +105,41 @@ pub fn softmax(scores: &[f32]) -> Vec<f32> {
     p
 }
 
-/// `d/dp` of `(1 - p)^gamma * (-ln p)`, at `gamma = 0` this is `-1/p` (plain
-/// cross-entropy's slope) with no special case needed for the general form.
-fn focal_slope(p: f64, gamma: f64) -> f64 {
-    let one_minus = (1.0 - p).max(0.0);
+/// Softmax and its logarithm together, in f64, from one max-shifted pass.
+///
+/// The log is the half that stays honest when an option saturates: `p`
+/// underflows to zero at a logit gap around 745, while `ln p` is merely
+/// -745 and still exact. Anything needing `ln p` from `p` alone has to
+/// invent a floor, and a floor is what silently flattens a gradient.
+fn softmax_with_log(scores: &[f32]) -> (Vec<f64>, Vec<f64>) {
+    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let shifted: Vec<f64> = scores.iter().map(|&z| z as f64 - max).collect();
+    let lse = shifted.iter().map(|&s| s.exp()).sum::<f64>().ln();
+    let logp: Vec<f64> = shifted.iter().map(|&s| s - lse).collect();
+    let p: Vec<f64> = logp.iter().map(|&l| l.exp()).collect();
+    (p, logp)
+}
+
+/// `p * d/dp` of the per-option focal term `(1 - p)^gamma * (-ln p)`.
+///
+/// Returned as the PRODUCT rather than as the slope alone, because the
+/// slope carries a `1/p` that diverges as an option saturates while every
+/// downstream use multiplies by `p` again. Forming the product cancels that
+/// analytically: at `gamma = 0` it is exactly `-1` at any `p`, so plain
+/// cross-entropy keeps its `p - target` gradient however confident the
+/// prediction got. Clamping `p` instead - which is what this did - makes
+/// the cancellation inexact and drives the gradient to zero precisely for
+/// the confidently WRONG predictions that most need one.
+fn focal_slope_times_p(p: f64, logp: f64, gamma: f64) -> f64 {
     if gamma == 0.0 {
-        -1.0 / p
-    } else {
-        gamma * one_minus.powf(gamma - 1.0) * p.ln() - one_minus.powf(gamma) / p
+        return -1.0;
     }
+    let one_minus = (1.0 - p).max(0.0);
+    // `(1-p)^(gamma-1) * p*ln p` tends to 0 as `p -> 1` for every
+    // `gamma > 0` - `ln p` vanishes faster than the power can diverge - so
+    // taking the limit here is what keeps `gamma < 1` from forming inf * 0.
+    let ramp = if one_minus > 0.0 { one_minus.powf(gamma - 1.0) * p * logp } else { 0.0 };
+    gamma * ramp - one_minus.powf(gamma)
 }
 
 /// Loss and `dL/d(score)` for one question against a full target
@@ -129,24 +155,19 @@ pub fn decision_loss_soft(scores: &[f32], target: &[f32], cfg: &LossConfig) -> (
         target.len(),
         "scores and target must have the same arity"
     );
-    let p = softmax(scores);
+    let (p, logp) = softmax_with_log(scores);
     let n = p.len();
     let (g, lam) = (cfg.gamma as f64, cfg.lambda as f64);
 
-    // Clamp every probability away from zero before it can enter a log or a
-    // reciprocal. The hard-label path only ever needed to clamp p[gold],
-    // because only the gold term appeared in a log there; here any option
-    // can carry target mass, so every p_i can.
-    let pc: Vec<f64> = p.iter().map(|&pi| (pi as f64).max(1e-12)).collect();
-
     // --- soft focal / cross-entropy: L = sum_i target_i * (1-p_i)^g * -ln(p_i) ---
+    // `-logp[i]` rather than `-p[i].ln()`: the two agree wherever `p` is
+    // representable and only the former survives where it is not.
     let mut focal = 0.0f64;
-    let mut slope = vec![0.0f64; n]; // d/dp_i of the per-option focal term
+    let mut psl = vec![0.0f64; n]; // p_i * d/dp_i of the per-option focal term
     for i in 0..n {
-        let pi = pc[i];
-        let one_minus = (1.0 - pi).max(0.0);
-        focal += target[i] as f64 * one_minus.powf(g) * (-pi.ln());
-        slope[i] = focal_slope(pi, g);
+        let one_minus = (1.0 - p[i]).max(0.0);
+        focal += target[i] as f64 * one_minus.powf(g) * (-logp[i]);
+        psl[i] = focal_slope_times_p(p[i], logp[i], g);
     }
 
     // --- Brier: sum over ALL options against the full target distribution ---
@@ -154,7 +175,7 @@ pub fn decision_loss_soft(scores: &[f32], target: &[f32], cfg: &LossConfig) -> (
         .iter()
         .zip(target)
         .map(|(&pi, &ti)| {
-            let d = pi as f64 - ti as f64;
+            let d = pi - ti as f64;
             d * d
         })
         .sum();
@@ -164,20 +185,21 @@ pub fn decision_loss_soft(scores: &[f32], target: &[f32], cfg: &LossConfig) -> (
     // --- gradient through the softmax jacobian: dp_j/dz_i = p_j(delta_ij - p_i) ---
     // Each objective term is `sum_k f_k(p_k)`, so dL/dp_k = target_k * slope_k
     // for the focal half; chaining through the jacobian collapses the sum
-    // over k into one dot product per output index.
-    let focal_dot: f64 = (0..n)
-        .map(|k| target[k] as f64 * slope[k] * p[k] as f64)
-        .sum();
+    // over k into one dot product per output index. Both places the slope
+    // appears it is already multiplied by a `p`, so both read `psl`
+    // directly and the `1/p` never has to be formed - see
+    // [`focal_slope_times_p`].
+    let focal_dot: f64 = (0..n).map(|k| target[k] as f64 * psl[k]).sum();
     let brier_dot: f64 = p
         .iter()
         .zip(target)
-        .map(|(&pj, &tj)| 2.0 * (pj as f64 - tj as f64) * pj as f64)
+        .map(|(&pj, &tj)| 2.0 * (pj - tj as f64) * pj)
         .sum();
 
     let mut d = vec![0.0f32; n];
     for i in 0..n {
-        let pi = p[i] as f64;
-        let d_focal = pi * (target[i] as f64 * slope[i] - focal_dot);
+        let pi = p[i];
+        let d_focal = target[i] as f64 * psl[i] - pi * focal_dot;
         let d_brier = 2.0 * pi * (pi - target[i] as f64) - pi * brier_dot;
         d[i] = ((1.0 - lam) * d_focal + lam * d_brier) as f32;
     }
@@ -329,6 +351,36 @@ mod tests {
                 "grad[{i}] {} vs p-target {expect}",
                 d[i]
             );
+        }
+    }
+
+    /// A saturated prediction must still produce cross-entropy's real
+    /// gradient. This is the case a finite-difference check cannot see: the
+    /// clamp that flattens the gradient flattens the LOSS by the same
+    /// amount, so numeric and analytic agree with each other and are both
+    /// wrong. The reference here is the closed form `p - target`, which is
+    /// exact at every logit gap.
+    #[test]
+    fn cross_entropy_keeps_its_gradient_when_a_prediction_saturates() {
+        let target = [0.8f32, 0.2];
+        // 27.6 nats is where p dips under the old 1e-12 floor; the last two
+        // are far past anything f32 can represent as a normal number.
+        for gap in [10.0f32, 27.0, 30.0, 100.0, 400.0] {
+            let scores = [-gap, 0.0];
+            let p = softmax(&scores);
+            let (loss, d) = decision_loss_soft(&scores, &target, &LossConfig::cross_entropy());
+            for i in 0..2 {
+                let expect = p[i] - target[i];
+                assert!(
+                    (d[i] - expect).abs() <= 1e-5,
+                    "gap {gap}: grad[{i}] {} should be p-target {expect}",
+                    d[i]
+                );
+            }
+            // The loss itself must keep growing with the gap rather than
+            // saturating at -ln(1e-12): a confidently wrong prediction is
+            // not equally wrong at 30 nats and at 400.
+            assert!(loss.is_finite() && loss >= 0.8 * gap * 0.99, "gap {gap}: loss {loss} saturated");
         }
     }
 
