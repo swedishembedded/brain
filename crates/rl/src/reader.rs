@@ -86,6 +86,9 @@ pub struct ModelLearner<'a, M: Model, T: Tokenizer> {
     alpha: f32,
     /// Held so the reach test does not reload a checkpoint per episode.
     cached: Option<M>,
+    /// `(initial, final)` from the last `model::fit_from`. See
+    /// `Learner::last_train_loss`.
+    last_train_loss: Option<(f64, f64)>,
 }
 
 impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
@@ -126,6 +129,7 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
             rank,
             alpha,
             cached: None,
+            last_train_loss: None,
         })
     }
 
@@ -201,12 +205,13 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
     /// A previous candidate at `out` is NOT a starting point either. It may
     /// be one the gate refused, and resuming from it would carry refused
     /// training forward, which is the one thing the gate exists to stop.
-    fn fit_into(&self, rows: &[&str], dir: &Path, out: &Path, seed: u64) -> std::io::Result<Vec<u8>> {
+    fn fit_into(&mut self, rows: &[&str], dir: &Path, out: &Path, seed: u64) -> std::io::Result<Vec<u8>> {
         self.write_dataset(rows, dir)?;
         let mut opts = self.fit.clone();
         opts.seed = seed;
         let served = checkpoint::load(self.incumbent.to_str().expect("utf-8 path"));
-        model::fit_from::<M>(dir, self.cfg.clone(), &opts, Some(out), &served.by_role(""))?;
+        let (initial, final_) = model::fit_from::<M>(dir, self.cfg.clone(), &opts, Some(out), &served.by_role(""))?;
+        self.last_train_loss = Some((initial as f64, final_ as f64));
         adapter_bytes::<M>(out, &self.work.join("adapter.safetensors"), self.rank, self.alpha)
     }
 }
@@ -287,6 +292,10 @@ impl<M: Model, T: Tokenizer> Learner for ModelLearner<'_, M, T> {
         let (scores, mean_entropy, completions) = decode_checkpoint::<M>(self.path_of(arm), &tasks, &verifier, &self.rollout);
         let answers = completions.iter().map(|c| self.tok.decode(c)).collect();
         Scored { scores, mean_entropy, answers }
+    }
+
+    fn last_train_loss(&self) -> Option<(f64, f64)> {
+        self.last_train_loss
     }
 
     fn joint_oracle(&mut self, rows: &[&str], probes: &[&Probe]) -> f64 {

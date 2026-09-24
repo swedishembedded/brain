@@ -106,6 +106,11 @@ pub struct LedgerRow {
     /// this field existed still reads.
     #[serde(default)]
     pub carried: bool,
+    /// The training loss before and after this episode's training run, when
+    /// it was trained. Additive; absent on a ledger written before it
+    /// existed, and on any episode that stopped before training.
+    #[serde(default)]
+    pub train_loss: Option<(f64, f64)>,
     /// Why, when there is a why. A rejection with no cause would make the
     /// ledger say less than the run knew.
     pub cause: Option<String>,
@@ -132,6 +137,7 @@ impl LedgerRow {
             stage: row.outcome.stage().to_string(),
             promoted: row.outcome.promoted(),
             carried: row.carried,
+            train_loss: row.train_loss,
             cause,
             audited: row.audited,
             audit_decodes: row.audit_decodes,
@@ -349,6 +355,7 @@ mod tests {
             stage: stage.to_string(),
             promoted: stage == "gate",
             carried: stage == "gate",
+            train_loss: None,
             cause: None,
             audited: 2,
             audit_decodes: 32,
@@ -462,6 +469,7 @@ mod tests {
             episode: EpisodeId::of("x"),
             source: PathBuf::from("noise.txt"),
             carried: false,
+            train_loss: None,
             outcome,
             audited: 0,
             audit_decodes: 0,

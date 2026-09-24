@@ -259,7 +259,14 @@ fn report(a: &mut Args) -> Result<ExitCode, String> {
     }
     for r in &rows {
         let cause = r.cause.clone().unwrap_or_default();
-        println!("{:>5}  {:<28} {:<8} {:<18} audited {}", r.episode, r.source, r.stage, cause, r.audited);
+        // The training loss beside the verdict, because "the gate found no
+        // significant gain" and "training did not move the model" are the
+        // same verdict and a different problem.
+        let trained = match r.train_loss {
+            Some((a, b)) => format!("loss {a:.3} -> {b:.3}"),
+            None => "not trained".to_string(),
+        };
+        println!("{:>5}  {:<28} {:<8} {:<18} {:<22} audited {}", r.episode, r.source, r.stage, cause, trained, r.audited);
     }
     let promoted = rows.iter().filter(|r| r.promoted).count();
     println!("\n{} episodes, {promoted} promoted", rows.len());

@@ -114,6 +114,21 @@ pub trait Learner {
     /// merely evaluate. An oracle handed only the probes could not do the
     /// one thing that makes it an upper bound.
     fn joint_oracle(&mut self, rows: &[&str], probes: &[&Probe]) -> f64;
+
+    /// The training loss at the start and end of the last [`Learner::train`].
+    ///
+    /// Reported so a refusal can be read. "The gate found no significant
+    /// improvement" and "the training step did not move the model at all"
+    /// produce exactly the same verdict, and without this pair there is
+    /// nothing in a run that tells them apart - a reader whose optimiser
+    /// silently did nothing would look like a reader reading unlearnable
+    /// documents, forever.
+    ///
+    /// `None` from a learner that does not measure it, which is honest;
+    /// the ledger then carries no claim either way.
+    fn last_train_loss(&self) -> Option<(f64, f64)> {
+        None
+    }
 }
 
 /// What happened to one episode.
@@ -158,6 +173,9 @@ pub struct Row {
     /// Recorded beside `outcome` rather than instead of it: the two arms are
     /// only comparable if the real gate's decision is kept in both.
     pub carried: bool,
+    /// What the training run did to its own loss, when this episode was
+    /// trained at all. See [`Learner::last_train_loss`].
+    pub train_loss: Option<(f64, f64)>,
     /// What the oracle said, when it was asked.
     pub diagnosis: Option<Diagnosis>,
     /// What was done about it.
@@ -383,6 +401,7 @@ impl<L: Learner> Reader<L> {
             // Nothing that stopped before the gate carried anything, under
             // any arm: the null coin replaces the gate, not the screen.
             carried: false,
+            train_loss: None,
             outcome,
             audited: 0,
             audit_decodes: 0,
@@ -546,6 +565,7 @@ impl<L: Learner> Reader<L> {
             episode: ep.id.clone(),
             source: ep.source.clone(),
             carried: promoted,
+            train_loss: self.learner.last_train_loss(),
             outcome: Outcome::Decided(verdict),
             audited: audit_blocks.len(),
             audit_decodes: audit_blocks.iter().map(|(_, b)| b.len()).sum(),

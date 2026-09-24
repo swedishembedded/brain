@@ -408,6 +408,7 @@ mod ledger_tests {
             stage: stage.to_string(),
             promoted,
             carried: promoted,
+            train_loss: None,
             cause: cause.map(str::to_string),
             audited: 2,
             audit_decodes: audited,
