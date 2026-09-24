@@ -180,3 +180,69 @@ fn promoting_replaces_what_is_served_and_nothing_else_does() {
     let candidate = std::fs::read(work.join("candidate.safetensors")).expect("candidate");
     assert_eq!(served, candidate, "a promotion makes the candidate what is served");
 }
+
+/// A run spans several processes: one promotes, the next scores the frozen
+/// battery against what the first left served. Rebuilding a learner over a
+/// work directory that already holds an incumbent must therefore keep that
+/// incumbent. Resetting it to the base would make every before/after
+/// comparison a comparison of the base against itself, reporting no change
+/// by construction rather than by measurement.
+#[test]
+fn a_reopened_learner_serves_what_was_promoted_rather_than_the_base() {
+    if gpu_disabled() {
+        return;
+    }
+    let dir = tmp("reopen");
+    let base = dir.join("base.safetensors");
+    base_checkpoint(&base, &cfg(), 5);
+    let tok = byte_tokenizer();
+    let rollout = RolloutParams { max_new: 8, sample: SampleParams::greedy(), eos: None };
+    let work = dir.join("work");
+
+    let promoted = {
+        let mut learner: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+            ModelLearner::new(&base, &work, &tok, cfg(), fit_opts(), rollout.clone(), RANK, ALPHA).expect("learner");
+        let owned = rows();
+        let row_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        learner.train(&row_refs, 7);
+        learner.promote().expect("promote");
+        std::fs::read(work.join("incumbent.safetensors")).expect("incumbent")
+    };
+    assert_ne!(promoted, std::fs::read(&base).expect("base"), "the fixture must actually move what is served, or the reopen below proves nothing");
+
+    let _reopened: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+        ModelLearner::new(&base, &work, &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("reopened learner");
+
+    let served = std::fs::read(work.join("incumbent.safetensors")).expect("incumbent");
+    assert_eq!(served, promoted, "reopening a run must serve what it promoted, not reset it to the base");
+}
+
+/// Clause 8 of the acceptance block rests on a run reproducing from its
+/// seed, and the seed-repeat control is only a floor if the same seed really
+/// does produce the same adapter. This trains the same rows twice at the
+/// same seed and compares the bytes.
+#[test]
+fn the_same_rows_at_the_same_seed_train_the_same_adapter() {
+    if gpu_disabled() {
+        return;
+    }
+    let dir = tmp("repeat");
+    let base = dir.join("base.safetensors");
+    base_checkpoint(&base, &cfg(), 11);
+    let tok = byte_tokenizer();
+    let rollout = RolloutParams { max_new: 8, sample: SampleParams::greedy(), eos: None };
+    let owned = rows();
+    let row_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+    let once = {
+        let mut l: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+            ModelLearner::new(&base, &dir.join("work-a"), &tok, cfg(), fit_opts(), rollout.clone(), RANK, ALPHA).expect("learner");
+        l.train(&row_refs, 13)
+    };
+    let twice = {
+        let mut l: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+            ModelLearner::new(&base, &dir.join("work-b"), &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("learner");
+        l.train(&row_refs, 13)
+    };
+    assert_eq!(once, twice, "the same seed over the same rows must produce the same adapter, or a seed-repeat control measures nothing");
+}

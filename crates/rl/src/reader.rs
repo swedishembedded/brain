@@ -91,6 +91,14 @@ pub struct ModelLearner<'a, M: Model, T: Tokenizer> {
 impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
     /// `base` is the frozen starting checkpoint and becomes the first
     /// incumbent; `work` holds the scratch datasets and both arms.
+    ///
+    /// A work directory that already holds an incumbent keeps it. A run is
+    /// several processes - one reads and promotes, the next scores the
+    /// frozen battery against what it left served - so seeding the incumbent
+    /// from the base every time a learner is built would silently discard
+    /// every promotion and make each such comparison one of the base against
+    /// itself. Which base a given work directory belongs to is the caller's
+    /// to keep straight; the run manifest is where that is recorded.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         base: &Path,
@@ -104,7 +112,9 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(work)?;
         let incumbent = work.join("incumbent.safetensors");
-        std::fs::copy(base, &incumbent)?;
+        if !incumbent.exists() {
+            std::fs::copy(base, &incumbent)?;
+        }
         Ok(ModelLearner {
             tok,
             cfg,
