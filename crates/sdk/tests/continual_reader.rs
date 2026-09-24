@@ -39,6 +39,10 @@ fn run_with(dir: &std::path::Path, rows: &[(&str, &str, bool, Option<&str>, usiz
             source: source.to_string(),
             stage: stage.to_string(),
             promoted: *promoted,
+            // The real arm carries exactly what it promoted; these fixtures
+            // have no null-gate arm to make the two differ.
+            carried: *promoted,
+            train_loss: None,
             cause: cause.map(str::to_string),
             audited: 2,
             audit_decodes: *decodes,
@@ -113,6 +117,8 @@ fn a_reopened_run_reports_every_episode_it_ever_read() {
         source: "learn/c.txt".into(),
         stage: "gate".into(),
         promoted: false,
+        carried: false,
+        train_loss: None,
         cause: Some("effect_too_small".into()),
         audited: 2,
         audit_decodes: 16,

@@ -484,6 +484,9 @@ fn a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot() {
         return;
     }
     const INSTRUCTIONS: &str = "which banking intent does this message express";
+    /// The option-order seed `train_choices` takes; fixed so the two arms
+    /// below shuffle identically and are comparable.
+    const SEED: u64 = 7;
     let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
         .iter()
         .map(|s| s.to_string())
@@ -500,7 +503,7 @@ fn a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot() {
     // refused because it could not reproduce this model.
     let mut live = brain::DecisionPipeline::builder(&dir).load().expect("real minilm");
     assert!(!live.encoder_frozen(), "the decide arm fine-tunes its encoder by default");
-    live.train_choices(train, &options, INSTRUCTIONS, 3, 7, &mut |_, _| {}).expect("train");
+    live.train_choices(train, &options, INSTRUCTIONS, 3, 7, SEED, &mut |_, _| {}).expect("train");
     assert!(live.encoder_was_trained());
     let err = live.save_head(path).expect_err("a fine-tuned encoder must still refuse a head-only save");
     assert!(format!("{err}").contains("encoder was trained"), "unexpected refusal: {err}");
@@ -508,7 +511,7 @@ fn a_frozen_encoder_run_can_save_its_head_and_a_fine_tuned_one_still_cannot() {
     // The CHOICE: freeze the encoder, and the same run produces a file.
     let mut frozen = brain::DecisionPipeline::builder(&dir).load().expect("real minilm");
     frozen.set_encoder_frozen(true).expect("the decide arm can freeze its encoder");
-    frozen.train_choices(train, &options, INSTRUCTIONS, 3, 7, &mut |_, _| {}).expect("train");
+    frozen.train_choices(train, &options, INSTRUCTIONS, 3, 7, SEED, &mut |_, _| {}).expect("train");
     assert!(!frozen.encoder_was_trained(), "a frozen encoder must not have moved");
     frozen.save_head(path).expect("a frozen-encoder run must be saveable");
 
@@ -545,6 +548,9 @@ fn a_batched_run_consumes_a_batch_per_step_and_still_trains() {
         return;
     }
     const INSTRUCTIONS: &str = "which banking intent does this message express";
+    /// The option-order seed `train_choices` takes; fixed so the two arms
+    /// below shuffle identically and are comparable.
+    const SEED: u64 = 7;
     let options: Vec<String> = ["card arrival", "exchange rate", "pin blocked"]
         .iter()
         .map(|s| s.to_string())
@@ -562,7 +568,7 @@ fn a_batched_run_consumes_a_batch_per_step_and_still_trains() {
 
     let mut logged = 0usize;
     let tail = pipe
-        .train_choices(train, &options, INSTRUCTIONS, 5, 7, &mut |_, l| {
+        .train_choices(train, &options, INSTRUCTIONS, 5, 7, SEED, &mut |_, l| {
             assert!(l.is_finite(), "a batched step reported a non-finite loss: {l}");
             logged += 1;
         })
