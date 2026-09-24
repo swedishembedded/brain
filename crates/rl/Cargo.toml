@@ -123,6 +123,14 @@ name = "document_study"
 path = "tests/document_study.rs"
 required-features = ["qwen3"]
 
+# `rl::reader::ModelLearner` against a real checkpoint: the four Learner
+# methods the continual reader drives, plus the incumbent/candidate file
+# contract that makes a promotion survive into the next process.
+[[test]]
+name = "reader_learner"
+path = "tests/reader_learner.rs"
+required-features = ["qwen3"]
+
 # The runnable demos/diagnostics over that harness. `cargo run --release -p
 # brain-rl --features qwen3 --example <name>`; all of them train real models on
 # a real GPU and print the trajectory they actually measured, including when it
