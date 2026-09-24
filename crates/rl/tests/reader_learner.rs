@@ -246,3 +246,58 @@ fn the_same_rows_at_the_same_seed_train_the_same_adapter() {
     };
     assert_eq!(once, twice, "the same seed over the same rows must produce the same adapter, or a seed-repeat control measures nothing");
 }
+
+/// The defect this exists to stop: training must start from what is
+/// currently SERVED, not from fresh random weights.
+///
+/// `model::fit` starts from its output path if that exists and from a random
+/// initialisation otherwise. A reader hands it a candidate path that does
+/// not exist yet, so every first episode trained a randomly initialised
+/// network, and every later one resumed from that - producing promotions,
+/// retention and a battery about a model that had never seen the pretrained
+/// weights. Nothing about the shape of those numbers says so.
+///
+/// Checked on a tensor the architecture initialises to a CONSTANT: a norm
+/// gain is all ones fresh, so a base whose gains are not ones distinguishes
+/// the two starting points without depending on any training outcome.
+#[test]
+fn training_starts_from_the_served_checkpoint_and_not_from_scratch() {
+    if gpu_disabled() {
+        return;
+    }
+    let dir = tmp("from-base");
+    let base = dir.join("base.safetensors");
+
+    // A base whose norm gains are deliberately NOT the fresh-init value.
+    let c = cfg();
+    let mut init = qwen3::init_weights(&c, 3);
+    let marked: Vec<String> = init.keys().filter(|k| k.ends_with("attn.q_norm.weight")).cloned().collect();
+    assert!(!marked.is_empty(), "the fixture needs a norm gain to mark");
+    for name in &marked {
+        init.insert(name.clone(), vec![0.5f32; init[name].len()]);
+    }
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+        c.param_list().into_iter().map(|(name, n)| (name.clone(), vec![n as u64], init[&name].clone())).collect();
+    checkpoint::save(base.to_str().expect("utf-8 path"), c.to_json(), &tensors);
+
+    let tok = byte_tokenizer();
+    let rollout = RolloutParams { max_new: 8, sample: SampleParams::greedy(), eos: None };
+    let work = dir.join("work");
+    let mut learner: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+        ModelLearner::new(&base, &work, &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("learner");
+    let owned = rows();
+    let row_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    learner.train(&row_refs, 3);
+
+    let trained = checkpoint::load(work.join("candidate.safetensors").to_str().expect("utf-8 path"));
+    let got = trained.by_role("");
+    let gains = &got[&marked[0]];
+    // LoRA freezes the base, so a marked gain must come through untouched.
+    // Even under full fine-tuning it could not have become exactly 1.0.
+    assert!(
+        gains.iter().all(|g| (g - 0.5).abs() < 1e-3),
+        "the candidate's {} is {:?}, not the base's 0.5 - training started from fresh weights, not from what is served",
+        marked[0],
+        &gains[..gains.len().min(4)]
+    );
+}

@@ -187,12 +187,26 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
         std::fs::write(dir.join("meta.json"), meta.to_json())
     }
 
-    /// Train into `out` and return the adapter tensors from the result.
+    /// Train into `out`, STARTING FROM WHAT IS CURRENTLY SERVED, and return
+    /// the adapter tensors from the result.
+    ///
+    /// The incumbent is the starting point, and saying so explicitly is
+    /// load-bearing. `model::fit` starts from `out` if it exists and from
+    /// fresh random weights otherwise, which for a reader means the first
+    /// episode trains a randomly initialised model and every later one
+    /// resumes from that - a run that reports promotions, retention and a
+    /// battery about a network that never saw the pretrained weights. There
+    /// is no symptom at the call site: the numbers all have the right shape.
+    ///
+    /// A previous candidate at `out` is NOT a starting point either. It may
+    /// be one the gate refused, and resuming from it would carry refused
+    /// training forward, which is the one thing the gate exists to stop.
     fn fit_into(&self, rows: &[&str], dir: &Path, out: &Path, seed: u64) -> std::io::Result<Vec<u8>> {
         self.write_dataset(rows, dir)?;
         let mut opts = self.fit.clone();
         opts.seed = seed;
-        model::fit::<M>(dir, self.cfg.clone(), &opts, Some(out))?;
+        let served = checkpoint::load(self.incumbent.to_str().expect("utf-8 path"));
+        model::fit_from::<M>(dir, self.cfg.clone(), &opts, Some(out), &served.by_role(""))?;
         adapter_bytes::<M>(out, &self.work.join("adapter.safetensors"), self.rank, self.alpha)
     }
 }

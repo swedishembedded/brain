@@ -476,6 +476,57 @@ pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Pa
     fit_with(model, obj, opts, out)
 }
 
+/// [`fit`], starting from WEIGHTS THE CALLER SUPPLIES.
+///
+/// [`fit`] has exactly two starting points: an existing checkpoint at `out`,
+/// or fresh random initialisation. That is right for a training job that
+/// owns its output path and either starts or resumes. It is wrong for a
+/// caller fine-tuning a PRETRAINED model into a new file, which is neither:
+/// such a caller gets random initialisation and silently trains from
+/// scratch, with nothing in the logs to say so but a missing "resuming from"
+/// line.
+///
+/// `init` is the starting point, and the architecture comes from `cfg`, so a
+/// fine-tune can be re-shaped (a shorter training window than the base was
+/// exported with, say) in a way the resume path deliberately refuses.
+/// Tensors absent from `init` fall back to the architecture's own fresh
+/// initialisation - which is what a LoRA overlay needs, since the base
+/// checkpoint has no `.lora_a`/`.lora_b` in it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fit_from<M: Model>(
+    dir: &Path,
+    cfg: M::Config,
+    opts: &FitOpts,
+    out: Option<&Path>,
+    init: &std::collections::HashMap<String, Vec<f32>>,
+) -> std::io::Result<(f32, f32)> {
+    let loaded = load(dir, opts)?;
+    let cfg = cfg.finalize_for_dataset(loaded.vocab, opts.block_size);
+    let mut weights = M::init_weights(&cfg, opts.seed);
+    for (name, values) in init {
+        // Only what the architecture actually has, and only at the shape it
+        // has it: a tensor the config sized differently is the caller
+        // handing over a different architecture, and overwriting silently
+        // would train a model nobody described.
+        match weights.get(name) {
+            Some(slot) if slot.len() == values.len() => {
+                weights.insert(name.clone(), values.clone());
+            }
+            Some(slot) => {
+                return Err(std::io::Error::other(format!(
+                    "fit_from: {name} is {} values in the supplied weights and {} in this config",
+                    values.len(),
+                    slot.len()
+                )))
+            }
+            None => {}
+        }
+    }
+    let model = M::new(cfg, opts.batch_size, opts.block_size, &weights);
+    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos };
+    fit_with(model, obj, opts, out)
+}
+
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
 /// Context is cropped to the model's block size. `temperature <= 0` selects
 /// greedy argmax; `top_k = 0` disables top-k filtering. A thin wrapper over
