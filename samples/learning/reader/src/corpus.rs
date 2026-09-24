@@ -363,6 +363,35 @@ pub fn write(dir: &Path, a: &Tool, b: &Tool) -> std::io::Result<BTreeMap<String,
     Ok(labels)
 }
 
+/// The labels a corpus was written with, read back from the corpus itself.
+///
+/// The selftest checks verdicts against these, and reads them rather than
+/// regenerating the corpus from a seed: a regeneration would overwrite the
+/// very documents a finished run was about, and under the wrong seed it
+/// would replace them with another tool's while still reporting a verdict.
+/// The labels on disk belong to the corpus that was actually read.
+pub fn labels(dir: &Path) -> std::io::Result<BTreeMap<String, Expect>> {
+    let path = dir.join("labels.json");
+    let raw = std::fs::read_to_string(&path)?;
+    let mut out = BTreeMap::new();
+    for line in raw.lines() {
+        let line = line.trim().trim_end_matches(',');
+        let Some((k, v)) = line.split_once(':') else { continue };
+        let (k, v) = (k.trim().trim_matches('"'), v.trim().trim_matches('"'));
+        let expect = match v {
+            "promote" => Expect::Promote,
+            "refuse" => Expect::Refuse,
+            "either" => Expect::Either,
+            _ => continue,
+        };
+        out.insert(k.to_string(), expect);
+    }
+    if out.is_empty() {
+        return Err(std::io::Error::other(format!("{}: no labels, so there is nothing to check verdicts against", path.display())));
+    }
+    Ok(out)
+}
+
 /// The labels file, written without a serialisation dependency: it is a flat
 /// map of strings to one of three words.
 fn serde_json_labels(labels: &BTreeMap<String, Expect>) -> String {
@@ -386,6 +415,29 @@ mod tests {
 
     fn tool() -> Tool {
         Tool::generate(42)
+    }
+
+    /// The selftest's labels come from the corpus that was read, so they
+    /// must round-trip through the file and reading them must leave that
+    /// corpus untouched.
+    #[test]
+    fn labels_are_read_back_from_the_corpus_without_rewriting_it() {
+        let dir = std::env::temp_dir().join(format!("sample-reader-labels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Tool::generate(7);
+        let b = Tool::generate_disjoint(8, &[&a]);
+        let written = write(&dir, &a, &b).expect("corpus");
+
+        let one = std::fs::read(dir.join("learn/a-manual.txt")).expect("an episode");
+        let read_back = labels(&dir).expect("labels");
+        assert_eq!(read_back, written, "the labels on disk are the labels the run was written with");
+        assert_eq!(one, std::fs::read(dir.join("learn/a-manual.txt")).expect("an episode"), "reading labels must not rewrite the corpus");
+
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        std::fs::write(empty.join("labels.json"), "{}\n").expect("write");
+        assert!(labels(&empty).is_err(), "a corpus with no labels must say so rather than check nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The claim this whole sample rests on: the tool did not exist until

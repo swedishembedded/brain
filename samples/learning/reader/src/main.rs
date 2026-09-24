@@ -41,7 +41,7 @@ usage: sample-learning-reader <verb> [options]
         invent two tools and write the corpus, its adversarial lanes and
         their labels. Nothing else needs preparing.
 
-  battery  --model REF --run-dir DIR [--corpus DIR] [--seed N]
+  battery  --model REF --run-dir DIR [--seed N]
         score the held-out tasks against what is currently served. Run it
         before reading and again after: the difference is the result.
 
@@ -83,6 +83,16 @@ impl Args {
             None => Ok(default),
             Some(v) => v.parse().map_err(|e| format!("{flag}: {e}")),
         }
+    }
+    /// Refuse anything the verb did not understand. Every flag this sample
+    /// has selects which run, which seed or which corpus a number is about,
+    /// so one that fell through to a default would report a believable
+    /// number about a different run than the one asked for.
+    fn finish(&self) -> Result<(), String> {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        Err(format!("not understood: {}\n\n{USAGE}", self.0.join(" ")))
     }
 }
 
@@ -132,6 +142,7 @@ fn tools(seed: u64) -> (Tool, Tool) {
 fn generate(a: &mut Args) -> Result<ExitCode, String> {
     let dir = a.path("--corpus", "corpus");
     let seed = a.number("--seed", 1)?;
+    a.finish()?;
     let (ta, tb) = tools(seed);
     let labels = corpus::write(&dir, &ta, &tb).map_err(|e| format!("{}: {e}", dir.display()))?;
     println!("invented {} and {}, {} subcommands between them", ta.name, tb.name, ta.commands.len() + tb.commands.len());
@@ -149,6 +160,7 @@ fn battery(a: &mut Args) -> Result<ExitCode, String> {
     let model = a.take("--model").ok_or("battery needs --model")?;
     let run_dir = a.path("--run-dir", "run");
     let seed = a.number("--seed", 1)?;
+    a.finish()?;
     let tasks = battery_tasks(seed);
 
     let reader = ContinualReader::from_pretrained(&model).run_dir(&run_dir).seed(seed);
@@ -180,6 +192,7 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
     let run_dir = a.path("--run-dir", "run");
     let seed = a.number("--seed", 1)?;
     let until = a.take("--until").map(|v| v.parse::<usize>().map_err(|e| format!("--until: {e}"))).transpose()?;
+    a.finish()?;
 
     let mut reader = ContinualReader::from_pretrained(&model).run_dir(&run_dir).corpus(&corpus_dir).seed(seed);
     if let Some(n) = until {
@@ -195,6 +208,7 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
 
 fn report(a: &mut Args) -> Result<ExitCode, String> {
     let run_dir = a.path("--run-dir", "run");
+    a.finish()?;
     let rows = ContinualReader::from_pretrained("unused").run_dir(&run_dir).ledger().map_err(|e| e.to_string())?;
     if rows.is_empty() {
         println!("nothing read yet");
@@ -220,9 +234,13 @@ fn report(a: &mut Args) -> Result<ExitCode, String> {
 fn selftest(a: &mut Args) -> Result<ExitCode, String> {
     let corpus_dir = a.path("--corpus", "corpus");
     let run_dir = a.path("--run-dir", "run");
-    let seed = a.number("--seed", 1)?;
-    let (ta, tb) = tools(seed);
-    let labels = corpus::write(&corpus_dir, &ta, &tb).map_err(|e| format!("{}: {e}", corpus_dir.display()))?;
+    a.finish()?;
+    // The labels of the corpus that was READ, taken from the corpus itself.
+    // Regenerating them from a seed would overwrite the documents the run is
+    // about, and under a seed other than the one it was generated with it
+    // would replace them with a different tool's while still printing a
+    // verdict about this run.
+    let labels = corpus::labels(&corpus_dir).map_err(|e| format!("{}: {e}", corpus_dir.display()))?;
 
     let rows = ContinualReader::from_pretrained("unused").run_dir(&run_dir).ledger().map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -278,5 +296,33 @@ fn selftest(a: &mut Args) -> Result<ExitCode, String> {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every number this sample reports is about a particular seed and a
+    /// particular run directory. A misspelled flag that fell through to a
+    /// default would produce a plausible number about the wrong run, which
+    /// is worse than no number at all.
+    #[test]
+    fn a_misspelled_flag_is_refused_rather_than_silently_defaulted() {
+        let dir = std::env::temp_dir().join(format!("sample-reader-unknown-flag-{}", std::process::id()));
+        let argv = vec!["generate".to_string(), "--corpus".to_string(), dir.to_string_lossy().into_owned(), "--seeed".to_string(), "2".to_string()];
+        let err = run(argv).expect_err("an unknown flag must not be ignored");
+        assert!(err.contains("--seeed"), "the message must name what was not understood: {err}");
+        assert!(!dir.exists(), "a refused invocation must not have written anything");
+    }
+
+    /// The stay-silent half: the flags a verb documents are accepted.
+    #[test]
+    fn the_documented_flags_of_a_verb_are_accepted() {
+        let dir = std::env::temp_dir().join(format!("sample-reader-args-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let argv = vec!["generate".to_string(), "--corpus".to_string(), dir.to_string_lossy().into_owned(), "--seed".to_string(), "2".to_string()];
+        run(argv).expect("the documented flags are accepted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
