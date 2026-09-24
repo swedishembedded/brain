@@ -28,10 +28,13 @@
 
 mod corpus;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use brain::{BatteryTask, ContinualReader, LedgerFacts};
+use brain::artifact;
+use brain::qa::{self, Candidate, Distil, Passage, Verdict};
+use brain::{BatteryTask, ContinualReader, LedgerFacts, TextGenerationPipeline};
 use corpus::{Expect, Tool};
 
 const USAGE: &str = "\
@@ -60,6 +63,16 @@ usage: sample-learning-reader <verb> [options]
 
         Run a control into its OWN run directory: it is a different arm, not
         a continuation of the real one.
+
+  distil   --corpus DIR --out DIR --model REF [--seed N] [--per-passage N]
+        turn the corpus into question/answer pairs the model can be TRAINED
+        to answer, and keep only the ones whose answer actually runs.
+
+        Writes one artefact per stage into --out, so every step can be read
+        rather than trusted: passages.jsonl, replies.jsonl (what the model
+        said about each passage, including the ones that yielded nothing),
+        candidates.jsonl (the pairs read out of those), checked.jsonl (what
+        the tool said about each) and accepted.jsonl (what survived).
 
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
@@ -130,6 +143,7 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
         "generate" => generate(&mut a),
         "battery" => battery(&mut a),
         "read" => read(&mut a),
+        "distil" => distil(&mut a),
         "report" => report(&mut a),
         "selftest" => selftest(&mut a),
         other => Err(format!("unknown verb {other:?}\n\n{USAGE}")),
@@ -274,6 +288,130 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
         // round has no backward transfer, and printing nothing there is how
         // an unanswered clause gets read as a passed one.
         None => println!("bwt UNMEASURED: {learned} episodes learned, none revisited yet - not a backward transfer of zero"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Split a document into the units a question can be asked about.
+///
+/// The corpus's manual pages are one subcommand each, separated by a blank
+/// line, so that is the unit. Reading a particular corpus's shape is the
+/// sample's job precisely because it is particular: the SDK cannot guess it,
+/// and guessing wrong makes passages no question can be answered from.
+fn passages_of(text: &str, source: &str, tool: &Tool) -> Vec<Passage> {
+    text.split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| {
+            // The subcommand a page documents is its identity, and the thing
+            // an answer drawn from it has to be about.
+            let head = p.lines().next().unwrap_or_default();
+            let name = head.split_whitespace().nth(1)?;
+            tool.command(name)?;
+            Some(Passage { id: name.to_string(), source: source.to_string(), text: p.to_string() })
+        })
+        .collect()
+}
+
+/// The oracle: run the answer, and require it to be about the passage it came
+/// from.
+///
+/// Two ways a generated pair fails, and they are different failures. An
+/// answer the tool refuses is a model that wrote something that is not a
+/// command. An answer that runs but invokes a DIFFERENT subcommand is a model
+/// that answered a question about material it was not shown - fluent, valid,
+/// and not grounded in the passage.
+fn verify(tool: &Tool, c: &Candidate) -> Verdict {
+    let command = command_in(&c.answer, tool);
+    match tool.run(&command) {
+        Err(why) => Verdict::Reject { reason: format!("{why:?}") },
+        Ok(outcome) => {
+            let invoked = command.split_whitespace().nth(1).unwrap_or_default();
+            if invoked != c.passage {
+                return Verdict::Reject {
+                    reason: format!("runs, but invokes {invoked:?} and the passage is about {:?}", c.passage),
+                };
+            }
+            Verdict::Accept { evidence: outcome.lines.last().cloned().unwrap_or_default() }
+        }
+    }
+}
+
+fn distil(a: &mut Args) -> Result<ExitCode, String> {
+    let corpus_dir = a.path("--corpus", "corpus");
+    let out_dir = a.path("--out", "distil");
+    let model = a.take("--model").ok_or("distil needs --model")?;
+    let seed = a.number("--seed", 1)?;
+    let per_passage = a.number("--per-passage", 4)? as usize;
+    a.finish()?;
+
+    let (tool, _) = tools(seed);
+
+    // Stage 1: the source material, cut into units a question can be asked
+    // about. Only the lanes that document the tool - the adversarial lanes
+    // exist to be refused by the reader, not to be asked about.
+    let mut passages = Vec::new();
+    for rel in ["learn/a-manual.txt", "learn/b-manual.txt", "rare/a-seldom.txt"] {
+        let path = corpus_dir.join(rel);
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        passages.extend(passages_of(&text, rel, &tool));
+    }
+    if passages.is_empty() {
+        return Err(format!("{}: no manual pages to ask about", corpus_dir.display()));
+    }
+    artifact::write_jsonl(out_dir.join("passages.jsonl"), &passages).map_err(|e| e.to_string())?;
+    println!("passages  {:>4}  from {}", passages.len(), corpus_dir.display());
+
+    // Stage 2: what the model proposes. Nothing here is believed yet.
+    let pipeline = TextGenerationPipeline::from_pretrained(&model).map_err(|e| e.to_string())?;
+    let distil = Distil::with(pipeline)
+        .seed(seed)
+        .per_passage(per_passage)
+        .instruction(format!(
+            "The reference material above is one subcommand's manual page for a command-line tool called {}. \
+             Write questions a user might ask about how to USE that subcommand, and for each the exact \
+             command line that answers it, taken only from the material. Every answer must start with {} \
+             and must only use flags the material lists. Reply with nothing but pairs in this form:\nQ: <question>\nA: <command>",
+            tool.name, tool.name
+        ));
+    let replies = distil.ask(&passages).map_err(|e| e.to_string())?;
+    artifact::write_jsonl(out_dir.join("replies.jsonl"), &replies).map_err(|e| e.to_string())?;
+    let candidates: Vec<Candidate> = replies.iter().flat_map(|r| qa::parse_pairs(&r.passage, &r.raw)).collect();
+    artifact::write_jsonl(out_dir.join("candidates.jsonl"), &candidates).map_err(|e| e.to_string())?;
+    let silent = replies.iter().filter(|r| r.pairs == 0).count();
+    println!("proposed  {:>4}  question/answer pairs", candidates.len());
+    if silent > 0 {
+        // Named, because a passage that yielded nothing is the one worth
+        // reading and the easiest one to not notice.
+        println!("  {silent} of {} passages yielded none: {}", replies.len(), replies.iter().filter(|r| r.pairs == 0).map(|r| r.passage.as_str()).collect::<Vec<&str>>().join(", "));
+    }
+
+    // Stage 3: what the tool says about each. Both outcomes are written: the
+    // refusals are the evidence that the checker did anything.
+    let checked = qa::check_all(candidates, &|c: &Candidate| verify(&tool, c));
+    artifact::write_jsonl(out_dir.join("checked.jsonl"), &checked).map_err(|e| e.to_string())?;
+    let (kept, tally) = qa::accepted(&checked);
+    artifact::write_jsonl(out_dir.join("accepted.jsonl"), &kept).map_err(|e| e.to_string())?;
+    println!("verified  {:>4}  of {} ran and were about their own passage ({:.0}%)", tally.accepted, tally.offered, tally.rate() * 100.0);
+
+    // Why the rest were refused, in the caller's own words, most common
+    // first - the number that says whether to fix the generator or the
+    // prompt.
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for c in checked.iter() {
+        if let Verdict::Reject { reason } = &c.verdict {
+            *reasons.entry(reason.split(" {").next().unwrap_or(reason).to_string()).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(String, usize)> = reasons.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    for (reason, n) in ranked.iter().take(8) {
+        println!("  refused {n:>3}  {reason}");
+    }
+    println!("\nwrote {}", out_dir.display());
+    if kept.is_empty() {
+        println!("nothing survived verification: there is no training set here, and that is the result");
+        return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -88,6 +88,26 @@ pub struct Candidate {
     pub raw: String,
 }
 
+/// What the model said about one passage, before anything was parsed out of
+/// it.
+///
+/// Written for EVERY passage, including the ones that yielded nothing. A
+/// passage that produced no candidates is the most important one to be able
+/// to look at, and without this it is the only one that leaves no trace: the
+/// candidates carry their own raw text, so the passages that worked are
+/// recorded and the ones that did not are invisible.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    pub passage: String,
+    /// Exactly what the model was asked. The first thing to look at when the
+    /// answers are bad, and not otherwise recoverable once the run is over.
+    pub prompt: String,
+    pub raw: String,
+    /// How many pairs were read out of `raw`. Zero is the case this record
+    /// exists for.
+    pub pairs: usize,
+}
+
 /// What a caller's checker decided about one candidate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verdict {
@@ -231,23 +251,35 @@ impl Distil {
         format!("{}\n\n---\n{}\n---\n\n{}\n\nWrite up to {} pairs.", "Reference material:", passage.text, self.instruction, self.per_passage)
     }
 
-    /// Ask the model about every passage and parse what it wrote.
+    /// Ask the model about every passage, keeping what it said whether or
+    /// not anything could be read out of it.
     ///
-    /// A passage the model answers unusably yields no candidates rather than
-    /// an error: one bad passage in a corpus is not a reason to fail the run,
-    /// and the count of passages that produced nothing is itself a signal
-    /// worth reading off the artefact.
-    pub fn generate(&self, passages: &[Passage]) -> Result<Vec<Candidate>> {
-        let mut out = Vec::new();
+    /// One [`Reply`] per passage, always. A passage the model answers
+    /// unusably is not an error - one bad passage in a corpus is no reason
+    /// to fail a run - but it must not be silent either, or the passages
+    /// that failed are exactly the ones with no record.
+    pub fn ask(&self, passages: &[Passage]) -> Result<Vec<Reply>> {
+        let mut out = Vec::with_capacity(passages.len());
         for (i, p) in passages.iter().enumerate() {
+            let prompt = self.prompt_for(p);
+            // Thinking off: this stage has a token budget and wants the
+            // answer, not the deliberation that would consume it.
             let opts = TextGenerationOptions::new()
                 .max_new_tokens(self.max_new)
                 .temperature(0.0)
+                .thinking(false)
                 .seed(self.seed.wrapping_add(i as u64));
-            let raw = self.model.generate_with(&self.prompt_for(p), opts)?.text;
-            out.extend(parse_pairs(&p.id, &raw));
+            let raw = self.model.generate_with(&prompt, opts)?.text;
+            let pairs = parse_pairs(&p.id, &raw).len();
+            out.push(Reply { passage: p.id.clone(), prompt, raw, pairs });
         }
         Ok(out)
+    }
+
+    /// [`Distil::ask`] and then [`parse_pairs`], for a caller that does not
+    /// want to keep the replies.
+    pub fn generate(&self, passages: &[Passage]) -> Result<Vec<Candidate>> {
+        Ok(self.ask(passages)?.iter().flat_map(|r| parse_pairs(&r.passage, &r.raw)).collect())
     }
 }
 
@@ -355,5 +387,14 @@ mod tests {
     #[test]
     fn an_empty_pass_has_a_rate_of_zero() {
         assert_eq!(Yield::default().rate(), 0.0);
+    }
+
+    /// The record that exists for the passages that FAILED. Without it the
+    /// only passages with a trace are the ones that worked.
+    #[test]
+    fn a_reply_records_the_prompt_and_the_text_even_when_nothing_parsed() {
+        let r = Reply { passage: "p1".into(), prompt: "ask".into(), raw: "no pairs here".into(), pairs: 0 };
+        assert_eq!(parse_pairs(&r.passage, &r.raw).len(), r.pairs, "the count is of what the parser found");
+        assert!(!r.prompt.is_empty(), "and the prompt is kept, since it is not recoverable afterwards");
     }
 }

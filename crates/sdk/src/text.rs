@@ -96,6 +96,7 @@ pub struct TextGenerationOptions {
     seed: Option<u64>,
     stop: Vec<String>,
     chat: Option<bool>,
+    thinking: Option<bool>,
 }
 
 impl TextGenerationOptions {
@@ -146,6 +147,17 @@ impl TextGenerationOptions {
         self
     }
 
+    /// Whether a hybrid reasoning model deliberates before answering.
+    ///
+    /// On by default, which is right for a chat turn and wrong for anything
+    /// with a token budget: the model spends it inside `<think>` and never
+    /// reaches the answer. A caller extracting data from a model wants the
+    /// answer.
+    pub fn thinking(mut self, on: bool) -> Self {
+        self.thinking = Some(on);
+        self
+    }
+
     fn into_invocation(self, prompt: &str) -> Result<capability::Invocation> {
         let mut inv = capability::Invocation::new().set("prompt", json!(prompt));
         if let Some(v) = self.max_new_tokens {
@@ -169,6 +181,9 @@ impl TextGenerationOptions {
         }
         if let Some(v) = self.chat {
             inv = inv.set("chat", json!(v));
+        }
+        if let Some(v) = self.thinking {
+            inv = inv.set("enable_thinking", json!(v));
         }
         Ok(inv)
     }
