@@ -150,7 +150,10 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
             let c = checkpoint::load(self.incumbent.to_str().expect("utf-8 path"));
             let cfg = M::Config::from_json(&c.header["config"]);
             let init = c.by_role("");
-            self.cached = Some(M::new(cfg.clone(), 1, cfg.block_size(), &init));
+            // Only `loss` reads this, and a loss is one forward pass. The
+            // training shape would carry the backward scratch and a
+            // per-layer copy of every activation for a pass this never runs.
+            self.cached = Some(M::new_inference(cfg.clone(), 1, cfg.block_size(), &init));
         }
         self.cached.as_ref().expect("just built")
     }

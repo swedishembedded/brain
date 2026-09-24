@@ -325,7 +325,11 @@ pub fn decode_checkpoint<M: Model>(path: &Path, tasks: &[Task], verifier: &dyn V
     let c = checkpoint::load(path.to_str().expect("utf-8 path"));
     let cfg = M::Config::from_json(&c.header["config"]);
     let init = c.by_role("");
-    let model = M::new(cfg.clone(), 1, cfg.block_size(), &init);
+    // Forward-only: this decodes and reads logits, and never runs a
+    // backward pass. A training-shaped build would allocate the backward
+    // scratch and a per-layer copy of every activation for it, which on a
+    // real model is most of the device memory the scoring pass asks for.
+    let model = M::new_inference(cfg.clone(), 1, cfg.block_size(), &init);
     let mut roll = ModelRollout::new(&model);
     let mut rng = Rng::new(0); // greedy: rollout::RolloutParams::sample must be SampleParams::greedy()
     let mut scores = Vec::with_capacity(tasks.len());

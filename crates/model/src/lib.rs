@@ -192,6 +192,25 @@ pub trait Model {
     where
         Self: Sized;
 
+    /// Build for FORWARD passes only, sized for batch `b` x seq `t`.
+    ///
+    /// [`Model::new`] builds the TRAINING shape: backward scratch, and one
+    /// copy of every per-layer activation, because a backward pass reads
+    /// every layer's. A caller that only ever asks for [`Model::logits_all`]
+    /// - scoring, evaluation, rollout - pays for both and reads neither, and
+    /// on a real model that is most of the allocation rather than a margin.
+    ///
+    /// Defaults to [`Model::new`], so a model with no separate inference
+    /// shape is correct without implementing it, and an implementation that
+    /// overrides it must return the same numbers: this is an allocation
+    /// decision, never a numerical one.
+    fn new_inference(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self
+    where
+        Self: Sized,
+    {
+        Self::new(cfg, b, t, init)
+    }
+
     /// Architecture-specific fresh weight initialization, deterministic for a
     /// fixed `seed`. The generic trainer needs this to construct a model from a
     /// bare config (this is the model's own `init_weights`, e.g. `gpt2::init`).

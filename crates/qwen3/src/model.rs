@@ -2788,6 +2788,17 @@ impl model::Model for Qwen {
     fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen::new(cfg, b, t, init)
     }
+    /// The same weights and the same forward arithmetic as [`Self::new`],
+    /// without the backward scratch or the per-layer copies of every
+    /// activation that only a backward pass reads. `new_impl` shares one set
+    /// of per-layer temporaries across layers when `train` is false, which is
+    /// where nearly all of the difference is: a 0.6B decoder at a 2048 block
+    /// asks the device for roughly 16 GiB through `new` and a small fraction
+    /// of that through here.
+    fn new_inference(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_shard(cfg, b, t, init, false, shard)
+    }
     fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)
     }

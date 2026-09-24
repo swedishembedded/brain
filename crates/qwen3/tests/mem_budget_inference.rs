@@ -37,7 +37,14 @@ use std::process::Command;
 /// memory classes so `charged_bytes()` is populated regardless of which
 /// backend (GPU or CPU JIT) the ambient device selection resolves to here.
 /// Returns the child's stdout; panics with its full output on failure.
+/// Two of these run in one binary and each spawns a child that builds a
+/// real 0.6B model on the device. Left to the harness's default threads they
+/// overlap, and the second one fails for want of memory the first is holding
+/// - a fact about the schedule, not about either build. One at a time.
+static ONE_CHILD_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn measure(helper: &str) -> String {
+    let _serialised = ONE_CHILD_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
     cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
@@ -94,4 +101,75 @@ fn child_measure_inference_charged_bytes() {
     let m = qwen3::Qwen::new_shard(cfg.clone(), 1, cfg.block_size, &init, false, shard);
     println!("WEIGHTS_ONLY={weights_only}");
     println!("CHARGED={}", m.gpu.charged_bytes());
+}
+
+/// The same gate over the SEAM a generic caller reaches for.
+///
+/// `Model::new` builds the training shape, and it is the only constructor
+/// the trait had: every generic consumer that merely scores or decodes -
+/// `rl::improve::decode_checkpoint`, and so the continual reader's whole
+/// battery - got the backward scratch and the per-layer activation copies
+/// through it, with no way to ask for anything else. `Model::new_inference`
+/// is that way, and this pins that the architecture actually overrides it
+/// rather than inheriting the default that forwards to `new`.
+#[test]
+fn the_generic_inference_seam_stays_under_the_same_budget() {
+    let out = measure("child_measure_trait_inference_charged_bytes");
+    let charged: u64 = marker(&out, "CHARGED").parse().expect("CHARGED must be a byte count");
+    let training: u64 = marker(&out, "TRAINING_ESTIMATE").parse().expect("TRAINING_ESTIMATE must be a byte count");
+    const GIB: u64 = 1 << 30;
+    assert!(
+        charged < 5 * GIB,
+        "Model::new_inference at Qwen3-0.6B scale requested {charged} bytes ({:.2} GiB); \
+         the trait default forwards to Model::new, which is the training shape",
+        charged as f64 / GIB as f64
+    );
+    assert!(
+        charged < training,
+        "new_inference ({charged}) must ask for less than the training build it exists to avoid ({training})"
+    );
+}
+
+#[test]
+#[ignore = "child process helper, driven by the_generic_inference_seam_stays_under_the_same_budget"]
+fn child_measure_trait_inference_charged_bytes() {
+    use model::Model;
+    let cfg = qwen3::QwenConfig::qwen3_0_6b();
+    let init = qwen3::init_weights(&cfg, 0);
+    let block = cfg.block_size;
+    let m = <qwen3::Qwen as Model>::new_inference(cfg.clone(), 1, block, &init);
+    println!("CHARGED={}", m.gpu().charged_bytes());
+    // The training shape's own demand, measured rather than asserted from a
+    // remembered number: `new` keeps one copy of every per-layer activation
+    // and the backward scratch beside it. Built at a SMALL block so the
+    // comparison can be made on a card this one would not fit on, and
+    // scaled to the block the inference build above used - the per-layer
+    // activations this is about are linear in it.
+    let small = 128u32;
+    let mut tiny = cfg.clone();
+    tiny.block_size = small;
+    let t = <qwen3::Qwen as Model>::new(tiny, 1, small, &init);
+    let scaled = t.gpu().charged_bytes().saturating_mul(u64::from(block) / u64::from(small));
+    println!("TRAINING_ESTIMATE={scaled}");
+}
+
+/// `new_inference` is an allocation decision and never a numerical one: the
+/// same weights through the same forward arithmetic must give the same
+/// logits, or every score taken through the cheaper build is about a
+/// different model than the one `new` would have scored.
+#[test]
+fn the_inference_build_computes_what_the_training_build_computes() {
+    use model::Model;
+    let cfg = qwen3::QwenConfig::tiny();
+    let init = qwen3::init_weights(&cfg, 7);
+    let tokens: Vec<u32> = (0..8u32).map(|i| i % cfg.vocab).collect();
+
+    let train = <qwen3::Qwen as Model>::new(cfg.clone(), 1, cfg.block_size, &init);
+    let infer = <qwen3::Qwen as Model>::new_inference(cfg.clone(), 1, cfg.block_size, &init);
+    let a = train.logits_all(&tokens);
+    let b = infer.logits_all(&tokens);
+    assert_eq!(a.len(), b.len(), "the two builds must produce the same logit shape");
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert!((x - y).abs() <= 1e-4, "logit {i} differs: {x} vs {y}");
+    }
 }
