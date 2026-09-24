@@ -379,6 +379,38 @@ pub fn load_safetensors(path: &str) -> io::Result<StModel> {
 /// and `card` (if any) via [`ModelCard::to_metadata`]. The write is atomic
 /// (tmp + rename), mirroring the custom-format `save`.
 #[cfg(not(target_arch = "wasm32"))]
+/// Rewrite a serialised file's header with its keys in sorted order.
+///
+/// `safetensors` writes `__metadata__` straight out of the `HashMap` it is
+/// handed, and a `HashMap`'s iteration order differs between instances, so
+/// two saves of identical content differ in their bytes. Anything that
+/// compares two checkpoints, hashes one for content addressing, or claims a
+/// training run reproduces would then be answering about key order rather
+/// than about content.
+///
+/// The keys and values are unchanged, so the re-serialised header is no
+/// longer than the original and the remaining room is the space padding
+/// `safetensors` already uses. A header that somehow does not fit is left
+/// exactly as written: a correct file with an arbitrary key order beats a
+/// corrupted one.
+fn canonical_header(mut out: Vec<u8>) -> io::Result<Vec<u8>> {
+    let Some(len_bytes) = out.get(..8) else { return Ok(out) };
+    let n = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes")) as usize;
+    let Some(header) = out.get(8..8 + n) else { return Ok(out) };
+    // `serde_json::Map` is a `BTreeMap` unless `preserve_order` is on, which
+    // this workspace deliberately leaves off, so parsing and re-emitting
+    // sorts the keys.
+    let parsed: serde_json::Value =
+        serde_json::from_slice(header).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("st: header: {e}")))?;
+    let mut sorted = serde_json::to_vec(&parsed).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("st: header: {e}")))?;
+    if sorted.len() > n {
+        return Ok(out);
+    }
+    sorted.resize(n, b' ');
+    out[8..8 + n].copy_from_slice(&sorted);
+    Ok(out)
+}
+
 pub fn save_safetensors(
     path: &str,
     tensors: &[(String, Vec<u64>, Vec<f32>)],
@@ -411,6 +443,7 @@ pub fn save_safetensors(
         .collect::<io::Result<_>>()?;
     let out = safetensors::serialize(views, Some(meta))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("st: {e}")))?;
+    let out = canonical_header(out)?;
 
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -523,6 +556,34 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    /// The same tensors and the same card must produce the same file. The
+    /// metadata goes through a `HashMap`, whose iteration order differs per
+    /// instance, so without canonicalising the header two identical saves
+    /// differ in their bytes - and every control that compares two artefacts
+    /// for equality, every content hash and every reproducibility claim over
+    /// a checkpoint would then be answering about key order rather than
+    /// about content.
+    #[test]
+    fn the_same_content_saved_twice_is_the_same_bytes() {
+        let tensors = vec![
+            ("b.weight".to_string(), vec![2u64, 2], vec![1.0f32, 2.0, 3.0, 4.0]),
+            ("a.weight".to_string(), vec![2u64], vec![5.0f32, 6.0]),
+        ];
+        let cfg = serde_json::json!({"rank": 4, "alpha": 8.0});
+        let (p1, p2) = (scratch("canon-1"), scratch("canon-2"));
+        save_safetensors(&p1, &tensors, &cfg, Some(&sample_card())).expect("save");
+        save_safetensors(&p2, &tensors, &cfg, Some(&sample_card())).expect("save");
+        let (a, b) = (std::fs::read(&p1).expect("read"), std::fs::read(&p2).expect("read"));
+        assert_eq!(a, b, "two saves of the same content must be the same bytes");
+
+        // And the file is still a safetensors file with its metadata intact,
+        // rather than one that only happens to compare equal.
+        let back = load_safetensors(&p1).expect("load");
+        assert!(back.card().is_some(), "the card survives canonicalisation");
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
     }
 
     fn sample_card() -> ModelCard {
