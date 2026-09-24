@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use audit::pool::{Pool, PoolConfig};
-use audit::reader::{Arm, Learner, Reader, ReaderConfig};
+use audit::reader::{Arm, ControlArm, Learner, Reader, ReaderConfig};
 use audit::acceptance::LedgerFacts;
 use audit::run::{LedgerRow, Manifest, Run, SCHEMA};
 use audit::stream::{EpisodeStream, StreamConfig};
@@ -260,6 +260,26 @@ impl ContinualReader {
         self
     }
 
+    /// Run the null-gate control: the same stream through the same gate,
+    /// with a coin deciding what carries forward. The gate's own verdict is
+    /// still recorded, so the two arms' promote rates are comparable.
+    ///
+    /// A real arm not separated from this beyond seed noise has a decorative
+    /// gate, and its promote rate says nothing about what it promoted.
+    pub fn null_gate(mut self, seed: u64) -> Self {
+        self.cfg.arm = ControlArm::NullGate { seed };
+        self
+    }
+
+    /// Run the shuffled-label control: each episode trained on its own rows
+    /// and gated against ANOTHER episode's frozen probes. Training on one
+    /// document should not make the model better at questions about a
+    /// different one, so this arm should promote at chance.
+    pub fn shuffled_labels(mut self, seed: u64) -> Self {
+        self.cfg.arm = ControlArm::ShuffledLabels { seed };
+        self
+    }
+
     /// Read the corpus, resuming if the run directory has been read before.
     pub fn read(&self) -> Result<ReadOutcome> {
         let (f, _) = self.dispatch()?;
@@ -389,7 +409,7 @@ fn read_for<A: StudyArch>(i: &Inputs) -> Result<ReadOutcome> {
         }
         let Some(ep) = stream.next() else { break };
         let row = reader.step(&ep);
-        if row.outcome.promoted() {
+        if row.carried {
             promoted += 1;
             // What the gate promoted is what must be served from here on.
             reader.learner_mut().promote().map_err(|e| Error::Backend(e.to_string()))?;

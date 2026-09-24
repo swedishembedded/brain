@@ -368,34 +368,11 @@ impl<C: Curriculum> Environment for PooledEnv<'_, C> {
 }
 
 /// What decides which checkpoint carries forward into the next cycle.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum GatePolicy {
-    /// The real [`crate::gate::gate`] decision decides.
-    Real,
-    /// Arm 4: the real gate still runs and is still recorded, but a coin flip
-    /// decides what carries forward. If Arm 1 is not separated from this
-    /// beyond seed noise, the gate is decorative.
-    CoinFlip { seed: u64 },
-}
-
-impl GatePolicy {
-    /// Whether cycle `k`'s candidate actually carries forward. Deterministic
-    /// for a fixed seed, so an Arm-4 run is reproducible.
-    pub fn applies(&self, decision: Decision, cycle: usize) -> bool {
-        match *self {
-            GatePolicy::Real => decision == Decision::Promote,
-            GatePolicy::CoinFlip { seed } => coin(seed, cycle),
-        }
-    }
-}
-
-/// SplitMix64 finalizer over `(seed, cycle)` - a reproducible coin.
-fn coin(seed: u64, cycle: usize) -> bool {
-    let mut z = seed.wrapping_add((cycle as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) & 1) == 1
-}
+///
+/// `promote::gate`'s, unchanged: the continual reader needs the same null
+/// arm from below this crate, and two coins would make the two control arms
+/// incomparable.
+pub use promote::gate::GatePolicy;
 
 /// Everything about a study run that is not architecture-specific.
 #[derive(Clone, Debug)]

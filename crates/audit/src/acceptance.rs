@@ -407,6 +407,7 @@ mod ledger_tests {
             source: format!("lane/doc{ep}.txt"),
             stage: stage.to_string(),
             promoted,
+            carried: promoted,
             cause: cause.map(str::to_string),
             audited: 2,
             audit_decodes: audited,

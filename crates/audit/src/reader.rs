@@ -149,10 +149,41 @@ pub struct Row {
     pub audited: usize,
     /// Probe decodes spent on the audit, for one arm.
     pub audit_decodes: usize,
+    /// What actually carried forward, which is the real gate's verdict
+    /// under every arm but [`ControlArm::NullGate`], where a coin decides.
+    /// Recorded beside `outcome` rather than instead of it: the two arms are
+    /// only comparable if the real gate's decision is kept in both.
+    pub carried: bool,
     /// What the oracle said, when it was asked.
     pub diagnosis: Option<Diagnosis>,
     /// What was done about it.
     pub action: Option<Action>,
+}
+
+/// Which CONTROL arm a run is. One at a time: each answers a different
+/// question about whether the real arm's number means anything, and a run
+/// that changed two things at once answers neither.
+///
+/// Both are deliberately the same stream, the same seeds and the same
+/// budget as the real arm. A control that differs in anything else is
+/// measuring that instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlArm {
+    /// The reader as it ships.
+    #[default]
+    Real,
+    /// A coin decides what carries forward. The real gate still runs and its
+    /// verdict is still what the ledger records, so the two arms' promote
+    /// rates are directly comparable. If they are not separated beyond seed
+    /// noise, the gate is decorative.
+    NullGate { seed: u64 },
+    /// Each episode is gated against ANOTHER episode's frozen probes, while
+    /// still being trained on its own rows. The gate should then almost
+    /// never promote: training on one document does not make you better at
+    /// answering questions about a different one. A promote rate here near
+    /// the real arm's means the gate is responding to something other than
+    /// what the episode taught - the training run happening at all, say.
+    ShuffledLabels { seed: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -167,6 +198,10 @@ pub struct ReaderConfig {
     /// regime mixes half and half, which is 1.0.
     pub rehearsal_ratio: f64,
     pub seed: u64,
+    /// Which control arm this run is. [`ControlArm::Real`] by default, so a
+    /// caller that says nothing gets the reader rather than a control.
+    #[serde(default)]
+    pub arm: ControlArm,
 }
 
 impl Default for ReaderConfig {
@@ -180,6 +215,7 @@ impl Default for ReaderConfig {
             pool: PoolConfig::default(),
             rehearsal_ratio: 1.0,
             seed: 0,
+            arm: ControlArm::Real,
         }
     }
 }
@@ -316,11 +352,33 @@ impl<L: Learner> Reader<L> {
         }
     }
 
+    /// Under [`ControlArm::ShuffledLabels`], another banked episode's frozen
+    /// probes: the ones this episode will be gated against instead of its
+    /// own.
+    ///
+    /// `None` for every other arm, and for the first episode of a shuffled
+    /// run - there is nothing to borrow from yet, and inventing an empty
+    /// probe set would refuse it for a reason the arm is not about.
+    fn shuffled_probes(&self, id: &EpisodeId) -> Option<Vec<Probe>> {
+        let ControlArm::ShuffledLabels { seed } = self.cfg.arm else { return None };
+        let others: Vec<&EpisodeId> = self.bank.keys().filter(|k| *k != id).collect();
+        if others.is_empty() {
+            return None;
+        }
+        let pick = (promote::gate::coin(seed, self.episode as usize) as usize
+            + (self.episode as usize).wrapping_mul(2))
+            % others.len();
+        self.bank.get(others[pick]).map(|s| s.probes().to_vec())
+    }
+
     /// Read one episode.
     pub fn step(&mut self, ep: &Episode) -> Row {
         let row = |outcome: Outcome| Row {
             episode: ep.id.clone(),
             source: ep.source.clone(),
+            // Nothing that stopped before the gate carried anything, under
+            // any arm: the null coin replaces the gate, not the screen.
+            carried: false,
             outcome,
             audited: 0,
             audit_decodes: 0,
@@ -375,7 +433,15 @@ impl<L: Learner> Reader<L> {
             })
             .collect();
 
-        let own: Vec<&Probe> = probes.probes().iter().collect();
+        // The shuffled-label arm swaps the probes the GATE sees for another
+        // episode's, while the training rows below stay this episode's own.
+        // Nothing else about the step changes, so the two arms' promote
+        // rates are a comparison of one thing.
+        let borrowed = self.shuffled_probes(&ep.id);
+        let own: Vec<&Probe> = match &borrowed {
+            Some(p) => p.iter().collect(),
+            None => probes.probes().iter().collect(),
+        };
         let mut all: Vec<&Probe> = own.clone();
         for (_, block) in &audit_blocks {
             all.extend(block.iter());
@@ -429,7 +495,17 @@ impl<L: Learner> Reader<L> {
             &gate_cfg,
         );
 
-        let promoted = matches!(verdict, Verdict::Promoted(_));
+        // What the gate SAID is what the ledger records, under every arm.
+        // What carries forward is what the arm's policy allows, so the null
+        // arm's promote rate is comparable with the real one's rather than
+        // being a different measurement.
+        let decided = matches!(verdict, Verdict::Promoted(_));
+        let promoted = match self.cfg.arm {
+            ControlArm::NullGate { seed } => {
+                promote::gate::coin(seed, self.episode as usize)
+            }
+            _ => decided,
+        };
         if promoted {
             let id = AdapterId(ep.id.as_str().to_string());
             // A duplicate id can only mean the same CONTENT was promoted
@@ -465,6 +541,7 @@ impl<L: Learner> Reader<L> {
         Row {
             episode: ep.id.clone(),
             source: ep.source.clone(),
+            carried: promoted,
             outcome: Outcome::Decided(verdict),
             audited: audit_blocks.len(),
             audit_decodes: audit_blocks.iter().map(|(_, b)| b.len()).sum(),
@@ -529,6 +606,9 @@ mod tests {
         trainings: usize,
         oracles: usize,
         last_train_rows: usize,
+        /// The ids of the probes the gate was last scored against. The
+        /// shuffled-label arm is a claim about exactly this.
+        last_scored: Vec<String>,
     }
 
     impl Learner for Fake {
@@ -558,6 +638,7 @@ mod tests {
                 })
                 .collect();
             let answers = probes.iter().map(|p| p.expected.clone()).collect();
+            self.last_scored = probes.iter().map(|p| format!("{:?}", p.id)).collect();
             Scored { scores, mean_entropy: 2.0, answers }
         }
         fn joint_oracle(&mut self, _rows: &[&str], _probes: &[&Probe]) -> f64 {
@@ -778,5 +859,71 @@ mod tests {
             rows.into_iter().map(|w| (w.episode, w.outcome.stage(), w.audited, w.audit_decodes)).collect::<Vec<_>>()
         };
         assert_eq!(run(), run());
+    }
+    /// The null arm's whole job: the real gate still runs and is still
+    /// recorded, and a coin decides what carries forward. Without both
+    /// halves the two arms are not comparable - one would be measuring a
+    /// different quantity than the other.
+    #[test]
+    fn the_null_gate_arm_carries_the_coin_and_records_the_gate() {
+        let arm_cfg = |arm| ReaderConfig { arm, ..cfg() };
+        let run = |arm| {
+            let d = Dir::new();
+            let pool = Pool::create(&d.0, cfg().pool).expect("pool");
+            let mut r = Reader::new(arm_cfg(arm), Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() }, pool);
+            (0..12).map(|i| r.step(&episode(&format!("e{i}"), 50))).collect::<Vec<Row>>()
+        };
+
+        let real = run(ControlArm::Real);
+        let null = run(ControlArm::NullGate { seed: 11 });
+
+        assert_eq!(
+            real.iter().map(|w| w.outcome.stage()).collect::<Vec<_>>(),
+            null.iter().map(|w| w.outcome.stage()).collect::<Vec<_>>(),
+            "the null arm must run the same stream through the same gate; only what CARRIES may differ"
+        );
+        for w in &real {
+            assert_eq!(w.carried, w.outcome.promoted(), "under the real arm the gate is what carries");
+        }
+        let gated: Vec<bool> = null.iter().map(|w| w.outcome.promoted()).collect();
+        let coined: Vec<bool> = null.iter().map(|w| w.carried).collect();
+        assert_ne!(gated, coined, "a coin that agreed with the gate on all twelve would not be a control");
+        for (i, w) in null.iter().enumerate() {
+            let reached_gate = w.outcome.stage() == "gate";
+            let expect = reached_gate && promote::gate::coin(11, i + 1);
+            assert_eq!(w.carried, expect, "episode {i}: the coin decides what carries, and only past the gate");
+        }
+    }
+
+    /// The shuffled-label arm gates each episode against ANOTHER episode's
+    /// frozen probes while training on its own rows. What it must actually
+    /// do is substitute the probes - a run that quietly kept scoring the
+    /// episode's own would be the real arm wearing a different name.
+    #[test]
+    fn the_shuffled_label_arm_gates_against_another_episodes_probes() {
+        let d = Dir::new();
+        let pool = Pool::create(&d.0, cfg().pool).expect("pool");
+        let mut r = Reader::new(
+            ReaderConfig { arm: ControlArm::ShuffledLabels { seed: 5 }, ..cfg() },
+            Fake { loss: 1.5, wins: 30, oracle: 0.9, ..Default::default() },
+            pool,
+        );
+
+        // The first episode has nothing to borrow from, so it is scored
+        // against its own - stated in the arm's own doc rather than left to
+        // be discovered as an inconsistency.
+        let first = r.step(&episode("e0", 50));
+        assert!(first.outcome.promoted(), "the fixture's first episode promotes, so there is something in the bank to borrow");
+        let own_of_first: Vec<String> = r.learner().last_scored.clone();
+
+        let second = r.step(&episode("e1", 50));
+        assert_eq!(second.outcome.stage(), "gate", "the second episode must reach the gate for this to be about the gate");
+        let scored_for_second = r.learner().last_scored.clone();
+
+        let borrowed: Vec<&String> = scored_for_second.iter().filter(|p| own_of_first.contains(p)).collect();
+        assert!(
+            !borrowed.is_empty(),
+            "the second episode must be gated against the first's probes; scored {scored_for_second:?} against own {own_of_first:?}"
+        );
     }
 }

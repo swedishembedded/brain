@@ -100,6 +100,12 @@ pub struct LedgerRow {
     /// Which filter ended this episode.
     pub stage: String,
     pub promoted: bool,
+    /// What actually carried forward. Equal to `promoted` under the real
+    /// arm; under the null-gate arm a coin decided, and the two together are
+    /// what makes the arms comparable. Additive, so a ledger written before
+    /// this field existed still reads.
+    #[serde(default)]
+    pub carried: bool,
     /// Why, when there is a why. A rejection with no cause would make the
     /// ledger say less than the run knew.
     pub cause: Option<String>,
@@ -125,6 +131,7 @@ impl LedgerRow {
             source: row.source.to_string_lossy().into_owned(),
             stage: row.outcome.stage().to_string(),
             promoted: row.outcome.promoted(),
+            carried: row.carried,
             cause,
             audited: row.audited,
             audit_decodes: row.audit_decodes,
@@ -341,6 +348,7 @@ mod tests {
             source: "m.txt".to_string(),
             stage: stage.to_string(),
             promoted: stage == "gate",
+            carried: stage == "gate",
             cause: None,
             audited: 2,
             audit_decodes: 32,
@@ -453,6 +461,7 @@ mod tests {
         let r = Row {
             episode: EpisodeId::of("x"),
             source: PathBuf::from("noise.txt"),
+            carried: false,
             outcome,
             audited: 0,
             audit_decodes: 0,

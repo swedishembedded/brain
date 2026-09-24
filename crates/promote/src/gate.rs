@@ -144,6 +144,47 @@ pub struct GateReport {
 /// one to fail is reported as the [`Cause`] - every number still gets
 /// computed either way, so `GateReport` always carries the full picture
 /// regardless of which one rejected.
+/// What decides which candidate actually carries forward.
+///
+/// Lives here rather than with either consumer because BOTH the
+/// document study and the continual reader need the same null arm, and two
+/// coins with two seeds would make their control arms incomparable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GatePolicy {
+    /// The real [`gate`] decision decides.
+    Real,
+    /// The null arm: the real gate still runs and is still recorded, but a
+    /// coin decides what carries forward. A gated run that is not separated
+    /// from this beyond seed noise has a decorative gate - its promote rate
+    /// carries no information about what it promoted.
+    CoinFlip { seed: u64 },
+}
+
+impl Default for GatePolicy {
+    fn default() -> Self {
+        GatePolicy::Real
+    }
+}
+
+impl GatePolicy {
+    /// Whether step `k`'s candidate carries forward. Deterministic for a
+    /// fixed seed, so a null-gate run reproduces like any other.
+    pub fn applies(&self, decision: Decision, k: usize) -> bool {
+        match *self {
+            GatePolicy::Real => decision == Decision::Promote,
+            GatePolicy::CoinFlip { seed } => coin(seed, k),
+        }
+    }
+}
+
+/// SplitMix64 finalizer over `(seed, k)` - a reproducible coin.
+pub fn coin(seed: u64, k: usize) -> bool {
+    let mut z = seed.wrapping_add((k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) & 1) == 1
+}
+
 pub fn gate(input: &GateInput, cfg: &GateConfig) -> GateReport {
     let sign = crate::stats::sign_test(input.candidate_scores, input.incumbent_scores);
     let effect_size = mean(input.candidate_scores) - mean(input.incumbent_scores);

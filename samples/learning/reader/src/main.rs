@@ -46,8 +46,20 @@ usage: sample-learning-reader <verb> [options]
         before reading and again after: the difference is the result.
 
   read     --corpus DIR --run-dir DIR --model REF [--until N] [--seed N]
+           [--null-gate N | --shuffled-labels N]
         read the corpus, deciding per episode what is worth learning.
         Resumes if the run directory has been read before.
+
+        --null-gate N        control arm: a coin with seed N decides what
+                             carries forward. The real gate still runs and
+                             the ledger still records it, so this arm's
+                             promote rate is comparable with the real one's.
+        --shuffled-labels N  control arm: each episode is trained on its own
+                             rows and gated against ANOTHER episode's frozen
+                             probes. It should promote at chance.
+
+        Run a control into its OWN run directory: it is a different arm, not
+        a continuation of the real one.
 
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
@@ -192,12 +204,31 @@ fn read(a: &mut Args) -> Result<ExitCode, String> {
     let run_dir = a.path("--run-dir", "run");
     let seed = a.number("--seed", 1)?;
     let until = a.take("--until").map(|v| v.parse::<usize>().map_err(|e| format!("--until: {e}"))).transpose()?;
+    let null_gate = a.take("--null-gate").map(|v| v.parse::<u64>().map_err(|e| format!("--null-gate: {e}"))).transpose()?;
+    let shuffled = a.take("--shuffled-labels").map(|v| v.parse::<u64>().map_err(|e| format!("--shuffled-labels: {e}"))).transpose()?;
     a.finish()?;
+    // One arm at a time. Two controls at once answers neither question, and
+    // silently honouring the first would report the run as the other.
+    if null_gate.is_some() && shuffled.is_some() {
+        return Err("--null-gate and --shuffled-labels are different control arms; run one at a time, into its own run directory".to_string());
+    }
 
     let mut reader = ContinualReader::from_pretrained(&model).run_dir(&run_dir).corpus(&corpus_dir).seed(seed);
     if let Some(n) = until {
         reader = reader.until(n);
     }
+    if let Some(s) = null_gate {
+        reader = reader.null_gate(s);
+    }
+    if let Some(s) = shuffled {
+        reader = reader.shuffled_labels(s);
+    }
+    let arm = match (null_gate, shuffled) {
+        (Some(s), _) => format!("null-gate arm (coin seed {s})"),
+        (_, Some(s)) => format!("shuffled-labels arm (seed {s})"),
+        _ => "real arm".to_string(),
+    };
+    println!("{arm}");
     let out = reader.read().map_err(|e| e.to_string())?;
 
     println!("read {} episodes, promoted {}", out.episodes, out.promoted);
