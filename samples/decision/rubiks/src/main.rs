@@ -672,7 +672,7 @@ fn solve_by_search(
                     None => format!("more than {} moves from solved.", Solver::MAX_DEPTH),
                 }
             ),
-            rows: vec![Row { name: m.notation(), detail: m.short(), probability: 1.0, admissible: true }],
+            rows: vec![Row { name: m.notation(), detail: m.short(), probability: 1.0, readout: None, admissible: true }],
             picked: Some(0),
             played: Some(0),
             history: history.clone(),
