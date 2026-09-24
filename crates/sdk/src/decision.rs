@@ -746,7 +746,7 @@ impl DecisionPipeline {
         let mut rng = data::rng::Rng::new(seed);
         let tail = (steps / 10).max(1);
         let mut tail_sum = 0.0f32;
-        let batch = self.batch.max(1);
+        let batch = batch.max(1);
 
         for step in 0..steps {
             // The whole step's draws first, so the two arms consume the RNG
