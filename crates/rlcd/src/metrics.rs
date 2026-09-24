@@ -202,6 +202,144 @@ pub fn brier_score(probs: &[Vec<f32>], labels: &[usize]) -> f32 {
     (sum / probs.len() as f64) as f32
 }
 
+/// Mean cross-entropy against the oracle's own DISTRIBUTION:
+/// `mean_n -sum_i q_n[i] * ln p_n[i]`.
+///
+/// The soft-target counterpart of [`nll`], for a task whose targets are
+/// exact posteriors rather than realized labels. Collapsing such a target to
+/// `argmax` and scoring [`nll`] against it does not measure a weaker version
+/// of the same thing - it measures a DIFFERENT thing, and rewards the model
+/// for moving toward `[0, 1]` when the world says `[1/3, 2/3]`.
+///
+/// **Its floor is not zero.** A model that reproduces `q` exactly scores the
+/// mean entropy of `q`, which is the irreducible uncertainty the world
+/// actually has. Compare a run against that floor, never against 0; pair it
+/// with [`posterior_kl`], whose floor IS zero, when the excess over the
+/// oracle is the quantity of interest.
+pub fn soft_nll(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
+    assert_eq!(probs.len(), targets.len(), "one target distribution per row");
+    if probs.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = probs
+        .iter()
+        .zip(targets)
+        .map(|(p, q)| {
+            assert_eq!(p.len(), q.len(), "a row and its target must have the same arity");
+            q.iter()
+                .zip(p)
+                .map(|(&qi, &pi)| -(qi as f64) * (pi as f64).max(1e-12).ln())
+                .sum::<f64>()
+        })
+        .sum();
+    (sum / probs.len() as f64) as f32
+}
+
+/// Mean squared distance between the model's posterior and the oracle's:
+/// `mean_n sum_i (p_n[i] - q_n[i])^2`.
+///
+/// The soft-target counterpart of [`brier_score`], and zero exactly when the
+/// model reproduces the oracle. Against a one-hot `q` this reduces to
+/// [`brier_score`] term for term.
+pub fn posterior_error(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
+    assert_eq!(probs.len(), targets.len(), "one target distribution per row");
+    if probs.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = probs
+        .iter()
+        .zip(targets)
+        .map(|(p, q)| {
+            assert_eq!(p.len(), q.len(), "a row and its target must have the same arity");
+            p.iter()
+                .zip(q)
+                .map(|(&pi, &qi)| {
+                    let d = pi as f64 - qi as f64;
+                    d * d
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    (sum / probs.len() as f64) as f32
+}
+
+/// Mean `KL(oracle || model)` - how much belief the model is missing,
+/// in nats, with a floor of exactly zero.
+///
+/// This is [`soft_nll`] minus the oracle's own entropy, so it answers the
+/// question `soft_nll` cannot on its own: is this run's number large because
+/// the model is wrong, or because the world is genuinely uncertain.
+pub fn posterior_kl(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
+    assert_eq!(probs.len(), targets.len(), "one target distribution per row");
+    if probs.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = probs
+        .iter()
+        .zip(targets)
+        .map(|(p, q)| {
+            assert_eq!(p.len(), q.len(), "a row and its target must have the same arity");
+            q.iter()
+                .zip(p)
+                .filter(|(&qi, _)| qi > 0.0)
+                .map(|(&qi, &pi)| {
+                    let (qi, pi) = (qi as f64, (pi as f64).max(1e-12));
+                    qi * (qi / pi).ln()
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    (sum / probs.len() as f64) as f32
+}
+
+/// Top-label calibration against a known oracle: bin by the model's reported
+/// probability for the option it would REPORT, and compare each bin's mean
+/// against the oracle's own probability that that option is correct.
+///
+/// [`ece`] needs a realized `correct[i]` flag, which is a single Bernoulli
+/// draw from `q[argmax p]`. Where the oracle is known, that draw can be
+/// replaced by its mean - the same statistic with the sampling noise removed
+/// - and the metric then has the property [`ece`] does not: **a model that
+/// reproduces the oracle scores exactly zero.**
+///
+/// Feeding [`ece`] an entropy-derived "confidence" instead measures neither.
+/// `1 - H(p)/ln K` is a statement about how PEAKED a distribution is, not
+/// about how often the reported option is right, so a correctly uncertain
+/// model is scored as badly calibrated for being uncertain: on the
+/// device-diagnosis world an exact Bayesian oracle scores 0.646 that way,
+/// worse than the trained model it is supposed to bound.
+pub fn soft_ece(probs: &[Vec<f32>], targets: &[Vec<f32>], n_bins: usize) -> f32 {
+    assert_eq!(probs.len(), targets.len(), "one target distribution per row");
+    assert!(n_bins > 0, "at least one bin");
+    let n = probs.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum_conf = vec![0.0f64; n_bins];
+    let mut sum_true = vec![0.0f64; n_bins];
+    let mut count = vec![0usize; n_bins];
+    for (p, q) in probs.iter().zip(targets) {
+        assert_eq!(p.len(), q.len(), "a row and its target must have the same arity");
+        let top = p
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) })
+            .0;
+        let conf = p[top].clamp(0.0, 1.0);
+        let mut b = (conf * n_bins as f32).floor() as usize;
+        if b >= n_bins {
+            b = n_bins - 1; // conf == 1.0 lands in the last bin
+        }
+        sum_conf[b] += conf as f64;
+        sum_true[b] += q[top] as f64;
+        count[b] += 1;
+    }
+    (0..n_bins)
+        .filter(|&b| count[b] > 0)
+        .map(|b| (count[b] as f64 / n as f64) * ((sum_true[b] - sum_conf[b]) / count[b] as f64).abs())
+        .sum::<f64>() as f32
+}
+
 /// The selective-prediction risk-coverage curve: sorted by DESCENDING
 /// confidence, `(coverage, accuracy)` after keeping the top `coverage`
 /// fraction. `coverage` values are `1/n, 2/n, ..., 1.0`. Ties are broken by
@@ -294,6 +432,82 @@ pub fn failure_auroc(confidences: &[f32], correct: &[bool]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The device-diagnosis world's three exact posteriors, each appearing
+    /// twice - the shape of `samples/learning/rlcd`'s own held-out split.
+    fn oracle_rows() -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+        let q: Vec<Vec<f32>> = [
+            vec![0.8f32, 0.2],                       // no evidence yet
+            vec![1.0 / 3.0, 2.0 / 3.0],              // diagnostic: positive
+            vec![18.0 / 19.0, 1.0 / 19.0],           // diagnostic: negative
+        ]
+        .iter()
+        .flat_map(|d| [d.clone(), d.clone()])
+        .collect();
+        (q.clone(), q)
+    }
+
+    /// The property the hard-label metrics do not have, and the reason these
+    /// exist: a model that reproduces the oracle EXACTLY must be reported as
+    /// having nothing left to fix.
+    #[test]
+    fn an_exact_oracle_scores_zero_on_every_soft_metric() {
+        let (probs, targets) = oracle_rows();
+        assert!(posterior_error(&probs, &targets).abs() <= 1e-6);
+        assert!(posterior_kl(&probs, &targets).abs() <= 1e-6);
+        assert!(soft_ece(&probs, &targets, 10).abs() <= 1e-6);
+        // soft_nll's floor is the world's own entropy, NOT zero.
+        let entropy: f32 = targets.iter().map(|q| -q.iter().map(|&x| x * x.ln()).sum::<f32>()).sum::<f32>() / targets.len() as f32;
+        assert!((soft_nll(&probs, &targets) - entropy).abs() <= 1e-5, "soft NLL should bottom out at the oracle's entropy");
+    }
+
+    /// What the metrics this replaces reported for that same exact oracle.
+    /// Pinned as a number, because "the old metric was wrong" is a claim and
+    /// 0.646 is the evidence: an ECE fed `1 - H(p)/ln K` ranks a perfect
+    /// Bayesian model WORSE than the 0.554 a real trained run scored.
+    #[test]
+    fn entropy_confidence_ece_punishes_the_exact_oracle() {
+        let (probs, targets) = oracle_rows();
+        let conf: Vec<f32> = probs
+            .iter()
+            .map(|p| {
+                let h: f32 = -p.iter().filter(|&&x| x > 0.0).map(|&x| x * x.ln()).sum::<f32>();
+                (1.0 - h / (p.len() as f32).ln()).clamp(0.0, 1.0)
+            })
+            .collect();
+        let correct = vec![true; probs.len()]; // p == q, so the argmax always matches
+        let old = ece(&conf, &correct, 10);
+        assert!((old - 0.6459).abs() <= 1e-3, "entropy-confidence ECE on an exact oracle was {old}");
+        assert!(soft_ece(&probs, &targets, 10) < old, "the replacement must not inherit the defect");
+    }
+
+    /// Against a one-hot target the soft metrics have to agree with the
+    /// hard-label ones they generalize, or they are a second answer to the
+    /// same question rather than a wider one.
+    #[test]
+    fn the_soft_metrics_reduce_to_the_hard_label_ones_on_a_one_hot_target() {
+        let probs = vec![vec![0.7f32, 0.2, 0.1], vec![0.1, 0.1, 0.8]];
+        let labels = vec![0usize, 2];
+        let targets: Vec<Vec<f32>> = labels
+            .iter()
+            .map(|&y| (0..3).map(|k| if k == y { 1.0 } else { 0.0 }).collect())
+            .collect();
+        assert!((soft_nll(&probs, &targets) - nll(&probs, &labels)).abs() <= 1e-6);
+        assert!((posterior_error(&probs, &targets) - brier_score(&probs, &labels)).abs() <= 1e-6);
+    }
+
+    /// A model that is confidently wrong has to be scored as miscalibrated,
+    /// or the metric cannot tell the run that needs work from the one that
+    /// does not.
+    #[test]
+    fn soft_ece_grows_with_overconfidence() {
+        let targets = vec![vec![1.0f32 / 3.0, 2.0 / 3.0]; 4];
+        let honest = vec![vec![1.0f32 / 3.0, 2.0 / 3.0]; 4];
+        let cocky = vec![vec![0.02f32, 0.98]; 4];
+        assert!(soft_ece(&cocky, &targets, 10) > soft_ece(&honest, &targets, 10));
+        // 0.98 claimed where the oracle says 0.667: a gap of about 0.313.
+        assert!((soft_ece(&cocky, &targets, 10) - 0.3133).abs() <= 1e-3);
+    }
 
     /// `decide.md`'s own gate: a perfectly calibrated input gives ECE 0.
     /// Constructed so every bin's empirical accuracy exactly equals its

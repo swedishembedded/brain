@@ -34,9 +34,13 @@
 //! `RlcdPipeline` domain-agnostic: it knows `(state, target)` pairs and
 //! nothing about devices, workflows, or any other concrete domain.
 //!
-//! Evaluation reports three axes, not one: [`rlcd::metrics::ece`] and
-//! [`rlcd::metrics::nll`] audit the PROBABILITY head against calibration
-//! (does the model believe correctly), and [`rlcd::cost::regret`] against
+//! Evaluation reports three axes, not one: [`rlcd::metrics::soft_ece`],
+//! [`rlcd::metrics::soft_nll`], [`rlcd::metrics::posterior_kl`] and
+//! [`rlcd::metrics::posterior_error`] audit the PROBABILITY head against
+//! calibration (does the model believe correctly) - every one of them
+//! against the example's own exact oracle DISTRIBUTION rather than its
+//! argmax, which is the difference between measuring a calibrated belief
+//! and rewarding a confident one - and [`rlcd::cost::regret`] against
 //! every named cost matrix in [`RlcdSpec::eval_costs`] audits the DECISION
 //! (does the belief, run through an explicit cost matrix, choose correctly)
 //! - on cost matrices the model never trained under, which is the number
@@ -44,8 +48,7 @@
 
 use decide::decide::{Decide, Limits};
 use decide::policy::{choice_loss, Act, PolicyConfig};
-use decide::primitives::{confidence, Opt, Question};
-use rlcd::metrics::{brier_score, ece, nll};
+use decide::primitives::{Opt, Question};
 use rlcd::scoring::{decision_loss_soft, softmax};
 
 use crate::flow::{EvalReport, Flow, Stages, TrainReport};
@@ -57,7 +60,9 @@ use crate::{Device, Error, Result};
 // dependency (see `samples/README.md`'s rules), never an engine crate.
 pub use rlcd::atlas::{check_information_refinement, DecisionContract, Distribution, Observation, OracleKind, World};
 pub use rlcd::cost::{bayes_action, bayes_risk, regret, voi, BayesAction, CostMatrix};
-pub use rlcd::metrics::{ada_ece, classwise_ece, coverage_accuracy, failure_auroc, reliability_bins, ReliabilityBin};
+pub use rlcd::metrics::{
+    ada_ece, classwise_ece, coverage_accuracy, failure_auroc, posterior_error, posterior_kl, reliability_bins, soft_ece, soft_nll, ReliabilityBin,
+};
 pub use rlcd::scoring::LossConfig;
 pub use rlcd::witness::{search as witness_search, Learner, WitnessFamily};
 
@@ -411,26 +416,30 @@ impl Stages for RlcdPipeline {
         let eval = std::mem::take(&mut self.eval);
 
         let mut probs: Vec<Vec<f32>> = Vec::with_capacity(eval.len());
-        let mut labels: Vec<usize> = Vec::with_capacity(eval.len());
-        let mut confidences: Vec<f32> = Vec::with_capacity(eval.len());
+        let mut targets: Vec<Vec<f32>> = Vec::with_capacity(eval.len());
         let mut correct: Vec<bool> = Vec::with_capacity(eval.len());
         for ex in &eval {
             let scores = self.model.score(&ex.state, std::slice::from_ref(&q)).map_err(Error::Backend)?;
             let p = softmax(&scores[0]);
-            let label = argmax(&ex.target);
-            let predicted = argmax(&p);
-            confidences.push(confidence(&p));
-            correct.push(predicted == label);
+            correct.push(argmax(&p) == argmax(&ex.target));
             probs.push(p);
-            labels.push(label);
+            targets.push(ex.target.clone());
         }
         self.eval = eval.clone();
 
         let hit = correct.iter().filter(|&&c| c).count();
+        // Every calibration number here is scored against the example's own
+        // EXACT oracle distribution, never against its argmax. An RlcdExample
+        // carries `[1/3, 2/3]` because that is what the world does; collapsing
+        // it to "faulty" and scoring the model on how close it got to
+        // `[0, 1]` rewards precisely the overconfidence this pipeline exists
+        // to measure. See `rlcd::metrics::soft_ece` for the number an exact
+        // oracle scored under the hard-label version that stood here.
         let mut notes = vec![
-            ("ECE".into(), ece(&confidences, &correct, 10)),
-            ("NLL".into(), nll(&probs, &labels)),
-            ("Brier".into(), brier_score(&probs, &labels)),
+            ("ECE".into(), soft_ece(&probs, &targets, 10)),
+            ("NLL".into(), soft_nll(&probs, &targets)),
+            ("KL".into(), posterior_kl(&probs, &targets)),
+            ("PostErr".into(), posterior_error(&probs, &targets)),
         ];
         // Decision regret per named held-out cost matrix: the model's own
         // action, scored against the EXACT oracle posterior the example
