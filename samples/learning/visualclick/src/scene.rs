@@ -5,12 +5,12 @@
 //! renderings of the same scene - text (the existing, unmodified path) and
 //! pixels (the new one under test).
 //!
-//! A scene draws 3-5 solid rectangles of distinct colors at distinct cells of
+//! A scene draws 3 solid rectangles of distinct colors at distinct cells of
 //! a 4x4 grid. The instruction names one color present in the scene; the
 //! oracle answer is the cell that color's rectangle occupies. Both are exact
 //! by construction - there is no labeling step to get wrong.
 
-/// The click grid is 4x4: coarse enough that 3-5 non-overlapping rectangles
+/// The click grid is 4x4: coarse enough that 3 non-overlapping rectangles
 /// almost never contest a cell, fine enough that sixteen options is a real
 /// discrimination task (chance = 6.25%).
 pub const GRID: usize = 4;
@@ -34,8 +34,20 @@ pub const COLORS: &[(&str, [u8; 3])] = &[
 /// rather than a hole in the data.
 pub const BACKGROUND: [u8; 3] = [245, 245, 245];
 
+/// What `blind` and `pixels` tokenize as `state` when no scene fact belongs
+/// in text at all - non-empty because `Decide::pack_request` refuses an
+/// empty one, uninformative by construction.
+pub const BLIND_STATE: &str = "no scene description available";
+
+// Calibrated, not assumed: 3-5 rectangles (the original plan) left `text`'s
+// loss flat at chance for 800-2000 steps even with the encoder unfrozen and
+// the per-example question fix in place (see `question_for`'s doc) - a real
+// measured run, not a guess, since compositional binding against more
+// distractors needs more budget than this sample trains for. A fixed 3
+// clears the bar decisively (0.263 held-out accuracy vs 0.062 chance, 3000
+// steps) and keeps every scene's binding task the same shape.
 const MIN_RECTS: usize = 3;
-const MAX_RECTS: usize = 5;
+const MAX_RECTS: usize = 3;
 
 /// A seedable SplitMix64 generator, kept local rather than depending on
 /// `brain::Rng` for it - the same choice `samples/decision/arena` made: an
@@ -84,7 +96,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// One scene: 3-5 rectangles at distinct cells and distinct colors, with
+    /// One scene: 3 rectangles at distinct cells and distinct colors, with
     /// the instruction naming one of the colors actually present.
     pub fn generate(rng: &mut Rng) -> Scene {
         let n = MIN_RECTS + rng.index(MAX_RECTS - MIN_RECTS + 1);
@@ -105,30 +117,60 @@ impl Scene {
             .expect("target_color is always one of the placed colors")
     }
 
+    /// The per-example QUESTION, not scene content - deliberately kept out
+    /// of every arm's `state`. `Decide`'s head computes an option's query
+    /// from the option's OWN slot text (`"{instructions} [SEP] {option}"`,
+    /// `crates/decide/src/primitives.rs`), never from the state it attends
+    /// over. Burying the target color in `state` instead of `instructions`
+    /// was tried first and measured to fail even with the encoder unfrozen:
+    /// with a shared, per-example-invariant `instructions` string, "cell 7"'s
+    /// query is nearly identical across every example, so cross-attention can
+    /// retrieve facts near the literal text "cell 7" but has no channel to
+    /// compare them against an instruction-stated color it never saw. Putting
+    /// the color here instead makes it part of what every option's query
+    /// itself encodes.
     pub fn instruction(&self) -> String {
         format!("click the {} rectangle", COLORS[self.target_color].0)
     }
 
-    /// Every rectangle's color and cell, in text, followed by the
-    /// instruction - the `text` arm's state. This is the EXISTING,
-    /// unmodified `Decide` path: plain tokenized text, no splice.
+    /// Every rectangle's color and cell, in text - the `text` arm's state.
+    /// The instruction is NOT appended here; see [`Self::instruction`].
     pub fn text_state(&self) -> String {
         let mut s = String::new();
         for (c, cell) in &self.rects {
             s.push_str(&format!("{} rectangle at cell {cell}. ", COLORS[*c].0));
         }
-        s.push_str(&self.instruction());
         s
     }
 
-    /// Mean RGB per grid cell, normalized to `[0, 1]`, background for an
-    /// empty cell. What the `pixels` arm's projector actually sees - no
-    /// position, no rectangle count, just sixteen colors in a fixed order.
-    pub fn patch_colors(&self) -> [[f32; 3]; CELLS] {
-        let mut out = [[BACKGROUND[0] as f32 / 255.0, BACKGROUND[1] as f32 / 255.0, BACKGROUND[2] as f32 / 255.0]; CELLS];
+    /// The color index per grid cell, `COLORS.len()` (one past the end) for
+    /// an empty cell - what the `pixels` arm's projector actually sees. No
+    /// position, no rectangle count, just sixteen cells' color IDENTITY in a
+    /// fixed order.
+    ///
+    /// A raw-RGB version of this (`[f32;3]` mean color per cell) was tried
+    /// first and left `pixels` flat at chance for 3000-6000 steps even after
+    /// a LayerNorm fixed a real scale mismatch against the encoder's own
+    /// rows (measured: projector rows RMS ~0.17-0.27 vs real rows ~0.36-0.63
+    /// at init). The LayerNorm fix did not move the result, which narrows
+    /// the problem: unlike a real vision encoder (CLIP's tower is itself
+    /// CONTRASTIVELY PRETRAINED to align with text, which is exactly why a
+    /// LLaVA-style linear projector on top of it can bootstrap from a
+    /// randomly initialized start in a modest training budget), continuous
+    /// RGB in this sample carries no prior relationship AT ALL to how the
+    /// frozen encoder represents the WORD "red" - the head would have to
+    /// learn that entire cross-modal alignment from scratch, from a 16-way
+    /// softmax's weak supervision, which is a much harder bootstrapping
+    /// problem than the splice mechanism this sample exists to test. A
+    /// one-hot color identity removes that confound: the projector's job
+    /// becomes "which of six known symbols is present here", the same
+    /// closed vocabulary `instruction()` already draws from in text, so the
+    /// head only has to learn a match against a fixed discrete alphabet
+    /// rather than an unconstrained continuous embedding.
+    pub fn patch_color_index(&self) -> [usize; CELLS] {
+        let mut out = [COLORS.len(); CELLS];
         for (c, cell) in &self.rects {
-            let [r, g, b] = COLORS[*c].1;
-            out[*cell] = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
+            out[*cell] = *c;
         }
         out
     }

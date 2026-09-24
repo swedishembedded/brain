@@ -10,21 +10,35 @@
 //! SAME synthetic scenes, differing only in what reaches the model:
 //!
 //! ```text
-//! blind   instruction only, no scene information       -> must read chance
-//! text    scene positions serialized to text            -> the EXISTING,
-//!         (Decide::score, unmodified)                      unmodified path
-//! pixels  16 image-patch rows spliced into the head's    -> the NEW path:
-//!         cross-attention state (Decide::accumulate_kept)    Features::from_parts
+//! blind   nothing - the instruction alone            -> must read chance
+//! text    scene positions serialized to text          -> the EXISTING,
+//!         (Decide::train_step_with, unmodified)          unmodified path
+//! pixels  16 image-patch rows spliced into the head's  -> the NEW path:
+//!         cross-attention state (Decide::accumulate_kept)  Features::from_parts
 //! ```
 //!
+//! **The instruction is the per-example QUESTION, not scene content, and it
+//! is never put in `state`.** `Decide`'s head computes an option's query from
+//! the option's OWN slot text (`"{instructions} [SEP] {option}"`), never from
+//! the state it attends over - see `crates/decide/src/head.rs`. A first
+//! version put "click the red rectangle" in `state` and left `instructions`
+//! a shared, per-arm-fixed string; `text` then failed to learn EVEN WITH THE
+//! ENCODER UNFROZEN, because every option's query was nearly
+//! example-invariant and had no channel to compare retrieved state facts
+//! against an instruction-stated color it never saw. Building a fresh
+//! `Question` per example, with the color IN `instructions`, is the fix, and
+//! `blind`/`text`/`pixels` all build the question the same way now - see
+//! `question_for`.
+//!
 //! `blind` at chance rules out label leakage through the option names.
-//! `text` well above chance proves the task, the grid framing, and the
-//! training loop are sound before any new capability is on trial - if `text`
-//! fails, nothing else here is worth running. `pixels` decisively above
-//! `blind` is the verdict on whether the splice mechanism itself works; two
-//! ablations (`--ablate noise`, `--ablate shuffle`) must both collapse
-//! `pixels` back to chance, or the measurement is not trustworthy - a result
-//! an ablation also produces is not evidence for the thing being tested.
+//! `text` well above chance proves the task, the grid framing, the question
+//! shape, and the training loop are sound before any new capability is on
+//! trial - if `text` fails, nothing else here is worth running. `pixels`
+//! decisively above `blind` is the verdict on whether the splice mechanism
+//! itself works; two ablations (`--ablate noise`, `--ablate shuffle`) must
+//! both collapse `pixels` back to chance, or the measurement is not
+//! trustworthy - a result an ablation also produces is not evidence for the
+//! thing being tested.
 //!
 //! Run it:
 //!
@@ -46,14 +60,9 @@
 mod patches;
 mod scene;
 
-use brain::{decision_loss, ece, Features, Flow, LossConfig, Opt, Question, RlcdExample, RlcdPipeline, RlcdSpec};
+use brain::{decision_loss, ece, Features, LossConfig, Opt, Question, RlcdPipeline};
 use patches::Projector;
 use scene::{Rng, Scene, CELLS};
-
-/// Shared across every arm, so `blind`/`text`/`pixels` answer literally the
-/// same question over literally the same sixteen option names - only what
-/// reaches the model about a given scene differs.
-const INSTRUCTIONS: &str = "which grid cell should be clicked";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Arm {
@@ -73,12 +82,28 @@ struct Args {
     encoder: String,
     arm: Arm,
     ablate: Ablate,
-    train_n: usize,
+    /// `None` resolves per-arm in `main` - see [`default_train_n`].
+    train_n: Option<usize>,
     eval_n: usize,
     seed: u64,
     shot: Option<String>,
     head_lr: f32,
     projector_lr: f32,
+}
+
+/// `text`/`blind` converge (a clear loss trend, well above chance) inside
+/// 3000 steps. `pixels` does not: measured flat at chance through 3000, and
+/// even 6000, before a clear downward trend emerges around step 4000-4400
+/// and continues to a comparable held-out accuracy by 15000. That gap is the
+/// cold-start cost of bootstrapping a whole new, unaligned input channel
+/// (the projector) jointly with the head, against `text`'s head-only
+/// bootstrap on an already richly-structured frozen encoder - see
+/// `spliced_features`'s doc.
+fn default_train_n(arm: Arm) -> usize {
+    match arm {
+        Arm::Blind | Arm::Text => 3000,
+        Arm::Pixels => 15000,
+    }
 }
 
 fn parse_args() -> Args {
@@ -88,7 +113,7 @@ fn parse_args() -> Args {
             .unwrap_or_else(|_| format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")),
         arm: Arm::Text,
         ablate: Ablate::None,
-        train_n: 2000,
+        train_n: None,
         eval_n: 400,
         seed: 11,
         shot: None,
@@ -123,7 +148,7 @@ fn parse_args() -> Args {
                     }
                 }
             }
-            "--train-scenes" => a.train_n = next().parse().unwrap_or(a.train_n),
+            "--train-scenes" => a.train_n = next().parse().ok(),
             "--eval-scenes" => a.eval_n = next().parse().unwrap_or(a.eval_n),
             "--seed" => a.seed = next().parse().unwrap_or(a.seed),
             "--shot" => a.shot = Some(next()),
@@ -152,8 +177,17 @@ fn require(path: &std::path::Path, what: &str, remedy: &str) {
     }
 }
 
-fn option_question() -> Question {
-    Question::Choice { instructions: INSTRUCTIONS.into(), options: scene::option_names().into_iter().map(Opt::new).collect() }
+/// The per-example question - see the module doc on why the color lives
+/// here and never in `state`.
+fn question_for(scene: &Scene) -> Question {
+    Question::Choice { instructions: scene.instruction(), options: scene::option_names().into_iter().map(Opt::new).collect() }
+}
+
+fn state_for(arm: Arm, scene: &Scene) -> String {
+    match arm {
+        Arm::Blind | Arm::Pixels => scene::BLIND_STATE.to_string(),
+        Arm::Text => scene.text_state(),
+    }
 }
 
 fn softmax(scores: &[f32]) -> Vec<f32> {
@@ -199,102 +233,114 @@ fn run_shot(dir: &str) {
     println!("visualclick: open the PNGs above and confirm the black outline sits on the named color's rectangle");
 }
 
-fn generate_examples(rng: &mut Rng, arm: Arm, n: usize) -> (Vec<Scene>, Vec<RlcdExample>) {
-    let mut scenes = Vec::with_capacity(n);
-    let mut examples = Vec::with_capacity(n);
-    for _ in 0..n {
-        let s = Scene::generate(rng);
-        let mut target = vec![0.0f32; CELLS];
-        target[s.oracle_cell()] = 1.0;
-        let state = match arm {
-            Arm::Blind => s.instruction(),
-            Arm::Text => s.text_state(),
-            Arm::Pixels => unreachable!("pixels builds its own Features, never an RlcdExample"),
-        };
-        examples.push(RlcdExample::new(state, target));
-        scenes.push(s);
-    }
-    (scenes, examples)
-}
-
-/// One arm's Features, built by encoding `instruction` through the frozen
-/// text path and splicing sixteen projected image rows in after it - the
-/// `pixels` arm's whole new mechanism, in one place.
-fn spliced_features(pipeline: &mut RlcdPipeline, q: &Question, instruction: &str, colors: &[[f32; 3]; CELLS], projector: &Projector) -> (Features, u32, usize) {
-    let (_, kept) = pipeline.model_mut().score_keeping(instruction, q).expect("score_keeping");
+/// One arm's Features, built by encoding `state` through the frozen text
+/// path and splicing sixteen projected image rows in after it - the
+/// `pixels` arm's whole new mechanism, in one place. `state` is always
+/// [`scene::BLIND_STATE`] in this sample; kept as a parameter because
+/// nothing here actually requires that.
+/// `state` still has to be a real, non-empty string - `Decide::pack_request`
+/// refuses an empty one - but its ENCODED ROWS ARE DROPPED here rather than
+/// kept as extra state alongside the image rows. A first version kept them:
+/// probing `head.read_grad` on the first few steps showed `wkv`'s gradient at
+/// a normal scale (~0.3-0.9) while the slice of it reaching the image rows
+/// specifically was two orders of magnitude smaller (~0.004-0.01) - the
+/// cross-attention head was spending its budget on the placeholder text
+/// (constant, familiar-looking to a frozen encoder, informationally useless)
+/// rather than the image rows (novel at init, actually informative), and
+/// with little gradient reaching the projector it never got the chance to
+/// become useful. Dropping the placeholder rows removes that lazy
+/// alternative entirely: the image rows are the ONLY state left to attend to.
+fn spliced_features(pipeline: &mut RlcdPipeline, q: &Question, state: &str, colors: &[usize; CELLS], projector: &mut Projector) -> (Features, u32, usize) {
+    let (_, kept) = pipeline.model_mut().score_keeping(state, q).expect("score_keeping");
     let d_model = pipeline.model_mut().cfg.d_model as usize;
     let instr_rows = kept.state_rows();
     let image_rows = projector.forward_rows(colors);
-    let mut hidden = Vec::with_capacity(kept.hidden().len() + image_rows.len());
-    hidden.extend_from_slice(&kept.hidden()[..instr_rows as usize * d_model]);
+    let mut hidden = Vec::with_capacity(image_rows.len() + kept.hidden().len() - instr_rows as usize * d_model);
     hidden.extend_from_slice(&image_rows);
     hidden.extend_from_slice(&kept.hidden()[instr_rows as usize * d_model..]);
-    (Features::from_parts(hidden, instr_rows + CELLS as u32, kept.n_slots()), instr_rows, d_model)
+    (Features::from_parts(hidden, CELLS as u32, kept.n_slots()), instr_rows, d_model)
 }
 
-fn ablated_colors(scene: &Scene, image_scene: &Scene, ablate: Ablate, noise_seed: u64) -> [[f32; 3]; CELLS] {
-    let mut colors = image_scene.patch_colors();
+fn ablated_colors(image_scene: &Scene, ablate: Ablate, noise_seed: u64) -> [usize; CELLS] {
+    let mut colors = image_scene.patch_color_index();
     if ablate == Ablate::Noise {
         let mut rng = Rng::new(noise_seed);
         for c in colors.iter_mut() {
-            *c = [rng.f32(), rng.f32(), rng.f32()];
+            *c = rng.index(patches::N_COLOR_CLASSES);
         }
     }
-    let _ = scene; // the label always comes from `scene`, never `image_scene` - see call sites
     colors
 }
 
-fn train_pixels(pipeline: &mut RlcdPipeline, projector: &mut Projector, q: &Question, scenes: &[Scene], ablate: Ablate, seed: u64, head_lr: f32) {
+/// `Ablate::Shuffle`'s image source: a fixed offset into the same slice, so
+/// every scene's patches come from a DIFFERENT scene than the one supplying
+/// its label - deterministic, and never `i` itself.
+fn image_scene(scenes: &[Scene], i: usize, ablate: Ablate) -> &Scene {
+    match ablate {
+        Ablate::Shuffle => &scenes[(i + scenes.len() / 2 + 1) % scenes.len()],
+        _ => &scenes[i],
+    }
+}
+
+fn run_train(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>, arm: Arm, scenes: &[Scene], ablate: Ablate, seed: u64, head_lr: f32) {
     pipeline.model_mut().set_encoder_frozen(true);
     let loss_cfg = LossConfig::cross_entropy();
-    let mut report_every = (scenes.len() / 10).max(1);
-    if report_every > 200 {
-        report_every = 200;
-    }
+    let report_every = (scenes.len() / 10).clamp(1, 200);
     for (i, scene) in scenes.iter().enumerate() {
-        let image_scene = match ablate {
-            Ablate::Shuffle => &scenes[(i + scenes.len() / 2 + 1) % scenes.len()],
-            _ => scene,
-        };
-        let colors = ablated_colors(scene, image_scene, ablate, seed ^ (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
-        let (features, instr_rows, d_model) = spliced_features(pipeline, q, &scene.instruction(), &colors, projector);
+        let q = question_for(scene);
         let gold = scene.oracle_cell();
+        let loss = match arm {
+            Arm::Blind | Arm::Text => {
+                let state = state_for(arm, scene);
+                pipeline.model_mut().train_step_with(&state, &q, 0.0, head_lr, |scores| decision_loss(scores, gold, &loss_cfg)).expect("train_step_with")
+            }
+            Arm::Pixels => {
+                let projector = projector.as_deref_mut().expect("pixels arm needs a projector");
+                let colors = ablated_colors(image_scene(scenes, i, ablate), ablate, seed ^ (i as u64).wrapping_mul(0x9E3779B97F4A7C15));
+                let (features, _, d_model) = spliced_features(pipeline, &q, scene::BLIND_STATE, &colors, projector);
 
-        pipeline.model_mut().zero_grads();
-        let loss = pipeline
-            .model_mut()
-            .accumulate_kept(&features, |scores| decision_loss(scores, gold, &loss_cfg))
-            .expect("accumulate_kept");
+                pipeline.model_mut().zero_grads();
+                let loss = pipeline.model_mut().accumulate_kept(&features, |scores| decision_loss(scores, gold, &loss_cfg)).expect("accumulate_kept");
 
-        let new_state_rows = instr_rows as usize + CELLS;
-        let grad_slab = {
-            let d = pipeline.model_mut();
-            let gpu = d.enc.gpu();
-            let seed_buf = d.enc.seed_buf();
-            gpu.read(seed_buf, new_state_rows * d_model)
+                // The image rows are the WHOLE state now (see
+                // `spliced_features`'s doc), so they sit at `[0, CELLS)` of
+                // the seed buffer's state region - no offset to compute.
+                let grad_slab = {
+                    let d = pipeline.model_mut();
+                    let gpu = d.enc.gpu();
+                    let seed_buf = d.enc.seed_buf();
+                    gpu.read(seed_buf, CELLS * d_model)
+                };
+                let d_image_rows = &grad_slab[..CELLS * d_model];
+                projector.accumulate(&colors, d_image_rows);
+                projector.step();
+                pipeline.model_mut().adamw(0.0, head_lr);
+                loss
+            }
         };
-        let d_image_rows = &grad_slab[instr_rows as usize * d_model..new_state_rows * d_model];
-        projector.accumulate(&colors, d_image_rows);
-        projector.step();
-        pipeline.model_mut().adamw(0.0, head_lr);
-
         if i % report_every == 0 {
-            println!("visualclick: pixels step {i}/{}, loss {loss:.4}", scenes.len());
+            println!("visualclick: {arm:?} step {i}/{}, loss {loss:.4}", scenes.len());
         }
     }
 }
 
-fn eval_pixels(pipeline: &mut RlcdPipeline, projector: &Projector, q: &Question, scenes: &[Scene], ablate: Ablate, seed: u64) -> (f32, f32) {
+fn run_eval(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>, arm: Arm, scenes: &[Scene], ablate: Ablate, seed: u64) -> (f32, f32) {
     let mut confidences = Vec::with_capacity(scenes.len());
     let mut correct = Vec::with_capacity(scenes.len());
     for (i, scene) in scenes.iter().enumerate() {
-        let image_scene = match ablate {
-            Ablate::Shuffle => &scenes[(i + scenes.len() / 2 + 1) % scenes.len()],
-            _ => scene,
+        let q = question_for(scene);
+        let scores = match arm {
+            Arm::Blind | Arm::Text => {
+                let state = state_for(arm, scene);
+                pipeline.model_mut().score(&state, std::slice::from_ref(&q)).expect("score")[0].clone()
+            }
+            Arm::Pixels => {
+                let projector = projector.as_deref_mut().expect("pixels arm needs a projector");
+                let colors = ablated_colors(image_scene(scenes, i, ablate), ablate, seed ^ (i as u64).wrapping_mul(0x2545F4914F6CDD1D));
+                let (features, _, _) = spliced_features(pipeline, &q, scene::BLIND_STATE, &colors, projector);
+                pipeline.model_mut().score_kept(&features).expect("score_kept")
+            }
         };
-        let colors = ablated_colors(scene, image_scene, ablate, seed ^ (i as u64).wrapping_mul(0x2545F4914F6CDD1D));
-        let (features, _, _) = spliced_features(pipeline, q, &scene.instruction(), &colors, projector);
-        let scores = pipeline.model_mut().score_kept(&features).expect("score_kept");
         let p = softmax(&scores);
         let predicted = argmax(&p);
         confidences.push(p[predicted]);
@@ -312,61 +358,44 @@ fn main() {
         return;
     }
 
+    if args.arm != Arm::Pixels && args.ablate != Ablate::None {
+        eprintln!("visualclick: --ablate only applies to --arm pixels (blind/text never see image rows to ablate)");
+        std::process::exit(1);
+    }
+
     require(std::path::Path::new(&args.encoder).join("config.json").as_path(), "encoder checkpoint", "run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR");
 
-    println!("visualclick: arm={:?} ablate={:?} train={} eval={} seed={}", args.arm, args.ablate, args.train_n, args.eval_n, args.seed);
+    let train_n = args.train_n.unwrap_or_else(|| default_train_n(args.arm));
+    println!("visualclick: arm={:?} ablate={:?} train={train_n} eval={} seed={}", args.arm, args.ablate, args.eval_n, args.seed);
 
     let mut rng = Rng::new(args.seed);
+    let train_scenes: Vec<Scene> = (0..train_n).map(|_| Scene::generate(&mut rng)).collect();
+    let eval_scenes: Vec<Scene> = (0..args.eval_n).map(|_| Scene::generate(&mut rng)).collect();
 
-    match args.arm {
-        Arm::Blind | Arm::Text => {
-            if args.ablate != Ablate::None {
-                eprintln!("visualclick: --ablate only applies to --arm pixels (blind/text never see image rows to ablate)");
-                std::process::exit(1);
-            }
-            let (_, train) = generate_examples(&mut rng, args.arm, args.train_n);
-            let (_, eval) = generate_examples(&mut rng, args.arm, args.eval_n);
-            let spec = RlcdSpec::default()
-                .instructions(INSTRUCTIONS.to_string())
-                .options(scene::option_names())
-                .train(train)
-                .eval(eval)
-                .loss(LossConfig::cross_entropy())
-                .steps(args.train_n)
-                .seed(args.seed)
-                .freeze_encoder(true);
-            let chain = RlcdPipeline::builder(&args.encoder).load();
-            let chain = Flow::new(chain).train(spec).evaluate().report();
-            if let Err(e) = chain.finish() {
-                eprintln!("visualclick: {e}");
-                std::process::exit(1);
-            }
+    let mut pipeline = match RlcdPipeline::builder(&args.encoder).load() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("visualclick: {e}");
+            std::process::exit(1);
         }
-        Arm::Pixels => {
-            let (train_scenes, _) = generate_examples(&mut rng, Arm::Blind, args.train_n);
-            let (eval_scenes, _) = generate_examples(&mut rng, Arm::Blind, args.eval_n);
+    };
 
-            let mut pipeline = match RlcdPipeline::builder(&args.encoder).load() {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("visualclick: {e}");
-                    std::process::exit(1);
-                }
-            };
-            let d_model = pipeline.model_mut().cfg.d_model as usize;
-            let mut projector = Projector::new(d_model, args.seed, args.projector_lr);
-            let q = option_question();
+    let mut projector = if args.arm == Arm::Pixels {
+        let d_model = pipeline.model_mut().cfg.d_model as usize;
+        Some(Projector::new(d_model, args.seed, args.projector_lr))
+    } else {
+        None
+    };
 
-            train_pixels(&mut pipeline, &mut projector, &q, &train_scenes, args.ablate, args.seed, args.head_lr);
-            let (accuracy, e) = eval_pixels(&mut pipeline, &projector, &q, &eval_scenes, args.ablate, args.seed ^ 0xFEED);
-            println!(
-                "visualclick: pixels (ablate={:?}) held-out accuracy {:.3} (chance {:.3}), ECE {:.3}, {} scenes",
-                args.ablate,
-                accuracy,
-                1.0 / CELLS as f32,
-                e,
-                eval_scenes.len()
-            );
-        }
-    }
+    run_train(&mut pipeline, projector.as_mut(), args.arm, &train_scenes, args.ablate, args.seed, args.head_lr);
+    let (accuracy, e) = run_eval(&mut pipeline, projector.as_mut(), args.arm, &eval_scenes, args.ablate, args.seed ^ 0xFEED);
+    println!(
+        "visualclick: {:?} (ablate={:?}) held-out accuracy {:.3} (chance {:.3}), ECE {:.3}, {} scenes",
+        args.arm,
+        args.ablate,
+        accuracy,
+        1.0 / CELLS as f32,
+        e,
+        eval_scenes.len()
+    );
 }

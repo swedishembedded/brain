@@ -332,9 +332,18 @@ impl Encoder {
             e.bwd = Some(Bwd {
                 // COPY_DST because the objective's seed is uploaded into
                 // `dx[n_layers]` directly rather than copied in on device.
+                // COPY_SRC because a caller with a frozen encoder (so this
+                // buffer is written but never consumed by the encoder's own
+                // reverse pass) may still want to read `dx[n_layers]` back -
+                // see `Decide::accumulate_kept`'s own doc on why the head
+                // writes there regardless of whether the encoder is frozen.
                 dx: (0..=cfg_layers)
                     .map(|_| {
-                        e.gpu.buffer("dx", n * h * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST)
+                        e.gpu.buffer(
+                            "dx",
+                            n * h * 4,
+                            gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST | gpu_core::BufUsage::COPY_SRC,
+                        )
                     })
                     .collect(),
                 d_ffn_pre: st(n * h),
