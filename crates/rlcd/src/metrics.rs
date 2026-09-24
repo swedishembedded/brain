@@ -298,9 +298,9 @@ pub fn posterior_kl(probs: &[Vec<f32>], targets: &[Vec<f32>]) -> f32 {
 ///
 /// [`ece`] needs a realized `correct[i]` flag, which is a single Bernoulli
 /// draw from `q[argmax p]`. Where the oracle is known, that draw can be
-/// replaced by its mean - the same statistic with the sampling noise removed
-/// - and the metric then has the property [`ece`] does not: **a model that
-/// reproduces the oracle scores exactly zero.**
+/// replaced by its mean (the same statistic with the sampling noise
+/// removed), and the metric then has the property [`ece`] does not: **a
+/// model that reproduces the oracle scores exactly zero.**
 ///
 /// Feeding [`ece`] an entropy-derived "confidence" instead measures neither.
 /// `1 - H(p)/ln K` is a statement about how PEAKED a distribution is, not

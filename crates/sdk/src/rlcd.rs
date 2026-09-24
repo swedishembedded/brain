@@ -301,11 +301,15 @@ pub struct RlcdPipeline {
     actions: Vec<String>,
     eval_costs: Vec<(String, CostMatrix)>,
     /// The meta-decision question `train_voi_policy` trains and
-    /// `voi_policy_action` queries - `{block, release, inspect}` by
-    /// construction (see `train_voi_policy`'s own doc). Separate from
-    /// `question`: a calibrated belief and a policy over what to DO about it
-    /// are two different heads answering two different questions of the same
-    /// state, not one repurposed as the other.
+    /// `voi_policy_action` queries - `{act now, inspect}` by construction
+    /// (see that function's own doc).
+    ///
+    /// A different QUESTION from `question`, but **not a different head**.
+    /// `Decide` scores (state, option-text) pairs through one option scorer,
+    /// which is what lets the two questions coexist at all - and equally
+    /// what means training either one moves the other. See
+    /// [`RlcdPipeline::train_voi_policy`] for the consequence a caller has
+    /// to handle.
     voi_question: Option<Question>,
 }
 
@@ -332,6 +336,17 @@ impl RlcdPipeline {
 
     fn question(&self, spec: &RlcdSpec) -> Question {
         Question::Choice { instructions: spec.instructions.clone(), options: spec.options.iter().map(Opt::new).collect() }
+    }
+
+    /// Install the held-out set this pipeline is measured on.
+    ///
+    /// [`Stages::run_train`] sets this from its spec, so training needs no
+    /// call here. A pipeline built from a SAVED head has weights and a task
+    /// contract but no data - the contract records what the head answers,
+    /// not what it was scored on - and this is how a caller hands back the
+    /// held-out set so a loaded head can be re-measured rather than trusted.
+    pub fn eval_set(&mut self, eval: Vec<RlcdExample>) {
+        self.eval = eval;
     }
 
     /// The model's own belief over `spec.options` for a rendered `state` -
@@ -385,6 +400,20 @@ impl RlcdPipeline {
     /// `query_cost` (see `samples/learning/rlcd`'s own measured run): as
     /// training converges, `voi_policy_action`'s answer should track the
     /// sign of `voi()` - `inspect` when positive, `act_now` when not.
+    ///
+    /// **This moves the same head [`RlcdPipeline::probability`] answers
+    /// from**, and measurably: on the sample's own 400/600-step run it costs
+    /// 0.023 of soft ECE and raises safety-critical regret from 0.140 to
+    /// 0.200. The states it trains on are the ones it degrades most, since
+    /// they are the ones it repeatedly rescores under a different question -
+    /// pushed far enough (12k steps there) the belief at "no evidence yet"
+    /// falls from 0.20 to 0.04 and crosses the block/release boundary, so a
+    /// model that PASSED a witness audit before this call can fail the same
+    /// audit after it.
+    ///
+    /// A caller must therefore **re-evaluate and re-audit after calling
+    /// this, and save only then.** Anything measured beforehand describes
+    /// weights that no longer exist.
     #[allow(clippy::too_many_arguments)]
     pub fn train_voi_policy(
         &mut self,

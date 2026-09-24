@@ -196,3 +196,4 @@ What belongs where:
 | 153 | A value that fits its own trajectory cannot rank the alternatives to it | [`153-a-value-that-fits-its-own-trajectory-cannot-rank-the.md`](153-a-value-that-fits-its-own-trajectory-cannot-rank-the.md) |
 | 154 | Preserving what is solved costs the most where there is nothing to preserve | [`154-preserving-what-is-solved-costs-nothing-to-preserve-at-the.md`](154-preserving-what-is-solved-costs-nothing-to-preserve-at-the.md) |
 | 155 | A clamp inside a loss hides from the finite-difference check that would catch it | [`155-a-clamp-inside-a-loss-hides-from-the-finite-difference.md`](155-a-clamp-inside-a-loss-hides-from-the-finite-difference.md) |
+| 156 | A certificate describes the weights it was computed on, and nothing else | [`156-a-certificate-describes-the-weights-it-was-computed-on.md`](156-a-certificate-describes-the-weights-it-was-computed-on.md) |

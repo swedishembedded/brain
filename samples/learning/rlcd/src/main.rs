@@ -28,13 +28,30 @@
 //!    rule, over many distinct phrasings of each evidence state - see
 //!    `world.rs` for why textual variety is what makes held-out evaluation
 //!    mean anything.
-//! 3. **Evaluation** reports calibration (ECE, NLL, Brier) AND decision
-//!    regret against TWO cost matrices the model never trained under - the
-//!    number that tells a learned belief apart from a learned policy.
+//! 3. **Evaluation** reports calibration against those same exact
+//!    posteriors - soft ECE, soft NLL, `KL(oracle || model)` and posterior
+//!    error, never against `argmax(target)` - AND decision regret under TWO
+//!    cost matrices the model never trained under, the number that tells a
+//!    learned belief apart from a learned policy.
 //! 4. **A witness audit** ([`brain::witness_search`]) exhaustively checks the
 //!    trained model against the oracle at the world's own canonical evidence
 //!    points, under a safety-critical cost matrix, and reports any case
 //!    where the model's induced action disagrees with the Bayes-optimal one.
+//! 5. **A learned evidence-acquisition policy** decides `{act now, inspect}`
+//!    before any query result is in, graded by return rather than by a
+//!    scoring rule, and gated against the closed-form `voi()`.
+//!
+//! **Stages 3 and 5 share one head.** `Decide` scores (state, option-text)
+//! pairs, and both questions go through the same scorer, so the
+//! policy-gradient run in stage 5 moves the belief stage 3 measured. That is
+//! a property of the architecture, not a bug to be hidden - but it does mean
+//! a number taken before stage 5 does not describe the model afterwards. So
+//! evaluation and the audit are run AGAIN on the post-policy weights, the
+//! before/after table is printed, and only then is the head saved: the
+//! numbers, the saved file, and the model that answers your questions are
+//! all the same weights. It is not free - on a 400/600-step run the shared
+//! head costs about 40% more safety-critical regret - and the point of
+//! printing it is that a cost you can see is a cost you can decide about.
 //!
 //! Run it:
 //!
@@ -146,6 +163,58 @@ impl Learner for TrainedLearner<'_> {
     }
 }
 
+/// The witness audit, run against whatever weights the pipeline currently
+/// holds. Factored out because it is run TWICE - once on the freshly trained
+/// belief and once on the weights that are actually saved and served - and a
+/// certificate that describes neither of those is worth nothing.
+fn audit(pipeline: &mut RlcdPipeline, costs: &CostMatrix) -> Vec<brain::WitnessFamily> {
+    let mut learner = TrainedLearner { pipeline };
+    match witness_search(&world::DiagnosisWorld, &mut learner, costs, &[]) {
+        Ok(w) => w,
+        // An audit that could not ask the model has not cleared it.
+        Err(e) => {
+            eprintln!("rlcd: the witness audit could not probe the model: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn report_witnesses(witnesses: &[brain::WitnessFamily]) {
+    if witnesses.is_empty() {
+        println!("  no decision failures found: the model's induced action agrees with the oracle at every canonical evidence point");
+        return;
+    }
+    for w in witnesses {
+        println!(
+            "  WITNESS at {:?}: oracle action {}, model action {} (regret {:.4})",
+            w.failing.name,
+            world::ACTION_NAMES.get(w.oracle_action).copied().unwrap_or("?"),
+            world::ACTION_NAMES.get(w.learner_action).copied().unwrap_or("?"),
+            w.regret
+        );
+        if let Some(near) = &w.nearby_correct {
+            println!("    nearby correct point: {:?}", near.name);
+        }
+        if let Some(reveal) = &w.resolving_reveal {
+            println!("    resolving evidence reveal: {:?}", reveal.name);
+        }
+    }
+}
+
+/// Side-by-side calibration and regret, before and after stage 3 trained the
+/// SAME head. Stage 3 is a policy-gradient run over the no-evidence
+/// phrasings through the same option-scoring head the belief uses, so it can
+/// move the belief - and nothing measured whether it did.
+fn report_regression(before: &brain::EvalReport, after: &brain::EvalReport) {
+    println!("\n--- what stage 3 did to the belief it shares a head with ---");
+    println!("  {:<22} {:>10} {:>10} {:>10}", "", "before", "after", "delta");
+    println!("  {:<22} {:>10.3} {:>10.3} {:>10.3}", "accuracy", before.accuracy, after.accuracy, after.accuracy - before.accuracy);
+    for (name, b) in &before.notes {
+        let a = after.notes.iter().find(|(n, _)| n == name).map(|(_, v)| *v).unwrap_or(f32::NAN);
+        println!("  {name:<22} {b:>10.4} {a:>10.4} {:>10.4}", a - b);
+    }
+}
+
 fn main() {
     let args = parse_args();
     require_decide_shaped_encoder(&args.encoder);
@@ -190,14 +259,23 @@ fn main() {
         require(std::path::Path::new(h), "head weights", "train first, or drop --head");
         flow = flow.head(h);
     }
-    let mut chain = Flow::new(flow.load());
+    // A loaded head brings its own task contract but no DATA, so the
+    // held-out set is installed either way - a reused head is measured, not
+    // trusted.
+    let held_out = spec.eval.clone();
+    let loaded = flow.load().map(|mut p| {
+        p.eval_set(held_out);
+        p
+    });
+    let mut chain = Flow::new(loaded);
 
     if args.head_in.is_none() {
-        chain = chain.train(spec).evaluate().save(&args.save_to);
+        chain = chain.train(spec);
     } else {
-        println!("rlcd: --head supplied - skipping training, auditing those weights directly");
+        println!("rlcd: --head supplied - skipping training, evaluating and auditing those weights directly");
     }
-    chain = chain.report();
+    chain = chain.evaluate().report();
+    let before = chain.eval_report().cloned().unwrap_or_default();
 
     // ---- pull the pipeline out of the chain for the witness audit --------
     // `Flow::stage` (and so every generic stage) is crate-private to the SDK,
@@ -214,33 +292,7 @@ fn main() {
 
     println!("\n--- witness audit (safety-critical cost matrix: C_FP=1, C_FN=10) ---");
     let audit_costs = CostMatrix::binary(1.0, 10.0);
-    let witnesses = {
-        let mut learner = TrainedLearner { pipeline: &mut pipeline };
-        match witness_search(&world::DiagnosisWorld, &mut learner, &audit_costs, &[]) {
-            Ok(w) => w,
-            // An audit that could not ask the model has not cleared it.
-            Err(e) => {
-                eprintln!("rlcd: the witness audit could not probe the model: {e}");
-                std::process::exit(1);
-            }
-        }
-    };
-    if witnesses.is_empty() {
-        println!("  no decision failures found: the model's induced action agrees with the oracle at every canonical evidence point");
-    } else {
-        for w in &witnesses {
-            println!(
-                "  WITNESS at {:?}: oracle action {}, model action {} (regret {:.4})",
-                w.failing.name, w.oracle_action, w.learner_action, w.regret
-            );
-            if let Some(near) = &w.nearby_correct {
-                println!("    nearby correct point: {:?}", near.name);
-            }
-            if let Some(reveal) = &w.resolving_reveal {
-                println!("    resolving evidence reveal: {:?}", reveal.name);
-            }
-        }
-    }
+    report_witnesses(&audit(&mut pipeline, &audit_costs));
 
     println!("\n--- stage 3: a LEARNED evidence-acquisition policy ---");
     let query_cost = args.query_cost;
@@ -279,6 +331,28 @@ fn main() {
         "  learned policy picked \"inspect\" on {inspect_votes}/{} no-evidence phrasings (oracle-optimal: {oracle_meta_action})",
         no_evidence.len()
     );
+
+    // ---- re-measure, THEN save -------------------------------------------
+    // Stage 3 trained the same option-scoring head the belief uses, so the
+    // weights just audited are no longer the weights in hand. Evaluating and
+    // auditing again here is what makes the numbers, the saved file and the
+    // model that answers below all describe the same thing; saving first
+    // would publish a head nothing had measured.
+    let mut chain = Flow::new(Ok(pipeline)).evaluate();
+    let after = chain.eval_report().cloned().unwrap_or_default();
+    chain = chain.save(&args.save_to).report();
+    let mut pipeline = match chain.finish() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rlcd: {e}");
+            std::process::exit(1);
+        }
+    };
+    if before.items > 0 && after.items > 0 {
+        report_regression(&before, &after);
+    }
+    println!("\n--- witness audit, re-run on the weights that were just saved ---");
+    report_witnesses(&audit(&mut pipeline, &audit_costs));
 
     // ---- resume the chain for interactive inference -----------------------
     let chain = Flow::new(Ok(pipeline));
