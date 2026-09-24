@@ -14,6 +14,7 @@ use crate::{Model, ModelConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Batch;
 #[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use data::binio::{self, Meta};
@@ -443,6 +444,36 @@ impl<M: Model> Objective<M> for CausalLm {
 /// per-position weighting the objective applies), just discarded (via the
 /// following [`Model::zero_grads`]) before the first real optimizer step.
 #[cfg(not(target_arch = "wasm32"))]
+/// How much of the trainable set the best-checkpoint keeper will hold in host
+/// memory before giving up and writing a checkpoint instead.
+///
+/// A full finetune's trainable set IS the model, and a second host-side copy
+/// of it is not free. A LoRA run's is the adapter alone - about 5M floats
+/// where the checkpoint it would otherwise rewrite is 600M - so the case that
+/// pays for this fits with room to spare.
+const BEST_IN_MEMORY_FLOATS: usize = 64 << 20;
+
+/// The trainable parameters, if they fit `budget` floats.
+///
+/// `None` means "too large to hold": the caller falls back to writing the
+/// checkpoint, which is what this replaces. Reading stops as soon as the
+/// budget is passed, so an oversized model is not fully copied just to
+/// discover it does not fit.
+#[cfg(not(target_arch = "wasm32"))]
+fn hold_trainable<M: Model>(model: &M, budget: usize) -> Option<HashMap<String, Vec<f32>>> {
+    let mut held = HashMap::new();
+    let mut floats = 0usize;
+    for name in model.param_names() {
+        let w = model.read_weight(&name);
+        floats += w.len();
+        if floats > budget {
+            return None;
+        }
+        held.insert(name, w);
+    }
+    Some(held)
+}
+
 /// What to do after one held-out evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Watch {
@@ -527,6 +558,10 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
     let mut watch = EarlyStop::new(opts.patience);
     let mut kept_best = false;
     let mut stopped_early = false;
+    // The best parameters, held rather than written. See `hold_trainable`:
+    // rewriting the whole checkpoint at every improvement cost a real run
+    // 19.8 GB of writes to preserve a 20 MB adapter.
+    let mut best_held: Option<HashMap<String, Vec<f32>>> = None;
 
     for step in 0..opts.steps {
         let lr = cosine_lr(step, opts);
@@ -547,12 +582,18 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
                 match watch.observe(eval_loss) {
                     Watch::Improved => {
-                        // The checkpoint IS the best one, written when it is
-                        // reached. Keeping it in memory instead would need a
-                        // second copy of the model.
+                        // Hold the best parameters if they fit, and write them
+                        // once after the loop; a trainable set too large to
+                        // hold falls back to writing the checkpoint here, as
+                        // this always did.
                         if let Some(p) = out {
-                            model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-                            kept_best = true;
+                            match hold_trainable(&model, BEST_IN_MEMORY_FLOATS) {
+                                Some(held) => best_held = Some(held),
+                                None => {
+                                    model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+                                    kept_best = true;
+                                }
+                            }
                         }
                     }
                     Watch::Wait => {}
@@ -591,6 +632,20 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
                 last_save = std::time::Instant::now();
             }
         }
+    }
+
+    // Held parameters are written exactly once, here. Restoring them into the
+    // model first means what lands on disk is the checkpoint the best
+    // held-out loss was measured on, not the last one trained.
+    if let (Some(held), Some(p)) = (best_held.take(), out) {
+        for (name, w) in &held {
+            model.write_weight(name, w);
+        }
+        model.poll_wait();
+        let ts = std::time::Instant::now();
+        model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+        println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+        kept_best = true;
     }
 
     // The final save would overwrite the best checkpoint with the last one,
@@ -857,6 +912,126 @@ mod tests {
             assert!(short.at(step) >= short.at(step + 1), "the cooldown must be monotone at {step}");
         }
         assert!(short.at(199) < short.floor + 0.01 * (short.peak - short.floor));
+    }
+
+    /// A model whose only parameter records which step produced it, and
+    /// which remembers every save it was asked to make.
+    struct Recorder {
+        w: std::cell::RefCell<Vec<f32>>,
+        saves: std::rc::Rc<std::cell::RefCell<Vec<Vec<f32>>>>,
+    }
+
+    #[derive(Clone)]
+    struct RecorderCfg;
+    impl ModelConfig for RecorderCfg {
+        fn param_list(&self) -> Vec<(String, usize)> {
+            vec![("w".into(), 1)]
+        }
+        fn to_json(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn from_json(_v: &serde_json::Value) -> Self {
+            RecorderCfg
+        }
+        fn vocab(&self) -> u32 {
+            0
+        }
+        fn block_size(&self) -> u32 {
+            0
+        }
+        fn finalize_for_dataset(self, _v: u32, _b: u32) -> Self {
+            self
+        }
+    }
+
+    impl Model for Recorder {
+        type Config = RecorderCfg;
+        fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), saves: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
+        }
+        fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
+            HashMap::new()
+        }
+        fn config(&self) -> &RecorderCfg {
+            &RecorderCfg
+        }
+        fn set_batch(&self, _b: Batch) {}
+        fn forward(&self) -> f32 {
+            0.0
+        }
+        fn backward(&self) {}
+        fn zero_grads(&self) {}
+        /// The step number IS the weight, so a saved checkpoint says which
+        /// step it came from.
+        fn adamw_step(&self, t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra: f32) {
+            *self.w.borrow_mut() = vec![t as f32];
+        }
+        fn poll_wait(&self) {}
+        fn param_names(&self) -> Vec<String> {
+            vec!["w".into()]
+        }
+        fn read_weight(&self, _name: &str) -> Vec<f32> {
+            self.w.borrow().clone()
+        }
+        fn write_weight(&self, _name: &str, data: &[f32]) {
+            *self.w.borrow_mut() = data.to_vec();
+        }
+        fn read_grad(&self, _name: &str) -> Vec<f32> {
+            vec![0.0]
+        }
+        fn logits_all(&self, _t: &[u32]) -> Option<Vec<f32>> {
+            None
+        }
+        fn save(&self, _path: &str) {
+            self.saves.borrow_mut().push(self.w.borrow().clone());
+        }
+        fn config_json(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+    }
+
+    /// An objective that replays a held-out curve: down to its bottom, then up.
+    struct Curve {
+        evals: Vec<f32>,
+        next: std::cell::Cell<usize>,
+    }
+    impl Objective<Recorder> for Curve {
+        fn regime(&self) -> &'static str {
+            "curve"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn eval(&mut self, _m: &Recorder, _r: &mut Rng, _b: u32) -> Option<f32> {
+            let i = self.next.get();
+            self.next.set(i + 1);
+            self.evals.get(i).copied()
+        }
+    }
+
+    /// Keeping the best checkpoint used to mean rewriting the whole model at
+    /// every improvement: a real LoRA run wrote 19.8 GB of checkpoints to
+    /// preserve a 20 MB adapter. The parameters are held instead and written
+    /// once - and what lands on disk must still be the best step's, not the
+    /// last step's.
+    #[test]
+    fn the_best_parameters_are_written_once_and_are_the_best_ones() {
+        let dir = tmp("best-written-once");
+        // Eval every step: improves through step 3, then worsens until the
+        // patience of 2 runs out.
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1];
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        // Shared, so the test sees what the training loop saved.
+        let saves = std::rc::Rc::clone(&model.saves);
+        let opts = FitOpts { steps: 6, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() };
+        let obj = Curve { evals, next: std::cell::Cell::new(0) };
+        fit_with(model, obj, &opts, Some(&dir.join("ckpt"))).expect("fit");
+
+        let saves = saves.borrow();
+        assert_eq!(saves.len(), 1, "one write, not one per improvement: {saves:?}");
+        // Step 4's eval (index 3) was the best, and `adamw_step` is called
+        // with t = step + 1, so the best parameters are 4.0.
+        assert_eq!(saves[0], vec![4.0], "the checkpoint must hold the best step's parameters");
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {
