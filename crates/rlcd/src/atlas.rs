@@ -125,7 +125,13 @@ pub fn check_information_refinement(world: &impl World, tolerance: f32) -> Resul
     let obs = world.observations();
     let prior = world.prior();
     let n = world.n_outcomes();
-    assert_eq!(prior.len(), n, "World::prior() must have n_outcomes() entries");
+    validate_distribution(&prior, n, tolerance, "World::prior()")?;
+    for o in &obs {
+        validate_distribution(&o.posterior, n, tolerance, &format!("the posterior of observation {:?}", o.name))?;
+        if !o.probability.is_finite() || o.probability < 0.0 {
+            return Err(format!("observation {:?} has probability {}, which is not a probability", o.name, o.probability));
+        }
+    }
 
     let prob_sum: f32 = obs.iter().map(|o| o.probability).sum();
     if (prob_sum - 1.0).abs() > tolerance {
@@ -140,8 +146,76 @@ pub fn check_information_refinement(world: &impl World, tolerance: f32) -> Resul
     Ok(())
 }
 
+/// Is `p` actually a distribution over `expect_len` outcomes: right arity,
+/// every entry finite and non-negative, summing to 1 within `tolerance`.
+///
+/// Shared by [`check_information_refinement`] and by every caller that
+/// accepts an oracle target from outside (`brain::RlcdPipeline`'s training
+/// and evaluation sets), so one definition of "a distribution" covers the
+/// world's own numbers and the targets derived from them.
+///
+/// **Normalization is not implied by the refinement identity.** Summed over
+/// outcomes it only forces the probability-weighted MEAN of the posterior
+/// sums to be 1, so a world with one posterior summing to 1.1 and another to
+/// 0.9 passes that check while neither is a distribution. This is what
+/// catches it.
+pub fn validate_distribution(p: &[f32], expect_len: usize, tolerance: f32, what: &str) -> Result<(), String> {
+    if p.len() != expect_len {
+        return Err(format!("{what} has {} entries, expected {expect_len}", p.len()));
+    }
+    for (i, &x) in p.iter().enumerate() {
+        if !x.is_finite() {
+            return Err(format!("{what} has a non-finite entry at {i}: {x}"));
+        }
+        if x < 0.0 {
+            return Err(format!("{what} has a negative entry at {i}: {x}"));
+        }
+    }
+    let sum: f32 = p.iter().sum();
+    if (sum - 1.0).abs() > tolerance {
+        return Err(format!("{what} sums to {sum}, not 1"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// A world whose posteriors are not distributions, arranged so the
+    /// refinement identity itself still passes: 0.24*1.1 + 0.76*(1 - 0.24*1.1
+    /// scaled) style compensation. Normalization has to be checked directly
+    /// or this world is accepted as honest.
+    #[test]
+    fn a_posterior_that_is_not_a_distribution_is_rejected() {
+        struct Unnormalized;
+        impl World for Unnormalized {
+            fn n_outcomes(&self) -> usize {
+                2
+            }
+            fn prior(&self) -> Distribution {
+                vec![0.8, 0.2]
+            }
+            fn observations(&self) -> Vec<Observation> {
+                // Both posteriors are shifted by +0.05 on outcome 0 and
+                // -0.05 on outcome 1, so every marginal still reproduces the
+                // prior exactly while neither row sums to 1.
+                vec![
+                    Observation { name: "a".into(), probability: 0.5, posterior: vec![0.85, 0.1] },
+                    Observation { name: "b".into(), probability: 0.5, posterior: vec![0.75, 0.3] },
+                ]
+            }
+        }
+        let err = check_information_refinement(&Unnormalized, 1e-5).expect_err("neither posterior is a distribution");
+        assert!(err.contains("sums to"), "{err}");
+    }
+
+    #[test]
+    fn a_non_finite_or_negative_entry_is_rejected_by_name() {
+        assert!(validate_distribution(&[f32::NAN, 1.0], 2, 1e-5, "t").unwrap_err().contains("non-finite"));
+        assert!(validate_distribution(&[-0.5, 1.5], 2, 1e-5, "t").unwrap_err().contains("negative"));
+        assert!(validate_distribution(&[0.5], 2, 1e-5, "t").unwrap_err().contains("expected 2"));
+        validate_distribution(&[0.25, 0.75], 2, 1e-5, "t").expect("a real distribution passes");
+    }
+
     use super::*;
     use crate::cost::{bayes_action, CostMatrix};
 

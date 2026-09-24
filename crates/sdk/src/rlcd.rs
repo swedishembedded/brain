@@ -58,7 +58,7 @@ use crate::{Device, Error, Result};
 // `RlcdExample`s and name cost matrices without depending on `brain-rlcd`
 // directly - a sample may name only the `brain` SDK facade as its brain
 // dependency (see `samples/README.md`'s rules), never an engine crate.
-pub use rlcd::atlas::{check_information_refinement, DecisionContract, Distribution, Observation, OracleKind, World};
+pub use rlcd::atlas::{check_information_refinement, validate_distribution, DecisionContract, Distribution, Observation, OracleKind, World};
 pub use rlcd::cost::{bayes_action, bayes_risk, regret, voi, BayesAction, CostMatrix};
 pub use rlcd::metrics::{
     ada_ece, classwise_ece, coverage_accuracy, failure_auroc, posterior_error, posterior_kl, reliability_bins, soft_ece, soft_nll, ReliabilityBin,
@@ -78,6 +78,12 @@ const HEAD_LR: f32 = 1e-3;
 /// answer off a handful of single-sample REINFORCE updates leaves little
 /// room for exploration to correct an early mistake.
 const VOI_HEAD_LR: f32 = 1e-4;
+
+/// How far an oracle target may be from summing to 1 before it is refused.
+/// Loose enough for f32 accumulation over a few hundred options, far tighter
+/// than any real mistake - a target built from the wrong denominator, or one
+/// option short, misses by percent, not by `1e-4`.
+const TARGET_TOLERANCE: f32 = 1e-4;
 
 /// One training or evaluation example: a rendered state, and the EXACT
 /// target distribution over `RlcdSpec::options` an oracle assigned it.
@@ -524,13 +530,16 @@ impl Stages for RlcdPipeline {
         if spec.train.is_empty() {
             return Err(Error::MissingArgument("no examples to train on".into()));
         }
-        for ex in &spec.train {
-            if ex.target.len() != spec.options.len() {
-                return Err(Error::MissingArgument(format!(
-                    "example target has {} entries, but {} options were declared",
-                    ex.target.len(),
-                    spec.options.len()
-                )));
+        // Both sets, before any step is spent: a target that is not a
+        // distribution trains the model toward something that is not one
+        // either, and `decision_loss_soft` documents normalization as the
+        // caller's invariant without anywhere that establishes it. An
+        // evaluation target that is not a distribution is worse still - it
+        // is the reference every calibration number is measured against.
+        for (set, examples) in [("training", &spec.train), ("evaluation", &spec.eval)] {
+            for (i, ex) in examples.iter().enumerate() {
+                validate_distribution(&ex.target, spec.options.len(), TARGET_TOLERANCE, &format!("{set} example {i} ({:?})", ex.state))
+                    .map_err(Error::MissingArgument)?;
             }
         }
         for (name, costs) in &spec.eval_costs {
@@ -749,6 +758,25 @@ impl RlcdPipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A target that is not a distribution has to be refused where it
+    /// enters, not silently trained on. `decision_loss_soft` names
+    /// normalization as the caller's invariant and nothing established it.
+    #[test]
+    fn a_target_that_is_not_a_distribution_is_refused_by_name() {
+        let base = || {
+            RlcdSpec::default()
+                .instructions("q")
+                .options(vec!["a".into(), "b".into()])
+                .steps(1)
+        };
+        for bad in [vec![0.5f32, 0.6], vec![0.5, -0.5], vec![f32::NAN, 1.0], vec![1.0]] {
+            let spec = base().train(vec![RlcdExample::new("s", bad.clone())]);
+            let err = validate_distribution(&spec.train[0].target, spec.options.len(), TARGET_TOLERANCE, "t").expect_err(&format!("{bad:?} is not a distribution"));
+            assert!(!err.is_empty());
+        }
+        validate_distribution(&[1.0 / 3.0, 2.0 / 3.0], 2, TARGET_TOLERANCE, "t").expect("the oracle's own posterior must pass");
+    }
 
     /// The contract has to survive the round trip through a checkpoint's
     /// config, or a loaded head is 445k floats nobody can ask anything.
