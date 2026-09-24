@@ -587,6 +587,7 @@ fn train(args: &[String], base: Option<&str>) {
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: align,
+        patience: 0,
         seed,
     };
     // finetune: seed weights from the base checkpoint by pre-writing `out`.
@@ -740,6 +741,10 @@ fn finetune_lora(args: &[String]) {
     let mut adapter_spec = String::new();
     let mut dataset_dir = String::new();
     let mut rank = 0u32;
+    // Stop when the held-out loss stops improving, and keep the checkpoint
+    // from before it turned. 0 keeps the old behaviour: run every step and
+    // save the last model, which on a small dataset is the memorised one.
+    let mut patience = 0u32;
     let mut alpha: Option<f32> = None;
     let mut steps = 500u32;
     let mut lr = 5e-5f32;
@@ -755,6 +760,7 @@ fn finetune_lora(args: &[String]) {
             "--adapter" => adapter_spec = val(args, &mut i, "--adapter"),
             "--dataset" => dataset_dir = val(args, &mut i, "--dataset"),
             "--lora" => rank = val(args, &mut i, "--lora").parse().unwrap_or(rank),
+            "--patience" => patience = val(args, &mut i, "--patience").parse().unwrap_or(patience),
             "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
@@ -770,6 +776,7 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
+             [--patience N] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
         return;
@@ -888,14 +895,23 @@ fn finetune_lora(args: &[String]) {
         weight_decay: 0.1,
         grad_clip: 1.0,
         grad_accum: 1,
-        eval_interval: if val_samples.is_empty() { 0 } else { (steps / 10).max(1) },
+        // Evaluated often enough that patience means something: ten chances
+        // to notice the turn is too few on a short run.
+        eval_interval: if val_samples.is_empty() { 0 } else { (steps / 20).max(1) },
         eval_batches: 20,
         checkpoint_secs: 0,
         mask_before: None,
         mask_per_line: false,
         align_to_lines: false,
+        patience,
         seed,
     };
+    if patience > 0 && val_samples.is_empty() {
+        // Said rather than silently ignored: a run asked to stop early with
+        // nothing to watch would run to the last step and save the model
+        // the caller asked not to have.
+        eprintln!("--patience {patience} needs a validation.jsonl to watch; there is none, so nothing will stop early");
+    }
     let mode = qwen3::finetune::Mode::Lora { rank, alpha };
     let full_ckpt_out = scratch.join("full.safetensors");
     let (l0, l1) = match qwen3::finetune::finetune(

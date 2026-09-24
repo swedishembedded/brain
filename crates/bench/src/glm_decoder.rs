@@ -100,6 +100,7 @@ impl DecoderLm for GlmDecoder {
             mask_before: cfg.mask_before,
             mask_per_line: cfg.mask_per_line,
             align_to_lines: cfg.align_to_lines,
+            patience: 0,
             ..Default::default()
         };
         model::train::fit::<Glm>(dir, gcfg, &opts, Some(weights_out))

@@ -422,6 +422,7 @@ fn prepare_base(args: &Args) -> PathBuf {
         // supervises completion tokens whose own prompt is not inside it -
         // label noise, not supervision.
         align_to_lines: true,
+        patience: 0,
         ..FitOpts::default()
     };
     let started = std::time::Instant::now();

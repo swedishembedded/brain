@@ -87,6 +87,7 @@ impl DecoderLm for MoeDecoder {
             mask_before: cfg.mask_before,
             mask_per_line: cfg.mask_per_line,
             align_to_lines: cfg.align_to_lines,
+            patience: 0,
             ..Default::default()
         };
         // `Trainer` implements `model::Model`, so the generic trainer trains MoE.

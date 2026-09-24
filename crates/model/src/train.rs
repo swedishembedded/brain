@@ -53,6 +53,19 @@ pub struct FitOpts {
     pub mask_before: Option<char>,
     pub mask_per_line: bool,
     pub align_to_lines: bool,
+    /// Stop when the HELD-OUT loss has not improved for this many
+    /// consecutive evaluations, and keep the checkpoint that achieved the
+    /// best one.
+    ///
+    /// `0` never stops early and saves the LAST model, which is what every
+    /// caller got before this existed. Any other value changes what `out`
+    /// holds: the point of stopping early is to keep the model from before
+    /// it started memorising, and saving the last one afterwards would
+    /// throw away the thing the stop was for.
+    ///
+    /// Needs `eval_interval > 0` and a validation split; without either
+    /// there is no held-out loss to watch and this is inert.
+    pub patience: u32,
 }
 
 impl Default for FitOpts {
@@ -75,6 +88,9 @@ impl Default for FitOpts {
             mask_before: None,
             mask_per_line: false,
             align_to_lines: false,
+            // Off: unchanged behaviour for every caller that has not asked
+            // to stop early.
+            patience: 0,
         }
     }
 }
@@ -392,6 +408,73 @@ impl<M: Model> Objective<M> for CausalLm {
 /// per-position weighting the objective applies), just discarded (via the
 /// following [`Model::zero_grads`]) before the first real optimizer step.
 #[cfg(not(target_arch = "wasm32"))]
+/// What to do after one held-out evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watch {
+    /// The best held-out loss so far. Keep this checkpoint.
+    Improved,
+    /// Worse than the best, but not for long enough to stop.
+    Wait,
+    /// It has not improved for `patience` evaluations. Stop, and keep the
+    /// checkpoint from the best one.
+    Stop,
+}
+
+/// Watches the held-out loss and decides when training has stopped learning
+/// the task and started learning the rows.
+///
+/// The signal is the DIVERGENCE: training loss falling while held-out loss
+/// rises. Watching the training loss alone cannot see it - that curve looks
+/// healthy all the way into memorisation, and on a small dataset it reaches
+/// ~0 while the model gets worse at everything it was not shown.
+///
+/// Separate from [`fit_with`] so the policy can be tested against a sequence
+/// of losses rather than against a GPU.
+#[derive(Clone, Debug)]
+pub struct EarlyStop {
+    patience: u32,
+    best: f32,
+    since_improved: u32,
+}
+
+impl EarlyStop {
+    /// `patience` evaluations without improvement before stopping. `0`
+    /// disarms it: nothing is watched and nothing stops.
+    pub fn new(patience: u32) -> EarlyStop {
+        EarlyStop { patience, best: f32::INFINITY, since_improved: 0 }
+    }
+
+    pub fn armed(&self) -> bool {
+        self.patience > 0
+    }
+
+    /// The best held-out loss seen. `f32::INFINITY` before the first one.
+    pub fn best(&self) -> f32 {
+        self.best
+    }
+
+    /// Record one held-out loss and say what to do about it.
+    ///
+    /// A NaN is treated as no improvement rather than as a new best: a
+    /// diverged step must not be allowed to claim the checkpoint.
+    pub fn observe(&mut self, eval: f32) -> Watch {
+        if !self.armed() {
+            return Watch::Wait;
+        }
+        if eval < self.best {
+            self.best = eval;
+            self.since_improved = 0;
+            return Watch::Improved;
+        }
+        self.since_improved += 1;
+        if self.since_improved >= self.patience {
+            Watch::Stop
+        } else {
+            Watch::Wait
+        }
+    }
+}
+
 pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     obj.prepare(&mut model);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
@@ -406,6 +489,9 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
     };
     let mut last_train = initial;
     let mut last_save = std::time::Instant::now();
+    let mut watch = EarlyStop::new(opts.patience);
+    let mut kept_best = false;
+    let mut stopped_early = false;
 
     for step in 0..opts.steps {
         let lr = cosine_lr(step, opts);
@@ -424,6 +510,30 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
         if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
             if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
+                match watch.observe(eval_loss) {
+                    Watch::Improved => {
+                        // The checkpoint IS the best one, written when it is
+                        // reached. Keeping it in memory instead would need a
+                        // second copy of the model.
+                        if let Some(p) = out {
+                            model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+                            kept_best = true;
+                        }
+                    }
+                    Watch::Wait => {}
+                    Watch::Stop => {
+                        println!(
+                            "stopping at step {}: held-out loss has not improved for {} evaluations (best {:.4}), \
+                             while the training loss went on falling - past this point the model is learning the \
+                             training rows rather than the task",
+                            step + 1,
+                            opts.patience,
+                            watch.best()
+                        );
+                        stopped_early = true;
+                        break;
+                    }
+                }
             }
             for (name, value) in obj.metrics() {
                 println!("  {name}: {value:.4}");
@@ -448,10 +558,18 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
         }
     }
 
-    if let Some(p) = out {
+    // The final save would overwrite the best checkpoint with the last one,
+    // which is exactly the model early stopping exists to discard.
+    if let Some(p) = out.filter(|_| !kept_best) {
         let ts = std::time::Instant::now();
         model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
         println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+    } else if kept_best {
+        println!(
+            "kept the checkpoint with the best held-out loss ({:.4}){}",
+            watch.best(),
+            if stopped_early { ", stopped early" } else { "" }
+        );
     }
     Ok((initial, last_train))
 }
@@ -568,6 +686,76 @@ pub fn generate<M: Model>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape this exists to catch: training loss falling all the way
+    /// while held-out loss bottoms out and turns back up.
+    ///
+    /// The stop must land on the TURN, not on the end of the run, and the
+    /// best it reports must be the bottom of the curve rather than the last
+    /// thing it saw.
+    #[test]
+    fn it_stops_where_the_held_out_loss_turned_and_keeps_that_checkpoint() {
+        // A real overfitting curve: down to 0.42 at the fourth eval, then up.
+        let evals = [3.10f32, 1.40, 0.80, 0.42, 0.55, 0.71, 0.93, 1.20];
+        let mut w = EarlyStop::new(2);
+        let mut stopped_at = None;
+        for (i, e) in evals.iter().enumerate() {
+            match w.observe(*e) {
+                Watch::Stop => {
+                    stopped_at = Some(i);
+                    break;
+                }
+                Watch::Improved | Watch::Wait => {}
+            }
+        }
+        assert_eq!(stopped_at, Some(5), "two evaluations after the turn at index 3, not at the end of the run");
+        assert!((w.best() - 0.42).abs() < 1e-6, "the best is the bottom of the curve, got {}", w.best());
+    }
+
+    /// A curve that is still improving must never be stopped, however long
+    /// it runs. A stopper that fires on a healthy run is worse than none.
+    #[test]
+    fn a_run_that_keeps_improving_is_never_stopped() {
+        let mut w = EarlyStop::new(2);
+        for i in 0..50 {
+            let eval = 3.0 - i as f32 * 0.05;
+            assert_eq!(w.observe(eval), Watch::Improved, "step {i}");
+        }
+    }
+
+    /// Patience is a budget, not a hair trigger: a single worse evaluation
+    /// inside a run that then improves again is noise.
+    #[test]
+    fn one_bad_evaluation_inside_an_improving_run_does_not_stop_it() {
+        let mut w = EarlyStop::new(3);
+        assert_eq!(w.observe(1.00), Watch::Improved);
+        assert_eq!(w.observe(1.05), Watch::Wait);
+        assert_eq!(w.observe(0.90), Watch::Improved, "improving again resets the budget");
+        assert_eq!(w.observe(0.95), Watch::Wait);
+        assert_eq!(w.observe(0.96), Watch::Wait);
+        assert_eq!(w.observe(0.97), Watch::Stop);
+    }
+
+    /// Disarmed is disarmed: the default must behave exactly as it did
+    /// before this existed.
+    #[test]
+    fn patience_zero_never_stops_and_never_claims_a_best() {
+        let mut w = EarlyStop::new(0);
+        assert!(!w.armed());
+        for e in [5.0f32, 0.1, 9.9, 0.01] {
+            assert_eq!(w.observe(e), Watch::Wait);
+        }
+        assert_eq!(w.best(), f32::INFINITY, "a disarmed watcher has no opinion about any checkpoint");
+    }
+
+    /// A diverged step must not be allowed to claim the checkpoint.
+    #[test]
+    fn a_nan_evaluation_is_not_an_improvement() {
+        let mut w = EarlyStop::new(2);
+        assert_eq!(w.observe(0.5), Watch::Improved);
+        assert_eq!(w.observe(f32::NAN), Watch::Wait);
+        assert!((w.best() - 0.5).abs() < 1e-6, "NaN must not become the best, got {}", w.best());
+    }
 
     #[test]
     fn cosine_lr_warmup_peak_and_floor() {

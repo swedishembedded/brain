@@ -678,6 +678,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
         mask_before: None,
         mask_per_line: false,
         align_to_lines: false,
+        patience: 0,
         seed,
     };
 

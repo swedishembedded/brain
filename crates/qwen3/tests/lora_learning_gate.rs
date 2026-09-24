@@ -142,6 +142,7 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         mask_before: None,
         mask_per_line: false,
         align_to_lines: false,
+        patience: 0,
         seed: 1234,
     };
     // rank=3 is coprime with this config's head_dim=8 / d_model=16

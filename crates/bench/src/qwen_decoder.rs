@@ -75,6 +75,7 @@ impl DecoderLm for QwenDecoder {
             mask_before: cfg.mask_before,
             mask_per_line: cfg.mask_per_line,
             align_to_lines: cfg.align_to_lines,
+            patience: 0,
             ..Default::default()
         };
         model::train::fit::<Qwen>(dir, qcfg, &opts, Some(weights_out))

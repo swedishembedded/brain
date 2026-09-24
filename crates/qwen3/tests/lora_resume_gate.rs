@@ -114,6 +114,7 @@ fn opts(seed: u64, steps: u32) -> model::FitOpts {
         mask_before: None,
         mask_per_line: false,
         align_to_lines: false,
+        patience: 0,
         seed,
     }
 }

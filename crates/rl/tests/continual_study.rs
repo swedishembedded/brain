@@ -286,6 +286,7 @@ fn prepare_base() -> PathBuf {
             // have no prompt in their own window - label noise, not
             // supervision.
             align_to_lines: true,
+            patience: 0,
             ..FitOpts::default()
         };
         let started = std::time::Instant::now();

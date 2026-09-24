@@ -253,6 +253,7 @@ fn parse_finetune(args: &[String]) -> Result<FinetuneArgs, String> {
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: a.take_flag("--align"),
+        patience: 0,
         ..d
     };
     // The corpus is positional, matching `brain glm finetune <data_dir> ...`

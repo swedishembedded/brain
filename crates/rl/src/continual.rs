@@ -792,6 +792,7 @@ fn sft_cycle_opts<C: Curriculum>(cfg: &StudyConfig, sft: &SftConfig, curr: &C, c
         // and supervises completions whose prompt is not in the window, and
         // without the mask the loss is spent mostly re-predicting the prompt.
         align_to_lines: true,
+        patience: 0,
         mask_before: curr.sft_mask_before(),
         mask_per_line: true,
     }

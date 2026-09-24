@@ -256,10 +256,20 @@ pub fn leaks_answer(question: &str, answer: &str) -> bool {
     !words.is_empty() && words.iter().all(|w| q.contains(w.as_str()))
 }
 
-/// A training set and the held-out questions that will judge it.
+/// A training set, the questions that decide when to stop, and the ones that
+/// judge the result.
+///
+/// Three, not two. Stopping early on the PROBE set would make the probe a
+/// selection criterion: the run would keep whichever checkpoint scored best
+/// on the very questions that then report the result, and the number would
+/// be the maximum over a search rather than a held-out measurement.
+/// `validation` exists to be spent on that decision so `probe` never is.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Split {
     pub train: Vec<Candidate>,
+    /// Watched during training, to decide when to stop. Spent, not held out.
+    pub validation: Vec<Candidate>,
+    /// Never used for any decision - only to report the result.
     pub probe: Vec<Candidate>,
 }
 
@@ -276,12 +286,23 @@ impl Split {
     ///   score is about the split rather than the model.
     pub fn defect(&self) -> Option<String> {
         let trained: BTreeSet<&str> = self.train.iter().map(|c| c.question.as_str()).collect();
-        if let Some(leaked) = self.probe.iter().find(|c| trained.contains(c.question.as_str())) {
-            return Some(format!("the probe question {:?} is also trained on", leaked.question));
+        for (name, half) in [("probe", &self.probe), ("validation", &self.validation)] {
+            if let Some(leaked) = half.iter().find(|c| trained.contains(c.question.as_str())) {
+                return Some(format!("the {name} question {:?} is also trained on", leaked.question));
+            }
+        }
+        // And the two held-out halves must not be each other: a probe that
+        // is also a validation question was used to choose the checkpoint
+        // that then reports the result.
+        let validated: BTreeSet<&str> = self.validation.iter().map(|c| c.question.as_str()).collect();
+        if let Some(shared) = self.probe.iter().find(|c| validated.contains(c.question.as_str())) {
+            return Some(format!("the probe question {:?} was also used to decide when to stop", shared.question));
         }
         let taught: BTreeSet<&str> = self.train.iter().map(|c| c.answer.as_str()).collect();
-        if let Some(orphan) = self.probe.iter().find(|c| !taught.contains(c.answer.as_str())) {
-            return Some(format!("the probe answer {:?} is never taught by the training half", orphan.answer));
+        for (name, half) in [("probe", &self.probe), ("validation", &self.validation)] {
+            if let Some(orphan) = half.iter().find(|c| !taught.contains(c.answer.as_str())) {
+                return Some(format!("the {name} answer {:?} is never taught by the training half", orphan.answer));
+            }
         }
         None
     }
@@ -312,14 +333,22 @@ pub fn split_by_phrasing(rows: &[Candidate], per_answer: usize, seed: u64) -> Sp
     }
     let mut split = Split::default();
     for (group_index, (_, group)) in by_answer.into_iter().enumerate() {
-        let spare = group.len().saturating_sub(1).min(per_answer);
+        // Training keeps at least one phrasing of every answer; what is
+        // spare goes to probe first, then to validation. Probe first because
+        // a run with too few phrasings to afford both should lose its
+        // stopping signal rather than its measurement.
+        let spare = group.len().saturating_sub(1);
+        let to_probe = spare.min(per_answer);
+        let to_validation = spare.saturating_sub(to_probe).min(per_answer);
         // A rotation seeded per group: reproducible, and uncorrelated with
         // the order the generator happened to write them in.
         let start = mix(seed, group_index as u64) as usize % group.len().max(1);
         for (i, c) in group.iter().enumerate() {
             let rotated = (i + group.len() - start) % group.len();
-            if rotated < spare {
+            if rotated < to_probe {
                 split.probe.push((*c).clone());
+            } else if rotated < to_probe + to_validation {
+                split.validation.push((*c).clone());
             } else {
                 split.train.push((*c).clone());
             }
@@ -358,6 +387,93 @@ pub fn write_chat_jsonl(path: impl AsRef<std::path::Path>, rows: &[Candidate]) -
         })
         .collect();
     crate::artifact::write_jsonl(path, &records)
+}
+
+/// What deduplication removed, and why.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Duplicates {
+    /// Rows dropped because the same question had already been kept for the
+    /// same answer. Asking a model for eight phrasings gets fewer than eight
+    /// distinct ones.
+    pub repeated: usize,
+    /// Questions that appeared with two DIFFERENT answers. Both are dropped:
+    /// one of them is wrong and nothing here can tell which, and training on
+    /// a contradiction teaches the model to pick arbitrarily.
+    pub contradictory: Vec<String>,
+}
+
+/// Keep one row per distinct question, and drop questions that answer to
+/// more than one command.
+///
+/// A generator asked for many phrasings repeats itself, and a repeat is not
+/// new data: it inflates the training set, and - the reason this is not
+/// merely wasteful - the same question can then land in two different
+/// halves of a split, which turns a held-out score into a recall score. That
+/// is exactly how it was found.
+pub fn dedupe(rows: &[Candidate]) -> (Vec<Candidate>, Duplicates) {
+    let mut answers_for: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for r in rows {
+        answers_for.entry(r.question.to_lowercase()).or_default().insert(r.answer.as_str());
+    }
+    let contradictory: Vec<String> =
+        answers_for.iter().filter(|(_, a)| a.len() > 1).map(|(q, _)| q.clone()).collect();
+    let banned: BTreeSet<&str> = contradictory.iter().map(String::as_str).collect();
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut kept = Vec::with_capacity(rows.len());
+    let mut repeated = 0usize;
+    for r in rows {
+        let key = r.question.to_lowercase();
+        if banned.contains(key.as_str()) {
+            continue;
+        }
+        if !seen.insert(key) {
+            repeated += 1;
+            continue;
+        }
+        kept.push(r.clone());
+    }
+    (kept, Duplicates { repeated, contradictory })
+}
+
+/// The same rows with every question attached to a DIFFERENT row's answer.
+///
+/// The control that decides whether a held-out score means anything. Train
+/// on this instead and the model sees the same questions, the same answers,
+/// the same count of rows and the same number of steps - everything except
+/// the mapping between them. A probe that scores as well from this as from
+/// the real thing is not measuring the mapping, and whatever it is measuring
+/// would have been reported as learning.
+///
+/// A fixed derangement rather than a shuffle: every row is guaranteed to be
+/// wrong, where a shuffle leaves some rows accidentally correct and weakens
+/// the control by exactly that fraction.
+pub fn shuffle_answers(rows: &[Candidate], seed: u64) -> Vec<Candidate> {
+    if rows.len() < 2 {
+        return rows.to_vec();
+    }
+    // Rotate by a seeded amount coprime with the length: every index moves,
+    // so no row keeps its own answer.
+    let n = rows.len();
+    let mut shift = (mix(seed, 0) as usize % (n - 1)) + 1;
+    while gcd(shift, n) != 1 {
+        shift += 1;
+        if shift >= n {
+            shift = 1;
+        }
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(i, c)| Candidate { answer: rows[(i + shift) % n].answer.clone(), ..c.clone() })
+        .collect()
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 /// Read back what [`write_chat_jsonl`] wrote.
@@ -708,7 +824,8 @@ mod tests {
         ];
         let split = split_by_phrasing(&rows, 1, 7);
         assert_eq!(split.probe.len(), 1, "one phrasing of the answer that has spares");
-        assert_eq!(split.train.len(), 3);
+        assert_eq!(split.validation.len(), 1, "and one to decide when to stop");
+        assert_eq!(split.train.len(), 2);
         assert_eq!(split.defect(), None);
         // The lone-phrasing answer stays in training rather than being
         // dropped to satisfy a ratio.
@@ -719,11 +836,12 @@ mod tests {
     #[test]
     fn a_split_that_leaks_or_orphans_says_so() {
         let shared = candidate("how do I graft?", "tool graft --on");
-        let leaked = Split { train: vec![shared.clone()], probe: vec![shared] };
+        let leaked = Split { train: vec![shared.clone()], validation: Vec::new(), probe: vec![shared] };
         assert!(leaked.defect().expect("leak").contains("also trained on"));
 
         let orphan = Split {
             train: vec![candidate("how do I graft?", "tool graft --on")],
+            validation: Vec::new(),
             probe: vec![candidate("how do I prune?", "tool prune --deep")],
         };
         assert!(orphan.defect().expect("orphan").contains("never taught"));
@@ -789,5 +907,88 @@ mod tests {
         let err = read_chat_jsonl(&path).expect_err("a half record must be refused");
         assert!(format!("{err}").contains("record 1"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Three-way, and the third one is the point: stopping early on the
+    /// PROBE set would make the probe a selection criterion, and the
+    /// reported number the maximum over a search.
+    #[test]
+    fn the_validation_half_is_disjoint_from_the_probe_it_protects() {
+        let rows: Vec<Candidate> = (0..6)
+            .flat_map(|a| {
+                ["what is the command", "how do i", "what flags", "which flags"]
+                    .iter()
+                    .map(move |style| candidate(&format!("{style} for answer {a}?"), &format!("tool run --n {a}")))
+                    .collect::<Vec<Candidate>>()
+            })
+            .collect();
+        let split = split_by_phrasing(&rows, 1, 5);
+        assert_eq!(split.probe.len(), 6);
+        assert_eq!(split.validation.len(), 6);
+        assert_eq!(split.train.len(), 12);
+        assert_eq!(split.defect(), None);
+
+        let probes: BTreeSet<&str> = split.probe.iter().map(|c| c.question.as_str()).collect();
+        assert!(
+            split.validation.iter().all(|c| !probes.contains(c.question.as_str())),
+            "a question used to choose the checkpoint must not also report the result"
+        );
+    }
+
+    /// And the defect check says so when they overlap.
+    #[test]
+    fn a_probe_that_also_decided_when_to_stop_is_refused() {
+        let shared = candidate("how do I graft?", "tool graft --on");
+        let bad = Split {
+            train: vec![candidate("what grafts?", "tool graft --on")],
+            validation: vec![shared.clone()],
+            probe: vec![shared],
+        };
+        assert!(bad.defect().expect("overlap").contains("also used to decide when to stop"));
+    }
+
+    /// Every row must be wrong, not most of them: a shuffle that leaves some
+    /// rows correct weakens the control by exactly that fraction.
+    #[test]
+    fn the_control_arm_gives_every_question_someone_elses_answer() {
+        let rows: Vec<Candidate> =
+            (0..9).map(|i| candidate(&format!("question {i}?"), &format!("tool run --n {i}"))).collect();
+        for seed in 0..12u64 {
+            let shuffled = shuffle_answers(&rows, seed);
+            assert_eq!(shuffled.len(), rows.len());
+            for (before, after) in rows.iter().zip(&shuffled) {
+                assert_eq!(before.question, after.question, "the questions are untouched");
+                assert_ne!(before.answer, after.answer, "seed {seed}: a row kept its own answer");
+            }
+            // The same answers, redistributed - not invented ones.
+            let want: BTreeSet<&str> = rows.iter().map(|c| c.answer.as_str()).collect();
+            let got: BTreeSet<&str> = shuffled.iter().map(|c| c.answer.as_str()).collect();
+            assert_eq!(want, got, "the control must train on the same answers, only mispaired");
+        }
+        // Reproducible.
+        assert_eq!(shuffle_answers(&rows, 3), shuffle_answers(&rows, 3));
+    }
+
+    /// A generator asked for eight phrasings does not produce eight distinct
+    /// ones, and a repeat is not merely wasteful: the same question can land
+    /// in two halves of a split, which is how it was found.
+    #[test]
+    fn repeated_questions_are_dropped_and_contradictions_taken_out_entirely() {
+        let rows = vec![
+            candidate("how do I graft?", "tool graft --on"),
+            candidate("How do I graft?", "tool graft --on"), // same, differently cased
+            candidate("what grafts?", "tool graft --on"),
+            candidate("which one?", "tool graft --on"),
+            candidate("which one?", "tool prune --deep"), // the same question, two answers
+        ];
+        let (kept, dup) = dedupe(&rows);
+        let questions: Vec<&str> = kept.iter().map(|c| c.question.as_str()).collect();
+        assert_eq!(questions, ["how do I graft?", "what grafts?"], "{questions:?}");
+        assert_eq!(dup.repeated, 1);
+        assert_eq!(dup.contradictory, ["which one?"]);
+        assert!(
+            kept.iter().all(|c| c.question != "which one?"),
+            "a question with two answers is dropped whole: one of them is wrong and nothing here knows which"
+        );
     }
 }

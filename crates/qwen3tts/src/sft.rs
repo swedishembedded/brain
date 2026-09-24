@@ -207,6 +207,7 @@ impl FinetuneOpts {
             mask_before: None,
             mask_per_line: false,
             align_to_lines: false,
+            patience: 0,
         }
     }
 }

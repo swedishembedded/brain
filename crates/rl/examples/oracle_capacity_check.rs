@@ -157,6 +157,7 @@ fn prepare_base(out: &Path) -> PathBuf {
         seed: PRETRAIN_SEED,
         checkpoint_secs: 0,
         align_to_lines: true,
+        patience: 0,
         ..model::FitOpts::default()
     };
     let started = std::time::Instant::now();
@@ -226,6 +227,7 @@ fn main() {
         seed: SFT_SEED,
         checkpoint_secs: 0,
         align_to_lines: true,
+        patience: 0,
         // Supervise only the completion (t0,t1,t2), not the prompt, which the
         // loss would otherwise spend most of its gradient trivially
         // predicting. The char is derived by the dataset writer's own module

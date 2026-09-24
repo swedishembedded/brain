@@ -28,7 +28,7 @@
 
 mod corpus;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -80,15 +80,26 @@ usage: sample-learning-reader <verb> [options]
         a training set: the TOOL supplies the answers, which makes them
         correct by construction, and the model only phrases the questions.
 
-  sft      --in DIR --out DIR [--held-out N] [--seed N]
+  sft      --in DIR --out DIR [--held-out N] [--seed N] [--control]
         turn the verified pairs into a training set and the held-out
         questions that will judge it. Splits by PHRASING, so the probe asks
         for something the training half teaches, in words it never used.
+
+        --control  write the SHUFFLED-ANSWER arm instead: the same questions,
+                   the same answers, the same row count, every pairing wrong.
+                   A probe that scores as well from this is not measuring the
+                   mapping.
 
   score    --probes DIR --model REF [--adapter PATH] [--max-new N]
         ask the held-out questions and RUN each answer. A reply counts only
         when running it produces the same observable result as running the
         reference - the measurement the whole pipeline exists to make.
+
+  audit    --sft DIR [--seed N]
+        prove the splits are what they claim before anything is trained on
+        them: no question shared between halves, no answer the training half
+        never teaches, every answer executable, and the probe genuinely
+        unseen. Exits non-zero on any of it.
 
   report   --run-dir DIR
         every episode the run recorded, and where each one stopped.
@@ -163,6 +174,7 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
         "phrase" => phrase(&mut a),
         "sft" => sft(&mut a),
         "score" => score(&mut a),
+        "audit" => audit(&mut a),
         "report" => report(&mut a),
         "selftest" => selftest(&mut a),
         other => Err(format!("unknown verb {other:?}\n\n{USAGE}")),
@@ -519,9 +531,25 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
         }
     });
     artifact::write_jsonl(out_dir.join("checked.jsonl"), &checked).map_err(|e| e.to_string())?;
-    let (kept, tally) = qa::accepted(&checked);
+    let (verified, tally) = qa::accepted(&checked);
+    // Asking for many phrasings gets fewer distinct ones, and a repeat is
+    // not new data: the same question can otherwise land in two halves of a
+    // split, which turns a held-out score into a recall score.
+    let (kept, dup) = qa::dedupe(&verified);
     artifact::write_jsonl(out_dir.join("accepted.jsonl"), &kept).map_err(|e| e.to_string())?;
     println!("training  {:>4}  of {} rows survived ({:.0}%)", tally.accepted, tally.offered, tally.rate() * 100.0);
+    if dup.repeated > 0 || !dup.contradictory.is_empty() {
+        println!(
+            "  deduped {:>3}  repeated question(s){}",
+            dup.repeated,
+            if dup.contradictory.is_empty() {
+                String::new()
+            } else {
+                format!(", and dropped {} question(s) that answered to two different commands", dup.contradictory.len())
+            }
+        );
+        println!("distinct  {:>4}  rows written", kept.len());
+    }
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     for c in checked.iter() {
@@ -547,6 +575,7 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
     let out_dir = a.path("--out", "sft");
     let held_out = a.number("--held-out", 1)? as usize;
     let seed = a.number("--seed", 1)?;
+    let control = a.0.iter().position(|x| x == "--control").map(|i| a.0.remove(i)).is_some();
     a.finish()?;
 
     let accepted: Vec<Candidate> =
@@ -555,6 +584,13 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
         return Err(format!("{}: no verified pairs to build a training set from", in_dir.display()));
     }
 
+    // Deduped again here rather than trusted from upstream: this stage is
+    // what a split's honesty rests on, and a repeated question is what makes
+    // the same row land in two halves of it.
+    let (accepted, dup) = qa::dedupe(&accepted);
+    if dup.repeated > 0 || !dup.contradictory.is_empty() {
+        println!("deduped   {:>4}  repeated, {} contradictory", dup.repeated, dup.contradictory.len());
+    }
     let split: Split = qa::split_by_phrasing(&accepted, held_out, seed);
     // Refused rather than reported: a split with either defect produces a
     // number that looks like learning and is not.
@@ -562,12 +598,25 @@ fn sft(a: &mut Args) -> Result<ExitCode, String> {
         return Err(format!("this split cannot be trusted: {defect}"));
     }
 
-    qa::write_chat_jsonl(out_dir.join("train.jsonl"), &split.train).map_err(|e| e.to_string())?;
+    // The control arm mispairs only the TRAINING half. Validation and probe
+    // stay exactly as the real arm has them, or the two runs would be scored
+    // against different questions and the comparison would be meaningless.
+    let train_rows = if control {
+        println!("CONTROL ARM: every training question is given another row's answer");
+        qa::shuffle_answers(&split.train, seed)
+    } else {
+        split.train.clone()
+    };
+    qa::write_chat_jsonl(out_dir.join("train.jsonl"), &train_rows).map_err(|e| e.to_string())?;
+    // `validation.jsonl` is the name the trainer looks for. It is SPENT on
+    // deciding when to stop, which is why it is not the probe.
+    qa::write_chat_jsonl(out_dir.join("validation.jsonl"), &split.validation).map_err(|e| e.to_string())?;
     qa::write_chat_jsonl(out_dir.join("probe.jsonl"), &split.probe).map_err(|e| e.to_string())?;
     artifact::write_jsonl(out_dir.join("split.jsonl"), &[&split]).map_err(|e| e.to_string())?;
 
-    println!("train     {:>4}  rows, answer supervised and question masked", split.train.len());
-    println!("probe     {:>4}  held-out phrasings of answers the training half teaches", split.probe.len());
+    println!("train     {:>4}  rows, answer supervised and question masked", train_rows.len());
+    println!("validate  {:>4}  phrasings spent on deciding when to stop", split.validation.len());
+    println!("probe     {:>4}  held-out phrasings, never used for any decision", split.probe.len());
     let answers: BTreeMap<&str, usize> = split.train.iter().fold(BTreeMap::new(), |mut m, c| {
         *m.entry(c.answer.as_str()).or_default() += 1;
         m
@@ -620,6 +669,107 @@ fn score(a: &mut Args) -> Result<ExitCode, String> {
     }
     println!("\nscore {passed}/{} on held-out questions, every answer executed", rows.len());
     Ok(ExitCode::SUCCESS)
+}
+
+/// Everything that has to be true about the splits before a number taken
+/// from them means anything.
+///
+/// Run as its own step rather than trusted from the stage that wrote them: a
+/// split is easy to build correctly and easy to break later, and the failure
+/// is silent - it shows up as a better result.
+fn audit(a: &mut Args) -> Result<ExitCode, String> {
+    let dir = a.path("--sft", "sft");
+    let seed = a.number("--seed", 1)?;
+    a.finish()?;
+    let (tool, _) = tools(seed);
+
+    let read = |name: &str| -> Result<Vec<Candidate>, String> {
+        qa::read_chat_jsonl(dir.join(name)).map_err(|e| format!("{}/{name}: {e}", dir.display()))
+    };
+    let train = read("train.jsonl")?;
+    let validation = read("validation.jsonl")?;
+    let probe = read("probe.jsonl")?;
+
+    let mut failed = Vec::new();
+    let mut check = |name: &str, ok: bool, detail: String| {
+        println!("  {:<52} {}", name, if ok { "PASS".to_string() } else { format!("FAIL  {detail}") });
+        if !ok {
+            failed.push(name.to_string());
+        }
+    };
+
+    // 1. The three halves share no question. This is the one that turns a
+    //    held-out score into a recall score if it ever stops holding.
+    let qset = |rows: &[Candidate]| -> BTreeSet<String> { rows.iter().map(|c| c.question.to_lowercase()).collect() };
+    let (qt, qv, qp) = (qset(&train), qset(&validation), qset(&probe));
+    let overlap = |a: &BTreeSet<String>, b: &BTreeSet<String>| -> Vec<String> { a.intersection(b).cloned().collect() };
+    for (name, shared) in [
+        ("no question is both trained on and probed", overlap(&qt, &qp)),
+        ("no question is both trained on and validated", overlap(&qt, &qv)),
+        ("no question both decides the stop and reports the result", overlap(&qv, &qp)),
+    ] {
+        check(name, shared.is_empty(), format!("{} shared: {:?}", shared.len(), shared.iter().take(2).collect::<Vec<&String>>()));
+    }
+
+    // 2. Every question is distinct WITHIN a half too: a probe asked twice
+    //    is one question counted twice.
+    for (name, rows) in [("train", &train), ("validation", &validation), ("probe", &probe)] {
+        let unique = qset(rows).len();
+        check(&format!("every {name} question is distinct"), unique == rows.len(), format!("{} rows, {unique} distinct", rows.len()));
+    }
+
+    // 3. Every answer the model is asked for must be one the training half
+    //    teaches. A probe about a command never trained on measures the
+    //    split, not the model.
+    let taught: BTreeSet<&str> = train.iter().map(|c| c.answer.as_str()).collect();
+    for (name, rows) in [("validation", &validation), ("probe", &probe)] {
+        let orphans: Vec<&str> = rows.iter().map(|c| c.answer.as_str()).filter(|a| !taught.contains(a)).collect();
+        check(
+            &format!("every {name} answer is taught by the training half"),
+            orphans.is_empty(),
+            format!("{} untaught: {:?}", orphans.len(), orphans.iter().take(2).collect::<Vec<&&str>>()),
+        );
+    }
+
+    // 4. Every answer, in every half, actually runs. A reference that does
+    //    not execute turns a correct reply into a failure.
+    for (name, rows) in [("train", &train), ("validation", &validation), ("probe", &probe)] {
+        let broken: Vec<&str> = rows.iter().map(|c| c.answer.as_str()).filter(|a| tool.run(a).is_err()).collect();
+        check(
+            &format!("every {name} answer executes"),
+            broken.is_empty(),
+            format!("{} do not run: {:?}", broken.len(), broken.iter().take(2).collect::<Vec<&&str>>()),
+        );
+    }
+
+    // 5. No question gives away its own answer, in any half.
+    for (name, rows) in [("train", &train), ("validation", &validation), ("probe", &probe)] {
+        let leaks: Vec<&str> =
+            rows.iter().filter(|c| qa::leaks_answer(&c.question, &c.answer)).map(|c| c.question.as_str()).collect();
+        check(
+            &format!("no {name} question quotes its own answer"),
+            leaks.is_empty(),
+            format!("{} leak: {:?}", leaks.len(), leaks.iter().take(2).collect::<Vec<&&str>>()),
+        );
+    }
+
+    // 6. And the pairing is still sound in every half - the same check the
+    //    data was accepted under, re-run against what was actually written.
+    for (name, rows) in [("train", &train), ("validation", &validation), ("probe", &probe)] {
+        let bad: Vec<String> = rows
+            .iter()
+            .filter_map(|c| tool.mismatch(&c.question, &c.answer).map(|why| format!("{:?}: {why}", c.question)))
+            .collect();
+        check(&format!("every {name} pairing is about one command"), bad.is_empty(), format!("{} bad: {:?}", bad.len(), bad.first()));
+    }
+
+    println!("\ntrain {} / validation {} / probe {}", train.len(), validation.len(), probe.len());
+    if failed.is_empty() {
+        println!("every check passed: these splits are testing what they claim to");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("{} check(s) failed: {failed:?}", failed.len());
+    Ok(ExitCode::FAILURE)
 }
 
 fn report(a: &mut Args) -> Result<ExitCode, String> {
