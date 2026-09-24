@@ -225,28 +225,6 @@ fn halve(img: &[f32], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
-/// Nearest-free bilinear upsample by 2: the most a band-limited source can
-/// honestly claim at twice its own sampling rate.
-fn doubled(img: &[f32], w: usize, h: usize) -> Vec<f32> {
-    let (dw, dh) = (w * 2, h * 2);
-    let mut out = vec![0.0f32; dw * dh * 3];
-    for y in 0..dh {
-        for x in 0..dw {
-            let (fx, fy) = ((x as f32 + 0.5) / 2.0 - 0.5, (y as f32 + 0.5) / 2.0 - 0.5);
-            let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
-            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
-            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-            for c in 0..3 {
-                let p = |xx: usize, yy: usize| img[(yy * w + xx) * 3 + c];
-                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                out[(y * dw + x) * 3 + c] = top * (1.0 - ty) + bot * ty;
-            }
-        }
-    }
-    out
-}
-
 /// Zooming OUT is the screen-space filter's job, and doing it without the
 /// energy compensation is simply wrong.
 ///
@@ -333,7 +311,6 @@ fn unprojecting_a_pixel_must_use_its_centre() {
     let (w, h) = (128u32, 128u32);
     let cam = camera(w, h);
     let img = source(w as usize, h as usize);
-    let (wu, hu) = (w as usize, h as usize);
 
     // the same scene, built from pixel CORNERS instead of pixel centres
     let mut off = one_splat_per_pixel(&img, &cam, 0.46);
