@@ -87,6 +87,12 @@ impl CostMatrix {
     pub fn get(&self, action: usize, outcome: usize) -> f32 {
         self.data[action * self.n_outcomes + outcome]
     }
+
+    /// `rows[a][y]`, the exact inverse of [`CostMatrix::from_rows`] - what a
+    /// caller needs to write a matrix into a checkpoint and read it back.
+    pub fn rows(&self) -> Vec<Vec<f32>> {
+        (0..self.n_actions).map(|a| (0..self.n_outcomes).map(|y| self.get(a, y)).collect()).collect()
+    }
 }
 
 /// `E_Y[cost(action, Y)]` under the distribution `p` over outcomes.
@@ -196,6 +202,23 @@ pub fn voi(
 
 #[cfg(test)]
 mod tests {
+    /// A cost matrix has to survive being written down and read back, or a
+    /// saved decision model cannot describe the costs it was evaluated
+    /// under - see `brain::RlcdPipeline`'s head checkpoint.
+    #[test]
+    fn rows_round_trips_through_from_rows() {
+        for m in [CostMatrix::binary(1.0, 10.0), CostMatrix::from_rows(&[vec![0.0, 3.0, 1.0], vec![2.0, 0.0, 5.0]])] {
+            let back = CostMatrix::from_rows(&m.rows());
+            assert_eq!(back.n_actions(), m.n_actions());
+            assert_eq!(back.n_outcomes(), m.n_outcomes());
+            for a in 0..m.n_actions() {
+                for y in 0..m.n_outcomes() {
+                    assert_eq!(back.get(a, y), m.get(a, y));
+                }
+            }
+        }
+    }
+
     use super::*;
 
     // The device-diagnosis worked example this crate's design was built

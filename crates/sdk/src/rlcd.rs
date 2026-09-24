@@ -94,6 +94,103 @@ impl RlcdExample {
     }
 }
 
+/// The task a saved head was fitted for, written into its checkpoint and
+/// read back out of it.
+///
+/// A head is 445k floats. Without this, everything needed to ASK it
+/// anything - the question, the option names the target distribution
+/// indexes, the action names its Bayes action indexes, whether its encoder
+/// may move - lived only in the `RlcdSpec` of the process that trained it.
+/// Loading a head therefore produced a model that could score nothing and
+/// reported "train before asking for a probability", which is not a missing
+/// feature but a checkpoint that does not describe itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskContract {
+    pub instructions: String,
+    pub options: Vec<String>,
+    pub actions: Vec<String>,
+    pub eval_costs: Vec<(String, Vec<Vec<f32>>)>,
+    pub freeze_encoder: bool,
+}
+
+/// The key `Decide::save_head` writes [`Provenance::task`] under.
+const TRAINED_FOR: &str = "trained_for";
+/// The key it writes the base encoder's reference under.
+const ADAPTER_OF: &str = "adapter_of";
+
+impl TaskContract {
+    fn from_spec(spec: &RlcdSpec) -> TaskContract {
+        TaskContract {
+            instructions: spec.instructions.clone(),
+            options: spec.options.clone(),
+            actions: spec.actions.clone(),
+            eval_costs: spec.eval_costs.iter().map(|(n, c)| (n.clone(), c.rows())).collect(),
+            freeze_encoder: spec.freeze_encoder,
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pipeline": "rlcd",
+            "instructions": self.instructions,
+            "options": self.options,
+            "actions": self.actions,
+            "freeze_encoder": self.freeze_encoder,
+            "eval_costs": self.eval_costs.iter().map(|(n, rows)| serde_json::json!({"name": n, "rows": rows})).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Parsed strictly: a field that is present but the wrong shape is an
+    /// error, not a default. A head that silently loaded with an empty
+    /// option list would score, and answer wrongly.
+    fn from_json(v: &serde_json::Value) -> std::result::Result<TaskContract, String> {
+        let pipeline = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or_default();
+        if pipeline != "rlcd" {
+            return Err(format!("this head was trained by {pipeline:?}, not by RlcdPipeline"));
+        }
+        let strings = |key: &str| -> std::result::Result<Vec<String>, String> {
+            match v.get(key) {
+                None => Ok(Vec::new()),
+                Some(a) => a
+                    .as_array()
+                    .ok_or_else(|| format!("{key} is not a list"))?
+                    .iter()
+                    .map(|x| x.as_str().map(str::to_string).ok_or_else(|| format!("{key} holds a non-string")))
+                    .collect(),
+            }
+        };
+        let options = strings("options")?;
+        if options.is_empty() {
+            return Err("the saved contract names no options".into());
+        }
+        let mut eval_costs = Vec::new();
+        if let Some(list) = v.get("eval_costs") {
+            for entry in list.as_array().ok_or("eval_costs is not a list")? {
+                let name = entry.get("name").and_then(|x| x.as_str()).ok_or("a cost matrix has no name")?.to_string();
+                let rows = entry.get("rows").and_then(|x| x.as_array()).ok_or_else(|| format!("cost matrix {name:?} has no rows"))?;
+                let parsed: std::result::Result<Vec<Vec<f32>>, String> = rows
+                    .iter()
+                    .map(|r| {
+                        r.as_array()
+                            .ok_or_else(|| format!("cost matrix {name:?} has a non-list row"))?
+                            .iter()
+                            .map(|x| x.as_f64().map(|f| f as f32).ok_or_else(|| format!("cost matrix {name:?} has a non-numeric entry")))
+                            .collect()
+                    })
+                    .collect();
+                eval_costs.push((name, parsed?));
+            }
+        }
+        Ok(TaskContract {
+            instructions: v.get("instructions").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            options,
+            actions: strings("actions")?,
+            eval_costs,
+            freeze_encoder: v.get("freeze_encoder").and_then(serde_json::Value::as_bool).unwrap_or(true),
+        })
+    }
+}
+
 /// What one RLCD training run needs.
 #[derive(Clone, Debug)]
 pub struct RlcdSpec {
@@ -441,6 +538,13 @@ impl Stages for RlcdPipeline {
         self.eval = spec.eval.clone();
         self.actions = spec.actions.clone();
         self.eval_costs = spec.eval_costs.clone();
+        // Recorded here rather than in `run_save`, because this is where the
+        // contract is known and `Stages::run_save` takes `&self`. A head
+        // written without it loads into a model that cannot be asked
+        // anything - see `TaskContract`.
+        let mut p = self.model.provenance().clone();
+        p.task = TaskContract::from_spec(spec).to_json();
+        self.model.set_provenance(p);
         Ok(TrainReport { steps: spec.steps, final_loss: tail, seconds: 0.0 })
     }
 
@@ -529,12 +633,47 @@ fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().fold((0, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) }).0
 }
 
+/// The task contract and base-encoder reference a saved head carries, read
+/// from its safetensors header alone - no tensor bytes are touched.
+fn read_head_contract(path: &str) -> Result<(TaskContract, String)> {
+    let meta = checkpoint::st::read_metadata(path).map_err(|e| Error::Backend(format!("read {path} header: {e}")))?;
+    let config: serde_json::Value = meta
+        .get("brain.config")
+        .ok_or_else(|| Error::Backend(format!("{path} carries no brain.config")))
+        .and_then(|s| serde_json::from_str(s).map_err(|e| Error::Backend(format!("{path}: brain.config is not JSON: {e}"))))?;
+    let task = config.get(TRAINED_FOR).ok_or_else(|| {
+        Error::Backend(format!(
+            "{path} does not say what it was trained for, so the question, options and costs it needs cannot be recovered - \
+             retrain and save with this version, or supply them by training rather than loading"
+        ))
+    })?;
+    let contract = TaskContract::from_json(task).map_err(|e| Error::Backend(format!("{path}: {e}")))?;
+    let base = config.get(ADAPTER_OF).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    Ok((contract, base))
+}
+
 pub struct RlcdPipelineBuilder {
     dir: String,
     head: Option<String>,
     device: Device,
     limits: Limits,
     seed: u64,
+}
+
+impl RlcdPipeline {
+    /// Install a [`TaskContract`] on a pipeline that was loaded rather than
+    /// trained, so it can be asked the question its weights were fitted for.
+    fn adopt(&mut self, c: TaskContract) {
+        self.question = Some(Question::Choice { instructions: c.instructions, options: c.options.iter().map(Opt::new).collect() });
+        self.actions = c.actions;
+        self.eval_costs = c.eval_costs.into_iter().map(|(n, rows)| (n, CostMatrix::from_rows(&rows))).collect();
+        // Restored explicitly. `set_encoder_frozen` otherwise keeps
+        // `Decide::new_on`'s `false`, so a head saved from a frozen run
+        // would come back with a TRAINABLE encoder, any later training would
+        // move it, and `save_head` would then refuse to write the result at
+        // all - having already changed the model.
+        self.model.set_encoder_frozen(c.freeze_encoder);
+    }
 }
 
 impl RlcdPipelineBuilder {
@@ -562,13 +701,56 @@ impl RlcdPipelineBuilder {
 
     pub fn load(self) -> Result<RlcdPipeline> {
         let model = crate::decision::load_decide(&self.dir, self.head.as_deref(), &self.device, self.limits, self.seed)?;
-        Ok(RlcdPipeline { model, question: None, eval: Vec::new(), actions: Vec::new(), eval_costs: Vec::new(), voi_question: None })
+        let mut pipeline = RlcdPipeline { model, question: None, eval: Vec::new(), actions: Vec::new(), eval_costs: Vec::new(), voi_question: None };
+        if let Some(head) = &self.head {
+            let (contract, base) = read_head_contract(head)?;
+            // The head names the encoder it is an adapter TO. Attaching it to
+            // a different one loads, scores, and is a different model, which
+            // nothing downstream can tell - so it is refused here.
+            let want = pipeline.model.provenance().base.clone();
+            if !base.is_empty() && !want.is_empty() && base != want {
+                return Err(Error::Backend(format!("{head} is an adapter of {base:?}, but it is being loaded onto {want:?}")));
+            }
+            pipeline.adopt(contract);
+        }
+        Ok(pipeline)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contract has to survive the round trip through a checkpoint's
+    /// config, or a loaded head is 445k floats nobody can ask anything.
+    #[test]
+    fn the_task_contract_round_trips_through_json() {
+        let spec = RlcdSpec::default()
+            .instructions("is this device faulty")
+            .options(vec!["healthy".into(), "faulty".into()])
+            .actions(vec!["block".into(), "release".into()])
+            .freeze_encoder(true)
+            .eval_costs(vec![("safety-critical".into(), CostMatrix::binary(1.0, 10.0))]);
+        let written = TaskContract::from_spec(&spec);
+        let read = TaskContract::from_json(&written.to_json()).expect("what we wrote must parse");
+        assert_eq!(read, written);
+        assert_eq!(read.eval_costs[0].1, vec![vec![1.0, 0.0], vec![0.0, 10.0]]);
+    }
+
+    /// Refused rather than defaulted. A head that loaded with no options
+    /// would score, answer, and be wrong with no indication.
+    #[test]
+    fn a_contract_that_does_not_describe_the_task_is_refused() {
+        for bad in [
+            serde_json::json!({"pipeline": "conversion", "options": ["a", "b"]}),
+            serde_json::json!({"pipeline": "rlcd", "options": []}),
+            serde_json::json!({"pipeline": "rlcd"}),
+            serde_json::json!({"pipeline": "rlcd", "options": ["a"], "eval_costs": [{"name": "c"}]}),
+            serde_json::json!({"pipeline": "rlcd", "options": ["a"], "actions": [7]}),
+        ] {
+            assert!(TaskContract::from_json(&bad).is_err(), "should have been refused: {bad}");
+        }
+    }
 
     /// The bug this exists to prevent: under `CostMatrix::binary` action 0
     /// is "block" while outcome 0 is "healthy", so naming an action from the
