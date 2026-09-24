@@ -13,17 +13,27 @@ and none should be repeated until this produces one.
 
 You are validating whether brain's continual reader can actually learn.
 
-Repository: `applications/edgeai/brain`, branch `main`. Read
-`.agents/roadmap/continual-reader.md` first: it is the design, and Part 3.3
-is the pre-registered acceptance block you are checking against. Do not edit
-that block. If you find yourself wanting to relax a threshold after seeing a
-number, that is the thing it exists to stop.
+Repository: `applications/edgeai/brain`, on the working branch (`latest`).
+Read `.agents/roadmap/continual-reader.md` first: it is the design, and Part
+3.3 is the pre-registered acceptance block you are checking against. Do not
+edit that block. If you find yourself wanting to relax a threshold after
+seeing a number, that is the thing it exists to stop.
+
+**Run everything from a scratch directory outside the repository.** Every
+command below writes relative paths - a corpus, run directories, transcripts
+- and those are run artefacts, not source. Only the pre-registration of Step
+0 is committed.
+
+    mkdir -p /tmp/reader-validation && cd /tmp/reader-validation
+    BRAIN=<path to>/applications/edgeai/brain
+    READER=$BRAIN/target/release/sample-learning-reader
 
 ### What is already true
 
-`brain-audit` (91 tests), `brain-residency` (110), `brain-promote` (35), the
-sample (8) and the SDK record surfaces (4) all pass. The instrument is
-built. `RunFacts` has only ever been filled in by hand.
+`brain-audit` (92 tests), `brain-residency` (110), `brain-promote` (35), the
+sample (11), the SDK record surfaces (4) and `rl`'s `reader_learner` (4,
+`--features qwen3`, needs a device) all pass. The instrument is built.
+`RunFacts` has only ever been filled in by hand.
 
 ### Step 0, before anything runs: pre-register
 
@@ -36,6 +46,12 @@ Write your thresholds into a file and commit it BEFORE the first run:
 
 A number chosen after seeing the result is not a threshold.
 
+**What the episode count can be.** `generate` writes ten documents across
+nine lanes, two of them in the `learn` lane. Ten is therefore the whole
+stream, and `--until` can only make it shorter. A pre-registered N above ten
+needs a larger corpus first; do not pre-register one this corpus cannot
+produce.
+
 ### Step 1: build and prove the machinery still holds
 
     make build/release
@@ -43,11 +59,22 @@ A number chosen after seeing the result is not a threshold.
     cargo test --release --offline -p brain-residency --lib
     cargo build --release -p sample-learning-reader
 
+The last one is not optional and is not implied by the first: samples are
+workspace members but never default members, so `make build/release` does
+not build them.
+
 ### Step 2: the corpus and the frozen baseline
 
-    ./target/release/sample-learning-reader generate --corpus corpus/ --seed 1
-    ./target/release/sample-learning-reader battery --model Qwen/Qwen3-0.6B \
-        --run-dir run-a/ --seed 1 | tee battery-before.txt
+    $READER generate --corpus corpus/ --seed 1
+    $READER battery --model Qwen/Qwen3-0.6B --run-dir run-a/ --seed 1 \
+        | tee battery-before.txt
+
+**One seed selects the tool, and the tool selects the battery.** `generate
+--seed S` invents the tools; `battery --seed S` derives its held-out tasks
+from the same S. Scoring a battery at a seed the corpus was not generated at
+asks about a tool that was never written down - and the batteries are not
+even the same size between seeds. Keep `generate` and `battery` on the same
+seed for the whole run.
 
 The tool the corpus describes did not exist until that seed was drawn, so
 the baseline should be at or near zero. **If it is not near zero, stop and
@@ -57,50 +84,79 @@ number is then meaningless.
 
 ### Step 3: read
 
-    ./target/release/sample-learning-reader read --corpus corpus/ \
-        --run-dir run-a/ --model Qwen/Qwen3-0.6B --seed 1 | tee read.txt
-    ./target/release/sample-learning-reader report --run-dir run-a/ | tee report.txt
+    $READER read --corpus corpus/ --run-dir run-a/ \
+        --model Qwen/Qwen3-0.6B --seed 1 | tee read.txt
+    $READER report --run-dir run-a/ | tee report.txt
 
 ### Step 4: the result
 
-    ./target/release/sample-learning-reader battery --model Qwen/Qwen3-0.6B \
-        --run-dir run-a/ --seed 1 | tee battery-after.txt
+    $READER battery --model Qwen/Qwen3-0.6B --run-dir run-a/ --seed 1 \
+        | tee battery-after.txt
 
 The difference between before and after, on tasks frozen before any reading
 and never trained on, is the only thing here that is a result. The promote
 rate is plumbing.
 
+`battery` scores what the run currently serves, which is what the gate last
+promoted into `run-a/work/incumbent.safetensors`. A run directory is bound
+to the model reference it was created with and refuses to reopen under
+another one, so the before and after are about the same base by
+construction.
+
 ### Step 5: the controls, which decide whether step 4 means anything
 
-    ./target/release/sample-learning-reader selftest --corpus corpus/ --run-dir run-a/
+    $READER selftest --corpus corpus/ --run-dir run-a/
+
+`selftest` reads the corpus's own `labels.json` and checks each episode's
+verdict against its lane's label. It takes no seed and writes nothing.
 
 Then, for the arms the sample can already run:
 
-- **seed repeat**: run steps 2 to 4 again into `run-a2/` at the SAME seed.
-  The adapters should be byte-identical and the battery delta zero. Any
-  effect smaller than what this produces is not an effect.
-- **multi-seed**: repeat at seeds 2, 3, 4 into their own run directories.
-  The spread across them is the instrument's noise floor
-  (`audit::arms::seed_spread`).
-- **order permutation**: the same corpus at a different `--seed` reorders
-  the documents. Compare the retention diagonals, not the promote rates.
+- **seed repeat**: run steps 2 to 4 again into `run-a2/` with every seed
+  unchanged. The promoted adapters should be byte-identical and the battery
+  delta zero. Any effect smaller than what this produces is not an effect.
+  Training is reproducible from its seed and a saved adapter is a function
+  of its content, so a difference here is a real finding, not serialisation
+  noise.
+- **order permutation**: the same corpus read in a different order. Vary
+  ONLY `read --seed` - leave `generate` and `battery` at the seed the corpus
+  was written with, so the battery stays the frozen one. Compare the
+  retention diagonals, not the promote rates.
+- **multi-seed**: for a noise floor over the instrument, repeat the order
+  permutation at several `read` seeds and use the spread of their battery
+  scores (`audit::arms::seed_spread`). Regenerating the corpus at seeds 2, 3
+  and 4 instead would measure how hard three DIFFERENT invented tools are,
+  which is not a noise floor for this one.
 - **injections**: `selftest` already checks these. It must exit zero.
 
 ### Step 6: what you will have to build to finish the block
 
-Three clauses cannot be filled by running the sample as it stands, and this
-is stated plainly so you do not report them as passed:
+Four things cannot be filled by running the sample as it stands, and this is
+stated plainly so you do not report them as passed:
 
-1. **The null-gate arm** is not a run mode. `audit::triage` decides with
-   `promote::gate`; a null arm means running the same stream with
-   `GatePolicy::CoinFlip` and counting promotions. Clause 1 needs it.
-2. **BWT and the retention matrix** are computed inside `audit::reader` but
-   not surfaced through `ReadOutcome`. Clause 3 needs them exposed.
+1. **The null-gate arm** is not a run mode for the reader. `audit::triage`
+   decides with `promote::gate`; a null arm means running the same stream
+   with a coin instead. The mechanism exists one layer over:
+   `rl::continual::GatePolicy::CoinFlip` and `rl::document::study`, which
+   already runs a gated arm and a null-gate arm as a pair and reports
+   `arm_separation()`. Clause 1 needs that pairing brought to the reader,
+   not written again.
+2. **The retention matrix** is not built by the reader at all, so BWT cannot
+   be surfaced from it. `rl::continual::bwt` computes BWT over an `R`
+   matrix, and `rl::continual::run_study` is what builds one; `audit::reader`
+   scores each episode's probes but never assembles them into a matrix, and
+   `ReadOutcome` reports `bank` and `detection_latency` only. Clause 3 needs
+   the matrix produced first and then exposed - it is not a field that is
+   already there and unexported.
 3. **The shuffled-labels arm** is not a run mode. It means training each
    episode against another episode's frozen probes.
+4. **Serving while reading.** The block's preamble asks for N episodes read
+   "in one process that also served requests throughout". Nothing connects
+   the reader to `brain-residency`; a read serves nothing. Either wire it or
+   report the run as not having met the preamble.
 
-`audit::arms` already has the scoring functions for all three
-(`shuffled_labels`, `order_permutation`, `seed_spread`, `injections`) and
+`audit::arms` already has the scoring functions (`shuffled_labels`,
+`order_permutation`, `seed_spread`, `injections`) and
 `audit::acceptance::Acceptance::evaluate` assembles the verdict. What is
 missing is the plumbing that produces their inputs from a real run.
 
@@ -124,6 +180,7 @@ make it credible, and do not tune anything to improve it.
   answers
 - the `format/` lane promoting while the paraphrase probes stay flat, which
   is template learning
+- a battery scored at a seed the corpus was not generated at
 - any clause reported as passed that was actually unanswered
 
 ## END OF BRIEF
