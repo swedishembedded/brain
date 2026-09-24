@@ -474,6 +474,58 @@ fn read_staging_reuse() -> bool {
 /// single card deadlocked the test suite roughly half the time (all threads in
 /// futex wait) and made every model activation pay a full device init. One
 /// process now builds this once per distinct kernel set and shares it.
+/// What this device has been asked to allocate, so an allocation failure can
+/// say what it was doing rather than only that it failed.
+///
+/// A bare "wgpu error: Out of Memory" names neither the buffer nor its size
+/// nor how much this device had already taken, which leaves the difference
+/// between "this model does not fit" and "one buffer was computed wrong"
+/// undecidable from the message. The cost is one relaxed add per buffer
+/// CREATION - not per dispatch, and orders of magnitude below the driver
+/// allocation it accompanies.
+#[derive(Default)]
+struct AllocTally {
+    /// Bytes requested since this device was built. Not decremented on drop:
+    /// the buffers that explain an out-of-memory are the resident ones, and
+    /// during a model build nothing has been dropped yet.
+    requested: std::sync::atomic::AtomicU64,
+    buffers: std::sync::atomic::AtomicU64,
+    /// The most recent request, which is the one that failed.
+    last: std::sync::Mutex<(String, u64)>,
+}
+
+impl AllocTally {
+    fn record(&self, label: &str, bytes: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.requested.fetch_add(bytes, Relaxed);
+        self.buffers.fetch_add(1, Relaxed);
+        if let Ok(mut last) = self.last.lock() {
+            last.0.clear();
+            last.0.push_str(label);
+            last.1 = bytes;
+        }
+    }
+
+    fn describe(&self) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        let (label, bytes) = match self.last.lock() {
+            Ok(l) => (l.0.clone(), l.1),
+            Err(e) => {
+                let l = e.into_inner();
+                (l.0.clone(), l.1)
+            }
+        };
+        let label = if label.is_empty() { "<unlabelled>".to_string() } else { label };
+        format!(
+            "last allocation requested: {label} ({:.1} MiB); this device has requested {:.1} MiB across {} buffers",
+            mib(bytes),
+            mib(self.requested.load(Relaxed)),
+            self.buffers.load(Relaxed)
+        )
+    }
+}
+
 struct DeviceShared {
     // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
     // pipelines, queue, device - is destroyed inside `drop` under the same lock
@@ -611,6 +663,10 @@ struct DeviceShared {
     /// [`TrackedBuffer`]'s `Drop` impl can reach it without holding the
     /// whole device alive.
     pending_reclaim_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// See [`AllocTally`]. An `Arc` because the uncaptured-error handler is
+    /// installed on the device BEFORE this struct exists and has to read the
+    /// same counters the allocation sites write.
+    alloc: std::sync::Arc<AllocTally>,
 }
 
 impl DeviceShared {
@@ -731,13 +787,25 @@ impl DeviceShared {
         // fails that one request); what is NOT survivable is destroying the
         // device afterwards - see `Drop`.
         let faulted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let alloc = std::sync::Arc::new(AllocTally::default());
         {
             let flag = faulted.clone();
+            let tally = alloc.clone();
+            let lim = device.limits();
+            let (max_buffer, max_binding) = (lim.max_buffer_size, lim.max_storage_buffer_binding_size);
             device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
                 flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                // Same message and same panic wgpu's own default handler
-                // raises, so nothing downstream sees a behaviour change.
-                panic!("wgpu error: {e}");
+                // wgpu's own message names neither the buffer nor its size,
+                // which is the whole of what an out-of-memory needs to be
+                // acted on. The panic itself is unchanged - a lane catches it
+                // and fails that one request - only what it says is.
+                let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+                panic!(
+                    "wgpu error: {e}\n  {}\n  device limits: max_buffer_size {:.0} MiB, max_storage_buffer_binding_size {:.0} MiB",
+                    tally.describe(),
+                    mib(max_buffer),
+                    mib(u64::from(max_binding)),
+                );
             }));
         }
         DeviceShared {
@@ -762,6 +830,7 @@ impl DeviceShared {
             #[cfg(not(target_arch = "wasm32"))]
             identity,
             pending_reclaim_bytes,
+            alloc,
         }
     }
 }
@@ -2390,6 +2459,7 @@ impl WgpuBackend {
     }
 
     pub fn storage(&self, n: u64) -> TrackedBuffer {
+        self.shared.alloc.record("storage", (n * 4).max(4));
         let buf = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (n * 4).max(4),
@@ -2402,6 +2472,7 @@ impl WgpuBackend {
     }
 
     pub fn storage_init(&self, name: &str, data: &[f32]) -> TrackedBuffer {
+        self.shared.alloc.record(name, (data.len() * 4) as u64);
         let buf = self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(name),
             contents: bytemuck::cast_slice(data),
@@ -2413,6 +2484,7 @@ impl WgpuBackend {
     }
 
     pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> TrackedBuffer {
+        self.shared.alloc.record(label, size);
         let mut u = wgpu::BufferUsages::empty();
         if usage.contains(BufUsage::STORAGE) {
             u |= wgpu::BufferUsages::STORAGE;
@@ -2748,6 +2820,7 @@ impl WgpuBackend {
     pub fn read_staging_allocations(&self) -> u64 {
         self.shared.read_staging_allocs.load(std::sync::atomic::Ordering::Relaxed)
     }
+
 
     /// [`Self::read`]'s staging buffer, reusing this device's cached one when
     /// it is big enough - see [`DeviceShared::read_staging`] for why.
