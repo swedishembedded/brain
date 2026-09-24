@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(line.cause.as_deref(), Some("no_structure"));
         assert_eq!(line.source, "noise.txt");
 
-        let leaked = Row { outcome: Outcome::Leaked { line: 12 }, ..r };
+        let leaked = Row { outcome: Outcome::Leaked { probes: 0 }, ..r };
         let line = LedgerRow::of(10, &leaked);
         assert_eq!(line.stage, "ingest");
         assert_eq!(line.cause.as_deref(), Some("probe_leak"));

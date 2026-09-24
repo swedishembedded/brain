@@ -121,7 +121,11 @@ pub trait Learner {
 pub enum Outcome {
     /// Refused before probes could be frozen: an answer would have been
     /// reachable from the half that gets trained on.
-    Leaked { line: usize },
+    /// Every candidate probe was reproduced in a row that would be trained
+    /// on, so nothing in this episode could be verified independently of
+    /// its own training half. A SINGLE repeated line is not this: it is
+    /// dropped from the probes and the episode carries on.
+    Leaked { probes: usize },
     /// Triage or the gate decided.
     Decided(Verdict),
 }
@@ -405,7 +409,7 @@ impl<L: Learner> Reader<L> {
         // the training run, since the point is not to train on it at all.
         let probes = match ProbeSet::build(ep, &self.cfg.probes, self.selector.as_ref()) {
             Ok(p) => p,
-            Err(crate::bank::BankError::ProbeAnswerInTrainedRow { line, .. }) => return row(Outcome::Leaked { line }),
+            Err(crate::bank::BankError::EveryProbeInTrainedRows(_)) => return row(Outcome::Leaked { probes: 0 }),
             Err(_) => return row(Outcome::Decided(Verdict::TooSmallToGate { probes: 0, floor: self.cfg.triage.min_probes })),
         };
 
@@ -744,10 +748,11 @@ mod tests {
     }
 
     /// V1, end to end. A restated line means one copy would be trained and
-    /// the other probed, so the probe would measure memorisation of the
-    /// training half.
+    /// the other probed, so THAT LINE cannot be a probe. The episode is only
+    /// refused when nothing is left that could be verified independently of
+    /// its own training half.
     #[test]
-    fn a_probe_leak_is_refused_at_ingest_and_names_the_line() {
+    fn a_repeated_line_costs_its_probe_and_only_a_wholly_repeated_document_costs_the_episode() {
         struct Pin;
         impl SpanSelector for Pin {
             fn score(&self, line: &str) -> f64 {
@@ -766,13 +771,28 @@ mod tests {
         let pool = Pool::create(&d.0, c.pool).expect("pool");
         let mut r = Reader::new(c, Fake { loss: 1.5, wins: 64, ..Default::default() }, pool).with_selector(Box::new(Pin));
 
+        // One restated line, in a document that is otherwise full of
+        // distinct ones. The episode goes on; the restated line does not
+        // become a probe.
         let mut text = manual("flag", 40);
         text.push_str("alias for the above: --flag007 VALUE   set the flag 007 option to VALUE\n");
         let ep = Episode { id: EpisodeId::of(&text), source: PathBuf::from("m.txt"), ordinal: 0, text };
         let row = r.step(&ep);
-        assert!(matches!(row.outcome, Outcome::Leaked { .. }), "expected a leak refusal, got {:?}", row.outcome);
+        assert!(!matches!(row.outcome, Outcome::Leaked { .. }), "one repeated line must not cost the whole episode: {:?}", row.outcome);
+        assert_eq!(r.learner().trainings, 1, "the episode reached training");
+
+        // Nothing in this run is a document whose every line repeats, so
+        // the half that DOES refuse gets its own episode.
+        let all_same = "the same line over and over again\n".repeat(40);
+        let ep = Episode { id: EpisodeId::of(&all_same), source: PathBuf::from("same.txt"), ordinal: 0, text: all_same };
+        let row = r.step(&ep);
+        assert!(
+            matches!(row.outcome, Outcome::Leaked { .. }),
+            "a document with nothing that could be probed independently is refused at ingest, got {:?}",
+            row.outcome
+        );
         assert_eq!(row.outcome.stage(), "ingest");
-        assert_eq!(r.learner().trainings, 0, "a leaking episode must be refused before it is trained on");
+        assert_eq!(r.learner().trainings, 1, "and it is refused BEFORE it is trained on");
     }
 
     /// The oracle costs a full training run over the history, so a healthy

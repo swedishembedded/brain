@@ -171,10 +171,10 @@ pub struct Coverage {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BankError {
-    #[error("probe answer frozen from line {line} also appears in a row that WILL be trained on ({answer:?}) - the probe would be measuring memorisation of the training half, not retention")]
-    ProbeAnswerInTrainedRow { line: usize, answer: String },
     #[error("episode {0} has no line long enough to probe (min_answer_chars)")]
     NoEligibleLines(String),
+    #[error("every candidate probe in episode {0} is reproduced in a row that will be trained on, so there is nothing here that could be verified independently of the training half")]
+    EveryProbeInTrainedRows(String),
     #[error("expected {expected} scores, one per probe in order, got {got}")]
     ScoreArityMismatch { expected: usize, got: usize },
     #[error("no zero-shot baseline has been frozen for this probe set - an absolute score is not comparable across episodes, so a delta cannot be reported")]
@@ -234,22 +234,52 @@ impl ProbeSet {
         let n_blind = take(cfg.blind_permille).min(rest.len());
         let blind: BTreeSet<usize> = rest[..n_blind].iter().copied().collect();
 
-        let held: BTreeSet<usize> = selected.union(&blind).copied().collect();
-        let trained: Vec<String> = (0..lines.len()).filter(|i| !held.contains(i)).map(|i| lines[i].to_string()).collect();
+        let mut held: BTreeSet<usize> = selected.union(&blind).copied().collect();
 
         // Containment, not equality: a probe answer reproduced ANYWHERE
         // inside a trained row is answerable from training, and real text
-        // repeats itself in ways synthetic curricula never do.
-        let trained_norm: Vec<String> = trained.iter().map(|r| normalize(r)).collect();
-        for &i in &held {
-            let answer = normalize(lines[i]);
-            if answer.is_empty() {
-                continue;
+        // repeats itself in ways a synthetic curriculum never does.
+        //
+        // A line like that is DROPPED from the probes rather than taken as
+        // grounds to refuse the episode. It is not a usable probe - the
+        // answer is in the training half - but it is also not evidence of
+        // anything wrong with the document: the lines this catches are
+        // markdown rules, closing braces and boilerplate, which carry no
+        // information and would measure nothing in either direction.
+        // Refusing the whole episode for one of them made the reader
+        // unusable on real directories (measured on this repository:
+        // 17% of its prose and 92% of its source).
+        //
+        // Iterated, because a dropped line rejoins the TRAINING half and can
+        // make a line that was clean a moment ago reachable from it.
+        loop {
+            let trained_norm: Vec<String> =
+                (0..lines.len()).filter(|i| !held.contains(i)).map(|i| normalize(lines[i])).collect();
+            let leaked: Vec<usize> = held
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let answer = normalize(lines[i]);
+                    !answer.is_empty() && trained_norm.iter().any(|r| r.contains(&answer))
+                })
+                .collect();
+            if leaked.is_empty() {
+                break;
             }
-            if trained_norm.iter().any(|r| r.contains(&answer)) {
-                return Err(BankError::ProbeAnswerInTrainedRow { line: i, answer: lines[i].to_string() });
+            for i in leaked {
+                held.remove(&i);
             }
         }
+        if held.is_empty() {
+            // Every candidate was reachable from the training half. Named
+            // rather than returned as an empty probe set, which would gate
+            // on no evidence at all.
+            return Err(BankError::EveryProbeInTrainedRows(ep.id.as_str().to_string()));
+        }
+        let selected: BTreeSet<usize> = selected.intersection(&held).copied().collect();
+        let blind: BTreeSet<usize> = blind.intersection(&held).copied().collect();
+        let _ = &selected;
+        let trained: Vec<String> = (0..lines.len()).filter(|i| !held.contains(i)).map(|i| lines[i].to_string()).collect();
 
         let prompt_for = |i: usize| -> String {
             let lo = i.saturating_sub(cfg.context_lines);
@@ -464,9 +494,10 @@ mod tests {
 
     /// V1, the half that fires. A line that appears twice cannot be both
     /// withheld and trained on: whichever copy is probed would be answerable
-    /// from the copy that was trained.
+    /// from the copy that was trained. So it is not a probe - and the rest
+    /// of the document still is.
     #[test]
-    fn a_probe_answer_that_also_appears_in_a_trained_row_is_refused_at_ingest() {
+    fn a_probe_answer_that_also_appears_in_a_trained_row_is_dropped_from_the_set() {
         // One line is restated inside a longer one further down. Which side
         // of the split each lands on is otherwise up to the tiebreak, so the
         // selector pins it: the restated line is ranked first and therefore
@@ -489,12 +520,12 @@ mod tests {
         // No blind draw here: it is taken from what the selector rejected,
         // which is exactly where the quoting line was put.
         let c = ProbeConfig { blind_permille: 0, ..cfg() };
-        match ProbeSet::build(&episode(&text), &c, &Pin) {
-            Err(BankError::ProbeAnswerInTrainedRow { answer, .. }) => {
-                assert!(answer.contains("007"), "the refusal must name the offending answer, got {answer:?}");
-            }
-            other => panic!("expected ProbeAnswerInTrainedRow, got {:?}", other.map(|s| s.probes().len())),
-        }
+        let set = ProbeSet::build(&episode(&text), &c, &Pin).expect("one restated line does not cost the episode");
+        assert!(
+            set.probes().iter().all(|p| !p.expected.starts_with("--flag007")),
+            "the restated line must not be a probe: it is answerable from the line quoting it"
+        );
+        assert!(!set.probes().is_empty(), "and the rest of the document is still probeable");
     }
 
     /// V1, the half that stays silent. A bar that refuses everything is not a
@@ -614,5 +645,58 @@ mod tests {
         assert!((d - 0.75).abs() < 1e-9, "delta must be measured against this episode's own baseline, got {d}");
 
         assert!(matches!(s.freeze_baseline(&[0.1]), Err(BankError::ScoreArityMismatch { .. })));
+    }
+
+    /// Real text repeats itself, and a document is not unusable because one
+    /// of its lines is boilerplate.
+    ///
+    /// Measured before this changed: the containment check refused 17% of
+    /// this repository's own prose documentation and 92% of its source, on
+    /// answers like a markdown table separator or a lone `Paraphrase,`.
+    /// Those lines are not leaks worth losing a document over - they carry
+    /// no information, so probing them measures nothing in either
+    /// direction. Refusing the whole EPISODE for one of them made the reader
+    /// unusable on the real directories it exists to be pointed at.
+    ///
+    /// The invariant is unchanged and asserted directly: no probe's answer
+    /// may appear in any row that will be trained on.
+    #[test]
+    fn a_repeated_line_is_dropped_from_the_probes_rather_than_refusing_the_episode() {
+        let mut text = String::new();
+        for i in 0..40 {
+            text.push_str(&format!("  --option{i:03} VALUE   set option {i:03} to a value\n"));
+            // Boilerplate, many times over, exactly as real documents carry.
+            text.push_str("|---|---|\n");
+        }
+        let ep = episode(&text);
+        let set = ProbeSet::build(&ep, &ProbeConfig::default(), &UniformSelector).expect("a document with boilerplate in it is still a document");
+
+        assert!(!set.probes().is_empty(), "the distinct lines must still be probeable");
+        let trained: Vec<String> = set.trained_rows().iter().map(|r| normalize(r)).collect();
+        for p in set.probes() {
+            let answer = normalize(&p.expected);
+            assert!(
+                answer.is_empty() || !trained.iter().any(|r| r.contains(&answer)),
+                "no probe answer may be reachable from the training half: {:?}",
+                p.expected
+            );
+        }
+        assert!(
+            set.probes().iter().all(|p| normalize(&p.expected) != normalize("|---|---|")),
+            "and the repeated line is the one that was dropped"
+        );
+    }
+
+    /// The other half: a document with nothing BUT repeated lines has
+    /// nothing to probe, and says so rather than returning an empty set that
+    /// would gate on no evidence.
+    #[test]
+    fn a_document_that_is_all_repetition_has_no_probes_at_all() {
+        let text = "the same line over and over\n".repeat(40);
+        let ep = episode(&text);
+        assert!(
+            ProbeSet::build(&ep, &ProbeConfig::default(), &UniformSelector).is_err(),
+            "a document whose every line is reproduced elsewhere cannot be probed"
+        );
     }
 }
