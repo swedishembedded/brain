@@ -219,4 +219,68 @@ mod tests {
         assert_eq!(Prompting::for_model_dir(&d).stop(), Some("</s>"));
         let _ = std::fs::remove_dir_all(&d);
     }
+
+    /// The mechanism is the HuggingFace convention, not one model's quirk:
+    /// a Jinja `chat_template` in `tokenizer_config.json`, rendered with
+    /// `messages` and `add_generation_prompt`. Every instruction-tuned model
+    /// in that ecosystem ships one, and they look nothing like each other.
+    ///
+    /// Structurally real templates from four different families, each
+    /// asserted to produce that family's actual wire format.
+    #[test]
+    fn any_family_s_template_is_applied_not_only_qwen_s() {
+        let cases: [(&str, &str, &str); 4] = [
+            (
+                "qwen/chatml",
+                "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}",
+                "<|im_start|>user\nhow?<|im_end|>\n<|im_start|>assistant\n",
+            ),
+            (
+                "llama-3",
+                "{% for m in messages %}<|start_header_id|>{{ m.role }}<|end_header_id|>\n\n{{ m.content }}<|eot_id|>{% endfor %}{% if add_generation_prompt %}<|start_header_id|>assistant<|end_header_id|>\n\n{% endif %}",
+                "<|start_header_id|>user<|end_header_id|>\n\nhow?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",
+            ),
+            (
+                "mistral",
+                "{% for m in messages %}{% if m.role == 'user' %}[INST] {{ m.content }} [/INST]{% endif %}{% endfor %}",
+                "[INST] how? [/INST]",
+            ),
+            (
+                "gemma",
+                "{% for m in messages %}<start_of_turn>{{ m.role }}\n{{ m.content }}<end_of_turn>\n{% endfor %}{% if add_generation_prompt %}<start_of_turn>model\n{% endif %}",
+                "<start_of_turn>user\nhow?<end_of_turn>\n<start_of_turn>model\n",
+            ),
+        ];
+        for (family, template, expected) in cases {
+            let d = dir_with(Some(template));
+            let p = Prompting::for_model_dir(&d);
+            assert!(p.is_templated(), "{family}: a model shipping a template must be detected as needing one");
+            assert_eq!(p.question("how?"), expected, "{family}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// `enable_thinking` is one family's template kwarg, and it is passed to
+    /// every render. A template that has never heard of it must be
+    /// unaffected rather than fail - otherwise turning thinking off for
+    /// Qwen would break every other model.
+    #[test]
+    fn a_template_that_does_not_know_the_thinking_kwarg_is_unaffected_by_it() {
+        let d = dir_with(Some("{% for m in messages %}[INST] {{ m.content }} [/INST]{% endfor %}"));
+        assert_eq!(Prompting::for_model_dir(&d).question("how?"), "[INST] how? [/INST]");
+        assert_eq!(Prompting::for_model_dir(&d).thinking(true).question("how?"), "[INST] how? [/INST]");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The template may also arrive as a standalone file, which is the other
+    /// shape the ecosystem ships it in.
+    #[test]
+    fn a_template_in_its_own_file_is_found_too() {
+        let d = dir_with(None);
+        std::fs::write(d.join("chat_template.jinja"), "{% for m in messages %}<s>{{ m.content }}</s>{% endfor %}").expect("write");
+        let p = Prompting::for_model_dir(&d);
+        assert!(p.is_templated(), "a chat_template.jinja beside the config is still a chat template");
+        assert_eq!(p.question("how?"), "<s>how?</s>");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

@@ -10,8 +10,10 @@ publish = false
 
 [dependencies]
 # The ONLY brain dependency a sample may have is the SDK facade, and it must
-# NAME the surfaces it uses. This one uses `reader` and nothing else.
-brain = { workspace = true, features = ["reader"] }
+# NAME the surfaces it uses. `reader` is the continual reader; `text` is the
+# generation the distil stage drives (`brain::qa`) - the step that turns the
+# corpus into question/answer pairs before anything is trained on it.
+brain = { workspace = true, features = ["reader", "text"] }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
