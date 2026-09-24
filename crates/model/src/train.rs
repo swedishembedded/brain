@@ -501,7 +501,21 @@ pub fn fit_from<M: Model>(
     init: &std::collections::HashMap<String, Vec<f32>>,
 ) -> std::io::Result<(f32, f32)> {
     let loaded = load(dir, opts)?;
-    let cfg = cfg.finalize_for_dataset(loaded.vocab, opts.block_size);
+    // The MODEL's vocabulary wins, not the dataset's. `fit` takes the
+    // dataset's because it is sizing a model that does not exist yet; here
+    // the model exists and is being fine-tuned, and a pretrained embedding
+    // reshaped to fit a tokenizer's count is a different model. Real case:
+    // a Qwen3 checkpoint's embedding is padded to 151936 rows while its
+    // tokenizer reports 151669, and taking the dataset's number silently
+    // rebuilt the embedding 273408 rows short.
+    let vocab = cfg.vocab();
+    if loaded.vocab > vocab {
+        return Err(std::io::Error::other(format!(
+            "fit_from: the dataset uses {} token ids and this model has {vocab} - the ids past the end have no embedding row",
+            loaded.vocab
+        )));
+    }
+    let cfg = cfg.finalize_for_dataset(vocab, opts.block_size);
     let mut weights = M::init_weights(&cfg, opts.seed);
     for (name, values) in init {
         // Only what the architecture actually has, and only at the shape it
