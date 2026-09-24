@@ -338,6 +338,14 @@ impl TextGenerationPipelineBuilder {
         let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() {
             check_local_weights_architecture(&weights)?;
             (weights, None)
+        } else if let Some(local) = crate::study::resolve_in_store(&weights) {
+            // A `vendor/repo` reference the local model store already holds.
+            // Taken BEFORE the hub policy so that one string means one model
+            // across this SDK: the reader and the study resolve
+            // `Qwen/Qwen3-0.6B` through the store, and a text pipeline that
+            // instead scanned for candidates would answer a different
+            // question about the same argument.
+            local
         } else {
             resolve_hub_weights(&weights, download_policy)?
         };
@@ -354,10 +362,27 @@ impl TextGenerationPipelineBuilder {
         } else {
             return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf), none resolved, and none given; call .tokenizer(path)")));
         };
-        drop(reader);
-
+        // Built for KV-cache DECODE, which is the only thing `generate_with`
+        // ever drives (`qwen3::sample::generate_kv_stream`: prefill, then one
+        // token at a time).
+        //
+        // The batched constructor sizes per-layer activations at `b*t`,
+        // attention scores at `n_heads*ctx^2` and a logits buffer at
+        // `t*vocab` - none of which a decode reads. On a large-vocabulary
+        // model that logits buffer alone is bigger than the device will bind:
+        // Qwen3-0.6B at the default 4096 capacity asks for 2.32 GiB against
+        // the 2 GiB `maxStorageBufferBindingSize` that Vulkan and WebGPU both
+        // standardise, so the default pipeline could not load it at all, and
+        // failed inside a bind group rather than anywhere that named a
+        // capacity. A decode build has no logits buffer - the LM head is
+        // applied host-side - and its KV cache is the only thing that scales
+        // with the context at all.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-        let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, false, "qwen3", || qwen3::Qwen::load_inference(&weights, 1, capacity)).map_err(Error::Backend)?;
+        let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
+            qwen3::Qwen::from_reader_decode(&reader, capacity)
+        })
+        .map_err(Error::Backend)?;
+        drop(reader);
 
         Ok(TextGenerationPipeline { model, tok, capacity })
     }
