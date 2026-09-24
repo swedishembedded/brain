@@ -201,7 +201,12 @@ fn finetune(pipe: &mut DecisionPipeline, steps: usize, seed: u64) {
         let Some(fv) = tasks::fixed_vocab(task) else { continue };
         let examples: Vec<(&str, usize)> = fv.train.iter().map(|(t, g)| (t.as_str(), *g)).collect();
         let mut log = |_step: usize, _loss: f32| {};
-        let tail_loss = pipe.train_choices(&examples, &fv.options, fv.instructions, steps, seed ^ (task as u64), &mut log).expect("train_choices");
+        // batch=1: matches this README's own "Does fine-tuning help?" table,
+        // measured before `train_choices` grew a batch argument. A larger
+        // batch would reduce the REINFORCE variance the README names as the
+        // likely cause of that negative result - a real follow-up, not done
+        // here so the published numbers stay reproducible against this call.
+        let tail_loss = pipe.train_choices(&examples, &fv.options, fv.instructions, steps, 1, seed ^ (task as u64), &mut log).expect("train_choices");
         println!("  {:<10} tail loss {tail_loss:.4}", task.name());
     }
 }
