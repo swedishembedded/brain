@@ -14,6 +14,8 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu};
 
+use crate::density::{self, Evidence};
+use crate::geometry;
 use crate::isp::{Encoding, Isp, IspCfg};
 use crate::loss::{photometric, PixelLoss};
 use crate::renderer::{BwdScratch, GpuSplats, Renderer, SplatGrads};
@@ -36,6 +38,13 @@ pub enum Densify {
     /// `max_gaussians`, and positions carry noise proportional to the learning
     /// rate so the fit samples rather than descends. See [`crate::mcmc`].
     Mcmc,
+    /// Credit-assigned, budgeted density control ([`crate::density`]): every
+    /// gaussian is scored by the ranks of the image residual it is
+    /// responsible for, the part of it on edges, and its AbsGS gradient; the
+    /// top of that ranking is refined within a population schedule that
+    /// reaches `max_gaussians` two thirds of the way through density control;
+    /// gaussians that contribute nothing twice in a row pay for it.
+    Hybrid,
 }
 
 pub struct FitCfg {
@@ -296,6 +305,21 @@ pub struct FitCfg {
     /// default) compares renders with photographs directly, as `fit` always
     /// did.
     pub isp: Option<IspCfg>,
+    /// Weight of the 2DGS depth-distortion term, 0 = off: penalizes
+    /// compositing weight spread ALONG each ray, which is what a stack of
+    /// semi-transparent layers standing in for one surface looks like. See
+    /// [`crate::geometry`].
+    pub distortion_weight: f32,
+    /// Weight of normal consistency against the rendered depth map's own
+    /// normals, 0 = off: turns each gaussian's flat axis onto the surface it
+    /// sits on, so a disc seen edge-on from a new view is not a streak.
+    pub normal_consistency_weight: f32,
+    /// Weight of supervision by [`TargetView::normals`], 0 = off.
+    pub normal_prior_weight: f32,
+    /// Fraction of the fit after which the geometry terms above switch on.
+    /// Surface regularizers applied before the scene has any shape pull
+    /// gaussians onto whatever surface happens to be rendered first.
+    pub geometry_after: f32,
 }
 
 impl Default for FitCfg {
@@ -331,6 +355,10 @@ impl Default for FitCfg {
             rotation_budget: 0.0,
             loss: PixelLoss::Mse,
             isp: None,
+            distortion_weight: 0.0,
+            normal_consistency_weight: 0.0,
+            normal_prior_weight: 0.0,
+            geometry_after: 0.0,
         }
     }
 }
@@ -372,6 +400,10 @@ pub struct TargetView {
     pub exposure: f32,
     /// How `rgb` is encoded; consulted by a scene-linear fit only.
     pub encoding: Encoding,
+    /// Per-pixel surface normal prior `[W*H*3]` in THIS camera's frame
+    /// (+X right, +Y down, +Z forward), facing the camera; a zero vector =
+    /// no prior at that pixel. Used by [`FitCfg::normal_prior_weight`].
+    pub normals: Option<Vec<f32>>,
 }
 
 impl TargetView {
@@ -386,7 +418,14 @@ impl TargetView {
             sensor: 0,
             exposure: 0.0,
             encoding: Encoding::Srgb,
+            normals: None,
         }
+    }
+
+    /// Add a camera-frame surface normal prior `[W*H*3]`.
+    pub fn with_normals(mut self, normals: Vec<f32>) -> TargetView {
+        self.normals = Some(normals);
+        self
     }
 
     /// Declare this view's exposure, in log2 stops relative to the capture.
@@ -551,6 +590,8 @@ fn fit_inner(
     // (which measures before it updates anything). It is the floor the fit has
     // to beat to have been worth running.
     let mut first_loss = f32::NAN;
+    // Recovery marks of the hybrid controller, carried across rounds.
+    let mut suspect: Vec<bool> = Vec::new();
     let mut seen = |it: usize, mse: f32, k: &mut dyn FnMut(usize, f32) -> bool| {
         if first_loss.is_nan() {
             first_loss = mse;
@@ -559,14 +600,15 @@ fn fit_inner(
     };
     while done < cfg.iters && !stop {
         let iters = stage_len.min(cfg.iters - done);
-        let (next, l, grad, aborted) = {
+        let out = {
             let mut tap = |it: usize, mse: f32| seen(it, mse, on_step);
             fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, isp, iters, done, &mut tap)
         };
-        scene = next;
-        loss = l;
+        scene = out.scene;
+        loss = out.loss;
+        let grad = out.absgrad;
         done += iters;
-        stop = aborted;
+        stop = out.aborted;
         let until = if cfg.densify_until > 0 { cfg.densify_until.min(cfg.iters) } else { cfg.iters };
         if cfg.densify_every > 0 && done >= cfg.densify_after && done < until && !stop {
             let before = scene.len();
@@ -584,6 +626,39 @@ fn fit_inner(
             };
             match cfg.strategy {
                 Densify::Heuristic => densify(&mut scene, &grad, cfg, eye),
+                Densify::Hybrid => {
+                    let mut ev = out.evidence.expect("a hybrid stage collects evidence");
+                    ev.absgrad = grad;
+                    let first = cfg.densify_after.max(cfg.densify_every);
+                    let round = done.saturating_sub(first) / cfg.densify_every;
+                    let rounds = (until.saturating_sub(first)).div_ceil(cfg.densify_every);
+                    let target = density::target_population(init.len(), cfg.max_gaussians, round, rounds, scene.len(), cfg.densify_frac);
+                    // A gaussian's size in pixels as the camera that sees it
+                    // most finely does: whether a refinement is a split or a
+                    // clone is a question about the image, not the world.
+                    let px1 = crate::mip::smoothing_sigma(&scene, &cams, 1.0);
+                    let size_px: Vec<f32> = (0..scene.len())
+                        .map(|i| {
+                            let s = scene.scales[i * 3..i * 3 + 3].iter().copied().fold(0.0f32, f32::max);
+                            if px1[i] > 0.0 { s / px1[i] } else { 0.0 }
+                        })
+                        .collect();
+                    // With a budget the schedule IS the growth rate; the
+                    // fraction only paces a fit that was given none.
+                    let policy = density::Policy {
+                        refine_frac: if cfg.max_gaussians > 0 { 1.0 } else { cfg.densify_frac },
+                        dead_opacity: cfg.prune_opacity,
+                        ..Default::default()
+                    };
+                    let seed = 0x6879_6272_6964_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                    let r = density::round(&mut scene, &ev, &size_px, &mut suspect, target, &policy, seed);
+                    if cfg.log_every > 0 {
+                        println!(
+                            "fit iter {done:4}: split {}, cloned {}, suppressed {}, reclaimed {} (target {target})",
+                            r.split, r.cloned, r.suppressed, r.reclaimed
+                        );
+                    }
+                }
                 // The chain has no use for the gradient statistic: where a
                 // sample goes is decided by opacity, which is the model's own
                 // statement about whether that sample is explaining anything.
@@ -815,7 +890,7 @@ fn fit_stage(
     iters: usize,
     it0: usize,
     on_step: &mut dyn FnMut(usize, f32) -> bool,
-) -> (Splats, f32, Vec<f32>, bool) {
+) -> StageOut {
     let n = init.len();
     let (maxw, maxh) = targets
         .iter()
@@ -837,6 +912,9 @@ fn fit_stage(
         packed.extend_from_slice(&init.quats[i * 4..i * 4 + 4]);
     }
     let p_geo = gpu.storage_init("fit.geo", &packed);
+    // The host's copy of what `p_geo` holds, refreshed by the clamp step
+    // that already reads it back: the auxiliary features are functions of it.
+    let mut host_geo = packed;
     let p_op = gpu.storage_init("fit.op", &init.opacities);
     let p_col = gpu.storage_init("fit.col", &init.colors);
     // View-dependent colour. `p_col` stays the base (what a degree-0 scene
@@ -869,6 +947,31 @@ fn fit_stage(
     let grads = SplatGrads::new(gpu, n);
     let dimg = gpu.storage(4 * max_px as u64);
     let ddepth = gpu.storage(max_px as u64);
+    // Auxiliary passes composite a per-gaussian FEATURE through the same
+    // rasterizer (see `crate::geometry` and `crate::density`). The geometry
+    // passes share the training gradients for geometry and opacity - the
+    // alpha chain is the same parameters - and keep their own feature slot;
+    // the credit pass is a measurement and owns every buffer it writes.
+    let geometry_terms =
+        cfg.distortion_weight > 0.0 || cfg.normal_consistency_weight > 0.0 || cfg.normal_prior_weight > 0.0;
+    let hybrid = cfg.densify_every > 0 && cfg.strategy == Densify::Hybrid;
+    let aux = geometry_terms.then(|| Aux {
+        feat: gpu.storage(3 * n as u64),
+        grads: SplatGrads {
+            d_gauss: grads.d_gauss.clone(),
+            d_opac: grads.d_opac.clone(),
+            d_colors: gpu.storage(3 * n as u64),
+            d_absgrad: gpu.storage(n as u64),
+            d_sumgrad: gpu.storage(2 * n as u64),
+        },
+    });
+    let credit = hybrid.then(|| SplatGrads::new(gpu, n));
+    let mut evidence = hybrid.then(|| Evidence::new(n));
+    let edges: Vec<Vec<f32>> = if hybrid {
+        targets.iter().map(|t| density::edge_map(&t.rgb, t.cam.width as usize, t.cam.height as usize)).collect()
+    } else {
+        Vec::new()
+    };
     let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
     let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
     let opts = RenderOpts {
@@ -1005,6 +1108,9 @@ fn fit_stage(
         );
         prof.add("zero grads", t0.elapsed());
         let mut loss_sum = 0.0f64;
+        // Geometry gradient the host chain rules produce from auxiliary
+        // feature gradients, added to the device gradient before the step.
+        let mut extra_geo = if aux.is_some() { vec![0.0f32; 10 * n] } else { Vec::new() };
         // Running totals of the pose reduction. It is LINEAR in the gaussian
         // gradients, and those accumulate across views, so differencing the
         // running total gives each view's own contribution exactly - no extra
@@ -1068,15 +1174,15 @@ fn fit_stage(
             let rgb = crate::renderer::rgba_to_rgb(&img);
             let mut g3 = vec![0.0f32; px * 3];
             let (w_px, h_px) = (cam.width as usize, cam.height as usize);
-            match isp.as_mut() {
-                None => loss_sum += photometric(cfg.loss, &rgb, &t.rgb, wts, w_px, h_px, &mut g3),
-                Some(model) => {
-                    // The render is radiance; the photograph is what this
-                    // view's camera made of it.
-                    let pred = model.forward(vi, &cam, &rgb);
-                    loss_sum += photometric(cfg.loss, &pred, &t.rgb, wts, w_px, h_px, &mut g3);
-                    g3 = model.backward(vi, &cam, &rgb, &g3);
-                }
+            // The render is radiance; the photograph is what this view's
+            // camera made of it.
+            let pred = match isp.as_ref() {
+                None => rgb.clone(),
+                Some(model) => model.forward(vi, &cam, &rgb),
+            };
+            loss_sum += photometric(cfg.loss, &pred, &t.rgb, wts, w_px, h_px, &mut g3);
+            if let Some(model) = isp.as_mut() {
+                g3 = model.backward(vi, &cam, &rgb, &g3);
             }
             for i in 0..px {
                 d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
@@ -1129,6 +1235,26 @@ fn fit_stage(
                 )
                 .unwrap_or_else(|e| panic!("{e}"));
             prof.add("render backward", tm.elapsed());
+            // Credit assignment, over the same tail of the stage the AbsGS
+            // statistic is read over. Replays the colour render just
+            // differentiated, so it has to run before any auxiliary render.
+            if let (Some(cg), Some(ev)) = (&credit, evidence.as_mut()) {
+                if it + window >= iters {
+                    let tm = std::time::Instant::now();
+                    let up = density::credit_upstream(&pred, &t.rgb, &edges[vi], wts);
+                    gpu.write(&dimg, cast(&up));
+                    gpu.submit(&[&cg.d_colors], &[]);
+                    renderer.render_bwd(gpu, &gs, &cam, &opts, &dimg, None, &mut bscr, cg).unwrap_or_else(|e| panic!("{e}"));
+                    ev.add_view(&gpu.read(&cg.d_colors, 3 * n));
+                    prof.add("credit assignment", tm.elapsed());
+                }
+            }
+            if let Some(a) = aux.as_ref().filter(|_| (it0 + it) as f32 >= cfg.geometry_after * cfg.iters as f32) {
+                let tm = std::time::Instant::now();
+                let ctx = AuxCtx { gpu, gs: &gs, dimg: &dimg, ddepth: &ddepth, opts: &opts, cfg };
+                loss_sum += geometry_passes(&ctx, &mut renderer, &mut bscr, a, &cam, t, wts, wsum, &host_geo, &mut extra_geo);
+                prof.add("geometry passes", tm.elapsed());
+            }
             if cfg.pose_lr > 0.0 {
                 let tm = std::time::Instant::now();
                 let step = gpu.step(
@@ -1166,6 +1292,13 @@ fn fit_stage(
                 gpu.submit(&[], &[e]);
                 gpu.submit(&[&grads.d_colors], &[]);
             }
+        }
+        if extra_geo.iter().any(|v| *v != 0.0) {
+            let mut dg = gpu.read(&grads.d_gauss, 10 * n);
+            for (a, b) in dg.iter_mut().zip(&extra_geo) {
+                *a += b;
+            }
+            gpu.write(&grads.d_gauss, cast(&dg));
         }
         if let Some(model) = isp.as_mut() {
             model.step((it0 + it) as f32 / cfg.iters.max(1) as f32);
@@ -1250,6 +1383,7 @@ fn fit_stage(
         prof.add("clamp: host loop", tm.elapsed());
         let tm = std::time::Instant::now();
         gpu.write(&p_geo, cast(&geo));
+        host_geo = geo;
         // The chain's opacity regularizer, as decoupled decay: every gaussian
         // fades a little every step and only the loss puts it back, so the
         // ones explaining nothing end up below `prune_opacity` where
@@ -1322,7 +1456,120 @@ fn fit_stage(
         out.opacities.push(op[i]);
         out.colors.extend_from_slice(&col[i * 3..i * 3 + 3]);
     }
-    (out, last_loss, gsum, aborted)
+    StageOut { scene: out, loss: last_loss, absgrad: gsum, evidence, aborted }
+}
+
+/// What one run of the optimizer over a fixed set of gaussians produced.
+struct StageOut {
+    scene: Splats,
+    /// The objective at the last iteration.
+    loss: f32,
+    /// Each gaussian's AbsGS positional-gradient magnitude over the tail of
+    /// the stage.
+    absgrad: Vec<f32>,
+    /// Credit-assignment evidence over the same tail, when the hybrid
+    /// density controller asked for it.
+    evidence: Option<Evidence>,
+    /// Whether `on_step` asked to stop.
+    aborted: bool,
+}
+
+/// Buffers of the geometry passes.
+struct Aux {
+    /// Per-gaussian feature composited in place of colour, `[N*3]`.
+    feat: DeviceBuffer,
+    /// Shares `d_gauss`/`d_opac` with the training gradients; own feature
+    /// and density-statistic slots.
+    grads: SplatGrads,
+}
+
+/// What every auxiliary pass of one view shares.
+struct AuxCtx<'a> {
+    gpu: &'a Gpu,
+    /// The view's colour scene; its geometry and opacity are reused.
+    gs: &'a GpuSplats,
+    dimg: &'a DeviceBuffer,
+    ddepth: &'a DeviceBuffer,
+    opts: &'a RenderOpts,
+    cfg: &'a FitCfg,
+}
+
+/// Run the geometry terms that are switched on for one view, accumulating
+/// their device gradient into the training gradients and their feature
+/// gradient, carried back to means and rotations, into `extra` (`[N*10]`).
+/// Returns their contribution to the objective.
+#[allow(clippy::too_many_arguments)]
+fn geometry_passes(
+    ctx: &AuxCtx,
+    renderer: &mut Renderer,
+    bscr: &mut BwdScratch,
+    aux: &Aux,
+    cam: &Camera,
+    t: &TargetView,
+    wts: Option<&[f32]>,
+    wsum: f64,
+    host_geo: &[f32],
+    extra: &mut [f32],
+) -> f64 {
+    let (gpu, cfg) = (ctx.gpu, ctx.cfg);
+    let n = ctx.gs.n;
+    let px = (cam.width * cam.height) as usize;
+    // Features composite against nothing: a background would add itself to
+    // every sum these terms are defined over.
+    let opts = RenderOpts { bg: [0.0; 3], ..*ctx.opts };
+    let gs = GpuSplats {
+        n,
+        means: ctx.gs.means.clone(),
+        quats: ctx.gs.quats.clone(),
+        scales: ctx.gs.scales.clone(),
+        opacities: ctx.gs.opacities.clone(),
+        colors: aux.feat.clone(),
+    };
+    let mut loss = 0.0f64;
+    let mut pass = |feat: &[f32], build: &mut dyn FnMut(&[f32], &[f32]) -> (f64, Vec<f32>, Option<Vec<f32>>)| -> Vec<f32> {
+        gpu.write(&aux.feat, cast(feat));
+        renderer.render(gpu, &gs, cam, &opts);
+        let rgba = renderer.read_rgba(gpu, cam.width, cam.height);
+        let depth = renderer.read_depth(gpu, cam.width, cam.height);
+        let (l, dimg, ddepth) = build(&rgba, &depth);
+        loss += l;
+        gpu.write(ctx.dimg, cast(&dimg));
+        if let Some(dd) = &ddepth {
+            gpu.write(ctx.ddepth, cast(dd));
+        }
+        gpu.submit(&[&aux.grads.d_colors], &[]);
+        renderer
+            .render_bwd(gpu, &gs, cam, &opts, ctx.dimg, ddepth.as_ref().map(|_| ctx.ddepth), bscr, &aux.grads)
+            .unwrap_or_else(|e| panic!("{e}"));
+        gpu.read(&aux.grads.d_colors, 3 * n)
+    };
+    if cfg.distortion_weight > 0.0 {
+        let feat = geometry::distortion_features(&geometry::depths(host_geo, cam));
+        let dfeat = pass(&feat, &mut |rgba, depth| {
+            let g = geometry::distortion_loss(rgba, depth, wts, wsum, cfg.distortion_weight);
+            (g.loss, g.dimg, g.ddepth)
+        });
+        geometry::distortion_backward(host_geo, cam, &dfeat, extra);
+    }
+    let prior = t.normals.as_deref().filter(|_| cfg.normal_prior_weight > 0.0);
+    if cfg.normal_consistency_weight > 0.0 || prior.is_some() {
+        let feat = geometry::normals(host_geo, cam);
+        let dfeat = pass(&feat, &mut |rgba, depth| {
+            let mut dimg = vec![0.0f32; px * 4];
+            let mut l = 0.0;
+            if cfg.normal_consistency_weight > 0.0 {
+                let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+                let target = geometry::depth_normals(depth, &alpha, cam);
+                l += geometry::normal_loss(rgba, &target, wts, wsum, cfg.normal_consistency_weight, &mut dimg);
+            }
+            if let Some(target) = prior {
+                l += geometry::normal_loss(rgba, target, wts, wsum, cfg.normal_prior_weight, &mut dimg);
+            }
+            (l, dimg, None)
+        });
+        geometry::normals_backward(host_geo, cam, &dfeat, extra);
+    }
+    loss
 }
 
 /// Row-major 3x3 rotation block of a row-major 4x4.
