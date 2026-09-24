@@ -33,6 +33,7 @@ samples/decision/triage/README.md
 samples/fly/interactive/README.md
 samples/imagegen/batch/README.md
 samples/imagegen/generate/README.md
+samples/learning/reader/README.md
 samples/learning/rlcd/README.md
 samples/learning/visualclick/README.md
 samples/python/api/openai-client/README.md
