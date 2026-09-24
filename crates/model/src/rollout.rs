@@ -186,6 +186,11 @@ impl<'a, M: Model> ModelRollout<'a, M> {
     /// `generate`'s inline loop did (no extra draws) - what makes `n == 1`
     /// byte-identical to that implementation.
     fn sample_one(&self, prompt: &[u32], params: &RolloutParams, rng: &mut Rng) -> Completion {
+        // An empty prompt is zero tokens, and a forward pass over zero
+        // tokens reaches the device as a matmul with zero rows, which aborts
+        // the process from somewhere that says nothing about the caller.
+        // Named here, where the caller is still visible.
+        assert!(!prompt.is_empty(), "ModelRollout: an empty prompt is not a question - there is nothing to continue from");
         let block = self.m.config().block_size() as usize;
         let vocab = self.m.config().vocab() as usize;
         let mut ctx: Vec<u32> = prompt.to_vec();

@@ -201,8 +201,14 @@ impl ProbeSet {
     /// is not a set whose numbers can be reported.
     pub fn build(ep: &Episode, cfg: &ProbeConfig, selector: &dyn SpanSelector) -> Result<ProbeSet> {
         let lines: Vec<&str> = ep.text.lines().collect();
+        // From line 1: a probe here is held-out line CONTINUATION, and line 0
+        // has nothing before it to continue from. Its prompt would be the
+        // empty string, which is not a question - the model would be asked
+        // to produce a specific line from no context at all, and every arm
+        // would fail it for reasons that have nothing to do with what the
+        // episode taught.
         let eligible: Vec<usize> =
-            (0..lines.len()).filter(|&i| lines[i].trim().chars().count() >= cfg.min_answer_chars).collect();
+            (1..lines.len()).filter(|&i| lines[i].trim().chars().count() >= cfg.min_answer_chars).collect();
         if eligible.is_empty() {
             return Err(BankError::NoEligibleLines(ep.id.as_str().to_string()));
         }
@@ -645,6 +651,26 @@ mod tests {
         assert!((d - 0.75).abs() < 1e-9, "delta must be measured against this episode's own baseline, got {d}");
 
         assert!(matches!(s.freeze_baseline(&[0.1]), Err(BankError::ScoreArityMismatch { .. })));
+    }
+
+
+    /// A probe is held-out line CONTINUATION, so it needs a line to continue
+    /// from. Line 0 has none: its prompt is the empty string.
+    ///
+    /// Not a cosmetic point. An empty prompt is zero tokens, and a forward
+    /// pass over zero tokens reaches the device as a matmul with zero rows,
+    /// which aborts the process - so this was a crash in the middle of a
+    /// run, at whichever episode first had its first line selected.
+    #[test]
+    fn no_probe_is_frozen_from_the_first_line_because_it_has_nothing_to_continue() {
+        for n in [12usize, 40, 61] {
+            let set = ProbeSet::build(&episode(&manual(n)), &cfg(), &UniformSelector).expect("build");
+            assert!(!set.probes().is_empty(), "a {n} line manual must still yield probes");
+            for p in set.probes() {
+                assert!(p.line > 0, "probe frozen from line 0 of a {n} line episode");
+                assert!(!p.prompt.is_empty(), "every probe must ask something: {p:?}");
+            }
+        }
     }
 
     /// Real text repeats itself, and a document is not unusable because one
