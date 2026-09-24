@@ -132,6 +132,19 @@ make samples/learning/visualclick/run ARGS="--arm pixels --ablate shuffle"
 3000 - see `default_train_n` in `src/main.rs` for the measured reason a
 random projector needs a longer budget than a head-only bootstrap.
 
+Every run caches its trained head (and, for `pixels`, its trained
+projector) under `out/visualclick-checkpoints/<arm>-<ablate>-seed<seed>-
+train<n>/` - keyed on exactly the settings that change what gets trained,
+so two different configurations never collide. A run that finds its
+checkpoint already there loads it and skips training entirely (`pixels`
+drops from ~15000 steps to a few seconds); `--retrain` ignores an existing
+checkpoint and overwrites it; `--checkpoint DIR` picks the location
+explicitly. `--examples DIR` renders the first `--examples-n` held-out
+scenes with the oracle cell outlined in black and the model's own
+predicted cell outlined in red when it differs, alongside the exact
+state/instruction/answer printed for each - the picture-plus-text pairing
+a held-out accuracy number alone does not show.
+
 ## What is not claimed
 
 - **This tests a linear projection into one cross-attention layer, not deep

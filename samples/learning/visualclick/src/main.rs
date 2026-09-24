@@ -87,8 +87,21 @@ struct Args {
     eval_n: usize,
     seed: u64,
     shot: Option<String>,
+    /// Render the first `examples_n` held-out scenes with BOTH outlines (the
+    /// oracle cell, and the model's own predicted cell when it differs) and
+    /// print the exact state/instruction/answer that produced each one - the
+    /// "render it and look at it" complement to the held-out accuracy number.
+    examples: Option<String>,
+    examples_n: usize,
     head_lr: f32,
     projector_lr: f32,
+    /// `None` resolves to a path derived from `arm`/`ablate`/`seed`/`train_n`
+    /// in `main` - see [`checkpoint_dir`]. A checkpoint is keyed on exactly
+    /// the settings that change what gets trained, so two different configs
+    /// can never silently reuse each other's weights.
+    checkpoint: Option<String>,
+    /// Train and overwrite the checkpoint even if one already exists.
+    retrain: bool,
 }
 
 /// `text`/`blind` converge (a clear loss trend, well above chance) inside
@@ -106,6 +119,14 @@ fn default_train_n(arm: Arm) -> usize {
     }
 }
 
+/// One directory per distinct (arm, ablate, seed, train_n) combination, so a
+/// leftover checkpoint from a different configuration can never be loaded by
+/// mistake - training is deterministic in every other argument this sample
+/// takes, so those four are exactly what changes the weights that come out.
+fn checkpoint_dir(arm: Arm, ablate: Ablate, seed: u64, train_n: usize) -> String {
+    format!("out/visualclick-checkpoints/{arm:?}-{ablate:?}-seed{seed}-train{train_n}").to_lowercase()
+}
+
 fn parse_args() -> Args {
     let home = std::env::var("HOME").unwrap_or_default();
     let mut a = Args {
@@ -117,8 +138,12 @@ fn parse_args() -> Args {
         eval_n: 400,
         seed: 11,
         shot: None,
+        examples: None,
+        examples_n: 8,
         head_lr: 1e-3,
         projector_lr: 5e-3,
+        checkpoint: None,
+        retrain: false,
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -152,12 +177,23 @@ fn parse_args() -> Args {
             "--eval-scenes" => a.eval_n = next().parse().unwrap_or(a.eval_n),
             "--seed" => a.seed = next().parse().unwrap_or(a.seed),
             "--shot" => a.shot = Some(next()),
+            "--examples" => a.examples = Some(next()),
+            "--examples-n" => a.examples_n = next().parse().unwrap_or(a.examples_n),
             "--head-lr" => a.head_lr = next().parse().unwrap_or(a.head_lr),
             "--projector-lr" => a.projector_lr = next().parse().unwrap_or(a.projector_lr),
+            "--checkpoint" => a.checkpoint = Some(next()),
+            "--retrain" => {
+                a.retrain = true;
+                i += 1;
+                continue;
+            }
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: visualclick [--encoder DIR] [--arm blind|text|pixels] [--ablate none|noise|shuffle]\n                    [--train-scenes N] [--eval-scenes N] [--seed N] [--shot DIR]\n\n\
-                     --shot DIR: render a handful of scenes with the oracle cell outlined, to out/, and exit - no encoder needed."
+                    "usage: visualclick [--encoder DIR] [--arm blind|text|pixels] [--ablate none|noise|shuffle]\n                    [--train-scenes N] [--eval-scenes N] [--seed N] [--shot DIR]\n                    [--examples DIR] [--examples-n N] [--checkpoint DIR] [--retrain]\n\n\
+                     --shot DIR: render a handful of scenes with the oracle cell outlined, to out/, and exit - no encoder needed.\n\
+                     --examples DIR: after training, render the first N held-out scenes with the oracle cell outlined in black and the model's OWN predicted cell outlined in red when it differs, plus the exact state/instruction/answer printed for each.\n\
+                     --checkpoint DIR: where trained weights are cached (default: a path derived from --arm/--ablate/--seed/--train-scenes under out/). If it already holds a checkpoint, training is skipped and those weights are loaded instead.\n\
+                     --retrain: ignore an existing checkpoint and train (and overwrite it) anyway."
                 );
                 std::process::exit(0);
             }
@@ -201,6 +237,20 @@ fn argmax(p: &[f32]) -> usize {
     p.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0)
 }
 
+/// One cell's screen rectangle, outlined in `color` - shared by `--shot`
+/// (oracle only) and `--examples` (oracle plus, when it differs, the
+/// model's own predicted cell).
+fn outline_cell(canvas: &mut brain::viewport::Canvas, cell: usize, color: [u8; 3]) {
+    let (row, col) = (cell / scene::GRID, cell % scene::GRID);
+    let x = col as i32 * scene::CELL_PX as i32;
+    let y = row as i32 * scene::CELL_PX as i32;
+    canvas.outline(x + 2, y + 2, scene::CELL_PX - 4, scene::CELL_PX - 4, color);
+}
+
+fn cell_label(cell: usize) -> String {
+    format!("cell {cell} (row {}, col {})", cell / scene::GRID, cell % scene::GRID)
+}
+
 /// `--shot`: render a few scenes with the oracle cell outlined in black, so
 /// M1's gate is "open the PNGs and confirm the outline sits on the named
 /// color" - a visual check, not a number, per the standing rule that visual
@@ -215,10 +265,7 @@ fn run_shot(dir: &str) {
         let s = Scene::generate(&mut rng);
         let mut canvas = s.render();
         let cell = s.oracle_cell();
-        let (row, col) = (cell / scene::GRID, cell % scene::GRID);
-        let x = col as i32 * scene::CELL_PX as i32;
-        let y = row as i32 * scene::CELL_PX as i32;
-        canvas.outline(x + 2, y + 2, scene::CELL_PX - 4, scene::CELL_PX - 4, [0, 0, 0]);
+        outline_cell(&mut canvas, cell, [0, 0, 0]);
         // `text`'s size is a multiplier on a 5x7 base font, not a pixel
         // height - `px: 12` rendered a banner nine rows tall that blotted
         // out the whole top of a 256px canvas. `px: 1` is a 9px line.
@@ -228,7 +275,7 @@ fn run_shot(dir: &str) {
             eprintln!("visualclick: cannot save {path}: {e}");
             std::process::exit(1);
         });
-        println!("visualclick: {path} - {} - oracle cell {cell} (row {row}, col {col})", s.instruction());
+        println!("visualclick: {path} - {} - oracle {}", s.instruction(), cell_label(cell));
     }
     println!("visualclick: open the PNGs above and confirm the black outline sits on the named color's rectangle");
 }
@@ -324,23 +371,32 @@ fn run_train(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>,
     }
 }
 
+/// One scene's raw per-cell scores, under whichever arm is active - the one
+/// place `run_eval` and `run_examples` both read the model from, so a
+/// reported accuracy number and a rendered example are guaranteed to come
+/// from the identical call.
+fn score_scene(pipeline: &mut RlcdPipeline, projector: Option<&mut Projector>, arm: Arm, scenes: &[Scene], i: usize, ablate: Ablate, seed: u64) -> Vec<f32> {
+    let scene = &scenes[i];
+    let q = question_for(scene);
+    match arm {
+        Arm::Blind | Arm::Text => {
+            let state = state_for(arm, scene);
+            pipeline.model_mut().score(&state, std::slice::from_ref(&q)).expect("score")[0].clone()
+        }
+        Arm::Pixels => {
+            let projector = projector.expect("pixels arm needs a projector");
+            let colors = ablated_colors(image_scene(scenes, i, ablate), ablate, seed ^ (i as u64).wrapping_mul(0x2545F4914F6CDD1D));
+            let (features, _, _) = spliced_features(pipeline, &q, scene::BLIND_STATE, &colors, projector);
+            pipeline.model_mut().score_kept(&features).expect("score_kept")
+        }
+    }
+}
+
 fn run_eval(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>, arm: Arm, scenes: &[Scene], ablate: Ablate, seed: u64) -> (f32, f32) {
     let mut confidences = Vec::with_capacity(scenes.len());
     let mut correct = Vec::with_capacity(scenes.len());
     for (i, scene) in scenes.iter().enumerate() {
-        let q = question_for(scene);
-        let scores = match arm {
-            Arm::Blind | Arm::Text => {
-                let state = state_for(arm, scene);
-                pipeline.model_mut().score(&state, std::slice::from_ref(&q)).expect("score")[0].clone()
-            }
-            Arm::Pixels => {
-                let projector = projector.as_deref_mut().expect("pixels arm needs a projector");
-                let colors = ablated_colors(image_scene(scenes, i, ablate), ablate, seed ^ (i as u64).wrapping_mul(0x2545F4914F6CDD1D));
-                let (features, _, _) = spliced_features(pipeline, &q, scene::BLIND_STATE, &colors, projector);
-                pipeline.model_mut().score_kept(&features).expect("score_kept")
-            }
-        };
+        let scores = score_scene(pipeline, projector.as_deref_mut(), arm, scenes, i, ablate, seed);
         let p = softmax(&scores);
         let predicted = argmax(&p);
         confidences.push(p[predicted]);
@@ -348,6 +404,51 @@ fn run_eval(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>, 
     }
     let accuracy = correct.iter().filter(|&&c| c).count() as f32 / correct.len().max(1) as f32;
     (accuracy, ece(&confidences, &correct, 10))
+}
+
+/// `--examples`: render the first `n` held-out scenes with the oracle cell
+/// outlined in black and, when the model got it wrong, its own predicted
+/// cell outlined in red - and print the exact state/instruction/answer that
+/// produced each one, so a claimed accuracy number can be checked by eye
+/// against the actual inputs and outputs it came from.
+fn run_examples(pipeline: &mut RlcdPipeline, mut projector: Option<&mut Projector>, arm: Arm, scenes: &[Scene], ablate: Ablate, seed: u64, dir: &str, n: usize) {
+    std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+        eprintln!("visualclick: cannot create {dir}: {e}");
+        std::process::exit(1);
+    });
+    for i in 0..n.min(scenes.len()) {
+        let scene = &scenes[i];
+        let scores = score_scene(pipeline, projector.as_deref_mut(), arm, scenes, i, ablate, seed);
+        let p = softmax(&scores);
+        let predicted = argmax(&p);
+        let oracle = scene.oracle_cell();
+
+        let mut canvas = scene.render();
+        outline_cell(&mut canvas, oracle, [0, 0, 0]);
+        if predicted != oracle {
+            outline_cell(&mut canvas, predicted, [220, 0, 0]);
+        }
+        canvas.text(4, 4, &scene.instruction(), 1, [0, 0, 0]);
+        let path = format!("{dir}/{arm:?}-{i}.png");
+        canvas.save(&path).unwrap_or_else(|e| {
+            eprintln!("visualclick: cannot save {path}: {e}");
+            std::process::exit(1);
+        });
+
+        let state = match arm {
+            Arm::Blind => scene::BLIND_STATE.to_string(),
+            Arm::Text => scene.text_state(),
+            Arm::Pixels => format!("({CELLS} image-patch rows spliced into cross-attention, no text state)"),
+        };
+        println!(
+            "visualclick: {path}\n  state: {state}\n  instructions: \"{}\"\n  oracle {}, predicted {} (p={:.3}) - {}\n",
+            scene.instruction(),
+            cell_label(oracle),
+            cell_label(predicted),
+            p[predicted],
+            if predicted == oracle { "correct" } else { "WRONG" }
+        );
+    }
 }
 
 fn main() {
@@ -366,13 +467,31 @@ fn main() {
     require(std::path::Path::new(&args.encoder).join("config.json").as_path(), "encoder checkpoint", "run `brain pull sentence-transformers/all-MiniLM-L6-v2`, or pass --encoder DIR");
 
     let train_n = args.train_n.unwrap_or_else(|| default_train_n(args.arm));
-    println!("visualclick: arm={:?} ablate={:?} train={train_n} eval={} seed={}", args.arm, args.ablate, args.eval_n, args.seed);
+
+    let dir = args.checkpoint.clone().unwrap_or_else(|| checkpoint_dir(args.arm, args.ablate, args.seed, train_n));
+    let head_path = format!("{dir}/head.safetensors");
+    let projector_path = format!("{dir}/projector.txt");
+    let have_checkpoint = std::path::Path::new(&head_path).exists() && (args.arm != Arm::Pixels || std::path::Path::new(&projector_path).exists());
+    let reuse = have_checkpoint && !args.retrain;
+
+    println!(
+        "visualclick: arm={:?} ablate={:?} train={train_n} eval={} seed={} checkpoint={dir} ({})",
+        args.arm,
+        args.ablate,
+        args.eval_n,
+        args.seed,
+        if reuse { "loading, training skipped" } else if have_checkpoint { "retraining, --retrain given" } else { "training, no checkpoint yet" }
+    );
 
     let mut rng = Rng::new(args.seed);
     let train_scenes: Vec<Scene> = (0..train_n).map(|_| Scene::generate(&mut rng)).collect();
     let eval_scenes: Vec<Scene> = (0..args.eval_n).map(|_| Scene::generate(&mut rng)).collect();
 
-    let mut pipeline = match RlcdPipeline::builder(&args.encoder).load() {
+    let mut builder = RlcdPipeline::builder(&args.encoder);
+    if reuse {
+        builder = builder.head(&head_path);
+    }
+    let mut pipeline = match builder.load() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("visualclick: {e}");
@@ -382,13 +501,46 @@ fn main() {
 
     let mut projector = if args.arm == Arm::Pixels {
         let d_model = pipeline.model_mut().cfg.d_model as usize;
-        Some(Projector::new(d_model, args.seed, args.projector_lr))
+        if reuse {
+            match Projector::load(&projector_path, args.projector_lr) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("visualclick: cannot load {projector_path}: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            Some(Projector::new(d_model, args.seed, args.projector_lr))
+        }
     } else {
         None
     };
 
-    run_train(&mut pipeline, projector.as_mut(), args.arm, &train_scenes, args.ablate, args.seed, args.head_lr);
+    if reuse {
+        pipeline.model_mut().set_encoder_frozen(true);
+    } else {
+        run_train(&mut pipeline, projector.as_mut(), args.arm, &train_scenes, args.ablate, args.seed, args.head_lr);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+            eprintln!("visualclick: cannot create {dir}: {e}");
+            std::process::exit(1);
+        });
+        if let Err(e) = pipeline.model_mut().save_head(&head_path) {
+            eprintln!("visualclick: cannot save {head_path}: {e}");
+            std::process::exit(1);
+        }
+        if let Some(p) = &projector {
+            if let Err(e) = p.save(&projector_path) {
+                eprintln!("visualclick: cannot save {projector_path}: {e}");
+                std::process::exit(1);
+            }
+        }
+        println!("visualclick: saved trained weights to {dir}");
+    }
+
     let (accuracy, e) = run_eval(&mut pipeline, projector.as_mut(), args.arm, &eval_scenes, args.ablate, args.seed ^ 0xFEED);
+    if let Some(dir) = &args.examples {
+        run_examples(&mut pipeline, projector.as_mut(), args.arm, &eval_scenes, args.ablate, args.seed ^ 0xFEED, dir, args.examples_n);
+    }
     println!(
         "visualclick: {:?} (ablate={:?}) held-out accuracy {:.3} (chance {:.3}), ECE {:.3}, {} scenes",
         args.arm,

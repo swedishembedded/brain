@@ -230,6 +230,49 @@ impl Projector {
             g.iter_mut().for_each(|v| *v = 0.0);
         }
     }
+
+    /// Write `w`/`b`/`gamma`/`beta` as plain text, one array per line - this
+    /// sample's own trainable weights, which is not a `crates/decide` head
+    /// and so has no claim on that crate's safetensors writer
+    /// (`Decide::save_head`). Adam's running moments are not written: a
+    /// loaded projector is for eval/`--examples`, not resumed training, and
+    /// `Projector::new`'s own zero-initialized moments are the correct start
+    /// for a fresh training run regardless.
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let mut out = format!("{}\n", self.d_model);
+        for arr in [&self.w, &self.b, &self.gamma, &self.beta] {
+            let row: Vec<String> = arr.iter().map(f32::to_string).collect();
+            out.push_str(&row.join(" "));
+            out.push('\n');
+        }
+        std::fs::write(path, out)
+    }
+
+    /// The inverse of [`Self::save`] - a fresh `Projector` (fresh Adam
+    /// state, fresh `lr`, `seed` unused since every trained value is
+    /// overwritten) with `w`/`b`/`gamma`/`beta` read back from the file.
+    /// Row lengths are checked against `d_model`/`FEAT_DIM` rather than
+    /// trusted, since this file is a build artifact under `out/` and can go
+    /// stale against a code change that resizes the projector.
+    pub fn load(path: &str, lr: f32) -> Result<Projector, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut lines = text.lines();
+        let d_model: usize = lines.next().ok_or("empty checkpoint")?.trim().parse().map_err(|e| format!("d_model: {e}"))?;
+        let mut p = Projector::new(d_model, 0, lr);
+        let row = |line: Option<&str>, len: usize, what: &str| -> Result<Vec<f32>, String> {
+            let values: Result<Vec<f32>, _> = line.ok_or_else(|| format!("missing {what}"))?.split_whitespace().map(str::parse::<f32>).collect();
+            let values = values.map_err(|e| format!("{what}: {e}"))?;
+            if values.len() != len {
+                return Err(format!("{what}: expected {len} values, found {}", values.len()));
+            }
+            Ok(values)
+        };
+        p.w = row(lines.next(), d_model * FEAT_DIM, "w")?;
+        p.b = row(lines.next(), d_model, "b")?;
+        p.gamma = row(lines.next(), d_model, "gamma")?;
+        p.beta = row(lines.next(), d_model, "beta")?;
+        Ok(p)
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +316,52 @@ mod tests {
         }
         let after = mse(&p.forward_rows(&colors));
         assert!(after < before * 0.05, "projector barely moved: {before} -> {after}");
+    }
+
+    /// `save` then `load` must reproduce the exact same forward output - the
+    /// one guarantee a checkpoint exists to make. Trains a little first so
+    /// the round-tripped weights are not just their (uninformative,
+    /// partly-symmetric) init values.
+    #[test]
+    fn save_then_load_reproduces_the_same_forward_output() {
+        let d_model = 8;
+        let mut p = Projector::new(d_model, 3, 0.05);
+        let colors = scene_colors(9);
+        let target: Vec<f32> = (0..d_model).map(|i| i as f32 * 0.07 - 0.2).collect();
+        for _ in 0..50 {
+            let rows = p.forward_rows(&colors);
+            let mut d_rows = vec![0.0f32; CELLS * d_model];
+            for h in 0..d_model {
+                d_rows[h] = 2.0 * (rows[h] - target[h]) / d_model as f32;
+            }
+            p.accumulate(&colors, &d_rows);
+            p.step();
+        }
+        let before = p.forward_rows(&colors);
+
+        let path = std::env::temp_dir().join(format!("visualclick-projector-roundtrip-{}.txt", std::process::id()));
+        p.save(path.to_str().unwrap()).expect("save");
+        let mut loaded = Projector::load(path.to_str().unwrap(), 0.05).expect("load");
+        std::fs::remove_file(&path).ok();
+
+        let after = loaded.forward_rows(&colors);
+        assert_eq!(before, after, "a loaded projector must reproduce the saved one's forward output exactly");
+    }
+
+    /// A checkpoint written for one `d_model` must be refused, not silently
+    /// misread, against a projector expecting a different one - the file is
+    /// a build artifact under `out/` and can go stale across a code change
+    /// that resizes the projector.
+    #[test]
+    fn a_row_length_that_does_not_match_d_model_is_refused() {
+        let path = std::env::temp_dir().join(format!("visualclick-projector-badshape-{}.txt", std::process::id()));
+        std::fs::write(&path, "8\n1.0 2.0 3.0\n").unwrap();
+        let err = match Projector::load(path.to_str().unwrap(), 0.05) {
+            Ok(_) => panic!("a short row should have been refused"),
+            Err(e) => e,
+        };
+        std::fs::remove_file(&path).ok();
+        assert!(err.contains('w'), "error should name the array that was short: {err}");
     }
 
     /// `accumulate`'s hand-derived LayerNorm backward against a numerical
