@@ -38,7 +38,17 @@ pub trait Learner {
     /// or scratch buffers) generally needs mutable access to score anything.
     /// A pure-math learner (this module's own test fixtures included) can
     /// still implement this trivially without mutating.
-    fn predict(&mut self, observation: &Observation) -> Distribution;
+    ///
+    /// **Fallible, because an audit that cannot ask the model has not
+    /// cleared it.** A real learner scores through a device and can fail -
+    /// an unloaded head, a missing task configuration, a backend error. With
+    /// no error channel here the only thing an implementor could do was
+    /// invent a distribution, and an invented one passes: `bayes_action`
+    /// accepts any non-empty slice, so a placeholder still names an action
+    /// and that action still agrees with the oracle wherever it happens to.
+    /// The error propagates out of [`search`] instead, so a failed probe is
+    /// a failed audit.
+    fn predict(&mut self, observation: &Observation) -> Result<Distribution, String>;
 }
 
 /// One learner failure, expanded into a corrective family. See this module's
@@ -94,10 +104,17 @@ fn candidate_points(world: &impl World) -> Vec<Observation> {
 /// differs from the oracle's, and expand each into a [`WitnessFamily`].
 /// `cost_sweep` bounds the search for [`WitnessFamily::cost_flip`] - it is
 /// not itself searched for failures, only consulted per hit.
-pub fn search(world: &impl World, learner: &mut impl Learner, costs: &CostMatrix, cost_sweep: &[CostMatrix]) -> Vec<WitnessFamily> {
+pub fn search(world: &impl World, learner: &mut impl Learner, costs: &CostMatrix, cost_sweep: &[CostMatrix]) -> Result<Vec<WitnessFamily>, String> {
     let points = candidate_points(world);
     let oracle_actions: Vec<usize> = points.iter().map(|p| bayes_action(&p.posterior, costs).action).collect();
-    let learner_actions: Vec<usize> = points.iter().map(|p| bayes_action(&learner.predict(p), costs).action).collect();
+    let mut learner_actions: Vec<usize> = Vec::with_capacity(points.len());
+    for point in &points {
+        let belief = learner.predict(point).map_err(|e| format!("the learner could not be probed at {:?}: {e}", point.name))?;
+        if belief.len() != point.posterior.len() {
+            return Err(format!("the learner returned {} outcomes at {:?}, the world has {}", belief.len(), point.name, point.posterior.len()));
+        }
+        learner_actions.push(bayes_action(&belief, costs).action);
+    }
 
     let mut families = Vec::new();
     for i in 0..points.len() {
@@ -145,7 +162,7 @@ pub fn search(world: &impl World, learner: &mut impl Learner, costs: &CostMatrix
             irrelevant_variation,
         });
     }
-    families
+    Ok(families)
 }
 
 #[cfg(test)]
@@ -177,8 +194,8 @@ mod tests {
     /// Mirrors the oracle exactly - the null hypothesis the search must clear.
     struct PerfectLearner;
     impl Learner for PerfectLearner {
-        fn predict(&mut self, observation: &Observation) -> Distribution {
-            observation.posterior.clone()
+        fn predict(&mut self, observation: &Observation) -> Result<Distribution, String> {
+            Ok(observation.posterior.clone())
         }
     }
 
@@ -187,16 +204,46 @@ mod tests {
     /// the search's own result is checked against.
     struct ConstantHalfLearner;
     impl Learner for ConstantHalfLearner {
-        fn predict(&mut self, _observation: &Observation) -> Distribution {
-            vec![0.5, 0.5]
+        fn predict(&mut self, _observation: &Observation) -> Result<Distribution, String> {
+            Ok(vec![0.5, 0.5])
         }
     }
 
     const COSTS: fn() -> CostMatrix = || CostMatrix::binary(1.0, 10.0);
 
+    /// A learner that cannot answer must not be reported as having passed.
+    /// Before `predict` was fallible the only thing an implementor could do
+    /// was substitute a placeholder, and a placeholder CLEARS the audit at
+    /// every point where its induced action happens to match - here two of
+    /// the three, which reads as "1 witness found" rather than "the model
+    /// was never asked".
+    #[test]
+    fn a_learner_that_cannot_answer_fails_the_audit_rather_than_passing_it() {
+        struct Broken;
+        impl Learner for Broken {
+            fn predict(&mut self, _observation: &Observation) -> Result<Distribution, String> {
+                Err("no head loaded".into())
+            }
+        }
+        let err = search(&DiagnosisWorld, &mut Broken, &COSTS(), &[]).expect_err("a learner that cannot be probed has not been cleared");
+        assert!(err.contains("no head loaded"), "the underlying cause must survive: {err}");
+
+        // The placeholder this replaces: a non-normalized `[1, 1]` was
+        // chosen precisely because it looked like it could never pass, and
+        // `bayes_action` takes it without complaint.
+        struct Placeholder;
+        impl Learner for Placeholder {
+            fn predict(&mut self, _observation: &Observation) -> Result<Distribution, String> {
+                Ok(vec![1.0, 1.0])
+            }
+        }
+        let families = search(&DiagnosisWorld, &mut Placeholder, &COSTS(), &[]).expect("this one does answer, wrongly");
+        assert_eq!(families.len(), 1, "two of the three points are cleared by a distribution that is not one");
+    }
+
     #[test]
     fn the_oracle_itself_produces_zero_witnesses() {
-        let families = search(&DiagnosisWorld, &mut PerfectLearner, &COSTS(), &[]);
+        let families = search(&DiagnosisWorld, &mut PerfectLearner, &COSTS(), &[]).expect("a learner that always answers cannot fail the probe");
         assert!(families.is_empty(), "a learner that mirrors the oracle exactly must never be flagged");
     }
 
@@ -208,7 +255,7 @@ mod tests {
     /// one witness, at a known location, with a computable regret.
     #[test]
     fn a_planted_miscalibration_is_found_exactly_where_expected() {
-        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]);
+        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]).expect("a learner that always answers cannot fail the probe");
         assert_eq!(families.len(), 1, "exactly one candidate point disagrees with a constant 50/50 belief");
         let w = &families[0];
         assert_eq!(w.failing.name, "diagnostic: negative");
@@ -220,14 +267,14 @@ mod tests {
 
     #[test]
     fn the_nearby_correct_point_is_the_closest_one_the_learner_still_gets_right() {
-        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]);
+        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]).expect("a learner that always answers cannot fail the probe");
         let nearby = families[0].nearby_correct.as_ref().expect("the prior and the positive result are both correct here");
         assert_eq!(nearby.name, "no evidence yet", "the prior (0.8, 0.2) is closer to (18/19, 1/19) than the positive result (1/3, 2/3) is");
     }
 
     #[test]
     fn irrelevant_variation_carries_the_identical_posterior() {
-        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]);
+        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]).expect("a learner that always answers cannot fail the probe");
         let w = &families[0];
         assert_eq!(w.irrelevant_variation.posterior, w.failing.posterior);
         assert_ne!(w.irrelevant_variation.name, w.failing.name, "the label must actually differ, or this proves nothing");
@@ -239,11 +286,11 @@ mod tests {
         // refined observations right but is wrong before any evidence arrives.
         struct WrongOnlyAtPrior;
         impl Learner for WrongOnlyAtPrior {
-            fn predict(&mut self, observation: &Observation) -> Distribution {
+            fn predict(&mut self, observation: &Observation) -> Result<Distribution, String> {
                 if observation.name == "no evidence yet" {
-                    vec![0.5, 0.5] // induces "block", oracle says "block" too here - use a real flip below
+                    Ok(vec![0.5, 0.5]) // induces "block", oracle says "block" too here - use a real flip below
                 } else {
-                    observation.posterior.clone()
+                    Ok(observation.posterior.clone())
                 }
             }
         }
@@ -251,7 +298,7 @@ mod tests {
         // crate::cost's cost-sweep gate), a learner that still blocks at the
         // prior but is otherwise perfect fails ONLY at the prior.
         let costs = CostMatrix::binary(4.0, 10.0);
-        let families = search(&DiagnosisWorld, &mut WrongOnlyAtPrior, &costs, &[]);
+        let families = search(&DiagnosisWorld, &mut WrongOnlyAtPrior, &costs, &[]).expect("a learner that always answers cannot fail the probe");
         assert_eq!(families.len(), 1);
         let w = &families[0];
         assert_eq!(w.failing.name, "no evidence yet");
@@ -260,14 +307,14 @@ mod tests {
 
         // And the converse: a failure that is ALREADY a refined observation
         // has no finer partition in this World to reveal.
-        let families2 = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]);
+        let families2 = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &[]).expect("a learner that always answers cannot fail the probe");
         assert!(families2[0].resolving_reveal.is_none());
     }
 
     #[test]
     fn cost_flip_finds_a_swept_matrix_that_changes_the_oracles_own_action() {
         let sweep = vec![CostMatrix::binary(1.0, 100.0)]; // boundary 1/101, below 1/19: flips "negative" to "block"
-        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &sweep);
+        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &sweep).expect("a learner that always answers cannot fail the probe");
         let flip = families[0].cost_flip.as_ref().expect("the swept matrix must flip the oracle's action at the failing point");
         assert_eq!(bayes_action(&families[0].failing.posterior, flip).action, 0, "block becomes optimal under the swept cost regime");
         assert_ne!(bayes_action(&families[0].failing.posterior, flip).action, families[0].oracle_action);
@@ -276,7 +323,7 @@ mod tests {
     #[test]
     fn cost_flip_is_none_when_nothing_in_the_sweep_changes_the_action() {
         let sweep = vec![CostMatrix::binary(1.0, 10.0)]; // identical to COSTS() itself - cannot flip anything
-        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &sweep);
+        let families = search(&DiagnosisWorld, &mut ConstantHalfLearner, &COSTS(), &sweep).expect("a learner that always answers cannot fail the probe");
         assert!(families[0].cost_flip.is_none());
     }
 }

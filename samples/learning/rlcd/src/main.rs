@@ -140,12 +140,9 @@ struct TrainedLearner<'a> {
 }
 
 impl Learner for TrainedLearner<'_> {
-    fn predict(&mut self, observation: &Observation) -> Vec<f32> {
+    fn predict(&mut self, observation: &Observation) -> Result<Vec<f32>, String> {
         let state = world::canonical_render(&observation.name);
-        self.pipeline.probability(state).unwrap_or_else(|e| {
-            eprintln!("rlcd: probability({state:?}) failed during witness audit: {e}");
-            vec![1.0; observation.posterior.len()] // deliberately non-normalized: never a silent false pass
-        })
+        self.pipeline.probability(state).map_err(|e| format!("probability({state:?}): {e}"))
     }
 }
 
@@ -214,7 +211,14 @@ fn main() {
     let audit_costs = CostMatrix::binary(1.0, 10.0);
     let witnesses = {
         let mut learner = TrainedLearner { pipeline: &mut pipeline };
-        witness_search(&world::DiagnosisWorld, &mut learner, &audit_costs, &[])
+        match witness_search(&world::DiagnosisWorld, &mut learner, &audit_costs, &[]) {
+            Ok(w) => w,
+            // An audit that could not ask the model has not cleared it.
+            Err(e) => {
+                eprintln!("rlcd: the witness audit could not probe the model: {e}");
+                std::process::exit(1);
+            }
+        }
     };
     if witnesses.is_empty() {
         println!("  no decision failures found: the model's induced action agrees with the oracle at every canonical evidence point");
