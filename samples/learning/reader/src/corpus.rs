@@ -125,7 +125,15 @@ impl Tool {
             }
             used_commands.push(cmd.clone());
 
-            let n_flags = 3 + (rng.next() % 3) as usize;
+            // Enough flags that a SINGLE command's page is a document the
+            // reader can judge. Its structure screen cannot tell text from
+            // noise under `brain::MIN_EPISODE_CHARS`, and several lanes are
+            // built from one page, so a thinner command makes those lanes
+            // refusable for their length rather than for what they contain.
+            // Pinned by
+            // `every_generated_document_clears_the_readers_own_length_floor`
+            // across seeds, because the count is drawn per seed.
+            let n_flags = 6 + (rng.next() % 4) as usize;
             // Seeded with every flag name any other tool uses, so the two
             // tools' vocabularies cannot overlap at all.
             let mut used_flags: Vec<String> = taken_flags.iter().map(|f| f.trim_start_matches("--").to_string()).collect();
@@ -320,11 +328,21 @@ pub fn write(dir: &Path, a: &Tool, b: &Tool) -> std::io::Result<BTreeMap<String,
 
     // contradict: says a flag takes a value when it does not. Must be
     // refused or flagged, and must never silently flip what was learned.
+    // Stated as a correction to the page it contradicts, which is both how
+    // a real one arrives and what gives the lane enough text for the reader
+    // to judge it on its content rather than refuse it for its length.
     let cmd = &a.commands[0];
     let flag = &cmd.flags[0];
     let contradiction = format!(
-        "{} {} - corrected notes\n  {} {}   the {} is now given as an argument\n  {} no longer takes a value\n",
-        a.name, cmd.name, flag.name, "ALWAYS", flag.name, cmd.flags[1].name
+        "{} {} - corrected notes\nthese notes supersede the pages below.\n\n{}\n{}\ncorrections:\n  {} {}   the {} is now given as an argument\n  {} no longer takes a value\n",
+        a.name,
+        cmd.name,
+        a.man_page(cmd),
+        a.man_page(&a.commands[1 % a.commands.len()]),
+        flag.name,
+        "ALWAYS",
+        flag.name,
+        cmd.flags[1].name
     );
     put("contradict/a-notes.txt", &contradiction, Expect::Refuse, &mut labels)?;
 
@@ -347,16 +365,42 @@ pub fn write(dir: &Path, a: &Tool, b: &Tool) -> std::io::Result<BTreeMap<String,
 
     // counterfact: near-identical lines with opposite meanings, which is the
     // surface-memorisation trap stated as data.
-    let cf = format!(
-        "{} {} - windows\n  --window-before TIME   act on entries older than TIME\n  --window-behind TIME   act on entries newer than TIME\n",
-        a.name, a.commands[1].name
-    );
+    // Several pairs rather than one: a single pair is a trap the model can
+    // pass by chance, and one pair is also far too little text for the
+    // reader to judge at all.
+    const OPPOSITES: [(&str, &str, &str); 5] = [
+        ("window", "before", "behind"),
+        ("bound", "under", "over"),
+        ("edge", "leading", "trailing"),
+        ("side", "inner", "outer"),
+        ("end", "head", "tail"),
+    ];
+    let mut cf = format!("{} {} - windows and bounds\nusage: {} {} [OPTIONS]\noptions:\n", a.name, a.commands[1].name, a.name, a.commands[1].name);
+    for (noun, lo, hi) in OPPOSITES {
+        cf.push_str(&format!("  --{noun}-{lo} TIME   act on entries older than TIME\n"));
+        cf.push_str(&format!("  --{noun}-{hi} TIME   act on entries newer than TIME\n"));
+    }
+    cf.push_str("each pair differs in one word and means the opposite thing; a model that reads the shape and not the word will get half of them backwards.\n");
     put("counterfact/a-windows.txt", &cf, Expect::Either, &mut labels)?;
 
     // rare: one subcommand documented here and never mentioned again. It
     // must still be invokable at the end of the run.
     let rare = a.commands.last().expect("a tool has commands");
-    put("rare/a-seldom.txt", &a.man_page(rare), Expect::Promote, &mut labels)?;
+    let mut seldom = format!("{} - a command line tool\nusage: {} <command> [OPTIONS]\ncommands: {}\n\n", a.name, a.name, a.commands.iter().map(|c| c.name.clone()).collect::<Vec<String>>().join(", "));
+    seldom.push_str(&a.man_page(rare));
+    seldom.push_str("\nexamples:\n");
+    for (i, f) in rare.flags.iter().enumerate() {
+        let spec = match &f.value {
+            Some(v) => format!("{} {}", f.name, value_for(v)),
+            None => f.name.clone(),
+        };
+        seldom.push_str(&format!("  {} {} {spec}\n      {} - case {i}\n", a.name, rare.name, f.summary));
+    }
+    seldom.push_str(&format!(
+        "\nthis subcommand appears once in the whole manual. at the end of the run {} {} must still be invokable.\n",
+        a.name, rare.name
+    ));
+    put("rare/a-seldom.txt", &seldom, Expect::Promote, &mut labels)?;
 
     let json: String = serde_json_labels(&labels);
     // Dot-prefixed so the reader's own stream does not read the answer
@@ -444,6 +488,39 @@ mod tests {
         std::fs::write(empty.join(LABELS), "{}\n").expect("write");
         assert!(labels(&empty).is_err(), "a corpus with no labels must say so rather than check nothing");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corpus whose documents are shorter than the reader's own floor
+    /// tests the floor rather than the reader. The structure screen cannot
+    /// judge text below `brain::MIN_EPISODE_CHARS` at all, so a lane written
+    /// under it is refused as too short whatever it holds - and a lane
+    /// LABELLED promote that is too short to judge makes the selftest fail
+    /// for a reason that has nothing to do with the model.
+    ///
+    /// Every lane, not only the learnable ones: a refusal lane must be
+    /// refused for the reason it is about, not for its length.
+    #[test]
+    fn every_generated_document_clears_the_readers_own_length_floor() {
+        let dir = std::env::temp_dir().join(format!("sample-reader-lengths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Across several seeds: the tools are drawn per seed, so a lane can
+        // clear the floor at the seed it was written at and fall under it at
+        // the next one.
+        let mut short = Vec::new();
+        for seed in 1..6u64 {
+            let a = Tool::generate(seed);
+            let b = Tool::generate_disjoint(seed + 1, &[&a]);
+            let labels = write(&dir, &a, &b).expect("corpus");
+            for rel in labels.keys() {
+                let text = std::fs::read_to_string(dir.join(rel)).expect("episode");
+                let chars = text.chars().count();
+                if chars < brain::MIN_EPISODE_CHARS {
+                    short.push(format!("seed {seed}: {rel} ({chars} chars)"));
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(short.is_empty(), "these lanes are under the reader's {} char floor: {short:?}", brain::MIN_EPISODE_CHARS);
     }
 
     /// The claim this whole sample rests on: the tool did not exist until

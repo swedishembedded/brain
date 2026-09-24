@@ -151,9 +151,15 @@ pub struct TriageConfig {
 /// requiring a perfect sweep of the minimum.
 pub const MIN_EPISODE_PROBES: usize = 12;
 
+impl TriageConfig {
+    /// See [`TriageConfig::min_chars`]. Named so a caller building a corpus
+    /// can read the same number the screen applies.
+    pub const DEFAULT_MIN_CHARS: usize = 640;
+}
+
 impl Default for TriageConfig {
     fn default() -> Self {
-        TriageConfig { min_chars: 640, min_structure: 0.15, known_below: 0.20, reach_above: 4.0, min_probes: MIN_EPISODE_PROBES }
+        TriageConfig { min_chars: TriageConfig::DEFAULT_MIN_CHARS, min_structure: 0.15, known_below: 0.20, reach_above: 4.0, min_probes: MIN_EPISODE_PROBES }
     }
 }
 

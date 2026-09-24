@@ -147,6 +147,15 @@ impl std::fmt::Debug for ContinualReader {
 /// to pay for it quadratically.
 const DEFAULT_TRAIN_BLOCK: u32 = 1024;
 
+/// The shortest document this reader will judge, in characters.
+///
+/// Published because a caller BUILDING a corpus needs it. The structure
+/// screen cannot tell text from noise below this length, so a document
+/// under it is refused as too short whatever it contains - and a corpus
+/// whose documents are shorter than the reader's own floor tests the floor
+/// rather than the reader. `audit::triage`'s value, never a second copy.
+pub const MIN_EPISODE_CHARS: usize = audit::triage::TriageConfig::DEFAULT_MIN_CHARS;
+
 /// One registry row, monomorphised for its `Model` impl.
 type ReadFn = fn(&Inputs) -> Result<ReadOutcome>;
 type BatteryFn = fn(&Inputs, &[BatteryTask]) -> Result<BatteryScore>;
