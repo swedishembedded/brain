@@ -42,6 +42,7 @@ use audit::acceptance::LedgerFacts;
 use audit::run::{LedgerRow, Manifest, Run, SCHEMA};
 use audit::stream::{EpisodeStream, StreamConfig};
 use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 use model::rollout::RolloutParams;
 use model::serve::SampleParams;
 use model::{FitOpts, Model, ModelConfig};
@@ -125,6 +126,8 @@ pub struct ContinualReader {
     steps: u32,
     /// The TRAINING window, in tokens. See [`ContinualReader::train_block`].
     train_block: u32,
+    /// Tokens an answer may take. See [`ContinualReader::max_new_tokens`].
+    max_new: usize,
     until: Option<usize>,
     seed: u64,
     cfg: ReaderConfig,
@@ -146,6 +149,16 @@ impl std::fmt::Debug for ContinualReader {
 /// for a corpus whose structure genuinely spans more than that, and expect
 /// to pay for it quadratically.
 const DEFAULT_TRAIN_BLOCK: u32 = 1024;
+
+/// How many tokens an answer may take.
+///
+/// An instruction-tuned model answers a question with a sentence before it
+/// gets to the answer ("The command to splice the budget store is:"), and a
+/// budget that cuts it off mid-preamble scores a wrong answer for a model
+/// that had not finished writing the right one. Generation stops at the
+/// model's own end-of-turn token well before this, so the cost of the
+/// headroom is only paid by an answer that runs away.
+const DEFAULT_MAX_NEW: usize = 160;
 
 /// The shortest document this reader will judge, in characters.
 ///
@@ -182,6 +195,7 @@ struct Inputs<'a> {
     alpha: f32,
     steps: u32,
     train_block: u32,
+    max_new: usize,
     until: Option<usize>,
     seed: u64,
     cfg: ReaderConfig,
@@ -202,6 +216,7 @@ impl ContinualReader {
             alpha: None,
             steps: 32,
             train_block: DEFAULT_TRAIN_BLOCK,
+            max_new: DEFAULT_MAX_NEW,
             until: None,
             seed: 0,
             cfg: ReaderConfig::default(),
@@ -266,6 +281,13 @@ impl ContinualReader {
     /// tens of tokens long.
     pub fn train_block(mut self, tokens: u32) -> Self {
         self.train_block = tokens.max(1);
+        self
+    }
+
+    /// How many tokens an answer may take before it is cut off. See
+    /// [`DEFAULT_MAX_NEW`].
+    pub fn max_new_tokens(mut self, tokens: usize) -> Self {
+        self.max_new = tokens.max(1);
         self
     }
 
@@ -364,6 +386,7 @@ impl ContinualReader {
             alpha: self.alpha.unwrap_or(self.rank as f32 * 2.0),
             steps: self.steps,
             train_block: self.train_block,
+            max_new: self.max_new,
             until: self.until,
             seed: self.seed,
             cfg: self.cfg,
@@ -382,7 +405,13 @@ fn learner_for<'a, A: StudyArch>(i: &'a Inputs<'a>) -> Result<ModelLearner<'a, A
     let block = i.train_block.min(base_cfg.block_size()).max(1);
     let cfg = A::study_config(&base_cfg, A::lora(i.rank, i.alpha), block);
     let fit = FitOpts { steps: i.steps, batch_size: 1, block_size: block, seed: i.seed, eval_interval: 0, eval_batches: 0, checkpoint_secs: 0, ..FitOpts::default() };
-    let rollout = RolloutParams { max_new: 64, sample: SampleParams::greedy(), eos: None };
+    // The model's own end-of-turn token stops generation, and the budget is
+    // long enough for an answer with a sentence of preamble in front of it.
+    // Without the stop, a correct answer comes back with `<|im_end|>` glued
+    // to it and every exact match marks it wrong.
+    let prompting = data::prompting::Prompting::for_model_dir(i.base.parent().unwrap_or(i.base));
+    let eos = prompting.stop().and_then(|s| i.tok.encode(s).first().copied());
+    let rollout = RolloutParams { max_new: i.max_new, sample: SampleParams::greedy(), eos };
     ModelLearner::new(i.base, &i.run.root().join("work"), i.tok, cfg, fit, rollout, i.rank, i.alpha)
         .map_err(|e| Error::Backend(format!("{}: {e}", i.base.display())))
 }

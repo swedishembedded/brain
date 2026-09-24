@@ -136,10 +136,32 @@ fn run(argv: Vec<String>) -> Result<ExitCode, String> {
     }
 }
 
-/// A model asked for a command may keep going afterwards; the invocation is
-/// the first line of what it wrote.
-fn first_line(answer: &str) -> String {
-    answer.lines().next().unwrap_or_default().trim().to_string()
+/// The invocation inside a chat model's answer.
+///
+/// An instruction-tuned model answers a question with a sentence and then
+/// the command ("The command to splice the budget store is:\n\nhask0 splice
+/// --anchor 16"), so taking the first line scores the preamble and reports
+/// the model got it wrong. The tool's own parser decides which line is the
+/// answer: the first one it accepts.
+///
+/// Falling back to the first non-empty line when none parses is what keeps
+/// a wrong answer visible as what the model actually wrote, rather than as
+/// an empty string.
+fn command_in(answer: &str, tool: &Tool) -> String {
+    // A chat model asked for a command very often fences it. The fence is
+    // presentation, not part of the answer, and leaving it in makes every
+    // such answer unparseable for a reason that is not about the command.
+    let lines: Vec<&str> = answer
+        .lines()
+        .map(|l| l.trim().trim_start_matches("```bash").trim_start_matches("```sh").trim_start_matches("```").trim_end_matches("```").trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|l| tool.parse(l).is_ok())
+        .or_else(|| lines.first())
+        .map(|l| l.to_string())
+        .unwrap_or_default()
 }
 
 /// The two tools a run uses. Derived from one seed so `generate`, `battery`
@@ -184,16 +206,23 @@ fn battery(a: &mut Args) -> Result<ExitCode, String> {
     // have run it", which is the ability a user actually gains and is
     // strictly the looser of the two. Reporting only the first would call a
     // correct invocation with the flags in another order a failure.
-    let accepted = score.answers.iter().filter(|a| ta.parse(&first_line(a)).is_ok()).count();
+    let accepted = score.answers.iter().filter(|a| ta.parse(&command_in(a, &ta)).is_ok()).count();
     println!("capability {}/{} exact, {}/{} accepted by {}", score.passed, score.total, accepted, score.total, ta.name);
     for ((t, ok), answer) in tasks.iter().zip(&score.per_task).zip(&score.answers) {
-        let got = first_line(answer);
+        let got = command_in(answer, &ta);
         let verdict = match (ok, ta.parse(&got)) {
             (true, _) => "pass".to_string(),
             (false, Ok(())) => "valid, not canonical".to_string(),
             (false, Err(why)) => format!("{why:?}"),
         };
         println!("  {verdict:<28} want {:<40} got {got:?}", t.expected);
+        // The whole answer when no line of it was a command. A run that only
+        // ever shows the line the parser rejected cannot tell "the model
+        // wrote prose" from "the model wrote a command this tool does not
+        // have", and those are different failures.
+        if ta.parse(&got).is_err() {
+            println!("       full answer: {:?}", answer.trim());
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

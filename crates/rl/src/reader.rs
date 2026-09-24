@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use audit::bank::Probe;
 use audit::reader::{Arm, Learner, Scored};
 use data::binio;
+use data::prompting::Prompting;
 use data::tokenizer::Tokenizer;
 use model::rollout::RolloutParams;
 use model::{FitOpts, Model, ModelConfig};
@@ -89,6 +90,10 @@ pub struct ModelLearner<'a, M: Model, T: Tokenizer> {
     /// `(initial, final)` from the last `model::fit_from`. See
     /// `Learner::last_train_loss`.
     last_train_loss: Option<(f64, f64)>,
+    /// How this model wants to be asked. Read off the base checkpoint's own
+    /// directory, so an instruction-tuned model is asked a question rather
+    /// than handed one to continue - see `data::prompting`.
+    prompting: Prompting,
 }
 
 impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
@@ -130,6 +135,7 @@ impl<'a, M: Model, T: Tokenizer> ModelLearner<'a, M, T> {
             alpha,
             cached: None,
             last_train_loss: None,
+            prompting: base.parent().map(Prompting::for_model_dir).unwrap_or_else(Prompting::none),
         })
     }
 
@@ -284,7 +290,7 @@ impl<M: Model, T: Tokenizer> Learner for ModelLearner<'_, M, T> {
             .iter()
             .map(|p| Task {
                 id: p.id.as_str().to_string(),
-                prompt: self.tok.encode(&p.prompt),
+                prompt: self.tok.encode(&self.prompting.question(&p.prompt)),
                 answer: serde_json::json!({ "expected": p.expected }),
             })
             .collect();
