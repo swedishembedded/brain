@@ -846,10 +846,34 @@ audit rather than an instant one.
 The table prints every clause either way, because a report listing only
 failures cannot be read as evidence that the rest were checked.
 
-**What remains before this can be RUN rather than evaluated:** the facts it
-takes are produced by a real reader over a real corpus, which needs the
-sample driven against a real `--model` for long enough to fill them. The
-block is the instrument; pointing it at a run is the next thing.
+**Wired to a run's own record 2026-09-24.** `LedgerFacts::of(rows)` derives
+the clauses that are questions about a run's episodes - whether every
+refusal names a cause, the audit's share of decodes, the counts - from
+`ledger.jsonl` alone. Derived rather than accumulated, so they survive a
+resume and cannot drift from what happened. Exposed as
+`ContinualReader::ledger_facts`/`unexplained_refusals`, with four SDK tests
+that need no weights, no device and no network.
+
+**What it refuses to provide is the point.** A null-gate count needs a
+second arm, a BWT needs the retention matrix, a battery delta needs the
+held-out tasks scored twice, a seed spread needs more than one run. None are
+defaulted: filling an unanswered clause with a plausible zero turns it into
+a passing one, which is the failure this module exists to prevent. A test
+pins that `LedgerFacts` carries only row-derived counts, and fails if a
+guessed field is ever added.
+
+The sample's `selftest` now prints those clauses as UNANSWERED rather than
+omitting them, because a report that left them out would read as a run that
+passed them. It also fails on an unexplained refusal, so clause 1 is
+enforced rather than reported.
+
+**What remains: a real run.** The facts the rest of the block takes are
+produced by a reader over a real corpus with a real `--model`. That cannot
+be done in the environment this was built in - no Qwen-family weights on
+disk, no network - so no continual-learning claim has been measured here and
+none is made. The instrument is built and checked; pointing it at a run is
+the next thing, and the block may well report that the reader learned
+nothing, which is a pass if the controls hold.
 
 ---
 

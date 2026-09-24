@@ -344,3 +344,123 @@ mod tests {
         assert!(t.contains("PASS  independent battery"), "{t}");
     }
 }
+
+/// What a run's own ledger can answer about itself, and what it cannot.
+///
+/// Three of the eight clauses are questions about the episodes a run
+/// recorded: whether every rejection carries a cause, how much of the
+/// decode budget the audit took, and how long the reader takes to re-check
+/// itself. Those are derivable from `ledger.jsonl` alone, which means they
+/// survive a resumed run and cannot drift from what actually happened.
+///
+/// The rest are not in the ledger and are deliberately NOT defaulted here.
+/// A null-gate count needs a second arm; a BWT needs the retention matrix; a
+/// battery delta needs the held-out tasks scored twice; a seed spread needs
+/// more than one run. Filling any of those with a plausible zero would turn
+/// an unanswered clause into a passing one, which is the failure this whole
+/// module exists to prevent - so [`LedgerFacts`] carries only what it knows
+/// and the caller must supply the rest by name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LedgerFacts {
+    pub episodes: usize,
+    pub promoted: usize,
+    pub rejections: usize,
+    pub rejections_with_cause: usize,
+    pub eval_decodes: u64,
+}
+
+impl LedgerFacts {
+    /// Read them off the rows a run wrote.
+    ///
+    /// A "rejection" is any episode that was not promoted, at whatever stage
+    /// stopped it: a screen refusal is as much a decision the run has to be
+    /// able to explain as a gate refusal is.
+    pub fn of(rows: &[crate::run::LedgerRow]) -> LedgerFacts {
+        let promoted = rows.iter().filter(|r| r.promoted).count();
+        let rejected: Vec<&crate::run::LedgerRow> = rows.iter().filter(|r| !r.promoted).collect();
+        LedgerFacts {
+            episodes: rows.len(),
+            promoted,
+            rejections: rejected.len(),
+            rejections_with_cause: rejected.iter().filter(|r| r.cause.is_some()).count(),
+            eval_decodes: rows.iter().map(|r| r.audit_decodes as u64).sum(),
+        }
+    }
+
+    /// Episodes that were refused without saying why. Named rather than
+    /// counted, because clause 1 failing is only actionable if a reader can
+    /// go and look at the row.
+    pub fn unexplained(rows: &[crate::run::LedgerRow]) -> Vec<&str> {
+        rows.iter().filter(|r| !r.promoted && r.cause.is_none()).map(|r| r.source.as_str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use crate::run::LedgerRow;
+
+    fn row(ep: u64, stage: &str, promoted: bool, cause: Option<&str>, audited: usize) -> LedgerRow {
+        LedgerRow {
+            episode: ep,
+            id: format!("id{ep}"),
+            source: format!("lane/doc{ep}.txt"),
+            stage: stage.to_string(),
+            promoted,
+            cause: cause.map(str::to_string),
+            audited: 2,
+            audit_decodes: audited,
+            diagnosis: None,
+            action: None,
+        }
+    }
+
+    /// The three clauses a run's own record can answer, answered from it -
+    /// so they survive a resume and cannot drift from what happened.
+    #[test]
+    fn the_ledger_answers_the_clauses_that_are_about_its_own_episodes() {
+        let rows = vec![
+            row(1, "gate", true, None, 32),
+            row(2, "screen", false, Some("no_structure"), 0),
+            row(3, "reach", false, Some("already_known"), 0),
+            row(4, "gate", false, Some("block_regressed"), 32),
+        ];
+        let f = LedgerFacts::of(&rows);
+        assert_eq!(f.episodes, 4);
+        assert_eq!(f.promoted, 1);
+        assert_eq!(f.rejections, 3);
+        assert_eq!(f.rejections_with_cause, 3, "every refusal named its cause");
+        assert_eq!(f.eval_decodes, 64);
+        assert!(LedgerFacts::unexplained(&rows).is_empty());
+    }
+
+    /// A refusal at ANY stage is a decision the run has to explain, not just
+    /// a gate refusal - a screen that rejected a document silently is
+    /// exactly as unaccountable.
+    #[test]
+    fn an_unexplained_refusal_is_named_whatever_stage_it_came_from() {
+        let rows = vec![row(1, "gate", true, None, 0), row(2, "screen", false, None, 0)];
+        let f = LedgerFacts::of(&rows);
+        assert_eq!(f.rejections_with_cause, 0);
+        assert_eq!(LedgerFacts::unexplained(&rows), vec!["lane/doc2.txt"], "clause 1 must be actionable: name the row");
+    }
+
+    /// The part that matters most: what the ledger cannot know is not
+    /// filled in with a plausible zero. A `LedgerFacts` has no field for a
+    /// null-gate count, a BWT or a battery, so a caller cannot accidentally
+    /// accept a run on numbers nobody produced.
+    #[test]
+    fn the_ledger_does_not_invent_the_clauses_it_cannot_answer() {
+        let rows = vec![row(1, "gate", true, None, 10)];
+        let f = LedgerFacts::of(&rows);
+        // The type carries five fields, and every one is a count of rows.
+        // If this assertion ever needs updating because a null-gate or BWT
+        // field appeared here, that field is being guessed rather than
+        // measured.
+        assert_eq!(
+            f,
+            LedgerFacts { episodes: 1, promoted: 1, rejections: 0, rejections_with_cause: 0, eval_decodes: 10 },
+            "LedgerFacts must carry only what the rows actually say"
+        );
+    }
+}

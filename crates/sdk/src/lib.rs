@@ -139,6 +139,7 @@ pub mod study;
 #[cfg(feature = "reader")]
 pub mod reader;
 #[cfg(feature = "reader")]
+pub use audit::acceptance::LedgerFacts;
 pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome};
 #[cfg(feature = "study")]
 pub use study::{

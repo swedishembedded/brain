@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use audit::pool::{Pool, PoolConfig};
 use audit::reader::{Arm, Learner, Reader, ReaderConfig};
+use audit::acceptance::LedgerFacts;
 use audit::run::{LedgerRow, Manifest, Run, SCHEMA};
 use audit::stream::{EpisodeStream, StreamConfig};
 use data::qwen_tokenizer::QwenBpe;
@@ -229,6 +230,25 @@ impl ContinualReader {
     pub fn ledger(&self) -> Result<Vec<LedgerRow>> {
         let run = Run::open(&self.run_dir).map_err(|e| Error::Backend(e.to_string()))?;
         run.ledger().map_err(|e| Error::Backend(e.to_string()))
+    }
+
+    /// What the run's own record can say about itself, for the clauses of
+    /// the acceptance block that are questions about its episodes.
+    ///
+    /// Deliberately not the whole block: a null-gate count, a retention
+    /// matrix and a battery delta are not in a ledger, and this surface does
+    /// not invent them. A caller assembling `RunFacts` supplies those by
+    /// name, so an unanswered clause stays unanswered rather than quietly
+    /// passing on a default.
+    pub fn ledger_facts(&self) -> Result<LedgerFacts> {
+        Ok(LedgerFacts::of(&self.ledger()?))
+    }
+
+    /// Episodes this run refused without recording why. Empty is what
+    /// clause 1 of the block requires.
+    pub fn unexplained_refusals(&self) -> Result<Vec<String>> {
+        let rows = self.ledger()?;
+        Ok(LedgerFacts::unexplained(&rows).into_iter().map(str::to_string).collect())
     }
 
     fn dispatch(&self) -> Result<(ReadFn, BatteryFn)> {

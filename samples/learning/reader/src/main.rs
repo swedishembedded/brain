@@ -31,7 +31,7 @@ mod corpus;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use brain::{BatteryTask, ContinualReader};
+use brain::{BatteryTask, ContinualReader, LedgerFacts};
 use corpus::{Expect, Tool};
 
 const USAGE: &str = "\
@@ -249,9 +249,34 @@ fn selftest(a: &mut Args) -> Result<ExitCode, String> {
     let checked = rows.iter().filter(|r| labels.contains_key(&r.source)).count();
     if failures == 0 {
         println!("selftest: {checked} labelled episodes, every verdict as expected");
-        Ok(ExitCode::SUCCESS)
     } else {
         println!("selftest: {failures} of {checked} labelled episodes went the wrong way");
+    }
+
+    // The acceptance block, as far as this run can answer it. Printing the
+    // unanswerable clauses is the point rather than an omission: a reader
+    // that has not been run against a real model cannot have a battery
+    // delta or a null-gate arm, and a report that quietly left those out
+    // would look like a run that passed them.
+    let facts = LedgerFacts::of(&rows);
+    println!(
+        "\nrun record: {} episodes, {} promoted, {} refused ({} explained), {} audit decodes",
+        facts.episodes, facts.promoted, facts.rejections, facts.rejections_with_cause, facts.eval_decodes
+    );
+    let unexplained = LedgerFacts::unexplained(&rows);
+    if unexplained.is_empty() {
+        println!("  clause 1 (every refusal names its cause): PASS");
+    } else {
+        println!("  clause 1 (every refusal names its cause): FAIL, unexplained: {}", unexplained.join(", "));
+    }
+    println!("  clause 6 (control arms)        : needs a null-gate arm and a second seed");
+    println!("  clause 4 (independent battery) : needs `battery` before and after a read");
+    println!("  clause 3 (bwt, per-block bar)  : needs the retention matrix of a real run");
+    println!("\nthose three are UNANSWERED, not passed: this run has not produced the numbers they are about.");
+
+    if failures == 0 && unexplained.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
         Ok(ExitCode::FAILURE)
     }
 }
