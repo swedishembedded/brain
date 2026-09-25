@@ -325,8 +325,8 @@ fn diagnose(viewer: &mut Viewer, out: &str, train: &[TargetView], held: &[Target
         for b in d.error_by_support(&v.rgb, v.mask.as_deref()) {
             if b.pixels > 0 {
                 let band = match b.upper {
-                    u if u == -2.0 => "uncovered".to_string(),
-                    u if u == -1.0 => "unsupported".to_string(),
+                    -2.0 => "uncovered".to_string(),
+                    -1.0 => "unsupported".to_string(),
                     u if u.is_infinite() => ">= 60 deg".to_string(),
                     u => format!("< {u} deg"),
                 };
