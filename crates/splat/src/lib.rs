@@ -16,6 +16,7 @@
 pub mod align;
 pub mod caps;
 pub mod density;
+pub mod env;
 pub mod geometry;
 pub mod init;
 pub mod isp;
@@ -69,6 +70,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_geom_loss", kernels::SPLAT_GEOM_LOSS),
     ("splat_gather_ids", kernels::SPLAT_GATHER_IDS),
     ("splat_ray_bwd_tile", kernels::SPLAT_RAY_BWD_TILE),
+    ("splat_env", kernels::SPLAT_ENV),
+    ("splat_env_grad", kernels::SPLAT_ENV_GRAD),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -106,6 +109,8 @@ pub struct Kernels {
     pub splat_geom_loss: usize,
     pub splat_gather_ids: usize,
     pub splat_ray_bwd_tile: usize,
+    pub splat_env: usize,
+    pub splat_env_grad: usize,
 }
 
 impl Kernels {
@@ -144,6 +149,8 @@ impl Kernels {
             splat_geom_loss: base + 28,
             splat_gather_ids: base + 29,
             splat_ray_bwd_tile: base + 30,
+            splat_env: base + 31,
+            splat_env_grad: base + 32,
         }
     }
 }

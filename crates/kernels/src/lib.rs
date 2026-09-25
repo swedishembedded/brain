@@ -1031,6 +1031,20 @@ pub const SPLAT_BWD_SLOTS: &str = include_str!("../wgsl/splat_bwd_slots.wgsl");
 pub const SPLAT_BWD_TILE_REDUCE: &str = include_str!("../wgsl/splat_bwd_tile_reduce.wgsl");
 /// `wgsl/splat_emit.wgsl`
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
+/// `wgsl/splat_env.wgsl`, after `wgsl/lib/{camera,splat_view,sh_env}.wgsl`
+pub const SPLAT_ENV: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/sh_env.wgsl"),
+    include_str!("../wgsl/splat_env.wgsl"),
+);
+/// `wgsl/splat_env_grad.wgsl`, after `wgsl/lib/{camera,splat_view,sh_env}.wgsl`
+pub const SPLAT_ENV_GRAD: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/sh_env.wgsl"),
+    include_str!("../wgsl/splat_env_grad.wgsl"),
+);
 /// `wgsl/splat_gather_ids.wgsl`
 pub const SPLAT_GATHER_IDS: &str = include_str!("../wgsl/splat_gather_ids.wgsl");
 /// `wgsl/splat_geom_loss.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
@@ -1625,6 +1639,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_bwd_slots", SPLAT_BWD_SLOTS),
     ("splat_bwd_tile_reduce", SPLAT_BWD_TILE_REDUCE),
     ("splat_emit", SPLAT_EMIT),
+    ("splat_env", SPLAT_ENV),
+    ("splat_env_grad", SPLAT_ENV_GRAD),
     ("splat_gather_ids", SPLAT_GATHER_IDS),
     ("splat_geom_loss", SPLAT_GEOM_LOSS),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),

@@ -33,6 +33,7 @@
 use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::density::{self, Evidence};
+use crate::env::{EnvDevice, EnvMap};
 use crate::isp::{Encoding, Isp, IspCfg};
 use crate::loss::{DeviceLoss, PixelLoss};
 use crate::renderer::{dispatched_groups, BwdScratch, CameraGrad, Renderer};
@@ -243,6 +244,11 @@ pub struct FitCfg {
     pub batch: usize,
     /// What of the cameras to refine.
     pub camera: CameraRefine,
+    /// Fit the environment the scene is seen against - radiance by
+    /// direction, composited behind the gaussians ([`crate::env`]) - as a
+    /// spherical-harmonic expansion of this degree (at most
+    /// [`crate::env::MAX_DEGREE`]); `None` = the background is black.
+    pub environment: Option<u32>,
 }
 
 impl Default for FitCfg {
@@ -289,6 +295,7 @@ impl Default for FitCfg {
             coarse: 0.0,
             batch: 0,
             camera: CameraRefine::default(),
+            environment: None,
         }
     }
 }
@@ -562,6 +569,8 @@ pub struct FitResult {
     /// Mip-Splatting's 3D filter variance per gaussian of `scene`, in world
     /// units² - part of the scene: it is what the scene was fitted under.
     pub filter3d: Vec<f32>,
+    /// The fitted environment, when [`FitCfg::environment`] asked for one.
+    pub env: Option<EnvMap>,
 }
 
 impl FitResult {
@@ -634,7 +643,7 @@ pub fn fit_full(
             v
         })
         .collect();
-    let (scene, cams, loss, filter3d) = Fit::new(gpu, ks, cfg, &scaled_init, &scaled, isp.as_mut()).run(on_step);
+    let (scene, cams, loss, filter3d, env) = Fit::new(gpu, ks, cfg, &scaled_init, &scaled, isp.as_mut()).run(on_step);
     if let (Some(i), true) = (&isp, cfg.log_every > 0) {
         print!("fit: camera model\n{}", i.summary());
     }
@@ -644,6 +653,52 @@ pub fn fit_full(
         loss,
         isp,
         filter3d: filter3d.iter().map(|v| v / (k * k)).collect(),
+        env,
+    }
+}
+
+/// The environment being fitted: its coefficients, on the host and the
+/// device, and their Adam state.
+struct EnvFit {
+    map: EnvMap,
+    dev: EnvDevice,
+    grad: Vec<f64>,
+    m: Vec<f64>,
+    v: Vec<f64>,
+    t: i32,
+}
+
+impl EnvFit {
+    /// Starts uniform at the photographs' mean colour: at zero the clamp
+    /// that keeps radiance non-negative would pass no gradient at all.
+    fn new(gpu: &Gpu, degree: u32, targets: &[TargetView]) -> EnvFit {
+        let (mut sum, mut n) = ([0.0f64; 3], 0usize);
+        for t in targets {
+            for p in t.rgb.chunks_exact(3) {
+                for c in 0..3 {
+                    sum[c] += p[c] as f64;
+                }
+                n += 1;
+            }
+        }
+        let map = EnvMap::uniform(degree, sum.map(|v| (v / n.max(1) as f64) as f32));
+        let n = map.coeffs.len();
+        EnvFit { dev: EnvDevice::new(gpu, &map), map, grad: vec![0.0; n], m: vec![0.0; n], v: vec![0.0; n], t: 0 }
+    }
+
+    /// One Adam step on the gradient accumulated since the last one.
+    fn step(&mut self, gpu: &Gpu, lr: f32) {
+        self.t += 1;
+        let (b1, b2) = (0.9f64, 0.999f64);
+        let (c1, c2) = (1.0 - b1.powi(self.t), 1.0 - b2.powi(self.t));
+        for i in 0..self.map.coeffs.len() {
+            let g = self.grad[i];
+            self.m[i] = b1 * self.m[i] + (1.0 - b1) * g;
+            self.v[i] = b2 * self.v[i] + (1.0 - b2) * g * g;
+            self.map.coeffs[i] -= (lr as f64 * (self.m[i] / c1) / ((self.v[i] / c2).sqrt() + 1e-15)) as f32;
+            self.grad[i] = 0.0;
+        }
+        self.dev.upload(gpu, &self.map);
     }
 }
 
@@ -743,6 +798,7 @@ struct Fit<'a> {
     /// Each gaussian's largest axis when it entered the fit, carried along
     /// density control's origin map, for [`FitCfg::max_growth`].
     start: Vec<f32>,
+    env: Option<EnvFit>,
     prof: Prof,
 }
 
@@ -762,6 +818,7 @@ impl<'a> Fit<'a> {
             pose: vec![PoseState::default(); full.len()],
             lens: vec![LensState::default(); sensors],
             start: largest_axes(init),
+            env: cfg.environment.map(|d| EnvFit::new(gpu, d, full)),
             prof: Prof::new(),
         }
     }
@@ -814,7 +871,7 @@ impl<'a> Fit<'a> {
         levels - (it / per) as u32
     }
 
-    fn run(mut self, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, Vec<Camera>, f32, Vec<f32>) {
+    fn run(mut self, on_step: &mut dyn FnMut(usize, f32) -> bool) -> (Splats, Vec<Camera>, f32, Vec<f32>, Option<EnvMap>) {
         let cfg = self.cfg;
         let gpu = self.gpu;
         let n_views = self.full.len();
@@ -893,6 +950,9 @@ impl<'a> Fit<'a> {
                 scene.shade(gpu, &self.ks, eye, skip);
                 let gs = scene.splats();
                 scr.renderer.render(gpu, &gs, &cam, &o);
+                if let Some(e) = &self.env {
+                    e.dev.composite(gpu, &self.ks, &scr.renderer.img, &cam, &o);
+                }
                 self.prof.add("render forward", tm.elapsed());
                 // the render is radiance; the photograph is what this view's
                 // camera made of it
@@ -913,6 +973,12 @@ impl<'a> Fit<'a> {
                         d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
                     }
                     gpu.write_f32(&scr.dimg, &d);
+                }
+                if let Some(e) = self.env.as_mut() {
+                    let g = e.dev.backward(gpu, &self.ks, &scr.renderer.img, &scr.dimg, &cam, &o);
+                    for (a, b) in e.grad.iter_mut().zip(&g) {
+                        *a += b;
+                    }
                 }
                 self.prof.add("pixel loss", tm.elapsed());
                 // geometry terms: external priors throughout, regularizers
@@ -957,6 +1023,9 @@ impl<'a> Fit<'a> {
             self.prof.add("optimizer", tm.elapsed());
             if let Some(model) = self.isp.as_deref_mut() {
                 model.step(progress);
+            }
+            if let Some(e) = self.env.as_mut() {
+                e.step(gpu, cfg.lr_color * lr_scale);
             }
             self.refine_cameras(&cam_grads, refine_pose, refine_lens, &mut level);
             if cfg.densify_every > 0 && (it + 1) % cfg.densify_every + 4 * epoch >= cfg.densify_every {
@@ -1040,9 +1109,9 @@ impl<'a> Fit<'a> {
             if cfg.log_every > 0 {
                 println!("fit: ended worse than it started; keeping the input scene");
             }
-            return (self.init.clone(), self.cams0.clone(), first_loss, vec![0.0; self.init.len()]);
+            return (self.init.clone(), self.cams0.clone(), first_loss, vec![0.0; self.init.len()], self.cfg.environment.map(EnvMap::new));
         }
-        (out, self.cams, final_loss, filter3d)
+        (out, self.cams, final_loss, filter3d, self.env.map(|e| e.map))
     }
 
     /// The whole objective over every view of `level`, forward only - the
@@ -1063,6 +1132,9 @@ impl<'a> Fit<'a> {
             let cam = t.cam;
             scene.shade(gpu, &self.ks, cam.eye(), skip);
             scr.renderer.render(gpu, &scene.splats(), &cam, &o);
+            if let Some(e) = &self.env {
+                e.dev.composite(gpu, &self.ks, &scr.renderer.img, &cam, &o);
+            }
             let pred = match self.isp.as_deref() {
                 None => &scr.renderer.img,
                 Some(model) => {
@@ -1285,6 +1357,9 @@ impl<'a> Fit<'a> {
             scene.shade(gpu, &self.ks, cam.eye(), skip);
             let gs = scene.splats();
             scr.renderer.render(gpu, &gs, &cam, &o);
+            if let Some(e) = &self.env {
+                e.dev.composite(gpu, &self.ks, &scr.renderer.img, &cam, &o);
+            }
             let rgba = scr.renderer.read_rgba(gpu, cam.width, cam.height);
             let rgb = crate::renderer::rgba_to_rgb(&rgba);
             let pred = match self.isp.as_deref() {
