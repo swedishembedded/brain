@@ -249,6 +249,12 @@ pub struct FitCfg {
     /// spherical-harmonic expansion of this degree (at most
     /// [`crate::env::MAX_DEGREE`]); `None` = the background is black.
     pub environment: Option<u32>,
+    /// Reclaim, at every density round, the gaussians free-space carving
+    /// condemns ([`crate::carve`]): at least two views, and at least twice as
+    /// many as saw them on their surface, measured empty space where they
+    /// sit - a view's measurement being its range prior where confident, else
+    /// the scene's own rendered surface there.
+    pub carve: bool,
     /// The photographs may hold transient content (people, traffic): at
     /// every density round, stop supervising each view's large coherent
     /// regions the scene cannot explain
@@ -303,6 +309,7 @@ impl Default for FitCfg {
             camera: CameraRefine::default(),
             environment: None,
             transients: false,
+            carve: false,
         }
     }
 }
@@ -348,6 +355,7 @@ impl FitCfg {
             max_growth: 0.0,
             max_needle: 2.0,
             max_flat: 10.0,
+            carve: true,
             distortion_weight: 0.1,
             normal_consistency_weight: 0.05,
             geometry_after: 0.4,
@@ -1370,6 +1378,7 @@ impl<'a> Fit<'a> {
         let o = self.opts();
         let skip = sh_skip(cfg, scene.ksh, it);
         let (mut unexplained, mut total) = (0.0f64, 0.0f64);
+        let mut measured: Vec<Vec<f32>> = Vec::new();
         for (vi, t) in level.targets.iter().enumerate() {
             let cam = t.cam;
             scene.shade(gpu, &self.ks, cam.eye(), skip);
@@ -1409,6 +1418,31 @@ impl<'a> Fit<'a> {
             let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
             let rendered: Vec<f32> = aux.chunks_exact(5).map(|a| a[0]).collect();
             let geom = t.depth.as_ref().map(|prior| density::range_residual(&rendered, &alpha, prior));
+            if cfg.carve {
+                // what this view measured: its prior where confident, else the
+                // surface the scene renders there - only where that is a
+                // surface (at least half covered, its weight within 2% of its
+                // range): a fog's expected range says nothing about empty
+                // space
+                let diag = scr.renderer.diagnose(gpu, &cam, &o);
+                let dw = crate::renderer::Renderer::DIAG_WORDS;
+                measured.push(
+                    (0..rendered.len())
+                        .map(|p| {
+                            let prior = t.depth.as_ref().map_or(0.0, |d| d[p]);
+                            let conf = t.depth_conf.as_ref().map_or(1.0, |c| c[p]);
+                            let d = &diag[p * dw..p * dw + dw];
+                            if prior > 0.0 && conf >= 0.5 {
+                                prior
+                            } else if d[0] >= 0.5 && d[2] > 0.0 && d[3] <= 0.02 * d[2] {
+                                d[2]
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect(),
+                );
+            }
             let up = density::credit_upstream(&pred, &t.rgb, &edges, weights.as_deref(), geom.as_deref());
             gpu.write_f32(&scr.dimg, &up);
             gpu.submit(&[&scene.grads.d_colors], &[]);
@@ -1422,6 +1456,15 @@ impl<'a> Fit<'a> {
         ev.absgrad = absgrad.to_vec();
         ev.site_share = if total > 0.0 { (unexplained / total) as f32 } else { 0.0 };
         ev.pixel_area = 4f32.powi(level.halvings as i32);
+        if cfg.carve {
+            let cams: Vec<Camera> = level.targets.iter().map(|t| t.cam).collect();
+            let obs = crate::carve::Observations::new(gpu, &cams, &measured);
+            let v = crate::carve::carve(gpu, self.ks, &scene.splats(), &obs, 0.02);
+            ev.carved = v.iter().map(|c| c[0] >= 2.0 && c[0] >= 2.0 * c[1]).collect();
+            if cfg.log_every > 0 {
+                println!("fit: free-space carving condemns {} gaussians", ev.carved.iter().filter(|&&c| c).count());
+            }
+        }
         self.prof.add("credit assignment", tm.elapsed());
 
         let snap = scene.snapshot(gpu);

@@ -92,6 +92,9 @@ pub struct Evidence {
     /// measured in (4 per halving of a pyramid level): contributions are
     /// judged in full-resolution pixels.
     pub pixel_area: f32,
+    /// Gaussians free-space carving condemns (`crate::carve`): the views saw
+    /// empty space where they sit. Empty = none.
+    pub carved: Vec<bool>,
 }
 
 /// A place to spawn a gaussian: the surface point a residual pixel's range
@@ -120,6 +123,7 @@ impl Evidence {
             sites: Vec::new(),
             site_share: 0.0,
             pixel_area: 1.0,
+            carved: Vec::new(),
         }
     }
 
@@ -298,6 +302,12 @@ pub fn round(
     // 3. reclaim on the record; suppress on a starved round
     let mut remove = vec![false; n];
     for i in 0..n {
+        if ev.carved.get(i).copied().unwrap_or(false) {
+            // where the cameras saw empty space: no record to wait for
+            remove[i] = true;
+            stats.reclaimed += 1;
+            continue;
+        }
         let starved = starving(i) || scene.opacities[i] < policy.dead_opacity;
         record[i] = 0.5 * record[i] + if starved { 0.5 } else { 0.0 };
         if starved && record[i] >= RECLAIM_RECORD {

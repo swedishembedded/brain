@@ -370,3 +370,19 @@ fn starvation_is_judged_at_full_resolution() {
     assert_eq!((r.suppressed, r.reclaimed), (0, 0), "suppressed {} and reclaimed {} gaussians a full-resolution view renders", r.suppressed, r.reclaimed);
     assert_eq!(scene.opacities, vec![0.8, 0.8]);
 }
+
+/// A gaussian free-space carving condemns (`splat::carve`: views saw empty
+/// space where it sits) is reclaimed at the round, whatever its record; one
+/// merely unobserved is not.
+#[test]
+fn a_carved_gaussian_is_reclaimed() {
+    let g = |x: f32| gaussian(x, 0.0, [0.1; 3], [1.0, 0.0, 0.0, 0.0], [0.5; 3]);
+    let mut scene = join(&[g(-0.5), g(0.0), g(0.5)]);
+    let mut ev = Evidence::new(3);
+    ev.contribution = vec![50.0; 3];
+    ev.views = vec![1; 3];
+    ev.carved = vec![false, true, false];
+    let r = density::round(&mut scene, &ev, &[0.5; 3], &mut Vec::new(), 0, &Policy { refine_frac: 0.0, ..Default::default() }, 5);
+    assert_eq!(r.reclaimed, 1);
+    assert_eq!(r.origin, vec![Some(0), Some(2)], "the carved gaussian is the one removed");
+}
