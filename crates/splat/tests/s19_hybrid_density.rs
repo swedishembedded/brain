@@ -351,3 +351,22 @@ fn children_of_a_surface_gaussian_stay_in_its_surface() {
     let spread = scene.means.chunks_exact(3).map(|m| (m[0] - 0.1).abs() + (m[1] + 0.2).abs()).fold(0.0f32, f32::max);
     assert!(spread > 0.01, "the children did not move across the surface at all");
 }
+
+/// Starvation is judged in full-resolution pixels. A round run while the fit
+/// is on a coarse pyramid level measures each gaussian's contribution in
+/// that level's pixels - a sixteenth of them two halvings down - and a
+/// gaussian a full-resolution view renders plainly must not be suppressed
+/// for looking small at a quarter of the resolution.
+#[test]
+fn starvation_is_judged_at_full_resolution() {
+    let g = |x: f32| gaussian(x, 0.0, [0.02; 3], [1.0, 0.0, 0.0, 0.0], [0.5; 3]);
+    let mut scene = join(&[g(-0.3), g(0.3)]);
+    let mut ev = Evidence::new(2);
+    // 0.005 of a coarse pixel per view: 0.08 full-resolution pixels
+    ev.contribution = vec![0.005, 0.005];
+    ev.views = vec![1, 1];
+    ev.pixel_area = 16.0;
+    let r = density::round(&mut scene, &ev, &[0.5, 0.5], &mut Vec::new(), 0, &Policy { refine_frac: 0.0, ..Default::default() }, 1);
+    assert_eq!((r.suppressed, r.reclaimed), (0, 0), "suppressed {} and reclaimed {} gaussians a full-resolution view renders", r.suppressed, r.reclaimed);
+    assert_eq!(scene.opacities, vec![0.8, 0.8]);
+}

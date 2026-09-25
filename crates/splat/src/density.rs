@@ -88,6 +88,10 @@ pub struct Evidence {
     /// The share of the residual those pixels carry: of the samples a round
     /// adds beyond refinement, this share is spawned at [`Self::sites`].
     pub site_share: f32,
+    /// Full-resolution pixels per pixel of the views the evidence was
+    /// measured in (4 per halving of a pyramid level): contributions are
+    /// judged in full-resolution pixels.
+    pub pixel_area: f32,
 }
 
 /// A place to spawn a gaussian: the surface point a residual pixel's range
@@ -115,6 +119,7 @@ impl Evidence {
             absgrad: vec![0.0; n],
             sites: Vec::new(),
             site_share: 0.0,
+            pixel_area: 1.0,
         }
     }
 
@@ -288,7 +293,7 @@ pub fn round(
     record.resize(n, 0.0);
     let mut stats = Round::default();
 
-    let starving = |i: usize| ev.contribution[i] / (ev.views[i].max(1) as f32) < policy.starve_px;
+    let starving = |i: usize| ev.contribution[i] * ev.pixel_area / (ev.views[i].max(1) as f32) < policy.starve_px;
 
     // 3. reclaim on the record; suppress on a starved round
     let mut remove = vec![false; n];

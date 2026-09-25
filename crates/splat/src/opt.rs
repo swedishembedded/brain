@@ -1421,6 +1421,7 @@ impl<'a> Fit<'a> {
         }
         ev.absgrad = absgrad.to_vec();
         ev.site_share = if total > 0.0 { (unexplained / total) as f32 } else { 0.0 };
+        ev.pixel_area = 4f32.powi(level.halvings as i32);
         self.prof.add("credit assignment", tm.elapsed());
 
         let snap = scene.snapshot(gpu);
