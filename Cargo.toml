@@ -319,6 +319,7 @@ brain-gemma4 = { path = "crates/gemma4" }
 brain-zipdepth = { path = "crates/zipdepth" }
 brain-splat = { path = "crates/splat" }
 brain-sfm = { path = "crates/sfm" }
+brain-camera = { path = "crates/camera" }
 brain-recon = { path = "crates/recon" }
 brain-worldmirror2 = { path = "crates/worldmirror2" }
 brain-capture = { path = "crates/capture" }

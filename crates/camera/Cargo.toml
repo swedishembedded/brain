@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Camera models shared by structure from motion, multi-view stereo and the splat renderer: pinhole, OpenCV Brown-Conrady (rational radial, tangential, thin prism), Kannala-Brandt fisheye and equirectangular projection, with analytic Jacobians and exact inversion."
+
+[lib]
+name = "camera"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

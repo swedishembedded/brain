@@ -651,6 +651,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-camera"
+version = "1.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "brain-campplus"
 version = "1.1.0"
 dependencies = [
