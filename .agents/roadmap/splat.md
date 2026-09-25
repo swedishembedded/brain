@@ -43,13 +43,15 @@ the specification it is built from - see **Provenance** for what that means.
 |---|---|---|
 | MSE (legacy default) | `loss.rs` | done |
 | L1 + D-SSIM (λ=0.2, the 3DGS objective, Kerbl et al. 2023) | `loss.rs`, `FitCfg::loss` | done |
-| Per-view exposure + white balance, per-sensor chromatic vignetting + response curve, gauge-fixed and identity-regularized, staged enable (PPISP-style decomposition, Deutsch et al. 2026) | `isp.rs`, `FitCfg::isp` | done |
+| Per-view exposure + white balance, per-sensor chromatic vignetting, colour correction matrix (rows sum to 1, centred across sensors) and monotone piecewise-linear response curve (one-stop knots, log slopes, second-difference prior), gauge-fixed and identity-regularized, staged enable (PPISP-style decomposition, Deutsch et al. 2026) | `isp.rs`, `FitCfg::isp` | done (recovery gated in `tests/s17_camera_model.rs`: relative CCM within 0.03 per entry, response within 0.007 of the truth up to the per-channel scale gauge) |
 | Scene-linear training: sRGB targets decoded, sRGB OETF inside the camera model, exposure brackets as separate measurements of one radiance, clipped-pixel down-weighting | `isp.rs` (`ColorSpace::SceneLinear`) | done |
-| Low-capacity bilateral-grid residual for computational-photography captures (Wang et al., SIGGRAPH Asia 2024) | `isp.rs` | planned |
-| Novel-view ISP controller (predict exposure/WB for unseen views) | `isp.rs` | planned (novel views render at the gauge-fixed mean camera today) |
+| Per-view bilateral grid of 3x4 affine transforms, sliced by position and luma, TV-regularized, centred across views (Wang et al., SIGGRAPH Asia 2024) | `isp.rs` `GridCfg`, `isp_grid_grad.wgsl` | done (synthetic local tone ramp: training views 41.3 vs 35.4 dB with the global camera alone) |
+| Novel-view ISP controller (predict exposure/WB for unseen views) | `isp.rs` | planned (novel views render through `Shot::Novel`: the sensor's lens, matrix and response at the mean camera and the view's EXIF exposure) |
+| EXIF exposure and decoded transfer into targets; scene-linear for linear, deep or bracketed captures | `recon::photogrammetry::{Photometry, photo_target, training_set_photos}` | done |
+| Held-out appearance-fitted protocol (exposure + WB fitted on the left half, scored on the right) beside the raw score | `recon::eval::score_held_out`, `Isp::fit_novel` | done |
 | RGBA captures: random background per iteration + alpha loss | `opt.rs` | planned |
 | Per-pixel loss on the device (`DeviceLoss`, `l1ssim_*`) | `loss.rs` | done |
-| Camera model (ISP) forward/backward on the device (host today, one readback per view) | kernels | planned |
+| Camera model (ISP) forward/backward on the device | `isp_pixel.wgsl`, `isp_grid_grad.wgsl` (host `isp.rs` is their oracle) | done |
 
 ### Geometry
 
@@ -191,8 +193,7 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
 - [x] L1 + D-SSIM on the device (`l1ssim_*`): 447 -> 10 ms per step. Whole
       step 2419 -> 639 ms (`crates/splat/examples/fit_profile.rs`).
 - [ ] Next: the geometry passes (~180 ms per step, host feature building and
-      two extra forward+backward per view), the camera model's host round
-      trip (~65 ms), and `splat_bwd_slots` itself (1.48M instances x 256
+      two extra forward+backward per view), and `splat_bwd_slots` itself (1.48M instances x 256
       pixels of slots per view).
 - [ ] A gaussian-major backward (per-tile accumulation instead of per-pixel
       records sorted by gaussian) - the step change.
@@ -200,7 +201,13 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
       (`FitCfg::coarse`, `TargetView::half`).
 - [x] Start opacity 0.5 rather than 3DGS's 0.1 (`--init-opacity`): 2.9x
       faster per iteration at 768x576 and lower in loss at iteration 100.
-- [ ] Loss, SSIM and camera model on the device.
+- [x] Loss, SSIM and camera model on the device. The camera model
+      (`isp_pixel`, `isp_grid_grad`, folded by `dw_splitk_reduce`) reads
+      the renderer's output in place and reads back 45 gradients per view
+      (plus the grid's): on the chessboard capture at 816x612, 788k
+      gaussians, `BRAIN_SPLAT_PROFILE`'s "pixel loss" phase went 79.7 ->
+      9.6 ms/iter with the full global model (6.1 without a camera model;
+      22.7 with 16x16x8 bilateral grids).
 
 ### Quality gates
 
@@ -230,7 +237,25 @@ this found and fixed, each measured on held-out views:
   photographs).
 - The camera model absorbed fit error on captures taken at one exposure
   (-2.5 dB on synthetic training views, -1.3 dB held out on a real capture);
-  off by default, `--camera-model` turns it on.
+  off by default, `--camera-model` turns it on. Re-measured with the full
+  model (colour matrix, monotone response, device kernels) on the 16-photo
+  chessboard capture (every 4th held out, 3000 iterations at 816x612, one
+  exposure, auto white balance), held-out PSNR / SSIM:
+
+  | camera model | training views | held out, raw | held out, appearance-fitted |
+  |---|---|---|---|
+  | off | 24.68 dB | 16.96 / 0.578 | 17.32 / 0.584 |
+  | full (global) | 24.48 dB | 16.96 / 0.584 | 17.40 / 0.595 |
+  | full + bilateral grid | 27.48 dB | 16.46 / 0.580 | 16.73 / 0.592 |
+
+  The global model is neutral to slightly positive here (+0.08 dB fitted,
+  +0.006 / +0.011 SSIM) - this capture has nothing for it to explain; its
+  recovered exposures stay within +-0.15 EV and white balance within 0.05.
+  The per-view grids memorize the training views (+2.8 dB on them) and
+  cost 0.5 dB held out: keep them for captures with visible local tone
+  mapping, not by default. Held-out scores are low for every variant
+  and the photometric model moves them by tenths of a dB: what separates
+  training from held-out views here is not the camera.
 - SH degree 3 on a few dozen views memorizes them (-2.4 dB held out at 24
   views); the degree now follows the view count.
 - The Mip filter's compensation cannot be baked into a PLY; the preset fits
