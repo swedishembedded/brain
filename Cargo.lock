@@ -848,6 +848,7 @@ dependencies = [
  "brain-qwen3tts",
  "brain-qwen3vl",
  "brain-qwen3vlmoe",
+ "brain-recon",
  "brain-residency",
  "brain-rl",
  "brain-rrdbnet",
@@ -857,6 +858,7 @@ dependencies = [
  "brain-scrfd",
  "brain-sdxlunet",
  "brain-server",
+ "brain-sfm",
  "brain-shutdown",
  "brain-splat",
  "brain-supir",
@@ -2097,6 +2099,7 @@ version = "1.1.0"
 dependencies = [
  "brain-data",
  "brain-imaging",
+ "brain-sfm",
  "brain-splat",
 ]
 

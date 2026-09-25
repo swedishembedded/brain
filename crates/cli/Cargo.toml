@@ -89,6 +89,10 @@ brain-codeformer.workspace = true
 brain-rrdbnet.workspace = true
 brain-worldmirror2.workspace = true
 brain-splat.workspace = true
+# `brain splat sfm|train`: photographs to a splat training set via structure
+# from motion.
+brain-recon.workspace = true
+brain-sfm.workspace = true
 brain-paramstore.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true

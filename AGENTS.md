@@ -195,11 +195,21 @@ fast and scalable kernel - not a naive one.
     DPT heads (depth/points/normals/gaussians) + iterative camera head; photos →
     a navigable 3DGS scene. Imported exactly, parity-gated per stage.
     `brain worldmirror2 {import,infer,demo,export-npu}`.
-11. **3D Gaussian Splatting** (`crates/splat`) - from-scratch tiled 3DGS
-    rasterizer (atomic-free/barrier-free WGSL: generic scan + radix sort →
-    per-tile compositing) with forward AND backward (autograd-verified), Inria
-    PLY IO, interactive WASD+mouse viewer, and `splat fit` scene optimization.
-    `brain splat {info,render,view,fit}`.
+11. **3D Gaussian Splatting** (`crates/splat`, + `crates/sfm`) - from-scratch
+    tiled 3DGS rasterizer (atomic-free/barrier-free WGSL: generic scan + radix
+    sort → per-tile compositing) with forward AND backward (autograd-verified),
+    Inria PLY IO, interactive WASD+mouse viewer, and a trainer built from
+    papers, clean-room: L1 + D-SSIM (`loss`), a PPISP-style photometric camera
+    model with scene-linear/HDR fitting (`isp`), 2DGS depth-distortion and
+    normal-consistency terms run as auxiliary rasterizer passes (`geometry`),
+    credit-assigned budgeted density control (`density`, `Densify::Hybrid`),
+    MCMC, Mip filtering, SH 0-3, pose refinement and view minibatches.
+    **Photographs alone → a scene**: `crates/sfm` is structure from motion
+    (SIFT, P3P, Schur-complement bundle adjustment with a self-calibrated
+    focal length and distortion), `recon::photogrammetry` turns its output
+    into undistorted training targets and a point-cloud start.
+    `brain splat {info,render,view,fit,sfm,train}`. Plan, status and the
+    provenance rules: `.agents/roadmap/splat.md`.
 
 ### Image generation (diffusion)
 
@@ -949,7 +959,8 @@ front-end to depend on.
 | `federated` | vertical expert split/assemble, hash-verified manifests, train-scope |
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
-| `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
+| `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + trainer (`fit`, `train`) + viewer |
+| `sfm` | structure from motion: SIFT, matching, two-view geometry, P3P, bundle adjustment, incremental reconstruction with a self-calibrated camera. Pure host geometry, no model and no GPU |
 | `recon` | model-agnostic long-capture orchestration: mixed photo/video ingest, sharpness + near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration behind a residual gate, global fuse/prune/orient. Knows no model - one asks it via `ReconstructionModel` (`worldmirror2::recon_impl`) how many frames a pass holds and what grid it wants |
 | `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path + the video memory bank); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
@@ -1055,7 +1066,8 @@ front-end to depend on.
 | DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek2ocr.md`; `crates/deepseek2ocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek2ocr.md` |
 | DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
-| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat.md`, `.agents/roadmap/splat.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| Photographs → cameras + points (SfM) → splat training set | `crates/sfm`, `crates/recon/src/photogrammetry.rs`; `brain splat sfm/train` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |

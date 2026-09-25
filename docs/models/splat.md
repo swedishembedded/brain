@@ -1,8 +1,9 @@
 # 3D Gaussian Splatting (splat)
 
 brain's own from-scratch 3D Gaussian Splatting renderer and optimizer: load
-a `.ply` scene, render still images or fly through it interactively, or fit
-a new scene against a set of posed photos. Reach for it to view or inspect
+a `.ply` scene, render still images or fly through it interactively, fit a
+scene against a set of posed photos, or train one from a folder of ordinary
+photographs with no camera information at all. Reach for it to view or inspect
 any Gaussian-splat scene - including ones produced by [mirror](worldmirror2.md) -
 or to optimize a scene of your own from a set of camera-posed images. The
 same rendering kernels run on any GPU and on the CPU, so it works without
@@ -32,6 +33,8 @@ brain splat info   scene.ply
 brain splat render scene.ply --out img.ppm [--eye x,y,z --target x,y,z]
 brain splat view   scene.ply         # interactive fly-through (WASD + mouse)
 brain splat fit     scene.ply --images photos/ --cameras cameras.json --out out/fitted.ply
+brain splat sfm     --images photos/ --out out/sfm.ply          # cameras + sparse points only
+brain splat train   --images photos/ --out out/scene.ply        # photographs -> finished scene
 ```
 
 `view` opens an interactive window. With no `--eye`, the camera auto-frames
@@ -89,7 +92,52 @@ into a scene that actually reproduces your photos.
 | `--densify N` | `fit` | run density control every N iterations (default off) |
 | `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
 | `--max-gaussians N` | `fit` | refuse to grow past N |
-| `--densify-strategy S` | `fit` | `heuristic` (default) or `mcmc` - see below |
+| `--densify-strategy S` | `fit` | `heuristic` (default), `mcmc` or `hybrid` - see below |
+| `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
+| `--camera-model` | `fit` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene |
+| `--batch N` | `fit` | photographs per optimizer step (default all of them) |
+| `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
+| `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |
+| `--images <dir\|list>` | `sfm`, `train` | the photographs, all from one camera |
+| `--width N` | `sfm`, `train` | training resolution (default `1024` across) |
+| `--focal-guess F` | `sfm`, `train` | starting focal length as a multiple of the long side (default `0.8`); it is re-estimated |
+| `--iters N` | `train` | optimizer steps (default `3000`) |
+| `--max-gaussians N` | `train` | the scene's gaussian budget (default `500000`) |
+| `--init-opacity O` | `sfm`, `train` | opacity of the starting gaussians (default `0.5`) |
+| `--cameras-out <path>` | `sfm`, `train` | where to write the recovered cameras (default next to `--out`) |
+
+## From photographs: `sfm` and `train`
+
+`train` needs nothing but the photographs: no camera poses, no EXIF, no
+learned model. It runs in three steps:
+
+1. **Structure from motion** (`brain splat sfm` on its own): features in every
+   photograph, matches between every pair checked against the geometry of
+   two views, and an incremental reconstruction that registers one
+   photograph at a time and refines everything with bundle adjustment. The
+   camera is calibrated from the photographs themselves - its focal length
+   is chosen by reconstructing under a range of candidates and keeping the
+   one that registers the most photographs most accurately, and lens
+   distortion is estimated alongside. It prints how many photographs it
+   registered and the reprojection error; a photograph it could not place
+   is listed and left out.
+2. The photographs are resampled to an ideal pinhole camera at `--width`,
+   removing the lens distortion, and the sparse point cloud becomes the
+   starting scene.
+3. The fit, with everything a real capture needs: the L1 + D-SSIM objective,
+   a camera model for per-photo exposure and white balance, credit-assigned
+   density control that grows the scene toward `--max-gaussians`, full
+   view-dependent colour, and surface regularizers in the second half.
+
+```bash
+brain splat train --images ~/captures/can --out can.ply
+brain splat view can.ply
+```
+
+Photograph the subject from all around with generous overlap between
+neighbouring shots (every part of the scene in at least three photographs),
+keep the zoom fixed, and avoid moving objects. A textured floor or table
+under the subject helps registration a great deal.
 
 ## Density control: when the fit may ADD gaussians
 
@@ -169,6 +217,31 @@ Two properties are worth knowing before turning it on, both measured in
 On the headline case - a scene slid 5.7% along every viewing ray, rendering the
 correct image - an RGB-only fit leaves 6.21% of depth error after 150 iterations
 and the same fit with `depth_weight: 1.0` leaves 0.08%.
+
+### `--densify-strategy hybrid`: spend the budget where the image error is
+
+The heuristic asks which gaussians' centres received a large gradient. The
+hybrid controller asks which gaussians are RESPONSIBLE for the error that is
+left: one extra backward pass per photograph attributes every pixel's
+remaining error to the gaussians that drew it, by the same weights they drew
+it with. Gaussians are ranked by that, by how much of it sits on an edge, and
+by the gradient signal; the top of the ranking is refined - an elongated one
+split along its long axis, a coarse blob in every direction, a small one
+cloned - within a growth schedule that reaches `--max-gaussians` two thirds
+of the way through density control. A gaussian that contributes nothing is
+first dimmed and removed only if it is still contributing nothing at the next
+round. On a scene started far too coarse, at an equal budget, it ends at half
+the heuristic's error.
+
+### Surface regularizers
+
+An image loss is as happy with two half-transparent layers as with one
+opaque surface, and with a disc whose flat side faces anywhere. `--distortion`
+penalizes compositing weight spread along each ray (layers collapse onto one
+surface) and `--normal-consistency` turns each gaussian's flat side onto the
+surface the render's own depth describes. Both are extra render passes, so
+they cost time; start them part-way through (`--geometry-after 0.4`), once
+the scene has a shape.
 
 ### `--densify-strategy mcmc`: relocate instead of split and prune
 
@@ -335,5 +408,6 @@ GPU is required. Only spherical-harmonics degree 0 (flat per-splat color)
 actually renders today; higher-order SH coefficients in a `.ply` are parsed
 and preserved on round-trip (so re-saving a scene doesn't lose them) but
 don't yet affect the rendered image. `fit` optimizes an existing set of
-gaussians against posed photos - it does not run structure-from-motion or
-recover camera poses itself; bring your own `cameras.json`.
+gaussians against posed photos; to start from photographs alone, use
+`sfm` (cameras and points) or `train` (the whole pipeline). Structure from
+motion assumes every photograph came from one camera at one zoom setting.

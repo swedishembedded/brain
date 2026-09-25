@@ -43,8 +43,10 @@ pub fn run_splat(argv: &[String]) {
         Some("orient") => orient_cmd(&argv[1..]),
         Some("merge") => merge_cmd(&argv[1..]),
         Some("prune") => prune_cmd(&argv[1..]),
+        Some("sfm") => sfm_cmd(&argv[1..]),
+        Some("train") => train_cmd(&argv[1..]),
         other => {
-            eprintln!("usage: brain splat <info|render|view|fit|orient|merge|prune> ...  (got {other:?})");
+            eprintln!("usage: brain splat <info|render|view|fit|orient|merge|prune|sfm|train> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -566,6 +568,145 @@ fn prune_cmd(argv: &[String]) {
     );
 }
 
+/// Write cameras in the `cameras.json` format [`read_cameras`] reads.
+pub fn write_cameras(path: &str, cams: &[Camera]) {
+    let js: Vec<serde_json::Value> = cams
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+                "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
+                "width": c.width, "height": c.height,
+            })
+        })
+        .collect();
+    std::fs::write(path, serde_json::to_string_pretty(&js).unwrap()).unwrap_or_else(|e| {
+        eprintln!("cannot write {path}: {e}");
+        std::process::exit(1);
+    });
+}
+
+/// Photographs, decoded, and structure from motion run on them: the shared
+/// front half of `sfm` and `train`.
+fn photogrammetry(a: &mut Args) -> (Vec<String>, recon::photogrammetry::TrainingSet) {
+    let images = a.take_str("--images").unwrap_or_else(|| {
+        eprintln!("--images <dir|a.jpg,b.jpg,...> is required");
+        std::process::exit(2);
+    });
+    // The training resolution: SfM runs on the full photographs, the fit on
+    // pinhole-resampled copies this wide.
+    let width = a.u32_or("--width", 1024);
+    let defaults = sfm::incremental::SfmCfg::default();
+    let focal = a.f32_or("--focal-guess", defaults.focal_guess as f32);
+    // What the sparse points start as. 3DGS starts at 0.1 so the fit decides
+    // what is solid, but every pixel then composites many layers deep and the
+    // backward's cost is proportional to that depth: on a 16-photo capture at
+    // 768x576, 0.5 ran 2.9x faster per iteration than 0.1 AND was lower in
+    // loss at iteration 100 (0.223 against 0.232).
+    let opacity = a.f32_or("--init-opacity", 0.5);
+    let paths = crate::mirror_cli::collect_images(&images);
+    let photos: Vec<imaging::Rgb8> = paths
+        .iter()
+        .map(|p| {
+            imaging::load(p).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    println!("structure from motion on {} photographs ...", photos.len());
+    let cfg = sfm::incremental::SfmCfg { focal_guess: focal as f64, verbose: true, ..defaults };
+    let set = recon::photogrammetry::training_set(&photos, width, opacity, &cfg).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let k = set.sfm.intrinsics;
+    println!(
+        "registered {}/{} photographs, {} points, reprojection rms {:.2} px, focal {:.1} px, k1 {:+.4}, k2 {:+.4}",
+        set.targets.len(),
+        photos.len(),
+        set.sfm.points.len(),
+        set.sfm.rms_px,
+        k.f,
+        k.k1,
+        k.k2
+    );
+    for (i, p) in paths.iter().enumerate() {
+        if !set.source.contains(&i) {
+            println!("  not registered: {p}");
+        }
+    }
+    let registered = set.source.iter().map(|&i| paths[i].clone()).collect();
+    (registered, set)
+}
+
+/// Structure from motion alone: cameras and the sparse cloud, for inspection
+/// or for `fit`.
+fn sfm_cmd(argv: &[String]) {
+    let mut a = Args::new(argv);
+    let out = a.str_or("--out", "out/sfm.ply");
+    let cams_out = a.str_or("--cameras-out", &format!("{out}.cameras.json"));
+    let (paths, set) = photogrammetry(&mut a);
+    a.finish();
+    let cams: Vec<Camera> = set.targets.iter().map(|t| t.cam).collect();
+    splat::ply::write(&out, &set.init).unwrap_or_else(|e| {
+        eprintln!("PLY write failed: {e}");
+        std::process::exit(1);
+    });
+    write_cameras(&cams_out, &cams);
+    println!("{} points -> {out}, {} cameras -> {cams_out} (for images: {})", set.init.len(), cams.len(), paths.join(","));
+}
+
+/// Photographs to a finished splat scene: structure from motion, the sparse
+/// cloud as the starting scene, and the full reconstruction objective
+/// ([`FitCfg::from_sparse_points`]).
+fn train_cmd(argv: &[String]) {
+    let mut a = Args::new(argv);
+    let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/trained.ply"), "scene").to_string();
+    let iters = a.usize_or("--iters", 3000);
+    let budget = a.usize_or("--max-gaussians", 500_000);
+    let lr = a.f32_or("--lr", 5e-3);
+    let cams_out = a.take_str("--cameras-out");
+    let (_, set) = photogrammetry(&mut a);
+    a.finish();
+    // Land the scene upright: structure from motion leaves it in its first
+    // camera's frame, however that camera was held.
+    let cams: Vec<Camera> = set.targets.iter().map(|t| t.cam).collect();
+    let (init, cams) = splat::orient::upright(&set.init, &cams);
+    let targets: Vec<TargetView> = set
+        .targets
+        .into_iter()
+        .zip(&cams)
+        .map(|(mut t, c)| {
+            t.cam = *c;
+            t
+        })
+        .collect();
+    let cfg = FitCfg { lr, ..FitCfg::from_sparse_points(iters, budget) };
+    let g = Gpu::new(splat::PIPELINES);
+    println!(
+        "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}) ...",
+        init.len(),
+        targets.len(),
+        targets[0].cam.width,
+        targets[0].cam.height
+    );
+    let res = splat::opt::fit_full(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
+    splat::ply::write(&out, &res.scene).unwrap_or_else(|e| {
+        eprintln!("PLY write failed: {e}");
+        std::process::exit(1);
+    });
+    let path = cams_out.unwrap_or_else(|| format!("{out}.cameras.json"));
+    write_cameras(&path, &res.cams);
+    println!(
+        "{} gaussians -> {out} (final loss {:.6}); cameras -> {path}. Rendered with the Mip filter \
+         (`brain splat render --aa --eps2d {}`).",
+        res.scene.len(),
+        res.loss,
+        cfg.eps2d
+    );
+}
+
 pub fn read_cameras(path: &str) -> Vec<Camera> {
     let j: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -746,11 +887,28 @@ fn fit_cmd(argv: &[String]) {
     let strategy = match a.str_or("--densify-strategy", "heuristic").as_str() {
         "heuristic" => Densify::Heuristic,
         "mcmc" => Densify::Mcmc,
+        "hybrid" => Densify::Hybrid,
         other => {
-            eprintln!("--densify-strategy must be `heuristic` or `mcmc`, got `{other}`");
+            eprintln!("--densify-strategy must be `heuristic`, `mcmc` or `hybrid`, got `{other}`");
             std::process::exit(2);
         }
     };
+    let loss = match a.str_or("--loss", "mse").as_str() {
+        "mse" => splat::loss::PixelLoss::Mse,
+        "l1-ssim" => splat::loss::PixelLoss::gaussian_splatting(),
+        other => {
+            eprintln!("--loss must be `mse` or `l1-ssim`, got `{other}`");
+            std::process::exit(2);
+        }
+    };
+    // Fit a photometric camera model (exposure, white balance, vignetting,
+    // response) with the scene, so a view shot a stop brighter is explained by
+    // its camera rather than by brighter gaussians.
+    let isp = a.take_flag("--camera-model").then(splat::isp::IspCfg::default);
+    let batch = a.usize_or("--batch", 0);
+    let distortion_weight = a.f32_or("--distortion", 0.0);
+    let normal_consistency_weight = a.f32_or("--normal-consistency", 0.0);
+    let geometry_after = a.f32_or("--geometry-after", 0.0);
     a.finish();
 
     let cams = read_cameras(&cams_path);
@@ -849,6 +1007,12 @@ fn fit_cmd(argv: &[String]) {
         position_budget,
         scale_budget,
         rotation_budget,
+        loss,
+        isp,
+        batch,
+        distortion_weight,
+        normal_consistency_weight,
+        geometry_after,
         ..Default::default()
     };
     let (fitted, refined, mse) =
@@ -857,20 +1021,7 @@ fn fit_cmd(argv: &[String]) {
         // The refined poses ARE part of the result: a scene fitted against
         // moved cameras only means anything when read back with those cameras.
         let path = cams_out.clone().unwrap_or_else(|| format!("{out}.cameras.json"));
-        let js: Vec<serde_json::Value> = refined
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
-                    "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
-                    "width": c.width, "height": c.height,
-                })
-            })
-            .collect();
-        std::fs::write(&path, serde_json::to_string_pretty(&js).unwrap()).unwrap_or_else(|e| {
-            eprintln!("cannot write {path}: {e}");
-            std::process::exit(1);
-        });
+        write_cameras(&path, &refined);
         println!("refined cameras -> {path}");
     }
     let grown = fitted.len();
@@ -879,7 +1030,7 @@ fn fit_cmd(argv: &[String]) {
         std::process::exit(1);
     });
     println!(
-        "{path} -> {out} ({grown} gaussians, final mse {mse:.6}, fitted at --eps2d {} with \
+        "{path} -> {out} ({grown} gaussians, final loss {mse:.6}, fitted at --eps2d {} with \
          compensation {}; render it the same way)",
         cfg.eps2d,
         cfg.antialiased
