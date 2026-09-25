@@ -669,57 +669,81 @@ fn sfm_cmd(argv: &[String]) {
 /// Photographs to a finished splat scene: structure from motion, the sparse
 /// cloud as the starting scene, and the full reconstruction objective
 /// ([`FitCfg::from_sparse_points`]).
+/// Photographs to a finished scene: `recon::photogrammetry::reconstruct`,
+/// the pipeline the SDK's `brain::Reconstruction` runs too.
 fn train_cmd(argv: &[String]) {
     let mut a = Args::new(argv);
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/trained.ply"), "scene").to_string();
-    let iters = a.usize_or("--iters", 3000);
-    let budget = a.usize_or("--max-gaussians", 500_000);
-    let lr_position = a.f32_or("--lr-position", FitCfg::from_sparse_points(iters, budget, 0).lr_position);
-    let coarse = a.f32_or("--coarse", FitCfg::from_sparse_points(iters, budget, 0).coarse);
-    let strategy = match a.str_or("--densify-strategy", "hybrid").as_str() {
-        "heuristic" => Densify::Heuristic,
-        "mcmc" => Densify::Mcmc,
-        "hybrid" => Densify::Hybrid,
-        other => {
-            eprintln!("--densify-strategy must be `heuristic`, `mcmc` or `hybrid`, got `{other}`");
-            std::process::exit(2);
-        }
-    };
-    let cams_out = a.take_str("--cameras-out");
+    let images = a.take_str("--images").unwrap_or_else(|| {
+        eprintln!("--images <dir|a.jpg,b.jpg,...> is required");
+        std::process::exit(2);
+    });
+    let defaults = recon::photogrammetry::PhotoCfg::default();
+    let max_width = a.u32_or("--max-width", defaults.max_width);
+    let iterations = a.take_str("--iters").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage_exit(&format!("--iters {v}: not a count"))));
+    let max_gaussians = a.take_str("--max-gaussians").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage_exit(&format!("--max-gaussians {v}: not a count"))));
+    let focal = a.f32_or("--focal-guess", defaults.sfm.focal_guess as f32);
+    let sparse = a.take_flag("--sparse");
     // Per-photo exposure and white balance and the lens's vignetting, for a
-    // capture that needs them; see `FitCfg::from_sparse_points` for why the
-    // preset leaves them off.
+    // capture that needs them; on one taken at one exposure they only absorb
+    // fit error.
     let camera_model = a.take_flag("--camera-model");
-    let (_, set) = photogrammetry(&mut a);
+    let cams_out = a.take_str("--cameras-out");
     a.finish();
-    let recon::photogrammetry::TrainingSet { targets, init, .. } = set.upright();
-    let preset = FitCfg::from_sparse_points(iters, budget, targets.len());
-    let isp = if camera_model { Some(splat::isp::IspCfg::default()) } else { preset.isp };
-    let cfg = FitCfg { lr_position, coarse, strategy, isp, ..preset };
-    let g = Gpu::new(splat::PIPELINES);
-    println!(
-        "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}, SH degree {}, camera model {}) ...",
-        init.len(),
-        targets.len(),
-        targets[0].cam.width,
-        targets[0].cam.height,
-        cfg.sh_degree,
-        if cfg.isp.is_some() { "on" } else { "off" }
-    );
-    let res = splat::opt::fit_full(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
+    let paths = crate::mirror_cli::collect_images(&images);
+    let photos: Vec<imaging::Rgb8> = paths
+        .iter()
+        .map(|p| {
+            imaging::load(p).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            })
+        })
+        .collect();
+    let cfg = recon::photogrammetry::PhotoCfg {
+        sfm: sfm::incremental::SfmCfg { focal_guess: focal as f64, ..defaults.sfm },
+        max_width,
+        dense: if sparse { None } else { defaults.dense },
+        iterations,
+        max_gaussians,
+        camera_model: camera_model.then(splat::isp::IspCfg::default),
+    };
+    println!("reconstructing {} photographs ...", photos.len());
+    let g = Gpu::new(&recon::photogrammetry::pipelines());
+    let every = iterations.unwrap_or(3000).div_ceil(20).max(1);
+    let res = recon::photogrammetry::reconstruct(&g, &photos, &cfg, &mut |line| println!("{line}"), &mut |it, loss| {
+        if it % every == 0 {
+            println!("  step {it:6}: loss {loss:.5}");
+        }
+        true
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    for (i, p) in paths.iter().enumerate() {
+        if !res.source.contains(&i) {
+            println!("  not placed: {p}");
+        }
+    }
     splat::ply::write(&out, &res.scene).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");
         std::process::exit(1);
     });
     let path = cams_out.unwrap_or_else(|| format!("{out}.cameras.json"));
-    write_cameras(&path, &res.cams);
+    write_cameras(&path, &res.cameras);
     println!(
-        "{} gaussians -> {out} (final loss {:.6}); cameras -> {path}. Fitted under the standard \
-         {} px dilation, as splat viewers render it.",
+        "{} gaussians -> {out} (final loss {:.5}); cameras -> {path}. Rendered along each pixel's ray through \
+         its lens, under the standard {} px dilation splat viewers use.",
         res.scene.len(),
         res.loss,
-        cfg.eps2d
+        res.render.eps2d
     );
+}
+
+fn usage_exit(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(2);
 }
 
 pub fn read_cameras(path: &str) -> Vec<Camera> {

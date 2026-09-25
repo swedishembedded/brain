@@ -4,9 +4,11 @@
 //! [`Reconstruction`]: brain's 3D reconstruction surface. Photographs of a
 //! static scene go in, and a 3D Gaussian Splatting scene comes out, with the
 //! camera every photograph was taken from. No camera poses, no EXIF and no
-//! learned model are needed: structure from motion recovers the cameras and a
-//! sparse point cloud from the photographs themselves, and the fit grows that
-//! cloud into the scene.
+//! learned model are needed: structure from motion recovers every camera and
+//! its real lens from the photographs themselves, multi-view stereo measures
+//! the surfaces they show, and the fit grows a radiance field from that dense
+//! start (`recon::photogrammetry::reconstruct`, the one pipeline the CLI and
+//! this surface share).
 //!
 //! Named for the `brain_arch::Domain` it belongs to (`three-d`, where the
 //! `splat` rasterizer's own `arch!` row sits). Nothing is resolved from the
@@ -14,8 +16,8 @@
 //!
 //! ```no_run
 //! let photos = ["a.jpg", "b.jpg", "c.jpg"].iter().map(brain::Image::open).collect::<brain::Result<Vec<_>>>()?;
-//! let scene = brain::Reconstruction::builder().photos(photos).width(768).iterations(3000).run()?;
-//! scene.save_ply("scene.ply")?;
+//! let scene = brain::Reconstruction::builder().photos(photos).run()?;
+//! scene.save("scene")?;
 //! scene.render(0)?.save("view0.png")?;
 //! # Ok::<(), brain::Error>(())
 //! ```
@@ -25,21 +27,16 @@
 //! If your team needs that, you can procure our services by sending an email
 //! to info@swedishembedded.com.
 
-use splat::opt::FitCfg;
+use recon::photogrammetry::{PhotoCfg, Reconstructed};
 use splat::renderer::{rgba_to_rgb, GpuSplats, Renderer};
-use splat::types::{Camera, RenderOpts, Splats};
 use splat::Kernels;
 
 use crate::{Device, Error, Image, Result};
 
 /// A reconstructed scene: the gaussians, the camera of every registered
-/// photograph, and how well structure from motion explained them.
+/// photograph, and what the pipeline measured on the way.
 pub struct Reconstruction {
-    splats: Splats,
-    cameras: Vec<Camera>,
-    registered: Vec<usize>,
-    reprojection_rms_px: f64,
-    render: RenderOpts,
+    out: Reconstructed,
     gpu: gpu_core::Gpu,
 }
 
@@ -47,9 +44,9 @@ pub struct Reconstruction {
 impl std::fmt::Debug for Reconstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reconstruction")
-            .field("gaussians", &self.splats.len())
-            .field("registered", &self.registered)
-            .field("reprojection_rms_px", &self.reprojection_rms_px)
+            .field("gaussians", &self.out.scene.len())
+            .field("registered", &self.out.source)
+            .field("reprojection_rms_px", &self.out.reprojection_rms_px)
             .finish()
     }
 }
@@ -58,67 +55,94 @@ impl Reconstruction {
     pub fn builder() -> ReconstructionBuilder {
         ReconstructionBuilder {
             photos: Vec::new(),
-            width: 1024,
-            iterations: 3000,
-            max_gaussians: 500_000,
-            camera_model: false,
+            cfg: PhotoCfg::default(),
             device: Device::default(),
             progress: None,
+            log: None,
         }
     }
 
     /// Gaussians in the scene.
     pub fn len(&self) -> usize {
-        self.splats.len()
+        self.out.scene.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.splats.is_empty()
+        self.out.scene.is_empty()
     }
 
     /// How many photographs structure from motion placed; one camera each,
     /// in input order.
     pub fn views(&self) -> usize {
-        self.cameras.len()
+        self.out.cameras.len()
     }
 
     /// The input index of each camera's photograph. A photograph that
     /// overlapped too little with the others is left out, so this can skip
     /// indices.
     pub fn registered(&self) -> &[usize] {
-        &self.registered
+        &self.out.source
     }
 
     /// Structure from motion's reprojection error over the photographs, in
     /// their own pixels.
     pub fn reprojection_rms_px(&self) -> f64 {
-        self.reprojection_rms_px
+        self.out.reprojection_rms_px
     }
 
     /// Write the scene as a standard 3D Gaussian Splatting PLY, which splat
     /// viewers and `brain splat view` open.
     pub fn save_ply(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref().to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", path.as_ref().display())))?;
-        splat::ply::write(path, &self.splats).map_err(Error::Backend)
+        splat::ply::write(path, &self.out.scene).map_err(Error::Backend)
     }
 
-    /// Write the cameras as the `cameras.json` that `brain splat render
-    /// --cameras` reads.
+    /// Write the cameras, each with its lens, as the `cameras.json` that
+    /// `brain splat render --cameras` reads.
     pub fn save_cameras(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        std::fs::write(path, splat::types::cameras_to_json(&self.cameras)).map_err(Error::Io)
+        std::fs::write(path, splat::types::cameras_to_json(&self.out.cameras)).map_err(Error::Io)
+    }
+
+    /// Write the whole reconstruction to the directory `dir`: `scene.ply`,
+    /// `cameras.json` and `reconstruction.json` (which photograph each camera
+    /// is, how the scene was fitted and rendered, and what structure from
+    /// motion and stereo measured).
+    pub fn save(&self, dir: impl AsRef<std::path::Path>) -> Result<()> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir).map_err(Error::Io)?;
+        self.save_ply(dir.join("scene.ply"))?;
+        self.save_cameras(dir.join("cameras.json"))?;
+        let o = &self.out;
+        let meta = serde_json::json!({
+            "gaussians": o.scene.len(),
+            "source": o.source,
+            "reprojection_rms_px": o.reprojection_rms_px,
+            "iterations": o.iterations,
+            "max_gaussians": o.max_gaussians,
+            "loss": o.loss,
+            "render": { "ray": o.render.ray, "antialiased": o.render.antialiased, "eps2d": o.render.eps2d },
+            "stereo": o.dense.as_ref().map(|d| serde_json::json!({ "points": d.points, "coverage": d.coverage })),
+            "camera_model": o.isp.as_ref().map(|i| i.summary()),
+        });
+        std::fs::write(dir.join("reconstruction.json"), serde_json::to_string_pretty(&meta).map_err(|e| Error::Backend(e.to_string()))?).map_err(Error::Io)
     }
 
     /// The scene seen from camera `view` (`0..views()`), at the training
-    /// resolution, rendered the way it was fitted.
+    /// resolution, rendered the way it was fitted - through that
+    /// photograph's own fitted camera model when the fit had one.
     pub fn render(&self, view: usize) -> Result<Image> {
-        let cam = self.cameras.get(view).ok_or_else(|| Error::Backend(format!("view {view} of {}", self.cameras.len())))?;
-        let mut r = Renderer::new(&self.gpu, Kernels::at(0), self.splats.len().max(1), cam.width, cam.height, 0).growable();
-        let gs = GpuSplats::upload(&self.gpu, &self.splats);
-        if let Some(col) = splat::sh::shade(&self.splats, cam.eye()) {
+        let cam = self.out.cameras.get(view).ok_or_else(|| Error::Backend(format!("view {view} of {}", self.out.cameras.len())))?;
+        let scene = &self.out.scene;
+        let mut r = Renderer::new(&self.gpu, Kernels::at(0), scene.len().max(1), cam.width, cam.height, 0).growable();
+        let gs = GpuSplats::upload(&self.gpu, scene);
+        if let Some(col) = splat::sh::shade(scene, cam.eye()) {
             self.gpu.write_f32(&gs.colors, &col);
         }
-        r.render(&self.gpu, &gs, cam, &self.render);
-        let rgb = rgba_to_rgb(&r.read_rgba(&self.gpu, cam.width, cam.height));
+        r.render(&self.gpu, &gs, cam, &self.out.render);
+        let mut rgb = rgba_to_rgb(&r.read_rgba(&self.gpu, cam.width, cam.height));
+        if let Some(isp) = &self.out.isp {
+            rgb = isp.forward(view, cam, &rgb);
+        }
         Image::from_rgb8(cam.width, cam.height, rgb.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect())
     }
 }
@@ -129,39 +153,47 @@ type Progress = Box<dyn FnMut(usize, f32) -> bool>;
 /// Builds a [`Reconstruction`] from photographs.
 pub struct ReconstructionBuilder {
     photos: Vec<Image>,
-    width: u32,
-    iterations: usize,
-    max_gaussians: usize,
-    camera_model: bool,
+    cfg: PhotoCfg,
     device: Device,
     progress: Option<Progress>,
+    log: Option<Box<dyn FnMut(&str)>>,
 }
 
 impl ReconstructionBuilder {
-    /// The photographs: one camera and one zoom, the whole scene static, each
-    /// part of it in at least three of them.
+    /// The photographs: one static scene, each part of it in at least three
+    /// of them. They may come from several cameras and zoom settings.
     pub fn photos(mut self, photos: impl IntoIterator<Item = Image>) -> Self {
         self.photos.extend(photos);
         self
     }
 
-    /// Training resolution across; the height follows the photographs'
-    /// aspect. Structure from motion always runs on the full photographs.
-    /// Default 1024.
-    pub fn width(mut self, width: u32) -> Self {
-        self.width = width;
+    /// The widest training image: the photographs are halved exactly until
+    /// they fit (never resampled at another factor). Structure from motion
+    /// always runs on the full photographs. Default 2048.
+    pub fn max_width(mut self, width: u32) -> Self {
+        self.cfg.max_width = width;
         self
     }
 
-    /// Optimizer steps. Default 3000.
+    /// Optimizer steps. By default about five hundred visits per photograph,
+    /// from 3000 to 30 000.
     pub fn iterations(mut self, iterations: usize) -> Self {
-        self.iterations = iterations;
+        self.cfg.iterations = Some(iterations);
         self
     }
 
-    /// The most gaussians the scene may grow to. Default 500 000.
+    /// The most gaussians the scene may hold. By default what the dense
+    /// start needs and a quarter more.
     pub fn max_gaussians(mut self, max_gaussians: usize) -> Self {
-        self.max_gaussians = max_gaussians;
+        self.cfg.max_gaussians = Some(max_gaussians);
+        self
+    }
+
+    /// Start from multi-view stereo's dense surfaces, with its range and
+    /// normals as priors (the default), or from the sparse structure-from-
+    /// motion points alone.
+    pub fn dense(mut self, on: bool) -> Self {
+        self.cfg.dense = on.then(Default::default);
         self
     }
 
@@ -169,7 +201,7 @@ impl ReconstructionBuilder {
     /// vignetting alongside the scene. Off by default: on photographs taken at
     /// one exposure it only absorbs fit error.
     pub fn camera_model(mut self, on: bool) -> Self {
-        self.camera_model = on;
+        self.cfg.camera_model = on.then(splat::isp::IspCfg::default);
         self
     }
 
@@ -185,38 +217,40 @@ impl ReconstructionBuilder {
         self
     }
 
+    /// Called with one line per finished stage (structure from motion,
+    /// stereo, the fit), saying what it found and how long it took.
+    pub fn log(mut self, f: impl FnMut(&str) + 'static) -> Self {
+        self.log = Some(Box::new(f));
+        self
+    }
+
     /// Recover the cameras and fit the scene. Blocks for as long as the fit
-    /// takes: minutes for a few dozen photographs on one GPU.
+    /// takes: minutes to hours, with the photographs' count and resolution.
     pub fn run(self) -> Result<Reconstruction> {
-        let ReconstructionBuilder { photos, width, iterations, max_gaussians, camera_model, device, progress } = self;
+        let ReconstructionBuilder { photos, cfg, device, progress, log } = self;
         if photos.is_empty() {
             return Err(Error::MissingArgument("photos".into()));
         }
-        if width == 0 || iterations == 0 || max_gaussians == 0 {
+        if cfg.max_width == 0 || cfg.iterations == Some(0) || cfg.max_gaussians == Some(0) {
             return Err(Error::Backend(format!(
-                "width ({width}), iterations ({iterations}) and max_gaussians ({max_gaussians}) must all be positive"
+                "max_width ({}), iterations ({}) and max_gaussians ({}) must all be positive",
+                cfg.max_width,
+                cfg.iterations.map_or("auto".into(), |v| v.to_string()),
+                cfg.max_gaussians.map_or("auto".into(), |v| v.to_string()),
             )));
         }
         crate::device::resolve(&device)?;
         let photos: Vec<imaging::Rgb8> = photos.into_iter().map(Image::into_rgb8).collect();
-        let sfm_cfg = sfm::incremental::SfmCfg::default();
-        let set = recon::photogrammetry::training_set(&photos, width, 0.5, &sfm_cfg)
-            .map_err(|e| Error::Backend(e.to_string()))?
-            .upright();
-        let preset = FitCfg::from_sparse_points(iterations, max_gaussians, set.targets.len());
-        let cfg = FitCfg { log_every: 0, isp: if camera_model { Some(splat::isp::IspCfg::default()) } else { preset.isp }, ..preset };
-        let gpu = gpu_core::Gpu::new(splat::PIPELINES);
-        let mut progress = progress;
+        let gpu = gpu_core::Gpu::new(&recon::photogrammetry::pipelines());
+        let (mut progress, mut log) = (progress, log);
         let mut step = |it: usize, loss: f32| progress.as_mut().is_none_or(|f| f(it, loss));
-        let fitted = splat::opt::fit_full(&gpu, Kernels::at(0), &set.init, &set.targets, &cfg, &mut step);
-        Ok(Reconstruction {
-            splats: fitted.scene,
-            cameras: fitted.cams,
-            registered: set.source,
-            reprojection_rms_px: set.sfm.rms_px,
-            render: RenderOpts { antialiased: cfg.antialiased, eps2d: cfg.eps2d, ..Default::default() },
-            gpu,
-        })
+        let mut line = |m: &str| {
+            if let Some(f) = log.as_mut() {
+                f(m)
+            }
+        };
+        let out = recon::photogrammetry::reconstruct(&gpu, &photos, &cfg, &mut line, &mut step).map_err(|e| Error::Backend(e.to_string()))?;
+        Ok(Reconstruction { out, gpu })
     }
 }
 
@@ -233,5 +267,8 @@ mod tests {
         let one = Image::from_rgb8(2, 2, vec![0; 12]).unwrap();
         let err = Reconstruction::builder().photos([one]).iterations(0).run().unwrap_err();
         assert!(err.to_string().contains("iterations (0)"), "{err}");
+        let one = Image::from_rgb8(2, 2, vec![0; 12]).unwrap();
+        let err = Reconstruction::builder().photos([one]).max_width(0).run().unwrap_err();
+        assert!(err.to_string().contains("max_width (0)"), "{err}");
     }
 }

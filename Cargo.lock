@@ -435,7 +435,6 @@ dependencies = [
  "brain-s3dit",
  "brain-sam2",
  "brain-search",
- "brain-sfm",
  "brain-solve",
  "brain-splat",
  "brain-testutil",

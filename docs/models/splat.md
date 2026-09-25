@@ -93,25 +93,27 @@ into a scene that actually reproduces your photos.
 | `--densify N` | `fit` | run density control every N iterations (default off) |
 | `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
 | `--max-gaussians N` | `fit` | refuse to grow past N |
-| `--densify-strategy S` | `fit`, `train` | `heuristic` (the `fit` default), `mcmc` or `hybrid` (the `train` default) - see below |
+| `--densify-strategy S` | `fit` | `heuristic` (the default), `mcmc` or `hybrid` (what `train` runs) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
 | `--camera-model` | `fit`, `train` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene (default off) |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
 | `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
 | `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |
-| `--images <dir\|list>` | `sfm`, `train` | the photographs, all from one camera |
-| `--width N` | `sfm`, `train` | training resolution (default `1024` across) |
+| `--images <dir\|list>` | `sfm`, `train` | the photographs of one static scene |
+| `--halvings N` | `sfm` | exact 2x halvings of the photographs for the written training set (default `0`) |
+| `--max-width N` | `train` | widest training image: the photographs are halved exactly until they fit (default `2048`) |
 | `--focal-guess F` | `sfm`, `train` | starting focal length as a multiple of the long side (default `0.8`); it is re-estimated |
-| `--iters N` | `train` | optimizer steps (default `3000`) |
-| `--max-gaussians N` | `train` | the scene's gaussian budget (default `500000`) |
-| `--init-opacity O` | `sfm`, `train` | opacity of the starting gaussians (default `0.5`) |
-| `--coarse F` | `train` | fraction of the fit run at half resolution first (default `0.3`) |
+| `--iters N` | `train` | optimizer steps (default: about 500 visits per photograph, 3000 to 30000) |
+| `--max-gaussians N` | `train` | the scene's gaussian budget (default: the dense start plus a quarter) |
+| `--sparse` | `train` | start from structure from motion's points instead of multi-view stereo |
+| `--init-opacity O` | `sfm` | opacity of the starting gaussians (default `0.1`) |
 | `--cameras-out <path>` | `sfm`, `train` | where to write the recovered cameras (default next to `--out`) |
 
 ## From photographs: `sfm` and `train`
 
 `train` needs nothing but the photographs: no camera poses, no EXIF, no
-learned model. It runs in three steps:
+learned model. It runs `recon::photogrammetry::reconstruct`, the same
+pipeline as the SDK's `brain::Reconstruction`, in four steps:
 
 1. **Structure from motion** (`brain splat sfm` on its own): features in every
    photograph, matches between every pair checked against the geometry of
@@ -126,13 +128,20 @@ learned model. It runs in three steps:
    information criterion). It prints how many photographs it
    registered and the reprojection error; a photograph it could not place
    is listed and left out.
-2. The photographs are resampled to an ideal pinhole camera at `--width`,
-   removing the lens distortion, and the sparse point cloud becomes the
-   starting scene.
-3. The fit, with everything a real capture needs: the L1 + D-SSIM objective,
-   credit-assigned density control that grows the scene toward
-   `--max-gaussians`, as much view-dependent colour as the capture has
-   photographs to support, and surface regularizers in the second half.
+2. Every photograph becomes a target exactly as it was recorded - its own
+   pixels through its own lens, halved exactly (a 2x2 box) until it is at
+   most `--max-width` across - and the set is turned upright.
+3. **Multi-view stereo** (`crates/mvs`) measures every photograph's range,
+   surface normal and their confidence per pixel through the same lens.
+   Those become each target's geometry priors, and the fused cloud becomes
+   the starting scene: thin gaussians lying in the measured surfaces.
+   `--sparse` skips this and starts from the structure-from-motion points.
+4. The fit, rendering every pixel along its own ray through the lens: the
+   L1 + D-SSIM objective with the stereo's range and normal priors,
+   credit-assigned density control that refines where the error is and
+   spawns where the scene has nothing to refine, each gaussian's
+   view-dependent colour limited to what the photographs that see it
+   support, and surface regularizers in the second half.
    View-dependent colour is a degree-`d` spherical-harmonic expansion,
    `(d+1)²` coefficients per channel per gaussian, and with about as many
    coefficients as photographs seeing a gaussian it memorizes the training
@@ -143,17 +152,14 @@ learned model. It runs in three steps:
    capture they cost 1.3 dB on held-out photographs.
 
 ```bash
-brain splat train --images ~/captures/can --out can.ply
-brain splat view can.ply
+brain splat train --images ~/captures/scene --out scene.ply
+brain splat view scene.ply
 ```
 
-On sixteen 2048x1536 phone photographs of an object on a wooden deck,
-`--width 768 --iters 4000 --max-gaussians 300000` took about an hour on one
-Tesla P40, structure from motion about a minute of it. Render a training
-camera next to its photograph to judge the result:
+Render a training camera next to its photograph to judge the result:
 
 ```bash
-brain splat render can.ply --cameras can.ply.cameras.json --view 0 --out view0.png
+brain splat render scene.ply --cameras scene.ply.cameras.json --view 0 --out view0.png
 ```
 
 Photograph the subject from all around with generous overlap between

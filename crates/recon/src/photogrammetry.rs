@@ -30,8 +30,8 @@
 
 use gpu_core::Gpu;
 use imaging::Rgb8;
-use sfm::incremental::{reconstruct, Photo, Reconstruction, SfmCfg, SfmError};
-use splat::opt::TargetView;
+use sfm::incremental::{Photo, Reconstruction, SfmCfg, SfmError};
+use splat::opt::{FitCfg, TargetView};
 use splat::types::{Camera, Splats};
 
 /// A rigid change of frame `p' = r (p - centre)`, `r` row-major.
@@ -208,7 +208,7 @@ pub fn target(photo: &Rgb8, cam: Camera, sensor: usize) -> TargetView {
 /// `opacity` is what every starting gaussian gets.
 pub fn training_set(photos: &[Rgb8], halvings: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
     let views: Vec<Photo> = photos.iter().map(|p| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None }).collect();
-    let rec = reconstruct(&views, cfg)?;
+    let rec = sfm::incremental::reconstruct(&views, cfg)?;
     let mut targets = Vec::new();
     let mut source = Vec::new();
     for (i, pose) in rec.poses.iter().enumerate() {
@@ -229,6 +229,173 @@ pub fn training_set(photos: &[Rgb8], halvings: u32, opacity: f32, cfg: &SfmCfg) 
     Ok(TrainingSet { targets, source, init, sfm: rec, frame: Frame::IDENTITY })
 }
 
+/// Every WGSL kernel [`reconstruct`] dispatches: `splat`'s at 0, then
+/// `mvs`'s at `splat::PIPELINES.len()`. Build the device with this list.
+pub fn pipelines() -> Vec<(&'static str, &'static str)> {
+    splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().collect()
+}
+
+/// How [`reconstruct`] turns photographs into a scene. Every `None` is
+/// decided from the capture itself.
+#[derive(Clone, Debug)]
+pub struct PhotoCfg {
+    pub sfm: SfmCfg,
+    /// Widest training image: the photographs are halved exactly until they
+    /// fit. The fit itself climbs a pyramid up to it.
+    pub max_width: u32,
+    /// Multi-view stereo priors and dense start; `None` starts from the
+    /// structure-from-motion points alone.
+    pub dense: Option<DenseCfg>,
+    /// Optimizer steps; `None` = [`auto_iterations`].
+    pub iterations: Option<usize>,
+    /// Gaussian budget; `None` = [`auto_budget`].
+    pub max_gaussians: Option<usize>,
+    /// Fit a photometric camera model alongside the scene.
+    pub camera_model: Option<splat::isp::IspCfg>,
+}
+
+impl Default for PhotoCfg {
+    fn default() -> Self {
+        PhotoCfg {
+            sfm: SfmCfg::default(),
+            max_width: 2048,
+            dense: Some(DenseCfg::default()),
+            iterations: None,
+            max_gaussians: None,
+            camera_model: None,
+        }
+    }
+}
+
+/// Optimizer steps for `views` training views: every view revisited about
+/// five hundred times at two views a step, never fewer than 3000 steps (the
+/// schedule's density rounds need room) nor more than 30 000 (3DGS's own
+/// length, for captures of hundreds of views).
+pub fn auto_iterations(views: usize) -> usize {
+    (250 * views).clamp(3000, 30_000)
+}
+
+/// The gaussian budget for a start of `start` gaussians against views of
+/// `pixels` pixels in all: a dense start already has about the population
+/// its surfaces need and gets a quarter more for density control to spend;
+/// a sparse one grows to one gaussian per eight training pixels, within
+/// 200 000 and 3 000 000.
+pub fn auto_budget(start: usize, pixels: usize, dense: bool) -> usize {
+    if dense {
+        start + start / 4
+    } else {
+        (pixels / 8).clamp(200_000, 3_000_000).max(start)
+    }
+}
+
+/// What [`reconstruct`] made.
+pub struct Reconstructed {
+    /// The fitted scene with its 3D filter baked in: what any viewer renders.
+    pub scene: Splats,
+    /// Every registered photograph's camera at the training resolution,
+    /// refined by the fit.
+    pub cameras: Vec<Camera>,
+    /// Input index of each camera's photograph.
+    pub source: Vec<usize>,
+    /// Structure from motion's reprojection error, pixels.
+    pub reprojection_rms_px: f64,
+    /// The fitted photometric camera model, when one was asked for.
+    pub isp: Option<splat::isp::Isp>,
+    /// How the render options the scene was fitted under.
+    pub render: splat::types::RenderOpts,
+    /// Stereo coverage and point count, when the dense path ran.
+    pub dense: Option<DenseReport>,
+    pub iterations: usize,
+    pub max_gaussians: usize,
+    /// The objective at the last step.
+    pub loss: f32,
+}
+
+/// Why [`reconstruct`] stopped.
+#[derive(Debug)]
+pub enum ReconstructError {
+    Sfm(SfmError),
+    Stereo(mvs::MvsError),
+}
+
+impl std::fmt::Display for ReconstructError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReconstructError::Sfm(e) => write!(f, "structure from motion: {e}"),
+            ReconstructError::Stereo(e) => write!(f, "multi-view stereo: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReconstructError {}
+
+/// Photographs to a finished scene: structure from motion through each
+/// photograph's real lens, the set landed upright, multi-view stereo priors
+/// and a dense start (unless `cfg.dense` is `None`), and the fit. `gpu` must
+/// have been built with [`pipelines`]. `log` receives one line per stage;
+/// `on_step(iteration, loss)` is polled every step and stops the fit early
+/// by returning `false`.
+pub fn reconstruct(
+    gpu: &Gpu,
+    photos: &[Rgb8],
+    cfg: &PhotoCfg,
+    log: &mut dyn FnMut(&str),
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> Result<Reconstructed, ReconstructError> {
+    let widest = photos.iter().map(|p| p.w).max().unwrap_or(0);
+    let halvings = (0..16).find(|&h| widest >> h <= cfg.max_width.max(1)).unwrap_or(16);
+    let t = std::time::Instant::now();
+    let set = training_set(photos, halvings, 0.1, &cfg.sfm).map_err(ReconstructError::Sfm)?.upright();
+    log(&format!(
+        "structure from motion: {}/{} photographs placed, {} points, {:.2} px rms, lens {:?}, {:.0} s",
+        set.targets.len(),
+        photos.len(),
+        set.sfm.points.len(),
+        set.sfm.rms_px,
+        set.sfm.lens,
+        t.elapsed().as_secs_f64()
+    ));
+    let (set, dense) = match &cfg.dense {
+        None => (set, None),
+        Some(dcfg) => {
+            let t = std::time::Instant::now();
+            let dcfg = DenseCfg { stereo: mvs::StereoCfg { halving: halvings, ..dcfg.stereo.clone() }, ..dcfg.clone() };
+            let ks = mvs::Kernels::at(splat::PIPELINES.len());
+            let (set, report) = set.densify(gpu, &ks, photos, &dcfg).map_err(ReconstructError::Stereo)?;
+            let cover = report.coverage.iter().sum::<f64>() / report.coverage.len().max(1) as f64;
+            log(&format!("multi-view stereo: {} points, {:.0}% of pixels measured, {:.0} s", report.points, 100.0 * cover, t.elapsed().as_secs_f64()));
+            (set, Some(report))
+        }
+    };
+    let views = set.targets.len();
+    let pixels: usize = set.targets.iter().map(|t| (t.cam.width * t.cam.height) as usize).sum();
+    let iterations = cfg.iterations.unwrap_or_else(|| auto_iterations(views));
+    let budget = cfg.max_gaussians.unwrap_or_else(|| auto_budget(set.init.len(), pixels, dense.is_some()));
+    let preset = if dense.is_some() {
+        FitCfg::from_dense_stereo(iterations, budget, views)
+    } else {
+        FitCfg::from_sparse_points(iterations, budget, views)
+    };
+    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), ..preset };
+    let (w, h) = (set.targets[0].cam.width, set.targets[0].cam.height);
+    log(&format!("fit: {views} views at {w}x{h}, {} gaussians to start, budget {budget}, {iterations} steps", set.init.len()));
+    let t = std::time::Instant::now();
+    let fitted = splat::opt::fit_full(gpu, splat::Kernels::at(0), &set.init, &set.targets, &fit_cfg, on_step);
+    log(&format!("fit: {} gaussians, loss {:.5}, {:.0} s", fitted.scene.len(), fitted.loss, t.elapsed().as_secs_f64()));
+    Ok(Reconstructed {
+        scene: fitted.baked(),
+        cameras: fitted.cams,
+        source: set.source,
+        reprojection_rms_px: set.sfm.rms_px,
+        isp: fitted.isp,
+        render: splat::types::RenderOpts { ray: true, antialiased: fit_cfg.antialiased, eps2d: fit_cfg.eps2d, ..Default::default() },
+        dense,
+        iterations,
+        max_gaussians: budget,
+        loss: fitted.loss,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,8 +410,8 @@ mod tests {
         let img = Rgb8 { w, h, px: px.clone() };
         let k = camera::Intrinsics { lens: camera::Lens::radial(-0.05, 0.01), ..camera::Intrinsics::pinhole(30.0, w, h) };
         let t = target(&img, Camera::with_intrinsics(std::array::from_fn(|i| if i % 5 == 0 { 1.0 } else { 0.0 }), &k), 0);
-        for i in 0..px.len() {
-            assert!((t.rgb[i] - px[i] as f32 / 255.0).abs() < 1e-6, "pixel value {i}");
+        for (i, (got, &want)) in t.rgb.iter().zip(&px).enumerate() {
+            assert!((got - want as f32 / 255.0).abs() < 1e-6, "pixel value {i}");
         }
         assert!(t.mask.is_none(), "every pixel of a mild barrel lens has a ray");
         // an equidistant fisheye whose image circle is smaller than the
