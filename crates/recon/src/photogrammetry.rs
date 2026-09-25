@@ -36,6 +36,23 @@ pub struct TrainingSet {
     pub sfm: Reconstruction,
 }
 
+impl TrainingSet {
+    /// The same set landed upright: structure from motion leaves the scene in
+    /// its first camera's frame, however that camera was held, and a viewer
+    /// opening the result expects the ground to be down.
+    pub fn upright(self) -> TrainingSet {
+        let cams: Vec<Camera> = self.targets.iter().map(|t| t.cam).collect();
+        let (init, cams) = splat::orient::upright(&self.init, &cams);
+        let targets = self
+            .targets
+            .into_iter()
+            .zip(cams)
+            .map(|(t, cam)| TargetView { cam, ..t })
+            .collect();
+        TrainingSet { targets, init, ..self }
+    }
+}
+
 /// Resample `img` (taken through `k`) to a pinhole camera of `width x height`
 /// with the same field of view along the long side. Returns interleaved RGB
 /// in [0,1], the validity mask, and the pinhole intrinsics `(f, cx, cy)`.

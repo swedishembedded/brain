@@ -695,19 +695,7 @@ fn train_cmd(argv: &[String]) {
     let camera_model = a.take_flag("--camera-model");
     let (_, set) = photogrammetry(&mut a);
     a.finish();
-    // Land the scene upright: structure from motion leaves it in its first
-    // camera's frame, however that camera was held.
-    let cams: Vec<Camera> = set.targets.iter().map(|t| t.cam).collect();
-    let (init, cams) = splat::orient::upright(&set.init, &cams);
-    let targets: Vec<TargetView> = set
-        .targets
-        .into_iter()
-        .zip(&cams)
-        .map(|(mut t, c)| {
-            t.cam = *c;
-            t
-        })
-        .collect();
+    let recon::photogrammetry::TrainingSet { targets, init, .. } = set.upright();
     let preset = FitCfg::from_sparse_points(iters, budget, targets.len());
     let isp = if camera_model { Some(splat::isp::IspCfg::default()) } else { preset.isp };
     let cfg = FitCfg { lr, coarse, strategy, isp, ..preset };
