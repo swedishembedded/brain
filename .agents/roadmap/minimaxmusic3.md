@@ -1493,12 +1493,11 @@ row in `gpu_core::upgrade`. No model crate changed at all.
   (`interned(stem, src, &[("MREG", b)])`), so there is no hand-written per-`m`
   file.
 * It is a genuine second FILE, not a template variant of `matmul_gemv`, because
-  a function-local accumulator array is a different body - and because the CPU
-  JIT rejects one outright. That claim was **re-verified, not inherited**:
-  `wgsl_cpu::Jit::new` returns `array local in a work-group kernel is
-  unsupported`. So `matmul_gemv` keeps its workgroup accumulators and stays
-  `@cpu yes`; `matmul_gemv_reg` is `@cpu no`. Each header points at the other
-  and says "edit the two together".
+  a function-local accumulator array is a different body. Both are `@cpu yes`
+  (the CPU JIT runs such an array as a per-invocation stack slot, and
+  `crates/wgsl-cpu/tests/aggregates.rs` holds the two bit-identical there),
+  but only `matmul_gemv` is ever selected on the CPU backend. Each header
+  points at the other and says "edit the two together".
 * Selection is `gpu_core::upgrade` - the seam `.agents/rules/kernels.md` §A.4
   prescribes for a *drop-in*: same `Params{m,k,n}`, same bindings, same
   `n * 64` thread count, bit-identical results. It meets all four bars, so

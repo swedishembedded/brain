@@ -4,7 +4,7 @@
 // @what  Skinny-M INT8 matmul (out = dequant(x_q @ W_qᵀ)), one WORKGROUP per output COLUMN, REGISTER accumulators - the GPU decode-regime int8 GEMM
 // @how   DP4A packed int8, register block per thread, 64-thread workgroup tile, 1 barrier
 // @opt   5
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant int8
@@ -48,10 +48,7 @@
 // the fp32 register version reached essentially all of it - so int8's four-fold
 // smaller weights were buying a little over two-fold in time. This closes that.
 //
-// `@cpu no`, like the fp32 twin and for the same reason: the CPU JIT rejects a
-// function-local array in a work-group kernel outright, which is precisely the
-// constraint `matmul_i8_gemv`'s header records and why THAT kernel must keep
-// its workgroup accumulators. `backend-cpu` reports
+// Like the fp32 twin, the CPU JIT can run it, but `backend-cpu` reports
 // `workgroup_reductions: false` and never selects either.
 //
 // ## Bit-identity with `matmul_i8_gemv`

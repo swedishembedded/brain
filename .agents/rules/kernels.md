@@ -219,18 +219,20 @@ existing caller. Assume nothing about units.
 
 - **No atomics, no subgroups, no f16** — a tree reduction is
   shared-memory + a second pass, never an atomic accumulate.
-- **The CPU JIT rejects a FUNCTION-scope array inside a work-group kernel**
-  (`array local in a work-group kernel is unsupported` - its per-invocation
-  locals are SSA scalars). This is the *second* structural reason a kernel
-  cannot be `@cpu yes`, alongside the barrier count below, and it is what makes
-  a register-accumulator kernel a GPU-only SIBLING rather than a template
-  variant of a portable one (`matmul_gemv` / `matmul_gemv_reg`). Both reasons
-  are derived from the code by `scripts/build/kernelmeta.py::cpu`, so the
-  declared `@cpu` cell cannot drift from what the JIT will actually do - and
-  `wgsl_cpu::Jit` *skips* only these two, failing hard on anything else, so a
-  real port bug can never hide as a skipped kernel. Re-verify such a claim
-  before building on it; this one was still true, but the header asserting it
-  had never been rechecked.
+- **The CPU JIT runs idiomatic WGSL, but not everything.** It scalarizes
+  vectors, matrices, structs and fixed-size arrays (as values, `var`s and
+  places in any buffer), inlines user functions, and runs a function-scope
+  array in a work-group kernel as a per-invocation stack slot - so a
+  register-accumulator kernel (`matmul_gemv_reg`) is `@cpu yes` like its
+  portable sibling; it stays a SIBLING rather than a template variant because
+  the accumulator array is a different body, and `gpu_core::upgrade` only
+  selects it where `workgroup_reductions` holds. Outside that subset (atomics,
+  `switch`, float `%`, most of the rarer builtins) the JIT fails hard at
+  compile time, which `crates/wgsl-cpu/tests/compile_all.rs` turns into a test
+  failure for every registered kernel. Two WGSL guarantees it does NOT give: a
+  function-scope array (stack-backed) is not zero-filled - write it before you
+  read it, as every in-tree kernel does - and a per-invocation local may not
+  be live across the one barrier (a hard compile error, see below).
 - **The CPU backend's Cranelift JIT supports ONE top-level barrier per kernel.**
   A textbook two-pass mean/variance will not JIT. The LayerNorm kernels use the
   *shifted* one-pass form (`K = x[row,0]`; `mean = K + S1/d`,

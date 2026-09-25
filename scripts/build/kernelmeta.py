@@ -72,9 +72,9 @@ def structure(name, text):
         "dp4a": "dot4I8Packed" in code,
         "regblock": bool(re.search(r"_reg\d?$|_reg_", name)) or "rA[" in code,
         # A FUNCTION-scope array (`var name: array<...>`, i.e. no address
-        # space, unlike `var<workgroup>`/`var<storage>`/`var<private>`). The
-        # CPU JIT rejects one outright inside a work-group kernel - see
-        # `cpu()` below.
+        # space, unlike `var<workgroup>`/`var<storage>`/`var<private>`).
+        # Inside a work-group kernel it is a per-thread register block (see
+        # `gen-kernel-table.py`'s `@opt 5` check).
         "localarray": bool(re.search(r"\bvar\s+\w+\s*:\s*array<", code)),
         "loops": len(re.findall(r"for\s*\(\s*var\s+\w+[^;]*;\s*\w+\s*<\s*(?:%s)\b" % bound, code)),
     }
@@ -116,23 +116,17 @@ def opt(name, st):
 def cpu(name, st, native):
     """`yes` / `no` / `native` / `native-only`.
 
-    TWO independent reasons the CPU JIT cannot execute a work-group kernel,
-    both read from the code:
+    ONE structural reason the CPU JIT cannot execute a kernel, read from the
+    code: more than ONE top-level barrier - the JIT splits a body at one and
+    no more; with two or more it does not fail cleanly, it corrupts memory
+    (#26). It is the only compile error `wgsl_cpu::Jit` skips rather than
+    fails on (`is_unsupported_workgroup_structure` in
+    `crates/wgsl-cpu/src/lib.rs`), so this cell and the JIT cannot disagree.
 
-    * more than ONE top-level barrier - the JIT splits a body at one and no
-      more; with two or more it does not fail cleanly, it corrupts memory (#26);
-    * a FUNCTION-scope array inside a work-group kernel - `wgsl_cpu::Jit`
-      rejects it by name ("array local in a work-group kernel is unsupported",
-      `crates/wgsl-cpu/src/lib.rs`), because its per-invocation locals are SSA
-      scalars. `matmul_gemv_reg` is the kernel this reason exists for: its
-      register accumulators are exactly such an array, which is why it is the
-      GPU-only sibling of `matmul_gemv` rather than a variant of it.
-
-    Only a WORK-GROUP kernel is affected by the second reason; the JIT's
-    plain per-invocation path handles function-local arrays fine.
+    A function-scope array in a work-group kernel used to be a second reason;
+    the JIT now backs such an array with a per-invocation stack slot.
     """
-    workgroup = st["shared"] or st["barriers"]
-    jitable = st["barriers"] <= 1 and not (workgroup and st["localarray"])
+    jitable = st["barriers"] <= 1
     if name in native:
         return "native" if jitable else "native-only"
     return "yes" if jitable else "no"

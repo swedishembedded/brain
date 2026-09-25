@@ -4,7 +4,7 @@
 // @what  Skinny-M W4A8 matmul (out = dequant(x_q8 @ w_q4ᵀ)), one WORKGROUP per output COLUMN, REGISTER accumulators - the GPU decode-regime q4 GEMM
 // @how   nibble-unpack into DP4A packed int8, register block per thread, 64-thread workgroup tile, 1 barrier
 // @opt   5
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant int8

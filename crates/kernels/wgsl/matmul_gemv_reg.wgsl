@@ -4,7 +4,7 @@
 // @what  Skinny-M matmul (out = x @ W^T), one WORKGROUP per output COLUMN, REGISTER accumulators - the GPU decode-regime GEMM
 // @how   register block per thread, 64-thread workgroup tile, 1 barrier
 // @opt   5
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
@@ -43,13 +43,10 @@
 //
 // That is why this cannot be a `kernels::template` variant of `matmul_gemv`:
 // the templater rewrites literals, and a function-local accumulator array is a
-// different BODY. And it is why this kernel is `@cpu no` while its sibling is
-// `@cpu yes` - the CPU JIT rejects a function-local array in a work-group
-// kernel outright ("array local in a work-group kernel is unsupported",
-// `crates/wgsl-cpu/src/lib.rs`), which is exactly the constraint
-// `matmul_gemv`'s header records and the reason that kernel must keep its
-// workgroup accumulators. `backend-cpu` reports `workgroup_reductions: false`
-// and therefore never selects either of them; `gpu_core::upgrade` only
+// different BODY. The CPU JIT can run both (a work-group kernel's
+// function-local array is a per-invocation stack slot there), but
+// `backend-cpu` reports `workgroup_reductions: false` and therefore never
+// selects either of them; `gpu_core::upgrade` only
 // appends this one where `backend_api::select` heads the decode regime with
 // `WorkgroupPerOutput`.
 //

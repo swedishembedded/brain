@@ -43,11 +43,10 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
 // Accumulators live in workgroup memory (indexed [m*64 + t]) rather than a
-// function-local array: the CPU JIT's work-group execution model does not
-// support local arrays (`wgsl_cpu::Jit` returns "array local in a work-group
-// kernel is unsupported" - re-verified, not inherited), and workgroup memory
-// is fast enough that the extra stores are negligible next to the M-fold cut
-// in W traffic.
+// function-local array: on the backends that run this kernel (the CPU JIT,
+// which never selects the register sibling below, and the `@npu` path)
+// workgroup memory is fast enough that the extra stores are negligible next
+// to the M-fold cut in W traffic.
 //
 // **On a GPU that is no longer true, and this kernel is no longer the one that
 // runs.** Sizing `partial` for the worst case costs 8 KB of shared memory per
@@ -61,7 +60,7 @@ struct Params {
 // is what pins a GPU back onto this one.
 //
 // So THIS kernel keeps the 2048-float array on purpose: it is what the CPU JIT
-// and the `@npu` path can execute, and neither pays a shared-memory occupancy
+// and the `@npu` path execute, and neither pays a shared-memory occupancy
 // cost. Shrinking it here (`kernels::template`) was measured and is NOT what
 // ships - it recovers most, but not all, of what the register sibling gets,
 // and only on the backend that cannot use it.

@@ -70,9 +70,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> out:  array<f32>;
 
 // Workgroup rather than function-local, for the reason `matmul_gemv.wgsl`'s
-// own comment records: `wgsl_cpu::Jit` rejects a function-local array in a
-// work-group kernel outright, and this kernel is `@cpu yes`. Sized for the
-// worst legal `m` (32 rows x 64 threads).
+// own comment records. Sized for the worst legal `m` (32 rows x 64 threads).
 var<workgroup> partial: array<f32, 2048>;
 
 @compute @workgroup_size(64)

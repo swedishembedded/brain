@@ -122,8 +122,7 @@ def cross_check(name, text, meta):
         errs.append("@quant q4 declared but the kernel name has no 'q4' marker")
 
     # A function-scope array in a work-group kernel IS a per-thread register
-    # block - that is the only thing such an array can be, and it is why the
-    # CPU JIT refuses one (see `kernelmeta.cpu`). Without this the ragged
+    # block - that is the only thing such an array can be. Without this the ragged
     # sibling of a `_reg` kernel (`flash_attn_bidir_spans`, whose `q0`/`o0`
     # accumulators are that array) is read as having no register block purely
     # because its NAME does not end in `_reg2`.

@@ -3,7 +3,7 @@
 
 // @what  ray-evaluated splat backward: camera pose, rolling shutter and lens gradients
 // @how   64-thread workgroup tile, 1 barrier
-// @opt   3
+// @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   no

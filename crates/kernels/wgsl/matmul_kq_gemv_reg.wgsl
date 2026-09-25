@@ -4,7 +4,7 @@
 // @what  Skinny-M AFFINE K-quant (Q4_K/Q5_K) matmul, one WORKGROUP per output COLUMN, REGISTER accumulators - the GPU decode-regime affine GEMM
 // @how   DP4A packed int8, register block per thread, 64-thread workgroup tile, staging-time code unpack, per-word group dequant + one-thread-per-group min correction, 1 barrier
 // @opt   5
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant int8
@@ -50,12 +50,10 @@
 // bounded loop, so they land in registers, and `partial` is written ONCE per
 // row at the end and sized `MREG * 64`.
 //
-// `@cpu no`, for the identical reason `matmul_i8_gemv_reg` states: the CPU
-// JIT rejects a function-local array in a work-group kernel outright, which
-// is the second structural reason (alongside the barrier count) a
-// register-accumulator kernel is a GPU-only SIBLING, not a template variant
-// of the portable `matmul_kq_gemv`. `backend-cpu` reports
-// `workgroup_reductions: false` and never selects either.
+// A register-accumulator kernel is a SIBLING, not a template variant of the
+// portable `matmul_kq_gemv`: the accumulator array is a different body. The
+// CPU JIT can run it, but `backend-cpu` reports `workgroup_reductions: false`
+// and never selects either.
 //
 // ## Bit-identity with `matmul_kq_gemv`
 //

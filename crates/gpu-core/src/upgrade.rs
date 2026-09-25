@@ -107,12 +107,11 @@ pub(crate) struct Upgrade {
     /// `&[]` for every plain row - the `variants()` params list is simply
     /// `extra` followed by `(knob, bucket)`.
     pub extra: &'static [(&'static str, u32)],
-    /// `true` when `fast` cannot be compiled by the CPU JIT, so it must not be
-    /// appended to a kernel set destined for `backend-cpu`: `wgsl_cpu::Jit`
-    /// only *skips* a kernel it cannot express, and every skipped kernel costs
-    /// a parse plus a warning line for something that backend can never
-    /// dispatch anyway (`backend-cpu` reports `workgroup_reductions: false`,
-    /// so [`resolve`] would not activate the row there in any case).
+    /// `true` when `backend-cpu` can never dispatch `fast` - it reports
+    /// `workgroup_reductions: false`, so [`resolve`] never activates the row
+    /// there - and its variants are therefore not appended to a kernel set
+    /// destined for the CPU JIT: each would only cost a JIT compile (one per
+    /// bucket) for a kernel nothing selects.
     pub gpu_only: bool,
 }
 
@@ -623,9 +622,8 @@ mod tests {
         assert_eq!(apply(&active, kq4.slow, Some(&[33, 4096, 4096]), 64).0, kq4.slow);
     }
 
-    /// The CPU JIT never receives a `gpu_only` row's variants: it cannot
-    /// compile them and could not dispatch them if it could
-    /// (`workgroup_reductions: false`).
+    /// The CPU JIT never receives a `gpu_only` row's variants: `backend-cpu`
+    /// could not dispatch them (`workgroup_reductions: false`).
     #[test]
     fn a_gpu_only_row_is_not_appended_for_the_cpu_jit() {
         assert!(expand(&[("matmul_gemv", "b")], true).is_none());
@@ -682,16 +680,20 @@ mod tests {
         }
     }
 
-    /// A `gpu_only` row's fast kernel must DECLARE `@cpu no` - that header is
-    /// what `wgsl-cpu`'s skip list and `kernelmeta.py`'s `@cpu` derivation are
-    /// cross-checked against, so a row claiming GPU-only over a kernel the JIT
-    /// would happily run is a table bug.
+    /// `gpu_only` is a claim about selection, so it is checked against the
+    /// policy: on the caps `backend-cpu` reports, no `gpu_only` row may ever
+    /// select its fast variant - otherwise leaving it out of the CPU kernel
+    /// set would silently cost that backend a faster kernel.
     #[test]
-    fn gpu_only_rows_declare_cpu_no() {
+    fn gpu_only_rows_are_never_selected_on_cpu_caps() {
+        use backend_api::DeviceClass;
+        let mut cpu = DeviceCaps::portable_baseline(DeviceClass::Cpu);
+        cpu.workgroup_reductions = false; // what `backend-cpu` reports
         for u in UPGRADES.iter().filter(|u| u.gpu_only) {
-            assert!(
-                u.src.lines().any(|l| l.trim_start().starts_with("// @cpu") && l.contains("no")),
-                "{} is marked gpu_only but does not declare `@cpu no`",
+            assert_ne!(
+                select::candidates(u.op, u.probe, &cpu).first(),
+                Some(&select::KernelVariant::WorkgroupPerOutput),
+                "{} is marked gpu_only but the CPU policy would select it",
                 u.fast
             );
         }
