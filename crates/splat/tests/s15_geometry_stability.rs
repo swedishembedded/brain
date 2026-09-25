@@ -204,7 +204,9 @@ fn the_position_budget_binds_on_the_cpu_backend() {
     }
 
     let free = FitCfg { iters: 60, lr: 5e-3, log_every: 0, ..Default::default() };
-    let budgeted = FitCfg { position_budget: 1.0, scale_budget: 0.5, rotation_budget: 0.5, ..free };
+    // Half a radius: a free fit of this scene drifts about 0.57 of one, so a
+    // full radius asked for would barely separate the two.
+    let budgeted = FitCfg { position_budget: 0.5, scale_budget: 0.5, rotation_budget: 0.5, ..free };
     let drift = |out: &Splats| {
         let mut d: Vec<f32> = (0..out.len())
             .map(|i| {
@@ -226,5 +228,5 @@ fn the_position_budget_binds_on_the_cpu_backend() {
         "the per-component descriptor did not bind on this backend: {db:.3}r budgeted against \
          {da:.3}r free"
     );
-    assert!(db < 1.0, "budgeted drift {db:.3}r exceeds the one radius asked for");
+    assert!(db < 0.5, "budgeted drift {db:.3}r exceeds the half radius asked for");
 }

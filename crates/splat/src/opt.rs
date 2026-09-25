@@ -407,8 +407,8 @@ impl FitCfg {
     /// the surface regularizers once the scene has a shape (40%) on every
     /// fourth step, and two views per step rather than all of them.
     ///
-    /// Geometry moves at rates relative to the gaussians' own size - over the
-    /// whole fit, 30 median radii of travel, 10 of resize, 2 of quaternion -
+    /// Geometry moves at rates relative to each gaussian's own size - over the
+    /// whole fit, 30 of its radii of travel, 10 of resize, 2 of quaternion -
     /// and no gaussian may exceed 32 pixels of its finest camera. With the
     /// parameters linear and Adam stepping about `lr` whatever the gradient,
     /// a raw `lr` of 5e-3 in a scene one unit across moves positions ~30x
@@ -735,6 +735,13 @@ fn fit_inner(
     // With density control off there is exactly ONE stage, and this is the
     // function it always was - same buffers, same Adam state, start to finish.
     let stage_len = if cfg.densify_every == 0 { cfg.iters } else { cfg.densify_every };
+    // The unit of every geometry budget: the scene as handed in, fixed for the
+    // whole fit. How far a capture's gaussians have to travel is a property
+    // of the capture - an object structure from motion left without points
+    // is as far from its neighbours after density control subdivides them as
+    // before - so re-measuring the median on each stage's population shrank
+    // every step with every round and left such objects half grown.
+    let radius = median_radius(init);
     let mut scene = init.clone();
     let mut cams: Vec<Camera> = targets.iter().map(|t| t.cam).collect();
     let mut loss = 0.0f32;
@@ -768,13 +775,13 @@ fn fit_inner(
                 // the half-size cameras carry the SAME poses, so pose
                 // refinement made at half resolution carries back
                 let mut small: Vec<Camera> = cams.iter().zip(&half).map(|(c, t)| Camera { c2w: c.c2w, ..t.cam }).collect();
-                let out = fit_stage(gpu, ks, &scene, &half, &mut small, cfg, isp, iters, done, &mut tap);
+                let out = fit_stage(gpu, ks, &scene, radius, &half, &mut small, cfg, isp, iters, done, &mut tap);
                 for (c, s) in cams.iter_mut().zip(&small) {
                     c.c2w = s.c2w;
                 }
                 out
             } else {
-                fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, isp, iters, done, &mut tap)
+                fit_stage(gpu, ks, &scene, radius, targets, &mut cams, cfg, isp, iters, done, &mut tap)
             }
         };
         scene = out.scene;
@@ -866,20 +873,15 @@ fn fit_inner(
     (scene, cams, loss)
 }
 
-/// Grow the scene where the loss is still pulling hardest, and drop what has
-/// gone transparent.
-///
-/// `grad` is the accumulated magnitude of each gaussian's positional gradient.
-/// Upstream 3DGS thresholds that at an absolute 2e-4; a FRACTION is used here
-/// instead because this loss is normalized per pixel and per view, so the
-/// absolute scale of a gradient depends on image size and view count and no
-/// constant transfers between scenes. A fraction also bounds growth by
-/// construction, which an absolute threshold does not.
-///
-/// Large gaussians SPLIT (two children at 1/1.6 the scale, offset along the
-/// parent's dominant axis) and small ones CLONE, following the reference: a
-/// big gaussian covering detail it cannot represent needs subdividing, while a
-/// small one in an under-populated region needs a neighbour.
+/// The median gaussian's largest axis. Median rather than mean because a
+/// reconstruction's size distribution has a long tail that a mean would let
+/// set the rate for everything else.
+fn median_radius(s: &Splats) -> f32 {
+    let mut r: Vec<f32> = (0..s.len()).map(|i| s.scales[i * 3..i * 3 + 3].iter().copied().fold(0.0f32, f32::max)).collect();
+    r.sort_by(f32::total_cmp);
+    r.get(r.len() / 2).copied().unwrap_or(0.0)
+}
+
 /// Deterministic per-gaussian jitter in [0,1). A fit has to give the same
 /// answer twice, so exploration is pseudo-random in the scene's own indices
 /// rather than in wall-clock entropy.
@@ -926,6 +928,20 @@ pub fn densify_for_test(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f3
     densify(scene, grad, cfg, eye)
 }
 
+/// Grow the scene where the loss is still pulling hardest, and drop what has
+/// gone transparent.
+///
+/// `grad` is the accumulated magnitude of each gaussian's positional gradient.
+/// Upstream 3DGS thresholds that at an absolute 2e-4; a FRACTION is used here
+/// instead because this loss is normalized per pixel and per view, so the
+/// absolute scale of a gradient depends on image size and view count and no
+/// constant transfers between scenes. A fraction also bounds growth by
+/// construction, which an absolute threshold does not.
+///
+/// Large gaussians SPLIT (two children at 1/1.6 the scale, offset along the
+/// parent's dominant axis) and small ones CLONE, following the reference: a
+/// big gaussian covering detail it cannot represent needs subdividing, while a
+/// small one in an under-populated region needs a neighbour.
 fn densify(scene: &mut Splats, grad: &[f32], cfg: &FitCfg, eye: [f32; 3]) {
     let n = scene.len();
     if n == 0 || grad.len() != n {
@@ -1086,6 +1102,7 @@ fn fit_stage(
     gpu: &Gpu,
     ks: Kernels,
     init: &Splats,
+    radius: f32,
     targets: &[TargetView],
     cams: &mut [Camera],
     cfg: &FitCfg,
@@ -1236,17 +1253,11 @@ fn fit_stage(
     };
     // Per-component learning rates for the packed gaussian, derived from the
     // scene rather than configured in absolute units: a budget is a multiple
-    // of the MEDIAN gaussian's own radius, and Adam's step is ~lr, so
+    // of `radius` (see [`median_radius`]), and Adam's step is ~lr, so
     // `budget * radius / iters` is the per-step rate that spends exactly that
-    // budget over the fit. Median rather than mean because a reconstruction's
-    // size distribution has a long tail that a mean would let set the rate for
-    // everything else.
+    // budget over the fit.
     let (desc_geo, lr_pos) = {
-        let mut r: Vec<f32> = (0..n)
-            .map(|i| init.scales[i * 3..i * 3 + 3].iter().copied().fold(0.0f32, f32::max))
-            .collect();
-        r.sort_by(f32::total_cmp);
-        let rad = r.get(n / 2).copied().unwrap_or(0.0).max(1e-12);
+        let rad = radius.max(1e-12);
         let steps = cfg.iters.max(1) as f32;
         let mult = |budget: f32, unit: f32| {
             if budget > 0.0 && cfg.lr > 0.0 { budget * unit / steps / cfg.lr } else { 1.0 }
@@ -1576,7 +1587,26 @@ fn fit_stage(
         let mut op = gpu.read(&p_op, n);
         prof.add("clamp: readback", tm.elapsed());
         let tm = std::time::Instant::now();
-        // The chain's exploration noise, before the clamps rather than after,
+        // The budgets are in each gaussian's OWN radii: the device stepped
+        // every position and scale at the rate of the reference radius, and
+        // each gaussian's step is rescaled here by its size relative to it.
+        // One shared rate cannot serve both ends of a scene: the fine
+        // gaussians density control makes jitter into fog at the rate a coarse
+        // one needs to grow across an object structure from motion left
+        // empty, and at the fine ones' rate the coarse ones never arrive.
+        if cfg.position_budget > 0.0 || cfg.scale_budget > 0.0 {
+            let rad = radius.max(1e-12);
+            for i in 0..n {
+                let prev = &host_geo[i * 10..i * 10 + 10];
+                let own = prev[3..6].iter().copied().fold(0.0f32, f32::max) / rad;
+                let (from, to) = (if cfg.position_budget > 0.0 { 0 } else { 3 }, if cfg.scale_budget > 0.0 { 6 } else { 3 });
+                for k in from..to {
+                    geo[i * 10 + k] = prev[k] + (geo[i * 10 + k] - prev[k]) * own;
+                }
+            }
+        }
+        // The chain's exploration noise, after the rescale (Eq. 8 already
+        // scales it by each gaussian's own covariance) and before the clamps,
         // so a gaussian cannot be pushed out of bounds and left there. It
         // rides along on the readback the clamps already needed, so sampling
         // costs no extra transfer.
