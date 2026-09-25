@@ -11,7 +11,7 @@
 //! and intrinsics the scene was actually built on, so this reads them back.
 use splat::quality::{psnr, sharpness_ratio};
 use splat::renderer::{GpuSplats, Renderer};
-use splat::types::{Camera, RenderOpts};
+use splat::types::RenderOpts;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -20,7 +20,7 @@ fn main() {
     // filter at 0.1, and a bare number an explicit uncompensated kernel size.
     let sel = a.get(3).cloned().unwrap_or_else(|| "inria".into());
     let s = splat::ply::read(ply).unwrap();
-    let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(cj).unwrap()).unwrap();
+    let cams = splat::types::cameras_from_json(&std::fs::read_to_string(cj).unwrap()).unwrap();
     let g = gpu_core::Gpu::new(splat::PIPELINES);
     let ks = splat::Kernels::at(0);
     let o = match sel.as_str() {
@@ -30,14 +30,7 @@ fn main() {
     };
     let mut ps = vec![];
     let mut ss = vec![];
-    for (i, c) in j.as_array().unwrap().iter().enumerate() {
-        let m: Vec<f32> = c["c2w"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let cam = Camera {
-            c2w: m.try_into().unwrap(),
-            fx: c["fx"].as_f64().unwrap() as f32, fy: c["fy"].as_f64().unwrap() as f32,
-            cx: c["cx"].as_f64().unwrap() as f32, cy: c["cy"].as_f64().unwrap() as f32,
-            width: c["width"].as_u64().unwrap() as u32, height: c["height"].as_u64().unwrap() as u32,
-        };
+    for (i, cam) in cams.into_iter().enumerate() {
         let p = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "ppm" || x == "png" || x == "jpg" || x == "jpeg"))
             .collect::<std::collections::BTreeSet<_>>().into_iter().nth(i).unwrap();

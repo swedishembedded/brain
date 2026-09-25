@@ -56,6 +56,52 @@ impl Camera {
     }
 }
 
+/// Parse a `cameras.json` document: a JSON array of
+/// `{c2w: [16], fx, fy, cx, cy, width, height}`. The one reader - `fit` over
+/// the wire, the CLI and the tools all take cameras in this shape.
+pub fn cameras_from_json(raw: &str) -> Result<Vec<Camera>, String> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("cameras must be a JSON array: {e}"))?;
+    let arr = v.as_array().ok_or("cameras must be a JSON array")?;
+    arr.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let c2w: Vec<f32> = c["c2w"]
+                .as_array()
+                .ok_or_else(|| format!("camera {i} has no 'c2w'"))?
+                .iter()
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+                .collect();
+            let c2w: [f32; 16] = c2w.try_into().map_err(|v: Vec<f32>| format!("camera {i}: 'c2w' has {} entries, expected 16", v.len()))?;
+            let get_f = |k: &str| c[k].as_f64().ok_or_else(|| format!("camera {i} has no '{k}'"));
+            let get_u = |k: &str| c[k].as_u64().ok_or_else(|| format!("camera {i} has no '{k}'"));
+            Ok(Camera {
+                c2w,
+                fx: get_f("fx")? as f32,
+                fy: get_f("fy")? as f32,
+                cx: get_f("cx")? as f32,
+                cy: get_f("cy")? as f32,
+                width: get_u("width")? as u32,
+                height: get_u("height")? as u32,
+            })
+        })
+        .collect()
+}
+
+/// One camera as a `cameras.json` entry.
+pub fn camera_to_json(c: &Camera) -> serde_json::Value {
+    serde_json::json!({
+        "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+        "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
+        "width": c.width, "height": c.height,
+    })
+}
+
+/// The `cameras.json` document [`cameras_from_json`] reads.
+pub fn cameras_to_json(cams: &[Camera]) -> String {
+    let arr: Vec<serde_json::Value> = cams.iter().map(camera_to_json).collect();
+    serde_json::to_string_pretty(&arr).expect("plain numbers serialize")
+}
+
 /// Frame a scene of known axis-aligned bounds: eye backed off along -Z from
 /// the bounds center, looking back at it. Shared by the CLI (`splat_cli::render`/
 /// `::view`) and `caps::render` - hoisted here so neither holds its own copy.

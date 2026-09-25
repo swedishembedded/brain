@@ -592,17 +592,7 @@ fn prune_cmd(argv: &[String]) {
 
 /// Write cameras in the `cameras.json` format [`read_cameras`] reads.
 pub fn write_cameras(path: &str, cams: &[Camera]) {
-    let js: Vec<serde_json::Value> = cams
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
-                "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
-                "width": c.width, "height": c.height,
-            })
-        })
-        .collect();
-    std::fs::write(path, serde_json::to_string_pretty(&js).unwrap()).unwrap_or_else(|e| {
+    std::fs::write(path, splat::types::cameras_to_json(cams)).unwrap_or_else(|e| {
         eprintln!("cannot write {path}: {e}");
         std::process::exit(1);
     });
@@ -740,29 +730,14 @@ fn train_cmd(argv: &[String]) {
 }
 
 pub fn read_cameras(path: &str) -> Vec<Camera> {
-    let j: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("cannot read {path}: {e}");
-            std::process::exit(1);
-        }))
-        .expect("valid cameras.json");
-    j.as_array()
-        .expect("array")
-        .iter()
-        .map(|c| {
-            let m: Vec<f32> =
-                c["c2w"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-            Camera {
-                c2w: m.try_into().expect("16 c2w entries"),
-                fx: c["fx"].as_f64().unwrap() as f32,
-                fy: c["fy"].as_f64().unwrap() as f32,
-                cx: c["cx"].as_f64().unwrap() as f32,
-                cy: c["cy"].as_f64().unwrap() as f32,
-                width: c["width"].as_u64().unwrap() as u32,
-                height: c["height"].as_u64().unwrap() as u32,
-            }
-        })
-        .collect()
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    splat::types::cameras_from_json(&raw).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    })
 }
 
 fn read_cams(path: &str) -> Vec<[f64; 16]> {

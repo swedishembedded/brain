@@ -209,35 +209,6 @@ fn render(inv: &Invocation, hot: &Mutex<Option<(u64, RenderSession)>>) -> Action
 
 // ===================== fit: no caching - a fresh optimization every call =====================
 
-/// One camera entry of the `views` JSON param - the same shape
-/// `mirror_cli.rs::write_cameras_json` writes.
-fn parse_views(raw: &str) -> Result<Vec<Camera>, String> {
-    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("splat fit: 'views' must be a JSON array: {e}"))?;
-    let arr = v.as_array().ok_or("splat fit: 'views' must be a JSON array")?;
-    arr.iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let c2w: Vec<f32> = c["c2w"]
-                .as_array()
-                .ok_or_else(|| format!("splat fit: views[{i}] missing 'c2w'"))?
-                .iter()
-                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                .collect();
-            let c2w: [f32; 16] = c2w.try_into().map_err(|v: Vec<f32>| format!("splat fit: views[{i}] 'c2w' has {} entries, expected 16", v.len()))?;
-            let get_f = |k: &str| c[k].as_f64().ok_or_else(|| format!("splat fit: views[{i}] missing '{k}'"));
-            Ok(Camera {
-                c2w,
-                fx: get_f("fx")? as f32,
-                fy: get_f("fy")? as f32,
-                cx: get_f("cx")? as f32,
-                cy: get_f("cy")? as f32,
-                width: c["width"].as_u64().ok_or_else(|| format!("splat fit: views[{i}] missing 'width'"))? as u32,
-                height: c["height"].as_u64().ok_or_else(|| format!("splat fit: views[{i}] missing 'height'"))? as u32,
-            })
-        })
-        .collect()
-}
-
 /// Run one `fit` invocation (already validated against [`fit_spec`]).
 ///
 /// Cancellation: `on_step` reports [`Progress::step`] then checks
@@ -253,7 +224,7 @@ fn fit(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let init = crate::ply::parse(&scene_blob.bytes)?;
     let frames = capability::blob::decode_video(inv, "video")?;
     let views_raw = inv.get_str("views").ok_or("splat fit: missing required param 'views'")?;
-    let cams = parse_views(&views_raw)?;
+    let cams = crate::types::cameras_from_json(&views_raw).map_err(|e| format!("splat fit: 'views': {e}"))?;
     if cams.len() != frames.len() {
         return Err(format!("splat fit: {} cameras in 'views' but {} frames in 'video'", cams.len(), frames.len()));
     }

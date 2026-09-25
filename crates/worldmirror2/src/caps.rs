@@ -53,7 +53,6 @@ use capability::{
 };
 use gpu_core::Gpu;
 use serde_json::json;
-use splat::types::Camera;
 
 use crate::config::MirrorConfig;
 use crate::gaussians::{assemble, frame_maps, AssembleOpts};
@@ -102,12 +101,6 @@ pub fn manifest_resident() -> Manifest {
     manifest().for_serving()
 }
 
-/// One camera as the `cameras` output's JSON shape - the same fields
-/// `mirror_cli.rs::write_cameras_json` and `splat::caps::fit`'s `views` param
-/// use, so a client that already speaks one of those shapes speaks this one.
-fn camera_json(c: &Camera) -> serde_json::Value {
-    json!({"c2w": c.c2w.to_vec(), "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy, "width": c.width, "height": c.height})
-}
 
 /// Interleaved HWC f32 (the video-blob wire layout) to concatenated CHW - the
 /// layout [`Mirror::forward`] expects. `pub` so
@@ -229,7 +222,7 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation) -> ActionResult 
         splats = splat::prune::voxel_merge(&splats, &gweights, prune_voxel, 0);
     }
     let ply_bytes = splat::ply::serialize(&splats)?;
-    let cameras: Vec<serde_json::Value> = cams.iter().map(camera_json).collect();
+    let cameras: Vec<serde_json::Value> = cams.iter().map(splat::types::camera_to_json).collect();
 
     let mut out = Outcome::new().set("cameras", json!(cameras)).blob("scene", Blob::new(Media::Bytes, ply_bytes));
     if want_maps {

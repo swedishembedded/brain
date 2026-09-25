@@ -467,20 +467,6 @@ fn normal_source(v: Option<&str>) -> NormalSource {
     }
 }
 
-fn write_cameras_json(path: &str, cams: &[splat::types::Camera]) {
-    let arr: Vec<serde_json::Value> = cams
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "c2w": c.c2w.to_vec(),
-                "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
-                "width": c.width, "height": c.height,
-            })
-        })
-        .collect();
-    std::fs::write(path, serde_json::to_string_pretty(&arr).unwrap())
-        .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
-}
 
 /// Export model stages as fp32 ONNX for OpenVINO (NPU/CPU). `--stage dino`
 /// (per-frame encoder) or `--stage trunk` (fixed-S alternating-attention
@@ -621,7 +607,7 @@ fn infer(argv: &[String]) {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
         });
-        write_cameras_json(&format!("{out_dir}/cameras.json"), cams);
+        crate::splat_cli::write_cameras(&format!("{out_dir}/cameras.json"), cams);
         println!("wrote {ply_path} ({} gaussians) + {out_dir}/cameras.json", splats.len());
         if maps {
             for fi in 0..s {
