@@ -91,6 +91,58 @@ if [ "${#script_dirs[@]}" -gt 0 ]; then
 	done
 fi
 
+# ------------------------------------------------------------------ images
+# A README pointing at an image the repo does not CARRY renders as a broken box
+# for everyone who clones it, and the author is the one person who cannot see
+# it: the untracked file is sitting right there in their working tree. The
+# mirror of it - an image nothing points at - is weight every clone pays for and
+# no reader ever sees, which is what a generated chart written into a tracked
+# directory turns into. Neither survives review reliably, so both are measured.
+python3 - <<'PY' || fail=1
+import pathlib, re, subprocess, sys
+
+tracked = set(subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split())
+IMG = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+ref_re = re.compile(r"!\[[^\]]*\]\(([^)\s]+)")
+src_re = re.compile(r"<img[^>]+src=\"([^\"]+)\"")
+root = pathlib.Path.cwd()
+ok = True
+referenced = set()
+
+# Every tracked markdown under samples/, not just README.md - a sample may
+# carry a second document (arena's CRITERIA.md), and scanning only READMEs
+# would report an image that document legitimately uses as an orphan.
+for rm in sorted(pathlib.Path(p) for p in tracked if p.startswith("samples/") and p.lower().endswith(".md")):
+    if not rm.exists():
+        continue
+    text = rm.read_text()
+    for ref in ref_re.findall(text) + src_re.findall(text):
+        if ref.startswith(("http://", "https://", "data:")):
+            continue
+        target = (rm.parent / ref).resolve()
+        if not target.is_relative_to(root):
+            print(f"FAIL {rm}: image {ref!r} escapes the repository")
+            ok = False
+            continue
+        rel = str(target.relative_to(root))
+        referenced.add(rel)
+        if not target.exists():
+            print(f"FAIL {rm}: image {ref!r} does not exist")
+            ok = False
+        elif rel not in tracked:
+            print(f"FAIL {rm}: image {ref!r} exists but is NOT in git - it would be "
+                  f"a broken image for everyone who clones it (git add it)")
+            ok = False
+
+for f in sorted(p for p in tracked if p.startswith("samples/") and pathlib.Path(p).suffix.lower() in IMG):
+    if f not in referenced:
+        print(f"FAIL {f}: committed but no sample README references it - a generated "
+              f"chart belongs in an ignored output directory, not in git")
+        ok = False
+
+sys.exit(0 if ok else 1)
+PY
+
 # ------------------------------------------------- surfaces, closure, budget
 # One python pass: read the SDK's feature table, then check every sample's
 # declaration and real dependency graph against it.

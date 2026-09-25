@@ -36,6 +36,13 @@ Regardless of kind, a sample is `samples/.../<name>/`, always containing:
 - **`README.md`** - what it demonstrates, what it needs, how to run it, and
   what it needs to build (for a Rust sample). This compiles into the docs
   manual (`make docs`) - see `scripts/build/gen-samples-manifest.py`.
+- Optionally, **`docs/`** - images the README displays. An image a README
+  points at must be committed: the author is the one person who cannot see a
+  broken one, because the untracked file is sitting in their working tree. The
+  converse holds too - an image nothing points at is weight every clone pays
+  for, which is what a generated chart written into a tracked directory becomes,
+  so point plotting scripts at an ignored output directory instead.
+  `make check/samples` measures both directions.
 - Optionally, **`fetch-data.sh`** - a script that pulls or generates the
   sample's own input data on demand. No sample commits a fixture; if it needs
   a CSV, an image, or a checkpoint conversion, it fetches or generates it

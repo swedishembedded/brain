@@ -229,7 +229,7 @@ move off 1 and 1. Nothing of the game's own is displaced, the same process can
 score on E1M1 straight afterwards, and the sky, music and intermission art stay
 the ones the IWAD ships.
 
-A training run's own stdout is the chart: `./plot-run.py out/train.log docs/`
+A training run's own stdout is the chart: `./plot-run.py out/train.log out/`
 draws return, wins and progress per iteration from the lines it prints.
 
 ### Prove it generalizes
