@@ -26,14 +26,23 @@
 //! invocation owns a disjoint output element there is no cross-invocation
 //! synchronisation to model.
 //!
-//! Only the IR subset the 54 kernels actually use is handled (scalar f32/u32/i32,
-//! the `global_invocation_id` / `num_workgroups` builtins, storage + uniform
-//! bindings, `if`/`loop`, and a closed set of math intrinsics). Anything outside
-//! that subset is a hard error at compile time rather than silently miscompiled.
+//! The handled IR subset: f32/u32/i32/bool scalars and, by scalarization, the
+//! vectors, matrices, structs and fixed-size arrays built from them - as
+//! values, `var`s (register-backed, or stack-backed when they contain an
+//! array), and places in the uniform, storage and work-group buffers laid out
+//! per WGSL's host-shareable rules ([`shape`], [`aggregate`]); user functions,
+//! inlined at their call sites ([`inline`]); the builtin input vectors;
+//! `if`/`loop`/`break`/`continue`/`return`; and a closed set of math, vector
+//! and matrix builtins. Anything outside that subset is a hard error at
+//! compile time rather than silently miscompiled.
+
+mod aggregate;
+mod inline;
+mod shape;
 
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
-    types, AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value,
+    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -45,6 +54,9 @@ use naga::{
     AddressSpace, BinaryOperator, Block, BuiltIn, Expression, Handle, Literal, MathFunction,
     Scalar, ScalarKind, Statement, TypeInner, UnaryOperator,
 };
+
+use inline::Frame;
+use shape::Shape;
 
 /// The ABI of every compiled kernel.
 pub type KernelFn =
@@ -71,21 +83,18 @@ pub struct Jit {
     wg_size: Vec<Option<u32>>,
 }
 
-/// The compile errors that mean "this backend's work-group execution model
+/// The compile error that means "this backend's work-group execution model
 /// cannot express this kernel", as opposed to "this kernel or this compiler is
-/// broken". Only these two are skippable; everything else is a hard error, so a
-/// genuine port bug can never masquerade as a skipped kernel.
+/// broken": more than one top-level barrier (`compile_one_wg`'s
+/// split-at-barrier model). Only it is skippable; everything else is a hard
+/// error, so a genuine port bug can never masquerade as a skipped kernel.
 ///
-/// Both are structural facts a kernel DECLARES in its header (`@cpu no` /
+/// It is a structural fact a kernel DECLARES in its header (`@cpu no` /
 /// `native-only`) and that `scripts/build/kernelmeta.py::cpu` derives from the
-/// same code the compiler reads, so the two can never disagree silently.
+/// same code the compiler reads, so the two can never disagree silently. No
+/// other error message may therefore contain the word "barrier".
 fn is_unsupported_workgroup_structure(e: &str) -> bool {
-    let e = e.to_lowercase();
-    // > 1 top-level barrier (`compile_one`'s split-at-barrier model).
-    e.contains("barrier")
-        // A function-scope array in a work-group kernel (per-invocation locals
-        // are SSA scalars on that path).
-        || e.contains("array local in a work-group kernel")
+    e.to_lowercase().contains("barrier")
 }
 
 // The JIT-compiled code is immutable after `new` returns; only `&Jit` is shared.
@@ -132,7 +141,7 @@ impl Jit {
 
         for (name, src) in kernels {
             ctx.func.signature = kernel_signature(module.target_config().pointer_type());
-            match compile_one(name, src, &mut module, &math, &mut ctx, &mut fctx) {
+            match compile_one(src, &mut module, &math, &mut ctx, &mut fctx) {
                 Ok(wg) => {
                     wg_size.push(wg);
                     let id = module
@@ -145,17 +154,13 @@ impl Jit {
                     ids.push(Some(id));
                 }
                 // A work-group kernel the CPU model can't express: a tiled GEMM
-                // with a barrier inside the K-loop, or a FUNCTION-scope array
-                // in a work-group kernel (`matmul_gemv_reg`'s register
-                // accumulators - this path's per-invocation locals are SSA
-                // scalars, see `Err("array local in a work-group kernel ...")`
-                // below). Skip it - such a kernel runs via a native fast path
-                // on CPU or on the GPU backend, and every one of them declares
-                // `@cpu no`/`native-only` (cross-checked by
-                // `scripts/build/kernelmeta.py::cpu`, which derives that cell
-                // from these same two structural facts). Genuine compile errors
-                // - anything that is not one of the two - still fail hard, so a
-                // real port bug cannot hide as a skip.
+                // with a barrier inside the K-loop. Skip it - such a kernel
+                // runs via a native fast path on CPU or on the GPU backend,
+                // and every one of them declares `@cpu no`/`native-only`
+                // (cross-checked by `scripts/build/kernelmeta.py::cpu`, which
+                // derives that cell from the same structural fact). Genuine
+                // compile errors still fail hard, so a real port bug cannot
+                // hide as a skip.
                 Err(e) if is_unsupported_workgroup_structure(&e) => {
                     eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
                     wg_size.push(None);
@@ -247,6 +252,7 @@ extern "C" fn w_sinf(x: f32) -> f32 { x.sin() }
 extern "C" fn w_cosf(x: f32) -> f32 { x.cos() }
 extern "C" fn w_tanhf(x: f32) -> f32 { x.tanh() }
 extern "C" fn w_powf(x: f32, y: f32) -> f32 { x.powf(y) }
+extern "C" fn w_atan2f(y: f32, x: f32) -> f32 { y.atan2(x) }
 
 fn math_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
@@ -256,6 +262,7 @@ fn math_symbols() -> Vec<(&'static str, *const u8)> {
         ("brain_cosf", w_cosf as *const u8),
         ("brain_tanhf", w_tanhf as *const u8),
         ("brain_powf", w_powf as *const u8),
+        ("brain_atan2f", w_atan2f as *const u8),
     ]
 }
 
@@ -263,6 +270,14 @@ struct MathRefs {
     // FuncIds of imported intrinsics; turned into FuncRefs per function.
     unary: HashMap<&'static str, cranelift_module::FuncId>,
     powf: cranelift_module::FuncId,
+    atan2: cranelift_module::FuncId,
+}
+
+/// The imported intrinsics as references usable from one function.
+struct FnRefs {
+    unary: HashMap<&'static str, FuncRef>,
+    powf: FuncRef,
+    atan2: FuncRef,
 }
 
 impl MathRefs {
@@ -284,7 +299,18 @@ impl MathRefs {
         let powf = module
             .declare_function("brain_powf", Linkage::Import, &bin_sig)
             .map_err(|e| format!("declare brain_powf: {e}"))?;
-        Ok(MathRefs { unary, powf })
+        let atan2 = module
+            .declare_function("brain_atan2f", Linkage::Import, &bin_sig)
+            .map_err(|e| format!("declare brain_atan2f: {e}"))?;
+        Ok(MathRefs { unary, powf, atan2 })
+    }
+
+    fn import(&self, module: &mut JITModule, func: &mut cranelift_codegen::ir::Function) -> FnRefs {
+        FnRefs {
+            unary: self.unary.iter().map(|(k, id)| (*k, module.declare_func_in_func(*id, func))).collect(),
+            powf: module.declare_func_in_func(self.powf, func),
+            atan2: module.declare_func_in_func(self.atan2, func),
+        }
     }
 }
 
@@ -335,11 +361,14 @@ impl Ty {
     }
 }
 
-/// The result of evaluating a naga expression: either a materialised scalar or a
-/// "place" (an addressable location) that a `Load`/`Store` resolves.
+/// The result of evaluating a naga expression: a materialised scalar, an
+/// aggregate value, or a "place" (an addressable location) that a
+/// `Load`/`Store` resolves.
 #[derive(Clone, Copy)]
 enum Eval {
     Scalar(Value, Ty),
+    /// An aggregate value: its flattened scalars are `Tr::aggs[id]`.
+    Agg(u32, Shape),
     Place(Place),
 }
 
@@ -347,8 +376,16 @@ enum Eval {
 enum Place {
     /// A mutable scalar function-local (`var`) backed by a Cranelift SSA variable.
     Local(Variable, Ty),
-    /// A memory element: `addr` bytes, of element type `elem`.
-    Mem { addr: Value, elem: Ty },
+    /// A scalar in memory at `addr`; `readonly` for the uniform buffer.
+    Mem { addr: Value, elem: Ty, readonly: bool },
+    /// An aggregate in memory at `addr + off`, in WGSL's host-shareable layout.
+    Ptr { addr: Value, off: u32, shape: Shape, readonly: bool },
+    /// Scalars `[start, start + flat_len(shape))` of variable group `group`
+    /// (a register-backed aggregate local).
+    Vars { group: u32, start: u32, shape: Shape },
+    /// A dynamically indexed part of variable group `group`: candidate `j`
+    /// of `n` starts at scalar `lo + j * step`, and `idx` picks one.
+    VarsDyn { group: u32, lo: u32, step: u32, n: u32, idx: Value, shape: Shape },
 }
 
 /// Backing storage for a naga function-local variable.
@@ -356,26 +393,39 @@ enum Place {
 enum LocalSlot {
     /// A scalar `var`: a Cranelift SSA variable.
     Scalar(Variable, Ty),
-    /// A fixed-size array `var`: `base` is its stack address, computed once in the
-    /// entry block so it dominates every use.
-    Array { base: Value, elem: Ty },
+    /// A vector, matrix or struct `var` without arrays: one Cranelift
+    /// variable per scalar, in variable group `group`.
+    Vars { group: u32, shape: Shape },
+    /// A `var` containing an array: a stack slot at `base`, computed where
+    /// the local is declared so it dominates every use.
+    Stack { base: Value, shape: Shape },
 }
 
-/// `(element scalar type, element count)` of a local fixed-size array type.
-fn local_array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32), String> {
+/// Load/store flags: the uniform buffer is immutable for a whole dispatch, so
+/// its loads may be merged, hoisted or dropped when unused.
+fn mem_flags(readonly: bool) -> MemFlags {
+    if readonly {
+        MemFlags::trusted().with_readonly().with_can_move()
+    } else {
+        MemFlags::trusted()
+    }
+}
+
+/// `(element scalar type, element count)` of a `var<workgroup>` array.
+fn workgroup_array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32), String> {
     match &m.types[ty].inner {
         TypeInner::Array { base, size, .. } => {
             let elem = match &m.types[*base].inner {
                 TypeInner::Scalar(s) => Ty::from_scalar(*s)?,
-                other => return Err(format!("local array of non-scalar {other:?}")),
+                other => return Err(format!("workgroup array of non-scalar {other:?}")),
             };
             let count = match size {
                 naga::ArraySize::Constant(n) => n.get(),
-                other => return Err(format!("non-constant local array size {other:?}")),
+                other => return Err(format!("non-constant workgroup array size {other:?}")),
             };
             Ok((elem, count))
         }
-        other => Err(format!("expected array local, got {other:?}")),
+        other => Err(format!("expected a workgroup array, got {other:?}")),
     }
 }
 
@@ -384,7 +434,6 @@ fn local_array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32
 // ---------------------------------------------------------------------------
 
 fn compile_one(
-    name: &str,
     src: &str,
     module: &mut JITModule,
     math: &MathRefs,
@@ -409,13 +458,7 @@ fn compile_one(
 
     let ptr_ty = module.target_config().pointer_type();
     let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
-
-    // Import math intrinsics into this function.
-    let mut unary_refs = HashMap::new();
-    for (k, id) in &math.unary {
-        unary_refs.insert(*k, module.declare_func_in_func(*id, builder.func));
-    }
-    let powf_ref = module.declare_func_in_func(math.powf, builder.func);
+    let fns = math.import(module, builder.func);
 
     let entry_block = builder.create_block();
     builder.append_block_params_for_function_params(entry_block);
@@ -431,14 +474,13 @@ fn compile_one(
 
     // Base pointer of each storage binding (binding 1.. -> bufs[binding-1]).
     let mut buf_base: HashMap<u32, Value> = HashMap::new();
-    let mut uniform_binding = None;
     for (_h, gv) in nmod.global_variables.iter() {
         let binding = match &gv.binding {
             Some(b) => b.binding,
             None => continue,
         };
         match gv.space {
-            AddressSpace::Uniform => uniform_binding = Some(binding),
+            AddressSpace::Uniform => {}
             AddressSpace::Storage { .. } => {
                 let slot = (binding - 1) as i64;
                 let addr = builder.ins().iadd_imm(bufs_ptr, slot * 8);
@@ -476,75 +518,23 @@ fn compile_one(
     let gid = [gid_x, gid_y, zero32];
     let nwg = [gx, gy, one32];
 
-    // Locals: scalars become zero-initialised Cranelift variables (naga
-    // initialises locals at function entry); fixed-size arrays become explicit
-    // stack slots (scratch buffers, always written before read).
-    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-    let mut locals: HashMap<Handle<naga::LocalVariable>, LocalSlot> = HashMap::new();
-    for (h, lv) in func.local_variables.iter() {
-        if let TypeInner::Array { .. } = &nmod.types[lv.ty].inner {
-            let (elem, count) = local_array_info(&nmod, lv.ty)?;
-            // All kernel arrays are 4-byte-strided scalars.
-            let slot = builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                count * 4,
-                2,
-            ));
-            // Materialise the base address in the (dominating) entry block.
-            let base = builder.ins().stack_addr(ptr_ty, slot, 0);
-            locals.insert(h, LocalSlot::Array { base, elem });
-        } else {
-            let ty = scalar_ty_of(&nmod, lv.ty)?;
-            let var = builder.declare_var(cl_ty(ty));
-            let init = match ty {
-                Ty::F32 => builder.ins().f32const(0.0),
-                _ => builder.ins().iconst(cl_ty(ty), 0),
-            };
-            builder.def_var(var, init);
-            locals.insert(h, LocalSlot::Scalar(var, ty));
-        }
-    }
-
-    let empty_wg: HashMap<Handle<naga::GlobalVariable>, (Value, Ty)> = HashMap::new();
-    let mut tr = Tr {
-        module_ref: &nmod,
-        b: &mut builder,
-        cache: HashMap::new(),
-        locals: &locals,
+    let empty_wg = HashMap::new();
+    let env = Env {
+        ptr_ty,
         buf_base: &buf_base,
         wg_mem: &empty_wg,
         uniform_ptr,
-        uniform_binding,
         gid,
         nwg,
         local_id: [zero32, zero32, zero32],
         wgid: [zero32, zero32, zero32],
-        gid_arg: Some(gid_arg),
-        nwg_arg: Some(nwg_arg),
-        local_id_arg: None,
-        wgid_arg: None,
-        unary_refs: &unary_refs,
-        powf_ref,
-        loop_stack: Vec::new(),
+        ba: BuiltinArgs { gid: Some(gid_arg), nwg: Some(nwg_arg), local_id: None, wgid: None },
+        fns: &fns,
         latch,
         active_addr: None,
     };
-    // Apply constant local initialisers now that the translator exists.
-    let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> = tr
-        .module_ref
-        .entry_points[0]
-        .function
-        .local_variables
-        .iter()
-        .filter_map(|(h, lv)| lv.init.map(|i| (h, i)))
-        .collect();
-    for (h, init) in inits {
-        if let LocalSlot::Scalar(var, ty) = tr.locals[&h] {
-            let v = tr.scalar(init)?;
-            let v = tr.coerce(v, ty)?;
-            tr.b.def_var(var, v);
-        }
-    }
+    let mut tr = Tr::new(&nmod, &mut builder, func, env);
+    tr.declare_locals()?;
 
     let fell_through = tr.block(&func.body)?;
     if fell_through {
@@ -560,7 +550,6 @@ fn compile_one(
 
     builder.seal_all_blocks();
     builder.finalize();
-    let _ = name;
     Ok(None)
 }
 
@@ -607,11 +596,11 @@ fn split_at_barrier(body: &Block) -> Result<(Block, Block), String> {
 }
 
 /// Collect every per-invocation `LocalVariable` this block either stores into
-/// (a `Store` whose pointer is directly that local — locals here are always
-/// scalar, so no `Access`/`AccessIndex` indirection to unwrap) or loads from (a
-/// `Load` expression appearing anywhere within one of the block's `Emit`
-/// ranges, at any nesting depth). Recurses into `If`/`Loop`/`Block` bodies so a
-/// store or load guarded by a conditional is still seen.
+/// (a `Store` whose pointer is that local or a component, member or element of
+/// it) or loads from (a `Load` of the same, appearing anywhere within one of
+/// the block's `Emit` ranges, at any nesting depth). Recurses into
+/// `If`/`Loop`/`Block` bodies so a store or load guarded by a conditional is
+/// still seen.
 fn locals_touched(
     block: &Block,
     func: &naga::Function,
@@ -620,16 +609,12 @@ fn locals_touched(
     for s in block.iter() {
         match s {
             Statement::Store { pointer, .. } => {
-                if let Expression::LocalVariable(h) = func.expressions[*pointer] {
-                    touched.insert(h);
-                }
+                touched.extend(root_local(func, *pointer));
             }
             Statement::Emit(range) => {
                 for eh in range.clone() {
                     if let Expression::Load { pointer } = func.expressions[eh] {
-                        if let Expression::LocalVariable(h) = func.expressions[pointer] {
-                            touched.insert(h);
-                        }
+                        touched.extend(root_local(func, pointer));
                     }
                 }
             }
@@ -643,6 +628,18 @@ fn locals_touched(
                 locals_touched(continuing, func, touched);
             }
             _ => {}
+        }
+    }
+}
+
+/// The local variable a pointer expression points into, through any chain of
+/// `Access`/`AccessIndex`.
+fn root_local(func: &naga::Function, mut pointer: Handle<Expression>) -> Option<Handle<naga::LocalVariable>> {
+    loop {
+        match func.expressions[pointer] {
+            Expression::LocalVariable(h) => return Some(h),
+            Expression::Access { base, .. } | Expression::AccessIndex { base, .. } => pointer = base,
+            _ => return None,
         }
     }
 }
@@ -705,8 +702,7 @@ fn compile_one_wg(
             // falls back to a native/GPU path rather than failing the build.
             // This is a different, worse kind of error — the barrier structure
             // is fine, but a value would silently read as stale/zero across
-            // the workgroup synchronisation point — so it must hard-fail like
-            // "array local in a work-group kernel is unsupported" does, not
+            // the workgroup synchronisation point - so it must hard-fail, not
             // be swallowed into that fallback.
             return Err(format!(
                 "local `{name}` is live across the workgroup synchronisation point; the JIT \
@@ -717,11 +713,7 @@ fn compile_one_wg(
     }
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
-    let mut unary_refs = HashMap::new();
-    for (k, id) in &math.unary {
-        unary_refs.insert(*k, module.declare_func_in_func(*id, builder.func));
-    }
-    let powf_ref = module.declare_func_in_func(math.powf, builder.func);
+    let fns = math.import(module, builder.func);
 
     let entry_block = builder.create_block();
     builder.append_block_params_for_function_params(entry_block);
@@ -731,11 +723,10 @@ fn compile_one_wg(
 
     let ba = builtin_args(func);
 
-    // Storage base pointers + uniform binding + workgroup-memory stack slots.
+    // Storage base pointers + workgroup-memory stack slots.
     use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
     let mut buf_base: HashMap<u32, Value> = HashMap::new();
-    let mut uniform_binding = None;
-    let mut wg_mem: HashMap<Handle<naga::GlobalVariable>, (Value, Ty)> = HashMap::new();
+    let mut wg_mem: HashMap<Handle<naga::GlobalVariable>, Value> = HashMap::new();
     // Every `var<workgroup>` array, with the element count that has to be
     // re-zeroed at the start of EVERY work-group. The stack slot is allocated
     // once and reused for all of them, so without this a slot no invocation
@@ -746,7 +737,7 @@ fn compile_one_wg(
     let mut wg_fill: Vec<(Value, Ty, i64)> = Vec::new();
     for (h, gv) in nmod.global_variables.iter() {
         match gv.space {
-            AddressSpace::Uniform => uniform_binding = gv.binding.as_ref().map(|b| b.binding),
+            AddressSpace::Uniform => {}
             AddressSpace::Storage { .. } => {
                 let binding = gv.binding.as_ref().map(|b| b.binding).ok_or("storage without binding")?;
                 let slot = (binding - 1) as i64;
@@ -755,14 +746,14 @@ fn compile_one_wg(
                 buf_base.insert(binding, base);
             }
             AddressSpace::WorkGroup => {
-                let (elem, count) = local_array_info(nmod, gv.ty)?;
+                let (elem, count) = workgroup_array_info(nmod, gv.ty)?;
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     count * 4,
                     2,
                 ));
                 let base = builder.ins().stack_addr(ptr_ty, slot, 0);
-                wg_mem.insert(h, (base, elem));
+                wg_mem.insert(h, base);
                 wg_fill.push((base, elem, count as i64));
             }
             other => return Err(format!("unsupported address space {other:?}")),
@@ -843,8 +834,8 @@ fn compile_one_wg(
     let bx = WgBuiltins { wg, gx, gy, wgsize: wgsize as i32 };
     for (seg, c, first) in [(&seg_before, &no_carried, true), (&seg_after, &carried, false)] {
         emit_invocation_loop(
-            &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, uniform_ptr,
-            uniform_binding, &unary_refs, powf_ref, &bx, active_base, first,
+            &mut builder, nmod, func, seg, c, &ba, &wg_mem, &buf_base, uniform_ptr, &fns, ptr_ty,
+            &bx, active_base, first,
         )?;
     }
     builder.ins().jump(wg_latch, &[]);
@@ -906,12 +897,11 @@ fn emit_invocation_loop(
     seg: &Block,
     carried: &[Handle<Expression>],
     ba: &BuiltinArgs,
-    wg_mem: &HashMap<Handle<naga::GlobalVariable>, (Value, Ty)>,
+    wg_mem: &HashMap<Handle<naga::GlobalVariable>, Value>,
     buf_base: &HashMap<u32, Value>,
     uniform_ptr: Value,
-    uniform_binding: Option<u32>,
-    unary_refs: &HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
-    powf_ref: cranelift_codegen::ir::FuncRef,
+    fns: &FnRefs,
+    ptr_ty: types::Type,
     bx: &WgBuiltins,
     // Base of the per-invocation "still running" mask (one i32 per lane).
     active_base: Value,
@@ -971,56 +961,25 @@ fn emit_invocation_loop(
         builder.switch_to_block(run);
     }
 
-    // Per-invocation scalar locals (SSA, re-initialised here each iteration).
-    let mut locals: HashMap<Handle<naga::LocalVariable>, LocalSlot> = HashMap::new();
-    for (h, lv) in func.local_variables.iter() {
-        if let TypeInner::Array { .. } = &nmod.types[lv.ty].inner {
-            return Err("array local in a work-group kernel is unsupported".into());
-        }
-        let ty = scalar_ty_of(nmod, lv.ty)?;
-        let var = builder.declare_var(cl_ty(ty));
-        let init = match ty {
-            Ty::F32 => builder.ins().f32const(0.0),
-            _ => builder.ins().iconst(cl_ty(ty), 0),
-        };
-        builder.def_var(var, init);
-        locals.insert(h, LocalSlot::Scalar(var, ty));
-    }
-
     let fell_through = {
-        let mut tr = Tr {
-            module_ref: nmod,
-            b: &mut *builder,
-            cache: HashMap::new(),
-            locals: &locals,
+        let env = Env {
+            ptr_ty,
             buf_base,
             wg_mem,
             uniform_ptr,
-            uniform_binding,
             gid,
             nwg,
             local_id,
             wgid,
-            gid_arg: ba.gid,
-            nwg_arg: ba.nwg,
-            local_id_arg: ba.local_id,
-            wgid_arg: ba.wgid,
-            unary_refs,
-            powf_ref,
-            loop_stack: Vec::new(),
+            ba: *ba,
+            fns,
             latch: lid_latch,
             active_addr: if first { Some(active_addr) } else { None },
         };
-        // Apply each local's initialiser expression (e.g. `var i = lid.x`).
-        let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> =
-            func.local_variables.iter().filter_map(|(h, lv)| lv.init.map(|i| (h, i))).collect();
-        for (h, init) in inits {
-            if let LocalSlot::Scalar(var, ty) = tr.locals[&h] {
-                let v = tr.scalar(init)?;
-                let v = tr.coerce(v, ty)?;
-                tr.b.def_var(var, v);
-            }
-        }
+        let mut tr = Tr::new(nmod, &mut *builder, func, env);
+        // Per-invocation locals, re-declared (and so re-initialised) each
+        // iteration; none may be live across the barrier (checked above).
+        tr.declare_locals()?;
         // Pre-materialise the carried pre-barrier lets in this (dominating) block.
         for &h in carried {
             tr.eval(h)?;
@@ -1072,47 +1031,23 @@ fn cl_ty(ty: Ty) -> types::Type {
     }
 }
 
-/// Scalar type of a value-typed naga type handle (Scalar or single-component).
-fn scalar_ty_of(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
-    match &m.types[ty].inner {
-        TypeInner::Scalar(s) => Ty::from_scalar(*s),
-        other => Err(format!("expected scalar local, got {other:?}")),
-    }
-}
-
-/// Element scalar type of an `array<T>` global.
-fn array_elem_ty(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
-    match &m.types[ty].inner {
-        TypeInner::Array { base, .. } => match &m.types[*base].inner {
-            TypeInner::Scalar(s) => Ty::from_scalar(*s),
-            other => Err(format!("array of non-scalar {other:?}")),
-        },
-        other => Err(format!("expected array global, got {other:?}")),
-    }
-}
-
-struct Tr<'a, 'b> {
-    module_ref: &'a naga::Module,
-    b: &'a mut FunctionBuilder<'b>,
-    cache: HashMap<Handle<Expression>, Eval>,
-    locals: &'a HashMap<Handle<naga::LocalVariable>, LocalSlot>,
+/// What a translated function body needs from the kernel around it: buffer
+/// base pointers, the builtin input values, the intrinsic references, and
+/// where an entry-point `return` goes.
+struct Env<'a> {
+    ptr_ty: types::Type,
     buf_base: &'a HashMap<u32, Value>,
-    /// Base address + element type of each `var<workgroup>` global (per-workgroup
-    /// scratch), keyed by global handle. Empty for one-output-per-invocation kernels.
-    wg_mem: &'a HashMap<Handle<naga::GlobalVariable>, (Value, Ty)>,
+    /// Base address of each `var<workgroup>` global (per-workgroup scratch),
+    /// keyed by global handle. Empty for one-output-per-invocation kernels.
+    wg_mem: &'a HashMap<Handle<naga::GlobalVariable>, Value>,
     uniform_ptr: Value,
-    uniform_binding: Option<u32>,
     gid: [Value; 3],
     nwg: [Value; 3],
     local_id: [Value; 3],
     wgid: [Value; 3],
-    gid_arg: Option<u32>,
-    nwg_arg: Option<u32>,
-    local_id_arg: Option<u32>,
-    wgid_arg: Option<u32>,
-    unary_refs: &'a HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
-    powf_ref: cranelift_codegen::ir::FuncRef,
-    loop_stack: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>, // (continue, break)
+    ba: BuiltinArgs,
+    fns: &'a FnRefs,
+    /// Where an entry-point `return` jumps: the next invocation.
     latch: cranelift_codegen::ir::Block,
     /// Address of this invocation's slot in the work-group "still running"
     /// mask, for the segment BEFORE the barrier. `None` everywhere else: the
@@ -1121,7 +1056,39 @@ struct Tr<'a, 'b> {
     active_addr: Option<Value>,
 }
 
+struct Tr<'a, 'b> {
+    module_ref: &'a naga::Module,
+    b: &'a mut FunctionBuilder<'b>,
+    env: Env<'a>,
+    /// The function being translated: the entry point, or an inlined callee.
+    frame: Frame<'a>,
+    /// Flattened aggregate values, indexed by `Eval::Agg`.
+    aggs: Vec<Vec<(Value, Ty)>>,
+    /// The variables of every register-backed aggregate local, indexed by
+    /// `Place::Vars::group`.
+    var_groups: Vec<Vec<(Variable, Ty)>>,
+    /// The user functions being inlined, innermost last.
+    call_stack: Vec<Handle<naga::Function>>,
+}
+
 impl<'a, 'b> Tr<'a, 'b> {
+    fn new(
+        module_ref: &'a naga::Module,
+        b: &'a mut FunctionBuilder<'b>,
+        entry: &'a naga::Function,
+        env: Env<'a>,
+    ) -> Self {
+        Tr {
+            module_ref,
+            b,
+            env,
+            frame: Frame::new(entry, true, Vec::new(), None),
+            aggs: Vec::new(),
+            var_groups: Vec::new(),
+            call_stack: Vec::new(),
+        }
+    }
+
     /// Translate a block. Returns `true` if control falls through the end (so the
     /// caller must emit the continuation jump), `false` if it already terminated
     /// (via return/break/continue).
@@ -1140,36 +1107,33 @@ impl<'a, 'b> Tr<'a, 'b> {
                 }
                 Statement::Store { pointer, value } => {
                     let place = self.place(*pointer)?;
-                    let v = self.scalar(*value)?;
-                    match place {
-                        Place::Local(var, ty) => {
-                            let v = self.coerce(v, ty)?;
-                            self.b.def_var(var, v);
-                        }
-                        Place::Mem { addr, elem } => {
-                            let v = self.coerce(v, elem)?;
-                            self.b.ins().store(MemFlags::trusted(), v, addr, 0);
-                        }
-                    }
+                    self.store(place, *value)?;
                 }
-                Statement::Return { .. } => {
+                Statement::Call { function, arguments, result } => {
+                    self.inline_call(*function, arguments, *result)?;
+                }
+                Statement::Return { value } => {
+                    if !self.frame.entry {
+                        self.inline_return(*value)?;
+                        return Ok(false);
+                    }
                     // Per-invocation early-out: skip to the next invocation -
                     // and, in a work-group kernel, record that this lane is
                     // done so the segment after the barrier skips it too.
-                    if let Some(addr) = self.active_addr {
+                    if let Some(addr) = self.env.active_addr {
                         let dead = self.b.ins().iconst(types::I32, 0);
                         self.b.ins().store(MemFlags::trusted(), dead, addr, 0);
                     }
-                    self.b.ins().jump(self.latch, &[]);
+                    self.b.ins().jump(self.env.latch, &[]);
                     return Ok(false);
                 }
                 Statement::Break => {
-                    let (_, brk) = *self.loop_stack.last().ok_or("break outside loop")?;
+                    let (_, brk) = *self.frame.loop_stack.last().ok_or("break outside loop")?;
                     self.b.ins().jump(brk, &[]);
                     return Ok(false);
                 }
                 Statement::Continue => {
-                    let (cont, _) = *self.loop_stack.last().ok_or("continue outside loop")?;
+                    let (cont, _) = *self.frame.loop_stack.last().ok_or("continue outside loop")?;
                     self.b.ins().jump(cont, &[]);
                     return Ok(false);
                 }
@@ -1197,11 +1161,11 @@ impl<'a, 'b> Tr<'a, 'b> {
                     self.b.ins().jump(body_b, &[]);
 
                     self.b.switch_to_block(body_b);
-                    self.loop_stack.push((cont_b, exit_b));
+                    self.frame.loop_stack.push((cont_b, exit_b));
                     if self.block(body)? {
                         self.b.ins().jump(cont_b, &[]);
                     }
-                    self.loop_stack.pop();
+                    self.frame.loop_stack.pop();
 
                     self.b.switch_to_block(cont_b);
                     if self.block(continuing)? {
@@ -1224,13 +1188,37 @@ impl<'a, 'b> Tr<'a, 'b> {
         Ok(true)
     }
 
-    /// Evaluate an expression, memoising the result.
+    /// `*place = value`.
+    fn store(&mut self, place: Place, value: Handle<Expression>) -> Result<(), String> {
+        match place {
+            Place::Local(var, ty) => {
+                let v = self.scalar(value)?;
+                let v = self.coerce(v, ty)?;
+                self.b.def_var(var, v);
+            }
+            Place::Mem { addr, elem, .. } => {
+                let v = self.scalar(value)?;
+                let v = self.coerce(v, elem)?;
+                self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+            }
+            _ => {
+                let (vals, _) = self.value(value)?;
+                self.store_place(place, &vals)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Evaluate an expression, memoising the result if it has a single
+    /// program point (see [`Frame::emitted`]).
     fn eval(&mut self, h: Handle<Expression>) -> Result<Eval, String> {
-        if let Some(e) = self.cache.get(&h) {
+        if let Some(e) = self.frame.cache.get(&h) {
             return Ok(*e);
         }
         let e = self.eval_uncached(h)?;
-        self.cache.insert(h, e);
+        if self.frame.emitted.contains(&h) {
+            self.frame.cache.insert(h, e);
+        }
         Ok(e)
     }
 
@@ -1238,7 +1226,11 @@ impl<'a, 'b> Tr<'a, 'b> {
     fn scalar(&mut self, h: Handle<Expression>) -> Result<(Value, Ty), String> {
         match self.eval(h)? {
             Eval::Scalar(v, t) => Ok((v, t)),
-            Eval::Place(p) => self.load(p),
+            Eval::Place(p) => match self.load_place(p)? {
+                Eval::Scalar(v, t) => Ok((v, t)),
+                _ => Err("expected a scalar, got an aggregate place".into()),
+            },
+            Eval::Agg(_, shape) => Err(format!("expected a scalar, got {shape:?}")),
         }
     }
 
@@ -1246,172 +1238,118 @@ impl<'a, 'b> Tr<'a, 'b> {
     fn place(&mut self, h: Handle<Expression>) -> Result<Place, String> {
         match self.eval(h)? {
             Eval::Place(p) => Ok(p),
-            Eval::Scalar(..) => Err("expected place, got scalar".into()),
-        }
-    }
-
-    fn load(&mut self, p: Place) -> Result<(Value, Ty), String> {
-        match p {
-            Place::Local(var, ty) => Ok((self.b.use_var(var), ty)),
-            Place::Mem { addr, elem } => {
-                let v = self.b.ins().load(cl_ty(elem), MemFlags::trusted(), addr, 0);
-                Ok((v, elem))
-            }
+            _ => Err("expected place, got a value".into()),
         }
     }
 
     fn eval_uncached(&mut self, h: Handle<Expression>) -> Result<Eval, String> {
-        // `m` is a copy of the `&'a Module` reference, independent of the `&mut
-        // self` borrow, so expression refs derived from it stay valid across the
-        // `&mut self` recursion below. Every kernel has exactly one entry point.
-        let m: &naga::Module = self.module_ref;
-        let func = &m.entry_points[0].function;
+        // `func` is a copy of the frame's `&'a Function`, independent of the
+        // `&mut self` borrow, so expression refs derived from it stay valid
+        // across the `&mut self` recursion below.
+        let func = self.frame.func;
         let expr = &func.expressions[h];
         match expr {
-            Expression::Literal(lit) => Ok(self.literal(lit)),
-            Expression::ZeroValue(ty) => {
-                let t = scalar_ty_of(self.module_ref, *ty)?;
-                Ok(Eval::Scalar(self.zero(t), t))
-            }
+            Expression::Literal(lit) => self.literal(lit),
+            Expression::ZeroValue(ty) => self.zero_value(*ty),
             Expression::Constant(c) => {
-                let cst = &self.module_ref.constants[*c];
-                self.eval_global_const(cst.init)
+                let init = self.module_ref.constants[*c].init;
+                self.eval_global_const(init)
             }
-            Expression::FunctionArgument(_) => {
-                Err("bare builtin vector value is unsupported (index it instead)".into())
-            }
-            Expression::GlobalVariable(g) => {
-                // A pointer to the whole binding; refined by Access/AccessIndex.
-                // Represented lazily: store the binding so the index step resolves
-                // the element address. We encode this as a Place with a sentinel
-                // addr of the base and elem from the array, but only Access uses it.
-                let gv = &self.module_ref.global_variables[*g];
-                let binding = gv.binding.as_ref().map(|b| b.binding);
-                // `var<workgroup>` arrays live in per-workgroup scratch (a stack
-                // slot set up by the work-group compile path), keyed by handle.
-                if let AddressSpace::WorkGroup = gv.space {
-                    let (base, elem) = *self
-                        .wg_mem
-                        .get(g)
-                        .ok_or("workgroup global without scratch base")?;
-                    return Ok(Eval::Place(Place::Mem { addr: base, elem }));
-                }
-                match gv.space {
-                    AddressSpace::Storage { .. } => {
-                        let b = binding.ok_or("storage global without binding")?;
-                        let base = *self
-                            .buf_base
-                            .get(&b)
-                            .ok_or("missing storage base pointer")?;
-                        let elem = array_elem_ty(self.module_ref, gv.ty)?;
-                        // addr currently points at element 0; Access adds the offset.
-                        Ok(Eval::Place(Place::Mem { addr: base, elem }))
-                    }
-                    AddressSpace::Uniform => {
-                        // Uniform struct base; AccessIndex refines to a member.
-                        Ok(Eval::Place(Place::Mem {
-                            addr: self.uniform_ptr,
-                            elem: Ty::U32, // refined by AccessIndex
-                        }))
-                    }
-                    other => Err(format!("global in unsupported space {other:?}")),
-                }
-            }
-            Expression::LocalVariable(l) => match self.locals[l] {
-                LocalSlot::Scalar(var, ty) => Ok(Eval::Place(Place::Local(var, ty))),
-                LocalSlot::Array { base, elem } => Ok(Eval::Place(Place::Mem { addr: base, elem })),
-            },
+            Expression::FunctionArgument(i) => self.function_argument(*i),
+            Expression::GlobalVariable(g) => Ok(Eval::Place(self.global_place(*g)?)),
+            Expression::LocalVariable(l) => Ok(Eval::Place(self.local_place(*l))),
             Expression::Load { pointer } => {
                 let p = self.place(*pointer)?;
-                let (v, t) = self.load(p)?;
-                Ok(Eval::Scalar(v, t))
+                self.load_place(p)
             }
-            Expression::Access { base, index } => {
-                let base_place = self.place(*base)?;
-                let (idx, _) = self.scalar(*index)?;
-                match base_place {
-                    Place::Mem { addr, elem } => {
-                        let idx64 = self.emit_i64(idx);
-                        let off = self.b.ins().imul_imm(idx64, 4);
-                        let a = self.b.ins().iadd(addr, off);
-                        Ok(Eval::Place(Place::Mem { addr: a, elem }))
-                    }
-                    Place::Local(..) => Err("indexing a scalar local".into()),
-                }
-            }
+            Expression::Access { base, index } => self.access(*base, *index),
             Expression::AccessIndex { base, index } => {
-                let base_expr = &func.expressions[*base];
-                // 1. A component of a builtin vector argument (gid.x, nwg.x, ...).
-                if let Expression::FunctionArgument(ai) = base_expr {
+                // A component of a builtin vector argument (gid.x, nwg.x, ...).
+                if let (true, Expression::FunctionArgument(ai)) = (self.frame.entry, &func.expressions[*base]) {
                     let comp = *index as usize;
-                    let v = if Some(*ai) == self.gid_arg {
-                        self.gid[comp]
-                    } else if Some(*ai) == self.nwg_arg {
-                        self.nwg[comp]
-                    } else if Some(*ai) == self.local_id_arg {
-                        self.local_id[comp]
-                    } else if Some(*ai) == self.wgid_arg {
-                        self.wgid[comp]
+                    let ba = self.env.ba;
+                    let v = if Some(*ai) == ba.gid {
+                        self.env.gid[comp]
+                    } else if Some(*ai) == ba.nwg {
+                        self.env.nwg[comp]
+                    } else if Some(*ai) == ba.local_id {
+                        self.env.local_id[comp]
+                    } else if Some(*ai) == ba.wgid {
+                        self.env.wgid[comp]
                     } else {
                         return Err("AccessIndex on unknown builtin arg".into());
                     };
                     return Ok(Eval::Scalar(v, Ty::U32));
                 }
-                // 2. A member of the uniform Params struct.
-                if let Expression::GlobalVariable(g) = base_expr {
-                    if m.global_variables[*g].space == AddressSpace::Uniform {
-                        let (member_off, member_ty) = self.uniform_member(*base, *index)?;
-                        let a = self.b.ins().iadd_imm(self.uniform_ptr, member_off as i64);
-                        return Ok(Eval::Place(Place::Mem { addr: a, elem: member_ty }));
-                    }
+                self.access_index(*base, *index)
+            }
+            Expression::Compose { ty, components } => self.compose(*ty, components),
+            Expression::Splat { size, value } => {
+                let v = self.scalar(*value)?;
+                Ok(self.splat(*size, v))
+            }
+            Expression::Swizzle { size, vector, pattern } => self.swizzle(*size, *vector, pattern),
+            Expression::Unary { op, expr } => match self.eval(*expr)? {
+                Eval::Scalar(v, t) => {
+                    let (r, t) = self.unary_scalar(*op, (v, t));
+                    Ok(Eval::Scalar(r, t))
                 }
-                // 3. A constant-indexed element of a storage or local array.
-                let base_place = self.place(*base)?;
-                match base_place {
-                    Place::Mem { addr, elem } => {
-                        let a = self.b.ins().iadd_imm(addr, (*index as i64) * 4);
-                        Ok(Eval::Place(Place::Mem { addr: a, elem }))
+                e => self.unary_agg(*op, e),
+            },
+            Expression::Binary { op, left, right } => {
+                let l = self.eval(*left)?;
+                let r = self.eval(*right)?;
+                match (l, r) {
+                    (Eval::Scalar(lv, lt), Eval::Scalar(rv, rt)) => {
+                        let (v, t) = self.binary_scalar(*op, (lv, lt), (rv, rt))?;
+                        Ok(Eval::Scalar(v, t))
                     }
-                    Place::Local(..) => Err("AccessIndex on scalar local".into()),
+                    _ => self.binary_agg(*op, l, r),
                 }
             }
-            Expression::Unary { op, expr } => {
-                let (v, t) = self.scalar(*expr)?;
-                let r = match op {
-                    UnaryOperator::Negate => {
-                        if t.is_float() {
-                            self.b.ins().fneg(v)
-                        } else {
-                            self.b.ins().ineg(v)
-                        }
-                    }
-                    UnaryOperator::LogicalNot => {
-                        let z = self.b.ins().iconst(types::I8, 0);
-                        self.b.ins().icmp(IntCC::Equal, v, z)
-                    }
-                    UnaryOperator::BitwiseNot => self.b.ins().bnot(v),
-                };
-                Ok(Eval::Scalar(r, t))
-            }
-            Expression::Binary { op, left, right } => self.binary(*op, *left, *right),
             Expression::Select { condition, accept, reject } => {
-                let (c, _) = self.scalar(*condition)?;
-                let (a, ta) = self.scalar(*accept)?;
-                let (r, _tr) = self.scalar(*reject)?;
-                Ok(Eval::Scalar(self.b.ins().select(c, a, r), ta))
+                let c = self.eval(*condition)?;
+                let a = self.eval(*accept)?;
+                let r = self.eval(*reject)?;
+                match (c, a, r) {
+                    (Eval::Scalar(c, _), Eval::Scalar(a, ta), Eval::Scalar(r, _)) => {
+                        Ok(Eval::Scalar(self.b.ins().select(c, a, r), ta))
+                    }
+                    _ => self.select_agg(c, a, r),
+                }
             }
-            Expression::Math { fun, arg, arg1, arg2, .. } => self.math(*fun, *arg, *arg1, *arg2),
-            Expression::As { expr, kind, convert } => self.cast(*expr, *kind, *convert),
-            Expression::Relational { fun, argument } => {
-                // Only scalar IsNan/IsInf would appear; our kernels don't use them.
-                Err(format!("unsupported relational {fun:?} on {argument:?}"))
+            Expression::Math { fun, arg, arg1, arg2, .. } => {
+                let a = self.eval(*arg)?;
+                let b = arg1.map(|h| self.eval(h)).transpose()?;
+                let c = arg2.map(|h| self.eval(h)).transpose()?;
+                let scalar = |e: Option<Eval>| match e {
+                    None => Some(None),
+                    Some(Eval::Scalar(v, t)) => Some(Some((v, t))),
+                    Some(_) => None,
+                };
+                match (a, scalar(b), scalar(c)) {
+                    (Eval::Scalar(v, t), Some(b), Some(c)) => {
+                        let (r, t) = self.math_scalar(*fun, (v, t), b, c)?;
+                        Ok(Eval::Scalar(r, t))
+                    }
+                    _ => self.math_agg(*fun, a, b, c),
+                }
             }
+            Expression::As { expr, kind, convert } => match self.eval(*expr)? {
+                Eval::Scalar(v, t) => {
+                    let (r, t) = self.cast_scalar((v, t), *kind, *convert)?;
+                    Ok(Eval::Scalar(r, t))
+                }
+                e => self.cast_agg(e, *kind, *convert),
+            },
+            Expression::Relational { fun, argument } => self.relational(*fun, *argument),
+            Expression::CallResult(_) => Err("a call result used before its call".into()),
             other => Err(format!("unsupported expression {other:?}")),
         }
     }
 
-    fn literal(&mut self, lit: &Literal) -> Eval {
-        match lit {
+    fn literal(&mut self, lit: &Literal) -> Result<Eval, String> {
+        Ok(match lit {
             Literal::F32(x) => Eval::Scalar(self.b.ins().f32const(*x), Ty::F32),
             Literal::F64(x) => Eval::Scalar(self.b.ins().f32const(*x as f32), Ty::F32),
             Literal::AbstractFloat(x) => Eval::Scalar(self.b.ins().f32const(*x as f32), Ty::F32),
@@ -1422,63 +1360,39 @@ impl<'a, 'b> Tr<'a, 'b> {
             Literal::AbstractInt(x) => {
                 Eval::Scalar(self.b.ins().iconst(types::I32, *x & 0xffff_ffff), Ty::I32)
             }
-            Literal::Bool(x) => {
-                Eval::Scalar(self.b.ins().iconst(types::I8, *x as i64), Ty::Bool)
-            }
-            _ => Eval::Scalar(self.b.ins().iconst(types::I32, 0), Ty::U32),
-        }
+            Literal::Bool(x) => Eval::Scalar(self.b.ins().iconst(types::I8, *x as i64), Ty::Bool),
+            other => return Err(format!("unsupported literal {other:?}")),
+        })
     }
 
-    fn eval_global_const(&mut self, h: Handle<Expression>) -> Result<Eval, String> {
-        // Constants live in the module-level global_expressions arena.
-        let expr = &self.module_ref.global_expressions[h];
-        match expr {
-            Expression::Literal(lit) => Ok(self.literal(lit)),
-            Expression::ZeroValue(ty) => {
-                let t = scalar_ty_of(self.module_ref, *ty)?;
-                Ok(Eval::Scalar(self.zero(t), t))
+    fn unary_scalar(&mut self, op: UnaryOperator, (v, t): (Value, Ty)) -> (Value, Ty) {
+        let r = match op {
+            UnaryOperator::Negate => {
+                if t.is_float() {
+                    self.b.ins().fneg(v)
+                } else {
+                    self.b.ins().ineg(v)
+                }
             }
-            other => Err(format!("unsupported constant expression {other:?}")),
-        }
-    }
-
-    fn uniform_member(
-        &self,
-        base: Handle<Expression>,
-        index: u32,
-    ) -> Result<(u32, Ty), String> {
-        let func = &self.module_ref.entry_points[0].function;
-        let g = match &func.expressions[base] {
-            Expression::GlobalVariable(g) => *g,
-            other => return Err(format!("AccessIndex base not a global: {other:?}")),
+            UnaryOperator::LogicalNot => {
+                let z = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().icmp(IntCC::Equal, v, z)
+            }
+            UnaryOperator::BitwiseNot => self.b.ins().bnot(v),
         };
-        let gv = &self.module_ref.global_variables[g];
-        if Some(gv.binding.as_ref().map(|b| b.binding)) != Some(self.uniform_binding) {
-            // Not strictly required, but guards against indexing a storage array
-            // with a constant (which would be Access, not AccessIndex).
-        }
-        match &self.module_ref.types[gv.ty].inner {
-            TypeInner::Struct { members, .. } => {
-                let m = &members[index as usize];
-                let ty = scalar_ty_of(self.module_ref, m.ty)?;
-                Ok((m.offset, ty))
-            }
-            other => Err(format!("AccessIndex on non-struct {other:?}")),
-        }
+        (r, t)
     }
 
-    fn binary(
+    fn binary_scalar(
         &mut self,
         op: BinaryOperator,
-        left: Handle<Expression>,
-        right: Handle<Expression>,
-    ) -> Result<Eval, String> {
-        let (l, lt) = self.scalar(left)?;
-        let (r, rt) = self.scalar(right)?;
+        (l, lt): (Value, Ty),
+        (r, rt): (Value, Ty),
+    ) -> Result<(Value, Ty), String> {
         let float = lt.is_float() || rt.is_float();
         use BinaryOperator::*;
         let ins = self.b.ins();
-        let (v, t) = match op {
+        Ok(match op {
             Add if float => (ins.fadd(l, r), Ty::F32),
             Add => (ins.iadd(l, r), lt),
             Subtract if float => (ins.fsub(l, r), Ty::F32),
@@ -1519,30 +1433,37 @@ impl<'a, 'b> Tr<'a, 'b> {
             ShiftLeft => (ins.ishl(l, r), lt),
             ShiftRight if lt == Ty::I32 => (ins.sshr(l, r), Ty::I32),
             ShiftRight => (ins.ushr(l, r), Ty::U32),
-        };
-        Ok(Eval::Scalar(v, t))
+        })
     }
 
-    fn math(
+    /// A math builtin on scalar arguments (applied per component to vectors
+    /// by `math_agg`).
+    fn math_scalar(
         &mut self,
         fun: MathFunction,
-        arg: Handle<Expression>,
-        arg1: Option<Handle<Expression>>,
-        _arg2: Option<Handle<Expression>>,
-    ) -> Result<Eval, String> {
+        (a, at): (Value, Ty),
+        arg1: Option<(Value, Ty)>,
+        arg2: Option<(Value, Ty)>,
+    ) -> Result<(Value, Ty), String> {
         use MathFunction::*;
-        let (a, at) = self.scalar(arg)?;
+        let need = |v: Option<(Value, Ty)>| v.ok_or(format!("{fun:?} needs more arguments"));
         match fun {
-            Sqrt => Ok(Eval::Scalar(self.b.ins().sqrt(a), Ty::F32)),
+            Sqrt => Ok((self.b.ins().sqrt(a), Ty::F32)),
             InverseSqrt => {
                 let s = self.b.ins().sqrt(a);
                 let one = self.b.ins().f32const(1.0);
-                Ok(Eval::Scalar(self.b.ins().fdiv(one, s), Ty::F32))
+                Ok((self.b.ins().fdiv(one, s), Ty::F32))
             }
-            Abs if at.is_float() => Ok(Eval::Scalar(self.b.ins().fabs(a), Ty::F32)),
-            Abs => Ok(Eval::Scalar(self.b.ins().iabs(a), at)),
+            Abs if at.is_float() => Ok((self.b.ins().fabs(a), Ty::F32)),
+            Abs => Ok((self.b.ins().iabs(a), at)),
+            // length(x) = |x| and distance(x, y) = |x - y| for scalars.
+            Length => Ok((self.b.ins().fabs(a), Ty::F32)),
+            Distance => {
+                let d = self.b.ins().fsub(a, need(arg1)?.0);
+                Ok((self.b.ins().fabs(d), Ty::F32))
+            }
             Min | Max => {
-                let (b, bt) = self.scalar(arg1.ok_or("min/max needs 2 args")?)?;
+                let (b, bt) = need(arg1)?;
                 let float = at.is_float() || bt.is_float();
                 let v = match (fun, float) {
                     (Min, true) => self.b.ins().fmin(a, b),
@@ -1553,25 +1474,26 @@ impl<'a, 'b> Tr<'a, 'b> {
                     (Max, false) => self.b.ins().umax(a, b),
                     _ => unreachable!(),
                 };
-                Ok(Eval::Scalar(v, if float { Ty::F32 } else { at }))
+                Ok((v, if float { Ty::F32 } else { at }))
             }
             Fma => {
-                let (b, _) = self.scalar(arg1.ok_or("fma needs args")?)?;
-                let (c, _) = self.scalar(_arg2.ok_or("fma needs 3 args")?)?;
-                Ok(Eval::Scalar(self.b.ins().fma(a, b, c), Ty::F32))
+                let (b, _) = need(arg1)?;
+                let (c, _) = need(arg2)?;
+                Ok((self.b.ins().fma(a, b, c), Ty::F32))
             }
             Step => {
                 // step(edge, x) = x < edge ? 0.0 : 1.0
-                let (x, _) = self.scalar(arg1.ok_or("step needs 2 args")?)?;
+                let (x, _) = need(arg1)?;
                 let lt = self.b.ins().fcmp(FloatCC::LessThan, x, a);
                 let zero = self.b.ins().f32const(0.0);
                 let one = self.b.ins().f32const(1.0);
-                Ok(Eval::Scalar(self.b.ins().select(lt, zero, one), Ty::F32))
+                Ok((self.b.ins().select(lt, zero, one), Ty::F32))
             }
-            Pow => {
-                let (b, _) = self.scalar(arg1.ok_or("pow needs 2 args")?)?;
-                let call = self.b.ins().call(self.powf_ref, &[a, b]);
-                Ok(Eval::Scalar(self.b.inst_results(call)[0], Ty::F32))
+            Pow | Atan2 => {
+                let (b, _) = need(arg1)?;
+                let f = if fun == Pow { self.env.fns.powf } else { self.env.fns.atan2 };
+                let call = self.b.ins().call(f, &[a, b]);
+                Ok((self.b.inst_results(call)[0], Ty::F32))
             }
             Exp | Log | Sin | Cos | Tanh => {
                 let sym = match fun {
@@ -1582,27 +1504,27 @@ impl<'a, 'b> Tr<'a, 'b> {
                     Tanh => "brain_tanhf",
                     _ => unreachable!(),
                 };
-                let fref = self.unary_refs[sym];
+                let fref = self.env.fns.unary[sym];
                 let call = self.b.ins().call(fref, &[a]);
-                Ok(Eval::Scalar(self.b.inst_results(call)[0], Ty::F32))
+                Ok((self.b.inst_results(call)[0], Ty::F32))
             }
             // --- rounding: Cranelift has these natively, and each matches the
             // WGSL builtin exactly. `Round` is roundToIntegralTiesToEven, which
             // is WGSL's "halfway cases round to even" -- NOT `round-half-away`,
             // so do not reach for a `floor(x+0.5)` shortcut here.
-            Floor => Ok(Eval::Scalar(self.b.ins().floor(a), Ty::F32)),
-            Ceil => Ok(Eval::Scalar(self.b.ins().ceil(a), Ty::F32)),
-            Trunc => Ok(Eval::Scalar(self.b.ins().trunc(a), Ty::F32)),
-            Round => Ok(Eval::Scalar(self.b.ins().nearest(a), Ty::F32)),
+            Floor => Ok((self.b.ins().floor(a), Ty::F32)),
+            Ceil => Ok((self.b.ins().ceil(a), Ty::F32)),
+            Trunc => Ok((self.b.ins().trunc(a), Ty::F32)),
+            Round => Ok((self.b.ins().nearest(a), Ty::F32)),
             // fract(e) = e - floor(e)
             Fract => {
                 let f = self.b.ins().floor(a);
-                Ok(Eval::Scalar(self.b.ins().fsub(a, f), Ty::F32))
+                Ok((self.b.ins().fsub(a, f), Ty::F32))
             }
             // clamp(e, low, high) = min(max(e, low), high)
             Clamp => {
-                let (lo, _) = self.scalar(arg1.ok_or("clamp needs 3 args")?)?;
-                let (hi, _) = self.scalar(_arg2.ok_or("clamp needs 3 args")?)?;
+                let (lo, _) = need(arg1)?;
+                let (hi, _) = need(arg2)?;
                 let v = if at.is_float() {
                     let m = self.b.ins().fmax(a, lo);
                     self.b.ins().fmin(m, hi)
@@ -1613,26 +1535,26 @@ impl<'a, 'b> Tr<'a, 'b> {
                     let m = self.b.ins().umax(a, lo);
                     self.b.ins().umin(m, hi)
                 };
-                Ok(Eval::Scalar(v, at))
+                Ok((v, at))
             }
             // saturate(e) = clamp(e, 0.0, 1.0)
             Saturate => {
                 let zero = self.b.ins().f32const(0.0);
                 let one = self.b.ins().f32const(1.0);
                 let m = self.b.ins().fmax(a, zero);
-                Ok(Eval::Scalar(self.b.ins().fmin(m, one), Ty::F32))
+                Ok((self.b.ins().fmin(m, one), Ty::F32))
             }
             // mix(e1, e2, e3) = e1*(1-e3) + e2*e3  (the spec form, not the
             // algebraically-equal `e1 + e3*(e2-e1)`: they differ in fp32 rounding
             // and the spec form is what the wgpu path computes).
             Mix => {
-                let (b, _) = self.scalar(arg1.ok_or("mix needs 3 args")?)?;
-                let (t, _) = self.scalar(_arg2.ok_or("mix needs 3 args")?)?;
+                let (b, _) = need(arg1)?;
+                let (t, _) = need(arg2)?;
                 let one = self.b.ins().f32const(1.0);
                 let inv = self.b.ins().fsub(one, t);
                 let l = self.b.ins().fmul(a, inv);
                 let r = self.b.ins().fmul(b, t);
-                Ok(Eval::Scalar(self.b.ins().fadd(l, r), Ty::F32))
+                Ok((self.b.ins().fadd(l, r), Ty::F32))
             }
             // sign(e) = e < 0 ? -1 : (e > 0 ? 1 : 0)
             Sign if at.is_float() => {
@@ -1642,7 +1564,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let gt = self.b.ins().fcmp(FloatCC::GreaterThan, a, zero);
                 let hi = self.b.ins().select(gt, pos1, zero);
                 let lt = self.b.ins().fcmp(FloatCC::LessThan, a, zero);
-                Ok(Eval::Scalar(self.b.ins().select(lt, neg1, hi), Ty::F32))
+                Ok((self.b.ins().select(lt, neg1, hi), Ty::F32))
             }
             Sign => {
                 let zero = self.b.ins().iconst(types::I32, 0);
@@ -1651,14 +1573,14 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let gt = self.b.ins().icmp(IntCC::SignedGreaterThan, a, zero);
                 let hi = self.b.ins().select(gt, pos1, zero);
                 let lt = self.b.ins().icmp(IntCC::SignedLessThan, a, zero);
-                Ok(Eval::Scalar(self.b.ins().select(lt, neg1, hi), Ty::I32))
+                Ok((self.b.ins().select(lt, neg1, hi), Ty::I32))
             }
             // dot4I8Packed(a, b): four signed-int8 multiply-accumulates over
             // the bytes of two u32s (the DP4A the packed-int8 GEMMs use).
             // Byte i sits at bits [8i, 8i+8): shift it to the top byte, then
             // an arithmetic shift right 24 sign-extends it to i32.
             Dot4I8Packed => {
-                let (b2, _) = self.scalar(arg1.ok_or("dot4I8Packed needs 2 args")?)?;
+                let (b2, _) = need(arg1)?;
                 let mut acc = self.b.ins().iconst(types::I32, 0);
                 for i in 0..4 {
                     let up = 24 - 8 * i;
@@ -1669,22 +1591,21 @@ impl<'a, 'b> Tr<'a, 'b> {
                     let p = self.b.ins().imul(ai, bi);
                     acc = self.b.ins().iadd(acc, p);
                 }
-                Ok(Eval::Scalar(acc, Ty::I32))
+                Ok((acc, Ty::I32))
             }
             other => Err(format!("unsupported math fn {other:?}")),
         }
     }
 
-    fn cast(
+    fn cast_scalar(
         &mut self,
-        expr: Handle<Expression>,
+        (v, t): (Value, Ty),
         kind: ScalarKind,
         convert: Option<u8>,
-    ) -> Result<Eval, String> {
-        let (v, t) = self.scalar(expr)?;
+    ) -> Result<(Value, Ty), String> {
         let target = Ty::from_scalar(Scalar { kind, width: convert.unwrap_or(4) })?;
         if t == target {
-            return Ok(Eval::Scalar(v, t));
+            return Ok((v, t));
         }
         if convert.is_none() {
             // Bitcast (reinterpret), same width.
@@ -1693,7 +1614,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                 (_, Ty::F32) => self.b.ins().bitcast(types::F32, MemFlags::new(), v),
                 _ => v, // int<->int reinterpret is a no-op
             };
-            return Ok(Eval::Scalar(v, target));
+            return Ok((v, target));
         }
         let v = match (t, target) {
             (Ty::U32, Ty::F32) => self.b.ins().fcvt_from_uint(types::F32, v),
@@ -1704,7 +1625,7 @@ impl<'a, 'b> Tr<'a, 'b> {
             (Ty::Bool, _) => self.b.ins().uextend(types::I32, v),
             _ => return Err(format!("unsupported cast {t:?} -> {target:?}")),
         };
-        Ok(Eval::Scalar(v, target))
+        Ok((v, target))
     }
 
     /// Coerce a scalar to the requested storage type (only int-width retags and

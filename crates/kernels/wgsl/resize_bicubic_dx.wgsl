@@ -49,26 +49,6 @@
 // Note the forward does NOT clamp the half_pixel source coordinate to >= 0 (see
 // resize_bicubic.wgsl's header: ATen applies that clamp only for !cubic), so this
 // kernel must not either. Reproducing the forward verbatim is what guarantees it.
-//
-// --- two wgsl-cpu JIT constraints, both paid for here ------------------------------
-// 1. Everything is inlined into main: the JIT rejects user-defined function calls,
-//    so a `src_coord`/`cubic_w` helper compiles on wgpu and hard-fails on CPU.
-// 2. `let a = -0.75;` binds a BARE LITERAL. naga does not put literals in a
-//    `Statement::Emit` range, so the JIT (which memoises every naga expression
-//    handle the first time it evaluates it, wgsl-cpu/src/lib.rs `eval`) materialises
-//    `a` in whichever Cranelift block first uses it — and then reuses that same
-//    `Value` from sibling blocks. First drafting this kernel with the weight
-//    polynomials written INSIDE the four `if` bodies put `a`'s definition in the
-//    first `if` block and every later branch referenced a non-dominating value:
-//      "define \"resize_bicubic_dx\": Verifier ... uses value v317 from
-//       non-dominating inst347"
-//    — a hard failure of `wgsl-cpu`'s `all_kernels_compile`, on the CPU backend
-//    only. Hence the weights (`cy0..cy3`, `cx0..cx3`) are computed unconditionally
-//    in straight-line code that dominates the branches, and only the SELECTION is
-//    conditional. Rule for anyone editing this file: a `let` bound to a bare
-//    literal must be first used in a block that dominates all its other uses.
-//    (A `let` bound to an *expression* — `hm`, `wm` — is emitted at its declaration
-//    and is safe.)
 
 struct Params {
     N: u32,
