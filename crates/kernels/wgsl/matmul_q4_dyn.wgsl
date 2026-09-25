@@ -47,15 +47,6 @@
 // the catch-all "unsupported math fn" and the kernel would silently never
 // run on `BRAIN_DEVICE=cpu`), so it is avoided here even though it is valid
 // WGSL and would work on the GPU backend alone.
-//
-// Inlined, not a helper `fn`: `crates/wgsl-cpu`'s WGSL->Cranelift JIT has no
-// lowering for calling a user-defined WGSL function at all (only the entry
-// point's own statements) -- every kernel in this tree already inlines its
-// math into `main` for exactly this reason, confirmed by grepping
-// `crates/kernels/wgsl/*.wgsl` for a top-level `fn` other than `main`: none
-// exist. A helper `fn` compiles fine on the GPU (naga/wgpu) but panics the
-// CPU JIT with "unsupported statement Call", so `@cpu yes` above would be a
-// lie if this used one.
 
 struct Params { m: u32, k: u32, n: u32 };
 

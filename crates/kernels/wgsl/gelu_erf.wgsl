@@ -15,7 +15,7 @@
 // brain's `gelu` uses the tanh approximation (GPT-2 style); GenieRedux and
 // other torch models that call plain F.gelu need this exact form for parity.
 // erf via Abramowitz & Stegun 7.1.26 (max abs error ~1.5e-7, well under fp32).
-// Inlined (no helper fn) and branch-based sign so the wgsl-cpu JIT accepts it.
+// erf inlined, with a branch-based sign.
 // Elementwise over `total`.
 
 struct Params {

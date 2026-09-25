@@ -17,8 +17,8 @@
 //   c^2   = squared diagonal of the smallest enclosing box.
 // pred[A,4] = (x1,y1,x2,y2), tgt[A,4] likewise. Output out[A]. One thread/anchor.
 //
-// NOTE: the CPU JIT MathFunction set has NO `atan` (and supports no user
-// function calls), so atan is polyfilled INLINE below: argument reduction to
+// NOTE: the CPU JIT MathFunction set has NO `atan`, so atan is polyfilled
+// INLINE below: argument reduction to
 // [0,1] then a degree-7 odd polynomial. |err| < 1e-3 over all positive ratios,
 // accurate enough that the ciou_grad central-difference check passes < 2e-2.
 

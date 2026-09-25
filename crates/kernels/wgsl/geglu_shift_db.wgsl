@@ -12,7 +12,7 @@
 //
 // geglu_shift backward w.r.t. `g`:
 //   dg[i] = dy[i] * gelu_erf(h[i])
-// erf inlined (A&S), no helper fn (wgsl-cpu JIT). Inputs dy, h; output dg.
+// erf inlined (A&S). Inputs dy, h; output dg.
 
 struct Params {
     total: u32,

@@ -32,9 +32,6 @@
 // high-side clamp (y1 = min(y0+1, H-1)) makes the last row take both taps, and
 // the half_pixel clamp (src >= 0) piles extra weight on the first row. Both are
 // reproduced because both branches are re-evaluated, not re-derived.
-//
-// Everything is inlined into main: the wgsl-cpu JIT rejects user-defined function
-// calls, so a `src_coord` helper compiles on wgpu and hard-fails on CPU.
 
 struct Params {
     N: u32,

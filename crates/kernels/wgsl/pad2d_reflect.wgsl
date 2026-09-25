@@ -59,8 +59,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let wo = r0 % wp;
 
     // Mirror into [0, n) with NO repeated edge sample (`nn.functional.pad`'s
-    // `mode="reflect"`), inlined twice (the CPU JIT's WGSL subset has no
-    // user-defined function calls) - `period = 2*(n-1)`, `n >= 2`.
+    // `mode="reflect"`), once per axis - `period = 2*(n-1)`, `n >= 2`.
     let hperiod = 2 * (i32(p.h) - 1);
     var hm = (i32(ho) - i32(p.t)) % hperiod;
     if (hm < 0) { hm = hm + hperiod; }

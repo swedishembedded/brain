@@ -36,12 +36,6 @@
 // upsampler use align_corners=false, while the predictor's final upsample back to
 // the source resolution uses align_corners=true — and DPT's fusion blocks use
 // true.
-//
-// The source-coordinate mapping is written out TWICE (once per axis) rather than
-// factored into a helper: the wgsl-cpu JIT inlines a single entry point and
-// rejects user-defined function calls outright, so a helper here would compile on
-// wgpu and hard-fail on the CPU backend, breaking the "same WGSL, both backends"
-// invariant. Same reason gelu_erf.wgsl inlines its erf.
 
 struct Params {
     N: u32,

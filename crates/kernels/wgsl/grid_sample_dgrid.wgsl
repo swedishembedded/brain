@@ -56,9 +56,6 @@
 // Corners are SIGNED (i32) for the same reason as in the forward: a coordinate
 // legitimately goes negative under 'zeros' padding, and u32 corner math turns
 // -1 into 4294967295.
-//
-// Everything is inlined into main: the wgsl-cpu Cranelift JIT rejects
-// user-defined function calls.
 
 struct Params {
     N: u32,

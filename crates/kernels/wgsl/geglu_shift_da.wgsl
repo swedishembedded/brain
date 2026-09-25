@@ -13,7 +13,7 @@
 // geglu_shift backward w.r.t. `h`:
 //   dh[i] = dy[i] * (g[i] + 1) * gelu'(h[i])
 // gelu'(x) = Phi(x) + x·phi(x) = 0.5·(1+erf(x/√2)) + x·(1/√(2π))·exp(-x²/2).
-// erf inlined (A&S), no helper fn (wgsl-cpu JIT). Inputs dy, g, h; output dh.
+// erf inlined (A&S). Inputs dy, g, h; output dh.
 
 struct Params {
     total: u32,

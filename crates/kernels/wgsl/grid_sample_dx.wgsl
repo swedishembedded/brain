@@ -78,9 +78,6 @@
 // No bounds test is needed on the matched corner: (hi, wi) is an existing input
 // element, so a corner equal to it is in bounds by definition, which is exactly
 // the tap 'zeros' padding would have kept.
-//
-// Everything is inlined into main: the wgsl-cpu Cranelift JIT rejects
-// user-defined function calls.
 
 struct Params {
     N: u32,

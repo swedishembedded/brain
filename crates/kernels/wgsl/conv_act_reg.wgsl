@@ -111,7 +111,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
 
     // Affine (BN-eval collapsed) + selected activation, then store. Inlined per
-    // channel (the wgsl-cpu JIT has no user-function-call support). a{pos}{ch}.
+    // channel. a{pos}{ch}.
     // `p.act` is uniform across the dispatch, so the branches are coherent.
     let is_r = p.act == 1u;
     let is_si = p.act == 2u;

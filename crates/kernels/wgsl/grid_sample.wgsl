@@ -57,11 +57,6 @@
 // coordinate legitimately goes negative under 'zeros' padding. Doing this corner
 // math in u32 wraps -1 to 4294967295, which passes an `< W` test only by luck
 // and reads a wild address otherwise.
-//
-// Everything is inlined into main: the wgsl-cpu Cranelift JIT rejects
-// user-defined function calls, so an `unnormalize` helper would compile on wgpu
-// and hard-fail on the CPU backend. Same reason resize_bilinear.wgsl writes its
-// mapping out once per axis.
 
 struct Params {
     N: u32,

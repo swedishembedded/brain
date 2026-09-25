@@ -97,8 +97,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
     }
 
-    // Per-channel bias, then store. Inlined per channel (the wgsl-cpu JIT
-    // has no user-function-call support). a{pos}{ch}.
+    // Per-channel bias, then store. Inlined per channel. a{pos}{ch}.
     let nco = n * p.Cout;
     {
         let co = co0; let bb = bias[co]; let row = (nco+co)*psz;

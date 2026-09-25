@@ -104,15 +104,9 @@ const GPS: u32 = 8u;
 
 // The same magic-multiply/FTZ-safe f16 decode `matmul_kq_dyn.wgsl` carries,
 // duplicated per this codebase's "every kernel is self-contained WGSL text"
-// convention - but INLINED as a `let` sequence rather than a callable `fn`
-// here (see the two `{X}h_*` blocks in `main` below): this kernel is `@cpu
-// yes` (the CPU JIT must compile it), and `wgsl_cpu::Jit` does not support
-// a `Call` statement to a user-defined function - only builtins - so a
-// separate `f16_to_f32` function (as `matmul_kq_dyn.wgsl`/`matmul_kq_gemv_
-// reg.wgsl` use, both `@cpu no`) fails CPU JIT compilation here with
-// "unsupported statement Call". Inlining is exactly how `kernels::template::
-// f16_decode_expr` already handles the identical constraint for the bf16/
-// f16 WEIGHT STORAGE tier.
+// convention and INLINED as a `let` sequence (see the two `{X}h_*` blocks in
+// `main` below), the form `kernels::template::f16_decode_expr` emits for the
+// bf16/f16 WEIGHT STORAGE tier.
 
 // f32 accumulators in workgroup memory (indexed [m*64 + t]) - same layout as
 // matmul_i8_gemv, same CPU-JIT-compatible single-barrier shape.

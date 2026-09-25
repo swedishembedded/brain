@@ -81,15 +81,10 @@
 //
 // --- structure -------------------------------------------------------------------
 // The 4x4 stencil is written out flat: no var<function> array, no loop, no helper
-// function. Three reasons, all load-bearing:
+// function. Two reasons, both load-bearing:
 //   * a thread-private array indexed by a loop lands in local (global-backed)
 //     memory unless the compiler can unroll every index — a documented
 //     `flash_attn_bidir` trap;
-//   * the wgsl-cpu Cranelift JIT inlines a single entry point and rejects
-//     user-defined function calls outright, so a `cubic_w`/`src_coord` helper
-//     would compile on wgpu and hard-fail on the CPU backend (same reason
-//     resize_bilinear.wgsl writes its coordinate map out twice and gelu_erf.wgsl
-//     inlines its erf);
 //   * 16 named loads keep the tap set obvious to the reader of the adjoint.
 
 struct Params {

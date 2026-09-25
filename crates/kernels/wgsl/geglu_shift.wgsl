@@ -13,8 +13,8 @@
 // Moondream MoE expert activation — GeGLU with a +1 shift:
 //   out[i] = gelu_erf(h[i]) * (g[i] + 1)
 // `h` and `g` are the two halves of the expert's fc1 projection. erf-GELU matches
-// torch's default F.gelu (A&S 7.1.26 erf, inlined + branch-based sign so the
-// wgsl-cpu JIT accepts it, like gelu_erf.wgsl). Elementwise over `total`.
+// torch's default F.gelu (A&S 7.1.26 erf, inlined + branch-based sign, like
+// gelu_erf.wgsl). Elementwise over `total`.
 
 struct Params {
     total: u32,

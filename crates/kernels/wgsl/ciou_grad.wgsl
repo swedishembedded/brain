@@ -42,8 +42,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       tgt:   array<f32>;
 @group(0) @binding(3) var<storage, read_write> dpred: array<f32>;
 
-// NOTE: the CPU JIT supports no user function calls, so the atan polyfill is
-// inlined below. Its analytic derivative 1/(1+u^2) is EXACT regardless of the
+// NOTE: the atan polyfill is inlined below. Its analytic derivative 1/(1+u^2) is EXACT regardless of the
 // polynomial value approximation, so the gradient is consistent with the value
 // kernel's polyfill, which keeps the FD check tight.
 

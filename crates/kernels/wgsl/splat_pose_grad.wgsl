@@ -51,8 +51,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let t = gid.y * (nwg.x * 64u) + gid.x;
     if (t >= p.total) { return; }
 
-    // Scalars only: the CPU backend JITs this kernel too, and it has no
-    // vector locals.
     var ax = 0.0;
     var ay = 0.0;
     var az = 0.0;
