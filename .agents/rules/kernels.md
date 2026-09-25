@@ -731,6 +731,27 @@ so every conv-autoencoder in the tree ran the unmeasured branch there, several
 times slower than the barrier-free path that already existed elsewhere.
 Enumerate the branches and measure each.
 
+### F.4b A kernel that gathers from MANY images: its loop order is its cache policy
+
+`mvs_pm` scores 9 hypotheses against 8 source images per pixel, 36 warped
+bilinear gathers each, and the gathers were most of its time. Loop order
+decided whether they hit: with hypotheses outermost every thread cycles all 8
+images through L2 per pixel; with views outermost the warps resident at any
+moment gather from ONE image. Measured on the finest level of a 1632x1224,
+16-view capture (P40, identical output):
+
+| variant | finest level |
+|---|---|
+| f32 taps, hypotheses outermost | 59.7 s |
+| f32 taps, views outermost | 53.9 s |
+| 2x2 taps packed as 16-bit unorms (one 8-byte load), views outermost | 44.0 s |
+
+Two killed hypotheses on the way, both zero within noise: the packed taps
+with hypotheses still outermost (the traffic saving only pays once the cache
+holds the image), and making the patch loop bounds compile-time constants so
+the compiler could unroll and overlap the gathers. Reorder first; shrink
+the sample second.
+
 ### F.5 A/B for CORRECTNESS and speed in the same harness
 
 A faster kernel that disagrees is not a faster kernel. Print `max|delta|`

@@ -732,6 +732,45 @@ pub const MSE_VALUE: &str = include_str!("../wgsl/mse_value.wgsl");
 pub const MSE_VALUE_W: &str = include_str!("../wgsl/mse_value_w.wgsl");
 /// `wgsl/mul.wgsl`
 pub const MUL: &str = include_str!("../wgsl/mul.wgsl");
+/// `wgsl/mvs_filter.wgsl`, after `wgsl/lib/{camera,mvs}.wgsl`
+pub const MVS_FILTER: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/mvs_filter.wgsl"),
+);
+/// `wgsl/mvs_fuse_acc.wgsl`, after `wgsl/lib/{camera,mvs}.wgsl`
+pub const MVS_FUSE_ACC: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/mvs_fuse_acc.wgsl"),
+);
+/// `wgsl/mvs_fuse_out.wgsl`, after `wgsl/lib/{camera,mvs}.wgsl`
+pub const MVS_FUSE_OUT: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/mvs_fuse_out.wgsl"),
+);
+/// `wgsl/mvs_pm.wgsl`, after `wgsl/lib/{camera,mvs}.wgsl`
+pub const MVS_PM: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/mvs_pm.wgsl"),
+);
+/// `wgsl/mvs_prepare.wgsl`
+pub const MVS_PREPARE: &str = include_str!("../wgsl/mvs_prepare.wgsl");
+/// `wgsl/mvs_quad.wgsl`
+pub const MVS_QUAD: &str = include_str!("../wgsl/mvs_quad.wgsl");
+/// `wgsl/mvs_rays.wgsl`, after `wgsl/lib/{camera}.wgsl`
+pub const MVS_RAYS: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/mvs_rays.wgsl"),
+);
+/// `wgsl/mvs_upsample.wgsl`, after `wgsl/lib/{camera,mvs}.wgsl`
+pub const MVS_UPSAMPLE: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/mvs_upsample.wgsl"),
+);
 /// `wgsl/na3d_apply.wgsl`
 pub const NA3D_APPLY: &str = include_str!("../wgsl/na3d_apply.wgsl");
 /// `wgsl/na3d_scores.wgsl`
@@ -1448,6 +1487,14 @@ pub const ALL: &[(&str, &str)] = &[
     ("mse_value", MSE_VALUE),
     ("mse_value_w", MSE_VALUE_W),
     ("mul", MUL),
+    ("mvs_filter", MVS_FILTER),
+    ("mvs_fuse_acc", MVS_FUSE_ACC),
+    ("mvs_fuse_out", MVS_FUSE_OUT),
+    ("mvs_pm", MVS_PM),
+    ("mvs_prepare", MVS_PREPARE),
+    ("mvs_quad", MVS_QUAD),
+    ("mvs_rays", MVS_RAYS),
+    ("mvs_upsample", MVS_UPSAMPLE),
     ("na3d_apply", NA3D_APPLY),
     ("na3d_scores", NA3D_SCORES),
     ("nchw_nlc", NCHW_NLC),

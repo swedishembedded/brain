@@ -1778,6 +1778,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-mvs"
+version = "1.1.0"
+dependencies = [
+ "brain-camera",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-sfm",
+ "brain-splat",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-nemotronasr"
 version = "1.1.0"
 dependencies = [

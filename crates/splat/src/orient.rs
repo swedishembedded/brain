@@ -207,8 +207,10 @@ fn rotation_taking(from: [f64; 3], to: [f64; 3]) -> [f64; 9] {
     ]
 }
 
-/// wxyz quaternion of a row-major rotation.
-pub(crate) fn quat_of(r: &[f64; 9]) -> [f64; 4] {
+/// wxyz quaternion of a row-major rotation - the convention
+/// [`crate::geometry::axis`] reads a gaussian's axes back out of: column `k`
+/// of `r` is `axis(q, k)`.
+pub fn quat_of(r: &[f64; 9]) -> [f64; 4] {
     let t = r[0] + r[4] + r[8];
     if t > 0.0 {
         let s = (t + 1.0).sqrt() * 2.0;

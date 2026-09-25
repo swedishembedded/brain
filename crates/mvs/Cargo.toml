@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+name = "brain-mvs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dense multi-view stereo on the GPU through any lens: PatchMatch over per-pixel range and normal hypotheses with bilaterally weighted NCC, joint view selection, red-black adaptive propagation, geometric consistency across a coarse-to-fine pyramid, consistency filtering and point fusion - and the surface-aligned gaussian scene a splat fit starts from."
+
+[lib]
+name = "mvs"
+path = "src/lib.rs"
+
+[dependencies]
+# `camera::Intrinsics` - the one lens model; every warp walks rays through it.
+brain-camera.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+# `splat::types::{Camera, Splats}` - the camera a view is seen through and the
+# scene type `init::to_splats` builds; nothing else of the renderer is used.
+brain-splat.workspace = true
+# `sfm::incremental::Reconstruction` - the tracks view selection and the
+# per-view range bounds are read from.
+brain-sfm.workspace = true
+
+[dev-dependencies]
+# `data::rng::Lcg` - the one deterministic test PRNG (synthetic textures).
+brain-data.workspace = true
+# `imaging::{load, save}` - photographs in and visualisations out, in the
+# `mvs_folder` example.
+brain-imaging.workspace = true
+serde_json.workspace = true

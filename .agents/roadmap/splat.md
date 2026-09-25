@@ -87,6 +87,26 @@ the specification it is built from - see **Provenance** for what that means.
 | ALIKED + LightGlue/LoMa matching, MAGSAC++, global SfM, 360° as a cubemap rig | `sfm` | planned |
 | GPS Sim(3) (Umeyama inside RANSAC) + IMU gravity | `align.rs` has Umeyama | planned |
 
+### Dense geometry (`crates/mvs`, upstream of `fit`)
+
+GPU PatchMatch multi-view stereo through the real lens (no rectification):
+per-view range/normal/confidence maps, fused points, and a surface-aligned
+gaussian start (`mvs::to_splats`). Measured on the 16-photo chessboard
+capture at 1632x1224 on one P40: 59 s of stereo (`mvs_pm` is 99.6 % of
+device time), 62 % mean coverage, 3.1 M fused points in 6 s
+(`crates/mvs/examples/mvs_folder.rs`).
+
+| capability | where | state |
+|---|---|---|
+| Source view selection + per-view range bounds from SfM tracks | `mvs::select` | done |
+| Red-black adaptive propagation, joint view selection, refinement, bilateral NCC through any lens | `mvs_pm.wgsl` | done |
+| Coarse-to-fine pyramid with geometric consistency; consistency filter | `mvs::stereo`, `mvs_upsample.wgsl`, `mvs_filter.wgsl` | done |
+| Fusion (gather-only ownership by finest footprint), surface-aligned splat init | `mvs::fuse`, `mvs::init` | done |
+| Wire into `recon::photogrammetry` / `brain splat train`: `TargetView::{depth, depth_conf, normals}` from `DepthMap` and the start scene from `to_splats`; judge on held-out views | `recon` | planned |
+| Truly textureless surfaces (planar priors, Xu & Tao AAAI 2020). Keeping zero-texture pixels on geometric consistency alone was measured wrong: a plane propagated into empty background is consistent in every view, 13.5 % of a synthetic view's measurements landed off the surface | `mvs` | planned |
+| CPU backend: the `mvs_*` kernels use vector/struct locals and helper functions the CPU JIT does not lower yet | `wgsl-cpu` | blocked |
+| Second P40: split a sweep's views across devices (each view then reads its sources' maps from the previous sweep rather than in order) | `mvs::stereo` | planned |
+
 ### Throughput (measured on a 2xP40 box, 16 photos at 1024x768)
 
 The fit's cost is dominated by the backward, whose gradient records scale

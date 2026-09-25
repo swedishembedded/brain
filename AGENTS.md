@@ -207,7 +207,10 @@ fast and scalable kernel - not a naive one.
     **Photographs alone → a scene**: `crates/sfm` is structure from motion
     (SIFT, P3P, Schur-complement bundle adjustment with a self-calibrated
     focal length and distortion), `recon::photogrammetry` turns its output
-    into undistorted training targets and a point-cloud start.
+    into undistorted training targets and a point-cloud start. `crates/mvs`
+    is GPU PatchMatch multi-view stereo through the real lens: per-view
+    range/normal/confidence maps (the fit's `TargetView` priors), fused
+    points and a surface-aligned gaussian start.
     `brain splat {info,render,view,fit,sfm,train}`. Plan, status and the
     provenance rules: `.agents/roadmap/splat.md`.
 
@@ -961,6 +964,7 @@ front-end to depend on.
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + trainer (`fit`, `train`) + viewer |
 | `sfm` | structure from motion: SIFT, matching, two-view geometry, P3P, bundle adjustment, incremental reconstruction with a self-calibrated camera. Pure host geometry, no model and no GPU |
+| `mvs` | dense multi-view stereo on the GPU through any lens (`camera::Intrinsics`): source selection from SfM tracks, PatchMatch (bilateral NCC, red-black propagation, joint view selection, coarse-to-fine geometric consistency), consistency filter, fusion, surface-aligned splat init |
 | `recon` | model-agnostic long-capture orchestration: mixed photo/video ingest, sharpness + near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration behind a residual gate, global fuse/prune/orient. Knows no model - one asks it via `ReconstructionModel` (`worldmirror2::recon_impl`) how many frames a pass holds and what grid it wants |
 | `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path + the video memory bank); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |
 | `diffusion` / `dit` / `vae` / `s3dit` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
@@ -1067,6 +1071,7 @@ front-end to depend on.
 | DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat.md`, `.agents/roadmap/splat.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| Dense depth/normal maps and fused points from calibrated photographs (MVS) | `crates/mvs`, `crates/kernels/wgsl/mvs_*.wgsl` + `wgsl/lib/mvs.wgsl`; real-capture run `crates/mvs/examples/mvs_folder.rs`; status `.agents/roadmap/splat.md` (Dense geometry) |
 | Photographs → cameras + points (SfM) → splat training set → fitted scene | `crates/sfm`, `crates/recon/src/photogrammetry.rs`; `brain splat sfm/train`; SDK surface `three-d` (`brain::Reconstruction`, `crates/sdk/src/three_d.rs`) and its sample `samples/reconstruction/splat`; held-out evaluation `crates/recon/examples/{synthetic_e2e,photo_holdout}.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
