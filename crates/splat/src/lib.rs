@@ -72,6 +72,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_ray_bwd_tile", kernels::SPLAT_RAY_BWD_TILE),
     ("splat_env", kernels::SPLAT_ENV),
     ("splat_env_grad", kernels::SPLAT_ENV_GRAD),
+    ("isp_pixel", kernels::ISP_PIXEL),
+    ("isp_grid_grad", kernels::ISP_GRID_GRAD),
+    ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -111,6 +114,9 @@ pub struct Kernels {
     pub splat_ray_bwd_tile: usize,
     pub splat_env: usize,
     pub splat_env_grad: usize,
+    pub isp_pixel: usize,
+    pub isp_grid_grad: usize,
+    pub dw_splitk_reduce: usize,
 }
 
 impl Kernels {
@@ -151,6 +157,9 @@ impl Kernels {
             splat_ray_bwd_tile: base + 30,
             splat_env: base + 31,
             splat_env_grad: base + 32,
+            isp_pixel: base + 33,
+            isp_grid_grad: base + 34,
+            dw_splitk_reduce: base + 35,
         }
     }
 }

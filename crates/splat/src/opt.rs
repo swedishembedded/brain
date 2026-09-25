@@ -34,7 +34,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::density::{self, Evidence};
 use crate::env::{EnvDevice, EnvMap};
-use crate::isp::{Encoding, Isp, IspCfg};
+use crate::isp::{ColorSpace, DeviceIsp, Encoding, Isp, IspCfg, Shot};
 use crate::loss::{DeviceLoss, PixelLoss};
 use crate::renderer::{dispatched_groups, BwdScratch, CameraGrad, Renderer};
 use crate::train::{Bounds, DeviceScene, Rates};
@@ -531,6 +531,19 @@ impl TargetView {
         }
     }
 
+    /// [`TargetView::half`] for a fit in colour space `space`: an sRGB
+    /// target of a scene-linear fit is averaged in linear light and encoded
+    /// again, since the camera integrates light before it encodes; any other
+    /// is averaged as stored.
+    pub fn half_in(&self, space: ColorSpace) -> TargetView {
+        if space != ColorSpace::SceneLinear || self.encoding != Encoding::Srgb {
+            return self.half();
+        }
+        let mut h = TargetView { rgb: self.rgb.iter().map(|&v| crate::isp::srgb_decode(v)).collect(), ..self.clone() }.half();
+        h.rgb.iter_mut().for_each(|v| *v = crate::isp::srgb_encode(*v));
+        h
+    }
+
     /// The per-pixel supervision weight a fit uses for this view: the mask,
     /// times the camera model's clipped-pixel weight when there is one.
     /// `None` = every pixel counts fully.
@@ -786,6 +799,8 @@ struct Scratch {
     ones: DeviceBuffer,
     no_geo: DeviceBuffer,
     geom_partial: DeviceBuffer,
+    /// The camera model's device side, when the fit has one.
+    isp: Option<DeviceIsp>,
 }
 
 /// One fit, in the normalized frame.
@@ -841,8 +856,9 @@ impl<'a> Fit<'a> {
         for (t, c) in targets.iter_mut().zip(&self.cams) {
             t.cam = *c;
         }
+        let space = self.cfg.isp.map_or(ColorSpace::Display, |i| i.color_space);
         for _ in 0..halvings {
-            targets = targets.iter().map(TargetView::half).collect();
+            targets = targets.iter().map(|t| t.half_in(space)).collect();
         }
         let isp = self.isp.as_deref();
         let weights: Vec<Option<Vec<f32>>> = targets.iter().map(|t| t.weights(isp)).collect();
@@ -902,6 +918,7 @@ impl<'a> Fit<'a> {
             ones,
             no_geo,
             geom_partial: gpu.storage((4 * dispatched_groups(max_px)) as u64),
+            isp: self.isp.as_deref().map(|m| DeviceIsp::new(gpu, m, max_px)),
         };
 
         let mut scene = DeviceScene::new(gpu, self.init, cfg.sh_degree);
@@ -951,7 +968,6 @@ impl<'a> Fit<'a> {
                     continue;
                 }
                 let cam = level.targets[vi].cam;
-                let px = (cam.width * cam.height) as usize;
                 let tm = std::time::Instant::now();
                 let eye = cam.eye();
                 scene.shade(gpu, &self.ks, eye, skip);
@@ -964,22 +980,13 @@ impl<'a> Fit<'a> {
                 // the render is radiance; the photograph is what this view's
                 // camera made of it
                 let tm = std::time::Instant::now();
-                let rgb = if self.isp.is_some() { crate::renderer::rgba_to_rgb(&scr.renderer.read_rgba(gpu, cam.width, cam.height)) } else { Vec::new() };
-                if let Some(model) = self.isp.as_deref() {
-                    let p = model.forward(vi, &cam, &rgb);
-                    let rgba: Vec<f32> = p.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
-                    gpu.write_f32(&scr.pred, &rgba);
+                if let (Some(model), Some(dev)) = (self.isp.as_deref(), &scr.isp) {
+                    dev.forward(gpu, self.ks, model, Shot::Training(vi), &cam, &scr.renderer.img, &scr.pred);
                 }
                 let pred = if self.isp.is_some() { &scr.pred } else { &scr.renderer.img };
                 loss_sum += scr.dloss.eval(gpu, self.ks, cfg.loss, pred, &level.tgt[vi], level.wt[vi].as_ref(), level.wsum[vi], cam.width, cam.height, &scr.dimg);
-                if let Some(model) = self.isp.as_deref_mut() {
-                    let mut d = gpu.read(&scr.dimg, px * 4);
-                    let g3: Vec<f32> = d.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
-                    let g3 = model.backward(vi, &cam, &rgb, &g3);
-                    for i in 0..px {
-                        d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
-                    }
-                    gpu.write_f32(&scr.dimg, &d);
+                if let (Some(model), Some(dev)) = (self.isp.as_deref_mut(), &scr.isp) {
+                    dev.backward(gpu, self.ks, model, vi, &cam, &scr.renderer.img, &scr.dimg);
                 }
                 if let Some(e) = self.env.as_mut() {
                     let g = e.dev.backward(gpu, &self.ks, &scr.renderer.img, &scr.dimg, &cam, &o);
@@ -1142,14 +1149,12 @@ impl<'a> Fit<'a> {
             if let Some(e) = &self.env {
                 e.dev.composite(gpu, &self.ks, &scr.renderer.img, &cam, &o);
             }
-            let pred = match self.isp.as_deref() {
-                None => &scr.renderer.img,
-                Some(model) => {
-                    let rgb = crate::renderer::rgba_to_rgb(&scr.renderer.read_rgba(gpu, cam.width, cam.height));
-                    let p = model.forward(vi, &cam, &rgb);
-                    gpu.write_f32(&scr.pred, &p.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 0.0]).collect::<Vec<f32>>());
+            let pred = match (self.isp.as_deref(), &scr.isp) {
+                (Some(model), Some(dev)) => {
+                    dev.forward(gpu, self.ks, model, Shot::Training(vi), &cam, &scr.renderer.img, &scr.pred);
                     &scr.pred
                 }
+                _ => &scr.renderer.img,
             };
             sum += scr.dloss.eval(gpu, self.ks, cfg.loss, pred, &level.tgt[vi], level.wt[vi].as_ref(), level.wsum[vi], cam.width, cam.height, &scr.dimg);
             let (wd, wn) = (cfg.depth_weight, cfg.normal_prior_weight);
@@ -1369,9 +1374,12 @@ impl<'a> Fit<'a> {
             }
             let rgba = scr.renderer.read_rgba(gpu, cam.width, cam.height);
             let rgb = crate::renderer::rgba_to_rgb(&rgba);
-            let pred = match self.isp.as_deref() {
-                None => rgb,
-                Some(model) => model.forward(vi, &cam, &rgb),
+            let pred = match (self.isp.as_deref(), &scr.isp) {
+                (Some(model), Some(dev)) => {
+                    dev.forward(gpu, self.ks, model, Shot::Training(vi), &cam, &scr.renderer.img, &scr.pred);
+                    crate::renderer::rgba_to_rgb(&gpu.read(&scr.pred, 4 * (cam.width * cam.height) as usize))
+                }
+                _ => rgb,
             };
             let mut weights = t.weights(self.isp.as_deref());
             if cfg.transients {

@@ -542,6 +542,16 @@ pub const IM2COL1D_AT: &str = include_str!("../wgsl/im2col1d_at.wgsl");
 pub const IM2COL3D_AT: &str = include_str!("../wgsl/im2col3d_at.wgsl");
 /// `wgsl/im2col_at.wgsl`
 pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
+/// `wgsl/isp_grid_grad.wgsl`, after `wgsl/lib/{isp}.wgsl`
+pub const ISP_GRID_GRAD: &str = concat!(
+    include_str!("../wgsl/lib/isp.wgsl"),
+    include_str!("../wgsl/isp_grid_grad.wgsl"),
+);
+/// `wgsl/isp_pixel.wgsl`, after `wgsl/lib/{isp}.wgsl`
+pub const ISP_PIXEL: &str = concat!(
+    include_str!("../wgsl/lib/isp.wgsl"),
+    include_str!("../wgsl/isp_pixel.wgsl"),
+);
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/kv_block_gather.wgsl`
@@ -1406,6 +1416,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("im2col1d_at", IM2COL1D_AT),
     ("im2col3d_at", IM2COL3D_AT),
     ("im2col_at", IM2COL_AT),
+    ("isp_grid_grad", ISP_GRID_GRAD),
+    ("isp_pixel", ISP_PIXEL),
     ("kv_append", KV_APPEND),
     ("kv_block_gather", KV_BLOCK_GATHER),
     ("kv_block_scatter", KV_BLOCK_SCATTER),
