@@ -1,62 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The camera model structure-from-motion estimates: one physical camera
-//! shared by every photograph of a capture (a single focal length and a
-//! two-coefficient radial distortion about the image centre), and a rigid
-//! pose per photograph.
+//! Camera poses, and projection through the workspace's one camera model
+//! (`camera::Intrinsics`, which this crate calibrates).
 //!
 //! Conventions match `splat::types::Camera`: +X right, +Y down, +Z forward,
 //! `X_cam = R·X_world + t`.
 
 use crate::linalg::{add, mtv, mv, scale, M3, V3};
-
-/// Intrinsics shared by every view.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Intrinsics {
-    /// Focal length in pixels.
-    pub f: f64,
-    pub cx: f64,
-    pub cy: f64,
-    /// Radial distortion `d(r²) = 1 + k1·r² + k2·r⁴` on normalized
-    /// coordinates.
-    pub k1: f64,
-    pub k2: f64,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Intrinsics {
-    /// A first guess for a camera with no metadata: principal point at the
-    /// centre, no distortion, and a focal length of `fov_factor` times the
-    /// larger side (1.2 is a typical phone main camera, about 45° across the
-    /// long side).
-    pub fn guess(width: u32, height: u32, fov_factor: f64) -> Intrinsics {
-        Intrinsics { f: fov_factor * width.max(height) as f64, cx: width as f64 / 2.0, cy: height as f64 / 2.0, k1: 0.0, k2: 0.0, width, height }
-    }
-
-    pub fn distortion(&self, r2: f64) -> f64 {
-        1.0 + self.k1 * r2 + self.k2 * r2 * r2
-    }
-
-    /// Pixel of a normalized (undistorted) image coordinate.
-    pub fn to_pixel(&self, n: [f64; 2]) -> [f64; 2] {
-        let d = self.distortion(n[0] * n[0] + n[1] * n[1]);
-        [self.f * d * n[0] + self.cx, self.f * d * n[1] + self.cy]
-    }
-
-    /// Normalized, undistorted coordinate of a pixel (fixed-point inversion
-    /// of the radial model).
-    pub fn to_normalized(&self, p: [f64; 2]) -> [f64; 2] {
-        let xd = [(p[0] - self.cx) / self.f, (p[1] - self.cy) / self.f];
-        let mut x = xd;
-        for _ in 0..20 {
-            let d = self.distortion(x[0] * x[0] + x[1] * x[1]);
-            x = [xd[0] / d, xd[1] / d];
-        }
-        x
-    }
-}
+use ::camera::Intrinsics;
 
 /// World-to-camera rigid transform.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,11 +39,8 @@ impl Pose {
     }
 }
 
-/// Where world point `x` lands in the image, `None` behind the camera.
+/// Where world point `x` lands in the image, `None` where the lens does not
+/// image it (behind a perspective camera, past the lens's valid field).
 pub fn project(k: &Intrinsics, pose: &Pose, x: V3) -> Option<[f64; 2]> {
-    let c = pose.to_cam(x);
-    if c[2] <= 1e-9 {
-        return None;
-    }
-    Some(k.to_pixel([c[0] / c[2], c[1] / c[2]]))
+    k.project(pose.to_cam(x))
 }

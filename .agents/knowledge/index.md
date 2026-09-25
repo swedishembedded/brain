@@ -203,3 +203,4 @@ What belongs where:
 | 160 | A minibatch statistics window straddles two epochs | [`160-a-minibatch-statistics-window-straddles-two-epochs.md`](160-a-minibatch-statistics-window-straddles-two-epochs.md) |
 | 161 | A 3D split of a coarse blob lands half its children behind the surface | [`161-a-3d-split-of-a-coarse-blob-lands-half-its-children-behind-the-surface.md`](161-a-3d-split-of-a-coarse-blob-lands-half-its-children-behind-the-surface.md) |
 | 162 | A raw learning rate on linear parameters turns a sparse start into fog | [`162-a-raw-learning-rate-on-linear-parameters-turns-a-sparse-start-into-fog.md`](162-a-raw-learning-rate-on-linear-parameters-turns-a-sparse-start-into-fog.md) |
+| 163 | A parameter sweep that picks its own bound has not found the optimum | [`163-a-parameter-sweep-that-picks-its-own-bound-has-not-found-the-optimum.md`](163-a-parameter-sweep-that-picks-its-own-bound-has-not-found-the-optimum.md) |

@@ -2,19 +2,41 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Bundle adjustment: Levenberg-Marquardt on the pixel reprojection error of
-//! every observation, over every camera pose, every point and (optionally)
-//! the shared intrinsics `f, k1, k2` - Triggs et al., "Bundle Adjustment - A
-//! Modern Synthesis" (1999), §4 and §6.
+//! every observation, over every camera pose, every point and, per physical
+//! camera (sensor), a chosen subset of its calibration - Triggs et al.,
+//! "Bundle Adjustment - A Modern Synthesis" (1999), §4 and §6.
+//!
+//! Projection and its Jacobians in the direction and in the calibration come
+//! from `camera::Intrinsics` (`project_param_jac`), so every lens model the
+//! workspace knows - pinhole, Brown-Conrady, Kannala-Brandt fisheye - is
+//! adjusted by the same code. Which calibration parameters move is a list of
+//! [`Param`]s per sensor; `fx = fy` tied is the one focal [`Param::Focal`].
 //!
 //! The points are eliminated with the Schur complement, so the system solved
-//! is the dense reduced CAMERA system (6 per pose + 3 intrinsics); each point
-//! is then recovered from its own 3x3 block. Residuals pass through a Huber
-//! loss (IRLS weights) so a mismatch that survived verification pulls with
-//! bounded force. The first pose in `fixed` pins the gauge's rotation and
-//! translation; scale is held by the damping.
+//! is the dense reduced CAMERA system (pose and calibration columns); each
+//! point is then recovered from its own 3x3 block. Residuals pass through a
+//! Huber loss (IRLS weights) so a mismatch that survived verification pulls
+//! with bounded force. Soft Gaussian priors hold a focal length near a
+//! metadata value and the principal point near the image centre, weak enough
+//! that only evidence moves them and strong enough that no evidence leaves
+//! them where they were.
+//!
+//! THE GAUGE is explicit - photographs fix a reconstruction only up to a
+//! similarity, and the seven free directions are removed rather than left to
+//! the damping:
+//!
+//! * the ANCHOR camera's pose is not a parameter (rotation and translation,
+//!   six directions);
+//! * the SCALE camera's centre moves only perpendicular to the line from the
+//!   anchor's centre (one direction), and after every accepted step the
+//!   whole reconstruction is rescaled about the anchor's centre so that the
+//!   distance between the two centres is EXACTLY what it was - the tangent
+//!   step keeps it to first order, the rescale (a similarity, which changes
+//!   no reprojection) keeps it to rounding.
 
-use crate::camera::{Intrinsics, Pose};
-use crate::linalg::{cholesky_solve, exp_so3, inv3_spd, mm, M3, V3};
+use crate::camera::Pose;
+use crate::linalg::{add, cholesky_solve, cross, exp_so3, inv3_spd, mm, mv, norm, normalize, scale, sub, M3, V3};
+use ::camera::Intrinsics;
 
 /// One image measurement of one point.
 #[derive(Clone, Copy, Debug)]
@@ -24,20 +46,74 @@ pub struct Observation {
     pub px: [f64; 2],
 }
 
+/// One calibration degree of freedom bundle adjustment can refine, over
+/// `camera::Intrinsics::params` (`fx, fy, cx, cy`, then the lens
+/// coefficients).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Param {
+    /// `fx` and `fy` moved together: square pixels.
+    Focal,
+    Fx,
+    Fy,
+    Cx,
+    Cy,
+    /// Lens coefficient `i` of `camera::Lens::coeffs` (Brown: `k1..k6` are
+    /// 0..5, `p1, p2` are 6, 7; fisheye: `k1..k4` are 0..3).
+    Coeff(usize),
+}
+
+impl Param {
+    /// This parameter's column of the projection's calibration Jacobian.
+    fn column(self, jp: &[[f64; 2]]) -> [f64; 2] {
+        match self {
+            Param::Focal => [jp[0][0] + jp[1][0], jp[0][1] + jp[1][1]],
+            Param::Fx => jp[0],
+            Param::Fy => jp[1],
+            Param::Cx => jp[2],
+            Param::Cy => jp[3],
+            Param::Coeff(i) => jp[4 + i],
+        }
+    }
+
+    fn apply(self, p: &mut [f64], d: f64) {
+        match self {
+            Param::Focal => {
+                p[0] += d;
+                p[1] += d;
+            }
+            Param::Fx => p[0] += d,
+            Param::Fy => p[1] += d,
+            Param::Cx => p[2] += d,
+            Param::Cy => p[3] += d,
+            Param::Coeff(i) => p[4 + i] += d,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BaCfg {
     pub iters: usize,
     /// Huber threshold in pixels.
     pub huber: f64,
-    /// Refine `f`, `k1`, `k2`.
-    pub intrinsics: bool,
-    /// Poses held fixed (gauge and already-trusted cameras).
-    pub fixed: Vec<usize>,
+    /// Per sensor, the calibration parameters refined; a sensor with no
+    /// entry (or an empty one) keeps its calibration.
+    pub free: Vec<Vec<Param>>,
+    /// The camera whose pose is held: the gauge's rotation and translation.
+    pub anchor: Option<usize>,
+    /// The camera whose distance from the anchor is held: the gauge's scale.
+    /// Needs `anchor`.
+    pub scale: Option<usize>,
+    /// Per sensor, a soft prior `(focal px, sigma px)` on a free focal
+    /// length (EXIF), `None` for none.
+    pub focal_prior: Vec<Option<(f64, f64)>>,
+    /// Sigma of the prior pulling a free principal point toward the image
+    /// centre, as a fraction of the longer image side.
+    pub pp_prior: f64,
 }
 
 impl Default for BaCfg {
     fn default() -> Self {
-        BaCfg { iters: 50, huber: 2.0, intrinsics: true, fixed: vec![0] }
+        BaCfg { iters: 50, huber: 2.0, free: Vec::new(), anchor: Some(0), scale: None, focal_prior: Vec::new(), pp_prior: 0.02 }
     }
 }
 
@@ -46,56 +122,31 @@ impl Default for BaCfg {
 pub struct BaReport {
     pub rms_before: f64,
     pub rms_after: f64,
+    /// Huber cost of the reprojections after, priors excluded.
+    pub cost_after: f64,
     pub iterations: usize,
 }
 
 /// Residual and Jacobians of one observation.
 struct Lin {
     r: [f64; 2],
-    /// d r / d (omega, t)
-    jc: [[f64; 6]; 2],
-    /// d r / d (f, k1, k2)
-    jk: [[f64; 3]; 2],
-    /// d r / d X
-    jp: [[f64; 3]; 2],
+    /// d r / d (camera point)
+    jd: [[f64; 3]; 2],
+    /// d r / d (every calibration parameter), empty unless asked for
+    jk: Vec<[f64; 2]>,
+    /// the camera-frame point
+    c: V3,
 }
 
-fn linearize(k: &Intrinsics, p: &Pose, x: V3, obs: [f64; 2]) -> Option<Lin> {
+fn linearize(k: &Intrinsics, p: &Pose, x: V3, obs: [f64; 2], want_k: bool) -> Option<Lin> {
     let c = p.to_cam(x);
-    if c[2] <= 1e-9 {
-        return None;
-    }
-    let iz = 1.0 / c[2];
-    let (nx, ny) = (c[0] * iz, c[1] * iz);
-    let r2 = nx * nx + ny * ny;
-    let d = 1.0 + k.k1 * r2 + k.k2 * r2 * r2;
-    let dd = k.k1 + 2.0 * k.k2 * r2;
-    let u = k.f * d * nx + k.cx;
-    let v = k.f * d * ny + k.cy;
-    // d(u,v)/d(nx,ny)
-    let a = [[k.f * (d + 2.0 * nx * nx * dd), k.f * 2.0 * nx * ny * dd], [k.f * 2.0 * nx * ny * dd, k.f * (d + 2.0 * ny * ny * dd)]];
-    // d(nx,ny)/dc
-    let b = [[iz, 0.0, -nx * iz], [0.0, iz, -ny * iz]];
-    let mut jcam = [[0.0f64; 3]; 2];
-    for i in 0..2 {
-        for j in 0..3 {
-            jcam[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j];
-        }
-    }
-    let rx = [c[0] - p.t[0], c[1] - p.t[1], c[2] - p.t[2]];
-    // dc/domega = -[R X]x
-    let dw = [[0.0, rx[2], -rx[1]], [-rx[2], 0.0, rx[0]], [rx[1], -rx[0], 0.0]];
-    let mut jc = [[0.0f64; 6]; 2];
-    let mut jp = [[0.0f64; 3]; 2];
-    for i in 0..2 {
-        for j in 0..3 {
-            jc[i][j] = (0..3).map(|m| jcam[i][m] * dw[m][j]).sum();
-            jc[i][3 + j] = jcam[i][j];
-            jp[i][j] = (0..3).map(|m| jcam[i][m] * p.r[m * 3 + j]).sum();
-        }
-    }
-    let jk = [[d * nx, k.f * nx * r2, k.f * nx * r2 * r2], [d * ny, k.f * ny * r2, k.f * ny * r2 * r2]];
-    Some(Lin { r: [u - obs[0], v - obs[1]], jc, jk, jp })
+    let (uv, jd, jk) = if want_k {
+        k.project_param_jac(c)?
+    } else {
+        let (uv, jd) = k.project_jac(c)?;
+        (uv, jd, Vec::new())
+    };
+    Some(Lin { r: [uv[0] - obs[0], uv[1] - obs[1]], jd, jk, c })
 }
 
 fn huber_weight(r: &[f64; 2], delta: f64) -> f64 {
@@ -103,26 +154,35 @@ fn huber_weight(r: &[f64; 2], delta: f64) -> f64 {
     if n <= delta { 1.0 } else { delta / n }
 }
 
-fn huber_cost(r: &[f64; 2], delta: f64) -> f64 {
+fn huber(r: &[f64; 2], delta: f64) -> f64 {
     let n2 = r[0] * r[0] + r[1] * r[1];
     let n = n2.sqrt();
     if n <= delta { n2 } else { 2.0 * delta * n - delta * delta }
 }
 
-fn total_cost(k: &Intrinsics, poses: &[Pose], pts: &[V3], obs: &[Observation], delta: f64) -> f64 {
+/// What an observation the lens cannot image costs: that of a residual of
+/// ten Huber thresholds, so a step that pushes points out of the field is
+/// refused rather than rewarded for dropping their error.
+fn lost(delta: f64) -> f64 {
+    huber(&[10.0 * delta, 0.0], delta)
+}
+
+/// Huber cost of every observation's reprojection, pixels².
+pub fn huber_cost(ks: &[Intrinsics], sensor: &[usize], poses: &[Pose], pts: &[V3], obs: &[Observation], delta: f64) -> f64 {
     obs.iter()
-        .map(|o| match crate::camera::project(k, &poses[o.cam], pts[o.point]) {
-            Some(uv) => huber_cost(&[uv[0] - o.px[0], uv[1] - o.px[1]], delta),
-            None => 4.0 * delta * delta * 100.0,
+        .map(|o| match crate::camera::project(&ks[sensor[o.cam]], &poses[o.cam], pts[o.point]) {
+            Some(uv) => huber(&[uv[0] - o.px[0], uv[1] - o.px[1]], delta),
+            None => lost(delta),
         })
         .sum()
 }
 
-/// RMS pixel reprojection error over `obs` (points behind a camera skipped).
-pub fn rms(k: &Intrinsics, poses: &[Pose], pts: &[V3], obs: &[Observation]) -> f64 {
+/// RMS pixel reprojection error over `obs` (observations the lens cannot
+/// image skipped).
+pub fn rms(ks: &[Intrinsics], sensor: &[usize], poses: &[Pose], pts: &[V3], obs: &[Observation]) -> f64 {
     let (mut s, mut n) = (0.0f64, 0usize);
     for o in obs {
-        if let Some(uv) = crate::camera::project(k, &poses[o.cam], pts[o.point]) {
+        if let Some(uv) = crate::camera::project(&ks[sensor[o.cam]], &poses[o.cam], pts[o.point]) {
             s += (uv[0] - o.px[0]).powi(2) + (uv[1] - o.px[1]).powi(2);
             n += 1;
         }
@@ -130,31 +190,104 @@ pub fn rms(k: &Intrinsics, poses: &[Pose], pts: &[V3], obs: &[Observation]) -> f
     (s / n.max(1) as f64).sqrt()
 }
 
-/// Refine `k`, `poses` and `points` in place against `obs`.
-pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], obs: &[Observation], cfg: &BaCfg) -> BaReport {
+/// One prior residual: `(value - target) / sigma` on the parameter in
+/// column `col`, whose value moves one-for-one with it.
+struct Prior {
+    col: usize,
+    sensor: usize,
+    /// index into `Intrinsics::params`
+    param: usize,
+    target: f64,
+    sigma: f64,
+}
+
+impl Prior {
+    fn residual(&self, ks: &[Intrinsics]) -> f64 {
+        (ks[self.sensor].params()[self.param] - self.target) / self.sigma
+    }
+}
+
+fn prior_cost(priors: &[Prior], ks: &[Intrinsics]) -> f64 {
+    priors.iter().map(|p| p.residual(ks).powi(2)).sum()
+}
+
+/// A camera's place in the reduced system.
+#[derive(Clone, Copy)]
+enum Slot {
+    Held,
+    /// rotation increment and translation, six columns from here
+    Free(usize),
+    /// rotation increment and a centre step across the baseline, five
+    Scale(usize),
+}
+
+/// Refine the calibrations `ks` (one per sensor; `sensor[c]` is camera
+/// `c`'s), `poses` and `points` in place against `obs`.
+pub fn bundle_adjust(ks: &mut [Intrinsics], sensor: &[usize], poses: &mut [Pose], points: &mut [V3], obs: &[Observation], cfg: &BaCfg) -> BaReport {
+    assert_eq!(sensor.len(), poses.len(), "one sensor per camera");
+    assert!(cfg.scale.is_none() || cfg.anchor.is_some(), "a scale camera needs an anchor");
+    assert!(cfg.scale != cfg.anchor || cfg.scale.is_none(), "the scale camera cannot be the anchor");
     let nc = poses.len();
-    let mut slot = vec![None; nc];
+    let mut slot = vec![Slot::Held; nc];
     let mut c = 0usize;
     for (i, s) in slot.iter_mut().enumerate() {
-        if !cfg.fixed.contains(&i) {
-            *s = Some(c);
+        if Some(i) == cfg.anchor {
+            continue;
+        }
+        if Some(i) == cfg.scale {
+            *s = Slot::Scale(c);
+            c += 5;
+        } else {
+            *s = Slot::Free(c);
             c += 6;
         }
     }
-    let kofs = c;
-    if cfg.intrinsics {
-        c += 3;
+    let free: Vec<&[Param]> = (0..ks.len()).map(|s| cfg.free.get(s).map_or(&[][..], |v| v.as_slice())).collect();
+    let mut kofs = vec![0usize; ks.len()];
+    let mut priors = Vec::new();
+    for s in 0..ks.len() {
+        kofs[s] = c;
+        let side = ks[s].width.max(ks[s].height) as f64;
+        for (j, p) in free[s].iter().enumerate() {
+            let col = c + j;
+            match p {
+                Param::Focal | Param::Fx | Param::Fy => {
+                    if let Some(Some((f0, sigma))) = cfg.focal_prior.get(s) {
+                        let param = if *p == Param::Fy { 1 } else { 0 };
+                        priors.push(Prior { col, sensor: s, param, target: *f0, sigma: *sigma });
+                    }
+                }
+                Param::Cx if cfg.pp_prior > 0.0 => priors.push(Prior { col, sensor: s, param: 2, target: ks[s].width as f64 / 2.0, sigma: cfg.pp_prior * side }),
+                Param::Cy if cfg.pp_prior > 0.0 => priors.push(Prior { col, sensor: s, param: 3, target: ks[s].height as f64 / 2.0, sigma: cfg.pp_prior * side }),
+                _ => {}
+            }
+        }
+        c += free[s].len();
     }
+    // distance the gauge holds
+    let span = match (cfg.anchor, cfg.scale) {
+        (Some(a), Some(s)) => Some(norm(sub(poses[s].centre(), poses[a].centre()))),
+        _ => None,
+    };
     let mut by_point: Vec<Vec<usize>> = vec![Vec::new(); points.len()];
     for (i, o) in obs.iter().enumerate() {
         by_point[o.point].push(i);
     }
-    let rms_before = rms(k, poses, points, obs);
+    let rms_before = rms(ks, sensor, poses, points, obs);
     let mut lambda = 1e-3;
-    let mut cost = total_cost(k, poses, points, obs, cfg.huber);
+    let total = |ks: &[Intrinsics], poses: &[Pose], points: &[V3]| huber_cost(ks, sensor, poses, points, obs, cfg.huber) + prior_cost(&priors, ks);
+    let mut cost = total(ks, poses, points);
     let mut it = 0;
     while it < cfg.iters {
         it += 1;
+        // the scale camera's centre moves across its baseline only
+        let across: Option<(V3, V3)> = match (cfg.anchor, cfg.scale) {
+            (Some(a), Some(s)) => {
+                let b = normalize(sub(poses[s].centre(), poses[a].centre()));
+                Some(crate::twoview::tangent_basis(b))
+            }
+            _ => None,
+        };
         // ---- normal equations ----
         let mut u = vec![0.0f64; c * c];
         let mut gc = vec![0.0f64; c];
@@ -163,25 +296,54 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
         // per observation: local camera-side columns and W = Jcᵀ Jp (cols x 3)
         let mut local: Vec<(Vec<usize>, Vec<[f64; 3]>)> = Vec::with_capacity(obs.len());
         for o in obs {
-            let Some(l) = linearize(k, &poses[o.cam], points[o.point], o.px) else {
+            let s = sensor[o.cam];
+            let pose = &poses[o.cam];
+            let Some(l) = linearize(&ks[s], pose, points[o.point], o.px, !free[s].is_empty()) else {
                 local.push((Vec::new(), Vec::new()));
                 continue;
             };
             let w = huber_weight(&l.r, cfg.huber);
-            let mut cols = Vec::with_capacity(9);
-            let mut jrows: Vec<[f64; 2]> = Vec::with_capacity(9);
-            if let Some(s) = slot[o.cam] {
-                for j in 0..6 {
-                    cols.push(s + j);
-                    jrows.push([l.jc[0][j], l.jc[1][j]]);
+            let jd = l.jd;
+            let chain = |d: V3| -> [f64; 2] { [jd[0][0] * d[0] + jd[0][1] * d[1] + jd[0][2] * d[2], jd[1][0] * d[0] + jd[1][1] * d[1] + jd[1][2] * d[2]] };
+            let mut cols = Vec::with_capacity(6 + free[s].len());
+            let mut jrows: Vec<[f64; 2]> = Vec::with_capacity(6 + free[s].len());
+            // left rotation increment ω: the camera point turns about the
+            // camera centre, d c / d ω = −[c − t]ₓ with t held, −[c]ₓ with the
+            // centre held
+            let about = |held_centre: bool| if held_centre { l.c } else { sub(l.c, pose.t) };
+            match slot[o.cam] {
+                Slot::Held => {}
+                Slot::Free(at) => {
+                    let q = about(false);
+                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        cols.push(at + j);
+                        jrows.push(chain(cross(e, q)));
+                    }
+                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        cols.push(at + 3 + j);
+                        jrows.push(chain(e));
+                    }
+                }
+                Slot::Scale(at) => {
+                    let q = about(true);
+                    for (j, e) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].into_iter().enumerate() {
+                        cols.push(at + j);
+                        jrows.push(chain(cross(e, q)));
+                    }
+                    // c = R (X − C): d c / d C = −R
+                    let (b1, b2) = across.unwrap();
+                    for (j, b) in [b1, b2].into_iter().enumerate() {
+                        cols.push(at + 3 + j);
+                        jrows.push(chain(scale(mv(&pose.r, b), -1.0)));
+                    }
                 }
             }
-            if cfg.intrinsics {
-                for j in 0..3 {
-                    cols.push(kofs + j);
-                    jrows.push([l.jk[0][j], l.jk[1][j]]);
-                }
+            for (j, p) in free[s].iter().enumerate() {
+                cols.push(kofs[s] + j);
+                jrows.push(p.column(&l.jk));
             }
+            // d c / d X = R
+            let jp: [[f64; 3]; 2] = std::array::from_fn(|r| std::array::from_fn(|k| (0..3).map(|m| jd[r][m] * pose.r[m * 3 + k]).sum()));
             for (a, ja) in cols.iter().zip(&jrows) {
                 gc[*a] += w * (ja[0] * l.r[0] + ja[1] * l.r[1]);
                 for (b, jb) in cols.iter().zip(&jrows) {
@@ -190,16 +352,18 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
             }
             let vb = &mut vblocks[o.point];
             for a in 0..3 {
-                gp[o.point][a] += w * (l.jp[0][a] * l.r[0] + l.jp[1][a] * l.r[1]);
+                gp[o.point][a] += w * (jp[0][a] * l.r[0] + jp[1][a] * l.r[1]);
                 for b in 0..3 {
-                    vb[a * 3 + b] += w * (l.jp[0][a] * l.jp[0][b] + l.jp[1][a] * l.jp[1][b]);
+                    vb[a * 3 + b] += w * (jp[0][a] * jp[0][b] + jp[1][a] * jp[1][b]);
                 }
             }
-            let wm: Vec<[f64; 3]> = jrows
-                .iter()
-                .map(|ja| std::array::from_fn(|b| w * (ja[0] * l.jp[0][b] + ja[1] * l.jp[1][b])))
-                .collect();
+            let wm: Vec<[f64; 3]> = jrows.iter().map(|ja| std::array::from_fn(|b| w * (ja[0] * jp[0][b] + ja[1] * jp[1][b]))).collect();
             local.push((cols, wm));
+        }
+        for p in &priors {
+            let r = p.residual(ks);
+            gc[p.col] += r / p.sigma;
+            u[p.col * c + p.col] += 1.0 / (p.sigma * p.sigma);
         }
         // ---- damped Schur complement, retried with more damping on failure
         let mut accepted = false;
@@ -218,7 +382,7 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
                 let Some(vi) = inv3_spd(&v) else { continue };
                 vinv[p] = vi;
                 let bp = [-gp[p][0], -gp[p][1], -gp[p][2]];
-                let vbp = mv3(&vi, bp);
+                let vbp = mv(&vi, bp);
                 for &oa in list {
                     let (ca, wa) = &local[oa];
                     for (ia, wr) in ca.iter().zip(wa) {
@@ -227,7 +391,7 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
                     for &ob in list {
                         let (cb, wb) = &local[ob];
                         for (ia, wra) in ca.iter().zip(wa) {
-                            let t = mv3(&vi, *wra);
+                            let t = mv(&vi, *wra);
                             for (ib, wrb) in cb.iter().zip(wb) {
                                 s[ia * c + ib] -= t[0] * wrb[0] + t[1] * wrb[1] + t[2] * wrb[2];
                             }
@@ -252,26 +416,42 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
                         }
                     }
                 }
-                let d = mv3(&vinv[p], b);
-                np[p] = [points[p][0] + d[0], points[p][1] + d[1], points[p][2] + d[2]];
+                np[p] = add(points[p], mv(&vinv[p], b));
             }
             let mut npose = poses.to_vec();
-            for (i, s) in slot.iter().enumerate() {
-                if let Some(s) = *s {
-                    let r: M3 = mm(&exp_so3([dc[s], dc[s + 1], dc[s + 2]]), &poses[i].r);
-                    npose[i] = Pose { r, t: [poses[i].t[0] + dc[s + 3], poses[i].t[1] + dc[s + 4], poses[i].t[2] + dc[s + 5]] };
+            for (i, sl) in slot.iter().enumerate() {
+                match *sl {
+                    Slot::Held => {}
+                    Slot::Free(at) => {
+                        let r: M3 = mm(&exp_so3([dc[at], dc[at + 1], dc[at + 2]]), &poses[i].r);
+                        npose[i] = Pose { r, t: add(poses[i].t, [dc[at + 3], dc[at + 4], dc[at + 5]]) };
+                    }
+                    Slot::Scale(at) => {
+                        let r: M3 = mm(&exp_so3([dc[at], dc[at + 1], dc[at + 2]]), &poses[i].r);
+                        let (b1, b2) = across.unwrap();
+                        let centre = add(poses[i].centre(), add(scale(b1, dc[at + 3]), scale(b2, dc[at + 4])));
+                        npose[i] = Pose { r, t: scale(mv(&r, centre), -1.0) };
+                    }
                 }
             }
-            let mut nk = *k;
-            if cfg.intrinsics {
-                nk.f += dc[kofs];
-                nk.k1 += dc[kofs + 1];
-                nk.k2 += dc[kofs + 2];
+            let mut nk = ks.to_vec();
+            for s in 0..ks.len() {
+                if free[s].is_empty() {
+                    continue;
+                }
+                let mut p = ks[s].params();
+                for (j, prm) in free[s].iter().enumerate() {
+                    prm.apply(&mut p, dc[kofs[s] + j]);
+                }
+                nk[s] = ks[s].with_params(&p);
             }
-            let ncost = total_cost(&nk, &npose, &np, obs, cfg.huber);
-            if ncost < cost && nk.f > 0.0 {
+            if let (Some(a), Some(sc), Some(d0)) = (cfg.anchor, cfg.scale, span) {
+                hold_scale(&mut npose, &mut np, a, sc, d0);
+            }
+            let ncost = total(&nk, &npose, &np);
+            if ncost < cost && nk.iter().all(|k| k.fx > 0.0 && k.fy > 0.0) {
                 let gain = cost - ncost;
-                *k = nk;
+                ks.copy_from_slice(&nk);
                 poses.copy_from_slice(&npose);
                 points.copy_from_slice(&np);
                 cost = ncost;
@@ -288,9 +468,31 @@ pub fn bundle_adjust(k: &mut Intrinsics, poses: &mut [Pose], points: &mut [V3], 
             break;
         }
     }
-    BaReport { rms_before, rms_after: rms(k, poses, points, obs), iterations: it }
+    BaReport {
+        rms_before,
+        rms_after: rms(ks, sensor, poses, points, obs),
+        cost_after: huber_cost(ks, sensor, poses, points, obs, cfg.huber),
+        iterations: it,
+    }
 }
 
-fn mv3(m: &[f64; 9], v: [f64; 3]) -> [f64; 3] {
-    [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]]
+/// Rescale everything but the anchor about the anchor's centre so the scale
+/// camera sits exactly `d0` from it: a similarity, invisible to every
+/// reprojection.
+fn hold_scale(poses: &mut [Pose], points: &mut [V3], anchor: usize, sc: usize, d0: f64) {
+    let ca = poses[anchor].centre();
+    let d = norm(sub(poses[sc].centre(), ca));
+    if d <= 0.0 || !d.is_finite() {
+        return;
+    }
+    let s = d0 / d;
+    for (i, p) in poses.iter_mut().enumerate() {
+        if i != anchor {
+            let c = add(ca, scale(sub(p.centre(), ca), s));
+            p.t = scale(mv(&p.r, c), -1.0);
+        }
+    }
+    for x in points.iter_mut() {
+        *x = add(ca, scale(sub(*x, ca), s));
+    }
 }

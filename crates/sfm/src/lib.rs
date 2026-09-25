@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Structure from motion: camera poses, one shared calibration and a sparse
-//! point cloud, recovered from nothing but a set of overlapping photographs.
+//! Structure from motion: camera poses, a calibration per physical camera
+//! (in the workspace's one camera model, `camera::Intrinsics`, under a
+//! selected lens model) and a sparse point cloud, recovered from nothing but
+//! a set of overlapping photographs.
 
 pub mod ba;
 pub mod camera;
 pub mod incremental;
+pub mod lens;
 pub mod linalg;
 pub mod matching;
 pub mod pnp;

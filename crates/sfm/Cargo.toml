@@ -3,7 +3,7 @@ name = "brain-sfm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Structure from motion from photographs alone: SIFT features, mutual ratio-test matching, RANSAC essential-matrix verification, PnP registration, triangulation and Levenberg-Marquardt bundle adjustment with a self-calibrated focal length and radial distortion."
+description = "Structure from motion from photographs alone: SIFT features, mutual ratio-test matching, five-point LO-RANSAC essential-matrix verification on bearing vectors, P3P registration, triangulation and Levenberg-Marquardt bundle adjustment that self-calibrates each physical camera under a selected lens model (pinhole, Brown-Conrady, Kannala-Brandt fisheye)."
 
 [lib]
 name = "sfm"
@@ -16,3 +16,10 @@ brain-backend-cpu.workspace = true
 # `data::rng::Lcg` - the deterministic PRNG, for RANSAC sampling that gives the
 # same reconstruction twice.
 brain-data.workspace = true
+# `camera::Intrinsics` - the workspace's one camera model, which this crate
+# calibrates.
+brain-camera.workspace = true
+
+[dev-dependencies]
+# `imaging::load` - JPEG decoding for the `sfm_folder` example.
+brain-imaging.workspace = true

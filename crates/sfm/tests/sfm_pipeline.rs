@@ -11,8 +11,9 @@
 //! calibrated cameras and geometry, you can procure our services by sending
 //! an email to info@swedishembedded.com.
 
-use sfm::camera::{Intrinsics, Pose};
-use sfm::incremental::{reconstruct, Photo, SfmCfg};
+use camera::{Intrinsics, Lens};
+use sfm::camera::Pose;
+use sfm::incremental::{reconstruct, Photo, SfmCfg, SfmError};
 use sfm::linalg::{dot, mv, normalize, scale, sub, V3};
 
 /// Multi-octave value noise in [0,1] - a texture with detail at every scale,
@@ -48,8 +49,8 @@ fn shoot(k: &Intrinsics, pose: &Pose) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 3];
     for y in 0..h {
         for x in 0..w {
-            let n = k.to_normalized([x as f64 + 0.5, y as f64 + 0.5]);
-            let d = normalize(sfm::linalg::mtv(&pose.r, [n[0], n[1], 1.0]));
+            let Some(n) = k.unproject([x as f64 + 0.5, y as f64 + 0.5]) else { continue };
+            let d = sfm::linalg::mtv(&pose.r, n);
             let mut best = f64::INFINITY;
             let mut tex = 0.3;
             // ground
@@ -109,44 +110,108 @@ fn look_at(eye: V3, target: V3) -> Pose {
     Pose { r: rot, t: scale(mv(&rot, eye), -1.0) }
 }
 
-#[test]
-fn photographs_of_a_known_scene_give_back_its_cameras() {
-    let k = Intrinsics { f: 420.0, cx: 320.0, cy: 240.0, k1: -0.08, k2: 0.01, width: 640, height: 480 };
-    let views = 8;
-    let truth: Vec<Pose> = (0..views)
+/// Cameras on half an orbit round the scene, `phase` steps along it.
+fn orbit(views: usize, phase: f64) -> Vec<Pose> {
+    (0..views)
         .map(|i| {
-            let a = i as f64 * std::f64::consts::TAU / views as f64 * 0.5;
+            let a = (i as f64 + phase) * std::f64::consts::TAU / views as f64 * 0.5;
             look_at([3.2 * a.sin(), -1.6, -3.2 * a.cos()], [0.0, 0.6, 0.0])
         })
-        .collect();
-    let images: Vec<Vec<u8>> = truth.iter().map(|p| shoot(&k, p)).collect();
-    let photos: Vec<Photo> = images.iter().map(|rgb| Photo { width: 640, height: 480, rgb }).collect();
-    let cfg = SfmCfg { focal_guess: 0.8, verbose: true, ..SfmCfg::default() };
-    let rec = reconstruct(&photos, &cfg).expect("reconstruction");
+        .collect()
+}
 
-    assert!(rec.poses.iter().all(|p| p.is_some()), "unregistered views: {:?}", rec.poses.iter().map(|p| p.is_some()).collect::<Vec<_>>());
-    assert!(rec.rms_px < 1.0, "final reprojection rms {:.3} px", rec.rms_px);
-    assert!((rec.intrinsics.f - k.f).abs() < 0.03 * k.f, "focal {:.1} against {}", rec.intrinsics.f, k.f);
-    assert!((rec.intrinsics.k1 - k.k1).abs() < 0.03, "k1 {:.4} against {}", rec.intrinsics.k1, k.k1);
-
-    // camera centres agree with the truth after the best similarity
-    let est: Vec<V3> = rec.poses.iter().map(|p| p.unwrap().centre()).collect();
+/// The worst camera-centre error, as a fraction of the rig's size, after
+/// the best similarity from the reconstruction to the truth.
+fn centre_error(est_poses: &[Option<Pose>], truth: &[Pose]) -> f64 {
+    let est: Vec<V3> = est_poses.iter().map(|p| p.unwrap().centre()).collect();
     let tru: Vec<V3> = truth.iter().map(|p| p.centre()).collect();
     let (ce, ct) = (centroid(&est), centroid(&tru));
     let se = est.iter().map(|p| norm2(sub(*p, ce))).sum::<f64>().sqrt();
     let st = tru.iter().map(|p| norm2(sub(*p, ct))).sum::<f64>().sqrt();
     // rotation between the two centred, normalized sets via the camera
     // orientations: R_align = R_true^T R_est for any view
-    let r0 = sfm::linalg::mm(&sfm::linalg::transpose(&truth[0].r), &rec.poses[0].unwrap().r);
+    let r0 = sfm::linalg::mm(&sfm::linalg::transpose(&truth[0].r), &est_poses[0].unwrap().r);
     let mut worst = 0.0f64;
-    for i in 0..views {
+    for i in 0..truth.len() {
         let a = scale(sub(est[i], ce), 1.0 / se);
         let b = scale(sub(tru[i], ct), 1.0 / st);
-        let a_in_truth = mv(&r0, a);
-        let e = sub(a_in_truth, b);
+        let e = sub(mv(&r0, a), b);
         worst = worst.max(dot(e, e).sqrt());
     }
+    worst
+}
+
+#[test]
+fn photographs_of_a_known_scene_give_back_its_cameras() {
+    let k = Intrinsics { lens: Lens::radial(-0.08, 0.01), ..Intrinsics::pinhole(420.0, 640, 480) };
+    let truth = orbit(8, 0.0);
+    let images: Vec<Vec<u8>> = truth.iter().map(|p| shoot(&k, p)).collect();
+    let photos: Vec<Photo> = images.iter().map(|rgb| Photo { width: 640, height: 480, rgb, sensor: 0, focal_px: None }).collect();
+    let cfg = SfmCfg { verbose: true, ..SfmCfg::default() };
+    let rec = reconstruct(&photos, &cfg).expect("reconstruction");
+
+    assert!(rec.poses.iter().all(|p| p.is_some()), "unregistered views: {:?}", rec.poses.iter().map(|p| p.is_some()).collect::<Vec<_>>());
+    assert!(rec.rms_px < 1.0, "final reprojection rms {:.3} px", rec.rms_px);
+    let est = rec.intrinsics[0];
+    assert!((est.fx - k.fx).abs() < 0.03 * k.fx, "focal {:.1} against {}", est.fx, k.fx);
+    let k1 = match est.lens {
+        Lens::Brown { k, .. } => k[0],
+        other => panic!("a perspective lens was described as {}", other.name()),
+    };
+    assert!((k1 + 0.08).abs() < 0.03, "k1 {k1:.4} against -0.08");
+    let worst = centre_error(&rec.poses, &truth);
     assert!(worst < 0.02, "worst camera-centre error {worst:.4} of the rig's size");
+}
+
+/// Two physical cameras of different image size and focal length in one
+/// capture, interleaved round the scene: each is calibrated on its own, and
+/// the poses of both land in one frame.
+#[test]
+fn two_cameras_of_different_sizes_are_calibrated_separately() {
+    let ka = Intrinsics { lens: Lens::radial(-0.08, 0.01), ..Intrinsics::pinhole(420.0, 640, 480) };
+    let kb = Intrinsics { lens: Lens::radial(-0.03, 0.0), ..Intrinsics::pinhole(330.0, 560, 420) };
+    let (ta, tb) = (orbit(8, 0.0), orbit(8, 0.5));
+    let mut truth = Vec::new();
+    let mut images = Vec::new();
+    let mut sensor = Vec::new();
+    for i in 0..8 {
+        for (s, (k, t)) in [(&ka, &ta), (&kb, &tb)].into_iter().enumerate() {
+            truth.push(t[i]);
+            images.push(shoot(k, &t[i]));
+            sensor.push(s);
+        }
+    }
+    let photos: Vec<Photo> = images
+        .iter()
+        .zip(&sensor)
+        .map(|(rgb, &s)| {
+            let k = if s == 0 { &ka } else { &kb };
+            Photo { width: k.width, height: k.height, rgb, sensor: s, focal_px: None }
+        })
+        .collect();
+    let rec = reconstruct(&photos, &SfmCfg { verbose: true, ..SfmCfg::default() }).expect("reconstruction");
+    assert_eq!(rec.sensor, sensor);
+    assert_eq!(rec.intrinsics.len(), 2);
+    assert!(rec.poses.iter().all(|p| p.is_some()), "unregistered views: {:?}", rec.poses.iter().map(|p| p.is_some()).collect::<Vec<_>>());
+    for (k, est) in [ka, kb].iter().zip(&rec.intrinsics) {
+        assert_eq!((est.width, est.height), (k.width, k.height));
+        assert!((est.fx - k.fx).abs() < 0.03 * k.fx, "focal {:.1} against {}", est.fx, k.fx);
+    }
+    let worst = centre_error(&rec.poses, &truth);
+    assert!(worst < 0.02, "worst camera-centre error {worst:.4} of the rig's size");
+}
+
+/// One sensor is one camera: photographs claiming the same sensor at
+/// different sizes are refused before any work is done.
+#[test]
+fn one_sensor_at_two_sizes_is_refused() {
+    let a = vec![0u8; 64 * 48 * 3];
+    let b = vec![0u8; 48 * 64 * 3];
+    let photos = [
+        Photo { width: 64, height: 48, rgb: &a, sensor: 0, focal_px: None },
+        Photo { width: 48, height: 64, rgb: &b, sensor: 0, focal_px: None },
+    ];
+    assert!(matches!(reconstruct(&photos, &SfmCfg::default()), Err(SfmError::MixedSizes { sensor: 0 })));
 }
 
 fn centroid(p: &[V3]) -> V3 {
