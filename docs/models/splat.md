@@ -106,6 +106,7 @@ into a scene that actually reproduces your photos.
 | `--iters N` | `train` | optimizer steps (default: about 500 visits per photograph, 3000 to 30000) |
 | `--max-gaussians N` | `train` | the scene's gaussian budget (default: the dense start plus a quarter) |
 | `--sparse` | `train` | start from structure from motion's points instead of multi-view stereo |
+| `--environment D` | `train` | fit the sky and distant scenery as radiance by direction (a degree-`D` spherical-harmonic environment, `D` up to 8) instead of leaving it to gaussians; the written PLY carries it as a distant shell of gaussians |
 | `--init-opacity O` | `sfm` | opacity of the starting gaussians (default `0.1`) |
 | `--cameras-out <path>` | `sfm`, `train` | where to write the recovered cameras (default next to `--out`) |
 

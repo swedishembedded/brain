@@ -159,7 +159,7 @@ fn main() {
         .iter()
         .map(|t| TargetView { cam: Camera { shutter: t.cam.shutter, ..Camera::with_intrinsics(t.cam.c2w, &k.resized(t.cam.width, t.cam.height)) }, ..t.clone() })
         .collect();
-    let mut viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h);
+    let mut viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h).with_env(res.env.as_ref());
     let (on_train, train_img) = score(&mut viewer, &refit);
     let (on_held, held_img) = score(&mut viewer, &held);
     let path = recon::eval::path(&refit.iter().map(|t| t.cam).collect::<Vec<_>>(), 8);

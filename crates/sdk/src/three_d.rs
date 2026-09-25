@@ -91,10 +91,11 @@ impl Reconstruction {
     }
 
     /// Write the scene as a standard 3D Gaussian Splatting PLY, which splat
-    /// viewers and `brain splat view` open.
+    /// viewers and `brain splat view` open; a fitted environment is baked in
+    /// as a distant shell of gaussians.
     pub fn save_ply(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let path = path.as_ref().to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", path.as_ref().display())))?;
-        splat::ply::write(path, &self.out.scene).map_err(Error::Backend)
+        splat::ply::write(path, &self.out.export()).map_err(Error::Backend)
     }
 
     /// Write the cameras, each with its lens, as the `cameras.json` that
@@ -123,6 +124,7 @@ impl Reconstruction {
             "render": { "ray": o.render.ray, "antialiased": o.render.antialiased, "eps2d": o.render.eps2d },
             "stereo": o.dense.as_ref().map(|d| serde_json::json!({ "points": d.points, "coverage": d.coverage })),
             "camera_model": o.isp.as_ref().map(|i| i.summary()),
+            "environment": o.env.as_ref().map(|e| serde_json::json!({ "degree": e.degree, "coeffs": e.coeffs })),
         });
         std::fs::write(dir.join("reconstruction.json"), serde_json::to_string_pretty(&meta).map_err(|e| Error::Backend(e.to_string()))?).map_err(Error::Io)
     }
@@ -139,6 +141,9 @@ impl Reconstruction {
             self.gpu.write_f32(&gs.colors, &col);
         }
         r.render(&self.gpu, &gs, cam, &self.out.render);
+        if let Some(env) = &self.out.env {
+            splat::env::EnvDevice::new(&self.gpu, env).composite(&self.gpu, &Kernels::at(0), &r.img, cam, &self.out.render);
+        }
         let mut rgb = rgba_to_rgb(&r.read_rgba(&self.gpu, cam.width, cam.height));
         if let Some(isp) = &self.out.isp {
             rgb = isp.forward(view, cam, &rgb);
@@ -194,6 +199,13 @@ impl ReconstructionBuilder {
     /// motion points alone.
     pub fn dense(mut self, on: bool) -> Self {
         self.cfg.dense = on.then(Default::default);
+        self
+    }
+
+    /// Fit the environment behind the scene - sky and distant scenery, as
+    /// radiance by direction - at this spherical-harmonic degree (up to 8).
+    pub fn environment(mut self, degree: u32) -> Self {
+        self.cfg.environment = Some(degree);
         self
     }
 

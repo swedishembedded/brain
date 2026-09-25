@@ -688,6 +688,9 @@ fn train_cmd(argv: &[String]) {
     // capture that needs them; on one taken at one exposure they only absorb
     // fit error.
     let camera_model = a.take_flag("--camera-model");
+    // Sky and distant scenery as radiance by direction, instead of gaussians
+    // hanging behind the scene.
+    let environment = a.take_str("--environment").map(|v| v.parse::<u32>().unwrap_or_else(|_| usage_exit(&format!("--environment {v}: a degree, 0 to 8"))));
     let cams_out = a.take_str("--cameras-out");
     a.finish();
     let paths = crate::mirror_cli::collect_images(&images);
@@ -707,6 +710,7 @@ fn train_cmd(argv: &[String]) {
         iterations,
         max_gaussians,
         camera_model: camera_model.then(splat::isp::IspCfg::default),
+        environment,
     };
     println!("reconstructing {} photographs ...", photos.len());
     let g = Gpu::new(&recon::photogrammetry::pipelines());
@@ -726,7 +730,7 @@ fn train_cmd(argv: &[String]) {
             println!("  not placed: {p}");
         }
     }
-    splat::ply::write(&out, &res.scene).unwrap_or_else(|e| {
+    splat::ply::write(&out, &res.export()).unwrap_or_else(|e| {
         eprintln!("PLY write failed: {e}");
         std::process::exit(1);
     });

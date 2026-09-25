@@ -49,7 +49,7 @@ impl Flags {
 }
 
 /// The options every evaluation takes on top of the preset.
-pub const FIT_USAGE: &str = "[--budget gaussians] [--depth w] [--normal-prior w] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
+pub const FIT_USAGE: &str = "[--budget gaussians] [--env degree] [--depth w] [--normal-prior w] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
                              [--intrinsics-after f] [--distortion w] [--normal w] [--geometry-after f] \
                              [--lr-position s] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] \
                              [--mip on|off] [--noise l] [--opacity-reg l] [--batch n] [--pyramid n] [--coarse f]";
@@ -62,6 +62,9 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize, dense: bool) -> FitCfg
     let budget = flags.parse("budget").unwrap_or(300_000);
     let preset = if dense { FitCfg::from_dense_stereo(iters, budget, views) } else { FitCfg::from_sparse_points(iters, budget, views) };
     let mut cfg = FitCfg { log_every: (iters / 10).max(1), ..preset };
+    if let Some(v) = flags.parse("env") {
+        cfg.environment = Some(v);
+    }
     if let Some(v) = flags.parse("depth") {
         cfg.depth_weight = v;
     }

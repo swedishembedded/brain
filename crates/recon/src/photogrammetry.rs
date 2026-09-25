@@ -271,6 +271,9 @@ pub struct PhotoCfg {
     pub max_gaussians: Option<usize>,
     /// Fit a photometric camera model alongside the scene.
     pub camera_model: Option<splat::isp::IspCfg>,
+    /// Fit the environment behind the scene (sky, distant scenery) at this
+    /// spherical-harmonic degree (`splat::env`).
+    pub environment: Option<u32>,
 }
 
 impl Default for PhotoCfg {
@@ -282,6 +285,7 @@ impl Default for PhotoCfg {
             iterations: None,
             max_gaussians: None,
             camera_model: None,
+            environment: None,
         }
     }
 }
@@ -320,6 +324,8 @@ pub struct Reconstructed {
     pub reprojection_rms_px: f64,
     /// The fitted photometric camera model, when one was asked for.
     pub isp: Option<splat::isp::Isp>,
+    /// The fitted environment, when one was asked for.
+    pub env: Option<splat::env::EnvMap>,
     /// How the render options the scene was fitted under.
     pub render: splat::types::RenderOpts,
     /// Stereo coverage and point count, when the dense path ran.
@@ -328,6 +334,26 @@ pub struct Reconstructed {
     pub max_gaussians: usize,
     /// The objective at the last step.
     pub loss: f32,
+}
+
+impl Reconstructed {
+    /// The scene as a standard splat viewer should get it: the gaussians,
+    /// and the environment (if any) baked into a shell of distant gaussians
+    /// fifty times as far out as the cameras spread, since such a viewer
+    /// has no environment of its own.
+    pub fn export(&self) -> Splats {
+        let Some(env) = &self.env else { return self.scene.clone() };
+        let n = self.cameras.len().max(1) as f32;
+        let centre: [f32; 3] = std::array::from_fn(|k| self.cameras.iter().map(|c| c.eye()[k]).sum::<f32>() / n);
+        let spread = self
+            .cameras
+            .iter()
+            .map(|c| (0..3).map(|k| (c.eye()[k] - centre[k]).powi(2)).sum::<f32>().sqrt())
+            .fold(0.0f32, f32::max)
+            .max(1e-3);
+        let shell = env.to_splats(centre, 50.0 * spread, 20_000);
+        splat::align::concat(&[self.scene.clone(), shell])
+    }
 }
 
 /// Why [`reconstruct`] stopped.
@@ -395,7 +421,7 @@ pub fn reconstruct(
     } else {
         FitCfg::from_sparse_points(iterations, budget, views)
     };
-    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), ..preset };
+    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), environment: cfg.environment, ..preset };
     let (w, h) = (set.targets[0].cam.width, set.targets[0].cam.height);
     log(&format!("fit: {views} views at {w}x{h}, {} gaussians to start, budget {budget}, {iterations} steps", set.init.len()));
     let t = std::time::Instant::now();
@@ -407,6 +433,7 @@ pub fn reconstruct(
         source: set.source,
         reprojection_rms_px: set.sfm.rms_px,
         isp: fitted.isp,
+        env: fitted.env,
         render: splat::types::RenderOpts { ray: true, antialiased: fit_cfg.antialiased, eps2d: fit_cfg.eps2d, ..Default::default() },
         dense,
         iterations,

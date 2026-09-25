@@ -69,6 +69,7 @@ pub struct Viewer {
     splats: GpuSplats,
     renderer: Renderer,
     opts: RenderOpts,
+    env: Option<splat::env::EnvDevice>,
 }
 
 impl Viewer {
@@ -85,7 +86,14 @@ impl Viewer {
             splats,
             renderer: Renderer::new(gpu, Kernels::at(0), scene.len().max(1), max_w, max_h, 0).growable(),
             opts: RenderOpts { ray: true, ..opts },
+            env: None,
         }
+    }
+
+    /// Render against the environment the scene was fitted with.
+    pub fn with_env(mut self, env: Option<&splat::env::EnvMap>) -> Viewer {
+        self.env = env.map(|e| splat::env::EnvDevice::new(&self.gpu, e));
+        self
     }
 
     /// The scene through `cam`: interleaved RGB in [0,1].
@@ -94,6 +102,9 @@ impl Viewer {
             self.gpu.write_f32(&self.splats.colors, &c);
         }
         self.renderer.render(&self.gpu, &self.splats, cam, &self.opts);
+        if let Some(e) = &self.env {
+            e.composite(&self.gpu, &Kernels::at(0), &self.renderer.img, cam, &self.opts);
+        }
         rgba_to_rgb(&self.renderer.read_rgba(&self.gpu, cam.width, cam.height))
     }
 }
