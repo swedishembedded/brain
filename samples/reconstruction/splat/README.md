@@ -56,7 +56,7 @@ brain splat view out/scene.ply
 | `--out PATH` | `out/reconstruction.ply` |
 | `--max-width N` | `2048`: the photographs are halved exactly until they fit |
 | `--iterations N` | about 500 visits per photograph, from 3000 to 30000 |
-| `--max-gaussians N` | what the dense start needs, plus a quarter |
+| `--max-gaussians N` | what the dense start needs, plus a quarter; a smaller budget thins the start uniformly to four fifths of it (use it on a GPU shared with other work) |
 | `--sparse` | start from structure from motion's points instead of stereo |
 | `--no-camera-model` | do not fit the photometric camera (per-photograph exposure and white balance, vignetting, colour matrix, response) |
 

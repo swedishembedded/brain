@@ -105,7 +105,7 @@ into a scene that actually reproduces your photos.
 | `--max-width N` | `train` | widest training image: the photographs are halved exactly until they fit (default `2048`) |
 | `--focal-guess F` | `sfm`, `train` | starting focal length as a multiple of the long side (default `0.8`); it is re-estimated |
 | `--iters N` | `train` | optimizer steps (default: about 500 visits per photograph, 3000 to 30000) |
-| `--max-gaussians N` | `train` | the scene's gaussian budget (default: the dense start plus a quarter) |
+| `--max-gaussians N` | `train` | the scene's gaussian budget (default: the dense start plus a quarter); below the stereo's point count the start is thinned uniformly to four fifths of it, each kept disc widened to cover the same surface |
 | `--sparse` | `train` | start from structure from motion's points instead of multi-view stereo |
 | `--transients` | `train` | the photographs hold people, traffic or other things not in all of them: stop supervising each photograph's large coherent regions the scene cannot explain (off by default; on a static capture it only withholds supervision from hard regions) |
 | `--environment D` | `train` | fit the sky and distant scenery as radiance by direction (a degree-`D` spherical-harmonic environment, `D` up to 8) instead of leaving it to gaussians; the written PLY carries it as a distant shell of gaussians |
