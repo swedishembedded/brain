@@ -176,3 +176,36 @@ fn instance_cap_clamps_gracefully() {
     let img = r.read_rgba(&g, cam.width, cam.height);
     assert!(img.iter().all(|v| v.is_finite()));
 }
+
+/// A renderer allowed to grow renders a frame that overflows its starting
+/// tile-instance budget exactly as one sized for it from the start, instead
+/// of dropping the depth-latest splats. The fit renders this way: a dropped
+/// splat contributes nothing to any view, so it receives no gradient and
+/// density control reads it as dead - measured on a sparse-start fit as 41%
+/// of the scene.
+#[test]
+fn a_growable_renderer_never_drops_splats() {
+    let g = gpu_core::Gpu::new_cpu(splat::PIPELINES);
+    let ks = splat::Kernels::at(0);
+    let mut s = splat::types::Splats::default();
+    for i in 0..64 {
+        let f = i as f32;
+        s.means.extend_from_slice(&[(f % 8.0) * 0.2 - 0.7, (f / 8.0).floor() * 0.2 - 0.7, 3.0 + 0.01 * f]);
+        s.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+        s.scales.extend_from_slice(&[0.5, 0.5, 0.5]); // each covers most of the frame
+        s.opacities.push(0.3);
+        s.colors.extend_from_slice(&[0.1 + 0.01 * f, 0.5, 0.9 - 0.01 * f]);
+    }
+    let cam = splat::types::Camera::look_at([0.0; 3], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 60.0, 64, 64);
+    let o = splat::types::RenderOpts::default();
+    let gs = splat::renderer::GpuSplats::upload(&g, &s);
+    let mut roomy = splat::renderer::Renderer::new(&g, ks, s.len(), 64, 64, 1 << 16);
+    let want_stats = roomy.render(&g, &gs, &cam, &o);
+    assert!(!want_stats.clamped);
+    let want = roomy.read_rgba(&g, 64, 64);
+    let mut small = splat::renderer::Renderer::new(&g, ks, s.len(), 64, 64, 64).growable();
+    let stats = small.render(&g, &gs, &cam, &o);
+    assert!(stats.n_isects > 64, "the scene must overflow the starting budget ({} instances)", stats.n_isects);
+    assert!(!stats.clamped, "a growable renderer clamped");
+    assert_eq!(small.read_rgba(&g, 64, 64), want);
+}

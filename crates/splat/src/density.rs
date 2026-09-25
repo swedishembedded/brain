@@ -168,6 +168,8 @@ pub struct Round {
     pub cloned: usize,
     pub suppressed: usize,
     pub reclaimed: usize,
+    /// Samples added at top-scored sites to fill the schedule.
+    pub grown: usize,
 }
 
 /// Knobs of the hybrid controller - all fractions, none of them absolute
@@ -179,10 +181,13 @@ pub struct Policy {
     /// Opacity below which a gaussian is a reclaim candidate outright.
     pub dead_opacity: f32,
     /// Compositing weight, in pixels per view that sees it, below which a
-    /// gaussian is a reclaim candidate. An ABSOLUTE measure on purpose: a
-    /// threshold relative to the median contribution condemns gaussians for
-    /// being small, and in a scene still made of large blobs that was
-    /// measured flagging 11k of 26k gaussians a round.
+    /// gaussian is a reclaim candidate: one that renders essentially nothing
+    /// anywhere. An ABSOLUTE measure on purpose - relative to the median it
+    /// condemns gaussians for being small (11k of 26k flagged in a round of
+    /// a blob-dominated scene) - and a small one: once a scene has about as
+    /// many gaussians as pixels, a quarter pixel per view is an ordinary
+    /// contribution, and a 0.25 px threshold was measured suppressing 150k of
+    /// 344k in one round and doubling the loss.
     pub starve_px: f32,
     /// Weights of the three ranked signals: residual, edge residual, AbsGS.
     pub weights: [f32; 3],
@@ -193,7 +198,7 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { refine_frac: 0.05, dead_opacity: 0.02, starve_px: 0.25, weights: [0.4, 0.3, 0.3], elongated: 1.5 }
+        Policy { refine_frac: 0.05, dead_opacity: 0.02, starve_px: 0.01, weights: [0.4, 0.3, 0.3], elongated: 1.5 }
     }
 }
 
@@ -258,6 +263,13 @@ pub fn round(
     let shk = sh_stride(scene);
     let mut out = Splats { sh_rest: scene.sh_rest.as_ref().map(|(d, _)| (*d, Vec::new())), ..Default::default() };
     let mut marks = Vec::with_capacity(n + want);
+    // each new gaussian's claim on the samples that fill the schedule: its
+    // (parent's) score, 0 for anything not ranked
+    let mut weight: Vec<f32> = Vec::with_capacity(n + want);
+    let mut ranked_flag = vec![false; n];
+    for &i in &ranked {
+        ranked_flag[i] = true;
+    }
     let push = |o: &mut Splats, i: usize, mean: [f32; 3], scale: [f32; 3], opacity: f32| {
         o.means.extend_from_slice(&mean);
         o.quats.extend_from_slice(&scene.quats[i * 4..i * 4 + 4]);
@@ -275,11 +287,15 @@ pub fn round(
         let mu = [scene.means[i * 3], scene.means[i * 3 + 1], scene.means[i * 3 + 2]];
         let s = [scene.scales[i * 3], scene.scales[i * 3 + 1], scene.scales[i * 3 + 2]];
         let o = scene.opacities[i];
+        let w = if ranked_flag[i] { score(i).max(1e-6) } else { 0.0 };
         if !refine[i] {
             push(&mut out, i, mu, s, o);
             marks.push(suspect[i]);
+            weight.push(w);
             continue;
         }
+        weight.push(w);
+        weight.push(w);
         let q = unit(&scene.quats[i * 4..i * 4 + 4]);
         let mut sorted = s;
         sorted.sort_by(|a, b| b.total_cmp(a));
@@ -342,9 +358,80 @@ pub fn round(
         marks.push(false);
         marks.push(false);
     }
+    // 5. fill whatever of the schedule refinement could not. Refinement
+    // doubles at most the gaussians that were ranked, and in a scene still
+    // made of large overlapping blobs most of the children of a 3D split land
+    // behind the surface, are occluded in every view and are reclaimed the
+    // next round - measured as a population that shrank for three rounds
+    // while the schedule asked it to grow tenfold. So the rest of the room is
+    // spent the way 3DGS-MCMC grows, but aimed by the credit score rather
+    // than by opacity: extra samples at the top-scored sites, each displaced
+    // by a draw from its site's own covariance, with the opacity and scale
+    // correction that keeps a site rendering as it did.
+    let left = target.saturating_sub(out.len());
+    if left > 0 {
+        stats.grown = grow_at(&mut out, &weight, left, seed ^ 0x6f77_6e67);
+        marks.resize(out.len(), false);
+    }
     *scene = out;
     *suspect = marks;
     stats
+}
+
+/// Add `count` samples to `scene` at sites drawn in proportion to `weight`,
+/// correcting every touched site for its new multiplicity. Returns how many
+/// were added.
+fn grow_at(scene: &mut Splats, weight: &[f32], count: usize, seed: u64) -> usize {
+    let n = scene.len();
+    let mut cdf = Vec::with_capacity(n);
+    let mut acc = 0.0f64;
+    for &w in weight.iter().take(n) {
+        acc += w.max(0.0) as f64;
+        cdf.push(acc);
+    }
+    if acc <= 0.0 {
+        return 0;
+    }
+    let mut copies = vec![0usize; n];
+    for j in 0..count {
+        let u = jitter(j, seed) as f64 * acc;
+        copies[cdf.partition_point(|&c| c <= u).min(n - 1)] += 1;
+    }
+    let shk = sh_stride(scene);
+    let mut added = 0;
+    for i in 0..n {
+        let m = copies[i];
+        if m == 0 {
+            continue;
+        }
+        let (op, coeff) = relocation(scene.opacities[i], m + 1);
+        let sc: [f32; 3] = std::array::from_fn(|k| (scene.scales[i * 3 + k] * coeff).max(1e-8));
+        scene.opacities[i] = op;
+        scene.scales[i * 3..i * 3 + 3].copy_from_slice(&sc);
+        let q = unit(&scene.quats[i * 4..i * 4 + 4]);
+        for c in 0..m {
+            let e = [normal(i * 7 + c * 3, seed), normal(i * 7 + c * 3 + 1, seed), normal(i * 7 + c * 3 + 2, seed)];
+            let mut d = [0.0f32; 3];
+            for (k, ek) in e.iter().enumerate() {
+                let a = axis(q, k);
+                for x in 0..3 {
+                    d[x] += 0.5 * a[x] * ek * sc[k];
+                }
+            }
+            for k in 0..3 {
+                scene.means.push(scene.means[i * 3 + k] + d[k]);
+            }
+            scene.quats.extend_from_within(i * 4..i * 4 + 4);
+            scene.scales.extend_from_slice(&sc);
+            scene.opacities.push(op);
+            scene.colors.extend_from_within(i * 3..i * 3 + 3);
+            if let Some((_, r)) = &mut scene.sh_rest {
+                r.extend_from_within(i * shk..i * shk + shk);
+            }
+            added += 1;
+        }
+    }
+    added
 }
 
 fn unit(q: &[f32]) -> [f32; 4] {

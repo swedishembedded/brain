@@ -817,8 +817,8 @@ fn fit_inner(
                     let r = density::round(&mut scene, &ev, &size_px, &mut suspect, target, &policy, seed);
                     if cfg.log_every > 0 {
                         println!(
-                            "fit iter {done:4}: split {}, cloned {}, suppressed {}, reclaimed {} (target {target})",
-                            r.split, r.cloned, r.suppressed, r.reclaimed
+                            "fit iter {done:4}: split {}, cloned {}, grown {}, suppressed {}, reclaimed {} (target {target})",
+                            r.split, r.cloned, r.grown, r.suppressed, r.reclaimed
                         );
                     }
                 }
@@ -1165,7 +1165,7 @@ fn fit_stage(
     } else {
         Vec::new()
     };
-    let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0);
+    let mut renderer = Renderer::new(gpu, ks, n, maxw, maxh, 0).growable();
     let mut bscr = BwdScratch::new(gpu, n, max_px, 0);
     let opts = RenderOpts {
         mode: Mode::Color,
@@ -1434,20 +1434,6 @@ fn fit_stage(
                 )
                 .unwrap_or_else(|e| panic!("{e}"));
             prof.add("render backward", tm.elapsed());
-            // Credit assignment, over the same tail of the stage the AbsGS
-            // statistic is read over. Replays the colour render just
-            // differentiated, so it has to run before any auxiliary render.
-            if let (Some(cg), Some(ev)) = (&credit, evidence.as_mut()) {
-                if it + window >= iters {
-                    let tm = std::time::Instant::now();
-                    let up = density::credit_upstream(&pred, &t.rgb, &edges[vi], wts);
-                    gpu.write(&dimg, cast(&up));
-                    gpu.submit(&[&cg.d_colors], &[]);
-                    renderer.render_bwd(gpu, &gs, &cam, &opts, &dimg, None, &mut bscr, cg).unwrap_or_else(|e| panic!("{e}"));
-                    ev.add_view(&gpu.read(&cg.d_colors, 3 * n));
-                    prof.add("credit assignment", tm.elapsed());
-                }
-            }
             let geometry_now = (it0 + it) as f32 >= cfg.geometry_after * cfg.iters as f32
                 && (it0 + it).is_multiple_of(cfg.geometry_every.max(1));
             if let Some(a) = aux.as_ref().filter(|_| geometry_now) {
@@ -1648,6 +1634,50 @@ fn fit_stage(
         if !on_step(global, last_loss) {
             aborted = true;
             break;
+        }
+    }
+
+    // Credit assignment for density control: EVERY view once, against the
+    // parameters the stage ends with. Collected inside the loop over the
+    // stage's last iterations instead, a minibatch window straddles two
+    // epochs with different view orders - some views twice, some never - and
+    // a gaussian seen only in the missed views reads as dead: measured as 41%
+    // of a sparse start's first round.
+    if let (Some(cg), Some(ev)) = (&credit, evidence.as_mut()) {
+        if !aborted {
+            let tm = std::time::Instant::now();
+            let unpack = gpu.step(ks.splat_unpack, &[&p_geo, &means, &scales, &quats], &[n as u32], n as u32);
+            gpu.submit(&[], &[unpack]);
+            let last = it0 + iters.saturating_sub(1);
+            for (vi, t) in targets.iter().enumerate() {
+                let cam = cams[vi];
+                if ksh > 0 {
+                    let eye = cam.eye();
+                    let params = [n as u32, ksh as u32, 0, sh_skip(cfg, ksh, last), f(eye[0]), f(eye[1]), f(eye[2]), 0];
+                    let e = gpu.step(ks.splat_sh, &[&means, &p_col, &p_sh, &col_view, &d_base, &d_sh], &params, n as u32);
+                    gpu.submit(&[], &[e]);
+                }
+                let gs = GpuSplats {
+                    n,
+                    means: means.clone(),
+                    quats: quats.clone(),
+                    scales: scales.clone(),
+                    opacities: p_op.clone(),
+                    colors: if ksh > 0 { col_view.clone() } else { p_col.clone() },
+                };
+                renderer.render(gpu, &gs, &cam, &opts);
+                let rgb = crate::renderer::rgba_to_rgb(&renderer.read_rgba(gpu, cam.width, cam.height));
+                let pred = match isp.as_ref() {
+                    None => rgb,
+                    Some(model) => model.forward(vi, &cam, &rgb),
+                };
+                let up = density::credit_upstream(&pred, &t.rgb, &edges[vi], weights[vi].as_deref());
+                gpu.write(&dimg, cast(&up));
+                gpu.submit(&[&cg.d_colors], &[]);
+                renderer.render_bwd(gpu, &gs, &cam, &opts, &dimg, None, &mut bscr, cg).unwrap_or_else(|e| panic!("{e}"));
+                ev.add_view(&gpu.read(&cg.d_colors, 3 * n));
+            }
+            prof.add("credit assignment", tm.elapsed());
         }
     }
 

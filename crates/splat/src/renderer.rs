@@ -105,6 +105,9 @@ pub struct Renderer {
     ranges: DeviceBuffer,
     /// Last render() state the backward replays.
     last: Option<(usize, bool, u32, u32)>, // (n_isects, vals_in_b, tiles_x, tiles_y)
+    /// Grow the instance buffers when a frame needs more, instead of
+    /// dropping its depth-latest splats - see [`Renderer::growable`].
+    grow: bool,
 }
 
 impl Renderer {
@@ -136,7 +139,23 @@ impl Renderer {
             sort: SortScratch::new(gpu, cap),
             ranges: gpu.storage(2 * max_tiles as u64),
             last: None,
+            grow: false,
         }
+    }
+
+    /// Never clamp: when a frame needs more (gaussian, tile) instances than
+    /// the buffers hold, grow them (up to what one storage binding holds) and
+    /// render all of it.
+    ///
+    /// For an optimizer, clamping is not a degraded frame but a wrong
+    /// gradient: a dropped splat contributes to no pixel, so it gets no
+    /// gradient at all and density control reads it as dead. A scene grown
+    /// from a sparse cloud is a few thousand LARGE gaussians early on, each
+    /// touching dozens of tiles, which is exactly when the default budget
+    /// overflows.
+    pub fn growable(mut self) -> Renderer {
+        self.grow = true;
+        self
     }
 
     /// Tiled render into `self.img` (+ packed rgba8). Two submissions with a
@@ -170,6 +189,17 @@ impl Renderer {
         let ctotal = record_scan(gpu, &self.ks, &self.counts, s.n, &self.count_scan, &mut steps);
         gpu.submit(&[], &steps);
         let total = gpu.read(ctotal, 1)[0].to_bits() as usize;
+        if self.grow && total > self.isect_cap {
+            // keys and values are one word each, the largest single binding
+            let ceiling = (gpu.max_storage_binding_bytes() / 4) as usize;
+            let cap = (total + total / 4).min(ceiling);
+            self.keys_a = gpu.storage(cap as u64);
+            self.vals_a = gpu.storage(cap as u64);
+            self.keys_b = gpu.storage(cap as u64);
+            self.vals_b = gpu.storage(cap as u64);
+            self.sort = SortScratch::new(gpu, cap);
+            self.isect_cap = cap;
+        }
         let clamped = total > self.isect_cap;
         let n_isects = total.min(self.isect_cap);
 
