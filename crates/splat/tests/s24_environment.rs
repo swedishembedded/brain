@@ -116,12 +116,12 @@ fn the_backward_is_the_derivative_of_the_composite() {
     let grad = dev.backward(&g, &ks, &img, &dimg, &cam, &RenderOpts::default());
     let da = g.read(&dimg, n_px * 4);
     let h = 1e-2f32;
-    for k in 0..env.coeffs.len() {
+    for (k, &an) in grad.iter().enumerate() {
         let (mut a, mut b) = (env.clone(), env.clone());
         a.coeffs[k] += h;
         b.coeffs[k] -= h;
         let fd = (loss(&a, &rgba) - loss(&b, &rgba)) / (2.0 * h as f64);
-        assert!((grad[k] - fd).abs() < 2e-3 * fd.abs().max(1.0), "coefficient {k}: analytic {} vs central difference {fd}", grad[k]);
+        assert!((an - fd).abs() < 2e-3 * fd.abs().max(1.0), "coefficient {k}: analytic {an} vs central difference {fd}");
     }
     // the alpha share: dL/dalpha of the composite, per pixel
     for p in (0..n_px).step_by(17) {

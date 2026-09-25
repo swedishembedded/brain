@@ -156,6 +156,9 @@ impl Reconstruction {
 /// The per-step progress callback: `(iteration, loss) -> keep going`.
 type Progress = Box<dyn FnMut(usize, f32) -> bool>;
 
+/// The per-stage log callback: one line per finished stage.
+type Log = Box<dyn FnMut(&str)>;
+
 /// Builds a [`Reconstruction`] from photographs.
 pub struct ReconstructionBuilder {
     photos: Vec<Image>,
@@ -163,7 +166,7 @@ pub struct ReconstructionBuilder {
     cfg: PhotoCfg,
     device: Device,
     progress: Option<Progress>,
-    log: Option<Box<dyn FnMut(&str)>>,
+    log: Option<Log>,
 }
 
 impl ReconstructionBuilder {

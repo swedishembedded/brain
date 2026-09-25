@@ -98,8 +98,8 @@ impl EnvMap {
     pub fn uniform(degree: u32, rgb: [f32; 3]) -> EnvMap {
         let mut e = EnvMap::new(degree);
         let y00 = basis([0.0, 0.0, 1.0], 0)[0] as f32;
-        for c in 0..3 {
-            e.coeffs[c] = rgb[c] / y00;
+        for (dc, v) in e.coeffs.iter_mut().zip(rgb) {
+            *dc = v / y00;
         }
         e
     }
