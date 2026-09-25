@@ -448,6 +448,35 @@ impl Renderer {
         gpu.read(&self.img, (w * h) as usize * 4)
     }
 
+    /// Floats per pixel of [`Self::diagnose`] (`splat_ray_diagnose.wgsl`).
+    pub const DIAG_WORDS: usize = 12;
+
+    /// What the last ray-evaluated [`Self::render`] is made of, per pixel,
+    /// `[W*H*DIAG_WORDS]`: alpha, expected range, median range, range
+    /// spread, contribution entropy, gaussians composited, the largest
+    /// share and its gaussian (u32 bits), the unit normal, the weight sum -
+    /// `splat_ray_diagnose.wgsl` lists them. The statistics that tell a
+    /// surface from a stack of translucent gaussians that only looks like
+    /// one; computed from the same sorted lists, in the same per-pixel order.
+    pub fn diagnose(&self, gpu: &Gpu, cam: &Camera, o: &RenderOpts) -> Vec<f32> {
+        let (_, sorted_in_b, tiles_x, tiles_y) = self.last.expect("render() must run before diagnose()");
+        assert!(self.last_ray, "diagnose: the last render was not ray-evaluated");
+        let px = (cam.width * cam.height) as usize;
+        let out = gpu.storage((Self::DIAG_WORDS * px) as u64);
+        let vals = self.sorted(sorted_in_b).2;
+        let n_tiles = tiles_x * tiles_y;
+        let step = gpu.step(
+            self.ks.splat_ray_diagnose,
+            &[&self.ray, vals, &self.ranges, &out],
+            &ray_view_params(0, cam, &RenderOpts { ray: true, ..*o }),
+            n_tiles * 256,
+        );
+        gpu.submit(&[], &[step]);
+        let v = gpu.read(&out, Self::DIAG_WORDS * px);
+        gpu_core::reclaiming(gpu, || drop(out));
+        v
+    }
+
     /// Read the per-pixel EXPECTED depth of the last [`Renderer::render`]:
     /// `(sum_i z_i alpha_i T_i) / A` in camera-space units, 0 where the frame
     /// has no geometry. Available from any render, not only `Mode::Depth` -

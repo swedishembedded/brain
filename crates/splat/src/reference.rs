@@ -297,62 +297,87 @@ pub fn render_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) ->
     render_ray_ordered(s, filter3d, cam, o, RayOrder::PerPixel)
 }
 
-/// [`render_ray`] compositing in `order`.
-pub fn render_ray_ordered(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts, order: RayOrder) -> (Vec<f32>, Vec<f32>) {
+/// One pair a pixel composites: its range `t*`, its compositing weight
+/// `w = alpha T` and its gaussian.
+#[derive(Clone, Copy, Debug)]
+pub struct RayHit<'a> {
+    pub t: f64,
+    pub w: f64,
+    pub g: &'a RayGaussian,
+}
+
+/// The gaussians of `s` the ray renderer evaluates from `cam`, in the order
+/// of their means' range.
+pub fn ray_gaussians(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) -> Vec<RayGaussian> {
     let mut gs: Vec<RayGaussian> = (0..s.len())
         .filter_map(|i| ray_gaussian(s, i, filter3d.get(i).copied().unwrap_or(0.0) as f64, cam, o))
         .collect();
     gs.sort_by(|a, b| (a.range as f32).total_cmp(&(b.range as f32)).then(a.index.cmp(&b.index)));
+    gs
+}
+
+/// What pixel `(px, py)` composites, in `order`, until its walk stops: every
+/// pair's range, weight and gaussian, and the transmittance left. `None` =
+/// the lens has no ray there.
+pub fn ray_pixel<'a>(gs: &'a [RayGaussian], cam: &Camera, px: usize, py: usize, order: RayOrder) -> (Vec<RayHit<'a>>, f64) {
+    let mut hits: Vec<(f64, f64, &RayGaussian)> = Vec::new();
+    if let Some((org, d)) = pixel_ray(cam, px as f64 + 0.5, py as f64 + 0.5) {
+        for g in gs {
+            let dm: [f64; 3] = std::array::from_fn(|k| g.m[k] - org[k]);
+            let ad: [f64; 3] = std::array::from_fn(|r| (0..3).map(|k| g.a[r][k] * d[k]).sum());
+            let vv: f64 = (0..3).map(|k| d[k] * ad[k]).sum();
+            if vv <= 0.0 {
+                continue;
+            }
+            let tt = (0..3).map(|k| dm[k] * ad[k]).sum::<f64>() / vv;
+            if tt <= 0.0 {
+                continue;
+            }
+            let e: [f64; 3] = std::array::from_fn(|k| dm[k] - tt * d[k]);
+            let q: f64 = (0..3).map(|r| (0..3).map(|k| e[r] * g.a[r][k] * e[k]).sum::<f64>()).sum();
+            let alpha = (g.opacity * (-0.5 * q).exp()).min(0.99);
+            if alpha >= 1.0 / 255.0 {
+                hits.push((tt, alpha, g));
+            }
+        }
+    }
+    if order == RayOrder::PerPixel {
+        // stable: equal ranges keep the order of the means
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let mut t = 1.0f64;
+    let mut out = Vec::with_capacity(hits.len());
+    for (tt, alpha, g) in hits {
+        let next = t * (1.0 - alpha);
+        if next <= 1e-4 {
+            break;
+        }
+        out.push(RayHit { t: tt, w: alpha * t, g });
+        t = next;
+    }
+    (out, t)
+}
+
+/// [`render_ray`] compositing in `order`.
+pub fn render_ray_ordered(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts, order: RayOrder) -> (Vec<f32>, Vec<f32>) {
+    let gs = ray_gaussians(s, filter3d, cam, o);
     let (w, h) = (cam.width as usize, cam.height as usize);
     let mut img = vec![0.0f32; w * h * 4];
     let mut aux = vec![0.0f32; w * h * 5];
-    // (t*, alpha, gaussian) of every pair a pixel composites
-    let mut hits: Vec<(f64, f64, &RayGaussian)> = Vec::with_capacity(gs.len());
     for py in 0..h {
         for px in 0..w {
             let pix = py * w + px;
-            let mut t = 1.0f64;
+            let (hits, t) = ray_pixel(&gs, cam, px, py, order);
             let (mut c, mut nsum) = ([0.0f64; 3], [0.0f64; 3]);
             let (mut dsum, mut wsum, mut dist) = (0.0f64, 0.0f64, 0.0f64);
-            hits.clear();
-            if let Some((org, d)) = pixel_ray(cam, px as f64 + 0.5, py as f64 + 0.5) {
-                for g in &gs {
-                    let dm: [f64; 3] = std::array::from_fn(|k| g.m[k] - org[k]);
-                    let ad: [f64; 3] = std::array::from_fn(|r| (0..3).map(|k| g.a[r][k] * d[k]).sum());
-                    let vv: f64 = (0..3).map(|k| d[k] * ad[k]).sum();
-                    if vv <= 0.0 {
-                        continue;
-                    }
-                    let tt = (0..3).map(|k| dm[k] * ad[k]).sum::<f64>() / vv;
-                    if tt <= 0.0 {
-                        continue;
-                    }
-                    let e: [f64; 3] = std::array::from_fn(|k| dm[k] - tt * d[k]);
-                    let q: f64 = (0..3).map(|r| (0..3).map(|k| e[r] * g.a[r][k] * e[k]).sum::<f64>()).sum();
-                    let alpha = (g.opacity * (-0.5 * q).exp()).min(0.99);
-                    if alpha >= 1.0 / 255.0 {
-                        hits.push((tt, alpha, g));
-                    }
-                }
-            }
-            if order == RayOrder::PerPixel {
-                // stable: equal ranges keep the order of the means
-                hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-            }
-            for &(tt, alpha, g) in &hits {
-                let next = t * (1.0 - alpha);
-                if next <= 1e-4 {
-                    break;
-                }
-                let wgt = alpha * t;
+            for hit in &hits {
                 for k in 0..3 {
-                    c[k] += wgt * s.colors[g.index * 3 + k] as f64;
-                    nsum[k] += wgt * g.normal[k];
+                    c[k] += hit.w * s.colors[hit.g.index * 3 + k] as f64;
+                    nsum[k] += hit.w * hit.g.normal[k];
                 }
-                dist += 2.0 * wgt * (tt * wsum - dsum);
-                dsum += wgt * tt;
-                wsum += wgt;
-                t = next;
+                dist += 2.0 * hit.w * (hit.t * wsum - dsum);
+                dsum += hit.w * hit.t;
+                wsum += hit.w;
             }
             for k in 0..3 {
                 img[pix * 4 + k] = (c[k] + t * o.bg[k] as f64) as f32;
@@ -367,4 +392,50 @@ pub fn render_ray_ordered(s: &Splats, filter3d: &[f32], cam: &Camera, o: &Render
         }
     }
     (img, aux)
+}
+
+/// `splat_ray_diagnose.wgsl` in f64, every pixel in its exact range order:
+/// `[W*H*12]` as `Renderer::diagnose` documents it.
+pub fn diagnose_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) -> Vec<f32> {
+    let gs = ray_gaussians(s, filter3d, cam, o);
+    let (w, h) = (cam.width as usize, cam.height as usize);
+    let mut out = vec![0.0f32; w * h * 12];
+    for py in 0..h {
+        for px in 0..w {
+            let (hits, t) = ray_pixel(&gs, cam, px, py, RayOrder::PerPixel);
+            let d = &mut out[(py * w + px) * 12..(py * w + px + 1) * 12];
+            let sw: f64 = hits.iter().map(|h| h.w).sum();
+            d[0] = (1.0 - t) as f32;
+            let mut acc = 0.0f64;
+            for h in &hits {
+                acc += h.w;
+                if acc >= 0.5 {
+                    d[2] = h.t as f32;
+                    break;
+                }
+            }
+            d[5] = hits.len() as f32;
+            d[7] = f32::from_bits(u32::MAX);
+            if sw > 1e-8 {
+                let mean = hits.iter().map(|h| h.w * h.t).sum::<f64>() / sw;
+                let var = hits.iter().map(|h| h.w * h.t * h.t).sum::<f64>() / sw - mean * mean;
+                let ent = -hits.iter().map(|h| (h.w / sw) * (h.w / sw).ln()).sum::<f64>();
+                let top = hits.iter().max_by(|a, b| a.w.total_cmp(&b.w)).expect("a weight");
+                let n: [f64; 3] = std::array::from_fn(|k| hits.iter().map(|h| h.w * h.g.normal[k]).sum());
+                let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                d[1] = mean as f32;
+                d[3] = var.max(0.0).sqrt() as f32;
+                d[4] = ent.max(0.0) as f32;
+                d[6] = (top.w / sw) as f32;
+                d[7] = f32::from_bits(top.g.index as u32);
+                if nl > 1e-8 {
+                    for k in 0..3 {
+                        d[8 + k] = (n[k] / nl) as f32;
+                    }
+                }
+            }
+            d[11] = sw as f32;
+        }
+    }
+    out
 }

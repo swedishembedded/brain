@@ -1107,6 +1107,14 @@ pub const SPLAT_RAY_CAMERA_GRAD: &str = concat!(
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/splat_ray_camera_grad.wgsl"),
 );
+/// `wgsl/splat_ray_diagnose.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair,splat_ray_window}.wgsl`
+pub const SPLAT_RAY_DIAGNOSE: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_window.wgsl"),
+    include_str!("../wgsl/splat_ray_diagnose.wgsl"),
+);
 /// `wgsl/splat_ray_emit.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
 pub const SPLAT_RAY_EMIT: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
@@ -1686,6 +1694,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_ray_bwd_tile", SPLAT_RAY_BWD_TILE),
     ("splat_ray_bwd_walk", SPLAT_RAY_BWD_WALK),
     ("splat_ray_camera_grad", SPLAT_RAY_CAMERA_GRAD),
+    ("splat_ray_diagnose", SPLAT_RAY_DIAGNOSE),
     ("splat_ray_emit", SPLAT_RAY_EMIT),
     ("splat_ray_project", SPLAT_RAY_PROJECT),
     ("splat_ray_project_bwd", SPLAT_RAY_PROJECT_BWD),

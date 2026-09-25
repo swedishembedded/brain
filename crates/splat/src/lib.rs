@@ -77,6 +77,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
     ("splat_ray_emit", kernels::SPLAT_RAY_EMIT),
     ("splat_ray_bwd_walk", kernels::SPLAT_RAY_BWD_WALK),
+    ("splat_ray_diagnose", kernels::SPLAT_RAY_DIAGNOSE),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -121,6 +122,7 @@ pub struct Kernels {
     pub dw_splitk_reduce: usize,
     pub splat_ray_emit: usize,
     pub splat_ray_bwd_walk: usize,
+    pub splat_ray_diagnose: usize,
 }
 
 impl Kernels {
@@ -166,6 +168,7 @@ impl Kernels {
             dw_splitk_reduce: base + 35,
             splat_ray_emit: base + 36,
             splat_ray_bwd_walk: base + 37,
+            splat_ray_diagnose: base + 38,
         }
     }
 }
