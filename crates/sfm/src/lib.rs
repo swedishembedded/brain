@@ -8,11 +8,15 @@
 
 pub mod ba;
 pub mod camera;
+pub mod georef;
 pub mod incremental;
 pub mod lens;
 pub mod linalg;
 pub mod matching;
 pub mod pnp;
+pub mod positioning;
+pub mod retrieval;
+pub mod rotation;
 pub mod sift;
 pub mod twoview;
 
