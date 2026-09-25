@@ -138,6 +138,12 @@ impl Reconstruction {
     /// photograph's own fitted camera model when the fit had one.
     pub fn render(&self, view: usize) -> Result<Image> {
         let cam = self.out.cameras.get(view).ok_or_else(|| Error::Backend(format!("view {view} of {}", self.out.cameras.len())))?;
+        // the renderer built for this one frame is reclaimed with it
+        let rgb = gpu_core::reclaiming(&self.gpu, || self.render_rgb(view, cam));
+        Image::from_rgb8(cam.width, cam.height, rgb.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect())
+    }
+
+    fn render_rgb(&self, view: usize, cam: &splat::types::Camera) -> Vec<f32> {
         let scene = &self.out.scene;
         let mut r = Renderer::new(&self.gpu, Kernels::at(0), scene.len().max(1), cam.width, cam.height, 0).growable();
         let gs = GpuSplats::upload(&self.gpu, scene);
@@ -152,7 +158,7 @@ impl Reconstruction {
         if let Some(isp) = &self.out.isp {
             rgb = isp.forward(view, cam, &rgb);
         }
-        Image::from_rgb8(cam.width, cam.height, rgb.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect())
+        rgb
     }
 }
 

@@ -663,7 +663,9 @@ pub fn fit_full(
             v
         })
         .collect();
-    let (scene, cams, loss, filter3d, env) = Fit::new(gpu, ks, cfg, &scaled_init, &scaled, isp.as_mut()).run(on_step);
+    // everything the fit allocated is dropped when it returns: reclaim it
+    // before the caller allocates again
+    let (scene, cams, loss, filter3d, env) = gpu_core::reclaiming(gpu, || Fit::new(gpu, ks, cfg, &scaled_init, &scaled, isp.as_mut()).run(on_step));
     if let (Some(i), true) = (&isp, cfg.log_every > 0) {
         print!("fit: camera model\n{}", i.summary());
     }
@@ -928,7 +930,7 @@ impl<'a> Fit<'a> {
         // running.
         let full = self.level(0);
         let first_loss = self.dataset_loss(&scene, &mut scr, &full);
-        drop(full);
+        gpu_core::reclaiming(gpu, || drop(full));
         let mut level = self.level(self.halvings_at(0));
         let mut starved: Vec<f32> = Vec::new();
         let mut absgrad = vec![0.0f32; scene.n];
@@ -945,7 +947,8 @@ impl<'a> Fit<'a> {
             let it = done;
             let halvings = self.halvings_at(it);
             if halvings != level.halvings {
-                level = self.level(halvings);
+                let next = self.level(halvings);
+                gpu_core::reclaiming(gpu, || drop(std::mem::replace(&mut level, next)));
                 // a finer level measures a different loss: its trend starts
                 // over
                 (smooth, rises, prev) = (f64::NAN, 0, f32::INFINITY);
@@ -1096,14 +1099,17 @@ impl<'a> Fit<'a> {
             // ---- density control ----
             if cfg.densify_every > 0 && done >= first_round && done < until && done.is_multiple_of(cfg.densify_every) {
                 let round = (done - first_round) / cfg.densify_every;
-                scene = self.densify(scene, &mut scr, &mut level, &absgrad, &mut starved, round, rounds, it);
+                // the round replaces the scene (and may replace view weights)
+                scene = gpu_core::reclaiming(gpu, || self.densify(scene, &mut scr, &mut level, &absgrad, &mut starved, round, rounds, it));
                 absgrad = vec![0.0; scene.n];
                 if scene.n > scr.cap {
                     // unbudgeted growth: the scratch sized for the start has
                     // to follow the scene
                     scr.cap = scene.n + scene.n / 4;
-                    scr.renderer = Renderer::new(gpu, self.ks, scr.cap, maxw, maxh, 0).growable();
-                    scr.bscr = BwdScratch::new(gpu, scr.cap, max_px, 0);
+                    gpu_core::reclaiming(gpu, || {
+                        scr.renderer = Renderer::new(gpu, self.ks, scr.cap, maxw, maxh, 0).growable();
+                        scr.bscr = BwdScratch::new(gpu, scr.cap, max_px, 0);
+                    });
                 }
                 (smooth, rises, prev) = (f64::NAN, 0, f32::INFINITY);
                 (window_sum, window_n, grace) = (0.0, 0, true);

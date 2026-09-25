@@ -315,12 +315,16 @@ impl Renderer {
             // keys and values are one word each, the largest single binding
             let ceiling = (gpu.max_storage_binding_bytes() / 4) as usize;
             let cap = (total + total / 4).min(ceiling);
-            self.keys_a = gpu.storage(cap as u64);
-            self.vals_a = gpu.storage(cap as u64);
-            self.keys_b = gpu.storage(cap as u64);
-            self.vals_b = gpu.storage(cap as u64);
-            self.ids = gpu.storage(cap as u64);
-            self.sort = SortScratch::new(gpu, cap);
+            // the replaced buffers are reclaimed before anything allocates
+            // again (see `gpu_core::reclaiming`)
+            gpu_core::reclaiming(gpu, || {
+                self.keys_a = gpu.storage(cap as u64);
+                self.vals_a = gpu.storage(cap as u64);
+                self.keys_b = gpu.storage(cap as u64);
+                self.vals_b = gpu.storage(cap as u64);
+                self.ids = gpu.storage(cap as u64);
+                self.sort = SortScratch::new(gpu, cap);
+            });
             self.isect_cap = cap;
         }
         let clamped = total > self.isect_cap;
@@ -702,7 +706,7 @@ impl BwdScratch {
 
     /// Size the record buffer for exactly `cap` records of `words`.
     fn alloc_records(&mut self, gpu: &Gpu, cap: usize, words: usize) {
-        self.recs = gpu.storage(words as u64 * cap as u64);
+        gpu_core::reclaiming(gpu, || self.recs = gpu.storage(words as u64 * cap as u64));
         self.rec_floats = cap * words;
     }
 
@@ -759,7 +763,7 @@ impl BwdScratch {
         if words > self.pair_words {
             // a quarter of headroom, as for the records, within the binding
             let cap = (words + words / 4).min((limit / 4) as usize);
-            self.pairs = gpu.storage(cap as u64);
+            gpu_core::reclaiming(gpu, || self.pairs = gpu.storage(cap as u64));
             self.pair_words = cap;
         }
         true
@@ -768,7 +772,7 @@ impl BwdScratch {
     fn reserve_slots(&mut self, gpu: &Gpu, instances: usize, channels: usize) {
         let floats = instances * channels * TILE_PIXELS;
         if floats > self.slot_floats {
-            self.slots = gpu.storage(floats as u64);
+            gpu_core::reclaiming(gpu, || self.slots = gpu.storage(floats as u64));
             self.slot_floats = floats;
         }
     }
