@@ -350,17 +350,13 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
 
     // ---- 1. features ----
     let clock = Instant::now();
-    let feats: Features = photos
-        .iter()
-        .map(|p| {
-            let gray: Vec<f32> = p
-                .rgb
-                .chunks_exact(3)
-                .map(|c| (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32) / 255.0)
-                .collect();
-            detect(&gray, p.width as usize, p.height as usize, &cfg.sift)
-        })
-        .collect();
+    // photographs in parallel as well as within one: the scale-space blur
+    // and the descriptors already are, extremum detection is not
+    let feats: Features = backend_cpu::par::map(n, |i| {
+        let p = &photos[i];
+        let gray: Vec<f32> = p.rgb.chunks_exact(3).map(|c| (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32) / 255.0).collect();
+        detect(&gray, p.width as usize, p.height as usize, &cfg.sift)
+    });
     let features_s = clock.elapsed().as_secs_f64();
     log(format!("features: {:?} in {features_s:.1} s", feats.iter().map(|f| f.0.len()).collect::<Vec<_>>()));
 
