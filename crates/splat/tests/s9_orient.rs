@@ -20,7 +20,7 @@
 //! procure our services by sending an email to info@swedishembedded.com.
 
 use gpu_core::Gpu;
-use splat::orient::{apply, frame_from_cameras, level, transform_c2w, upright};
+use splat::orient::{apply, frame_from_cameras, level, transform_c2w, upright, upright_along};
 use splat::quality::psnr;
 use splat::renderer::{GpuSplats, Renderer};
 use splat::types::{Camera, RenderOpts, Splats};
@@ -334,4 +334,59 @@ fn a_scene_with_no_dominant_surface_is_refused() {
         .expect("a floor with an object on it is still a floor");
     let off = (n[1].abs()).clamp(0.0, 1.0).acos().to_degrees();
     assert!((off - 12.0).abs() < 2.0, "the floor's 12 degree tilt read as {off:.2}");
+}
+
+/// When the reconstruction KNOWS which way is up - gravity from how the
+/// photographs were held, or +Z of a georeferenced one - that is used as
+/// given, not re-inferred from the path the photographer walked: cameras
+/// strung along a straight street, which no orbit fit can read, come out
+/// with the known up on world up (-Y), rigidly, each camera tipped exactly
+/// as far from vertical as it was.
+#[test]
+fn a_known_up_lands_on_world_up_whatever_the_path() {
+    // a rotated world whose up is `up`; the cameras walk along a line in it
+    let (ax, ang) = ([0.36f64, 0.48, 0.8], 1.1f64);
+    let (c, sn) = (ang.cos(), ang.sin());
+    let k = ax;
+    let rot = [
+        c + k[0] * k[0] * (1.0 - c), k[0] * k[1] * (1.0 - c) - k[2] * sn, k[0] * k[2] * (1.0 - c) + k[1] * sn,
+        k[1] * k[0] * (1.0 - c) + k[2] * sn, c + k[1] * k[1] * (1.0 - c), k[1] * k[2] * (1.0 - c) - k[0] * sn,
+        k[2] * k[0] * (1.0 - c) - k[1] * sn, k[2] * k[1] * (1.0 - c) + k[0] * sn, c + k[2] * k[2] * (1.0 - c),
+    ];
+    let mv = |m: &[f64; 9], v: [f64; 3]| [0, 1, 2].map(|i| m[i * 3] * v[0] + m[i * 3 + 1] * v[1] + m[i * 3 + 2] * v[2]);
+    let up = mv(&rot, [0.0, -1.0, 0.0]);
+    let mats: Vec<[f64; 16]> = (0..6)
+        .map(|i| {
+            // level cameras looking along +Z, yawed a little, walking along +X
+            let yaw = 0.3 * (i as f64 - 2.5);
+            let (cy, sy) = (yaw.cos(), yaw.sin());
+            let local = [cy, 0.0, sy, 0.0, 1.0, 0.0, -sy, 0.0, cy];
+            let r = {
+                let mut o = [0.0f64; 9];
+                for a in 0..3 {
+                    for b in 0..3 {
+                        o[a * 3 + b] = (0..3).map(|j| rot[a * 3 + j] * local[j * 3 + b]).sum();
+                    }
+                }
+                o
+            };
+            let eye = mv(&rot, [1.5 * i as f64, 0.0, 0.0]);
+            [r[0], r[1], r[2], eye[0], r[3], r[4], r[5], eye[1], r[6], r[7], r[8], eye[2], 0.0, 0.0, 0.0, 1.0]
+        })
+        .collect();
+    let cams: Vec<Camera> = mats.iter().map(|m| cam_from(m, 64, 64)).collect();
+    let s = scene(50);
+    let (moved, moved_cams) = upright_along(&s, &cams, up);
+    assert_eq!(moved.scales, s.scales, "re-framing must not reshape a gaussian");
+    for (a, b) in cams.iter().zip(&moved_cams) {
+        // each camera's own down axis (c2w column 1) against world down, as a
+        // cosine: an angle near zero is lost to f32 rounding under acos
+        let before = a.c2w[1] as f64 * -up[0] + a.c2w[5] as f64 * -up[1] + a.c2w[9] as f64 * -up[2];
+        let after = b.c2w[5] as f64;
+        assert!((before - after).abs() < 1e-5, "a camera's tilt from vertical changed: cosine {before:.6} became {after:.6}");
+    }
+    // level cameras stay level, at one height, in the frame handed back
+    let ys: Vec<f64> = moved_cams.iter().map(|c| c.c2w[7] as f64).collect();
+    let spread = ys.iter().cloned().fold(f64::MIN, f64::max) - ys.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(spread < 1e-4, "cameras walking on level ground came out {spread:.5} apart in height");
 }

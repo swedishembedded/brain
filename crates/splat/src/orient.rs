@@ -10,7 +10,12 @@
 //!
 //! The cameras themselves say which way is up, with no assumption about the
 //! subject: they orbit it, so the normal of the plane they lie in is the
-//! scene's vertical, and their view rays intersect at its centre.
+//! scene's vertical, and their view rays intersect at its centre. That is
+//! [`upright`], for a scene that knows nothing else. A scene whose producer
+//! KNOWS its vertical - structure from motion reads gravity off how the
+//! photographs were held, or puts a georeferenced scene's up on +Z - is
+//! landed along that instead by [`upright_along`], which assumes nothing
+//! about the path the cameras took.
 //!
 //! Every transform here is RIGID. Rotating a gaussian rotates its mean and
 //! composes with its orientation; its scales and opacity are properties of the
@@ -29,29 +34,7 @@ use crate::types::{Camera, Splats};
 pub fn frame_from_cameras(c2w: &[[f64; 16]], up_sign: f64) -> ([f64; 9], [f64; 3]) {
     let n = c2w.len() as f64;
     let eyes: Vec<[f64; 3]> = c2w.iter().map(|m| [m[3], m[7], m[11]]).collect();
-    let fwd: Vec<[f64; 3]> = c2w.iter().map(|m| [m[2], m[6], m[10]]).collect();
-
-    // centre: the point closest to every view ray
-    let (mut a, mut b) = ([[0.0f64; 3]; 3], [0.0f64; 3]);
-    for (e, f) in eyes.iter().zip(&fwd) {
-        let l = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(1e-12);
-        let d = [f[0] / l, f[1] / l, f[2] / l];
-        for i in 0..3 {
-            for j in 0..3 {
-                a[i][j] += if i == j { 1.0 } else { 0.0 } - d[i] * d[j];
-            }
-            b[i] += (0..3).map(|j| (if i == j { 1.0 } else { 0.0 } - d[i] * d[j]) * e[j]).sum::<f64>();
-        }
-    }
-    let centre = solve3(&a, &b).unwrap_or_else(|| {
-        let mut m = [0.0; 3];
-        for e in &eyes {
-            for k in 0..3 {
-                m[k] += e[k] / n;
-            }
-        }
-        m
-    });
+    let centre = look_centre(c2w);
 
     // up: the normal of the plane the cameras lie in, via the smallest
     // principal axis of their offsets.
@@ -88,6 +71,34 @@ pub fn frame_from_cameras(c2w: &[[f64; 16]], up_sign: f64) -> ([f64; 9], [f64; 3
         up = [-up[0], -up[1], -up[2]];
     }
     (rotation_taking(up, [0.0, up_sign, 0.0]), centre)
+}
+
+/// The point the cameras look at: the one closest to every view ray, or the
+/// mean camera position when the rays are all parallel.
+fn look_centre(c2w: &[[f64; 16]]) -> [f64; 3] {
+    let n = c2w.len() as f64;
+    let eyes: Vec<[f64; 3]> = c2w.iter().map(|m| [m[3], m[7], m[11]]).collect();
+    let fwd: Vec<[f64; 3]> = c2w.iter().map(|m| [m[2], m[6], m[10]]).collect();
+    let (mut a, mut b) = ([[0.0f64; 3]; 3], [0.0f64; 3]);
+    for (e, f) in eyes.iter().zip(&fwd) {
+        let l = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt().max(1e-12);
+        let d = [f[0] / l, f[1] / l, f[2] / l];
+        for i in 0..3 {
+            for j in 0..3 {
+                a[i][j] += if i == j { 1.0 } else { 0.0 } - d[i] * d[j];
+            }
+            b[i] += (0..3).map(|j| (if i == j { 1.0 } else { 0.0 } - d[i] * d[j]) * e[j]).sum::<f64>();
+        }
+    }
+    solve3(&a, &b).unwrap_or_else(|| {
+        let mut m = [0.0; 3];
+        for e in &eyes {
+            for k in 0..3 {
+                m[k] += e[k] / n;
+            }
+        }
+        m
+    })
 }
 
 /// Apply a rigid re-framing to every gaussian.
@@ -253,6 +264,32 @@ pub(crate) fn qmul(a: &[f64; 4], b: &[f64; 4]) -> [f64; 4] {
 pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
     let mats: Vec<[f64; 16]> = cams.iter().map(|c| std::array::from_fn(|i| c.c2w[i] as f64)).collect();
     let (r, centre) = frame_from_cameras(&mats, -1.0);
+    let moved = cams
+        .iter()
+        .zip(&mats)
+        .map(|(c, m)| {
+            let t = transform_c2w(m, &r, &centre);
+            Camera { c2w: std::array::from_fn(|i| t[i] as f32), ..*c }
+        })
+        .collect();
+    (apply(s, &r, &centre), moved)
+}
+
+/// Re-frame a scene and its cameras so that `up` - the direction opposite
+/// gravity in the scene's frame, as the scene's producer knows it - becomes
+/// world up (-Y, the camera convention's up), about the point the cameras
+/// look at.
+///
+/// This is [`upright`] for a scene whose vertical is KNOWN rather than
+/// guessed from the camera path: an orbit-plane fit needs an orbit, and a
+/// walk down a street, a sweep along a wall or a set of photographs from
+/// one spot has none. The rotation is the shortest one taking `up` onto
+/// -Y, so a georeferenced scene (east-north-up, `up = +Z`) comes out with
+/// east on +X and north on +Z. Rigid, like [`upright`].
+pub fn upright_along(s: &Splats, cams: &[Camera], up: [f64; 3]) -> (Splats, Vec<Camera>) {
+    let mats: Vec<[f64; 16]> = cams.iter().map(|c| std::array::from_fn(|i| c.c2w[i] as f64)).collect();
+    let r = rotation_taking(up, [0.0, -1.0, 0.0]);
+    let centre = look_centre(&mats);
     let moved = cams
         .iter()
         .zip(&mats)
