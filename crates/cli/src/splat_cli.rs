@@ -76,7 +76,7 @@ fn info(argv: &[String]) {
     println!("  bounds  min [{:.3} {:.3} {:.3}]  max [{:.3} {:.3} {:.3}]", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
     println!("  mean opacity {mean_op:.3}");
     match &s.sh_rest {
-        Some((deg, _)) => println!("  SH degree {deg} (higher orders parsed, rendered as DC for now)"),
+        Some((deg, _)) => println!("  SH degree {deg} (view-dependent colour, shaded by render and view)"),
         None => println!("  SH degree 0"),
     }
 }
