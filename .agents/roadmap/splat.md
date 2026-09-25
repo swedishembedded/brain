@@ -151,6 +151,18 @@ fitted), 816x612, 3000 steps, one P40 (`crates/recon/examples/photo_holdout.rs`)
 | + environment (degree 6) | 16.88 / 0.591 | 24.89 | (shared GPU) |
 | + pose refinement from 20%, calibration from 50% | 16.82 / 0.558 | 23.97 | 1008 s |
 
+With per-pixel range ordering and the photometric camera on (the current
+defaults): 17.20 dB / SSIM 0.601 held out through the average camera, 17.51
+dB / 0.614 with each held-out view's exposure and white balance fitted on
+half its frame; 23.37 dB on the training views - less overfitting, better
+novel views.
+
+End to end through the SDK (`samples/reconstruction/splat`) on all 16
+photographs at 1632x1224: structure from motion 155 s (features in parallel,
+descriptors matched on the device; 261 s before), stereo 68 s (3.14 M
+points, 62% of pixels measured), then 4000 steps from 3.14 M gaussians
+within a budget of 3.93 M.
+
 Refining the cameras loses here: structure from motion already fits these
 photographs to 0.64 px, and the refinement trades scene quality for pose
 changes the held-out views do not confirm. The presets leave it off.
