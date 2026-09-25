@@ -162,16 +162,30 @@ pub fn transform_c2w_sim3(m: &[f64; 16], w: &Sim3) -> [f64; 16] {
     out
 }
 
-/// Concatenate, keeping every gaussian. Overlapping surface is left to voxel
-/// merging, which already knows how to fuse duplicates.
+/// Concatenate, keeping every gaussian - and its view-dependent colour, at
+/// the highest degree any part carries (a part with fewer bands gets zeros
+/// for the rest, which renders exactly as it did). Overlapping surface is
+/// left to voxel merging, which already knows how to fuse duplicates.
 pub fn concat(parts: &[Splats]) -> Splats {
-    let mut out = Splats::default();
+    let degree = parts.iter().filter_map(|p| p.sh_rest.as_ref().map(|(d, _)| *d)).max();
+    let k = degree.map_or(0, crate::sh::coeffs);
+    let mut out = Splats { sh_rest: degree.map(|d| (d, Vec::new())), ..Default::default() };
     for p in parts {
         out.means.extend_from_slice(&p.means);
         out.quats.extend_from_slice(&p.quats);
         out.scales.extend_from_slice(&p.scales);
         out.opacities.extend_from_slice(&p.opacities);
         out.colors.extend_from_slice(&p.colors);
+        if let Some((_, dst)) = &mut out.sh_rest {
+            let pk = p.sh_rest.as_ref().map_or(0, |(d, _)| crate::sh::coeffs(*d));
+            for i in 0..p.len() {
+                for c in 0..3 {
+                    let row = p.sh_rest.as_ref().map_or(&[][..], |(_, r)| &r[(i * 3 + c) * pk..(i * 3 + c + 1) * pk]);
+                    dst.extend_from_slice(row);
+                    dst.extend(std::iter::repeat_n(0.0, k - pk));
+                }
+            }
+        }
     }
     out
 }

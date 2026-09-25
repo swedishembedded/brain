@@ -191,3 +191,26 @@ fn inverse(m: &Sim3) -> Sim3 {
     ];
     Sim3 { s, r, t }
 }
+
+/// Concatenating scenes keeps every gaussian's view-dependent colour: a
+/// scene with harmonics merged with one without renders, gaussian for
+/// gaussian, as each did alone.
+#[test]
+fn concatenation_keeps_view_dependent_colour() {
+    let one = |x: f32, sh: Option<(u32, Vec<f32>)>| Splats {
+        means: vec![x, 0.0, 3.0],
+        quats: vec![1.0, 0.0, 0.0, 0.0],
+        scales: vec![0.1; 3],
+        opacities: vec![0.9],
+        colors: vec![0.3, 0.4, 0.5],
+        sh_rest: sh,
+    };
+    let a = one(0.0, Some((1, (0..9).map(|v| v as f32 * 0.01).collect())));
+    let b = one(1.0, None);
+    let m = splat::align::concat(&[a.clone(), b.clone()]);
+    let eye = [0.4, -0.3, 0.0];
+    let got = splat::sh::shade(&m, eye).expect("the merged scene has harmonics");
+    let want_a = splat::sh::shade(&a, eye).expect("a has harmonics");
+    assert_eq!(&got[..3], &want_a[..], "the gaussian with harmonics");
+    assert_eq!(&got[3..], &b.colors[..], "the gaussian without them is its flat colour");
+}
