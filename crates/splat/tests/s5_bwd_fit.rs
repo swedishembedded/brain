@@ -498,3 +498,16 @@ fn the_mip_filters_opacity_compensation_is_differentiated() {
     }
     assert!(worst.0 < 0.05, "worst disagreement {:.1}%: {}", 100.0 * worst.0, worst.1);
 }
+
+/// The backward's starting record buffer must fit one storage binding. It is
+/// sized per pixel, so at 1024x768 the default of 64 records per pixel is
+/// 2.2 GB - past the 2 GiB binding a P40 (and WebGPU's floor) allows - and
+/// the growth path's clamp never got a chance to apply.
+#[test]
+fn the_starting_record_buffer_fits_one_binding() {
+    let limit = 2047u64 << 20;
+    let cap = splat::renderer::initial_record_capacity(1024 * 768, 0, limit);
+    assert!(cap <= splat::renderer::max_records_for_binding(limit), "{cap} records do not fit one binding");
+    // and a small frame still gets its full default
+    assert_eq!(splat::renderer::initial_record_capacity(64 * 64, 0, limit), 1 << 20);
+}

@@ -408,6 +408,20 @@ pub fn record_capacity(need: usize, limit: u64) -> Result<usize, String> {
     Ok((need + need / 4).min(ceiling))
 }
 
+/// The record capacity a [`BwdScratch`] starts with: `rec_cap`, or 64 per
+/// pixel when that is 0 - never more than ONE storage binding of `limit`
+/// bytes holds.
+///
+/// The ceiling used to apply only when the buffers GREW, so the default
+/// start of 64 records per pixel was allocated unclamped: at 1024x768 that
+/// is 50.3M records, 2.2 GB, past a 2 GiB binding, and the first backward of
+/// any fit at that size failed bind-group validation before emitting a single
+/// record.
+pub fn initial_record_capacity(max_px: usize, rec_cap: usize, limit: u64) -> usize {
+    let want = if rec_cap == 0 { (64 * max_px).clamp(1 << 20, 64 << 20) } else { rec_cap };
+    want.min(max_records_for_binding(limit))
+}
+
 /// Backward scratch. The record buffers start at `rec_cap` (default 64·px)
 /// and [grow][BwdScratch::reserve_records] to fit whatever the scene actually
 /// emits: how many gaussians each pixel's alpha-composite touches is a
@@ -436,7 +450,7 @@ pub struct BwdScratch {
 
 impl BwdScratch {
     pub fn new(gpu: &Gpu, max_n: usize, max_px: usize, rec_cap: usize) -> BwdScratch {
-        let cap = if rec_cap == 0 { (64 * max_px).clamp(1 << 20, 64 << 20) } else { rec_cap };
+        let cap = initial_record_capacity(max_px, rec_cap, gpu.max_storage_binding_bytes());
         let mut s = BwdScratch {
             counts_px: gpu.storage(max_px as u64),
             px_scan: ScanScratch::new(gpu, max_px),
