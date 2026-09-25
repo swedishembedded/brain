@@ -47,8 +47,10 @@ pub const DESC: usize = 128;
 pub struct SiftCfg {
     /// Keep at most this many keypoints, strongest first.
     pub max_features: usize,
-    /// Lowe's contrast threshold on the refined DoG value, for images in
-    /// [0,1], before division by the interval count.
+    /// Contrast threshold on the refined DoG value, for images in [0,1],
+    /// before division by the interval count. COLMAP's 0.02, half of Lowe's
+    /// 0.04: Lowe's keeps a third of the keypoints of a faintly textured
+    /// capture, and loses views with them.
     pub contrast: f32,
     /// Principal-curvature ratio above which an extremum is an edge.
     pub edge_ratio: f32,
@@ -59,7 +61,7 @@ pub struct SiftCfg {
 
 impl Default for SiftCfg {
     fn default() -> Self {
-        SiftCfg { max_features: 8000, contrast: 0.04, edge_ratio: 10.0, upsample: true }
+        SiftCfg { max_features: 8000, contrast: 0.02, edge_ratio: 10.0, upsample: true }
     }
 }
 
