@@ -50,6 +50,7 @@ impl Image {
     /// other f32-HWC-to-u8 writer in this workspace already uses
     /// (`crates/imaging/src/pixels.rs`), not a second copy of that rounding
     /// rule written here.
+    #[cfg(any(feature = "image", test))]
     pub(crate) fn from_hwc_unit(width: u32, height: u32, hwc: &[f32]) -> Result<Image> {
         Ok(Image(imaging::pixels::hwc_to_rgb8(hwc, width, height, 3, imaging::ChannelPolicy::RequireRgb).map_err(Error::Backend)?))
     }
@@ -59,8 +60,16 @@ impl Image {
     /// second copy of the same `u8`-to-unit conversion). The inverse of
     /// [`Image::from_hwc_unit`], for a pipeline whose task takes an `Image`
     /// as INPUT (upscaling, restoration) rather than only producing one.
+    #[cfg(any(feature = "image", feature = "vision", test))]
     pub(crate) fn to_hwc_unit(&self) -> Vec<f32> {
         self.0.to_hwc_unit()
+    }
+
+    /// The pixels themselves, for a pipeline that consumes photographs whole
+    /// (reconstruction) rather than resampling them.
+    #[cfg(feature = "three-d")]
+    pub(crate) fn into_rgb8(self) -> imaging::Rgb8 {
+        self.0
     }
 
     pub fn width(&self) -> u32 {

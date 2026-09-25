@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "reader", "video", "multimodal", "auto", "viewport"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "reader", "video", "multimodal", "auto", "viewport", "three-d"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -58,6 +58,13 @@ image = ["resolve", "imagetype", "dep:brain-flux2", "dep:brain-s3dit", "dep:brai
 # fincast have neither a `default_ref` nor any resolver wiring registered
 # anywhere yet, so they are a tracked gap, not silently unsupported.
 forecast = ["resolve", "dep:brain-forecast", "dep:brain-kronos", "dep:brain-timesfm3"]
+# `brain::Reconstruction`: photographs in, a 3D Gaussian Splatting scene out -
+# structure from motion (`brain-sfm`), the training set it implies
+# (`brain-recon`) and the fit (`brain-splat`). Selects `device` for the GPU
+# the fit runs on and `imagetype` for the photographs; NOT `resolve`, because
+# nothing here is a checkpoint - the scene is learned from the photographs
+# themselves.
+three-d = ["device", "imagetype", "dep:brain-recon", "dep:brain-sfm", "dep:brain-splat"]
 # `brain::Creature`, `brain::View` -- a connectome running a body, and a window
 # onto it. Selects `device` for the GPU the spiking network runs on. It does
 # NOT select `resolve`: a connectome is a published scientific dataset, not a
@@ -222,10 +229,13 @@ brain-promote = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
 brain-qwen3vl = { workspace = true, optional = true }
+brain-recon = { workspace = true, optional = true }
 brain-rrdbnet = { workspace = true, optional = true }
 brain-sam2 = { workspace = true, optional = true }
 brain-timesfm3 = { workspace = true, optional = true }
 brain-s3dit = { workspace = true, optional = true }
+brain-sfm = { workspace = true, optional = true }
+brain-splat = { workspace = true, optional = true }
 brain-wan = { workspace = true, optional = true }
 brain-wm-display = { workspace = true, optional = true }
 brain-viewport = { workspace = true, optional = true }

@@ -1067,7 +1067,7 @@ front-end to depend on.
 | DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat.md`, `.agents/roadmap/splat.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
-| Photographs → cameras + points (SfM) → splat training set | `crates/sfm`, `crates/recon/src/photogrammetry.rs`; `brain splat sfm/train` |
+| Photographs → cameras + points (SfM) → splat training set → fitted scene | `crates/sfm`, `crates/recon/src/photogrammetry.rs`; `brain splat sfm/train`; SDK surface `three-d` (`brain::Reconstruction`, `crates/sdk/src/three_d.rs`) and its sample `samples/reconstruction/splat`; held-out evaluation `crates/recon/examples/{synthetic_e2e,photo_holdout}.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |

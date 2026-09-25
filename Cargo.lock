@@ -428,13 +428,16 @@ dependencies = [
  "brain-qwen3asr",
  "brain-qwen3tts",
  "brain-qwen3vl",
+ "brain-recon",
  "brain-rl",
  "brain-rlcd",
  "brain-rrdbnet",
  "brain-s3dit",
  "brain-sam2",
  "brain-search",
+ "brain-sfm",
  "brain-solve",
+ "brain-splat",
  "brain-testutil",
  "brain-timesfm3",
  "brain-viewport",
@@ -5752,6 +5755,13 @@ dependencies = [
 
 [[package]]
 name = "sample-learning-visualclick"
+version = "1.1.0"
+dependencies = [
+ "brain",
+]
+
+[[package]]
+name = "sample-reconstruction-splat"
 version = "1.1.0"
 dependencies = [
  "brain",

@@ -40,6 +40,7 @@
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
 //! | `multimodal` | [`VisionLanguagePipeline`] -- vision-language (Qwen3-VL: 1-8 images + text in, text out) |
+//! | `three-d` | [`Reconstruction`] -- photographs of a static scene to a 3D Gaussian Splatting scene and the camera of every photograph (structure from motion, then the fit; no weights) |
 //! | `full` | every surface; this is `default` |
 //!
 //! `device` and `resolve` are infrastructure tiers that a surface selects for
@@ -215,6 +216,8 @@ mod restore;
 mod segment;
 #[cfg(feature = "text")]
 mod text;
+#[cfg(feature = "three-d")]
+mod three_d;
 #[cfg(feature = "text")]
 pub mod qa;
 #[cfg(feature = "audio")]
@@ -256,6 +259,8 @@ pub use auto::{AutoPipeline, AutoPipelineBuilder};
 pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring};
 #[cfg(feature = "vision")]
 pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
+#[cfg(feature = "three-d")]
+pub use three_d::{Reconstruction, ReconstructionBuilder};
 #[cfg(feature = "vision")]
 pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
 #[cfg(any(feature = "vision", feature = "text"))]

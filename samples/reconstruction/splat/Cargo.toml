@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+[package]
+# `samples/reconstruction/splat` -> `sample-reconstruction-splat`; see
+# samples/README.md rule 4.
+name = "sample-reconstruction-splat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: photographs to a 3D Gaussian Splatting scene through the public brain SDK."
+publish = false
+
+[dependencies]
+# The one surface this sample uses: structure from motion, the training set
+# and the fit, and nothing that resolves or runs a model checkpoint.
+brain = { workspace = true, features = ["three-d"] }
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 31
