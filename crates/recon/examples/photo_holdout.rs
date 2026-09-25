@@ -83,9 +83,20 @@ fn main() {
             .collect()
     };
     let mean = |s: &[(f64, Vec<f32>)]| s.iter().map(|x| x.0).sum::<f64>() / s.len().max(1) as f64;
-    // the fit may have refined the training cameras; held-out ones are the
-    // structure-from-motion cameras either way
+    // The fit may have refined the training cameras, and with them the
+    // frame: the held-out cameras are carried into it by the similarity
+    // between the training cameras before and after.
     let refit: Vec<_> = train.iter().zip(&res.cams).map(|(t, c)| splat::opt::TargetView { cam: *c, ..t.clone() }).collect();
+    let before: Vec<[f64; 16]> = train.iter().map(|t| t.cam.c2w.map(f64::from)).collect();
+    let after: Vec<[f64; 16]> = res.cams.iter().map(|c| c.c2w.map(f64::from)).collect();
+    let sim = splat::align::sim3_from_cameras(&after, &before).expect("similarity");
+    let held: Vec<_> = held
+        .iter()
+        .map(|t| {
+            let m = splat::align::transform_c2w_sim3(&t.cam.c2w.map(f64::from), &sim);
+            splat::opt::TargetView { cam: splat::types::Camera { c2w: m.map(|v| v as f32), ..t.cam }, ..t.clone() }
+        })
+        .collect();
     let on_train = score(&refit);
     let on_held = score(&held);
     println!(
