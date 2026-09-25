@@ -128,6 +128,46 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
 
 ### Quality gates
 
+End to end, the pipeline is judged on views the fit never saw:
+
+- `crates/recon/examples/synthetic_e2e.rs` renders a known scene of flat
+  gaussians (textured ground, sphere, box) from two camera rings and scores
+  the reconstruction on cameras at other azimuths, heights and distances,
+  against the truth: the trainer alone on the true cameras (A), and the whole
+  pipeline from the images through structure from motion (B).
+  `--bare-sphere` starts the sphere without a point, as structure from motion
+  leaves a textureless object.
+- `crates/recon/examples/photo_holdout.rs` holds every k-th photograph of a
+  real capture out of the fit and scores against it.
+
+At 512x384, 3000 iterations, 100k gaussians: A 44.2 dB on training views,
+36.5 dB held out (views between the training rings 36-41 dB, views below them
+31.5-35.5 dB); B 42.3 / 32.3 dB, the 4 dB between them being camera
+precision (centres within 0.58% of the rig radius, focal within 0.17%). What
+this found and fixed, each measured on held-out views:
+
+- Geometry budgets stepped every gaussian at the MEDIAN one's rate, re-measured
+  as density control subdivided the scene, so nothing could travel to a region
+  structure from motion left empty: the bare sphere came back half missing
+  (29.8 dB on its training views, 40.2 with each gaussian's own radius), and
+  the real capture's textureless can came apart (18.6 -> 25.8 dB on training
+  photographs).
+- The camera model absorbed fit error on captures taken at one exposure
+  (-2.5 dB on synthetic training views, -1.3 dB held out on a real capture);
+  off by default, `--camera-model` turns it on.
+- SH degree 3 on a few dozen views memorizes them (-2.4 dB held out at 24
+  views); the degree now follows the view count.
+- The Mip filter's compensation cannot be baked into a PLY; the preset fits
+  under the dilation viewers render (+0.5 dB held out on synthetic).
+- Structure from motion: an adaptive RANSAC bound that ended the search after
+  one sample when the first model had no support, a SIFT pyramid that never
+  doubled its input, and Lowe's contrast threshold - together 18/24 -> 24/24
+  registered, 1.2% -> 0.58% worst camera centre, 3.9x the points.
+
+Open: B's camera precision (photometric pose refinement gains 1.3 dB on
+synthetic but loses 0.35 on the real capture); thin dark structure (a
+sprinkler rose) stays soft; held-out views below every training camera.
+
 `tests/s*.rs` gate each capability on small synthetic scenes on the CPU JIT
 (`Gpu::new_cpu`). The CI benchmark set the design calls for (fabric/fence,
 glossy, blank room, sky, 360, fisheye, exposure-changing video, HDR bracket,
