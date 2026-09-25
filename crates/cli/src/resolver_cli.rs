@@ -262,6 +262,15 @@ pub fn extract_role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap
     (overrides, remaining)
 }
 
+/// Whether [`with_arch_spec`] can build an `ArchSpec` for `arch` - the
+/// half of "resolver-migrated" that actually replaces the env path, checked
+/// against `resolve::RESOLVER_MIGRATED_ARCHS` by that module's own test (its
+/// only caller, hence test-only).
+#[cfg(test)]
+pub fn has_arch_spec(arch: &str) -> bool {
+    with_arch_spec(arch, |_| ()).is_some()
+}
+
 /// Every architecture reached through `crate::resolve::ARCH_TO_MODEL`'s
 /// generic capability dispatch (or a dedicated `_cli.rs` module that still
 /// forwards its own non-special verbs to that generic path, e.g. `sam2_cli`)
@@ -271,13 +280,6 @@ pub fn extract_role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap
 /// hand-writing the resolve/extract-overrides call again per architecture.
 /// `flux2` has its own dedicated command (`flux2_cli::resolve_flux2`) and is
 /// not reached generically, so it has no row here.
-/// Whether [`with_arch_spec`] can build an `ArchSpec` for `arch` - the
-/// half of "resolver-migrated" that actually replaces the env path, checked
-/// against `resolve::RESOLVER_MIGRATED_ARCHS` by that module's own test.
-pub fn has_arch_spec(arch: &str) -> bool {
-    with_arch_spec(arch, |_| ()).is_some()
-}
-
 fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R> {
     match arch {
         "qwen3asr" => Some(f(&qwen3asr::spec::Qwen3AsrSpec)),
