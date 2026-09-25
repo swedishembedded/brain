@@ -66,6 +66,7 @@ pub mod photogrammetry;
 pub mod pipeline;
 pub mod plan;
 pub mod select;
+pub mod validate;
 
 pub use ingest::{ingest, Frame, Source};
 pub use pipeline::{

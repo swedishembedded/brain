@@ -82,12 +82,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var agree = 0u;
     for (var k = 0u; k < p.nsrc; k = k + 1u) {
         let cam = p.src[k];
-        let y = mvs_to_cam(cam, x0);
-        let pr = lens_project(cam.lens, y);
-        if (pr.ok == 0.0 || pr.uv.x < 0.0 || pr.uv.y < 0.0 || pr.uv.x >= f32(cam.dims.x) || pr.uv.y >= f32(cam.dims.y)) { continue; }
-        let rk = depth[k * pl + u32(pr.uv.y) * cam.dims.x + u32(pr.uv.x)];
+        let seen = mvs_seen(cam, x0);
+        if (!seen.ok) { continue; }
+        let rk = depth[k * pl + u32(seen.uv.y) * cam.dims.x + u32(seen.uv.x)];
         if (rk <= 0.0) { continue; }
-        let xb = mvs_from_cam(cam, normalize(y) * rk);
+        let xb = mvs_measured(cam, seen.y, rk);
         let back = lens_project(p.lens, xb);
         if (back.ok == 0.0) { continue; }
         if (length(back.uv - pc) > p.max_reproj) { continue; }

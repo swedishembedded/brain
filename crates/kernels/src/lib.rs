@@ -1148,6 +1148,13 @@ pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
 pub const SPLAT_TILE_COUNT: &str = include_str!("../wgsl/splat_tile_count.wgsl");
 /// `wgsl/splat_tile_ranges.wgsl`
 pub const SPLAT_TILE_RANGES: &str = include_str!("../wgsl/splat_tile_ranges.wgsl");
+/// `wgsl/splat_view_support.wgsl`, after `wgsl/lib/{camera,splat_view,mvs}.wgsl`
+pub const SPLAT_VIEW_SUPPORT: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/mvs.wgsl"),
+    include_str!("../wgsl/splat_view_support.wgsl"),
+);
 /// `wgsl/splice.wgsl`
 pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
 /// `wgsl/splice_add.wgsl`
@@ -1702,6 +1709,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_sh", SPLAT_SH),
     ("splat_tile_count", SPLAT_TILE_COUNT),
     ("splat_tile_ranges", SPLAT_TILE_RANGES),
+    ("splat_view_support", SPLAT_VIEW_SUPPORT),
     ("splice", SPLICE),
     ("splice_add", SPLICE_ADD),
     ("splice_add_offset_src", SPLICE_ADD_OFFSET_SRC),

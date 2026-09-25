@@ -2129,6 +2129,7 @@ dependencies = [
  "brain-mvs",
  "brain-sfm",
  "brain-splat",
+ "brain-testutil",
 ]
 
 [[package]]

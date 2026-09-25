@@ -53,7 +53,7 @@ pub use depth::DepthMap;
 pub use fuse::{fuse, FuseCfg, Fused};
 pub use init::{to_splats, SplatInit};
 pub use select::{SelectCfg, Track};
-pub use stereo::{depth_maps, FilterCfg, Stereo, StereoCfg, View};
+pub use stereo::{cam_record, depth_maps, FilterCfg, Stereo, StereoCfg, View, CAM_WORDS};
 
 /// WGSL kernels this crate dispatches, in [`Kernels`] order. Pass to
 /// `Gpu::new(..)` alone or appended to another pipeline list (then resolve

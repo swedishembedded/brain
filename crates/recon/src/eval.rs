@@ -73,12 +73,12 @@ impl Scores {
 /// A scene ready to render: the gaussians and the 3D filter they were fitted
 /// under, on the device, with a renderer sized for them.
 pub struct Viewer {
-    gpu: Gpu,
-    scene: Splats,
-    splats: GpuSplats,
-    renderer: Renderer,
-    opts: RenderOpts,
-    env: Option<splat::env::EnvDevice>,
+    pub(crate) gpu: Gpu,
+    pub(crate) scene: Splats,
+    pub(crate) splats: GpuSplats,
+    pub(crate) renderer: Renderer,
+    pub(crate) opts: RenderOpts,
+    pub(crate) env: Option<splat::env::EnvDevice>,
 }
 
 impl Viewer {

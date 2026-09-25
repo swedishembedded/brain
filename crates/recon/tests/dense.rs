@@ -14,55 +14,13 @@
 //! expertise in 3D reconstruction then you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
-use data::rng::Lcg;
+mod common;
+
 use imaging::Rgb8;
 use recon::photogrammetry::{dense, DenseCfg};
 use splat::opt::TargetView;
 use splat::renderer::{GpuSplats, Renderer};
-use splat::types::{Camera, RenderOpts, Splats};
-
-/// A floor at y = 1 and a ball resting on it, tiled with small opaque
-/// gaussians of random colour: texture everywhere for stereo to match.
-fn scene() -> Splats {
-    let mut r = Lcg::new(0xde75e);
-    let mut s = Splats::default();
-    let mut add = |p: [f32; 3], q: [f32; 4], size: f32, r: &mut Lcg| {
-        s.means.extend_from_slice(&p);
-        s.quats.extend_from_slice(&q);
-        s.scales.extend_from_slice(&[size, size, size * 0.1]);
-        s.opacities.push(0.98);
-        s.colors.extend_from_slice(&[r.unit(), r.unit(), r.unit()]);
-    };
-    // floor: normal +y, so the thin axis (z) is rotated onto y
-    let floor_q = [std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0];
-    for iz in 0..90 {
-        for ix in 0..90 {
-            add([-2.2 + ix as f32 * 0.05, 1.0, 2.0 + iz as f32 * 0.05], floor_q, 0.03, &mut r);
-        }
-    }
-    // ball: each gaussian's thin axis along the radius
-    let (c, rad) = ([0.0f32, 0.45, 4.2], 0.55f32);
-    for k in 0..5000 {
-        let z = 1.0 - 2.0 * (k as f32 + 0.5) / 5000.0;
-        let phi = k as f32 * 2.399_963;
-        let n = [(1.0 - z * z).sqrt() * phi.cos(), (1.0 - z * z).sqrt() * phi.sin(), z];
-        let q = splat::orient::quat_of(&frame_with_z(n)).map(|v| v as f32);
-        add([c[0] + rad * n[0], c[1] + rad * n[1], c[2] + rad * n[2]], q, 0.03, &mut r);
-    }
-    s
-}
-
-/// A rotation (row-major) whose third column is `n`.
-fn frame_with_z(n: [f32; 3]) -> [f64; 9] {
-    let n = n.map(|v| v as f64);
-    let a = if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-    let cross = |a: [f64; 3], b: [f64; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    let mut x = cross(a, n);
-    let l = (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
-    x = x.map(|v| v / l);
-    let y = cross(n, x);
-    [x[0], y[0], n[0], x[1], y[1], n[1], x[2], y[2], n[2]]
-}
+use splat::types::{Camera, RenderOpts};
 
 fn cameras(w: u32, h: u32) -> Vec<Camera> {
     (0..6)
@@ -89,7 +47,7 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
         return;
     }
     let (sk, mk) = (splat::Kernels::at(0), mvs::Kernels::at(splat::PIPELINES.len()));
-    let truth = scene();
+    let truth = common::floor_and_ball();
     let o = RenderOpts { ray: true, ..Default::default() };
     let (w, h) = (320u32, 240u32);
     let full = cameras(w, h);
@@ -156,8 +114,9 @@ fn stereo_priors_land_on_each_target_at_its_resolution_and_agree_with_the_surfac
         .chunks_exact(3)
         .filter(|m| {
             let floor = (m[1] - 1.0).abs() < 0.05;
-            let d = ((m[0]).powi(2) + (m[1] - 0.45).powi(2) + (m[2] - 4.2).powi(2)).sqrt();
-            floor || (d - 0.55).abs() < 0.05
+            let (c, rad) = common::BALL;
+            let d = ((m[0] - c[0]).powi(2) + (m[1] - c[1]).powi(2) + (m[2] - c[2]).powi(2)).sqrt();
+            floor || (d - rad).abs() < 0.05
         })
         .count();
     assert!(on_surface as f64 > 0.9 * init.len() as f64, "{on_surface} of {} dense gaussians on the surface", init.len());

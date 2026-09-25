@@ -400,7 +400,7 @@ fn solve(
 /// Every WGSL kernel [`reconstruct`] dispatches: `splat`'s at 0, then
 /// `mvs`'s at `splat::PIPELINES.len()`. Build the device with this list.
 pub fn pipelines() -> Vec<(&'static str, &'static str)> {
-    splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().chain([("sift_match", kernels::SIFT_MATCH)]).collect()
+    splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().chain([("sift_match", kernels::SIFT_MATCH), ("splat_view_support", kernels::SPLAT_VIEW_SUPPORT)]).collect()
 }
 
 /// How [`reconstruct`] turns photographs into a scene. Every `None` is

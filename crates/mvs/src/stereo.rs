@@ -45,7 +45,7 @@ use crate::{pose_of, Kernels, MvsError, Timings};
 pub const MAX_SOURCES: usize = 16;
 
 /// Words of one `MvsCam` record (`wgsl/lib/mvs.wgsl`).
-const CAM_WORDS: usize = 16 + camera::DEVICE_LENS_WORDS;
+pub const CAM_WORDS: usize = 16 + camera::DEVICE_LENS_WORDS;
 
 /// Planes of the PatchMatch state: range, normal (3), cost.
 const STATE_PLANES: u64 = 5;
@@ -249,6 +249,15 @@ pub(crate) fn cam_words(r: &M3, t: V3, k: &Intrinsics) -> [u32; CAM_WORDS] {
     w[13] = k.height;
     w[16..].copy_from_slice(&k.device_lens());
     w
+}
+
+/// The `MvsCam` record of `view` relative to `reference`: the rigid transform
+/// from `reference`'s camera frame into `view`'s, and `view`'s lens and
+/// size - what a kernel testing points of `reference` against `view`'s
+/// measurements (`lib/mvs.wgsl`'s `mvs_seen`, `mvs_measured`) is handed.
+pub fn cam_record(reference: &splat::types::Camera, view: &splat::types::Camera) -> [u32; CAM_WORDS] {
+    let (r, t) = relative(&pose_of(reference), &pose_of(view));
+    cam_words(&r, t, &view.intrinsics())
 }
 
 /// A `MvsCam` record carrying camera-to-world: rotation rows of `c2w`, the

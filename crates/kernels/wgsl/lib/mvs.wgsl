@@ -31,6 +31,30 @@ fn mvs_from_cam(c: MvsCam, y: vec3<f32>) -> vec3<f32> {
     return c.r0.xyz * d.x + c.r1.xyz * d.y + c.r2.xyz * d.z;
 }
 
+// Where view `c` images the reference-frame point `x0`: the point in `c`'s
+// frame and its pixel; `ok` false when `c`'s lens has no pixel for it or the
+// pixel is outside `c`'s frame.
+struct MvsSeen {
+    ok: bool,
+    uv: vec2<f32>,
+    y: vec3<f32>,
+};
+
+fn mvs_seen(c: MvsCam, x0: vec3<f32>) -> MvsSeen {
+    var s: MvsSeen;
+    s.y = mvs_to_cam(c, x0);
+    let pr = lens_project(c.lens, s.y);
+    s.uv = pr.uv;
+    s.ok = pr.ok != 0.0 && pr.uv.x >= 0.0 && pr.uv.y >= 0.0 && pr.uv.x < f32(c.dims.x) && pr.uv.y < f32(c.dims.y);
+    return s;
+}
+
+// The surface view `c` measures at range `rk` along its ray through `y` (a
+// point in `c`'s frame), back in the reference frame.
+fn mvs_measured(c: MvsCam, y: vec3<f32>, rk: f32) -> vec3<f32> {
+    return mvs_from_cam(c, normalize(y) * rk);
+}
+
 // View `c`'s centre in the reference frame.
 fn mvs_centre(c: MvsCam) -> vec3<f32> {
     return mvs_from_cam(c, vec3<f32>(0.0, 0.0, 0.0));
