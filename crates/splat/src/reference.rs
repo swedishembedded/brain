@@ -275,11 +275,30 @@ fn rotate(w: [f64; 3], x: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|r| x[r] * c + kx[r] * s + k[r] * kd * (1.0 - c))
 }
 
+/// The order a pixel of [`render_ray_ordered`] composites its gaussians in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RayOrder {
+    /// By the range `t*` along the pixel's own ray at which each gaussian
+    /// responds most: the order light meets them, and the one the 2DGS
+    /// distortion assumes. It differs from pixel to pixel wherever gaussians
+    /// overlap or intersect.
+    PerPixel,
+    /// By range to each gaussian's mean, one order for the whole frame: what a
+    /// global sort of the centres alone composites. Where two gaussians
+    /// overlap it is wrong on part of the overlap, and as the view moves it
+    /// flips for all of the overlap at once.
+    Mean,
+}
+
 /// The ray renderer, in f64 and without tiles: `(rgba [W*H*4], aux
-/// [W*H*5])` exactly as `splat_ray_rasterize.wgsl` defines them - compositing
-/// in order of range to the mean, which is the order the device's sort keys
-/// produce within every tile.
+/// [W*H*5])` exactly as `splat_ray_rasterize.wgsl` defines them, every pixel
+/// compositing in its own exact range order ([`RayOrder::PerPixel`]).
 pub fn render_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) -> (Vec<f32>, Vec<f32>) {
+    render_ray_ordered(s, filter3d, cam, o, RayOrder::PerPixel)
+}
+
+/// [`render_ray`] compositing in `order`.
+pub fn render_ray_ordered(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts, order: RayOrder) -> (Vec<f32>, Vec<f32>) {
     let mut gs: Vec<RayGaussian> = (0..s.len())
         .filter_map(|i| ray_gaussian(s, i, filter3d.get(i).copied().unwrap_or(0.0) as f64, cam, o))
         .collect();
@@ -287,12 +306,15 @@ pub fn render_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) ->
     let (w, h) = (cam.width as usize, cam.height as usize);
     let mut img = vec![0.0f32; w * h * 4];
     let mut aux = vec![0.0f32; w * h * 5];
+    // (t*, alpha, gaussian) of every pair a pixel composites
+    let mut hits: Vec<(f64, f64, &RayGaussian)> = Vec::with_capacity(gs.len());
     for py in 0..h {
         for px in 0..w {
             let pix = py * w + px;
             let mut t = 1.0f64;
             let (mut c, mut nsum) = ([0.0f64; 3], [0.0f64; 3]);
             let (mut dsum, mut wsum, mut dist) = (0.0f64, 0.0f64, 0.0f64);
+            hits.clear();
             if let Some((org, d)) = pixel_ray(cam, px as f64 + 0.5, py as f64 + 0.5) {
                 for g in &gs {
                     let dm: [f64; 3] = std::array::from_fn(|k| g.m[k] - org[k]);
@@ -308,23 +330,29 @@ pub fn render_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) ->
                     let e: [f64; 3] = std::array::from_fn(|k| dm[k] - tt * d[k]);
                     let q: f64 = (0..3).map(|r| (0..3).map(|k| e[r] * g.a[r][k] * e[k]).sum::<f64>()).sum();
                     let alpha = (g.opacity * (-0.5 * q).exp()).min(0.99);
-                    if alpha < 1.0 / 255.0 {
-                        continue;
+                    if alpha >= 1.0 / 255.0 {
+                        hits.push((tt, alpha, g));
                     }
-                    let next = t * (1.0 - alpha);
-                    if next <= 1e-4 {
-                        break;
-                    }
-                    let wgt = alpha * t;
-                    for k in 0..3 {
-                        c[k] += wgt * s.colors[g.index * 3 + k] as f64;
-                        nsum[k] += wgt * g.normal[k];
-                    }
-                    dist += 2.0 * wgt * (tt * wsum - dsum);
-                    dsum += wgt * tt;
-                    wsum += wgt;
-                    t = next;
                 }
+            }
+            if order == RayOrder::PerPixel {
+                // stable: equal ranges keep the order of the means
+                hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+            for &(tt, alpha, g) in &hits {
+                let next = t * (1.0 - alpha);
+                if next <= 1e-4 {
+                    break;
+                }
+                let wgt = alpha * t;
+                for k in 0..3 {
+                    c[k] += wgt * s.colors[g.index * 3 + k] as f64;
+                    nsum[k] += wgt * g.normal[k];
+                }
+                dist += 2.0 * wgt * (tt * wsum - dsum);
+                dsum += wgt * tt;
+                wsum += wgt;
+                t = next;
             }
             for k in 0..3 {
                 img[pix * 4 + k] = (c[k] + t * o.bg[k] as f64) as f32;

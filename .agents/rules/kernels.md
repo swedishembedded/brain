@@ -752,6 +752,45 @@ holds the image), and making the patch loop bounds compile-time constants so
 the compiler could unroll and overlap the gathers. Reorder first; shrink
 the sample second.
 
+### F.4c A per-pixel queue in a compositing loop is paid per LIST ENTRY, and its registers are a cliff
+
+The ray renderer's per-pixel sort window (`wgsl/lib/splat_ray_window.wgsl`)
+holds a pixel's nearest few pairs while one thread per pixel walks a tile's
+list. Any lane of a warp that hits an entry makes the whole warp run the
+window's work for that entry, and neighbouring pixels hit different entries,
+so a cost that looks per-hit is paid on most list entries. Measured on a P40
+over a trained 500k-gaussian scene at 816x612, as the ratio to the
+list-order rasterizer run on the same list in the same process (the device
+was shared, so only the ratios are comparable; the last two rows are the
+least of 3 or 4 runs per view with both kernels run hot):
+
+| window | rasterizer vs list order |
+|---|---|
+| 16 slots, looked up by a computed index in `vec4` registers | 2.7x |
+| 8 slots, compare-exchange network over named fields | 1.8x |
+| 8 slots, each pair carrying its colour and normal (no reads at composite) | 4x |
+| 8 slots, colour read per composite, no payload | 1.76x |
+| 6 slots, network, shade prefetched when a pair becomes nearest | 1.6x |
+| no window (join composites at once) | 1.26x |
+
+Three rules came out of it. Keep the queue in registers as named fields
+behind a fixed compare-exchange network - a slot index computed at run time
+selects among every register of the array. Carry no payload through the
+network: widening each slot past (range, alpha, id) pushed the kernel over a
+register threshold and cost more than every read it saved. And size the
+queue by measurement, because occupancy falls off a cliff: a queue of 8 cost
+1.3x a queue of 6 in the backward walk that carries the same window. The
+select-per-field form of the compare-exchange (instead of an `if` returning
+one of two structs) measured 2.2x, slower - the compiler already emits
+selects for the branch.
+
+A backward that must reduce per instance in lockstep cannot follow a
+per-pixel order at all (a pair leaves one pixel's window long after its
+neighbours'); logging each composited pair's dL/dalpha, dL/dt* and weight at
+its join rank (16 bytes, list order) and reducing the logs in a second
+kernel kept the backward at parity with the list-order one, once its first
+walk read the forward's totals instead of repeating the forward.
+
 ### F.5 A/B for CORRECTNESS and speed in the same harness
 
 A faster kernel that disagrees is not a faster kernel. Print `max|delta|`

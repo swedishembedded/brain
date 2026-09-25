@@ -197,7 +197,10 @@ fast and scalable kernel - not a naive one.
     `brain worldmirror2 {import,infer,demo,export-npu}`.
 11. **3D Gaussian Splatting** (`crates/splat`, + `crates/sfm`) - from-scratch
     tiled 3DGS rasterizer (atomic-free/barrier-free WGSL: generic scan + radix
-    sort → per-tile compositing) with forward AND backward (autograd-verified),
+    sort → per-tile compositing) with forward AND backward (autograd-verified);
+    the ray-evaluated renderer composites every pixel in its own range order
+    (a per-pixel sort window, `wgsl/lib/splat_ray_window.wgsl`), so views do
+    not pop as the camera moves,
     Inria PLY IO, interactive WASD+mouse viewer, and a trainer built from
     papers, clean-room: L1 + D-SSIM (`loss`), a PPISP-style photometric camera
     model with scene-linear/HDR fitting (`isp`), 2DGS depth-distortion and

@@ -194,6 +194,16 @@ pub struct Renderer {
     ids: DeviceBuffer,
     sort: SortScratch,
     ranges: DeviceBuffer,
+    /// Per pixel of the last ray render, how many pairs its window took in
+    /// (`W*H + 1`, the last zero); scanned in place into where each pixel's
+    /// pairs sit in the backward's log - see [`Renderer::pair_offsets`].
+    joined: DeviceBuffer,
+    /// Per pixel of the last ray render, its walk's sums as it ended (`W*H*10`),
+    /// where the backward's second walk starts.
+    totals: DeviceBuffer,
+    joined_scan: ScanScratch,
+    /// The log's pair count once `joined` has been scanned for the last render.
+    scanned: Option<usize>,
     /// Last render() state the backward replays.
     last: Option<(usize, bool, u32, u32)>, // (n_isects, sorted_in_b, tiles_x, tiles_y)
     /// Whether the last render() evaluated along rays.
@@ -235,6 +245,10 @@ impl Renderer {
             ids: gpu.storage(cap as u64),
             sort: SortScratch::new(gpu, cap),
             ranges: gpu.storage(2 * max_tiles as u64),
+            joined: gpu.storage(max_px as u64 + 1),
+            totals: gpu.storage(10 * max_px as u64),
+            joined_scan: ScanScratch::new(gpu, max_px + 1),
+            scanned: None,
             last: None,
             last_ray: false,
             grow: false,
@@ -314,12 +328,26 @@ impl Renderer {
 
         // ---- pass 2: emit + sort + ranges + rasterize + pack ----
         let mut steps = Vec::new();
-        steps.push(gpu.step(
-            self.ks.splat_emit,
-            &[&self.proj, &self.counts, &self.keys_a, &self.vals_a, &self.ids],
-            &[s.n as u32, tiles_x, tiles_y, TILE, depth_bits, self.isect_cap as u32],
-            s.n as u32,
-        ));
+        if ray {
+            // each tile's list in order of range along the tile's ray nearest
+            // each gaussian, the order its pixels' windows refine
+            // (`splat_ray_emit.wgsl`)
+            let mut params = ray_view_params(s.n, cam, o).to_vec();
+            params.extend_from_slice(&[tiles_x, tiles_y, depth_bits, self.isect_cap as u32]);
+            steps.push(gpu.step(
+                self.ks.splat_ray_emit,
+                &[&self.proj, &self.ray, &self.counts, &self.keys_a, &self.vals_a, &self.ids],
+                &params,
+                s.n as u32,
+            ));
+        } else {
+            steps.push(gpu.step(
+                self.ks.splat_emit,
+                &[&self.proj, &self.counts, &self.keys_a, &self.vals_a, &self.ids],
+                &[s.n as u32, tiles_x, tiles_y, TILE, depth_bits, self.isect_cap as u32],
+                s.n as u32,
+            ));
+        }
         let mut sorted_in_b = false;
         if n_isects > 0 {
             sorted_in_b = record_sort_pairs(
@@ -339,7 +367,7 @@ impl Renderer {
         if ray {
             steps.push(gpu.step(
                 self.ks.splat_ray_rasterize,
-                &[&self.ray, vals, &self.ranges, &self.img, &self.aux],
+                &[&self.ray, vals, &self.ranges, &self.img, &self.aux, &self.joined, &self.totals],
                 &ray_view_params(s.n, cam, o),
                 (n_tiles * 256) as u32,
             ));
@@ -369,7 +397,24 @@ impl Renderer {
         gpu.submit(&[&self.ranges], &steps);
         self.last = Some((n_isects, sorted_in_b, tiles_x, tiles_y));
         self.last_ray = ray;
+        self.scanned = None;
         RenderStats { n_isects, clamped }
+    }
+
+    /// How many pairs the backward's log of the last ray render holds, after
+    /// scanning each pixel's count in place into where its pairs start
+    /// (`splat_ray_bwd_walk.wgsl`). Scanned once per render: one more backward
+    /// of the same frame reuses the offsets.
+    fn pair_offsets(&mut self, gpu: &Gpu, n_px: usize) -> usize {
+        if let Some(total) = self.scanned {
+            return total;
+        }
+        let mut steps = Vec::new();
+        let sum = record_scan(gpu, &self.ks, &self.joined, n_px + 1, &self.joined_scan, &mut steps);
+        gpu.submit(&[], &steps);
+        let total = gpu.read(sum, 1)[0].to_bits() as usize;
+        self.scanned = Some(total);
+        total
     }
 
     /// The buffers of a sort that left its output in B (`in_b`) or A:
@@ -616,8 +661,13 @@ pub struct BwdScratch {
     /// contributes nothing, and one zeroed allocation per scratch is cheaper
     /// than branching the kernel or carrying a second pipeline.
     no_depth: DeviceBuffer,
-    /// Per-pixel ray gradients `[W*H*6]` of the ray backward.
+    /// Per-pixel ray gradients `[W*H*6]` of the per-pixel ray backward.
     dray: DeviceBuffer,
+    /// The tile ray backward's log (`splat_ray_bwd_walk.wgsl`): per-pixel ray
+    /// gradients, upstream gradients, then every composited pair's gradient;
+    /// `pair_words` words.
+    pairs: DeviceBuffer,
+    pair_words: usize,
     /// `splat_ray_camera_grad`'s per-workgroup partial sums.
     cam_partial: DeviceBuffer,
     /// Floats `recs` holds.
@@ -638,6 +688,8 @@ impl BwdScratch {
             slot_floats: 0,
             no_depth: gpu.storage(5 * max_px as u64),
             dray: gpu.storage(6 * max_px as u64),
+            pairs: gpu.storage(0),
+            pair_words: 0,
             cam_partial: gpu.storage((CAMERA_GRAD_WORDS * dispatched_groups(max_px.max(max_n))) as u64),
             rec_floats: 0,
             limit: None,
@@ -695,6 +747,22 @@ impl BwdScratch {
     fn band_instances(&self, gpu: &Gpu, channels: usize) -> usize {
         let bytes = self.limit(gpu).min(SLOT_BAND_BYTES);
         (bytes / slot_bytes_per_instance(channels)) as usize
+    }
+
+    /// Make room for a pair log of `words` words; false when one binding
+    /// cannot hold it.
+    fn reserve_pairs(&mut self, gpu: &Gpu, words: usize) -> bool {
+        let limit = self.limit(gpu);
+        if (words as u64) * 4 > limit {
+            return false;
+        }
+        if words > self.pair_words {
+            // a quarter of headroom, as for the records, within the binding
+            let cap = (words + words / 4).min((limit / 4) as usize);
+            self.pairs = gpu.storage(cap as u64);
+            self.pair_words = cap;
+        }
+        true
     }
 
     fn reserve_slots(&mut self, gpu: &Gpu, instances: usize, channels: usize) {
@@ -884,13 +952,22 @@ impl Renderer {
             self.last.expect("render() must run before render_bwd_ray()");
         assert!(self.last_ray, "render_bwd_ray: the last render was EWA-splatted; use render_bwd");
         let view = ray_view_params(s.n, cam, o);
+        // The tile-cooperative pair: every pixel's walks log its pairs
+        // (`splat_ray_bwd_walk`), one workgroup per tile reduces them
+        // (`splat_ray_bwd_tile`). Per pixel instead where the device has no
+        // workgroup reductions, or one binding cannot hold the log.
+        let n_px = (cam.width * cam.height) as usize;
+        let tile_pass = n_isects > 0 && !scr.per_pixel && gpu.caps().workgroup_reductions && {
+            let words = 12 * n_px + 4 * self.pair_offsets(gpu, n_px);
+            scr.reserve_pairs(gpu, words)
+        };
         let filter = s.filter3d.as_ref().unwrap_or(&self.no_filter);
         let (_, order, vals) = self.sorted(sorted_in_b);
         let n_tiles = (tiles_x * tiles_y) as usize;
         let mut steps = Vec::new();
         if n_isects > 0 {
             scr.reserve_records(gpu, n_isects, RAY_RECORD_WORDS)?;
-            if scr.per_pixel || !gpu.caps().workgroup_reductions {
+            if !tile_pass {
                 if camera {
                     // a pixel no band reaches must read as no gradient
                     gpu.submit(&[&scr.dray], &[]);
@@ -922,10 +999,16 @@ impl Renderer {
             } else {
                 let mut params = view.to_vec();
                 params.extend_from_slice(&[camera as u32, 0, 0, 0]);
+                steps.push(gpu.step(
+                    self.ks.splat_ray_bwd_walk,
+                    &[&self.ray, vals, &self.ranges, dimg, daux.unwrap_or(&scr.no_depth), &self.joined, &self.totals, &scr.pairs],
+                    &params,
+                    (n_tiles * 256) as u32,
+                ));
                 steps.push(gpu.dispatch(
                     self.ks.splat_ray_bwd_tile,
-                    &[&self.ray, vals, order, &self.ranges, dimg, daux.unwrap_or(&scr.no_depth), &scr.recs, &scr.dray],
-                    &params,
+                    &[&self.ray, vals, order, &self.ranges, &self.joined, &scr.pairs, &scr.recs],
+                    &view,
                     gpu_core::Dispatch::Workgroups(n_tiles as u32),
                 ));
             }
@@ -955,7 +1038,7 @@ impl Renderer {
         params.extend_from_slice(&[n_pix as u32, 0, 0, 0]);
         steps.push(gpu.dispatch(
             self.ks.splat_ray_camera_grad,
-            &[&scr.dray, &scr.pgrad, &self.aux, daux.unwrap_or(&scr.no_depth), &scr.cam_partial],
+            &[if tile_pass { &scr.pairs } else { &scr.dray }, &scr.pgrad, &self.aux, daux.unwrap_or(&scr.no_depth), &scr.cam_partial],
             &params,
             gpu_core::Dispatch::Workgroups(threads.div_ceil(64) as u32),
         ));

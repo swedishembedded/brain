@@ -12,13 +12,17 @@
 // @import camera
 // @import splat_view
 // @import splat_ray_pair
+// @import splat_ray_window
 //
 // The ray renderer's backward, per pixel, over a BAND of tiles
 // [tile0, tile0 + n/256) and instances [k0, k1) - the slot layout and banding
 // of `splat_bwd_slots.wgsl`, so `splat_bwd_tile_reduce` and everything after
-// it are shared. One thread per pixel replays the forward walk twice
-// (`splat_ray_pair`): once for the totals, once subtracting each
-// contribution to get the strict suffixes the alpha gradient needs.
+// it are shared. One thread per pixel replays the forward walk twice, in the
+// forward's own per-pixel order (`splat_ray_window`): once for the totals,
+// once subtracting each contribution to get the strict suffixes the alpha
+// gradient needs. A pair's partials are written when it leaves the pixel's
+// window, into its instance's slot, so the order is free to differ from the
+// list's.
 //
 // This is the reference form of the backward and the one the CPU JIT runs:
 // every thread is independent. On a GPU `splat_ray_bwd_tile.wgsl` computes
@@ -55,7 +59,7 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read>       ray:    array<f32>; // N*16
+@group(0) @binding(1) var<storage, read>       ray:    array<vec4<f32>>; // N*4
 @group(0) @binding(2) var<storage, read>       vals:   array<u32>; // sorted instance -> gaussian id
 @group(0) @binding(3) var<storage, read>       ranges: array<u32>; // n_tiles*2
 @group(0) @binding(4) var<storage, read>       dimg:   array<f32>; // W*H*4
@@ -65,14 +69,34 @@ struct Params {
 
 const CH: u32 = 17u;
 
-fn rec(g: u32) -> RayRec {
-    let r = g * 16u;
-    return RayRec(vec3<f32>(ray[r], ray[r + 1u], ray[r + 2u]),
-                  vec3<f32>(ray[r + 3u], ray[r + 4u], ray[r + 5u]),
-                  vec3<f32>(ray[r + 6u], ray[r + 7u], ray[r + 8u]),
-                  vec3<f32>(ray[r + 9u], ray[r + 10u], ray[r + 11u]),
-                  ray[r + 12u],
-                  vec3<f32>(ray[r + 13u], ray[r + 14u], ray[r + 15u]));
+fn ray_record(g: u32) -> RayRec {
+    return ray_rec4(ray[g * 4u], ray[g * 4u + 1u], ray[g * 4u + 2u], ray[g * 4u + 3u]);
+}
+
+fn zeros() -> array<f32, 17> {
+    var z: array<f32, 17>;
+    for (var c = 0u; c < CH; c = c + 1u) { z[c] = 0.0; }
+    return z;
+}
+
+// Instance k's partials from this pixel, if k is in the band.
+fn put(k: u32, local: u32, part: array<f32, 17>) {
+    if (k < p.b.k0 || k >= p.b.k1) { return; }
+    let base = (k - p.b.k0) * CH * 256u + local;
+    for (var c = 0u; c < CH; c = c + 1u) {
+        slots[base + c * 256u] = part[c];
+    }
+}
+
+// A pair that left the window: its partials, and its share of the ray's
+// gradient.
+fn composited(s: RayBack, pair: RayBackPair, local: u32) -> RayBack {
+    var b = s;
+    let pg = ray_pair_grad(ray_record(pair.g), b.o, b.d, b.gc, b.gn, pair.g_alpha, pair.g_t, pair.w);
+    put(pair.tag, local, pg.part);
+    b.g_o = b.g_o + pg.g_o;
+    b.g_d = b.g_d + pg.g_d;
+    return b;
 }
 
 @compute @workgroup_size(64)
@@ -103,19 +127,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     var w = ray_walk(pr.o, pr.d, live0);
     for (var j = start; j < end && w.live; j = j + 1u) {
-        w = ray_walk_step(w, rec(vals[j]));
+        let g = vals[j];
+        w = ray_walk_join(w, g, ray_record(g));
     }
+    w = ray_walk_drain(w);
     var b = ray_back(w, live0, dimg4, daux4, gl, p.v.bg.xyz);
-    let stop = min(end, p.b.k1);
-    for (var j = start; j < stop; j = j + 1u) {
-        let st = ray_back_step(b, rec(vals[j]));
-        b = st.b;
-        if (j >= p.b.k0) {
-            let base = (j - p.b.k0) * CH * 256u + local;
-            for (var c = 0u; c < CH; c = c + 1u) {
-                slots[base + c * 256u] = st.part[c];
-            }
+    // Every instance of the band is written once: a miss as the walk passes
+    // it, a pair when it leaves the window (zero if the walk had stopped).
+    // The walk goes on past the band, whose pairs can leave after later ones.
+    for (var j = start; j < end; j = j + 1u) {
+        if (!b.live) {
+            if (j >= p.b.k1) { break; }
+            put(j, local, zeros());
+            continue;
         }
+        let joined = b.win.joined;
+        let g = vals[j];
+        let st = ray_back_join(b, g, j, ray_record(g));
+        b = st.b;
+        if (b.win.joined == joined) { put(j, local, zeros()); }
+        if (st.leaves) { b = composited(b, st.out, local); }
+    }
+    loop {
+        let st = ray_back_drain(b);
+        if (!st.leaves) { break; }
+        b = composited(st.b, st.out, local);
     }
     if (p.b.want_ray != 0u && p.b.k1 >= end && inside) {
         let pix = (py * p.v.width + px) * 6u;

@@ -1075,25 +1075,42 @@ pub const SPLAT_PROJECT: &str = include_str!("../wgsl/splat_project.wgsl");
 pub const SPLAT_PROJECT_BWD: &str = include_str!("../wgsl/splat_project_bwd.wgsl");
 /// `wgsl/splat_rasterize.wgsl`
 pub const SPLAT_RASTERIZE: &str = include_str!("../wgsl/splat_rasterize.wgsl");
-/// `wgsl/splat_ray_bwd_slots.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
+/// `wgsl/splat_ray_bwd_slots.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair,splat_ray_window}.wgsl`
 pub const SPLAT_RAY_BWD_SLOTS: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_window.wgsl"),
     include_str!("../wgsl/splat_ray_bwd_slots.wgsl"),
 );
-/// `wgsl/splat_ray_bwd_tile.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
+/// `wgsl/splat_ray_bwd_tile.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair,splat_ray_window}.wgsl`
 pub const SPLAT_RAY_BWD_TILE: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_window.wgsl"),
     include_str!("../wgsl/splat_ray_bwd_tile.wgsl"),
+);
+/// `wgsl/splat_ray_bwd_walk.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair,splat_ray_window}.wgsl`
+pub const SPLAT_RAY_BWD_WALK: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_window.wgsl"),
+    include_str!("../wgsl/splat_ray_bwd_walk.wgsl"),
 );
 /// `wgsl/splat_ray_camera_grad.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
 pub const SPLAT_RAY_CAMERA_GRAD: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/splat_ray_camera_grad.wgsl"),
+);
+/// `wgsl/splat_ray_emit.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
+pub const SPLAT_RAY_EMIT: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/splat_ray_emit.wgsl"),
 );
 /// `wgsl/splat_ray_project.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
 pub const SPLAT_RAY_PROJECT: &str = concat!(
@@ -1107,11 +1124,12 @@ pub const SPLAT_RAY_PROJECT_BWD: &str = concat!(
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/splat_ray_project_bwd.wgsl"),
 );
-/// `wgsl/splat_ray_rasterize.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
+/// `wgsl/splat_ray_rasterize.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair,splat_ray_window}.wgsl`
 pub const SPLAT_RAY_RASTERIZE: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_window.wgsl"),
     include_str!("../wgsl/splat_ray_rasterize.wgsl"),
 );
 /// `wgsl/splat_sh.wgsl`
@@ -1663,7 +1681,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_rasterize", SPLAT_RASTERIZE),
     ("splat_ray_bwd_slots", SPLAT_RAY_BWD_SLOTS),
     ("splat_ray_bwd_tile", SPLAT_RAY_BWD_TILE),
+    ("splat_ray_bwd_walk", SPLAT_RAY_BWD_WALK),
     ("splat_ray_camera_grad", SPLAT_RAY_CAMERA_GRAD),
+    ("splat_ray_emit", SPLAT_RAY_EMIT),
     ("splat_ray_project", SPLAT_RAY_PROJECT),
     ("splat_ray_project_bwd", SPLAT_RAY_PROJECT_BWD),
     ("splat_ray_rasterize", SPLAT_RAY_RASTERIZE),

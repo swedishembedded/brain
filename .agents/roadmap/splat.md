@@ -31,11 +31,27 @@ the specification it is built from - see **Provenance** for what that means.
 | Auxiliary render passes (per-gaussian features composited by the same weights: normals, depth moments, credit assignment) | `opt.rs::geometry_passes`, `density::credit_upstream` | done |
 | SH in `render`/`view` (host shading per frame via `sh::shade`) | `cli/splat_cli.rs` | done |
 | Ray-evaluated renderer (3DGUT-style, Wu et al., CVPR 2025): every pixel evaluates each gaussian at its maximum along the pixel's own ray through the real lens (pinhole, OpenCV Brown, Kannala-Brandt fisheye, equirectangular), rolling shutter, unscented tile bounds, 3D and 2D Mip filters with ray-marginal compensation; gradients of every gaussian parameter and of pose, shutter and calibration | `crates/camera`, `renderer.rs`, `splat_ray_*.wgsl`, `lib/splat_ray_pair.wgsl` | done |
-| Tile-cooperative ray backward: one workgroup per tile, records reduced in workgroup memory at their emission slots (no record sort); 45.6 ms per view at 500k gaussians and 816x612 against ~480 ms for the slot grid it replaced (which stays as the per-pixel reference and CPU path) | `splat_ray_bwd_tile.wgsl`, `splat_gather_ids.wgsl` | done |
+| Tile-cooperative ray backward with records at their emission slots (no record sort): in list order it measured 45.6 ms per view at 500k gaussians and 816x612 against ~480 ms for the slot grid (which stays as the per-pixel reference and CPU path); per-pixel ordering below splits it into a walk that logs pair gradients and a per-tile reduction, at parity | `splat_ray_bwd_walk.wgsl`, `splat_ray_bwd_tile.wgsl`, `splat_gather_ids.wgsl` | done |
 | Environment at infinity: real SH radiance by direction up to degree 8, composited behind the gaussians along each pixel's ray, fitted with the scene, baked into a distant shell for export | `env.rs`, `splat_env*.wgsl`, `FitCfg::environment` | done |
-| StopThePop hierarchical per-tile re-sorting (Radl et al., SIGGRAPH 2024) | rasterizer | planned |
+| Per-pixel compositing order for the ray renderer (StopThePop-style, Radl et al., SIGGRAPH 2024): tile lists sorted by t* along each tile's ray nearest the gaussian, refined per pixel by a window of its 6 nearest pending hits; the backward replays the same window and logs each pair's gradient for a per-tile reduction | `splat_ray_emit.wgsl`, `lib/splat_ray_window.wgsl`, `splat_ray_bwd_walk.wgsl`, `splat_ray_bwd_tile.wgsl` | done (see below) |
+| Faster per-pixel window: the rasterizer runs ~1.5x its list-order time, the whole fit step ~1.25x | `lib/splat_ray_window.wgsl` | planned |
 | `.splat` / `.spz` IO | `ply.rs` siblings | planned |
 | Render-time optimization: per-stage profiling, radix chunk tuning, pipelined present | renderer | planned |
+
+Per-pixel order, measured (`tests/s23_ray_renderer.rs` gates it): the f64
+oracle composites each pixel in exact t* order and the device reproduces it on
+intersecting discs and on the 40-gaussian lens scenes; a quarter-degree orbit
+over intersecting discs changes no pixel by more than 0.2 in any step, where
+compositing by centre pops 163 pixels at once; gradients match central
+differences on that scene. On the trained 500k-gaussian capture (816x612,
+12 views, P40), a host model of the order puts 129 of 3072 sampled pixels more
+than 0.02 in colour off exact order, against 557 for the old range-to-mean
+sort. Cost, same list, idle device: rasterizer 15.4 -> 25.7 ms per view,
+backward (walk + tile reduce) 87.1 -> 88.2 ms. `fit_profile` step, device
+shared with other jobs (3 interleaved rounds): rasterizer 1.5x per call,
+backward 1.3x, sort 1.2x (the per-tile keys scatter more), device time per
+iteration +24%. The 4-byte readback that sizes the backward's log is one more
+host sync per backward.
 
 ### Losses and photometric model
 

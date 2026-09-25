@@ -6,16 +6,22 @@
 //! 1. The forward reproduces `splat::reference::render_ray`, an f64 oracle
 //!    that evaluates every gaussian at every pixel along the lens's own rays -
 //!    through a pinhole, an OpenCV Brown lens, a Kannala-Brandt fisheye and a
-//!    rolling shutter, with and without the 2D and 3D Mip filters. The oracle
-//!    has no tiles, so an image-space bound that clips a visible gaussian is a
+//!    rolling shutter, with and without the 2D and 3D Mip filters - and
+//!    composites each pixel in its own exact order of range along its ray.
+//!    The oracle has no tiles and no sort, so an image-space bound that clips
+//!    a visible gaussian, or a pixel composited out of its range order, is a
 //!    difference here rather than a reproduced mistake.
 //! 2. For a pinhole camera and small, distant gaussians - where the EWA
 //!    linearization is exact in the limit - the ray renderer and the EWA
 //!    renderer draw the same image.
-//! 3. Every gradient the backward returns - gaussian parameters through
+//! 3. Orbiting a scene of intersecting gaussians does not pop: the frame
+//!    changes by a thin moving seam per step where compositing in the order
+//!    of the centres flips whole overlaps at once.
+//! 4. Every gradient the backward returns - gaussian parameters through
 //!    colour, alpha, expected range, normal and distortion, and the camera's
 //!    pose, rolling shutter and calibration - agrees with a central
-//!    difference of the device forward.
+//!    difference of the device forward, including on a scene whose pixels
+//!    composite in orders no sort of the centres produces.
 //!
 //! Swedish Embedded AB implements differentiable renderers for 3D
 //! reconstruction that image through real lenses. If your team needs
@@ -68,9 +74,56 @@ fn max_diff(a: &[f32], b: &[f32]) -> (f32, usize) {
     a.iter().zip(b).enumerate().map(|(i, (x, y))| ((x - y).abs(), i)).fold((0.0, 0), |m, v| if v.0 > m.0 { v } else { m })
 }
 
+/// Push a gaussian rotated by `angle` degrees about `axis`.
+#[allow(clippy::too_many_arguments)]
+fn push(s: &mut Splats, m: [f32; 3], axis: [f32; 3], angle: f32, scale: [f32; 3], opacity: f32, colour: [f32; 3]) {
+    let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+    let (sh, ch) = (0.5 * angle.to_radians()).sin_cos();
+    s.means.extend_from_slice(&m);
+    s.quats.extend_from_slice(&[ch, sh * axis[0] / n, sh * axis[1] / n, sh * axis[2] / n]);
+    s.scales.extend_from_slice(&scale);
+    s.opacities.push(opacity);
+    s.colors.extend_from_slice(&colour);
+}
+
+/// Gaussians that intersect and overlap, centred near `(0, 0, 4)`: thin
+/// discs crossing each other at steep angles and elongated blobs pushed
+/// through them. Wherever two of them overlap, which one a pixel meets first
+/// depends on the pixel, so no single order of the centres composites the
+/// frame right.
+fn crossing_scene() -> Splats {
+    let mut s = Splats::default();
+    push(&mut s, [-0.12, 0.0, 4.0], [0.0, 1.0, 0.0], 12.0, [1.0, 0.8, 0.02], 0.8, [0.9, 0.2, 0.1]);
+    push(&mut s, [0.12, 0.05, 4.0], [0.0, 1.0, 0.0], -12.0, [1.0, 0.8, 0.02], 0.8, [0.1, 0.8, 0.2]);
+    push(&mut s, [0.0, 0.3, 4.2], [1.0, 0.0, 0.0], 55.0, [0.8, 0.8, 0.02], 0.6, [0.2, 0.3, 0.9]);
+    push(&mut s, [0.1, -0.2, 4.0], [0.0, 0.0, 1.0], 0.0, [0.25, 0.22, 0.2], 0.6, [0.9, 0.9, 0.2]);
+    push(&mut s, [-0.3, 0.25, 3.9], [1.0, 1.0, 0.0], 30.0, [0.45, 0.12, 0.1], 0.6, [0.8, 0.3, 0.8]);
+    push(&mut s, [0.2, -0.1, 4.3], [0.0, 1.0, 1.0], 70.0, [0.6, 0.1, 0.08], 0.6, [0.2, 0.9, 0.9]);
+    s
+}
+
+/// A camera orbiting `(0, 0, 4)` at radius 4, `deg` degrees about the
+/// vertical from straight on.
+fn orbit(deg: f32, w: u32, h: u32) -> Camera {
+    let (sn, cs) = deg.to_radians().sin_cos();
+    Camera::look_at([-4.0 * sn, 0.0, 4.0 - 4.0 * cs], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 70.0, w, h)
+}
+
 #[test]
 fn the_forward_is_the_oracle_through_every_lens() {
     let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    // intersecting gaussians first: each pixel composites them in its own order
+    let o = RenderOpts { antialiased: true, eps2d: 0.3, bg: [0.1, 0.2, 0.3], ..Default::default() };
+    let s = crossing_scene();
+    for deg in [-7.0, 3.0, 11.0] {
+        let cam = orbit(deg, 48, 36);
+        let (img, aux) = device_render(&g, &s, &vec![0.0; s.len()], &cam, &o);
+        let (ri, ra) = splat::reference::render_ray(&s, &[], &cam, &o);
+        let (di, at) = max_diff(&img, &ri);
+        assert!(di < 2e-4, "crossing scene at {deg} deg: rgba differs by {di} at pixel {} channel {}", at / 4, at % 4);
+        let (dv, at) = max_diff(&aux, &ra);
+        assert!(dv < 2e-3, "crossing scene at {deg} deg: aux differs by {dv} at pixel {} channel {}", at / 5, at % 5);
+    }
     let s = scene(40, 0x1a2b, 3.0, 0.25);
     let mut r = Lcg::new(7);
     let filt: Vec<f32> = (0..s.len()).map(|_| 1e-4 * r.unit()).collect();
@@ -279,7 +332,9 @@ fn every_gaussian_gradient_matches_a_central_difference() {
             for k in 0..3 {
                 ck.check(format!("{name} mean[{i}][{k}]"), an.d_gauss[i * 10 + k] as f64, &|x| at(&|t, v| t.means[i * 3 + k] += v, x), 1e-3, 5e-2);
                 ck.check(format!("{name} scale[{i}][{k}]"), an.d_gauss[i * 10 + 3 + k] as f64, &|x| at(&|t, v| t.scales[i * 3 + k] += v, x), 1e-3, 5e-2);
-                ck.check(format!("{name} colour[{i}][{k}]"), an.d_colors[i * 3 + k] as f64, &|x| at(&|t, v| t.colors[i * 3 + k] += v, x), 1e-2, 1e-3);
+                // the frame is linear in colour: a long step differences it exactly and
+                // keeps the f32 rounding of the frame out of the difference
+                ck.check(format!("{name} colour[{i}][{k}]"), an.d_colors[i * 3 + k] as f64, &|x| at(&|t, v| t.colors[i * 3 + k] += v, x), 5e-2, 1e-3);
             }
             for k in 0..4 {
                 ck.check(format!("{name} quat[{i}][{k}]"), an.d_gauss[i * 10 + 6 + k] as f64, &|x| at(&|t, v| t.quats[i * 4 + k] += v, x), 2e-3, 5e-2);
@@ -360,6 +415,102 @@ fn camera_gradients_match_central_differences() {
     ck.assert(30, 0.02);
 }
 
+
+/// Per step of a frame sequence, how many pixels jump: change by more than
+/// 0.2 in some colour channel between consecutive frames.
+fn jumps(frames: &[Vec<f32>]) -> Vec<usize> {
+    frames
+        .windows(2)
+        .map(|f| f[0].chunks_exact(4).zip(f[1].chunks_exact(4)).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.2)).count())
+        .collect()
+}
+
+/// An orbit in quarter-degree steps over intersecting gaussians. Where two
+/// of them overlap, compositing in the order of their centres puts one in
+/// front across the WHOLE overlap and flips it the moment the camera passes
+/// the point where the two centres are equally far: a pop. Compositing each
+/// pixel in its own range order draws the seam where the surfaces actually
+/// cross, which moves by a fraction of a pixel per step, so any step changes
+/// only a thin band of pixels.
+#[test]
+fn an_orbit_over_intersecting_gaussians_does_not_pop() {
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let s = crossing_scene();
+    let (w, h) = (64u32, 48u32);
+    let o = RenderOpts { ray: true, antialiased: true, eps2d: 0.3, bg: [0.05, 0.05, 0.05], ..Default::default() };
+    let mut ren = Renderer::new(&g, Kernels::at(0), s.len(), w, h, 0).growable();
+    let gs = GpuSplats::upload(&g, &s);
+    let angles: Vec<f32> = (0..=120).map(|i| -15.0 + 0.25 * i as f32).collect();
+    let mut device = Vec::new();
+    let mut by_centre = Vec::new();
+    for &deg in &angles {
+        let cam = orbit(deg, w, h);
+        ren.render(&g, &gs, &cam, &o);
+        device.push(ren.read_rgba(&g, w, h));
+        by_centre.push(splat::reference::render_ray_ordered(&s, &[], &cam, &o, splat::reference::RayOrder::Mean).0);
+    }
+    let (steady, popping) = (jumps(&device), jumps(&by_centre));
+    let worst = |j: &[usize]| j.iter().enumerate().max_by_key(|v| v.1).map(|(i, n)| (*n, angles[i])).expect("steps");
+    let (pop, pop_at) = worst(&popping);
+    let (seam, seam_at) = worst(&steady);
+    println!("worst step: {seam} pixels at {seam_at} deg per pixel, {pop} at {pop_at} deg by centre");
+    // the control must pop, or the scene tests nothing
+    assert!(pop > 150, "compositing by centre never pops ({pop} pixels at most, at {pop_at} deg): the scene has no overlap that flips");
+    assert!(
+        seam * 8 < pop,
+        "a quarter-degree step changes {seam} pixels (at {seam_at} deg) against the {pop}-pixel pop of compositing by centre (at {pop_at} deg)"
+    );
+}
+
+/// The backward differentiates the order the forward composited: on
+/// intersecting gaussians, where each pixel's order is its own, every
+/// gradient agrees with a central difference.
+///
+/// The discs span much of the frame, so the contour where each one's alpha
+/// crosses the 1/255 cutoff runs through dozens of pixels, and a central
+/// difference sees those pixels switch on and off as a boundary term of about
+/// 3e-3 that the analytic gradient, by definition, does not have. Gradients
+/// are judged against a floor of 0.2 accordingly: a backward that replayed
+/// any other order than the forward's would be off by a sizeable fraction of
+/// the gradients of the overlapping discs, which run to 2.
+#[test]
+fn gradients_follow_each_pixels_order() {
+    const FLOOR: f64 = 0.2;
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let s = crossing_scene();
+    let cam = orbit(4.0, 36, 28);
+    let o = RenderOpts { ray: true, antialiased: true, eps2d: 0.3, bg: [0.2, 0.1, 0.4], ..Default::default() };
+    // the order must matter here, or this is the other gradient test again
+    let (exact, _) = splat::reference::render_ray(&s, &[], &cam, &o);
+    let (by_centre, _) = splat::reference::render_ray_ordered(&s, &[], &cam, &o, splat::reference::RayOrder::Mean);
+    let reordered = exact.chunks_exact(4).zip(by_centre.chunks_exact(4)).filter(|(a, b)| (0..3).any(|k| (a[k] - b[k]).abs() > 0.05)).count();
+    assert!(reordered > 60, "only {reordered} pixels depend on the per-pixel order");
+    let filt = vec![0.0; s.len()];
+    let probe = probe_for(&g, &s, &filt, &cam, &o, 0x0dd);
+    let an = analytic(&g, &s, &filt, &cam, &o, &probe);
+    let lossof = |s: &Splats| {
+        let (img, aux) = device_render(&g, s, &filt, &cam, &o);
+        probe.loss(&img, &aux)
+    };
+    let mut ck = Checker::new();
+    for i in 0..s.len() {
+        let at = |edit: &dyn Fn(&mut Splats, f32), x: f64| {
+            let mut t = s.clone();
+            edit(&mut t, x as f32);
+            lossof(&t)
+        };
+        for k in 0..3 {
+            ck.check(format!("mean[{i}][{k}]"), an.d_gauss[i * 10 + k] as f64, &|x| at(&|t, v| t.means[i * 3 + k] += v, x), 1e-3, FLOOR);
+            ck.check(format!("scale[{i}][{k}]"), an.d_gauss[i * 10 + 3 + k] as f64, &|x| at(&|t, v| t.scales[i * 3 + k] += v, x), 3e-4, FLOOR);
+            ck.check(format!("colour[{i}][{k}]"), an.d_colors[i * 3 + k] as f64, &|x| at(&|t, v| t.colors[i * 3 + k] += v, x), 5e-2, 1e-3);
+        }
+        for k in 0..4 {
+            ck.check(format!("quat[{i}][{k}]"), an.d_gauss[i * 10 + 6 + k] as f64, &|x| at(&|t, v| t.quats[i * 4 + k] += v, x), 2e-3, FLOOR);
+        }
+        ck.check(format!("opacity[{i}]"), an.d_opac[i] as f64, &|x| at(&|t, v| t.opacities[i] += v, x), 1e-3, FLOOR);
+    }
+    ck.assert(40, 0.02);
+}
 
 /// Everything one backward accumulates, read back.
 struct Backward {
