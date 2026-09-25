@@ -44,7 +44,7 @@
 //! mock.verify().unwrap();
 //! ```
 //!
-//! # What this does NOT do
+//! # Limitations
 //!
 //! No async (matches [`capability::Action::run`]'s synchronous contract), no
 //! real inference, no RNG, no wall-clock delay, no cross-`(model, action)`

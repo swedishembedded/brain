@@ -884,7 +884,7 @@ mod tests {
     /// `"lumina2"`; and a file that carries the tag but is not a Wan
     /// transformer is refused by name rather than half-imported.
     ///
-    /// **What this does NOT prove.** Only the dispatch. The dequantize ->
+    /// **Certified elsewhere.** Only the dispatch is covered here. The dequantize ->
     /// `import_dit` -> safetensors path itself is exercised against a real
     /// `city96/Wan2.1-T2V-14B-gguf` file by `crates/wan`'s
     /// `gguf_import_real` suite (`BRAIN_WAN_GGUF`), which is where the
@@ -913,7 +913,7 @@ mod tests {
     /// the embedded `config` KV -> two-way manifest coverage -> streamed
     /// dequant+write, and reads the result back.
     ///
-    /// **What this does NOT prove.** `model_dir::resident_for`/
+    /// **Out of scope here.** `model_dir::resident_for`/
     /// `resident_for_compound` serving the converted checkpoint - `ltxv` is
     /// a COMPOUND model (DiT + two VAEs + text encoder + tokenizer, like
     /// `wan`'s own `zimage`/`wan` arms in `resident_for_compound`), and

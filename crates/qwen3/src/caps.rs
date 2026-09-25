@@ -771,7 +771,7 @@ impl Action for LoraGateAction {
 /// The `lora_gate` action body: a candidate adapter blob and a frozen probe
 /// set in, `promote::gate`'s four-bar decision out.
 ///
-/// ## What this function is, and what it is NOT
+/// ## Scope
 ///
 /// The decision is `promote::gate::gate` and nothing else - the exact
 /// one-sided paired sign test, the pre-registered effect-size floor, the

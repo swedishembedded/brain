@@ -1579,7 +1579,7 @@ had rejected. Cycle 2 shows the mechanism in one line: the real gate
 rejected it as `Cause::AnchorRegressed`, the coin carried it anyway, and the
 cycle-1 canary fell 0.90 -> 0.08 on the spot and never recovered.
 
-**What this does NOT show.** One seed per arm. The 0.215 ACC gap is smaller
+**Limits of this comparison.** One seed per arm. The 0.215 ACC gap is smaller
 than the 0.292 single-cycle training-outcome spread the P19 pre-registration
 measured, so the ACC and BWT differences alone are suggestive, not
 conclusive; the collapse and the canary are the parts of this comparison
@@ -2069,7 +2069,7 @@ something no arm of this study has tried, because every replay/rehearsal
 row in the escalation ladder above kept GRPO as the objective and therefore
 kept the 237x starvation and 73.6% waste rate in place too.
 
-**What this does not do.** It does not re-run the 12-cycle study under a
+**Limits of this result.** It does not re-run the 12-cycle study under a
 fixed regime, so it does not itself demonstrate accumulation across
 sequential cycles - it demonstrates that the ONE thing standing in the way
 of a positive result is not adapter size. It does not test any regime

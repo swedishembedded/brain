@@ -10,7 +10,7 @@ single-active-sequence serving: `crate::resident_qwen35moe::Qwen35Resident`
 (`crates/cli/src/resident_qwen35moe.rs`) is fp32 weights + fp32 KV, one
 sequence truly decoding on the GPU at a time (several may be RESIDENT and
 interleaved by the scheduler, never batched into one GPU dispatch) - see
-that module's own doc for the complete list of what this does NOT have yet
+that module's own doc for the complete list of current gaps
 (int8 KV, LoRA adapter folding, multi-GPU sharding, a `.gguf` serving path).
 `--dbus`/`--openai`/`--anthropic` all converge on the exact same `generate`
 action (`brain qwen35moe infer`/D-Bus-direct-dispatch callers reach it ad

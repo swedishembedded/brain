@@ -27,7 +27,7 @@
 //! device an instance touches is named, with its own real byte count,
 //! checked against its own real budget.
 //!
-//! # What this does NOT do yet
+//! # Scope
 //!
 //! [`pick_devices`] is a pure function, exactly like [`crate::place::
 //! pick_device`]. `crate::manager::ResidencyManager::claim_multi` is the

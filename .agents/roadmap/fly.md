@@ -1007,7 +1007,7 @@ it against the scan+sort reference at `max|d| == 0`.
   smell on the left moves the descending population differently from one on the
   right, by up to twelve spikes a tick at the gains swept.
 
-  **What it is not is steering.** The leg bias that asymmetry produces flips
+  **Pathway, not steering.** The leg bias that asymmetry produces flips
   sign across the gain sweep, which is exactly what a connectome without fitted
   synaptic strengths should be expected to do. The pathway is what M10
   establishes. `--smell` on the sample runs it, against `--seek` which is the

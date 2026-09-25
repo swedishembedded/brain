@@ -35,7 +35,7 @@
 //! so both consumers share one implementation and each applies its own
 //! convention.
 //!
-//! # What this does NOT do
+//! # Limitations
 //!
 //! The EVA-CLIP half still takes whatever image the caller supplies. The
 //! reference preprocesses it with facexlib's RetinaFace alignment plus a BiSeNet

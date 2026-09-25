@@ -3451,8 +3451,8 @@ steps); f32 loss `0.10994 -> 0.04906` (55.4% reduction) over the SAME steps.
 The two trajectories track within about `1e-4` of each other at **every
 single step** (e.g. step 30: bf16 `0.059839` vs f32 `0.059838`; step 59:
 `0.049068` vs `0.049057`) - bf16-forward training is, at this tiny synthetic
-scale, indistinguishable from the f32 baseline. **What this does NOT prove,
-stated explicitly**: this is not validated at production model scale, does
+scale, indistinguishable from the f32 baseline. **Limits, stated
+explicitly**: this is not validated at production model scale, does
 not exercise a real optimizer (Adam moments, weight decay, grad-norm
 clipping), and does not touch any real model's training loop - an honest,
 deliberate limit of this phase's scope, not an oversight.

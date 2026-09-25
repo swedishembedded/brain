@@ -32,7 +32,7 @@
 //! and takes the uniform stream first, then one pointer per storage binding in
 //! ascending binding order.
 //!
-//! # What this is NOT
+//! # Limitations
 //!
 //! It is not a performance tier. A mechanically translated kernel inherits the
 //! WGSL execution model - no warp intrinsics, no register blocking, no

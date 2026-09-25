@@ -8008,7 +8008,7 @@ structural, and the ranked ways past them are:
   it inherited the fused kernel for free, but nothing in this port encodes a
   clip large enough to profile.
 
-#### 7 - what this is worth on a real run, and what it is not
+#### 7 - what this is worth on a real run
 
 The stage this phase touched was 645.7 s of a 3162.6 s clip. Nothing here
 changes the DiT, so the honest projection is the decode's own ratio applied to

@@ -13,7 +13,7 @@
 //! (`ltx_core.conditioning.types.attention_strength_wrapper`) and
 //! `ltx_pipelines.iclora_utils.downsample_mask_video_to_latent`.
 //!
-//! # What this is, and what it is NOT
+//! # Scope
 //!
 //! An IC-LoRA conditions generation on a *reference video* that is positionally
 //! aligned with the clip being generated: the reference's latent tokens are

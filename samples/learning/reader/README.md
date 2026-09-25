@@ -264,13 +264,13 @@ That path trains on raw next-token continuation and is measured by a
 question-answering battery, which is the mismatch the pipeline above exists
 to fix. Its measured result on this corpus is a battery that does not move.
 
-## What this does not claim
+## Limitations
 
 The probe measures **unseen phrasing to correct command, verified by
-execution**. It does not measure composing commands never trained on, and it
-cannot: this pipeline fine-tunes on question/answer pairs only, so the model
-never sees the manual at training or inference time.
+execution**. Composing commands never trained on is out of its reach, and
+necessarily so: this pipeline fine-tunes on question/answer pairs only, so the
+model never sees the manual at training or inference time.
 
-Nothing here says a particular model will learn a particular tool. The
-sample is the instrument. A run that gains nothing reports that, and a run
-whose control is not separated from it reports that too.
+The sample is the instrument rather than a verdict on any particular model or
+tool. A run that gains nothing reports that, and a run whose control is not
+separated from it reports that too.

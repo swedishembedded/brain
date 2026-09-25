@@ -588,7 +588,7 @@ the architecture can do":
   (`Resident.seq_len`), and a request that overflows it is refused BY NAME,
   naming both the built capacity and the checkpoint's real ceiling.
 
-**What this is not**: native-262144 or paged-KV serving. This decode path
+**Out of scope**: native-262144 or paged-KV serving. This decode path
 still allocates a plain linear fp32 KV cache
 (`Qwen::new_shard_dt_decode`) - at the 4B config's shape that is ~288 KiB
 per token, so the real 262144-token ceiling would be ~77 GiB for one

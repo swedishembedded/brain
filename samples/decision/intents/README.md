@@ -77,16 +77,17 @@ alone. An untrained head scores 16.2% on the same held-out set - the pretrained
 encoder already puts some of this in for free, which is another reason the
 control matters.
 
-## What this does NOT measure
+## Limitations
 
-- **Not a BANKING77 leaderboard number.** Published baselines (RoBERTa-base
-  93.86%, ModernBERT-base 93.99%) always score against all 77 intents at once
-  and are a different, easier task than a sampled subset with held-out intents.
-  Quoting these numbers against those is meaningless in both directions.
-- **Not calibration.** Whether the probabilities are *honest* - Brier score,
-  ECE, failure-AUROC - is a separate question this run does not ask.
-- **Not transfer to a different domain.** Held-out INTENTS are still banking
-  intents. A held-out domain is a stronger claim and a different experiment.
+- **Published BANKING77 baselines measure a different task.** RoBERTa-base
+  93.86% and ModernBERT-base 93.99% score against all 77 intents at once,
+  which is easier than a sampled subset with held-out intents. The numbers do
+  not translate in either direction.
+- **Calibration is a separate question.** Whether the probabilities are
+  *honest* - Brier score, ECE, failure-AUROC - is something a different run
+  has to ask.
+- **Held-out intents are still banking intents.** Transfer to another domain
+  is a stronger claim and a different experiment.
 
 ---
 
