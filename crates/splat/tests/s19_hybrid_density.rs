@@ -180,3 +180,78 @@ fn credit_assigned_density_beats_the_heuristic_at_an_equal_budget() {
         base.max_gaussians, b.len(), c.len(), a.len(), d.len()
     );
 }
+
+/// Refinement and growth both start from a gaussian that already exists, so
+/// an object the starting scene has nothing near - a structure-from-motion
+/// cloud that missed it, a stereo map with a hole - could never be
+/// reconstructed however long the fit ran: every new sample lands within a
+/// few radii of its parent. The controller also spawns at residual PIXELS:
+/// where a view's error is large and the scene there is empty or at the wrong
+/// depth, a new gaussian goes where that pixel's range prior (or the
+/// scene's own rendered range) puts the surface.
+#[test]
+fn an_object_nothing_was_seeded_near_is_grown_where_the_photographs_show_it() {
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let (w, h) = (64u32, 64u32);
+    // the board, and a bright block well to its side at a different depth
+    let mut block = Splats::default();
+    for iy in 0..4 {
+        for ix in 0..4 {
+            block.means.extend_from_slice(&[1.6 + 0.12 * ix as f32, -0.9 + 0.12 * iy as f32, 2.4]);
+            block.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+            block.scales.extend_from_slice(&[0.07, 0.07, 0.07]);
+            block.opacities.push(0.99);
+            block.colors.extend_from_slice(&[0.95, 0.75, 0.1]);
+        }
+    }
+    let truth = join(&[board(8, false), block]);
+    let cams: Vec<Camera> = [[0.0f32, 0.0, 0.0], [0.5, -0.2, 0.2], [-0.5, 0.2, 0.2], [0.3, 0.3, -0.1]]
+        .iter()
+        .map(|e| Camera::look_at(*e, [0.4, 0.0, 3.0], [0.0, -1.0, 0.0], 70.0, w, h))
+        .collect();
+    let o = RenderOpts { ray: true, ..Default::default() };
+    let mut ren = Renderer::new(&g, Kernels::at(0), truth.len(), w, h, 0);
+    let gs = GpuSplats::upload(&g, &truth);
+    let t: Vec<TargetView> = cams
+        .iter()
+        .map(|c| {
+            ren.render(&g, &gs, c, &o);
+            let rgb = rgba_to_rgb(&ren.read_rgba(&g, w, h));
+            let aux = ren.read_aux(&g, w, h);
+            let alpha: Vec<f32> = ren.read_rgba(&g, w, h).chunks_exact(4).map(|p| p[3]).collect();
+            let range: Vec<f32> = aux.chunks_exact(5).zip(&alpha).map(|(a, al)| if *al > 0.5 { a[0] } else { 0.0 }).collect();
+            TargetView::new(*c, rgb).with_depth(range, None)
+        })
+        .collect();
+    // where the block is, in the first view
+    let block_px: Vec<usize> = {
+        let mut s = truth.clone();
+        s.opacities[..64].fill(0.0);
+        ren.render(&g, &GpuSplats::upload(&g, &s), &cams[0], &o);
+        ren.read_rgba(&g, w, h).chunks_exact(4).enumerate().filter(|(_, p)| p[3] > 0.9).map(|(i, _)| i).collect()
+    };
+    assert!(block_px.len() > 30, "the block covers {} pixels of the first view", block_px.len());
+
+    let init = board(8, false);
+    let cfg = FitCfg {
+        iters: 240,
+        lr_position: 1e-2,
+        log_every: 0,
+        strategy: Densify::Hybrid,
+        densify_every: 20,
+        densify_after: 20,
+        densify_until: 180,
+        max_gaussians: 160,
+        depth_weight: 0.1,
+        ..Default::default()
+    };
+    let (out, _) = fit(&g, Kernels::at(0), &init, &t, &cfg, &mut |_, _| true);
+    let got = {
+        let mut ren = Renderer::new(&g, Kernels::at(0), out.len(), w, h, 0);
+        ren.render(&g, &GpuSplats::upload(&g, &out), &cams[0], &o);
+        rgba_to_rgb(&ren.read_rgba(&g, w, h))
+    };
+    let pick = |img: &[f32]| -> Vec<f32> { block_px.iter().flat_map(|&i| img[i * 3..i * 3 + 3].to_vec()).collect() };
+    let p = psnr(&pick(&got), &pick(&t[0].rgb));
+    assert!(p > 20.0, "the unseeded block renders at {p:.1} dB where the photographs show it");
+}

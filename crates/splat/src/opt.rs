@@ -1263,17 +1263,24 @@ impl<'a> Fit<'a> {
         let mut seen: Vec<Vec<bool>> = Vec::with_capacity(level.targets.len());
         let o = self.opts();
         let skip = sh_skip(cfg, scene.ksh, it);
+        let (mut unexplained, mut total) = (0.0f64, 0.0f64);
         for (vi, t) in level.targets.iter().enumerate() {
             let cam = t.cam;
             scene.shade(gpu, &self.ks, cam.eye(), skip);
             let gs = scene.splats();
             scr.renderer.render(gpu, &gs, &cam, &o);
-            let rgb = crate::renderer::rgba_to_rgb(&scr.renderer.read_rgba(gpu, cam.width, cam.height));
+            let rgba = scr.renderer.read_rgba(gpu, cam.width, cam.height);
+            let rgb = crate::renderer::rgba_to_rgb(&rgba);
             let pred = match self.isp.as_deref() {
                 None => rgb,
                 Some(model) => model.forward(vi, &cam, &rgb),
             };
             let weights = t.weights(self.isp.as_deref());
+            let aux = scr.renderer.read_aux(gpu, cam.width, cam.height);
+            let (sites, u, a) = residual_sites(t, &pred, &rgba, &aux, weights.as_deref(), round as u64 ^ (vi as u64) << 32);
+            ev.sites.extend(sites);
+            unexplained += u;
+            total += a;
             let edges = level.edges.get(vi).cloned().unwrap_or_else(|| vec![0.0; (cam.width * cam.height) as usize]);
             let up = density::credit_upstream(&pred, &t.rgb, &edges, weights.as_deref());
             gpu.write_f32(&scr.dimg, &up);
@@ -1286,6 +1293,7 @@ impl<'a> Fit<'a> {
             ev.add_view(&credit);
         }
         ev.absgrad = absgrad.to_vec();
+        ev.site_share = if total > 0.0 { (unexplained / total) as f32 } else { 0.0 };
         self.prof.add("credit assignment", tm.elapsed());
 
         let snap = scene.snapshot(gpu);
@@ -1311,8 +1319,9 @@ impl<'a> Fit<'a> {
                 let r = density::round(&mut next, &ev, &size_px, suspect, target, &policy, seed);
                 if cfg.log_every > 0 {
                     println!(
-                        "fit: density round {round}: split {}, cloned {}, grown {}, suppressed {}, reclaimed {} (target {target})",
-                        r.split, r.cloned, r.grown, r.suppressed, r.reclaimed
+                        "fit: density round {round}: split {}, cloned {}, grown {}, spawned {} of {} sites ({:.0}% of the residual), \
+                         suppressed {}, reclaimed {} (target {target})",
+                        r.split, r.cloned, r.grown, r.spawned, ev.sites.len(), 100.0 * ev.site_share, r.suppressed, r.reclaimed
                     );
                 }
                 r.origin
@@ -1348,6 +1357,69 @@ impl<'a> Fit<'a> {
         self.refresh_bounds(&out, Some(&seen_next));
         out
     }
+}
+
+/// A view's residual pixels the scene cannot fix by refining what is there,
+/// as spawn sites, with the residual they carry and the view's total
+/// residual.
+///
+/// A pixel qualifies when its residual is in the view's top tenth and the
+/// scene there is empty (alpha below one half) or, where the view has a range
+/// prior, at the wrong depth (off by more than 5% in range). Its site is
+/// where the prior - or, without one, the scene's own rendered range - puts
+/// the surface along the pixel's ray; a pixel with neither says nothing
+/// about where its surface is and is skipped.
+fn residual_sites(t: &TargetView, pred: &[f32], rgba: &[f32], aux: &[f32], weights: Option<&[f32]>, seed: u64) -> (Vec<density::Site>, f64, f64) {
+    let (w, h) = (t.cam.width as usize, t.cam.height as usize);
+    let r: Vec<f32> = (0..w * h)
+        .map(|p| weights.map_or(1.0, |m| m[p]) * (0..3).map(|c| (pred[p * 3 + c] - t.rgb[p * 3 + c]).abs()).sum::<f32>() / 3.0)
+        .collect();
+    let total: f64 = r.iter().map(|v| *v as f64).sum();
+    let mut sorted: Vec<f32> = r.iter().copied().filter(|v| *v > 0.0).collect();
+    if sorted.is_empty() {
+        return (Vec::new(), 0.0, total);
+    }
+    let k = (sorted.len() * 9 / 10).min(sorted.len() - 1);
+    let thr = *sorted.select_nth_unstable_by(k, f32::total_cmp).1;
+    let k_int = t.cam.intrinsics();
+    let rot = |v: [f64; 3]| -> [f32; 3] {
+        let m = &t.cam.c2w;
+        std::array::from_fn(|i| (m[i * 4] as f64 * v[0] + m[i * 4 + 1] as f64 * v[1] + m[i * 4 + 2] as f64 * v[2]) as f32)
+    };
+    let eye = t.cam.eye();
+    // at most this many sites per view: a round spawns a few percent of the
+    // population, and the sites are drawn from by weight anyway
+    let keep = 1.0f32.min(20_000.0 / (w * h) as f32 * 10.0);
+    let mut sites = Vec::new();
+    let mut unexplained = 0.0f64;
+    for p in 0..w * h {
+        if r[p] < thr || r[p] <= 0.0 {
+            continue;
+        }
+        let alpha = rgba[p * 4 + 3];
+        let rendered = (alpha > 0.5).then_some(aux[p * 5]).filter(|v| *v > 0.0);
+        let prior = t.depth.as_ref().map(|d| d[p]).filter(|v| *v > 0.0);
+        let wrong_depth = matches!((prior, rendered), (Some(a), Some(b)) if (a / b).ln().abs() > 0.05);
+        if alpha >= 0.5 && !wrong_depth {
+            continue;
+        }
+        let Some(range) = prior.or(rendered) else { continue };
+        unexplained += r[p] as f64;
+        if jitter(p, seed) >= keep {
+            continue;
+        }
+        let Some(d) = k_int.unproject([(p % w) as f64 + 0.5, (p / w) as f64 + 0.5]) else { continue };
+        let dw = rot(d);
+        let normal = t.normals.as_ref().map(|n| [n[p * 3] as f64, n[p * 3 + 1] as f64, n[p * 3 + 2] as f64]).filter(|n| n.iter().any(|v| *v != 0.0)).map(rot);
+        sites.push(density::Site {
+            pos: std::array::from_fn(|i| eye[i] + dw[i] * range),
+            radius: range / t.cam.fx.max(t.cam.fy),
+            normal,
+            rgb: [t.rgb[p * 3], t.rgb[p * 3 + 1], t.rgb[p * 3 + 2]],
+            weight: r[p],
+        });
+    }
+    (sites, unexplained, total)
 }
 
 /// The views iteration `it` optimizes: `per` of them, walking a fresh

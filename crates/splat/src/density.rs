@@ -71,6 +71,27 @@ pub struct Evidence {
     /// AbsGS: summed per-pixel magnitudes of its screen-space position
     /// gradient.
     pub absgrad: Vec<f32>,
+    /// Where the scene has no gaussian to refine for an error: pixels whose
+    /// residual is large and whose scene is empty or at the wrong depth.
+    pub sites: Vec<Site>,
+    /// The share of the residual those pixels carry: of the samples a round
+    /// adds beyond refinement, this share is spawned at [`Self::sites`].
+    pub site_share: f32,
+}
+
+/// A place to spawn a gaussian: the surface point a residual pixel's range
+/// puts under it, its footprint there, the photograph's colour and the
+/// surface normal where a prior gives one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Site {
+    pub pos: [f32; 3],
+    /// The pixel's footprint at `pos`, world units.
+    pub radius: f32,
+    /// Unit surface normal, world frame.
+    pub normal: Option<[f32; 3]>,
+    pub rgb: [f32; 3],
+    /// The pixel's residual: sites are drawn in proportion to it.
+    pub weight: f32,
 }
 
 impl Evidence {
@@ -81,6 +102,8 @@ impl Evidence {
             edge: vec![0.0; n],
             views: vec![0; n],
             absgrad: vec![0.0; n],
+            sites: Vec::new(),
+            site_share: 0.0,
         }
     }
 
@@ -171,6 +194,8 @@ pub struct Round {
     pub reclaimed: usize,
     /// Samples added at top-scored sites to fill the schedule.
     pub grown: usize,
+    /// Gaussians spawned at residual pixels ([`Evidence::sites`]).
+    pub spawned: usize,
     /// Per gaussian of the new scene, the gaussian of the old one whose
     /// optimizer state it continues - itself, or the parent of a split or a
     /// clone - and `None` for a new sample placed at a site, which starts
@@ -256,9 +281,14 @@ pub fn round(
     let score = |i: usize| wr * pr[i] + we * pe[i] + wg * pg[i];
     ranked.sort_by(|&a, &b| score(b).total_cmp(&score(a)));
 
-    // 2. budget
+    // 2. budget. Refinement and growth both work near gaussians that exist,
+    // which cannot reach an object the scene has nothing near; the share of
+    // the residual that sits where the scene is empty or at the wrong depth
+    // is reserved for spawning there instead.
     let alive = n - stats.reclaimed;
     let room = target.saturating_sub(alive);
+    let spawn_n = ((room as f32 * ev.site_share.clamp(0.0, 1.0)).round() as usize).min(ev.sites.len());
+    let room = room - spawn_n;
     let want = ((n as f32 * policy.refine_frac).ceil() as usize).min(room).min(ranked.len());
     let chosen: Vec<usize> = ranked[..want].to_vec();
     let mut refine = vec![false; n];
@@ -379,16 +409,70 @@ pub fn round(
     // than by opacity: extra samples at the top-scored sites, each displaced
     // by a draw from its site's own covariance, with the opacity and scale
     // correction that keeps a site rendering as it did.
+    stats.spawned = spawn(&mut out, &ev.sites, spawn_n, seed ^ 0x7370_6177);
     let left = target.saturating_sub(out.len());
     if left > 0 {
         stats.grown = grow_at(&mut out, &weight, left, seed ^ 0x6f77_6e67);
-        marks.resize(out.len(), false);
-        origin.resize(out.len(), None);
     }
+    marks.resize(out.len(), false);
+    origin.resize(out.len(), None);
     *scene = out;
     *suspect = marks;
     stats.origin = origin;
     stats
+}
+
+/// Spawn `count` gaussians at `sites` drawn without replacement in
+/// proportion to their weight. Each lies in the surface its site's normal
+/// describes (thin along it, a pixel footprint across) or is a round pixel
+/// footprint without one, carries the photograph's colour and starts at a
+/// modest opacity the fit can raise or prune. Returns how many were added.
+fn spawn(scene: &mut Splats, sites: &[Site], count: usize, seed: u64) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    // weighted sampling without replacement: the largest u^(1/w)
+    let mut keyed: Vec<(f32, usize)> = sites
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.weight > 0.0)
+        .map(|(i, s)| (jitter(i, seed).max(1e-12).ln() / s.weight, i))
+        .collect();
+    let count = count.min(keyed.len());
+    if count == 0 {
+        return 0;
+    }
+    keyed.select_nth_unstable_by(count - 1, |a, b| b.0.total_cmp(&a.0));
+    let shk = sh_stride(scene);
+    for &(_, i) in &keyed[..count] {
+        let s = &sites[i];
+        let (q, scale) = match s.normal {
+            Some(n) => (quat_with_z(n), [s.radius, s.radius, 0.1 * s.radius]),
+            None => ([1.0, 0.0, 0.0, 0.0], [s.radius; 3]),
+        };
+        scene.means.extend_from_slice(&s.pos);
+        scene.quats.extend_from_slice(&q);
+        scene.scales.extend_from_slice(&scale);
+        scene.opacities.push(0.3);
+        scene.colors.extend_from_slice(&s.rgb);
+        if let Some((_, r)) = &mut scene.sh_rest {
+            r.extend(std::iter::repeat_n(0.0, shk));
+        }
+    }
+    count
+}
+
+/// A unit quaternion `(w, x, y, z)` whose rotation takes +z to `n`.
+fn quat_with_z(n: [f32; 3]) -> [f32; 4] {
+    // half-way rotation from z to n
+    let (x, y, z) = (n[0], n[1], n[2]);
+    if z < -0.999_999 {
+        return [0.0, 1.0, 0.0, 0.0];
+    }
+    let w = 1.0 + z;
+    let q = [w, -y, x, 0.0];
+    let l = (q.iter().map(|v| v * v).sum::<f32>()).sqrt();
+    q.map(|v| v / l)
 }
 
 /// Add `count` samples to `scene` at sites drawn in proportion to `weight`,
