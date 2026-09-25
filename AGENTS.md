@@ -205,8 +205,11 @@ fast and scalable kernel - not a naive one.
     credit-assigned budgeted density control (`density`, `Densify::Hybrid`),
     MCMC, Mip filtering, SH 0-3, pose refinement and view minibatches.
     **Photographs alone → a scene**: `crates/sfm` is structure from motion
-    (SIFT, P3P, Schur-complement bundle adjustment with a self-calibrated
-    focal length and distortion), `recon::photogrammetry` turns its output
+    (SIFT, VLAD retrieval for pair selection, global initialization by
+    rotation averaging + global positioning with incremental P3P as
+    fallback, Schur-complement bundle adjustment with a self-calibrated
+    focal length and lens, GPS Sim(3) to metres and gravity from the
+    cameras - `sfm::georef`), `recon::photogrammetry` turns its output
     into undistorted training targets and a point-cloud start. `crates/mvs`
     is GPU PatchMatch multi-view stereo through the real lens: per-view
     range/normal/confidence maps (the fit's `TargetView` priors), fused
@@ -963,7 +966,7 @@ front-end to depend on.
 | `yolov8` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `zipdepth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `worldmirror2` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + trainer (`fit`, `train`) + viewer |
-| `sfm` | structure from motion: SIFT, matching, two-view geometry, P3P, bundle adjustment, incremental reconstruction with a self-calibrated camera. Pure host geometry, no model and no GPU |
+| `sfm` | structure from motion: SIFT, VLAD pair retrieval, matching, two-view geometry, rotation averaging, global positioning, P3P, bundle adjustment, global or incremental reconstruction with a self-calibrated camera, georeferencing (GPS Sim(3), gravity). Pure host geometry, no model and no GPU |
 | `mvs` | dense multi-view stereo on the GPU through any lens (`camera::Intrinsics`): source selection from SfM tracks, PatchMatch (bilateral NCC, red-black propagation, joint view selection, coarse-to-fine geometric consistency), consistency filter, fusion, surface-aligned splat init |
 | `recon` | model-agnostic long-capture orchestration: mixed photo/video ingest, sharpness + near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration behind a residual gate, global fuse/prune/orient. Knows no model - one asks it via `ReconstructionModel` (`worldmirror2::recon_impl`) how many frames a pass holds and what grid it wants |
 | `scrfd` / `arcface` / `sam2` / `clip` | SCRFD face detection; ArcFace identity embedding (+ the 5-point alignment and its trainer); SAM 2.1 promptable segmentation (image path + the video memory bank); CLIP-L/OpenCLIP-bigG/EVA-CLIP text+image towers |

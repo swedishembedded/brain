@@ -116,9 +116,16 @@ learned model. It runs `recon::photogrammetry::reconstruct`, the same
 pipeline as the SDK's `brain::Reconstruction`, in four steps:
 
 1. **Structure from motion** (`brain splat sfm` on its own): features in every
-   photograph, matches between every pair checked against the geometry of
-   two views, and an incremental reconstruction that registers one
-   photograph at a time and refines everything with bundle adjustment. The
+   photograph, matches between the pairs worth matching (every pair up to 24
+   photographs; beyond that each photograph's most similar ones by a global
+   image descriptor, plus its neighbours in capture order) checked against
+   the geometry of two views, then every camera placed at once (rotation
+   averaging, then global positioning of cameras and points) and refined
+   with bundle adjustment - or, when that leaves photographs out, the
+   incremental reconstruction that registers one photograph at a time, if it
+   does better. Photographs carrying usable GPS come back in metres with up
+   up; otherwise the direction of gravity is read off how the cameras were
+   held, and the scene is landed with it. The
    camera is calibrated from the photographs themselves - its focal length
    is chosen by reconstructing under a range of candidates and keeping the
    one that registers the most photographs most accurately, and the

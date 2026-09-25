@@ -275,6 +275,12 @@ pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
     (apply(s, &r, &centre), moved)
 }
 
+/// Rotation (row-major 3x3) and centre of [`upright_along`]'s re-framing, for
+/// a caller holding camera-to-world matrices rather than [`Camera`]s.
+pub fn frame_along(c2w: &[[f64; 16]], up: [f64; 3]) -> ([f64; 9], [f64; 3]) {
+    (rotation_taking(up, [0.0, -1.0, 0.0]), look_centre(c2w))
+}
+
 /// Re-frame a scene and its cameras so that `up` - the direction opposite
 /// gravity in the scene's frame, as the scene's producer knows it - becomes
 /// world up (-Y, the camera convention's up), about the point the cameras
@@ -288,8 +294,7 @@ pub fn upright(s: &Splats, cams: &[Camera]) -> (Splats, Vec<Camera>) {
 /// east on +X and north on +Z. Rigid, like [`upright`].
 pub fn upright_along(s: &Splats, cams: &[Camera], up: [f64; 3]) -> (Splats, Vec<Camera>) {
     let mats: Vec<[f64; 16]> = cams.iter().map(|c| std::array::from_fn(|i| c.c2w[i] as f64)).collect();
-    let r = rotation_taking(up, [0.0, -1.0, 0.0]);
-    let centre = look_centre(&mats);
+    let (r, centre) = frame_along(&mats, up);
     let moved = cams
         .iter()
         .zip(&mats)

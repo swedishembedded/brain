@@ -29,7 +29,9 @@
 //! to info@swedishembedded.com.
 
 use gpu_core::Gpu;
+use imaging::photo::Gps;
 use imaging::Rgb8;
+use sfm::georef::Wgs84;
 use sfm::incremental::{Photo, Reconstruction, SfmCfg, SfmError};
 use splat::opt::{FitCfg, TargetView};
 use splat::types::{Camera, Splats};
@@ -77,12 +79,20 @@ pub struct TrainingSet {
 
 impl TrainingSet {
     /// The same set landed upright: structure from motion leaves the scene in
-    /// its first camera's frame, however that camera was held, and a viewer
-    /// opening the result expects the ground to be down.
+    /// its gauge's frame (see `sfm::incremental::Gauge`) - the seed
+    /// photograph's, however that camera was held, or east-north-up - and a
+    /// viewer opening the result expects the ground to be down. Where the
+    /// reconstruction knows which way gravity points ([`Reconstruction::up`])
+    /// that is what is landed on world up; otherwise the capture's orbit is
+    /// taken to be level.
     pub fn upright(self) -> TrainingSet {
         let cams: Vec<Camera> = self.targets.iter().map(|t| t.cam).collect();
         let mats: Vec<[f64; 16]> = cams.iter().map(|c| std::array::from_fn(|i| c.c2w[i] as f64)).collect();
-        let (r, centre) = splat::orient::frame_from_cameras(&mats, -1.0);
+        let (r, centre) = match self.sfm.up {
+            // up in the reconstruction's frame, turned into the targets'
+            Some(up) => splat::orient::frame_along(&mats, std::array::from_fn(|i| (0..3).map(|j| self.frame.r[i * 3 + j] * up[j]).sum())),
+            None => splat::orient::frame_from_cameras(&mats, -1.0),
+        };
         let init = splat::orient::apply(&self.init, &r, &centre);
         let targets = self
             .targets
@@ -207,7 +217,16 @@ pub fn target(photo: &Rgb8, cam: Camera, sensor: usize) -> TargetView {
 /// exact halvings below the photographs' own resolution.
 /// `opacity` is what every starting gaussian gets.
 pub fn training_set(photos: &[Rgb8], halvings: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
-    let views: Vec<Photo> = photos.iter().map(|p| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None }).collect();
+    training_set_located(photos, &[], halvings, opacity, cfg)
+}
+
+/// [`training_set`] for photographs with satellite fixes (EXIF GPS, in
+/// input order; missing entries and a short slice mean none): when the fixes
+/// span the capture the scene comes back in metres east-north-up, otherwise
+/// they are reported unused in `sfm.report`.
+pub fn training_set_located(photos: &[Rgb8], gps: &[Option<Gps>], halvings: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
+    let fix = |i: usize| gps.get(i).copied().flatten().map(|g| Wgs84 { latitude_deg: g.latitude_deg, longitude_deg: g.longitude_deg, altitude_m: g.altitude_m });
+    let views: Vec<Photo> = photos.iter().enumerate().map(|(i, p)| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None, gps: fix(i) }).collect();
     let rec = sfm::incremental::reconstruct(&views, cfg)?;
     let mut targets = Vec::new();
     let mut source = Vec::new();

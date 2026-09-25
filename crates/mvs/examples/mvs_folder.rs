@@ -65,7 +65,7 @@ fn cameras_and_tracks(photos: &[imaging::Rgb8], cache: &std::path::Path) -> (Vec
         return (cams, source, tracks);
     }
     let views: Vec<sfm::incremental::Photo> =
-        photos.iter().map(|p| sfm::incremental::Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None }).collect();
+        photos.iter().map(|p| sfm::incremental::Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None, gps: None }).collect();
     let t = std::time::Instant::now();
     let rec = sfm::incremental::reconstruct(&views, &sfm::incremental::SfmCfg::default()).unwrap_or_else(|e| {
         eprintln!("structure from motion: {e}");

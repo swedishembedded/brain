@@ -77,15 +77,38 @@ the specification it is built from - see **Provenance** for what that means.
 | capability | where | state |
 |---|---|---|
 | Incremental SfM from photographs alone: SIFT (Lowe 2004) + RootSIFT, mutual ratio-test matching, 8-point essential in adaptive RANSAC, P3P registration, DLT triangulation, Schur-complement LM bundle adjustment with shared f/k1/k2, re-triangulation; focal length chosen by solving under candidates | `crates/sfm` | done |
+| Pair selection by retrieval: VLAD (intra-normalized, power-normalized) over the RootSIFT already computed, vocabulary by k-means on the capture itself (no weights), top-k per image plus capture-order neighbours; exhaustive up to 24 photographs | `sfm::retrieval`, `SfmCfg::pairs` | done |
+| Global initializer (GLOMAP-style): relative rotations re-estimated through the swept focal length, robust rotation averaging (max spanning tree, then L1 and Geman-McClure IRLS on the Lie algebra, CG solve), global positioning of cameras and points from bearings (BATA objective, random start, exact alternation), triangulation and bundle adjustment under a tightening error bound; incremental kept as fallback, chosen by registered views then RMS | `sfm::{rotation, positioning}`, `incremental::Solver::global` | done |
+| Metric scale + gravity: WGS84 -> local ENU, Umeyama Sim(3) in LO-RANSAC from camera centres to fixes (refused when the fixes' misfit exceeds 10% of their spread), gravity from the cameras' horizontal axes (robust), held exactly in the Sim(3) when known; `Reconstruction::{gauge, up}`; `splat::orient::upright_along` / `TrainingSet::upright` land the known up | `sfm::georef`, `recon::photogrammetry` | done |
 | Photographs -> undistorted pinhole targets + masks + point-cloud init; `brain splat sfm`, `brain splat train` | `recon::photogrammetry`, `splat::init`, `cli/splat_cli.rs` | done |
 | Frame selection (sharpness + near-duplicate) | `crates/recon/src/select.rs` | done (baseline; not yet wired into `train`) |
 | Pose refinement inside the fit | `opt.rs`, `FitCfg::pose_lr` | done |
-| Five-point essential solver (the 8-point one is weak on near-planar pairs) | `sfm::twoview` | planned |
 | Per-image or mixed cameras (today one camera and one zoom for the whole capture), principal point refinement | `sfm` | planned |
 | Device SIFT and matching (host today: ~35 s of a 51 s run on 16 photos is features + all-pairs matching) | kernels | planned |
 | Staged calibration inside the fit (poses -> shared intrinsics -> distortion) with SfM priors; video pose smoothness | `opt.rs` | planned |
-| ALIKED + LightGlue/LoMa matching, MAGSAC++, global SfM, 360° as a cubemap rig | `sfm` | planned |
-| GPS Sim(3) (Umeyama inside RANSAC) + IMU gravity | `align.rs` has Umeyama | planned |
+| ALIKED + LightGlue/LoMa matching, MAGSAC++, 360° as a cubemap rig | `sfm` | planned |
+| IMU gravity (per-photo accelerometer, where a container records it) | `sfm::georef` | planned |
+| Parallel feature extraction across photographs (94 s of 16 x 8 MP today, serial over photographs) and parallel pair matching | `sfm` | planned |
+| Global SfM measured on a capture that breaks the incremental path (drift over a long walk); the chessboard registers fully either way | `sfm` | planned |
+
+Measured on the 16-photo chessboard capture (3264x2448 ultrawide, network
+GPS in EXIF), `crates/sfm/examples/sfm_folder.rs`, on a shared 48-core host
+whose load varied between runs (so seconds compare within a run better than
+across runs):
+
+| run | pairs matched / verified | matching | solve | registered | points | RMS | lens |
+|---|---|---|---|---|---|---|---|
+| before (exhaustive, incremental) | 120 / 105 | 155 s | 28 s | 16/16 | 7104 | 0.645 px | fisheye f 1500.6 |
+| default now (exhaustive at 16, global kept) | 120 / 105 | 187 s (higher load) | 19 s | 16/16 | 7104 | 0.645 px | fisheye f 1500.6 |
+| `--pairs 5` (retrieval) | 53 / 47 | 85 s | 17 s | 16/16 | 6565 | 0.608 px | fisheye f 1499.2 |
+| `--pairs 8` (retrieval) | 72 / 65 | 123 s | 33 s | 16/16 | 6805 | 0.626 px | fisheye f 1500.5 |
+
+The global start alone (before the lens fit) reaches 16/16 at 0.726 px; rotation
+averaging keeps 85 of 102 pair rotations (the rest miss by over 5 degrees
+through the not-yet-fitted lens). Gravity from the cameras is 0.38 degrees
+from the normal of the chessboard's plane (83% of the points); the network
+GPS (arc-second cells, ~1 m misfit over ~1 m of camera spread) is refused,
+as it should be. Features (94-141 s) are now the largest cost.
 
 ### Dense geometry (`crates/mvs`, upstream of `fit`)
 
