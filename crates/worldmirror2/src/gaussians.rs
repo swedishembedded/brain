@@ -54,6 +54,8 @@ pub fn decode_cameras(raw: &[f32], s: usize, width: u32, height: u32) -> Vec<Cam
                 cy: 0.5 * h,
                 width,
                 height,
+                lens: splat::types::Lens::Pinhole,
+                shutter: [0.0; 6],
             }
         })
         .collect()

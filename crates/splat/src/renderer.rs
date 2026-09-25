@@ -110,7 +110,7 @@ const CAMERA_GRAD_WORDS: usize = 28;
 /// Workgroups a 64-wide dispatch of `threads` actually launches: the grid is
 /// tiled into Y past the per-dimension limit, so the count can exceed
 /// `threads / 64` (`backend_api::grid`).
-fn dispatched_groups(threads: usize) -> usize {
+pub(crate) fn dispatched_groups(threads: usize) -> usize {
     const MAX: usize = 65535;
     let groups = threads.div_ceil(64).max(1);
     if groups <= MAX { groups } else { MAX * groups.div_ceil(MAX) }

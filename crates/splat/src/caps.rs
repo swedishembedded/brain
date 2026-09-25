@@ -83,16 +83,15 @@ pub fn render_spec() -> ActionSpec {
 }
 
 pub fn fit_spec() -> ActionSpec {
-    ActionSpec::new("fit", "optimize a Gaussian-splat scene against N posed target views (AdamW on gaussian parameters, rasterizer backward)")
+    ActionSpec::new("fit", "optimize a Gaussian-splat scene against N posed target views (Adam on log-scale / logit gaussian parameters, ray-evaluated rasterizer backward)")
         .streaming()
         .param(ParamSpec::new(
             "views",
             ParamType::Str,
-            "camera array as JSON, one entry per target-view frame in order: [{\"c2w\":[16 floats],\"fx\":...,\"fy\":...,\"cx\":...,\"cy\":...,\"width\":...,\"height\":...}, ...] - the same shape `mirror_cli.rs`'s cameras.json uses",
+            "camera array as JSON, one entry per target-view frame in order: [{\"c2w\":[16 floats],\"fx\":...,\"fy\":...,\"cx\":...,\"cy\":...,\"width\":...,\"height\":...}, ...] - the same shape `mirror_cli.rs`'s cameras.json uses; a lens (\"model\": \"opencv\"|\"fisheye\"|\"equirect\" with \"k\"/\"p\"/\"s\" coefficients) and a rolling-shutter \"shutter\" twist are optional",
         ).required())
         .param(ParamSpec::new("iters", ParamType::Int, "optimization steps").default(json!(200)).min(1.0))
-        .param(ParamSpec::new("lr", ParamType::Float, "AdamW learning rate").default(json!(5e-3)))
-        .param(ParamSpec::new("min_scale", ParamType::Float, "projected-gradient clamp floor for linear scales").default(json!(1e-4)))
+        .param(ParamSpec::new("lr_position", ParamType::Float, "starting position step, in units of a scene normalized to about one across; decays a hundredfold over the fit").default(json!(FitCfg::default().lr_position)))
         .input(BlobSpec::new("scene", Media::Bytes, "the initial scene to optimize: Inria-layout binary PLY").required())
         .input(BlobSpec::new("video", Media::Video, "N target views: interleaved-HWC f32 RGB frames, one per camera in 'views', same convention as every other video input (capability::blob::decode_video)").required())
         .output(BlobSpec::new("scene", Media::Bytes, "the optimized scene: Inria-layout binary PLY"))
@@ -243,8 +242,7 @@ fn fit(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let iters = inv.get_i64("iters").unwrap_or(200).max(1) as usize;
     let cfg = FitCfg {
         iters,
-        lr: inv.get_f64("lr").unwrap_or(5e-3) as f32,
-        min_scale: inv.get_f64("min_scale").unwrap_or(1e-4) as f32,
+        lr_position: inv.get_f64("lr_position").map_or(FitCfg::default().lr_position, |v| v as f32),
         log_every: 0,
         ..Default::default()
     };
@@ -432,7 +430,7 @@ mod caps_tests {
         for v in init.means.iter_mut() {
             *v += (r.next() - 0.5) * 0.08;
         }
-        let cfg = FitCfg { iters: 40, lr: 5e-3, min_scale: 1e-4, log_every: 0, ..Default::default() };
+        let cfg = FitCfg { iters: 40, lr_position: 5e-3, log_every: 0, ..Default::default() };
         (gpu, ks, init, targets, cfg)
     }
 
@@ -440,7 +438,8 @@ mod caps_tests {
         let (mw, mh) = targets.iter().fold((0u32, 0u32), |(mw, mh), t| (mw.max(t.cam.width), mh.max(t.cam.height)));
         let mut ren = Renderer::new(gpu, ks, s.len(), mw, mh, 0);
         let gs = GpuSplats::upload(gpu, s);
-        let opts = RenderOpts::default();
+        // the fit's own forward model
+        let opts = RenderOpts { ray: true, ..Default::default() };
         let mut acc = 0.0f64;
         for t in targets {
             ren.render(gpu, &gs, &t.cam, &opts);
@@ -466,8 +465,7 @@ mod caps_tests {
         Invocation::new()
             .set("views", json!(views_json))
             .set("iters", json!(cfg.iters as i64))
-            .set("lr", json!(cfg.lr as f64))
-            .set("min_scale", json!(cfg.min_scale as f64))
+            .set("lr_position", json!(cfg.lr_position as f64))
             .blob("scene", Blob::new(Media::Bytes, scene_bytes))
             .blob("video", video)
     }

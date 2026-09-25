@@ -31,30 +31,41 @@ use crate::types::{Camera, Splats};
 /// Mip-Splatting's default kernel size, in samples.
 pub const DEFAULT_SCALE: f32 = 0.2;
 
-/// Per-gaussian filter width in WORLD units: `scale / max_views(focal/depth)`.
-/// Zero where no camera saw the gaussian, which leaves it untouched.
-pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32) -> Vec<f32> {
-    let mut best = vec![0.0f32; s.len()];
-    for c in cams {
-        let v = c.viewmat();
-        // The rate a view samples at is set by its focal length; with
-        // non-square pixels the denser axis is the one that bounds detail.
-        let focal = c.fx.max(c.fy);
-        for (i, b) in best.iter_mut().enumerate() {
-            let m = &s.means[i * 3..i * 3 + 3];
-            let z = v[8] * m[0] + v[9] * m[1] + v[10] * m[2] + v[11];
-            if z <= 1e-4 {
+/// Per-gaussian filter width in WORLD units: `scale / max_views(rate)`, the
+/// rate being how many pixels per world unit a view samples the gaussian at -
+/// the lens's local pixels per radian over its range, so a fisheye's
+/// periphery and a pinhole's centre are both measured where they are. Zero
+/// where no view saw it, which leaves it untouched.
+///
+/// `seen(i, v)` says whether view `v` saw gaussian `i` at all. A centre that
+/// projects into a frame is not the same thing: a gaussian behind a wall
+/// projects into every view of the wall, and would inherit a frequency bound
+/// from cameras that never observed it. Pass `&|_, _| true` when nothing
+/// better is known (a starting scene), and the frame test is all there is.
+pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32, seen: &(dyn Fn(usize, usize) -> bool + Sync)) -> Vec<f32> {
+    let lenses: Vec<(camera::Intrinsics, [f32; 12])> = cams.iter().map(|c| (c.intrinsics(), c.viewmat())).collect();
+    let best = backend_cpu::par::map_f32(s.len(), |i| {
+        let m = &s.means[i * 3..i * 3 + 3];
+        let mut best = 0.0f64;
+        for (vi, (k, v)) in lenses.iter().enumerate() {
+            if !seen(i, vi) {
                 continue;
             }
-            let x = v[0] * m[0] + v[1] * m[1] + v[2] * m[2] + v[3];
-            let y = v[4] * m[0] + v[5] * m[1] + v[6] * m[2] + v[7];
-            let (px, py) = (c.fx * x / z + c.cx, c.fy * y / z + c.cy);
-            if px < 0.0 || py < 0.0 || px >= c.width as f32 || py >= c.height as f32 {
+            let d: [f64; 3] = std::array::from_fn(|r| (v[r * 4] * m[0] + v[r * 4 + 1] * m[1] + v[r * 4 + 2] * m[2] + v[r * 4 + 3]) as f64);
+            let range = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            if range <= 1e-6 {
                 continue;
             }
-            *b = b.max(focal / z);
+            let Some(px) = k.project(d) else { continue };
+            if px[0] < 0.0 || px[1] < 0.0 || px[0] >= k.width as f64 || px[1] >= k.height as f64 {
+                continue;
+            }
+            if let Some(ppr) = k.pixels_per_radian(d) {
+                best = best.max(ppr / range);
+            }
         }
-    }
+        best as f32
+    });
     best.iter().map(|&f| if f > 0.0 { scale / f } else { 0.0 }).collect()
 }
 
@@ -64,13 +75,21 @@ pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32) -> Vec<f32> {
 /// `sqrt(|S| / |S + sigma^2 I|)` - the same factor the 2D Mip filter uses, for
 /// the same reason.
 pub fn apply_3d_filter(s: &Splats, cams: &[Camera], scale: f32) -> Splats {
-    let sigma = smoothing_sigma(s, cams, scale);
+    let var: Vec<f32> = smoothing_sigma(s, cams, scale, &|_, _| true).iter().map(|v| v * v).collect();
+    bake_filter3d(s, &var)
+}
+
+/// Bake a per-gaussian 3D filter `variance` (world units², as a fit carries
+/// it) into the gaussians themselves: every axis widened by it, opacity
+/// scaled by the energy factor. The result renders with no filter exactly as
+/// `s` renders under it - which is what a scene handed to anything that does
+/// not know about the filter (a PLY, a viewer) has to be.
+pub fn bake_filter3d(s: &Splats, variance: &[f32]) -> Splats {
     let mut out = s.clone();
-    for (i, &sg) in sigma.iter().enumerate() {
-        if sg <= 0.0 {
+    for (i, &v2) in variance.iter().enumerate().take(s.len()) {
+        if v2 <= 0.0 {
             continue;
         }
-        let v2 = sg * sg;
         let mut det0 = 1.0f64;
         let mut det1 = 1.0f64;
         for k in 0..3 {
@@ -109,18 +128,15 @@ pub fn recalibrate_opacity(s: &Splats, cams: &[Camera], eps2d: f32) -> Splats {
         let r = (s.scales[i * 3] * s.scales[i * 3 + 1] * s.scales[i * 3 + 2]).abs().cbrt();
         for c in cams {
             let v = c.viewmat();
-            let z = v[8] * m[0] + v[9] * m[1] + v[10] * m[2] + v[11];
-            if z <= 1e-4 {
-                continue;
-            }
-            let x = v[0] * m[0] + v[1] * m[1] + v[2] * m[2] + v[3];
-            let y = v[4] * m[0] + v[5] * m[1] + v[6] * m[2] + v[7];
-            let (px, py) = (c.fx * x / z + c.cx, c.fy * y / z + c.cy);
-            if px < 0.0 || py < 0.0 || px >= c.width as f32 || py >= c.height as f32 {
+            let k = c.intrinsics();
+            let d: [f64; 3] = std::array::from_fn(|q| (v[q * 4] * m[0] + v[q * 4 + 1] * m[1] + v[q * 4 + 2] * m[2] + v[q * 4 + 3]) as f64);
+            let range = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let (Some(px), Some(ppr)) = (k.project(d), k.pixels_per_radian(d)) else { continue };
+            if range <= 1e-4 || px[0] < 0.0 || px[1] < 0.0 || px[0] >= c.width as f64 || px[1] >= c.height as f64 {
                 continue;
             }
             // screen-space variance of an isotropic splat of world radius r
-            let var = (r * c.fx.max(c.fy) / z).powi(2);
+            let var = (r as f64 * ppr / range).powi(2) as f32;
             comps.push(var / (var + eps2d));
         }
         if comps.is_empty() {

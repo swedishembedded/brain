@@ -32,7 +32,9 @@
 
 mod common;
 
-use common::{fit_cfg, fitted_opts, montage, psnr_masked, render, Flags, FIT_USAGE};
+use common::{fit_cfg, fitted_opts, montage, Flags, FIT_USAGE};
+use recon::eval::Viewer;
+use splat::quality::psnr_masked;
 use gpu_core::Gpu;
 use imaging::Rgb8;
 use splat::opt::{fit_full, FitCfg, TargetView};
@@ -165,7 +167,11 @@ fn main() {
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
     let t0 = truth();
-    let see = RenderOpts::default();
+    let see = RenderOpts { ray: true, ..Default::default() };
+    let render_all = |s: &Splats, cams: &[Camera], o: &RenderOpts| -> Vec<Vec<f32>> {
+        let mut v = Viewer::new(&g, s, &[], *o, width, height);
+        cams.iter().map(|c| v.render(c)).collect()
+    };
 
     let mut train = ring(16, 3.2, -1.4, 0.0, width, height);
     train.extend(ring(8, 2.6, -2.4, 0.2, width, height));
@@ -173,8 +179,8 @@ fn main() {
     // training camera had
     let mut held = ring(4, 2.9, -1.9, 0.19, width, height);
     held.extend(ring(4, 3.6, -0.9, 0.61, width, height));
-    let photos: Vec<Vec<f32>> = train.iter().map(|c| render(&g, &t0, c, &see)).collect();
-    let truth_held: Vec<Vec<f32>> = held.iter().map(|c| render(&g, &t0, c, &see)).collect();
+    let photos: Vec<Vec<f32>> = render_all(&t0, &train, &see);
+    let truth_held: Vec<Vec<f32>> = render_all(&t0, &held, &see);
     for (i, p) in photos.iter().enumerate().step_by(8) {
         imaging::save(format!("{out}/train_{i}.png"), &to_rgb8(p, width, height)).expect("png");
     }
@@ -182,7 +188,7 @@ fn main() {
 
     let score = |s: &Splats, cams: &[Camera], want: &[Vec<f32>], fitted: &FitCfg| -> (f64, f64, Vec<Vec<f32>>) {
         let o = fitted_opts(fitted);
-        let imgs: Vec<Vec<f32>> = cams.iter().map(|c| render(&g, s, c, &o)).collect();
+        let imgs: Vec<Vec<f32>> = render_all(s, cams, &o);
         let each: Vec<f64> = imgs.iter().zip(want).map(|(i, w)| psnr_masked(i, w, None)).collect();
         let p = each.iter().sum::<f64>() / each.len() as f64;
         if cams.len() == held.len() {
@@ -206,8 +212,7 @@ fn main() {
             xyz.extend_from_slice(&t0.means[i * 3..i * 3 + 3]);
             rgb.extend_from_slice(&t0.colors[i * 3..i * 3 + 3]);
         }
-        let mut init = splat::init::from_points(&xyz, &rgb, 0.5);
-        splat::init::floor_to_pixels(&mut init, &train, 1.0);
+        let init = splat::init::from_points(&xyz, &rgb, 0.1);
         let targets: Vec<TargetView> = train.iter().zip(&photos).map(|(c, p)| TargetView::new(*c, p.clone())).collect();
         let t = std::time::Instant::now();
         let out_a = fit_full(&g, ks, &init, &targets, &cfg, &mut |_, _| true);
@@ -232,7 +237,7 @@ fn main() {
         if let Some(m) = flags.parse("min-inliers") {
             sfm_cfg.min_inliers = m;
         }
-        let set = recon::photogrammetry::training_set(&rgb8, width, 0.5, &sfm_cfg).expect("structure from motion");
+        let set = recon::photogrammetry::training_set(&rgb8, 0, 0.1, &sfm_cfg).expect("structure from motion");
         let k = set.sfm.intrinsics[0];
         let true_f = train[0].fx as f64;
         println!(
@@ -275,17 +280,17 @@ fn main() {
         let out_b = fit_full(&g, ks, &set.init, &set.targets, &cfg, &mut |_, _| true);
         let secs = t.elapsed().as_secs_f64();
         let (sim, err) = align(&out_b.cams);
-        if cfg.pose_lr > 0.0 {
+        if cfg.camera.pose_after < 1.0 {
             println!("B camera centres after the fit refined them: worst {:.3}% of the rig radius", 100.0 * err);
         }
         // the held-out cameras, in the reconstruction's frame, through its own
         // recovered calibration
-        let f_scaled = (set.targets[0].cam.fx / set.targets[0].cam.width as f32) * width as f32;
+        let k = out_b.cams[0].intrinsics();
         let held_b: Vec<Camera> = held
             .iter()
             .map(|c| {
                 let m = splat::align::transform_c2w_sim3(&c.c2w.map(|v| v as f64), &sim);
-                Camera { c2w: m.map(|v| v as f32), fx: f_scaled, fy: f_scaled, ..*c }
+                Camera::with_intrinsics(m.map(|v| v as f32), &k)
             })
             .collect();
         let train_cams = &out_b.cams;

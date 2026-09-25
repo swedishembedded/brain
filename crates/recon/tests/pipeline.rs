@@ -138,6 +138,8 @@ fn truth_cameras(n: usize) -> Vec<Camera> {
                 cy: 120.0,
                 width: 320,
                 height: 240,
+                lens: splat::types::Lens::Pinhole,
+                shutter: [0.0; 6],
             }
         })
         .collect()

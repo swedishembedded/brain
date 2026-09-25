@@ -116,7 +116,7 @@ fn a_fitted_scene_reproduces_its_views_sharply_and_not_merely_closely() {
         *v += (r.next() - 0.5) * 0.04;
     }
 
-    let cfg = FitCfg { iters: 220, lr: 8e-3, log_every: 0, ..Default::default() };
+    let cfg = FitCfg { iters: 220, lr_position: 8e-3, log_every: 0, ..Default::default() };
     let (fitted, _) = fit(&g, ks, &init, &targets, &cfg, &mut |_, _| true);
 
     let o = RenderOpts::default();
@@ -221,9 +221,9 @@ fn a_fitted_scene_is_still_right_from_a_view_it_never_saw() {
     for v in init.colors.iter_mut() {
         *v = 0.5 + (*v - 0.5) * 0.25 + (r.next() - 0.5) * 0.1;
     }
-    let cfg = FitCfg { iters: 200, lr: 8e-3, log_every: 0, ..Default::default() };
+    let cfg = FitCfg { iters: 200, lr_position: 8e-3, log_every: 0, ..Default::default() };
     let (fitted, _) = fit(&g, ks, &init, train, &cfg, &mut |_, _| true);
-    let loose = FitCfg { iters: 200, lr: 8e-3, log_every: 0, max_needle: 0.0, ..Default::default() };
+    let loose = FitCfg { iters: 200, lr_position: 8e-3, log_every: 0, max_needle: 0.0, ..Default::default() };
     let (needly, _) = fit(&g, ks, &init, train, &loose, &mut |_, _| true);
 
     let o = RenderOpts::default();

@@ -105,7 +105,8 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
     let (w, h) = (64u32, 64u32);
     let truth = slab();
     let truth_cams = cams(w, h);
-    let o = RenderOpts::default();
+    // the fit's own forward model
+    let o = RenderOpts { ray: true, ..Default::default() };
 
     let mut ren = Renderer::new(&g, ks, truth.len(), w, h, 0);
     let gs = GpuSplats::upload(&g, &truth);
@@ -146,8 +147,19 @@ fn a_fit_can_recover_cameras_that_were_handed_to_it_wrong() {
         acc / shots.len() as f64
     };
 
-    // The scene is already correct, so anything gained here is the cameras.
-    let cfg = FitCfg { iters: 200, lr: 0.0, pose_lr: 3e-3, log_every: 0, ..Default::default() };
+    // The scene is already correct and held still - every one of its step
+    // sizes zero - so anything gained here is the cameras.
+    let cfg = FitCfg {
+        iters: 200,
+        lr_position: 0.0,
+        lr_scale: 0.0,
+        lr_rotation: 0.0,
+        lr_opacity: 0.0,
+        lr_color: 0.0,
+        camera: splat::opt::CameraRefine { pose_after: 0.0, pose_lr: 3e-3, ..Default::default() },
+        log_every: 0,
+        ..Default::default()
+    };
     let (fitted, refined, _) = fit_bundle(&g, ks, &truth, &targets, &cfg, &mut |_, _| true);
 
     let after: f64 = {

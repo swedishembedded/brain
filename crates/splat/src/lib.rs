@@ -31,6 +31,7 @@ pub mod reference;
 pub mod renderer;
 pub mod sh;
 pub mod sort;
+pub(crate) mod train;
 pub mod types;
 
 /// WGSL kernels this crate dispatches, in [`Kernels`] order. Pass to
@@ -66,6 +67,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_ray_bwd_slots", kernels::SPLAT_RAY_BWD_SLOTS),
     ("splat_ray_project_bwd", kernels::SPLAT_RAY_PROJECT_BWD),
     ("splat_ray_camera_grad", kernels::SPLAT_RAY_CAMERA_GRAD),
+    ("splat_adam", kernels::SPLAT_ADAM),
+    ("splat_activate", kernels::SPLAT_ACTIVATE),
+    ("splat_geom_loss", kernels::SPLAT_GEOM_LOSS),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -101,6 +105,9 @@ pub struct Kernels {
     pub splat_ray_bwd_slots: usize,
     pub splat_ray_project_bwd: usize,
     pub splat_ray_camera_grad: usize,
+    pub splat_adam: usize,
+    pub splat_activate: usize,
+    pub splat_geom_loss: usize,
 }
 
 impl Kernels {
@@ -137,6 +144,9 @@ impl Kernels {
             splat_ray_bwd_slots: base + 26,
             splat_ray_project_bwd: base + 27,
             splat_ray_camera_grad: base + 28,
+            splat_adam: base + 29,
+            splat_activate: base + 30,
+            splat_geom_loss: base + 31,
         }
     }
 }

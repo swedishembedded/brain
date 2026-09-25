@@ -103,8 +103,11 @@ fn shoot(radiance: &[f32], c: &Camera, ev: f32, wb: [f32; 3], vig: [f32; 3], enc
     out
 }
 
+/// A short fit: colour and rotation step as fast as position, so the scene
+/// settles within the few hundred iterations and what is left over is the
+/// camera's.
 fn base_cfg(iters: usize) -> FitCfg {
-    FitCfg { iters, lr: 1e-2, log_every: 0, max_growth: 0.0, ..Default::default() }
+    FitCfg { iters, lr_position: 1e-2, lr_color: 1e-2, lr_rotation: 1e-2, log_every: 0, max_growth: 0.0, ..Default::default() }
 }
 
 /// Views shot at different exposures and white balances through a vignetting

@@ -144,7 +144,8 @@ fn fit_recovers_perturbed_scene() {
         Camera::look_at([1.5, -0.5, 0.5], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, 48, 48),
         Camera::look_at([-1.5, 0.5, 0.5], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, 48, 48),
     ];
-    let o = RenderOpts::default();
+    // the fit's own forward model: ray evaluation, the default dilation
+    let o = RenderOpts { ray: true, ..Default::default() };
     let mut ren = Renderer::new(&g, ks, truth.len(), 48, 48, 0);
     let gst = GpuSplats::upload(&g, &truth);
     let targets: Vec<TargetView> = cams
@@ -185,7 +186,7 @@ fn fit_recovers_perturbed_scene() {
         acc / targets.len() as f64
     };
 
-    let cfg = FitCfg { iters: 120, lr: 5e-3, log_every: 0, ..Default::default() };
+    let cfg = FitCfg { iters: 120, lr_position: 5e-3, log_every: 0, ..Default::default() };
     let (_fitted, mse_end) = fit(&g, ks, &init, &targets, &cfg, &mut |_it, _mse| true);
     assert!(
         (mse_end as f64) < mse0 * 0.35,
@@ -220,7 +221,8 @@ fn a_fit_that_starts_diverging_recovers_instead_of_running_on() {
                             [0.0, -1.0, 0.0], 60.0, 48, 48)
         })
         .collect();
-    let o = RenderOpts::default();
+    // the fit's own forward model: ray evaluation, the default dilation
+    let o = RenderOpts { ray: true, ..Default::default() };
     let mut ren = Renderer::new(&g, ks, truth.len(), 48, 48, 0);
     let gst = GpuSplats::upload(&g, &truth);
     let targets: Vec<TargetView> = cams
@@ -242,7 +244,7 @@ fn a_fit_that_starts_diverging_recovers_instead_of_running_on() {
     }
 
     // A rate two orders of magnitude past what this scene tolerates.
-    let cfg = FitCfg { iters: 60, lr: 3.0, log_every: 0, densify_every: 0, ..Default::default() };
+    let cfg = FitCfg { iters: 60, lr_position: 3.0, log_every: 0, densify_every: 0, ..Default::default() };
     let mut first = f32::NAN;
     let (_fitted, mse_end) =
         fit(&g, ks, &init, &targets, &cfg, &mut |it, mse| {

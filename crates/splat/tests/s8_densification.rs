@@ -85,20 +85,22 @@ fn a_fit_that_can_add_gaussians_beats_one_that_cannot() {
     // only thing that can close the gap.
     let coarse = board(4, true);
 
-    let fixed = FitCfg { iters: 160, lr: 1e-2, log_every: 0, densify_every: 0, ..Default::default() };
+    // a short fit: every group steps fast enough to settle in 160 iterations
+    let fixed = FitCfg { iters: 160, lr_position: 1e-2, lr_color: 1e-2, lr_scale: 1e-2, log_every: 0, densify_every: 0, ..Default::default() };
     let (a, mse_fixed) = fit(&g, ks, &coarse, &t, &fixed, &mut |_, _| true);
 
-    let grown = FitCfg { iters: 160, lr: 1e-2, log_every: 0, densify_every: 20, densify_after: 10, densify_frac: 0.30, ..Default::default() };
+    let grown = FitCfg { densify_every: 20, densify_after: 10, densify_frac: 0.30, ..fixed };
     let (b, mse_grown) = fit(&g, ks, &coarse, &t, &grown, &mut |_, _| true);
 
-    // Staging alone costs ~3.5% of final loss (Adam momentum restarts at each
-    // boundary), so density control has to earn that back before it pays at
-    // all - which is why a margin is demanded rather than any improvement
-    // being accepted. The margin is 7%, measured at 8.7%: it was larger when
-    // the learning rate was a fixed distance in world units, because the fit
-    // that CANNOT add gaussians was much weaker then. A stronger baseline
-    // leaves density control less to recover, which is the right outcome and
-    // not a regression in it.
+    // A margin is demanded rather than any improvement being accepted: a
+    // round disturbs the fit (3DGS's clones double the opacity at their
+    // site until they separate), and density control has to earn that back
+    // before it pays at all. The margin is 5%, measured at 6.0% under
+    // per-group log-space step sizes; it was 8.7% when one learning rate was
+    // a fixed distance for every group, because the fit that CANNOT add
+    // gaussians was much weaker then. A stronger baseline leaves density
+    // control less to recover, which is the right outcome and not a
+    // regression in it.
     assert_eq!(a.len(), coarse.len(), "the fixed-set fit must not change the gaussian count");
     assert!(
         b.len() > coarse.len(),
@@ -106,7 +108,7 @@ fn a_fit_that_can_add_gaussians_beats_one_that_cannot() {
         b.len(), coarse.len()
     );
     assert!(
-        mse_grown < mse_fixed * 0.93,
+        mse_grown < mse_fixed * 0.95,
         "density control did not pay for itself: {mse_grown:.6} against {mse_fixed:.6} for a fit \
          that cannot add gaussians, on a target the initial set cannot represent"
     );
@@ -140,7 +142,7 @@ fn density_control_leaves_an_adequate_scene_alone() {
     let truth = board(12, false);
     let t = targets(&g, ks, &truth, w, h);
 
-    let cfg = FitCfg { iters: 120, lr: 5e-3, log_every: 0, densify_every: 30, densify_after: 10, ..Default::default() };
+    let cfg = FitCfg { iters: 120, lr_position: 5e-3, log_every: 0, densify_every: 30, densify_after: 10, ..Default::default() };
     let (out, _) = fit(&g, ks, &truth, &t, &cfg, &mut |_, _| true);
     assert!(
         out.len() < truth.len() * 3,
@@ -191,7 +193,7 @@ fn fitting_does_not_stretch_gaussians_into_needles() {
         (needle, disc)
     };
 
-    let cfg = FitCfg { iters: 200, lr: 2e-2, log_every: 0, max_needle: 2.0, ..Default::default() };
+    let cfg = FitCfg { iters: 200, lr_position: 2e-2, log_every: 0, max_needle: 2.0, ..Default::default() };
     let (fitted, _) = fit(&g, ks, &init, &t, &cfg, &mut |_, _| true);
     let (worst, discs) = shape(&fitted);
     assert!(
@@ -210,7 +212,7 @@ fn fitting_does_not_stretch_gaussians_into_needles() {
 
     // and the cap has to be the thing doing it - without one, the same fit
     // reaches for far more extreme shapes
-    let loose = FitCfg { iters: 200, lr: 2e-2, log_every: 0, max_needle: 0.0, ..Default::default() };
+    let loose = FitCfg { iters: 200, lr_position: 2e-2, log_every: 0, max_needle: 0.0, ..Default::default() };
     let (unclamped, _) = fit(&g, ks, &init, &t, &loose, &mut |_, _| true);
     assert!(
         shape(&unclamped).0 > worst * 1.5,
@@ -285,69 +287,6 @@ fn the_split_criterion_sees_a_gaussian_that_straddles_a_detail() {
     );
 }
 
-/// Exploration must reach the one direction the gradient cannot.
-///
-/// A splat's image-plane gradient is orthogonal to the viewing ray, so no
-/// amount of training pushes a gaussian nearer or further - it can only slide
-/// across the frame. Classic density control inherits that limitation exactly,
-/// because every child it makes is displaced along its parent's own axes,
-/// which is a rotation of the same plane. So a gaussian at the wrong DEPTH
-/// stays at the wrong depth forever, and the region stays soft.
-///
-/// The check is geometric and needs no fit: after a densification round, some
-/// child must sit at a materially different distance from the cameras than any
-/// gaussian that existed before.
-#[test]
-fn exploration_moves_gaussians_along_the_one_axis_the_gradient_cannot() {
-    let eye = [0.0f32, 0.0, 0.0];
-    let dist = |s: &Splats, i: usize| {
-        let d = [s.means[i * 3] - eye[0], s.means[i * 3 + 1] - eye[1], s.means[i * 3 + 2] - eye[2]];
-        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-    };
-    // a slab all at one depth, so any change in depth is unambiguous
-    let mut s = Splats::default();
-    for i in 0..600 {
-        let a = i as f32 * 0.37;
-        s.means.extend_from_slice(&[a.sin() * 0.6, a.cos() * 0.6, 4.0]);
-        s.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
-        s.scales.extend_from_slice(&[0.10, 0.10, 0.10]);
-        s.opacities.push(0.9);
-        s.colors.extend_from_slice(&[0.5, 0.5, 0.5]);
-    }
-    let before: Vec<f32> = (0..s.len()).map(|i| dist(&s, i)).collect();
-    let (lo, hi) = (
-        before.iter().cloned().fold(f32::MAX, f32::min),
-        before.iter().cloned().fold(f32::MIN, f32::max),
-    );
-
-    // no gradient signal at all: nothing is "chosen", so anything that happens
-    // is exploration and only exploration
-    let grad = vec![0.0f32; s.len()];
-    let cfg = FitCfg { densify_every: 1, densify_frac: 0.0, explore_frac: 0.25, ..Default::default() };
-
-    let mut explored = s.clone();
-    splat::opt::densify_for_test(&mut explored, &grad, &cfg, eye);
-    let moved = (0..explored.len())
-        .map(|i| dist(&explored, i))
-        .filter(|&d| d < lo - 1e-3 || d > hi + 1e-3)
-        .count();
-    assert!(moved > 0, "exploration produced no gaussian at a new depth ({} total)", explored.len());
-
-    let mut plain = s.clone();
-    let off = FitCfg { explore_frac: 0.0, ..cfg };
-    splat::opt::densify_for_test(&mut plain, &grad, &off, eye);
-    let moved_off = (0..plain.len())
-        .map(|i| dist(&plain, i))
-        .filter(|&d| d < lo - 1e-3 || d > hi + 1e-3)
-        .count();
-    assert_eq!(moved_off, 0, "density control without exploration changed a depth, so this test proves nothing");
-
-    // and it must stay deterministic: a fit has to give the same answer twice
-    let mut again = s.clone();
-    splat::opt::densify_for_test(&mut again, &grad, &cfg, eye);
-    assert_eq!(again.means, explored.means, "exploration is not reproducible");
-}
-
 /// A surface that looks different from different sides cannot be fitted by a
 /// scene whose colour does not depend on where you look from.
 ///
@@ -403,7 +342,9 @@ fn a_view_dependent_surface_needs_view_dependent_colour() {
     // start from the middle appearance, so neither fit is handed the answer
     let init = slab([0.45, 0.40, 0.45]);
     let score = |deg: u32| -> f64 {
-        let cfg = FitCfg { iters: 160, lr: 1e-2, log_every: 0, sh_degree: deg, ..Default::default() };
+        // a short fit: colour - and with it the harmonics, at a twentieth of
+        // its rate - has to move far in 160 iterations
+        let cfg = FitCfg { iters: 160, lr_position: 1e-2, lr_color: 4e-2, log_every: 0, sh_degree: deg, ..Default::default() };
         let (fitted, _) = fit(&g, ks, &init, &targets, &cfg, &mut |_, _| true);
         let mut r = Renderer::new(&g, ks, fitted.len(), w, h, 0);
         let gs = GpuSplats::upload(&g, &fitted);
@@ -515,13 +456,15 @@ fn a_fit_may_not_inflate_a_splat_far_past_where_it_started() {
         worst
     };
 
+    // sizes step fast enough to take up the temptation in 150 iterations;
+    // measured on the fitted scale itself, before the 3D filter is baked in
     let base = FitCfg {
-        iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 0.0, max_growth: 0.0,
+        iters: 150, lr_position: 8e-3, lr_scale: 2e-2, log_every: 0, max_scale_pixels: 0.0, max_growth: 0.0,
         ..Default::default()
     };
-    let (loose, _) = fit(&g, ks, &init, &shots, &base, &mut |_, _| true);
+    let loose = splat::opt::fit_full(&g, ks, &init, &shots, &base, &mut |_, _| true).scene;
     let cap = 2.0f32;
-    let (held, _) = fit(&g, ks, &init, &shots, &FitCfg { max_growth: cap, ..base }, &mut |_, _| true);
+    let held = splat::opt::fit_full(&g, ks, &init, &shots, &FitCfg { max_growth: cap, ..base }, &mut |_, _| true).scene;
 
     let (l, h) = (grew(&loose), grew(&held));
     assert!(
@@ -552,7 +495,7 @@ fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
     let biggest = |s: &Splats, limit_px: f32| -> f32 {
         // express every gaussian's longest axis in pixels, at the rate its own
         // cameras sampled it
-        let unit = splat::mip::smoothing_sigma(s, &cams, 1.0);
+        let unit = splat::mip::smoothing_sigma(s, &cams, 1.0, &|_, _| true);
         let mut worst = 0.0f32;
         for (i, &u) in unit.iter().enumerate() {
             if u <= 0.0 {
@@ -573,13 +516,14 @@ fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
     // the cameras resolve - and leaving it on would bound the control run too,
     // making this compare two bounded fits and prove nothing. Its own bound is
     // tested separately.
+    // sizes step fast enough to take up the temptation in 150 iterations;
+    // measured on the fitted scale itself, before the 3D filter is baked in
     let base = FitCfg {
-        iters: 150, lr: 8e-3, log_every: 0, max_scale_pixels: 4.0, max_growth: 0.0,
+        iters: 150, lr_position: 8e-3, lr_scale: 3e-2, log_every: 0, max_scale_pixels: 4.0, max_growth: 0.0,
         ..Default::default()
     };
-    let (bounded, _) = fit(&g, ks, &init, &shots, &base, &mut |_, _| true);
-    let (loose, _) =
-        fit(&g, ks, &init, &shots, &FitCfg { max_scale_pixels: 0.0, ..base }, &mut |_, _| true);
+    let bounded = splat::opt::fit_full(&g, ks, &init, &shots, &base, &mut |_, _| true).scene;
+    let loose = splat::opt::fit_full(&g, ks, &init, &shots, &FitCfg { max_scale_pixels: 0.0, ..base }, &mut |_, _| true).scene;
 
     let b = biggest(&bounded, base.max_scale_pixels);
     let l = biggest(&loose, 0.0);

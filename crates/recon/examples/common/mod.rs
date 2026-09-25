@@ -9,11 +9,8 @@
 //! that, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use gpu_core::Gpu;
 use splat::opt::FitCfg;
-use splat::renderer::{rgba_to_rgb, GpuSplats, Renderer};
-use splat::types::{Camera, RenderOpts, Splats};
-use splat::Kernels;
+use splat::types::RenderOpts;
 
 /// Positional arguments, `--name value` options and bare `--name` switches.
 pub struct Flags {
@@ -52,9 +49,10 @@ impl Flags {
 }
 
 /// The options every evaluation takes on top of the preset.
-pub const FIT_USAGE: &str = "[--budget gaussians] [--sh degree] [--isp off|exposure|full] [--pose-lr step] \
-                             [--distortion w] [--normal w] [--geometry-after f] [--position-budget r] \
-                             [--scale-budget r] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] [--mip on|off]";
+pub const FIT_USAGE: &str = "[--budget gaussians] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
+                             [--intrinsics-after f] [--distortion w] [--normal w] [--geometry-after f] \
+                             [--lr-position s] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] \
+                             [--mip on|off] [--noise l] [--opacity-reg l] [--batch n] [--pyramid n] [--coarse f]";
 
 /// [`FitCfg::from_sparse_points`] for `views` training views, with the
 /// command line's overrides.
@@ -64,8 +62,11 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
     if let Some(v) = flags.parse("sh") {
         cfg.sh_degree = v;
     }
-    if let Some(v) = flags.parse("pose-lr") {
-        cfg.pose_lr = v;
+    if let Some(v) = flags.parse("pose-after") {
+        cfg.camera.pose_after = v;
+    }
+    if let Some(v) = flags.parse("intrinsics-after") {
+        cfg.camera.intrinsics_after = v;
     }
     if let Some(v) = flags.parse("distortion") {
         cfg.distortion_weight = v;
@@ -76,14 +77,26 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
     if let Some(v) = flags.parse("geometry-after") {
         cfg.geometry_after = v;
     }
-    if let Some(v) = flags.parse("position-budget") {
-        cfg.position_budget = v;
-    }
-    if let Some(v) = flags.parse("scale-budget") {
-        cfg.scale_budget = v;
+    if let Some(v) = flags.parse("lr-position") {
+        cfg.lr_position = v;
     }
     if let Some(v) = flags.parse("max-scale-px") {
         cfg.max_scale_pixels = v;
+    }
+    if let Some(v) = flags.parse("noise") {
+        cfg.noise = v;
+    }
+    if let Some(v) = flags.parse("opacity-reg") {
+        cfg.opacity_reg = v;
+    }
+    if let Some(v) = flags.parse("batch") {
+        cfg.batch = v;
+    }
+    if let Some(v) = flags.parse("pyramid") {
+        cfg.pyramid = v;
+    }
+    if let Some(v) = flags.parse("coarse") {
+        cfg.coarse = v;
     }
     match flags.get("mip") {
         None => {}
@@ -111,9 +124,10 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
         Some(o) => panic!("--isp {o}: off, exposure or full"),
     }
     println!(
-        "fit: {iters} iterations, budget {budget}, sh {}, pose lr {}, isp {}",
+        "fit: {iters} iterations, budget {budget}, sh {}, poses after {}, intrinsics after {}, isp {}",
         cfg.sh_degree,
-        cfg.pose_lr,
+        cfg.camera.pose_after,
+        cfg.camera.intrinsics_after,
         match cfg.isp {
             None => "off".to_string(),
             Some(i) => format!("vignetting after {}, response after {}", i.vignetting_after, i.response_after),
@@ -122,36 +136,9 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
     cfg
 }
 
-/// `s` from `c`, SH evaluated for that camera, as RGB `[w*h*3]`.
-pub fn render(g: &Gpu, s: &Splats, c: &Camera, o: &RenderOpts) -> Vec<f32> {
-    let mut r = Renderer::new(g, Kernels::at(0), s.len().max(1), c.width, c.height, 0).growable();
-    let gs = GpuSplats::upload(g, s);
-    if let Some(col) = splat::sh::shade(s, c.eye()) {
-        g.write_f32(&gs.colors, &col);
-    }
-    r.render(g, &gs, c, o);
-    rgba_to_rgb(&r.read_rgba(g, c.width, c.height))
-}
-
-/// How the fit rendered: its Mip filter setting.
+/// How the fit rendered: its Mip filter setting, along rays.
 pub fn fitted_opts(cfg: &FitCfg) -> RenderOpts {
-    RenderOpts { antialiased: cfg.antialiased, eps2d: cfg.eps2d, ..Default::default() }
-}
-
-/// PSNR over the pixels whose `mask` (`[w*h]`, `None` = all) is at least 0.5.
-pub fn psnr_masked(a: &[f32], b: &[f32], mask: Option<&[f32]>) -> f64 {
-    let (mut se, mut n) = (0.0f64, 0usize);
-    for (p, (x, y)) in a.chunks_exact(3).zip(b.chunks_exact(3)).enumerate() {
-        if mask.is_some_and(|m| m[p] < 0.5) {
-            continue;
-        }
-        se += (0..3).map(|c| ((x[c] - y[c]) as f64).powi(2)).sum::<f64>();
-        n += 3;
-    }
-    if se <= 0.0 {
-        return f64::INFINITY;
-    }
-    10.0 * (n as f64 / se).log10()
+    RenderOpts { antialiased: cfg.antialiased, eps2d: cfg.eps2d, ray: true, ..Default::default() }
 }
 
 /// Side-by-side columns of equally sized RGB images, as 8-bit.

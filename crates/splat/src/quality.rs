@@ -80,6 +80,111 @@ pub fn sharpness_ratio(render: &[f32], reference: &[f32], w: usize, h: usize) ->
     hf_energy(render, w, h) / r
 }
 
+/// PSNR in dB over the pixels `mask` weights (`None` = all), interleaved
+/// RGB in `[0,1]`.
+pub fn psnr_masked(a: &[f32], b: &[f32], mask: Option<&[f32]>) -> f64 {
+    assert_eq!(a.len(), b.len(), "psnr_masked: images differ in size");
+    let (mut se, mut n) = (0.0f64, 0.0f64);
+    for p in 0..a.len() / 3 {
+        let w = mask.map_or(1.0, |m| m[p] as f64);
+        if w <= 0.0 {
+            continue;
+        }
+        for c in 0..3 {
+            se += w * ((a[p * 3 + c] - b[p * 3 + c]) as f64).powi(2);
+        }
+        n += 3.0 * w;
+    }
+    if se <= 0.0 || n <= 0.0 {
+        return f64::INFINITY;
+    }
+    -10.0 * (se / n).log10()
+}
+
+/// Structural similarity (Wang et al., IEEE TIP 2004): the mean SSIM map of
+/// two interleaved-RGB images in `[0,1]`, per channel, over an 11x11 gaussian
+/// window of sigma 1.5 with `C1 = 0.01²`, `C2 = 0.03²` - the constants every
+/// splatting paper reports SSIM with - averaged over the pixels `mask`
+/// weights (`None` = all) and the channels. The window is renormalized at the
+/// frame's border rather than zero-padded, so an edge pixel is scored on the
+/// image it has.
+pub fn ssim(a: &[f32], b: &[f32], w: usize, h: usize, mask: Option<&[f32]>) -> f64 {
+    assert_eq!(a.len(), w * h * 3);
+    assert_eq!(b.len(), w * h * 3);
+    const R: isize = 5;
+    let g: Vec<f64> = (-R..=R).map(|k| (-((k * k) as f64) / (2.0 * 1.5 * 1.5)).exp()).collect();
+    let (c1, c2) = (0.01f64 * 0.01, 0.03f64 * 0.03);
+    // five moments per channel, blurred separably
+    let blur = |f: &(dyn Fn(usize) -> f64 + Sync)| -> Vec<f64> {
+        let rows = backend_cpu::par::map(h * w, |i| {
+            let (y, x) = (i / w, i % w);
+            let (mut s, mut n) = (0.0, 0.0);
+            for (k, gk) in g.iter().enumerate() {
+                let xx = x as isize + k as isize - R;
+                if xx >= 0 && (xx as usize) < w {
+                    s += gk * f(y * w + xx as usize);
+                    n += gk;
+                }
+            }
+            s / n
+        });
+        backend_cpu::par::map(h * w, |i| {
+            let (y, x) = (i / w, i % w);
+            let (mut s, mut n) = (0.0, 0.0);
+            for (k, gk) in g.iter().enumerate() {
+                let yy = y as isize + k as isize - R;
+                if yy >= 0 && (yy as usize) < h {
+                    s += gk * rows[yy as usize * w + x];
+                    n += gk;
+                }
+            }
+            s / n
+        })
+    };
+    let (mut total, mut n) = (0.0f64, 0.0f64);
+    for c in 0..3 {
+        let pa = |i: usize| a[i * 3 + c] as f64;
+        let pb = |i: usize| b[i * 3 + c] as f64;
+        let ma = blur(&pa);
+        let mb = blur(&pb);
+        let saa = blur(&|i| pa(i) * pa(i));
+        let sbb = blur(&|i| pb(i) * pb(i));
+        let sab = blur(&|i| pa(i) * pb(i));
+        for i in 0..w * h {
+            let wgt = mask.map_or(1.0, |m| m[i] as f64);
+            if wgt <= 0.0 {
+                continue;
+            }
+            let (va, vb, cov) = (saa[i] - ma[i] * ma[i], sbb[i] - mb[i] * mb[i], sab[i] - ma[i] * mb[i]);
+            let s = ((2.0 * ma[i] * mb[i] + c1) * (2.0 * cov + c2)) / ((ma[i] * ma[i] + mb[i] * mb[i] + c1) * (va + vb + c2));
+            total += wgt * s;
+            n += wgt;
+        }
+    }
+    if n > 0.0 { total / n } else { 1.0 }
+}
+
+/// How much a rendered camera path flickers: the mean absolute SECOND
+/// difference `|I(t+1) - 2 I(t) + I(t-1)|` over consecutive frames of a path
+/// sampled finely enough that the true image changes smoothly. Smooth motion
+/// has a near-zero second difference; a splat popping in front of another as
+/// the sort order flips, or a sub-pixel gaussian aliasing, is a spike in it.
+/// Interleaved RGB frames of one size; 0 for fewer than three.
+pub fn temporal_instability(frames: &[Vec<f32>]) -> f64 {
+    if frames.len() < 3 {
+        return 0.0;
+    }
+    let mut acc = 0.0f64;
+    let mut n = 0usize;
+    for t in 1..frames.len() - 1 {
+        for ((a, b), c) in frames[t - 1].iter().zip(&frames[t]).zip(&frames[t + 1]) {
+            acc += (*c as f64 - 2.0 * *b as f64 + *a as f64).abs();
+            n += 1;
+        }
+    }
+    acc / n.max(1) as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

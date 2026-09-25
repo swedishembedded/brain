@@ -243,7 +243,7 @@ impl FlyCam {
             0.0, 0.0, 0.0, 1.0,
         ];
         let fy = 0.5 * height as f32 / (0.5 * fov_y_deg.to_radians()).tan();
-        Camera { c2w, fx: fy, fy, cx: width as f32 / 2.0, cy: height as f32 / 2.0, width, height }
+        Camera::pinhole(c2w, fy, fy, width as f32 / 2.0, height as f32 / 2.0, width, height)
     }
 }
 
@@ -566,7 +566,7 @@ fn prune_cmd(argv: &[String]) {
             std::process::exit(2);
         }));
         let mut sig: Vec<f32> =
-            splat::mip::smoothing_sigma(&t, &cams, voxel_px).into_iter().filter(|&v| v > 0.0).collect();
+            splat::mip::smoothing_sigma(&t, &cams, voxel_px, &|_, _| true).into_iter().filter(|&v| v > 0.0).collect();
         if sig.is_empty() {
             eprintln!("prune: no gaussian is visible from any of those cameras");
             std::process::exit(2);
@@ -605,17 +605,16 @@ fn photogrammetry(a: &mut Args) -> (Vec<String>, recon::photogrammetry::Training
         eprintln!("--images <dir|a.jpg,b.jpg,...> is required");
         std::process::exit(2);
     });
-    // The training resolution: SfM runs on the full photographs, the fit on
-    // pinhole-resampled copies this wide.
-    let width = a.u32_or("--width", 1024);
+    // The training resolution, as exact halvings of the photographs' own:
+    // SfM runs on the full photographs, the fit on their own pixels through
+    // their own lens, this many 2x2 box-downsamplings below.
+    let halvings = a.u32_or("--halvings", 0);
     let defaults = sfm::incremental::SfmCfg::default();
     let focal = a.f32_or("--focal-guess", defaults.focal_guess as f32);
-    // What the sparse points start as. 3DGS starts at 0.1 so the fit decides
-    // what is solid, but every pixel then composites many layers deep and the
-    // backward's cost is proportional to that depth: on a 16-photo capture at
-    // 768x576, 0.5 ran 2.9x faster per iteration than 0.1 AND was lower in
-    // loss at iteration 100 (0.223 against 0.232).
-    let opacity = a.f32_or("--init-opacity", 0.5);
+    // What the sparse points start as: 3DGS's 0.1, so the fit decides what
+    // is solid. Fat blobs of high opacity occlude what is behind them from
+    // the first step and starve it of gradient.
+    let opacity = a.f32_or("--init-opacity", 0.1);
     let paths = crate::mirror_cli::collect_images(&images);
     let photos: Vec<imaging::Rgb8> = paths
         .iter()
@@ -628,7 +627,7 @@ fn photogrammetry(a: &mut Args) -> (Vec<String>, recon::photogrammetry::Training
         .collect();
     println!("structure from motion on {} photographs ...", photos.len());
     let cfg = sfm::incremental::SfmCfg { focal_guess: focal as f64, verbose: true, ..defaults };
-    let set = recon::photogrammetry::training_set(&photos, width, opacity, &cfg).unwrap_or_else(|e| {
+    let set = recon::photogrammetry::training_set(&photos, halvings, opacity, &cfg).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
@@ -675,7 +674,7 @@ fn train_cmd(argv: &[String]) {
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/trained.ply"), "scene").to_string();
     let iters = a.usize_or("--iters", 3000);
     let budget = a.usize_or("--max-gaussians", 500_000);
-    let lr = a.f32_or("--lr", 5e-3);
+    let lr_position = a.f32_or("--lr-position", FitCfg::from_sparse_points(iters, budget, 0).lr_position);
     let coarse = a.f32_or("--coarse", FitCfg::from_sparse_points(iters, budget, 0).coarse);
     let strategy = match a.str_or("--densify-strategy", "hybrid").as_str() {
         "heuristic" => Densify::Heuristic,
@@ -696,7 +695,7 @@ fn train_cmd(argv: &[String]) {
     let recon::photogrammetry::TrainingSet { targets, init, .. } = set.upright();
     let preset = FitCfg::from_sparse_points(iters, budget, targets.len());
     let isp = if camera_model { Some(splat::isp::IspCfg::default()) } else { preset.isp };
-    let cfg = FitCfg { lr, coarse, strategy, isp, ..preset };
+    let cfg = FitCfg { lr_position, coarse, strategy, isp, ..preset };
     let g = Gpu::new(splat::PIPELINES);
     println!(
         "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}, SH degree {}, camera model {}) ...",
@@ -855,7 +854,15 @@ fn fit_cmd(argv: &[String]) {
     });
     let out = crate::args::strip_out_name_prefix(&a.str_or("--out", "out/fitted.ply"), "scene").to_string();
     let iters = a.usize_or("--iters", 200);
-    let lr = a.f32_or("--lr", 5e-3);
+    // Position step, scene-normalized (the fit works in a frame about one
+    // unit across), decaying a hundredfold over the fit.
+    let lr_position = a.f32_or("--lr-position", FitCfg::default().lr_position);
+    // Travel budget in each gaussian's OWN radii over the whole run, for a
+    // scene that is ALREADY metric, as a feed-forward reconstruction's is:
+    // then a gaussian should settle onto its surface and not leave it. Off by
+    // default because a fit from a sparse point cloud needs the opposite -
+    // there the geometry HAS to migrate a long way.
+    let position_radii = a.f32_or("--position-radii", 0.0);
     // Part of the forward model, not a display setting: render the result with
     // this same value or the optimizer's compensation for it shows up as blur
     // (rendered higher) or as aliasing (rendered lower).
@@ -871,8 +878,8 @@ fn fit_cmd(argv: &[String]) {
     let sh_degree = a.u32_or("--sh-degree", FitCfg::default().sh_degree);
     // Refine the cameras alongside the scene. A pipeline that predicts its own
     // poses hands this step cameras that are wrong, and a pose error is a
-    // position error for every pixel of that frame.
-    let pose_lr = a.f32_or("--pose-lr", FitCfg::default().pose_lr);
+    // position error for every pixel of that frame. 0 = hold them.
+    let pose_lr = a.f32_or("--pose-lr", 0.0);
     let cams_out = a.take_str("--cameras-out");
     // Density control: let the fit ADD gaussians where the loss is still
     // pulling. Off unless asked, because a feed-forward scene is already
@@ -910,6 +917,14 @@ fn fit_cmd(argv: &[String]) {
     let distortion_weight = a.f32_or("--distortion", 0.0);
     let normal_consistency_weight = a.f32_or("--normal-consistency", 0.0);
     let geometry_after = a.f32_or("--geometry-after", 0.0);
+    // How large a fitted gaussian may get, in pixels of the view that samples
+    // it best: wider than a few pixels it cannot carry detail the cameras
+    // resolved, only blur it. The shape bounds cap the axis RATIOS - see
+    // `FitCfg::max_needle` - which is a separate question from size.
+    let max_scale_pixels = a.f32_or("--max-scale-pixels", 16.0);
+    let max_growth = a.f32_or("--max-growth", 2.0);
+    let max_needle = a.f32_or("--max-needle", 2.0);
+    let max_flat = a.f32_or("--max-flat", 4.0);
     a.finish();
 
     let cams = read_cameras(&cams_path);
@@ -962,36 +977,11 @@ fn fit_cmd(argv: &[String]) {
 
     let g = Gpu::new(splat::PIPELINES);
     let ks = Kernels::at(0);
-    println!("fitting {} gaussians against {} views ({} iters, lr {lr}) …", s.len(), targets.len(), iters);
-    // How large a fitted gaussian may get, in pixels of the view that samples
-    // it best. A gaussian wider than a couple of pixels cannot carry detail
-    // the cameras resolved; it can only blur it, and from a grazing angle a
-    // scene of them is fog. The two shape bounds cap the axis RATIOS - see
-    // `splat::opt::clamp_axes` - which is a separate question from size.
-    let max_scale_pixels = a.f32_or("--max-scale-pixels", 16.0);
-    let max_growth = a.f32_or("--max-growth", 2.0);
-    let max_needle = a.f32_or("--max-needle", 2.0);
-    let max_flat = a.f32_or("--max-flat", 4.0);
-    // Radius-relative budgets for the three geometry groups: how far a
-    // gaussian may travel, resize or turn over the WHOLE run, measured in
-    // units of a median gaussian's own radius. `p_geo` packs a position in
-    // world units, a linear scale and a unit quaternion into one buffer, and
-    // Adam's step is ~lr regardless of gradient, so one rate cannot serve all
-    // three - at a rate small enough to be a rounding error on the scene
-    // diagonal it is still a sixth of a small gaussian's own radius.
-    //
-    // Set these when the scene is ALREADY metric, as a feed-forward
-    // reconstruction's is: then a gaussian should settle onto its surface and
-    // not leave it, and `--lr` becomes the appearance rate (the budget divides
-    // by it, so raising it cannot move a gaussian further than it already
-    // could). They are off by default because a fit from a sparse point cloud
-    // needs the opposite - there the geometry HAS to migrate a long way.
-    let position_budget = a.f32_or("--position-budget", FitCfg::default().position_budget);
-    let scale_budget = a.f32_or("--scale-budget", FitCfg::default().scale_budget);
-    let rotation_budget = a.f32_or("--rotation-budget", FitCfg::default().rotation_budget);
+    println!("fitting {} gaussians against {} views ({} iters) …", s.len(), targets.len(), iters);
     let cfg = FitCfg {
         iters,
-        lr,
+        relative_position: position_radii > 0.0,
+        lr_position: if position_radii > 0.0 { position_radii * 4.65 / iters.max(1) as f32 } else { lr_position },
         eps2d: if inria { 0.3 } else { eps2d },
         antialiased: !inria,
         mip_scale,
@@ -1000,14 +990,11 @@ fn fit_cmd(argv: &[String]) {
         max_gaussians,
         strategy,
         sh_degree,
-        pose_lr,
+        camera: splat::opt::CameraRefine { pose_after: if pose_lr > 0.0 { 0.0 } else { 1.0 }, pose_lr, ..Default::default() },
         max_scale_pixels,
         max_growth,
         max_needle,
         max_flat,
-        position_budget,
-        scale_budget,
-        rotation_budget,
         loss,
         isp,
         batch,

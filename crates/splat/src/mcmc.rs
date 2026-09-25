@@ -163,22 +163,23 @@ fn place(scene: &mut Splats, src: &[usize], dst: &[usize]) {
 }
 
 /// Teleport every gaussian whose opacity is below `dead_below` onto a live one
-/// drawn by opacity, image-preservingly. Returns how many moved.
+/// drawn by opacity, image-preservingly. Returns the slots that moved: each
+/// is now a new sample and starts its own optimizer state.
 ///
 /// This is the move that the heuristic has no equivalent of. Pruning a dead
 /// gaussian gives its budget back to nobody; relocating it puts the sample
 /// where the density is, which is the only reason a FIXED budget can keep
 /// improving.
-pub fn relocate(scene: &mut Splats, dead_below: f32, seed: u64) -> usize {
+pub fn relocate(scene: &mut Splats, dead_below: f32, seed: u64) -> Vec<usize> {
     let n = scene.len();
     let dead: Vec<usize> = (0..n).filter(|&i| scene.opacities[i] < dead_below).collect();
     let live: Vec<usize> = (0..n).filter(|&i| scene.opacities[i] >= dead_below).collect();
     if dead.is_empty() || live.is_empty() {
-        return 0;
+        return Vec::new();
     }
     let src = sample_by_opacity(&live, &scene.opacities, dead.len(), seed);
     place(scene, &src, &dead);
-    dead.len()
+    dead
 }
 
 /// Grow the scene to `target` gaussians by duplicating sites drawn by opacity,
@@ -208,7 +209,9 @@ pub fn grow(scene: &mut Splats, target: usize, seed: u64) -> usize {
 }
 
 /// One MCMC density-control step, `round` of `rounds`: recycle the dead, then
-/// spend whatever budget is left. Returns `(relocated, added)`.
+/// spend whatever budget is left. Returns `(relocated, added, origin)`, with
+/// `origin` per gaussian of the new scene as in
+/// [`crate::density::Round::origin`]: a relocated or added sample is new.
 ///
 /// Relocation runs FIRST so the gaussians it frees are counted against the
 /// cap before anything new is asked for - a scene at its budget still has
@@ -224,10 +227,14 @@ pub fn grow(scene: &mut Splats, target: usize, seed: u64) -> usize {
 /// order of magnitude above it, reaches the cap about a sixth of the way in.
 /// Without a budget there is nothing to aim at, and the literal 5% per round
 /// is all that is left.
-pub fn step(scene: &mut Splats, cfg: &FitCfg, round: usize, rounds: usize) -> (usize, usize) {
+pub fn step(scene: &mut Splats, cfg: &FitCfg, round: usize, rounds: usize) -> (usize, usize, Vec<Option<usize>>) {
     let seed = 0x3d47_535f_4d43_4d43_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    let moved = relocate(scene, cfg.prune_opacity, seed);
     let n = scene.len();
+    let mut origin: Vec<Option<usize>> = (0..n).map(Some).collect();
+    let moved = relocate(scene, cfg.prune_opacity, seed);
+    for &d in &moved {
+        origin[d] = None;
+    }
     let want = if cfg.max_gaussians == 0 {
         n + ((n as f32 * cfg.mcmc_grow_frac) as usize).max(1)
     } else {
@@ -241,67 +248,6 @@ pub fn step(scene: &mut Splats, cfg: &FitCfg, round: usize, rounds: usize) -> (u
         }
     };
     let added = grow(scene, want, seed ^ 0xa5a5_a5a5);
-    (moved, added)
-}
-
-/// Add the paper's exploration noise (its Eq. 8) to the packed geometry in
-/// place. `geo` is the fit's `[N*10] = {mean, scale, quat}` layout, the same
-/// one `splat_unpack` reads.
-///
-/// `amount` is `λ_noise · lr`, and the displacement it buys is in units of
-/// the gaussian's OWN size: the noise is proportional to the step size, so
-/// that as the fit anneals the chain stops exploring and settles, which is
-/// what makes this sampling rather than jitter. The per-gaussian weight is
-/// `sigmoid(-k(o - t))` with the paper's `k=100`, `t=0.005`, so a gaussian
-/// that is explaining something is left alone and only the ones on their way
-/// out are pushed around - which is the sense the paper gives for the term,
-/// and the sense the reference implementation computes it in. The direction is shaped by the gaussian's own
-/// covariance, so a flat one wanders in its own plane.
-pub fn add_noise(geo: &mut [f32], opacities: &[f32], amount: f32, seed: u64) {
-    if amount <= 0.0 {
-        return;
-    }
-    for (i, &o) in opacities.iter().enumerate() {
-        // 1/(1+exp(k(o-t))), the paper's op_sigmoid(1-o) written without the
-        // detour through 1-o
-        let w = 1.0 / (1.0 + (100.0 * (o - 0.005)).exp());
-        if w < 1e-4 {
-            continue;
-        }
-        let g = &mut geo[i * 10..i * 10 + 10];
-        let e = [normal(i * 3, seed), normal(i * 3 + 1, seed), normal(i * 3 + 2, seed)];
-        let q = [g[6], g[7], g[8], g[9]];
-        let nq = (q.iter().map(|v| v * v).sum::<f32>()).sqrt().max(1e-8);
-        let (w0, x, y, z) = (q[0] / nq, q[1] / nq, q[2] / nq, q[3] / nq);
-        // rotation columns, i.e. the gaussian's own axes in world space
-        let r = [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w0 * z), 2.0 * (x * z - w0 * y)],
-            [2.0 * (x * y - w0 * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w0 * x)],
-            [2.0 * (x * z + w0 * y), 2.0 * (y * z - w0 * x), 1.0 - 2.0 * (x * x + y * y)],
-        ];
-        // A draw from N(0, Σ), which is `L ε` for `Σ = L Lᵀ` with `L = R S`:
-        // scale each component of ε by that axis's sigma and rotate the
-        // result into the world. Written as scalar dot products, no vector
-        // locals, so the same shape of code ports to a kernel if it ever has
-        // to move onto the device.
-        //
-        // The reference implementation multiplies by Σ rather than by L,
-        // which gives a displacement proportional to the SQUARE of a length.
-        // That makes the same λ_noise mean different things in scenes of
-        // different size, which is the class of bug this fit already
-        // normalizes the whole scene to avoid, so the paper's own statement
-        // of the noise is what is implemented here.
-        for k in 0..3 {
-            let d = r[0][k] * e[0] * g[3] + r[1][k] * e[1] * g[4] + r[2][k] * e[2] * g[5];
-            g[k] += amount * w * d;
-        }
-    }
-}
-
-/// Standard normal from the scene's own indices, by Box-Muller on two
-/// hashed uniforms.
-fn normal(i: usize, seed: u64) -> f32 {
-    let u = jitter(i, seed).max(1e-7);
-    let v = jitter(i, seed ^ 0x1234_5678_9abc_def0);
-    (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos()
+    origin.resize(scene.len(), None);
+    (moved.len(), added, origin)
 }

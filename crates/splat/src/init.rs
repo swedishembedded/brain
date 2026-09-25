@@ -10,7 +10,7 @@
 //! own spacing, so the cost is linear in the number of points rather than
 //! quadratic.
 
-use crate::types::{Camera, Splats};
+use crate::types::Splats;
 use std::collections::HashMap;
 
 /// Starting scene from `xyz` `[N*3]` and `rgb` `[N*3]` (0..1).
@@ -28,26 +28,6 @@ pub fn from_points(xyz: &[f32], rgb: &[f32], opacity: f32) -> Splats {
         s.colors.extend_from_slice(&rgb[i * 3..i * 3 + 3]);
     }
     s
-}
-
-/// Raise every gaussian's axes to at least `px` pixels of the camera that
-/// sees it most finely.
-///
-/// Nearest-neighbour spacing is a WORLD distance, and where structure from
-/// motion found dense texture or distant surface it is sub-pixel. Under the
-/// Mip filter such a gaussian's opacity is compensated almost to nothing, so
-/// it renders nothing, receives no gradient, and density control correctly
-/// reads it as dead: measured on a 16-photo capture, 3,605 of 8,792 starting
-/// gaussians contributed nothing to any view and the median contributed
-/// 0.001 px - so only the visible remainder could ever be refined and the
-/// scene grew far below its schedule.
-pub fn floor_to_pixels(s: &mut Splats, cams: &[Camera], px: f32) {
-    let floor = crate::mip::smoothing_sigma(s, cams, px);
-    for (i, f) in floor.iter().enumerate() {
-        for v in &mut s.scales[i * 3..i * 3 + 3] {
-            *v = v.max(*f);
-        }
-    }
 }
 
 /// Mean distance from every point to its `k` nearest neighbours.

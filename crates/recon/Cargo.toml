@@ -19,11 +19,14 @@ brain-imaging.workspace = true
 # needs no learned model (`photogrammetry.rs`).
 brain-sfm.workspace = true
 # `camera::Intrinsics` - the calibration structure from motion returns, and
-# the lens the undistortion looks through.
+# the lens every target is imaged through.
 brain-camera.workspace = true
+# `backend_cpu::par` - the workspace's one rayon seam, for per-pixel host
+# loops over full-resolution photographs.
+brain-backend-cpu.workspace = true
+# The device `eval` renders a fitted scene on to score it.
+brain-gpu-core.workspace = true
 
 [dev-dependencies]
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).
 brain-data.workspace = true
-# `examples/synthetic_e2e.rs` builds its own device.
-brain-gpu-core.workspace = true

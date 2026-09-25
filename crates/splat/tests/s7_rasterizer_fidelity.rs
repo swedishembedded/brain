@@ -182,7 +182,7 @@ fn a_scene_must_be_rendered_at_the_dilation_it_was_fitted_under() {
     for v in init.colors.iter_mut() {
         *v = 0.5 + (*v - 0.5) * 0.3;
     }
-    let cfg = FitCfg { iters: 120, lr: 1e-2, log_every: 0, eps2d: FITTED_AT, ..Default::default() };
+    let cfg = FitCfg { iters: 120, lr_position: 1e-2, log_every: 0, eps2d: FITTED_AT, ..Default::default() };
     let (fitted, _) = fit(&g, ks, &init, std::slice::from_ref(&target), &cfg, &mut |_, _| true);
 
     let rm = render(&g, &fitted, &cam, FITTED_AT);
@@ -269,7 +269,7 @@ fn band_limiting_leaves_no_gaussian_below_what_its_cameras_sampled() {
     let img = source(w as usize, h as usize);
     let scene = one_splat_per_pixel(&img, &cam, 0.08);
     let filtered = splat::mip::apply_3d_filter(&scene, &[cam], splat::mip::DEFAULT_SCALE);
-    let sigma = splat::mip::smoothing_sigma(&scene, &[cam], splat::mip::DEFAULT_SCALE);
+    let sigma = splat::mip::smoothing_sigma(&scene, &[cam], splat::mip::DEFAULT_SCALE, &|_, _| true);
 
     let mut widened = 0;
     for (i, &sg) in sigma.iter().enumerate() {

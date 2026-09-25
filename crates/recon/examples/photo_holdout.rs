@@ -4,15 +4,22 @@
 //! Held-out evaluation of photographs -> splat scene on a REAL capture: every
 //! photograph is solved for by structure from motion, every `k`-th registered
 //! one is kept out of the fit, and the result is rendered from those
-//! photographs' own cameras and compared with them, inside the region the
-//! undistortion covers. A capture's training views say how well the fit
+//! photographs' own cameras - through their own lens, at their own pixels -
+//! and compared with them. A capture's training views say how well the fit
 //! memorized them; only views it never saw say whether the scene is right.
 //!
 //! ```text
-//! photo_holdout <photos dir> <out dir> [iters] [width] [--every k] [--views n] <fit options>
+//! photo_holdout <photos dir> <out dir> [iters] [halvings] [--every k] [--views n]
+//!               [--sfm-cache dir] <fit options>
 //! ```
 //!
-//! Writes `heldout_<i>.png` (photograph | render) for every held-out view.
+//! `halvings` is how many exact halvings below the photographs' own
+//! resolution the fit runs at (0 = native). `--sfm-cache` keeps structure
+//! from motion's cameras and points in a directory and reads them from there
+//! on the next run, so experiments on the fit do not re-solve the capture.
+//!
+//! Writes `heldout_<i>.png` (photograph | render) for every held-out view,
+//! `train_<i>.png` for some training views, and `scene.ply`.
 //!
 //! Swedish Embedded AB implements photogrammetry and 3D reconstruction
 //! pipelines and the evaluation that keeps them honest. If your team needs
@@ -21,20 +28,58 @@
 
 mod common;
 
-use common::{fit_cfg, fitted_opts, montage, psnr_masked, render, Flags, FIT_USAGE};
+use common::{fit_cfg, fitted_opts, montage, Flags, FIT_USAGE};
 use gpu_core::Gpu;
-use splat::opt::fit_full;
+use recon::eval::{holdout, score, stability, Viewer};
+use splat::opt::{fit_full, TargetView};
+use splat::types::{Camera, Splats};
 use splat::Kernels;
+
+/// Cameras (full resolution, with their lens), the source index of each and
+/// the starting scene - from the cache when it has them, else from structure
+/// from motion, which then fills it.
+fn cameras(photos: &[imaging::Rgb8], cache: Option<&str>) -> (Vec<Camera>, Vec<usize>, Splats) {
+    if let Some(dir) = cache {
+        let (cj, pj, sj) = (format!("{dir}/cameras.json"), format!("{dir}/points.ply"), format!("{dir}/source.txt"));
+        if let (Ok(c), Ok(s)) = (std::fs::read_to_string(&cj), std::fs::read_to_string(&sj)) {
+            let cams = splat::types::cameras_from_json(&c).expect("cached cameras");
+            let source: Vec<usize> = s.split_whitespace().map(|v| v.parse().expect("cached source index")).collect();
+            let init = splat::ply::read(&pj).expect("cached points");
+            println!("structure from motion: {} cameras and {} points from {dir}", cams.len(), init.len());
+            return (cams, source, init);
+        }
+    }
+    let t = std::time::Instant::now();
+    let sfm_cfg = sfm::incremental::SfmCfg { verbose: true, ..Default::default() };
+    let set = recon::photogrammetry::training_set(photos, 0, 0.1, &sfm_cfg).expect("structure from motion");
+    println!(
+        "structure from motion: {}/{} registered, {} points, rms {:.3} px, lens {:?} in {:.0} s",
+        set.targets.len(),
+        photos.len(),
+        set.sfm.points.len(),
+        set.sfm.rms_px,
+        set.sfm.lens,
+        t.elapsed().as_secs_f64()
+    );
+    let cams: Vec<Camera> = set.targets.iter().map(|t| t.cam).collect();
+    if let Some(dir) = cache {
+        std::fs::create_dir_all(dir).expect("cache dir");
+        std::fs::write(format!("{dir}/cameras.json"), splat::types::cameras_to_json(&cams)).expect("cache cameras");
+        std::fs::write(format!("{dir}/source.txt"), set.source.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(" ")).expect("cache sources");
+        splat::ply::write(&format!("{dir}/points.ply"), &set.init).expect("cache points");
+    }
+    (cams, set.source, set.init)
+}
 
 fn main() {
     let flags = Flags::from_env();
     let Some(dir) = flags.positional.first().cloned().filter(|_| flags.get("help").is_none()) else {
-        eprintln!("usage: photo_holdout <photos dir> <out dir> [iters] [width] [--every k] [--views n] {FIT_USAGE}");
+        eprintln!("usage: photo_holdout <photos dir> <out dir> [iters] [halvings] [--every k] [--views n] [--sfm-cache dir] {FIT_USAGE}");
         std::process::exit(2);
     };
     let out: String = flags.arg(1, "photo_holdout".to_string());
     let iters: usize = flags.arg(2, 3000);
-    let width: u32 = flags.arg(3, 768);
+    let halvings: u32 = flags.arg(3, 2);
     let every: usize = flags.parse("every").unwrap_or(8);
     std::fs::create_dir_all(&out).expect("out dir");
 
@@ -45,73 +90,65 @@ fn main() {
         .collect();
     paths.sort();
     let photos: Vec<imaging::Rgb8> = paths.iter().map(|p| imaging::load(p).unwrap_or_else(|e| panic!("{e}"))).collect();
-    let sfm_cfg = sfm::incremental::SfmCfg { verbose: true, ..Default::default() };
-    let set = recon::photogrammetry::training_set(&photos, width, 0.5, &sfm_cfg).expect("structure from motion");
-    println!(
-        "structure from motion: {}/{} registered, {} points, rms {:.2} px, focal {:.1}",
-        set.targets.len(),
-        photos.len(),
-        set.sfm.points.len(),
-        set.sfm.rms_px,
-        set.sfm.intrinsics[0].fx
-    );
+    let (cams, source, init) = cameras(&photos, flags.get("sfm-cache"));
+    let targets: Vec<TargetView> = cams
+        .iter()
+        .zip(&source)
+        .map(|(c, &i)| {
+            let mut t = recon::photogrammetry::target(&photos[i], *c, 0);
+            for _ in 0..halvings {
+                t = t.half();
+            }
+            t
+        })
+        .collect();
 
-    // hold out every k-th registered view, starting half a stride in so the
-    // held-out views are not the capture's first and last
-    let held_out = |i: usize| i % every == every / 2;
-    let (train, held): (Vec<_>, Vec<_>) = set.targets.iter().cloned().enumerate().partition(|(i, _)| !held_out(*i));
+    let held_out = holdout(targets.len(), every);
+    let (train, held): (Vec<_>, Vec<_>) = targets.iter().cloned().zip(&held_out).partition(|(_, h)| !**h);
     // `--views n` fits only the first n training views: a fit that cannot
     // reproduce even one photograph has a problem no amount of views explains
     let keep: usize = flags.parse("views").unwrap_or(usize::MAX);
-    let train: Vec<_> = train.into_iter().map(|(_, t)| t).take(keep).collect();
-    let held: Vec<_> = held.into_iter().map(|(_, t)| t).collect();
-    println!("fitting {} views, holding out {}", train.len(), held.len());
+    let train: Vec<TargetView> = train.into_iter().map(|(t, _)| t).take(keep).collect();
+    let held: Vec<TargetView> = held.into_iter().map(|(t, _)| t).collect();
+    let (w, h) = (train[0].cam.width, train[0].cam.height);
+    println!("fitting {} views at {w}x{h}, holding out {}", train.len(), held.len());
 
     let cfg = fit_cfg(&flags, iters, train.len());
     let g = Gpu::new(splat::PIPELINES);
     let t = std::time::Instant::now();
-    let res = fit_full(&g, Kernels::at(0), &set.init, &train, &cfg, &mut |_, _| true);
+    let res = fit_full(&g, Kernels::at(0), &init, &train, &cfg, &mut |_, _| true);
     let secs = t.elapsed().as_secs_f64();
-    let o = fitted_opts(&cfg);
-    let score = |views: &[splat::opt::TargetView]| -> Vec<(f64, Vec<f32>)> {
-        views
-            .iter()
-            .map(|v| {
-                let img = render(&g, &res.scene, &v.cam, &o);
-                (psnr_masked(&img, &v.rgb, v.mask.as_deref()), img)
-            })
-            .collect()
-    };
-    let mean = |s: &[(f64, Vec<f32>)]| s.iter().map(|x| x.0).sum::<f64>() / s.len().max(1) as f64;
-    // The fit may have refined the training cameras, and with them the
-    // frame: the held-out cameras are carried into it by the similarity
-    // between the training cameras before and after.
-    let refit: Vec<_> = train.iter().zip(&res.cams).map(|(t, c)| splat::opt::TargetView { cam: *c, ..t.clone() }).collect();
-    let before: Vec<[f64; 16]> = train.iter().map(|t| t.cam.c2w.map(f64::from)).collect();
-    let after: Vec<[f64; 16]> = res.cams.iter().map(|c| c.c2w.map(f64::from)).collect();
-    let sim = splat::align::sim3_from_cameras(&after, &before).expect("similarity");
-    let held: Vec<_> = held
+
+    // The fit may have refined the cameras; its gauge holds the first one
+    // and the scale, so the held-out cameras stay in its frame, and they
+    // take their sensor's refined calibration.
+    let refit: Vec<TargetView> = train.iter().zip(&res.cams).map(|(t, c)| TargetView { cam: *c, ..t.clone() }).collect();
+    let k = res.cams[0].intrinsics();
+    let held: Vec<TargetView> = held
         .iter()
-        .map(|t| {
-            let m = splat::align::transform_c2w_sim3(&t.cam.c2w.map(f64::from), &sim);
-            splat::opt::TargetView { cam: splat::types::Camera { c2w: m.map(|v| v as f32), ..t.cam }, ..t.clone() }
-        })
+        .map(|t| TargetView { cam: Camera { shutter: t.cam.shutter, ..Camera::with_intrinsics(t.cam.c2w, &k.resized(t.cam.width, t.cam.height)) }, ..t.clone() })
         .collect();
-    let on_train = score(&refit);
-    let on_held = score(&held);
+    let mut viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h);
+    let (on_train, train_img) = score(&mut viewer, &refit);
+    let (on_held, held_img) = score(&mut viewer, &held);
+    let path = recon::eval::path(&refit.iter().map(|t| t.cam).collect::<Vec<_>>(), 8);
+    let flicker = stability(&mut viewer, &path);
     println!(
-        "{} gaussians in {secs:.0} s; training views {:.2} dB; HELD-OUT {:.2} dB ({})",
+        "{} gaussians in {secs:.0} s; training views {:.2} dB / SSIM {:.4}; HELD-OUT {:.2} dB / SSIM {:.4} ({}); path flicker {flicker:.5}",
         res.scene.len(),
-        mean(&on_train),
-        mean(&on_held),
-        on_held.iter().map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" ")
+        on_train.mean_psnr(),
+        on_train.mean_ssim(),
+        on_held.mean_psnr(),
+        on_held.mean_ssim(),
+        on_held.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" "),
     );
-    println!("  per training view: {}", on_train.iter().map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" "));
-    for (i, (v, (_, img))) in refit.iter().zip(&on_train).enumerate().step_by(4) {
+    println!("  per training view: {}", on_train.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" "));
+    for (i, (v, img)) in refit.iter().zip(&train_img).enumerate().step_by(4) {
         imaging::save(format!("{out}/train_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }
-    for (i, (v, (_, img))) in held.iter().zip(&on_held).enumerate() {
+    for (i, (v, img)) in held.iter().zip(&held_img).enumerate() {
         imaging::save(format!("{out}/heldout_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }
     splat::ply::write(&format!("{out}/scene.ply"), &res.scene).expect("ply");
+    std::fs::write(format!("{out}/cameras.json"), splat::types::cameras_to_json(&res.cams)).expect("cameras");
 }

@@ -161,8 +161,9 @@ pub fn target_population(start: usize, cap: usize, round: usize, rounds: usize, 
     (start as f32 + (cap as f32 - start.min(cap) as f32) * s) as usize
 }
 
-/// What one round did, for the log.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What one round did, for the log, and where every gaussian of the new
+/// scene came from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Round {
     pub split: usize,
     pub cloned: usize,
@@ -170,6 +171,12 @@ pub struct Round {
     pub reclaimed: usize,
     /// Samples added at top-scored sites to fill the schedule.
     pub grown: usize,
+    /// Per gaussian of the new scene, the gaussian of the old one whose
+    /// optimizer state it continues - itself, or the parent of a split or a
+    /// clone - and `None` for a new sample placed at a site, which starts
+    /// its own. See `crate::opt`: discarding Adam's moments at every round
+    /// throws away the momentum exactly when refinement should accelerate.
+    pub origin: Vec<Option<usize>>,
 }
 
 /// Knobs of the hybrid controller - all fractions, none of them absolute
@@ -263,6 +270,7 @@ pub fn round(
     let shk = sh_stride(scene);
     let mut out = Splats { sh_rest: scene.sh_rest.as_ref().map(|(d, _)| (*d, Vec::new())), ..Default::default() };
     let mut marks = Vec::with_capacity(n + want);
+    let mut origin: Vec<Option<usize>> = Vec::with_capacity(n + want);
     // each new gaussian's claim on the samples that fill the schedule: its
     // (parent's) score, 0 for anything not ranked
     let mut weight: Vec<f32> = Vec::with_capacity(n + want);
@@ -292,8 +300,11 @@ pub fn round(
             push(&mut out, i, mu, s, o);
             marks.push(suspect[i]);
             weight.push(w);
+            origin.push(Some(i));
             continue;
         }
+        origin.push(Some(i));
+        origin.push(Some(i));
         weight.push(w);
         weight.push(w);
         let q = unit(&scene.quats[i * 4..i * 4 + 4]);
@@ -372,9 +383,11 @@ pub fn round(
     if left > 0 {
         stats.grown = grow_at(&mut out, &weight, left, seed ^ 0x6f77_6e67);
         marks.resize(out.len(), false);
+        origin.resize(out.len(), None);
     }
     *scene = out;
     *suspect = marks;
+    stats.origin = origin;
     stats
 }
 

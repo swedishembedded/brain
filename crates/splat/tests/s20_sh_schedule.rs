@@ -45,7 +45,7 @@ fn bands_that_have_not_switched_on_stay_at_zero() {
         *c = 0.5;
     }
     // A ramp twice the fit's length reaches degree 1 and no further.
-    let cfg = FitCfg { iters: 30, lr: 1e-2, log_every: 0, sh_degree: 3, sh_ramp: 2.0, ..Default::default() };
+    let cfg = FitCfg { iters: 30, lr_position: 1e-2, log_every: 0, sh_degree: 3, sh_ramp: 2.0, ..Default::default() };
     let (out, _) = fit(&g, Kernels::at(0), &init, &t, &cfg, &mut |_, _| true);
     let (degree, rest) = out.sh_rest.expect("an SH fit returns its coefficients");
     assert_eq!(degree, 3);

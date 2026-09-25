@@ -334,9 +334,7 @@ fn with_scene<R>(
     // hint to the trunk - see `gaussians::assemble`.
     let known: Option<Vec<splat::types::Camera>> = priors.as_ref().map(|ps| {
         ps.iter()
-            .map(|p| splat::types::Camera {
-                c2w: p.c2w, fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, width: w, height: h,
-            })
+            .map(|p| splat::types::Camera::pinhole(p.c2w, p.fx, p.fy, p.cx, p.cy, w, h))
             .collect()
     });
     if priors.is_some() {

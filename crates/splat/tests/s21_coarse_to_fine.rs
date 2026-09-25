@@ -66,7 +66,7 @@ fn switching_resolution_part_way_matches_a_full_resolution_fit_for_less_compute(
         })
         .collect();
     let init = board(8, true);
-    let base = FitCfg { iters: 160, lr: 1e-2, log_every: 0, ..Default::default() };
+    let base = FitCfg { iters: 160, lr_position: 1e-2, log_every: 0, ..Default::default() };
     let (a, _) = fit(&g, Kernels::at(0), &init, &t, &base, &mut |_, _| true);
     // At LESS compute: a half-resolution iteration renders and differentiates
     // a quarter of the pixels, so 220 iterations with the first half coarse

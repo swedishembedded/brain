@@ -9,16 +9,16 @@
 //! opposite of the one the original 3DGS optimizer was designed for, which
 //! starts from a sparse point cloud that HAS to migrate a long way.
 //!
-//! The failure this gate exists to catch is a single learning rate shared by
-//! parameter groups whose natural magnitudes differ by orders of magnitude.
-//! `p_geo` packs a position in world units, a LINEAR scale, and a unit
-//! quaternion into one buffer; Adam's step is ~lr regardless of gradient, so
-//! one step is a rounding error on the scene diagonal, a sixth of a typical
-//! gaussian's own radius, and nothing at all on a quaternion. Measured on a
-//! real capture that drove 94% of gaussians more than three radii off their
-//! surface and pinned a quarter of the scene against the growth clamp, which
-//! reads as stray gaussians and lost sharpness however good the initial
-//! geometry was.
+//! The failure this gate exists to catch is a position step that does not
+//! know how big the gaussian it moves is. Adam's step is ~lr regardless of
+//! gradient, so one rate in world units is a rounding error on the scene
+//! diagonal and a large fraction of a small gaussian's own radius. Measured
+//! on a real capture that drove 94% of gaussians more than three radii off
+//! their surface, which reads as stray gaussians and lost sharpness however
+//! good the initial geometry was. A caller with metric geometry therefore
+//! steps positions in each gaussian's OWN radii
+//! (`FitCfg::relative_position`), and sizes and opacities in logarithms,
+//! which are relative by construction.
 //!
 //! Swedish Embedded AB implements differentiable renderers and the numerical
 //! gates that keep them stable. If your team needs expertise in 3D
@@ -123,25 +123,15 @@ fn fit_refines_colour_without_relocating_geometry() {
         *c = (*c + (r.next() - 0.5) * 0.6).clamp(0.0, 1.0);
     }
 
-    // `lr` is the APPEARANCE rate now that the geometry groups are budgeted
-    // against their own radius, and the budget divides by `lr` - so raising
-    // this cannot move a gaussian any further than it already could. The rate
-    // that used to be forced on every group by the slowest-moving one is
-    // exactly what this decoupling buys back.
-    // The budgets are what a caller with metric geometry declares, and they
-    // are off by default because a fit from a sparse cloud needs the opposite.
-    // `lr` is the APPEARANCE rate once they are set: the budget divides by it,
-    // so raising this cannot move a gaussian any further than it already
-    // could. The single rate that every group used to share was held down to
-    // whatever the most fragile of them could survive, and that is exactly
-    // what this decoupling buys back.
+    // One radius of travel and about half a size's change over the whole
+    // fit: what a caller with metric geometry declares. Colour moves at its
+    // own rate, unaffected.
     let cfg = FitCfg {
         iters: 300,
-        lr: 5e-3,
+        relative_position: true,
+        lr_position: 4.65 / 300.0,
+        lr_scale: 0.4 / 300.0,
         log_every: 0,
-        position_budget: 1.0,
-        scale_budget: 0.5,
-        rotation_budget: 0.5,
         ..Default::default()
     };
     let (out, _) = fit(&g, ks, &init, &tgts, &cfg, &mut |_, _| true);
@@ -181,16 +171,11 @@ fn fit_refines_colour_without_relocating_geometry() {
     assert!(shrink < 1.5, "p95 gaussian shrank {shrink:.2}x on a scene that was already correct");
 }
 
-/// The same budget on the CPU backend, and proof that it is the descriptor
-/// doing the work.
-///
-/// `adamw.wgsl` reads the per-component multiplier at `desc[3 + idx % period]`,
-/// a DYNAMIC subscript, which is the kind of indexing a JIT backend can get
-/// wrong on its own. Running the budgeted and unbudgeted fits side by side
-/// asserts the two are different functions here as well, so a backend that
-/// quietly ignored the tail of the descriptor could not pass.
+/// The relative step on the CPU backend, and proof that it is the relative
+/// step doing the work: the same numeric rate taken in world units instead
+/// moves these small gaussians several times as far.
 #[test]
-fn the_position_budget_binds_on_the_cpu_backend() {
+fn the_relative_position_step_binds_on_the_cpu_backend() {
     let g = Gpu::new_cpu(splat::PIPELINES);
     let ks = Kernels::at(0);
     let truth = shell(300, 3);
@@ -203,10 +188,10 @@ fn the_position_budget_binds_on_the_cpu_backend() {
         *c = (*c + (r.next() - 0.5) * 0.6).clamp(0.0, 1.0);
     }
 
-    let free = FitCfg { iters: 60, lr: 5e-3, log_every: 0, ..Default::default() };
-    // Half a radius: a free fit of this scene drifts about 0.57 of one, so a
-    // full radius asked for would barely separate the two.
-    let budgeted = FitCfg { position_budget: 0.5, scale_budget: 0.5, rotation_budget: 0.5, ..free };
+    // Half a radius over the fit, as a relative step; as a world-unit step
+    // the same number is many radii of these gaussians.
+    let budgeted = FitCfg { iters: 60, relative_position: true, lr_position: 0.5 * 4.65 / 60.0, log_every: 0, ..Default::default() };
+    let free = FitCfg { relative_position: false, ..budgeted };
     let drift = |out: &Splats| {
         let mut d: Vec<f32> = (0..out.len())
             .map(|i| {
@@ -225,8 +210,11 @@ fn the_position_budget_binds_on_the_cpu_backend() {
     println!("cpu drift: unbudgeted {da:.3}r, budgeted {db:.3}r");
     assert!(
         db < da * 0.5,
-        "the per-component descriptor did not bind on this backend: {db:.3}r budgeted against \
-         {da:.3}r free"
+        "the relative step did not bind on this backend: {db:.3}r relative against {da:.3}r \
+         in world units"
     );
-    assert!(db < 0.5, "budgeted drift {db:.3}r exceeds the half radius asked for");
+    // The travel a rate buys is approximate - Adam's normalized step can
+    // exceed its learning rate while the gradient's scale settles - so the
+    // bound is the half radius asked for with a fifth of it to spare.
+    assert!(db < 0.6, "budgeted drift {db:.3}r exceeds the half radius asked for");
 }

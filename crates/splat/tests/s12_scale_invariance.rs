@@ -88,7 +88,7 @@ fn cams(k: f32, w: u32, h: u32) -> Vec<Camera> {
 /// Expressed this way the answer cannot depend on the scene's units, so if it
 /// moves with `k` something in the pipeline is measuring the world in metres.
 fn biggest_px(s: &Splats, cams: &[Camera]) -> f32 {
-    let unit = splat::mip::smoothing_sigma(s, cams, 1.0);
+    let unit = splat::mip::smoothing_sigma(s, cams, 1.0, &|_, _| true);
     let mut worst = 0.0f32;
     for (i, &u) in unit.iter().enumerate() {
         if u <= 0.0 {
@@ -140,7 +140,7 @@ fn run(g: &Gpu, ks: Kernels, k: f32) -> Outcome {
         init.colors.extend_from_slice(&truth.colors[i * 3..i * 3 + 3]);
     }
 
-    let cfg = FitCfg { iters: 140, lr: 8e-3, log_every: 0, ..Default::default() };
+    let cfg = FitCfg { iters: 140, lr_position: 8e-3, log_every: 0, ..Default::default() };
     let (fitted, _) = fit(g, ks, &init, &targets, &cfg, &mut |_, _| true);
 
     let mut ren2 = Renderer::new(g, ks, fitted.len(), w, h, 0);

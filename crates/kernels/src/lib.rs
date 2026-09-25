@@ -982,6 +982,10 @@ pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
 pub const SORT_SCATTER: &str = include_str!("../wgsl/sort_scatter.wgsl");
 /// `wgsl/space_to_depth3d.wgsl`
 pub const SPACE_TO_DEPTH3D: &str = include_str!("../wgsl/space_to_depth3d.wgsl");
+/// `wgsl/splat_activate.wgsl`
+pub const SPLAT_ACTIVATE: &str = include_str!("../wgsl/splat_activate.wgsl");
+/// `wgsl/splat_adam.wgsl`
+pub const SPLAT_ADAM: &str = include_str!("../wgsl/splat_adam.wgsl");
 /// `wgsl/splat_bwd_keys.wgsl`
 pub const SPLAT_BWD_KEYS: &str = include_str!("../wgsl/splat_bwd_keys.wgsl");
 /// `wgsl/splat_bwd_slots.wgsl`
@@ -990,6 +994,12 @@ pub const SPLAT_BWD_SLOTS: &str = include_str!("../wgsl/splat_bwd_slots.wgsl");
 pub const SPLAT_BWD_TILE_REDUCE: &str = include_str!("../wgsl/splat_bwd_tile_reduce.wgsl");
 /// `wgsl/splat_emit.wgsl`
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
+/// `wgsl/splat_geom_loss.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_GEOM_LOSS: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_geom_loss.wgsl"),
+);
 /// `wgsl/splat_grad_reduce.wgsl`
 pub const SPLAT_GRAD_REDUCE: &str = include_str!("../wgsl/splat_grad_reduce.wgsl");
 /// `wgsl/splat_naive.wgsl`
@@ -1558,10 +1568,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("sort_hist", SORT_HIST),
     ("sort_scatter", SORT_SCATTER),
     ("space_to_depth3d", SPACE_TO_DEPTH3D),
+    ("splat_activate", SPLAT_ACTIVATE),
+    ("splat_adam", SPLAT_ADAM),
     ("splat_bwd_keys", SPLAT_BWD_KEYS),
     ("splat_bwd_slots", SPLAT_BWD_SLOTS),
     ("splat_bwd_tile_reduce", SPLAT_BWD_TILE_REDUCE),
     ("splat_emit", SPLAT_EMIT),
+    ("splat_geom_loss", SPLAT_GEOM_LOSS),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
     ("splat_naive", SPLAT_NAIVE),
     ("splat_pack_rgba8", SPLAT_PACK_RGBA8),

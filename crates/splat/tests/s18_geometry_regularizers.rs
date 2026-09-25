@@ -55,7 +55,7 @@ fn views(g: &Gpu, truth: &Splats, w: u32, h: u32) -> Vec<TargetView> {
 }
 
 fn cfg(iters: usize) -> FitCfg {
-    FitCfg { iters, lr: 1e-2, log_every: 0, max_growth: 0.0, ..Default::default() }
+    FitCfg { iters, lr_position: 1e-2, lr_color: 1e-2, lr_rotation: 1e-2, log_every: 0, max_growth: 0.0, ..Default::default() }
 }
 
 /// Opacity-weighted spread of the gaussians' depths.

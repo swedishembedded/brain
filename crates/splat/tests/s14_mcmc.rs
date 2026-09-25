@@ -152,15 +152,16 @@ fn relocating_dead_gaussians_preserves_the_image() {
     let live: Vec<usize> = (0..n).filter(|&i| orig.opacities[i] >= 0.02).collect();
 
     let moved = mcmc::relocate(&mut s, 0.02, 0x5eed);
-    assert_eq!(moved, dead.len(), "every dead gaussian must be recycled");
+    assert_eq!(moved.len(), dead.len(), "every dead gaussian must be recycled");
     assert_eq!(s.len(), n, "relocation MOVES gaussians, it does not add or drop any");
 
     let after = render(&g, ks, &s, &c);
     let d = psnr(&after, &before);
     assert!(
         d > 45.0,
-        "relocating {moved} dead gaussians changed the render: {d:.1} dB. The opacity and scale \
-         correction exists precisely so this is a no-op at the moment it happens"
+        "relocating {} dead gaussians changed the render: {d:.1} dB. The opacity and scale \
+         correction exists precisely so this is a no-op at the moment it happens",
+        moved.len()
     );
 
     // The control, built from where the move actually put things: the same
@@ -347,7 +348,7 @@ fn mcmc_reconstructs_better_than_the_heuristic_at_the_same_budget() {
 
     let base = FitCfg {
         iters: 150,
-        lr: 1e-2,
+        lr_position: 1e-2,
         log_every: 0,
         densify_every: 25,
         densify_after: 25,
@@ -368,7 +369,7 @@ fn mcmc_reconstructs_better_than_the_heuristic_at_the_same_budget() {
         ..Default::default()
     };
     let (a, mse_heur) = fit(&g, ks, &init, &t, &base, &mut |_, _| true);
-    let mcmc_cfg = FitCfg { strategy: Densify::Mcmc, ..base };
+    let mcmc_cfg = FitCfg { strategy: Densify::Mcmc, noise: 1.0, ..base };
     let (b, mse_mcmc) = fit(&g, ks, &init, &t, &mcmc_cfg, &mut |_, _| true);
 
     assert!(a.len() <= BUDGET && b.len() <= BUDGET, "budget broken: {} and {}", a.len(), b.len());
@@ -453,7 +454,7 @@ fn density_control_carries_view_dependent_colour() {
     let mut heuristic = base.clone();
     let grad: Vec<f32> = (0..base.len()).map(|i| i as f32).collect();
     let cfg = FitCfg { densify_every: 1, densify_frac: 0.3, ..Default::default() };
-    splat::opt::densify_for_test(&mut heuristic, &grad, &cfg, [0.0, 0.0, 0.0]);
+    splat::opt::densify_for_test(&mut heuristic, &grad, &cfg);
     // measured against what it KEPT: the heuristic prunes the transparent
     // quarter of this scene, so the count it grows from is the live one
     let alive = base.opacities.iter().filter(|o| **o >= cfg.prune_opacity).count();

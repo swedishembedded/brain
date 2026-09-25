@@ -111,8 +111,8 @@ fn the_long_axis_split_preserves_the_image() {
     assert_eq!((r.split, ours.len()), (1, 2));
 
     let mut reference = parent.clone();
-    let cfg = FitCfg { densify_frac: 1.0, explore_frac: 0.0, ..Default::default() };
-    splat::opt::densify_for_test(&mut reference, &[1.0], &cfg, [0.0; 3]);
+    let cfg = FitCfg { densify_frac: 1.0, ..Default::default() };
+    splat::opt::densify_for_test(&mut reference, &[1.0], &cfg);
     assert_eq!(reference.len(), 2);
 
     let (a, b) = (psnr(&render(&g, &ours, &c), &before), psnr(&render(&g, &reference, &c), &before));
@@ -159,7 +159,7 @@ fn credit_assigned_density_beats_the_heuristic_at_an_equal_budget() {
     let coarse = board(4, true);
     let base = FitCfg {
         iters: 200,
-        lr: 1e-2,
+        lr_position: 1e-2,
         log_every: 0,
         densify_every: 20,
         densify_after: 10,
@@ -171,7 +171,7 @@ fn credit_assigned_density_beats_the_heuristic_at_an_equal_budget() {
     let (a, la) = fit(&g, Kernels::at(0), &coarse, &t, &FitCfg { strategy: Densify::Heuristic, ..base }, &mut |_, _| true);
     let (b, lb) = fit(&g, Kernels::at(0), &coarse, &t, &FitCfg { strategy: Densify::Hybrid, ..base }, &mut |_, _| true);
     let (c, lc) = fit(&g, Kernels::at(0), &coarse, &t, &FitCfg { strategy: Densify::Heuristic, densify_frac: 1.0, ..base }, &mut |_, _| true);
-    let (d, ld) = fit(&g, Kernels::at(0), &coarse, &t, &FitCfg { strategy: Densify::Mcmc, ..base }, &mut |_, _| true);
+    let (d, ld) = fit(&g, Kernels::at(0), &coarse, &t, &FitCfg { strategy: Densify::Mcmc, noise: 1.0, ..base }, &mut |_, _| true);
     assert!(b.len() <= base.max_gaussians, "hybrid grew to {} past a budget of {}", b.len(), base.max_gaussians);
     assert!(
         lb < 0.7 * lc && lb < 0.7 * ld && lb < la,

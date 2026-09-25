@@ -374,7 +374,8 @@ fn a_scene_at_the_wrong_depth_is_pulled_back_only_by_the_depth_term() {
     let ks = Kernels::at(0);
     let truth = slab(7, 0x60a1);
     let c = cam(32, 32);
-    let o = RenderOpts::default();
+    // the fit's own forward model, whose depth is the range along each ray
+    let o = RenderOpts { ray: true, ..Default::default() };
     let (truth_rgba, truth_depth) = shoot(&g, ks, &truth, &c, &o);
 
     const BIAS: f32 = 1.057;
@@ -397,7 +398,7 @@ fn a_scene_at_the_wrong_depth_is_pulled_back_only_by_the_depth_term() {
         .collect();
     let base_cfg = FitCfg {
         iters: 150,
-        lr: 5e-3,
+        lr_position: 5e-3,
         log_every: 0,
         mip_scale: 0.0,
         max_scale_pixels: 0.0,
@@ -453,7 +454,8 @@ fn a_biased_depth_prior_moves_only_the_pixels_it_is_trusted_at() {
     let ks = Kernels::at(0);
     let truth = slab(7, 0x60a1);
     let c = cam(32, 32);
-    let o = RenderOpts::default();
+    // the fit's own forward model, whose depth is the range along each ray
+    let o = RenderOpts { ray: true, ..Default::default() };
     let (truth_rgba, truth_depth) = shoot(&g, ks, &truth, &c, &o);
     let target_rgb = rgb_of(&truth_rgba);
     let px = (c.width * c.height) as usize;
@@ -471,7 +473,7 @@ fn a_biased_depth_prior_moves_only_the_pixels_it_is_trusted_at() {
     let t = TargetView::new(c, target_rgb).with_depth(depth, Some(conf));
     let cfg = FitCfg {
         iters: 150,
-        lr: 5e-3,
+        lr_position: 5e-3,
         log_every: 0,
         depth_weight: 1.0,
         mip_scale: 0.0,
@@ -504,18 +506,26 @@ fn a_biased_depth_prior_moves_only_the_pixels_it_is_trusted_at() {
 /// a switch.
 ///
 /// Each gaussian here covers pixels carrying BOTH a +10% and a -10% depth
-/// target, so its stationary point is the confidence-weighted mean of the two.
-/// Equal trust puts that at the truth; 3:1 trust puts it halfway to the
-/// positive bias. Same gradient magnitudes, same optimizer, only the weights
-/// differ - so unlike a global scale this is a statement AdamW cannot
-/// normalize away.
+/// target. With the depth term's knee wider than the disagreement the loss is
+/// quadratic in log range there, so the stationary point is the
+/// confidence-weighted mean of the two: equal trust puts it at the truth, 3:1
+/// trust halfway to the positive bias. Same gradient magnitudes, same
+/// optimizer, only the weights differ - so unlike a global scale this is a
+/// statement Adam cannot normalize away.
+///
+/// At the default knee a 10% disagreement is far past it, where the term's
+/// influence is bounded: that is what keeps a wrong prior (a reflection, a
+/// bad match) from dragging the geometry, so the 3:1 run then settles
+/// towards the MORE trusted prior rather than at the mean - still between
+/// the two, still decided by the confidences.
 #[test]
 fn conflicting_depth_priors_settle_where_their_confidences_balance() {
     let g = Gpu::new_cpu(splat::PIPELINES);
     let ks = Kernels::at(0);
     let truth = slab(7, 0x60a1);
     let c = cam(32, 32);
-    let o = RenderOpts::default();
+    // the fit's own forward model, whose depth is the range along each ray
+    let o = RenderOpts { ray: true, ..Default::default() };
     let (truth_rgba, truth_depth) = shoot(&g, ks, &truth, &c, &o);
     let target_rgb = rgb_of(&truth_rgba);
     let px = (c.width * c.height) as usize;
@@ -532,14 +542,15 @@ fn conflicting_depth_priors_settle_where_their_confidences_balance() {
         })
         .collect();
 
-    let run = |w_up: f32, w_dn: f32| -> f64 {
+    let run = |w_up: f32, w_dn: f32, knee: f32| -> f64 {
         let conf: Vec<f32> = (0..px).map(|i| if up(i) { w_up } else { w_dn }).collect();
         let t = TargetView::new(c, target_rgb.clone()).with_depth(depth.clone(), Some(conf));
         let cfg = FitCfg {
             iters: 200,
-            lr: 5e-3,
+            lr_position: 5e-3,
             log_every: 0,
             depth_weight: 1.0,
+            depth_delta: knee,
             mip_scale: 0.0,
             max_scale_pixels: 0.0,
             max_needle: 0.0,
@@ -550,19 +561,27 @@ fn conflicting_depth_priors_settle_where_their_confidences_balance() {
         depth_bias(&d, &truth_depth, &truth_rgba, |_| true)
     };
 
-    let balanced = run(1.0, 1.0);
-    let leaning = run(3.0, 1.0);
+    let wide = 1.0;
+    let balanced = run(1.0, 1.0, wide);
+    let leaning = run(3.0, 1.0, wide);
+    let robust = run(3.0, 1.0, FitCfg::default().depth_delta);
     // (3-1)/(3+1) of a 10% bias
     let want = 0.5 * BIAS as f64;
     println!(
-        "conflicting priors: balanced {:+.2}%  3:1 {:+.2}% (expected {:+.2}%)",
-        100.0 * balanced, 100.0 * leaning, 100.0 * want
+        "conflicting priors: balanced {:+.2}%  3:1 {:+.2}% (expected {:+.2}%)  3:1 at the default knee {:+.2}%",
+        100.0 * balanced, 100.0 * leaning, 100.0 * want, 100.0 * robust
     );
     assert!(balanced.abs() < 0.02, "equal confidences did not cancel: {:+.2}%", 100.0 * balanced);
     assert!(
         (leaning - want).abs() < 0.025,
         "3:1 confidence settled at {:+.2}%, not near the weighted mean {:+.2}%",
         100.0 * leaning, 100.0 * want
+    );
+    assert!(
+        robust > want && robust < BIAS as f64 * 1.02,
+        "past the knee 3:1 confidence settled at {:+.2}%: bounded influence puts it between the \
+         weighted mean and the more trusted prior",
+        100.0 * robust
     );
 }
 
@@ -582,7 +601,8 @@ fn masked_pixels_reach_neither_the_loss_nor_the_gradient() {
     let ks = Kernels::at(0);
     let truth = slab(6, 0x1d0e);
     let c = cam(32, 32);
-    let o = RenderOpts::default();
+    // the fit's own forward model, whose depth is the range along each ray
+    let o = RenderOpts { ray: true, ..Default::default() };
     let (truth_rgba, _) = shoot(&g, ks, &truth, &c, &o);
     let target_rgb = rgb_of(&truth_rgba);
     let px = (c.width * c.height) as usize;
@@ -608,7 +628,7 @@ fn masked_pixels_reach_neither_the_loss_nor_the_gradient() {
         if let Some(m) = m {
             t = t.with_mask(m);
         }
-        let cfg = FitCfg { iters, lr: 5e-3, log_every: 0, ..Default::default() };
+        let cfg = FitCfg { iters, lr_position: 5e-3, log_every: 0, ..Default::default() };
         fit(&g, ks, &init, &[t], &cfg, &mut |_, _| true)
     };
 
@@ -624,12 +644,12 @@ fn masked_pixels_reach_neither_the_loss_nor_the_gradient() {
     assert_eq!(l1, l0, "an all-ones mask changed the reported MSE ({l1} vs {l0})");
     assert_eq!(c1.means, c0.means, "an all-ones mask changed the fit");
 
-    // A one-iteration fit reports the loss of the scene it STARTED from, so
-    // the number can be checked against a direct computation rather than
-    // against the fit's own arithmetic.
-    let (_, one) = run(target_rgb.clone(), Some(mask.clone()), 1);
-    let mut ren = Renderer::new(&g, ks, init.len(), c.width, c.height, 0);
-    let gs = GpuSplats::upload(&g, &init);
+    // The fit reports the objective of the scene it RETURNS, so the number
+    // can be checked against a direct computation rather than against the
+    // fit's own arithmetic.
+    let (fitted, one) = run(target_rgb.clone(), Some(mask.clone()), 1);
+    let mut ren = Renderer::new(&g, ks, fitted.len(), c.width, c.height, 0);
+    let gs = GpuSplats::upload(&g, &fitted);
     ren.render(&g, &gs, &c, &o);
     let img = ren.read_rgba(&g, c.width, c.height);
     let mut kept = 0.0f64;
