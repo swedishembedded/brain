@@ -135,6 +135,8 @@ pub use solve;
 /// pre-registered bar, run a null-gate control beside it, publish only on a
 /// promote - which no inference pipeline's shape can express.
 #[cfg(feature = "study")]
+pub mod chat_dataset;
+#[cfg(feature = "study")]
 pub mod study;
 
 #[cfg(feature = "reader")]
@@ -143,6 +145,8 @@ pub mod reader;
 pub use audit::acceptance::LedgerFacts;
 #[cfg(feature = "reader")]
 pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome, MIN_EPISODE_CHARS};
+#[cfg(feature = "study")]
+pub use chat_dataset::{validate_chat_dataset, ChatDatasetSummary};
 #[cfg(feature = "study")]
 pub use study::{
     Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,
