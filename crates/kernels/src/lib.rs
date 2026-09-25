@@ -1041,6 +1041,12 @@ pub const SPLAT_ADAM: &str = include_str!("../wgsl/splat_adam.wgsl");
 pub const SPLAT_BWD_SLOTS: &str = include_str!("../wgsl/splat_bwd_slots.wgsl");
 /// `wgsl/splat_bwd_tile_reduce.wgsl`
 pub const SPLAT_BWD_TILE_REDUCE: &str = include_str!("../wgsl/splat_bwd_tile_reduce.wgsl");
+/// `wgsl/splat_carve.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_CARVE: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_carve.wgsl"),
+);
 /// `wgsl/splat_emit.wgsl`
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
 /// `wgsl/splat_env.wgsl`, after `wgsl/lib/{camera,splat_view,sh_env}.wgsl`
@@ -1686,6 +1692,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_adam", SPLAT_ADAM),
     ("splat_bwd_slots", SPLAT_BWD_SLOTS),
     ("splat_bwd_tile_reduce", SPLAT_BWD_TILE_REDUCE),
+    ("splat_carve", SPLAT_CARVE),
     ("splat_emit", SPLAT_EMIT),
     ("splat_env", SPLAT_ENV),
     ("splat_env_grad", SPLAT_ENV_GRAD),

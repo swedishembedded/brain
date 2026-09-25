@@ -15,6 +15,7 @@
 
 pub mod align;
 pub mod caps;
+pub mod carve;
 pub mod density;
 pub mod env;
 pub mod geometry;
@@ -78,6 +79,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_ray_emit", kernels::SPLAT_RAY_EMIT),
     ("splat_ray_bwd_walk", kernels::SPLAT_RAY_BWD_WALK),
     ("splat_ray_diagnose", kernels::SPLAT_RAY_DIAGNOSE),
+    ("splat_carve", kernels::SPLAT_CARVE),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -123,6 +125,7 @@ pub struct Kernels {
     pub splat_ray_emit: usize,
     pub splat_ray_bwd_walk: usize,
     pub splat_ray_diagnose: usize,
+    pub splat_carve: usize,
 }
 
 impl Kernels {
@@ -169,6 +172,7 @@ impl Kernels {
             splat_ray_emit: base + 36,
             splat_ray_bwd_walk: base + 37,
             splat_ray_diagnose: base + 38,
+            splat_carve: base + 39,
         }
     }
 }
