@@ -565,10 +565,11 @@ fn is_workgroup_kernel(m: &naga::Module, func: &naga::Function) -> bool {
     has_wg_global || block_has_barrier(&func.body)
 }
 
-/// Whether a statement block contains a barrier (searched recursively).
+/// Whether a statement block contains a barrier (searched recursively). A
+/// `workgroupUniformLoad` is one: every invocation waits at it for the load.
 fn block_has_barrier(block: &Block) -> bool {
     block.iter().any(|s| match s {
-        Statement::ControlBarrier(_) => true,
+        Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => true,
         Statement::Block(b) => block_has_barrier(b),
         Statement::If { accept, reject, .. } => block_has_barrier(accept) || block_has_barrier(reject),
         Statement::Loop { body, continuing, .. } => block_has_barrier(body) || block_has_barrier(continuing),

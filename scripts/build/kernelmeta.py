@@ -67,7 +67,8 @@ def structure(name, text):
     bound = r"p\.\w+" + ("|" + "|".join(map(re.escape, aliases)) if aliases else "")
     return {
         "wg": wg,
-        "barriers": code.count("workgroupBarrier"),
+        # `workgroupUniformLoad` is a barrier too: every invocation waits at it.
+        "barriers": code.count("workgroupBarrier") + code.count("workgroupUniformLoad"),
         "shared": "var<workgroup>" in code,
         "dp4a": "dot4I8Packed" in code,
         "regblock": bool(re.search(r"_reg\d?$|_reg_", name)) or "rA[" in code,
