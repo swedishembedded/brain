@@ -21,10 +21,34 @@ pub mod twoview;
 /// at 30% inliers a six-point sample is all-inlier once in 1,372 draws, so a
 /// fixed 2,000 finds a pose about three times in four.
 pub fn ransac_iterations(inliers: f64, sample: i32, cap: usize) -> usize {
-    let p = inliers.clamp(1e-9, 1.0).powi(sample);
+    let p = inliers.clamp(0.0, 1.0).powi(sample);
     if p >= 1.0 - 1e-12 {
         return 1;
     }
-    let n = (1.0f64 - 0.999).ln() / (1.0 - p).ln();
+    // ln(1 - p) through ln_1p: for a rare all-inlier sample `1 - p` rounds
+    // to exactly 1, and the bound came out as a single iteration
+    let n = (1.0f64 - 0.999).ln() / (-p).ln_1p();
+    if !n.is_finite() {
+        return cap;
+    }
     (n.ceil() as usize).clamp(1, cap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ransac_iterations;
+
+    /// A model with little or no support must not end the search: the first
+    /// sample of a pair can be degenerate, and when it was, the bound used to
+    /// come out as ONE iteration and the pair was rejected with its true
+    /// matches unexamined.
+    #[test]
+    fn rare_inliers_keep_the_search_going() {
+        assert_eq!(ransac_iterations(0.0, 8, 50_000), 50_000);
+        assert_eq!(ransac_iterations(0.05, 8, 50_000), 50_000);
+        assert_eq!(ransac_iterations(0.02, 3, 50_000), 50_000);
+        // and the textbook value where it is representable: 99.9% at half
+        // inliers and eight-point samples is 1765 draws
+        assert_eq!(ransac_iterations(0.5, 8, 50_000), 1765);
+    }
 }
