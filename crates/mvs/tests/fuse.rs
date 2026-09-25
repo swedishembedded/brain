@@ -58,3 +58,28 @@ fn fused_points_lie_on_the_surface_once_each() {
     assert!(colour_err < 0.05, "mean colour error {colour_err:.3}");
     assert!(frac(radius_ok) > 0.95, "radius is not the pixel footprint for {:.2} % of the points", 100.0 * (1.0 - frac(radius_ok)));
 }
+
+/// A fused cloud larger than the scene's budget is thinned uniformly, and
+/// every point kept widens its footprint so the kept discs still cover the
+/// surface the whole cloud covered.
+#[test]
+fn a_thinned_cloud_covers_the_same_surface() {
+    let n = 10_000;
+    let mut f = mvs::Fused::default();
+    for i in 0..n {
+        f.xyz.extend_from_slice(&[(i % 100) as f32 * 0.01, (i / 100) as f32 * 0.01, 1.0]);
+        f.normal.extend_from_slice(&[0.0, 0.0, -1.0]);
+        f.rgb.extend_from_slice(&[0.5, 0.5, 0.5]);
+        f.conf.push(1.0);
+        f.radius.push(0.005);
+        f.support.push(3);
+    }
+    let t = f.thinned(2_500, 7);
+    assert_eq!(t.len(), 2_500);
+    let area = |c: &mvs::Fused| c.radius.iter().map(|r| (r * r) as f64).sum::<f64>();
+    assert!((area(&t) - area(&f)).abs() < 1e-6 * area(&f), "covered area {} against {}", area(&t), area(&f));
+    // uniformly: each quarter of the patch keeps about a quarter of the points
+    let left = t.xyz.chunks_exact(3).filter(|p| p[0] < 0.5).count();
+    assert!((1_000..1_500).contains(&left), "{left} of 2500 kept in the left half");
+    assert_eq!(f.thinned(n + 5, 7), f, "a budget above the cloud keeps it whole");
+}

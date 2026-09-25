@@ -123,7 +123,7 @@ impl Reconstruction {
             "max_gaussians": o.max_gaussians,
             "loss": o.loss,
             "render": { "ray": o.render.ray, "antialiased": o.render.antialiased, "eps2d": o.render.eps2d },
-            "stereo": o.dense.as_ref().map(|d| serde_json::json!({ "points": d.points, "coverage": d.coverage })),
+            "stereo": o.dense.as_ref().map(|d| serde_json::json!({ "fused": d.fused, "start": d.points, "coverage": d.coverage })),
             // the summary to read; the parameters (`splat::isp::Isp::params`
             // order, one camera per entry of `source`) to restore it with
             // `set_params`

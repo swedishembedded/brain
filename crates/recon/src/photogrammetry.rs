@@ -147,6 +147,10 @@ pub struct DenseCfg {
     pub stereo: mvs::StereoCfg,
     pub fuse: mvs::FuseCfg,
     pub init: mvs::SplatInit,
+    /// Start from at most this many gaussians: a larger fused cloud is
+    /// thinned uniformly, its kept discs widened to cover the same surface
+    /// (`mvs::Fused::thinned`).
+    pub max_points: Option<usize>,
 }
 
 /// What [`dense`] measured.
@@ -154,7 +158,9 @@ pub struct DenseCfg {
 pub struct DenseReport {
     /// Fraction of each target's pixels with a range prior.
     pub coverage: Vec<f64>,
-    /// Points in the fused cloud, one gaussian each.
+    /// Points in the fused cloud.
+    pub fused: usize,
+    /// Of those, the ones the start was made of, one gaussian each.
     pub points: usize,
     pub timings: mvs::Timings,
 }
@@ -202,8 +208,13 @@ pub fn dense(
         t.depth_conf = Some(map.conf);
         t.normals = Some(map.normal);
     }
+    let all = fused.len();
+    let fused = match cfg.max_points {
+        Some(m) => fused.thinned(m, 0x5eed_7417),
+        None => fused,
+    };
     let init = mvs::to_splats(&fused, &cfg.init);
-    Ok((init, DenseReport { coverage, points: fused.len(), timings: st.timings }))
+    Ok((init, DenseReport { coverage, fused: all, points: fused.len(), timings: st.timings }))
 }
 
 /// A photograph as a target: its own pixels in [0,1], through its camera,
@@ -586,12 +597,21 @@ pub fn reconstruct_photos(
         None => (set, None),
         Some(dcfg) => {
             let t = std::time::Instant::now();
-            let dcfg = DenseCfg { stereo: mvs::StereoCfg { halving: halvings, ..dcfg.stereo.clone() }, ..dcfg.clone() };
+            // an explicit budget holds for the start too, with a fifth of it
+            // left for density control
+            let max_points = dcfg.max_points.or(cfg.max_gaussians.map(|b| b - b / 5));
+            let dcfg = DenseCfg { stereo: mvs::StereoCfg { halving: halvings, ..dcfg.stereo.clone() }, max_points, ..dcfg.clone() };
             let ks = mvs::Kernels::at(splat::PIPELINES.len());
             let rgb8: Vec<Rgb8> = photos.iter().map(imaging::Photo::rgb8).collect();
             let (set, report) = set.densify(gpu, &ks, &rgb8, &dcfg).map_err(ReconstructError::Stereo)?;
             let cover = report.coverage.iter().sum::<f64>() / report.coverage.len().max(1) as f64;
-            log(&format!("multi-view stereo: {} points, {:.0}% of pixels measured, {:.0} s", report.points, 100.0 * cover, t.elapsed().as_secs_f64()));
+            log(&format!(
+                "multi-view stereo: {} points ({} kept for the start), {:.0}% of pixels measured, {:.0} s",
+                report.fused,
+                report.points,
+                100.0 * cover,
+                t.elapsed().as_secs_f64()
+            ));
             (set, Some(report))
         }
     };

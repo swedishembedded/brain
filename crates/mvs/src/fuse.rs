@@ -67,6 +67,38 @@ impl Fused {
     pub fn is_empty(&self) -> bool {
         self.conf.is_empty()
     }
+
+    /// At most `keep` of the points, drawn uniformly (deterministic in
+    /// `seed`), each kept point's footprint radius widened by
+    /// `sqrt(len / keep)` so the kept discs cover the surface the whole
+    /// cloud covered. A cloud of `keep` points or fewer is returned whole.
+    pub fn thinned(&self, keep: usize, seed: u64) -> Fused {
+        let n = self.len();
+        if keep >= n {
+            return self.clone();
+        }
+        // splitmix64 of the index: a key per point, keep the smallest
+        let key = |i: usize| {
+            let mut z = (i as u64 ^ seed).wrapping_add(0x9e37_79b9_7f4a_7c15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut order: Vec<usize> = (0..n).collect();
+        order.select_nth_unstable_by_key(keep, |&i| key(i));
+        let mut kept = order[..keep].to_vec();
+        kept.sort_unstable();
+        let widen = (n as f32 / keep as f32).sqrt();
+        let pick3 = |v: &[f32]| kept.iter().flat_map(|&i| v[3 * i..3 * i + 3].iter().copied()).collect();
+        Fused {
+            xyz: pick3(&self.xyz),
+            normal: pick3(&self.normal),
+            rgb: pick3(&self.rgb),
+            conf: kept.iter().map(|&i| self.conf[i]).collect(),
+            radius: kept.iter().map(|&i| self.radius[i] * widen).collect(),
+            support: kept.iter().map(|&i| self.support[i]).collect(),
+        }
+    }
 }
 
 /// Planar device layout of a map: range, normal (3), confidence.
