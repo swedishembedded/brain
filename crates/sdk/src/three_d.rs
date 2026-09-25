@@ -55,6 +55,7 @@ impl Reconstruction {
     pub fn builder() -> ReconstructionBuilder {
         ReconstructionBuilder {
             photos: Vec::new(),
+            files: Vec::new(),
             cfg: PhotoCfg::default(),
             device: Device::default(),
             progress: None,
@@ -158,6 +159,7 @@ type Progress = Box<dyn FnMut(usize, f32) -> bool>;
 /// Builds a [`Reconstruction`] from photographs.
 pub struct ReconstructionBuilder {
     photos: Vec<Image>,
+    files: Vec<std::path::PathBuf>,
     cfg: PhotoCfg,
     device: Device,
     progress: Option<Progress>,
@@ -169,6 +171,17 @@ impl ReconstructionBuilder {
     /// of them. They may come from several cameras and zoom settings.
     pub fn photos(mut self, photos: impl IntoIterator<Item = Image>) -> Self {
         self.photos.extend(photos);
+        self
+    }
+
+    /// Photographs to read from disk, after any given as [`Image`]s. Read
+    /// this way a photograph keeps what its file records beyond the pixels:
+    /// its orientation, bit depth and colour encoding, the exposure it was
+    /// shot at (so the camera model starts from the true brightness
+    /// differences) and where it was taken (so the scene comes back in
+    /// metres, upright, when the fixes are precise enough).
+    pub fn photo_files<P: AsRef<std::path::Path>>(mut self, paths: impl IntoIterator<Item = P>) -> Self {
+        self.files.extend(paths.into_iter().map(|p| p.as_ref().to_path_buf()));
         self
     }
 
@@ -248,8 +261,8 @@ impl ReconstructionBuilder {
     /// Recover the cameras and fit the scene. Blocks for as long as the fit
     /// takes: minutes to hours, with the photographs' count and resolution.
     pub fn run(self) -> Result<Reconstruction> {
-        let ReconstructionBuilder { photos, cfg, device, progress, log } = self;
-        if photos.is_empty() {
+        let ReconstructionBuilder { photos, files, cfg, device, progress, log } = self;
+        if photos.is_empty() && files.is_empty() {
             return Err(Error::MissingArgument("photos".into()));
         }
         if cfg.max_width == 0 || cfg.iterations == Some(0) || cfg.max_gaussians == Some(0) {
@@ -261,7 +274,10 @@ impl ReconstructionBuilder {
             )));
         }
         crate::device::resolve(&device)?;
-        let photos: Vec<imaging::Rgb8> = photos.into_iter().map(Image::into_rgb8).collect();
+        let mut all: Vec<imaging::Photo> = photos.into_iter().map(|i| imaging::Photo::from_rgb8(&i.into_rgb8())).collect();
+        for f in &files {
+            all.push(imaging::load_photo(f).map_err(Error::Backend)?);
+        }
         let gpu = gpu_core::Gpu::new(&recon::photogrammetry::pipelines());
         let (mut progress, mut log) = (progress, log);
         let mut step = |it: usize, loss: f32| progress.as_mut().is_none_or(|f| f(it, loss));
@@ -270,7 +286,7 @@ impl ReconstructionBuilder {
                 f(m)
             }
         };
-        let out = recon::photogrammetry::reconstruct(&gpu, &photos, &cfg, &mut line, &mut step).map_err(|e| Error::Backend(e.to_string()))?;
+        let out = recon::photogrammetry::reconstruct_photos(&gpu, &all, &cfg, &mut line, &mut step).map_err(|e| Error::Backend(e.to_string()))?;
         Ok(Reconstruction { out, gpu })
     }
 }

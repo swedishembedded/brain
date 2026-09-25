@@ -108,11 +108,10 @@ fn photographs(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 fn run(a: &Args) -> brain::Result<()> {
     let paths = photographs(&a.photos).map_err(brain::Error::Backend)?;
-    let photos = paths.iter().map(brain::Image::open).collect::<brain::Result<Vec<_>>>()?;
-    println!("{} photographs from {}", photos.len(), a.photos.display());
+    println!("{} photographs from {}", paths.len(), a.photos.display());
 
     let mut b = brain::Reconstruction::builder()
-        .photos(photos)
+        .photo_files(&paths)
         .max_width(a.max_width)
         .dense(!a.sparse)
         .camera_model(a.camera_model)
