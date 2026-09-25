@@ -483,9 +483,9 @@ pub struct BwdScratch {
     slot_cap: usize,
     /// A permanently zero `W*H` buffer bound as the depth-gradient input when
     /// the caller supplies none. The slots kernel always reads that binding,
-    /// so an RGB-only backward needs something there that contributes nothing
-    /// - and one zeroed allocation per scratch is cheaper than branching the
-    /// kernel or carrying a second pipeline.
+    /// so an RGB-only backward needs something there that contributes
+    /// nothing, and one zeroed allocation per scratch is cheaper than
+    /// branching the kernel or carrying a second pipeline.
     no_depth: DeviceBuffer,
     rec_cap: usize,
     limit: Option<u64>,
@@ -572,7 +572,14 @@ impl BwdScratch {
 /// `(first tile, tile count, first instance, instance count)`, from the
 /// per-tile instance ranges of the last render. Tiles are sorted by id, so a
 /// run of tiles owns one contiguous run of instances.
-fn plan_bands(ranges: &[u32], cap: usize) -> Result<Vec<(u32, u32, u32, u32)>, String> {
+///
+/// A tile holding more than `cap` instances on its own gets bands of `cap`
+/// of ITS instances each: every pixel of the tile replays the whole list in
+/// every one of them and writes only that band's run, so the price of a
+/// crowded tile (the far ground near a horizon) is repeated walks, not a
+/// failed pass.
+fn plan_bands(ranges: &[u32], cap: usize) -> Vec<(u32, u32, u32, u32)> {
+    let cap = cap.max(1) as u32;
     let n_tiles = ranges.len() / 2;
     let mut out = Vec::new();
     // (first tile, first instance, one past the last instance) of the open band
@@ -582,15 +589,15 @@ fn plan_bands(ranges: &[u32], cap: usize) -> Result<Vec<(u32, u32, u32, u32)>, S
         if e <= s {
             continue; // an empty tile belongs to whichever band surrounds it
         }
-        if (e - s) as usize > cap {
-            return Err(format!(
-                "tile {t} alone holds {} gaussian instances, more than one backward band's {cap}; \
-                 the scene is too dense at this image size - thin it with `--prune`",
-                e - s
-            ));
+        if e - s > cap {
+            if let Some((t0, k0, k1)) = open.take() {
+                out.push((t0 as u32, (t - t0) as u32, k0, k1 - k0));
+            }
+            out.extend((s..e).step_by(cap as usize).map(|k| (t as u32, 1, k, cap.min(e - k))));
+            continue;
         }
         match open {
-            Some((t0, k0, _)) if (e - k0) as usize <= cap => open = Some((t0, k0, e)),
+            Some((t0, k0, _)) if e - k0 <= cap => open = Some((t0, k0, e)),
             Some((t0, k0, k1)) => {
                 out.push((t0 as u32, (t - t0) as u32, k0, k1 - k0));
                 open = Some((t, s, e));
@@ -601,7 +608,7 @@ fn plan_bands(ranges: &[u32], cap: usize) -> Result<Vec<(u32, u32, u32, u32)>, S
     if let Some((t0, k0, k1)) = open {
         out.push((t0 as u32, (n_tiles - t0) as u32, k0, k1 - k0));
     }
-    Ok(out)
+    out
 }
 
 impl Renderer {
@@ -624,8 +631,7 @@ impl Renderer {
     /// per (pixel, gaussian) was 70% of the backward's device time on a
     /// trained 300k-gaussian scene.
     ///
-    /// `Err` only when a single tile holds more instances than one band's slot
-    /// grid, or the frame more records than one binding.
+    /// `Err` only when the frame has more records than one binding holds.
     #[allow(clippy::too_many_arguments)]
     pub fn render_bwd(
         &mut self,
@@ -647,7 +653,7 @@ impl Renderer {
         let n_tiles = (tiles_x * tiles_y) as usize;
         let ranges = gpu.read(&self.ranges, 2 * n_tiles);
         let ranges: Vec<u32> = ranges.iter().map(|v| v.to_bits()).collect();
-        let bands = plan_bands(&ranges, scr.band_instances(gpu))?;
+        let bands = plan_bands(&ranges, scr.band_instances(gpu));
         scr.reserve_records(gpu, n_isects)?;
         scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0));
 
@@ -675,7 +681,7 @@ impl Renderer {
             steps.push(gpu.step(
                 self.ks.splat_bwd_slots,
                 &[&self.proj, &s.colors, vals, &self.ranges, dimg, ddepth.unwrap_or(&scr.no_depth), &scr.slots],
-                &[cam.width, cam.height, tiles_x, tile0, k0, threads, f(o.bg[0]), f(o.bg[1]), f(o.bg[2])],
+                &[cam.width, cam.height, tiles_x, tile0, k0, k0 + count, threads, f(o.bg[0]), f(o.bg[1]), f(o.bg[2])],
                 threads,
             ));
             steps.push(gpu.dispatch(

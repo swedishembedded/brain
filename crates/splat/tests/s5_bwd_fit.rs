@@ -349,7 +349,16 @@ fn a_scene_too_dense_for_one_binding_says_so_in_its_own_terms() {
 /// different projection and a different function to differentiate.
 #[test]
 fn a_frame_past_the_record_ceiling_is_differentiated_in_bands_cpu() {
-    band_equivalence(&Gpu::new_cpu(splat::PIPELINES));
+    band_equivalence(&Gpu::new_cpu(splat::PIPELINES), 20);
+}
+
+/// A single tile holding more instances than one band is split across bands
+/// too: every pixel of it still walks the whole list, and each band writes
+/// only its own run of instances. The distant ground near a horizon puts
+/// tens of thousands of instances into one tile, which used to fail the pass.
+#[test]
+fn a_tile_past_one_band_is_split_across_bands_cpu() {
+    band_equivalence(&Gpu::new_cpu(splat::PIPELINES), 3);
 }
 
 /// The band origins ride in a uniform block the two backends lay out
@@ -359,10 +368,14 @@ fn a_frame_past_the_record_ceiling_is_differentiated_in_bands_gpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    band_equivalence(&gpu_core::testgpu::dev(splat::PIPELINES));
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    band_equivalence(&g, 20);
+    band_equivalence(&g, 3);
 }
 
-fn band_equivalence(g: &Gpu) {
+/// Gradients with the slot grid squeezed to `band` instances equal the
+/// unbanded ones.
+fn band_equivalence(g: &Gpu, band: u64) {
     let ks = Kernels::at(0);
     let s = scene(16, 0x8a5d);
     let c = Camera::look_at([0.0, 0.0, 0.0], [0.0, 0.0, 4.0], [0.0, -1.0, 0.0], 60.0, 32, 32);
@@ -372,8 +385,8 @@ fn band_equivalence(g: &Gpu) {
     let wimg: Vec<f32> = (0..px * 4).map(|i| if i % 4 == 3 { 0.0 } else { r.next() - 0.5 }).collect();
 
     // `limit` in bytes; zero means the device's own, which this scene is far
-    // below. The banded run's slot grid holds 20 instances - about one tile
-    // of this scene - so every tile is its own band.
+    // below. A band of 20 instances is about one tile of this scene, so every
+    // tile is its own band; one of 3 splits every tile.
     let run = |limit: u64| -> (Vec<f32>, usize) {
         let mut ren = Renderer::new(g, ks, s.len(), c.width, c.height, 0);
         let gs = GpuSplats::upload(g, &s);
@@ -390,10 +403,10 @@ fn band_equivalence(g: &Gpu) {
     };
 
     let (whole, n_whole) = run(0);
-    let squeezed = 20 * splat::renderer::slot_bytes_per_instance();
+    let squeezed = band * splat::renderer::slot_bytes_per_instance();
     let (banded, n_banded) = run(squeezed);
     assert!(
-        n_whole > 20,
+        n_whole as u64 > band,
         "test is vacuous: the frame has {n_whole} instances and never exceeds one forced band"
     );
     assert_eq!(n_banded, n_whole, "banding changed how many records the frame produces");

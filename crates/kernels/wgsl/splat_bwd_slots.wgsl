@@ -10,17 +10,20 @@
 // @quant none
 // @dtype f32
 //
-// The backward's first stage, over a BAND of tiles [tile0, tile0 + n/256).
-// One thread per pixel of the band: thread i is local pixel i % 256 of tile
-// tile0 + i / 256. Each pixel walks its tile's depth-sorted instance list
-// exactly as the forward composited it and, for EVERY instance k in that list,
-// writes 11 partials to
+// The backward's first stage, over a BAND of tiles [tile0, tile0 + n/256)
+// and instances [k0, k1). One thread per pixel of the band: thread i is local
+// pixel i % 256 of tile tile0 + i / 256. Each pixel walks its tile's
+// depth-sorted instance list exactly as the forward composited it and, for
+// every instance k of the band, writes 11 partials to
 //
 //   slots[((k - k0) * 11 + c) * 256 + local]
 //
 // - zeros where the instance does not touch the pixel or the walk has already
 // saturated - so no clear is needed and splat_bwd_tile_reduce can sum each
 // instance's 256 pixels as one fixed-size contiguous block, with no sort.
+// A band of whole tiles holds all of their instances; a tile too crowded for
+// one band is split into several, each replaying the walk up to its k1 and
+// writing only its own [k0, k1).
 // Within a warp the 32 lanes are consecutive pixels of one tile walking the
 // same list, so the writes are coalesced.
 //
@@ -42,6 +45,7 @@ struct Params {
     tiles_x: u32,
     tile0: u32,   // first tile of the band
     k0: u32,      // first instance of the band (the band's slot origin)
+    k1: u32,      // one past the band's last instance
     n: u32,       // threads in the band: tiles * 256
     bg_r: f32,
     bg_g: f32,
@@ -122,7 +126,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     // passes it.
     t = 1.0;
     var live = inside;
-    for (var j = start; j < end; j = j + 1u) {
+    let stop = min(end, p.k1);
+    for (var j = start; j < stop; j = j + 1u) {
         var part: array<f32, 11>;
         for (var c = 0u; c < 11u; c = c + 1u) { part[c] = 0.0; }
         if (live) {
@@ -182,9 +187,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
                 }
             }
         }
-        let base = (j - p.k0) * 11u * 256u + local;
-        for (var c = 0u; c < 11u; c = c + 1u) {
-            slots[base + c * 256u] = part[c];
+        if (j >= p.k0) {
+            let base = (j - p.k0) * 11u * 256u + local;
+            for (var c = 0u; c < 11u; c = c + 1u) {
+                slots[base + c * 256u] = part[c];
+            }
         }
     }
 }
