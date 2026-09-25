@@ -354,6 +354,9 @@ pub enum Split {
     Wedge { centre: f64, width: f64 },
     /// Every view whose elevation lies in `[low, high)` degrees.
     Band { low: f64, high: f64 },
+    /// Every view in both a wedge and a band: one camera of one ring, say,
+    /// with the ring above it still trained on.
+    Region { centre: f64, width: f64, low: f64, high: f64 },
 }
 
 /// Which of `cams` `split` holds out.
@@ -370,6 +373,11 @@ pub fn split(cams: &[Camera], split: Split) -> Vec<bool> {
             Split::Band { low, high } => {
                 let el = orbit.angles(c).1;
                 el >= low && el < high
+            }
+            Split::Region { centre, width, low, high } => {
+                let (az, el) = orbit.angles(c);
+                let d = (az - centre).rem_euclid(360.0);
+                d.min(360.0 - d) <= width / 2.0 && el >= low && el < high
             }
         })
         .collect()

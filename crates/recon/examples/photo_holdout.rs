@@ -10,8 +10,25 @@
 //!
 //! ```text
 //! photo_holdout <photos dir> <out dir> [iters] [halvings] [--every k] [--views n]
+//!               [--split DESIGN[+DESIGN...]] [--path-steps n]
 //!               [--sfm-cache dir] <fit options>
 //! ```
+//!
+//! `--split` chooses the held-out views by their angle about the capture's
+//! orbit (`recon::validate::Split`; azimuth and elevation in degrees, as the
+//! run prints them per camera): `every:K` every k-th view in capture order,
+//! `wedge:AZ:WIDTH` an azimuth wedge (a gap in the orbit), `band:LOW:HIGH` an
+//! elevation band (extrapolation in elevation), `region:AZ:WIDTH:LOW:HIGH`
+//! both (one camera of one ring, its ring above kept: interpolation); `+`
+//! joins designs. Every held-out view is reported with its
+//! angular deviation from the training views, its surface statistics and
+//! its error binned by per-pixel observational support
+//! (`recon::validate::Diagnosis`), and its diagnostic images are written
+//! (`heldout_<i>_diag.png`: render | median range | range spread | entropy
+//! | normal | support angle | free-space violations). The training views
+//! are diagnosed against each other. A camera path through the held-out
+//! views and their trained neighbours is rendered and diagnosed frame by
+//! frame (`path/frame_<n>.png`, `path.csv`).
 //!
 //! `halvings` is how many exact halvings below the photographs' own
 //! resolution the fit runs at (0 = native). `--sfm-cache` keeps structure
@@ -37,7 +54,8 @@ mod common;
 
 use common::{fit_cfg, fitted_opts, montage, Flags, FIT_USAGE};
 use gpu_core::Gpu;
-use recon::eval::{holdout, score_held_out, score_training, stability, Viewer};
+use recon::eval::{score_held_out, score_training, stability, Viewer};
+use recon::validate::{deviation, split, Diagnosis, Orbit, Split, SurfaceStats};
 use recon::photogrammetry::{photo_target, Photometry};
 use splat::isp::ColorSpace;
 use splat::opt::{fit_full, TargetView};
@@ -127,7 +145,16 @@ fn main() {
         })
         .collect();
 
-    let held_out = holdout(targets.len(), every);
+    let design = Split::Every(every);
+    let held_out: Vec<bool> = match flags.get("split") {
+        None => split(&cams, design),
+        Some(v) => v.split('+').map(|d| split(&cams, parse_split(d))).fold(vec![false; cams.len()], |a, b| a.iter().zip(&b).map(|(x, y)| *x || *y).collect()),
+    };
+    let orbit = Orbit::of(&cams);
+    for (i, c) in cams.iter().enumerate() {
+        let (az, el) = orbit.angles(c);
+        println!("  camera {i:2}: azimuth {az:6.1}, elevation {el:5.1}{}", if held_out[i] { "  HELD OUT" } else { "" });
+    }
     // `--views n` fits only the first n training views: a fit that cannot
     // reproduce even one photograph has a problem no amount of views explains
     let keep: usize = flags.parse("views").unwrap_or(usize::MAX);
@@ -137,8 +164,7 @@ fn main() {
     let (w, h) = (train[0].cam.width, train[0].cam.height);
     println!("fitting {} views at {w}x{h}, holding out {}", train.len(), held.len());
 
-    let pipes: Vec<(&str, &str)> = splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().collect();
-    let g = Gpu::new(&pipes);
+    let g = Gpu::new(&recon::photogrammetry::pipelines());
     let dense = match flags.get("dense") {
         None | Some("on") => true,
         Some("off") => false,
@@ -210,8 +236,126 @@ fn main() {
     for (i, (v, img)) in held.iter().zip(&held_img).enumerate() {
         imaging::save(format!("{out}/heldout_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }
+    diagnose(&mut viewer, &out, &refit, &held, &cams, &held_out, &orbit, flags.parse("path-steps").unwrap_or(6));
+
     // viewers show stored colour: a scene-linear scene is exported encoded
     let scene = if ph.color_space == ColorSpace::SceneLinear { splat::isp::bake_display(&res.scene) } else { res.scene.clone() };
     splat::ply::write(&format!("{out}/scene.ply"), &scene).expect("ply");
     std::fs::write(format!("{out}/cameras.json"), splat::types::cameras_to_json(&res.cams)).expect("cameras");
+}
+
+fn parse_split(v: &str) -> Split {
+    let parts: Vec<&str> = v.split(':').collect();
+    let num = |i: usize| -> f64 { parts.get(i).and_then(|x| x.parse().ok()).unwrap_or_else(|| panic!("--split {v}: expected a number at field {i}")) };
+    match parts[0] {
+        "every" => Split::Every(num(1) as usize),
+        "wedge" => Split::Wedge { centre: num(1), width: num(2) },
+        "band" => Split::Band { low: num(1), high: num(2) },
+        "region" => Split::Region { centre: num(1), width: num(2), low: num(3), high: num(4) },
+        o => panic!("--split {o}: every:K, wedge:AZ:WIDTH, band:LOW:HIGH or region:AZ:WIDTH:LOW:HIGH"),
+    }
+}
+
+fn stats_line(s: &SurfaceStats) -> String {
+    format!(
+        "covered {:.0}%, spread {:.4}, entropy {:.3}, share {:.3}, views {:.1}, unsupported {:.1}%, <5 {:.0}% <15 {:.0}% <30 {:.0}% <60 {:.0}% >=60 {:.0}%, free-space {:.2}%",
+        100.0 * s.covered,
+        s.spread,
+        s.entropy,
+        s.share,
+        s.views,
+        100.0 * s.support[0],
+        100.0 * s.support[1],
+        100.0 * s.support[2],
+        100.0 * s.support[3],
+        100.0 * s.support[4],
+        100.0 * s.support[5],
+        100.0 * s.free_space
+    )
+}
+
+fn diag_montage(d: &Diagnosis) -> imaging::Rgb8 {
+    let cols: Vec<Vec<f32>> = d.images().into_iter().map(|(_, im)| im.px.iter().map(|&v| v as f32 / 255.0).collect()).collect();
+    let refs: Vec<&[f32]> = cols.iter().map(|c| c.as_slice()).collect();
+    montage(&refs, d.width, d.height)
+}
+
+/// Diagnose the training views against each other, every held-out view
+/// against the training views, and a camera path through the held-out views.
+#[allow(clippy::too_many_arguments)]
+fn diagnose(viewer: &mut Viewer, out: &str, train: &[TargetView], held: &[TargetView], all: &[Camera], held_out: &[bool], orbit: &Orbit, steps: usize) {
+    let train_cams: Vec<Camera> = train.iter().map(|t| t.cam).collect();
+    let observed = viewer.observe(&train_cams);
+    let mut acc = SurfaceStats::default();
+    for (k, t) in train.iter().enumerate() {
+        let s = viewer.diagnose(&t.cam, Some(&observed), Some(k)).stats(t.mask.as_deref());
+        acc.spread += s.spread / train.len() as f64;
+        acc.entropy += s.entropy / train.len() as f64;
+        acc.support[0] += s.support[0] / train.len() as f64;
+        acc.free_space += s.free_space / train.len() as f64;
+    }
+    println!(
+        "training views against each other: spread {:.4}, entropy {:.3}, unsupported {:.1}%, free-space {:.2}%",
+        acc.spread,
+        acc.entropy,
+        100.0 * acc.support[0],
+        100.0 * acc.free_space
+    );
+    for (i, v) in held.iter().enumerate() {
+        let d = viewer.diagnose(&v.cam, Some(&observed), None);
+        let dev = deviation(&v.cam, &train_cams, orbit.centre);
+        println!("held-out view {i} (deviation {dev:.1} deg): {}", stats_line(&d.stats(v.mask.as_deref())));
+        for b in d.error_by_support(&v.rgb, v.mask.as_deref()) {
+            if b.pixels > 0 {
+                let band = match b.upper {
+                    u if u == -2.0 => "uncovered".to_string(),
+                    u if u == -1.0 => "unsupported".to_string(),
+                    u if u.is_infinite() => ">= 60 deg".to_string(),
+                    u => format!("< {u} deg"),
+                };
+                println!("    {band:>12}: {:6} px, mean |error| {:.4}, {:.2} dB", b.pixels, b.mean_abs, b.psnr);
+            }
+        }
+        imaging::save(format!("{out}/heldout_{i}_diag.png"), &diag_montage(&d)).expect("png");
+    }
+    // a path through the held-out views and the trained views beside them,
+    // in azimuth order about the first held-out view
+    let Some(first) = held_out.iter().position(|&h| h) else { return };
+    let (az0, el0) = orbit.angles(&all[first]);
+    let rel = |c: &Camera| {
+        let (az, el) = orbit.angles(c);
+        ((az - az0 + 540.0).rem_euclid(360.0) - 180.0, el)
+    };
+    let span = all.iter().zip(held_out).filter(|(_, &h)| h).map(|(c, _)| rel(c).0.abs()).fold(0.0f64, f64::max) + 60.0;
+    let mut way: Vec<(f64, Camera)> = all.iter().map(|c| (rel(c), *c)).filter(|((a, e), _)| a.abs() <= span && (e - el0).abs() <= 12.0).map(|((a, _), c)| (a, c)).collect();
+    way.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (w, h) = (train[0].cam.width, train[0].cam.height);
+    let way: Vec<Camera> = way.into_iter().map(|(_, c)| c.resized(w, h)).collect();
+    let path = recon::eval::path(&way, steps);
+    std::fs::create_dir_all(format!("{out}/path")).expect("path dir");
+    let mut csv = String::from("frame,azimuth,elevation,deviation,covered,spread,entropy,share,views,unsupported,s5,s15,s30,s60,s60plus,free_space\n");
+    for (n, c) in path.iter().enumerate() {
+        let d = viewer.diagnose(c, Some(&observed), None);
+        let s = d.stats(None);
+        let (az, el) = orbit.angles(c);
+        csv.push_str(&format!(
+            "{n},{az:.2},{el:.2},{:.2},{:.4},{:.5},{:.4},{:.4},{:.2},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.5}\n",
+            deviation(c, &train_cams, orbit.centre),
+            s.covered,
+            s.spread,
+            s.entropy,
+            s.share,
+            s.views,
+            s.support[0],
+            s.support[1],
+            s.support[2],
+            s.support[3],
+            s.support[4],
+            s.support[5],
+            s.free_space
+        ));
+        imaging::save(format!("{out}/path/frame_{n:03}.png"), &diag_montage(&d)).expect("png");
+    }
+    std::fs::write(format!("{out}/path.csv"), csv).expect("path.csv");
+    println!("path: {} frames through the held-out views -> {out}/path/, {out}/path.csv", path.len());
 }
