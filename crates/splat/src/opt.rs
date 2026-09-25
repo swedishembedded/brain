@@ -320,6 +320,37 @@ pub struct FitCfg {
     /// Surface regularizers applied before the scene has any shape pull
     /// gaussians onto whatever surface happens to be rendered first.
     pub geometry_after: f32,
+    /// Run the geometry terms on every Nth iteration only, with their weights
+    /// multiplied by N so the gradient they contribute is the same on
+    /// average. Each term is a full extra forward AND backward of every view
+    /// it touches, so at 1 the two of them triple the cost of an iteration.
+    pub geometry_every: usize,
+    /// Fraction of the fit by which every SH band up to `sh_degree` is on,
+    /// 0 = all of them from the start. Bands switch on one degree at a time
+    /// at even steps before it, as 3DGS does: with every band free from the
+    /// first iteration, view-dependent colour explains away error that
+    /// geometry has not yet had the chance to.
+    pub sh_ramp: f32,
+    /// Fraction of the fit run at HALF resolution before switching to full,
+    /// 0 = full resolution throughout.
+    ///
+    /// A scene started from a sparse cloud is, for its first stretch, a few
+    /// thousand large gaussians that cannot use full-resolution detail - and
+    /// the backward's cost is proportional to pixels times compositing depth,
+    /// so those are the most expensive iterations of the whole fit. A quarter
+    /// of the pixels costs about a quarter of the backward.
+    pub coarse: f32,
+    /// Views per iteration, 0 = all of them (full batch, what `fit` always
+    /// did). Each epoch visits every view once in a fresh deterministic
+    /// order.
+    ///
+    /// Full batch spends a render and a backward of EVERY view on each
+    /// optimizer step. 3DGS takes one view per step, and for the same compute
+    /// a minibatch fit takes many more, noisier steps - which is what an
+    /// optimizer this far from its solution wants. The reported loss, and the
+    /// step-size backoff that watches it, are then an exponential average
+    /// over about one epoch, since one batch's loss says little.
+    pub batch: usize,
 }
 
 impl Default for FitCfg {
@@ -359,6 +390,51 @@ impl Default for FitCfg {
             normal_consistency_weight: 0.0,
             normal_prior_weight: 0.0,
             geometry_after: 0.0,
+            geometry_every: 1,
+            sh_ramp: 0.0,
+            coarse: 0.0,
+            batch: 0,
+        }
+    }
+}
+
+impl FitCfg {
+    /// Everything a scene started from a SPARSE point cloud (structure from
+    /// motion) needs to become a finished reconstruction in `iters`
+    /// iterations and at most `budget` gaussians: the L1 + D-SSIM objective,
+    /// the photometric camera model, credit-assigned density control from 5%
+    /// to 60% of the fit, the Mip filter, full view-dependent colour, and
+    /// the surface regularizers once the scene has a shape (40%) on every
+    /// fourth step, and two views per step rather than all of them.
+    ///
+    /// The per-gaussian growth bounds are OFF: they exist to stop a fit from
+    /// inflating a DENSE feed-forward scene, and a sparse cloud has to grow a
+    /// long way to cover what its points only sample.
+    pub fn from_sparse_points(iters: usize, budget: usize) -> FitCfg {
+        let every = (iters / 20).max(1);
+        FitCfg {
+            iters,
+            loss: PixelLoss::gaussian_splatting(),
+            isp: Some(IspCfg::default()),
+            strategy: Densify::Hybrid,
+            densify_every: every,
+            densify_after: every,
+            densify_until: iters * 6 / 10,
+            max_gaussians: budget,
+            antialiased: true,
+            sh_degree: 3,
+            max_growth: 0.0,
+            max_scale_pixels: 0.0,
+            max_flat: 10.0,
+            distortion_weight: 0.1,
+            normal_consistency_weight: 0.05,
+            geometry_after: 0.4,
+            geometry_every: 4,
+            sh_ramp: 0.3,
+            coarse: 0.3,
+            batch: 2,
+            log_every: 50,
+            ..Default::default()
         }
     }
 }
@@ -452,6 +528,74 @@ impl TargetView {
         self.depth = Some(depth);
         self.depth_conf = conf;
         self
+    }
+
+    /// This view at half the resolution: every per-pixel quantity averaged
+    /// over 2x2 blocks (normals renormalized), the camera's intrinsics halved.
+    /// An odd last row or column is dropped, which leaves pixel coordinates -
+    /// and so the principal point - exactly halved.
+    pub fn half(&self) -> TargetView {
+        let (w, h) = (self.cam.width as usize, self.cam.height as usize);
+        let (hw, hh) = ((w / 2).max(1), (h / 2).max(1));
+        let down = |src: &[f32], ch: usize| -> Vec<f32> {
+            let mut out = vec![0.0f32; hw * hh * ch];
+            for y in 0..hh {
+                for x in 0..hw {
+                    for c in 0..ch {
+                        let at = |xx: usize, yy: usize| src[((2 * y + yy).min(h - 1) * w + (2 * x + xx).min(w - 1)) * ch + c];
+                        out[(y * hw + x) * ch + c] = 0.25 * (at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1));
+                    }
+                }
+            }
+            out
+        };
+        let normals = self.normals.as_ref().map(|n| {
+            let mut m = down(n, 3);
+            for v in m.chunks_exact_mut(3) {
+                let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                if l > 1e-6 {
+                    v.iter_mut().for_each(|c| *c /= l);
+                }
+            }
+            m
+        });
+        let cam = Camera {
+            fx: self.cam.fx * 0.5,
+            fy: self.cam.fy * 0.5,
+            cx: self.cam.cx * 0.5,
+            cy: self.cam.cy * 0.5,
+            width: hw as u32,
+            height: hh as u32,
+            ..self.cam
+        };
+        TargetView {
+            cam,
+            rgb: down(&self.rgb, 3),
+            // a depth average across an edge is a depth nowhere; take the
+            // near one of the block, where it has data
+            depth: self.depth.as_ref().map(|d| {
+                let mut out = vec![0.0f32; hw * hh];
+                for y in 0..hh {
+                    for x in 0..hw {
+                        let mut best = 0.0f32;
+                        for (xx, yy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                            let v = d[(2 * y + yy).min(h - 1) * w + (2 * x + xx).min(w - 1)];
+                            if v > 0.0 && (best == 0.0 || v < best) {
+                                best = v;
+                            }
+                        }
+                        out[y * hw + x] = best;
+                    }
+                }
+                out
+            }),
+            depth_conf: self.depth_conf.as_ref().map(|c| down(c, 1)),
+            mask: self.mask.as_ref().map(|m| down(m, 1)),
+            normals,
+            sensor: self.sensor,
+            exposure: self.exposure,
+            encoding: self.encoding,
+        }
     }
 
     /// Restrict supervision to the pixels `mask` `[W*H]` weights.
@@ -598,11 +742,30 @@ fn fit_inner(
         }
         k(it, mse)
     };
+    // Coarse-to-fine: the first `coarse` of the fit sees every target and
+    // camera at half resolution. A stage never straddles the switch.
+    let coarse_end = (cfg.coarse.clamp(0.0, 1.0) * cfg.iters as f32) as usize;
+    let half: Vec<TargetView> = if coarse_end > 0 { targets.iter().map(TargetView::half).collect() } else { Vec::new() };
     while done < cfg.iters && !stop {
-        let iters = stage_len.min(cfg.iters - done);
+        let coarse = done < coarse_end;
+        let mut iters = stage_len.min(cfg.iters - done);
+        if coarse {
+            iters = iters.min(coarse_end - done);
+        }
         let out = {
             let mut tap = |it: usize, mse: f32| seen(it, mse, on_step);
-            fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, isp, iters, done, &mut tap)
+            if coarse {
+                // the half-size cameras carry the SAME poses, so pose
+                // refinement made at half resolution carries back
+                let mut small: Vec<Camera> = cams.iter().zip(&half).map(|(c, t)| Camera { c2w: c.c2w, ..t.cam }).collect();
+                let out = fit_stage(gpu, ks, &scene, &half, &mut small, cfg, isp, iters, done, &mut tap);
+                for (c, s) in cams.iter_mut().zip(&small) {
+                    c.c2w = s.c2w;
+                }
+                out
+            } else {
+                fit_stage(gpu, ks, &scene, targets, &mut cams, cfg, isp, iters, done, &mut tap)
+            }
         };
         scene = out.scene;
         loss = out.loss;
@@ -715,6 +878,36 @@ pub(crate) fn jitter(i: usize, salt: u64) -> f32 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     ((z ^ (z >> 31)) >> 40) as f32 / (1u32 << 24) as f32
+}
+
+/// How many of the `ksh` highest SH coefficients are still held out at
+/// iteration `global` under [`FitCfg::sh_ramp`].
+fn sh_skip(cfg: &FitCfg, ksh: usize, global: usize) -> u32 {
+    if cfg.sh_ramp <= 0.0 || ksh == 0 {
+        return 0;
+    }
+    let degree = cfg.sh_degree.min(3) as f32;
+    let progress = global as f32 / (cfg.sh_ramp * cfg.iters.max(1) as f32);
+    let on = ((progress * (degree + 1.0)).floor() as usize).min(degree as usize);
+    (ksh - ((on + 1) * (on + 1) - 1)) as u32
+}
+
+/// The views iteration `global` optimizes: `per` of them, walking a fresh
+/// deterministic permutation of all `n` each epoch; all of them when `per`
+/// covers `n`.
+fn batch_views(n: usize, per: usize, global: usize) -> Vec<usize> {
+    if per >= n {
+        return (0..n).collect();
+    }
+    (0..per)
+        .map(|j| {
+            let pos = global * per + j;
+            let (epoch, at) = (pos / n, pos % n);
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| jitter(a, epoch as u64 ^ 0xba7c).total_cmp(&jitter(b, epoch as u64 ^ 0xba7c)));
+            order[at]
+        })
+        .collect()
 }
 
 /// Density control as a step, for tests that need to look at what it did
@@ -1088,7 +1281,11 @@ fn fit_stage(
     // the stage. Read back over a WINDOW rather than every iteration: one
     // iteration is noisy and every iteration would be 40 bytes per gaussian
     // per step off the device for a signal that is used once.
-    let window = iters.clamp(1, 4);
+    // With a minibatch the window has to span an epoch, or some views never
+    // contribute to what density control reads.
+    let views_per_iter = if cfg.batch == 0 || cfg.batch >= targets.len() { targets.len() } else { cfg.batch };
+    let window = targets.len().div_ceil(views_per_iter).max(4).clamp(1, iters.max(1));
+    let mut smooth = f64::NAN;
     let mut gsum = vec![0.0f32; n];
     let mut prof = Prof::new();
     for it in 0..iters {
@@ -1117,7 +1314,9 @@ fn fit_stage(
         // buffer and no per-view zeroing.
         let mut pose_running = [0.0f64; 6];
         let mut pose_grads: Vec<[f64; 6]> = vec![[0.0; 6]; targets.len()];
-        for (vi, t) in targets.iter().enumerate() {
+        let batch = batch_views(targets.len(), views_per_iter, it0 + it);
+        for &vi in &batch {
+            let t = &targets[vi];
             let cam = cams[vi];
             let px = (cam.width * cam.height) as usize;
             // unpack params for the forward
@@ -1132,7 +1331,7 @@ fn fit_stage(
             prof.add("unpack params", tm.elapsed());
             let eye = [cam.c2w[3], cam.c2w[7], cam.c2w[11]];
             let sh_params =
-                [n as u32, ksh as u32, 0, 0, f(eye[0]), f(eye[1]), f(eye[2]), 0];
+                [n as u32, ksh as u32, 0, sh_skip(cfg, ksh, it0 + it), f(eye[0]), f(eye[1]), f(eye[2]), 0];
             if ksh > 0 {
                 let e = gpu.step(
                     ks.splat_sh,
@@ -1249,7 +1448,9 @@ fn fit_stage(
                     prof.add("credit assignment", tm.elapsed());
                 }
             }
-            if let Some(a) = aux.as_ref().filter(|_| (it0 + it) as f32 >= cfg.geometry_after * cfg.iters as f32) {
+            let geometry_now = (it0 + it) as f32 >= cfg.geometry_after * cfg.iters as f32
+                && (it0 + it).is_multiple_of(cfg.geometry_every.max(1));
+            if let Some(a) = aux.as_ref().filter(|_| geometry_now) {
                 let tm = std::time::Instant::now();
                 let ctx = AuxCtx { gpu, gs: &gs, dimg: &dimg, ddepth: &ddepth, opts: &opts, cfg };
                 loss_sum += geometry_passes(&ctx, &mut renderer, &mut bscr, a, &cam, t, wts, wsum, &host_geo, &mut extra_geo);
@@ -1328,7 +1529,8 @@ fn fit_stage(
             let ts = it as i32 + 1;
             let (b1, b2) = (0.9f64, 0.999f64);
             let (bc1, bc2) = (1.0 - b1.powi(ts), 1.0 - b2.powi(ts));
-            for vi in 0..cams.len() {
+            // only the views this step measured have a gradient to follow
+            for &vi in &batch {
                 // The reduction measured a SCENE motion about the camera
                 // centre; the camera moves the opposite way, and in its own
                 // frame, which is what keeps rotation and translation from
@@ -1409,17 +1611,28 @@ fn fit_stage(
             prof.add("densify grad readback", tm.elapsed());
         }
 
-        last_loss = (loss_sum / targets.len() as f64) as f32;
+        // An epoch-length average of the batch losses; with the full batch the
+        // weight is 1 and this is the batch loss itself.
+        let batch_loss = loss_sum / batch.len() as f64;
+        let alpha = batch.len() as f64 / targets.len() as f64;
+        smooth = if smooth.is_nan() { batch_loss } else { (1.0 - alpha) * smooth + alpha * batch_loss };
+        last_loss = smooth as f32;
         // Back off a step size this scene will not take. The rate is already
         // normalised against the scene's extent, which makes one value work
         // across scales but does not make it work everywhere: a rate that
         // converges on one capture can diverge on the next, and Adam has no
         // opinion about that. Two rises in a row is the signal - one can be a
-        // clamp or an unlucky view ordering, two is a trend.
-        if last_loss > prev_loss {
-            rises += 1;
-        } else {
-            rises = 0;
+        // clamp or an unlucky view ordering, two is a trend. With a minibatch
+        // "in a row" is counted in EPOCHS: consecutive batches see different
+        // views, and their losses rise and fall with which views they drew.
+        let epoch = targets.len().div_ceil(views_per_iter);
+        if (it + 1).is_multiple_of(epoch) {
+            if last_loss > prev_loss {
+                rises += 1;
+            } else {
+                rises = 0;
+            }
+            prev_loss = last_loss;
         }
         if rises >= 2 && lr_scale > 1e-3 {
             lr_scale *= 0.5;
@@ -1428,7 +1641,6 @@ fn fit_stage(
                 println!("fit iter {:4}: loss rising, learning rate -> {:.3e}", it0 + it, cfg.lr * lr_scale);
             }
         }
-        prev_loss = last_loss;
         let global = it0 + it;
         if cfg.log_every > 0 && (global.is_multiple_of(cfg.log_every) || global + 1 == cfg.iters) {
             println!("fit iter {global:4}: loss {last_loss:.6}");
@@ -1513,6 +1725,8 @@ fn geometry_passes(
 ) -> f64 {
     let (gpu, cfg) = (ctx.gpu, ctx.cfg);
     let n = ctx.gs.n;
+    // run every `geometry_every` iterations, so each run carries that many
+    let every = cfg.geometry_every.max(1) as f32;
     let px = (cam.width * cam.height) as usize;
     // Features composite against nothing: a background would add itself to
     // every sum these terms are defined over.
@@ -1546,7 +1760,7 @@ fn geometry_passes(
     if cfg.distortion_weight > 0.0 {
         let feat = geometry::distortion_features(&geometry::depths(host_geo, cam));
         let dfeat = pass(&feat, &mut |rgba, depth| {
-            let g = geometry::distortion_loss(rgba, depth, wts, wsum, cfg.distortion_weight);
+            let g = geometry::distortion_loss(rgba, depth, wts, wsum, every * cfg.distortion_weight);
             (g.loss, g.dimg, g.ddepth)
         });
         geometry::distortion_backward(host_geo, cam, &dfeat, extra);
@@ -1560,10 +1774,10 @@ fn geometry_passes(
             if cfg.normal_consistency_weight > 0.0 {
                 let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
                 let target = geometry::depth_normals(depth, &alpha, cam);
-                l += geometry::normal_loss(rgba, &target, wts, wsum, cfg.normal_consistency_weight, &mut dimg);
+                l += geometry::normal_loss(rgba, &target, wts, wsum, every * cfg.normal_consistency_weight, &mut dimg);
             }
             if let Some(target) = prior {
-                l += geometry::normal_loss(rgba, target, wts, wsum, cfg.normal_prior_weight, &mut dimg);
+                l += geometry::normal_loss(rgba, target, wts, wsum, every * cfg.normal_prior_weight, &mut dimg);
             }
             (l, dimg, None)
         });

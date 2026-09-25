@@ -260,7 +260,10 @@ impl Isp {
     /// the whole frame of `cam`).
     pub fn forward(&self, v: usize, cam: &Camera, radiance: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; radiance.len()];
-        self.walk(v, cam, radiance, |p, c, px| out[p * 3 + c] = px.pred);
+        let row = 3 * cam.width as usize;
+        backend_cpu::par::rows_mut(&mut out, row, |y, dst| {
+            self.walk_row(v, cam, y, &radiance[y * row..y * row + row], |x, c, px| dst[x * 3 + c] = px.pred);
+        });
         out
     }
 
@@ -268,69 +271,78 @@ impl Isp {
     /// accumulate the camera parameters' own gradient for the next
     /// [`Isp::step`].
     pub fn backward(&mut self, v: usize, cam: &Camera, radiance: &[f32], dpred: &[f32]) -> Vec<f32> {
-        let mut drad = vec![0.0f32; radiance.len()];
-        let vo = self.view_at(v);
-        let so = self.sensor_at(self.view_sensor[v]);
-        let mut g = vec![0.0f64; PER_VIEW + PER_SENSOR];
-        self.walk(v, cam, radiance, |p, c, px| {
-            let dy = dpred[p * 3 + c] * px.dpred_dy;
-            let dx = dy * px.dy_dx;
-            drad[p * 3 + c] = dx * px.gain * px.vig;
-            let dxs = (dx * px.x) as f64;
-            g[0] += dxs * std::f64::consts::LN_2;
-            g[1 + c] += dxs;
-            if px.vig > VIG_FLOOR {
-                let base = (dx * px.gain * px.radiance) as f64;
-                let r2 = px.r2 as f64;
-                g[PER_VIEW + c * 3] += base * r2;
-                g[PER_VIEW + c * 3 + 1] += base * r2 * r2;
-                g[PER_VIEW + c * 3 + 2] += base * r2 * r2 * r2;
-            }
-            g[PER_VIEW + 9 + c] += (dy * px.dy_drho) as f64;
+        let row = 3 * cam.width as usize;
+        // rows in parallel, each with its own partial parameter gradient
+        let parts: Vec<(Vec<f32>, [f64; PER_VIEW + PER_SENSOR])> = backend_cpu::par::map(cam.height as usize, |y| {
+            let mut drad = vec![0.0f32; row];
+            let mut g = [0.0f64; PER_VIEW + PER_SENSOR];
+            let up = &dpred[y * row..y * row + row];
+            self.walk_row(v, cam, y, &radiance[y * row..y * row + row], |x, c, px| {
+                let dy = up[x * 3 + c] * px.dpred_dy;
+                let dx = dy * px.dy_dx;
+                drad[x * 3 + c] = dx * px.gain * px.vig;
+                let dxs = (dx * px.x) as f64;
+                g[0] += dxs * std::f64::consts::LN_2;
+                g[1 + c] += dxs;
+                if px.vig > VIG_FLOOR {
+                    let base = (dx * px.gain * px.radiance) as f64;
+                    let r2 = px.r2 as f64;
+                    g[PER_VIEW + c * 3] += base * r2;
+                    g[PER_VIEW + c * 3 + 1] += base * r2 * r2;
+                    g[PER_VIEW + c * 3 + 2] += base * r2 * r2 * r2;
+                }
+                g[PER_VIEW + 9 + c] += (dy * px.dy_drho) as f64;
+            });
+            (drad, g)
         });
-        for k in 0..PER_VIEW {
-            self.grad[vo + k] += g[k];
-        }
-        for k in 0..PER_SENSOR {
-            self.grad[so + k] += g[PER_VIEW + k];
+        let (vo, so) = (self.view_at(v), self.sensor_at(self.view_sensor[v]));
+        let mut drad = Vec::with_capacity(radiance.len());
+        for (d, g) in parts {
+            drad.extend_from_slice(&d);
+            for k in 0..PER_VIEW {
+                self.grad[vo + k] += g[k];
+            }
+            for k in 0..PER_SENSOR {
+                self.grad[so + k] += g[PER_VIEW + k];
+            }
         }
         drad
     }
 
-    fn walk(&self, v: usize, cam: &Camera, radiance: &[f32], mut f: impl FnMut(usize, usize, Px)) {
-        let (w, h) = (cam.width as usize, cam.height as usize);
-        assert_eq!(radiance.len(), w * h * 3);
+    /// The camera applied to row `y` of the frame, `radiance` being that row.
+    fn walk_row(&self, v: usize, cam: &Camera, y: usize, radiance: &[f32], mut f: impl FnMut(usize, usize, Px)) {
+        let w = cam.width as usize;
         let ev = self.exposure(v);
         let wb = self.white_balance(v);
-        let s = self.view_sensor[v];
-        let so = self.sensor_at(s);
-        let gamma = self.gamma(s);
+        let so = self.sensor_at(self.view_sensor[v]);
+        let gamma = self.gamma(self.view_sensor[v]);
         let gain: [f32; 3] = std::array::from_fn(|c| 2f32.powf(ev) * wb[c].exp());
         let norm = 0.25 * (cam.width as f32).powi(2) + 0.25 * (cam.height as f32).powi(2);
         let encode = self.encodes(v);
-        for y in 0..h {
-            let dy2 = (y as f32 + 0.5 - cam.cy).powi(2);
-            for x in 0..w {
-                let r2 = ((x as f32 + 0.5 - cam.cx).powi(2) + dy2) / norm;
-                let p = y * w + x;
-                for c in 0..3 {
-                    let a = &self.theta[so + c * 3..so + c * 3 + 3];
-                    let vig = (1.0 + a[0] * r2 + a[1] * r2 * r2 + a[2] * r2 * r2 * r2).max(VIG_FLOOR);
-                    let l = radiance[p * 3 + c];
-                    let xv = gain[c] * vig * l;
-                    // response: (x + ε)^γ - ε^γ, flat below zero
-                    let g = gamma[c];
-                    let (y_out, dy_dx, dy_drho) = if xv > 0.0 {
-                        let b = xv + EPS;
-                        let yb = b.powf(g);
-                        let ye = EPS.powf(g);
-                        (yb - ye, g * b.powf(g - 1.0), g * (yb * b.ln() - ye * EPS.ln()))
-                    } else {
-                        (0.0, 0.0, 0.0)
-                    };
-                    let (pred, dpred_dy) = if encode { (srgb_encode(y_out), srgb_encode_grad(y_out)) } else { (y_out, 1.0) };
-                    f(p, c, Px { pred, dpred_dy, dy_dx, dy_drho, x: xv, gain: gain[c], vig, radiance: l, r2 });
-                }
+        let dy2 = (y as f32 + 0.5 - cam.cy).powi(2);
+        for x in 0..w {
+            let r2 = ((x as f32 + 0.5 - cam.cx).powi(2) + dy2) / norm;
+            for c in 0..3 {
+                let a = &self.theta[so + c * 3..so + c * 3 + 3];
+                let vig = (1.0 + a[0] * r2 + a[1] * r2 * r2 + a[2] * r2 * r2 * r2).max(VIG_FLOOR);
+                let l = radiance[x * 3 + c];
+                let xv = gain[c] * vig * l;
+                // response: (x + ε)^γ - ε^γ, flat below zero
+                let g = gamma[c];
+                let (y_out, dy_dx, dy_drho) = if xv <= 0.0 {
+                    (0.0, 0.0, 0.0)
+                } else if g == 1.0 {
+                    // the identity curve, which is what the response is until
+                    // its stage starts: no transcendental per pixel for it
+                    (xv, 1.0, xv * (xv + EPS).ln() + EPS * ((xv + EPS).ln() - EPS.ln()))
+                } else {
+                    let b = xv + EPS;
+                    let yb = b.powf(g);
+                    let ye = EPS.powf(g);
+                    (yb - ye, g * b.powf(g - 1.0), g * (yb * b.ln() - ye * EPS.ln()))
+                };
+                let (pred, dpred_dy) = if encode { (srgb_encode(y_out), srgb_encode_grad(y_out)) } else { (y_out, 1.0) };
+                f(x, c, Px { pred, dpred_dy, dy_dx, dy_drho, x: xv, gain: gain[c], vig, radiance: l, r2 });
             }
         }
     }

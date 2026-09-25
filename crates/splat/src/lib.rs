@@ -15,6 +15,7 @@ pub mod align;
 pub mod caps;
 pub mod density;
 pub mod geometry;
+pub mod init;
 pub mod isp;
 pub mod loss;
 pub mod mcmc;

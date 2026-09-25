@@ -27,7 +27,7 @@ struct Params {
     n: u32,
     k: u32,       // coefficients per channel: 0, 3, 8 or 15
     mode: u32,    // 0 = forward (write colors), 1 = VJP (accumulate d_base/d_sh)
-    pad: u32,
+    skip: u32,    // highest coefficients held out (progressive bands), 0 = none
     eye_x: f32,
     eye_y: f32,
     eye_z: f32,
@@ -86,6 +86,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
     }
+
+    // Progressive bands: a fit enables SH one degree at a time, so the
+    // coefficients above the current degree neither colour the splat nor
+    // receive a gradient until their band switches on.
+    for (var t = p.k - min(p.skip, p.k); t < 15u; t = t + 1u) { y[t] = 0.0; }
 
     for (var c = 0u; c < 3u; c = c + 1u) {
         let o = i * 3u + c;

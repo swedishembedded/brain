@@ -178,8 +178,12 @@ pub struct Policy {
     pub refine_frac: f32,
     /// Opacity below which a gaussian is a reclaim candidate outright.
     pub dead_opacity: f32,
-    /// Contribution below this fraction of the median is a reclaim candidate.
-    pub starve_frac: f32,
+    /// Compositing weight, in pixels per view that sees it, below which a
+    /// gaussian is a reclaim candidate. An ABSOLUTE measure on purpose: a
+    /// threshold relative to the median contribution condemns gaussians for
+    /// being small, and in a scene still made of large blobs that was
+    /// measured flagging 11k of 26k gaussians a round.
+    pub starve_px: f32,
     /// Weights of the three ranked signals: residual, edge residual, AbsGS.
     pub weights: [f32; 3],
     /// Longest-to-middle axis ratio above which a gaussian is split along
@@ -189,7 +193,7 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy { refine_frac: 0.05, dead_opacity: 0.02, starve_frac: 0.02, weights: [0.4, 0.3, 0.3], elongated: 1.5 }
+        Policy { refine_frac: 0.05, dead_opacity: 0.02, starve_px: 0.25, weights: [0.4, 0.3, 0.3], elongated: 1.5 }
     }
 }
 
@@ -212,14 +216,12 @@ pub fn round(
     suspect.resize(n, false);
     let mut stats = Round::default();
 
-    let mut contrib: Vec<f32> = ev.contribution.clone();
-    contrib.sort_by(f32::total_cmp);
-    let median = contrib[n / 2].max(1e-12);
+    let starving = |i: usize| ev.contribution[i] / (ev.views[i].max(1) as f32) < policy.starve_px;
 
     // 3. reclaim: second strike removes, first strike suppresses
     let mut remove = vec![false; n];
     for i in 0..n {
-        let starved = ev.contribution[i] < policy.starve_frac * median || scene.opacities[i] < policy.dead_opacity;
+        let starved = starving(i) || scene.opacities[i] < policy.dead_opacity;
         if starved && suspect[i] {
             remove[i] = true;
             stats.reclaimed += 1;
@@ -233,7 +235,7 @@ pub fn round(
     }
 
     // 1. score by ranks among the gaussians with evidence worth ranking
-    let eligible: Vec<usize> = (0..n).filter(|&i| !remove[i] && !suspect[i] && ev.contribution[i] >= policy.starve_frac * median).collect();
+    let eligible: Vec<usize> = (0..n).filter(|&i| !remove[i] && !suspect[i] && !starving(i)).collect();
     let mean = |num: &[f32]| -> Vec<f32> { (0..n).map(|i| num[i] / ev.contribution[i].max(1e-12)).collect() };
     let grad: Vec<f32> = (0..n).map(|i| ev.absgrad[i] / ev.views[i].max(1) as f32).collect();
     let (pr, pe, pg) = (percentile(&mean(&ev.residual), &eligible), percentile(&mean(&ev.edge), &eligible), percentile(&grad, &eligible));
