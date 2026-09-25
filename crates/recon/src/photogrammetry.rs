@@ -293,18 +293,61 @@ pub fn training_set(photos: &[Rgb8], halvings: u32, opacity: f32, cfg: &SfmCfg) 
 /// they are reported unused in `sfm.report`.
 pub fn training_set_located(photos: &[Rgb8], gps: &[Option<Gps>], halvings: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
     let make = |i: usize, cam: Camera, sensor: usize| target(&photos[i], cam, sensor);
-    solve(photos, gps, halvings, ColorSpace::Display, opacity, cfg, make)
+    solve(photos, gps, halvings, ColorSpace::Display, opacity, cfg, &sfm::matching::Host, make)
 }
 
 /// [`training_set_located`] from photographs loaded with
 /// [`imaging::photo::load_photo`]: their own GPS fixes, and every target
 /// with its exposure and encoding as [`photo_target`] makes them under `ph`,
-/// halved in `ph`'s colour space.
-pub fn training_set_photos(photos: &[imaging::Photo], halvings: u32, opacity: f32, cfg: &SfmCfg, ph: &Photometry) -> Result<TrainingSet, SfmError> {
+/// halved in `ph`'s colour space. Descriptors are matched through `nn`
+/// ([`DeviceMatcher`] on a GPU, `sfm::matching::Host` without one).
+pub fn training_set_photos(
+    photos: &[imaging::Photo],
+    halvings: u32,
+    opacity: f32,
+    cfg: &SfmCfg,
+    ph: &Photometry,
+    nn: &dyn sfm::matching::NearestNeighbours,
+) -> Result<TrainingSet, SfmError> {
     let rgb8: Vec<Rgb8> = photos.iter().map(imaging::Photo::rgb8).collect();
     let gps: Vec<Option<Gps>> = photos.iter().map(|p| p.exif.gps).collect();
     let make = |i: usize, cam: Camera, sensor: usize| photo_target(&photos[i], cam, sensor, ph);
-    solve(&rgb8, &gps, halvings, ph.color_space, opacity, cfg, make)
+    solve(&rgb8, &gps, halvings, ph.color_space, opacity, cfg, nn, make)
+}
+
+/// Descriptor matching on the device (`sift_match.wgsl`): the same search as
+/// `sfm::matching::Host`, for a `gpu` built with [`pipelines`].
+pub struct DeviceMatcher<'a> {
+    gpu: &'a Gpu,
+    kernel: usize,
+}
+
+impl<'a> DeviceMatcher<'a> {
+    pub fn new(gpu: &'a Gpu) -> DeviceMatcher<'a> {
+        DeviceMatcher { gpu, kernel: splat::PIPELINES.len() + mvs::PIPELINES.len() }
+    }
+}
+
+impl sfm::matching::NearestNeighbours for DeviceMatcher<'_> {
+    fn best_two(&self, a: &[f32], b: &[f32]) -> Vec<(usize, f32, f32)> {
+        let d = sfm::sift::DESC;
+        let (na, nb) = (a.len() / d, b.len() / d);
+        if na == 0 {
+            return Vec::new();
+        }
+        let g = self.gpu;
+        let (ba, bb) = (g.storage_init("sfm.match.a", a), g.storage_init("sfm.match.b", if b.is_empty() { &[0.0] } else { b }));
+        let out = g.storage(3 * na as u64);
+        let step = g.dispatch(self.kernel, &[&ba, &bb, &out], &[na as u32, nb as u32], gpu_core::Dispatch::Workgroups(na.div_ceil(64) as u32));
+        g.submit(&[], &[step]);
+        g.read(&out, 3 * na)
+            .chunks_exact(3)
+            .map(|r| {
+                let j = r[0].to_bits();
+                (if j == u32::MAX { usize::MAX } else { j as usize }, r[1], r[2])
+            })
+            .collect()
+    }
 }
 
 /// Structure from motion on `photos`, each registered one made a target by
@@ -317,11 +360,12 @@ fn solve(
     space: ColorSpace,
     opacity: f32,
     cfg: &SfmCfg,
+    nn: &dyn sfm::matching::NearestNeighbours,
     make: impl Fn(usize, Camera, usize) -> TargetView,
 ) -> Result<TrainingSet, SfmError> {
     let fix = |i: usize| gps.get(i).copied().flatten().map(|g| Wgs84 { latitude_deg: g.latitude_deg, longitude_deg: g.longitude_deg, altitude_m: g.altitude_m });
     let views: Vec<Photo> = photos.iter().enumerate().map(|(i, p)| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None, gps: fix(i) }).collect();
-    let rec = sfm::incremental::reconstruct(&views, cfg)?;
+    let rec = sfm::incremental::reconstruct_with(&views, cfg, nn)?;
     let mut targets = Vec::new();
     let mut source = Vec::new();
     for (i, pose) in rec.poses.iter().enumerate() {
@@ -345,7 +389,7 @@ fn solve(
 /// Every WGSL kernel [`reconstruct`] dispatches: `splat`'s at 0, then
 /// `mvs`'s at `splat::PIPELINES.len()`. Build the device with this list.
 pub fn pipelines() -> Vec<(&'static str, &'static str)> {
-    splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().collect()
+    splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().chain([("sift_match", kernels::SIFT_MATCH)]).collect()
 }
 
 /// How [`reconstruct`] turns photographs into a scene. Every `None` is
@@ -528,7 +572,7 @@ pub fn reconstruct_photos(
     }
     log(&format!("photometry: {:?}, exposures from EXIF {}", ph.color_space, if ph.reference_ev.is_some() { "recorded" } else { "unknown" }));
     let t = std::time::Instant::now();
-    let set = training_set_photos(photos, halvings, 0.1, &cfg.sfm, &ph).map_err(ReconstructError::Sfm)?.upright();
+    let set = training_set_photos(photos, halvings, 0.1, &cfg.sfm, &ph, &DeviceMatcher::new(gpu)).map_err(ReconstructError::Sfm)?.upright();
     log(&format!(
         "structure from motion: {}/{} photographs placed, {} points, {:.2} px rms, lens {:?}, {:.0} s",
         set.targets.len(),

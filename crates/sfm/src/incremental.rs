@@ -62,7 +62,7 @@ use crate::camera::Pose;
 use crate::georef::{gravity_from_cameras, solve_enu, GeorefCfg, GeorefError, Wgs84};
 use crate::lens::{describe, fit_lenses, stage_for, LensCfg, LensChoice, LensFit, Stage};
 use crate::linalg::{dot, mv, scale, V3};
-use crate::matching::match_descriptors;
+use crate::matching::{match_with, Host, NearestNeighbours};
 use crate::positioning::{global_positions, PositioningCfg, RayObservation};
 use crate::retrieval::{select_pairs, PairSelection};
 use crate::rotation::{average_rotations, RelativeRotation, RotationCfg};
@@ -320,6 +320,11 @@ fn starting_lens(choice: LensChoice) -> Lens {
 
 /// Run structure from motion on `photos`.
 pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, SfmError> {
+    reconstruct_with(photos, cfg, &Host)
+}
+
+/// [`reconstruct`], matching descriptors through `nn` (a device search, say).
+pub fn reconstruct_with(photos: &[Photo], cfg: &SfmCfg, nn: &dyn NearestNeighbours) -> Result<Reconstruction, SfmError> {
     let n = photos.len();
     if n < 2 {
         return Err(SfmError::TooFewImages);
@@ -378,7 +383,7 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
     log(format!("{} of {} pairs selected for matching", candidates.len(), n * (n - 1) / 2));
     let mut pairs: Vec<Pair> = Vec::new();
     for &(a, b) in &candidates {
-        let m = match_descriptors(&feats[a].1, &feats[b].1, cfg.ratio);
+        let m = match_with(nn, &feats[a].1, &feats[b].1, cfg.ratio);
         let m: Vec<(usize, usize)> = m.into_iter().filter(|&(i, j)| rays[a][i].is_some() && rays[b][j].is_some()).collect();
         if m.len() < cfg.min_inliers {
             continue;

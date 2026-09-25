@@ -29,6 +29,9 @@ brain-gpu-core.workspace = true
 # Dense range, normal and confidence per photograph, and the dense starting
 # scene fused from them (`photogrammetry::dense`).
 brain-mvs.workspace = true
+# `sift_match.wgsl`, the device descriptor search structure from motion is
+# handed (`photogrammetry::DeviceMatcher`).
+brain-kernels.workspace = true
 
 [dev-dependencies]
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).

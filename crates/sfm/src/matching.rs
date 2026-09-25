@@ -9,8 +9,24 @@
 
 use crate::sift::DESC;
 
-/// For each descriptor of `a`, its best and second-best dot products in `b`
-/// and the index of the best.
+/// The nearest-neighbour search matching runs on: for each descriptor of
+/// `a` (rows of [`DESC`] floats), the index of its largest dot product in
+/// `b` and the two largest values; `usize::MAX` and -1 when `b` is empty.
+/// Ties keep the first index. [`Host`] is the reference; a device
+/// implementation lives with whoever owns the device.
+pub trait NearestNeighbours {
+    fn best_two(&self, a: &[f32], b: &[f32]) -> Vec<(usize, f32, f32)>;
+}
+
+/// The search on the host, parallel over `a`'s descriptors.
+pub struct Host;
+
+impl NearestNeighbours for Host {
+    fn best_two(&self, a: &[f32], b: &[f32]) -> Vec<(usize, f32, f32)> {
+        best_two(a, b)
+    }
+}
+
 fn best_two(a: &[f32], b: &[f32]) -> Vec<(usize, f32, f32)> {
     let nb = b.len() / DESC;
     backend_cpu::par::map(a.len() / DESC, |i| {
@@ -37,11 +53,16 @@ fn best_two(a: &[f32], b: &[f32]) -> Vec<(usize, f32, f32)> {
 /// Mutual nearest-neighbour matches passing the ratio test at `ratio` (on
 /// Euclidean distance), as index pairs `(in a, in b)`.
 pub fn match_descriptors(a: &[f32], b: &[f32], ratio: f32) -> Vec<(usize, usize)> {
+    match_with(&Host, a, b, ratio)
+}
+
+/// [`match_descriptors`] through the search `nn`.
+pub fn match_with(nn: &dyn NearestNeighbours, a: &[f32], b: &[f32], ratio: f32) -> Vec<(usize, usize)> {
     if a.is_empty() || b.is_empty() {
         return Vec::new();
     }
-    let ab = best_two(a, b);
-    let ba = best_two(b, a);
+    let ab = nn.best_two(a, b);
+    let ba = nn.best_two(b, a);
     let dist = |s: f32| (2.0 - 2.0 * s).max(0.0).sqrt();
     ab.iter()
         .enumerate()

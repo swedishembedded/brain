@@ -518,6 +518,7 @@ load of it must already be bare-identifier-indexed.
 | [`scale_row`](../../crates/kernels/wgsl/scale_row.wgsl) | Per-row (per-sample) scalar scale on a row-major [N, M] tensor - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`scan_add`](../../crates/kernels/wgsl/scan_add.wgsl) | Exclusive prefix scan, stage 2 | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | n/a |
 | [`scan_block`](../../crates/kernels/wgsl/scan_block.wgsl) | Exclusive prefix scan, stage 1 of the generic multi-pass scan | one thread per output element | 3/5 | ✓ | ✓ | - | - | n/a |
+| [`sift_match`](../../crates/kernels/wgsl/sift_match.wgsl) | descriptor matching: each descriptor's best and second-best dot product in another image's set | 64-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ | - | - | f32 |
 | [`sigmoid`](../../crates/kernels/wgsl/sigmoid.wgsl) | Sigmoid activation:  y = 1 / (1 + exp(-x)) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`sigmoid_bwd`](../../crates/kernels/wgsl/sigmoid_bwd.wgsl) | Sigmoid backward:  dx = dy * s * (1 - s),  s = sigmoid(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`silu`](../../crates/kernels/wgsl/silu.wgsl) | SiLU (a.k.a. swish) activation | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |

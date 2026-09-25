@@ -995,6 +995,8 @@ pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
 pub const SCAN_ADD: &str = include_str!("../wgsl/scan_add.wgsl");
 /// `wgsl/scan_block.wgsl`
 pub const SCAN_BLOCK: &str = include_str!("../wgsl/scan_block.wgsl");
+/// `wgsl/sift_match.wgsl`
+pub const SIFT_MATCH: &str = include_str!("../wgsl/sift_match.wgsl");
 /// `wgsl/sigmoid.wgsl`
 pub const SIGMOID: &str = include_str!("../wgsl/sigmoid.wgsl");
 /// `wgsl/sigmoid_bwd.wgsl`
@@ -1646,6 +1648,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_row", SCALE_ROW),
     ("scan_add", SCAN_ADD),
     ("scan_block", SCAN_BLOCK),
+    ("sift_match", SIFT_MATCH),
     ("sigmoid", SIGMOID),
     ("sigmoid_bwd", SIGMOID_BWD),
     ("silu", SILU),
