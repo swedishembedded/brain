@@ -92,6 +92,29 @@ impl Drop for AdapterWatcher {
     }
 }
 
+/// The warning a caller must print when `--watch-adapters` was given but
+/// cannot do anything, or `None` when the configuration is coherent.
+///
+/// Separated from [`spawn_adapter_watcher`] so the decision is testable
+/// without capturing stderr or standing up a resident. The distinction it
+/// draws is the whole point: no flag is a default and is correctly silent; a
+/// flag with nothing to apply an adapter to is a misconfiguration whose only
+/// symptom is that promotion silently stops working.
+pub(crate) fn ignored_watch_warning(dir: Option<&Path>, has_resident: bool) -> Option<String> {
+    let dir = dir?;
+    if has_resident {
+        return None;
+    }
+    Some(format!(
+        "brain serve: WARNING --watch-adapters {} is being IGNORED: this process serves no Qwen3 \
+         resident, so there is nothing for a promoted adapter to apply to. Name the checkpoint \
+         (BRAIN_QWEN_WEIGHTS=<dir-or-file>) and restart. Until then every request is answered by \
+         the base weights no matter what is promoted into that directory, so a before/after \
+         comparison will show no difference and look like a training failure.",
+        dir.display()
+    ))
+}
+
 /// Spawn the opt-in watcher, or `None` when there is nothing to watch:
 /// `dir` is `None` (the flag was not given - the default) or `resident` is
 /// `None` (this process serves no Qwen3, so no adapter could be applied to
@@ -101,8 +124,21 @@ impl Drop for AdapterWatcher {
 /// `Arc<dyn ResidentModel>` the executor holds, because `set_adapter` is
 /// inherent - see `crate::resident::Serving`.
 pub fn spawn_adapter_watcher(dir: Option<&Path>, resident: Option<Arc<QwenResident>>, executor: &Executor) -> Option<AdapterWatcher> {
+    // No flag: the default, and correctly silent.
     let dir = dir?.to_path_buf();
-    let resident = resident?;
+    // A directory to watch but nothing to apply an adapter to. This is a
+    // misconfiguration, not a default, and it must not be silent: the flag was
+    // given deliberately, every request is still answered, and the ONLY
+    // observable difference is that promoted adapters never take effect. A
+    // caller measuring before/after therefore sees two identical arms and
+    // concludes that training achieved nothing -- the process reports success
+    // the whole way through.
+    let Some(resident) = resident else {
+        if let Some(warning) = ignored_watch_warning(Some(&dir), false) {
+            eprintln!("{warning}");
+        }
+        return None;
+    };
     // Asked of the resident each time rather than captured once: the
     // variant string is the resident's business, and a resident that keys on
     // its current adapter answers differently after every swap. A key held
@@ -311,6 +347,28 @@ mod tests {
         assert!(
             spawn_adapter_watcher(Some(&dir), None, &executor).is_none(),
             "a watched directory with no served Qwen3 has nothing to swap, so it must spawn no watcher either"
+        );
+    }
+
+    /// Not spawning is correct; doing it SILENTLY is not. A directory named
+    /// with nothing to apply an adapter to keeps answering every request from
+    /// the base weights, so the only symptom is that a promoted adapter never
+    /// changes an answer -- which reads as a training failure rather than a
+    /// configuration one, and costs whoever hits it a debugging session
+    /// pointed at entirely the wrong half of the system.
+    #[test]
+    fn a_watched_directory_with_nothing_to_apply_it_to_says_so() {
+        let dir = tmp("watcher-warns");
+
+        assert!(ignored_watch_warning(None, false).is_none(), "no flag is the default, not a misconfiguration");
+        assert!(ignored_watch_warning(Some(&dir), true).is_none(), "a resident to swap under means nothing is wrong");
+
+        let warning = ignored_watch_warning(Some(&dir), false).expect("a flag that cannot work must be reported");
+        assert!(warning.contains("IGNORED"), "it must say the flag is not in effect: {warning}");
+        assert!(warning.contains("BRAIN_QWEN_WEIGHTS"), "and name the remedy: {warning}");
+        assert!(
+            warning.contains(&dir.display().to_string()),
+            "and name the directory it is ignoring: {warning}"
         );
     }
 
