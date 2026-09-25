@@ -122,3 +122,57 @@ impl DeviceLoss {
         gpu.read(&self.loss, px).iter().map(|&v| v as f64).sum()
     }
 }
+
+/// Which pixels of a view to go on supervising when the photograph may hold
+/// transient content (`crate::opt::FitCfg::transients`): 1 = supervise, 0 =
+/// ignore, from each pixel's photometric residual `r` (`[W*H]`) against the
+/// current scene (after RobustNeRF, Sabour et al. 2023).
+///
+/// A pixel is an outlier when its residual is above the view's 80th
+/// percentile; a 3x3 majority vote removes isolated outliers - fine texture
+/// the scene has not resolved yet scatters its error, a transient object
+/// does not - and a 16x16 block that is at least 60% inliers is supervised
+/// whole. What remains masked is a large coherent region the scene the
+/// other views agree on cannot explain.
+pub fn transient_mask(r: &[f32], w: usize, h: usize) -> Vec<f32> {
+    assert_eq!(r.len(), w * h);
+    let mut sorted: Vec<f32> = r.iter().copied().filter(|v| v.is_finite()).collect();
+    if sorted.is_empty() {
+        return vec![1.0; w * h];
+    }
+    let k = (sorted.len() * 8 / 10).min(sorted.len() - 1);
+    let tau = *sorted.select_nth_unstable_by(k, f32::total_cmp).1;
+    let inlier: Vec<bool> = r.iter().map(|v| *v <= tau).collect();
+    let mut smooth = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (mut n, mut good) = (0, 0);
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let (xx, yy) = (x as i32 + dx, y as i32 + dy);
+                    if xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h {
+                        n += 1;
+                        good += inlier[yy as usize * w + xx as usize] as u32;
+                    }
+                }
+            }
+            smooth[y * w + x] = 2 * good >= n;
+        }
+    }
+    let mut mask: Vec<f32> = smooth.iter().map(|&v| if v { 1.0 } else { 0.0 }).collect();
+    const BLOCK: usize = 16;
+    for by in (0..h).step_by(BLOCK) {
+        for bx in (0..w).step_by(BLOCK) {
+            let (y1, x1) = ((by + BLOCK).min(h), (bx + BLOCK).min(w));
+            let total = (y1 - by) * (x1 - bx);
+            let good: usize = (by..y1).map(|y| (bx..x1).filter(|&x| smooth[y * w + x]).count()).sum();
+            if 10 * good >= 6 * total {
+                for y in by..y1 {
+                    mask[y * w + bx..y * w + x1].fill(1.0);
+                }
+            }
+        }
+    }
+    mask
+}
+

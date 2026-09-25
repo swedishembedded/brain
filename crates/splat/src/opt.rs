@@ -249,6 +249,12 @@ pub struct FitCfg {
     /// spherical-harmonic expansion of this degree (at most
     /// [`crate::env::MAX_DEGREE`]); `None` = the background is black.
     pub environment: Option<u32>,
+    /// The photographs may hold transient content (people, traffic): at
+    /// every density round, stop supervising each view's large coherent
+    /// regions the scene cannot explain
+    /// ([`crate::loss::transient_mask`]). Off for a static capture, where it
+    /// can only withhold supervision from regions that are merely hard.
+    pub transients: bool,
 }
 
 impl Default for FitCfg {
@@ -296,6 +302,7 @@ impl Default for FitCfg {
             batch: 0,
             camera: CameraRefine::default(),
             environment: None,
+            transients: false,
         }
     }
 }
@@ -1082,7 +1089,7 @@ impl<'a> Fit<'a> {
             // ---- density control ----
             if cfg.densify_every > 0 && done >= first_round && done < until && done.is_multiple_of(cfg.densify_every) {
                 let round = (done - first_round) / cfg.densify_every;
-                scene = self.densify(scene, &mut scr, &level, &absgrad, &mut starved, round, rounds, it);
+                scene = self.densify(scene, &mut scr, &mut level, &absgrad, &mut starved, round, rounds, it);
                 absgrad = vec![0.0; scene.n];
                 if scene.n > scr.cap {
                     // unbudgeted growth: the scratch sized for the start has
@@ -1331,7 +1338,7 @@ impl<'a> Fit<'a> {
         &mut self,
         scene: DeviceScene,
         scr: &mut Scratch,
-        level: &Level,
+        level: &mut Level,
         absgrad: &[f32],
         starved: &mut Vec<f32>,
         round: usize,
@@ -1366,7 +1373,19 @@ impl<'a> Fit<'a> {
                 None => rgb,
                 Some(model) => model.forward(vi, &cam, &rgb),
             };
-            let weights = t.weights(self.isp.as_deref());
+            let mut weights = t.weights(self.isp.as_deref());
+            if cfg.transients {
+                let (w, h) = (cam.width as usize, cam.height as usize);
+                let r: Vec<f32> = (0..w * h).map(|p| (0..3).map(|c| (pred[p * 3 + c] - t.rgb[p * 3 + c]).abs()).sum::<f32>() / 3.0).collect();
+                let keep = crate::loss::transient_mask(&r, w, h);
+                let wt: Vec<f32> = match &weights {
+                    Some(b) => b.iter().zip(&keep).map(|(a, k)| a * k).collect(),
+                    None => keep,
+                };
+                level.wsum[vi] = wt.iter().map(|&v| v as f64).sum();
+                level.wt[vi] = Some(gpu.storage_init("fit.weight", &wt));
+                weights = Some(wt);
+            }
             let aux = scr.renderer.read_aux(gpu, cam.width, cam.height);
             let (sites, u, a) = residual_sites(t, &pred, &rgba, &aux, weights.as_deref(), round as u64 ^ (vi as u64) << 32);
             ev.sites.extend(sites);

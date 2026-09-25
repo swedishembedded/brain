@@ -274,6 +274,9 @@ pub struct PhotoCfg {
     /// Fit the environment behind the scene (sky, distant scenery) at this
     /// spherical-harmonic degree (`splat::env`).
     pub environment: Option<u32>,
+    /// The photographs may hold transient content (people, traffic), which
+    /// the fit should stop supervising (`FitCfg::transients`).
+    pub transients: bool,
 }
 
 impl Default for PhotoCfg {
@@ -286,6 +289,7 @@ impl Default for PhotoCfg {
             max_gaussians: None,
             camera_model: None,
             environment: None,
+            transients: false,
         }
     }
 }
@@ -421,7 +425,7 @@ pub fn reconstruct(
     } else {
         FitCfg::from_sparse_points(iterations, budget, views)
     };
-    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), environment: cfg.environment, ..preset };
+    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), environment: cfg.environment, transients: cfg.transients, ..preset };
     let (w, h) = (set.targets[0].cam.width, set.targets[0].cam.height);
     log(&format!("fit: {views} views at {w}x{h}, {} gaussians to start, budget {budget}, {iterations} steps", set.init.len()));
     let t = std::time::Instant::now();

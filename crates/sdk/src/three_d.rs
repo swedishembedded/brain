@@ -202,6 +202,15 @@ impl ReconstructionBuilder {
         self
     }
 
+    /// The photographs may hold people, traffic or anything else that was
+    /// not there in all of them: stop supervising what the scene cannot
+    /// explain in one view. Off by default; on a static capture it can only
+    /// withhold supervision from regions that are merely hard to fit.
+    pub fn transients(mut self, on: bool) -> Self {
+        self.cfg.transients = on;
+        self
+    }
+
     /// Fit the environment behind the scene - sky and distant scenery, as
     /// radiance by direction - at this spherical-harmonic degree (up to 8).
     pub fn environment(mut self, degree: u32) -> Self {

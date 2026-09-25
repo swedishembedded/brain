@@ -691,6 +691,8 @@ fn train_cmd(argv: &[String]) {
     // Sky and distant scenery as radiance by direction, instead of gaussians
     // hanging behind the scene.
     let environment = a.take_str("--environment").map(|v| v.parse::<u32>().unwrap_or_else(|_| usage_exit(&format!("--environment {v}: a degree, 0 to 8"))));
+    // People, traffic, anything not in every photograph.
+    let transients = a.take_flag("--transients");
     let cams_out = a.take_str("--cameras-out");
     a.finish();
     let paths = crate::mirror_cli::collect_images(&images);
@@ -711,6 +713,7 @@ fn train_cmd(argv: &[String]) {
         max_gaussians,
         camera_model: camera_model.then(splat::isp::IspCfg::default),
         environment,
+        transients,
     };
     println!("reconstructing {} photographs ...", photos.len());
     let g = Gpu::new(&recon::photogrammetry::pipelines());
