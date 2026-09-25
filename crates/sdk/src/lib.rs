@@ -146,7 +146,7 @@ pub use audit::acceptance::LedgerFacts;
 #[cfg(feature = "reader")]
 pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome, MIN_EPISODE_CHARS};
 #[cfg(feature = "study")]
-pub use chat_dataset::{validate_chat_dataset, ChatDatasetSummary};
+pub use chat_dataset::{validate_chat_dataset, validate_chat_dataset_for, ChatDatasetSummary};
 #[cfg(feature = "study")]
 pub use study::{
     Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,

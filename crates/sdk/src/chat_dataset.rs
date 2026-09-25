@@ -33,6 +33,9 @@
 use std::path::Path;
 
 use data::chat::ChatSample;
+use data::chat_template::ChatTemplate;
+use data::qwen_tokenizer::QwenBpe;
+use data::tokenizer::Tokenizer;
 
 /// What a dataset file contains, once it has been shown to parse.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -48,6 +51,57 @@ pub struct ChatDatasetSummary {
     pub trained_messages: usize,
     /// Conversations carrying a tool schema.
     pub records_with_tools: usize,
+}
+
+/// Parse `path` and, given the checkpoint that will train on it, ENCODE every
+/// record the way training will.
+///
+/// Parsing alone is not enough, and the gap is not theoretical: a dataset can
+/// satisfy the wire schema completely and still be untrainable, because the
+/// loss mask is derived by rendering each message through the checkpoint's own
+/// chat template and some message shapes are not prefix-stable under it - the
+/// template's output for a message depends on what comes after it, so there is
+/// no honest boundary to mask at. `model::fit` refuses those rather than
+/// guessing, which is correct and also means the refusal arrives after a
+/// checkpoint has been loaded and a device claimed.
+///
+/// This runs the same encode, needs no device, and reports the offending
+/// record and message.
+pub fn validate_chat_dataset_for(
+    path: impl AsRef<Path>,
+    model_dir: impl AsRef<Path>,
+) -> Result<ChatDatasetSummary, String> {
+    let path = path.as_ref();
+    let summary = validate_chat_dataset(path)?;
+    let samples = ChatSample::from_jsonl(path).map_err(|e| e.to_string())?;
+
+    let model_dir = model_dir.as_ref();
+    let tmpl = ChatTemplate::from_model_dir(model_dir).map_err(|e| {
+        format!("{}: could not load the chat template: {e}", model_dir.display())
+    })?;
+    let tok_path = model_dir.join("tokenizer.json");
+    let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default())
+        .map_err(|e| format!("{}: could not load the tokenizer: {e}", tok_path.display()))?;
+
+    for (index, sample) in samples.iter().enumerate() {
+        let (ids, mask) = sample.encode(&tok, &tmpl).map_err(|e| {
+            format!(
+                "{}: record {} cannot be encoded for training: {e}",
+                path.display(),
+                index + 1
+            )
+        })?;
+        if !mask.iter().any(|m| *m) {
+            return Err(format!(
+                "{}: record {} encodes to {} token(s) with none supervised, so training on it \
+                 would be a no-op",
+                path.display(),
+                index + 1,
+                ids.len()
+            ));
+        }
+    }
+    Ok(summary)
 }
 
 /// Parse `path` exactly as the trainer would, and report what is in it.
