@@ -119,8 +119,11 @@ learned model. It runs in three steps:
    photograph at a time and refines everything with bundle adjustment. The
    camera is calibrated from the photographs themselves - its focal length
    is chosen by reconstructing under a range of candidates and keeping the
-   one that registers the most photographs most accurately, and lens
-   distortion is estimated alongside. It prints how many photographs it
+   one that registers the most photographs most accurately, and the
+   principal point and lens distortion are estimated alongside, under
+   whichever lens model explains the photographs best (pinhole,
+   Brown-Conrady radial and tangential, or Kannala-Brandt fisheye, chosen by
+   information criterion). It prints how many photographs it
    registered and the reprojection error; a photograph it could not place
    is listed and left out.
 2. The photographs are resampled to an ideal pinhole camera at `--width`,
