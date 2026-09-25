@@ -1,57 +1,105 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Absolute pose from 2D-3D correspondences: the calibrated direct linear
-//! transform (Hartley & Zisserman §7.1) on six-point samples inside RANSAC,
-//! then Gauss-Newton on the reprojection error of the inliers.
+//! Absolute pose from 2D-3D correspondences: the minimal three-point problem
+//! (P3P, Grunert 1841; see Haralick et al., IJCV 1994) inside RANSAC, then
+//! Gauss-Newton on the reprojection error of the inliers.
 //!
-//! Image points are normalized coordinates, so the DLT estimates `[R|t]` up to
-//! scale directly; the rotation block is projected onto SO(3) and the scale
-//! read off its singular values.
+//! P3P rather than the six-point DLT (Hartley & Zisserman §7.1): the DLT
+//! estimates a full
+//! 3x4 projection and is DEGENERATE when the points are coplanar - which is
+//! what most of a capture of an object on a floor, a table or a deck is. It
+//! also needs six clean points per sample against P3P's three, so at 30%
+//! inliers it needs 27x more samples. Image points are normalized
+//! coordinates.
 
 use crate::camera::Pose;
-use crate::linalg::{cholesky_solve, exp_so3, mm, mv, nearest_rotation, null_vector, svd3, M3, V3};
+use crate::linalg::{cholesky_solve, exp_so3, mm, mv, nearest_rotation, normalize, V3};
 use data::rng::Lcg;
 
-fn dlt(x: &[V3], u: &[[f64; 2]]) -> Option<Pose> {
-    if x.len() < 6 {
-        return None;
+/// Every pose that puts world points `x` on the bearings of normalized image
+/// points `u` exactly (up to four).
+///
+/// With depths `s_i` along unit bearings `j_i`, the law of cosines gives
+/// `s_j² + s_k² - 2 s_j s_k cos(j_j, j_k) = |x_j - x_k|²` for each pair.
+/// Substituting the depth ratios `u = s2/s1`, `v = s3/s1` and dividing two
+/// of those by the third leaves, for each `v`, a quadratic in `u` and one
+/// scalar residual in `v`; its roots are found by a log-spaced scan with
+/// bisection, which is slower than a closed-form quartic and cannot silently
+/// lose a root to a mis-transcribed coefficient.
+pub fn p3p(x: [V3; 3], u: [[f64; 2]; 3]) -> Vec<Pose> {
+    let j: [V3; 3] = std::array::from_fn(|i| normalize([u[i][0], u[i][1], 1.0]));
+    let d2 = |a: V3, b: V3| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2);
+    let (a2, b2, c2) = (d2(x[1], x[2]), d2(x[0], x[2]), d2(x[0], x[1]));
+    if a2 < 1e-18 || b2 < 1e-18 || c2 < 1e-18 {
+        return Vec::new();
     }
-    // condition the world points: centre and scale to unit RMS
-    let n = x.len() as f64;
-    let c: V3 = std::array::from_fn(|k| x.iter().map(|p| p[k]).sum::<f64>() / n);
-    let rms = (x.iter().map(|p| (0..3).map(|k| (p[k] - c[k]).powi(2)).sum::<f64>()).sum::<f64>() / n).sqrt().max(1e-12);
-    let s = 1.0 / rms;
-    let mut rows = Vec::with_capacity(2 * x.len());
-    for (p, q) in x.iter().zip(u) {
-        let (a, b, cc) = ((p[0] - c[0]) * s, (p[1] - c[1]) * s, (p[2] - c[2]) * s);
-        rows.push(vec![a, b, cc, 1.0, 0.0, 0.0, 0.0, 0.0, -q[0] * a, -q[0] * b, -q[0] * cc, -q[0]]);
-        rows.push(vec![0.0, 0.0, 0.0, 0.0, a, b, cc, 1.0, -q[1] * a, -q[1] * b, -q[1] * cc, -q[1]]);
+    let dot = |p: V3, q: V3| p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+    let (ca, cb, cg) = (dot(j[1], j[2]), dot(j[0], j[2]), dot(j[0], j[1]));
+    // for a given v: the (up to two) u satisfying the c-equation, and the
+    // a-equation's residual at each
+    let branch = |v: f64, which: usize| -> Option<(f64, f64)> {
+        let q = 1.0 + v * v - 2.0 * v * cb; // s1² = b² / q
+        let k = 1.0 - (c2 / b2) * q; // u² - 2 cg u + k = 0
+        let disc = cg * cg - k;
+        if disc < 0.0 || q <= 0.0 {
+            return None;
+        }
+        let uu = if which == 0 { cg + disc.sqrt() } else { cg - disc.sqrt() };
+        if uu <= 0.0 {
+            return None;
+        }
+        Some((uu, uu * uu + v * v - 2.0 * uu * v * ca - (a2 / b2) * q))
+    };
+    let mut roots: Vec<(f64, f64)> = Vec::new();
+    for which in 0..2 {
+        let mut prev: Option<(f64, f64)> = None;
+        for step in 0..=3000 {
+            let v = 1e-3 * (1e6f64).powf(step as f64 / 3000.0);
+            let cur = branch(v, which).map(|(_, g)| (v, g));
+            if let (Some((v0, g0)), Some((v1, g1))) = (prev, cur) {
+                if g0 == 0.0 || g0.signum() != g1.signum() {
+                    let (mut lo, mut hi, mut glo) = (v0, v1, g0);
+                    for _ in 0..60 {
+                        let mid = 0.5 * (lo + hi);
+                        let Some((_, gm)) = branch(mid, which) else { break };
+                        if gm.signum() == glo.signum() {
+                            lo = mid;
+                            glo = gm;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    let v = 0.5 * (lo + hi);
+                    if let Some((uu, _)) = branch(v, which) {
+                        roots.push((uu, v));
+                    }
+                }
+            }
+            prev = cur;
+        }
     }
-    let h = null_vector(&rows, 12);
-    let m: M3 = [h[0], h[1], h[2], h[4], h[5], h[6], h[8], h[9], h[10]];
-    let (_, sv, _) = svd3(&m);
-    let scale = (sv[0] + sv[1] + sv[2]) / 3.0;
-    if scale < 1e-12 {
-        return None;
+    let mut out = Vec::new();
+    for (uu, v) in roots {
+        let s1 = (b2 / (1.0 + v * v - 2.0 * v * cb)).sqrt();
+        let depth = [s1, uu * s1, v * s1];
+        let q: [V3; 3] = std::array::from_fn(|i| [j[i][0] * depth[i], j[i][1] * depth[i], j[i][2] * depth[i]]);
+        // absolute orientation: q = R x + t
+        let cx: V3 = std::array::from_fn(|k| (x[0][k] + x[1][k] + x[2][k]) / 3.0);
+        let cq: V3 = std::array::from_fn(|k| (q[0][k] + q[1][k] + q[2][k]) / 3.0);
+        let mut h = [0.0f64; 9];
+        for i in 0..3 {
+            for r in 0..3 {
+                for c in 0..3 {
+                    h[r * 3 + c] += (q[i][r] - cq[r]) * (x[i][c] - cx[c]);
+                }
+            }
+        }
+        let r = nearest_rotation(&h);
+        let rc = mv(&r, cx);
+        out.push(Pose { r, t: [cq[0] - rc[0], cq[1] - rc[1], cq[2] - rc[2]] });
     }
-    let mut sign = 1.0;
-    // the recovered projection must put the points in front
-    let t0 = [h[3] / scale, h[7] / scale, h[11] / scale];
-    let front = x.iter().filter(|p| {
-        let d = (m[6] * (p[0] - c[0]) * s + m[7] * (p[1] - c[1]) * s + m[8] * (p[2] - c[2]) * s) / scale + t0[2];
-        d > 0.0
-    }).count();
-    if front * 2 < x.len() {
-        sign = -1.0;
-    }
-    let r = nearest_rotation(&m.map(|v| sign * v / scale));
-    let tn = [sign * h[3] / scale, sign * h[7] / scale, sign * h[11] / scale];
-    // undo the conditioning: X' = s (X - c)  =>  t = tn - s R c ... with the
-    // scale folded back: x_cam = R s (X - c) + tn, divide by s
-    let rc = mv(&r, c);
-    let t = [tn[0] / s - rc[0], tn[1] / s - rc[1], tn[2] / s - rc[2]];
-    Some(Pose { r, t })
+    out
 }
 
 /// Squared normalized reprojection error, infinite behind the camera.
@@ -122,19 +170,22 @@ pub fn refine(mut p: Pose, x: &[V3], u: &[[f64; 2]], iters: usize) -> Pose {
     p
 }
 
-/// RANSAC over six-point DLT samples, then refinement on the consensus.
-/// `thresh` is in normalized units. Returns the pose and the inlier mask.
+/// RANSAC over P3P samples, then refinement on the consensus. `thresh` is in
+/// normalized units. Returns the pose and the inlier mask.
 pub fn ransac_pnp(x: &[V3], u: &[[f64; 2]], thresh: f64, iters: usize, seed: u64) -> Option<(Pose, Vec<bool>)> {
     let n = x.len();
-    if n < 6 {
+    if n < 4 {
         return None;
     }
     let t2 = thresh * thresh;
     let mut rng = Lcg::new(seed);
     let mut best: Option<(Pose, usize)> = None;
-    for _ in 0..iters {
-        let mut idx = [0usize; 6];
-        for k in 0..6 {
+    let mut need = iters;
+    let mut done = 0;
+    while done < need {
+        done += 1;
+        let mut idx = [0usize; 3];
+        for k in 0..3 {
             loop {
                 let c = (rng.next_u32() as usize) % n;
                 if !idx[..k].contains(&c) {
@@ -143,19 +194,19 @@ pub fn ransac_pnp(x: &[V3], u: &[[f64; 2]], thresh: f64, iters: usize, seed: u64
                 }
             }
         }
-        let sx: Vec<V3> = idx.iter().map(|&i| x[i]).collect();
-        let su: Vec<[f64; 2]> = idx.iter().map(|&i| u[i]).collect();
-        let Some(p) = dlt(&sx, &su) else { continue };
-        let count = (0..n).filter(|&i| residual2(&p, x[i], u[i]) < t2).count();
-        if best.as_ref().is_none_or(|(_, c)| count > *c) {
-            best = Some((p, count));
+        for p in p3p([x[idx[0]], x[idx[1]], x[idx[2]]], [u[idx[0]], u[idx[1]], u[idx[2]]]) {
+            let count = (0..n).filter(|&i| residual2(&p, x[i], u[i]) < t2).count();
+            if best.as_ref().is_none_or(|(_, c)| count > *c) {
+                best = Some((p, count));
+                need = need.min(crate::ransac_iterations(count as f64 / n as f64, 3, iters));
+            }
         }
     }
     let (mut p, _) = best?;
     let mut mask: Vec<bool> = (0..n).map(|i| residual2(&p, x[i], u[i]) < t2).collect();
     for _ in 0..3 {
         let (ix, iu): (Vec<V3>, Vec<[f64; 2]>) = (0..n).filter(|&i| mask[i]).map(|i| (x[i], u[i])).unzip();
-        if ix.len() < 6 {
+        if ix.len() < 4 {
             return None;
         }
         p = refine(p, &ix, &iu, 20);

@@ -62,7 +62,10 @@ pub fn ransac_essential(a: &[[f64; 2]], b: &[[f64; 2]], thresh: f64, iters: usiz
     let mut best: Option<(M3, usize)> = None;
     let mut sa = [[0.0; 2]; 8];
     let mut sb = [[0.0; 2]; 8];
-    for _ in 0..iters {
+    let mut need = iters;
+    let mut done = 0;
+    while done < need {
+        done += 1;
         let mut idx = [0usize; 8];
         for k in 0..8 {
             loop {
@@ -79,6 +82,7 @@ pub fn ransac_essential(a: &[[f64; 2]], b: &[[f64; 2]], thresh: f64, iters: usiz
         let count = (0..n).filter(|&i| sampson(&e, a[i], b[i]) < t2).count();
         if best.as_ref().is_none_or(|(_, c)| count > *c) {
             best = Some((e, count));
+            need = need.min(crate::ransac_iterations(count as f64 / n as f64, 8, iters));
         }
     }
     let (e, _) = best?;

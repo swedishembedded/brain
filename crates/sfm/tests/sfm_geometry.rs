@@ -15,7 +15,7 @@ use data::rng::Lcg;
 use sfm::ba::{bundle_adjust, rms, BaCfg, Observation};
 use sfm::camera::{project, Intrinsics, Pose};
 use sfm::linalg::{exp_so3, log_so3, mm, normalize, sub, transpose, V3};
-use sfm::pnp::ransac_pnp;
+use sfm::pnp::{p3p, ransac_pnp};
 use sfm::twoview::{ransac_essential, relative_pose};
 
 fn cloud(rng: &mut Lcg, n: usize) -> Vec<V3> {
@@ -131,4 +131,29 @@ fn bundle_adjustment_self_calibrates() {
     assert!((k.f - 800.0).abs() < 12.0, "focal {:.1} against 800", k.f);
     assert!((k.k1 + 0.12).abs() < 0.01, "k1 {:.4} against -0.12", k.k1);
     assert!(rms(&k, &est_poses, &pts, &obs) < 0.45);
+}
+
+/// P3P returns the true pose among its solutions, and absolute pose works on
+/// a PLANE - where a linear 3x4 estimate is degenerate, and which is most of
+/// what a capture of an object on a floor contains.
+#[test]
+fn absolute_pose_on_a_plane() {
+    let mut rng = Lcg::new(21);
+    let truth = pose([0.3, -0.2, 0.1], [0.2, 0.4, 4.0]);
+    let x: Vec<V3> = (0..150).map(|_| [2.0 * rng.signed() as f64, 2.0 * rng.signed() as f64, 0.0]).collect();
+    let mut u: Vec<[f64; 2]> = x
+        .iter()
+        .map(|v| {
+            let c = truth.to_cam(*v);
+            [c[0] / c[2], c[1] / c[2]]
+        })
+        .collect();
+    let sols = p3p([x[0], x[1], x[2]], [u[0], u[1], u[2]]);
+    assert!(sols.iter().any(|p| angle_between(p, &truth) < 1e-6), "{} solutions, none the truth", sols.len());
+    for p in u.iter_mut().take(60) {
+        *p = [0.5 * rng.signed() as f64, 0.4 * rng.signed() as f64];
+    }
+    let (p, mask) = ransac_pnp(&x, &u, 1e-3, 10_000, 4).unwrap();
+    assert!(mask.iter().filter(|&&v| v).count() >= 88);
+    assert!(angle_between(&p, &truth).to_degrees() < 0.01);
 }

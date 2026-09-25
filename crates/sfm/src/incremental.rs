@@ -44,14 +44,24 @@ pub struct SfmCfg {
     /// Inlier threshold for verification and registration, pixels.
     pub thresh_px: f64,
     pub ransac_iters: usize,
-    /// Focal length guess as a multiple of the longer side.
+    /// Focal length guess as a multiple of the longer side. 0.8 is about a
+    /// 26 mm-equivalent lens, what phone and compact main cameras ship;
+    /// bundle adjustment refines it.
     pub focal_guess: f64,
     /// Smallest ray angle a new point may be triangulated with, degrees.
     pub min_angle_deg: f64,
+    /// Choose the focal length by solving the capture under a range of
+    /// candidates, instead of trusting `focal_guess`. Off only when the focal
+    /// length is known.
+    pub estimate_focal: bool,
     /// Largest reprojection error an observation may keep, pixels.
     pub max_error_px: f64,
     /// Fewest 2D-3D inliers an image needs to be registered.
     pub min_register: usize,
+    /// Most rounds of re-triangulating every track through the refined
+    /// calibration and re-adjusting, stopped early once the focal length
+    /// holds still.
+    pub retriangulate: usize,
     /// Print progress.
     pub verbose: bool,
 }
@@ -63,11 +73,13 @@ impl Default for SfmCfg {
             ratio: 0.8,
             min_inliers: 40,
             thresh_px: 4.0,
-            ransac_iters: 2000,
-            focal_guess: 1.2,
+            ransac_iters: 50_000,
+            focal_guess: 0.8,
+            estimate_focal: true,
             min_angle_deg: 1.5,
             max_error_px: 4.0,
             min_register: 20,
+            retriangulate: 3,
             verbose: false,
         }
     }
@@ -124,6 +136,30 @@ fn uf_find(p: &mut [usize], mut x: usize) -> usize {
     x
 }
 
+/// Features, verified matches and tracks: everything that does not depend
+/// on the calibration being right.
+struct Prepared {
+    n: usize,
+    feats: Vec<(Vec<Keypoint>, Vec<f32>)>,
+    pairs: Vec<(usize, usize, Vec<(usize, usize)>)>,
+    tracks: Vec<Vec<(usize, usize)>>,
+    track_of: Vec<Vec<Option<usize>>>,
+}
+
+/// What one incremental solve under a given starting calibration produced.
+struct Solved {
+    k: Intrinsics,
+    poses: Vec<Option<Pose>>,
+    points: Vec<Point>,
+    rms: f64,
+}
+
+impl Solved {
+    fn registered(&self) -> usize {
+        self.poses.iter().flatten().count()
+    }
+}
+
 /// Run structure from motion on `photos`, all taken with one camera.
 pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, SfmError> {
     let n = photos.len();
@@ -154,13 +190,9 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         .collect();
     log(format!("features: {:?}", feats.iter().map(|f| f.0.len()).collect::<Vec<_>>()));
 
-    let mut k = Intrinsics::guess(w, h, cfg.focal_guess);
-    let norm_all = |k: &Intrinsics| -> Vec<Vec<[f64; 2]>> {
-        feats.iter().map(|(kp, _)| kp.iter().map(|p| k.to_normalized([p.x as f64, p.y as f64])).collect()).collect()
-    };
-    let mut nrm = norm_all(&k);
-
-    // ---- 2. matching + verification ----
+    // ---- 2. matching + verification, through the guessed calibration ----
+    let guess = Intrinsics::guess(w, h, cfg.focal_guess);
+    let nrm = normalized(&feats, &guess);
     let mut pairs: Vec<(usize, usize, Vec<(usize, usize)>)> = Vec::new();
     for a in 0..n {
         for b in a + 1..n {
@@ -171,7 +203,7 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
             let xa: Vec<[f64; 2]> = m.iter().map(|&(i, _)| nrm[a][i]).collect();
             let xb: Vec<[f64; 2]> = m.iter().map(|&(_, j)| nrm[b][j]).collect();
             let seed = (a * n + b) as u64 + 1;
-            let Some((_, mask)) = ransac_essential(&xa, &xb, cfg.thresh_px / k.f, cfg.ransac_iters, seed) else { continue };
+            let Some((_, mask)) = ransac_essential(&xa, &xb, cfg.thresh_px / guess.f, cfg.ransac_iters, seed) else { continue };
             let inl: Vec<(usize, usize)> = m.iter().zip(&mask).filter(|(_, &ok)| ok).map(|(p, _)| *p).collect();
             if inl.len() >= cfg.min_inliers {
                 pairs.push((a, b, inl));
@@ -181,11 +213,14 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
     log(format!("{} verified pairs", pairs.len()));
 
     // ---- 3. tracks ----
-    let offs: Vec<usize> = feats.iter().scan(0usize, |s, f| {
-        let o = *s;
-        *s += f.0.len();
-        Some(o)
-    }).collect();
+    let offs: Vec<usize> = feats
+        .iter()
+        .scan(0usize, |s, f| {
+            let o = *s;
+            *s += f.0.len();
+            Some(o)
+        })
+        .collect();
     let total = offs.last().unwrap() + feats.last().unwrap().0.len();
     let mut parent: Vec<usize> = (0..total).collect();
     for (a, b, m) in &pairs {
@@ -219,11 +254,80 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         }
     }
     log(format!("{} tracks", tracks.len()));
+    let prep = Prepared { n, feats, pairs, tracks, track_of };
 
-    // ---- 4. seed pair ----
+    // ---- 4. focal length ----
+    // With no metadata the focal length is a guess, and a scene seeded
+    // through a wrong one is projectively distorted: 10% of focal error is
+    // ~100 px at the edge of a 2048 px frame, so later views stop
+    // registering, and bundle adjustment creeps out of the distorted basin
+    // by about a percent per round rather than leaving it. So the focal
+    // length is chosen by what it is FOR: solve the whole capture with each
+    // candidate held fixed and keep the one that registers the most views at
+    // the lowest reprojection error. (Counting epipolar inliers over the
+    // best pairs instead was measured choosing 0.45x the long side on a
+    // capture whose solves bottom out at 0.68x.)
+    let f0 = if cfg.estimate_focal {
+        let side = w.max(h) as f64;
+        let steps = 12;
+        let candidates: Vec<f64> = (0..=steps).map(|i| side * 0.5 * (1.3f64 / 0.5).powf(i as f64 / steps as f64)).collect();
+        let quiet = |_: String| {};
+        let scored: Vec<Option<(usize, f64)>> = backend_cpu::par::map(candidates.len(), |i| {
+            solve(&prep, Intrinsics { f: candidates[i], ..guess }, false, 0, cfg, &quiet).ok().map(|s| (s.registered(), s.rms))
+        });
+        let mut best: Option<(f64, usize, f64)> = None;
+        for (f, sc) in candidates.iter().zip(&scored) {
+            if let Some((r, e)) = sc {
+                log(format!("  focal {f:7.1} px: {r} registered, rms {e:.3} px"));
+                if best.is_none_or(|(_, br, be)| *r > br || (*r == br && *e < be)) {
+                    best = Some((*f, *r, *e));
+                }
+            }
+        }
+        let f = best.map_or(guess.f, |b| b.0);
+        log(format!("focal length {f:.1} px ({:.2} x the long side)", f / side));
+        f
+    } else {
+        guess.f
+    };
+
+    // ---- 5. the reconstruction, calibration free ----
+    let solved = solve(&prep, Intrinsics { f: f0, ..guess }, true, cfg.retriangulate, cfg, &log)?;
+    let Solved { k, poses, mut points, rms } = solved;
+    for p in &mut points {
+        let mut c = [0.0f32; 3];
+        for &(i, kp) in &p.obs {
+            let f = prep.feats[i].0[kp];
+            let (x, y) = ((f.x as u32).min(w - 1), (f.y as u32).min(h - 1));
+            let o = ((y * w + x) * 3) as usize;
+            for ch in 0..3 {
+                c[ch] += photos[i].rgb[o + ch] as f32 / 255.0;
+            }
+        }
+        p.rgb = c.map(|v| v / p.obs.len() as f32);
+    }
+    Ok(Reconstruction { intrinsics: k, poses, points, keypoints: prep.feats.into_iter().map(|f| f.0).collect(), rms_px: rms })
+}
+
+/// Normalized, undistorted coordinates of every keypoint through `k`.
+fn normalized(feats: &[(Vec<Keypoint>, Vec<f32>)], k: &Intrinsics) -> Vec<Vec<[f64; 2]>> {
+    feats.iter().map(|(kp, _)| kp.iter().map(|p| k.to_normalized([p.x as f64, p.y as f64])).collect()).collect()
+}
+
+/// Seed, register, triangulate and adjust from starting calibration `k`.
+/// `free` lets bundle adjustment refine the calibration; `retriangulate`
+/// rounds of re-triangulation through it follow the incremental pass.
+fn solve(prep: &Prepared, mut k: Intrinsics, free: bool, retriangulate: usize, cfg: &SfmCfg, log: &dyn Fn(String)) -> Result<Solved, SfmError> {
+    let Prepared { n, feats, pairs, tracks, track_of, .. } = prep;
+    let n = *n;
+    let mut nrm = normalized(feats, &k);
+
+    // Many points AND a wide baseline: a narrow pair triangulates poorly and
+    // everything registered onto it inherits the error. Score by points
+    // times baseline, saturating at 10 degrees.
     let mut order: Vec<usize> = (0..pairs.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(pairs[i].2.len()));
-    let mut seed = None;
+    let mut seed: Option<(usize, usize, Pose, f64)> = None;
     for &pi in order.iter().take(30) {
         let (a, b, m) = &pairs[pi];
         let xa: Vec<[f64; 2]> = m.iter().map(|&(i, _)| nrm[*a][i]).collect();
@@ -232,13 +336,16 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         let (pose, pts) = relative_pose(&e, &xa, &xb, &mask);
         let ang = median_angle(&pose, &pts).to_degrees();
         let good = pts.iter().flatten().count();
-        if ang >= 4.0 && good >= cfg.min_inliers {
-            log(format!("seed pair {a}-{b}: {good} points, median ray angle {ang:.1} deg"));
-            seed = Some((*a, *b, pose));
-            break;
+        if ang < 3.0 || good < cfg.min_inliers {
+            continue;
+        }
+        let score = good as f64 * (ang / 10.0).min(1.0);
+        if seed.as_ref().is_none_or(|s| score > s.3) {
+            seed = Some((*a, *b, pose, score));
         }
     }
-    let (sa, sb, sp) = seed.ok_or(SfmError::NoSeedPair)?;
+    let (sa, sb, sp, _) = seed.ok_or(SfmError::NoSeedPair)?;
+    log(format!("seed pair {sa}-{sb}"));
     let mut poses: Vec<Option<Pose>> = vec![None; n];
     poses[sa] = Some(Pose::identity());
     poses[sb] = Some(sp);
@@ -289,7 +396,7 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
     };
     triangulate_new(&poses, &k, &nrm, &mut point_of, &mut points);
 
-    let adjust = |k: &mut Intrinsics, poses: &mut [Option<Pose>], points: &mut Vec<Point>, point_of: &mut Vec<Option<usize>>, fix: usize, iters: usize| -> f64 {
+    let adjust = |k: &mut Intrinsics, poses: &mut [Option<Pose>], points: &mut Vec<Point>, point_of: &mut Vec<Option<usize>>, iters: usize| -> f64 {
         let reg: Vec<usize> = (0..n).filter(|&i| poses[i].is_some()).collect();
         let mut cam_ix = vec![usize::MAX; n];
         for (c, &i) in reg.iter().enumerate() {
@@ -300,15 +407,13 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         let obs: Vec<Observation> = points
             .iter()
             .enumerate()
-            .flat_map(|(pi, p)| {
-                p.obs.iter().map(move |&(i, kp)| (pi, i, kp))
-            })
+            .flat_map(|(pi, p)| p.obs.iter().map(move |&(i, kp)| (pi, i, kp)))
             .map(|(pi, i, kp)| {
                 let f = feats[i].0[kp];
                 Observation { cam: cam_ix[i], point: pi, px: [f.x as f64, f.y as f64] }
             })
             .collect();
-        let bcfg = BaCfg { iters, intrinsics: reg.len() >= 3, fixed: vec![cam_ix[fix]], ..BaCfg::default() };
+        let bcfg = BaCfg { iters, intrinsics: free && reg.len() >= 4, fixed: vec![cam_ix[sa]], ..BaCfg::default() };
         let rep = bundle_adjust(k, &mut cp, &mut xs, &obs, &bcfg);
         for (c, &i) in reg.iter().enumerate() {
             poses[i] = Some(cp[c]);
@@ -337,13 +442,14 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         }
         rep.rms_after
     };
-    let r = adjust(&mut k, &mut poses, &mut points, &mut point_of, sa, 30);
+    let r = adjust(&mut k, &mut poses, &mut points, &mut point_of, 30);
     log(format!("seed: {} points, rms {r:.2} px", points.len()));
 
-    // ---- 5. register the rest ----
+    // register the rest, most-connected first
     let mut failed = vec![false; n];
+    let mut rms = r;
     loop {
-        nrm = norm_all(&k);
+        nrm = normalized(feats, &k);
         let mut best: Option<(usize, usize)> = None;
         for i in 0..n {
             if poses[i].is_some() || failed[i] {
@@ -381,9 +487,9 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
             }
         }
         let added = triangulate_new(&poses, &k, &nrm, &mut point_of, &mut points);
-        let r = adjust(&mut k, &mut poses, &mut points, &mut point_of, sa, 20);
+        rms = adjust(&mut k, &mut poses, &mut points, &mut point_of, 20);
         log(format!(
-            "image {img}: {} inliers, +{added} points, {} total, rms {r:.2} px, f {:.1} k1 {:+.4} k2 {:+.4}",
+            "image {img}: {} inliers, +{added} points, {} total, rms {rms:.2} px, f {:.1} k1 {:+.4} k2 {:+.4}",
             mask.iter().filter(|&&v| v).count(),
             points.len(),
             k.f,
@@ -393,21 +499,20 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
         // a failure may succeed once more of the scene exists
         failed.iter_mut().for_each(|f| *f = false);
     }
-    nrm = norm_all(&k);
-    triangulate_new(&poses, &k, &nrm, &mut point_of, &mut points);
-    let rms_px = adjust(&mut k, &mut poses, &mut points, &mut point_of, sa, 100);
-
-    for p in &mut points {
-        let mut c = [0.0f32; 3];
-        for &(i, kp) in &p.obs {
-            let f = feats[i].0[kp];
-            let (x, y) = ((f.x as u32).min(w - 1), (f.y as u32).min(h - 1));
-            let o = ((y * w + x) * 3) as usize;
-            for ch in 0..3 {
-                c[ch] += photos[i].rgb[o + ch] as f32 / 255.0;
-            }
+    // Points triangulated early were triangulated through the calibration
+    // of the moment. Re-triangulate every track through the refined camera
+    // and adjust again, until the focal length holds still.
+    for round in 0..retriangulate {
+        let before = k.f;
+        nrm = normalized(feats, &k);
+        points.clear();
+        point_of.iter_mut().for_each(|v| *v = None);
+        triangulate_new(&poses, &k, &nrm, &mut point_of, &mut points);
+        rms = adjust(&mut k, &mut poses, &mut points, &mut point_of, 100);
+        log(format!("re-triangulation {round}: {} points, rms {rms:.3} px, f {:.1} k1 {:+.4} k2 {:+.4}", points.len(), k.f, k.k1, k.k2));
+        if (k.f - before).abs() < 1e-3 * before {
+            break;
         }
-        p.rgb = c.map(|v| v / p.obs.len() as f32);
     }
-    Ok(Reconstruction { intrinsics: k, poses, points, keypoints: feats.into_iter().map(|f| f.0).collect(), rms_px })
+    Ok(Solved { k, poses, points, rms })
 }
