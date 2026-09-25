@@ -95,7 +95,7 @@ into a scene that actually reproduces your photos.
 | `--max-gaussians N` | `fit` | refuse to grow past N |
 | `--densify-strategy S` | `fit` | `heuristic` (the default), `mcmc` or `hybrid` (what `train` runs) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
-| `--camera-model` | `fit`, `train` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene (default off) |
+| `--camera-model` | `fit`, `train` | fit the photometric camera alongside the scene: per-photo exposure and white balance, the lens's vignetting, the sensor's colour matrix and response curve (default off). `train` starts each photo's exposure from its EXIF, and fits linear, 16-bit or exposure-bracketed photographs in linear light |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
 | `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
 | `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |

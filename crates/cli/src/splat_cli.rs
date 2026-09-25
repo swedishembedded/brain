@@ -684,8 +684,9 @@ fn train_cmd(argv: &[String]) {
     let max_gaussians = a.take_str("--max-gaussians").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage_exit(&format!("--max-gaussians {v}: not a count"))));
     let focal = a.f32_or("--focal-guess", defaults.sfm.focal_guess as f32);
     let sparse = a.take_flag("--sparse");
-    // Per-photo exposure and white balance and the lens's vignetting, for a
-    // capture that needs them; on one taken at one exposure they only absorb
+    // The photometric camera model (per-photo exposure and white balance,
+    // the lens's vignetting, the sensor's colour matrix and response), for a
+    // capture that needs it; on one taken at one exposure it mostly absorbs
     // fit error.
     let camera_model = a.take_flag("--camera-model");
     // Sky and distant scenery as radiance by direction, instead of gaussians
@@ -696,11 +697,13 @@ fn train_cmd(argv: &[String]) {
     let cams_out = a.take_str("--cameras-out");
     a.finish();
     let paths = crate::mirror_cli::collect_images(&images);
-    let photos: Vec<imaging::Rgb8> = paths
+    // as recorded: GPS places the scene, EXIF exposure starts the camera
+    // model's, a linear or deep photograph keeps its precision
+    let photos: Vec<imaging::Photo> = paths
         .iter()
         .map(|p| {
-            imaging::load(p).unwrap_or_else(|e| {
-                eprintln!("{e}");
+            imaging::load_photo(p).unwrap_or_else(|e| {
+                eprintln!("{p}: {e}");
                 std::process::exit(1);
             })
         })
@@ -718,7 +721,7 @@ fn train_cmd(argv: &[String]) {
     println!("reconstructing {} photographs ...", photos.len());
     let g = Gpu::new(&recon::photogrammetry::pipelines());
     let every = iterations.unwrap_or(3000).div_ceil(20).max(1);
-    let res = recon::photogrammetry::reconstruct(&g, &photos, &cfg, &mut |line| println!("{line}"), &mut |it, loss| {
+    let res = recon::photogrammetry::reconstruct_photos(&g, &photos, &cfg, &mut |line| println!("{line}"), &mut |it, loss| {
         if it % every == 0 {
             println!("  step {it:6}: loss {loss:.5}");
         }

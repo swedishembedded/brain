@@ -49,7 +49,7 @@ impl Flags {
 }
 
 /// The options every evaluation takes on top of the preset.
-pub const FIT_USAGE: &str = "[--budget gaussians] [--env degree] [--depth w] [--normal-prior w] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
+pub const FIT_USAGE: &str = "[--budget gaussians] [--env degree] [--depth w] [--normal-prior w] [--sh degree] [--isp off|exposure|full|grid] [--pose-after f] \
                              [--intrinsics-after f] [--distortion w] [--normal w] [--geometry-after f] \
                              [--lr-position s] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] \
                              [--mip on|off] [--noise l] [--opacity-reg l] [--batch n] [--pyramid n] [--coarse f]";
@@ -133,7 +133,8 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize, dense: bool) -> FitCfg
             cfg.isp = Some(i);
         }
         Some("full") => cfg.isp = Some(Default::default()),
-        Some(o) => panic!("--isp {o}: off, exposure or full"),
+        Some("grid") => cfg.isp = Some(splat::isp::IspCfg { grid: Some(Default::default()), ..Default::default() }),
+        Some(o) => panic!("--isp {o}: off, exposure, full or grid"),
     }
     println!(
         "fit: {iters} iterations, budget {budget}, sh {}, poses after {}, intrinsics after {}, isp {}",
@@ -142,7 +143,13 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize, dense: bool) -> FitCfg
         cfg.camera.intrinsics_after,
         match cfg.isp {
             None => "off".to_string(),
-            Some(i) => format!("vignetting after {}, response after {}", i.vignetting_after, i.response_after),
+            Some(i) => format!(
+                "vignetting after {}, colour matrix after {}, response after {}, grid {}",
+                i.vignetting_after,
+                i.ccm_after,
+                i.response_after,
+                i.grid.map_or("off".to_string(), |g| format!("{:?} after {}", g.cells, g.after))
+            ),
         }
     );
     cfg

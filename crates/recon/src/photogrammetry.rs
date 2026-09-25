@@ -17,6 +17,13 @@
 //! every pixel coordinate by exactly one half), never by a resample at an
 //! arbitrary factor.
 //!
+//! A photograph loaded with [`imaging::photo::load_photo`] brings more than
+//! its pixels, and [`reconstruct_photos`] / [`training_set_photos`] carry it
+//! through: its GPS fix to structure from motion, its EXIF exposure
+//! (relative to the capture, [`Photometry`]) and its encoding into the
+//! target, so the camera model starts from the exposure it knows and a
+//! linear, deep or bracketed capture is fitted in linear light.
+//!
 //! [`dense`] adds what the sparse points cannot give a fit: multi-view stereo
 //! ([`mvs`]) measures every photograph's range, surface normal and their
 //! confidence per pixel, through the same lens, which become each target's
@@ -29,10 +36,11 @@
 //! to info@swedishembedded.com.
 
 use gpu_core::Gpu;
-use imaging::photo::Gps;
+use imaging::photo::{Gps, Transfer};
 use imaging::Rgb8;
 use sfm::georef::Wgs84;
 use sfm::incremental::{Photo, Reconstruction, SfmCfg, SfmError};
+use splat::isp::{ColorSpace, Encoding};
 use splat::opt::{FitCfg, TargetView};
 use splat::types::{Camera, Splats};
 
@@ -203,14 +211,73 @@ pub fn dense(
 /// circle) masked out rather than supervised against nothing.
 pub fn target(photo: &Rgb8, cam: Camera, sensor: usize) -> TargetView {
     let rgb: Vec<f32> = photo.px.iter().map(|&v| v as f32 / 255.0).collect();
-    let k = cam.intrinsics();
-    let (w, h) = (photo.w as usize, photo.h as usize);
+    lens_masked(TargetView::new(cam, rgb).with_sensor(sensor))
+}
+
+/// `t` with the pixels its camera's lens has no ray for masked out.
+fn lens_masked(t: TargetView) -> TargetView {
+    let k = t.cam.intrinsics();
+    let (w, h) = (t.cam.width as usize, t.cam.height as usize);
     let mask: Vec<f32> = backend_cpu::par::map_f32(w * h, |i| {
         let px = [(i % w) as f64 + 0.5, (i / w) as f64 + 0.5];
         if k.unproject(px).is_some() { 1.0 } else { 0.0 }
     });
-    let t = TargetView::new(cam, rgb).with_sensor(sensor);
     if mask.iter().all(|&m| m == 1.0) { t } else { t.with_mask(mask) }
+}
+
+/// How a capture's photographs enter a fit: the colour space the scene is
+/// fitted in, and the exposure every photograph's EXIF is measured against.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Photometry {
+    pub color_space: ColorSpace,
+    /// Mean [`imaging::Exif::exposure_log2`] of the photographs that record
+    /// one: each target's exposure hint is relative to it, so the capture's
+    /// average camera sits at 0.
+    pub reference_ev: Option<f64>,
+}
+
+impl Photometry {
+    /// Chosen from the photographs themselves: scene-linear when any of them
+    /// is linear or deeper than 8 bits (the precision is there to be used),
+    /// or when their exposures differ by more than half a stop (a bracket is
+    /// several measurements of ONE radiance, which only a linear scene can
+    /// be); display-referred otherwise. A scene-linear fit needs the camera
+    /// model ([`splat::opt::FitCfg::isp`]) to put the transfer back.
+    pub fn of(photos: &[&imaging::Photo]) -> Photometry {
+        let evs: Vec<f64> = photos.iter().filter_map(|p| p.exif.exposure_log2()).collect();
+        let reference_ev = (!evs.is_empty()).then(|| evs.iter().sum::<f64>() / evs.len() as f64);
+        let spread = evs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)) - evs.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let deep = photos.iter().any(|p| p.transfer == Transfer::Linear || p.bits > 8);
+        let color_space = if deep || spread > 0.5 { ColorSpace::SceneLinear } else { ColorSpace::Display };
+        Photometry { color_space, reference_ev }
+    }
+
+    /// `photo`'s exposure relative to the capture, in log2 stops; 0 when its
+    /// EXIF does not say.
+    pub fn exposure(&self, photo: &imaging::Photo) -> f32 {
+        match (photo.exif.exposure_log2(), self.reference_ev) {
+            (Some(ev), Some(r)) => (ev - r) as f32,
+            _ => 0.0,
+        }
+    }
+}
+
+/// A photograph as a target, with what its file says about how it was
+/// recorded: its exposure relative to the capture, and its values in the
+/// form `ph`'s colour space fits against - display-referred sRGB, or for a
+/// scene-linear fit the values as recorded when they are sRGB-encoded
+/// (the camera model applies the transfer) and linear Rec.709 light when
+/// they are not (a linear or profiled photograph, wide-gamut primaries).
+/// `photo` must be at `cam`'s resolution. Halve it with
+/// [`TargetView::half_in`] in `ph.color_space`.
+pub fn photo_target(photo: &imaging::Photo, cam: Camera, sensor: usize, ph: &Photometry) -> TargetView {
+    assert_eq!((photo.width, photo.height), (cam.width, cam.height), "a photograph at its camera's resolution");
+    let (rgb, encoding) = match ph.color_space {
+        ColorSpace::Display => (photo.display(), Encoding::Srgb),
+        ColorSpace::SceneLinear if photo.transfer == Transfer::Srgb && photo.to_rec709.is_none() => (photo.encoded.clone(), Encoding::Srgb),
+        ColorSpace::SceneLinear => (photo.linear(), Encoding::Linear),
+    };
+    lens_masked(TargetView::new(cam, rgb).with_sensor(sensor).with_exposure(ph.exposure(photo)).with_encoding(encoding))
 }
 
 /// Recover cameras from `photos` and build the training set `halvings`
@@ -225,6 +292,33 @@ pub fn training_set(photos: &[Rgb8], halvings: u32, opacity: f32, cfg: &SfmCfg) 
 /// span the capture the scene comes back in metres east-north-up, otherwise
 /// they are reported unused in `sfm.report`.
 pub fn training_set_located(photos: &[Rgb8], gps: &[Option<Gps>], halvings: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
+    let make = |i: usize, cam: Camera, sensor: usize| target(&photos[i], cam, sensor);
+    solve(photos, gps, halvings, ColorSpace::Display, opacity, cfg, make)
+}
+
+/// [`training_set_located`] from photographs loaded with
+/// [`imaging::photo::load_photo`]: their own GPS fixes, and every target
+/// with its exposure and encoding as [`photo_target`] makes them under `ph`,
+/// halved in `ph`'s colour space.
+pub fn training_set_photos(photos: &[imaging::Photo], halvings: u32, opacity: f32, cfg: &SfmCfg, ph: &Photometry) -> Result<TrainingSet, SfmError> {
+    let rgb8: Vec<Rgb8> = photos.iter().map(imaging::Photo::rgb8).collect();
+    let gps: Vec<Option<Gps>> = photos.iter().map(|p| p.exif.gps).collect();
+    let make = |i: usize, cam: Camera, sensor: usize| photo_target(&photos[i], cam, sensor, ph);
+    solve(&rgb8, &gps, halvings, ph.color_space, opacity, cfg, make)
+}
+
+/// Structure from motion on `photos`, each registered one made a target by
+/// `make(input index, camera, sensor)` at full resolution and halved in
+/// `space`.
+fn solve(
+    photos: &[Rgb8],
+    gps: &[Option<Gps>],
+    halvings: u32,
+    space: ColorSpace,
+    opacity: f32,
+    cfg: &SfmCfg,
+    make: impl Fn(usize, Camera, usize) -> TargetView,
+) -> Result<TrainingSet, SfmError> {
     let fix = |i: usize| gps.get(i).copied().flatten().map(|g| Wgs84 { latitude_deg: g.latitude_deg, longitude_deg: g.longitude_deg, altitude_m: g.altitude_m });
     let views: Vec<Photo> = photos.iter().enumerate().map(|(i, p)| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None, gps: fix(i) }).collect();
     let rec = sfm::incremental::reconstruct(&views, cfg)?;
@@ -235,9 +329,9 @@ pub fn training_set_located(photos: &[Rgb8], gps: &[Option<Gps>], halvings: u32,
         let s = rec.sensor[i];
         let m = pose.c2w();
         let cam = Camera::with_intrinsics(std::array::from_fn(|k| m[k] as f32), &rec.intrinsics[s]);
-        let mut t = target(&photos[i], cam, s);
+        let mut t = make(i, cam, s);
         for _ in 0..halvings {
-            t = t.half();
+            t = t.half_in(space);
         }
         targets.push(t);
         source.push(i);
@@ -328,6 +422,9 @@ pub struct Reconstructed {
     pub reprojection_rms_px: f64,
     /// The fitted photometric camera model, when one was asked for.
     pub isp: Option<splat::isp::Isp>,
+    /// What `scene`'s colours mean: scene-linear when the photographs asked
+    /// for it and the camera model was on ([`Photometry::of`]).
+    pub color_space: ColorSpace,
     /// The fitted environment, when one was asked for.
     pub env: Option<splat::env::EnvMap>,
     /// How the render options the scene was fitted under.
@@ -344,8 +441,18 @@ impl Reconstructed {
     /// The scene as a standard splat viewer should get it: the gaussians,
     /// and the environment (if any) baked into a shell of distant gaussians
     /// fifty times as far out as the cameras spread, since such a viewer
-    /// has no environment of its own.
+    /// has no environment of its own; display-referred
+    /// ([`splat::isp::bake_display`]) when it was fitted scene-linear, since
+    /// such a viewer shows stored colour.
     pub fn export(&self) -> Splats {
+        let whole = self.with_environment();
+        match self.color_space {
+            ColorSpace::Display => whole,
+            ColorSpace::SceneLinear => splat::isp::bake_display(&whole),
+        }
+    }
+
+    fn with_environment(&self) -> Splats {
         let Some(env) = &self.env else { return self.scene.clone() };
         let n = self.cameras.len().max(1) as f32;
         let centre: [f32; 3] = std::array::from_fn(|k| self.cameras.iter().map(|c| c.eye()[k]).sum::<f32>() / n);
@@ -384,6 +491,9 @@ impl std::error::Error for ReconstructError {}
 /// have been built with [`pipelines`]. `log` receives one line per stage;
 /// `on_step(iteration, loss)` is polled every step and stops the fit early
 /// by returning `false`.
+///
+/// Pictures with nothing known about how they were taken; a capture loaded
+/// with [`imaging::photo::load_photo`] goes to [`reconstruct_photos`].
 pub fn reconstruct(
     gpu: &Gpu,
     photos: &[Rgb8],
@@ -391,10 +501,31 @@ pub fn reconstruct(
     log: &mut dyn FnMut(&str),
     on_step: &mut dyn FnMut(usize, f32) -> bool,
 ) -> Result<Reconstructed, ReconstructError> {
-    let widest = photos.iter().map(|p| p.w).max().unwrap_or(0);
+    let photos: Vec<imaging::Photo> = photos.iter().map(imaging::Photo::from_rgb8).collect();
+    reconstruct_photos(gpu, &photos, cfg, log, on_step)
+}
+
+/// [`reconstruct`] of photographs as recorded: their GPS fixes place the
+/// scene, their EXIF exposures start the camera model's, and a linear, deep
+/// or bracketed capture is fitted scene-linear when `cfg.camera_model` is
+/// on ([`Photometry::of`] decides; the camera model's own colour space is
+/// replaced by that decision).
+pub fn reconstruct_photos(
+    gpu: &Gpu,
+    photos: &[imaging::Photo],
+    cfg: &PhotoCfg,
+    log: &mut dyn FnMut(&str),
+    on_step: &mut dyn FnMut(usize, f32) -> bool,
+) -> Result<Reconstructed, ReconstructError> {
+    let widest = photos.iter().map(|p| p.width).max().unwrap_or(0);
     let halvings = (0..16).find(|&h| widest >> h <= cfg.max_width.max(1)).unwrap_or(16);
+    let mut ph = Photometry::of(&photos.iter().collect::<Vec<_>>());
+    if cfg.camera_model.is_none() {
+        ph.color_space = ColorSpace::Display;
+    }
+    log(&format!("photometry: {:?}, exposures from EXIF {}", ph.color_space, if ph.reference_ev.is_some() { "recorded" } else { "unknown" }));
     let t = std::time::Instant::now();
-    let set = training_set(photos, halvings, 0.1, &cfg.sfm).map_err(ReconstructError::Sfm)?.upright();
+    let set = training_set_photos(photos, halvings, 0.1, &cfg.sfm, &ph).map_err(ReconstructError::Sfm)?.upright();
     log(&format!(
         "structure from motion: {}/{} photographs placed, {} points, {:.2} px rms, lens {:?}, {:.0} s",
         set.targets.len(),
@@ -410,7 +541,8 @@ pub fn reconstruct(
             let t = std::time::Instant::now();
             let dcfg = DenseCfg { stereo: mvs::StereoCfg { halving: halvings, ..dcfg.stereo.clone() }, ..dcfg.clone() };
             let ks = mvs::Kernels::at(splat::PIPELINES.len());
-            let (set, report) = set.densify(gpu, &ks, photos, &dcfg).map_err(ReconstructError::Stereo)?;
+            let rgb8: Vec<Rgb8> = photos.iter().map(imaging::Photo::rgb8).collect();
+            let (set, report) = set.densify(gpu, &ks, &rgb8, &dcfg).map_err(ReconstructError::Stereo)?;
             let cover = report.coverage.iter().sum::<f64>() / report.coverage.len().max(1) as f64;
             log(&format!("multi-view stereo: {} points, {:.0}% of pixels measured, {:.0} s", report.points, 100.0 * cover, t.elapsed().as_secs_f64()));
             (set, Some(report))
@@ -425,7 +557,8 @@ pub fn reconstruct(
     } else {
         FitCfg::from_sparse_points(iterations, budget, views)
     };
-    let fit_cfg = FitCfg { log_every: 0, isp: cfg.camera_model.or(preset.isp), environment: cfg.environment, transients: cfg.transients, ..preset };
+    let isp = cfg.camera_model.map(|i| splat::isp::IspCfg { color_space: ph.color_space, ..i }).or(preset.isp);
+    let fit_cfg = FitCfg { log_every: 0, isp, environment: cfg.environment, transients: cfg.transients, ..preset };
     let (w, h) = (set.targets[0].cam.width, set.targets[0].cam.height);
     log(&format!("fit: {views} views at {w}x{h}, {} gaussians to start, budget {budget}, {iterations} steps", set.init.len()));
     let t = std::time::Instant::now();
@@ -437,6 +570,7 @@ pub fn reconstruct(
         source: set.source,
         reprojection_rms_px: set.sfm.rms_px,
         isp: fitted.isp,
+        color_space: ph.color_space,
         env: fitted.env,
         render: splat::types::RenderOpts { ray: true, antialiased: fit_cfg.antialiased, eps2d: fit_cfg.eps2d, ..Default::default() },
         dense,
@@ -472,5 +606,51 @@ mod tests {
         let mask = t.mask.expect("pixels beyond the fisheye's reach are masked");
         assert_eq!(mask[(h / 2 * w + w / 2) as usize], 1.0);
         assert!(mask.contains(&0.0), "a corner past 180 degrees has no ray");
+    }
+
+    fn photograph(bits: u8, transfer: imaging::photo::Transfer, exposure_s: f64) -> imaging::Photo {
+        let (w, h) = (6u32, 4u32);
+        imaging::Photo {
+            width: w,
+            height: h,
+            encoded: (0..w * h * 3).map(|i| (i % 11) as f32 / 10.0).collect(),
+            bits,
+            transfer,
+            to_rec709: None,
+            exif: imaging::Exif { exposure_s: Some(exposure_s), f_number: Some(2.0), iso: Some(100.0), ..Default::default() },
+        }
+    }
+
+    /// What a photograph's file says about how it was recorded reaches the
+    /// fit: its exposure relative to the capture (EXIF), and in a
+    /// scene-linear fit its values either as encoded (the camera model then
+    /// applies the transfer) or, when its own transfer is not sRGB, decoded
+    /// to linear light.
+    #[test]
+    fn a_photograph_target_carries_its_exposure_and_encoding() {
+        use imaging::photo::Transfer;
+        use splat::isp::{ColorSpace, Encoding};
+        let cam = Camera::with_intrinsics(std::array::from_fn(|i| if i % 5 == 0 { 1.0 } else { 0.0 }), &camera::Intrinsics::pinhole(5.0, 6, 4));
+        // an 8-bit sRGB pair at one exposure: display-referred
+        let (a, b) = (photograph(8, Transfer::Srgb, 1.0 / 100.0), photograph(8, Transfer::Srgb, 1.0 / 100.0));
+        let ph = Photometry::of(&[&a, &b]);
+        assert_eq!(ph.color_space, ColorSpace::Display);
+        let t = photo_target(&a, cam, 0, &ph);
+        assert_eq!((t.exposure, t.encoding), (0.0, Encoding::Srgb));
+        assert_eq!(t.rgb, a.display());
+        // a bracket (one stop apart): scene-linear, each view's exposure
+        // relative to the capture's mean
+        let (a, b) = (photograph(8, Transfer::Srgb, 1.0 / 200.0), photograph(8, Transfer::Srgb, 1.0 / 100.0));
+        let ph = Photometry::of(&[&a, &b]);
+        assert_eq!(ph.color_space, ColorSpace::SceneLinear);
+        let (ta, tb) = (photo_target(&a, cam, 0, &ph), photo_target(&b, cam, 0, &ph));
+        assert!((ta.exposure + 0.5).abs() < 1e-6 && (tb.exposure - 0.5).abs() < 1e-6, "{} {}", ta.exposure, tb.exposure);
+        assert_eq!((ta.encoding, &ta.rgb), (Encoding::Srgb, &a.encoded), "an sRGB photograph is supervised as recorded");
+        // a 16-bit linear photograph: scene-linear, supervised in linear light
+        let lin = photograph(16, Transfer::Linear, 1.0 / 100.0);
+        let ph = Photometry::of(&[&lin]);
+        assert_eq!(ph.color_space, ColorSpace::SceneLinear);
+        let t = photo_target(&lin, cam, 0, &ph);
+        assert_eq!((t.encoding, &t.rgb), (Encoding::Linear, &lin.linear()));
     }
 }

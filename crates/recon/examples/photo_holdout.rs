@@ -18,8 +18,15 @@
 //! from motion's cameras and points in a directory and reads them from there
 //! on the next run, so experiments on the fit do not re-solve the capture.
 //!
-//! Writes `heldout_<i>.png` (photograph | render) for every held-out view,
-//! `train_<i>.png` for some training views, and `scene.ply`.
+//! Photographs are loaded as measurements (`imaging::load_photo`): each
+//! target carries its EXIF exposure and encoding, and a linear, deep or
+//! bracketed capture is fitted scene-linear when the camera model (`--isp`)
+//! is on. Held-out views are scored raw (the capture's average camera at the
+//! photograph's known exposure) and appearance-fitted (exposure and white
+//! balance fitted on the left half of each, scored on the right half).
+//!
+//! Writes `heldout_<i>.png` (photograph | raw render) for every held-out
+//! view, `train_<i>.png` for some training views, and `scene.ply`.
 //!
 //! Swedish Embedded AB implements photogrammetry and 3D reconstruction
 //! pipelines and the evaluation that keeps them honest. If your team needs
@@ -30,7 +37,9 @@ mod common;
 
 use common::{fit_cfg, fitted_opts, montage, Flags, FIT_USAGE};
 use gpu_core::Gpu;
-use recon::eval::{holdout, score, stability, Viewer};
+use recon::eval::{holdout, score_held_out, score_training, stability, Viewer};
+use recon::photogrammetry::{photo_target, Photometry};
+use splat::isp::ColorSpace;
 use splat::opt::{fit_full, TargetView};
 use splat::types::{Camera, Splats};
 use splat::Kernels;
@@ -92,15 +101,27 @@ fn main() {
         .filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| ["jpg", "jpeg", "png"].contains(&x.to_ascii_lowercase().as_str())))
         .collect();
     paths.sort();
-    let photos: Vec<imaging::Rgb8> = paths.iter().map(|p| imaging::load(p).unwrap_or_else(|e| panic!("{e}"))).collect();
+    let recorded: Vec<imaging::Photo> = paths.iter().map(|p| imaging::load_photo(p).unwrap_or_else(|e| panic!("{e}"))).collect();
+    let photos: Vec<imaging::Rgb8> = recorded.iter().map(imaging::Photo::rgb8).collect();
     let (cams, source, init) = cameras(&photos, flags.get("sfm-cache"));
+    let camera_model = flags.get("isp").is_some_and(|v| v != "off");
+    let mut ph = Photometry::of(&recorded.iter().collect::<Vec<_>>());
+    if !camera_model && ph.color_space == ColorSpace::SceneLinear {
+        println!("photometry: the capture asks for a scene-linear fit, which needs the camera model; fitting display-referred");
+        ph.color_space = ColorSpace::Display;
+    }
+    println!(
+        "photometry: {:?}, exposures {} (EXIF, log2 stops relative to the capture)",
+        ph.color_space,
+        source.iter().map(|&i| format!("{:+.2}", ph.exposure(&recorded[i]))).collect::<Vec<_>>().join(" ")
+    );
     let targets: Vec<TargetView> = cams
         .iter()
         .zip(&source)
         .map(|(c, &i)| {
-            let mut t = recon::photogrammetry::target(&photos[i], *c, 0);
+            let mut t = photo_target(&recorded[i], *c, 0, &ph);
             for _ in 0..halvings {
-                t = t.half();
+                t = t.half_in(ph.color_space);
             }
             t
         })
@@ -145,7 +166,10 @@ fn main() {
         init
     };
 
-    let cfg = fit_cfg(&flags, iters, train.len(), dense);
+    let mut cfg = fit_cfg(&flags, iters, train.len(), dense);
+    if let Some(i) = &mut cfg.isp {
+        i.color_space = ph.color_space;
+    }
     let t = std::time::Instant::now();
     let res = fit_full(&g, Kernels::at(0), &init, &train, &cfg, &mut |_, _| true);
     let secs = t.elapsed().as_secs_f64();
@@ -160,26 +184,34 @@ fn main() {
         .map(|t| TargetView { cam: Camera { shutter: t.cam.shutter, ..Camera::with_intrinsics(t.cam.c2w, &k.resized(t.cam.width, t.cam.height)) }, ..t.clone() })
         .collect();
     let mut viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h).with_env(res.env.as_ref());
-    let (on_train, train_img) = score(&mut viewer, &refit);
-    let (on_held, held_img) = score(&mut viewer, &held);
+    let isp = res.isp.as_ref();
+    let (on_train, train_img) = score_training(&mut viewer, &refit, isp);
+    let (on_held, held_img) = score_held_out(&mut viewer, &held, isp);
     let path = recon::eval::path(&refit.iter().map(|t| t.cam).collect::<Vec<_>>(), 8);
     let flicker = stability(&mut viewer, &path);
+    let per = |s: &recon::eval::Scores| s.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" ");
     println!(
-        "{} gaussians in {secs:.0} s; training views {:.2} dB / SSIM {:.4}; HELD-OUT {:.2} dB / SSIM {:.4} ({}); path flicker {flicker:.5}",
+        "{} gaussians in {secs:.0} s; training views {:.2} dB / SSIM {:.4}; HELD-OUT raw {:.2} dB / SSIM {:.4} ({}), \
+         appearance-fitted {:.2} dB / SSIM {:.4} ({}); path flicker {flicker:.5}",
         res.scene.len(),
         on_train.mean_psnr(),
         on_train.mean_ssim(),
-        on_held.mean_psnr(),
-        on_held.mean_ssim(),
-        on_held.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" "),
+        on_held.raw.mean_psnr(),
+        on_held.raw.mean_ssim(),
+        per(&on_held.raw),
+        on_held.fitted.mean_psnr(),
+        on_held.fitted.mean_ssim(),
+        per(&on_held.fitted),
     );
-    println!("  per training view: {}", on_train.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" "));
+    println!("  per training view: {}", per(&on_train));
     for (i, (v, img)) in refit.iter().zip(&train_img).enumerate().step_by(4) {
         imaging::save(format!("{out}/train_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }
     for (i, (v, img)) in held.iter().zip(&held_img).enumerate() {
         imaging::save(format!("{out}/heldout_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }
-    splat::ply::write(&format!("{out}/scene.ply"), &res.scene).expect("ply");
+    // viewers show stored colour: a scene-linear scene is exported encoded
+    let scene = if ph.color_space == ColorSpace::SceneLinear { splat::isp::bake_display(&res.scene) } else { res.scene.clone() };
+    splat::ply::write(&format!("{out}/scene.ply"), &scene).expect("ply");
     std::fs::write(format!("{out}/cameras.json"), splat::types::cameras_to_json(&res.cams)).expect("cameras");
 }

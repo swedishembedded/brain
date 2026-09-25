@@ -14,7 +14,15 @@
 //! * [`holdout`] - which registered photographs are withheld: every k-th,
 //!   spread over the capture rather than its ends;
 //! * [`score`] - PSNR and SSIM of each view's render against its photograph,
-//!   over the pixels its lens images;
+//!   over the pixels its lens images; [`score_training`] through each
+//!   training view's fitted camera model;
+//! * [`score_held_out`] - held-out views under the two standard protocols:
+//!   RAW, the scene through the capture's average camera at the exposure the
+//!   photograph is known to have had (what a novel view looks like), and
+//!   APPEARANCE-FITTED, each view's exposure and white balance fitted on the
+//!   left half of its frame and scored on the right half. A held-out view
+//!   was shot with settings no fit could know; the fitted protocol forgives
+//!   the camera exactly that and nothing about the scene;
 //! * [`path`] and [`stability`] - a smooth camera path through the capture
 //!   and how much a render of it flickers (splats popping as their order
 //!   flips, sub-pixel detail aliasing), which no still image shows.
@@ -25,6 +33,7 @@
 //! info@swedishembedded.com.
 
 use gpu_core::Gpu;
+use splat::isp::{Isp, IspCfg, NovelShot, Shot};
 use splat::opt::TargetView;
 use splat::renderer::{rgba_to_rgb, GpuSplats, Renderer};
 use splat::types::{Camera, RenderOpts, Splats};
@@ -96,7 +105,7 @@ impl Viewer {
         self
     }
 
-    /// The scene through `cam`: interleaved RGB in [0,1].
+    /// The scene's radiance through `cam`: interleaved RGB.
     pub fn render(&mut self, cam: &Camera) -> Vec<f32> {
         if let Some(c) = splat::sh::shade(&self.scene, cam.eye()) {
             self.gpu.write_f32(&self.splats.colors, &c);
@@ -107,25 +116,85 @@ impl Viewer {
         }
         rgba_to_rgb(&self.renderer.read_rgba(&self.gpu, cam.width, cam.height))
     }
+
+    /// What `shot`'s camera records of the scene through `cam`: the fitted
+    /// camera of a training view, or a novel view's; the radiance itself
+    /// when the fit had no camera model.
+    pub fn render_through(&mut self, cam: &Camera, isp: Option<&Isp>, shot: Shot) -> Vec<f32> {
+        let radiance = self.render(cam);
+        match isp {
+            Some(isp) => isp.render(shot, cam, &radiance),
+            None => radiance,
+        }
+    }
+}
+
+fn view_score(i: usize, img: &[f32], v: &TargetView, mask: Option<&[f32]>) -> ViewScore {
+    let (w, h) = (v.cam.width as usize, v.cam.height as usize);
+    ViewScore { view: i, psnr: splat::quality::psnr_masked(img, &v.rgb, mask), ssim: splat::quality::ssim(img, &v.rgb, w, h, mask) }
 }
 
 /// Score every view's render against its photograph over the pixels it
 /// supervises. Returns the scores and the renders.
 pub fn score(viewer: &mut Viewer, views: &[TargetView]) -> (Scores, Vec<Vec<f32>>) {
+    score_shots(viewer, views, None, |_| Shot::Training(0))
+}
+
+/// [`score`] of training views through the camera the fit gave each (view
+/// `i` of `views` being the fit's training view `i`).
+pub fn score_training(viewer: &mut Viewer, views: &[TargetView], isp: Option<&Isp>) -> (Scores, Vec<Vec<f32>>) {
+    score_shots(viewer, views, isp, Shot::Training)
+}
+
+fn score_shots(viewer: &mut Viewer, views: &[TargetView], isp: Option<&Isp>, shot: impl Fn(usize) -> Shot) -> (Scores, Vec<Vec<f32>>) {
     let mut scores = Scores::default();
     let mut renders = Vec::with_capacity(views.len());
     for (i, v) in views.iter().enumerate() {
-        let img = viewer.render(&v.cam);
-        let (w, h) = (v.cam.width as usize, v.cam.height as usize);
-        let mask = v.mask.as_deref();
-        scores.views.push(ViewScore {
-            view: i,
-            psnr: splat::quality::psnr_masked(&img, &v.rgb, mask),
-            ssim: splat::quality::ssim(&img, &v.rgb, w, h, mask),
-        });
+        let img = viewer.render_through(&v.cam, isp, shot(i));
+        scores.views.push(view_score(i, &img, v, v.mask.as_deref()));
         renders.push(img);
     }
     (scores, renders)
+}
+
+/// Held-out views scored under both protocols (module docs).
+#[derive(Clone, Debug, Default)]
+pub struct HeldOut {
+    /// Whole frame, the capture's average camera at the view's known
+    /// exposure.
+    pub raw: Scores,
+    /// Exposure and white balance fitted on the left half, scored on the
+    /// right half.
+    pub fitted: Scores,
+}
+
+/// Score views the fit never saw, raw and appearance-fitted; `isp` is the
+/// fit's camera model (without one, the appearance is fitted through an
+/// identity camera). Returns the scores and the raw renders.
+pub fn score_held_out(viewer: &mut Viewer, views: &[TargetView], isp: Option<&Isp>) -> (HeldOut, Vec<Vec<f32>>) {
+    let identity;
+    let camera = match isp {
+        Some(i) => i,
+        None => {
+            identity = Isp::new(IspCfg::default(), &[]);
+            &identity
+        }
+    };
+    let mut out = HeldOut::default();
+    let mut renders = Vec::with_capacity(views.len());
+    for (i, v) in views.iter().enumerate() {
+        let neutral = NovelShot::neutral(if isp.is_some() { v.sensor } else { 0 }, v.exposure, v.encoding);
+        let radiance = viewer.render(&v.cam);
+        let img = camera.render(Shot::Novel(neutral), &v.cam, &radiance);
+        out.raw.views.push(view_score(i, &img, v, v.mask.as_deref()));
+        let (w, px) = (v.cam.width as usize, (v.cam.width * v.cam.height) as usize);
+        let half = |left: bool| -> Vec<f32> { (0..px).map(|p| if (p % w < w / 2) == left { v.mask.as_ref().map_or(1.0, |m| m[p]) } else { 0.0 }).collect() };
+        let fitted = camera.fit_novel(neutral, &v.cam, &radiance, &v.rgb, &half(true));
+        let img_fitted = camera.render(Shot::Novel(fitted), &v.cam, &radiance);
+        out.fitted.views.push(view_score(i, &img_fitted, v, Some(&half(false))));
+        renders.push(img);
+    }
+    (out, renders)
 }
 
 /// A smooth path through `cams`: visited in a nearest-neighbour chain from
@@ -244,6 +313,34 @@ mod tests {
         assert!(!h[0] && !h[15]);
         assert!(h[2] && h[6] && h[10] && h[14]);
         assert!(holdout(5, 0).iter().all(|&v| !v));
+    }
+
+    /// A held-out photograph taken brighter and warmer than the capture's
+    /// average camera: the raw score charges the scene for the camera's
+    /// settings, the appearance-fitted one fits them on the left half of the
+    /// frame and, scored on the right half, finds the scene exact.
+    #[test]
+    fn the_appearance_fitted_protocol_forgives_the_camera_not_the_scene() {
+        let g = gpu_core::testgpu::dev(splat::PIPELINES);
+        let mut s = Splats::default();
+        for iy in 0..8 {
+            for ix in 0..8 {
+                s.means.extend_from_slice(&[-1.0 + 0.25 * ix as f32 + 0.125, -1.0 + 0.25 * iy as f32 + 0.125, 3.0]);
+                s.quats.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
+                s.scales.extend_from_slice(&[0.14, 0.14, 0.05]);
+                s.opacities.push(0.99);
+                s.colors.extend_from_slice(&[0.2 + 0.07 * ix as f32, 0.3 + 0.05 * iy as f32, 0.4]);
+            }
+        }
+        let cam = Camera::look_at([0.0; 3], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 40.0, 32, 24);
+        let mut viewer = Viewer::new(&g, &s, &[], RenderOpts::default(), 32, 24);
+        let radiance = viewer.render(&cam);
+        let photo: Vec<f32> = radiance.chunks_exact(3).flat_map(|p| [p[0] * 1.6, p[1] * 1.45, p[2] * 1.3]).collect();
+        let view = TargetView::new(cam, photo);
+        let (held, _) = score_held_out(&mut viewer, &[view], None);
+        let (raw, fitted) = (held.raw.mean_psnr(), held.fitted.mean_psnr());
+        assert!(raw < 20.0, "the raw score sees the exposure: {raw:.1} dB");
+        assert!(fitted > 45.0, "fitted on one half, the other half is exact: {fitted:.1} dB");
     }
 
     /// The path passes through every camera, and between two it turns and

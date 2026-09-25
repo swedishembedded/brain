@@ -183,6 +183,20 @@ impl Photo {
         Rgb8 { w: self.width, h: self.height, px }
     }
 
+    /// An 8-bit sRGB picture as a photograph nothing is known about: no
+    /// EXIF, Rec.709 primaries. `from_rgb8(p).rgb8()` is `p`.
+    pub fn from_rgb8(img: &Rgb8) -> Photo {
+        Photo {
+            width: img.w,
+            height: img.h,
+            encoded: img.px.iter().map(|&v| v as f32 / 255.0).collect(),
+            bits: 8,
+            transfer: Transfer::Srgb,
+            to_rec709: None,
+            exif: Exif::default(),
+        }
+    }
+
     /// Which physical camera took it, as far as the metadata can tell:
     /// photographs with the same key share one calibration. Make, model,
     /// lens, focal length and image size - a phone's lenses are different
