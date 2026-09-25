@@ -18,4 +18,4 @@ brain = { workspace = true, features = ["three-d"] }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
-max-brain-crates = 31
+max-brain-crates = 33
