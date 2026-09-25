@@ -29,7 +29,7 @@ the specification it is built from - see **Provenance** for what that means.
 | SH degree 0-3 view-dependent colour | `splat_sh.wgsl`, `FitCfg::sh_degree` | done |
 | Progressive SH bands (SH0 -> SH3 over training) | `splat_sh.wgsl` held-out coefficient count, `FitCfg::sh_ramp` | done |
 | Auxiliary render passes (per-gaussian features composited by the same weights: normals, depth moments, credit assignment) | `opt.rs::geometry_passes`, `density::credit_upstream` | done |
-| SH in `render`/`view` (today they draw the DC colour only; a fitted scene's view dependence is exported to the PLY and used by other viewers) | CLI render path + `splat_sh.wgsl` | planned |
+| SH in `render`/`view` (host shading per frame via `sh::shade`) | `cli/splat_cli.rs` | done |
 | Nonlinear cameras via the Unscented Transform (3DGUT, Wu et al., CVPR 2025): OpenCV radial/tangential, fisheye/Kannala-Brandt, equirectangular with seam duplication, rolling shutter | `camera.rs` (planned) | planned |
 | StopThePop hierarchical per-tile re-sorting (Radl et al., SIGGRAPH 2024) | rasterizer | planned |
 | `.splat` / `.spz` IO | `ply.rs` siblings | planned |

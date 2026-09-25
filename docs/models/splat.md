@@ -75,6 +75,7 @@ into a scene that actually reproduces your photos.
 | `--out <path>` | `render`, `fit` | output file (`img.ppm` / `fitted.ply`) |
 | `--width` / `--height` | `render`, `view` | output resolution |
 | `--eye x,y,z --target x,y,z [--up x,y,z]` | `render`, `view` | explicit camera; omit both for auto-framing |
+| `--cameras <path> --view I` | `render` | render camera `I` of a `cameras.json` (e.g. the one `train` writes), at its own size |
 | `--fov D` | `render`, `view` | vertical field of view in degrees |
 | `--depth` | `render` | render the depth view instead of color |
 | `--bg r,g,b` | `render`, `view` | background color |
@@ -92,7 +93,7 @@ into a scene that actually reproduces your photos.
 | `--densify N` | `fit` | run density control every N iterations (default off) |
 | `--densify-frac F` | `fit` | fraction of gaussians treated as under-reconstructed per step (default `0.05`) |
 | `--max-gaussians N` | `fit` | refuse to grow past N |
-| `--densify-strategy S` | `fit` | `heuristic` (default), `mcmc` or `hybrid` - see below |
+| `--densify-strategy S` | `fit`, `train` | `heuristic` (the `fit` default), `mcmc` or `hybrid` (the `train` default) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
 | `--camera-model` | `fit` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
@@ -104,6 +105,7 @@ into a scene that actually reproduces your photos.
 | `--iters N` | `train` | optimizer steps (default `3000`) |
 | `--max-gaussians N` | `train` | the scene's gaussian budget (default `500000`) |
 | `--init-opacity O` | `sfm`, `train` | opacity of the starting gaussians (default `0.5`) |
+| `--coarse F` | `train` | fraction of the fit run at half resolution first (default `0.3`) |
 | `--cameras-out <path>` | `sfm`, `train` | where to write the recovered cameras (default next to `--out`) |
 
 ## From photographs: `sfm` and `train`
@@ -404,10 +406,8 @@ WASD/mouse loop with no request/response shape. See
 ## Hardware and limits
 
 Runs on any wgpu-supported GPU or on the CPU - no CUDA or vendor-specific
-GPU is required. Only spherical-harmonics degree 0 (flat per-splat color)
-actually renders today; higher-order SH coefficients in a `.ply` are parsed
-and preserved on round-trip (so re-saving a scene doesn't lose them) but
-don't yet affect the rendered image. `fit` optimizes an existing set of
+GPU is required. `render` and `view` shade spherical harmonics up to degree
+3, so a scene's view-dependent colour shows. `fit` optimizes an existing set of
 gaussians against posed photos; to start from photographs alone, use
 `sfm` (cameras and points) or `train` (the whole pipeline). Structure from
 motion assumes every photograph came from one camera at one zoom setting.

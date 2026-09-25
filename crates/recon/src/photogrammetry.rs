@@ -98,7 +98,9 @@ pub fn training_set(photos: &[Rgb8], width: u32, opacity: f32, cfg: &SfmCfg) -> 
     }
     let xyz: Vec<f32> = rec.points.iter().flat_map(|p| p.xyz.map(|v| v as f32)).collect();
     let rgb: Vec<f32> = rec.points.iter().flat_map(|p| p.rgb).collect();
-    let init = splat::init::from_points(&xyz, &rgb, opacity);
+    let mut init = splat::init::from_points(&xyz, &rgb, opacity);
+    let cams: Vec<Camera> = targets.iter().map(|t| t.cam).collect();
+    splat::init::floor_to_pixels(&mut init, &cams, 1.0);
     Ok(TrainingSet { targets, source, init, sfm: rec })
 }
 

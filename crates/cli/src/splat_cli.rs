@@ -123,16 +123,29 @@ fn render(argv: &[String]) {
     // reconstruction with roughly one gaussian per source pixel.
     let eps2d =
         a.f32_or("--eps2d", if inria_render { 0.3 } else { RenderOpts::default().eps2d });
+    // Render exactly one of the cameras a scene was trained or fitted with,
+    // to put next to its photograph.
+    let cams_file = a.take_str("--cameras");
+    let view = a.usize_or("--view", 0);
     a.finish();
 
-    let cam = match (eye, target) {
-        (Some(e), Some(t)) => Camera::look_at(e, t, up, fov, width, height),
-        (None, None) => auto_camera(&s, width, height, fov),
+    let cam = match (eye, target, cams_file) {
+        (_, _, Some(f)) => {
+            let cams = read_cameras(&f);
+            *cams.get(view).unwrap_or_else(|| {
+                eprintln!("--view {view}: {f} holds {} cameras", cams.len());
+                std::process::exit(2);
+            })
+        }
+        (Some(e), Some(t), None) => Camera::look_at(e, t, up, fov, width, height),
+        (None, None, None) => auto_camera(&s, width, height, fov),
         _ => {
             eprintln!("--eye and --target go together");
             std::process::exit(2);
         }
     };
+    // a camera from a file brings its own size
+    let (width, height) = (cam.width, cam.height);
     let opts = RenderOpts {
         bg,
         mode: if depth_view { Mode::Depth } else { Mode::Color },
@@ -150,7 +163,13 @@ fn render(argv: &[String]) {
         let gs = GpuSplats::upload(&g, &sorted);
         (r.render_naive_gpu(&g, &gs, &cam, &opts), "naive".to_string())
     } else {
+        // View-dependent colour, shaded for this camera: a fitted scene's
+        // harmonics are part of how it looks.
+        let eye = [cam.c2w[3], cam.c2w[7], cam.c2w[11]];
         let gs = GpuSplats::upload(&g, &s);
+        if let Some(c) = splat::sh::shade(&s, eye) {
+            g.write_f32(&gs.colors, &c);
+        }
         let stats = r.render(&g, &gs, &cam, &opts);
         let img = r.read_rgba(&g, width, height);
         (img, format!("tiled, {} isects{}", stats.n_isects, if stats.clamped { ", CLAMPED" } else { "" }))
@@ -372,6 +391,9 @@ pub fn run_viewer(
         let cam = fly.camera(fov, rw, rh);
         let opts = RenderOpts { bg, mode, ..Default::default() };
         let t0 = std::time::Instant::now();
+        if let Some(c) = splat::sh::shade(s, [cam.c2w[3], cam.c2w[7], cam.c2w[11]]) {
+            g.write_f32(&gs.colors, &c);
+        }
         let stats = renderer.render(&g, &gs, &cam, &opts);
         let mut rgb = renderer.read_rgb24(&g, rw, rh);
         let render_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -666,6 +688,16 @@ fn train_cmd(argv: &[String]) {
     let iters = a.usize_or("--iters", 3000);
     let budget = a.usize_or("--max-gaussians", 500_000);
     let lr = a.f32_or("--lr", 5e-3);
+    let coarse = a.f32_or("--coarse", FitCfg::from_sparse_points(iters, budget).coarse);
+    let strategy = match a.str_or("--densify-strategy", "hybrid").as_str() {
+        "heuristic" => Densify::Heuristic,
+        "mcmc" => Densify::Mcmc,
+        "hybrid" => Densify::Hybrid,
+        other => {
+            eprintln!("--densify-strategy must be `heuristic`, `mcmc` or `hybrid`, got `{other}`");
+            std::process::exit(2);
+        }
+    };
     let cams_out = a.take_str("--cameras-out");
     let (_, set) = photogrammetry(&mut a);
     a.finish();
@@ -682,7 +714,7 @@ fn train_cmd(argv: &[String]) {
             t
         })
         .collect();
-    let cfg = FitCfg { lr, ..FitCfg::from_sparse_points(iters, budget) };
+    let cfg = FitCfg { lr, coarse, strategy, ..FitCfg::from_sparse_points(iters, budget) };
     let g = Gpu::new(splat::PIPELINES);
     println!(
         "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}) ...",
