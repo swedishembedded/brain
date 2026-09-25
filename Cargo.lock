@@ -1608,6 +1608,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-lpips"
+version = "1.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-modelstore",
+ "brain-paramstore",
+ "brain-testutil",
+ "brain-vision",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-ltxv"
 version = "1.1.0"
 dependencies = [

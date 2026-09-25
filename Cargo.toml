@@ -123,6 +123,7 @@ default-members = [
     "crates/sam2",
     "crates/sam1",
     "crates/bisenet",
+    "crates/lpips",
     "crates/scrfd",
     "crates/arcface",
     "crates/vqgan",
@@ -297,6 +298,7 @@ brain-imaging = { path = "crates/imaging" }
 brain-sam2 = { path = "crates/sam2" }
 brain-sam1 = { path = "crates/sam1" }
 brain-bisenet = { path = "crates/bisenet" }
+brain-lpips = { path = "crates/lpips" }
 brain-scrfd = { path = "crates/scrfd" }
 brain-arcface = { path = "crates/arcface" }
 brain-vqgan = { path = "crates/vqgan" }

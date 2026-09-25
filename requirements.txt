@@ -37,6 +37,8 @@ chronos-forecasting      # tools/goldens/chronos2_dump_*_reference.py (`from chr
 st_moe_pytorch           # tools/goldens/fincast_dump_reference.py
 facexlib                 # tools/goldens/pulid_face_parsing_dump_reference.py (real BiSeNet face-parsing
                         # reference + weights - auto-downloads parsing_bisenet.pth on first use)
+lpips                    # tools/goldens/lpips_dump_reference.py (the official LPIPS implementation the
+                        # crates/lpips goldens are computed with; it pulls in torchvision)
 
 # NOT pip-installable under a stable PyPI name — install from source manually if
 # you need to regenerate their goldens (the parity tests these feed skip cleanly

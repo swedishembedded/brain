@@ -1,0 +1,33 @@
+[package]
+name = "brain-lpips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LPIPS v0.1 (AlexNet) perceptual image distance on the device: torchvision's ImageNet AlexNet trunk and the five learned linear heads, composed from the shared conv-net blocks."
+
+[lib]
+name = "lpips"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+# `Conv`/`MaxPool`/`Ctx`/`ConvKernelIds` - the trunk and the heads are the
+# shared conv-net blocks, nothing of this crate's own.
+brain-vision.workspace = true
+# The device layout swap, the per-channel affine (the LPIPS scaling layer),
+# and the area-average a mask is brought down to a feature map's grid with.
+brain-imaging.workspace = true
+brain-checkpoint.workspace = true
+brain-paramstore.workspace = true
+
+# `spec.rs` - this metric's rules for the model-store resolver, and the
+# store scan and resolve that find its two files.
+brain-modelstore.workspace = true
+brain-capability.workspace = true # ArchSpec::validate's Assembly
+
+[dev-dependencies]
+brain-testutil.workspace = true
+# `data::rng::Lcg` - the one deterministic test PRNG.
+brain-data.workspace = true
+serde_json.workspace = true
