@@ -178,6 +178,24 @@ neighbouring shots (every part of the scene in at least three photographs),
 keep the zoom fixed, and avoid moving objects. A textured floor or table
 under the subject helps registration a great deal.
 
+### Judging a fit on photographs it never saw
+
+`crates/recon/examples/photo_holdout.rs` keeps every k-th photograph out of
+the fit and scores the scene from those photographs' cameras with PSNR, SSIM
+and LPIPS (v0.1, AlexNet trunk: the perceptual distance novel-view synthesis
+results are usually reported in; lower is closer, 0 is identical). LPIPS
+runs on the same device as the render. Its weights are two small upstream
+releases that are not auto-fetched; this puts both in the models directory,
+checksum-verified, where brain finds them by content:
+
+```bash
+python tools/goldens/lpips_dump_reference.py      # needs torch, safetensors and lpips (make requirements)
+```
+
+Without them the example says LPIPS was not scored and reports the other two.
+In your own code, `recon::eval::Viewer::with_lpips(lpips::Lpips::from_store(&gpu)?)`
+adds the same column to every score.
+
 ## Density control: when the fit may ADD gaussians
 
 Without it, a fit has exactly one way to cover a region it cannot represent:

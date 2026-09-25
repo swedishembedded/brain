@@ -13,9 +13,10 @@
 //!
 //! * [`holdout`] - which registered photographs are withheld: every k-th,
 //!   spread over the capture rather than its ends;
-//! * [`score`] - PSNR and SSIM of each view's render against its photograph,
-//!   over the pixels its lens images; [`score_training`] through each
-//!   training view's fitted camera model;
+//! * [`score`] - PSNR, SSIM and, when the viewer carries the metric
+//!   ([`Viewer::with_lpips`]), LPIPS of each view's render against its
+//!   photograph, over the pixels its lens images; [`score_training`] through
+//!   each training view's fitted camera model;
 //! * [`score_held_out`] - held-out views under the two standard protocols:
 //!   RAW, the scene through the capture's average camera at the exposure the
 //!   photograph is known to have had (what a novel view looks like), and
@@ -53,6 +54,10 @@ pub struct ViewScore {
     pub view: usize,
     pub psnr: f64,
     pub ssim: f64,
+    /// LPIPS v0.1 / AlexNet (lower is closer), over the same pixels as the
+    /// other two. `None` when the viewer carries no LPIPS metric, or the view
+    /// is smaller than the `lpips::config::MIN_SIDE` AlexNet can see.
+    pub lpips: Option<f64>,
 }
 
 /// Every scored view, and their means.
@@ -68,6 +73,12 @@ impl Scores {
     pub fn mean_ssim(&self) -> f64 {
         self.views.iter().map(|v| v.ssim).sum::<f64>() / self.views.len().max(1) as f64
     }
+    /// The mean LPIPS, only when every view has one: a mean over the views
+    /// that happened to be scorable would not be the mean over the views.
+    pub fn mean_lpips(&self) -> Option<f64> {
+        let all: Option<Vec<f64>> = self.views.iter().map(|v| v.lpips).collect();
+        all.filter(|v| !v.is_empty()).map(|v| v.iter().sum::<f64>() / v.len() as f64)
+    }
 }
 
 /// A scene ready to render: the gaussians and the 3D filter they were fitted
@@ -79,6 +90,7 @@ pub struct Viewer {
     pub(crate) renderer: Renderer,
     pub(crate) opts: RenderOpts,
     pub(crate) env: Option<splat::env::EnvDevice>,
+    lpips: Option<lpips::Lpips>,
 }
 
 impl Viewer {
@@ -96,6 +108,29 @@ impl Viewer {
             renderer: Renderer::new(gpu, Kernels::at(0), scene.len().max(1), max_w, max_h, 0).growable(),
             opts: RenderOpts { ray: true, ..opts },
             env: None,
+            lpips: None,
+        }
+    }
+
+    /// Score LPIPS too, with `metric` (`lpips::Lpips::from_store(gpu)` puts
+    /// it on the viewer's own device).
+    pub fn with_lpips(mut self, metric: lpips::Lpips) -> Viewer {
+        self.lpips = Some(metric);
+        self
+    }
+
+    fn view_score(&mut self, i: usize, img: &[f32], v: &TargetView, mask: Option<&[f32]>) -> ViewScore {
+        let (w, h) = (v.cam.width, v.cam.height);
+        let perceptual = self.lpips.as_mut().filter(|_| w.min(h) >= lpips::config::MIN_SIDE).map(|m| {
+            // Sizes and mask come from the view itself, so a refusal here is
+            // a broken invariant, not a view to skip.
+            m.distance(img, &v.rgb, w, h, mask).unwrap_or_else(|e| panic!("view {i}: {e}")).total
+        });
+        ViewScore {
+            view: i,
+            psnr: splat::quality::psnr_masked(img, &v.rgb, mask),
+            ssim: splat::quality::ssim(img, &v.rgb, w as usize, h as usize, mask),
+            lpips: perceptual,
         }
     }
 
@@ -129,11 +164,6 @@ impl Viewer {
     }
 }
 
-fn view_score(i: usize, img: &[f32], v: &TargetView, mask: Option<&[f32]>) -> ViewScore {
-    let (w, h) = (v.cam.width as usize, v.cam.height as usize);
-    ViewScore { view: i, psnr: splat::quality::psnr_masked(img, &v.rgb, mask), ssim: splat::quality::ssim(img, &v.rgb, w, h, mask) }
-}
-
 /// Score every view's render against its photograph over the pixels it
 /// supervises. Returns the scores and the renders.
 pub fn score(viewer: &mut Viewer, views: &[TargetView]) -> (Scores, Vec<Vec<f32>>) {
@@ -151,7 +181,7 @@ fn score_shots(viewer: &mut Viewer, views: &[TargetView], isp: Option<&Isp>, sho
     let mut renders = Vec::with_capacity(views.len());
     for (i, v) in views.iter().enumerate() {
         let img = viewer.render_through(&v.cam, isp, shot(i));
-        scores.views.push(view_score(i, &img, v, v.mask.as_deref()));
+        scores.views.push(viewer.view_score(i, &img, v, v.mask.as_deref()));
         renders.push(img);
     }
     (scores, renders)
@@ -186,12 +216,12 @@ pub fn score_held_out(viewer: &mut Viewer, views: &[TargetView], isp: Option<&Is
         let neutral = NovelShot::neutral(if isp.is_some() { v.sensor } else { 0 }, v.exposure, v.encoding);
         let radiance = viewer.render(&v.cam);
         let img = camera.render(Shot::Novel(neutral), &v.cam, &radiance);
-        out.raw.views.push(view_score(i, &img, v, v.mask.as_deref()));
+        out.raw.views.push(viewer.view_score(i, &img, v, v.mask.as_deref()));
         let (w, px) = (v.cam.width as usize, (v.cam.width * v.cam.height) as usize);
         let half = |left: bool| -> Vec<f32> { (0..px).map(|p| if (p % w < w / 2) == left { v.mask.as_ref().map_or(1.0, |m| m[p]) } else { 0.0 }).collect() };
         let fitted = camera.fit_novel(neutral, &v.cam, &radiance, &v.rgb, &half(true));
         let img_fitted = camera.render(Shot::Novel(fitted), &v.cam, &radiance);
-        out.fitted.views.push(view_score(i, &img_fitted, v, Some(&half(false))));
+        out.fitted.views.push(viewer.view_score(i, &img_fitted, v, Some(&half(false))));
         renders.push(img);
     }
     (out, renders)
@@ -315,13 +345,8 @@ mod tests {
         assert!(holdout(5, 0).iter().all(|&v| !v));
     }
 
-    /// A held-out photograph taken brighter and warmer than the capture's
-    /// average camera: the raw score charges the scene for the camera's
-    /// settings, the appearance-fitted one fits them on the left half of the
-    /// frame and, scored on the right half, finds the scene exact.
-    #[test]
-    fn the_appearance_fitted_protocol_forgives_the_camera_not_the_scene() {
-        let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    /// An 8x8 wall of coloured splats three units in front of the origin.
+    fn wall() -> Splats {
         let mut s = Splats::default();
         for iy in 0..8 {
             for ix in 0..8 {
@@ -332,6 +357,17 @@ mod tests {
                 s.colors.extend_from_slice(&[0.2 + 0.07 * ix as f32, 0.3 + 0.05 * iy as f32, 0.4]);
             }
         }
+        s
+    }
+
+    /// A held-out photograph taken brighter and warmer than the capture's
+    /// average camera: the raw score charges the scene for the camera's
+    /// settings, the appearance-fitted one fits them on the left half of the
+    /// frame and, scored on the right half, finds the scene exact.
+    #[test]
+    fn the_appearance_fitted_protocol_forgives_the_camera_not_the_scene() {
+        let g = gpu_core::testgpu::dev(splat::PIPELINES);
+        let s = wall();
         let cam = Camera::look_at([0.0; 3], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 40.0, 32, 24);
         let mut viewer = Viewer::new(&g, &s, &[], RenderOpts::default(), 32, 24);
         let radiance = viewer.render(&cam);
@@ -341,6 +377,33 @@ mod tests {
         let (raw, fitted) = (held.raw.mean_psnr(), held.fitted.mean_psnr());
         assert!(raw < 20.0, "the raw score sees the exposure: {raw:.1} dB");
         assert!(fitted > 45.0, "fitted on one half, the other half is exact: {fitted:.1} dB");
+    }
+
+    /// LPIPS is scored when the viewer carries the metric, and only then: a
+    /// view against its own render is at zero, a darkened photograph is not,
+    /// and a viewer without the metric reports none rather than a number.
+    #[test]
+    fn lpips_is_scored_when_the_viewer_carries_the_metric() {
+        let g = gpu_core::testgpu::dev(splat::PIPELINES);
+        let s = wall();
+        let cam = Camera::look_at([0.0; 3], [0.0, 0.0, 3.0], [0.0, -1.0, 0.0], 40.0, 64, 48);
+        let mut plain = Viewer::new(&g, &s, &[], RenderOpts::default(), 64, 48);
+        let photo = plain.render(&cam);
+        let darker: Vec<f32> = photo.iter().map(|v| v * 0.6).collect();
+        let views = [TargetView::new(cam, photo), TargetView::new(cam, darker)];
+        let (without, _) = score(&mut plain, &views);
+        assert!(without.views.iter().all(|v| v.lpips.is_none()) && without.mean_lpips().is_none());
+
+        let metric = match lpips::Lpips::from_store(&g) {
+            Ok(m) => m,
+            Err(e) => return brain_testutil::skip(&format!("LPIPS weights not in the model store: {e}")),
+        };
+        let mut viewer = Viewer::new(&g, &s, &[], RenderOpts::default(), 64, 48).with_lpips(metric);
+        let (with, _) = score(&mut viewer, &views);
+        let (same, dark) = (with.views[0].lpips.expect("scored"), with.views[1].lpips.expect("scored"));
+        assert!(same < 1e-4, "a render against itself: {same}");
+        assert!(dark > same + 0.01, "a darkened photograph is further: {dark} vs {same}");
+        assert_eq!(with.mean_lpips(), Some((same + dark) / 2.0));
     }
 
     /// The path passes through every camera, and between two it turns and

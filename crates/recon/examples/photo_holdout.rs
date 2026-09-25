@@ -41,6 +41,9 @@
 //! is on. Held-out views are scored raw (the capture's average camera at the
 //! photograph's known exposure) and appearance-fitted (exposure and white
 //! balance fitted on the left half of each, scored on the right half).
+//! Every protocol reports PSNR, SSIM and, when its two weight files are in
+//! the model store (`tools/goldens/lpips_dump_reference.py` puts them there),
+//! LPIPS v0.1 / AlexNet on the same device as the render.
 //!
 //! Writes `heldout_<i>.png` (photograph | raw render) for every held-out
 //! view, `train_<i>.png` for some training views, and `scene.ply`.
@@ -209,24 +212,38 @@ fn main() {
         .iter()
         .map(|t| TargetView { cam: Camera { shutter: t.cam.shutter, ..Camera::with_intrinsics(t.cam.c2w, &k.resized(t.cam.width, t.cam.height)) }, ..t.clone() })
         .collect();
-    let mut viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h).with_env(res.env.as_ref());
+    let viewer = Viewer::new(&g, &res.scene, &res.filter3d, fitted_opts(&cfg), w, h).with_env(res.env.as_ref());
+    let mut viewer = match lpips::Lpips::from_store(&g) {
+        Ok(metric) => {
+            println!("lpips: v0.1 / AlexNet, on the {} device", metric.gpu().kind());
+            viewer.with_lpips(metric)
+        }
+        Err(e) => {
+            println!("lpips: not scored - {e}");
+            viewer
+        }
+    };
     let isp = res.isp.as_ref();
     let (on_train, train_img) = score_training(&mut viewer, &refit, isp);
     let (on_held, held_img) = score_held_out(&mut viewer, &held, isp);
     let path = recon::eval::path(&refit.iter().map(|t| t.cam).collect::<Vec<_>>(), 8);
     let flicker = stability(&mut viewer, &path);
     let per = |s: &recon::eval::Scores| s.views.iter().map(|x| format!("{:.1}", x.psnr)).collect::<Vec<_>>().join(" ");
+    let lp = |s: &recon::eval::Scores| s.mean_lpips().map_or(String::new(), |v| format!(" / LPIPS {v:.4}"));
     println!(
-        "{} gaussians in {secs:.0} s; training views {:.2} dB / SSIM {:.4}; HELD-OUT raw {:.2} dB / SSIM {:.4} ({}), \
-         appearance-fitted {:.2} dB / SSIM {:.4} ({}); path flicker {flicker:.5}",
+        "{} gaussians in {secs:.0} s; training views {:.2} dB / SSIM {:.4}{}; HELD-OUT raw {:.2} dB / SSIM {:.4}{} ({}), \
+         appearance-fitted {:.2} dB / SSIM {:.4}{} ({}); path flicker {flicker:.5}",
         res.scene.len(),
         on_train.mean_psnr(),
         on_train.mean_ssim(),
+        lp(&on_train),
         on_held.raw.mean_psnr(),
         on_held.raw.mean_ssim(),
+        lp(&on_held.raw),
         per(&on_held.raw),
         on_held.fitted.mean_psnr(),
         on_held.fitted.mean_ssim(),
+        lp(&on_held.fitted),
         per(&on_held.fitted),
     );
     println!("  per training view: {}", per(&on_train));
