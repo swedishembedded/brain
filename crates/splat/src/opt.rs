@@ -398,14 +398,30 @@ impl Default for FitCfg {
     }
 }
 
+/// The spherical-harmonic degree a capture of `views` photographs can
+/// support: the largest `d` with `8 (d+1)² <= views`. A degree-`d` expansion
+/// is `(d+1)²` coefficients per channel per gaussian, fitted from the views
+/// that see it; with about as many coefficients as observations it memorizes
+/// the training views rather than describing the surface. Flat colour below
+/// 32 views, full degree 3 from 128.
+pub fn sh_degree_for_views(views: usize) -> u32 {
+    (0..=3u32).rev().find(|d| 8 * (d + 1) * (d + 1) <= views as u32).unwrap_or(0)
+}
+
 impl FitCfg {
     /// Everything a scene started from a SPARSE point cloud (structure from
-    /// motion) needs to become a finished reconstruction in `iters`
-    /// iterations and at most `budget` gaussians: the L1 + D-SSIM objective,
-    /// the photometric camera model, credit-assigned density control from 5%
-    /// to 60% of the fit, the Mip filter, full view-dependent colour, and
-    /// the surface regularizers once the scene has a shape (40%) on every
-    /// fourth step, and two views per step rather than all of them.
+    /// motion) needs to become a finished reconstruction of `views`
+    /// photographs in `iters` iterations and at most `budget` gaussians: the
+    /// L1 + D-SSIM objective, credit-assigned density control from 5% to 60%
+    /// of the fit, the Mip filter, as much view-dependent colour as the
+    /// capture has views to support ([`sh_degree_for_views`]), and the surface
+    /// regularizers once the scene has a shape (40%) on every fourth step, and
+    /// two views per step rather than all of them.
+    ///
+    /// The photometric camera model ([`FitCfg::isp`]) is left off: on a
+    /// capture taken at one exposure it only absorbs fit error, measured at
+    /// 1.3 dB lost on held-out photographs of a 16-photo capture. A capture
+    /// whose exposure or white balance really varies turns it on.
     ///
     /// Geometry moves at rates relative to each gaussian's own size - over the
     /// whole fit, 30 of its radii of travel, 10 of resize, 2 of quaternion -
@@ -417,19 +433,19 @@ impl FitCfg {
     /// scene into uniform grey fog. The growth bound relative to a gaussian's
     /// START stays off: a sparse cloud has to grow a long way to cover what
     /// its points only sample.
-    pub fn from_sparse_points(iters: usize, budget: usize) -> FitCfg {
+    pub fn from_sparse_points(iters: usize, budget: usize, views: usize) -> FitCfg {
         let every = (iters / 20).max(1);
         FitCfg {
             iters,
             loss: PixelLoss::gaussian_splatting(),
-            isp: Some(IspCfg::default()),
+            isp: None,
             strategy: Densify::Hybrid,
             densify_every: every,
             densify_after: every,
             densify_until: iters * 6 / 10,
             max_gaussians: budget,
             antialiased: true,
-            sh_degree: 3,
+            sh_degree: sh_degree_for_views(views),
             max_growth: 0.0,
             max_scale_pixels: 32.0,
             position_budget: 30.0,

@@ -78,7 +78,7 @@ fn a_sparse_start_becomes_sharper_not_fog() {
         rgb.extend_from_slice(&t0.colors[i * 3..i * 3 + 3]);
     }
     let init = splat::init::from_points(&xyz, &rgb, 0.5);
-    let cfg = FitCfg { log_every: 0, ..FitCfg::from_sparse_points(160, 1200) };
+    let cfg = FitCfg { log_every: 0, ..FitCfg::from_sparse_points(160, 1200, targets.len()) };
     let out = fit_full(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
 
     let score = |s: &Splats| -> (f64, f64) {
@@ -137,7 +137,7 @@ fn an_unseeded_region_is_grown_in() {
         rgb.extend_from_slice(&t0.colors[i * 3..i * 3 + 3]);
     }
     let init = splat::init::from_points(&xyz, &rgb, 0.5);
-    let cfg = FitCfg { log_every: 0, ..FitCfg::from_sparse_points(160, 1200) };
+    let cfg = FitCfg { log_every: 0, ..FitCfg::from_sparse_points(160, 1200, targets.len()) };
     let out = fit_full(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
 
     // PSNR over the pixels where the head-on view sees the unseeded patch

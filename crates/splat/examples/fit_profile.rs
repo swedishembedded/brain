@@ -50,7 +50,7 @@ fn main() {
         geometry_after: 0.0,
         coarse: 0.0,
         log_every: 0,
-        ..FitCfg::from_sparse_points(iters, scene.len())
+        ..FitCfg::from_sparse_points(iters, scene.len(), targets.len())
     };
     let g = gpu_core::Gpu::new(splat::PIPELINES);
     println!(

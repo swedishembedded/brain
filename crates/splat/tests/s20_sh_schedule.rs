@@ -57,3 +57,38 @@ fn bands_that_have_not_switched_on_stay_at_zero() {
     assert!(low > 0.0, "degree 1 was on for half the fit and never moved");
     assert_eq!(high, 0.0, "degrees 2 and 3 never switched on, yet their coefficients moved");
 }
+
+/// How much view-dependent colour a capture can support is set by how many
+/// views it has. A degree-`d` expansion is `(d+1)²` coefficients per channel
+/// per gaussian, and each gaussian is seen by a fraction of the capture: with
+/// about as many coefficients as views observing it, SH memorizes the
+/// training views instead of describing the surface. Measured on 24 views of
+/// a diffuse synthetic scene, degree 3 lost 2.4 dB on held-out views against
+/// degree 0 and degree 1 still lost 0.45; on a 13-photo real capture degree
+/// 1 lost 0.4 dB held-out against degree 0.
+///
+/// So the sparse-start preset gives a capture degree `d` only once it has
+/// `8 (d+1)²` views: flat colour below 32, full degree 3 from 128 - the
+/// capture sizes 3DGS was defined on.
+#[test]
+fn a_sparse_capture_gets_flat_colour_and_a_dense_one_full_sh() {
+    let degree = |views: usize| FitCfg::from_sparse_points(1000, 1000, views).sh_degree;
+    assert_eq!(degree(13), 0);
+    assert_eq!(degree(24), 0);
+    assert_eq!(degree(31), 0);
+    assert_eq!(degree(32), 1);
+    assert_eq!(degree(72), 2);
+    assert_eq!(degree(127), 2);
+    assert_eq!(degree(128), 3);
+    assert_eq!(degree(300), 3);
+}
+
+/// The photometric camera model is not free: on a capture taken at one
+/// exposure it absorbs fit error as spurious exposure, vignetting and
+/// response - 2.5 dB lost on the training views of a synthetic capture with
+/// no photometric variation at all, and 1.3 dB held-out on a real one. So
+/// the preset leaves it off, and a capture that does vary turns it on.
+#[test]
+fn the_sparse_start_preset_leaves_the_camera_model_off() {
+    assert!(FitCfg::from_sparse_points(1000, 1000, 16).isp.is_none());
+}

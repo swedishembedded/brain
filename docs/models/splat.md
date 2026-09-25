@@ -95,7 +95,7 @@ into a scene that actually reproduces your photos.
 | `--max-gaussians N` | `fit` | refuse to grow past N |
 | `--densify-strategy S` | `fit`, `train` | `heuristic` (the `fit` default), `mcmc` or `hybrid` (the `train` default) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
-| `--camera-model` | `fit` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene |
+| `--camera-model` | `fit`, `train` | fit per-photo exposure and white balance and the lens's vignetting alongside the scene (default off) |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
 | `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
 | `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |
@@ -127,9 +127,17 @@ learned model. It runs in three steps:
    removing the lens distortion, and the sparse point cloud becomes the
    starting scene.
 3. The fit, with everything a real capture needs: the L1 + D-SSIM objective,
-   a camera model for per-photo exposure and white balance, credit-assigned
-   density control that grows the scene toward `--max-gaussians`, full
-   view-dependent colour, and surface regularizers in the second half.
+   credit-assigned density control that grows the scene toward
+   `--max-gaussians`, as much view-dependent colour as the capture has
+   photographs to support, and surface regularizers in the second half.
+   View-dependent colour is a degree-`d` spherical-harmonic expansion,
+   `(d+1)²` coefficients per channel per gaussian, and with about as many
+   coefficients as photographs seeing a gaussian it memorizes the training
+   photographs instead of describing the surface: `train` uses flat colour
+   below 32 photographs and full degree 3 from 128. Per-photo exposure and
+   white balance (`--camera-model`) are off unless asked for - on a capture
+   taken at one exposure they only absorb fit error, and on a 16-photo
+   capture they cost 1.3 dB on held-out photographs.
 
 ```bash
 brain splat train --images ~/captures/can --out can.ply

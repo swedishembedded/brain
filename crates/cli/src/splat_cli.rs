@@ -678,7 +678,7 @@ fn train_cmd(argv: &[String]) {
     let iters = a.usize_or("--iters", 3000);
     let budget = a.usize_or("--max-gaussians", 500_000);
     let lr = a.f32_or("--lr", 5e-3);
-    let coarse = a.f32_or("--coarse", FitCfg::from_sparse_points(iters, budget).coarse);
+    let coarse = a.f32_or("--coarse", FitCfg::from_sparse_points(iters, budget, 0).coarse);
     let strategy = match a.str_or("--densify-strategy", "hybrid").as_str() {
         "heuristic" => Densify::Heuristic,
         "mcmc" => Densify::Mcmc,
@@ -689,6 +689,10 @@ fn train_cmd(argv: &[String]) {
         }
     };
     let cams_out = a.take_str("--cameras-out");
+    // Per-photo exposure and white balance and the lens's vignetting, for a
+    // capture that needs them; see `FitCfg::from_sparse_points` for why the
+    // preset leaves them off.
+    let camera_model = a.take_flag("--camera-model");
     let (_, set) = photogrammetry(&mut a);
     a.finish();
     // Land the scene upright: structure from motion leaves it in its first
@@ -704,14 +708,18 @@ fn train_cmd(argv: &[String]) {
             t
         })
         .collect();
-    let cfg = FitCfg { lr, coarse, strategy, ..FitCfg::from_sparse_points(iters, budget) };
+    let preset = FitCfg::from_sparse_points(iters, budget, targets.len());
+    let isp = if camera_model { Some(splat::isp::IspCfg::default()) } else { preset.isp };
+    let cfg = FitCfg { lr, coarse, strategy, isp, ..preset };
     let g = Gpu::new(splat::PIPELINES);
     println!(
-        "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}) ...",
+        "training {} gaussians against {} views at {}x{} ({iters} iters, budget {budget}, SH degree {}, camera model {}) ...",
         init.len(),
         targets.len(),
         targets[0].cam.width,
-        targets[0].cam.height
+        targets[0].cam.height,
+        cfg.sh_degree,
+        if cfg.isp.is_some() { "on" } else { "off" }
     );
     let res = splat::opt::fit_full(&g, Kernels::at(0), &init, &targets, &cfg, &mut |_, _| true);
     splat::ply::write(&out, &res.scene).unwrap_or_else(|e| {
