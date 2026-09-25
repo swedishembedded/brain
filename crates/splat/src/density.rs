@@ -24,20 +24,25 @@
 //! From that evidence, each round:
 //!
 //! 1. **Score** every gaussian that contributes meaningfully by the RANK of
-//!    its mean residual, its mean edge residual and its per-view AbsGS
-//!    gradient. Ranks, not thresholds: an absolute gradient threshold means
+//!    its mean residual (photometric, plus how far the rendered range misses
+//!    a range prior where the view has one), its mean edge residual and its
+//!    per-view AbsGS gradient. Ranks, not thresholds: an absolute gradient threshold means
 //!    something different at every image size, view count and scene, a
 //!    percentile does not.
 //! 2. **Budget** the round from a growth schedule `N_target(round)` that
 //!    reaches `max_gaussians` about two thirds of the way through density
 //!    control and then holds (Taming 3DGS, Mallick et al. 2024: population
 //!    is a resource to schedule, not a side effect of thresholds).
-//! 3. **Reclaim** what contributes nothing - but only on the SECOND round in a
-//!    row it does so. The first time, it is suppressed (opacity halved) and
-//!    marked; a gaussian that was only temporarily starved recovers and is
-//!    unmarked, one that was genuinely redundant does not (recovery-aware
-//!    pruning, after ImprovedGS, Deng et al. 2026). Reclaimed slots pay for
-//!    new samples, the way 3DGS-MCMC relocation recycles dead ones.
+//! 3. **Reclaim** what contributes nothing - judged on its record, not one
+//!    round. Each gaussian carries a running average of whether it starved
+//!    (an exponential average halving every round); a round it starves in
+//!    suppresses it (opacity halved), and it is reclaimed once the average
+//!    reaches 0.6 - two starved rounds in a row, or a third within a few
+//!    rounds of recovering. A gaussian only temporarily starved recovers and
+//!    its record fades; one that is genuinely redundant is removed, even if
+//!    it flickers back to life every other round (recovery-aware pruning,
+//!    after ImprovedGS, Deng et al. 2026). Reclaimed slots pay for new
+//!    samples, the way 3DGS-MCMC relocation recycles dead ones.
 //! 4. **Refine** the top-scored gaussians within the budget, by SHAPE: one
 //!    larger than a pixel and elongated is split along its long axis into
 //!    two children fitted to reproduce its composited alpha profile (the
@@ -45,7 +50,13 @@
 //!    isotropic is too coarse in every direction and is subdivided in every
 //!    direction (3DGS's split); a small one is cloned into two samples displaced in
 //!    opposite directions by its own covariance, with the 3DGS-MCMC opacity
-//!    correction so the pair renders as the one did.
+//!    correction so the pair renders as the one did. The children of a flat
+//!    gaussian are displaced across its surface only, never along its normal.
+//! 5. **Spawn** where there is nothing to refine: the share of the residual
+//!    that sits on pixels where the scene is empty or at the wrong depth is
+//!    reserved for new gaussians placed on those pixels' surfaces
+//!    ([`Evidence::sites`]), so an object the starting scene missed is not
+//!    out of reach.
 //!
 //! Swedish Embedded AB implements 3D reconstruction optimizers whose density
 //! control spends a primitive budget where the image error is, not where a
@@ -122,19 +133,35 @@ impl Evidence {
 }
 
 /// The per-pixel upstream of a credit-assignment pass, `[W*H*4]`:
-/// `(m, m·r, m·e·r, 0)` with `r` the mean absolute residual over channels,
-/// `e` the edge strength of the target and `m` the supervision weight.
-pub fn credit_upstream(pred: &[f32], target: &[f32], edges: &[f32], weights: Option<&[f32]>) -> Vec<f32> {
+/// `(m, m·r, m·e·r, 0)` with `r` the mean absolute residual over channels
+/// plus the geometric residual `geometry` where there is one
+/// ([`range_residual`]), `e` the edge strength of the target and `m` the
+/// supervision weight.
+pub fn credit_upstream(pred: &[f32], target: &[f32], edges: &[f32], weights: Option<&[f32]>, geometry: Option<&[f32]>) -> Vec<f32> {
     let px = edges.len();
     let mut out = vec![0.0f32; px * 4];
     for p in 0..px {
         let m = weights.map_or(1.0, |w| w[p]);
-        let r = (0..3).map(|c| (pred[p * 3 + c] - target[p * 3 + c]).abs()).sum::<f32>() / 3.0;
+        let r = (0..3).map(|c| (pred[p * 3 + c] - target[p * 3 + c]).abs()).sum::<f32>() / 3.0 + geometry.map_or(0.0, |g| g[p]);
         out[p * 4] = m;
         out[p * 4 + 1] = m * r;
         out[p * 4 + 2] = m * edges[p] * r;
     }
     out
+}
+
+/// How far a view's rendered range misses its range prior, per pixel:
+/// `|ln(rendered / prior)|`, 0 where the prior has no value or the pixel is
+/// mostly empty (`alpha` below one half, where the rendered range is not a
+/// surface). In log range, a 5% miss weighs about as much as a colour off by
+/// 0.05, so the two residuals add.
+pub fn range_residual(rendered: &[f32], alpha: &[f32], prior: &[f32]) -> Vec<f32> {
+    rendered
+        .iter()
+        .zip(alpha)
+        .zip(prior)
+        .map(|((&r, &a), &p)| if a > 0.5 && r > 0.0 && p > 0.0 { (r / p).ln().abs() } else { 0.0 })
+        .collect()
 }
 
 /// Edge strength of an interleaved RGB image in [0,1]: the Sobel magnitude of
@@ -234,15 +261,23 @@ impl Default for Policy {
     }
 }
 
+/// Starvation record at which a gaussian is reclaimed: two starved rounds
+/// in a row (0.5, then 0.75), or starving again soon after recovering.
+const RECLAIM_RECORD: f32 = 0.6;
+
+/// Record above which a gaussian is not refined: it starved recently.
+const REFINE_RECORD: f32 = 0.25;
+
 /// One density round. `size_px[i]` is gaussian `i`'s largest axis in pixels
 /// as its best-sampling camera sees it; `target` is the population to aim
-/// for; `suspect` carries the recovery marks across rounds (resized to the
-/// new scene on return). Deterministic in `seed`.
+/// for; `record` carries each gaussian's starvation record across rounds
+/// (resized to the new scene on return, 0 for a new gaussian).
+/// Deterministic in `seed`.
 pub fn round(
     scene: &mut Splats,
     ev: &Evidence,
     size_px: &[f32],
-    suspect: &mut Vec<bool>,
+    record: &mut Vec<f32>,
     target: usize,
     policy: &Policy,
     seed: u64,
@@ -250,29 +285,27 @@ pub fn round(
     let n = scene.len();
     assert_eq!(ev.contribution.len(), n);
     assert_eq!(size_px.len(), n);
-    suspect.resize(n, false);
+    record.resize(n, 0.0);
     let mut stats = Round::default();
 
     let starving = |i: usize| ev.contribution[i] / (ev.views[i].max(1) as f32) < policy.starve_px;
 
-    // 3. reclaim: second strike removes, first strike suppresses
+    // 3. reclaim on the record; suppress on a starved round
     let mut remove = vec![false; n];
     for i in 0..n {
         let starved = starving(i) || scene.opacities[i] < policy.dead_opacity;
-        if starved && suspect[i] {
+        record[i] = 0.5 * record[i] + if starved { 0.5 } else { 0.0 };
+        if starved && record[i] >= RECLAIM_RECORD {
             remove[i] = true;
             stats.reclaimed += 1;
         } else if starved {
-            suspect[i] = true;
             scene.opacities[i] *= 0.5;
             stats.suppressed += 1;
-        } else {
-            suspect[i] = false;
         }
     }
 
     // 1. score by ranks among the gaussians with evidence worth ranking
-    let eligible: Vec<usize> = (0..n).filter(|&i| !remove[i] && !suspect[i] && !starving(i)).collect();
+    let eligible: Vec<usize> = (0..n).filter(|&i| !remove[i] && record[i] < REFINE_RECORD && !starving(i)).collect();
     let mean = |num: &[f32]| -> Vec<f32> { (0..n).map(|i| num[i] / ev.contribution[i].max(1e-12)).collect() };
     let grad: Vec<f32> = (0..n).map(|i| ev.absgrad[i] / ev.views[i].max(1) as f32).collect();
     let (pr, pe, pg) = (percentile(&mean(&ev.residual), &eligible), percentile(&mean(&ev.edge), &eligible), percentile(&grad, &eligible));
@@ -328,7 +361,7 @@ pub fn round(
         let w = if ranked_flag[i] { score(i).max(1e-6) } else { 0.0 };
         if !refine[i] {
             push(&mut out, i, mu, s, o);
-            marks.push(suspect[i]);
+            marks.push(record[i]);
             weight.push(w);
             origin.push(Some(i));
             continue;
@@ -383,7 +416,7 @@ pub fn round(
             // parent's mean and the optimizer is not handed two identical
             // gaussians it can never tell apart.
             let (co, coeff) = relocation(o, 2);
-            let e = [normal(i * 3, seed), normal(i * 3 + 1, seed), normal(i * 3 + 2, seed)];
+            let e = in_surface([normal(i * 3, seed), normal(i * 3 + 1, seed), normal(i * 3 + 2, seed)], s);
             let mut d = [0.0f32; 3];
             for (k, ek) in e.iter().enumerate() {
                 let a = axis(q, k);
@@ -396,8 +429,8 @@ pub fn round(
             push(&mut out, i, [mu[0] - d[0], mu[1] - d[1], mu[2] - d[2]], cs, co);
             stats.cloned += 1;
         }
-        marks.push(false);
-        marks.push(false);
+        marks.push(0.0);
+        marks.push(0.0);
     }
     // 5. fill whatever of the schedule refinement could not. Refinement
     // doubles at most the gaussians that were ranked, and in a scene still
@@ -414,10 +447,10 @@ pub fn round(
     if left > 0 {
         stats.grown = grow_at(&mut out, &weight, left, seed ^ 0x6f77_6e67);
     }
-    marks.resize(out.len(), false);
+    marks.resize(out.len(), 0.0);
     origin.resize(out.len(), None);
     *scene = out;
-    *suspect = marks;
+    *record = marks;
     stats.origin = origin;
     stats
 }
@@ -506,7 +539,7 @@ fn grow_at(scene: &mut Splats, weight: &[f32], count: usize, seed: u64) -> usize
         scene.scales[i * 3..i * 3 + 3].copy_from_slice(&sc);
         let q = unit(&scene.quats[i * 4..i * 4 + 4]);
         for c in 0..m {
-            let e = [normal(i * 7 + c * 3, seed), normal(i * 7 + c * 3 + 1, seed), normal(i * 7 + c * 3 + 2, seed)];
+            let e = in_surface([normal(i * 7 + c * 3, seed), normal(i * 7 + c * 3 + 1, seed), normal(i * 7 + c * 3 + 2, seed)], sc);
             let mut d = [0.0f32; 3];
             for (k, ek) in e.iter().enumerate() {
                 let a = axis(q, k);
@@ -529,6 +562,18 @@ fn grow_at(scene: &mut Splats, weight: &[f32], count: usize, seed: u64) -> usize
         }
     }
     added
+}
+
+/// A displacement `e` in a gaussian's own axes (scales `s`), kept in its
+/// surface: a flat gaussian - shortest axis under 0.3 of the middle one - is
+/// a piece of surface, and moving a child along its normal makes a floater.
+fn in_surface(mut e: [f32; 3], s: [f32; 3]) -> [f32; 3] {
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|&a, &b| s[a].total_cmp(&s[b]));
+    if s[order[0]] < 0.3 * s[order[1]] {
+        e[order[0]] = 0.0;
+    }
+    e
 }
 
 fn unit(q: &[f32]) -> [f32; 4] {

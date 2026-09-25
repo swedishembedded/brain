@@ -72,7 +72,7 @@ fn credit_assignment_attributes_the_residual_to_its_cause() {
     let rgba = r.read_rgba(&g, c.width, c.height);
     let pred = rgba_to_rgb(&rgba);
     let edges = density::edge_map(&target, 48, 48);
-    let up = density::credit_upstream(&pred, &target, &edges, None);
+    let up = density::credit_upstream(&pred, &target, &edges, None, None);
     let dimg = g.storage_init("dimg", &up);
     let grads = SplatGrads::new(&g, 2);
     let mut scr = BwdScratch::new(&g, 2, 48 * 48, 0);
@@ -86,6 +86,43 @@ fn credit_assignment_attributes_the_residual_to_its_cause() {
     assert!(
         ev.residual[0] > 20.0 * ev.residual[1],
         "residual attributed {:.4} to the gaussian whose colour is wrong and {:.4} to the one that is right",
+        ev.residual[0], ev.residual[1]
+    );
+}
+
+/// A gaussian can be the right colour in the wrong place. Where a view has a
+/// range prior, the residual a gaussian is credited with includes how far
+/// the rendered range misses it, so density control refines geometry the
+/// photographs alone call finished.
+#[test]
+fn a_gaussian_at_the_wrong_depth_is_credited_with_the_error() {
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let c = cam(48, 48);
+    let scene = join(&[
+        gaussian(-0.5, 0.0, [0.25, 0.2, 0.2], [1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+        gaussian(0.5, 0.0, [0.25, 0.2, 0.2], [1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+    ]);
+    let o = RenderOpts { ray: true, eps2d: 0.0, ..Default::default() };
+    let mut r = Renderer::new(&g, Kernels::at(0), 2, c.width, c.height, 0);
+    let gs = GpuSplats::upload(&g, &scene);
+    r.render(&g, &gs, &c, &o);
+    let rgba = r.read_rgba(&g, c.width, c.height);
+    let pred = rgba_to_rgb(&rgba);
+    let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let range: Vec<f32> = r.read_aux(&g, c.width, c.height).chunks_exact(5).map(|a| a[0]).collect();
+    // the prior agrees on the right half and puts the left half 20% farther
+    let prior: Vec<f32> = range.iter().enumerate().map(|(p, v)| if p % 48 < 24 { 1.2 * v } else { *v }).collect();
+    let geom = density::range_residual(&range, &alpha, &prior);
+    let up = density::credit_upstream(&pred, &pred, &vec![0.0; 48 * 48], None, Some(&geom));
+    let dimg = g.storage_init("dimg", &up);
+    let grads = SplatGrads::new(&g, 2);
+    let mut scr = BwdScratch::new(&g, 2, 48 * 48, 0);
+    r.render_bwd_ray(&g, &gs, &c, &o, &dimg, None, &mut scr, &grads, false).unwrap();
+    let mut ev = Evidence::new(2);
+    ev.add_view(&g.read(&grads.d_colors, 6));
+    assert!(
+        ev.residual[0] > 20.0 * ev.residual[1].max(1e-9) && ev.residual[0] > 0.0,
+        "residual credited {:.4} to the gaussian at the wrong depth and {:.4} to the one at the right depth",
         ev.residual[0], ev.residual[1]
     );
 }
@@ -254,4 +291,63 @@ fn an_object_nothing_was_seeded_near_is_grown_where_the_photographs_show_it() {
     let pick = |img: &[f32]| -> Vec<f32> { block_px.iter().flat_map(|&i| img[i * 3..i * 3 + 3].to_vec()).collect() };
     let p = psnr(&pick(&got), &pick(&t[0].rgb));
     assert!(p > 20.0, "the unseeded block renders at {p:.1} dB where the photographs show it");
+}
+
+/// Reclaiming is judged on a gaussian's record, not on one round: a gaussian
+/// starved once (occluded while the scene in front of it settled) is only
+/// suppressed and keeps its place when it recovers, one starved two rounds
+/// running is reclaimed, and one that starves every other round - which a
+/// rule that forgets each recovery would keep forever - is reclaimed too.
+#[test]
+fn reclaiming_follows_a_gaussians_record_not_its_last_round() {
+    let three = join(&[
+        gaussian(-0.5, 0.0, [0.1; 3], [1.0, 0.0, 0.0, 0.0], [0.5; 3]),
+        gaussian(0.0, 0.0, [0.1; 3], [1.0, 0.0, 0.0, 0.0], [0.5; 3]),
+        gaussian(0.5, 0.0, [0.1; 3], [1.0, 0.0, 0.0, 0.0], [0.5; 3]),
+    ]);
+    // per round, whether each of (once, twice, alternating) was starved
+    let schedule = [[true, true, true], [false, true, false], [false, false, true], [false, false, false], [false, false, true]];
+    let mut scene = three.clone();
+    let mut ids: Vec<usize> = vec![0, 1, 2];
+    let mut record = Vec::new();
+    let policy = Policy { refine_frac: 0.0, ..Default::default() };
+    for starved in schedule {
+        let mut ev = Evidence::new(scene.len());
+        for (slot, &id) in ids.iter().enumerate() {
+            ev.contribution[slot] = if starved[id] { 0.0 } else { 50.0 };
+            ev.views[slot] = 1;
+        }
+        // a target of zero: reclaim, never grow
+        let n = scene.len();
+        let r = density::round(&mut scene, &ev, &vec![0.5; n], &mut record, 0, &policy, 3);
+        ids = r.origin.iter().map(|o| ids[o.expect("a round that may not grow adds nothing")]).collect();
+    }
+    assert_eq!(ids, vec![0], "survivors: {ids:?} - only the gaussian starved once should remain");
+}
+
+/// A flat gaussian is a piece of surface. Its clones, and the samples grown
+/// at it, are displaced across that surface, never off it: a child pushed
+/// along the normal is a floater the fit then has to pull back or prune.
+#[test]
+fn children_of_a_surface_gaussian_stay_in_its_surface() {
+    // a disc tilted about x, normal (0, -sin, cos)
+    let (s, c) = (0.5f32.sin(), 0.5f32.cos());
+    let q = [(0.25f32).cos(), (0.25f32).sin(), 0.0, 0.0];
+    let normal = [0.0, -s, c];
+    let parent = gaussian(0.1, -0.2, [0.2, 0.15, 0.004], q, [0.6, 0.4, 0.3]);
+    let mut ev = Evidence::new(1);
+    ev.contribution[0] = 10.0;
+    ev.views[0] = 1;
+    ev.residual[0] = 1.0;
+    let mut scene = parent.clone();
+    let policy = Policy { refine_frac: 1.0, ..Default::default() };
+    // below a pixel: cloned, and the rest of a target of 8 grown at it
+    density::round(&mut scene, &ev, &[0.5], &mut Vec::new(), 8, &policy, 11);
+    assert_eq!(scene.len(), 8);
+    for m in scene.means.chunks_exact(3) {
+        let off = (0..3).map(|k| (m[k] - parent.means[k]) * normal[k]).sum::<f32>();
+        assert!(off.abs() < 1e-5, "a child sits {off} off its parent's surface");
+    }
+    let spread = scene.means.chunks_exact(3).map(|m| (m[0] - 0.1).abs() + (m[1] + 0.2).abs()).fold(0.0f32, f32::max);
+    assert!(spread > 0.01, "the children did not move across the surface at all");
 }

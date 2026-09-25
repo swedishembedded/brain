@@ -849,7 +849,7 @@ impl<'a> Fit<'a> {
         let first_loss = self.dataset_loss(&scene, &mut scr, &full);
         drop(full);
         let mut level = self.level(self.halvings_at(0));
-        let mut suspect: Vec<bool> = Vec::new();
+        let mut starved: Vec<f32> = Vec::new();
         let mut absgrad = vec![0.0f32; scene.n];
         let mut smooth = f64::NAN;
         let mut last_loss = f32::NAN;
@@ -1013,7 +1013,7 @@ impl<'a> Fit<'a> {
             // ---- density control ----
             if cfg.densify_every > 0 && done >= first_round && done < until && done.is_multiple_of(cfg.densify_every) {
                 let round = (done - first_round) / cfg.densify_every;
-                scene = self.densify(scene, &mut scr, &level, &absgrad, &mut suspect, round, rounds, it);
+                scene = self.densify(scene, &mut scr, &level, &absgrad, &mut starved, round, rounds, it);
                 absgrad = vec![0.0; scene.n];
                 if scene.n > scr.cap {
                     // unbudgeted growth: the scratch sized for the start has
@@ -1261,7 +1261,7 @@ impl<'a> Fit<'a> {
         scr: &mut Scratch,
         level: &Level,
         absgrad: &[f32],
-        suspect: &mut Vec<bool>,
+        starved: &mut Vec<f32>,
         round: usize,
         rounds: usize,
         it: usize,
@@ -1298,7 +1298,10 @@ impl<'a> Fit<'a> {
             unexplained += u;
             total += a;
             let edges = level.edges.get(vi).cloned().unwrap_or_else(|| vec![0.0; (cam.width * cam.height) as usize]);
-            let up = density::credit_upstream(&pred, &t.rgb, &edges, weights.as_deref());
+            let alpha: Vec<f32> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+            let rendered: Vec<f32> = aux.chunks_exact(5).map(|a| a[0]).collect();
+            let geom = t.depth.as_ref().map(|prior| density::range_residual(&rendered, &alpha, prior));
+            let up = density::credit_upstream(&pred, &t.rgb, &edges, weights.as_deref(), geom.as_deref());
             gpu.write_f32(&scr.dimg, &up);
             gpu.submit(&[&scene.grads.d_colors], &[]);
             scr.renderer.render_bwd_ray(gpu, &gs, &cam, &o, &scr.dimg, None, &mut scr.bscr, &scene.grads, false).unwrap_or_else(|e| panic!("{e}"));
@@ -1332,7 +1335,7 @@ impl<'a> Fit<'a> {
                     ..Default::default()
                 };
                 let seed = 0x6879_6272_6964_u64 ^ (round as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                let r = density::round(&mut next, &ev, &size_px, suspect, target, &policy, seed);
+                let r = density::round(&mut next, &ev, &size_px, starved, target, &policy, seed);
                 if cfg.log_every > 0 {
                     println!(
                         "fit: density round {round}: split {}, cloned {}, grown {}, spawned {} of {} sites ({:.0}% of the residual), \
