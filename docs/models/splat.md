@@ -150,7 +150,7 @@ Tesla P40, structure from motion about a minute of it. Render a training
 camera next to its photograph to judge the result:
 
 ```bash
-brain splat render can.ply --cameras can.ply.cameras.json --view 0 --aa --out view0.png
+brain splat render can.ply --cameras can.ply.cameras.json --view 0 --out view0.png
 ```
 
 Photograph the subject from all around with generous overlap between

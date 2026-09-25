@@ -84,7 +84,7 @@ fn a_sparse_start_becomes_sharper_not_fog() {
     let score = |s: &Splats| -> (f64, f64) {
         let (mut p, mut sharp) = (0.0, 0.0);
         for t in &targets {
-            let img = render(&g, s, &t.cam, true);
+            let img = render(&g, s, &t.cam, cfg.antialiased);
             p += psnr(&img, &t.rgb);
             sharp += sharpness_ratio(&img, &t.rgb, w as usize, h as usize);
         }
@@ -104,12 +104,12 @@ fn a_sparse_start_becomes_sharper_not_fog() {
 /// step raised in front of the slab, so reaching it means moving in depth
 /// and not only along the surface the neighbours already sit on.
 ///
-/// The step each gaussian takes is a budget in radii of the scene's median
-/// gaussian. Measured on that median as density control left it, the step
-/// shrank with every round that subdivided the scene, and a synthetic sphere
-/// started with no points came back with its top half missing (29.8 dB on
-/// its training views against 40.2 once the radius is the one the fit was
-/// given) - which is how a real capture's watering can came apart.
+/// This scene is small enough for the CPU backend and passes with the
+/// geometry budgets measured on either the median or each gaussian's own
+/// radius; the case that separates the two - a sphere started without a
+/// point, 29.8 dB on its training views under the median's rate and 40.2 dB
+/// under each gaussian's own - is `crates/recon/examples/synthetic_e2e.rs
+/// --bare-sphere`, which needs a GPU.
 #[test]
 fn an_unseeded_region_is_grown_in() {
     let g = Gpu::new_cpu(splat::PIPELINES);
@@ -142,7 +142,7 @@ fn an_unseeded_region_is_grown_in() {
 
     // PSNR over the pixels where the head-on view sees the unseeded patch
     let c = targets[0].cam;
-    let img = render(&g, &out.scene, &c, true);
+    let img = render(&g, &out.scene, &c, cfg.antialiased);
     let (mut se, mut k) = (0.0f64, 0usize);
     for y in 8..40usize {
         for x in 0..w as usize {
@@ -159,6 +159,30 @@ fn an_unseeded_region_is_grown_in() {
         }
     }
     let patch = 10.0 * (k as f64 / se).log10();
-    println!("unseeded patch: {patch:.2} dB over {} values", k);
-    assert!(patch > 22.0, "the unseeded patch reached only {patch:.2} dB; the fit did not grow into it");
+    // measured 29.18 dB
+    assert!(patch > 27.0, "the unseeded patch reached only {patch:.2} dB; the fit did not grow into it");
+}
+
+/// The photometric camera model is not free: on a capture taken at one
+/// exposure it absorbs fit error as spurious exposure, vignetting and
+/// response - 2.5 dB lost on the training views of a synthetic capture with
+/// no photometric variation at all, and 1.3 dB held-out on a real one. So
+/// the preset leaves it off, and a capture that does vary turns it on.
+#[test]
+fn the_sparse_start_preset_leaves_the_camera_model_off() {
+    assert!(FitCfg::from_sparse_points(1000, 1000, 16).isp.is_none());
+}
+
+/// A trained scene is shown by viewers that render 3D Gaussian Splatting's
+/// uncompensated 0.3 px dilation, and the Mip filter's opacity compensation
+/// depends on each view's screen-space covariance, so it cannot be baked into
+/// the file: a scene fitted under it renders differently everywhere else. The
+/// preset fits under the dilation the viewers use - which on a synthetic
+/// capture was also better on held-out views (37.29 dB against 36.76, and
+/// 0.80 of the truth's detail against 0.69).
+#[test]
+fn the_sparse_start_preset_fits_what_viewers_render() {
+    let cfg = FitCfg::from_sparse_points(1000, 1000, 16);
+    assert!(!cfg.antialiased, "the preset fits under the Mip filter's compensation, which viewers do not render");
+    assert_eq!(cfg.eps2d, splat::types::RenderOpts::default().eps2d);
 }

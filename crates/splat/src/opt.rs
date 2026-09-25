@@ -413,7 +413,9 @@ impl FitCfg {
     /// motion) needs to become a finished reconstruction of `views`
     /// photographs in `iters` iterations and at most `budget` gaussians: the
     /// L1 + D-SSIM objective, credit-assigned density control from 5% to 60%
-    /// of the fit, the Mip filter, as much view-dependent colour as the
+    /// of the fit, the 0.3 px dilation standard viewers render (not the Mip
+    /// filter, whose compensation cannot be baked into a file), as much
+    /// view-dependent colour as the
     /// capture has views to support ([`sh_degree_for_views`]), and the surface
     /// regularizers once the scene has a shape (40%) on every fourth step, and
     /// two views per step rather than all of them.
@@ -444,7 +446,8 @@ impl FitCfg {
             densify_after: every,
             densify_until: iters * 6 / 10,
             max_gaussians: budget,
-            antialiased: true,
+            // the dilation viewers render: see `RenderOpts::antialiased`
+            antialiased: false,
             sh_degree: sh_degree_for_views(views),
             max_growth: 0.0,
             max_scale_pixels: 32.0,

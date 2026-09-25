@@ -54,7 +54,7 @@ impl Flags {
 /// The options every evaluation takes on top of the preset.
 pub const FIT_USAGE: &str = "[--budget gaussians] [--sh degree] [--isp off|exposure|full] [--pose-lr step] \
                              [--distortion w] [--normal w] [--geometry-after f] [--position-budget r] \
-                             [--scale-budget r] [--max-scale-px px] [--densify heuristic|mcmc|hybrid]";
+                             [--scale-budget r] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] [--mip on|off]";
 
 /// [`FitCfg::from_sparse_points`] for `views` training views, with the
 /// command line's overrides.
@@ -84,6 +84,12 @@ pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
     }
     if let Some(v) = flags.parse("max-scale-px") {
         cfg.max_scale_pixels = v;
+    }
+    match flags.get("mip") {
+        None => {}
+        Some("on") => cfg.antialiased = true,
+        Some("off") => cfg.antialiased = false,
+        Some(o) => panic!("--mip {o}: on or off"),
     }
     match flags.get("densify") {
         None => {}

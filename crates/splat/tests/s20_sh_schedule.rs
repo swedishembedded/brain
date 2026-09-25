@@ -82,13 +82,3 @@ fn a_sparse_capture_gets_flat_colour_and_a_dense_one_full_sh() {
     assert_eq!(degree(128), 3);
     assert_eq!(degree(300), 3);
 }
-
-/// The photometric camera model is not free: on a capture taken at one
-/// exposure it absorbs fit error as spurious exposure, vignetting and
-/// response - 2.5 dB lost on the training views of a synthetic capture with
-/// no photometric variation at all, and 1.3 dB held-out on a real one. So
-/// the preset leaves it off, and a capture that does vary turns it on.
-#[test]
-fn the_sparse_start_preset_leaves_the_camera_model_off() {
-    assert!(FitCfg::from_sparse_points(1000, 1000, 16).isp.is_none());
-}

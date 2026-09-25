@@ -729,8 +729,8 @@ fn train_cmd(argv: &[String]) {
     let path = cams_out.unwrap_or_else(|| format!("{out}.cameras.json"));
     write_cameras(&path, &res.cams);
     println!(
-        "{} gaussians -> {out} (final loss {:.6}); cameras -> {path}. Rendered with the Mip filter \
-         (`brain splat render --aa --eps2d {}`).",
+        "{} gaussians -> {out} (final loss {:.6}); cameras -> {path}. Fitted under the standard \
+         {} px dilation, as splat viewers render it.",
         res.scene.len(),
         res.loss,
         cfg.eps2d
