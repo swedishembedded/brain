@@ -407,9 +407,16 @@ impl FitCfg {
     /// the surface regularizers once the scene has a shape (40%) on every
     /// fourth step, and two views per step rather than all of them.
     ///
-    /// The per-gaussian growth bounds are OFF: they exist to stop a fit from
-    /// inflating a DENSE feed-forward scene, and a sparse cloud has to grow a
-    /// long way to cover what its points only sample.
+    /// Geometry moves at rates relative to the gaussians' own size - over the
+    /// whole fit, 30 median radii of travel, 10 of resize, 2 of quaternion -
+    /// and no gaussian may exceed 32 pixels of its finest camera. With the
+    /// parameters linear and Adam stepping about `lr` whatever the gradient,
+    /// a raw `lr` of 5e-3 in a scene one unit across moves positions ~30x
+    /// faster than 3DGS does and lets a 0.002-unit gaussian grow several-fold
+    /// in ONE step: measured on a 16-photo capture, 60 iterations turned the
+    /// scene into uniform grey fog. The growth bound relative to a gaussian's
+    /// START stays off: a sparse cloud has to grow a long way to cover what
+    /// its points only sample.
     pub fn from_sparse_points(iters: usize, budget: usize) -> FitCfg {
         let every = (iters / 20).max(1);
         FitCfg {
@@ -424,7 +431,10 @@ impl FitCfg {
             antialiased: true,
             sh_degree: 3,
             max_growth: 0.0,
-            max_scale_pixels: 0.0,
+            max_scale_pixels: 32.0,
+            position_budget: 30.0,
+            scale_budget: 10.0,
+            rotation_budget: 2.0,
             max_flat: 10.0,
             distortion_weight: 0.1,
             normal_consistency_weight: 0.05,
