@@ -86,7 +86,7 @@ fn project_params(n: usize, cam: &Camera, o: &RenderOpts) -> [u32; 24] {
 
 /// Words in the ray renderer's per-view uniform (`wgsl/lib/splat_view.wgsl`'s
 /// `View`, including its `Lens`).
-pub const RAY_VIEW_WORDS: usize = 52;
+pub const RAY_VIEW_WORDS: usize = 32 + camera::DEVICE_LENS_WORDS;
 
 /// Words per gaussian of the ray renderer's projected record: `{m (3), A (6),
 /// n (3), opacity', colour (3)}` (`splat_ray_project.wgsl`).
@@ -120,11 +120,6 @@ pub fn ray_view_params(n: usize, cam: &Camera, o: &RenderOpts) -> [u32; RAY_VIEW
     let rolling = cam.shutter.iter().any(|x| *x != 0.0);
     let wrap = matches!(cam.lens, crate::types::Lens::Equirect);
     let flags = o.antialiased as u32 | (rolling as u32) << 1 | (wrap as u32) << 2;
-    let bound = k.valid_radius();
-    let mut coeffs = [0.0f32; 12];
-    for (c, v) in coeffs.iter_mut().zip(k.lens.coeffs()) {
-        *c = v as f32;
-    }
     let mut p = [0u32; RAY_VIEW_WORDS];
     p[0] = n as u32;
     p[1] = cam.width;
@@ -141,16 +136,7 @@ pub fn ray_view_params(n: usize, cam: &Camera, o: &RenderOpts) -> [u32; RAY_VIEW
         p[24 + i] = f(cam.shutter[3 + i]);
         p[28 + i] = f(o.bg[i]);
     }
-    // Lens
-    p[32] = k.lens.code();
-    p[33] = f(if bound.is_finite() { bound as f32 } else { -1.0 });
-    p[36] = f(cam.fx);
-    p[37] = f(cam.fy);
-    p[38] = f(cam.cx);
-    p[39] = f(cam.cy);
-    for (i, c) in coeffs.iter().enumerate() {
-        p[40 + i] = f(*c);
-    }
+    p[32..].copy_from_slice(&k.device_lens());
     p
 }
 

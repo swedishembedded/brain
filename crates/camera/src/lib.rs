@@ -132,6 +132,9 @@ pub struct Intrinsics {
 /// parameter).
 pub type Projection = ([f64; 2], [[f64; 3]; 2], Vec<[f64; 2]>);
 
+/// Words in the device `Lens` record ([`Intrinsics::device_lens`]).
+pub const DEVICE_LENS_WORDS: usize = 20;
+
 /// Radius (normalized, `r = |(x, y)|` of `X/Z, Y/Z`) the Brown validity scan
 /// looks out to: 4 is 76 degrees off axis, past any lens this model can
 /// describe - a wider one is a fisheye.
@@ -227,6 +230,25 @@ impl Intrinsics {
                 memo_fold(&k, PI, slope).unwrap_or(PI)
             }
         }
+    }
+
+    /// This calibration as the device's `Lens` record (`struct Lens` in the
+    /// kernels' `wgsl/lib/camera.wgsl`), [`DEVICE_LENS_WORDS`] u32 words in
+    /// field order: the lens code, the validity bound (f32 bits, -1 =
+    /// unbounded), two padding words, `fx fy cx cy`, then the twelve
+    /// coefficient slots in [`Lens::coeffs`] order, zero-filled.
+    pub fn device_lens(&self) -> [u32; DEVICE_LENS_WORDS] {
+        let bound = self.valid_radius();
+        let mut w = [0u32; DEVICE_LENS_WORDS];
+        w[0] = self.lens.code();
+        w[1] = (if bound.is_finite() { bound as f32 } else { -1.0 }).to_bits();
+        for (i, v) in [self.fx, self.fy, self.cx, self.cy].iter().enumerate() {
+            w[4 + i] = (*v as f32).to_bits();
+        }
+        for (i, c) in self.lens.coeffs().iter().enumerate() {
+            w[8 + i] = (*c as f32).to_bits();
+        }
+        w
     }
 
     /// The pixel a camera-frame point or direction `d` lands on, `None` when
