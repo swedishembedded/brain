@@ -19,6 +19,9 @@ use crate::types::{Camera, RenderOpts, Splats};
 
 /// Real spherical harmonics up to degree 3, in the order Inria's PLY stores
 /// them. Writes `k` values and leaves the rest zero.
+// The constants are written digit-for-digit as in `splat_sh.wgsl`, so the two
+// implementations can be compared by eye; f32 rounds the extra digits away.
+#[allow(clippy::excessive_precision)]
 pub fn basis(dir: [f32; 3], k: usize) -> [f32; 15] {
     let mut y = [0.0f32; 15];
     if k == 0 {

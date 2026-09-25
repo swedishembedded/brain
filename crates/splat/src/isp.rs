@@ -299,11 +299,11 @@ impl Isp {
         let mut drad = Vec::with_capacity(radiance.len());
         for (d, g) in parts {
             drad.extend_from_slice(&d);
-            for k in 0..PER_VIEW {
-                self.grad[vo + k] += g[k];
+            for (k, gk) in g[..PER_VIEW].iter().enumerate() {
+                self.grad[vo + k] += gk;
             }
-            for k in 0..PER_SENSOR {
-                self.grad[so + k] += g[PER_VIEW + k];
+            for (k, gk) in g[PER_VIEW..].iter().enumerate() {
+                self.grad[so + k] += gk;
             }
         }
         drad
@@ -505,16 +505,14 @@ mod tests {
                 let fd = (loss(&isp, &a) - loss(&isp, &b)) / (2.0 * eps as f64);
                 assert!((fd - drad[i] as f64).abs() < 2e-2 * fd.abs().max(1.0), "{space:?} radiance {i}: {fd} vs {}", drad[i]);
             }
-            for k in 0..isp.theta.len() {
-                if k < PER_VIEW {
-                    continue; // view 0 is not the view differentiated
-                }
+            // view 0 is not the view differentiated
+            for (k, &want) in pg.iter().enumerate().skip(PER_VIEW) {
                 let mut a = isp.clone();
                 a.theta[k] += eps;
                 let mut b = isp.clone();
                 b.theta[k] -= eps;
                 let fd = (loss(&a, &rad) - loss(&b, &rad)) / (2.0 * eps as f64);
-                assert!((fd - pg[k]).abs() < 2e-2 * fd.abs().max(1.0), "{space:?} parameter {k}: {fd} vs {}", pg[k]);
+                assert!((fd - want).abs() < 2e-2 * fd.abs().max(1.0), "{space:?} parameter {k}: {fd} vs {want}");
             }
         }
     }

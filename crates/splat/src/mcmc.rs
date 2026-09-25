@@ -111,7 +111,7 @@ fn sample_by_opacity(pool: &[usize], opacities: &[f32], k: usize, seed: u64) -> 
 /// it or the scene quietly reverts to flat colour.
 pub(crate) fn sh_stride(scene: &Splats) -> usize {
     match &scene.sh_rest {
-        Some((_, r)) if scene.len() > 0 && r.len().is_multiple_of(scene.len()) => r.len() / scene.len(),
+        Some((_, r)) if !scene.is_empty() && r.len().is_multiple_of(scene.len()) => r.len() / scene.len(),
         _ => 0,
     }
 }

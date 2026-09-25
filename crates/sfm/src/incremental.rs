@@ -136,12 +136,17 @@ fn uf_find(p: &mut [usize], mut x: usize) -> usize {
     x
 }
 
+/// Every image's keypoints and descriptors.
+type Features = Vec<(Vec<Keypoint>, Vec<f32>)>;
+/// A verified image pair and its inlier matches.
+type Pair = (usize, usize, Vec<(usize, usize)>);
+
 /// Features, verified matches and tracks: everything that does not depend
 /// on the calibration being right.
 struct Prepared {
     n: usize,
-    feats: Vec<(Vec<Keypoint>, Vec<f32>)>,
-    pairs: Vec<(usize, usize, Vec<(usize, usize)>)>,
+    feats: Features,
+    pairs: Vec<Pair>,
     tracks: Vec<Vec<(usize, usize)>>,
     track_of: Vec<Vec<Option<usize>>>,
 }
@@ -177,7 +182,7 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
     };
 
     // ---- 1. features ----
-    let feats: Vec<(Vec<Keypoint>, Vec<f32>)> = photos
+    let feats: Features = photos
         .iter()
         .map(|p| {
             let gray: Vec<f32> = p
@@ -193,7 +198,7 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
     // ---- 2. matching + verification, through the guessed calibration ----
     let guess = Intrinsics::guess(w, h, cfg.focal_guess);
     let nrm = normalized(&feats, &guess);
-    let mut pairs: Vec<(usize, usize, Vec<(usize, usize)>)> = Vec::new();
+    let mut pairs: Vec<Pair> = Vec::new();
     for a in 0..n {
         for b in a + 1..n {
             let m = match_descriptors(&feats[a].1, &feats[b].1, cfg.ratio);
@@ -300,8 +305,8 @@ pub fn reconstruct(photos: &[Photo], cfg: &SfmCfg) -> Result<Reconstruction, Sfm
             let f = prep.feats[i].0[kp];
             let (x, y) = ((f.x as u32).min(w - 1), (f.y as u32).min(h - 1));
             let o = ((y * w + x) * 3) as usize;
-            for ch in 0..3 {
-                c[ch] += photos[i].rgb[o + ch] as f32 / 255.0;
+            for (ch, v) in c.iter_mut().enumerate() {
+                *v += photos[i].rgb[o + ch] as f32 / 255.0;
             }
         }
         p.rgb = c.map(|v| v / p.obs.len() as f32);
@@ -478,8 +483,8 @@ fn solve(prep: &Prepared, mut k: Intrinsics, free: bool, retriangulate: usize, c
         poses[img] = Some(pose);
         // attach the image's inlier observations to existing points
         let mut j = 0;
-        for kp in 0..feats[img].0.len() {
-            if let Some(pi) = track_of[img][kp].and_then(|t| point_of[t]) {
+        for (kp, track) in track_of[img].iter().enumerate() {
+            if let Some(pi) = track.and_then(|t| point_of[t]) {
                 if mask[j] {
                     points[pi].obs.push((img, kp));
                 }

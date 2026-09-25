@@ -399,8 +399,7 @@ fn grow_at(scene: &mut Splats, weight: &[f32], count: usize, seed: u64) -> usize
     }
     let shk = sh_stride(scene);
     let mut added = 0;
-    for i in 0..n {
-        let m = copies[i];
+    for (i, &m) in copies.iter().enumerate() {
         if m == 0 {
             continue;
         }
@@ -418,8 +417,9 @@ fn grow_at(scene: &mut Splats, weight: &[f32], count: usize, seed: u64) -> usize
                     d[x] += 0.5 * a[x] * ek * sc[k];
                 }
             }
-            for k in 0..3 {
-                scene.means.push(scene.means[i * 3 + k] + d[k]);
+            for (k, dk) in d.iter().enumerate() {
+                let v = scene.means[i * 3 + k] + dk;
+                scene.means.push(v);
             }
             scene.quats.extend_from_within(i * 4..i * 4 + 4);
             scene.scales.extend_from_slice(&sc);

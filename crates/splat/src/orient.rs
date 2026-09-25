@@ -162,8 +162,8 @@ fn smallest_axis(cov: &[[f64; 3]; 3]) -> [f64; 3] {
     // leaves an invertible matrix.
     let tr = (cov[0][0] + cov[1][1] + cov[2][2]).max(1e-12);
     let mut m = *cov;
-    for i in 0..3 {
-        m[i][i] += tr * 1e-6;
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] += tr * 1e-6;
     }
     let mut v = [0.577, 0.577, 0.577];
     for _ in 0..64 {

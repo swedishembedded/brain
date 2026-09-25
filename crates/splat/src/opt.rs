@@ -1425,7 +1425,7 @@ fn fit_stage(
                 // RISES as the depth term does its job, so the fit was
                 // correctly moving the geometry and then handing back the
                 // untouched input.
-                loss_sum += cfg.depth_weight as f64 * dsum / wsum as f64;
+                loss_sum += cfg.depth_weight as f64 * dsum / wsum;
                 crate::renderer::add_expected_depth_vjp(&vdn, &rendered_depth, &img, &mut d, &mut ddepth_h);
             }
             prof.add("host loss + dL/dimg", tm.elapsed());
@@ -1780,12 +1780,12 @@ fn geometry_passes(
         colors: aux.feat.clone(),
     };
     let mut loss = 0.0f64;
-    let mut pass = |feat: &[f32], build: &mut dyn FnMut(&[f32], &[f32]) -> (f64, Vec<f32>, Option<Vec<f32>>)| -> Vec<f32> {
+    let mut pass = |feat: &[f32], build: &mut dyn FnMut(&[f32], &[f32]) -> geometry::AuxGrad| -> Vec<f32> {
         gpu.write(&aux.feat, cast(feat));
         renderer.render(gpu, &gs, cam, &opts);
         let rgba = renderer.read_rgba(gpu, cam.width, cam.height);
         let depth = renderer.read_depth(gpu, cam.width, cam.height);
-        let (l, dimg, ddepth) = build(&rgba, &depth);
+        let geometry::AuxGrad { loss: l, dimg, ddepth } = build(&rgba, &depth);
         loss += l;
         gpu.write(ctx.dimg, cast(&dimg));
         if let Some(dd) = &ddepth {
@@ -1799,10 +1799,7 @@ fn geometry_passes(
     };
     if cfg.distortion_weight > 0.0 {
         let feat = geometry::distortion_features(&geometry::depths(host_geo, cam));
-        let dfeat = pass(&feat, &mut |rgba, depth| {
-            let g = geometry::distortion_loss(rgba, depth, wts, wsum, every * cfg.distortion_weight);
-            (g.loss, g.dimg, g.ddepth)
-        });
+        let dfeat = pass(&feat, &mut |rgba, depth| geometry::distortion_loss(rgba, depth, wts, wsum, every * cfg.distortion_weight));
         geometry::distortion_backward(host_geo, cam, &dfeat, extra);
     }
     let prior = t.normals.as_deref().filter(|_| cfg.normal_prior_weight > 0.0);
@@ -1819,7 +1816,7 @@ fn geometry_passes(
             if let Some(target) = prior {
                 l += geometry::normal_loss(rgba, target, wts, wsum, every * cfg.normal_prior_weight, &mut dimg);
             }
-            (l, dimg, None)
+            geometry::AuxGrad { loss: l, dimg, ddepth: None }
         });
         geometry::normals_backward(host_geo, cam, &dfeat, extra);
     }

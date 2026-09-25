@@ -127,8 +127,8 @@ pub fn apply_sim3(s: &Splats, m: &Sim3) -> Splats {
     let mut out = Splats::default();
     for i in 0..s.len() {
         let p = mul3(&m.r, &[s.means[i * 3] as f64, s.means[i * 3 + 1] as f64, s.means[i * 3 + 2] as f64]);
-        for k in 0..3 {
-            out.means.push((m.s * p[k] + m.t[k]) as f32);
+        for (pk, tk) in p.iter().zip(&m.t) {
+            out.means.push((m.s * pk + tk) as f32);
         }
         let q = &s.quats[i * 4..i * 4 + 4];
         let c = qmul(&rq, &[q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64]);
@@ -221,6 +221,8 @@ fn nearest_rotation(s: &[[f64; 3]; 3]) -> [f64; 9] {
 }
 
 /// Cyclic Jacobi on a symmetric 4x4. Small, exact enough, and dependency-free.
+// Cyclic Jacobi, written in the index form of its rotation formulas.
+#[allow(clippy::needless_range_loop)]
 fn largest_eigenvector4(m: &[[f64; 4]; 4]) -> [f64; 4] {
     let mut a = *m;
     let mut v = [[0.0f64; 4]; 4];

@@ -77,8 +77,8 @@ fn disturb(c: &Camera, ang: f32, shift: [f32; 3]) -> Camera {
         out.c2w[col] = co * x + s * z;
         out.c2w[8 + col] = -s * x + co * z;
     }
-    for k in 0..3 {
-        out.c2w[k * 4 + 3] += shift[k];
+    for (k, d) in shift.iter().enumerate() {
+        out.c2w[k * 4 + 3] += d;
     }
     out
 }

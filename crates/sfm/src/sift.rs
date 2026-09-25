@@ -266,7 +266,7 @@ fn refine(dog: &[Plane], mut x: usize, mut y: usize, mut s: usize, cfg: &SiftCfg
         x = step(x, off[0]);
         y = step(y, off[1]);
         s = step(s, off[2]);
-        if s < 1 || s > S || x < 5 || y < 5 || x >= w - 5 || y >= h - 5 {
+        if !(1..=S).contains(&s) || x < 5 || y < 5 || x >= w - 5 || y >= h - 5 {
             return None;
         }
     }

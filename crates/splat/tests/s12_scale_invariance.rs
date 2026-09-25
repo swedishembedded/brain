@@ -90,12 +90,12 @@ fn cams(k: f32, w: u32, h: u32) -> Vec<Camera> {
 fn biggest_px(s: &Splats, cams: &[Camera]) -> f32 {
     let unit = splat::mip::smoothing_sigma(s, cams, 1.0);
     let mut worst = 0.0f32;
-    for i in 0..s.len() {
-        if unit[i] <= 0.0 {
+    for (i, &u) in unit.iter().enumerate() {
+        if u <= 0.0 {
             continue;
         }
         let lng = s.scales[i * 3].max(s.scales[i * 3 + 1]).max(s.scales[i * 3 + 2]);
-        worst = worst.max(lng / unit[i]);
+        worst = worst.max(lng / u);
     }
     worst
 }

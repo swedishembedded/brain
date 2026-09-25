@@ -197,7 +197,7 @@ pub trait Model {
     /// [`Model::new`] builds the TRAINING shape: backward scratch, and one
     /// copy of every per-layer activation, because a backward pass reads
     /// every layer's. A caller that only ever asks for [`Model::logits_all`]
-    /// - scoring, evaluation, rollout - pays for both and reads neither, and
+    /// (scoring, evaluation, rollout) pays for both and reads neither, and
     /// on a real model that is most of the allocation rather than a margin.
     ///
     /// Defaults to [`Model::new`], so a model with no separate inference

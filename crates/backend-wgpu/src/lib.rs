@@ -804,7 +804,7 @@ impl DeviceShared {
                     "wgpu error: {e}\n  {}\n  device limits: max_buffer_size {:.0} MiB, max_storage_buffer_binding_size {:.0} MiB",
                     tally.describe(),
                     mib(max_buffer),
-                    mib(u64::from(max_binding)),
+                    mib(max_binding),
                 );
             }));
         }

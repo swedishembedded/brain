@@ -40,7 +40,7 @@ pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32) -> Vec<f32> {
         // The rate a view samples at is set by its focal length; with
         // non-square pixels the denser axis is the one that bounds detail.
         let focal = c.fx.max(c.fy);
-        for i in 0..s.len() {
+        for (i, b) in best.iter_mut().enumerate() {
             let m = &s.means[i * 3..i * 3 + 3];
             let z = v[8] * m[0] + v[9] * m[1] + v[10] * m[2] + v[11];
             if z <= 1e-4 {
@@ -52,7 +52,7 @@ pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32) -> Vec<f32> {
             if px < 0.0 || py < 0.0 || px >= c.width as f32 || py >= c.height as f32 {
                 continue;
             }
-            best[i] = best[i].max(focal / z);
+            *b = b.max(focal / z);
         }
     }
     best.iter().map(|&f| if f > 0.0 { scale / f } else { 0.0 }).collect()
@@ -66,11 +66,11 @@ pub fn smoothing_sigma(s: &Splats, cams: &[Camera], scale: f32) -> Vec<f32> {
 pub fn apply_3d_filter(s: &Splats, cams: &[Camera], scale: f32) -> Splats {
     let sigma = smoothing_sigma(s, cams, scale);
     let mut out = s.clone();
-    for i in 0..s.len() {
-        if sigma[i] <= 0.0 {
+    for (i, &sg) in sigma.iter().enumerate() {
+        if sg <= 0.0 {
             continue;
         }
-        let v2 = sigma[i] * sigma[i];
+        let v2 = sg * sg;
         let mut det0 = 1.0f64;
         let mut det1 = 1.0f64;
         for k in 0..3 {

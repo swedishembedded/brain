@@ -455,14 +455,14 @@ fn inflatable_scene(g: &Gpu, ks: Kernels) -> (Splats, Vec<TargetView>) {
         Camera::look_at(e, [0.0, 0.0, 3.0 * K], [0.0, -1.0, 0.0], 55.0, w, h)
     };
     let o = RenderOpts::default();
-    let mut ren = Renderer::new(&g, ks, truth.len(), w, h, 0);
-    let gs = GpuSplats::upload(&g, &truth);
+    let mut ren = Renderer::new(g, ks, truth.len(), w, h, 0);
+    let gs = GpuSplats::upload(g, &truth);
     let shots: Vec<TargetView> = [[0.0, 0.0, 0.0], [0.7 * K, -0.25 * K, 0.3 * K], [-0.7 * K, 0.25 * K, 0.3 * K]]
         .iter()
         .map(|e| {
             let c = cam_at(*e);
-            ren.render(&g, &gs, &c, &o);
-            let img = ren.read_rgba(&g, w, h);
+            ren.render(g, &gs, &c, &o);
+            let img = ren.read_rgba(g, w, h);
             TargetView::new(c, img.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect())
         })
         .collect();
@@ -554,12 +554,12 @@ fn a_fit_may_not_grow_a_splat_past_what_its_cameras_resolve() {
         // cameras sampled it
         let unit = splat::mip::smoothing_sigma(s, &cams, 1.0);
         let mut worst = 0.0f32;
-        for i in 0..s.len() {
-            if unit[i] <= 0.0 {
+        for (i, &u) in unit.iter().enumerate() {
+            if u <= 0.0 {
                 continue;
             }
             let lng = s.scales[i * 3].max(s.scales[i * 3 + 1]).max(s.scales[i * 3 + 2]);
-            worst = worst.max(lng / unit[i]);
+            worst = worst.max(lng / u);
         }
         let _ = limit_px;
         worst

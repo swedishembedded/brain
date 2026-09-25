@@ -272,15 +272,15 @@ fn band_limiting_leaves_no_gaussian_below_what_its_cameras_sampled() {
     let sigma = splat::mip::smoothing_sigma(&scene, &[cam], splat::mip::DEFAULT_SCALE);
 
     let mut widened = 0;
-    for i in 0..scene.len() {
-        if sigma[i] <= 0.0 {
+    for (i, &sg) in sigma.iter().enumerate() {
+        if sg <= 0.0 {
             continue;
         }
         widened += 1;
         for k in 0..3 {
             let got = filtered.scales[i * 3 + k];
-            assert!(got >= sigma[i], "gaussian {i} axis {k} is {got:.5}, below its own limit {:.5}", sigma[i]);
-            let want = (scene.scales[i * 3 + k].powi(2) + sigma[i] * sigma[i]).sqrt();
+            assert!(got >= sg, "gaussian {i} axis {k} is {got:.5}, below its own limit {:.5}", sg);
+            let want = (scene.scales[i * 3 + k].powi(2) + sg * sg).sqrt();
             assert!((got - want).abs() < 1e-6, "gaussian {i} axis {k}: {got:.6} is not the convolution {want:.6}");
         }
         // widening spreads the mass, so it must not also brighten
