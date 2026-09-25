@@ -113,7 +113,7 @@ host sync per backward.
 | ALIKED + LightGlue/LoMa matching, MAGSAC++, 360° as a cubemap rig | `sfm` | planned |
 | IMU gravity (per-photo accelerometer, where a container records it) | `sfm::georef` | planned |
 | Feature extraction parallel across photographs as well as within one: 94-141 s -> 13.3 s for 16 x 8 MP, same reconstruction | `sfm::incremental` | done |
-| Parallel pair matching (now the largest SfM cost, ~200 s for 120 pairs at 8000 features) | `sfm` | planned |
+| Descriptor matching on the device (`sift_match.wgsl` through `sfm::matching::NearestNeighbours`, held to the host search by test); host matching stays the default without a device | `recon::photogrammetry::DeviceMatcher` | done |
 | Global SfM measured on a capture that breaks the incremental path (drift over a long walk); the chessboard registers fully either way | `sfm` | planned |
 
 Measured on the 16-photo chessboard capture (3264x2448 ultrawide, network
