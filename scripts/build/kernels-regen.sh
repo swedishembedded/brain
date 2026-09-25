@@ -41,11 +41,31 @@ tmp="$(mktemp)"
 head -n "$((header_end - 1))" "$LIB" > "$tmp"
 
 # Const block, sorted by file stem (C-locale sort for stability).
+#
+# A kernel that needs shared device code names it in its header as
+# `// @import <name>` (one per line, in order); the library lives at
+# `wgsl/lib/<name>.wgsl` and is concatenated IN FRONT of the kernel at compile
+# time with `concat!`, so the registered source is still one self-contained
+# WGSL module and every backend (wgpu, the CPU JIT, native Vulkan, the CUDA
+# translation) sees exactly what it always did. Libraries hold functions and
+# structs only - no entry point, no bindings - so they are not kernels and are
+# not registered on their own.
 for f in $(ls "$WGSL_DIR"/*.wgsl | LC_ALL=C sort); do
   stem="$(basename "$f" .wgsl)"
   upper="$(echo "$stem" | tr '[:lower:]' '[:upper:]')"
-  printf '/// `wgsl/%s.wgsl`\npub const %s: &%s = include_str!("../wgsl/%s.wgsl");\n' \
-    "$stem" "$upper" "str" "$stem" >> "$tmp"
+  imports="$(sed -n 's|^// @import \([a-z0-9_]*\)$|\1|p' "$f")"
+  if [ -z "$imports" ]; then
+    printf '/// `wgsl/%s.wgsl`\npub const %s: &%s = include_str!("../wgsl/%s.wgsl");\n' \
+      "$stem" "$upper" "str" "$stem" >> "$tmp"
+  else
+    parts=""
+    for lib in $imports; do
+      [ -f "$WGSL_DIR/lib/$lib.wgsl" ] || { echo "$stem imports missing wgsl/lib/$lib.wgsl" >&2; exit 1; }
+      parts="$parts    include_str!(\"../wgsl/lib/$lib.wgsl\"),\n"
+    done
+    printf '/// `wgsl/%s.wgsl`, after `wgsl/lib/{%s}.wgsl`\npub const %s: &%s = concat!(\n%b    include_str!("../wgsl/%s.wgsl"),\n);\n' \
+      "$stem" "$(echo $imports | tr ' ' ',')" "$upper" "str" "$parts" "$stem" >> "$tmp"
+  fi
 done
 
 # ALL registry.
