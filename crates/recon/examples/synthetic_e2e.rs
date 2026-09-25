@@ -198,7 +198,7 @@ fn main() {
         (p, d, imgs)
     };
 
-    let cfg = fit_cfg(&flags, iters, train.len());
+    let cfg = fit_cfg(&flags, iters, train.len(), false);
     let mut columns: Vec<Vec<Vec<f32>>> = vec![truth_held.clone()];
 
     // ---- A: the trainer alone, true cameras, a sparse start ----

@@ -345,6 +345,22 @@ impl FitCfg {
             ..Default::default()
         }
     }
+
+    /// The fit for a scene started from multi-view stereo: thin gaussians
+    /// already lying in the measured surfaces, and every view carrying the
+    /// stereo's range and normal as priors. The gaussians start where they
+    /// belong, so they move a few of their own radii rather than thirty, and
+    /// the priors hold the geometry the photographs alone leave ambiguous -
+    /// untextured and glossy surfaces, which a photometric loss would
+    /// otherwise explain with floaters.
+    pub fn from_dense_stereo(iters: usize, budget: usize, views: usize) -> FitCfg {
+        FitCfg {
+            lr_position: 5.0 * 4.65 / iters.max(1) as f32,
+            depth_weight: 0.1,
+            normal_prior_weight: 0.05,
+            ..FitCfg::from_sparse_points(iters, budget, views)
+        }
+    }
 }
 
 /// One posed target view: its camera and the photograph's RGB `[W*H*3]` in

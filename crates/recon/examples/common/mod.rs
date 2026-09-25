@@ -49,16 +49,25 @@ impl Flags {
 }
 
 /// The options every evaluation takes on top of the preset.
-pub const FIT_USAGE: &str = "[--budget gaussians] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
+pub const FIT_USAGE: &str = "[--budget gaussians] [--depth w] [--normal-prior w] [--sh degree] [--isp off|exposure|full] [--pose-after f] \
                              [--intrinsics-after f] [--distortion w] [--normal w] [--geometry-after f] \
                              [--lr-position s] [--max-scale-px px] [--densify heuristic|mcmc|hybrid] \
                              [--mip on|off] [--noise l] [--opacity-reg l] [--batch n] [--pyramid n] [--coarse f]";
 
 /// [`FitCfg::from_sparse_points`] for `views` training views, with the
 /// command line's overrides.
-pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
+/// The fit `flags` ask for; `dense` = the scene starts from multi-view
+/// stereo and the views carry its priors.
+pub fn fit_cfg(flags: &Flags, iters: usize, views: usize, dense: bool) -> FitCfg {
     let budget = flags.parse("budget").unwrap_or(300_000);
-    let mut cfg = FitCfg { log_every: (iters / 10).max(1), ..FitCfg::from_sparse_points(iters, budget, views) };
+    let preset = if dense { FitCfg::from_dense_stereo(iters, budget, views) } else { FitCfg::from_sparse_points(iters, budget, views) };
+    let mut cfg = FitCfg { log_every: (iters / 10).max(1), ..preset };
+    if let Some(v) = flags.parse("depth") {
+        cfg.depth_weight = v;
+    }
+    if let Some(v) = flags.parse("normal-prior") {
+        cfg.normal_prior_weight = v;
+    }
     if let Some(v) = flags.parse("sh") {
         cfg.sh_degree = v;
     }

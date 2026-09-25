@@ -26,6 +26,9 @@ brain-camera.workspace = true
 brain-backend-cpu.workspace = true
 # The device `eval` renders a fitted scene on to score it.
 brain-gpu-core.workspace = true
+# Dense range, normal and confidence per photograph, and the dense starting
+# scene fused from them (`photogrammetry::dense`).
+brain-mvs.workspace = true
 
 [dev-dependencies]
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).

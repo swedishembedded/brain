@@ -74,7 +74,10 @@ fn cameras(photos: &[imaging::Rgb8], cache: Option<&str>) -> (Vec<Camera>, Vec<u
 fn main() {
     let flags = Flags::from_env();
     let Some(dir) = flags.positional.first().cloned().filter(|_| flags.get("help").is_none()) else {
-        eprintln!("usage: photo_holdout <photos dir> <out dir> [iters] [halvings] [--every k] [--views n] [--sfm-cache dir] {FIT_USAGE}");
+        eprintln!(
+            "usage: photo_holdout <photos dir> <out dir> [iters] [halvings] [--every k] [--views n] [--sfm-cache dir] \
+             [--dense on|off] [--stereo-halving n] {FIT_USAGE}"
+        );
         std::process::exit(2);
     };
     let out: String = flags.arg(1, "photo_holdout".to_string());
@@ -104,17 +107,45 @@ fn main() {
         .collect();
 
     let held_out = holdout(targets.len(), every);
-    let (train, held): (Vec<_>, Vec<_>) = targets.iter().cloned().zip(&held_out).partition(|(_, h)| !**h);
     // `--views n` fits only the first n training views: a fit that cannot
     // reproduce even one photograph has a problem no amount of views explains
     let keep: usize = flags.parse("views").unwrap_or(usize::MAX);
-    let train: Vec<TargetView> = train.into_iter().map(|(t, _)| t).take(keep).collect();
-    let held: Vec<TargetView> = held.into_iter().map(|(t, _)| t).collect();
+    let train_ix: Vec<usize> = (0..targets.len()).filter(|&i| !held_out[i]).take(keep).collect();
+    let mut train: Vec<TargetView> = train_ix.iter().map(|&i| targets[i].clone()).collect();
+    let held: Vec<TargetView> = (0..targets.len()).filter(|&i| held_out[i]).map(|i| targets[i].clone()).collect();
     let (w, h) = (train[0].cam.width, train[0].cam.height);
     println!("fitting {} views at {w}x{h}, holding out {}", train.len(), held.len());
 
-    let cfg = fit_cfg(&flags, iters, train.len());
-    let g = Gpu::new(splat::PIPELINES);
+    let pipes: Vec<(&str, &str)> = splat::PIPELINES.iter().chain(mvs::PIPELINES).copied().collect();
+    let g = Gpu::new(&pipes);
+    let dense = match flags.get("dense") {
+        None | Some("on") => true,
+        Some("off") => false,
+        Some(o) => panic!("--dense {o}: on or off"),
+    };
+    let init = if dense {
+        // stereo on the training photographs only: a held-out view must not
+        // shape the scene it is scored on
+        let t = std::time::Instant::now();
+        let full: Vec<Camera> = train_ix.iter().map(|&i| cams[i]).collect();
+        let rgb: Vec<&imaging::Rgb8> = train_ix.iter().map(|&i| &photos[source[i]]).collect();
+        let tracks: Vec<mvs::Track> =
+            init.means.chunks_exact(3).map(|m| mvs::Track { xyz: [m[0] as f64, m[1] as f64, m[2] as f64], views: Vec::new() }).collect();
+        let dcfg = recon::photogrammetry::DenseCfg {
+            stereo: mvs::StereoCfg { halving: flags.parse("stereo-halving").unwrap_or(halvings), ..Default::default() },
+            ..Default::default()
+        };
+        let mk = mvs::Kernels::at(splat::PIPELINES.len());
+        let (dense_init, report) = recon::photogrammetry::dense(&g, &mk, &full, &rgb, &tracks, &mut train, &dcfg).expect("multi-view stereo");
+        let cover = report.coverage.iter().sum::<f64>() / report.coverage.len() as f64;
+        println!("multi-view stereo: {} points, mean coverage {:.1}% in {:.0} s", report.points, 100.0 * cover, t.elapsed().as_secs_f64());
+        splat::ply::write(&format!("{out}/dense_init.ply"), &dense_init).expect("ply");
+        dense_init
+    } else {
+        init
+    };
+
+    let cfg = fit_cfg(&flags, iters, train.len(), dense);
     let t = std::time::Instant::now();
     let res = fit_full(&g, Kernels::at(0), &init, &train, &cfg, &mut |_, _| true);
     let secs = t.elapsed().as_secs_f64();

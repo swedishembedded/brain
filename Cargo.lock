@@ -2126,6 +2126,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
+ "brain-mvs",
  "brain-sfm",
  "brain-splat",
 ]
