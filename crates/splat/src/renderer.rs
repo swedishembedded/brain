@@ -395,19 +395,37 @@ impl SplatGrads {
     }
 }
 
-/// Words per gradient record in `recs`, the layout `splat_bwd_emit.wgsl`
-/// writes and `splat_grad_reduce.wgsl` reads: five sigma partials, the opacity
-/// partial, three weighted colour partials, the depth partial, and the
-/// gaussian id bitcast into the last slot as the sort key. Declared once here
-/// because the host sizes the buffer and only the kernels know the stride -
+/// Words per gradient record in `recs`: one record per (tile, gaussian)
+/// INSTANCE, written by `splat_bwd_tile_reduce.wgsl` and read by
+/// `splat_bwd_keys.wgsl` / `splat_grad_reduce.wgsl` - five sigma partials,
+/// the opacity partial, three weighted colour partials, the depth partial,
+/// the summed per-pixel magnitude of the position partial, and the gaussian id
+/// bitcast into the last slot as the sort key. Declared once here because the
+/// host sizes the buffer and only the kernels know the stride -
 /// `record_width` in `crates/kernels/tests/` gates the two against each other.
-pub const RECORD_WORDS: usize = 11;
+pub const RECORD_WORDS: usize = 12;
+
+/// Channels per (instance, pixel) slot written by `splat_bwd_slots.wgsl`:
+/// the record's eleven values, before the id.
+pub const SLOT_CHANNELS: usize = 11;
+
+/// Pixels per tile, the slot grid's inner dimension.
+const TILE_PIXELS: usize = (TILE * TILE) as usize;
+
+/// Bytes of slot grid one instance occupies while its band is reduced.
+pub const fn slot_bytes_per_instance() -> u64 {
+    (SLOT_CHANNELS * TILE_PIXELS * 4) as u64
+}
+
+/// Most slot bytes a band may use, whatever the binding limit allows: the
+/// grid is transient, rewritten per band, and a smaller one is as fast.
+const SLOT_BAND_BYTES: u64 = 256 << 20;
 
 /// How many gradient records fit in ONE storage binding of `limit` bytes.
 ///
 /// This is a real ceiling, not a tunable: `recs` is bound as a single
-/// storage buffer, so a pass needing more records than this cannot run on the
-/// device at all, however much memory is free.
+/// storage buffer, so a frame with more (tile, gaussian) instances than this
+/// cannot be differentiated on the device at all.
 pub fn max_records_for_binding(limit: u64) -> usize {
     (limit / (RECORD_WORDS * 4) as u64) as usize
 }
@@ -415,22 +433,18 @@ pub fn max_records_for_binding(limit: u64) -> usize {
 /// The capacity to allocate for a pass needing `need` records, or an error
 /// naming what the device refused.
 ///
-/// A quarter of headroom keeps a fit whose record count drifts upward from
+/// A quarter of headroom keeps a fit whose instance count drifts upward from
 /// reallocating every step, but the headroom is CLAMPED to the binding limit:
 /// exceeding it to leave room to grow would fail a pass that would otherwise
 /// have run.
-///
-/// [`Renderer::render_bwd`] splits the frame into row bands until each fits, so
-/// reaching this error means a SINGLE row of pixels is past the ceiling, which
-/// no further splitting can help.
 pub fn record_capacity(need: usize, limit: u64) -> Result<usize, String> {
     let ceiling = max_records_for_binding(limit);
     if need > ceiling {
         return Err(format!(
-            "one row of pixels needs {need} gradient records ({:.1} GiB) but one storage binding \
-             on this device holds {ceiling} ({} MiB), and a row cannot be split further. The scene \
-             is too dense to differentiate at this image width: thin it with `--prune` \
-             (voxel-merge duplicate gaussians across overlapping views) or `--min-opacity`.",
+            "one frame has {need} (tile, gaussian) instances, {:.1} GiB of gradient records, but \
+             one storage binding on this device holds {ceiling} ({} MiB). The scene is too dense to \
+             differentiate at this image size: thin it with `--prune` (voxel-merge duplicate \
+             gaussians across overlapping views) or `--min-opacity`.",
             (need * RECORD_WORDS * 4) as f64 / (1u64 << 30) as f64,
             limit >> 20,
         ));
@@ -438,28 +452,23 @@ pub fn record_capacity(need: usize, limit: u64) -> Result<usize, String> {
     Ok((need + need / 4).min(ceiling))
 }
 
-/// The record capacity a [`BwdScratch`] starts with: `rec_cap`, or 64 per
-/// pixel when that is 0 - never more than ONE storage binding of `limit`
+/// The record capacity a [`BwdScratch`] starts with: `rec_cap`, or 8 per
+/// gaussian when that is 0 - never more than ONE storage binding of `limit`
 /// bytes holds.
 ///
-/// The ceiling used to apply only when the buffers GREW, so the default
-/// start of 64 records per pixel was allocated unclamped: at 1024x768 that
-/// is 50.3M records, 2.2 GB, past a 2 GiB binding, and the first backward of
-/// any fit at that size failed bind-group validation before emitting a single
-/// record.
-pub fn initial_record_capacity(max_px: usize, rec_cap: usize, limit: u64) -> usize {
-    let want = if rec_cap == 0 { (64 * max_px).clamp(1 << 20, 64 << 20) } else { rec_cap };
+/// The ceiling used to apply only when the buffers GREW, so a default start
+/// sized per pixel (64 per pixel, 50.3M records at 1024x768, 2.2 GB) was
+/// allocated unclamped past a 2 GiB binding and the first backward of any fit
+/// at that size failed bind-group validation.
+pub fn initial_record_capacity(max_n: usize, rec_cap: usize, limit: u64) -> usize {
+    let want = if rec_cap == 0 { (8 * max_n).clamp(1 << 16, 16 << 20) } else { rec_cap };
     want.min(max_records_for_binding(limit))
 }
 
-/// Backward scratch. The record buffers start at `rec_cap` (default 64·px)
-/// and [grow][BwdScratch::reserve_records] to fit whatever the scene actually
-/// emits: how many gaussians each pixel's alpha-composite touches is a
-/// property of the scene and the camera, and nothing knows it until the
-/// forward pass has run.
+/// Backward scratch. The record buffers start at `rec_cap` (default 8 per
+/// gaussian) and [grow][BwdScratch::reserve_records] to the frame's instance
+/// count; the slot grid is sized per band.
 pub struct BwdScratch {
-    counts_px: DeviceBuffer,
-    px_scan: ScanScratch,
     recs: DeviceBuffer,
     rkeys_a: DeviceBuffer,
     rvals_a: DeviceBuffer,
@@ -468,10 +477,14 @@ pub struct BwdScratch {
     rsort: SortScratch,
     granges: DeviceBuffer,
     pgrad: DeviceBuffer,
+    /// The (instance, channel, pixel) grid one band of tiles writes and
+    /// `splat_bwd_tile_reduce` sums; `slot_cap` instances.
+    slots: DeviceBuffer,
+    slot_cap: usize,
     /// A permanently zero `W*H` buffer bound as the depth-gradient input when
-    /// the caller supplies none. The emit kernel always reads that binding, so
-    /// an RGB-only backward needs something there that contributes nothing -
-    /// and one zeroed allocation per scratch is cheaper than branching the
+    /// the caller supplies none. The slots kernel always reads that binding,
+    /// so an RGB-only backward needs something there that contributes nothing
+    /// - and one zeroed allocation per scratch is cheaper than branching the
     /// kernel or carrying a second pipeline.
     no_depth: DeviceBuffer,
     rec_cap: usize,
@@ -480,10 +493,9 @@ pub struct BwdScratch {
 
 impl BwdScratch {
     pub fn new(gpu: &Gpu, max_n: usize, max_px: usize, rec_cap: usize) -> BwdScratch {
-        let cap = initial_record_capacity(max_px, rec_cap, gpu.max_storage_binding_bytes());
+        let limit = gpu.max_storage_binding_bytes();
+        let cap = initial_record_capacity(max_n, rec_cap, limit);
         let mut s = BwdScratch {
-            counts_px: gpu.storage(max_px as u64),
-            px_scan: ScanScratch::new(gpu, max_px),
             recs: gpu.storage(0),
             rkeys_a: gpu.storage(0),
             rvals_a: gpu.storage(0),
@@ -492,6 +504,8 @@ impl BwdScratch {
             rsort: SortScratch::new(gpu, 1),
             granges: gpu.storage(2 * max_n as u64),
             pgrad: gpu.storage(10 * max_n as u64),
+            slots: gpu.storage(0),
+            slot_cap: 0,
             no_depth: gpu.storage(max_px as u64),
             rec_cap: 0,
             limit: None,
@@ -523,7 +537,7 @@ impl BwdScratch {
         if need <= self.rec_cap {
             return Ok(());
         }
-        let cap = record_capacity(need, self.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes()))?;
+        let cap = record_capacity(need, self.limit(gpu))?;
         self.alloc_records(gpu, cap);
         Ok(())
     }
@@ -535,16 +549,66 @@ impl BwdScratch {
         self.limit = Some(bytes);
         self
     }
+
+    fn limit(&self, gpu: &Gpu) -> u64 {
+        self.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes())
+    }
+
+    /// How many instances one band's slot grid may hold.
+    fn band_instances(&self, gpu: &Gpu) -> usize {
+        let bytes = self.limit(gpu).min(SLOT_BAND_BYTES);
+        (bytes / slot_bytes_per_instance()) as usize
+    }
+
+    fn reserve_slots(&mut self, gpu: &Gpu, instances: usize) {
+        if instances > self.slot_cap {
+            self.slots = gpu.storage(instances as u64 * (SLOT_CHANNELS * TILE_PIXELS) as u64);
+            self.slot_cap = instances;
+        }
+    }
+}
+
+/// Contiguous runs of tiles whose instances fit `cap` at a time, as
+/// `(first tile, tile count, first instance, instance count)`, from the
+/// per-tile instance ranges of the last render. Tiles are sorted by id, so a
+/// run of tiles owns one contiguous run of instances.
+fn plan_bands(ranges: &[u32], cap: usize) -> Result<Vec<(u32, u32, u32, u32)>, String> {
+    let n_tiles = ranges.len() / 2;
+    let mut out = Vec::new();
+    // (first tile, first instance, one past the last instance) of the open band
+    let mut open: Option<(usize, u32, u32)> = None;
+    for t in 0..n_tiles {
+        let (s, e) = (ranges[2 * t], ranges[2 * t + 1]);
+        if e <= s {
+            continue; // an empty tile belongs to whichever band surrounds it
+        }
+        if (e - s) as usize > cap {
+            return Err(format!(
+                "tile {t} alone holds {} gaussian instances, more than one backward band's {cap}; \
+                 the scene is too dense at this image size - thin it with `--prune`",
+                e - s
+            ));
+        }
+        match open {
+            Some((t0, k0, _)) if (e - k0) as usize <= cap => open = Some((t0, k0, e)),
+            Some((t0, k0, k1)) => {
+                out.push((t0 as u32, (t - t0) as u32, k0, k1 - k0));
+                open = Some((t, s, e));
+            }
+            None => open = Some((t, s, e)),
+        }
+    }
+    if let Some((t0, k0, k1)) = open {
+        out.push((t0 as u32, (n_tiles - t0) as u32, k0, k1 - k0));
+    }
+    Ok(out)
 }
 
 impl Renderer {
-    /// Backward through the LAST `render()` call: upstream RGBA image grads
-    /// `dimg` (`W*H*4`) → accumulate parameter grads. Returns the gradient
-    /// record count; `scr` grows to fit it.
-    ///
     /// Differentiate the frame last [rendered][Self::render] against `dimg`
     /// (the whole frame's dL/dRGBA), accumulating into `grads`. Returns the
-    /// number of gradient records the pass emitted.
+    /// number of gradient records the pass produced: one per (tile, gaussian)
+    /// instance.
     ///
     /// `ddepth` (`W*H`, `None` = no depth supervision) is dL/d(**accumulated**
     /// depth `sum_i z_i alpha_i T_i`), the unnormalized composite. What the
@@ -554,15 +618,14 @@ impl Renderer {
     /// [`add_expected_depth_vjp`] is the one place that does the split, and
     /// callers should use it rather than repeat it.
     ///
-    /// A dense scene can need more records for one frame than a single storage
-    /// binding on the device holds, whatever memory is free. The loss is a sum
-    /// over pixels, so this splits the ROWS until each group fits and lets the
-    /// groups accumulate, which is exact. It bands the pixel walk and nothing
-    /// else: `cam` stays the whole frame, because the projection clamps each
-    /// covariance against the frustum and a shorter camera would be a different
-    /// function to differentiate.
+    /// The pass reduces each instance over its tile's pixels first (a fixed
+    /// slot grid, band by band of tiles so the grid stays bounded), and only
+    /// then sorts - instances, not pixels - by gaussian. Sorting one record
+    /// per (pixel, gaussian) was 70% of the backward's device time on a
+    /// trained 300k-gaussian scene.
     ///
-    /// `Err` only when a single row of pixels is itself past the ceiling.
+    /// `Err` only when a single tile holds more instances than one band's slot
+    /// grid, or the frame more records than one binding.
     #[allow(clippy::too_many_arguments)]
     pub fn render_bwd(
         &mut self,
@@ -575,63 +638,22 @@ impl Renderer {
         scr: &mut BwdScratch,
         grads: &SplatGrads,
     ) -> Result<usize, String> {
-        let limit = scr.limit.unwrap_or_else(|| gpu.max_storage_binding_bytes());
-        self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, 0, cam.height, limit)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn bwd_rows(
-        &mut self,
-        gpu: &Gpu,
-        s: &GpuSplats,
-        cam: &Camera,
-        o: &RenderOpts,
-        dimg: &DeviceBuffer,
-        ddepth: Option<&DeviceBuffer>,
-        scr: &mut BwdScratch,
-        grads: &SplatGrads,
-        y0: u32,
-        rows: u32,
-        limit: u64,
-    ) -> Result<usize, String> {
         let (n_isects, vals_in_b, tiles_x, tiles_y) =
             self.last.expect("render() must run before render_bwd()");
-        let _ = n_isects;
+        if n_isects == 0 {
+            return Ok(0);
+        }
         let vals = if vals_in_b { &self.vals_b } else { &self.vals_a };
-        let rows = rows.min(cam.height.saturating_sub(y0));
-        if rows == 0 {
-            return Ok(0);
-        }
-        let px = (cam.width * rows) as usize;
-
-        // pass A: per-pixel record counts -> offsets + total
-        let mut steps = Vec::new();
-        steps.push(gpu.step(
-            self.ks.splat_bwd_count,
-            &[&self.proj, vals, &self.ranges, &scr.counts_px],
-            &[cam.width, rows, tiles_x, tiles_y, y0],
-            px as u32,
-        ));
-        let rtotal = record_scan(gpu, &self.ks, &scr.counts_px, px, &scr.px_scan, &mut steps);
-        gpu.submit(&[], &steps);
-        let n_recs = gpu.read(rtotal, 1)[0].to_bits() as usize;
-        if n_recs == 0 {
-            return Ok(0);
-        }
-        // Too dense to emit in one go: halve the band and let the two halves
-        // accumulate. Nothing has been written to `grads` yet, so splitting
-        // here costs only this band's count pass.
-        if n_recs > max_records_for_binding(limit) && rows > 1 {
-            let h = rows / 2;
-            let a = self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, y0, h, limit)?;
-            let b = self.bwd_rows(gpu, s, cam, o, dimg, ddepth, scr, grads, y0 + h, rows - h, limit)?;
-            return Ok(a + b);
-        }
-        scr.reserve_records(gpu, n_recs)?;
+        let n_tiles = (tiles_x * tiles_y) as usize;
+        let ranges = gpu.read(&self.ranges, 2 * n_tiles);
+        let ranges: Vec<u32> = ranges.iter().map(|v| v.to_bits()).collect();
+        let bands = plan_bands(&ranges, scr.band_instances(gpu))?;
+        scr.reserve_records(gpu, n_isects)?;
+        scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0));
 
         // Stage timings, on request. Splitting the submissions costs a few
         // extra syncs, which is the price of finding out which stage is the
-        // expensive one - and the answer is not obvious from the code.
+        // expensive one.
         let prof = std::env::var_os("BRAIN_SPLAT_PROFILE").is_some();
         let flush = |gpu: &Gpu, steps: &mut Vec<gpu_core::Step>, what: &'static str| {
             if !prof {
@@ -644,40 +666,45 @@ impl Renderer {
             eprintln!("    bwd {what}: {:.1} ms", 1e3 * t.elapsed().as_secs_f64());
         };
 
-        // pass B: emit records, sort by gaussian id, segment-reduce, project VJP
         let mut steps = Vec::new();
-        steps.push(gpu.step(
-            self.ks.splat_bwd_emit,
-            &[
-                &self.proj, &s.colors, vals, &self.ranges, dimg, &scr.counts_px, &scr.recs,
-                ddepth.unwrap_or(&scr.no_depth),
-            ],
-            &[
-                cam.width, rows, tiles_x, tiles_y,
-                f(o.bg[0]), f(o.bg[1]), f(o.bg[2]), y0,
-            ],
-            px as u32,
-        ));
+        for &(tile0, tiles, k0, count) in &bands {
+            if count == 0 {
+                continue;
+            }
+            let threads = tiles * TILE * TILE;
+            steps.push(gpu.step(
+                self.ks.splat_bwd_slots,
+                &[&self.proj, &s.colors, vals, &self.ranges, dimg, ddepth.unwrap_or(&scr.no_depth), &scr.slots],
+                &[cam.width, cam.height, tiles_x, tile0, k0, threads, f(o.bg[0]), f(o.bg[1]), f(o.bg[2])],
+                threads,
+            ));
+            steps.push(gpu.dispatch(
+                self.ks.splat_bwd_tile_reduce,
+                &[&scr.slots, vals, &scr.recs],
+                &[count, k0],
+                gpu_core::Dispatch::Workgroups(count),
+            ));
+        }
+        flush(gpu, &mut steps, "slots + tile reduce");
         steps.push(gpu.step(
             self.ks.splat_bwd_keys,
             &[&scr.recs, &scr.rkeys_a, &scr.rvals_a],
-            &[n_recs as u32],
-            n_recs as u32,
+            &[n_isects as u32],
+            n_isects as u32,
         ));
-        flush(gpu, &mut steps, "emit + keys");
         let key_bits = 32u32.min((s.n.next_power_of_two().trailing_zeros()).max(1) + 1);
         let in_b = record_sort_pairs(
             gpu, &self.ks, &scr.rkeys_a, &scr.rvals_a, &scr.rkeys_b, &scr.rvals_b,
-            n_recs, key_bits, &scr.rsort, &mut steps,
+            n_isects, key_bits, &scr.rsort, &mut steps,
         );
-        flush(gpu, &mut steps, "sort records by gaussian");
+        flush(gpu, &mut steps, "sort instances by gaussian");
         let (skeys, svals) = if in_b { (&scr.rkeys_b, &scr.rvals_b) } else { (&scr.rkeys_a, &scr.rvals_a) };
         // segment ranges over gaussian ids (tile_ranges with depth_bits = 0)
         steps.push(gpu.step(
             self.ks.splat_tile_ranges,
             &[skeys, &scr.granges],
-            &[n_recs as u32, 0],
-            n_recs as u32,
+            &[n_isects as u32, 0],
+            n_isects as u32,
         ));
         steps.push(gpu.step(
             self.ks.splat_grad_reduce,
@@ -685,39 +712,19 @@ impl Renderer {
             &[s.n as u32],
             s.n as u32,
         ));
-        let v = cam.viewmat();
-        let mut pp = [0u32; 24];
-        pp[0] = s.n as u32;
-        pp[1] = cam.width;
-        pp[2] = cam.height;
-        pp[3] = o.antialiased as u32;
-        pp[4] = f(cam.fx);
-        pp[5] = f(cam.fy);
-        pp[6] = f(cam.cx);
-        pp[7] = f(cam.cy);
-        pp[8] = f(o.near);
-        pp[9] = f(o.far);
-        pp[10] = f(o.eps2d);
-        pp[11] = 0;
-        for (i, val) in v.iter().enumerate() {
-            pp[12 + i] = f(*val);
-        }
         steps.push(gpu.step(
             self.ks.splat_project_bwd,
             &[&s.means, &s.quats, &s.scales, &self.proj, &scr.pgrad, &grads.d_gauss, &grads.d_opac],
-            &pp,
+            &project_params(s.n, cam, o),
             s.n as u32,
         ));
-        if prof {
-            eprintln!("    bwd records: {n_recs}");
-        }
         let t = std::time::Instant::now();
         gpu.submit(&[&scr.granges, &scr.pgrad], &steps);
         if prof {
             gpu.read(&self.proj, 1);
-            eprintln!("    bwd ranges + reduce + project: {:.1} ms", 1e3 * t.elapsed().as_secs_f64());
+            eprintln!("    bwd {} instances in {} band(s); ranges + reduce + project: {:.1} ms", n_isects, bands.len(), 1e3 * t.elapsed().as_secs_f64());
         }
-        Ok(n_recs)
+        Ok(n_isects)
     }
 }
 

@@ -128,14 +128,14 @@ pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl
 pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl");
 /// `wgsl/attn_bwd_dv_cross_acc.wgsl`
 pub const ATTN_BWD_DV_CROSS_ACC: &str = include_str!("../wgsl/attn_bwd_dv_cross_acc.wgsl");
+/// `wgsl/attn_bwd_dv_spans.wgsl`
+pub const ATTN_BWD_DV_SPANS: &str = include_str!("../wgsl/attn_bwd_dv_spans.wgsl");
 /// `wgsl/attn_decode_apply.wgsl`
 pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl");
 /// `wgsl/attn_decode_scores.wgsl`
 pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
 /// `wgsl/attn_decode_scores_win.wgsl`
 pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
-/// `wgsl/attn_bwd_dv_spans.wgsl`
-pub const ATTN_BWD_DV_SPANS: &str = include_str!("../wgsl/attn_bwd_dv_spans.wgsl");
 /// `wgsl/attn_keypad_mask.wgsl`
 pub const ATTN_KEYPAD_MASK: &str = include_str!("../wgsl/attn_keypad_mask.wgsl");
 /// `wgsl/attn_prefix_mask.wgsl`
@@ -180,8 +180,6 @@ pub const ATTN_SCORES_QK_KMASK: &str = include_str!("../wgsl/attn_scores_qk_kmas
 pub const ATTN_SCORES_SPANS: &str = include_str!("../wgsl/attn_scores_spans.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
-/// `wgsl/attn_softmax_spans.wgsl`
-pub const ATTN_SOFTMAX_SPANS: &str = include_str!("../wgsl/attn_softmax_spans.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -190,6 +188,8 @@ pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wg
 pub const ATTN_SOFTMAX_FULL: &str = include_str!("../wgsl/attn_softmax_full.wgsl");
 /// `wgsl/attn_softmax_masked.wgsl`
 pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
+/// `wgsl/attn_softmax_spans.wgsl`
+pub const ATTN_SOFTMAX_SPANS: &str = include_str!("../wgsl/attn_softmax_spans.wgsl");
 /// `wgsl/avgpool2d.wgsl`
 pub const AVGPOOL2D: &str = include_str!("../wgsl/avgpool2d.wgsl");
 /// `wgsl/avgpool2d_dx.wgsl`
@@ -554,6 +554,14 @@ pub const KV_EXPAND: &str = include_str!("../wgsl/kv_expand.wgsl");
 pub const KV_EXPAND_BWD: &str = include_str!("../wgsl/kv_expand_bwd.wgsl");
 /// `wgsl/kv_k_headt.wgsl`
 pub const KV_K_HEADT: &str = include_str!("../wgsl/kv_k_headt.wgsl");
+/// `wgsl/l1ssim_grad_v.wgsl`
+pub const L1SSIM_GRAD_V: &str = include_str!("../wgsl/l1ssim_grad_v.wgsl");
+/// `wgsl/l1ssim_map_v.wgsl`
+pub const L1SSIM_MAP_V: &str = include_str!("../wgsl/l1ssim_map_v.wgsl");
+/// `wgsl/l1ssim_moments_h.wgsl`
+pub const L1SSIM_MOMENTS_H: &str = include_str!("../wgsl/l1ssim_moments_h.wgsl");
+/// `wgsl/l1ssim_partials_h.wgsl`
+pub const L1SSIM_PARTIALS_H: &str = include_str!("../wgsl/l1ssim_partials_h.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale2d.wgsl`
@@ -974,12 +982,12 @@ pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
 pub const SORT_SCATTER: &str = include_str!("../wgsl/sort_scatter.wgsl");
 /// `wgsl/space_to_depth3d.wgsl`
 pub const SPACE_TO_DEPTH3D: &str = include_str!("../wgsl/space_to_depth3d.wgsl");
-/// `wgsl/splat_bwd_count.wgsl`
-pub const SPLAT_BWD_COUNT: &str = include_str!("../wgsl/splat_bwd_count.wgsl");
-/// `wgsl/splat_bwd_emit.wgsl`
-pub const SPLAT_BWD_EMIT: &str = include_str!("../wgsl/splat_bwd_emit.wgsl");
 /// `wgsl/splat_bwd_keys.wgsl`
 pub const SPLAT_BWD_KEYS: &str = include_str!("../wgsl/splat_bwd_keys.wgsl");
+/// `wgsl/splat_bwd_slots.wgsl`
+pub const SPLAT_BWD_SLOTS: &str = include_str!("../wgsl/splat_bwd_slots.wgsl");
+/// `wgsl/splat_bwd_tile_reduce.wgsl`
+pub const SPLAT_BWD_TILE_REDUCE: &str = include_str!("../wgsl/splat_bwd_tile_reduce.wgsl");
 /// `wgsl/splat_emit.wgsl`
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
 /// `wgsl/splat_grad_reduce.wgsl`
@@ -1093,6 +1101,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
     ("attn_bwd_dv_cross_acc", ATTN_BWD_DV_CROSS_ACC),
+    ("attn_bwd_dv_spans", ATTN_BWD_DV_SPANS),
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("attn_decode_scores", ATTN_DECODE_SCORES),
     ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
@@ -1104,7 +1113,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_relpos_drh", ATTN_RELPOS_DRH),
     ("attn_relpos_drw", ATTN_RELPOS_DRW),
     ("attn_relpos_qr", ATTN_RELPOS_QR),
-    ("attn_bwd_dv_spans", ATTN_BWD_DV_SPANS),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
@@ -1119,11 +1127,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_qk_kmask", ATTN_SCORES_QK_KMASK),
     ("attn_scores_spans", ATTN_SCORES_SPANS),
     ("attn_softmax", ATTN_SOFTMAX),
-    ("attn_softmax_spans", ATTN_SOFTMAX_SPANS),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
     ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
+    ("attn_softmax_spans", ATTN_SOFTMAX_SPANS),
     ("avgpool2d", AVGPOOL2D),
     ("avgpool2d_dx", AVGPOOL2D_DX),
     ("axpy", AXPY),
@@ -1306,6 +1314,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
     ("kv_k_headt", KV_K_HEADT),
+    ("l1ssim_grad_v", L1SSIM_GRAD_V),
+    ("l1ssim_map_v", L1SSIM_MAP_V),
+    ("l1ssim_moments_h", L1SSIM_MOMENTS_H),
+    ("l1ssim_partials_h", L1SSIM_PARTIALS_H),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale2d", L2NORM_SCALE2D),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
@@ -1516,9 +1528,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("sort_hist", SORT_HIST),
     ("sort_scatter", SORT_SCATTER),
     ("space_to_depth3d", SPACE_TO_DEPTH3D),
-    ("splat_bwd_count", SPLAT_BWD_COUNT),
-    ("splat_bwd_emit", SPLAT_BWD_EMIT),
     ("splat_bwd_keys", SPLAT_BWD_KEYS),
+    ("splat_bwd_slots", SPLAT_BWD_SLOTS),
+    ("splat_bwd_tile_reduce", SPLAT_BWD_TILE_REDUCE),
     ("splat_emit", SPLAT_EMIT),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
     ("splat_naive", SPLAT_NAIVE),

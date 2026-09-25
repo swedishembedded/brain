@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The splat backward's gradient record is a fixed-width struct written by
-//! `splat_bwd_emit.wgsl`, read by `splat_grad_reduce.wgsl`, and SIZED by the
+//! `splat_bwd_tile_reduce.wgsl`, read by `splat_bwd_keys.wgsl` and
+//! `splat_grad_reduce.wgsl`, and SIZED by the
 //! host (`splat::renderer::RECORD_WORDS`), which is also what decides whether
 //! a scene fits inside one storage binding. Three places, one stride.
 //!
@@ -44,27 +45,28 @@ fn highest_recs_slot(src: &str) -> Option<usize> {
 
 #[test]
 fn the_gradient_record_is_the_same_width_on_both_sides_of_the_dispatch() {
-    let emit = highest_recs_slot(kernels::SPLAT_BWD_EMIT)
-        .expect("splat_bwd_emit.wgsl no longer subscripts recs[..] by a literal - this gate has gone blind");
+    let emit = highest_recs_slot(kernels::SPLAT_BWD_TILE_REDUCE)
+        .expect("splat_bwd_tile_reduce.wgsl no longer subscripts recs[..] by a literal - this gate has gone blind");
     assert_eq!(
         emit + 1,
         splat::renderer::RECORD_WORDS,
-        "splat_bwd_emit.wgsl writes {} words per record but splat::renderer::RECORD_WORDS is {}; \
-         the host sizes `recs` from that constant, so the emit pass would stride past its own buffer",
+        "splat_bwd_tile_reduce.wgsl writes {} words per record but splat::renderer::RECORD_WORDS is {}; \
+         the host sizes `recs` from that constant, so the pass would stride past its own buffer",
         emit + 1,
         splat::renderer::RECORD_WORDS,
     );
 }
 
-/// The reduce side walks the record with a loop bound, not a literal, so what
-/// is checkable there is the declared stride in its own binding comment.
+/// The readers walk the record with a loop bound, not a literal, so what is
+/// checkable there is the declared stride in each binding comment.
 #[test]
-fn the_reduce_side_declares_the_same_stride() {
-    let src = kernels::SPLAT_GRAD_REDUCE;
-    let want = format!("n*{}", splat::renderer::RECORD_WORDS);
-    assert!(
-        src.contains(&want),
-        "splat_grad_reduce.wgsl does not declare `recs: array<f32>; // {want}` - either the stride \
-         changed or the declaration did, and the two sides can no longer be checked against each other"
-    );
+fn the_reading_side_declares_the_same_stride() {
+    for (name, src) in [("splat_grad_reduce", kernels::SPLAT_GRAD_REDUCE), ("splat_bwd_keys", kernels::SPLAT_BWD_KEYS)] {
+        let want = format!("n*{}", splat::renderer::RECORD_WORDS);
+        assert!(
+            src.contains(&want),
+            "{name}.wgsl does not declare `recs: array<f32>; // {want}` - either the stride changed or \
+             the declaration did, and the two sides can no longer be checked against each other"
+        );
+    }
 }

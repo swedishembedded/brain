@@ -19,21 +19,22 @@
 // pixels it composited into; splat_project_bwd turns it into a world-space
 // mean gradient along the viewing ray.
 //
-// Also accumulates `absgrad[N]`: the sum over records of the MAGNITUDE of each
-// record's 2D position gradient, as opposed to the magnitude of their sum.
+// Also accumulates `absgrad[N]`: the sum over pixels of the MAGNITUDE of each
+// pixel's 2D position gradient, as opposed to the magnitude of their sum.
 // Density control needs the former. A gaussian spanning an edge gets pushed
 // one way by the pixels on one side and the other way by the pixels on the
 // other; those cancel in the sum, so the usual criterion reads "well fitted"
 // for exactly the gaussians that are too big and blurring a detail. Summing
-// magnitudes cannot cancel, and because one record is one pixel the sum also
-// grows with the area a gaussian covers.
+// magnitudes cannot cancel, and the sum also grows with the area a gaussian
+// covers. Records are per (tile, gaussian) instance, so the per-pixel
+// magnitudes arrive pre-summed in slot 10 (splat_bwd_slots/_tile_reduce).
 
 struct Params {
     n_gauss: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var<storage, read>       recs:     array<f32>; // n*11
+@group(0) @binding(1) var<storage, read>       recs:     array<f32>; // n*12
 @group(0) @binding(2) var<storage, read>       vals:     array<u32>; // sorted record idx
 @group(0) @binding(3) var<storage, read>       ranges:   array<u32>; // n_gauss*2
 @group(0) @binding(4) var<storage, read_write> pgrad:    array<f32>; // N*10
@@ -52,11 +53,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let start = ranges[g * 2u];
     let end = ranges[g * 2u + 1u];
     for (var j = start; j < end; j = j + 1u) {
-        let r = vals[j] * 11u;
+        let r = vals[j] * 12u;
         for (var k = 0u; k < 10u; k = k + 1u) {
             acc[k] = acc[k] + recs[r + k];
         }
-        absacc = absacc + sqrt(recs[r] * recs[r] + recs[r + 1u] * recs[r + 1u]);
+        absacc = absacc + recs[r + 10u];
     }
     absgrad[g] = absgrad[g] + absacc;
     // and the summed 2D gradient across views, which is the reference

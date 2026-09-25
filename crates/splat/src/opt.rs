@@ -17,7 +17,7 @@ use gpu_core::{f, DeviceBuffer, Gpu};
 use crate::density::{self, Evidence};
 use crate::geometry;
 use crate::isp::{Encoding, Isp, IspCfg};
-use crate::loss::{photometric, PixelLoss};
+use crate::loss::{DeviceLoss, PixelLoss};
 use crate::renderer::{BwdScratch, GpuSplats, Renderer, SplatGrads};
 use crate::types::{Camera, Mode, RenderOpts, Splats};
 use crate::Kernels;
@@ -1280,6 +1280,18 @@ fn fit_stage(
     // Per-view supervision weights (mask x clipped pixels), fixed for the
     // stage: both are properties of the photographs, not of the scene.
     let weights: Vec<Option<Vec<f32>>> = targets.iter().map(|t| t.weights(isp.as_ref())).collect();
+    // The photographs, their weights and the loss scratch live on the device
+    // for the stage: the pixel loss runs there (`crate::loss`).
+    let wsums: Vec<f64> = targets
+        .iter()
+        .zip(&weights)
+        .map(|(t, w)| w.as_ref().map_or((t.cam.width * t.cam.height) as f64, |m| m.iter().map(|&v| v as f64).sum()))
+        .collect();
+    let tgt_bufs: Vec<DeviceBuffer> = targets.iter().map(|t| gpu.storage_init("fit.target", &t.rgb)).collect();
+    let wt_bufs: Vec<Option<DeviceBuffer>> =
+        weights.iter().map(|w| w.as_ref().map(|m| gpu.storage_init("fit.weight", m))).collect();
+    let dloss = DeviceLoss::new(gpu, max_px);
+    let pred_buf = gpu.storage(4 * max_px as u64);
 
     let mut last_loss = 0.0f32;
     // Step-size backoff state: see where `rises` is updated below.
@@ -1362,79 +1374,86 @@ fn fit_stage(
             let tm = std::time::Instant::now();
             renderer.render(gpu, &gs, &cam, &opts);
             prof.add("render forward", tm.elapsed());
-            // host loss: MSE over rgb; alpha unsupervised
-            let tm = std::time::Instant::now();
-            let img = renderer.read_rgba(gpu, cam.width, cam.height);
-            let want_depth = cfg.depth_weight > 0.0 && t.depth.is_some();
-            let rendered_depth =
-                if want_depth { renderer.read_depth(gpu, cam.width, cam.height) } else { Vec::new() };
-            prof.add("read image back", tm.elapsed());
-            let tm = std::time::Instant::now();
-            let mut d = vec![0.0f32; px * 4];
             // The mask divides out of the normalizer as well as multiplying
             // into the loss, so the number reported is the loss of the pixels
             // that were actually supervised - comparable with an unmasked run
             // rather than diluted by however much of the frame was excluded.
             let wts = weights[vi].as_deref();
-            let wsum = wts.map_or(px as f64, |m| m.iter().map(|&v| v as f64).sum());
+            let wsum = wsums[vi];
             if wsum <= 0.0 {
                 continue; // this view's mask keeps nothing
             }
-            let rgb = crate::renderer::rgba_to_rgb(&img);
-            let mut g3 = vec![0.0f32; px * 3];
-            let (w_px, h_px) = (cam.width as usize, cam.height as usize);
+            let want_depth = cfg.depth_weight > 0.0 && t.depth.is_some();
             // The render is radiance; the photograph is what this view's
-            // camera made of it.
-            let pred = match isp.as_ref() {
-                None => rgb.clone(),
-                Some(model) => model.forward(vi, &cam, &rgb),
-            };
-            loss_sum += photometric(cfg.loss, &pred, &t.rgb, wts, w_px, h_px, &mut g3);
-            if let Some(model) = isp.as_mut() {
-                g3 = model.backward(vi, &cam, &rgb, &g3);
-            }
-            for i in 0..px {
-                d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
-            }
-            // The depth term, on the SAME normalizer, so `depth_weight` reads
-            // as a ratio against RGB rather than as a number whose meaning
-            // depends on how much of the frame carries a depth prior.
-            let mut ddepth_h = vec![0.0f32; px];
-            if want_depth {
-                let tgt = t.depth.as_ref().unwrap();
-                let dscale = (2.0 * cfg.depth_weight as f64 / wsum) as f32;
-                let mut vdn = vec![0.0f32; px];
-                let mut dsum = 0.0f64;
-                for i in 0..px {
-                    let w = wts.map_or(1.0, |m| m[i]) * t.depth_conf.as_ref().map_or(1.0, |c| c[i]);
-                    if w <= 0.0 || tgt[i] <= 0.0 {
-                        continue; // masked out, distrusted, or no prior here
-                    }
-                    let diff = rendered_depth[i] - tgt[i];
-                    dsum += (w * diff * diff) as f64;
-                    vdn[i] = dscale * w * diff;
-                }
-                // The depth term belongs in the REPORTED loss too, not only in
-                // the gradient. Everything that watches the loss - the step
-                // size backoff, the guarantee that a fit never returns
-                // something worse than it was given, the number printed every
-                // few iterations - has to be watching the objective actually
-                // being minimised. Leaving depth out of it made the guard
-                // compare a different function: on a scene that already
-                // renders correctly but sits at the wrong depth, RGB error
-                // RISES as the depth term does its job, so the fit was
-                // correctly moving the geometry and then handing back the
-                // untouched input.
-                loss_sum += cfg.depth_weight as f64 * dsum / wsum;
-                crate::renderer::add_expected_depth_vjp(&vdn, &rendered_depth, &img, &mut d, &mut ddepth_h);
-            }
-            prof.add("host loss + dL/dimg", tm.elapsed());
+            // camera made of it. With no camera model the render IS the
+            // prediction and never leaves the device.
             let tm = std::time::Instant::now();
-            gpu.write(&dimg, cast(&d));
-            if want_depth {
-                gpu.write(&ddepth, cast(&ddepth_h));
+            let img = if isp.is_some() || want_depth { renderer.read_rgba(gpu, cam.width, cam.height) } else { Vec::new() };
+            prof.add("read image back", tm.elapsed());
+            let tm = std::time::Instant::now();
+            let rgb = if isp.is_some() { crate::renderer::rgba_to_rgb(&img) } else { Vec::new() };
+            let pred_dev = match isp.as_ref() {
+                None => &renderer.img,
+                Some(model) => {
+                    let pred = model.forward(vi, &cam, &rgb);
+                    let rgba: Vec<f32> = pred.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
+                    gpu.write_f32(&pred_buf, &rgba);
+                    &pred_buf
+                }
+            };
+            prof.add("camera model", tm.elapsed());
+            let tm = std::time::Instant::now();
+            loss_sum += dloss.eval(gpu, ks, cfg.loss, pred_dev, &tgt_bufs[vi], wt_bufs[vi].as_ref(), wsum, cam.width, cam.height, &dimg);
+            prof.add("pixel loss", tm.elapsed());
+            // What still runs on the host - the camera model's backward and
+            // the depth term - edits dL/dimg there.
+            if isp.is_some() || want_depth {
+                let tm = std::time::Instant::now();
+                let mut d = gpu.read(&dimg, px * 4);
+                if let Some(model) = isp.as_mut() {
+                    let g3: Vec<f32> = d.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+                    let g3 = model.backward(vi, &cam, &rgb, &g3);
+                    for i in 0..px {
+                        d[i * 4..i * 4 + 3].copy_from_slice(&g3[i * 3..i * 3 + 3]);
+                    }
+                }
+                // The depth term, on the SAME normalizer, so `depth_weight`
+                // reads as a ratio against RGB rather than as a number whose
+                // meaning depends on how much of the frame carries a prior.
+                if want_depth {
+                    let rendered_depth = renderer.read_depth(gpu, cam.width, cam.height);
+                    let mut ddepth_h = vec![0.0f32; px];
+                    let tgt = t.depth.as_ref().unwrap();
+                    let dscale = (2.0 * cfg.depth_weight as f64 / wsum) as f32;
+                    let mut vdn = vec![0.0f32; px];
+                    let mut dsum = 0.0f64;
+                    for i in 0..px {
+                        let w = wts.map_or(1.0, |m| m[i]) * t.depth_conf.as_ref().map_or(1.0, |c| c[i]);
+                        if w <= 0.0 || tgt[i] <= 0.0 {
+                            continue; // masked out, distrusted, or no prior here
+                        }
+                        let diff = rendered_depth[i] - tgt[i];
+                        dsum += (w * diff * diff) as f64;
+                        vdn[i] = dscale * w * diff;
+                    }
+                    // The depth term belongs in the REPORTED loss too, not
+                    // only in the gradient. Everything that watches the loss -
+                    // the step size backoff, the guarantee that a fit never
+                    // returns something worse than it was given, the number
+                    // printed every few iterations - has to be watching the
+                    // objective actually being minimised. Leaving depth out of
+                    // it made the guard compare a different function: on a
+                    // scene that already renders correctly but sits at the
+                    // wrong depth, RGB error RISES as the depth term does its
+                    // job, so the fit was correctly moving the geometry and
+                    // then handing back the untouched input.
+                    loss_sum += cfg.depth_weight as f64 * dsum / wsum;
+                    crate::renderer::add_expected_depth_vjp(&vdn, &rendered_depth, &img, &mut d, &mut ddepth_h);
+                    gpu.write(&ddepth, cast(&ddepth_h));
+                }
+                gpu.write(&dimg, cast(&d));
+                prof.add("camera model + depth dL/dimg", tm.elapsed());
             }
-            prof.add("upload dL/dimg", tm.elapsed());
             let tm = std::time::Instant::now();
             renderer
                 .render_bwd(

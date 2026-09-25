@@ -105,13 +105,19 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
 - [ ] Floater suppression beyond the surface terms (opacity reset or decay
       late in the fit, a visibility-count prune) and thin-structure
       coverage; judged on held-out views, not training views.
-- [ ] Sort cost: `sort_scatter`/`sort_hist` give each thread a contiguous
-      256-key chunk with a private 256-entry offset table (local memory,
-      uncoalesced reads), and the histogram is as large as the data. A
-      cooperative design is the step change but meets the one-barrier CPU-JIT
-      rule; measure what fraction of the backward it can return first.
-- [ ] `splat_grad_reduce` is one thread per gaussian over its whole record
-      segment - a large gaussian's thread serializes 100k+ gathers.
+- [x] Backward restructured (measured on the trained 300k-gaussian scene at
+      768x576, 2 views a step): per-(pixel, gaussian) records sorted by
+      gaussian were 70% of the backward's device time and the one-thread-per-
+      gaussian reduce 20%. Now each (tile, gaussian) instance is reduced over
+      its 256 pixels in a fixed slot grid (`splat_bwd_slots`,
+      `splat_bwd_tile_reduce`, one barrier) and only instances are sorted:
+      backward 1178 -> 240 ms per step.
+- [x] L1 + D-SSIM on the device (`l1ssim_*`): 447 -> 10 ms per step. Whole
+      step 2419 -> 639 ms (`crates/splat/examples/fit_profile.rs`).
+- [ ] Next: the geometry passes (~180 ms per step, host feature building and
+      two extra forward+backward per view), the camera model's host round
+      trip (~65 ms), and `splat_bwd_slots` itself (1.48M instances x 256
+      pixels of slots per view).
 - [ ] A gaussian-major backward (per-tile accumulation instead of per-pixel
       records sorted by gaussian) - the step change.
 - [x] Coarse-to-fine resolution schedule for the sparse-start phase
@@ -185,7 +191,7 @@ scenes' `f32::to_bits()` bitwise (`crates/splat/src/caps.rs`'s
 `determinism_probe_fit_twice_on_identical_inputs` test). Measured result (Intel
 Arc integrated GPU, Vulkan backend): **`0` differing bits** - `mse
 0.000007867729` on both runs, identical to the ULP. The backward kernels
-(`splat_grad_reduce`, `splat_bwd_emit`, `splat_bwd_count`, `splat_bwd_keys`,
+(`splat_grad_reduce`, `splat_bwd_slots`, `splat_bwd_tile_reduce`, `splat_bwd_keys`,
 `splat_project_bwd`) contain zero atomic operations - `splat_grad_reduce` is a
 deterministic per-gaussian segmented reduction over id-sorted gradient records
 - so bit-determinism was expected, and is now a measured fact rather than an

@@ -18,7 +18,22 @@
 //! email to info@swedishembedded.com.
 
 use data::rng::Lcg;
-use splat::loss::{photometric, PixelLoss};
+use gpu_core::Gpu;
+use splat::loss::{DeviceLoss, PixelLoss};
+
+/// The device loss of `pred` (RGB) against `target`, and dLoss/dpred (RGB).
+fn photometric(g: &Gpu, loss: PixelLoss, pred: &[f32], target: &[f32], weight: Option<&[f32]>, w: usize, h: usize) -> (f64, Vec<f32>) {
+    let px = w * h;
+    let rgba: Vec<f32> = pred.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 0.0]).collect();
+    let (pb, tb) = (g.storage_init("pred", &rgba), g.storage_init("target", target));
+    let wb = weight.map(|m| g.storage_init("weight", m));
+    let wsum = weight.map_or(px as f64, |m| m.iter().map(|&v| v as f64).sum());
+    let dimg = g.storage(4 * px as u64);
+    let dl = DeviceLoss::new(g, px);
+    let value = dl.eval(g, splat::Kernels::at(0), loss, &pb, &tb, wb.as_ref(), wsum, w as u32, h as u32, &dimg);
+    let grad = g.read(&dimg, 4 * px).chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    (value, grad)
+}
 
 /// Independent oracle: SSIM by DIRECT 2D window sums in f64, zero padding,
 /// 11x11 gaussian window with sigma 1.5 - no separable convolution and no
@@ -91,9 +106,9 @@ fn gradient_matches_an_independent_oracle() {
     let pred = image(&mut rng, px);
     let tgt = image(&mut rng, px);
     let mask: Vec<f32> = (0..px).map(|i| if i % 7 == 3 { 0.0 } else { 0.25 + 0.75 * ((i * 37 % 11) as f32 / 10.0) }).collect();
+    let g = Gpu::new_cpu(splat::PIPELINES);
     for loss in [PixelLoss::Mse, PixelLoss::L1Ssim { ssim: 0.2 }, PixelLoss::L1Ssim { ssim: 1.0 }] {
-        let mut grad = vec![0.0f32; px * 3];
-        let value = photometric(loss, &pred, &tgt, Some(&mask), w, h, &mut grad);
+        let (value, grad) = photometric(&g, loss, &pred, &tgt, Some(&mask), w, h);
         let p64: Vec<f64> = pred.iter().map(|&v| v as f64).collect();
         let t64: Vec<f64> = tgt.iter().map(|&v| v as f64).collect();
         let m64: Vec<f64> = mask.iter().map(|&v| v as f64).collect();
@@ -140,17 +155,17 @@ fn structure_is_charged_more_than_the_same_energy_as_an_offset() {
     let off = mse.sqrt() as f32;
     let shifted: Vec<f32> = tgt.iter().map(|v| v + off).collect();
 
-    let mut g = vec![0.0f32; px * 3];
-    let at = |pred: &[f32], loss: PixelLoss, g: &mut [f32]| photometric(loss, pred, &tgt, None, w, h, g);
-    let (m_blur, m_off) = (at(&blur, PixelLoss::Mse, &mut g), at(&shifted, PixelLoss::Mse, &mut g));
+    let g = Gpu::new_cpu(splat::PIPELINES);
+    let at = |pred: &[f32], loss: PixelLoss| photometric(&g, loss, pred, &tgt, None, w, h).0;
+    let (m_blur, m_off) = (at(&blur, PixelLoss::Mse), at(&shifted, PixelLoss::Mse));
     assert!((m_blur - m_off).abs() / m_off < 1e-3, "the two errors must carry the same MSE ({m_blur} vs {m_off})");
     let dssim = PixelLoss::L1Ssim { ssim: 1.0 };
-    let (s_blur, s_off) = (at(&blur, dssim, &mut g), at(&shifted, dssim, &mut g));
+    let (s_blur, s_off) = (at(&blur, dssim), at(&shifted, dssim));
     assert!(
         s_blur > 3.0 * s_off,
         "D-SSIM charged the blurred edge {s_blur:.4} and the equal-energy offset {s_off:.4}; the \
          structural term exists to tell those apart"
     );
     // and identical images cost nothing
-    assert!(at(&tgt, dssim, &mut g).abs() < 1e-6);
+    assert!(at(&tgt, dssim).abs() < 1e-6);
 }

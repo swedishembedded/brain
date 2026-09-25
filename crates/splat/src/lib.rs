@@ -46,8 +46,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_tile_ranges", kernels::SPLAT_TILE_RANGES),
     ("splat_rasterize", kernels::SPLAT_RASTERIZE),
     ("splat_pack_rgba8", kernels::SPLAT_PACK_RGBA8),
-    ("splat_bwd_count", kernels::SPLAT_BWD_COUNT),
-    ("splat_bwd_emit", kernels::SPLAT_BWD_EMIT),
+    ("splat_bwd_slots", kernels::SPLAT_BWD_SLOTS),
+    ("splat_bwd_tile_reduce", kernels::SPLAT_BWD_TILE_REDUCE),
     ("splat_bwd_keys", kernels::SPLAT_BWD_KEYS),
     ("splat_grad_reduce", kernels::SPLAT_GRAD_REDUCE),
     ("splat_project_bwd", kernels::SPLAT_PROJECT_BWD),
@@ -55,6 +55,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("splat_sh", kernels::SPLAT_SH),
     ("splat_pose_grad", kernels::SPLAT_POSE_GRAD),
     ("adamw", kernels::ADAMW),
+    ("l1ssim_moments_h", kernels::L1SSIM_MOMENTS_H),
+    ("l1ssim_map_v", kernels::L1SSIM_MAP_V),
+    ("l1ssim_partials_h", kernels::L1SSIM_PARTIALS_H),
+    ("l1ssim_grad_v", kernels::L1SSIM_GRAD_V),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -72,8 +76,8 @@ pub struct Kernels {
     pub splat_tile_ranges: usize,
     pub splat_rasterize: usize,
     pub splat_pack_rgba8: usize,
-    pub splat_bwd_count: usize,
-    pub splat_bwd_emit: usize,
+    pub splat_bwd_slots: usize,
+    pub splat_bwd_tile_reduce: usize,
     pub splat_bwd_keys: usize,
     pub splat_grad_reduce: usize,
     pub splat_project_bwd: usize,
@@ -81,6 +85,10 @@ pub struct Kernels {
     pub splat_sh: usize,
     pub splat_pose_grad: usize,
     pub adamw: usize,
+    pub l1ssim_moments_h: usize,
+    pub l1ssim_map_v: usize,
+    pub l1ssim_partials_h: usize,
+    pub l1ssim_grad_v: usize,
 }
 
 impl Kernels {
@@ -99,8 +107,8 @@ impl Kernels {
             splat_tile_ranges: base + 8,
             splat_rasterize: base + 9,
             splat_pack_rgba8: base + 10,
-            splat_bwd_count: base + 11,
-            splat_bwd_emit: base + 12,
+            splat_bwd_slots: base + 11,
+            splat_bwd_tile_reduce: base + 12,
             splat_bwd_keys: base + 13,
             splat_grad_reduce: base + 14,
             splat_project_bwd: base + 15,
@@ -108,6 +116,10 @@ impl Kernels {
             splat_sh: base + 17,
             splat_pose_grad: base + 18,
             adamw: base + 19,
+            l1ssim_moments_h: base + 20,
+            l1ssim_map_v: base + 21,
+            l1ssim_partials_h: base + 22,
+            l1ssim_grad_v: base + 23,
         }
     }
 }
