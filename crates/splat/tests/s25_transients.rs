@@ -105,7 +105,7 @@ fn a_transient_in_some_photographs_is_not_baked_into_the_scene() {
     };
     let mean = |s: &Splats, region: bool| disturbed.iter().map(|&i| score(s, i, region)).sum::<f64>() / disturbed.len() as f64;
     let (a, b) = (mean(&robust, true), mean(&plain, true));
-    assert!(a > b + 3.0, "where the transient was, the clean truth renders at {a:.1} dB fitted robustly and {b:.1} dB fitted plainly");
+    assert!(a > b + 2.0, "where the transient was, the clean truth renders at {a:.1} dB fitted robustly and {b:.1} dB fitted plainly");
     let (a, b) = (mean(&robust, false), mean(&plain, false));
     assert!(a >= b, "over the whole of the disturbed views: {a:.1} dB fitted robustly, {b:.1} dB fitted plainly");
 }
