@@ -1328,7 +1328,18 @@ impl<'a> Fit<'a> {
         if cfg.log_every > 0 && next.len() != before {
             println!("fit: density control {before} -> {} gaussians", next.len());
         }
-        let out = DeviceScene::remap(gpu, &snap, &next, &origin, cfg.sh_degree);
+        let mut out = DeviceScene::remap(gpu, &snap, &next, &origin, cfg.sh_degree);
+        if out.ksh > 0 {
+            // each gaussian's view dependence, as far as its own views support
+            // it; a new sample has none until the next round has seen it
+            let eyes: Vec<[f32; 3]> = level.targets.iter().map(|t| t.cam.eye()).collect();
+            let old = &snap.scene;
+            let limit: Vec<u32> = backend_cpu::par::map(old.len(), |i| {
+                let mine: Vec<[f32; 3]> = (0..eyes.len()).filter(|&v| seen[v][i]).map(|v| eyes[v]).collect();
+                crate::sh::supported_coefficients([old.means[i * 3], old.means[i * 3 + 1], old.means[i * 3 + 2]], &mine, cfg.sh_degree)
+            });
+            out.set_sh_limit(gpu, &origin.iter().map(|o| o.map_or(0, |i| limit[i])).collect::<Vec<u32>>());
+        }
         let fresh = largest_axes(&next);
         self.start = origin.iter().zip(&fresh).map(|(o, f)| o.map_or(*f, |i| self.start[i])).collect();
         // what saw each gaussian carries over along the same map; a new

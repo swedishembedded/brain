@@ -111,6 +111,11 @@ pub(crate) struct DeviceScene {
     /// colour's gradient by `splat_sh`'s VJP.
     pub d_base: DeviceBuffer,
     pub d_sh: DeviceBuffer,
+    /// Per-gaussian cap on its SH coefficients per channel
+    /// ([`DeviceScene::set_sh_limit`]); the host copy is what
+    /// [`DeviceScene::snapshot`] zeroes the coefficients past.
+    sh_limit: DeviceBuffer,
+    sh_limit_host: Vec<u32>,
 }
 
 /// A host snapshot of everything [`DeviceScene`] carries, for a topology
@@ -123,9 +128,10 @@ pub(crate) struct Snapshot {
     base_v: Vec<f32>,
     sh_m: Vec<f32>,
     sh_v: Vec<f32>,
+    sh_limit: Vec<u32>,
 }
 
-fn ksh_of(degree: u32) -> usize {
+pub(crate) fn ksh_of(degree: u32) -> usize {
     match degree {
         0 => 0,
         1 => 3,
@@ -149,6 +155,7 @@ impl DeviceScene {
             base_v: zeros(3 * n),
             sh_m: zeros(3 * n * ksh),
             sh_v: zeros(3 * n * ksh),
+            sh_limit: vec![ksh as u32; n],
         };
         Self::from_snapshot(gpu, &snap, sh_degree)
     }
@@ -206,6 +213,14 @@ impl DeviceScene {
             grads: SplatGrads::new(gpu, n.max(1)),
             d_base: wide(3 * n),
             d_sh: wide(3 * n * ksh),
+            sh_limit: {
+                let b = gpu.storage(n.max(1) as u64);
+                if n > 0 {
+                    gpu.write(&b, &snap.sh_limit);
+                }
+                b
+            },
+            sh_limit_host: snap.sh_limit.clone(),
         }
     }
 
@@ -223,7 +238,15 @@ impl DeviceScene {
         }
         s.colors = gpu.read(&self.base, 3 * n);
         if self.ksh > 0 {
-            s.sh_rest = Some((self.sh_degree, gpu.read(&self.sh, 3 * n * self.ksh)));
+            // what a gaussian's cap holds out renders as zero, so it is zero
+            let mut rest = gpu.read(&self.sh, 3 * n * self.ksh);
+            for (i, &cap) in self.sh_limit_host.iter().enumerate() {
+                for c in 0..3 {
+                    let row = &mut rest[(i * 3 + c) * self.ksh..(i * 3 + c + 1) * self.ksh];
+                    row[(cap as usize).min(self.ksh)..].fill(0.0);
+                }
+            }
+            s.sh_rest = Some((self.sh_degree, rest));
         }
         let k = 3 * n * self.ksh;
         Snapshot {
@@ -234,6 +257,7 @@ impl DeviceScene {
             base_v: gpu.read(&self.v_base, 3 * n),
             sh_m: if k > 0 { gpu.read(&self.m_sh, k) } else { Vec::new() },
             sh_v: if k > 0 { gpu.read(&self.v_sh, k) } else { Vec::new() },
+            sh_limit: self.sh_limit_host.clone(),
         }
     }
 
@@ -268,6 +292,9 @@ impl DeviceScene {
             base_v: gather(&old.base_v, 3),
             sh_m: gather(&old.sh_m, 3 * ksh),
             sh_v: gather(&old.sh_v, 3 * ksh),
+            // a new sample has no views of its own yet: flat colour until
+            // the next round measures them
+            sh_limit: origin.iter().map(|o| o.map_or(0, |i| old.sh_limit.get(i).copied().unwrap_or(ksh as u32))).collect(),
         };
         Self::from_snapshot(gpu, &snap, sh_degree)
     }
@@ -277,6 +304,14 @@ impl DeviceScene {
         assert_eq!(max.len(), self.n);
         let l: Vec<f32> = max.iter().map(|v| if *v > 0.0 { v.ln() } else { f32::MAX.ln() }).collect();
         gpu.write_f32(&self.smax, &l);
+    }
+
+    /// Cap each gaussian's SH coefficients per channel at `limit[i]` (0, 3, 8
+    /// or 15; values past the scene's own degree are clamped to it).
+    pub fn set_sh_limit(&mut self, gpu: &Gpu, limit: &[u32]) {
+        assert_eq!(limit.len(), self.n);
+        self.sh_limit_host = limit.iter().map(|v| (*v).min(self.ksh as u32)).collect();
+        gpu.write(&self.sh_limit, &self.sh_limit_host);
     }
 
     /// Mip-Splatting's 3D filter, as a variance per gaussian.
@@ -306,7 +341,7 @@ impl DeviceScene {
         }
         let e = gpu.step(
             ks.splat_sh,
-            &[&self.means, &self.base, &self.sh, &self.col_view, &self.d_base, &self.d_sh],
+            &[&self.means, &self.base, &self.sh, &self.col_view, &self.d_base, &self.d_sh, &self.sh_limit],
             &[self.n as u32, self.ksh as u32, 0, skip, f(eye[0]), f(eye[1]), f(eye[2]), 0],
             self.n as u32,
         );
@@ -322,7 +357,7 @@ impl DeviceScene {
         }
         let e = gpu.step(
             ks.splat_sh,
-            &[&self.means, &self.base, &self.sh, &self.grads.d_colors, &self.d_base, &self.d_sh],
+            &[&self.means, &self.base, &self.sh, &self.grads.d_colors, &self.d_base, &self.d_sh, &self.sh_limit],
             &[self.n as u32, self.ksh as u32, 1, skip, f(eye[0]), f(eye[1]), f(eye[2]), 0],
             self.n as u32,
         );

@@ -22,6 +22,10 @@
 // which one runs; both are one invocation per gaussian, no reductions.
 //
 // sh layout is Inria's, channel-major: all K coefficients of R, then G, then B.
+//
+// `limit[i]` caps gaussian i's own coefficients per channel (0, 3, 8 or 15):
+// the view dependence the views that see IT can support. Coefficients past
+// the cap neither colour the gaussian nor receive a gradient.
 
 struct Params {
     n: u32,
@@ -41,6 +45,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> colors: array<f32>; // N*3 (fwd out)
 @group(0) @binding(5) var<storage, read_write> d_base: array<f32>; // N*3   (+=)
 @group(0) @binding(6) var<storage, read_write> d_sh:   array<f32>; // N*3K  (+=)
+@group(0) @binding(7) var<storage, read>       limit:  array<u32>; // N
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -90,7 +95,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     // Progressive bands: a fit enables SH one degree at a time, so the
     // coefficients above the current degree neither colour the splat nor
     // receive a gradient until their band switches on.
-    for (var t = p.k - min(p.skip, p.k); t < 15u; t = t + 1u) { y[t] = 0.0; }
+    for (var t = min(p.k - min(p.skip, p.k), limit[i]); t < 15u; t = t + 1u) { y[t] = 0.0; }
 
     for (var c = 0u; c < 3u; c = c + 1u) {
         let o = i * 3u + c;

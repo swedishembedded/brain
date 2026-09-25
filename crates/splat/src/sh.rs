@@ -65,6 +65,39 @@ pub fn coeffs(degree: u32) -> usize {
     }
 }
 
+/// The SH coefficients per channel (0, 3, 8 or 15, at most `degree`'s) a
+/// gaussian at `mean` can support from the views at `eyes` that see it.
+///
+/// A degree-`d` expansion is `(d+1)²` coefficients per channel, fitted from
+/// one sample per view; with fewer than about eight views per coefficient it
+/// memorizes those views instead of describing the surface (the capture-wide
+/// rule `crate::opt::sh_degree_for_views` measured). And views bunched in
+/// one direction cannot separate a band from the flat colour at all however
+/// many there are: degree `d` also needs the views to spread over at least
+/// `30 d` degrees as seen from the gaussian.
+pub fn supported_coefficients(mean: [f32; 3], eyes: &[[f32; 3]], degree: u32) -> u32 {
+    let dirs: Vec<[f32; 3]> = eyes
+        .iter()
+        .filter_map(|e| {
+            let d = [e[0] - mean[0], e[1] - mean[1], e[2] - mean[2]];
+            let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            (l > 1e-12).then(|| d.map(|v| v / l))
+        })
+        .collect();
+    let sum = dirs.iter().fold([0.0f32; 3], |a, d| [a[0] + d[0], a[1] + d[1], a[2] + d[2]]);
+    let l = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+    let spread_deg = if l < 1e-6 * dirs.len() as f32 {
+        360.0
+    } else {
+        let m = sum.map(|v| v / l);
+        let widest = dirs.iter().map(|d| (d[0] * m[0] + d[1] * m[1] + d[2] * m[2]).clamp(-1.0, 1.0).acos()).fold(0.0f32, f32::max);
+        2.0 * widest.to_degrees()
+    };
+    let n = dirs.len() as u32;
+    let d = (0..=degree.min(3)).rev().find(|&d| n >= 8 * (d + 1) * (d + 1) && spread_deg >= 30.0 * d as f32).unwrap_or(0);
+    coeffs(d) as u32
+}
+
 /// The colours a scene shows from `eye`. Returns `None` for a scene with no
 /// harmonics, whose colours are already what it shows from everywhere.
 pub fn shade(s: &Splats, eye: [f32; 3]) -> Option<Vec<f32>> {
@@ -158,9 +191,11 @@ mod tests {
         let out = g.storage(3 * n as u64);
         let dummy = g.storage(1);
         let dummy2 = g.storage(1);
+        let limit = g.storage(n as u64);
+        g.write(&limit, &vec![k as u32; n]);
         let step = g.step(
             ks.splat_sh,
-            &[&means, &base, &shb, &out, &dummy, &dummy2],
+            &[&means, &base, &shb, &out, &dummy, &dummy2, &limit],
             &[
                 n as u32,
                 k as u32,
