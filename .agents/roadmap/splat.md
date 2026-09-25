@@ -30,7 +30,9 @@ the specification it is built from - see **Provenance** for what that means.
 | Progressive SH bands (SH0 -> SH3 over training) | `splat_sh.wgsl` held-out coefficient count, `FitCfg::sh_ramp` | done |
 | Auxiliary render passes (per-gaussian features composited by the same weights: normals, depth moments, credit assignment) | `opt.rs::geometry_passes`, `density::credit_upstream` | done |
 | SH in `render`/`view` (host shading per frame via `sh::shade`) | `cli/splat_cli.rs` | done |
-| Nonlinear cameras via the Unscented Transform (3DGUT, Wu et al., CVPR 2025): OpenCV radial/tangential, fisheye/Kannala-Brandt, equirectangular with seam duplication, rolling shutter | `camera.rs` (planned) | planned |
+| Ray-evaluated renderer (3DGUT-style, Wu et al., CVPR 2025): every pixel evaluates each gaussian at its maximum along the pixel's own ray through the real lens (pinhole, OpenCV Brown, Kannala-Brandt fisheye, equirectangular), rolling shutter, unscented tile bounds, 3D and 2D Mip filters with ray-marginal compensation; gradients of every gaussian parameter and of pose, shutter and calibration | `crates/camera`, `renderer.rs`, `splat_ray_*.wgsl`, `lib/splat_ray_pair.wgsl` | done |
+| Tile-cooperative ray backward: one workgroup per tile, records reduced in workgroup memory at their emission slots (no record sort); 45.6 ms per view at 500k gaussians and 816x612 against ~480 ms for the slot grid it replaced (which stays as the per-pixel reference and CPU path) | `splat_ray_bwd_tile.wgsl`, `splat_gather_ids.wgsl` | done |
+| Environment at infinity: real SH radiance by direction up to degree 8, composited behind the gaussians along each pixel's ray, fitted with the scene, baked into a distant shell for export | `env.rs`, `splat_env*.wgsl`, `FitCfg::environment` | done |
 | StopThePop hierarchical per-tile re-sorting (Radl et al., SIGGRAPH 2024) | rasterizer | planned |
 | `.splat` / `.spz` IO | `ply.rs` siblings | planned |
 | Render-time optimization: per-stage profiling, radix chunk tuning, pipelined present | renderer | planned |
@@ -46,19 +48,21 @@ the specification it is built from - see **Provenance** for what that means.
 | Low-capacity bilateral-grid residual for computational-photography captures (Wang et al., SIGGRAPH Asia 2024) | `isp.rs` | planned |
 | Novel-view ISP controller (predict exposure/WB for unseen views) | `isp.rs` | planned (novel views render at the gauge-fixed mean camera today) |
 | RGBA captures: random background per iteration + alpha loss | `opt.rs` | planned |
-| Loss + ISP on the device (today the per-pixel loss runs on the host, one readback per view) | kernels | planned |
+| Per-pixel loss on the device (`DeviceLoss`, `l1ssim_*`) | `loss.rs` | done |
+| Camera model (ISP) forward/backward on the device (host today, one readback per view) | kernels | planned |
 
 ### Geometry
 
 | capability | where | state |
 |---|---|---|
-| Expected-depth supervision with per-pixel confidence | `opt.rs`, `FitCfg::depth_weight` | done |
-| Depth distortion (2DGS, Huang et al., SIGGRAPH 2024), squared form `2(A·M2 - M1²)` | `geometry.rs`, `FitCfg::distortion_weight` | done |
-| Normal consistency against the rendered depth's own normals (2DGS) | `geometry.rs`, `FitCfg::normal_consistency_weight` | done |
+| Range supervision along each pixel's ray: pseudo-Huber on log range, per-pixel confidence | `splat_geom_loss.wgsl`, `FitCfg::depth_weight` | done |
+| Depth distortion (2DGS, Huang et al., SIGGRAPH 2024), the exact pairwise form composited in the rasterizer | `splat_ray_pair.wgsl`, `FitCfg::distortion_weight` | done |
+| Normal consistency against the rendered range's own normals (2DGS), only where no normal prior exists | `splat_geom_loss.wgsl`, `FitCfg::normal_consistency_weight` | done |
 | Normal prior supervision (`TargetView::with_normals`) | `geometry.rs`, `FitCfg::normal_prior_weight` | done |
 | Monocular priors (MoGe-2 / Metric3D v2) with robust scale/shift alignment to SfM | model crates + `align.rs` | planned |
-| Sky / background environment model at infinity | new `background.rs` | planned |
-| Dynamic-object masks from SAM 2 (`crates/sam2` exists) wired into `TargetView::mask` | `recon` | planned |
+| Sky / background environment model at infinity | `env.rs` | done (see Renderer) |
+| Transient masking by residual coherence (RobustNeRF, Sabour et al. 2023): large coherent unexplained regions per view stop being supervised; 4.6 dB better where a transient was in a synthetic test | `loss::transient_mask`, `FitCfg::transients` | done (opt-in) |
+| Semantic dynamic-object masks from SAM 2 (`crates/sam2` exists) wired into `TargetView::mask` | `recon` | planned |
 | Mesh extraction: GOF opacity-field + marching tetrahedra, SuGaR-style Poisson, visibility Delaunay; texture baking | new crate | planned |
 
 ### Density control
@@ -67,9 +71,11 @@ the specification it is built from - see **Provenance** for what that means.
 |---|---|---|
 | Heuristic clone/split/prune (3DGS) with AbsGS homodirectional gradient (Ye et al., 2024) | `opt.rs::densify`, `splat_grad_reduce.wgsl` | done |
 | 3DGS-MCMC relocation + SGLD noise + budget (Kheradmand et al., NeurIPS 2024) | `mcmc.rs` | done |
-| **Hybrid credit-assigned controller**: per-gaussian contribution `U=Σ Tα`, residual responsibility `R=Σ Tα r / U`, edge-weighted responsibility, visibility count, AbsGS gradient; percentile-normalized scores; moment-preserving long-axis split (ImprovedGS-style, Deng et al. 2026); recovery-aware two-round pruning; budgeted growth schedule `N_target(t)` (Taming 3DGS, Mallick et al. 2024); relocation of reclaimed slots | `density.rs`, `Densify::Hybrid` | done |
-| Geometry-residual gating (don't densify an appearance-only error: high RGB, low depth/normal residual) | `density.rs` | planned (needs a depth prior per view; the signal slot exists) |
-| Spawn into uncovered high-residual pixels (unproject from the depth prior) | `density.rs` | planned |
+| **Hybrid credit-assigned controller**: per-gaussian contribution `U=Σ Tα`, residual responsibility `R=Σ Tα r / U`, edge-weighted responsibility, visibility count, AbsGS gradient; percentile-normalized scores; moment-preserving long-axis split (ImprovedGS-style, Deng et al. 2026); recovery-aware pruning on a starvation record (exponential average, reclaimed at 0.6); budgeted growth schedule `N_target(t)` (Taming 3DGS, Mallick et al. 2024); relocation of reclaimed slots | `density.rs`, `Densify::Hybrid` | done |
+| Geometric evidence: the credited residual includes `|ln(rendered / prior range)|` where a view has a range prior | `density::range_residual` | done |
+| Spawn into residual pixels where the scene is empty or at the wrong depth, placed by the range prior (or the rendered range), budgeted by the residual share they carry | `density::Site`, `opt::residual_sites` | done |
+| Children of flat gaussians displaced across their surface only | `density::in_surface` | done |
+| Per-gaussian SH degree from its own views (count and angular spread) | `sh::supported_coefficients`, `splat_sh.wgsl` limit | done |
 | Low-texture coverage (large thin surface-aligned gaussians on walls) | `density.rs` | planned |
 
 ### Capture, SfM, calibration (upstream of `fit`)
@@ -80,15 +86,16 @@ the specification it is built from - see **Provenance** for what that means.
 | Pair selection by retrieval: VLAD (intra-normalized, power-normalized) over the RootSIFT already computed, vocabulary by k-means on the capture itself (no weights), top-k per image plus capture-order neighbours; exhaustive up to 24 photographs | `sfm::retrieval`, `SfmCfg::pairs` | done |
 | Global initializer (GLOMAP-style): relative rotations re-estimated through the swept focal length, robust rotation averaging (max spanning tree, then L1 and Geman-McClure IRLS on the Lie algebra, CG solve), global positioning of cameras and points from bearings (BATA objective, random start, exact alternation), triangulation and bundle adjustment under a tightening error bound; incremental kept as fallback, chosen by registered views then RMS | `sfm::{rotation, positioning}`, `incremental::Solver::global` | done |
 | Metric scale + gravity: WGS84 -> local ENU, Umeyama Sim(3) in LO-RANSAC from camera centres to fixes (refused when the fixes' misfit exceeds 10% of their spread), gravity from the cameras' horizontal axes (robust), held exactly in the Sim(3) when known; `Reconstruction::{gauge, up}`; `splat::orient::upright_along` / `TrainingSet::upright` land the known up | `sfm::georef`, `recon::photogrammetry` | done |
-| Photographs -> undistorted pinhole targets + masks + point-cloud init; `brain splat sfm`, `brain splat train` | `recon::photogrammetry`, `splat::init`, `cli/splat_cli.rs` | done |
+| Photographs -> targets exactly as recorded through their own lens (masked where it has no ray), exact halvings, landed upright, dense stereo priors and start; one pipeline for `brain splat train`, the SDK and the sample, with automatic steps and budget | `recon::photogrammetry::reconstruct` | done |
 | Frame selection (sharpness + near-duplicate) | `crates/recon/src/select.rs` | done (baseline; not yet wired into `train`) |
-| Pose refinement inside the fit | `opt.rs`, `FitCfg::pose_lr` | done |
+| Pose, rolling-shutter and calibration (focal, principal point, distortion) refinement inside the fit, gauge fixed | `opt.rs`, `FitCfg::camera` | done (off in the presets until measured to help) |
 | Per-image or mixed cameras (today one camera and one zoom for the whole capture), principal point refinement | `sfm` | planned |
 | Device SIFT and matching (host today: ~35 s of a 51 s run on 16 photos is features + all-pairs matching) | kernels | planned |
 | Staged calibration inside the fit (poses -> shared intrinsics -> distortion) with SfM priors; video pose smoothness | `opt.rs` | planned |
 | ALIKED + LightGlue/LoMa matching, MAGSAC++, 360° as a cubemap rig | `sfm` | planned |
 | IMU gravity (per-photo accelerometer, where a container records it) | `sfm::georef` | planned |
-| Parallel feature extraction across photographs (94 s of 16 x 8 MP today, serial over photographs) and parallel pair matching | `sfm` | planned |
+| Feature extraction parallel across photographs as well as within one: 94-141 s -> 13.3 s for 16 x 8 MP, same reconstruction | `sfm::incremental` | done |
+| Parallel pair matching (now the largest SfM cost, ~200 s for 120 pairs at 8000 features) | `sfm` | planned |
 | Global SfM measured on a capture that breaks the incremental path (drift over a long walk); the chessboard registers fully either way | `sfm` | planned |
 
 Measured on the 16-photo chessboard capture (3264x2448 ultrawide, network
@@ -110,6 +117,32 @@ from the normal of the chessboard's plane (83% of the points); the network
 GPS (arc-second cells, ~1 m misfit over ~1 m of camera spread) is refused,
 as it should be. Features (94-141 s) are now the largest cost.
 
+### Held-out quality on the chessboard capture
+
+16 phone photographs (ultrawide, fisheye lens), every fourth held out (12
+fitted), 816x612, 3000 steps, one P40 (`crates/recon/examples/photo_holdout.rs`):
+
+| pipeline | held-out PSNR / SSIM | training PSNR | time |
+|---|---|---|---|
+| undistorted pinhole targets, sparse start (before) | 13.83 dB / - | 30.96 dB | - |
+| native-lens targets, device optimizer, slot backward | 15.10 / 0.433 | 27.82 | 3421 s |
+| same, tile backward, sparse start | 15.12 / 0.449 | 26.19 | 337 s |
+| dense stereo start and priors | 16.89 / 0.574 | 24.71 | 969 s |
+| + spawning, geometric evidence, per-gaussian SH | 16.93 / 0.577 | 25.44 | 923 s |
+| priors weighted 0.3 / 0.1 instead of 0.1 / 0.05 | 16.72 / 0.574 | 24.62 | 1376 s |
+| + environment (degree 6) | 16.88 / 0.591 | 24.89 | (shared GPU) |
+| + pose refinement from 20%, calibration from 50% | 16.82 / 0.558 | 23.97 | 1008 s |
+
+Refining the cameras loses here: structure from motion already fits these
+photographs to 0.64 px, and the refinement trades scene quality for pose
+changes the held-out views do not confirm. The presets leave it off.
+
+What remains wrong in held-out views is where 12 photographs do not
+constrain the scene: the frame borders (fence, deck seen by one or two
+views), the glass table (transparent and reflective), and the thin chess
+pieces. LPIPS is not reported: it needs pretrained network weights the
+engine does not ship.
+
 ### Dense geometry (`crates/mvs`, upstream of `fit`)
 
 GPU PatchMatch multi-view stereo through the real lens (no rectification):
@@ -125,7 +158,7 @@ device time), 62 % mean coverage, 3.1 M fused points in 6 s
 | Red-black adaptive propagation, joint view selection, refinement, bilateral NCC through any lens | `mvs_pm.wgsl` | done |
 | Coarse-to-fine pyramid with geometric consistency; consistency filter | `mvs::stereo`, `mvs_upsample.wgsl`, `mvs_filter.wgsl` | done |
 | Fusion (gather-only ownership by finest footprint), surface-aligned splat init | `mvs::fuse`, `mvs::init` | done |
-| Wire into `recon::photogrammetry` / `brain splat train`: `TargetView::{depth, depth_conf, normals}` from `DepthMap` and the start scene from `to_splats`; judge on held-out views | `recon` | planned |
+| Wired into `recon::photogrammetry` (`TrainingSet::densify`, `dense`) and the pipeline: every target's range, normal and confidence priors, the fused start; stereo on training photographs only when judging held-out views | `recon` | done |
 | Truly textureless surfaces (planar priors, Xu & Tao AAAI 2020). Keeping zero-texture pixels on geometric consistency alone was measured wrong: a plane propagated into empty background is consistent in every view, 13.5 % of a synthetic view's measurements landed off the surface | `mvs` | planned |
 | CPU backend: the `mvs_*` kernels use vector/struct locals and helper functions the CPU JIT does not lower yet | `wgsl-cpu` | blocked |
 | Second P40: split a sweep's views across devices (each view then reads its sources' maps from the previous sweep rather than in order) | `mvs::stereo` | planned |
