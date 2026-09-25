@@ -205,3 +205,53 @@ fn a_head_only_save_is_refused_only_once_the_encoder_has_actually_moved() {
 
     let _ = std::fs::remove_file(path);
 }
+
+/// The gradient `accumulate_kept` leaves in the seed buffer must describe THIS
+/// call, not this call plus every call before it.
+///
+/// `Features::from_parts` exists so a caller can splice in rows the encoder
+/// never produced and train whatever produced them on the gradient this pass
+/// leaves behind. That caller reads the slot rows as readily as the state
+/// rows, and the two are written by different mechanisms: the state path
+/// ASSIGNS (`row_scatter`), so a stale row is overwritten and the defect is
+/// invisible there, while the `[CLS]` path ACCUMULATES (`emb_bwd`). Without a
+/// clear, the second identical step reports twice the first step's slot
+/// gradient, the tenth reports ten times, and an external projector trained on
+/// it is following a number that grows without bound.
+///
+/// Running the SAME features through the SAME objective twice is what makes
+/// that visible: nothing between the two calls changes any weight, so the two
+/// gradients have to be identical.
+#[test]
+fn the_kept_path_leaves_this_steps_gradient_not_a_running_sum() {
+    let Some(mut m) = tiny_model(true) else { return };
+    let q = question();
+    let (_, kept) = m.score_keeping("hp 40 ammo 2 | demon range 1", &q).expect("score_keeping");
+
+    let h = m.cfg.d_model as usize;
+    let rows = (kept.state_rows() + kept.n_slots()) as usize;
+    let seed_of = |m: &mut Decide| -> Vec<f32> {
+        m.accumulate_kept(&kept, |sc| {
+            // A fixed, non-zero score gradient, so the reverse pass has
+            // something definite to propagate on both calls.
+            (0.0, (0..sc.len()).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect())
+        })
+        .expect("accumulate_kept");
+        m.enc.gpu().read(m.enc.seed_buf(), rows * h)
+    };
+
+    let first = seed_of(&mut m);
+    let second = seed_of(&mut m);
+
+    let slots = kept.state_rows() as usize * h;
+    let magnitude: f32 = first[slots..].iter().map(|v| v.abs()).sum();
+    assert!(magnitude > 1e-6, "the slot rows got no gradient at all, so this test proves nothing");
+
+    for (i, (a, b)) in first.iter().zip(&second).enumerate() {
+        let (row, kind) = if i < slots { (i / h, "state") } else { ((i - slots) / h + kept.state_rows() as usize, "slot") };
+        assert!(
+            (a - b).abs() <= 1e-5 * (a.abs() + 1.0),
+            "{kind} row {row}: repeating an identical step changed its gradient, {a} -> {b}"
+        );
+    }
+}

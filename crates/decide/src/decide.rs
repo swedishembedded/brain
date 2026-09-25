@@ -515,6 +515,27 @@ impl Decide {
         let scores = self.head.forward();
         let (l, d_score) = objective(&scores);
         assert_eq!(d_score.len(), scores.len(), "one score gradient per option");
+        // Cleared even though THIS crate never reads the result: the two
+        // halves of the seed buffer are written differently, and only one of
+        // them is self-correcting. `Head::backward`'s state path ASSIGNS
+        // (`row_scatter`), so a stale state row is overwritten; its `[CLS]`
+        // path ACCUMULATES (`emb_bwd`), so without this every slot row would
+        // carry the running SUM of every step taken before it.
+        //
+        // That matters here and nowhere else in this crate. `Features::from_parts`
+        // exists so a caller can splice in rows the encoder never produced and
+        // train whatever produced them on the gradient this pass leaves behind -
+        // and such a caller reads the slot rows as readily as the state rows.
+        // The other two `clear_seed` sites are guarded by `!frozen_encoder`,
+        // which is exactly the condition this path requires, so neither of
+        // them can ever cover it.
+        //
+        // One clear per call, unlike `accumulate_batch`'s once-per-pass: this
+        // path carries a single example, so there is no sibling example whose
+        // gradient a clear here could erase.
+        if let Some(seed) = seed {
+            self.head.clear_seed(seed);
+        }
         self.head.backward(&d_score);
         self.head.poll_wait();
         Ok(l)
