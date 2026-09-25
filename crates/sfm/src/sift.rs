@@ -5,7 +5,9 @@
 //! "Distinctive Image Features from Scale-Invariant Keypoints" (IJCV 2004):
 //!
 //! 1. a gaussian scale space, `S = 3` intervals per octave from `σ0 = 1.6`,
-//!    the input assumed pre-blurred by `0.5`;
+//!    the input assumed pre-blurred by `0.5` and first doubled in size
+//!    (§3.3: it multiplies the stable keypoints by almost four, all of them
+//!    fine texture, which is where most of a capture's correspondences are);
 //! 2. extrema of the difference-of-gaussians in 3x3x3 neighbourhoods,
 //!    refined to sub-sample accuracy by a quadratic fit (§4), rejected when
 //!    low-contrast or edge-like (principal-curvature ratio above 10, §4.1);
@@ -50,11 +52,14 @@ pub struct SiftCfg {
     pub contrast: f32,
     /// Principal-curvature ratio above which an extremum is an edge.
     pub edge_ratio: f32,
+    /// Build the first octave from the input doubled in size (Lowe §3.3), so
+    /// features finer than `σ0` on the input are found.
+    pub upsample: bool,
 }
 
 impl Default for SiftCfg {
     fn default() -> Self {
-        SiftCfg { max_features: 8000, contrast: 0.04, edge_ratio: 10.0 }
+        SiftCfg { max_features: 8000, contrast: 0.04, edge_ratio: 10.0, upsample: true }
     }
 }
 
@@ -114,6 +119,22 @@ fn blur(p: &Plane, sigma: f32) -> Plane {
     Plane { w, h, px: out }
 }
 
+/// Twice the size, sample `2i` being input pixel `i` and `2i+1` the mean of
+/// its neighbours: so [`half`] of the result is the input again, and every
+/// octave keeps pixel `x` at input position `x * 2^octave` exactly.
+fn double(p: &Plane) -> Plane {
+    let (w, h) = (2 * p.w, 2 * p.h);
+    let mut px = vec![0.0f32; w * h];
+    for y in 0..h {
+        let (y0, y1) = (y / 2, y.div_ceil(2).min(p.h - 1));
+        for x in 0..w {
+            let (x0, x1) = (x / 2, x.div_ceil(2).min(p.w - 1));
+            px[y * w + x] = 0.25 * (p.at(x0, y0) + p.at(x1, y0) + p.at(x0, y1) + p.at(x1, y1));
+        }
+    }
+    Plane { w, h, px }
+}
+
 fn half(p: &Plane) -> Plane {
     let (w, h) = (p.w / 2, p.h / 2);
     let mut px = vec![0.0f32; w * h];
@@ -130,9 +151,17 @@ fn half(p: &Plane) -> Plane {
 /// `[k*128]`.
 pub fn detect(gray: &[f32], w: usize, h: usize, cfg: &SiftCfg) -> (Vec<Keypoint>, Vec<f32>) {
     assert_eq!(gray.len(), w * h);
-    let base = Plane { w, h, px: gray.to_vec() };
-    let first = (SIGMA0 * SIGMA0 - INPUT_BLUR * INPUT_BLUR).sqrt();
-    let mut cur = blur(&base, first);
+    let mut base = Plane { w, h, px: gray.to_vec() };
+    let mut have = INPUT_BLUR;
+    // input pixels per pixel of octave 0
+    let base_scale = if cfg.upsample {
+        base = double(&base);
+        have *= 2.0;
+        0.5
+    } else {
+        1.0
+    };
+    let mut cur = blur(&base, (SIGMA0 * SIGMA0 - have * have).sqrt());
     let k = 2f32.powf(1.0 / S as f32);
     let steps: Vec<f32> = (1..S + 3)
         .map(|i| {
@@ -154,7 +183,7 @@ pub fn detect(gray: &[f32], w: usize, h: usize, cfg: &SiftCfg) -> (Vec<Keypoint>
             .windows(2)
             .map(|p| Plane { w: p[0].w, h: p[0].h, px: p[1].px.iter().zip(&p[0].px).map(|(a, b)| a - b).collect() })
             .collect();
-        let scale = (1u32 << octave) as f32;
+        let scale = base_scale * (1u32 << octave) as f32;
         for kp in extrema(&dog, cfg) {
             // (x, y, interval, response) in octave coordinates
             let local_sigma = SIGMA0 * 2f32.powf(kp.2 / S as f32);
@@ -176,7 +205,7 @@ pub fn detect(gray: &[f32], w: usize, h: usize, cfg: &SiftCfg) -> (Vec<Keypoint>
     found.truncate(cfg.max_features);
     let desc: Vec<Vec<f32>> = backend_cpu::par::map(found.len(), |i| {
         let (kp, o, ls) = found[i];
-        let scale = (1u32 << o) as f32;
+        let scale = base_scale * (1u32 << o) as f32;
         let interval = (S as f32 * (ls / SIGMA0).log2()).round() as usize;
         descriptor(&octaves[o][interval.clamp(0, S + 2)], (kp.x - 0.5) / scale, (kp.y - 0.5) / scale, ls, kp.angle)
     });
@@ -249,7 +278,10 @@ fn refine(dog: &[Plane], mut x: usize, mut y: usize, mut s: usize, cfg: &SiftCfg
         // offset = -H^-1 g
         let inv = inverse3(&hm, det);
         let off: [f64; 3] = std::array::from_fn(|r| -(inv[r * 3] * g[0] as f64 + inv[r * 3 + 1] * g[1] as f64 + inv[r * 3 + 2] * g[2] as f64));
-        if off.iter().all(|o| o.abs() < 0.5) {
+        // Accept up to 0.6 rather than 0.5, as VLFeat does: an extremum
+        // exactly between two samples has offsets of +-0.5 from both, and
+        // stepping on 0.5 bounces between them until the iterations run out.
+        if off.iter().all(|o| o.abs() < 0.6) {
             let val = v as f64 + 0.5 * (g[0] as f64 * off[0] + g[1] as f64 * off[1] + g[2] as f64 * off[2]);
             if val.abs() < (cfg.contrast / S as f32) as f64 {
                 return None;
