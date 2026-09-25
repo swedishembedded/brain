@@ -160,8 +160,13 @@ novel views.
 End to end through the SDK (`samples/reconstruction/splat`) on all 16
 photographs at 1632x1224: structure from motion 155 s (features in parallel,
 descriptors matched on the device; 261 s before), stereo 68 s (3.14 M
-points, 62% of pixels measured), then 4000 steps from 3.14 M gaussians
-within a budget of 3.93 M.
+points, 62% of pixels measured), then 4000 steps. With the automatic
+budget (3.93 M from a 3.14 M start) the fit needs more than the ~8 GB a
+P40 shared with other work had free; with `--max-gaussians 2000000` (start
+thinned to 1.6 M) it held ~6.4 GB and finished in 3095 s. The remaining
+visible faults: the top border of the ultrawide frames (a fence seen
+obliquely at the lens's edge) stays soft, and regions no photograph covers
+render as background.
 
 Refining the cameras loses here: structure from motion already fits these
 photographs to 0.64 px, and the refinement trades scene quality for pose
