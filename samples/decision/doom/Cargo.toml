@@ -43,4 +43,9 @@ libc = { workspace = true }
 # episodes) and a sample that trains itself in a loop needs one, because a
 # loop with no gate adopts a worse generation exactly as readily as a better
 # one. brain-promote's own dependencies were all in the closure already.
-max-brain-crates = 36
+# 36 -> 37: not a dependency this sample added, but the transitive closure
+# growing under the decision+viewport surfaces as crates/sdk picked up new
+# re-exported surfaces. Measured via scripts/gates/check-samples.sh against
+# the actual current closure; samples/decision/rubiks and
+# samples/learning/visualclick carry the same combination at the same 37.
+max-brain-crates = 37

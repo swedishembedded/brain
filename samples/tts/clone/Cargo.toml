@@ -40,4 +40,8 @@ rodio = { version = "0.22", default-features = false, features = ["playback"] }
 # 68 -> 69: `brain-rlcd` joined, by the same shape one level along - it
 # arrives `rlcd <- eval <- npu <- qwen3tts`, so re-exporting `rlcd::metrics`
 # from `eval` added it to every consumer of the audio surface.
-max-brain-crates = 69
+# 69 -> 70: `brain-sfm` joined, by the same shape again - it arrives
+# `sfm <- recon <- worldmirror2 <- npu <- qwen3tts`, so adding structure from
+# motion to recon added it to every consumer of the audio surface. Measured
+# via scripts/gates/check-samples.sh against the actual current closure.
+max-brain-crates = 70
