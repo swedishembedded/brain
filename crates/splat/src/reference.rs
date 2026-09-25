@@ -176,3 +176,167 @@ pub fn render(s: &Splats, cam: &Camera, o: &RenderOpts) -> Vec<f32> {
     }
     img
 }
+
+/// One gaussian as the ray renderer sees it from a camera, in f64: its mean
+/// in the camera frame, the precision of its filtered covariance, the
+/// compensated opacity and its camera-facing normal.
+#[derive(Clone, Copy, Debug)]
+pub struct RayGaussian {
+    pub index: usize,
+    pub m: [f64; 3],
+    pub a: [[f64; 3]; 3],
+    pub opacity: f64,
+    pub normal: [f64; 3],
+    pub range: f64,
+}
+
+/// [`RayGaussian`] of gaussian `i` under `filter3d` (a variance, 0 = none),
+/// or `None` where `splat_ray_project.wgsl` culls it for depth or opacity.
+/// Image-space bounds are not modelled: the oracle evaluates every gaussian
+/// at every pixel, so a bound that clips something visible shows up as a
+/// difference instead of being reproduced.
+pub fn ray_gaussian(s: &Splats, i: usize, filter3d: f64, cam: &Camera, o: &RenderOpts) -> Option<RayGaussian> {
+    let v = cam.viewmat().map(|x| x as f64);
+    let mw = [s.means[i * 3] as f64, s.means[i * 3 + 1] as f64, s.means[i * 3 + 2] as f64];
+    let m: [f64; 3] = std::array::from_fn(|r| v[r * 4] * mw[0] + v[r * 4 + 1] * mw[1] + v[r * 4 + 2] * mw[2] + v[r * 4 + 3]);
+    let range = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+    if cam.lens.is_perspective() {
+        if m[2] < o.near as f64 || m[2] > o.far as f64 {
+            return None;
+        }
+    } else if range < o.near as f64 || range > o.far as f64 {
+        return None;
+    }
+    let q: [f64; 4] = std::array::from_fn(|k| s.quats[i * 4 + k] as f64);
+    let qn = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt() + 1e-8;
+    let (w, x, y, z) = (q[0] / qn, q[1] / qn, q[2] / qn, q[3] / qn);
+    let cols = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)],
+        [2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x)],
+        [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let ax: Vec<[f64; 3]> = cols
+        .iter()
+        .map(|c| std::array::from_fn(|r| v[r * 4] * c[0] + v[r * 4 + 1] * c[1] + v[r * 4 + 2] * c[2]))
+        .collect();
+    let sv: [f64; 3] = std::array::from_fn(|k| s.scales[i * 3 + k] as f64);
+    let lf: [f64; 3] = std::array::from_fn(|k| sv[k] * sv[k] + filter3d);
+    let c3 = if filter3d > 0.0 { ((0..3).map(|k| sv[k] * sv[k] / lf[k]).product::<f64>()).sqrt() } else { 1.0 };
+    let ppr = cam.intrinsics().pixels_per_radian(m)?;
+    let fp = o.eps2d as f64 * (range / ppr).powi(2);
+    let mut op = s.opacities[i] as f64 * c3;
+    if o.antialiased {
+        let nh = [m[0] / range, m[1] / range, m[2] / range];
+        let c: Vec<f64> = ax.iter().map(|a| a[0] * nh[0] + a[1] * nh[1] + a[2] * nh[2]).collect();
+        let det: f64 = lf.iter().product();
+        let dd = det * (0..3).map(|k| c[k] * c[k] / lf[k]).sum::<f64>();
+        let tt = lf.iter().sum::<f64>() - (0..3).map(|k| c[k] * c[k] * lf[k]).sum::<f64>();
+        op *= (dd / (dd + fp * tt + fp * fp)).sqrt();
+    }
+    if op < 1.0 / 255.0 {
+        return None;
+    }
+    let mut a = [[0.0f64; 3]; 3];
+    for k in 0..3 {
+        let wk = 1.0 / (lf[k] + fp);
+        for r in 0..3 {
+            for c in 0..3 {
+                a[r][c] += wk * ax[k][r] * ax[k][c];
+            }
+        }
+    }
+    let kmin = if sv[0] <= sv[1] && sv[0] <= sv[2] { 0 } else if sv[1] <= sv[2] { 1 } else { 2 };
+    let mut normal = ax[kmin];
+    if normal[0] * m[0] + normal[1] * m[1] + normal[2] * m[2] > 0.0 {
+        normal = normal.map(|v| -v);
+    }
+    Some(RayGaussian { index: i, m, a, opacity: op, normal, range })
+}
+
+/// The ray pixel `(px, py)` casts in the mid-frame camera: origin and unit
+/// direction, `None` where the lens has no ray.
+pub fn pixel_ray(cam: &Camera, px: f64, py: f64) -> Option<([f64; 3], [f64; 3])> {
+    let d = cam.intrinsics().unproject([px, py])?;
+    let tau = py / cam.height as f64 - 0.5;
+    let w: [f64; 3] = std::array::from_fn(|k| tau * cam.shutter[k] as f64);
+    let o: [f64; 3] = std::array::from_fn(|k| tau * cam.shutter[3 + k] as f64);
+    Some((o, rotate(w, d)))
+}
+
+fn rotate(w: [f64; 3], x: [f64; 3]) -> [f64; 3] {
+    let th = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+    if th < 1e-12 {
+        return x;
+    }
+    let k = [w[0] / th, w[1] / th, w[2] / th];
+    let (c, s) = (th.cos(), th.sin());
+    let kx = [k[1] * x[2] - k[2] * x[1], k[2] * x[0] - k[0] * x[2], k[0] * x[1] - k[1] * x[0]];
+    let kd = k[0] * x[0] + k[1] * x[1] + k[2] * x[2];
+    std::array::from_fn(|r| x[r] * c + kx[r] * s + k[r] * kd * (1.0 - c))
+}
+
+/// The ray renderer, in f64 and without tiles: `(rgba [W*H*4], aux
+/// [W*H*5])` exactly as `splat_ray_rasterize.wgsl` defines them - compositing
+/// in order of range to the mean, which is the order the device's sort keys
+/// produce within every tile.
+pub fn render_ray(s: &Splats, filter3d: &[f32], cam: &Camera, o: &RenderOpts) -> (Vec<f32>, Vec<f32>) {
+    let mut gs: Vec<RayGaussian> = (0..s.len())
+        .filter_map(|i| ray_gaussian(s, i, filter3d.get(i).copied().unwrap_or(0.0) as f64, cam, o))
+        .collect();
+    gs.sort_by(|a, b| (a.range as f32).total_cmp(&(b.range as f32)).then(a.index.cmp(&b.index)));
+    let (w, h) = (cam.width as usize, cam.height as usize);
+    let mut img = vec![0.0f32; w * h * 4];
+    let mut aux = vec![0.0f32; w * h * 5];
+    for py in 0..h {
+        for px in 0..w {
+            let pix = py * w + px;
+            let mut t = 1.0f64;
+            let (mut c, mut nsum) = ([0.0f64; 3], [0.0f64; 3]);
+            let (mut dsum, mut wsum, mut dist) = (0.0f64, 0.0f64, 0.0f64);
+            if let Some((org, d)) = pixel_ray(cam, px as f64 + 0.5, py as f64 + 0.5) {
+                for g in &gs {
+                    let dm: [f64; 3] = std::array::from_fn(|k| g.m[k] - org[k]);
+                    let ad: [f64; 3] = std::array::from_fn(|r| (0..3).map(|k| g.a[r][k] * d[k]).sum());
+                    let vv: f64 = (0..3).map(|k| d[k] * ad[k]).sum();
+                    if vv <= 0.0 {
+                        continue;
+                    }
+                    let tt = (0..3).map(|k| dm[k] * ad[k]).sum::<f64>() / vv;
+                    if tt <= 0.0 {
+                        continue;
+                    }
+                    let e: [f64; 3] = std::array::from_fn(|k| dm[k] - tt * d[k]);
+                    let q: f64 = (0..3).map(|r| (0..3).map(|k| e[r] * g.a[r][k] * e[k]).sum::<f64>()).sum();
+                    let alpha = (g.opacity * (-0.5 * q).exp()).min(0.99);
+                    if alpha < 1.0 / 255.0 {
+                        continue;
+                    }
+                    let next = t * (1.0 - alpha);
+                    if next <= 1e-4 {
+                        break;
+                    }
+                    let wgt = alpha * t;
+                    for k in 0..3 {
+                        c[k] += wgt * s.colors[g.index * 3 + k] as f64;
+                        nsum[k] += wgt * g.normal[k];
+                    }
+                    dist += 2.0 * wgt * (tt * wsum - dsum);
+                    dsum += wgt * tt;
+                    wsum += wgt;
+                    t = next;
+                }
+            }
+            for k in 0..3 {
+                img[pix * 4 + k] = (c[k] + t * o.bg[k] as f64) as f32;
+            }
+            let a = 1.0 - t;
+            img[pix * 4 + 3] = a as f32;
+            aux[pix * 5] = if a > 1e-6 { (dsum / a) as f32 } else { 0.0 };
+            for k in 0..3 {
+                aux[pix * 5 + 1 + k] = nsum[k] as f32;
+            }
+            aux[pix * 5 + 4] = dist as f32;
+        }
+    }
+    (img, aux)
+}

@@ -318,16 +318,16 @@ fn a_scratch_too_small_for_the_scene_grows_instead_of_aborting() {
 fn a_scene_too_dense_for_one_binding_says_so_in_its_own_terms() {
     // what wgpu actually reports on this class of card: i32::MAX rounded down
     let limit = 2_147_483_644u64;
-    let fits = splat::renderer::max_records_for_binding(limit);
+    let fits = splat::renderer::max_records_for_binding(limit, splat::renderer::RECORD_WORDS);
     assert_eq!(fits, limit as usize / (splat::renderer::RECORD_WORDS * 4));
 
-    let err = splat::renderer::record_capacity(fits + 1, limit)
+    let err = splat::renderer::record_capacity(fits + 1, limit, splat::renderer::RECORD_WORDS)
         .expect_err("a count past the binding limit must not be silently allocated");
     for want in ["gradient record", "instances", "--prune", "2047 MiB"] {
         assert!(err.contains(want), "message {err:?} does not mention {want:?}");
     }
     // One below the limit is allocatable, and headroom never pushes it over.
-    let cap = splat::renderer::record_capacity(fits - 1, limit).expect("fits");
+    let cap = splat::renderer::record_capacity(fits - 1, limit, splat::renderer::RECORD_WORDS).expect("fits");
     assert!(cap <= fits, "headroom grew the capacity past the binding limit ({cap} > {fits})");
     assert!(cap >= fits - 1, "capacity {cap} is below what the pass needs");
 }
@@ -403,7 +403,7 @@ fn band_equivalence(g: &Gpu, band: u64) {
     };
 
     let (whole, n_whole) = run(0);
-    let squeezed = band * splat::renderer::slot_bytes_per_instance();
+    let squeezed = band * splat::renderer::slot_bytes_per_instance(splat::renderer::SLOT_CHANNELS);
     let (banded, n_banded) = run(squeezed);
     assert!(
         n_whole as u64 > band,
@@ -521,7 +521,7 @@ fn the_mip_filters_opacity_compensation_is_differentiated() {
 fn the_starting_record_buffer_fits_one_binding() {
     let limit = 2047u64 << 20;
     let cap = splat::renderer::initial_record_capacity(8 << 20, 0, limit);
-    assert!(cap <= splat::renderer::max_records_for_binding(limit), "{cap} records do not fit one binding");
+    assert!(cap <= splat::renderer::max_records_for_binding(limit, splat::renderer::RAY_RECORD_WORDS), "{cap} records do not fit one binding");
     // and a small scene still gets its full default
     assert_eq!(splat::renderer::initial_record_capacity(1000, 0, limit), 1 << 16);
 }

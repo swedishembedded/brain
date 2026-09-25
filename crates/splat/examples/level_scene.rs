@@ -13,14 +13,8 @@
 use splat::types::Camera;
 
 fn read_cameras(path: &str) -> Vec<Camera> {
-    let j: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    j.as_array().unwrap().iter().map(|c| Camera {
-        c2w: c["c2w"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32)
-            .collect::<Vec<f32>>().try_into().unwrap(),
-        fx: c["fx"].as_f64().unwrap() as f32, fy: c["fy"].as_f64().unwrap() as f32,
-        cx: c["cx"].as_f64().unwrap() as f32, cy: c["cy"].as_f64().unwrap() as f32,
-        width: c["width"].as_u64().unwrap() as u32, height: c["height"].as_u64().unwrap() as u32,
-    }).collect()
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    splat::types::cameras_from_json(&raw).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
 fn main() {

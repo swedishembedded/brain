@@ -3,8 +3,10 @@
 
 //! 3D Gaussian Splatting for brain: scene IO (Inria `.ply`), the generic
 //! device scan / radix-sort primitives (brain's first — reusable beyond
-//! splatting), and the tiled fp32 rasterizer built from atomic-free,
-//! barrier-free WGSL kernels so the same source runs on wgpu and the CPU JIT.
+//! splatting), and the tiled fp32 rasterizer built from atomic-free WGSL
+//! kernels so the same source runs on wgpu and the CPU JIT - in two
+//! evaluations: the EWA splat of the original 3DGS, and exact per-ray
+//! evaluation through any lens ([`types::RenderOpts::ray`]).
 //!
 //! The kernel list is exposed as [`PIPELINES`] plus the positional
 //! [`Kernels`] resolver so a host binary can compose it after its own model
@@ -59,6 +61,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("l1ssim_map_v", kernels::L1SSIM_MAP_V),
     ("l1ssim_partials_h", kernels::L1SSIM_PARTIALS_H),
     ("l1ssim_grad_v", kernels::L1SSIM_GRAD_V),
+    ("splat_ray_project", kernels::SPLAT_RAY_PROJECT),
+    ("splat_ray_rasterize", kernels::SPLAT_RAY_RASTERIZE),
+    ("splat_ray_bwd_slots", kernels::SPLAT_RAY_BWD_SLOTS),
+    ("splat_ray_project_bwd", kernels::SPLAT_RAY_PROJECT_BWD),
+    ("splat_ray_camera_grad", kernels::SPLAT_RAY_CAMERA_GRAD),
 ];
 
 /// Positional kernel indices into a `Gpu` whose pipeline list contains
@@ -89,6 +96,11 @@ pub struct Kernels {
     pub l1ssim_map_v: usize,
     pub l1ssim_partials_h: usize,
     pub l1ssim_grad_v: usize,
+    pub splat_ray_project: usize,
+    pub splat_ray_rasterize: usize,
+    pub splat_ray_bwd_slots: usize,
+    pub splat_ray_project_bwd: usize,
+    pub splat_ray_camera_grad: usize,
 }
 
 impl Kernels {
@@ -120,6 +132,11 @@ impl Kernels {
             l1ssim_map_v: base + 21,
             l1ssim_partials_h: base + 22,
             l1ssim_grad_v: base + 23,
+            splat_ray_project: base + 24,
+            splat_ray_rasterize: base + 25,
+            splat_ray_bwd_slots: base + 26,
+            splat_ray_project_bwd: base + 27,
+            splat_ray_camera_grad: base + 28,
         }
     }
 }

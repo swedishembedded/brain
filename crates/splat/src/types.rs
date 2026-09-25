@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Host-side scene types: Gaussians (post-activation SoA), the OpenCV pinhole
-//! camera, and render options. Conventions match gsplat/WorldMirror: +X right,
-//! +Y down, +Z forward; `c2w` is camera-to-world (SE(3), row-major 4×4); the
+//! Host-side scene types: Gaussians (post-activation SoA), the camera, and
+//! render options. Conventions match gsplat/WorldMirror: +X right, +Y down,
+//! +Z forward; `c2w` is camera-to-world (SE(3), row-major 4×4); the
 //! rasterizer consumes the world-to-camera rows from [`Camera::viewmat`].
 
-/// Pinhole camera, OpenCV convention.
+pub use camera::Lens;
+
+/// A camera: pose, the linear intrinsics `fx fy cx cy` in pixels (continuous
+/// coordinates, pixel `i`'s centre at `i + 0.5`), the lens, and the image
+/// size. The EWA renderer understands the pinhole part only; the ray renderer
+/// ([`RenderOpts::ray`]) images through [`Camera::lens`] and
+/// [`Camera::shutter`] exactly.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
-    /// Camera-to-world, row-major 4×4 (last row 0 0 0 1). Must be rigid.
+    /// Camera-to-world, row-major 4×4 (last row 0 0 0 1). Must be rigid. For
+    /// a rolling-shutter camera, the pose at the MIDDLE of the readout.
     pub c2w: [f32; 16],
     pub fx: f32,
     pub fy: f32,
@@ -17,9 +24,62 @@ pub struct Camera {
     pub cy: f32,
     pub width: u32,
     pub height: u32,
+    /// Distortion beyond the pinhole map.
+    pub lens: Lens,
+    /// Rolling shutter: the camera's motion over the readout, as a twist in
+    /// its own frame `(angular [3], linear [3])` per frame height. The row at
+    /// continuous `v` is exposed at `tau = v / height - 1/2`, from the pose
+    /// `c2w · [Exp(tau·angular) | tau·linear]`. Zero is a global shutter.
+    pub shutter: [f32; 6],
 }
 
 impl Camera {
+    /// A global-shutter pinhole camera.
+    pub fn pinhole(c2w: [f32; 16], fx: f32, fy: f32, cx: f32, cy: f32, width: u32, height: u32) -> Camera {
+        Camera { c2w, fx, fy, cx, cy, width, height, lens: Lens::Pinhole, shutter: [0.0; 6] }
+    }
+
+    /// A global-shutter camera with calibration `k`.
+    pub fn with_intrinsics(c2w: [f32; 16], k: &camera::Intrinsics) -> Camera {
+        Camera {
+            c2w,
+            fx: k.fx as f32,
+            fy: k.fy as f32,
+            cx: k.cx as f32,
+            cy: k.cy as f32,
+            width: k.width,
+            height: k.height,
+            lens: k.lens,
+            shutter: [0.0; 6],
+        }
+    }
+
+    /// This camera's calibration.
+    pub fn intrinsics(&self) -> camera::Intrinsics {
+        camera::Intrinsics {
+            fx: self.fx as f64,
+            fy: self.fy as f64,
+            cx: self.cx as f64,
+            cy: self.cy as f64,
+            lens: self.lens,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// Whether the EWA renderer's linear pinhole model is this camera
+    /// exactly: no lens distortion and no rolling shutter.
+    pub fn is_pinhole(&self) -> bool {
+        self.lens == Lens::Pinhole && self.shutter.iter().all(|v| *v == 0.0)
+    }
+
+    /// The same camera imaging `width x height`: every continuous pixel
+    /// coordinate scales by the size ratio, so this is exact for any lens.
+    pub fn resized(&self, width: u32, height: u32) -> Camera {
+        let (sx, sy) = (width as f32 / self.width as f32, height as f32 / self.height as f32);
+        Camera { fx: self.fx * sx, fy: self.fy * sy, cx: self.cx * sx, cy: self.cy * sy, width, height, ..*self }
+    }
+
     /// World-to-camera `[R|t]` rows (rigid inverse of `c2w`):
     /// `[r00 r01 r02 tx, r10 r11 r12 ty, r20 r21 r22 tz]`.
     pub fn viewmat(&self) -> [f32; 12] {
@@ -52,13 +112,15 @@ impl Camera {
             0.0, 0.0, 0.0, 1.0,
         ];
         let fy = 0.5 * height as f32 / (0.5 * fov_y_deg.to_radians()).tan();
-        Camera { c2w, fx: fy, fy, cx: width as f32 / 2.0, cy: height as f32 / 2.0, width, height }
+        Camera::pinhole(c2w, fy, fy, width as f32 / 2.0, height as f32 / 2.0, width, height)
     }
 }
 
 /// Parse a `cameras.json` document: a JSON array of
-/// `{c2w: [16], fx, fy, cx, cy, width, height}`. The one reader - `fit` over
-/// the wire, the CLI and the tools all take cameras in this shape.
+/// `{c2w: [16], fx, fy, cx, cy, width, height}`, plus a lens (`model` and its
+/// coefficients, see `camera::Intrinsics::from_json`) and a rolling-shutter
+/// twist (`shutter: [6]`) where the camera has them. The one reader - `fit`
+/// over the wire, the CLI and the tools all take cameras in this shape.
 pub fn cameras_from_json(raw: &str) -> Result<Vec<Camera>, String> {
     let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("cameras must be a JSON array: {e}"))?;
     let arr = v.as_array().ok_or("cameras must be a JSON array")?;
@@ -72,28 +134,25 @@ pub fn cameras_from_json(raw: &str) -> Result<Vec<Camera>, String> {
                 .map(|x| x.as_f64().unwrap_or(0.0) as f32)
                 .collect();
             let c2w: [f32; 16] = c2w.try_into().map_err(|v: Vec<f32>| format!("camera {i}: 'c2w' has {} entries, expected 16", v.len()))?;
-            let get_f = |k: &str| c[k].as_f64().ok_or_else(|| format!("camera {i} has no '{k}'"));
-            let get_u = |k: &str| c[k].as_u64().ok_or_else(|| format!("camera {i} has no '{k}'"));
-            Ok(Camera {
-                c2w,
-                fx: get_f("fx")? as f32,
-                fy: get_f("fy")? as f32,
-                cx: get_f("cx")? as f32,
-                cy: get_f("cy")? as f32,
-                width: get_u("width")? as u32,
-                height: get_u("height")? as u32,
-            })
+            let k = camera::Intrinsics::from_json(c).map_err(|e| format!("camera {i}: {e}"))?;
+            let mut cam = Camera::with_intrinsics(c2w, &k);
+            if let Some(sh) = c.get("shutter") {
+                let v: Vec<f32> = sh.as_array().ok_or(format!("camera {i}: 'shutter' must be an array"))?.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect();
+                cam.shutter = v.try_into().map_err(|v: Vec<f32>| format!("camera {i}: 'shutter' has {} entries, expected 6", v.len()))?;
+            }
+            Ok(cam)
         })
         .collect()
 }
 
 /// One camera as a `cameras.json` entry.
 pub fn camera_to_json(c: &Camera) -> serde_json::Value {
-    serde_json::json!({
-        "c2w": c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
-        "fx": c.fx, "fy": c.fy, "cx": c.cx, "cy": c.cy,
-        "width": c.width, "height": c.height,
-    })
+    let mut v = c.intrinsics().to_json();
+    v["c2w"] = c.c2w.iter().map(|v| *v as f64).collect::<Vec<f64>>().into();
+    if c.shutter.iter().any(|v| *v != 0.0) {
+        v["shutter"] = c.shutter.iter().map(|v| *v as f64).collect::<Vec<f64>>().into();
+    }
+    v
 }
 
 /// The `cameras.json` document [`cameras_from_json`] reads.
@@ -210,6 +269,15 @@ pub struct RenderOpts {
     pub eps2d: f32,
     pub near: f32,
     pub far: f32,
+    /// Evaluate every gaussian exactly along each pixel's own ray through
+    /// the camera's lens (`splat_ray_*.wgsl`) instead of splatting its EWA
+    /// linearization. Required for any camera that is not a plain pinhole
+    /// (see [`Camera::is_pinhole`]), which renders this way whatever this
+    /// says; for a pinhole it is the exact image EWA approximates. The
+    /// filters then act in 3D: `eps2d` is a pixel's footprint variance at the
+    /// gaussian's range, and `antialiased` compensates it on the ray
+    /// marginal - Mip-Splatting's 2D filter, evaluated where the ray is.
+    pub ray: bool,
 }
 
 impl Default for RenderOpts {
@@ -221,6 +289,7 @@ impl Default for RenderOpts {
             eps2d: 0.3,
             near: 0.01,
             far: 1e10,
+            ray: false,
         }
     }
 }

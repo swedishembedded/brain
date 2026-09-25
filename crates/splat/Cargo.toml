@@ -10,6 +10,9 @@ name = "splat"
 path = "src/lib.rs"
 
 [dependencies]
+# `camera::{Intrinsics, Lens}` - the one lens model; the ray renderer images
+# through it.
+brain-camera.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 # `caps.rs` - the serving contract's capability surface.
@@ -20,6 +23,7 @@ serde_json.workspace = true
 brain-backend-cpu.workspace = true
 
 [dev-dependencies]
+brain-camera.workspace = true
 bytemuck.workspace = true
 brain-imaging.workspace = true
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).

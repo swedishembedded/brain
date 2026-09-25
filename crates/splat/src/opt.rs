@@ -1400,6 +1400,7 @@ fn fit_stage(
                 scales: scales.clone(),
                 opacities: p_op.clone(),
                 colors: if ksh > 0 { col_view.clone() } else { p_col.clone() },
+                filter3d: None,
             };
             let tm = std::time::Instant::now();
             renderer.render(gpu, &gs, &cam, &opts);
@@ -1742,6 +1743,7 @@ fn fit_stage(
                     scales: scales.clone(),
                     opacities: p_op.clone(),
                     colors: if ksh > 0 { col_view.clone() } else { p_col.clone() },
+                    filter3d: None,
                 };
                 renderer.render(gpu, &gs, &cam, &opts);
                 let rgb = crate::renderer::rgba_to_rgb(&renderer.read_rgba(gpu, cam.width, cam.height));
@@ -1846,6 +1848,7 @@ fn geometry_passes(
         scales: ctx.gs.scales.clone(),
         opacities: ctx.gs.opacities.clone(),
         colors: aux.feat.clone(),
+        filter3d: None,
     };
     let mut loss = 0.0f64;
     let mut pass = |feat: &[f32], build: &mut dyn FnMut(&[f32], &[f32]) -> geometry::AuxGrad| -> Vec<f32> {

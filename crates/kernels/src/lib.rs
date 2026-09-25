@@ -1004,6 +1004,36 @@ pub const SPLAT_PROJECT: &str = include_str!("../wgsl/splat_project.wgsl");
 pub const SPLAT_PROJECT_BWD: &str = include_str!("../wgsl/splat_project_bwd.wgsl");
 /// `wgsl/splat_rasterize.wgsl`
 pub const SPLAT_RASTERIZE: &str = include_str!("../wgsl/splat_rasterize.wgsl");
+/// `wgsl/splat_ray_bwd_slots.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_RAY_BWD_SLOTS: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_ray_bwd_slots.wgsl"),
+);
+/// `wgsl/splat_ray_camera_grad.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_RAY_CAMERA_GRAD: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_ray_camera_grad.wgsl"),
+);
+/// `wgsl/splat_ray_project.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_RAY_PROJECT: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_ray_project.wgsl"),
+);
+/// `wgsl/splat_ray_project_bwd.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_RAY_PROJECT_BWD: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_ray_project_bwd.wgsl"),
+);
+/// `wgsl/splat_ray_rasterize.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+pub const SPLAT_RAY_RASTERIZE: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/splat_ray_rasterize.wgsl"),
+);
 /// `wgsl/splat_sh.wgsl`
 pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
 /// `wgsl/splat_tile_count.wgsl`
@@ -1539,6 +1569,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_project", SPLAT_PROJECT),
     ("splat_project_bwd", SPLAT_PROJECT_BWD),
     ("splat_rasterize", SPLAT_RASTERIZE),
+    ("splat_ray_bwd_slots", SPLAT_RAY_BWD_SLOTS),
+    ("splat_ray_camera_grad", SPLAT_RAY_CAMERA_GRAD),
+    ("splat_ray_project", SPLAT_RAY_PROJECT),
+    ("splat_ray_project_bwd", SPLAT_RAY_PROJECT_BWD),
+    ("splat_ray_rasterize", SPLAT_RAY_RASTERIZE),
     ("splat_sh", SPLAT_SH),
     ("splat_tile_count", SPLAT_TILE_COUNT),
     ("splat_tile_ranges", SPLAT_TILE_RANGES),

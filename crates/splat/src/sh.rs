@@ -110,6 +110,7 @@ pub fn render_rgb(
         scales: gs.scales.clone(),
         opacities: gs.opacities.clone(),
         colors: g.storage_init("sh.colors", &c),
+        filter3d: gs.filter3d.clone(),
     });
     ren.render(g, shaded.as_ref().unwrap_or(gs), cam, o);
     ren.read_rgba(g, cam.width, cam.height)

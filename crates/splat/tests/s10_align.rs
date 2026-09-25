@@ -96,15 +96,7 @@ fn own_world() -> Sim3 {
 }
 
 fn cam(m: &[f64; 16], w: u32, h: u32) -> Camera {
-    Camera {
-        c2w: std::array::from_fn(|i| m[i] as f32),
-        fx: 190.0,
-        fy: 190.0,
-        cx: w as f32 / 2.0,
-        cy: h as f32 / 2.0,
-        width: w,
-        height: h,
-    }
+    Camera::pinhole(std::array::from_fn(|i| m[i] as f32), 190.0, 190.0, w as f32 / 2.0, h as f32 / 2.0, w, h)
 }
 
 fn recentre_err(a: &[[f64; 16]], b: &[[f64; 16]], m: &Sim3) -> f64 {

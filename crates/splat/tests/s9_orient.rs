@@ -83,7 +83,7 @@ fn cam_from(m: &[f64; 16], w: u32, h: u32) -> Camera {
     for (i, v) in m.iter().enumerate() {
         c2w[i] = *v as f32;
     }
-    Camera { c2w, fx: 180.0, fy: 180.0, cx: w as f32 / 2.0, cy: h as f32 / 2.0, width: w, height: h }
+    Camera::pinhole(c2w, 180.0, 180.0, w as f32 / 2.0, h as f32 / 2.0, w, h)
 }
 
 #[test]

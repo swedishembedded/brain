@@ -34,7 +34,7 @@ fn one_gaussian() -> (Splats, Camera) {
     for i in 0..4 {
         c2w[i * 4 + i] = 1.0;
     }
-    let cam = Camera { c2w, fx: 100.0, fy: 100.0, cx: 32.0, cy: 32.0, width: 64, height: 64 };
+    let cam = Camera::pinhole(c2w, 100.0, 100.0, 32.0, 32.0, 64, 64);
     (s, cam)
 }
 
