@@ -124,7 +124,10 @@ impl Reconstruction {
             "loss": o.loss,
             "render": { "ray": o.render.ray, "antialiased": o.render.antialiased, "eps2d": o.render.eps2d },
             "stereo": o.dense.as_ref().map(|d| serde_json::json!({ "points": d.points, "coverage": d.coverage })),
-            "camera_model": o.isp.as_ref().map(|i| i.summary()),
+            // the summary to read; the parameters (`splat::isp::Isp::params`
+            // order, one camera per entry of `source`) to restore it with
+            // `set_params`
+            "camera_model": o.isp.as_ref().map(|i| serde_json::json!({ "summary": i.summary(), "params": i.params() })),
             "environment": o.env.as_ref().map(|e| serde_json::json!({ "degree": e.degree, "coeffs": e.coeffs })),
         });
         std::fs::write(dir.join("reconstruction.json"), serde_json::to_string_pretty(&meta).map_err(|e| Error::Backend(e.to_string()))?).map_err(Error::Io)
