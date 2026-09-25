@@ -35,8 +35,10 @@ brain-audio.workspace = true
 # (`data::imageset::decode_rgb`). Hoisting it here is what makes
 # `events::decode_pixels`' "PNG is not supported (no decoder)" fixable.
 # `pnm` is deliberately NOT enabled: P6 has exactly one implementation in this
-# workspace and it is `events::ppm`.
-image = { workspace = true, features = ["jpeg", "png"] }
+# workspace and it is `events::ppm`. `tiff` is what 16-bit and linear captures
+# arrive as (`photo::load_photo`); it adds `tiff`, `fax`, `weezl` and
+# `quick-error`, all MIT or MIT/Apache-2.0.
+image = { workspace = true, features = ["jpeg", "png", "tiff"] }
 
 [dev-dependencies]
 brain-testutil.workspace = true

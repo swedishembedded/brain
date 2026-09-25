@@ -131,6 +131,7 @@ pub mod device;
 pub mod host;
 pub mod letterbox;
 pub mod mask;
+pub mod photo;
 pub mod pixels;
 pub mod tiling;
 pub mod video;
@@ -141,6 +142,7 @@ pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};
 pub use device::{AlignCorners, Border, Ctx, Filter, ImagingKernelIds, PIPELINES};
 pub use host::resize_bilinear_hwc;
 pub use letterbox::{letterbox_rgb, Letterbox};
+pub use photo::{load_photo, Exif, Photo};
 pub use pixels::{ChannelPolicy, Rect, Rgb8};
 pub use tiling::{BlendPlan, BlendSpec, BlendTile, Tile, TilePlan, TileSpec};
 
