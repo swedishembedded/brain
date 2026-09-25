@@ -96,6 +96,22 @@ average, 2-2.5 s per view. Host SSIM is ~150 ms per 1024x768 view.
 
 - [x] View minibatches (`FitCfg::batch`) with epoch-level loss averaging and
       step-size backoff; geometry passes every Nth step (`geometry_every`).
+- Measured end to end: 16 photos (2048x1536, no EXIF) -> 16/16 registered
+  at 0.98 px -> 300k gaussians at 768x576 in 4000 iterations, ~60 min on one
+  P40, loss 0.31 -> 0.060. Training views reproduce deck grain, fence and
+  object; views on the capture orbit between photographs hold the object's
+  shape but show floaters near thin parts and the thin dark sprinkler rose
+  as a blur - the next quality work (below).
+- [ ] Floater suppression beyond the surface terms (opacity reset or decay
+      late in the fit, a visibility-count prune) and thin-structure
+      coverage; judged on held-out views, not training views.
+- [ ] Sort cost: `sort_scatter`/`sort_hist` give each thread a contiguous
+      256-key chunk with a private 256-entry offset table (local memory,
+      uncoalesced reads), and the histogram is as large as the data. A
+      cooperative design is the step change but meets the one-barrier CPU-JIT
+      rule; measure what fraction of the backward it can return first.
+- [ ] `splat_grad_reduce` is one thread per gaussian over its whole record
+      segment - a large gaussian's thread serializes 100k+ gathers.
 - [ ] A gaussian-major backward (per-tile accumulation instead of per-pixel
       records sorted by gaussian) - the step change.
 - [x] Coarse-to-fine resolution schedule for the sparse-start phase

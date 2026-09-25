@@ -136,6 +136,15 @@ brain splat train --images ~/captures/can --out can.ply
 brain splat view can.ply
 ```
 
+On sixteen 2048x1536 phone photographs of an object on a wooden deck,
+`--width 768 --iters 4000 --max-gaussians 300000` took about an hour on one
+Tesla P40, structure from motion about a minute of it. Render a training
+camera next to its photograph to judge the result:
+
+```bash
+brain splat render can.ply --cameras can.ply.cameras.json --view 0 --aa --out view0.png
+```
+
 Photograph the subject from all around with generous overlap between
 neighbouring shots (every part of the scene in at least three photographs),
 keep the zoom fixed, and avoid moving objects. A textured floor or table
