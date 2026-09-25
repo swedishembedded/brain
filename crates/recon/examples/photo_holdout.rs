@@ -9,7 +9,7 @@
 //! memorized them; only views it never saw say whether the scene is right.
 //!
 //! ```text
-//! photo_holdout <photos dir> <out dir> [iters] [width] [--every k] <fit options>
+//! photo_holdout <photos dir> <out dir> [iters] [width] [--every k] [--views n] <fit options>
 //! ```
 //!
 //! Writes `heldout_<i>.png` (photograph | render) for every held-out view.
@@ -29,7 +29,7 @@ use splat::Kernels;
 fn main() {
     let flags = Flags::from_env();
     let Some(dir) = flags.positional.first().cloned().filter(|_| flags.get("help").is_none()) else {
-        eprintln!("usage: photo_holdout <photos dir> <out dir> [iters] [width] [--every k] {FIT_USAGE}");
+        eprintln!("usage: photo_holdout <photos dir> <out dir> [iters] [width] [--every k] [--views n] {FIT_USAGE}");
         std::process::exit(2);
     };
     let out: String = flags.arg(1, "photo_holdout".to_string());
@@ -60,11 +60,14 @@ fn main() {
     // held-out views are not the capture's first and last
     let held_out = |i: usize| i % every == every / 2;
     let (train, held): (Vec<_>, Vec<_>) = set.targets.iter().cloned().enumerate().partition(|(i, _)| !held_out(*i));
-    let train: Vec<_> = train.into_iter().map(|(_, t)| t).collect();
+    // `--views n` fits only the first n training views: a fit that cannot
+    // reproduce even one photograph has a problem no amount of views explains
+    let keep: usize = flags.parse("views").unwrap_or(usize::MAX);
+    let train: Vec<_> = train.into_iter().map(|(_, t)| t).take(keep).collect();
     let held: Vec<_> = held.into_iter().map(|(_, t)| t).collect();
     println!("fitting {} views, holding out {}", train.len(), held.len());
 
-    let cfg = fit_cfg(&flags, iters);
+    let cfg = fit_cfg(&flags, iters, train.len());
     let g = Gpu::new(splat::PIPELINES);
     let t = std::time::Instant::now();
     let res = fit_full(&g, Kernels::at(0), &set.init, &train, &cfg, &mut |_, _| true);
@@ -92,6 +95,10 @@ fn main() {
         mean(&on_held),
         on_held.iter().map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" ")
     );
+    println!("  per training view: {}", on_train.iter().map(|x| format!("{:.1}", x.0)).collect::<Vec<_>>().join(" "));
+    for (i, (v, (_, img))) in refit.iter().zip(&on_train).enumerate().step_by(4) {
+        imaging::save(format!("{out}/train_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
+    }
     for (i, (v, (_, img))) in held.iter().zip(&on_held).enumerate() {
         imaging::save(format!("{out}/heldout_{i}.png"), &montage(&[&v.rgb, img], v.cam.width, v.cam.height)).expect("png");
     }

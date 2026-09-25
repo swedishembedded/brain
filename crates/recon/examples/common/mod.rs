@@ -53,12 +53,14 @@ impl Flags {
 
 /// The options every evaluation takes on top of the preset.
 pub const FIT_USAGE: &str = "[--budget gaussians] [--sh degree] [--isp off|exposure|full] [--pose-lr step] \
-                             [--distortion w] [--normal w] [--geometry-after f]";
+                             [--distortion w] [--normal w] [--geometry-after f] [--position-budget r] \
+                             [--scale-budget r] [--max-scale-px px] [--densify heuristic|mcmc|hybrid]";
 
-/// [`FitCfg::from_sparse_points`] with the command line's overrides.
-pub fn fit_cfg(flags: &Flags, iters: usize) -> FitCfg {
+/// [`FitCfg::from_sparse_points`] for `views` training views, with the
+/// command line's overrides.
+pub fn fit_cfg(flags: &Flags, iters: usize, views: usize) -> FitCfg {
     let budget = flags.parse("budget").unwrap_or(300_000);
-    let mut cfg = FitCfg { log_every: (iters / 10).max(1), ..FitCfg::from_sparse_points(iters, budget) };
+    let mut cfg = FitCfg { log_every: (iters / 10).max(1), ..FitCfg::from_sparse_points(iters, budget, views) };
     if let Some(v) = flags.parse("sh") {
         cfg.sh_degree = v;
     }
@@ -73,6 +75,22 @@ pub fn fit_cfg(flags: &Flags, iters: usize) -> FitCfg {
     }
     if let Some(v) = flags.parse("geometry-after") {
         cfg.geometry_after = v;
+    }
+    if let Some(v) = flags.parse("position-budget") {
+        cfg.position_budget = v;
+    }
+    if let Some(v) = flags.parse("scale-budget") {
+        cfg.scale_budget = v;
+    }
+    if let Some(v) = flags.parse("max-scale-px") {
+        cfg.max_scale_pixels = v;
+    }
+    match flags.get("densify") {
+        None => {}
+        Some("heuristic") => cfg.strategy = splat::opt::Densify::Heuristic,
+        Some("mcmc") => cfg.strategy = splat::opt::Densify::Mcmc,
+        Some("hybrid") => cfg.strategy = splat::opt::Densify::Hybrid,
+        Some(o) => panic!("--densify {o}: heuristic, mcmc or hybrid"),
     }
     match flags.get("isp") {
         None => {}

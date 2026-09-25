@@ -10,14 +10,16 @@
 //! Two reconstructions are scored:
 //!
 //! * **A - trainer only**: the true cameras, started from every 10th true
-//!   point. Isolates the fit from camera recovery.
+//!   point. Isolates the fit from camera recovery. `--bare-sphere` leaves the
+//!   sphere without a single starting point, as structure from motion leaves
+//!   a textureless object: the fit has to grow it.
 //! * **B - the whole pipeline**: the rendered images alone -> structure from
 //!   motion -> training set -> fit, exactly what `brain splat train` runs; the
 //!   result is compared in the truth's frame through the similarity the
 //!   recovered cameras imply.
 //!
 //! ```text
-//! synthetic_e2e <out dir> [iters] [width] [--only a|b|sfm]
+//! synthetic_e2e <out dir> [iters] [width] [--only a|b|sfm] [--bare-sphere]
 //!               [--contrast c] [--min-inliers n] <fit options>
 //! ```
 //!
@@ -75,6 +77,9 @@ fn disc(s: &mut Splats, p: [f32; 3], n: [f32; 3], r: f32, c: [f32; 3]) {
     s.opacities.push(0.97);
     s.colors.extend_from_slice(&c);
 }
+
+/// Where [`truth`] puts the sphere's gaussians: after the 160x160 ground.
+const SPHERE: std::ops::Range<usize> = 160 * 160..160 * 160 + 5000;
 
 /// The truth: +Y is DOWN, the ground is y = 0.5.
 fn truth() -> Splats {
@@ -145,7 +150,7 @@ fn to_rgb8(rgb: &[f32], w: u32, h: u32) -> Rgb8 {
 fn main() {
     let flags = Flags::from_env();
     if flags.get("help").is_some() {
-        println!("usage: synthetic_e2e <out dir> [iters] [width] [--only a|b|sfm] [--contrast c] [--min-inliers n] {FIT_USAGE}");
+        println!("usage: synthetic_e2e <out dir> [iters] [width] [--only a|b|sfm] [--bare-sphere] [--contrast c] [--min-inliers n] {FIT_USAGE}");
         return;
     }
     let only = flags.get("only");
@@ -187,13 +192,17 @@ fn main() {
         (p, d, imgs)
     };
 
-    let cfg = fit_cfg(&flags, iters);
+    let cfg = fit_cfg(&flags, iters, train.len());
     let mut columns: Vec<Vec<Vec<f32>>> = vec![truth_held.clone()];
 
     // ---- A: the trainer alone, true cameras, a sparse start ----
     if run_a {
         let (mut xyz, mut rgb) = (Vec::new(), Vec::new());
+        let bare = flags.get("bare-sphere").is_some();
         for i in (0..t0.len()).step_by(10) {
+            if bare && SPHERE.contains(&i) {
+                continue;
+            }
             xyz.extend_from_slice(&t0.means[i * 3..i * 3 + 3]);
             rgb.extend_from_slice(&t0.colors[i * 3..i * 3 + 3]);
         }
