@@ -39,7 +39,7 @@ sample-reconstruction-splat - photographs to a 3D Gaussian Splatting scene
 USAGE:
     sample-reconstruction-splat --photos DIR [--out PATH] [--max-width N]
                                 [--iterations N] [--max-gaussians N]
-                                [--sparse] [--camera-model]
+                                [--sparse] [--no-camera-model]
 
 OPTIONS:
     --photos DIR         the photographs (.jpg/.jpeg/.png) of one static scene
@@ -52,7 +52,7 @@ OPTIONS:
     --max-gaussians N    the scene's gaussian budget (default: from the stereo)
     --sparse             start from structure from motion's points instead of
                          multi-view stereo
-    --camera-model       fit per-photograph exposure and white balance too
+    --no-camera-model    do not fit per-photograph exposure and white balance
 ";
 
 fn parse() -> Result<Args, String> {
@@ -64,7 +64,7 @@ fn parse() -> Result<Args, String> {
         iterations: None,
         max_gaussians: None,
         sparse: false,
-        camera_model: false,
+        camera_model: true,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -80,7 +80,7 @@ fn parse() -> Result<Args, String> {
             "--iterations" => a.iterations = Some(value()?.parse().map_err(|e| format!("--iterations: {e}"))?),
             "--max-gaussians" => a.max_gaussians = Some(value()?.parse().map_err(|e| format!("--max-gaussians: {e}"))?),
             "--sparse" => a.sparse = true,
-            "--camera-model" => a.camera_model = true,
+            "--no-camera-model" => a.camera_model = false,
             other => return Err(format!("unknown argument: {other}")),
         }
     }

@@ -231,9 +231,11 @@ impl ReconstructionBuilder {
         self
     }
 
-    /// Fit per-photograph exposure and white balance and the lens's
-    /// vignetting alongside the scene. Off by default: on photographs taken at
-    /// one exposure it only absorbs fit error.
+    /// Fit the photometric camera alongside the scene: per-photograph
+    /// exposure and white balance, the lens's vignetting, the sensor's colour
+    /// matrix and response curve. On by default; on photographs all taken at
+    /// one exposure it changes little, on a capture whose exposure or white
+    /// balance changes it is what keeps the scene consistent.
     pub fn camera_model(mut self, on: bool) -> Self {
         self.cfg.camera_model = on.then(splat::isp::IspCfg::default);
         self

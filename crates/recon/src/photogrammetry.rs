@@ -363,7 +363,10 @@ pub struct PhotoCfg {
     pub iterations: Option<usize>,
     /// Gaussian budget; `None` = [`auto_budget`].
     pub max_gaussians: Option<usize>,
-    /// Fit a photometric camera model alongside the scene.
+    /// Fit a photometric camera model alongside the scene (the default: the
+    /// global model - exposure, white balance, vignetting, colour matrix and
+    /// response - measured neutral to slightly better held out on a capture
+    /// at one exposure, and what a capture with changing exposure needs).
     pub camera_model: Option<splat::isp::IspCfg>,
     /// Fit the environment behind the scene (sky, distant scenery) at this
     /// spherical-harmonic degree (`splat::env`).
@@ -381,7 +384,7 @@ impl Default for PhotoCfg {
             dense: Some(DenseCfg::default()),
             iterations: None,
             max_gaussians: None,
-            camera_model: None,
+            camera_model: Some(splat::isp::IspCfg::default()),
             environment: None,
             transients: false,
         }

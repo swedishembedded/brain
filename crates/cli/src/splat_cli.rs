@@ -684,11 +684,9 @@ fn train_cmd(argv: &[String]) {
     let max_gaussians = a.take_str("--max-gaussians").map(|v| v.parse::<usize>().unwrap_or_else(|_| usage_exit(&format!("--max-gaussians {v}: not a count"))));
     let focal = a.f32_or("--focal-guess", defaults.sfm.focal_guess as f32);
     let sparse = a.take_flag("--sparse");
-    // The photometric camera model (per-photo exposure and white balance,
-    // the lens's vignetting, the sensor's colour matrix and response), for a
-    // capture that needs it; on one taken at one exposure it mostly absorbs
-    // fit error.
-    let camera_model = a.take_flag("--camera-model");
+    // The photometric camera (exposure, white balance, vignetting, colour
+    // matrix, response) is fitted unless asked not to be.
+    let camera_model = !a.take_flag("--no-camera-model");
     // Sky and distant scenery as radiance by direction, instead of gaussians
     // hanging behind the scene.
     let environment = a.take_str("--environment").map(|v| v.parse::<u32>().unwrap_or_else(|_| usage_exit(&format!("--environment {v}: a degree, 0 to 8"))));

@@ -25,6 +25,9 @@ brain splat view out/scene.ply
   * **The fit** renders every pixel along its own ray through the lens, so no
     photograph is resampled or undistorted. The stereo's range and normals
     act as priors, and density control grows detail where the error is.
+    Alongside the scene it fits the photometric camera: each photograph's
+    exposure (starting from its EXIF) and white balance, the lens's
+    vignetting, and the sensor's colour matrix and response.
 * `save_ply`, `save_cameras`, `save` and `render` cover what an application
   does with the result. The PLY is the standard splat format that viewers
   open, with the anti-aliasing filter the fit used baked in.
@@ -55,7 +58,7 @@ brain splat view out/scene.ply
 | `--iterations N` | about 500 visits per photograph, from 3000 to 30000 |
 | `--max-gaussians N` | what the dense start needs, plus a quarter |
 | `--sparse` | start from structure from motion's points instead of stereo |
-| `--camera-model` | also fit per-photograph exposure and white balance |
+| `--no-camera-model` | do not fit the photometric camera (per-photograph exposure and white balance, vignetting, colour matrix, response) |
 
 It writes these files:
 

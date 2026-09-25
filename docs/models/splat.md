@@ -95,7 +95,8 @@ into a scene that actually reproduces your photos.
 | `--max-gaussians N` | `fit` | refuse to grow past N |
 | `--densify-strategy S` | `fit` | `heuristic` (the default), `mcmc` or `hybrid` (what `train` runs) - see below |
 | `--loss L` | `fit` | `mse` (default) or `l1-ssim`, the objective 3DGS is defined with |
-| `--camera-model` | `fit`, `train` | fit the photometric camera alongside the scene: per-photo exposure and white balance, the lens's vignetting, the sensor's colour matrix and response curve (default off). `train` starts each photo's exposure from its EXIF, and fits linear, 16-bit or exposure-bracketed photographs in linear light |
+| `--camera-model` | `fit` | fit the photometric camera alongside the scene: per-photo exposure and white balance, the lens's vignetting, the sensor's colour matrix and response curve (default off) |
+| `--no-camera-model` | `train` | do not fit the photometric camera, which `train` fits by default: it starts each photo's exposure from its EXIF, and fits linear, 16-bit or exposure-bracketed photographs in linear light |
 | `--batch N` | `fit` | photographs per optimizer step (default all of them) |
 | `--distortion W` / `--normal-consistency W` | `fit` | surface regularizers (default off) - see below |
 | `--geometry-after F` | `fit` | fraction of the fit after which the surface regularizers start |
@@ -155,10 +156,11 @@ pipeline as the SDK's `brain::Reconstruction`, in four steps:
    `(d+1)²` coefficients per channel per gaussian, and with about as many
    coefficients as photographs seeing a gaussian it memorizes the training
    photographs instead of describing the surface: `train` uses flat colour
-   below 32 photographs and full degree 3 from 128. Per-photo exposure and
-   white balance (`--camera-model`) are off unless asked for - on a capture
-   taken at one exposure they only absorb fit error, and on a 16-photo
-   capture they cost 1.3 dB on held-out photographs.
+   below 32 photographs and full degree 3 from 128. The photometric camera
+   (per-photo exposure and white balance, vignetting, colour matrix,
+   response) is fitted too: on a 16-photo capture shot at one exposure it
+   changes held-out quality by +0.08 dB, and on one whose exposure or white
+   balance changes it is what keeps the scene consistent.
 
 ```bash
 brain splat train --images ~/captures/scene --out scene.ply
