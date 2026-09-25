@@ -986,14 +986,14 @@ pub const SPACE_TO_DEPTH3D: &str = include_str!("../wgsl/space_to_depth3d.wgsl")
 pub const SPLAT_ACTIVATE: &str = include_str!("../wgsl/splat_activate.wgsl");
 /// `wgsl/splat_adam.wgsl`
 pub const SPLAT_ADAM: &str = include_str!("../wgsl/splat_adam.wgsl");
-/// `wgsl/splat_bwd_keys.wgsl`
-pub const SPLAT_BWD_KEYS: &str = include_str!("../wgsl/splat_bwd_keys.wgsl");
 /// `wgsl/splat_bwd_slots.wgsl`
 pub const SPLAT_BWD_SLOTS: &str = include_str!("../wgsl/splat_bwd_slots.wgsl");
 /// `wgsl/splat_bwd_tile_reduce.wgsl`
 pub const SPLAT_BWD_TILE_REDUCE: &str = include_str!("../wgsl/splat_bwd_tile_reduce.wgsl");
 /// `wgsl/splat_emit.wgsl`
 pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
+/// `wgsl/splat_gather_ids.wgsl`
+pub const SPLAT_GATHER_IDS: &str = include_str!("../wgsl/splat_gather_ids.wgsl");
 /// `wgsl/splat_geom_loss.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
 pub const SPLAT_GEOM_LOSS: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
@@ -1006,19 +1006,25 @@ pub const SPLAT_GRAD_REDUCE: &str = include_str!("../wgsl/splat_grad_reduce.wgsl
 pub const SPLAT_NAIVE: &str = include_str!("../wgsl/splat_naive.wgsl");
 /// `wgsl/splat_pack_rgba8.wgsl`
 pub const SPLAT_PACK_RGBA8: &str = include_str!("../wgsl/splat_pack_rgba8.wgsl");
-/// `wgsl/splat_pose_grad.wgsl`
-pub const SPLAT_POSE_GRAD: &str = include_str!("../wgsl/splat_pose_grad.wgsl");
 /// `wgsl/splat_project.wgsl`
 pub const SPLAT_PROJECT: &str = include_str!("../wgsl/splat_project.wgsl");
 /// `wgsl/splat_project_bwd.wgsl`
 pub const SPLAT_PROJECT_BWD: &str = include_str!("../wgsl/splat_project_bwd.wgsl");
 /// `wgsl/splat_rasterize.wgsl`
 pub const SPLAT_RASTERIZE: &str = include_str!("../wgsl/splat_rasterize.wgsl");
-/// `wgsl/splat_ray_bwd_slots.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+/// `wgsl/splat_ray_bwd_slots.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
 pub const SPLAT_RAY_BWD_SLOTS: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
     include_str!("../wgsl/splat_ray_bwd_slots.wgsl"),
+);
+/// `wgsl/splat_ray_bwd_tile.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
+pub const SPLAT_RAY_BWD_TILE: &str = concat!(
+    include_str!("../wgsl/lib/camera.wgsl"),
+    include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
+    include_str!("../wgsl/splat_ray_bwd_tile.wgsl"),
 );
 /// `wgsl/splat_ray_camera_grad.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
 pub const SPLAT_RAY_CAMERA_GRAD: &str = concat!(
@@ -1038,10 +1044,11 @@ pub const SPLAT_RAY_PROJECT_BWD: &str = concat!(
     include_str!("../wgsl/lib/splat_view.wgsl"),
     include_str!("../wgsl/splat_ray_project_bwd.wgsl"),
 );
-/// `wgsl/splat_ray_rasterize.wgsl`, after `wgsl/lib/{camera,splat_view}.wgsl`
+/// `wgsl/splat_ray_rasterize.wgsl`, after `wgsl/lib/{camera,splat_view,splat_ray_pair}.wgsl`
 pub const SPLAT_RAY_RASTERIZE: &str = concat!(
     include_str!("../wgsl/lib/camera.wgsl"),
     include_str!("../wgsl/lib/splat_view.wgsl"),
+    include_str!("../wgsl/lib/splat_ray_pair.wgsl"),
     include_str!("../wgsl/splat_ray_rasterize.wgsl"),
 );
 /// `wgsl/splat_sh.wgsl`
@@ -1050,8 +1057,6 @@ pub const SPLAT_SH: &str = include_str!("../wgsl/splat_sh.wgsl");
 pub const SPLAT_TILE_COUNT: &str = include_str!("../wgsl/splat_tile_count.wgsl");
 /// `wgsl/splat_tile_ranges.wgsl`
 pub const SPLAT_TILE_RANGES: &str = include_str!("../wgsl/splat_tile_ranges.wgsl");
-/// `wgsl/splat_unpack.wgsl`
-pub const SPLAT_UNPACK: &str = include_str!("../wgsl/splat_unpack.wgsl");
 /// `wgsl/splice.wgsl`
 pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
 /// `wgsl/splice_add.wgsl`
@@ -1570,19 +1575,19 @@ pub const ALL: &[(&str, &str)] = &[
     ("space_to_depth3d", SPACE_TO_DEPTH3D),
     ("splat_activate", SPLAT_ACTIVATE),
     ("splat_adam", SPLAT_ADAM),
-    ("splat_bwd_keys", SPLAT_BWD_KEYS),
     ("splat_bwd_slots", SPLAT_BWD_SLOTS),
     ("splat_bwd_tile_reduce", SPLAT_BWD_TILE_REDUCE),
     ("splat_emit", SPLAT_EMIT),
+    ("splat_gather_ids", SPLAT_GATHER_IDS),
     ("splat_geom_loss", SPLAT_GEOM_LOSS),
     ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
     ("splat_naive", SPLAT_NAIVE),
     ("splat_pack_rgba8", SPLAT_PACK_RGBA8),
-    ("splat_pose_grad", SPLAT_POSE_GRAD),
     ("splat_project", SPLAT_PROJECT),
     ("splat_project_bwd", SPLAT_PROJECT_BWD),
     ("splat_rasterize", SPLAT_RASTERIZE),
     ("splat_ray_bwd_slots", SPLAT_RAY_BWD_SLOTS),
+    ("splat_ray_bwd_tile", SPLAT_RAY_BWD_TILE),
     ("splat_ray_camera_grad", SPLAT_RAY_CAMERA_GRAD),
     ("splat_ray_project", SPLAT_RAY_PROJECT),
     ("splat_ray_project_bwd", SPLAT_RAY_PROJECT_BWD),
@@ -1590,7 +1595,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_sh", SPLAT_SH),
     ("splat_tile_count", SPLAT_TILE_COUNT),
     ("splat_tile_ranges", SPLAT_TILE_RANGES),
-    ("splat_unpack", SPLAT_UNPACK),
     ("splice", SPLICE),
     ("splice_add", SPLICE_ADD),
     ("splice_add_offset_src", SPLICE_ADD_OFFSET_SRC),

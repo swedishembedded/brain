@@ -16,17 +16,14 @@
 // the 64 threads sums 4 consecutive pixels of every channel - lanes read
 // consecutive 16-byte chunks, so every load is coalesced - into workgroup
 // memory, and after the one barrier threads 0..ch-1 finish one channel each.
-// Thread `ch` stamps the record with its gaussian id (the sort key of the
-// per-gaussian stage).
 //
-// Record stride ch + 1 in `recs`: the channels, then the id. The EWA
+// The record goes to the instance's EMISSION slot (`order`, the sorted
+// emission indices of `splat_emit.wgsl`), `ch` floats wide: the EWA
 // renderer's 11 channels are {v_xy(2), v_conic(3), v_opacity, v_rgb(3),
 // v_depth, |v_xy| summed per pixel}; the ray renderer's 17 are listed in
-// splat_ray_bwd_slots.wgsl.
-//
-// This is what replaced sorting one record per (pixel, gaussian) by gaussian
-// id: that sort was 70% of the backward's device time. The records it now
-// feeds are one per (tile, gaussian) instance, a few percent as many.
+// splat_ray_bwd_slots.wgsl. Emission slots are contiguous per gaussian, so
+// `splat_grad_reduce.wgsl` sums each gaussian's records straight from its
+// scanned offset.
 
 struct Params {
     n: u32,   // instances in the band
@@ -36,8 +33,8 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       slots: array<f32>; // band_instances*ch*256
-@group(0) @binding(2) var<storage, read>       vals:  array<u32>; // sorted instance -> gaussian id
-@group(0) @binding(3) var<storage, read_write> recs:  array<f32>; // n_isects*(ch+1)
+@group(0) @binding(2) var<storage, read>       order: array<u32>; // sorted instance -> emission slot
+@group(0) @binding(3) var<storage, read_write> recs:  array<f32>; // n_isects*ch
 
 var<workgroup> partial: array<f32, 1088>; // up to 17 channels x 64 threads
 
@@ -53,14 +50,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         partial[c * 64u + t] = slots[base] + slots[base + 1u] + slots[base + 2u] + slots[base + 3u];
     }
     workgroupBarrier();
-    let r = (p.k0 + inst) * (p.ch + 1u);
     if (t < p.ch) {
         var s = 0.0;
         for (var i = 0u; i < 64u; i = i + 1u) {
             s = s + partial[t * 64u + i];
         }
-        recs[r + t] = s;
-    } else if (t == p.ch) {
-        recs[r + p.ch] = bitcast<f32>(vals[p.k0 + inst]);
+        recs[order[p.k0 + inst] * p.ch + t] = s;
     }
 }

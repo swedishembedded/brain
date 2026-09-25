@@ -405,7 +405,7 @@ fn band_equivalence(g: &Gpu, band: u64) {
     };
 
     let (whole, n_whole) = run(0);
-    let squeezed = band * splat::renderer::slot_bytes_per_instance(splat::renderer::SLOT_CHANNELS);
+    let squeezed = band * splat::renderer::slot_bytes_per_instance(splat::renderer::RECORD_WORDS);
     let (banded, n_banded) = run(squeezed);
     assert!(
         n_whole as u64 > band,

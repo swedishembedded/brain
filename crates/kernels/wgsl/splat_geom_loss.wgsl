@@ -3,7 +3,7 @@
 
 // @what  splat geometry objective per pixel: robust log-depth, normal prior / self-consistency, distortion
 // @how   64-thread workgroup tile, 1 barrier
-// @opt   3
+// @opt   4
 // @cpu   yes
 // @gpu   yes
 // @npu   no

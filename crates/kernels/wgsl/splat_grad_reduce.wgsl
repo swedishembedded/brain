@@ -10,19 +10,21 @@
 // @quant none
 // @dtype f32
 //
-// 3DGS backward, stage 4: per-gaussian segmented reduction over the
-// id-sorted gradient records. `ranges` comes from splat_tile_ranges run with
-// depth_bits=0 over the sorted keys (segment = gaussian id). One invocation
-// per gaussian sums its records channel by channel and hands them on:
+// 3DGS backward, last stage: per-gaussian reduction over the gradient
+// records. Every record sits at its instance's emission slot, and a
+// gaussian's instances were emitted contiguously from its scanned offset
+// (`splat_emit.wgsl`), so gaussian g owns records [offsets[g], offsets[g+1])
+// - clipped to the `n_isects` instances the frame kept. One invocation per
+// gaussian sums its records channel by channel and hands them on:
 // channels [0, npg) become the per-gaussian bundle pgrad[N*npg] the
 // projection backward consumes, [col, col+3) are added to the colour
 // gradient, `abs` to absgrad, and channels 0 and 1 to sumgrad. The layouts:
-//   EWA (splat_bwd_slots, stride 12): npg 10 = {v_xy(2), v_conic(3), v_op,
+//   EWA (splat_bwd_slots, stride 11): npg 10 = {v_xy(2), v_conic(3), v_op,
 //     v_rgb(3), v_depth}, col 6, abs 10 - v_depth is dL/d(this gaussian's
 //     camera-space z), which splat_project_bwd turns into a world-space mean
 //     gradient along the viewing ray;
-//   ray (splat_ray_bwd_slots, stride 18): npg 13 = {dL/dm(3), dL/dA(6),
-//     dL/dopacity', dL/dn(3)}, col 13, abs 16.
+//   ray (splat_ray_bwd_tile or splat_ray_bwd_slots, stride 17): npg 13 =
+//     {dL/dm(3), dL/dA(6), dL/dopacity', dL/dn(3)}, col 13, abs 16.
 //
 // Also accumulates `absgrad[N]`: the sum over pixels of the MAGNITUDE of each
 // pixel's 2D position gradient, as opposed to the magnitude of their sum.
@@ -36,20 +38,20 @@
 
 struct Params {
     n_gauss: u32,
-    stride: u32, // words per record
-    npg: u32,    // channels handed on in pgrad, at most 13
-    col: u32,    // first colour channel
-    abs: u32,    // the AbsGS channel
+    stride: u32,   // words per record, at most 17
+    npg: u32,      // channels handed on in pgrad, at most 13
+    col: u32,      // first colour channel
+    abs: u32,      // the AbsGS channel
+    n_isects: u32, // records the frame wrote
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       recs:     array<f32>; // n*stride
-@group(0) @binding(2) var<storage, read>       vals:     array<u32>; // sorted record idx
-@group(0) @binding(3) var<storage, read>       ranges:   array<u32>; // n_gauss*2
-@group(0) @binding(4) var<storage, read_write> pgrad:    array<f32>; // N*npg
-@group(0) @binding(5) var<storage, read_write> d_colors: array<f32>; // N*3 (+=)
-@group(0) @binding(6) var<storage, read_write> absgrad:  array<f32>; // N (+=)
-@group(0) @binding(7) var<storage, read_write> sumgrad:  array<f32>; // N*2 (+=)
+@group(0) @binding(2) var<storage, read>       offsets:  array<u32>; // n_gauss, exclusive scan of instance counts
+@group(0) @binding(3) var<storage, read_write> pgrad:    array<f32>; // N*npg
+@group(0) @binding(4) var<storage, read_write> d_colors: array<f32>; // N*3 (+=)
+@group(0) @binding(5) var<storage, read_write> absgrad:  array<f32>; // N (+=)
+@group(0) @binding(6) var<storage, read_write> sumgrad:  array<f32>; // N*2 (+=)
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -57,13 +59,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let g = gid.y * (nwg.x * 64u) + gid.x;
     if (g >= p.n_gauss) { return; }
     var acc: array<f32, 17>;
-    let nch = p.stride - 1u;
     for (var k = 0u; k < 17u; k = k + 1u) { acc[k] = 0.0; }
-    let start = ranges[g * 2u];
-    let end = ranges[g * 2u + 1u];
+    let start = min(offsets[g], p.n_isects);
+    var end = p.n_isects;
+    if (g + 1u < p.n_gauss) { end = min(offsets[g + 1u], p.n_isects); }
     for (var j = start; j < end; j = j + 1u) {
-        let r = vals[j] * p.stride;
-        for (var k = 0u; k < nch; k = k + 1u) {
+        let r = j * p.stride;
+        for (var k = 0u; k < p.stride; k = k + 1u) {
             acc[k] = acc[k] + recs[r + k];
         }
     }

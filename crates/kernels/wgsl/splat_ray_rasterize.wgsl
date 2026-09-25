@@ -11,6 +11,7 @@
 // @dtype f32
 // @import camera
 // @import splat_view
+// @import splat_ray_pair
 //
 // Ray-evaluated splatting, compositing. One invocation per pixel; the 256
 // pixels of a 16x16 tile are four consecutive 64-invocation workgroups
@@ -44,6 +45,16 @@
 @group(0) @binding(4) var<storage, read_write> img:    array<f32>; // W*H*4
 @group(0) @binding(5) var<storage, read_write> aux:    array<f32>; // W*H*5
 
+fn rec(g: u32) -> RayRec {
+    let r = g * 16u;
+    return RayRec(vec3<f32>(ray[r], ray[r + 1u], ray[r + 2u]),
+                  vec3<f32>(ray[r + 3u], ray[r + 4u], ray[r + 5u]),
+                  vec3<f32>(ray[r + 6u], ray[r + 7u], ray[r + 8u]),
+                  vec3<f32>(ray[r + 9u], ray[r + 10u], ray[r + 11u]),
+                  ray[r + 12u],
+                  vec3<f32>(ray[r + 13u], ray[r + 14u], ray[r + 15u]));
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -57,66 +68,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let py = (tile / tiles_x) * 16u + local / 16u;
     if (px >= p.width || py >= p.height) { return; }
     let pr = pixel_ray(p, vec2<f32>(f32(px) + 0.5, f32(py) + 0.5));
-    let d = pr.d;
-
-    var tr = 1.0;
-    var col = vec3<f32>(0.0, 0.0, 0.0);
-    var nsum = vec3<f32>(0.0, 0.0, 0.0);
-    var dsum = 0.0;
-    var wsum = 0.0;
-    var dist = 0.0;
-    if (pr.ok != 0.0) {
-        let start = ranges[tile * 2u];
-        let end = ranges[tile * 2u + 1u];
-        for (var j = start; j < end; j = j + 1u) {
-            let g = vals[j];
-            let r = g * 16u;
-            let dm = vec3<f32>(ray[r], ray[r + 1u], ray[r + 2u]) - pr.o;
-            let a00 = ray[r + 3u];
-            let a11 = ray[r + 4u];
-            let a22 = ray[r + 5u];
-            let a01 = ray[r + 6u];
-            let a02 = ray[r + 7u];
-            let a12 = ray[r + 8u];
-            let ad = vec3<f32>(a00 * d.x + a01 * d.y + a02 * d.z,
-                               a01 * d.x + a11 * d.y + a12 * d.z,
-                               a02 * d.x + a12 * d.y + a22 * d.z);
-            let vv = dot(d, ad);
-            if (vv <= 0.0) { continue; }
-            let t = dot(dm, ad) / vv;
-            if (t <= 0.0) { continue; }
-            let e = dm - t * d;
-            let ae = vec3<f32>(a00 * e.x + a01 * e.y + a02 * e.z,
-                               a01 * e.x + a11 * e.y + a12 * e.z,
-                               a02 * e.x + a12 * e.y + a22 * e.z);
-            let q = dot(e, ae);
-            let alpha = min(0.99, ray[r + 12u] * exp(-0.5 * q));
-            if (alpha < 1.0 / 255.0) { continue; }
-            let next_t = tr * (1.0 - alpha);
-            if (next_t <= 1e-4) {
-                // the terminating gaussian is excluded (gsplat semantics)
-                break;
-            }
-            let w = alpha * tr;
-            col = col + w * vec3<f32>(ray[r + 13u], ray[r + 14u], ray[r + 15u]);
-            nsum = nsum + w * vec3<f32>(ray[r + 9u], ray[r + 10u], ray[r + 11u]);
-            dist = dist + 2.0 * w * (t * wsum - dsum);
-            dsum = dsum + w * t;
-            wsum = wsum + w;
-            tr = next_t;
-        }
+    var w = ray_walk(pr.o, pr.d, pr.ok != 0.0);
+    let start = ranges[tile * 2u];
+    let end = ranges[tile * 2u + 1u];
+    for (var j = start; j < end && w.live; j = j + 1u) {
+        w = ray_walk_step(w, rec(vals[j]));
     }
     let pix = py * p.width + px;
-    let a = 1.0 - tr;
-    img[pix * 4u] = col.x + tr * p.bg.x;
-    img[pix * 4u + 1u] = col.y + tr * p.bg.y;
-    img[pix * 4u + 2u] = col.z + tr * p.bg.z;
+    let a = 1.0 - w.tr;
+    img[pix * 4u] = w.col.x + w.tr * p.bg.x;
+    img[pix * 4u + 1u] = w.col.y + w.tr * p.bg.y;
+    img[pix * 4u + 2u] = w.col.z + w.tr * p.bg.z;
     img[pix * 4u + 3u] = a;
     var dexp = 0.0;
-    if (a > 1e-6) { dexp = dsum / a; }
+    if (a > 1e-6) { dexp = w.dsum / a; }
     aux[pix * 5u] = dexp;
-    aux[pix * 5u + 1u] = nsum.x;
-    aux[pix * 5u + 2u] = nsum.y;
-    aux[pix * 5u + 3u] = nsum.z;
-    aux[pix * 5u + 4u] = dist;
+    aux[pix * 5u + 1u] = w.nsum.x;
+    aux[pix * 5u + 2u] = w.nsum.y;
+    aux[pix * 5u + 3u] = w.nsum.z;
+    aux[pix * 5u + 4u] = w.dist;
 }

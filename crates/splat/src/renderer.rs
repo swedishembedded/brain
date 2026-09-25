@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Device-side scene + rasterizer entry points: `render` is the tiled
-//! pipeline (project → tile count → scan → emit → radix sort → tile ranges →
-//! per-tile compositing → rgba8 pack), `render_naive_gpu` the per-pixel
-//! oracle path for tests and tiny scenes.
+//! pipeline (project → tile count → scan → emit → radix sort → gather ids →
+//! tile ranges → per-tile compositing → rgba8 pack), `render_naive_gpu` the
+//! per-pixel oracle path for tests and tiny scenes.
 
 use gpu_core::{f, DeviceBuffer, Gpu};
 
@@ -92,13 +92,10 @@ pub const RAY_VIEW_WORDS: usize = 52;
 /// n (3), opacity', colour (3)}` (`splat_ray_project.wgsl`).
 pub const RAY_WORDS: usize = 16;
 
-/// Channels per (instance, pixel) slot of the ray renderer's backward
-/// (`splat_ray_bwd_slots.wgsl`'s `CH`).
-pub const RAY_SLOT_CHANNELS: usize = 17;
-
-/// Words per gradient record of the ray renderer's backward: the channels,
-/// then the gaussian id.
-pub const RAY_RECORD_WORDS: usize = RAY_SLOT_CHANNELS + 1;
+/// Words per gradient record of the ray renderer's backward, one per
+/// channel (`wgsl/lib/splat_ray_pair.wgsl`; `CH` of `splat_ray_bwd_tile.wgsl`
+/// and `splat_ray_bwd_slots.wgsl`).
+pub const RAY_RECORD_WORDS: usize = 17;
 
 /// Per-gaussian gradient bundle the ray renderer's projection backward
 /// consumes: `{dL/dm (3), dL/dA (6), dL/dopacity', dL/dn (3)}`.
@@ -207,10 +204,12 @@ pub struct Renderer {
     vals_a: DeviceBuffer,
     keys_b: DeviceBuffer,
     vals_b: DeviceBuffer,
+    /// Emission index -> gaussian (`splat_emit.wgsl`).
+    ids: DeviceBuffer,
     sort: SortScratch,
     ranges: DeviceBuffer,
     /// Last render() state the backward replays.
-    last: Option<(usize, bool, u32, u32)>, // (n_isects, vals_in_b, tiles_x, tiles_y)
+    last: Option<(usize, bool, u32, u32)>, // (n_isects, sorted_in_b, tiles_x, tiles_y)
     /// Whether the last render() evaluated along rays.
     last_ray: bool,
     /// Grow the instance buffers when a frame needs more, instead of
@@ -247,6 +246,7 @@ impl Renderer {
             vals_a: gpu.storage(cap as u64),
             keys_b: gpu.storage(cap as u64),
             vals_b: gpu.storage(cap as u64),
+            ids: gpu.storage(cap as u64),
             sort: SortScratch::new(gpu, cap),
             ranges: gpu.storage(2 * max_tiles as u64),
             last: None,
@@ -319,6 +319,7 @@ impl Renderer {
             self.vals_a = gpu.storage(cap as u64);
             self.keys_b = gpu.storage(cap as u64);
             self.vals_b = gpu.storage(cap as u64);
+            self.ids = gpu.storage(cap as u64);
             self.sort = SortScratch::new(gpu, cap);
             self.isect_cap = cap;
         }
@@ -329,22 +330,18 @@ impl Renderer {
         let mut steps = Vec::new();
         steps.push(gpu.step(
             self.ks.splat_emit,
-            &[&self.proj, &self.counts, &self.keys_a, &self.vals_a],
+            &[&self.proj, &self.counts, &self.keys_a, &self.vals_a, &self.ids],
             &[s.n as u32, tiles_x, tiles_y, TILE, depth_bits, self.isect_cap as u32],
             s.n as u32,
         ));
-        let mut vals_in_b = false;
-        let (keys, vals) = if n_isects > 0 {
-            let in_b = record_sort_pairs(
+        let mut sorted_in_b = false;
+        if n_isects > 0 {
+            sorted_in_b = record_sort_pairs(
                 gpu, &self.ks, &self.keys_a, &self.vals_a, &self.keys_b, &self.vals_b,
                 n_isects, 32, &self.sort, &mut steps,
             );
-            vals_in_b = in_b;
-            if in_b { (&self.keys_b, &self.vals_b) } else { (&self.keys_a, &self.vals_a) }
-        } else {
-            (&self.keys_a, &self.vals_a)
-        };
-        if n_isects > 0 {
+            let (keys, order, vals) = self.sorted(sorted_in_b);
+            steps.push(gpu.step(self.ks.splat_gather_ids, &[order, &self.ids, vals], &[n_isects as u32], n_isects as u32));
             steps.push(gpu.step(
                 self.ks.splat_tile_ranges,
                 &[keys, &self.ranges],
@@ -352,6 +349,7 @@ impl Renderer {
                 n_isects as u32,
             ));
         }
+        let vals = self.sorted(sorted_in_b).2;
         if ray {
             steps.push(gpu.step(
                 self.ks.splat_ray_rasterize,
@@ -383,9 +381,17 @@ impl Renderer {
             px as u32,
         ));
         gpu.submit(&[&self.ranges], &steps);
-        self.last = Some((n_isects, vals_in_b, tiles_x, tiles_y));
+        self.last = Some((n_isects, sorted_in_b, tiles_x, tiles_y));
         self.last_ray = ray;
         RenderStats { n_isects, clamped }
+    }
+
+    /// The buffers of a sort that left its output in B (`in_b`) or A:
+    /// `(sorted keys, sorted emission indices, sorted gaussian ids)`. The ids
+    /// are gathered into the pair's other value buffer, which the sort no
+    /// longer needs.
+    fn sorted(&self, in_b: bool) -> (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer) {
+        if in_b { (&self.keys_b, &self.vals_b, &self.vals_a) } else { (&self.keys_a, &self.vals_a, &self.vals_b) }
     }
 
     /// Read the packed frame back as tight RGB24 bytes (drops alpha).
@@ -541,18 +547,14 @@ impl SplatGrads {
 }
 
 /// Words per gradient record in `recs`: one record per (tile, gaussian)
-/// INSTANCE, written by `splat_bwd_tile_reduce.wgsl` and read by
-/// `splat_bwd_keys.wgsl` / `splat_grad_reduce.wgsl` - five sigma partials,
-/// the opacity partial, three weighted colour partials, the depth partial,
-/// the summed per-pixel magnitude of the position partial, and the gaussian id
-/// bitcast into the last slot as the sort key. Declared once here because the
-/// host sizes the buffer and only the kernels know the stride -
-/// `record_width` in `crates/kernels/tests/` gates the two against each other.
-pub const RECORD_WORDS: usize = 12;
-
-/// Channels per (instance, pixel) slot written by `splat_bwd_slots.wgsl`:
-/// the record's eleven values, before the id.
-pub const SLOT_CHANNELS: usize = 11;
+/// INSTANCE, at the instance's emission slot, written by
+/// `splat_bwd_tile_reduce.wgsl` and read by `splat_grad_reduce.wgsl` - the
+/// 2D position partials, three conic partials, the opacity partial, three
+/// weighted colour partials, the depth partial and the summed per-pixel
+/// magnitude of the position partial. Declared once here because the host
+/// sizes the buffer and only the kernels know the stride - `record_width` in
+/// `crates/kernels/tests/` gates the two against each other.
+pub const RECORD_WORDS: usize = 11;
 
 /// Pixels per tile, the slot grid's inner dimension.
 const TILE_PIXELS: usize = (TILE * TILE) as usize;
@@ -612,17 +614,11 @@ pub fn initial_record_capacity(max_n: usize, rec_cap: usize, limit: u64) -> usiz
     want.min(max_records_for_binding(limit, RAY_RECORD_WORDS))
 }
 
-/// Backward scratch. The record buffers start at `rec_cap` (default 8 per
-/// gaussian) and [grow][BwdScratch::reserve_records] to the frame's instance
-/// count; the slot grid is sized per band.
+/// Backward scratch. The record buffer starts at `rec_cap` (default 8 per
+/// gaussian) and [grows][BwdScratch::reserve_records] to the frame's instance
+/// count; the slot grid of the per-pixel backward is sized per band.
 pub struct BwdScratch {
     recs: DeviceBuffer,
-    rkeys_a: DeviceBuffer,
-    rvals_a: DeviceBuffer,
-    rkeys_b: DeviceBuffer,
-    rvals_b: DeviceBuffer,
-    rsort: SortScratch,
-    granges: DeviceBuffer,
     pgrad: DeviceBuffer,
     /// The (instance, channel, pixel) grid one band of tiles writes and
     /// `splat_bwd_tile_reduce` sums; `slot_floats` floats.
@@ -638,10 +634,11 @@ pub struct BwdScratch {
     dray: DeviceBuffer,
     /// `splat_ray_camera_grad`'s per-workgroup partial sums.
     cam_partial: DeviceBuffer,
-    /// Records the key buffers hold, and floats `recs` holds.
-    rec_cap: usize,
+    /// Floats `recs` holds.
     rec_floats: usize,
     limit: Option<u64>,
+    /// Run the ray backward per pixel even where the tile kernel can run.
+    per_pixel: bool,
 }
 
 impl BwdScratch {
@@ -650,36 +647,24 @@ impl BwdScratch {
         let cap = initial_record_capacity(max_n, rec_cap, limit);
         let mut s = BwdScratch {
             recs: gpu.storage(0),
-            rkeys_a: gpu.storage(0),
-            rvals_a: gpu.storage(0),
-            rkeys_b: gpu.storage(0),
-            rvals_b: gpu.storage(0),
-            rsort: SortScratch::new(gpu, 1),
-            granges: gpu.storage(2 * max_n as u64),
             pgrad: gpu.storage((RAY_PGRAD * max_n) as u64),
             slots: gpu.storage(0),
             slot_floats: 0,
             no_depth: gpu.storage(5 * max_px as u64),
             dray: gpu.storage(6 * max_px as u64),
             cam_partial: gpu.storage((CAMERA_GRAD_WORDS * dispatched_groups(max_px.max(max_n))) as u64),
-            rec_cap: 0,
             rec_floats: 0,
             limit: None,
+            per_pixel: false,
         };
         gpu.submit(&[&s.no_depth], &[]);
         s.alloc_records(gpu, cap, RECORD_WORDS);
         s
     }
 
-    /// Size the record-keyed buffers for exactly `cap` records of `words`.
+    /// Size the record buffer for exactly `cap` records of `words`.
     fn alloc_records(&mut self, gpu: &Gpu, cap: usize, words: usize) {
         self.recs = gpu.storage(words as u64 * cap as u64);
-        self.rkeys_a = gpu.storage(cap as u64);
-        self.rvals_a = gpu.storage(cap as u64);
-        self.rkeys_b = gpu.storage(cap as u64);
-        self.rvals_b = gpu.storage(cap as u64);
-        self.rsort = SortScratch::new(gpu, cap);
-        self.rec_cap = cap;
         self.rec_floats = cap * words;
     }
 
@@ -691,7 +676,7 @@ impl BwdScratch {
     /// records for one backward are written and consumed inside that one
     /// call.
     pub fn reserve_records(&mut self, gpu: &Gpu, need: usize, words: usize) -> Result<(), String> {
-        if need <= self.rec_cap && need * words <= self.rec_floats {
+        if need * words <= self.rec_floats {
             return Ok(());
         }
         let cap = record_capacity(need, self.limit(gpu), words)?;
@@ -704,6 +689,15 @@ impl BwdScratch {
     /// one.
     pub fn with_binding_limit(mut self, bytes: u64) -> BwdScratch {
         self.limit = Some(bytes);
+        self
+    }
+
+    /// Differentiate the ray renderer per pixel (`splat_ray_bwd_slots` and
+    /// `splat_bwd_tile_reduce`) even on a device that runs the tile kernel
+    /// (`splat_ray_bwd_tile`): the reference the tile kernel is tested
+    /// against. The CPU JIT always runs this path.
+    pub fn per_pixel(mut self) -> BwdScratch {
+        self.per_pixel = true;
         self
     }
 
@@ -783,11 +777,11 @@ impl Renderer {
     /// [`add_expected_depth_vjp`] is the one place that does the split, and
     /// callers should use it rather than repeat it.
     ///
-    /// The pass reduces each instance over its tile's pixels first (a fixed
-    /// slot grid, band by band of tiles so the grid stays bounded), and only
-    /// then sorts - instances, not pixels - by gaussian. Sorting one record
-    /// per (pixel, gaussian) was 70% of the backward's device time on a
-    /// trained 300k-gaussian scene.
+    /// The pass reduces each instance over its tile's pixels (a fixed slot
+    /// grid, band by band of tiles so the grid stays bounded) into a record
+    /// at the instance's emission slot; a gaussian's instances were emitted
+    /// contiguously, so its records are summed straight from its scanned
+    /// offset with no sort by gaussian.
     ///
     /// `Err` only when the frame has more records than one binding holds.
     #[allow(clippy::too_many_arguments)]
@@ -802,19 +796,19 @@ impl Renderer {
         scr: &mut BwdScratch,
         grads: &SplatGrads,
     ) -> Result<usize, String> {
-        let (n_isects, vals_in_b, tiles_x, tiles_y) =
+        let (n_isects, sorted_in_b, tiles_x, tiles_y) =
             self.last.expect("render() must run before render_bwd()");
         assert!(!self.last_ray, "render_bwd: the last render was ray-evaluated; use render_bwd_ray");
         if n_isects == 0 {
             return Ok(0);
         }
-        let vals = if vals_in_b { &self.vals_b } else { &self.vals_a };
+        let (_, order, vals) = self.sorted(sorted_in_b);
         let n_tiles = (tiles_x * tiles_y) as usize;
         let ranges = gpu.read(&self.ranges, 2 * n_tiles);
         let ranges: Vec<u32> = ranges.iter().map(|v| v.to_bits()).collect();
-        let bands = plan_bands(&ranges, scr.band_instances(gpu, SLOT_CHANNELS));
+        let bands = plan_bands(&ranges, scr.band_instances(gpu, RECORD_WORDS));
         scr.reserve_records(gpu, n_isects, RECORD_WORDS)?;
-        scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0), SLOT_CHANNELS);
+        scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0), RECORD_WORDS);
 
         // Stage timings, on request. Splitting the submissions costs a few
         // extra syncs, which is the price of finding out which stage is the
@@ -845,37 +839,17 @@ impl Renderer {
             ));
             steps.push(gpu.dispatch(
                 self.ks.splat_bwd_tile_reduce,
-                &[&scr.slots, vals, &scr.recs],
-                &[count, k0, SLOT_CHANNELS as u32],
+                &[&scr.slots, order, &scr.recs],
+                &[count, k0, RECORD_WORDS as u32],
                 gpu_core::Dispatch::Workgroups(count),
             ));
         }
         flush(gpu, &mut steps, "slots + tile reduce");
-        steps.push(gpu.step(
-            self.ks.splat_bwd_keys,
-            &[&scr.recs, &scr.rkeys_a, &scr.rvals_a],
-            &[n_isects as u32, RECORD_WORDS as u32],
-            n_isects as u32,
-        ));
-        let key_bits = 32u32.min((s.n.next_power_of_two().trailing_zeros()).max(1) + 1);
-        let in_b = record_sort_pairs(
-            gpu, &self.ks, &scr.rkeys_a, &scr.rvals_a, &scr.rkeys_b, &scr.rvals_b,
-            n_isects, key_bits, &scr.rsort, &mut steps,
-        );
-        flush(gpu, &mut steps, "sort instances by gaussian");
-        let (skeys, svals) = if in_b { (&scr.rkeys_b, &scr.rvals_b) } else { (&scr.rkeys_a, &scr.rvals_a) };
-        // segment ranges over gaussian ids (tile_ranges with depth_bits = 0)
-        steps.push(gpu.step(
-            self.ks.splat_tile_ranges,
-            &[skeys, &scr.granges],
-            &[n_isects as u32, 0],
-            n_isects as u32,
-        ));
         // pgrad {v_xy, v_conic, v_op, v_rgb, v_depth}, colour at 6, AbsGS at 10
         steps.push(gpu.step(
             self.ks.splat_grad_reduce,
-            &[&scr.recs, svals, &scr.granges, &scr.pgrad, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
-            &[s.n as u32, RECORD_WORDS as u32, 10, 6, 10],
+            &[&scr.recs, &self.counts, &scr.pgrad, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
+            &[s.n as u32, RECORD_WORDS as u32, 10, 6, 10, n_isects as u32],
             s.n as u32,
         ));
         steps.push(gpu.step(
@@ -885,10 +859,10 @@ impl Renderer {
             s.n as u32,
         ));
         let t = std::time::Instant::now();
-        gpu.submit(&[&scr.granges, &scr.pgrad], &steps);
+        gpu.submit(&[&scr.pgrad], &steps);
         if prof {
             gpu.read(&self.proj, 1);
-            eprintln!("    bwd {} instances in {} band(s); ranges + reduce + project: {:.1} ms", n_isects, bands.len(), 1e3 * t.elapsed().as_secs_f64());
+            eprintln!("    bwd {} instances in {} band(s); reduce + project: {:.1} ms", n_isects, bands.len(), 1e3 * t.elapsed().as_secs_f64());
         }
         Ok(n_isects)
     }
@@ -920,71 +894,64 @@ impl Renderer {
         grads: &SplatGrads,
         camera: bool,
     ) -> Result<Option<CameraGrad>, String> {
-        let (n_isects, vals_in_b, tiles_x, tiles_y) =
+        let (n_isects, sorted_in_b, tiles_x, tiles_y) =
             self.last.expect("render() must run before render_bwd_ray()");
         assert!(self.last_ray, "render_bwd_ray: the last render was EWA-splatted; use render_bwd");
         let view = ray_view_params(s.n, cam, o);
         let filter = s.filter3d.as_ref().unwrap_or(&self.no_filter);
-        let vals = if vals_in_b { &self.vals_b } else { &self.vals_a };
+        let (_, order, vals) = self.sorted(sorted_in_b);
         let n_tiles = (tiles_x * tiles_y) as usize;
         let mut steps = Vec::new();
-        if camera {
-            // a pixel no band reaches must read as no gradient
-            gpu.submit(&[&scr.dray], &[]);
-        }
         if n_isects > 0 {
-            let ranges = gpu.read(&self.ranges, 2 * n_tiles);
-            let ranges: Vec<u32> = ranges.iter().map(|v| v.to_bits()).collect();
-            let bands = plan_bands(&ranges, scr.band_instances(gpu, RAY_SLOT_CHANNELS));
             scr.reserve_records(gpu, n_isects, RAY_RECORD_WORDS)?;
-            scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0), RAY_SLOT_CHANNELS);
-            for &(tile0, tiles, k0, count) in &bands {
-                if count == 0 {
-                    continue;
+            if scr.per_pixel || !gpu.caps().workgroup_reductions {
+                if camera {
+                    // a pixel no band reaches must read as no gradient
+                    gpu.submit(&[&scr.dray], &[]);
                 }
-                let threads = tiles * TILE * TILE;
+                let ranges = gpu.read(&self.ranges, 2 * n_tiles);
+                let ranges: Vec<u32> = ranges.iter().map(|v| v.to_bits()).collect();
+                let bands = plan_bands(&ranges, scr.band_instances(gpu, RAY_RECORD_WORDS));
+                scr.reserve_slots(gpu, bands.iter().map(|b| b.3 as usize).max().unwrap_or(0), RAY_RECORD_WORDS);
+                for &(tile0, tiles, k0, count) in &bands {
+                    if count == 0 {
+                        continue;
+                    }
+                    let threads = tiles * TILE * TILE;
+                    let mut params = view.to_vec();
+                    params.extend_from_slice(&[tile0, k0, k0 + count, threads, camera as u32, 0, 0, 0]);
+                    steps.push(gpu.step(
+                        self.ks.splat_ray_bwd_slots,
+                        &[&self.ray, vals, &self.ranges, dimg, daux.unwrap_or(&scr.no_depth), &scr.slots, &scr.dray],
+                        &params,
+                        threads,
+                    ));
+                    steps.push(gpu.dispatch(
+                        self.ks.splat_bwd_tile_reduce,
+                        &[&scr.slots, order, &scr.recs],
+                        &[count, k0, RAY_RECORD_WORDS as u32],
+                        gpu_core::Dispatch::Workgroups(count),
+                    ));
+                }
+            } else {
                 let mut params = view.to_vec();
-                params.extend_from_slice(&[tile0, k0, k0 + count, threads, camera as u32, 0, 0, 0]);
-                steps.push(gpu.step(
-                    self.ks.splat_ray_bwd_slots,
-                    &[&self.ray, vals, &self.ranges, dimg, daux.unwrap_or(&scr.no_depth), &scr.slots, &scr.dray],
-                    &params,
-                    threads,
-                ));
+                params.extend_from_slice(&[camera as u32, 0, 0, 0]);
                 steps.push(gpu.dispatch(
-                    self.ks.splat_bwd_tile_reduce,
-                    &[&scr.slots, vals, &scr.recs],
-                    &[count, k0, RAY_SLOT_CHANNELS as u32],
-                    gpu_core::Dispatch::Workgroups(count),
+                    self.ks.splat_ray_bwd_tile,
+                    &[&self.ray, vals, order, &self.ranges, dimg, daux.unwrap_or(&scr.no_depth), &scr.recs, &scr.dray],
+                    &params,
+                    gpu_core::Dispatch::Workgroups(n_tiles as u32),
                 ));
             }
-            steps.push(gpu.step(
-                self.ks.splat_bwd_keys,
-                &[&scr.recs, &scr.rkeys_a, &scr.rvals_a],
-                &[n_isects as u32, RAY_RECORD_WORDS as u32],
-                n_isects as u32,
-            ));
-            let key_bits = 32u32.min((s.n.next_power_of_two().trailing_zeros()).max(1) + 1);
-            let in_b = record_sort_pairs(
-                gpu, &self.ks, &scr.rkeys_a, &scr.rvals_a, &scr.rkeys_b, &scr.rvals_b,
-                n_isects, key_bits, &scr.rsort, &mut steps,
-            );
-            let (skeys, svals) = if in_b { (&scr.rkeys_b, &scr.rvals_b) } else { (&scr.rkeys_a, &scr.rvals_a) };
-            steps.push(gpu.step(
-                self.ks.splat_tile_ranges,
-                &[skeys, &scr.granges],
-                &[n_isects as u32, 0],
-                n_isects as u32,
-            ));
             // pgrad {dL/dm, dL/dA, dL/dopacity', dL/dn}, colour at 13, AbsGS at 16
             steps.push(gpu.step(
                 self.ks.splat_grad_reduce,
-                &[&scr.recs, svals, &scr.granges, &scr.pgrad, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
-                &[s.n as u32, RAY_RECORD_WORDS as u32, RAY_PGRAD as u32, 13, 16],
+                &[&scr.recs, &self.counts, &scr.pgrad, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad],
+                &[s.n as u32, RAY_RECORD_WORDS as u32, RAY_PGRAD as u32, 13, 16, n_isects as u32],
                 s.n as u32,
             ));
         } else {
-            gpu.submit(&[&scr.pgrad], &[]);
+            gpu.submit(&[&scr.pgrad, &scr.dray], &[]);
         }
         steps.push(gpu.step(
             self.ks.splat_ray_project_bwd,
@@ -993,7 +960,7 @@ impl Renderer {
             s.n as u32,
         ));
         if !camera {
-            gpu.submit(&[&scr.granges], &steps);
+            gpu.submit(&[], &steps);
             return Ok(None);
         }
         let n_pix = (cam.width * cam.height) as usize;
@@ -1006,7 +973,7 @@ impl Renderer {
             &params,
             gpu_core::Dispatch::Workgroups(threads.div_ceil(64) as u32),
         ));
-        gpu.submit(&[&scr.granges], &steps);
+        gpu.submit(&[], &steps);
         let groups = dispatched_groups(threads);
         let part = gpu.read(&scr.cam_partial, groups * CAMERA_GRAD_WORDS);
         let mut g = [0.0f64; CAMERA_GRAD_WORDS];

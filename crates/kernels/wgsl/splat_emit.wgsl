@@ -14,8 +14,15 @@
 // instances at its scanned offset. Key = tile_id << depth_bits | depth_q,
 // where depth_q is the top `depth_bits` of the raw IEEE bits of the positive
 // camera depth (monotonic under truncation), so one 32-bit LSD radix sort
-// yields tile-major, front-to-back order. Value = gaussian index.
-// Writes past `cap` are dropped (host clamps n_isects and warns).
+// yields tile-major, front-to-back order. Value = the instance's own emission
+// index, and `ids` maps that index to its gaussian: after the sort the value
+// array says where each sorted instance was emitted, which is what lets the
+// backward write an instance's gradient record at its emission slot - every
+// gaussian's records then sit contiguously at its scanned offset, with no
+// second sort to gather them (`splat_grad_reduce.wgsl`).
+// `splat_gather_ids.wgsl` turns the sorted indices into sorted gaussian ids
+// for the rasterizers. Writes past `cap` are dropped (host clamps n_isects
+// and warns).
 
 struct Params {
     n: u32,
@@ -30,7 +37,8 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       proj:    array<f32>; // N*9
 @group(0) @binding(2) var<storage, read>       offsets: array<u32>; // N (scanned counts)
 @group(0) @binding(3) var<storage, read_write> keys:    array<u32>;
-@group(0) @binding(4) var<storage, read_write> vals:    array<u32>;
+@group(0) @binding(4) var<storage, read_write> vals:    array<u32>; // emission index
+@group(0) @binding(5) var<storage, read_write> ids:     array<u32>; // emission index -> gaussian
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -55,7 +63,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             if (pos < p.cap) {
                 let tile_id = u32(ty) * p.tiles_x + u32(tx);
                 keys[pos] = (tile_id << p.depth_bits) | depth_q;
-                vals[pos] = i;
+                vals[pos] = pos;
+                ids[pos] = i;
             }
             pos = pos + 1u;
         }

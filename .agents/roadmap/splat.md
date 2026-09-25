@@ -231,10 +231,11 @@ scenes' `f32::to_bits()` bitwise (`crates/splat/src/caps.rs`'s
 `determinism_probe_fit_twice_on_identical_inputs` test). Measured result (Intel
 Arc integrated GPU, Vulkan backend): **`0` differing bits** - `mse
 0.000007867729` on both runs, identical to the ULP. The backward kernels
-(`splat_grad_reduce`, `splat_bwd_slots`, `splat_bwd_tile_reduce`, `splat_bwd_keys`,
-`splat_project_bwd`) contain zero atomic operations - `splat_grad_reduce` is a
-deterministic per-gaussian segmented reduction over id-sorted gradient records
-- so bit-determinism was expected, and is now a measured fact rather than an
+(`splat_grad_reduce`, `splat_bwd_slots`, `splat_bwd_tile_reduce`,
+`splat_ray_bwd_tile`, `splat_project_bwd`) contain zero atomic operations -
+every reduction runs in a fixed order, and `splat_grad_reduce` sums each
+gaussian's records from its contiguous emission slots - so bit-determinism was
+expected, and is now a measured fact rather than an
 assumption. Following from this, the `fit` capability action's own
 caps-vs-library test is gated at bit-identity for a fit run in isolation; the
 tiny (sub-1e-6) deviations it separately measures between a `fit` action's PLY

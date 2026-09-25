@@ -360,3 +360,87 @@ fn camera_gradients_match_central_differences() {
     ck.assert(30, 0.02);
 }
 
+
+/// Everything one backward accumulates, read back.
+struct Backward {
+    d_gauss: Vec<f32>,
+    d_opac: Vec<f32>,
+    d_colors: Vec<f32>,
+    d_absgrad: Vec<f32>,
+    d_sumgrad: Vec<f32>,
+    camera: CameraGrad,
+}
+
+fn backward(g: &Gpu, s: &Splats, cam: &Camera, o: &RenderOpts, probe: &Probe, per_pixel: bool) -> Backward {
+    let mut ren = Renderer::new(g, Kernels::at(0), s.len(), cam.width, cam.height, 0).growable();
+    let gs = GpuSplats::upload(g, s);
+    ren.render(g, &gs, cam, o);
+    let (dimg, daux) = probe.upstream(&ren.read_rgba(g, cam.width, cam.height), &ren.read_aux(g, cam.width, cam.height));
+    let grads = SplatGrads::new(g, s.len());
+    g.submit(&[&grads.d_gauss, &grads.d_opac, &grads.d_colors, &grads.d_absgrad, &grads.d_sumgrad], &[]);
+    let (dimg, daux) = (g.storage_init("dimg", &dimg), g.storage_init("daux", &daux));
+    let mut scr = BwdScratch::new(g, s.len(), (cam.width * cam.height) as usize, 0);
+    if per_pixel {
+        scr = scr.per_pixel();
+    }
+    let camera = ren.render_bwd_ray(g, &gs, cam, o, &dimg, Some(&daux), &mut scr, &grads, true).expect("fits").expect("asked for");
+    Backward {
+        d_gauss: g.read(&grads.d_gauss, 10 * s.len()),
+        d_opac: g.read(&grads.d_opac, s.len()),
+        d_colors: g.read(&grads.d_colors, 3 * s.len()),
+        d_absgrad: g.read(&grads.d_absgrad, s.len()),
+        d_sumgrad: g.read(&grads.d_sumgrad, 2 * s.len()),
+        camera,
+    }
+}
+
+/// The tile-cooperative backward a GPU runs is the per-pixel backward
+/// reorganized, not a different derivative: on a crowded scene - hundreds of
+/// instances per tile, pixels that saturate part way down their list, a frame
+/// that is not a whole number of tiles, a lens and a rolling shutter - every
+/// accumulated gradient and density statistic agrees with the per-pixel
+/// reference to summation-order rounding.
+#[test]
+fn the_tile_backward_is_the_per_pixel_backward() {
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
+    let cam = cameras(70, 53).into_iter().find(|c| c.0 == "rolling shutter").expect("listed").1;
+    let cam = Camera { lens: Lens::Fisheye { k: [0.03, -0.01, 0.002, 0.0] }, fx: cam.fx * 0.8, fy: cam.fy * 0.8, ..cam };
+    // spread across the fisheye's whole field
+    let mut s = scene(2500, 0x7e57, 3.0, 0.3);
+    for m in s.means.chunks_exact_mut(3) {
+        m[0] *= 2.5;
+        m[1] *= 2.5;
+    }
+    for o in &mut s.opacities {
+        *o = 0.5 + 0.45 * (*o - 0.3) / 0.4;
+    }
+    let o = RenderOpts { ray: true, antialiased: true, eps2d: 0.3, bg: [0.3, 0.1, 0.2], ..Default::default() };
+    let probe = probe_for(&g, &s, &vec![0.0; s.len()], &cam, &o, 0x7a11);
+    let mut ren = Renderer::new(&g, Kernels::at(0), s.len(), cam.width, cam.height, 0).growable();
+    let stats = ren.render(&g, &GpuSplats::upload(&g, &s), &cam, &o);
+    let tiles = (cam.width.div_ceil(16) * cam.height.div_ceil(16)) as usize;
+    let alpha: Vec<f32> = ren.read_rgba(&g, cam.width, cam.height).chunks_exact(4).map(|p| p[3]).collect();
+    // a walk stops before transmittance reaches 1e-4, so its pixel ends
+    // within a pair or so of opaque
+    let saturated = alpha.iter().filter(|a| **a > 0.99).count();
+    assert!(stats.n_isects > 200 * tiles, "{} instances over {tiles} tiles is not a crowded scene", stats.n_isects);
+    assert!(saturated > alpha.len() / 4, "only {saturated} of {} pixels come near opaque", alpha.len());
+    let tile = backward(&g, &s, &cam, &o, &probe, false);
+    let reference = backward(&g, &s, &cam, &o, &probe, true);
+
+    let agree = |what: &str, a: &[f32], b: &[f32]| {
+        let scale = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(scale > 0.0, "{what}: the reference is all zero - the scene tests nothing");
+        let (d, i) = max_diff(a, b);
+        assert!(d <= 2e-4 * scale, "{what}[{i}]: tile {} vs per-pixel {} (largest entry {scale})", a[i], b[i]);
+    };
+    agree("d_gauss", &tile.d_gauss, &reference.d_gauss);
+    agree("d_opac", &tile.d_opac, &reference.d_opac);
+    agree("d_colors", &tile.d_colors, &reference.d_colors);
+    agree("d_absgrad", &tile.d_absgrad, &reference.d_absgrad);
+    agree("d_sumgrad", &tile.d_sumgrad, &reference.d_sumgrad);
+    let flat = |c: &CameraGrad| -> Vec<f32> {
+        c.rotation.iter().chain(&c.translation).chain(&c.shutter).chain(&c.lens).map(|v| *v as f32).collect()
+    };
+    agree("camera", &flat(&tile.camera), &flat(&reference.camera));
+}
