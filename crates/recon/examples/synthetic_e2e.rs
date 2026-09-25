@@ -233,18 +233,17 @@ fn main() {
             sfm_cfg.min_inliers = m;
         }
         let set = recon::photogrammetry::training_set(&rgb8, width, 0.5, &sfm_cfg).expect("structure from motion");
-        let k = set.sfm.intrinsics;
+        let k = set.sfm.intrinsics[0];
         let true_f = train[0].fx as f64;
         println!(
-            "B structure from motion: {}/{} registered, {} points, rms {:.2} px, focal {:.1} (true {true_f:.1}, {:+.2}%), k1 {:+.4} k2 {:+.4}",
+            "B structure from motion: {}/{} registered, {} points, rms {:.2} px, focal {:.1} (true {true_f:.1}, {:+.2}%), {}",
             set.targets.len(),
             train.len(),
             set.sfm.points.len(),
             set.sfm.rms_px,
-            k.f,
-            100.0 * (k.f - true_f) / true_f,
-            k.k1,
-            k.k2
+            k.fx,
+            100.0 * (k.fx - true_f) / true_f,
+            sfm::lens::describe(&k)
         );
         let tru: Vec<[f64; 16]> = set.source.iter().map(|&i| train[i].c2w.map(|v| v as f64)).collect();
         let rig = {

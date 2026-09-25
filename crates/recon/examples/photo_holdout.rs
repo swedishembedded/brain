@@ -53,7 +53,7 @@ fn main() {
         photos.len(),
         set.sfm.points.len(),
         set.sfm.rms_px,
-        set.sfm.intrinsics.f
+        set.sfm.intrinsics[0].fx
     );
 
     // hold out every k-th registered view, starting half a stride in so the

@@ -18,8 +18,9 @@
 //! If your team needs that, you can procure our services by sending an email
 //! to info@swedishembedded.com.
 
+use camera::Intrinsics;
 use imaging::Rgb8;
-use sfm::camera::{Intrinsics, Pose};
+use sfm::camera::Pose;
 use sfm::incremental::{reconstruct, Photo, Reconstruction, SfmCfg, SfmError};
 use splat::opt::TargetView;
 use splat::types::{Camera, Splats};
@@ -58,15 +59,14 @@ impl TrainingSet {
 /// in [0,1], the validity mask, and the pinhole intrinsics `(f, cx, cy)`.
 pub fn undistort(img: &Rgb8, k: &Intrinsics, width: u32, height: u32) -> (Vec<f32>, Vec<f32>, (f32, f32, f32)) {
     let s = width as f64 / k.width as f64;
-    let (f, cx, cy) = (k.f * s, k.cx * s, k.cy * s);
+    let (f, cx, cy) = (k.fx * s, k.cx * s, k.cy * s);
     let (w, h) = (width as usize, height as usize);
     let mut rgb = vec![0.0f32; w * h * 3];
     let mut mask = vec![0.0f32; w * h];
     let (iw, ih) = (img.w as usize, img.h as usize);
     for y in 0..h {
         for x in 0..w {
-            let n = [(x as f64 + 0.5 - cx) / f, (y as f64 + 0.5 - cy) / f];
-            let p = k.to_pixel(n);
+            let Some(p) = k.project([(x as f64 + 0.5 - cx) / f, (y as f64 + 0.5 - cy) / f, 1.0]) else { continue };
             // bilinear on pixel centres
             let (fx, fy) = (p[0] - 0.5, p[1] - 0.5);
             if fx < 0.0 || fy < 0.0 || fx > (iw - 1) as f64 || fy > (ih - 1) as f64 {
@@ -98,9 +98,9 @@ pub fn camera(pose: &Pose, fcc: (f32, f32, f32), width: u32, height: u32) -> Cam
 /// pixels across (the height follows the photographs' aspect).
 /// `opacity` is what every starting gaussian gets (3DGS starts at 0.1).
 pub fn training_set(photos: &[Rgb8], width: u32, opacity: f32, cfg: &SfmCfg) -> Result<TrainingSet, SfmError> {
-    let views: Vec<Photo> = photos.iter().map(|p| Photo { width: p.w, height: p.h, rgb: &p.px }).collect();
+    let views: Vec<Photo> = photos.iter().map(|p| Photo { width: p.w, height: p.h, rgb: &p.px, sensor: 0, focal_px: None }).collect();
     let rec = reconstruct(&views, cfg)?;
-    let k = rec.intrinsics;
+    let k = rec.intrinsics[0];
     let height = ((width as f64 * k.height as f64 / k.width as f64).round() as u32).max(1);
     // Downscale first so the pinhole resample reads a band-limited source.
     let factor = (k.width as f64 / width as f64).floor().max(1.0) as u32;
@@ -139,7 +139,7 @@ fn box_down(img: &Rgb8, factor: u32, k: &Intrinsics) -> (Rgb8, Intrinsics) {
         }
     }
     let s = 1.0 / factor as f64;
-    let ks = Intrinsics { f: k.f * s, cx: k.cx * s, cy: k.cy * s, width: w, height: h, ..*k };
+    let ks = Intrinsics { fx: k.fx * s, fy: k.fy * s, cx: k.cx * s, cy: k.cy * s, width: w, height: h, ..*k };
     (Rgb8 { w, h, px }, ks)
 }
 
@@ -156,13 +156,13 @@ mod tests {
         let (w, h) = (40u32, 30u32);
         let px: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 251) as u8).collect();
         let img = Rgb8 { w, h, px: px.clone() };
-        let k = Intrinsics::guess(w, h, 0.8);
+        let k = Intrinsics::pinhole(0.8 * w.max(h) as f64, w, h);
         let (rgb, mask, _) = undistort(&img, &k, w, h);
         for i in 0..px.len() {
             assert!((rgb[i] - px[i] as f32 / 255.0).abs() < 1e-5, "pixel value {i}");
         }
         assert!(mask.iter().all(|&m| m == 1.0));
-        let pincushion = Intrinsics { k1: 0.2, ..k };
+        let pincushion = Intrinsics { lens: camera::Lens::radial(0.2, 0.0), ..k };
         let (_, mask, _) = undistort(&img, &pincushion, w, h);
         assert_eq!(mask[0], 0.0, "a corner outside the photograph must be masked");
         assert_eq!(mask[(h / 2 * w + w / 2) as usize], 1.0);

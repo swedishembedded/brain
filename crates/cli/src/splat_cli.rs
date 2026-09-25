@@ -632,16 +632,14 @@ fn photogrammetry(a: &mut Args) -> (Vec<String>, recon::photogrammetry::Training
         eprintln!("{e}");
         std::process::exit(1);
     });
-    let k = set.sfm.intrinsics;
+    let k = set.sfm.intrinsics[0];
     println!(
-        "registered {}/{} photographs, {} points, reprojection rms {:.2} px, focal {:.1} px, k1 {:+.4}, k2 {:+.4}",
+        "registered {}/{} photographs, {} points, reprojection rms {:.2} px, {}",
         set.targets.len(),
         photos.len(),
         set.sfm.points.len(),
         set.sfm.rms_px,
-        k.f,
-        k.k1,
-        k.k2
+        sfm::lens::describe(&k)
     );
     for (i, p) in paths.iter().enumerate() {
         if !set.source.contains(&i) {

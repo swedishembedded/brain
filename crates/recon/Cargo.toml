@@ -18,6 +18,9 @@ brain-imaging.workspace = true
 # Cameras and a sparse point cloud from photographs, for a training set that
 # needs no learned model (`photogrammetry.rs`).
 brain-sfm.workspace = true
+# `camera::Intrinsics` - the calibration structure from motion returns, and
+# the lens the undistortion looks through.
+brain-camera.workspace = true
 
 [dev-dependencies]
 # `data::rng::Lcg` - the one deterministic test PRNG (tests only).
