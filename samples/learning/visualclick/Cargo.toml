@@ -7,15 +7,17 @@ name = "sample-learning-visualclick"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Validation sample: can rows the encoder never produced (an image patch feature) drive a decision model's cross-attention head to a spatially grounded answer, against a text baseline and two ablations."
+description = "A decision model that reads a rendered screen and answers which control to click, for a plain-language instruction supplied at run time."
 publish = false
 
 [dependencies]
 # The ONLY brain dependency a sample may have is the SDK facade, and it must
 # NAME the surfaces it uses - see samples/README.md rules 1 and 2.
-#   decision  RlcdPipeline / Decide / Question / Features: the model and the
-#             splice seam this sample validates
-#   viewport  Canvas: headless, no-GPU rendering of the synthetic scenes
+#   decision  RlcdPipeline / Decide / Question / Features: the decision head,
+#             and the `Features::from_parts` seam the screen's rows go in through
+#   viewport  Canvas: headless, no-GPU rendering of the screens - and the
+#             pixels are read back off it, so this is an INPUT path here, not
+#             only a way to draw a PNG
 brain = { workspace = true, features = ["decision", "viewport"] }
 
 [package.metadata.brain]
