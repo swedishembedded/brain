@@ -372,7 +372,7 @@ impl TextGenerationPipelineBuilder {
         let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() {
             check_local_weights_architecture(&weights)?;
             (weights, None)
-        } else if let Some(local) = crate::study::resolve_in_store(&weights) {
+        } else if let Some(local) = resolve_in_store(&weights) {
             // A `vendor/repo` reference the local model store already holds.
             // Taken BEFORE the hub policy so that one string means one model
             // across this SDK: the reader and the study resolve
@@ -466,6 +466,25 @@ pub(crate) fn check_local_weights_architecture(weights: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `(weights, tokenizer)` for a reference the LOCAL model store already
+/// holds, or `None` for anything else.
+///
+/// Taken between the local-file check and `resolve_hub_weights` so that one
+/// model reference means one model across this SDK: without it a
+/// `vendor/repo` string resolves through the store on the reader and study
+/// surfaces and through a candidate scan here, and the same argument names
+/// two different checkpoints.
+fn resolve_in_store(reference: &str) -> Option<(String, Option<String>)> {
+    let root = loader::model_dir::resolve(None)?;
+    let r = brain_modelref::ModelRef::parse(reference).ok()?;
+    let local = brain_modelstore::Store::new(&root).local(&r)?;
+    let tokenizer = local.dir.join("tokenizer.json");
+    Some((
+        local.weights.to_string_lossy().into_owned(),
+        tokenizer.exists().then(|| tokenizer.to_string_lossy().into_owned()),
+    ))
 }
 
 /// Resolve `model_id` as a `<vendor>/<repo>` hub reference through

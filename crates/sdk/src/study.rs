@@ -698,7 +698,6 @@ mod tests {
     }
 }
 
-
 /// A base checkpoint from a path, a model directory, or a `vendor/repo`
 /// reference resolved against the store.
 ///
@@ -707,25 +706,6 @@ mod tests {
 /// the adapter card records as the base it derives from - which is why a
 /// bare file synthesizes a `local/<stem>` id rather than using the filename:
 /// the adapter ref grammar needs a `vendor/repo`.
-/// `(weights, tokenizer)` for a reference the LOCAL model store already
-/// holds, or `None` for anything else.
-///
-/// The shared half of [`resolve_base`], for a caller that only needs the two
-/// paths. It exists so that one model reference means one model across this
-/// SDK: without it a `vendor/repo` string resolves through the store on the
-/// reader and study surfaces and through a candidate scan on the text one,
-/// and the same argument names two different checkpoints.
-pub(crate) fn resolve_in_store(reference: &str) -> Option<(String, Option<String>)> {
-    let root = loader::model_dir::resolve(None)?;
-    let r = brain_modelref::ModelRef::parse(reference).ok()?;
-    let local = brain_modelstore::Store::new(&root).local(&r)?;
-    let tokenizer = local.dir.join("tokenizer.json");
-    Some((
-        local.weights.to_string_lossy().into_owned(),
-        tokenizer.exists().then(|| tokenizer.to_string_lossy().into_owned()),
-    ))
-}
-
 pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> std::result::Result<(PathBuf, PathBuf, String), String> {
     let path = Path::new(base);
     if path.is_dir() {
