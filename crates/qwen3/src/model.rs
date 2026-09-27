@@ -841,6 +841,14 @@ impl Qwen {
             Gpu::new_on_index(shard.gpu_index as u32, pipelines())
                 .unwrap_or_else(|e| panic!("qwen shard placement: {e}"))
         };
+        // Reclaim what previous builds dropped: on wgpu, buffers freed by
+        // their last handle stay allocated until the device is polled, and
+        // this crate's pipeline is exactly "build, score, drop, build
+        // again" - a second build on a not-yet-polled device allocates a
+        // second full copy of the weights on top of the first, and OOMs on
+        // any card sized for one model. Polling here is a no-op when
+        // nothing is pending.
+        gpu.poll_wait();
         // A second handle onto the SAME device AND the SAME compiled
         // pipeline set (`Gpu::share`, not `Gpu::new_like` - see `pipelines`'s
         // own doc comment for why index-space compatibility, not just

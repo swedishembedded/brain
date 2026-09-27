@@ -24,6 +24,7 @@ use data::qwen_tokenizer::QwenBpe;
 
 use crate::config::QwenConfig;
 use crate::model::Qwen;
+use gpu_core::select::Dtype;
 
 /// Aggregate score over a held-out set: `loss` is mean per-token
 /// cross-entropy (NaN if every sample was skipped), `token_accuracy` is the
@@ -43,10 +44,19 @@ pub struct ChatScore {
 /// `adapter` (an adapter-only safetensors file, `qwen3::lora::save_adapter`'s
 /// output) into the base tensors first -- the same zero-inference-overhead
 /// path a resident uses to serve a named adapter, so scoring an adapter
-/// exercises exactly what serving it would do.
-fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32) -> Qwen {
+/// exercises exactly what serving it would do. `dt` is the weight STORAGE
+/// tier both builds use; an fp32 master copy is kept nowhere when `dt`
+/// differs, so base and adapter scores must pass the SAME tier or the
+/// comparison crosses tiers.
+fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32, dt: Dtype) -> Qwen {
     match adapter {
-        None => Qwen::load_inference(weights, 1, t),
+        None => {
+            let reader = checkpoint::weightio::WeightReader::open(weights)
+                .unwrap_or_else(|e| panic!("cannot open {weights}: {e}"));
+            let cfg = QwenConfig::from_json(&reader.config());
+            let shard = crate::Shard::whole(cfg.n_layers as usize);
+            Qwen::new_shard_dt(cfg, 1, t, &reader, shard, dt)
+        }
         Some(a) => {
             let c = checkpoint::load(weights);
             let mut tensors: HashMap<String, Vec<f32>> = c.by_role("");
@@ -56,7 +66,13 @@ fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32) -> Qwen {
             // this Qwen has no separate lora_a/lora_b params to build.
             cfg.lora = None;
             cfg.block_size = t;
-            Qwen::new(cfg, 1, t, &tensors)
+            // Score on an INFERENCE build: the trainable constructor holds
+            // grad + optimizer buffers on top of the fp32 master copy that
+            // no scorer ever steps - about 7x the weights' device memory
+            // for zero benefit, and an OOM on any card too small for a
+            // training build.
+            let shard = crate::Shard::whole(cfg.n_layers as usize);
+            Qwen::new_shard_dt(cfg, 1, t, &tensors, shard, dt)
         }
     }
 }
@@ -81,7 +97,20 @@ fn argmax(s: &[f32]) -> u32 {
 /// whose length exceeds `block` is skipped, not silently dropped from the
 /// count -- see [`ChatScore::skipped`].
 pub fn score_chat(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32) -> ChatScore {
-    let model = load_scored_model(weights, adapter, block);
+    score_chat_dt(weights, adapter, tok, tmpl, samples, block, Dtype::F32)
+}
+
+/// [`score_chat`] at an explicit weight STORAGE tier. Comparing a base
+/// score against a tuned score is only meaningful at ONE tier: both builds
+/// must land on the same tier or the numbers cross precisions. The tier the
+/// linears actually landed on (a device without an f16 path demotes the
+/// request) is reported, never silently swallowed.
+pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, dt: Dtype) -> ChatScore {
+    let model = load_scored_model(weights, adapter, block, dt);
+    eprintln!(
+        "eval: weight tier requested {dt:?}, linears landed {:?}",
+        model.linear_dtype()
+    );
     let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
 
