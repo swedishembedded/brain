@@ -121,6 +121,60 @@ pub fn generate_kv_stream_with_head(
     head: &[f32],
     on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
+    // An unarmed token never fires, and one whole-prompt chunk is exactly the
+    // single prefill call this function has always been: existing callers are
+    // unchanged, byte for byte on the device.
+    generate_kv_stream_cancellable(
+        model,
+        prompt,
+        max_new,
+        temperature,
+        top_k,
+        top_p,
+        eos,
+        rng,
+        head,
+        &capability::CancelToken::default(),
+        prompt.len(),
+        on_token,
+    )
+}
+
+/// [`generate_kv_stream_with_head`] with brain's cooperative cancellation:
+/// the prompt is prefilled in chunks of `prefill_chunk` tokens with `cancel`
+/// polled between chunks, and the decode loop stops when the caller's
+/// `on_token` says so (the same place a cancel surfaces through
+/// `qwen3::chat`'s [`SeqState`](crate::chat::SeqState)).
+///
+/// Why chunk at all: `Qwen::prefill` submits every prompt position but
+/// fences ONCE at the end, so a whole-prompt prefill is one uninterruptible
+/// device wait - for a real agentic prompt (a system prompt plus a full tool
+/// schema, thousands of tokens) that is minutes of work a cancellation
+/// requested mid-flight cannot reach, and a process that must not wait for
+/// it cannot exit cleanly under it. Chunking costs one extra readback per
+/// chunk - noise against the per-chunk compute - and bounds the cancellation
+/// latency to one chunk. Numerically it is the single-call prefill: the KV
+/// cache and the final hidden do not depend on how the prompt is split
+/// (proved by `chunked_prefill_generation_matches_the_single_call_path`).
+///
+/// A token already cancelled when the call starts submits nothing and
+/// returns the empty sequence; one armed mid-prefill stops the generation
+/// with whatever tokens were produced so far.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream_cancellable(
+    model: &Qwen,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    head: &[f32],
+    cancel: &capability::CancelToken,
+    prefill_chunk: usize,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
     // Row-parallel: the single-threaded head was measured at hundreds of ms
@@ -128,19 +182,25 @@ pub fn generate_kv_stream_with_head(
     let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
     model.reset_cache();
     let mut out = Vec::with_capacity(max_new);
-    // Feed the prompt in ONE prefill call (single readback at the end), not a
-    // step()-per-token loop: step() does a full submit+fence+map round trip
-    // per call, and Qwen::prefill's own doc calls that "pure waste" during
-    // prefill, where every intermediate hidden is discarded anyway. Proven
-    // identical to the old step()-per-token behavior by
+    // Feed the prompt in as few prefill calls as the cancellation policy
+    // needs, not a step()-per-token loop: step() does a full submit+fence+map
+    // round trip per call, and Qwen::prefill's own doc calls that "pure
+    // waste" during prefill, where every intermediate hidden is discarded
+    // anyway. Proven identical to the old step()-per-token behavior by
     // model::tests::prefill_matches_step_by_step. For a real agentic prompt
     // (a system prompt plus a full tool-schema block, easily 1000+ tokens)
     // this was measured to dominate turn latency by orders of magnitude --
     // multiple real end-to-end runs against Qwen3-0.6B took 600+ seconds
     // before this fix. (Empty prompt → seed a single newline-like id 0.)
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
-    let prefill_inputs: Vec<PrefillInput<'_>> = seed_prompt.iter().map(|&t| PrefillInput::Token(t)).collect();
-    let mut hidden = model.prefill(&prefill_inputs);
+    let mut hidden = Vec::new();
+    for chunk in seed_prompt.chunks(prefill_chunk.max(1)) {
+        if cancel.is_cancelled() {
+            return out;
+        }
+        let prefill_inputs: Vec<PrefillInput<'_>> = chunk.iter().map(|&t| PrefillInput::Token(t)).collect();
+        hidden = model.prefill(&prefill_inputs);
+    }
     for _ in 0..max_new {
         let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
         if eos.contains(&next) {
@@ -302,6 +362,89 @@ mod kv_gen_tests {
             map.insert(name, v);
         }
         Qwen::new(cfg, 1, 32, &map)
+    }
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// Chunked, cancel-aware prefill must be numerically the single-call
+    /// prefill: the KV cache and the final hidden do not depend on how the
+    /// prompt is split across device round trips, so the same seed must give
+    /// the same tokens at every chunk size - including the whole-prompt chunk
+    /// that reproduces the old single-call behavior exactly.
+    #[test]
+    fn chunked_prefill_generation_matches_the_single_call_path() {
+        if gpu_disabled() {
+            return;
+        }
+        let model = tiny_model(3);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7];
+        let cancel = capability::CancelToken::default();
+        let baseline = {
+            let mut rng = data::rng::Rng::new(4);
+            generate_kv_stream_with_head(
+                &model,
+                &prompt,
+                8,
+                1.0,
+                0,
+                1.0,
+                &[],
+                &mut rng,
+                &model.read_weight(model.cfg.head_weight()),
+                &mut |_, _| true,
+            )
+        };
+        for chunk in [1usize, 2, 4] {
+            let mut rng = data::rng::Rng::new(4);
+            let chunked = generate_kv_stream_cancellable(
+                &model,
+                &prompt,
+                8,
+                1.0,
+                0,
+                1.0,
+                &[],
+                &mut rng,
+                &model.read_weight(model.cfg.head_weight()),
+                &cancel,
+                chunk,
+                &mut |_, _| true,
+            );
+            assert_eq!(chunked, baseline, "chunk size {chunk} must not change the sampled tokens");
+        }
+    }
+
+    /// A cancel token armed before the call must stop the generation at the
+    /// first chunk boundary: nothing is submitted, and the empty token
+    /// sequence is returned. (Mid-prefill cancellation is covered by the
+    /// between-chunk poll itself; this pins the boundary case.)
+    #[test]
+    fn a_cancel_armed_before_the_call_submits_nothing() {
+        if gpu_disabled() {
+            return;
+        }
+        let model = tiny_model(3);
+        let prompt = vec![1u32, 5, 3];
+        let cancel = capability::CancelToken::armed();
+        cancel.cancel();
+        let mut rng = data::rng::Rng::new(4);
+        let out = generate_kv_stream_cancellable(
+            &model,
+            &prompt,
+            8,
+            1.0,
+            0,
+            1.0,
+            &[],
+            &mut rng,
+            &model.read_weight(model.cfg.head_weight()),
+            &cancel,
+            1,
+            &mut |_, _| true,
+        );
+        assert!(out.is_empty(), "a cancelled prefill must produce no tokens");
     }
 
     /// `generate_kv_stream`'s `eos` is a SET of stop ids: generation must stop
