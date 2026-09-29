@@ -77,11 +77,6 @@ pub use rl::gate::{Cause, Decision};
 use rl::improve::AdapterMeta;
 use rl::objective::grpo::{Grpo, GrpoConfig};
 
-
-/// The architecture a study runs against when `--arch` is omitted. Named,
-/// not silent: the study's measured recipe (`SftConfig::default`) was tuned
-/// on this family.
-
 // ---------------------------------------------------------------------------
 // The architecture seam
 // ---------------------------------------------------------------------------

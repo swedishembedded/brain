@@ -174,6 +174,55 @@ for call in &reply.tool_calls {
 A pipeline runs one generation at a time (it is `Send`, not `Sync`): give it
 its own thread, or share it behind a `Mutex`.
 
+### Fine-tuning a chat model
+
+`brain::ChatFineTune` (the `study` feature) trains a LoRA adapter on a chat
+dataset - `generic-messages-v2` JSONL, one conversation per line, `train`
+per message marking what is supervised - and exports the adapter plus a
+training record. `brain::score_chat` is the held-out measurement: mean
+per-token cross-entropy over the supervised positions of held-out records,
+for the base alone or with an adapter folded in exactly as serving folds it.
+
+```rust
+let outcome = brain::ChatFineTune::from_pretrained("/models/qwen3-0.6b/model.brain.safetensors")
+    .dataset("train.jsonl")
+    .held_out("held_out.jsonl")
+    .replay("earlier.jsonl")
+    .out_dir("runs/support-1")
+    .rank(8)
+    .steps(200)
+    .run()?;
+println!("{:?} -> {:?}", outcome.base_score, outcome.tuned_score);
+let chat = brain::ChatPipeline::from(
+    brain::TextGenerationPipeline::builder("/models/qwen3-0.6b/model.brain.safetensors")
+        .tokenizer("/models/qwen3-0.6b/tokenizer.json")
+        .adapter(outcome.adapter.as_ref().unwrap().to_str().unwrap())
+        .load()?,
+);
+```
+
+- The tokenizer (`tokenizer.json`) and chat template are read from the base
+  checkpoint's directory, and every dataset is checked against them
+  (`validate_chat_dataset_for`) before a device is claimed.
+- `.replay(path)` mixes every record of another dataset into training; call
+  it once per file. The mix is exactly the union of the files.
+- `.continue_from(adapter)` trains an existing adapter further at its own
+  rank and alpha; its digest is recorded as the new adapter's parent
+  (`trained_from` on the outcome and on the adapter card's training
+  provenance).
+- `.rank`, `.alpha`, `.steps`, `.lr`, `.seed`, `.max_block` (the longest
+  training row; a longer record is refused, not truncated) and `.device`
+  are the knobs.
+- `run_with(&cancel, |progress| ..)` reports every optimizer step and stops
+  at the next step boundary once the `CancelToken` fires. A cancelled run
+  exports nothing and leaves its training state in the out directory
+  (`outcome.resume_state`); running the same fine-tune again continues it
+  and ends at the same adapter, bit for bit, an uninterrupted run produces.
+  `.checkpoint_every(n)` also saves that state every `n` steps. A state from
+  a run with different data, options or starting point is refused.
+- The outcome's losses and scores are `Option`s: a value that was not
+  measured (no held-out set, a cancelled run) is `None`.
+
 ## Text embedding
 
 ```rust
@@ -296,6 +345,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
+| `study` | `ChatFineTune`, `score_chat` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `DocumentStudy` - teaching a model documents behind a gate |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |

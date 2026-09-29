@@ -87,25 +87,14 @@ pub fn finetune_from(
             assert_eq!(lora.alpha, *alpha, "resume checkpoint {out} LoRA alpha {} does not match requested alpha {alpha}", lora.alpha);
         }
         (cfg, c.by_role(""))
+    } else if let Mode::Lora { rank, alpha } = mode {
+        lora_start(base, *rank, *alpha, opts.seed, &LoraStart::Fresh)?
     } else {
-        // Fresh start: base architecture + weights from the checkpoint.
+        // Fresh full fine-tune: base architecture + weights from the checkpoint.
         let c = checkpoint::load(base);
-        let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
-        let base_w = c.by_role("");
-        if let Mode::Lora { rank, alpha } = mode {
-            cfg.lora = Some(LoraCfg {
-                rank: *rank,
-                alpha: *alpha,
-                targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect(),
-            });
-        }
-        // Fresh init for the (possibly LoRA-extended) param set, then overwrite
-        // the base params with the checkpoint's - adapters stay at their
-        // zero-delta init.
+        let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
         let mut init: HashMap<String, Vec<f32>> = crate::init_weights(&cfg, opts.seed);
-        for (k, v) in base_w {
-            init.insert(k, v);
-        }
+        init.extend(c.by_role(""));
         (cfg, init)
     };
 
@@ -117,4 +106,94 @@ pub fn finetune_from(
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
+}
+
+/// The LoRA targets a fresh adapter covers: every attention and MLP
+/// projection.
+const LORA_TARGETS: [&str; 7] = ["wq", "wk", "wv", "wo", "gate", "up", "down"];
+
+/// Where a LoRA fine-tune's adapter starts.
+#[derive(Clone, Copy, Debug)]
+pub enum LoraStart<'a> {
+    /// Zero-delta adapters over the base: the model starts as the base.
+    Fresh,
+    /// The adapter file at this path (`crate::lora::save_adapter`'s output),
+    /// unfolded, so training continues ITS low-rank factors - the model
+    /// starts as base plus that adapter.
+    Continue(&'a str),
+}
+
+/// The configuration and initial weights of a LoRA fine-tune of `base`:
+/// the base's own architecture and weights, a `rank`/`alpha` adapter over
+/// [`LORA_TARGETS`] (or over the continued adapter's own targets), and the
+/// adapter factors either freshly initialised from `seed` (zero delta) or
+/// read from the adapter being continued.
+///
+/// Continuing an adapter at a different rank or alpha than it was trained
+/// at is refused: its factors only mean what they mean at their own shape
+/// and scale.
+pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, HashMap<String, Vec<f32>>)> {
+    let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, why);
+    let (targets, adapter) = match start {
+        LoraStart::Fresh => (LORA_TARGETS.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None),
+        LoraStart::Continue(path) => {
+            let st = checkpoint::st::load_safetensors(path)?;
+            let card = st.card().and_then(|c| c.adapter).ok_or_else(|| invalid(format!("{path}: not an adapter file (no adapter card)")))?;
+            if card.kind != "lora" {
+                return Err(invalid(format!("{path}: a {:?} adapter, only LoRA can be continued", card.kind)));
+            }
+            if card.rank != Some(rank) || card.alpha.is_some_and(|a| a != alpha) {
+                return Err(invalid(format!("{path}: trained at rank {:?} alpha {:?}, asked to continue at rank {rank} alpha {alpha}", card.rank, card.alpha)));
+            }
+            let targets = card.targets.ok_or_else(|| invalid(format!("{path}: the adapter card names no targets")))?;
+            (targets, Some(st.tensors))
+        }
+    };
+    let c = checkpoint::load(base);
+    let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
+    cfg.lora = Some(LoraCfg { rank, alpha, targets });
+    // Fresh init for the LoRA-extended param set, then the base's own
+    // weights over it; a fresh adapter stays at its zero-delta init.
+    let mut init: HashMap<String, Vec<f32>> = crate::init_weights(&cfg, seed);
+    init.extend(c.by_role(""));
+    if let Some(tensors) = adapter {
+        for (name, values) in tensors {
+            match init.get(&name) {
+                Some(slot) if slot.len() == values.len() => {
+                    init.insert(name, values);
+                }
+                Some(slot) => return Err(invalid(format!("adapter tensor {name} holds {} values, this base's has {}", values.len(), slot.len()))),
+                None => return Err(invalid(format!("adapter tensor {name} has no counterpart in this base's LoRA parameters"))),
+            }
+        }
+    }
+    Ok((cfg, init))
+}
+
+/// A LoRA fine-tune of `base` on the masked token dataset in `dir`, with the
+/// caller in the loop (progress, stopping, exact resume - see
+/// `model::FitControl`), returning the trained model rather than writing a
+/// whole checkpoint: the caller saves what it wants of it (its adapter).
+pub fn finetune_lora_controlled(
+    base: &str,
+    dir: &Path,
+    opts: &FitOpts,
+    rank: u32,
+    alpha: f32,
+    start: &LoraStart<'_>,
+    control: model::FitControl<'_>,
+) -> std::io::Result<(model::FitReport, Qwen)> {
+    let (cfg, init) = lora_start(base, rank, alpha, opts.seed, start)?;
+    // A LoRA build never offloads its moments; the process-wide switch is
+    // cleared for the construction and restored after, as `finetune_from`
+    // does.
+    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
+    std::env::remove_var("BRAIN_OFFLOAD_ADAM");
+    let m = Qwen::new(cfg, opts.batch_size, opts.block_size, &init);
+    if let Some(v) = prev_off {
+        std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
+    }
+    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
+    let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
+    model::fit_controlled(m, obj, opts, None, control)
 }

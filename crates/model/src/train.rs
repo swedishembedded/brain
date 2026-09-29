@@ -429,20 +429,6 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 }
 
-/// The one training/eval/checkpoint loop, generic over any [`Objective`].
-/// Owns everything that must NOT vary per objective: cosine-with-warmup LR,
-/// grad accumulation and its averaging scale, global-norm clipping, AdamW,
-/// wall-clock checkpointing, eval cadence, and the final save. Always calls
-/// [`Model::save_with_itos`] (asking `obj` for its [`Objective::itos`]) -
-/// never [`Model::save`] - so no objective can silently drop the char vocab
-/// the way `rl::fit_weighted` used to.
-///
-/// The initial (pre-training) loss estimate runs 5 [`Objective::micro_step`]s
-/// on a throwaway clone of the rng stream, exactly mirroring the original
-/// inline loops' 5-batch train-split sample: it uses the same batches
-/// `micro_step`'s own accumulation loop draws (train split, whatever
-/// per-position weighting the objective applies), just discarded (via the
-/// following [`Model::zero_grads`]) before the first real optimizer step.
 #[cfg(not(target_arch = "wasm32"))]
 /// How much of the trainable set the best-checkpoint keeper will hold in host
 /// memory before giving up and writing a checkpoint instead.
@@ -541,9 +527,205 @@ impl EarlyStop {
     }
 }
 
-pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+/// The one training/eval/checkpoint loop, generic over any [`Objective`].
+/// Owns everything that must NOT vary per objective: cosine-with-warmup LR,
+/// grad accumulation and its averaging scale, global-norm clipping, AdamW,
+/// wall-clock checkpointing, eval cadence, and the final save. Always calls
+/// [`Model::save_with_itos`] (asking `obj` for its [`Objective::itos`]) -
+/// never [`Model::save`] - so no objective can silently drop the char vocab
+/// the way `rl::fit_weighted` used to.
+///
+/// The initial (pre-training) loss estimate runs 5 [`Objective::micro_step`]s
+/// on a throwaway clone of the rng stream, exactly mirroring the original
+/// inline loops' 5-batch train-split sample: it uses the same batches
+/// `micro_step`'s own accumulation loop draws (train split, whatever
+/// per-position weighting the objective applies), just discarded (via the
+/// following [`Model::zero_grads`]) before the first real optimizer step.
+///
+/// [`fit_controlled`] with no caller in the loop: every step runs, and the
+/// run starts from whatever `model` holds. Returns `(initial_loss,
+/// final_loss)`.
+pub fn fit_with<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+    let (report, _) = fit_controlled(model, obj, opts, out, FitControl::default())?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+/// One completed optimizer step, as [`fit_controlled`] hands it to
+/// [`FitControl::on_step`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StepReport {
+    /// Steps completed so far in the whole run, this one included (1-based,
+    /// and global: a resumed run continues the count).
+    pub step: u32,
+    /// The run's total, [`FitOpts::steps`].
+    pub steps: u32,
+    /// This step's training loss, averaged over its accumulation micro-steps.
+    pub loss: f32,
+    /// The learning rate this step ran at.
+    pub lr: f32,
+}
+
+/// What a caller controls about a [`fit_controlled`] run beyond [`FitOpts`].
+#[derive(Default)]
+pub struct FitControl<'a> {
+    /// Called after every optimizer step. Returning `false` stops the run at
+    /// that step boundary - after writing the resume state when [`Self::state`]
+    /// is set, so the run can be continued exactly.
+    pub on_step: Option<&'a mut dyn FnMut(&StepReport) -> bool>,
+    /// Exact resume: the file this run's training state is written to, and
+    /// read back from when it already exists. The state is the optimised
+    /// weights, their AdamW moments, the completed step count (which fixes the
+    /// learning-rate schedule's position and AdamW's bias correction) and the
+    /// batch generator's position - everything a step depends on besides the
+    /// frozen weights and the data, so a run continued from it computes the
+    /// same updates an uninterrupted run would. The model must expose its
+    /// optimizer state ([`Model::optimized_params`]).
+    pub state: Option<&'a Path>,
+    /// Also write [`Self::state`] after every this-many steps (`0`: only when
+    /// [`Self::on_step`] stops the run), so a crash loses at most this many.
+    pub state_every: u32,
+    /// What else must be the same for a saved state to be continued: the
+    /// caller's description of its data and starting point (digests, ids).
+    /// Compared as JSON after a round trip through the state file, so a
+    /// float belongs in it as its bits.
+    /// A state whose identity or [`FitOpts`] differ is refused, never
+    /// continued into a different run.
+    pub identity: serde_json::Value,
+}
+
+/// How a [`fit_controlled`] run went.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitReport {
+    /// The loss estimate taken before this call's first step.
+    pub initial_loss: f32,
+    /// The last step's training loss; `None` when this call ran no step.
+    pub final_loss: Option<f32>,
+    /// Steps completed in the whole run, including any before a resume.
+    pub steps_completed: u32,
+    /// The step count a saved state resumed this call at, if it did.
+    pub resumed_at: Option<u32>,
+    /// True when [`FitControl::on_step`] stopped the run before
+    /// [`FitOpts::steps`].
+    pub interrupted: bool,
+}
+
+/// The format tag of an exact-resume state file.
+const TRAIN_STATE_FORMAT: &str = "brain-train-state/1";
+
+/// Everything in [`FitOpts`] a step's arithmetic or batch depends on - what a
+/// saved state must agree with to be continued. Rates are compared by their
+/// bits: a decimal round trip through JSON is not guaranteed to give the
+/// same `f32` back, and "the same rate" here means the same bits.
+fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
+    serde_json::json!({
+        "steps": opts.steps,
+        "batch_size": opts.batch_size,
+        "block_size": opts.block_size,
+        "lr_bits": opts.lr.to_bits(),
+        "min_lr_bits": opts.min_lr.to_bits(),
+        "warmup": opts.warmup,
+        "decay_iters": opts.decay_iters,
+        "weight_decay_bits": opts.weight_decay.to_bits(),
+        "grad_clip_bits": opts.grad_clip.to_bits(),
+        "grad_accum": opts.grad_accum,
+        "seed": opts.seed,
+        "mask_before": opts.mask_before.map(String::from),
+        "mask_per_line": opts.mask_per_line,
+        "align_to_lines": opts.align_to_lines,
+    })
+}
+
+/// Write the exact-resume state of a run that has completed `step` steps,
+/// atomically: a crash mid-write leaves the previous state, never half of
+/// this one.
+fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<()> {
+    let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
+    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 3);
+    for name in &names {
+        let (m, v) = model.read_moments(name).ok_or_else(|| std::io::Error::other(format!("exact resume: {name} has no optimizer moments to save")))?;
+        let w = model.read_weight(name);
+        tensors.push((format!("w:{name}"), vec![w.len() as u64], w));
+        tensors.push((format!("m:{name}"), vec![m.len() as u64], m));
+        tensors.push((format!("v:{name}"), vec![v.len() as u64], v));
+    }
+    let header = serde_json::json!({
+        "format": TRAIN_STATE_FORMAT,
+        "step": step,
+        // A string: the generator's state is a full u64, and a JSON reader
+        // that goes through f64 would round it.
+        "rng": rng.state().to_string(),
+        "opts": schedule_fingerprint(opts),
+        "identity": identity,
+    });
+    let tmp = path.with_extension("tmp");
+    let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
+    checkpoint::st::save_safetensors(tmp_str, &tensors, &header, None)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Restore the state [`save_train_state`] wrote into `model`, returning the
+/// completed step count and the batch generator to continue with.
+fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, Rng)> {
+    let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
+    let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
+    let st = checkpoint::st::load_safetensors(path_str)?;
+    let header = st.config();
+    if header.get("format").and_then(|f| f.as_str()) != Some(TRAIN_STATE_FORMAT) {
+        return Err(invalid(format!("not a {TRAIN_STATE_FORMAT} training state")));
+    }
+    if header.get("opts") != Some(&schedule_fingerprint(opts)) {
+        return Err(invalid("saved by a run with different training options; resuming it would not continue that run".to_string()));
+    }
+    if header.get("identity") != Some(identity) {
+        return Err(invalid("saved by a run over different data or a different starting point; resuming it would not continue that run".to_string()));
+    }
+    let step = header.get("step").and_then(|s| s.as_u64()).and_then(|s| u32::try_from(s).ok()).ok_or_else(|| invalid("no step count".to_string()))?;
+    if step > opts.steps {
+        return Err(invalid(format!("{step} steps completed, past this run's {}", opts.steps)));
+    }
+    let rng = header.get("rng").and_then(|r| r.as_str()).and_then(|r| r.parse::<u64>().ok()).map(Rng::from_state).ok_or_else(|| invalid("no batch generator state".to_string()))?;
+    let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
+    let saved = st.tensors.keys().filter(|k| k.starts_with("w:")).count();
+    if saved != names.len() {
+        return Err(invalid(format!("holds {saved} optimised parameters, this model has {}", names.len())));
+    }
+    for name in &names {
+        let get = |kind: &str| st.tensors.get(&format!("{kind}:{name}")).ok_or_else(|| invalid(format!("no {kind} for {name}")));
+        let (w, m, v) = (get("w")?, get("m")?, get("v")?);
+        if w.len() != model.read_weight(name).len() {
+            return Err(invalid(format!("{name} holds {} values, this model's has a different size", w.len())));
+        }
+        model.write_weight(name, w);
+        model.write_moments(name, m, v).map_err(std::io::Error::other)?;
+    }
+    model.poll_wait();
+    Ok((step, rng))
+}
+
+/// [`fit_with`], with the caller in the loop: a per-step report that can
+/// stop the run, and exact resume through a saved training state (see
+/// [`FitControl`]). Hands the trained model back, so a caller that wants
+/// only part of it (a LoRA adapter) need not write and re-read a whole
+/// checkpoint.
+///
+/// Exact resume does not cover early stopping: the held best parameters and
+/// the patience count are not part of the state, so `patience > 0` with a
+/// state file is refused rather than resumed approximately.
+pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
+    if control.state.is_some() && opts.patience > 0 {
+        return Err(std::io::Error::other("exact resume does not cover early stopping (patience > 0): the held best parameters are not part of the saved state"));
+    }
     obj.prepare(&mut model);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
+    let mut first_step = 0u32;
+    let mut resumed_at = None;
+    if let Some(state) = control.state.filter(|p| p.exists()) {
+        let (step, saved_rng) = load_train_state(&model, state, opts, &control.identity)?;
+        println!("resuming at step {step} from {}", state.display());
+        first_step = step;
+        rng = saved_rng;
+        resumed_at = Some(step);
+    }
 
     let initial = {
         let mut sample_rng = rng.clone();
@@ -553,7 +735,9 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
         }
         total / 5.0
     };
-    let mut last_train = initial;
+    let mut last_train: Option<f32> = None;
+    let mut completed = first_step;
+    let mut interrupted = false;
     let mut last_save = std::time::Instant::now();
     let mut watch = EarlyStop::new(opts.patience);
     let mut kept_best = false;
@@ -563,7 +747,7 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
     // 19.8 GB of writes to preserve a 20 MB adapter.
     let mut best_held: Option<HashMap<String, Vec<f32>>> = None;
 
-    for step in 0..opts.steps {
+    for step in first_step..opts.steps {
         let lr = cosine_lr(step, opts);
         model.zero_grads();
         let mut step_loss = 0.0;
@@ -575,11 +759,13 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
         let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
         model.adamw_step(step + 1, lr, opts.weight_decay, clip, scale);
         model.poll_wait();
-        last_train = step_loss / opts.grad_accum.max(1) as f32;
+        let loss = step_loss / opts.grad_accum.max(1) as f32;
+        last_train = Some(loss);
+        completed = step + 1;
 
         if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
             if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
-                println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
+                println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
                 match watch.observe(eval_loss) {
                     Watch::Improved => {
                         // Hold the best parameters if they fit, and write them
@@ -632,6 +818,21 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
                 last_save = std::time::Instant::now();
             }
         }
+
+        let keep_going = match control.on_step.as_mut() {
+            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr }),
+            None => true,
+        };
+        if let Some(state) = control.state {
+            let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
+            if !keep_going || periodic {
+                save_train_state(&model, state, completed, &rng, opts, &control.identity)?;
+            }
+        }
+        if !keep_going {
+            interrupted = completed < opts.steps;
+            break;
+        }
     }
 
     // Held parameters are written exactly once, here. Restoring them into the
@@ -661,7 +862,8 @@ pub fn fit_with<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitO
             if stopped_early { ", stopped early" } else { "" }
         );
     }
-    Ok((initial, last_train))
+    let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted };
+    Ok((report, model))
 }
 
 /// Train any [`Model`] on the token dataset in `dir`, writing the final

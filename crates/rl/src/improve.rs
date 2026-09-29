@@ -180,7 +180,7 @@ pub struct CycleArtifacts<'a> {
 }
 
 /// Everything [`cycle`] needs to save a promoted candidate as a versioned,
-/// loadable LoRA adapter via [`model::lora::device_adapter::save_adapter`] -
+/// loadable LoRA adapter via [`model::lora::device_adapter::save_adapter_with_lineage`] -
 /// architecture-specific bits the CALLER supplies, so this module stays
 /// generic over `M: Model` rather than hardcoding qwen3's `LoraCfg`.
 ///
@@ -474,18 +474,6 @@ pub fn cycle<M: Model, O: Objective<M>>(
             let version = next_adapter_version(adapter_out_dir)?;
             let card_id = format!("adapter-{version:06}");
             let path = adapter_out_dir.join(format!("{card_id}.safetensors"));
-            model::lora::device_adapter::save_adapter(
-                path.to_str().expect("utf-8 path"),
-                &trained_model,
-                adapter.rank,
-                adapter.alpha,
-                adapter.targets,
-                &card_id,
-                adapter.base_id,
-                adapter.family,
-                adapter.dataset_id,
-            )?;
-
             let training = checkpoint::st::TrainingProvenance {
                 code_revision: code_revision(),
                 regime: provenance.regime,
@@ -496,28 +484,24 @@ pub fn cycle<M: Model, O: Objective<M>>(
                 trained_from: Some(adapter.base_id.to_string()),
                 cycle: provenance.cycle,
             };
-            stamp_lineage(&path, training)?;
+            model::lora::device_adapter::save_adapter_with_lineage(
+                path.to_str().expect("utf-8 path"),
+                &trained_model,
+                adapter.rank,
+                adapter.alpha,
+                adapter.targets,
+                &card_id,
+                adapter.base_id,
+                adapter.family,
+                adapter.dataset_id,
+                Some(training),
+            )?;
             Some(path)
         }
         Decision::Reject(_) => None,
     };
 
     Ok(CycleOutcome { decision: report.decision, report, adapter_path, candidate, incumbent })
-}
-
-/// Attach `training` to `path`'s already-written [`checkpoint::st::
-/// ModelCard`] (round-tripping the file once) - the generic post-processing
-/// step that turns any [`model::lora::device_adapter::save_adapter`] output
-/// into a lineage-stamped artifact, independent of which `Model` produced it.
-fn stamp_lineage(path: &Path, training: checkpoint::st::TrainingProvenance) -> std::io::Result<()> {
-    let st = checkpoint::st::load_safetensors(path.to_str().expect("utf-8 path"))?;
-    let mut card = st
-        .card()
-        .unwrap_or_else(|| panic!("rl::improve::stamp_lineage: {} has no ModelCard to stamp lineage onto", path.display()));
-    card.training = Some(training);
-    let config = st.config();
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = st.tensors.into_iter().map(|(name, data)| (name.clone(), vec![data.len() as u64], data)).collect();
-    checkpoint::st::save_safetensors(path.to_str().expect("utf-8 path"), &tensors, &config, Some(&card))
 }
 
 #[cfg(test)]

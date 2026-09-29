@@ -25,6 +25,19 @@ impl Rng {
         }
     }
 
+    /// The generator's whole state: [`Rng::from_state`] of it continues the
+    /// stream exactly where this one is, which is what an interrupted
+    /// training run needs to draw the same batches after it resumes.
+    pub fn state(&self) -> u64 {
+        self.state
+    }
+
+    /// The generator [`Rng::state`] was read from, at the same point in its
+    /// stream. Not a seed: `Rng::new(s)` and `Rng::from_state(s)` differ.
+    pub fn from_state(state: u64) -> Self {
+        Rng { state }
+    }
+
     /// Next raw 64-bit value.
     pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -209,6 +222,18 @@ impl Lcg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A generator rebuilt from a saved state draws exactly what the
+    /// original would have drawn next.
+    #[test]
+    fn a_saved_state_continues_the_stream() {
+        let mut original = Rng::new(42);
+        original.next_u64();
+        let mut resumed = Rng::from_state(original.state());
+        for _ in 0..8 {
+            assert_eq!(resumed.next_u64(), original.next_u64());
+        }
+    }
 
     /// The defect this type exists to fix: the stream must straddle zero.
     #[test]

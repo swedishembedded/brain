@@ -1150,6 +1150,23 @@ pub mod device_adapter {
         family: &str,
         dataset_id: Option<&str>,
     ) -> std::io::Result<()> {
+        save_adapter_with_lineage(path, model, rank, alpha, targets, card_id, base_id, family, dataset_id, None)
+    }
+
+    /// [`save_adapter`], with the training run that produced the adapter
+    /// recorded on its card (`ModelCard::training`) in the same write.
+    pub fn save_adapter_with_lineage<M: Model>(
+        path: &str,
+        model: &M,
+        rank: u32,
+        alpha: f32,
+        targets: &[String],
+        card_id: &str,
+        base_id: &str,
+        family: &str,
+        dataset_id: Option<&str>,
+        training: Option<checkpoint::st::TrainingProvenance>,
+    ) -> std::io::Result<()> {
         let r = rank as usize;
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = model
             .param_names()
@@ -1180,6 +1197,7 @@ pub mod device_adapter {
             dataset_id: dataset_id.map(str::to_string),
             per_target: None,
         });
+        card.training = training;
 
         let config = serde_json::json!({ "rank": rank, "alpha": alpha, "targets": targets });
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))

@@ -307,6 +307,34 @@ impl ParamStore {
     pub fn read_grad(&self, gpu: &Gpu, name: &str) -> Vec<f32> {
         gpu.read(self.g(name), self.numel(name))
     }
+
+    /// The AdamW first and second moments of the device-optimised parameter
+    /// `name`, or `None` when it has none on the device (frozen, or offloaded
+    /// to the offloading optimiser's host copy). With the weights, the step
+    /// index and the batch stream, these are everything an AdamW run carries
+    /// from one step to the next.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_moments(&self, gpu: &Gpu, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        let (m, v) = (self.adam_m.get(name)?, self.adam_v.get(name)?);
+        let n = self.numel(name);
+        Some((gpu.read(m, n), gpu.read(v, n)))
+    }
+
+    /// Overwrite `name`'s AdamW moments - the restore half of
+    /// [`Self::read_moments`]. Refuses a parameter with no device moments or
+    /// data of the wrong length rather than writing a partial state.
+    pub fn write_moments(&self, gpu: &Gpu, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        let (Some(mb), Some(vb)) = (self.adam_m.get(name), self.adam_v.get(name)) else {
+            return Err(format!("{name} has no AdamW moments on the device"));
+        };
+        let n = self.numel(name);
+        if m.len() != n || v.len() != n {
+            return Err(format!("{name}: moments of {}/{} values for a {n}-value parameter", m.len(), v.len()));
+        }
+        gpu.write_f32(mb, m);
+        gpu.write_f32(vb, v);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

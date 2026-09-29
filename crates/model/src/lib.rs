@@ -88,7 +88,7 @@ pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable, StreamPlan
 pub use objective::Objective;
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, fit, fit_from, fit_with, load_dataset, load_dataset_with_itos};
+pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, FitControl, FitReport, StepReport};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -289,6 +289,27 @@ pub trait Model {
 
     /// Block until submitted device work completes (memory-aperture hygiene).
     fn poll_wait(&self);
+
+    // ---- optimizer state (exact resume) ----
+    /// The parameters [`Model::adamw_step`] optimises on the device, when
+    /// this model can hand over and take back their AdamW moments through
+    /// [`Model::read_moments`]/[`Model::write_moments`] - what
+    /// [`crate::train::fit_controlled`] needs to resume a run exactly rather
+    /// than with its moments reset. `None` (the default) for a model that
+    /// cannot, including one whose moments live off the device.
+    fn optimized_params(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.
+    fn read_moments(&self, _name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
+    /// Restore `name`'s AdamW moments, as [`Model::read_moments`] returned them.
+    fn write_moments(&self, name: &str, _m: &[f32], _v: &[f32]) -> Result<(), String> {
+        Err(format!("{name}: this model does not expose its optimizer state"))
+    }
 
     // ---- parameter access (also satisfies gradcheck::CheckModel) ----
     fn param_names(&self) -> Vec<String>;
