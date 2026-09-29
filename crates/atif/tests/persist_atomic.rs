@@ -12,7 +12,7 @@ use atif::persist::{
 use atif::{AgentProfile, StepOrigin, TraceStep, Trajectory};
 
 fn sample(step_id: u64, text: &str) -> Trajectory {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     t.steps
         .push(TraceStep::new(step_id, StepOrigin::User, text));
     t

@@ -3,17 +3,16 @@
 
 #![cfg(feature = "study")]
 
-//! `brain::DocumentStudy` end to end: the local (sven + brain, no whale)
-//! entry point to `rl::document::run_document_study`
-//! (continuous-learning roadmap B9).
+//! `brain::DocumentStudy` end to end: the local, single-machine entry point
+//! to `rl::document::run_document_study`.
 //!
-//! The study itself has been real and tested since `B5′`, but only as a
-//! library function - `crates/rl/tests/document_study.rs` is the only thing
-//! that has ever called it, so nothing outside a test binary could run a
+//! The study itself was real and tested before this surface existed, but
+//! only as a library function - `crates/rl/tests/document_study.rs` was the
+//! only thing that called it, so nothing outside a test binary could run a
 //! document study at all. This test drives the public `brain::DocumentStudy`
-//! SDK builder directly (there is no `brain document-study` CLI verb - B9's
-//! own text was corrected on 2026-09-20 to say so) - through `.arch("qwen3")`,
-//! one row of the study's architecture registry - against the same tiny
+//! SDK builder directly (there is no `brain document-study` CLI verb) -
+//! through `.arch("qwen3")`, one row of the study's architecture registry -
+//! against the same tiny
 //! CPU-runnable Qwen3 fixture that test uses (a randomly initialised
 //! two-layer decoder over a byte tokenizer) and asserts the three contracts
 //! the surface owes its callers:
@@ -315,8 +314,8 @@ fn an_unregistered_architecture_is_refused_and_names_the_registered_ones() {
 
 /// `--dry-run` runs a dataset through the same `FactBatch::new`/
 /// `document::train_probe_split` checks the real study applies before it
-/// resolves a base checkpoint at all - the seam sven's own shell-out to this
-/// command uses to validate an extracted dataset before paying for the
+/// resolves a base checkpoint at all - the seam a caller shelling out to
+/// this command uses to validate an extracted dataset before paying for the
 /// real, GPU-bound training run. Only `--dataset` is given here: no
 /// `--weights` is passed, and nothing besides the dataset file itself is
 /// ever written under `dir` - if this mode touched a checkpoint at all, it

@@ -107,11 +107,10 @@ separate from and not resolved by the copyright analysis above.
 
 ## Housekeeping (not a third-party risk)
 
-`crates/atif` is a same-company internal mirror of
-`applications/sven/crates/atif` - same owner, same license, explicit
-provenance note on both sides, confirmed. Its doc-comment's "byte-for-byte"
-claim is stale: every file has cosmetically drifted (comment headers,
-cross-crate references) since the last manual sync.
+`crates/atif` is brain's own implementation of the ATIF v1.7 trajectory
+format - same owner, same license as the rest of the workspace, confirmed.
+It follows the public ATIF RFC's wire schema; no third-party code is
+involved.
 
 ## What was not exhaustively covered
 

@@ -39,7 +39,7 @@ a leaderboard row.
    is ever wanted inside `bench`'s own registry, it belongs in the CLI
    layer instead, not in either crate.
 3. **Self-containment.** Per the standing invariant in `self-improve.md`
-   ("brain never depends on sven"), every environment here is procedurally
+   ("brain never depends on any agent runtime"), every environment here is procedurally
    generated in-process with an exact, executable oracle - no network, no
    external service, no downloaded checkpoint. That is what lets the
    self-improvement examples ship inside brain and run from a clean
@@ -61,15 +61,15 @@ them:
 |---|---|---|---|
 | `BASE`    | old | wiped    | brain - the natural starting state |
 | `WEIGHTS` | new | wiped    | brain - the natural state after training, since there IS no external state to wipe |
-| `FULL`    | new | retained | sven - needs a real skill library / episodic memory to retain |
-| `CONTROL` | old | retained | sven - same reason |
+| `FULL`    | new | retained | an agent runtime - needs a real skill library / episodic memory to retain |
+| `CONTROL` | old | retained | an agent runtime - same reason |
 
 `WEIGHTS - BASE` is therefore the weight contribution, measurable in brain
-alone, with no sven dependency and nothing blocked on sven's side. Building
+alone, with no agent-runtime dependency and nothing blocked outside brain. Building
 a fabricated "external learned state" stand-in inside brain just to fill in
 `FULL`/`CONTROL` would violate the same "evaluate honestly, don't fabricate
 a stand-in" discipline that deferred P6 - so those two cells are explicitly
-left to whoever wires this into a real agent harness (sven), not simulated
+left to whoever wires this into a real agent harness, not simulated
 here.
 
 ## The five procedural environments

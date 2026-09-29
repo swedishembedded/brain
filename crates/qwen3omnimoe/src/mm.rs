@@ -30,7 +30,7 @@
 //! HF)**: [`build_multimodal_prompt`] does NOT expand that inline placeholder
 //! in place with real embeddings. A true per-content-part inline expansion
 //! was implemented and measured on real hardware (two Tesla P40s, the real
-//! W8A16 checkpoint, sven's real request) to be WORSE than a single
+//! W8A16 checkpoint, a real agent request) to be WORSE than a single
 //! whole-block splice of every attached medium at one point
 //! ([`media_splice_point`]): the identical request that produced a real,
 //! correct bbox answer with the whole-block splice instead looped
@@ -522,7 +522,7 @@ pub fn build_multimodal_prompt(
 /// GPU encode).
 ///
 /// **Real hardware finding that shaped this (2x Tesla P40, the real W8A16
-/// checkpoint, sven's real request - long system prompt, image THEN
+/// checkpoint, a real agent request - long system prompt, image THEN
 /// unrelated caption text THEN audio, all in one user turn)**: a true
 /// per-content-part INLINE placement - each medium's real embeddings
 /// expanded exactly where its own single placeholder token sits in the

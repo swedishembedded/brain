@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
-//! Whole-document atomic writer, adapted from `sven-input`'s
-//! `chat_document.rs` YAML save path for JSON `Trajectory` documents.
+//! Whole-document atomic writer for JSON `Trajectory` documents.
 //!
-//! Two write entry points, mirroring `save_chat_to` / `save_chat_to_atomic`:
+//! Two write entry points:
 //! - [`write_trajectory`] - a plain `fs::write`, no concurrency guarantees.
 //! - [`write_trajectory_atomic`] - temp file + `flock`-guarded sidecar lock
 //!   + inode/mtime identity check + atomic `rename`.
 //!
-//! One deliberate adaptation from `chat_document.rs`: `save_chat_to_atomic`
-//! re-stats the target file itself at call-entry, so it only catches a
+//! Re-statting the target file at call-entry would only catch a
 //! modification that happens *during* the save call (a narrow window).
-//! Here, [`write_trajectory_atomic`] instead takes the caller's previously
+//! [`write_trajectory_atomic`] instead takes the caller's previously
 //! captured [`FileFingerprint`] (from [`read_trajectory_with_fingerprint`])
 //! as an explicit `expected` parameter, so it can detect a modification that
 //! happened any time between the caller's read and this write - which is
@@ -43,7 +41,7 @@ pub enum PersistError {
 /// Identity snapshot of a file used to detect concurrent modification.
 ///
 /// On Unix this is the real `(inode, mtime)` pair. On other platforms it
-/// falls back to `(file size, mtime seconds)`, same as `chat_document.rs`.
+/// falls back to `(file size, mtime seconds)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileFingerprint {
     identity: u64,
@@ -83,8 +81,7 @@ fn serialize_pretty(trajectory: &Trajectory) -> Result<String, PersistError> {
 }
 
 /// Write a trajectory to `path`, overwriting whatever is there. No atomicity
-/// or concurrent-modification guarantees - mirrors `chat_document.rs`'s
-/// `save_chat_to`.
+/// or concurrent-modification guarantees.
 pub fn write_trajectory(path: &Path, trajectory: &Trajectory) -> Result<(), PersistError> {
     let content = serialize_pretty(trajectory)?;
     fs::write(path, content)?;

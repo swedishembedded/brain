@@ -8,7 +8,7 @@ use serde_json::Value;
 /// Identifies the agent system used to produce a [`crate::Trajectory`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentProfile {
-    /// Agent system name (e.g. "openhands", "claude-code", "sven").
+    /// Agent system name (e.g. "openhands", "claude-code").
     pub name: String,
     /// Agent system version (e.g. "1.0.0").
     pub version: String,

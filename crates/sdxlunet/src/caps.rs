@@ -46,7 +46,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 8)").default(json!(1024)).min(256.0).max(2048.0).step(8.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps").default(json!(30)).min(1.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 1.0 disables CFG").default(json!(5.0)).min(1.0).max(30.0).step(0.1))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 

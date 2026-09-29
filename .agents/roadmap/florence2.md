@@ -14,8 +14,8 @@ entry.
 ## Goal
 
 Florence-2-base as brain's first UI-element visual-grounding oracle (image +
-text query -> bounding box), chosen for the swedishembedded/whale
-android-ui-test initiative (see whale/sven repos' own roadmap docs). Picked
+text query -> bounding box), chosen for Android UI testing, where a caller
+asks where a named UI element is on a screenshot. Picked
 over Qwen3-VL/moondream3 specifically for footprint: 0.23B params, 463 MiB
 fp16, CPU-viable on hardware too small for a 4B+ VLM. License: MIT
 (`microsoft/Florence-2-base`'s own `LICENSE`) - both weights and the

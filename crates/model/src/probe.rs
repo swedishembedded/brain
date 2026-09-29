@@ -284,7 +284,8 @@ impl Default for Plan {
     /// seconds and reaches its plateau at about three. It is spent once per
     /// device, so it dominates what a five-tier sweep costs - which is the
     /// price of the number being about the device rather than about its idle
-    /// clock, and why `whale node` only benchmarks an idle machine.
+    /// clock, and why an orchestrator's node benchmark should only run on an
+    /// idle machine.
     fn default() -> Self {
         Self {
             shapes: vec![(128, 512, 512), (256, 1024, 1024), (256, 2048, 2048)],

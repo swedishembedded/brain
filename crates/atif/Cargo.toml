@@ -3,7 +3,7 @@ name = "brain-atif"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ATIF (Agent Trajectory Interchange Format) v1.7 trajectory model, validator, and persistence. Mirrored from applications/sven/crates/atif (formerly crates/trace) -- see src/lib.rs for the sync note."
+description = "ATIF (Agent Trajectory Interchange Format) v1.7 trajectory model, validator, and persistence."
 
 [lib]
 name = "atif"

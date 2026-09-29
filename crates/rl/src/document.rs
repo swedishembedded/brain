@@ -3,7 +3,7 @@
 
 //! The document/fact `Curriculum` and the study that drives it - the half of
 //! document learning that needs a model, a tokenizer with a chat template and
-//! a training loop (continuous-learning roadmap B5'/B8).
+//! a training loop.
 //!
 //! The other half - the frozen `{fact, probe_question, expected_answer}`
 //! contract, its `Environment`/`Verifier` pair, the pre-registered
@@ -72,8 +72,7 @@ pub enum CurriculumError {
 }
 
 /// A document/fact [`Curriculum`]: one validated [`FactBatch`] per cycle over
-/// one tokenizer, plus the behavioural anchor suite every cycle rehearses
-/// (continuous-learning roadmap B5').
+/// one tokenizer, plus the behavioural anchor suite every cycle rehearses.
 ///
 /// There is deliberately no new training composition here. Brain has already
 /// MEASURED that a per-cycle `improve::cycle` composition does not accumulate

@@ -168,8 +168,8 @@ fn arch_names() -> String {
 // The dataset - the one input brain did not itself produce
 // ---------------------------------------------------------------------------
 
-/// A document-study dataset as it crosses into brain from outside - sven's
-/// extraction step, or a hand-written batch.
+/// A document-study dataset as it crosses into brain from outside - an
+/// application's extraction step, or a hand-written batch.
 ///
 /// `deny_unknown_fields` and plain (non-`Option`) members throughout, here
 /// and in [`FactProbe`] itself: serde is then the structural validator, so a
@@ -282,8 +282,8 @@ fn cycle_outcome(rec: &rl::continual::CycleRecord) -> CycleOutcome {
     }
 }
 
-/// The whole study, as a caller (sven's ledger, an operator, a later
-/// re-analysis) reads it back without re-running anything.
+/// The whole study, as a caller (an application's ledger, an operator, a
+/// later re-analysis) reads it back without re-running anything.
 #[derive(Serialize)]
 struct Report {
     arch: String,
@@ -421,8 +421,8 @@ fn validate_cycles(raw: Vec<Vec<FactProbe>>) -> std::result::Result<Vec<FactBatc
 
 /// Validate a dataset exactly as the real study would, and nothing else: no
 /// weights resolution, no checkpoint load, no device. This is the seam a
-/// caller that did not produce the dataset itself - sven's own shell-out to
-/// this command among them - uses to know in advance whether an extracted
+/// caller that did not produce the dataset itself - an application shelling
+/// out to this command among them - uses to know in advance whether an extracted
 /// dataset is well-formed, before paying for the real, GPU-bound training
 /// run this command otherwise goes straight into.
 ///
@@ -1038,7 +1038,7 @@ impl StudyOutcome {
 /// GRPO knobs for [`Improve::run`].
 ///
 /// `Default` gives a configuration that RUNS, not one that is known to work:
-/// the continuous-learning roadmap's own measurement found a single GRPO
+/// a measured run found a single GRPO
 /// improve cycle scoring 0.271 against a 0.354 untrained baseline on the one
 /// task family tried, while the SFT-driven path ([`DocumentStudy`]) scored
 /// 0.932/0.815 on the same shape of problem. This surface exists so an

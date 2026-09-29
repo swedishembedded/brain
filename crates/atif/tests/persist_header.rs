@@ -9,7 +9,7 @@ use atif::{AgentProfile, FinalMetrics, StepOrigin, TraceStep, Trajectory};
 fn big_trajectory(n: u64) -> Trajectory {
     let mut t = Trajectory::new(
         "ATIF-v1.7",
-        AgentProfile::new("sven", "1.0.0").with_model("claude"),
+        AgentProfile::new("example-agent", "1.0.0").with_model("claude"),
     );
     t.session_id = Some("session-xyz".into());
     t.trajectory_id = Some("traj-xyz".into());
@@ -55,7 +55,7 @@ fn fast_path_header_matches_full_parse_on_large_trajectory() {
     let header =
         read_trajectory_header_fast(&path).expect("fast path must succeed on a large document too");
     assert_eq!(header.schema_version, "ATIF-v1.7");
-    assert_eq!(header.agent.name, "sven");
+    assert_eq!(header.agent.name, "example-agent");
     assert_eq!(header.final_metrics.unwrap().total_steps, Some(5_000));
 }
 
@@ -74,7 +74,7 @@ fn public_reader_falls_back_gracefully_when_fast_path_heuristic_misses() {
         "steps": [
             {"step_id": 1, "source": "user", "message": "hi"}
         ],
-        "agent": {"name": "sven", "version": "1.0.0"},
+        "agent": {"name": "example-agent", "version": "1.0.0"},
         "session_id": "s-1"
     }"#;
     std::fs::write(&path, json).unwrap();
@@ -87,7 +87,7 @@ fn public_reader_falls_back_gracefully_when_fast_path_heuristic_misses() {
     // and still returns the right header fields.
     let header = read_trajectory_header(&path).expect("fallback must succeed via full parse");
     assert_eq!(header.schema_version, "ATIF-v1.7");
-    assert_eq!(header.agent.name, "sven");
+    assert_eq!(header.agent.name, "example-agent");
     assert_eq!(header.session_id.as_deref(), Some("s-1"));
 }
 
@@ -120,7 +120,7 @@ fn fast_path_splits_before_subagent_trajectories() {
     let json = r#"{
         "schema_version": "ATIF-v1.7",
         "session_id": "s-1",
-        "agent": {"name": "sven", "version": "1.0.0"},
+        "agent": {"name": "example-agent", "version": "1.0.0"},
         "subagent_trajectories": [ {"this is": not even json ],
         "steps": []
     }"#;
@@ -142,7 +142,7 @@ fn fast_path_reads_only_the_header_prefix_not_the_whole_file() {
     let mut bytes = br#"{
         "schema_version": "ATIF-v1.7",
         "session_id": "s-2",
-        "agent": {"name": "sven", "version": "1.0.0"},
+        "agent": {"name": "example-agent", "version": "1.0.0"},
         "steps": ["#
         .to_vec();
     bytes.extend(vec![0xFF; 256 * 1024]); // invalid UTF-8, never valid JSON
@@ -151,7 +151,7 @@ fn fast_path_reads_only_the_header_prefix_not_the_whole_file() {
     let header = read_trajectory_header_fast(&path)
         .expect("the fast path must stop reading at the steps split point");
     assert_eq!(header.session_id.as_deref(), Some("s-2"));
-    assert_eq!(header.agent.name, "sven");
+    assert_eq!(header.agent.name, "example-agent");
 }
 
 #[test]

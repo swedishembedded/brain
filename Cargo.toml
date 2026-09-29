@@ -448,8 +448,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
-# crates/atif (ATIF trajectory model, mirrored from applications/sven/crates/atif):
-# versions matched to sven's own workspace so the mirror stays a straight diff.
+# crates/atif (brain's ATIF v1.7 trajectory model, validator and persistence).
 # Unrelated to crates/trace above, which is the tracing/observability crate.
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"

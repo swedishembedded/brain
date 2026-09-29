@@ -95,7 +95,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("frames", ParamType::Int, "training window length in frames; must be 1 + 4k").default(json!(9)))
         .param(ParamSpec::new("samples", ParamType::Int, "training windows to draw and encode up front").default(json!(8)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
         .param(ParamSpec::new("ckpt_every", ParamType::Int, "write a checkpoint every N steps (0 = final only)").default(json!(50)))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt").default(json!("t2v-1.3B")))
         .param(ParamSpec::new("device", ParamType::Str, "device for the VAE encode and the DiT trainer; 'cpu' forces the host trainer (omit for brain's default, which uses the GPU where one is present)"))

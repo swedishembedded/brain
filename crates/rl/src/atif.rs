@@ -7,14 +7,14 @@
 //! training data), not architecture-generic, and deliberately so: the
 //! generic weighted-training core lives in `lib.rs` (works for any
 //! `Head::TokenClassifier` model), while turning a specific reward SOURCE
-//! (here, real sven coding sessions) into training examples is inherently
+//! (here, real coding-agent sessions) into training examples is inherently
 //! domain-specific and does not try to generalize further.
 //!
 //! Reward extraction itself is a special case of [`crate::env`]'s
 //! `Environment`/`Verifier` seam, not a parallel system beside it:
 //! [`task_from_trajectory`] builds the generic `Task` and [`AtifVerifier`]
 //! is the `Verifier` impl - both thin wrappers over [`trajectory_reward`],
-//! which stays the one place the P0 reward stamp is actually read.
+//! which stays the one place the trajectory's reward stamp is actually read.
 //!
 //! ## Scope (v1)
 //!
@@ -24,7 +24,7 @@
 //! - Direct tool calls/results only; a subagent-delegated observation
 //!   (`ObservationEntry::subagent_trajectory_ref`) is a hard error - walking
 //!   into embedded subagent trajectories is not implemented yet.
-//! - Trajectory-level reward only (P0's stamp on
+//! - Trajectory-level reward only (the producer's stamp on
 //!   `Trajectory.final_metrics.extra.reward`), broadcast across every token
 //!   the trajectory contributes - matching lecture 3's finding (cited in
 //!   the roadmap doc) that outcome-level reward is the right place to
@@ -44,9 +44,9 @@ use data::qwen_tokenizer::QwenBpe;
 
 use crate::env::{Reward, Step, Task, Verifier};
 
-/// The trajectory-level reward sven's task machine stamps at
-/// `final_metrics.extra.reward` once a task concludes (self-improve roadmap
-/// P0). `None` when absent - see this module's doc comment on why that
+/// The trajectory-level reward the producing agent runtime stamps at
+/// `final_metrics.extra.reward` once a task concludes; producing it is the
+/// caller's job, not brain's. `None` when absent - see this module's doc comment on why that
 /// means "skip", not "default to 1.0".
 pub fn trajectory_reward(traj: &Trajectory) -> Option<f32> {
     traj.final_metrics.as_ref()?.extra.as_ref()?.get("reward")?.as_f64().map(|r| r as f32)
@@ -70,8 +70,8 @@ pub fn task_from_trajectory(traj: &Trajectory) -> Option<Task> {
 /// [`Verifier`] over ATIF trajectories: recomputes the reward from
 /// [`Task::answer`] alone (built by [`task_from_trajectory`]), ignoring
 /// `transcript`/`completion` - the trajectory's outcome was already
-/// determined by sven's task machine (P0) before this seam ever sees it,
-/// so there is nothing left here to recompute from raw tokens, only to
+/// determined by the agent runtime that recorded it before this seam ever
+/// sees it, so there is nothing left here to recompute from raw tokens, only to
 /// read back deterministically.
 pub struct AtifVerifier;
 

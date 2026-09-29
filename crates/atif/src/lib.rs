@@ -5,24 +5,24 @@
 //! set of persistence helpers (atomic whole-document writes, cheap
 //! header-only reads, and NDJSON step streaming).
 //!
-//! **Manual mirror**: this crate is byte-for-byte copied from
-//! `applications/sven/crates/atif` (sven's own copy of the same crate,
-//! briefly named `crates/trace` before sven's internal rename) so that
-//! brain - a separate Cargo workspace - can parse ATIF trajectories sven
-//! writes without a cross-repo path/git dependency (brain stays a
-//! self-contained workspace). Kept in sync **manually** for now: re-sync by
-//! diffing this crate's `src/`/`tests/` against sven's. Any brain-side
-//! consumer of ATIF trajectories (see `crates/rl`) reads only real, sven-
-//! written trajectory files - this crate contributes no brain-specific
-//! behavior of its own.
+//! It is how brain reads the trajectories an agent runtime records as ATIF:
+//! any producer that writes spec-conformant ATIF v1.7 JSON can hand its
+//! trajectories to brain's trajectory consumers (see `crates/rl`) without
+//! brain depending on that producer. brain never depends on any agent
+//! runtime; the ATIF wire format is the whole contract.
 //!
-//! This crate is a standalone, spec-complete building block with zero
-//! dependencies on other sven crates (true here too - brain adds none). In
-//! sven, `sven-session-store::trace_session` consumes it as the session
-//! store backing the TUI/GUI/CI surfaces. See the ATIF RFC (v1.7) for the
-//! normative schema this crate mirrors byte-for-byte on the wire, even
-//! though the Rust-side type and module names here are an independent
-//! design.
+//! What it validates: [`validate::validate_trajectory`] checks the ATIF
+//! v1.7 rules the type system cannot enforce on a parsed [`Trajectory`] -
+//! the schema version, sequential `step_id`s, agent-only fields appearing
+//! only on agent steps, observation `source_call_id`s resolving to a tool
+//! call, and subagent references resolving to uniquely identified embedded
+//! trajectories (validated recursively) - and reports every violation
+//! rather than stopping at the first one.
+//!
+//! This crate is a standalone, spec-complete building block with no
+//! dependencies on other brain crates. See the ATIF RFC (v1.7) for the
+//! normative schema this crate follows byte-for-byte on the wire; the
+//! Rust-side type and module names are an independent design.
 //!
 //! # Module map
 //!

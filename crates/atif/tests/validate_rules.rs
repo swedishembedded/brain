@@ -10,7 +10,7 @@ use atif::{
 };
 
 fn base_trajectory() -> Trajectory {
-    Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"))
+    Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"))
 }
 
 // ── step_id sequential-starting-at-1 ────────────────────────────────────────
@@ -326,14 +326,14 @@ fn dangling_source_call_id_fails() {
 
 #[test]
 fn schema_version_looking_like_atif_v_passes() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     t.steps.push(TraceStep::new(1, StepOrigin::User, "hi"));
     assert!(validate_trajectory(&t).is_ok());
 }
 
 #[test]
 fn empty_schema_version_fails() {
-    let mut t = Trajectory::new("", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("", AgentProfile::new("example-agent", "1.0.0"));
     t.steps.push(TraceStep::new(1, StepOrigin::User, "hi"));
     let errs = validate_trajectory(&t).unwrap_err();
     assert!(errs
@@ -343,7 +343,7 @@ fn empty_schema_version_fails() {
 
 #[test]
 fn non_atif_schema_version_fails() {
-    let mut t = Trajectory::new("not-atif", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("not-atif", AgentProfile::new("example-agent", "1.0.0"));
     t.steps.push(TraceStep::new(1, StepOrigin::User, "hi"));
     let errs = validate_trajectory(&t).unwrap_err();
     assert!(errs

@@ -915,7 +915,7 @@ pub fn gate_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Action
     // Per-fact rows from the candidate arm's OWN per-task scores - the same
     // decodes the gate was computed from, never a second pass. A batch
     // verdict of "promote" can still hide facts that did not land, and
-    // "reject" can still hide facts that did (continuous-learning B8).
+    // "reject" can still hide facts that did.
     let by_task: Vec<(String, f64)> = probe_tasks.iter().zip(candidate.scores.iter()).map(|(t, s)| (t.id.clone(), *s)).collect();
     let verdicts = fact_verdicts(&batch, &by_task);
 
@@ -1340,14 +1340,15 @@ mod tests {
         out.into_bytes()
     }
 
-    /// `continuous-learning` B3a/B3b: qwen3's LoRA training loop was CLI-only
+    /// qwen3's LoRA training loop was CLI-only
     /// (`crates/cli/src/qwen_cli.rs::finetune_lora`) and its promote/reject
     /// gate was not reachable from this crate at all, so nothing that reads a
-    /// manifest - `brain caps`, the event API, D-Bus, whale's node-type
-    /// generation - could see that this model can be trained, let alone that
-    /// training it and gating the result are two separate steps. The manifest
-    /// is the only place those facts can live, and `lora_train -> lora_gate`
-    /// being TWO actions is what makes the whale graph two nodes.
+    /// manifest - `brain caps`, the event API, D-Bus, an orchestrator's
+    /// node-type generation - could see that this model can be trained, let
+    /// alone that training it and gating the result are two separate steps.
+    /// The manifest is the only place those facts can live, and
+    /// `lora_train -> lora_gate` being TWO actions is what makes a
+    /// graph-executing caller's graph two nodes.
     #[test]
     fn manifest_lists_generate_lora_train_lora_gate_and_embed() {
         let m = manifest();
@@ -1671,9 +1672,9 @@ mod tests {
         out.into_bytes()
     }
 
-    /// `continuous-learning` B3b, the round trip the milestone is specified by:
-    /// a candidate adapter that destroys the anchor suite must come back
-    /// `reject: AnchorRegressed`, never `promote`.
+    /// The train-then-gate round trip: a candidate adapter that destroys the
+    /// anchor suite must come back `reject: AnchorRegressed`, never
+    /// `promote`.
     ///
     /// The fixture labels each suite with the arm whose behaviour it is meant
     /// to describe, which is what makes this a real round trip rather than a

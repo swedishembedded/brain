@@ -49,7 +49,7 @@
 //! No async (matches [`capability::Action::run`]'s synchronous contract), no
 //! real inference, no RNG, no wall-clock delay, no cross-`(model, action)`
 //! call ordering (each rule's `at_call` ordinal counts calls to that ONE
-//! action only - whale-shaped callers dispatch independent graph nodes
+//! action only - graph-executing callers dispatch independent graph nodes
 //! concurrently, so a global sequence would be nondeterministic by
 //! construction), and no scenario-document (YAML/JSON) loader yet - this is
 //! the Rust builder layer only.

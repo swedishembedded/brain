@@ -1,13 +1,13 @@
 # probe - roadmap
 
 `model::probe` (the per-accelerator, per-dtype GEMM capability measurement
-whale's `whale status` publishes) and `gpu_core::roof` (the measured silicon
+an orchestrator's node status report publishes) and `gpu_core::roof` (the measured silicon
 ceiling every "% of peak" divides by).
 
 ## Fixed: both probes were timing an idle GPU, not the GPU
 
 **Symptom.** On a Meteor Lake box (Intel Arc iGPU, Mesa 25.0.7 ANV, 22-thread
-Cranelift CPU JIT) `whale status` reported the iGPU at 56-65 GFLOP/s fp32
+Cranelift CPU JIT) an orchestrator's node status report showed the iGPU at 56-65 GFLOP/s fp32
 while the CPU JIT reported 138-157 GFLOP/s. An integrated Arc beaten by the
 host CPU at fp32 is not a plausible reading of that silicon.
 
@@ -61,9 +61,9 @@ checked for it.
 | igpu (wgpu) | 765 GFLOP/s | 874 | 842 | 1442 GOP/s | 184 |
 | cpu (Cranelift JIT) | 195 GFLOP/s | 13.8 | 7.7 | -- | -- |
 
-**End to end**, which is what the change is for: a live `whale node
---benchmark-interval 10` plus `whale status` on the same box, against what the
-same two commands printed before the ramp existed.
+**End to end**, which is what the change is for: a live orchestrator node
+benchmarking every 10 s plus its status report on the same box, against what
+the same two commands printed before the ramp existed.
 
 | device | tier | before | after |
 |---|---|---|---|
@@ -94,7 +94,7 @@ otherwise-unchanged tree:
   PyTorch job on the CPU), the same `machine` profile read 163 GFLOP/s fp32
   for the iGPU and 35 GFLOP/s for the CPU - both roughly 5x down from the
   idle-box figures above, with the fix in place either way.
-* Two live `whale status` runs from the same binary fourteen minutes apart
+* Two live orchestrator status reports from the same binary fourteen minutes apart
   read 82 and 528 GFLOP/s fp32 on the iGPU. Sampling `rps_act_freq_mhz` and
   `punit_req_freq_mhz` once a second through the second sweep shows the shape
   of it: the punit raises its request to 2033 MHz partway in while the actual
@@ -134,7 +134,7 @@ heating event measures the chassis.
 
 ## Left to do
 
-* **A ceiling that survives the thermal state.** whale caches one sweep's
+* **A ceiling that survives the thermal state.** The orchestrator caches one sweep's
   result for 15 minutes; on a part whose rate swings 5x with package
   temperature, "the best of the last N sweeps" is arguably the honest reading
   of the word *ceiling*, and the current single-sweep value is not. Deliberately

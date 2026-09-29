@@ -21,6 +21,26 @@ fast and scalable kernel - not a naive one.
 
 ---
 
+## Repository scope
+
+brain is the model engine.
+
+- **In scope:** model architectures, kernels, inference, training algorithms
+  (SFT/LoRA/GRPO/DPO/distillation), replay/continual-learning mechanisms,
+  evaluation arithmetic, checkpoints and adapters, quantization, serving
+  (CLI, HTTP, D-Bus), the public `brain` SDK and its standalone samples.
+- **Out of scope:** agent loops and tool execution, learning-campaign policy
+  (what to learn next, which experiences qualify, release decisions for an
+  application), fleet orchestration.
+
+**Naming rule:** a tracked file names another project only if brain depends
+on it. brain depends on no agent runtime or orchestration service, so none
+is named - describe the caller generically ("an agent runtime", "an
+application", "an orchestrator"). Enforced by `make check/scope`
+(`scripts/gates/check-repo-scope.sh`); `CHANGELOG.md` is history and exempt.
+
+---
+
 ## Models (today)
 
 ### Language / decoder LMs
@@ -982,7 +1002,7 @@ front-end to depend on.
 | `audio` / `mimi` / `ecapatdnn` / `qwen3tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
 | `minimaxmusic3` | MiniMax Music 3 lyrics+caption → song: RVQ depth decoder, condition encoder, 36-layer flow-matching DiT, DAC-style vocoder (Global LLM is `crates/qwen3` verbatim) |
 | `cosyvoice` / `s3tokenizer` / `campplus` | CosyVoice 2/3 zero-shot voice cloning; FSQ speech tokenizer; CAM++ x-vector |
-| `atif` / `rl` | the training-from-trajectories pair: `atif` is a manual byte-for-byte mirror of sven's Agent Trajectory Interchange Format crate (re-sync by diffing against sven's `crates/atif`; brain adds no behaviour of its own), `rl` is `model::train::fit` lifted to reward-weighted batches over any `Model` that implements `enable_weighted_loss` (today only `qwen3`) |
+| `atif` / `rl` | the training-from-trajectories pair: `atif` is brain's implementation of the Agent Trajectory Interchange Format (ATIF) v1.7 trajectory model, its validator, and persistence helpers (how brain reads the trajectories an agent runtime records), `rl` is `model::train::fit` lifted to reward-weighted batches over any `Model` that implements `enable_weighted_loss` (today only `qwen3`) |
 | `qwen3asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
 | `qwen3omnimoe` / `qwen3vl` / `fastvlm` / `moondream3` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
 | `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
@@ -1429,13 +1449,14 @@ not "does this architecture learn task X" but "can this *system* detect a
 capability gap, close it through parameter updates, verify the weights
 (not some other state) did it, retain what it already knew, and reduce the
 cost of learning the next thing." Fully self-contained - procedurally
-generated environments with in-process oracles, no sven dependency, same
-standing invariant as everywhere else in this repo.
+generated environments with in-process oracles, no agent-runtime
+dependency, same standing invariant as everywhere else in this repo.
 
-**Standing invariant:** brain never depends on sven. `crates/atif` mirrors
-sven's trajectory format by hand-copying it, kept manually in sync - not a
-path/git dependency. Anything that needs an acting agent driving the loop
-is an example living in sven's own repo, talking to `brain serve --openai`.
+**Standing invariant:** brain never depends on any agent runtime.
+`crates/atif` implements the ATIF v1.7 wire format itself, so any producer
+of conformant trajectories can feed brain without a path/git dependency.
+Anything that needs an acting agent driving the loop lives with that agent
+runtime, talking to `brain serve --openai`.
 
 ---
 

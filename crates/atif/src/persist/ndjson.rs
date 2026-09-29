@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 //! NDJSON step streaming: one [`TraceStep`] per line, each line an
 //! independently-valid standalone JSON object. Intended for the
-//! `sven | sven` piping use case, where a consumer can start parsing steps
-//! before the producer has finished emitting them.
+//! `producer | consumer` piping use case, where a consumer can start
+//! parsing steps before the producer has finished emitting them.
 
 use std::io::{BufRead, Write};
 

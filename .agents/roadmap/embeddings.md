@@ -38,7 +38,7 @@ downstream project.
 - [x] `qwen3::caps` moved off `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`
       (`host_env`) onto the model-store resolver (`ParamSpec::host_resolved()`,
       `qwen3::spec::Qwen3Spec`) for `generate`/`lora_train`/`lora_gate`/`embed`
-      alike - see `.agents/roadmap/continuous-learning.md`'s B3a update. The
+      alike. The
       separate `brain serve` residency-scheduler hot-swap resident
       (`crate::resident_llm::QwenResident`) is unaffected, a different
       mechanism, out of this track's scope.

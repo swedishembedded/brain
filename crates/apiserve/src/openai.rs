@@ -543,7 +543,7 @@ fn content_text(c: Option<&Value>) -> String {
 /// `<|audio_start|><|audio_pad|><|audio_end|>` at each part's own position -
 /// see that function's doc) never actually saw a typed array in production,
 /// only ever flattened text; verified by tracing this exact code path (not a
-/// standalone probe) against a real captured sven request. Preserving the
+/// standalone probe) against a real captured agent request. Preserving the
 /// array here is what lets `crate::mm::build_multimodal_prompt` expand each
 /// medium's real embeddings IN PLACE at its own placeholder, instead of a
 /// whole-block splice heuristic.
@@ -557,7 +557,7 @@ fn content_text(c: Option<&Value>) -> String {
 /// `content.type == 'audio' or 'audio' in content or 'audio_url' in
 /// content` - none of which match OpenAI's real
 /// `{"type":"input_audio","input_audio":{...}}` shape as sent by a real
-/// OpenAI-compatible client (sven included) as-is, so without this the
+/// OpenAI-compatible client (a coding agent included) as-is, so without this the
 /// audio part would reach the template as a typed array yet still render as
 /// NOTHING (silently falls through every `{%- elif %}` branch). `image_url`
 /// parts need no such normalization: OpenAI's own `{"type":"image_url",

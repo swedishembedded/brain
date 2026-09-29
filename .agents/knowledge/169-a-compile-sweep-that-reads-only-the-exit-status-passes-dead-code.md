@@ -15,9 +15,9 @@ build including the default. Extending the sweep to the test targets
 then found six integration tests with no feature gate at all, so `cargo
 test -p brain --no-default-features --features <any surface>` did not
 compile, and a unit-test module whose every test needs `decision` was dead
-under every other surface. A downstream application that selects one
-surface - as Splinter does with `study` - saw warnings the workspace build
-never showed, because in the full build some other surface used each item.
+under every other surface. An application that selects one surface -
+`study` alone, for training - saw warnings the workspace build never
+showed, because in the full build some other surface used each item.
 
 **Rule:** a per-feature sweep is a warning gate, not only a compile gate:
 fail on any warning located in the crate under test, and build its test

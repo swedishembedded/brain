@@ -43,7 +43,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(512)).min(64.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to whale's execution cache and collapse to one cached result").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
         .param(ParamSpec::new("ckpt_every", ParamType::Int, "checkpoint the adapter every N steps (0 = only at the end); each write is atomic, so an interrupted one cannot damage the last good checkpoint").default(json!(100)))
         .param(ParamSpec::new("resume", ParamType::Bool, "continue from the adapter already at 'save' instead of starting over - a cancelled multi-hour run then costs only the steps since its last checkpoint").default(json!(false)))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
@@ -479,7 +479,8 @@ mod tests {
         assert!(t2i.params.iter().any(|p| p.name == "prompt" && p.required));
         // seed must be required, never silently defaulted: two invocations
         // with no explicit distinct seed would otherwise be indistinguishable
-        // to whale's execution cache and collapse to one cached result.
+        // to an orchestrator's execution cache and collapse to one cached
+        // result.
         assert!(t2i.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
         assert_eq!(t2i.params.iter().find(|p| p.name == "width").unwrap().default, Some(json!(512)));
         assert_eq!(t2i.params.iter().find(|p| p.name == "steps").unwrap().default, Some(json!(0)));

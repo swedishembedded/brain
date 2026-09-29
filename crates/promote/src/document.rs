@@ -3,7 +3,7 @@
 
 //! The document-learning [`Environment`]/[`Verifier`] pair and the
 //! pre-registered [`document_gate_config`] a document/fact batch is promoted
-//! under (continuous-learning roadmap B2).
+//! under.
 //!
 //! A batch is N `{fact, probe_question, expected_answer}` triples, frozen at
 //! extraction time by the agent that read the document. The FACT is what gets
@@ -84,8 +84,8 @@ use crate::gate::GateConfig;
 /// exactly which rule failed and on which record.
 ///
 /// A malformed document-study dataset is untrusted input crossing a process
-/// boundary - a served capability action, a CLI `--dataset` load, sven's own
-/// shell-out to a document study - and every variant here used to be an
+/// boundary - a served capability action, a CLI `--dataset` load, an
+/// application's shell-out to a document study - and every variant here used to be an
 /// `assert!`/`panic!`. Panicking mid-training (deep past where a checkpoint
 /// has already started loading) leaves a caller with a Rust panic tail as its
 /// only diagnostic and no way to check a dataset up front; a named,
@@ -513,12 +513,12 @@ pub fn train_probe_split<'a, T: Tokenizer>(batch: &'a FactBatch, tok: &'a T) -> 
 }
 
 /// One fact's own promote/reject verdict for a cycle, independent of the
-/// cycle's aggregate gate decision (continuous-learning roadmap B8).
+/// cycle's aggregate gate decision.
 ///
 /// A batch of many facts trained and gated together produces ONE verdict for
 /// the whole batch - "20 facts in, promote" can silently mean 15 landed and
-/// 5 did not, and neither the user nor sven's ledger (`S6′`) can tell which
-/// without this.
+/// 5 did not, and neither the user nor an application's ledger can tell
+/// which without this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FactVerdict {
     /// The fact statement, exactly as it was trained on.
@@ -993,8 +993,7 @@ mod tests {
     /// aggregate gate promotes (57 of 60 probes flip, an effect size and a
     /// significance no default or document config would reject), but one
     /// fact's own three probes still score zero post-training, and the
-    /// per-fact report must name that fact anyway (continuous-learning
-    /// roadmap B8).
+    /// per-fact report must name that fact anyway.
     #[test]
     fn a_batch_promote_still_names_every_fact_that_did_not_land() {
         let batch = batch_of_twenty_facts();

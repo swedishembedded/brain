@@ -19,7 +19,7 @@ fn roundtrip(t: &Trajectory) -> Trajectory {
 
 #[test]
 fn mixed_text_and_image_message_round_trips() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     let mut step = TraceStep::new(
         1,
         StepOrigin::User,
@@ -55,7 +55,7 @@ fn image_source_round_trips_for_each_allowed_media_type() {
         ImageMediaType::Gif,
         ImageMediaType::Webp,
     ] {
-        let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+        let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
         t.steps.push(TraceStep::new(
             1,
             StepOrigin::User,
@@ -72,7 +72,7 @@ fn image_source_round_trips_for_each_allowed_media_type() {
 
 #[test]
 fn multimodal_observation_content_round_trips() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     let mut step = TraceStep::new(1, StepOrigin::Agent, "");
     step.tool_calls = Some(vec![ToolInvocation::new("call_1", "screenshot")]);
     step.observation = Some(StepObservation::single(ObservationEntry {
@@ -108,7 +108,7 @@ fn embedded_subagent_round_trips_and_validates() {
         .steps
         .push(TraceStep::new(2, StepOrigin::Agent, "Summary: ..."));
 
-    let mut parent = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut parent = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     parent.trajectory_id = Some("parent-1".into());
     let mut step = TraceStep::new(1, StepOrigin::Agent, "Delegating to a subagent.");
     step.observation = Some(StepObservation::single(ObservationEntry::for_subagent(
@@ -131,7 +131,7 @@ fn embedded_subagent_round_trips_and_validates() {
 
 #[test]
 fn deterministic_dispatch_step_round_trips_and_validates() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     let mut step = TraceStep::new(1, StepOrigin::Agent, "");
     step.llm_call_count = Some(0);
     step.tool_calls = Some(vec![ToolInvocation::new("call_1", "graph_edge_dispatch")]);
@@ -149,7 +149,7 @@ fn deterministic_dispatch_step_round_trips_and_validates() {
 
 #[test]
 fn is_copied_context_steps_are_excluded_from_sft_iteration() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     t.steps
         .push(TraceStep::new(1, StepOrigin::User, "original turn"));
 
@@ -170,7 +170,7 @@ fn is_copied_context_steps_are_excluded_from_sft_iteration() {
 
 #[test]
 fn steps_without_is_copied_context_are_all_included() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     t.steps.push(TraceStep::new(1, StepOrigin::User, "a"));
     t.steps.push(TraceStep::new(2, StepOrigin::Agent, "b"));
     let sft_ids: Vec<u64> = t.sft_steps().map(|s| s.step_id).collect();
@@ -181,7 +181,7 @@ fn steps_without_is_copied_context_are_all_included() {
 
 #[test]
 fn context_management_convention_round_trips_nested_in_extra() {
-    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("sven", "1.0.0"));
+    let mut t = Trajectory::new("ATIF-v1.7", AgentProfile::new("example-agent", "1.0.0"));
     let mut step = TraceStep::new(5, StepOrigin::System, "Context compaction performed");
     step.observation = Some(StepObservation::single(ObservationEntry::for_call(
         "n/a",

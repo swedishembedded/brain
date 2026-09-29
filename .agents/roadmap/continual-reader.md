@@ -5,9 +5,9 @@ self-driving continual learner as a brain sample: point it at a directory or a
 stream, leave it running unattended, and it decides what to learn, what to
 refuse, and what it can still do.
 
-Distinct from `.agents/roadmap/continuous-learning.md`, which is brain's half
-of a cross-repo loop where fact extraction and scheduling live outside this
-repo. This one has nothing else in the loop. Its whole point is that the
+Distinct from the document-study path (`brain::DocumentStudy`), where fact
+extraction and scheduling are the caller's job and brain only trains and
+gates a batch it is handed. This one has nothing else in the loop. Its whole point is that the
 learner audits itself.
 
 ---

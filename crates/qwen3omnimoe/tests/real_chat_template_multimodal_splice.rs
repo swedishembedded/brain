@@ -15,7 +15,7 @@
 //! opt-in-env-var pattern: skips (never panics) when `BRAIN_OMNI_HF_DIR` is
 //! unset or the checkpoint dir is absent.
 //!
-//! usage: BRAIN_OMNI_HF_DIR=/tmp/.X11-unix/brain/omni/Qwen3-Omni-30B-A3B-Instruct \
+//! usage: BRAIN_OMNI_HF_DIR=<Qwen3-Omni-30B-A3B-Instruct HF dir> \
 //!        cargo test --release -p brain-omni --test real_chat_template_multimodal_splice -- --ignored
 
 use capability::Invocation;
@@ -28,16 +28,16 @@ fn hf_dir() -> Option<PathBuf> {
 }
 
 /// The exact shape `crates/apiserve/src/openai.rs`'s `message_content`
-/// (this session's Gap A/B fix) now builds for a real sven-shaped request:
+/// (this session's Gap A/B fix) now builds for a real agent-shaped request:
 /// a plain-string system turn, and a user turn whose content is a typed
 /// array with `image_url`/`input_audio` parts interleaved with their own
 /// text captions -- `input_audio` carrying the `"audio"`/`"audio_url"` keys
 /// `message_content` adds so the template's own audio detection
 /// (`content.type == 'audio' or 'audio' in content or 'audio_url' in
 /// content`) actually matches it (Gap B).
-fn sven_shaped_messages() -> serde_json::Value {
+fn agent_shaped_messages() -> serde_json::Value {
     json!([
-        {"role": "system", "content": "You are Sven, a specialized AI coding agent built for professional software engineering."},
+        {"role": "system", "content": "You are a specialized AI coding agent built for professional software engineering."},
         {"role": "user", "content": [
             {"type": "text", "text": "Follow the spoken instruction."},
             {"type": "text", "text": "Attached image: three-objects.png"},
@@ -57,7 +57,7 @@ fn real_template_places_image_and_audio_placeholders_inline_after_their_own_capt
     };
     let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
 
-    let messages = sven_shaped_messages();
+    let messages = agent_shaped_messages();
     let inv = Invocation::new().set("messages", json!(serde_json::to_string(&messages).unwrap())).set("enable_thinking", json!(false));
     let prompt = qwen3omnimoe::caps::render_chat_prompt(&tmpl, &inv).expect("render");
 
@@ -150,7 +150,7 @@ fn typed_array_plus_strip_matches_the_old_always_flatten_prompt_byte_for_byte() 
     };
     let tmpl = data::chat_template::ChatTemplate::from_model_dir(&dir).expect("load real chat template");
 
-    let system = "You are Sven, a specialized AI coding agent built for professional software engineering.";
+    let system = "You are a specialized AI coding agent built for professional software engineering.";
     let instruction = "Follow the spoken instruction.";
     let img_caption = "Attached image: three-objects.png (697x503, image/png)";
     let audio_caption = "Attached audio: explain-this-image.wav (5.8s, 44100 Hz)";

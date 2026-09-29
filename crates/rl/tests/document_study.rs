@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The document `Curriculum` and the study that drives it
-//! (continuous-learning roadmap B5'): a batch of frozen
+//! The document `Curriculum` and the study that drives it: a batch of frozen
 //! `{fact, probe_question, expected_answer}` triples per cycle, trained as a
-//! masked chat dataset under `Regime::Sft`, gated by B2's pre-registered
+//! masked chat dataset under `Regime::Sft`, gated by the pre-registered
 //! document gate, with the control arms that make the resulting number mean
 //! anything.
 //!

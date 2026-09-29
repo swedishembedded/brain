@@ -21,14 +21,13 @@
 # stored. Pinned to the ordinary default so every invocation (make, CI,
 # agent) resolves the same absolute source paths in Cargo's fingerprint
 # files rather than rebuilding from scratch if $HOME ever differs between
-# them - matching whale's own Makefile, which states the same rule.
+# them.
 CARGO_HOME = $(HOME)/.cargo
 export CARGO_HOME
 
 # sccache caches rustc invocations by (source, flags, deps) hash across
-# separate `cargo` processes - auto-enabled here (mirroring whale's
-# Makefile) so every developer/CI box with it installed benefits by
-# default, not just a machine that happens to have hand-written it into a
+# separate `cargo` processes - auto-enabled here so every developer/CI box
+# with it installed benefits by default, not just a machine that happens to have hand-written it into a
 # local, gitignored `.cargo/config.toml`. A machine that also wants the
 # faster `mold` linker or a capped job count (see that file's own comment
 # for why - 22 concurrent thin-LTO test-binary links exceeded this box's
@@ -83,7 +82,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata \
-        clippy check/scripts check/spdx check/paths check/files hooks/install qwen/serving-perf-gate \
+        clippy check/scripts check/spdx check/paths check/scope check/files hooks/install qwen/serving-perf-gate \
         test/e2e test/e2e/claude-code test/e2e/api-conformance test/e2e/shutdown test/e2e/samples test/e2e/scheduler test/e2e/ready \
         perf/lfm perf/flux2 perf/wan flux2/generate flux2/edit wan/t2v wan/parity parity/strict s3dit/int8-e2e \
         release/patch release/minor release/major changelog release/notes \
@@ -115,6 +114,7 @@ help:
 	@echo "                               + no-doc-citations + no-perf-numbers gates"
 	@echo "  make check/spdx              SPDX-License-Identifier + copyright header gate"
 	@echo "  make check/paths             no baked-in absolute machine paths under crates/"
+	@echo "  make check/scope             no tracked file names a project brain does not depend on"
 	@echo "  make check/files             no video, model weights, or oversized files in git"
 	@echo "  make hooks/install           install the local git hooks (SPDX check, commit"
 	@echo "                               trailer cleanup/gate)"
@@ -531,6 +531,11 @@ check/scripts:
 check/paths:
 	bash scripts/gates/check-no-machine-paths.sh
 
+# Repository scope (AGENTS.md "Repository scope"): a tracked file names another
+# project only if brain depends on it; CHANGELOG.md is history and exempt.
+check/scope:
+	bash scripts/gates/check-repo-scope.sh
+
 check/files:
 	bash scripts/gates/check-large-files.sh
 
@@ -541,7 +546,8 @@ check/spdx:
 # not run automatically, since it writes outside version control:
 #   pre-commit  - the check/spdx gate above, plus check-no-doc-citations.sh
 #                 (crates/scripts/tools/samples must never cite a docs/ or
-#                 .agents/ file path)
+#                 .agents/ file path) and check-repo-scope.sh (the check/scope
+#                 gate, on the staged files)
 #   commit-msg  - silently strips Co-Authored-By:/Claude-Session: trailer
 #                 lines from every new commit message (never fails)
 #   pre-push    - fails the push if a trailer line survived anyway, OR if a
@@ -585,7 +591,7 @@ hooks/install:
 # controlnet's duplicate `scale_chan` registration - see `.agents/rules/
 # .agents/knowledge/`). Needs no external fixtures, so unlike `parity/strict` it
 # carries no narrowing knob and no "green because skipped" risk.
-test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/files check/samples check/sdk-features kernels-table/check samples-manifest/check knowledge-index/check cuda-table/check wordpiece-table/check parity parity/strict
+test/full: test test/doc test/slow test/e2e check/scripts check/spdx check/paths check/scope check/files check/samples check/sdk-features kernels-table/check samples-manifest/check knowledge-index/check cuda-table/check wordpiece-table/check parity parity/strict
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -732,8 +738,7 @@ gradcheck:
 # targets carries `required-features = ["qwen3"]`, so `cargo test -p
 # brain-rl` with no flag silently builds and runs NONE of them - not a
 # reported skip, an absence. Without this target, "the objectives are
-# gradient-checked" is true only of whatever tree a human last ran manually
-# (continuous-learning roadmap's own build order names this explicitly).
+# gradient-checked" is true only of whatever tree a human last ran manually.
 #
 # Excludes `continual_study`/`document_study`: both are documented in
 # crates/rl/Cargo.toml as multi-minute, one-GPU, "run it alone" - batching

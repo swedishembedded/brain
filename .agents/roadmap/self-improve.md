@@ -2,24 +2,24 @@
 
 Continuous self-improvement for brain's production models, generic over any
 `model::Model`-implementing architecture with thin per-model wiring, fed by
-real coding-agent trajectories from `applications/sven` - not brain's own
-toy tasks. Distilled from the Stanford CS329A "Self-Improving AI Agents"
+the trajectories an agent runtime records as ATIF - not brain's own toy
+tasks. Distilled from the Stanford CS329A "Self-Improving AI Agents"
 lecture series (test-time compute scaling, verification, STaR/rejection
 sampling, GRPO/DAPO train-time scaling) into what belongs specifically in
-brain (the model-running engine) versus in sven (the coding agent). Full
+brain (the model-running engine) versus in the agent runtime. Full
 context and the boundary rationale: see the planning session this roadmap
 was extracted from; the phase numbering (P0–P6) is kept unchanged here for
 continuity.
 
-**P7 onward (below)** extends this roadmap past P6's sven-traffic boundary:
+**P7 onward (below)** extends this roadmap past P6's real-agent-traffic boundary:
 a generic training-*regime* layer (DPO, GRPO, distillation, replay - not just
 the P2/P3 weighted-SFT contract) usable by any `Model`, plus the
 programmatic promote/reject machinery and lineage a real self-improvement
 loop needs regardless of who supplies the trajectories. This does **not**
-replace P6 - P6 is the real-sven-traffic proof and stays exactly as blocked
+replace P6 - P6 is the real-agent-traffic proof and stays exactly as blocked
 as the note at the end of this file says. P7+ is what makes the machinery
 demonstrable on brain's own procedurally-generated, in-process-verifiable
-environments without fabricating a stand-in for sven, which the same
+environments without fabricating a stand-in for an agent runtime, which the same
 honesty discipline that deferred P6 would otherwise forbid.
 
 Two corrections to that sentence, so it is not read as more than it says.
@@ -48,12 +48,12 @@ of this file before quoting anything above it as a continuous-learning
 result.
 
 **Standing invariant, unchanged by any of this: brain
-never depends on sven.** `crates/atif` mirrors sven's trajectory format by
-hand-copying it (see P1) precisely so that stays true; every environment
+never depends on any agent runtime.** `crates/atif` implements the ATIF v1.7
+wire format itself (see P1) precisely so that stays true; every environment
 introduced from P11 on is self-contained inside brain with an in-process
-oracle, and anything that needs an acting agent is an example that lives in
-sven's own repo, talking to `brain serve --openai` - the one coupling this
-whole roadmap has ever used.
+oracle, and anything that needs an acting agent lives with that agent
+runtime, talking to `brain serve --openai` - the one coupling this whole
+roadmap has ever used.
 
 **The keystone result P12–P14 rest on**, worth stating up front because nothing
 below makes sense without it: DPO, GRPO (including clipping, off-policy
@@ -78,41 +78,37 @@ distillation-capable. The one thing this reduction cannot express is an
 entropy bonus (`∇_z H` is dense, not a scalar multiple of `p - e_y`) - v1
 omits it and says so rather than silently approximating it.
 
-**Boundary** (holds for every phase below): sven owns generating real
-trajectories, executing tools/tests, and stamping a reward/outcome signal
-onto a concluded trajectory - brain owns everything from "a reward-stamped
-trajectory" onward (ingestion, the weighted training objective, the LoRA
-adapter it produces, and hot-swapping it into the serving model). sven
-already treats brain purely as an OpenAI-compatible HTTP endpoint
-(`brain serve --openai`) - this work does not add any other coupling.
+**Boundary** (holds for every phase below): the agent runtime owns
+generating real trajectories, executing tools/tests, and stamping a
+reward/outcome signal onto a concluded trajectory - brain owns everything
+from "a reward-stamped trajectory" onward (ingestion, the weighted training
+objective, the LoRA adapter it produces, and hot-swapping it into the
+serving model). An agent runtime treats brain purely as an
+OpenAI-compatible HTTP endpoint (`brain serve --openai`) - this work does
+not add any other coupling.
 
-## P0 - sven-side reward stamp
+## P0 - the reward-stamp contract
 
-**Not implemented here - a prerequisite on sven's side, not brain's.**
-sven's task machines (its HSM `machines`/`kernel` crates - sven has
-undergone its own internal crate-rename churn during this work; check
-sven's own `AGENTS.md` for current names before touching this) need to
-stamp an outcome/reward signal (e.g. `{"reward": 1.0, "outcome":
-"tests_passed"}`) into a concluded trajectory's `extra` field at the point
-the task machine already knows whether it succeeded. Everything below
-assumes trajectories arriving at brain already carry this.
+A trajectory arrives with its reward in `final_metrics.extra.reward` (e.g.
+`{"reward": 1.0, "outcome": "tests_passed"}`); producing it is the caller's
+job, not brain's. A trajectory without the stamp is skipped, never
+defaulted. Everything below assumes trajectories arriving at brain already
+carry this.
 
-## P1 - mirror `atif` into brain - DONE
+## P1 - `atif` in brain - DONE
 
-sven's trajectory crate (ATIF v1.7 - `Trajectory`/`TraceStep`/
-`sft_steps()`) was briefly named `crates/trace`, renamed to `crates/atif`
-by sven mid-session; brain's mirror follows that rename. Landed at
-`crates/atif` (package `brain-atif`, lib `atif`), copied verbatim from
-`applications/sven/crates/atif`, kept manually in sync (not a Cargo path/
-git dependency - brain stays a self-contained workspace). Wired into the
+brain's own ATIF v1.7 trajectory model (`Trajectory`/`TraceStep`/
+`sft_steps()`), validator and persistence helpers. Landed at
+`crates/atif` (package `brain-atif`, lib `atif`), a self-contained crate
+following the public ATIF wire schema (no Cargo path/git dependency on any
+producer - brain stays a self-contained workspace). Wired into the
 root `Cargo.toml` (workspace members, default-members, the new `chrono`/
 `thiserror`/`tempfile`/`libc` workspace dependencies its `Cargo.toml`
 needs - `libc` was previously only a literal per-crate dep in
 `gpu-core`/`shutdown`; promoted to a workspace entry and both crates
 migrated onto it instead of adding a third copy of the literal).
 
-Verified: `cargo test -p brain-atif` - 37 tests, all green, matching
-sven's own suite for the crate. `cargo check --workspace --all-targets`
+Verified: `cargo test -p brain-atif` - 37 tests, all green. `cargo check --workspace --all-targets`
 - clean, nothing else in the workspace regressed.
 
 ## P2 - generic weighted-`Batch` contract - DONE (qwen3; other `Head`-using models not yet adopted)
@@ -302,8 +298,8 @@ checkpoint, no OOM risk), plus the existing `resident_llm` suite unaffected.
 serve`'s startup path (`run_apis` in `crates/cli/src/run_cli.rs`) - that
 wiring needs a real running server to verify end to end (this repo's own
 gradual, independently-verified phases avoid doing that blind), and is
-gated on the still-outstanding sven-side reward stamp (P0) having
-something real to train on in the first place. When both exist, the
+gated on real reward-stamped trajectories (P0) existing to train on in
+the first place. When both exist, the
 remaining work is: an opt-in flag/env var so default `brain serve`
 behavior is unchanged, a background thread reusing the `brain_shutdown`
 channel `run_apis` already wires up for clean process exit, and keeping a
@@ -312,11 +308,11 @@ concrete (not type-erased) `Arc<QwenResident>` handle alongside the
 `set_adapter` is inherent to `QwenResident`, not part of the
 `ResidentModel` trait.
 
-## P6 - the demonstrable proof - DEFERRED, blocked on sven (P0)
+## P6 - the demonstrable proof - DEFERRED, blocked on real reward-stamped trajectories (P0)
 
-Run real sven sessions against `brain serve --openai` (qwen3), periodically
+Run real agent sessions against `brain serve --openai` (qwen3), periodically
 harvest reward-stamped trajectories, run P6a's cycle in the background,
-chart a **held-out** real-task pass-rate (a fixed `sven-ci` headless suite,
+chart a **held-out** real-task pass-rate (a fixed headless task suite,
 disjoint from whatever tasks generated the training trajectories) over
 wall-clock time across multiple continuous-loop cycles, plus a check that
 LoRA hot-swap never drops or corrupts an in-flight request. This is the
@@ -324,23 +320,19 @@ concrete "brain trains continuously" deliverable, and the only piece of
 this whole roadmap still not done.
 
 Every piece on brain's side is built and independently tested (P1-P6a).
-What's left is entirely outside this repo: sven's trajectories carry no
-reward signal, so there is nothing real yet for the pipeline to train on
-- the P0 boundary this roadmap set from the start. That's now written up
-as a standalone task brief for whoever picks up sven next:
-`applications/sven/.todo/self-improvement.md` (gitignored in sven, per
-that repo's own convention for cross-session task notes - not something
-this repo's history can point at by path, hence the full brief living
-there rather than a citation here). Once a real sven session produces a
-real reward-stamped trajectory, P6 is: point `hot_swap_cycle` (P6a) at
-sven's real trajectory directory instead of a test fixture, wire it into
+What's left is entirely outside this repo: no real trajectory source
+stamps a reward yet, so there is nothing real for the pipeline to train on
+- the P0 boundary this roadmap set from the start. Once a real agent
+session produces a real reward-stamped trajectory, P6 is: point
+`hot_swap_cycle` (P6a) at that runtime's trajectory directory instead of a
+test fixture, wire it into
 `brain serve`'s startup path behind an opt-in flag (deferred in P6a for
 exactly this reason - no real server run to verify it against until now),
 and let it run.
 
 ## Why P6 is not in this pass
 
-P1-P6a are done and verified, each as its own gate (crate mirror,
+P1-P6a are done and verified, each as its own gate (the ATIF crate,
 gradchecked kernel composition, a convergence-tested generic driver, a
 de-duplication + tested concurrency-safe primitive, and the cycle glue
 tying them together). P6 is the actual multi-session, two-repo,
@@ -1470,8 +1462,7 @@ keyed by a config fingerprint), T1 ~380 s, T2 ~1030 s, T3 ~370 s.
 - **P19c - the two runnable demos** - DONE, see the P19c section below.
 - **P20 - `brain improve` CLI verb.** Needs `crates/cli` verb registration,
   capability-manifest wiring and the e2e examples manifest; deliberately out
-  of scope here. **Decided 2026-09-20 (`.agents/roadmap/continuous-learning.md`
-  B9's correction): the primary surface is the SDK, not a CLI verb** -
+  of scope here. **Decided 2026-09-20: the primary surface is the SDK, not a CLI verb** -
   `brain::Improve` (`crates/sdk/src/study.rs`) exposes `rl::improve::cycle`
   generically over any caller `Environment`/`Verifier` through GRPO. A CLI
   verb remains buildable as a thin wrapper over the identical SDK call, but
@@ -1930,12 +1921,12 @@ mistaken for closing them.
   what P18's `rl::improve::cycle` already does correctly and gated. Any
   future timer/trigger for this half must call `rl::improve::cycle`, not
   reintroduce an ungated shortcut.
-- **Real sven-driven trajectories (P0/P6, unchanged, out of brain's repo by
+- **Real agent-driven trajectories (P0/P6, unchanged, out of brain's repo by
   design).** Every task in every number above is procedurally generated
-  inside brain with an in-process oracle. The reward stamp (P0) does not
-  exist on the sven side yet, and P6 - the multi-session, two-repo,
-  real-traffic proof - stays exactly as deferred as it was. The standing
-  invariant that brain never depends on sven is why it must stay that way
+  inside brain with an in-process oracle. No real trajectory source stamps
+  the reward (P0) yet, and P6 - the multi-session, two-repo, real-traffic
+  proof - stays exactly as deferred as it was. The standing invariant that
+  brain never depends on any agent runtime is why it must stay that way
   rather than be simulated here.
 - **The Gauntlet (`.agents/roadmap/gauntlet.md`, still design-only, zero
   code).** All five environments (`AlienLang`, `AlienAPI`, `AlienAlgo`,

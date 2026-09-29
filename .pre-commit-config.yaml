@@ -73,6 +73,19 @@ repos:
         language: system
         pass_filenames: true
         stages: [pre-commit]
+      - id: repo-scope
+        name: "No tracked file names a project brain does not depend on"
+        description: >-
+          brain is the model engine and depends on no agent runtime or
+          orchestration service, so no tracked file names one; a caller is
+          described generically ("an agent runtime", "an orchestrator").
+          CHANGELOG.md is history and exempt. See AGENTS.md "Repository
+          scope" and scripts/gates/check-repo-scope.sh. Diff-scoped here;
+          the same script scans the whole tree under make check/scope.
+        entry: bash scripts/gates/check-repo-scope.sh
+        language: system
+        pass_filenames: true
+        stages: [pre-commit]
       - id: no-em-dash
         name: "No new em dashes (U+2014)"
         description: >-

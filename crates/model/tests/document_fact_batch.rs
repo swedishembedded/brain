@@ -2,8 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `model::load_dataset` over a `data::chat::prepare_chat_samples` dataset:
-//! the seam a confirmed document/fact batch is trained through
-//! (continuous-learning B1).
+//! the seam a confirmed document/fact batch is trained through.
 //!
 //! The PRODUCTION side of B1 is not here and is not new: turning N confirmed
 //! `{fact, probe_question, expected_answer}` triples into

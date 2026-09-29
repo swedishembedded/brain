@@ -4,9 +4,10 @@
 
 # Git pre-commit hook: blocks a commit that (1) touches a source file missing
 # the SPDX-License-Identifier/copyright header (scripts/spdx/check.py has the
-# actual rules), or (2) adds a docs/ or .agents/ file-path citation in
+# actual rules), (2) adds a docs/ or .agents/ file-path citation in
 # crates/, scripts/, tools/, or samples/ (scripts/gates/check-no-doc-citations.sh
-# has the rationale). Installed via `make hooks/install`; this is the
+# has the rationale), or (3) names a project brain does not depend on
+# (scripts/gates/check-repo-scope.sh). Installed via `make hooks/install`; this is the
 # no-extra-dependency path — see .pre-commit-config.yaml for the same checks
 # via the `pre-commit` framework, for anyone already using it.
 set -euo pipefail
@@ -17,3 +18,4 @@ mapfile -d '' -t staged < <(git diff --cached --name-only --diff-filter=ACM -z)
 
 python3 scripts/spdx/check.py "${staged[@]}"
 bash scripts/gates/check-no-doc-citations.sh "${staged[@]}"
+bash scripts/gates/check-repo-scope.sh "${staged[@]}"
