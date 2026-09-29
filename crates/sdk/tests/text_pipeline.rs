@@ -36,37 +36,22 @@
 //! `QwenConfig::tiny()`'s own `param_list()` (`(name, numel)` pairs, the same
 //! discipline `Flux2Config::tensor_manifest()` uses) is a complete,
 //! mechanical recipe for a real, forward-capable checkpoint at 23-token
-//! vocab / 2-layer / 16-dim scale. See that test's own doc for the fixture
-//! design (a curated small vocab, not a universal one - reproducing an HF
+//! vocab / 2-layer / 16-dim scale. The fixture lives in `tests/common`,
+//! shared with the chat surface's tests; see its module doc for the design
+//! (a curated small vocab, not a universal one - reproducing an HF
 //! tokenizer.json byte-for-byte is still out of scope, this only needs to
 //! cover the one prompt under test).
 
-use std::path::{Path, PathBuf};
+mod common;
 
-/// A fixture checkpoint file that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
+use common::{scratch_path, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMPT_WITHIN_VOCAB, VOCAB_LETTERS};
 
 /// A minimal, real, valid safetensors checkpoint: one dummy tensor (this
 /// pipeline never reaches a real weight read - see this file's module doc)
 /// and an EMPTY `{}` config, which `QwenConfig::from_json` resolves to
 /// exactly `QwenConfig::tiny()` via its own defaults.
 fn tiny_checkpoint(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-{tag}-{}-{n}.safetensors", std::process::id()));
+    let path = scratch_path(&format!("text-pipeline-{tag}"), "safetensors");
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
     Scratch(path)
 }
@@ -209,55 +194,6 @@ fn download_policy_offline_never_touches_the_network() {
     assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
 }
 
-/// A minimal, COMPLETE (for this one prompt, not universal text) tokenizer:
-/// every byte of `a_prompt_within_vocab` maps to a distinct id in
-/// `0..QwenConfig::tiny().vocab` (23), so the decode side can also round-trip
-/// every id the tiny model's 23-wide lm_head can ever sample - not just the
-/// prompt's own characters. `data::bpe::bytes_to_unicode()` is the SAME
-/// byte<->char table `QwenBpe::encode_piece` looks up through, so a vocab key
-/// built any other way (e.g. the literal ASCII byte) would silently miss on
-/// every lookup (see [`data::qwen_tokenizer::QwenBpe`]'s own "a miss ... drop
-/// it" contract - the failure mode would be an empty encode, not a panic, so
-/// this is worth getting right on purpose rather than debugging it by
-/// symptom).
-const VOCAB_LETTERS: std::ops::RangeInclusive<u8> = b'a'..=b'w'; // 23 letters
-const PROMPT_WITHIN_VOCAB: &str = "cabbage"; // every char in 'a'..='w'
-
-fn tiny_tokenizer_json() -> serde_json::Value {
-    let byte_encoder = data::bpe::bytes_to_unicode();
-    let vocab: serde_json::Map<String, serde_json::Value> = VOCAB_LETTERS
-        .enumerate()
-        .map(|(id, b)| (byte_encoder[b as usize].to_string(), serde_json::json!(id as u32)))
-        .collect();
-    assert_eq!(vocab.len(), qwen3::QwenConfig::tiny().vocab as usize, "the vocab must exactly cover the tiny config's lm_head width");
-    serde_json::json!({ "model": { "vocab": vocab, "merges": [] } })
-}
-
-/// A real, forward-capable `QwenConfig::tiny()` checkpoint: every tensor
-/// `param_list()` names, filled with small deterministic non-constant values
-/// (the same fill `crates/flux2/tests/model_smoke.rs` uses for its own
-/// from-scratch synthetic DiT) - not all-zero, so a degenerate all-equal
-/// softmax cannot mask a real indexing bug. The `{}` header is deliberate,
-/// not a placeholder: `QwenConfig::from_json`'s own defaults already equal
-/// `QwenConfig::tiny()` exactly (this file's module doc), so `param_list()`
-/// called on that SAME `tiny()` is guaranteed to match what `load_inference`
-/// reads back, with no risk of the header and the tensor set drifting apart.
-fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-real-{tag}-{}-{n}.safetensors", std::process::id()));
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = qwen3::QwenConfig::tiny()
-        .param_list()
-        .into_iter()
-        .map(|(name, numel)| {
-            let data: Vec<f32> = (0..numel).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
-            (name, vec![numel as u64], data)
-        })
-        .collect();
-    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), None).unwrap();
-    Scratch(path)
-}
-
 /// The gap this file's module doc used to call out of reach: resolve ->
 /// open -> parse -> tokenize -> build -> a REAL `generate_kv_stream` forward
 /// pass -> detokenize, entirely on a from-scratch synthetic fixture, no
@@ -270,10 +206,8 @@ fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
 /// thing this test exists to prove reachable at all.
 #[test]
 fn a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate() {
-    let ckpt = tiny_qwen3_checkpoint("real-generate");
-    let tok_path = std::env::temp_dir().join(format!("brain-sdk-text-pipeline-real-generate-tokenizer-{}.json", std::process::id()));
-    std::fs::write(&tok_path, serde_json::to_vec(&tiny_tokenizer_json()).unwrap()).unwrap();
-    let tok_path = Scratch(tok_path);
+    let ckpt = tiny_qwen3_checkpoint("text-pipeline-real-generate");
+    let tok_path = tiny_tokenizer("text-pipeline-real-generate");
 
     let pipe = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap()).tokenizer(tok_path.to_str().unwrap()).load().expect("a fully-synthetic but complete checkpoint + tokenizer must build");
 

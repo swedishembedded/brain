@@ -251,3 +251,6 @@ tempfile = { workspace = true, optional = true }
 brain-checkpoint.workspace = true
 brain-testutil.workspace = true
 serde_json.workspace = true
+# An independent SHA-256, so the chat surface's identity test checks the
+# digest it reports against the file's bytes rather than against itself.
+sha2.workspace = true

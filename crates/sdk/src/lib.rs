@@ -35,7 +35,7 @@
 //! | `image` | [`ImagePipeline`], [`Image`] -- text-to-image and image editing; [`UpscalePipeline`] -- super-resolution; [`RestorePipeline`] -- blind face restoration |
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
-//! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id); [`EmbeddingPipeline`]'s Qwen3/LFM2.5-Encoder backends (long-context text embedding); [`EmbeddingTrainer`] -- contrastive training of a frozen-backbone projection head; [`EncoderFineTuner`] -- full-encoder contrastive fine-tuning (LFM2.5-Encoder only, via its seeded backward pass) |
+//! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id); [`ChatPipeline`] -- multi-turn chat with tool calling, streaming and cancellation on the same model, optionally with a LoRA adapter; [`EmbeddingPipeline`]'s Qwen3/LFM2.5-Encoder backends (long-context text embedding); [`EmbeddingTrainer`] -- contrastive training of a frozen-backbone projection head; [`EncoderFineTuner`] -- full-encoder contrastive fine-tuning (LFM2.5-Encoder only, via its seeded backward pass) |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); [`GroundingPipeline`] -- open-vocabulary visual grounding (Florence-2); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth`/`Grounding` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
@@ -212,6 +212,12 @@ pub use flow::{EvalReport, Flow, Stages, TrainReport};
 
 #[cfg(feature = "text")]
 pub mod artifact;
+/// `brain::ChatPipeline` - multi-turn chat with tool calling, streaming and
+/// cancellation, over the model a [`TextGenerationPipeline`] loads. The
+/// request, message, tool and response types live here; the ones every
+/// caller names are also re-exported at the top level.
+#[cfg(feature = "text")]
+pub mod chat;
 #[cfg(feature = "resolve")]
 mod resolve_policy;
 #[cfg(feature = "image")]
@@ -294,6 +300,14 @@ pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
 pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
 #[cfg(feature = "text")]
 pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
+#[cfg(feature = "text")]
+pub use chat::{ChatMessage, ChatPipeline, ChatRequest, ChatResponse};
+/// Cooperative cancellation for a streaming call such as
+/// [`ChatPipeline::generate_stream`]. Re-exported, not reinvented: the SAME
+/// token every served invocation carries. Make one with
+/// `CancelToken::armed()` - a `default()` token is unarmed and never fires.
+#[cfg(feature = "text")]
+pub use capability::CancelToken;
 #[cfg(feature = "audio")]
 pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
 #[cfg(feature = "audio")]

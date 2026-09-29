@@ -73,6 +73,25 @@ pub fn stream_to_file(
     Ok(())
 }
 
+/// The lowercase-hex SHA-256 of a file's bytes - the digest
+/// [`stream_to_file`] checks a download against, so a digest recorded for a
+/// file already on disk compares directly with the one its download was
+/// verified by. Streams the file through a fixed-size buffer: a
+/// multi-gigabyte checkpoint is never held in memory to hash it.
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex_lower(&hasher.finalize()))
+}
+
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -121,6 +140,20 @@ mod tests {
         let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         stream_to_file(&data[..], &dest, None, Some(expected), &mut |_, _| {}).unwrap();
         assert!(dest.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file hashes to the digest of its bytes, and a file that is not
+    /// there is an error, not a digest.
+    #[test]
+    fn a_file_hashes_to_the_digest_of_its_bytes() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sha-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("weights.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        // sha256("abc") -- the FIPS 180-2 example vector.
+        assert_eq!(sha256_file(&path).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert!(sha256_file(&dir.join("absent.bin")).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -23,11 +23,15 @@
 //! `brain do qwen3 chat_generate` / HTTP `/v1/chat/completions` path) runs -
 //! `chat::parse_request` (chat-template rendering, sampling-param parsing,
 //! stop-strings) + `chat::SeqState` (streaming/finalization, cancellation,
-//! `finish_reason`) + `sample::generate_kv_stream` - constructed in-process
-//! from a plain [`capability::Invocation`] built here, with no
+//! `finish_reason`) + `sample::generate_kv_stream_cancellable` - constructed
+//! in-process from a plain [`capability::Invocation`] built here, with no
 //! capability-dispatch machinery, no scheduler and no paged KV cache in the
 //! loop. This is deliberately the SAME code the served path runs, not a
 //! second implementation of chat templating/sampling/stop-strings.
+//!
+//! [`crate::ChatPipeline`] is the multi-turn, tool-calling half of this
+//! surface: it runs on the model a [`TextGenerationPipeline`] loaded
+//! (`ChatPipeline::from(pipe)`), through the same generation loop.
 //!
 //! A checkpoint's own on-disk shape decides how much you need to pass:
 //!
@@ -83,83 +87,22 @@ pub struct GeneratedText {
     pub finish_reason: String,
 }
 
-/// Generation knobs layered over `qwen3::chat::parse_request`'s own spec
-/// defaults - every field left unset here keeps whatever that function
-/// already does (greedy-ish 0.8 temperature, 128 new tokens, chat-template
-/// rendering on). See that function's own doc for the full default set.
+/// The sampling knobs the text and chat surfaces share, and their ONE
+/// mapping onto the invocation `qwen3::chat::parse_request` reads - every
+/// field left unset keeps whatever that function already does.
 #[derive(Clone, Debug, Default)]
-pub struct TextGenerationOptions {
-    max_new_tokens: Option<u32>,
-    temperature: Option<f32>,
-    top_k: Option<u32>,
-    top_p: Option<f32>,
-    seed: Option<u64>,
-    stop: Vec<String>,
-    chat: Option<bool>,
-    thinking: Option<bool>,
+pub(crate) struct Sampling {
+    pub(crate) max_new_tokens: Option<u32>,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) top_k: Option<u32>,
+    pub(crate) top_p: Option<f32>,
+    pub(crate) seed: Option<u64>,
+    pub(crate) stop: Vec<String>,
+    pub(crate) thinking: Option<bool>,
 }
 
-impl TextGenerationOptions {
-    pub fn new() -> TextGenerationOptions {
-        TextGenerationOptions::default()
-    }
-
-    pub fn max_new_tokens(mut self, n: u32) -> Self {
-        self.max_new_tokens = Some(n);
-        self
-    }
-
-    pub fn temperature(mut self, t: f32) -> Self {
-        self.temperature = Some(t);
-        self
-    }
-
-    pub fn top_k(mut self, k: u32) -> Self {
-        self.top_k = Some(k);
-        self
-    }
-
-    pub fn top_p(mut self, p: f32) -> Self {
-        self.top_p = Some(p);
-        self
-    }
-
-    /// Reproducible decoding. Left unset, every call gets a real random seed
-    /// (never a fixed default) - two back-to-back unseeded calls must not
-    /// decode the same sequence, matching `qwen3::chat::sampling_params`'s
-    /// own contract.
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = Some(seed);
-        self
-    }
-
-    /// Add a stop string; generation ends the moment the decoded text
-    /// contains it. May be called more than once.
-    pub fn stop(mut self, s: impl Into<String>) -> Self {
-        self.stop.push(s.into());
-        self
-    }
-
-    /// Whether to render `prompt` through the chat template (the default) or
-    /// send it to the model completion-style, verbatim.
-    pub fn chat(mut self, on: bool) -> Self {
-        self.chat = Some(on);
-        self
-    }
-
-    /// Whether a hybrid reasoning model deliberates before answering.
-    ///
-    /// On by default, which is right for a chat turn and wrong for anything
-    /// with a token budget: the model spends it inside `<think>` and never
-    /// reaches the answer. A caller extracting data from a model wants the
-    /// answer.
-    pub fn thinking(mut self, on: bool) -> Self {
-        self.thinking = Some(on);
-        self
-    }
-
-    fn into_invocation(self, prompt: &str) -> Result<capability::Invocation> {
-        let mut inv = capability::Invocation::new().set("prompt", json!(prompt));
+impl Sampling {
+    pub(crate) fn apply(&self, mut inv: capability::Invocation) -> Result<capability::Invocation> {
         if let Some(v) = self.max_new_tokens {
             inv = inv.set("max_new", json!(v));
         }
@@ -179,11 +122,86 @@ impl TextGenerationOptions {
             let raw = serde_json::to_string(&self.stop).map_err(|e| Error::Backend(format!("qwen3: encoding stop strings: {e}")))?;
             inv = inv.set("stop", json!(raw));
         }
-        if let Some(v) = self.chat {
-            inv = inv.set("chat", json!(v));
-        }
         if let Some(v) = self.thinking {
             inv = inv.set("enable_thinking", json!(v));
+        }
+        Ok(inv)
+    }
+}
+
+/// Generation knobs layered over `qwen3::chat::parse_request`'s own spec
+/// defaults - every field left unset here keeps whatever that function
+/// already does (greedy-ish 0.8 temperature, 128 new tokens, chat-template
+/// rendering on). See that function's own doc for the full default set.
+#[derive(Clone, Debug, Default)]
+pub struct TextGenerationOptions {
+    sampling: Sampling,
+    chat: Option<bool>,
+}
+
+impl TextGenerationOptions {
+    pub fn new() -> TextGenerationOptions {
+        TextGenerationOptions::default()
+    }
+
+    pub fn max_new_tokens(mut self, n: u32) -> Self {
+        self.sampling.max_new_tokens = Some(n);
+        self
+    }
+
+    pub fn temperature(mut self, t: f32) -> Self {
+        self.sampling.temperature = Some(t);
+        self
+    }
+
+    pub fn top_k(mut self, k: u32) -> Self {
+        self.sampling.top_k = Some(k);
+        self
+    }
+
+    pub fn top_p(mut self, p: f32) -> Self {
+        self.sampling.top_p = Some(p);
+        self
+    }
+
+    /// Reproducible decoding. Left unset, every call gets a real random seed
+    /// (never a fixed default) - two back-to-back unseeded calls must not
+    /// decode the same sequence, matching `qwen3::chat::sampling_params`'s
+    /// own contract.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.sampling.seed = Some(seed);
+        self
+    }
+
+    /// Add a stop string; generation ends the moment the decoded text
+    /// contains it. May be called more than once.
+    pub fn stop(mut self, s: impl Into<String>) -> Self {
+        self.sampling.stop.push(s.into());
+        self
+    }
+
+    /// Whether to render `prompt` through the chat template (the default) or
+    /// send it to the model completion-style, verbatim.
+    pub fn chat(mut self, on: bool) -> Self {
+        self.chat = Some(on);
+        self
+    }
+
+    /// Whether a hybrid reasoning model deliberates before answering.
+    ///
+    /// On by default, which is right for a chat turn and wrong for anything
+    /// with a token budget: the model spends it inside `<think>` and never
+    /// reaches the answer. A caller extracting data from a model wants the
+    /// answer.
+    pub fn thinking(mut self, on: bool) -> Self {
+        self.sampling.thinking = Some(on);
+        self
+    }
+
+    fn into_invocation(self, prompt: &str) -> Result<capability::Invocation> {
+        let mut inv = self.sampling.apply(capability::Invocation::new().set("prompt", json!(prompt)))?;
+        if let Some(v) = self.chat {
+            inv = inv.set("chat", json!(v));
         }
         Ok(inv)
     }
@@ -192,19 +210,12 @@ impl TextGenerationOptions {
 /// `brain`'s text-generation pipeline. See this module's doc for how it
 /// tells a local checkpoint path apart from a hub id.
 pub struct TextGenerationPipeline {
-    model: qwen3::Qwen,
-    tok: data::qwen_tokenizer::QwenBpe,
-    /// The context budget (prompt + completion, in tokens) this pipeline was
-    /// BUILT for - fixed at construction, like `s3dit`'s build-time size
-    /// (see `ImagePipelineBuilder::size`'s own doc for the same asymmetry).
-    /// [`TextGenerationPipeline::generate_with`] validates a request against
-    /// it rather than silently truncating or rebuilding.
-    capacity: u32,
+    engine: Engine,
 }
 
 impl std::fmt::Debug for TextGenerationPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TextGenerationPipeline").field("capacity", &self.capacity).finish()
+        f.debug_struct("TextGenerationPipeline").field("capacity", &self.engine.capacity).field("identity", &self.engine.identity).finish()
     }
 }
 
@@ -232,31 +243,90 @@ impl TextGenerationPipeline {
     }
 
     /// [`TextGenerationPipeline::generate`] plus [`TextGenerationOptions`].
-    /// Runs the SAME `chat::parse_request` + `chat::SeqState` +
-    /// `sample::generate_kv_stream` sequence the served path does - see
-    /// this module's doc.
+    /// Runs the SAME `chat::parse_request` + `chat::SeqState` + streaming
+    /// KV-cached sampler sequence the served path does - see this module's
+    /// doc.
     pub fn generate_with(&self, prompt: &str, opts: TextGenerationOptions) -> Result<GeneratedText> {
         let inv = opts.into_invocation(prompt)?;
-        let req = qwen3::chat::parse_request(&self.tok, &inv).map_err(Error::Backend)?;
+        let req = qwen3::chat::parse_request(&self.engine.tok, &inv).map_err(Error::Backend)?;
 
         let need = req.ids.len() as u64 + req.max_new as u64;
-        if need > self.capacity as u64 {
+        if need > self.engine.capacity as u64 {
             return Err(Error::Backend(format!(
                 "qwen3: prompt + max_new_tokens ({need} tokens) exceeds this pipeline's built capacity ({} tokens) -- rebuild with .capacity({need}) or larger",
-                self.capacity
+                self.engine.capacity
             )));
         }
 
-        let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| self.tok.special_id(s)).collect();
-        let mut rng = data::rng::Rng::new(req.seed);
-        let mut seq = qwen3::chat::SeqState::new(&req, capability::CancelToken::default());
-        let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
-        let gen = qwen3::sample::generate_kv_stream(&self.model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, &eos, &mut rng, &mut |_i, t| {
-            ids_out.push(t);
-            !seq.advance(&self.tok, &ids_out, &mut |_| {})
-        });
-        let outcome = seq.finish(&self.tok, &gen, &mut |_| {});
+        // Nothing here can cancel, so the whole prompt is one prefill chunk:
+        // the single prefill call, with no per-chunk readback to pay for.
+        let outcome = self.engine.run(&req, &capability::CancelToken::default(), req.ids.len(), &mut |_| {});
         generated_text_from_outcome(outcome)
+    }
+
+    /// What this pipeline loaded, by content - see [`crate::chat::ModelIdentity`].
+    pub fn identity(&self) -> &crate::chat::ModelIdentity {
+        &self.engine.identity
+    }
+
+    /// The loaded engine, for the chat surface built on this same load.
+    pub(crate) fn into_engine(self) -> Engine {
+        self.engine
+    }
+}
+
+/// One loaded Qwen3 decoder and everything a generation reads besides the
+/// request: the tokenizer, the LM head, the stop ids, the context it was
+/// built for and what it was built from. Both the text and the chat surface
+/// run their generations through [`Engine::run`], so the two cannot diverge
+/// on templating, sampling, stop strings or cancellation.
+pub(crate) struct Engine {
+    model: qwen3::Qwen,
+    pub(crate) tok: data::qwen_tokenizer::QwenBpe,
+    /// The (possibly tied) LM head, `[vocab, d_model]`, applied host-side by
+    /// the sampler. Read once at load: reading it per request is a whole
+    /// head's device-to-host copy on every call.
+    head: Vec<f32>,
+    /// `<|im_end|>` and `<|endoftext|>`, whichever the tokenizer has.
+    eos: Vec<u32>,
+    /// The context budget (prompt + completion, in tokens) the KV cache was
+    /// BUILT for - fixed at construction, like `s3dit`'s build-time size
+    /// (see `ImagePipelineBuilder::size`'s own doc for the same asymmetry).
+    pub(crate) capacity: u32,
+    pub(crate) identity: crate::chat::ModelIdentity,
+}
+
+impl Engine {
+    /// One generation: the served path's `SeqState` over the cancellable,
+    /// chunk-prefilling KV sampler. `cancel` is polled between prefill
+    /// chunks of `prefill_chunk` tokens and after every decoded token;
+    /// `progress` sees every visible-text delta and scanner event as it is
+    /// produced, including the tail `finish` flushes, so the streamed text
+    /// and the outcome's text are the same.
+    pub(crate) fn run(&self, req: &qwen3::chat::ParsedRequest, cancel: &capability::CancelToken, prefill_chunk: usize, progress: &mut dyn FnMut(capability::Progress)) -> capability::Outcome {
+        let mut rng = data::rng::Rng::new(req.seed);
+        let mut seq = qwen3::chat::SeqState::new(req, cancel.clone());
+        let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
+        let generated = qwen3::sample::generate_kv_stream_cancellable(
+            &self.model,
+            &req.ids,
+            req.max_new,
+            req.temp,
+            req.top_k,
+            req.top_p,
+            &self.eos,
+            &mut rng,
+            &self.head,
+            cancel,
+            prefill_chunk,
+            &mut |_i, t| {
+                ids_out.push(t);
+                // `advance` answers "should we stop?"; the sampler asks
+                // "keep going?".
+                !seq.advance(&self.tok, &ids_out, progress)
+            },
+        );
+        seq.finish(&self.tok, &generated, progress)
     }
 }
 
@@ -265,10 +335,16 @@ impl TextGenerationPipeline {
 /// `text`/`prompt_tokens`/`completion_tokens`/`finish_reason` fields) since
 /// `qwen3vl::caps::Resident::generate` runs that SAME shared function - one
 /// implementation, not two.
+///
+/// Both counts are always measured on a generation; one missing is a broken
+/// outcome and an error here, never a zero that reads as a measurement.
 pub(crate) fn generated_text_from_outcome(o: capability::Outcome) -> Result<GeneratedText> {
     let text = o.outputs.get("text").and_then(|v| v.as_str()).ok_or_else(|| Error::Backend("qwen3: generation outcome carries no text".to_string()))?.to_string();
-    let prompt_tokens = o.outputs.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
-    let completion_tokens = o.outputs.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
+    let count = |key: &str| -> Result<u32> {
+        o.outputs.get(key).and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).ok_or_else(|| Error::Backend(format!("qwen3: generation outcome carries no {key}")))
+    };
+    let prompt_tokens = count("prompt_tokens")?;
+    let completion_tokens = count("completion_tokens")?;
     let finish_reason = o.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
     Ok(GeneratedText { text, prompt_tokens, completion_tokens, finish_reason })
 }
@@ -396,9 +472,8 @@ impl TextGenerationPipelineBuilder {
         } else {
             return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf), none resolved, and none given; call .tokenizer(path)")));
         };
-        // Built for KV-cache DECODE, which is the only thing `generate_with`
-        // ever drives (`qwen3::sample::generate_kv_stream`: prefill, then one
-        // token at a time).
+        // Built for KV-cache DECODE, which is the only thing a generation
+        // ever drives (`Engine::run`: prefill, then one token at a time).
         //
         // The batched constructor sizes per-layer activations at `b*t`,
         // attention scores at `n_heads*ctx^2` and a logits buffer at
@@ -412,6 +487,7 @@ impl TextGenerationPipelineBuilder {
         // applied host-side - and its KV cache is the only thing that scales
         // with the context at all.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+        let base_id = reader.card().map(|card| card.id);
         let model = if let Some(path) = &adapter {
             // Folded on the host, then built decode-shaped from the result -
             // the one path `from_tensors_decode` exists for.
@@ -433,7 +509,21 @@ impl TextGenerationPipelineBuilder {
             built
         };
 
-        Ok(TextGenerationPipeline { model, tok, capacity })
+        // What was loaded, by content: hashed after the build, so a file that
+        // could not be loaded is never reported, and before the pipeline is
+        // handed out, so the digest describes the bytes this load read.
+        let adapter_identity = match &adapter {
+            Some(path) => {
+                let card = checkpoint::st::read_card(path).map_err(|e| Error::Backend(format!("{path}: reading the adapter card: {e}")))?;
+                Some(crate::chat::WeightsIdentity::of_file(path, card.map(|card| card.id))?)
+            }
+            None => None,
+        };
+        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_file(&weights, base_id)?, adapter: adapter_identity };
+
+        let head = model.read_weight(model.cfg.head_weight());
+        let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| tok.special_id(s)).collect();
+        Ok(TextGenerationPipeline { engine: Engine { model, tok, head, eos, capacity, identity } })
     }
 }
 
@@ -480,6 +570,12 @@ fn resolve_in_store(reference: &str) -> Option<(String, Option<String>)> {
     let root = loader::model_dir::resolve(None)?;
     let r = brain_modelref::ModelRef::parse(reference).ok()?;
     let local = brain_modelstore::Store::new(&root).local(&r)?;
+    // A compound entry's `weights` is its manifest, not a checkpoint: which
+    // file plays which role is the spec-aware resolver's question, so it
+    // goes there (`resolve_hub_weights`) rather than being opened as one.
+    if local.format == brain_modelstore::Format::Compound {
+        return None;
+    }
     let tokenizer = local.dir.join("tokenizer.json");
     Some((
         local.weights.to_string_lossy().into_owned(),

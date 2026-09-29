@@ -313,15 +313,30 @@ pub struct ParsedRequest {
     pub thinking_open: bool,
 }
 
-/// Build a [`ParsedRequest`] from an [`Invocation`]: `messages` (chat template,
+/// The chat-template render of one request, before tokenization: the prompt
+/// text, and what the render decided that the per-sequence scanner must
+/// follow ([`SeqState`] reads the flavor and the prefilled `<think>`, and
+/// enforces the `tool_choice` demand after generation).
+#[derive(Debug)]
+pub struct RenderedPrompt {
+    pub text: String,
+    pub tool_choice: ToolChoice,
+    pub flavor: qwen_chat::TemplateFlavor,
+    pub thinking_open: bool,
+}
+
+/// Render an [`Invocation`]'s prompt: `messages` (chat template,
 /// tool-calling and reasoning-aware) wins; else the legacy single-`prompt`
 /// (+ `chat`) path, wrapped as a one-turn user message so it goes through the
 /// SAME renderer (`qwen_chat::render_for_generation`'s byte-exact Jinja
-/// renderer — see that module's doc comment on why it coexists with the
+/// renderer - see that module's doc comment on why it coexists with the
 /// older plain-string `QwenBpe::apply_chat_template`).
-pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
-    let (max_new, temp, top_k, seed) = sampling_params(inv);
-    let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+///
+/// Needs no tokenizer: the render is text, and [`parse_request`] is this
+/// plus encoding and the sampling params. A caller that wants to see the
+/// prompt a request becomes - or to parse a reply to it with
+/// [`parse_reply`] - gets it from here without loading a model.
+pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
     let enable_thinking = inv.get_bool("enable_thinking").unwrap_or(true);
     // Resolve reasoning_effort: upstream Qwen3.8 defaults to "xhigh" when
     // thinking is enabled and no value is provided.
@@ -394,12 +409,48 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, S
             }
         }
     };
+    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open })
+}
+
+/// Build a [`ParsedRequest`] from an [`Invocation`]: the [`render_prompt`]
+/// render, tokenized, plus the sampling params and stop strings.
+pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
+    let (max_new, temp, top_k, seed) = sampling_params(inv);
+    let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+    let RenderedPrompt { text, tool_choice, flavor, thinking_open } = render_prompt(inv)?;
     let ids = tok.encode(&text);
     if ids.is_empty() {
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
     Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open })
+}
+
+/// Parse a completion that was NOT decoded here - a recorded reply, a
+/// replayed transcript - into the same [`Outcome`] a generation's
+/// [`SeqState::finish`] reports for the request `inv` describes: visible
+/// text, reasoning, tool calls and finish reason, through the same scanner
+/// and the same reason precedence.
+///
+/// Nothing was counted, so the outcome carries no `prompt_tokens` or
+/// `completion_tokens` (a missing count is unmeasured, never zero), and
+/// `length` is never the reason (whether a budget ran out is not knowable
+/// from text). Stop strings are not applied: they end a decode, and a
+/// finished reply has already ended.
+pub fn parse_reply(inv: &Invocation, text: &str) -> Result<Outcome, String> {
+    let prompt = render_prompt(inv)?;
+    let seq = SeqState {
+        stops: Vec::new(),
+        cancel: CancelToken::default(),
+        printed: String::new(),
+        scan: ChatScanner::with_flavor(prompt.thinking_open, prompt.flavor),
+        stop_at: None,
+        cancelled: false,
+        max_new: 0,
+        prompt_tokens: None,
+        tool_choice: prompt.tool_choice,
+    };
+    Ok(seq.finish_text(text, None, &mut |_| {}))
 }
 
 /// Per-sequence streaming/finalisation state, common to every caller: the
@@ -413,7 +464,8 @@ pub struct SeqState {
     stop_at: Option<usize>,
     cancelled: bool,
     max_new: usize,
-    prompt_tokens: usize,
+    /// `None` only for [`parse_reply`], whose prompt was never tokenized.
+    prompt_tokens: Option<usize>,
     tool_choice: ToolChoice,
 }
 
@@ -432,7 +484,7 @@ impl SeqState {
             stop_at: None,
             cancelled: false,
             max_new: req.max_new,
-            prompt_tokens: req.ids.len(),
+            prompt_tokens: Some(req.ids.len()),
             tool_choice: req.tool_choice.clone(),
         }
     }
@@ -466,12 +518,27 @@ impl SeqState {
 
     /// Final text + finish reason, and the outcome those become. A
     /// stop-string truncates the visible RAW text (existing behavior, kept
-    /// as-is — a stop-string cutting mid-generation takes precedence over any
+    /// as-is - a stop-string cutting mid-generation takes precedence over any
     /// in-flight tool call, which is left unclosed and unreported). Otherwise
     /// flush any held-back multi-byte tail through the scanner, then
     /// [`ChatScanner::finish`] closes out a still-open tool call (truncated
     /// by `max_new`) rather than silently dropping it.
-    pub fn finish(mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> Outcome {
+    pub fn finish(self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> Outcome {
+        let full = tok.decode(all_tokens);
+        self.finish_text(&full, Some(all_tokens.len()), progress)
+    }
+
+    /// [`SeqState::finish`] over already-decoded text. `generated` is how many
+    /// tokens produced `full`, or `None` when nobody counted them
+    /// ([`parse_reply`]): the outcome then carries no `completion_tokens`
+    /// and cannot report `length`.
+    fn finish_text(mut self, full: &str, generated: Option<usize>, progress: &mut dyn FnMut(Progress)) -> Outcome {
+        let step = generated.unwrap_or(0) as u32;
+        // A token that fired during prefill stopped the sequence before its
+        // first token was sampled, so `advance` never ran to notice - but
+        // the sequence was cancelled all the same, and reporting "stop" for
+        // it would pass an empty truncation off as a finished answer.
+        let cancelled = self.cancelled || (generated == Some(0) && self.cancel.is_cancelled());
         // Post-hoc `required`/`named` enforcement: did the model actually
         // produce the demanded tool call? Evaluated AFTER the scanner is
         // flushed below, so a call closing only in the final held-back tail
@@ -482,16 +549,15 @@ impl SeqState {
         let (text, finish) = if let Some(idx) = self.stop_at {
             (self.printed[..idx].to_string(), "stop_sequence")
         } else {
-            let full = tok.decode(all_tokens);
             if full.len() > self.printed.len() {
                 let tail = full[self.printed.len()..].to_string();
                 let mut evs = Vec::new();
                 self.scan.push(&tail, &mut evs);
-                emit_chat_events(&evs, progress, all_tokens.len() as u32, self.max_new as u32);
+                emit_chat_events(&evs, progress, step, self.max_new as u32);
             }
             let mut evs = Vec::new();
             self.scan.finish(&mut evs);
-            emit_chat_events(&evs, progress, all_tokens.len() as u32, self.max_new as u32);
+            emit_chat_events(&evs, progress, step, self.max_new as u32);
             let calls_present = !self.scan.tool_calls().is_empty();
             let met = match &self.tool_choice {
                 ToolChoice::Auto | ToolChoice::None => true,
@@ -507,13 +573,13 @@ impl SeqState {
             // below for a caller that wants them; they just no longer decide
             // the reason. Then an unmet demand outranks a mismatched tool
             // call, and tool_calls > length > stop as before.
-            let reason = if self.cancelled {
+            let reason = if cancelled {
                 "cancelled"
             } else if demanded && !met {
                 "tool_choice_unmet"
             } else if calls_present {
                 "tool_calls"
-            } else if all_tokens.len() >= self.max_new {
+            } else if generated.is_some_and(|n| n >= self.max_new) {
                 "length"
             } else {
                 "stop" // eos
@@ -522,11 +588,14 @@ impl SeqState {
         };
         progress(Progress::step(self.max_new as u32, self.max_new as u32, "done"));
         let mut out = text_outcome(text);
-        out = out
-            .set("prompt_tokens", json!(self.prompt_tokens as i64))
-            .set("completion_tokens", json!(all_tokens.len() as i64))
-            .set("finish_reason", json!(finish))
-            .set("reasoning_content", json!(self.scan.reasoning()));
+        // A count nobody took is absent, not zero.
+        if let Some(n) = self.prompt_tokens {
+            out = out.set("prompt_tokens", json!(n as i64));
+        }
+        if let Some(n) = generated {
+            out = out.set("completion_tokens", json!(n as i64));
+        }
+        out = out.set("finish_reason", json!(finish)).set("reasoning_content", json!(self.scan.reasoning()));
         if !self.scan.tool_calls().is_empty() {
             let calls: Vec<serde_json::Value> =
                 self.scan.tool_calls().iter().map(|c| json!({ "id": c.id, "name": c.name, "arguments": c.arguments })).collect();

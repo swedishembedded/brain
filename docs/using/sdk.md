@@ -90,10 +90,10 @@ let out = pipe.generate("Explain DMA in one sentence.")?;
 println!("{}", out.text);
 ```
 
-Loads from a local checkpoint path rather than a hub id today (qwen3 has no
-model-store resolver registered yet). A `.gguf` checkpoint carries its own
-tokenizer; a brain-format `.safetensors` checkpoint needs one named
-explicitly:
+Takes a local checkpoint path or a `<vendor>/<repo>` hub id through the same
+call - a string naming a real file on disk is always the local path. A
+`.gguf` checkpoint carries its own tokenizer; a brain-format `.safetensors`
+checkpoint needs one named explicitly:
 
 ```rust
 let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors")
@@ -105,6 +105,74 @@ let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors"
 layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/
 `finish_reason` mirror what the served `/v1/chat/completions` endpoint
 reports, since both run through the same chat-templating and sampling code.
+
+### Chat with tools
+
+`brain::ChatPipeline` is the multi-turn half of the same surface: a
+conversation, tool schemas and sampling knobs in; the visible answer, the
+reasoning, typed tool calls, a finish reason and token counts out.
+
+```rust
+use brain::{ChatMessage, ChatPipeline, ChatRequest};
+
+let chat = ChatPipeline::from_pretrained("unsloth/Qwen3-4B-GGUF")?;
+let reply = chat.generate(&ChatRequest::new(vec![ChatMessage::user("Explain DMA in one sentence.")]))?;
+println!("{}", reply.text);
+```
+
+Every loader knob - tokenizer, a LoRA adapter folded in at load, context
+capacity, device - is `TextGenerationPipeline::builder`'s; a chat pipeline is
+the model that builder loaded. Tools, streaming and cancellation:
+
+```rust
+use brain::chat::{ChatDelta, ToolChoice, ToolSchema};
+use brain::{CancelToken, ChatMessage, ChatPipeline, ChatRequest, TextGenerationPipeline};
+
+let chat = ChatPipeline::from(
+    TextGenerationPipeline::builder("/models/qwen3-4b.safetensors")
+        .tokenizer("/models/qwen3-4b/tokenizer.json")
+        .adapter("/adapters/support.safetensors")
+        .capacity(16384)
+        .load()?,
+);
+let request = ChatRequest::new(vec![ChatMessage::user("Weather in Paris?")])
+    .tools(vec![ToolSchema::new("get_weather", "Current weather", serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}))])
+    .tool_choice(ToolChoice::Auto)
+    .thinking(false)
+    .max_tokens(512);
+let cancel = CancelToken::armed();
+let reply = chat.generate_stream(&request, &cancel, |delta| {
+    if let ChatDelta::Text(text) = delta {
+        print!("{text}");
+    }
+})?;
+for call in &reply.tool_calls {
+    println!("{} {} {}", call.id, call.name, call.arguments);
+}
+```
+
+- A tool's result goes back as `ChatMessage::tool(call_id, content)`, after
+  the assistant turn that made the call
+  (`ChatMessage::assistant("").with_tool_calls(calls)`).
+- `reply.finish_reason` is `Stop`, `StopSequence`, `Length`, `ToolCalls`,
+  `ToolChoiceUnmet` (a `Required`/`Named` tool choice the model did not
+  honour) or `Cancelled` (the token fired; the reply is partial).
+- `reply.usage.prompt_tokens`/`completion_tokens` are `Option<u32>`: a count
+  that was not measured is `None`, never `0`.
+- `max_tokens` is an upper bound, and so is the context: a budget bigger than
+  what the prompt leaves generates until the context is full and reports
+  `Length`. A prompt that fills the context alone is an error.
+- Cancellation is noticed between prefill chunks (512 prompt tokens by
+  default, `ChatPipeline::prefill_chunk`) and after every token.
+- `chat.identity()` names what was loaded by content: the base weights file
+  and, when one is attached, the adapter - each with its card id and a
+  `sha256:` digest of the file.
+- `request.render_prompt()` and `request.parse_reply(raw)` need no model:
+  the prompt the request renders to, and a recorded completion parsed the way
+  a generation's own is.
+
+A pipeline runs one generation at a time (it is `Send`, not `Sync`): give it
+its own thread, or share it behind a `Mutex`.
 
 ## Text embedding
 
@@ -227,7 +295,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `image` | `ImagePipeline`, `Image` - text-to-image and image editing |
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
-| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
+| `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `TranscribePipeline` - speech-to-text (qwen3-asr, offline) |
 | `full` | every surface; this is the default |
