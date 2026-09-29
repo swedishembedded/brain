@@ -212,3 +212,4 @@ What belongs where:
 | 169 | A compile sweep that reads only the exit status passes dead code | [`169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md`](169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md) |
 | 170 | An unmeasured number reported as zero reads as a measurement | [`170-an-unmeasured-number-reported-as-zero-reads-as-a-measurement.md`](170-an-unmeasured-number-reported-as-zero-reads-as-a-measurement.md) |
 | 171 | A params list shorter than the uniform reads zero | [`171-a-params-list-shorter-than-the-uniform-reads-zero.md`](171-a-params-list-shorter-than-the-uniform-reads-zero.md) |
+| 172 | A gate red for everything hides the failures it was written for | [`172-a-gate-red-for-everything-hides-the-failures-it-was-written-for.md`](172-a-gate-red-for-everything-hides-the-failures-it-was-written-for.md) |

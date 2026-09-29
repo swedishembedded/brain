@@ -105,7 +105,7 @@ EOF
 # name literally -- everything else routes through crate::resolve instead.
 # Keep this list in sync with that match arm-for-arm; a new infra verb needs
 # a line here, a new architecture must NOT need one.
-infra_verbs="data devices npu federated flops gradcheck bench perf forecast label caps fetch pull serve help -h --help"
+infra_verbs="data devices npu federated flops gradcheck bench perf forecast label caps fetch pull serve models plan gguf roofline help -h --help"
 
 # Bounded to fn main's own top-level `match argv.get(1)...` block, not the
 # whole file: nested match blocks further down (`run_bench`'s own `eval`/
@@ -151,6 +151,12 @@ done
 # place to leave a rename unfinished.
 overview_pages="index asr vlm world-models forecast imgpipe"
 
+# Pages for something brain RUNS that is not a registry architecture: `fly`
+# executes a connectome (a wiring diagram, no checkpoint to import) and
+# `optionhead` documents one served checkpoint of the `decide` architecture.
+# Same bar as the list above: real user-facing content, never a parking spot.
+non_arch_pages="fly optionhead"
+
 # Toy architectures (Domain::Toy) are excluded from `non_toy_ids` by design
 # (see crates/arch's own doc: excluded from brain caps / --help / the docs
 # model list) -- their docs pages are optional, educational content, not
@@ -180,7 +186,7 @@ for f in "$MODELS_DIR"/*.md; do
   case " $non_toy_ids " in
   *" $base "*) continue ;;
   esac
-  case " $overview_pages " in
+  case " $overview_pages $non_arch_pages " in
   *" $base "*) continue ;;
   esac
   case " $toy_ids " in
@@ -200,7 +206,7 @@ done
 MANIFEST=docs/manifest.txt
 for f in "$MODELS_DIR"/*.md; do
   [ -e "$f" ] || continue
-  rel="models/$(basename "$f")"
+  rel="$f"
   grep -qxF "$rel" "$MANIFEST" || {
     echo "PAGE NOT PUBLISHED: $f exists but is not listed in $MANIFEST, so the docs build never includes it"
     fail=1

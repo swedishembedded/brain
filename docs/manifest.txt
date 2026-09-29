@@ -112,6 +112,7 @@ docs/models/deepseek2.md
 docs/models/lfm2.md
 docs/models/qwen3omnimoe/readme.md
 docs/models/qwen3vl.md
+docs/models/qwen3vlmoe.md
 docs/models/vlm.md
 docs/models/fastvlm.md
 docs/models/moondream3.md
