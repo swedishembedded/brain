@@ -28,7 +28,8 @@ pub use backend_api::{
 };
 pub use backend_api::select;
 
-/// How a kernel's threads map onto the work it is given.
+/// How a kernel's threads map onto the work it is given, and how many params
+/// words its uniform block reads.
 ///
 /// Read off the WGSL itself rather than declared by hand: `@workgroup_size`
 /// is in every shader, and a kernel that calls `workgroupBarrier` is one
@@ -45,6 +46,9 @@ pub struct KernelGrid {
     pub wg_size: u32,
     /// Whether the threads of one workgroup cooperate on one item.
     pub cooperative: bool,
+    /// The params block's size in 32-bit words ([`parse_params_words`]), when
+    /// the source declares a flat one. A dispatch passing fewer is refused.
+    pub params_words: Option<u32>,
 }
 
 /// What a caller is counting when it dispatches.
@@ -127,7 +131,44 @@ pub fn parse_kernel_grid(src: &str) -> KernelGrid {
     // `var<workgroup>` alone would over-report: a kernel can use scratch
     // without its threads sharing an item. A barrier means they do.
     let cooperative = code.contains("workgroupBarrier");
-    KernelGrid { wg_size: wg_size.max(1), cooperative }
+    KernelGrid { wg_size: wg_size.max(1), cooperative, params_words: parse_params_words(src) }
+}
+
+/// The size, in 32-bit words, of the struct a shader binds as its
+/// `var<uniform>` params block - `None` when there is no single uniform, or
+/// when any field is not a 4-byte scalar (`u32`/`i32`/`f32`).
+///
+/// Declining the non-scalar case is deliberate: vector and nested-struct
+/// members carry WGSL uniform alignment padding, and a guessed size that is
+/// too large would refuse a correct dispatch. Every flat block is counted
+/// exactly, which is what [`Gpu::step`]'s short-params refusal needs.
+pub fn parse_params_words(src: &str) -> Option<u32> {
+    let code = wgsl_code_only(src);
+    let mut uniforms = code.match_indices("var<uniform>").map(|(i, _)| &code[i + "var<uniform>".len()..]);
+    let decl = uniforms.next()?;
+    if uniforms.next().is_some() {
+        return None;
+    }
+    // `var<uniform> p: Params;` -> `Params`
+    let ty = decl.split_once(':')?.1.split(|c: char| c == ';' || c.is_whitespace()).find(|s| !s.is_empty())?;
+    let open = code.match_indices("struct").find_map(|(i, _)| {
+        let rest = code[i + "struct".len()..].trim_start();
+        let name_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+        (&rest[..name_end] == ty).then(|| rest[name_end..].trim_start())
+    })?;
+    let body = open.strip_prefix('{')?.split('}').next()?;
+    let mut words = 0u32;
+    for field in body.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()) {
+        // An `@align`/`@size` attribute moves the layout off the packed count.
+        if field.contains('@') {
+            return None;
+        }
+        match field.split_once(':')?.1.trim() {
+            "u32" | "i32" | "f32" => words += 1,
+            _ => return None,
+        }
+    }
+    Some(words)
 }
 
 /// Record each kernel's thread mapping under its name.
@@ -140,6 +181,21 @@ pub(crate) fn register_kernel_grids(kernels: &[(&str, &str)]) {
     let mut reg = grid_registry().lock().unwrap_or_else(|e| e.into_inner());
     for (name, src) in kernels {
         reg.entry(name.to_string()).or_insert_with(|| parse_kernel_grid(src));
+    }
+}
+
+/// Panic when `params` is shorter than the params block kernel `name`
+/// declares. See [`KernelGrid::params_words`] for why short is the case
+/// that matters: the backends zero-pad the uniform, so the missing trailing
+/// fields read 0.0 instead of failing anywhere.
+fn refuse_short_params(name: &str, grid: Option<KernelGrid>, params: &[u32]) {
+    if let Some(words) = grid.and_then(|g| g.params_words) {
+        assert!(
+            params.len() >= words as usize,
+            "kernel '{name}' declares a {words}-word params block but was dispatched with {} word(s); \
+             the missing trailing field(s) would silently read 0",
+            params.len()
+        );
     }
 }
 
@@ -1395,6 +1451,7 @@ mod native_facade {
                 }
             }
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
             let step = self
                 .inner
                 .step(k, bufs, params, t)
@@ -1497,6 +1554,7 @@ mod native_facade {
                 }
             }
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
             let step = self
                 .inner
                 .step_sliced(k, bufs, offsets, params, t)
@@ -1818,6 +1876,7 @@ mod wasm_facade {
         fn step_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
             Backend::step(&self.inner, k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
@@ -1827,6 +1886,7 @@ mod wasm_facade {
         }
         fn step_sliced_unchecked(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
             Backend::step_sliced(&self.inner, k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
@@ -2003,12 +2063,72 @@ mod tests {
                      /* nor a /* nested */ one */\n\
                      @compute @workgroup_size(64)\n\
                      fn main() {}";
-        assert_eq!(crate::parse_kernel_grid(prose), crate::KernelGrid { wg_size: 64, cooperative: false });
+        assert_eq!(crate::parse_kernel_grid(prose), crate::KernelGrid { wg_size: 64, cooperative: false, params_words: None });
 
         let real = "// a tiled GEMM\n\
                     @compute @workgroup_size(16, 16)\n\
                     fn main() { workgroupBarrier(); }";
-        assert_eq!(crate::parse_kernel_grid(real), crate::KernelGrid { wg_size: 256, cooperative: true });
+        assert_eq!(crate::parse_kernel_grid(real), crate::KernelGrid { wg_size: 256, cooperative: true, params_words: None });
+    }
+
+    /// The uniform block's size is read from the struct the kernel actually
+    /// binds as `var<uniform>`, in 32-bit words, and only when every field is
+    /// a scalar - a nested/vector layout carries WGSL alignment padding this
+    /// reading does not model, so it declines rather than guess.
+    #[test]
+    fn params_words_are_read_from_the_bound_uniform_struct() {
+        let flat = "struct Params {\n  d: u32, // rows\n  rows: u32,\n  eps: f32,\n};\n\
+                    @group(0) @binding(3) var<uniform> p: Params;";
+        assert_eq!(crate::parse_params_words(flat), Some(3));
+
+        let renamed = "struct Knobs { a: u32, b: i32 }\n@group(0) @binding(0) var<uniform> pr: Knobs;";
+        assert_eq!(crate::parse_params_words(renamed), Some(2));
+
+        let nested = "struct View { m: vec4<f32>, };\nstruct Params { v: View, n: u32, };\n\
+                      @group(0) @binding(0) var<uniform> p: Params;";
+        assert_eq!(crate::parse_params_words(nested), None);
+
+        let commented = "/* struct Params { a: u32, b: u32, c: u32 } */\n\
+                         struct Params { a: u32 };\n@group(0) @binding(0) var<uniform> p: Params;";
+        assert_eq!(crate::parse_params_words(commented), Some(1));
+
+        assert_eq!(crate::parse_params_words("fn main() {}"), None);
+    }
+
+    /// A params list SHORTER than the kernel's uniform block is refused at
+    /// the dispatch, naming the kernel.
+    ///
+    /// The backends zero-pad the uniform to its 16-byte binding size, so a
+    /// missing trailing field is not an error anywhere else: it silently
+    /// reads 0. That is how an `eps` field added to a kernel becomes
+    /// `eps = 0.0` at every call site nobody updated.
+    #[test]
+    #[should_panic(expected = "rmsnorm_eps")]
+    fn a_dispatch_shorter_than_its_params_block_is_refused() {
+        let gpu = Gpu::new_cpu(&[("rmsnorm_eps", kernels::RMSNORM_EPS)]);
+        let x = gpu.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
+        let w = gpu.storage_init("w", &[1.0; 4]);
+        let out = gpu.storage(4);
+        // `rmsnorm_eps` declares {d_model, seq_len, eps}; eps is missing here.
+        let _ = gpu.step(0, &[&x, &w, &out], &[4, 1], 1);
+    }
+
+    /// Passing the full block still dispatches (and passing MORE words than
+    /// the block holds stays legal: shared call sites hand one list to
+    /// several variants whose blocks differ in length).
+    #[test]
+    fn a_dispatch_with_the_full_params_block_runs() {
+        let gpu = Gpu::new_cpu(&[("rmsnorm_eps", kernels::RMSNORM_EPS)]);
+        let x = gpu.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
+        let w = gpu.storage_init("w", &[1.0; 4]);
+        let out = gpu.storage(4);
+        let s = gpu.step(0, &[&x, &w, &out], &[4, 1, f(1e-6), 7], 1);
+        gpu.submit(&[], &[s]);
+        let y = gpu.read(&out, 4);
+        let rms = ((1.0f32 + 4.0 + 9.0 + 16.0) / 4.0 + 1e-6).sqrt();
+        for (i, v) in y.iter().enumerate() {
+            assert!((v - (i as f32 + 1.0) / rms).abs() < 1e-6, "{y:?}");
+        }
     }
 
     #[test]

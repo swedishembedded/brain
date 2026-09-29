@@ -945,7 +945,7 @@ fn main() {
             let mut outs = Vec::new();
             for (name, kind, prm, threads) in [
                 ("rmsnorm_eps", K_RMS, vec![d, rows, f(1e-6)], rows),
-                ("rmsnorm_rows", K_RMS_ROWS, vec![d, rows], rows * 64),
+                ("rmsnorm_rows", K_RMS_ROWS, vec![d, rows, f(1e-6)], rows * 64),
             ] {
                 let o = gpu.storage(rows as u64 * d as u64);
                 let st = vec![gpu.step(kind, &[&x, &w, &o], &prm, threads)];

@@ -211,3 +211,4 @@ What belongs where:
 | 168 | A renamed argument of the same type compiles at every stale caller | [`168-a-renamed-argument-of-the-same-type-compiles-at-every-stale-caller.md`](168-a-renamed-argument-of-the-same-type-compiles-at-every-stale-caller.md) |
 | 169 | A compile sweep that reads only the exit status passes dead code | [`169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md`](169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md) |
 | 170 | An unmeasured number reported as zero reads as a measurement | [`170-an-unmeasured-number-reported-as-zero-reads-as-a-measurement.md`](170-an-unmeasured-number-reported-as-zero-reads-as-a-measurement.md) |
+| 171 | A params list shorter than the uniform reads zero | [`171-a-params-list-shorter-than-the-uniform-reads-zero.md`](171-a-params-list-shorter-than-the-uniform-reads-zero.md) |
