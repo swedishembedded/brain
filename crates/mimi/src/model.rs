@@ -628,7 +628,7 @@ impl Codec {
             let p = |leaf: &str| format!("pre_transformer.layers.{layer}.{leaf}");
             // --- attention ---
             let xn = self.st((t * d) as usize);
-            self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w(&p("input_layernorm.weight")), &xn, d, t, 1e-6));
+            self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w(&p("input_layernorm.weight")), &xn, d, t, c.rms_norm_eps));
             let q = self.matmul(&xn, &p("self_attn.q_proj.weight"), t, d, hq);
             let k = self.matmul(&xn, &p("self_attn.k_proj.weight"), t, d, hkv);
             let v = self.matmul(&xn, &p("self_attn.v_proj.weight"), t, d, hkv);
@@ -676,7 +676,7 @@ impl Codec {
             x = self.add2(&x, &attn, t * d);
             // --- MLP ---
             let xn = self.st((t * d) as usize);
-            self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w(&p("post_attention_layernorm.weight")), &xn, d, t, 1e-6));
+            self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w(&p("post_attention_layernorm.weight")), &xn, d, t, c.rms_norm_eps));
             let gate = self.matmul(&xn, &p("mlp.gate_proj.weight"), t, d, ff);
             let up = self.matmul(&xn, &p("mlp.up_proj.weight"), t, d, ff);
             let hmid = self.st((t * ff) as usize);
@@ -686,7 +686,7 @@ impl Codec {
             x = self.add2(&x, &mlp, t * d);
         }
         let out = self.st((t * d) as usize);
-        self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w("pre_transformer.norm.weight"), &out, d, t, 1e-6));
+        self.run(block::rmsnorm_fwd(&self.gpu, &ids, &x, self.w("pre_transformer.norm.weight"), &out, d, t, c.rms_norm_eps));
         out
     }
 }
