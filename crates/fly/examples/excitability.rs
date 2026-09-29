@@ -32,7 +32,6 @@
 //!                     inhibition and is therefore a property a correct model
 //!                     reproduces rather than one it can be tuned to.
 
-use connectome::Connectome;
 use fly::{Cns, Wiring};
 use neuro::{DynamicalSystem, Port, SpikingNet};
 
@@ -52,8 +51,6 @@ fn num<T: std::str::FromStr>(name: &str, default: T) -> T {
 const RATE_BAND: (f64, f64) = (2.0, 60.0);
 /// Fraction of Kenyon cells an odour should recruit.
 const KC_SPARSENESS: (f64, f64) = (0.01, 0.15);
-/// Neurons the stimulus is bisected to recruit.
-const TARGET_RECRUITED: usize = 500;
 
 struct Measured {
     scale: f32,
@@ -243,8 +240,8 @@ fn main() {
     };
 
     println!(
-        "\n{:>8}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {}",
-        "scale", "idle Hz", "mean Hz", "recruited", "% pinned", "KC active", "verdict"
+        "\n{:>8}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {}",
+        "scale", "idle Hz", "mean Hz", "recruited", "current", "% pinned", "KC active", "verdict"
     );
     let mut ok: Vec<Measured> = Vec::new();
     for s in scales {
@@ -280,11 +277,12 @@ fn main() {
             }
         }
         println!(
-            "{:>8.3}  {:>9.2}  {:>9.2}  {:>9}  {:>8.2}%  {:>9}  {}",
+            "{:>8.3}  {:>9.2}  {:>9.2}  {:>9}  {:>9.3}  {:>8.2}%  {:>9}  {}",
             m.scale,
             m.idle,
             m.rate,
             m.recruited,
+            m.current,
             100.0 * m.saturated,
             m.kc.map(|k| format!("{:.1}%", 100.0 * k)).unwrap_or_else(|| "-".into()),
             if why.is_empty() { "OK".to_string() } else { why.join(", ") }

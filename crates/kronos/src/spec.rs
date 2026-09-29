@@ -108,7 +108,6 @@ impl ArchSpec for KronosSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_modelstore::inventory::Completeness;
     use brain_modelstore::resolve::{resolve, Resolution};
     use std::path::PathBuf;
 
@@ -116,10 +115,6 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("brain-kronos-spec-test-{tag}-{}-{n}", std::process::id()))
-    }
-
-    fn complete(path: PathBuf, kind: ArtifactKind) -> ArtifactRecord {
-        ArtifactRecord { path, size: 1, mtime_ns: 0, kind, completeness: Completeness::Complete }
     }
 
     fn write_hfdir(dir: &Path, config: &serde_json::Value) {
