@@ -100,6 +100,7 @@ fn storage_dtype(module: &str, name: &str) -> Result<DType, String> {
 // ---------------------------------------------------------------------------
 
 /// A storage reference resolved from a persistent id: dtype + archive key.
+#[derive(Clone)]
 struct StorageRef {
     dtype: DType,
     key: String,
@@ -720,9 +721,9 @@ fn contains_tensor(v: &Val) -> bool {
 struct Archive<'a> {
     bytes: &'a [u8],
     /// entry name -> (offset, len)
-    entries: HashMap<String, (usize, usize)>,
+    entries: &'a HashMap<String, (usize, usize)>,
     /// the single top-level directory ("archive", file stem, ...; may be "")
-    root: String,
+    root: &'a str,
     /// decoded storages by key (shared storages are decoded once)
     cache: HashMap<String, Rc<Vec<f32>>>,
 }
@@ -790,40 +791,42 @@ impl<'a> Archive<'a> {
     /// Materialize a (possibly non-contiguous) tensor node as contiguous f32.
     fn materialize(&mut self, name: &str, t: &TensorNode) -> Result<NamedTensor, String> {
         let storage = self.storage_f32(&t.storage)?;
-        let numel: usize = t.size.iter().product();
-        let mut data = Vec::with_capacity(numel);
-        if numel > 0 {
-            // Row-major walk over the index space, gathering via strides.
-            let mut idx = vec![0usize; t.size.len()];
-            'gather: loop {
-                let off =
-                    t.offset + idx.iter().zip(&t.stride).map(|(i, s)| i * s).sum::<usize>();
-                let v = *storage.get(off).ok_or_else(|| {
-                    format!(
-                        "torchpt: tensor '{name}' indexes element {off} past end of storage \
-                         '{}' ({} elements)",
-                        t.storage.key,
-                        storage.len()
-                    )
-                })?;
-                data.push(v);
-                // odometer increment (last dim fastest); empty idx = 0-dim scalar
-                let mut d = t.size.len();
-                loop {
-                    if d == 0 {
-                        break 'gather;
-                    }
-                    d -= 1;
-                    idx[d] += 1;
-                    if idx[d] < t.size[d] {
-                        break;
-                    }
-                    idx[d] = 0;
-                }
-            }
-        }
+        let data = gather(name, t, &storage)?;
         Ok(NamedTensor { name: name.to_string(), shape: t.size.clone(), data })
     }
+}
+
+/// `t`'s elements, contiguous, gathered from its decoded `storage` through its
+/// offset and strides.
+fn gather(name: &str, t: &TensorNode, storage: &[f32]) -> Result<Vec<f32>, String> {
+    let numel: usize = t.size.iter().product();
+    let mut data = Vec::with_capacity(numel);
+    if numel == 0 {
+        return Ok(data);
+    }
+    // Row-major walk over the index space, gathering via strides.
+    let mut idx = vec![0usize; t.size.len()];
+    'gather: loop {
+        let off = t.offset + idx.iter().zip(&t.stride).map(|(i, s)| i * s).sum::<usize>();
+        let v = *storage.get(off).ok_or_else(|| {
+            format!("torchpt: tensor '{name}' indexes element {off} past end of storage '{}' ({} elements)", t.storage.key, storage.len())
+        })?;
+        data.push(v);
+        // odometer increment (last dim fastest); empty idx = 0-dim scalar
+        let mut d = t.size.len();
+        loop {
+            if d == 0 {
+                break 'gather;
+            }
+            d -= 1;
+            idx[d] += 1;
+            if idx[d] < t.size[d] {
+                break;
+            }
+            idx[d] = 0;
+        }
+    }
+    Ok(data)
 }
 
 /// Render a dict key as a name component. State_dict keys are strings; int
@@ -844,37 +847,31 @@ fn join(prefix: &str, key: &str) -> String {
     }
 }
 
-/// Walk the unpickled tree, flattening dict keys with '.' joins. Tensors are
-/// materialized; every other leaf increments `skipped`.
-fn flatten(
-    v: &Val,
-    prefix: &str,
-    arch: &mut Archive,
-    out: &mut Vec<NamedTensor>,
-    skipped: &mut usize,
-) -> Result<(), String> {
+/// Walk the unpickled tree, flattening dict keys with '.' joins and list or
+/// tuple elements by index, collecting every tensor node under its name.
+/// Every other leaf increments `skipped`. Reads no storage bytes.
+fn collect(v: &Val, prefix: &str, out: &mut Vec<(String, TensorNode)>, skipped: &mut usize) -> Result<(), String> {
     match v {
         Val::Dict(d) => {
             let pairs: Vec<(Val, Val)> = d.borrow().clone();
             for (k, val) in &pairs {
-                let name = join(prefix, &key_string(k)?);
-                flatten(val, &name, arch, out, skipped)?;
+                collect(val, &join(prefix, &key_string(k)?), out, skipped)?;
             }
         }
         Val::List(l) => {
             let items: Vec<Val> = l.borrow().clone();
             for (i, e) in items.iter().enumerate() {
-                flatten(e, &join(prefix, &i.to_string()), arch, out, skipped)?;
+                collect(e, &join(prefix, &i.to_string()), out, skipped)?;
             }
         }
         Val::Tuple(t) => {
             for (i, e) in t.iter().enumerate() {
-                flatten(e, &join(prefix, &i.to_string()), arch, out, skipped)?;
+                collect(e, &join(prefix, &i.to_string()), out, skipped)?;
             }
         }
         Val::Tensor(t) => {
-            let name = if prefix.is_empty() { "tensor" } else { prefix };
-            out.push(arch.materialize(name, t)?);
+            let name = if prefix.is_empty() { "tensor".to_string() } else { prefix.to_string() };
+            out.push((name, TensorNode { storage: t.storage.clone(), offset: t.offset, size: t.size.clone(), stride: t.stride.clone() }));
         }
         Val::Mark => return Err("torchpt: internal error: MARK escaped the pickle stack".into()),
         // Non-tensor leaves (None, bool, int, float, str, stray globals or
@@ -884,21 +881,23 @@ fn flatten(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// public API
-// ---------------------------------------------------------------------------
+/// A checkpoint's archive layout and its tensor nodes: the zip entry table,
+/// the root directory the storages live under, every tensor in pickle order,
+/// and the count of non-tensor leaves. Everything but the storage bytes.
+struct Index {
+    entries: HashMap<String, (usize, usize)>,
+    root: String,
+    tensors: Vec<(String, TensorNode)>,
+    skipped: usize,
+}
 
-/// Parse a `torch.save` zip container from an in-memory byte buffer.
-pub fn parse(bytes: &[u8]) -> Result<ReadReport, String> {
+/// Locate and unpickle `<root>/data.pkl` in the zip `bytes`.
+fn index(bytes: &[u8]) -> Result<Index, String> {
     let entries = zipread::parse(bytes)?;
     // Locate <root>/data.pkl; the root is the archive's single top-level dir.
     let mut pkl: Option<(String, usize, usize)> = None;
     for e in &entries {
-        let root = if e.name == "data.pkl" {
-            Some(String::new())
-        } else {
-            e.name.strip_suffix("/data.pkl").map(|r| r.to_string())
-        };
+        let root = if e.name == "data.pkl" { Some(String::new()) } else { e.name.strip_suffix("/data.pkl").map(|r| r.to_string()) };
         if let Some(root) = root {
             if pkl.is_some() {
                 return Err("torchpt: multiple data.pkl entries in archive".into());
@@ -906,22 +905,25 @@ pub fn parse(bytes: &[u8]) -> Result<ReadReport, String> {
             pkl = Some((root, e.offset, e.len));
         }
     }
-    let (root, off, len) =
-        pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
-
+    let (root, off, len) = pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
     let mut u = Unpickler { b: &bytes[off..off + len], pos: 0, stack: Vec::new(), memo: HashMap::new() };
     let tree = u.run()?;
-
-    let mut arch = Archive {
-        bytes,
-        entries: entries.into_iter().map(|e| (e.name, (e.offset, e.len))).collect(),
-        root,
-        cache: HashMap::new(),
-    };
     let mut tensors = Vec::new();
     let mut skipped = 0usize;
-    flatten(&tree, "", &mut arch, &mut tensors, &mut skipped)?;
-    Ok(ReadReport { tensors, skipped_non_tensor: skipped })
+    collect(&tree, "", &mut tensors, &mut skipped)?;
+    Ok(Index { entries: entries.into_iter().map(|e| (e.name, (e.offset, e.len))).collect(), root, tensors, skipped })
+}
+
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+
+/// Parse a `torch.save` zip container from an in-memory byte buffer.
+pub fn parse(bytes: &[u8]) -> Result<ReadReport, String> {
+    let ix = index(bytes)?;
+    let mut arch = Archive { bytes, entries: &ix.entries, root: &ix.root, cache: HashMap::new() };
+    let tensors = ix.tensors.iter().map(|(name, t)| arch.materialize(name, t)).collect::<Result<_, _>>()?;
+    Ok(ReadReport { tensors, skipped_non_tensor: ix.skipped })
 }
 
 /// Read a `.pt` checkpoint from disk, returning every tensor plus the count
@@ -938,92 +940,102 @@ pub fn read(path: &str) -> Result<Vec<NamedTensor>, String> {
     read_report(path).map(|r| r.tensors)
 }
 
-// ---------------------------------------------------------------------------
-// shapes-only reading - no tensor DATA ever touched
-// ---------------------------------------------------------------------------
-//
-// A `_rebuild_tensor_v2` node's `size` is a plain literal already sitting in
-// the pickle stream (see `TensorNode`/the `torch._utils` arm of `Unpickler::
-// call` above) - nothing about it depends on the storage blob a persistent id
-// merely NAMES. So a caller that only wants "what tensors are in here, and
-// what shape are they" (a classifier deciding what ROLE a checkpoint plays,
-// say) never needs `Archive::materialize`'s dequantize-and-copy at all.
-
-/// Walk the unpickled tree collecting `(name, shape)` for every tensor leaf,
-/// exactly the flattening [`flatten`] does - but without an [`Archive`] and
-/// without reading any storage bytes.
-fn flatten_shapes(v: &Val, prefix: &str, out: &mut Vec<(String, Vec<usize>)>, skipped: &mut usize) -> Result<(), String> {
-    match v {
-        Val::Dict(d) => {
-            let pairs: Vec<(Val, Val)> = d.borrow().clone();
-            for (k, val) in &pairs {
-                let name = join(prefix, &key_string(k)?);
-                flatten_shapes(val, &name, out, skipped)?;
-            }
-        }
-        Val::List(l) => {
-            let items: Vec<Val> = l.borrow().clone();
-            for (i, e) in items.iter().enumerate() {
-                flatten_shapes(e, &join(prefix, &i.to_string()), out, skipped)?;
-            }
-        }
-        Val::Tuple(t) => {
-            for (i, e) in t.iter().enumerate() {
-                flatten_shapes(e, &join(prefix, &i.to_string()), out, skipped)?;
-            }
-        }
-        Val::Tensor(t) => {
-            let name = if prefix.is_empty() { "tensor".to_string() } else { prefix.to_string() };
-            out.push((name, t.size.clone()));
-        }
-        Val::Mark => return Err("torchpt: internal error: MARK escaped the pickle stack".into()),
-        _ => *skipped += 1,
-    }
-    Ok(())
-}
-
-/// [`read_shapes`] over an in-memory (or mmap'd) byte buffer - the shapes-only
-/// sibling of [`parse`]. Locates and unpickles `<root>/data.pkl` exactly as
-/// `parse` does; the only difference is that a tensor leaf contributes its
-/// `(name, shape)` and nothing else, so the `<root>/data/<key>` storage
-/// entries are never read even though [`zipread::parse`] still has to walk
-/// past them to build the entry list.
+/// Every tensor's `(name, shape)` in a `torch.save` zip held in `bytes`,
+/// without reading a single storage: a tensor node's size is a literal in
+/// the pickle stream, independent of the blob its persistent id names.
 pub fn parse_shapes(bytes: &[u8]) -> Result<Vec<(String, Vec<usize>)>, String> {
-    let entries = zipread::parse(bytes)?;
-    let mut pkl: Option<(usize, usize)> = None;
-    for e in &entries {
-        let is_pkl = e.name == "data.pkl" || e.name.ends_with("/data.pkl");
-        if is_pkl {
-            if pkl.is_some() {
-                return Err("torchpt: multiple data.pkl entries in archive".into());
-            }
-            pkl = Some((e.offset, e.len));
-        }
-    }
-    let (off, len) = pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
-
-    let mut u = Unpickler { b: &bytes[off..off + len], pos: 0, stack: Vec::new(), memo: HashMap::new() };
-    let tree = u.run()?;
-
-    let mut out = Vec::new();
-    let mut skipped = 0usize;
-    flatten_shapes(&tree, "", &mut out, &mut skipped)?;
-    Ok(out)
+    Ok(index(bytes)?.tensors.into_iter().map(|(name, t)| (name, t.size)).collect())
 }
 
 /// Every tensor's name + shape in a `torch.save` checkpoint, read from `path`
-/// without materializing a single value.
-///
-/// Mmap'd rather than `std::fs::read`'d, for the same reason
-/// [`crate::mmap::MmapSafetensors`]/`checkpoint::gguf::MmapGguf` are: the
-/// storage bytes a multi-gigabyte checkpoint is mostly made of are never
-/// touched by [`parse_shapes`], so classifying (or shape-checking) one costs
-/// a handful of small reads near the zip's central directory and each
-/// entry's local header, never a read of the weights themselves.
+/// without materializing a single value. Mmap'd, so classifying (or
+/// shape-checking) a multi-gigabyte checkpoint costs a handful of small reads
+/// near the zip's central directory, never a read of the weights themselves.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_shapes(path: &str) -> Result<Vec<(String, Vec<usize>)>, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("torchpt: open {path}: {e}"))?;
-    // SAFETY: weight files are treated as immutable for the mapping's lifetime.
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("torchpt: mmap {path}: {e}"))?;
-    parse_shapes(&mmap)
+    Ok(MmapTorch::open(path)?.tensors.into_iter().map(|(name, t)| (name, t.size)).collect())
+}
+
+/// One tensor of a [`MmapTorch`]: where its storage lives and how the tensor
+/// views it. Owned plain data, so the reader is `Send + Sync`.
+struct TorchTensor {
+    key: String,
+    dtype: DType,
+    offset: usize,
+    size: Vec<usize>,
+    stride: Vec<usize>,
+}
+
+/// A `torch.save` checkpoint (`pytorch_model*.bin`) mapped once and read one
+/// tensor at a time.
+///
+/// The pickle index is parsed once at [`MmapTorch::open`]; [`Self::tensor_f32`]
+/// then decodes exactly the storage the named tensor views, so streaming a
+/// multi-gigabyte shard holds one tensor's fp32 expansion at a time, never the
+/// whole file. [`read`] is the eager reader for small checkpoints.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct MmapTorch {
+    mmap: memmap2::Mmap,
+    entries: HashMap<String, (usize, usize)>,
+    root: String,
+    tensors: Vec<(String, TorchTensor)>,
+    by_name: HashMap<String, usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MmapTorch {
+    /// Map `path` and parse its pickle index. No storage is read.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<MmapTorch, String> {
+        let path = path.as_ref();
+        let file = std::fs::File::open(path).map_err(|e| format!("torchpt: open {}: {e}", path.display()))?;
+        // SAFETY: weight files are treated as immutable for the mapping's lifetime.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("torchpt: mmap {}: {e}", path.display()))?;
+        let ix = index(&mmap)?;
+        let tensors: Vec<(String, TorchTensor)> = ix
+            .tensors
+            .into_iter()
+            .map(|(name, t)| (name, TorchTensor { key: t.storage.key.clone(), dtype: t.storage.dtype, offset: t.offset, size: t.size, stride: t.stride }))
+            .collect();
+        let by_name = tensors.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
+        Ok(MmapTorch { mmap, entries: ix.entries, root: ix.root, tensors, by_name })
+    }
+
+    /// Tensor names, in pickle order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.tensors.iter().map(|(n, _)| n.as_str())
+    }
+
+    fn get(&self, name: &str) -> Option<&TorchTensor> {
+        self.by_name.get(name).map(|&i| &self.tensors[i].1)
+    }
+
+    /// `name`'s shape.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.get(name).map(|t| t.size.as_slice())
+    }
+
+    /// `name`'s storage dtype, spelled as safetensors spells it.
+    pub fn dtype(&self, name: &str) -> Option<&'static str> {
+        self.get(name).map(|t| match t.dtype {
+            DType::F32 => "F32",
+            DType::F64 => "F64",
+            DType::F16 => "F16",
+            DType::BF16 => "BF16",
+            DType::I64 => "I64",
+        })
+    }
+
+    /// `name`'s element count times its storage element size.
+    pub fn nbytes(&self, name: &str) -> Option<u64> {
+        self.get(name).map(|t| (t.size.iter().product::<usize>() * t.dtype.elem_size()) as u64)
+    }
+
+    /// Decode exactly `name` to contiguous f32. `None` if unknown.
+    pub fn tensor_f32(&self, name: &str) -> Option<Result<Vec<f32>, String>> {
+        let t = self.get(name)?;
+        let storage = StorageRef { dtype: t.dtype, key: t.key.clone() };
+        let node = TensorNode { storage: Rc::new(storage.clone()), offset: t.offset, size: t.size.clone(), stride: t.stride.clone() };
+        let mut arch = Archive { bytes: &self.mmap, entries: &self.entries, root: &self.root, cache: HashMap::new() };
+        Some(arch.storage_f32(&storage).and_then(|s| gather(name, &node, &s)))
+    }
 }

@@ -41,6 +41,10 @@ enum Inner {
     /// `model-K-of-N.safetensors`): one mmap per shard file + which shard owns
     /// each tensor name. See [`WeightReader::open_hf_dir`].
     StSharded(Vec<MmapSafetensors>, HashMap<String, usize>),
+    /// A `torch.save` HF checkpoint (`pytorch_model.bin`, or the shards
+    /// `pytorch_model.bin.index.json` names): one mapping per file + which
+    /// file owns each tensor name. See [`WeightReader::open_hf_dir`].
+    Torch(Vec<crate::torchpt::MmapTorch>, HashMap<String, usize>),
 }
 
 /// A lazy, mmap-backed reader over a safetensors or GGUF weight file. Decodes
@@ -66,7 +70,7 @@ impl WeightReader {
         let (order, shapes) = match &inner {
             Inner::St(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
             Inner::Gguf(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
-            Inner::StSharded(..) => unreachable!("open() constructs only St/Gguf; see open_hf_dir"),
+            Inner::StSharded(..) | Inner::Torch(..) => unreachable!("open() constructs only St/Gguf; see open_hf_dir"),
         };
         Ok(WeightReader { inner, order, shapes })
     }
@@ -102,58 +106,41 @@ impl WeightReader {
             .into_iter()
             .map(|n| dir.join(n))
             .find(|p| p.exists());
-        let Some(index_path) = index_path else {
-            // No index: exactly one *.safetensors file (mirrors
-            // crate::safetensors::read_model_dir's single-file fallback).
-            let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
-                .collect();
-            candidates.sort();
-            let path = candidates
-                .into_iter()
-                .next()
-                .ok_or_else(|| inval(format!("no .safetensors file in {}", dir.display())))?;
+        if let Some(index_path) = index_path {
+            let (shard_files, weight_map) = read_weight_map(&index_path)?;
+            let readers = shard_files.iter().map(|f| MmapSafetensors::open(dir.join(f)).map_err(inval)).collect::<io::Result<Vec<_>>>()?;
+            let (owner, order, shapes) = own_names(&shard_files, &weight_map, |si, name| readers[si].shape(name).map(usize_to_u64))?;
+            return Ok(WeightReader { inner: Inner::StSharded(readers, owner), order, shapes });
+        }
+        // No index: exactly one *.safetensors file (mirrors
+        // crate::safetensors::read_model_dir's single-file fallback).
+        let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
+            .collect();
+        candidates.sort();
+        if let Some(path) = candidates.into_iter().next() {
             let path = path.to_str().ok_or_else(|| inval("non-utf8 shard path".to_string()))?;
             return Self::open(path);
+        }
+        // No safetensors at all: a `torch.save` checkpoint, sharded or single.
+        let torch_index = dir.join("pytorch_model.bin.index.json");
+        let (files, weight_map) = if torch_index.exists() {
+            let (files, map) = read_weight_map(&torch_index)?;
+            (files, Some(map))
+        } else if dir.join("pytorch_model.bin").exists() {
+            (vec!["pytorch_model.bin".to_string()], None)
+        } else {
+            return Err(inval(format!("no .safetensors or pytorch_model.bin checkpoint in {}", dir.display())));
         };
-
-        let idx_bytes = std::fs::read(&index_path)?;
-        let idx: Value = serde_json::from_slice(&idx_bytes).map_err(|e| inval(format!("bad index.json: {e}")))?;
-        let weight_map = idx["weight_map"]
-            .as_object()
-            .ok_or_else(|| inval("index.json: missing weight_map object".to_string()))?;
-
-        // Unique shard filenames, sorted for a deterministic shard index
-        // (matches read_model_dir's determinism).
-        let shard_files: std::collections::BTreeSet<String> = weight_map
-            .values()
-            .map(|v| v.as_str().map(str::to_string).ok_or_else(|| inval("index.json: weight_map value is not a string".to_string())))
-            .collect::<io::Result<_>>()?;
-        let shard_files: Vec<String> = shard_files.into_iter().collect();
-        let shard_of: HashMap<&str, usize> = shard_files.iter().enumerate().map(|(i, f)| (f.as_str(), i)).collect();
-
-        let mut readers = Vec::with_capacity(shard_files.len());
-        for f in &shard_files {
-            readers.push(MmapSafetensors::open(dir.join(f)).map_err(inval)?);
-        }
-
-        let mut owner: HashMap<String, usize> = HashMap::with_capacity(weight_map.len());
-        let mut shapes = HashMap::with_capacity(weight_map.len());
-        let mut order = Vec::with_capacity(weight_map.len());
-        for (name, file_val) in weight_map {
-            let file = file_val.as_str().unwrap(); // validated above
-            let si = shard_of[file];
-            owner.insert(name.clone(), si);
-            if let Some(s) = readers[si].shape(name) {
-                shapes.insert(name.clone(), usize_to_u64(s));
-            }
-            order.push(name.clone());
-        }
-        order.sort(); // deterministic regardless of the index JSON's own key order
-
-        Ok(WeightReader { inner: Inner::StSharded(readers, owner), order, shapes })
+        let readers = files.iter().map(|f| crate::torchpt::MmapTorch::open(dir.join(f)).map_err(inval)).collect::<io::Result<Vec<_>>>()?;
+        let weight_map = match weight_map {
+            Some(m) => m,
+            None => readers[0].names().map(|n| (n.to_string(), Value::String(files[0].clone()))).collect(),
+        };
+        let (owner, order, shapes) = own_names(&files, &weight_map, |si, name| readers[si].shape(name).map(usize_to_u64))?;
+        Ok(WeightReader { inner: Inner::Torch(readers, owner), order, shapes })
     }
 
     /// Tensor names, in the underlying file's order.
@@ -184,6 +171,7 @@ impl WeightReader {
             Inner::St(m) => m.dtype(name),
             Inner::Gguf(m) => m.dtype(name),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].dtype(name),
+            Inner::Torch(readers, owner) => readers[*owner.get(name)?].dtype(name),
         }
     }
 
@@ -196,6 +184,7 @@ impl WeightReader {
             Inner::St(m) => m.nbytes(name),
             Inner::Gguf(m) => m.raw_tensor_bytes(name).map(|(raw, _ty)| raw.len() as u64),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].nbytes(name),
+            Inner::Torch(readers, owner) => readers[*owner.get(name)?].nbytes(name),
         }
     }
 
@@ -206,7 +195,7 @@ impl WeightReader {
             Inner::Gguf(m) => m.config(),
             // A foreign checkpoint's config is its own config.json, read
             // separately by the caller -- see open_hf_dir's doc.
-            Inner::StSharded(..) => Value::Null,
+            Inner::StSharded(..) | Inner::Torch(..) => Value::Null,
         }
     }
 
@@ -215,7 +204,7 @@ impl WeightReader {
     pub fn gguf(&self) -> Option<&MmapGguf> {
         match &self.inner {
             Inner::Gguf(m) => Some(m),
-            Inner::St(_) | Inner::StSharded(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
         }
     }
 
@@ -224,7 +213,7 @@ impl WeightReader {
         match &self.inner {
             Inner::St(m) => m.card(),
             Inner::Gguf(m) => Some(m.model_card()),
-            Inner::StSharded(..) => None,
+            Inner::StSharded(..) | Inner::Torch(..) => None,
         }
     }
 
@@ -232,7 +221,7 @@ impl WeightReader {
     /// Always `None` for safetensors (whose tokenizer is a sibling file).
     pub fn tokenizer(&self) -> Option<crate::gguf::GgufTokenizer> {
         match &self.inner {
-            Inner::St(_) | Inner::StSharded(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
             Inner::Gguf(m) => m.tokenizer(),
         }
     }
@@ -245,6 +234,7 @@ impl WeightReader {
             Inner::St(m) => m.tensor_f32(name),
             Inner::Gguf(m) => m.tensor(name).map(|r| r.unwrap_or_else(|e| panic!("gguf dequant '{name}': {e}"))),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_f32(name),
+            Inner::Torch(readers, owner) => readers[*owner.get(name)?].tensor_f32(name).map(|r| r.unwrap_or_else(|e| panic!("torch decode '{name}': {e}"))),
         }
     }
 
@@ -261,6 +251,7 @@ impl WeightReader {
             Inner::St(m) => m.tensor_u32(name),
             Inner::Gguf(_) => panic!("tensor_u32: '{name}': GGUF has no U32 packed-weight convention -- this is a safetensors-only accessor"),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_u32(name),
+            Inner::Torch(..) => panic!("tensor_u32: '{name}': a torch checkpoint has no U32 packed-weight convention -- this is a safetensors-only accessor"),
         }
     }
 
@@ -296,6 +287,7 @@ impl crate::TensorSource for WeightReader {
             Inner::St(m) => m.raw_words(name),
             Inner::Gguf(_) => None,
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].raw_words(name),
+            Inner::Torch(..) => None,
         }
     }
 
@@ -313,6 +305,17 @@ impl crate::TensorSource for WeightReader {
                 Some(&si) => readers[si].with_tensor_chunks(name, max_elems, f),
                 None => false,
             },
+            // A torch storage is decoded whole (it may back several views),
+            // then lent out chunk by chunk.
+            Inner::Torch(..) => match self.tensor(name) {
+                Some(v) => {
+                    for (i, c) in v.chunks(max_elems.max(1)).enumerate() {
+                        f((i * max_elems.max(1)) as u64, c);
+                    }
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -328,6 +331,7 @@ impl crate::TensorSource for WeightReader {
                 Some(&si) => readers[si].with_tensor_u32_chunks(name, max_elems, f),
                 None => false,
             },
+            Inner::Torch(..) => false,
         }
     }
 
@@ -346,6 +350,7 @@ impl crate::TensorSource for WeightReader {
                     readers[si].advise_dontneed_tensor(name);
                 }
             }
+            Inner::Torch(..) => {}
         }
     }
 
@@ -354,6 +359,7 @@ impl crate::TensorSource for WeightReader {
             Inner::St(m) => m.numel(name),
             Inner::Gguf(_) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].numel(name),
+            Inner::Torch(..) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
         }
     }
 
@@ -362,10 +368,43 @@ impl crate::TensorSource for WeightReader {
     /// already covers the case where safetensors bytes bind as-is).
     fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
         match &self.inner {
-            Inner::St(_) | Inner::StSharded(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
             Inner::Gguf(m) => m.raw_blocks(name),
         }
     }
+}
+
+/// A shard index's `weight_map` (tensor name → shard file) and its unique
+/// shard files, sorted for a deterministic shard numbering.
+fn read_weight_map(index_path: &Path) -> io::Result<(Vec<String>, serde_json::Map<String, Value>)> {
+    let idx: Value = serde_json::from_slice(&std::fs::read(index_path)?).map_err(|e| inval(format!("bad index.json: {e}")))?;
+    let weight_map = idx["weight_map"].as_object().cloned().ok_or_else(|| inval("index.json: missing weight_map object".to_string()))?;
+    let files: std::collections::BTreeSet<String> = weight_map
+        .values()
+        .map(|v| v.as_str().map(str::to_string).ok_or_else(|| inval("index.json: weight_map value is not a string".to_string())))
+        .collect::<io::Result<_>>()?;
+    Ok((files.into_iter().collect(), weight_map))
+}
+
+type NameIndex = (HashMap<String, usize>, Vec<String>, HashMap<String, Vec<u64>>);
+
+/// Which shard owns each name, the names sorted, and each name's shape as
+/// its owning shard reports it.
+fn own_names(files: &[String], weight_map: &serde_json::Map<String, Value>, shape: impl Fn(usize, &str) -> Option<Vec<u64>>) -> io::Result<NameIndex> {
+    let shard_of: HashMap<&str, usize> = files.iter().enumerate().map(|(i, f)| (f.as_str(), i)).collect();
+    let mut owner = HashMap::with_capacity(weight_map.len());
+    let mut shapes = HashMap::with_capacity(weight_map.len());
+    let mut order = Vec::with_capacity(weight_map.len());
+    for (name, file) in weight_map {
+        let si = *file.as_str().and_then(|f| shard_of.get(f)).ok_or_else(|| inval(format!("index.json: {name} names no known shard")))?;
+        owner.insert(name.clone(), si);
+        if let Some(s) = shape(si, name) {
+            shapes.insert(name.clone(), s);
+        }
+        order.push(name.clone());
+    }
+    order.sort(); // deterministic regardless of the index JSON's own key order
+    Ok((owner, order, shapes))
 }
 
 fn usize_to_u64(s: &[usize]) -> Vec<u64> {
