@@ -62,30 +62,7 @@ pub struct LmWeights {
 /// bolted-on table or the tied `lm_head.weight` duplicate, both handled by
 /// [`import_llm_pt`] directly).
 fn backbone_name(name: &str) -> Option<String> {
-    if name == "llm.model.model.embed_tokens.weight" {
-        return Some("tok.weight".to_string());
-    }
-    if name == "llm.model.model.norm.weight" {
-        return Some("norm.weight".to_string());
-    }
-    let rest = name.strip_prefix("llm.model.model.layers.")?;
-    let (n, rest) = rest.split_once('.')?;
-    let leaf = match rest {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.q_proj.bias" => "attn.wq.bias",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.k_proj.bias" => "attn.wk.bias",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.v_proj.bias" => "attn.wv.bias",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    };
-    Some(format!("blocks.{n}.{leaf}"))
+    qwen3::hf::HfNames { prefix: "llm.model.model.", head: "llm.model.lm_head.weight" }.body_param(name)
 }
 
 /// Import `llm.pt` into [`LmWeights`], validated with the same two-way

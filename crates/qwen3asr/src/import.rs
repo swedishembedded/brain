@@ -102,28 +102,7 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
 /// serves as the head; the checkpoint's separate `thinker.lm_head.weight`
 /// (present but redundant under tying) is simply never looked up.
 pub fn map_decoder(hf: &str) -> Option<String> {
-    let s = hf.strip_prefix("thinker.model.")?;
-    match s {
-        "embed_tokens.weight" => return Some("tok.weight".into()),
-        "norm.weight" => return Some("norm.weight".into()),
-        _ => {}
-    }
-    let (n, leaf) = s.strip_prefix("layers.")?.split_once('.')?;
-    let mapped = match leaf {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "self_attn.q_norm.weight" => "attn.q_norm.weight",
-        "self_attn.k_norm.weight" => "attn.k_norm.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    };
-    Some(format!("blocks.{n}.{mapped}"))
+    qwen3::hf::HfNames { prefix: "thinker.model.", head: "thinker.lm_head.weight" }.body_param(hf)
 }
 
 /// Build the brain Qwen decoder weight map from a name→f32 tensor map.

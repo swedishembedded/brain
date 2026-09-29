@@ -23,25 +23,6 @@ use serde_json::Value;
 
 use crate::config::{MtpConfig, TalkerConfig};
 
-/// Map a per-layer Qwen3 decoder leaf (`self_attn.q_proj.weight`, …) to its brain
-/// name (`attn.wq.weight`, …). Returns `None` for an unknown leaf.
-fn layer_leaf(rest: &str) -> Option<&'static str> {
-    Some(match rest {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "self_attn.q_norm.weight" => "attn.q_norm.weight",
-        "self_attn.k_norm.weight" => "attn.k_norm.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    })
-}
-
 /// Map an HF `talker.*` tensor name to its brain Talker-container name, or `None`
 /// to drop it (a non-Talker tensor: `code_predictor.*`, `speaker_encoder.*`).
 pub fn talker_hf_to_brain(name: &str) -> Option<String> {
@@ -69,7 +50,7 @@ pub fn talker_hf_to_brain(name: &str) -> Option<String> {
     }
     let rest = name.strip_prefix("talker.model.layers.")?;
     let (n, rest) = rest.split_once('.')?;
-    Some(format!("blocks.{n}.{}", layer_leaf(rest)?))
+    Some(format!("blocks.{n}.{}", qwen3::hf::layer_leaf(rest)?))
 }
 
 /// Map an HF `talker.code_predictor.*` tensor name to its brain MTP-container
@@ -98,7 +79,7 @@ pub fn mtp_hf_to_brain(name: &str) -> Option<String> {
     }
     let rest = name.strip_prefix("talker.code_predictor.model.layers.")?;
     let (n, rest) = rest.split_once('.')?;
-    Some(format!("blocks.{n}.{}", layer_leaf(rest)?))
+    Some(format!("blocks.{n}.{}", qwen3::hf::layer_leaf(rest)?))
 }
 
 fn read_config(dir: &Path) -> Result<Value, String> {
@@ -338,24 +319,6 @@ mod tests {
         assert_eq!(ms.len(), 5 * 11 + 1 + 15 + 15);
     }
 
-    /// Inverse of `layer_leaf`: the HF decoder-layer leaf name for a brain leaf.
-    fn hf_layer_leaf(brain_leaf: &str) -> &'static str {
-        match brain_leaf {
-            "ln1.weight" => "input_layernorm.weight",
-            "ln2.weight" => "post_attention_layernorm.weight",
-            "attn.wq.weight" => "self_attn.q_proj.weight",
-            "attn.wk.weight" => "self_attn.k_proj.weight",
-            "attn.wv.weight" => "self_attn.v_proj.weight",
-            "attn.wo.weight" => "self_attn.o_proj.weight",
-            "attn.q_norm.weight" => "self_attn.q_norm.weight",
-            "attn.k_norm.weight" => "self_attn.k_norm.weight",
-            "mlp.gate.weight" => "mlp.gate_proj.weight",
-            "mlp.up.weight" => "mlp.up_proj.weight",
-            "mlp.down.weight" => "mlp.down_proj.weight",
-            other => panic!("unknown brain leaf {other}"),
-        }
-    }
-
     /// Inverse of `talker_hf_to_brain`: the HF tensor name a given brain Talker
     /// param name came from.
     fn hf_name_for_talker(brain_name: &str) -> String {
@@ -371,7 +334,7 @@ mod tests {
             other => {
                 let rest = other.strip_prefix("blocks.").unwrap();
                 let (n, leaf) = rest.split_once('.').unwrap();
-                format!("talker.model.layers.{n}.{}", hf_layer_leaf(leaf))
+                format!("talker.model.layers.{n}.{}", qwen3::hf::hf_layer_leaf(leaf).unwrap_or_else(|| panic!("unknown brain leaf {leaf}")))
             }
         }
     }
@@ -395,7 +358,7 @@ mod tests {
             other => {
                 let rest = other.strip_prefix("blocks.").unwrap();
                 let (n, leaf) = rest.split_once('.').unwrap();
-                format!("talker.code_predictor.model.layers.{n}.{}", hf_layer_leaf(leaf))
+                format!("talker.code_predictor.model.layers.{n}.{}", qwen3::hf::hf_layer_leaf(leaf).unwrap_or_else(|| panic!("unknown brain leaf {leaf}")))
             }
         }
     }

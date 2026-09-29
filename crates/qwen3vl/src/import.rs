@@ -72,30 +72,10 @@ pub fn map_deepstack(hf: &str) -> Option<(usize, String)> {
     Some((idx, merger_leaf(leaf).map(String::from)?))
 }
 
-/// HF decoder name → `qwen3::Qwen` parameter key.
+/// HF decoder name → `qwen3::Qwen` parameter key (`model.language_model.*`,
+/// through the one `qwen3::hf` leaf table).
 pub fn map_decoder(hf: &str) -> Option<String> {
-    let s = hf.strip_prefix("model.language_model.")?;
-    match s {
-        "embed_tokens.weight" => return Some("tok.weight".into()),
-        "norm.weight" => return Some("norm.weight".into()),
-        _ => {}
-    }
-    let (n, leaf) = s.strip_prefix("layers.")?.split_once('.')?;
-    let mapped = match leaf {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "self_attn.q_norm.weight" => "attn.q_norm.weight",
-        "self_attn.k_norm.weight" => "attn.k_norm.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    };
-    Some(format!("blocks.{n}.{mapped}"))
+    qwen3::hf::HfNames { prefix: "model.language_model.", head: "lm_head.weight" }.body_param(hf)
 }
 
 /// A streaming [`checkpoint::remap::RemapSource`] over `r`'s decoder tensors

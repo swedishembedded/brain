@@ -159,6 +159,38 @@ pub enum HfTensor {
     Unknown,
 }
 
+/// Every per-layer leaf of the decoder: `(HF name under layers.N., brain
+/// name under blocks.N.)`. The one table both directions of the map read.
+const LEAVES: &[(&str, &str)] = &[
+    ("input_layernorm.weight", "ln1.weight"),
+    ("post_attention_layernorm.weight", "ln2.weight"),
+    ("self_attn.q_proj.weight", "attn.wq.weight"),
+    ("self_attn.k_proj.weight", "attn.wk.weight"),
+    ("self_attn.v_proj.weight", "attn.wv.weight"),
+    ("self_attn.o_proj.weight", "attn.wo.weight"),
+    ("self_attn.q_proj.bias", "attn.wq.bias"),
+    ("self_attn.k_proj.bias", "attn.wk.bias"),
+    ("self_attn.v_proj.bias", "attn.wv.bias"),
+    ("self_attn.q_norm.weight", "attn.q_norm.weight"),
+    ("self_attn.k_norm.weight", "attn.k_norm.weight"),
+    ("mlp.gate_proj.weight", "mlp.gate.weight"),
+    ("mlp.up_proj.weight", "mlp.up.weight"),
+    ("mlp.down_proj.weight", "mlp.down.weight"),
+];
+
+/// The brain leaf (under `blocks.N.`) of one HF decoder-layer leaf (under
+/// `layers.N.`), for a composite whose top-level names are its own (a talker
+/// with a codec embedding instead of `embed_tokens`) but whose layers are
+/// this decoder's.
+pub fn layer_leaf(hf_leaf: &str) -> Option<&'static str> {
+    LEAVES.iter().find(|(hf, _)| *hf == hf_leaf).map(|(_, b)| *b)
+}
+
+/// The inverse of [`layer_leaf`].
+pub fn hf_layer_leaf(brain_leaf: &str) -> Option<&'static str> {
+    LEAVES.iter().find(|(_, b)| *b == brain_leaf).map(|(hf, _)| *hf)
+}
+
 /// Where a checkpoint keeps the decoder: the prefix of its body
 /// (`model.` for a plain `*ForCausalLM`; a composite nests it) and the name
 /// of its output head.
@@ -178,34 +210,37 @@ impl HfNames {
             return if cfg.tie_embeddings { HfTensor::Dropped } else { HfTensor::Param("lm_head.weight".into()) };
         }
         let Some(rest) = name.strip_prefix(self.prefix) else { return HfTensor::Foreign };
+        if let Some((n, leaf)) = rest.strip_prefix("layers.").and_then(|r| r.split_once('.')) {
+            if leaf == "self_attn.rotary_emb.inv_freq" {
+                return HfTensor::Dropped;
+            }
+            if n.parse::<u32>().map_or(true, |l| l >= cfg.n_layers) {
+                return HfTensor::Unknown;
+            }
+        }
+        match self.body_param(name) {
+            Some(p) if (p.ends_with("attn.wq.bias") || p.ends_with("attn.wk.bias") || p.ends_with("attn.wv.bias")) && !cfg.attn_bias => HfTensor::Unknown,
+            Some(p) if (p.ends_with("attn.q_norm.weight") || p.ends_with("attn.k_norm.weight")) && !cfg.qk_norm => HfTensor::Unknown,
+            Some(p) => HfTensor::Param(p),
+            None => HfTensor::Unknown,
+        }
+    }
+
+    /// The brain parameter an HF name under this prefix spells, by name alone
+    /// (every leaf any of the three architectures has, bias and QK-norm
+    /// included; no head, no switches). For a composite reader that routes
+    /// its checkpoint by prefix and validates coverage against its own
+    /// `param_list` - [`Self::to_brain`] is the checked form.
+    pub fn body_param(&self, name: &str) -> Option<String> {
+        let rest = name.strip_prefix(self.prefix)?;
         match rest {
-            "embed_tokens.weight" => return HfTensor::Param("tok.weight".into()),
-            "norm.weight" => return HfTensor::Param("norm.weight".into()),
+            "embed_tokens.weight" => return Some("tok.weight".into()),
+            "norm.weight" => return Some("norm.weight".into()),
             _ => {}
         }
-        let Some((n, leaf)) = rest.strip_prefix("layers.").and_then(|r| r.split_once('.')) else { return HfTensor::Unknown };
-        if n.parse::<u32>().map_or(true, |l| l >= cfg.n_layers) {
-            return HfTensor::Unknown;
-        }
-        let mapped = match leaf {
-            "input_layernorm.weight" => "ln1.weight",
-            "post_attention_layernorm.weight" => "ln2.weight",
-            "self_attn.q_proj.weight" => "attn.wq.weight",
-            "self_attn.k_proj.weight" => "attn.wk.weight",
-            "self_attn.v_proj.weight" => "attn.wv.weight",
-            "self_attn.o_proj.weight" => "attn.wo.weight",
-            "self_attn.q_proj.bias" if cfg.attn_bias => "attn.wq.bias",
-            "self_attn.k_proj.bias" if cfg.attn_bias => "attn.wk.bias",
-            "self_attn.v_proj.bias" if cfg.attn_bias => "attn.wv.bias",
-            "self_attn.q_norm.weight" if cfg.qk_norm => "attn.q_norm.weight",
-            "self_attn.k_norm.weight" if cfg.qk_norm => "attn.k_norm.weight",
-            "mlp.gate_proj.weight" => "mlp.gate.weight",
-            "mlp.up_proj.weight" => "mlp.up.weight",
-            "mlp.down_proj.weight" => "mlp.down.weight",
-            "self_attn.rotary_emb.inv_freq" => return HfTensor::Dropped,
-            _ => return HfTensor::Unknown,
-        };
-        HfTensor::Param(format!("blocks.{n}.{mapped}"))
+        let (n, leaf) = rest.strip_prefix("layers.")?.split_once('.')?;
+        let brain = layer_leaf(leaf)?;
+        Some(format!("blocks.{n}.{brain}"))
     }
 
     /// The HF name brain parameter `name` is stored under, or `None` for a
@@ -219,23 +254,7 @@ impl HfNames {
             _ => {}
         }
         let (n, leaf) = name.strip_prefix("blocks.")?.split_once('.')?;
-        let hf = match leaf {
-            "ln1.weight" => "input_layernorm.weight",
-            "ln2.weight" => "post_attention_layernorm.weight",
-            "attn.wq.weight" => "self_attn.q_proj.weight",
-            "attn.wk.weight" => "self_attn.k_proj.weight",
-            "attn.wv.weight" => "self_attn.v_proj.weight",
-            "attn.wo.weight" => "self_attn.o_proj.weight",
-            "attn.wq.bias" => "self_attn.q_proj.bias",
-            "attn.wk.bias" => "self_attn.k_proj.bias",
-            "attn.wv.bias" => "self_attn.v_proj.bias",
-            "attn.q_norm.weight" => "self_attn.q_norm.weight",
-            "attn.k_norm.weight" => "self_attn.k_norm.weight",
-            "mlp.gate.weight" => "mlp.gate_proj.weight",
-            "mlp.up.weight" => "mlp.up_proj.weight",
-            "mlp.down.weight" => "mlp.down_proj.weight",
-            _ => return None,
-        };
+        let hf = hf_layer_leaf(leaf)?;
         Some(format!("{}layers.{n}.{hf}", self.prefix))
     }
 }
