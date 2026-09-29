@@ -171,6 +171,9 @@ const ROPE_PAGED_YARN: usize = 43;
 // the gap this closes and the measured A/B against the int8 triad).
 const PAGED_FLASH_DECODE_SPLIT_I8: usize = 44;
 const PAGED_FLASH_DECODE_COMBINE_I8: usize = 45;
+/// The packed q/k/v bias of a Qwen2-shaped config, added to the fused WQKV
+/// output. Appended at the end so every index above stays put.
+const BIAS_ADD: usize = 46;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -219,6 +222,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
     ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
     ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
+    ("bias_add", kernels::BIAS_ADD),
 ];
 
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
@@ -398,7 +402,12 @@ fn is_fused_source_leaf(name: &str) -> bool {
         .any(|leaf| name.ends_with(leaf))
 }
 
+/// The q/k/v bias leaves of a Qwen2-shaped config, in the fused WQKV order.
+const QKV_BIAS: [&str; 3] = ["attn.wq.bias", "attn.wk.bias", "attn.wv.bias"];
+
 /// One decoder-param leaf name → element count (mirrors the decode weight set).
+/// The QK-norm weights and q/k/v biases are present exactly when the config
+/// declares them, as in `QwenConfig::param_list`.
 fn decoder_param_list(cfg: &QwenConfig) -> Vec<(String, usize)> {
     let (d, ff) = (cfg.d_model as usize, cfg.d_ff as usize);
     let (hq, hkv, hd) = (cfg.q_dim() as usize, cfg.kv_dim() as usize, cfg.head_dim as usize);
@@ -409,8 +418,13 @@ fn decoder_param_list(cfg: &QwenConfig) -> Vec<(String, usize)> {
         out.push((p("attn.wq.weight"), hq * d));
         out.push((p("attn.wk.weight"), hkv * d));
         out.push((p("attn.wv.weight"), hkv * d));
-        out.push((p("attn.q_norm.weight"), hd));
-        out.push((p("attn.k_norm.weight"), hd));
+        if cfg.attn_bias {
+            out.extend(QKV_BIAS.iter().zip([hq, hkv, hkv]).map(|(leaf, n)| (p(leaf), n)));
+        }
+        if cfg.qk_norm {
+            out.push((p("attn.q_norm.weight"), hd));
+            out.push((p("attn.k_norm.weight"), hd));
+        }
         out.push((p("attn.wo.weight"), d * hq));
         out.push((p("ln2.weight"), d));
         out.push((p("mlp.gate.weight"), ff * d));
@@ -707,6 +721,9 @@ pub struct Engine {
     prefix_hit_tokens: u64,
     pool_k: Vec<DeviceBuffer>,
     pool_v: Vec<DeviceBuffer>,
+    /// Per layer, the packed `[bq; bk; bv]` bias added to the fused WQKV
+    /// output; empty when the config has no q/k/v bias.
+    qkv_bias: Vec<DeviceBuffer>,
     // int8 KV: pools hold packed int8 (4/u32, ~4x smaller) + per-(token,kv-head)
     // dequant scales. Empty when kv_int8 is false (fp32 pools).
     //
@@ -900,7 +917,7 @@ impl Engine {
         // names any more) and cost real resident memory for nothing.
         let roles = decoder_param_list(&cfg)
             .into_iter()
-            .filter(|(n, _)| !(is_fused_source_leaf(n) || (w8_on && crate::q8::Q8::is_i8_linear(n))))
+            .filter(|(n, _)| !(is_fused_source_leaf(n) || QKV_BIAS.iter().any(|b| n.ends_with(b)) || (w8_on && crate::q8::Q8::is_i8_linear(n))))
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
             .collect();
         let stage_t0 = std::time::Instant::now();
@@ -1152,6 +1169,22 @@ impl Engine {
         // (re-quantized in place) every layer's forward, exactly like the
         // old `Q8::sx`/`Q8::xq` this replaces. `None` on an all-fp32 engine:
         // nothing ever reads it, so nothing is allocated.
+        let qkv_bias: Vec<DeviceBuffer> = if cfg.attn_bias {
+            (0..cfg.n_layers)
+                .map(|l| {
+                    let parts: Vec<f32> = QKV_BIAS
+                        .iter()
+                        .flat_map(|leaf| {
+                            let name = format!("blocks.{l}.{leaf}");
+                            weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}")).iter().copied()
+                        })
+                        .collect();
+                    gpu.storage_init("qkv_bias", &parts)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let i8_scratch = if w8_on { Some(I8Scratch::new(&gpu, b, b, &[d as u32, hq as u32, ff as u32])) } else { None };
         // S5: measure the GEMV/tile crossover for THIS device's int8 shapes at
         // build time (a few ms; persisted per adapter + kernel sources), so
@@ -1200,6 +1233,7 @@ impl Engine {
             prefix_hit_tokens: 0,
             pool_k,
             pool_v,
+            qkv_bias,
             kv_int8,
             scales_k,
             scales_v,
@@ -1915,8 +1949,13 @@ impl Engine {
     /// capability keeps the original two-dispatch pair rather than an
     /// unconditional fused dispatch reproducing that defect.
     #[allow(clippy::too_many_arguments)]
-    fn qk_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32) {
+    fn qk_norm_rope(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: Option<&DeviceBuffer>, out: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32) {
         let g = &self.gpu;
+        let Some(w) = w else {
+            // No QK-norm: `x` IS `out`, rotated in place.
+            s.push(self.rope_in_place(out, hd, heads, rows, theta));
+            return;
+        };
         if let Some((inv_freq, af)) = &self.yarn {
             s.push(self.rms(x, w, out, hd, rows));
             s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
@@ -1931,6 +1970,19 @@ impl Engine {
             s.push(self.rms(x, w, out, hd, rows));
             let b = rows / heads;
             s.push(g.step(ROPE_PAGED, &[out, &self.sc.pos_buf], &[b, heads, hd, heads * hd, fb(theta)], rows * (hd / 2)));
+        }
+    }
+
+    /// RoPE alone, in place over `rows` per-head rows of `buf` at the paged
+    /// positions: the scaled table when the config declares one, otherwise
+    /// the analytic schedule. The rotation a config without QK-norm needs.
+    fn rope_in_place(&self, buf: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32) -> Step {
+        match &self.yarn {
+            Some((inv_freq, af)) => self.rope_yarn(buf, inv_freq, *af, hd, heads, rows),
+            None => {
+                let b = rows / heads;
+                self.gpu.step(ROPE_PAGED, &[buf, &self.sc.pos_buf], &[b, heads, hd, heads * hd, fb(theta)], rows * (hd / 2))
+            }
         }
     }
 
@@ -1963,8 +2015,15 @@ impl Engine {
     /// slot in one write instead of a separate `KV_APPEND_B` re-reading what
     /// RoPE just wrote. Same `workgroup_reductions` gate as `Self::qk_norm_rope`.
     #[allow(clippy::too_many_arguments)]
-    fn qk_norm_rope_append(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, pool: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32, block_size: u32) {
+    fn qk_norm_rope_append(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: Option<&DeviceBuffer>, out: &DeviceBuffer, pool: &DeviceBuffer, hd: u32, heads: u32, rows: u32, theta: f32, block_size: u32) {
         let g = &self.gpu;
+        let Some(w) = w else {
+            // No QK-norm: rotate `out` (which is `x`) in place, then append.
+            let b = rows / heads;
+            s.push(self.rope_in_place(out, hd, heads, rows, theta));
+            s.push(g.step(KV_APPEND_B, &[out, &self.sc.blk_buf, &self.sc.off_buf, pool], &[b, heads * hd, block_size], rows * hd));
+            return;
+        };
         if let Some((inv_freq, af)) = &self.yarn {
             let b = rows / heads;
             s.push(self.rms(x, w, out, hd, rows));
@@ -2079,14 +2138,21 @@ impl Engine {
             // RoPE/KV-append already require.
             self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b);
             let qkv_width = hq + 2 * hkv;
-            s.push(concat_split_step(g, &sc.qkv_pre, &sc.q_pre, b, qkv_width, hq, 0));
-            s.push(concat_split_step(g, &sc.qkv_pre, &sc.k_pre, b, qkv_width, hkv, hq));
+            if let Some(bias) = self.qkv_bias.get(l) {
+                s.push(g.step(BIAS_ADD, &[&sc.qkv_pre, bias], &[b, qkv_width], b * qkv_width));
+            }
+            // Without QK-norm, Q and K go straight into the buffers RoPE
+            // rotates in place; with it, into the pre-norm ones it reads.
+            let (q_src, k_src) = if c.qk_norm { (&sc.q_pre, &sc.k_pre) } else { (&sc.q, &sc.k) };
+            let (q_norm, k_norm) = if c.qk_norm { (Some(w(&p("attn.q_norm.weight"))), Some(w(&p("attn.k_norm.weight")))) } else { (None, None) };
+            s.push(concat_split_step(g, &sc.qkv_pre, q_src, b, qkv_width, hq, 0));
+            s.push(concat_split_step(g, &sc.qkv_pre, k_src, b, qkv_width, hkv, hq));
             s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
             // M4.2: QK-norm + RoPE fused into one dispatch each for Q and K
             // (`Self::qk_norm_rope`) instead of the four separate `self.rms`/
             // `ROPE_PAGED` dispatches this used to be - see that method's own
             // doc for the derivation and the `workgroup_reductions` gate.
-            self.qk_norm_rope(&mut s, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, b * nh, theta);
+            self.qk_norm_rope(&mut s, q_src, q_norm, &sc.q, hd, nh, b * nh, theta);
             if self.kv_int8 {
                 // K's fused pass stops at norm+RoPE here - the int8 append
                 // below needs the whole per-head row for its own absmax
@@ -2094,7 +2160,7 @@ impl Engine {
                 // different shape than the fp32 append `Self::
                 // qk_norm_rope_append` folds in, so it is NOT merged into
                 // this milestone.
-                self.qk_norm_rope(&mut s, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, b * nkv, theta);
+                self.qk_norm_rope(&mut s, k_src, k_norm, &sc.k, hd, nkv, b * nkv, theta);
                 // ONE append kernel for both paths (audit F42): the clip
                 // buffers hold either the calibrated ceilings or the
                 // f32::MAX sentinel, which the kernel's contract documents
@@ -2152,7 +2218,7 @@ impl Engine {
                 // merge, unlike the int8 branch above) - `sc.k` still comes
                 // out normalized+rotated for `Engine::calibrate_kv`/tests,
                 // `self.pool_k[l]` gets the same values at their paged slot.
-                self.qk_norm_rope_append(&mut s, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, &self.pool_k[l], hd, nkv, b * nkv, theta, bs);
+                self.qk_norm_rope_append(&mut s, k_src, k_norm, &sc.k, &self.pool_k[l], hd, nkv, b * nkv, theta, bs);
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
                 // M2.4/M2.7: whole-triad-vs-single-fused-dispatch choice,
                 // through `Op::PagedAttentionFused` (a SEPARATE Op from
