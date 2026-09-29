@@ -16,7 +16,9 @@
 # mention and is filtered out.
 #
 # CHANGELOG.md is history (generated from past commit subjects) and exempt, as
-# is this script, which has to spell the names to match them.
+# is this script, which has to spell the names to match them. So is
+# .gitignore: an ignore pattern for a tool's state directory is a filter, not
+# a description of that tool.
 #
 # Usage: scripts/gates/check-repo-scope.sh [file ...]
 #   With no arguments, scans every tracked file. With arguments (how the
@@ -37,7 +39,7 @@ else
 fi
 for f in "${candidates[@]}"; do
   case "$f" in
-  CHANGELOG.md | "$SELF") continue ;;
+  CHANGELOG.md | .gitignore | "$SELF") continue ;;
   esac
   # A tracked path deleted in the working tree has nothing left to scan.
   [ -f "$f" ] && files+=("$f")
