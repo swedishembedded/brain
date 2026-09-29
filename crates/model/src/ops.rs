@@ -1571,7 +1571,9 @@ impl Ops {
                     Operand { role: Role::Aux(0), buf: gate, range: WHOLE, dtype: Dtype::F32 },
                     Operand { role: Role::Out, buf: out, range: WHOLE, dtype: Dtype::F32 },
                 ];
-                let attrs = [m, k, n, n_experts, e_idx];
+                // `w_off = 0`: `w` is this expert's own `[n, k]` matrix, so
+                // its rows start at the buffer's first element.
+                let attrs = [m, k, n, n_experts, e_idx, 0];
                 let req = OpRequest {
                     op: Op::MoeExpertLinear,
                     shape: OpShape { m, n, k, dtype: dt },

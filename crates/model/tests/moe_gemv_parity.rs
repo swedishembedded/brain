@@ -93,7 +93,7 @@ fn the_gemv_tier_matches_the_element_per_thread_kernel() {
                 g.submit(
                     &[],
                     &[
-                        g.step(slow, &[&x, &w, &gate, &want_buf], &[m, k, n, e, e_idx], m * n),
+                        g.step(slow, &[&x, &w, &gate, &want_buf], &[m, k, n, e, e_idx, 0], m * n),
                         g.dispatch(fast, &[&x, &w, &gate, &got_buf], &[m, k, n, e, e_idx], gpu_core::Dispatch::Workgroups(n)),
                     ],
                 );
