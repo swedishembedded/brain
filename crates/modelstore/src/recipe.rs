@@ -938,28 +938,37 @@ impl ArtifactRecipe for TransformersRecipe {
             return Err(Box::new(PlanError::UnsupportedArchitecture(reference.clone(), arch)));
         }
 
+        // `generation_config.json` names the model's stop tokens (its
+        // `eos_token_id` may be a list), which the tokenizer files do not.
         let mut artifacts = vec![artifact("config.json", "config.json")];
-        if listing.iter().any(|f| f == "tokenizer.json") {
-            artifacts.push(artifact("tokenizer.json", "tokenizer.json"));
-        }
-        if listing.iter().any(|f| f == "tokenizer_config.json") {
-            artifacts.push(artifact("tokenizer_config.json", "tokenizer_config.json"));
+        for f in ["generation_config.json", "tokenizer.json", "tokenizer_config.json"] {
+            if listing.iter().any(|l| l == f) {
+                artifacts.push(artifact(f, f));
+            }
         }
 
-        if listing.iter().any(|f| f == "model.safetensors") {
-            artifacts.push(artifact("model.safetensors", "model.safetensors"));
+        // Weights in exactly one format: safetensors when the repo has them,
+        // otherwise its `torch.save` shards - never both.
+        let has = |f: &str| listing.iter().any(|l| l == f);
+        let shards_of = |prefix: &str, ext: &str| -> Vec<String> {
+            let mut v: Vec<String> = listing.iter().filter(|f| f.starts_with(prefix) && f.ends_with(ext)).cloned().collect();
+            v.sort();
+            v
+        };
+        let (single, index, shards) = if has("model.safetensors") || !shards_of("model-", ".safetensors").is_empty() {
+            ("model.safetensors", "model.safetensors.index.json", shards_of("model-", ".safetensors"))
         } else {
-            let mut shards: Vec<&String> = listing.iter().filter(|f| f.starts_with("model-") && f.ends_with(".safetensors")).collect();
-            if shards.is_empty() {
-                return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no safetensors weights found (single file or shard set)".to_string())));
+            ("pytorch_model.bin", "pytorch_model.bin.index.json", shards_of("pytorch_model-", ".bin"))
+        };
+        if has(single) {
+            artifacts.push(artifact(single, single));
+        } else if !shards.is_empty() {
+            if has(index) {
+                artifacts.push(artifact(index, index));
             }
-            shards.sort();
-            if listing.iter().any(|f| f == "model.safetensors.index.json") {
-                artifacts.push(artifact("model.safetensors.index.json", "model.safetensors.index.json"));
-            }
-            for shard in shards {
-                artifacts.push(artifact(shard.clone(), shard.clone()));
-            }
+            artifacts.extend(shards.into_iter().map(|s| artifact(s.clone(), s)));
+        } else {
+            return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no weights found (safetensors or pytorch_model.bin, single file or shard set)".to_string())));
         }
 
         Ok(artifacts)

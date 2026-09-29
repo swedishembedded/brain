@@ -389,7 +389,7 @@ fn walk_repo_dir(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEn
             }
             let path = entry.path();
             let Some(fname) = path.file_name().and_then(|s| s.to_str()) else { continue };
-            if shards.iter().any(|s| s == fname) || fname == "config.json" || fname == "model.safetensors.index.json" {
+            if shards.iter().any(|s| s == fname) || fname == "config.json" || INDEX_FILES.contains(&fname) {
                 continue;
             }
             if let Some(kind) = kind_of_extension(fname) {
@@ -442,11 +442,25 @@ fn push_file_record(path: &Path, scan_root: &Path, kind: ArtifactKind, cache: &B
     }
 }
 
-/// The shard filenames a directory declares, from `model.safetensors.index.json`
-/// if present (its `weight_map` values, deduped), else every loose
-/// `model*.safetensors` file sitting directly in it.
+/// The shard indexes an HF checkpoint directory may carry, safetensors first.
+const INDEX_FILES: [&str; 2] = ["model.safetensors.index.json", "pytorch_model.bin.index.json"];
+
+/// The shard filenames a directory declares: from its safetensors shard index,
+/// else every loose `model*.safetensors` file sitting directly in it, else the
+/// same for its `torch.save` weights (`pytorch_model.bin.index.json`, or the
+/// loose `pytorch_model*.bin` files) - the order `WeightReader::open_hf_dir`
+/// reads them in.
 fn shard_filenames(dir: &Path) -> Vec<String> {
-    let index = dir.join("model.safetensors.index.json");
+    let st = declared_shards(dir, INDEX_FILES[0], "model", ".safetensors");
+    if !st.is_empty() {
+        return st;
+    }
+    declared_shards(dir, INDEX_FILES[1], "pytorch_model", ".bin")
+}
+
+/// `index`'s `weight_map` values (deduped), else the loose `prefix*ext` files.
+fn declared_shards(dir: &Path, index: &str, prefix: &str, ext: &str) -> Vec<String> {
+    let index = dir.join(index);
     if let Ok(bytes) = std::fs::read(&index) {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
             if let Some(map) = v.get("weight_map").and_then(|m| m.as_object()) {
@@ -462,7 +476,7 @@ fn shard_filenames(dir: &Path) -> Vec<String> {
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|n| n.starts_with("model") && n.ends_with(".safetensors"))
+        .filter(|n| n.starts_with(prefix) && n.ends_with(ext))
         .collect();
     files.sort();
     files
@@ -518,7 +532,7 @@ fn hfdir_record(dir: &Path, scan_root: &Path, cache: &BTreeMap<PathBuf, CacheEnt
     if !dir.join("config.json").is_file() {
         return None;
     }
-    let has_index = dir.join("model.safetensors.index.json").is_file();
+    let has_index = INDEX_FILES.iter().any(|f| dir.join(f).is_file());
     let shards = shard_filenames(dir);
     if !has_index && shards.is_empty() {
         return None;
@@ -549,6 +563,15 @@ fn hfdir_completeness(dir: &Path, shards: &[String]) -> Completeness {
             // interrupted fetch leaves behind, whether or not a `.part`
             // sibling happens to still be sitting there.
             return Completeness::Partial { final_path: path };
+        }
+        // A `torch.save` shard lands only by an atomic rename after a
+        // complete download; what remains to check is that it is a readable
+        // archive with a tensor index.
+        if name.ends_with(".bin") {
+            if let Err(e) = checkpoint::torchpt::read_shapes(path.to_string_lossy().as_ref()) {
+                return Completeness::Unreadable(format!("{}: {e}", path.display()));
+            }
+            continue;
         }
         match checkpoint::st::declared_data_extent(path.to_string_lossy().as_ref()) {
             Ok(declared) => {
@@ -790,6 +813,36 @@ mod tests {
             other => panic!("expected Truncated, got {other:?}"),
         }
         assert!(!found[0].usable());
+    }
+
+    /// A checkpoint that ships only `torch.save` shards is one complete
+    /// `HfDir` record, like a safetensors one.
+    #[test]
+    fn a_bin_shard_set_is_one_complete_hfdir_record() {
+        let bin_dir = |tag: &str, corrupt: bool| {
+            let root = scratch_root(tag);
+            let dir = root.join("deepseek-ai").join("deepseek-llm-7b-base");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+            for f in ["pytorch_model-00001-of-00002.bin", "pytorch_model-00002-of-00002.bin"] {
+                let t = checkpoint::torchpt_write::TensorOut { name: "w".into(), shape: vec![2], data: vec![1.0, 2.0] };
+                checkpoint::torchpt_write::write(dir.join(f).to_str().unwrap(), &[t]).unwrap();
+            }
+            if corrupt {
+                std::fs::write(dir.join("pytorch_model-00002-of-00002.bin"), b"PK not a zip").unwrap();
+            }
+            let map = serde_json::json!({"weight_map": {"a": "pytorch_model-00001-of-00002.bin", "b": "pytorch_model-00002-of-00002.bin"}});
+            std::fs::write(dir.join("pytorch_model.bin.index.json"), serde_json::to_vec(&map).unwrap()).unwrap();
+            scan(&root)
+        };
+
+        let found = bin_dir("hfdir-bin", false);
+        assert_eq!(found.len(), 1, "expected one HfDir record, got {found:?}");
+        assert_eq!(found[0].kind, ArtifactKind::HfDir);
+        assert_eq!(found[0].completeness, Completeness::Complete);
+
+        let found = bin_dir("hfdir-bin-corrupt", true);
+        assert!(matches!(found[0].completeness, Completeness::Unreadable(_)), "a corrupt shard must not read as complete: {found:?}");
     }
 
     #[test]

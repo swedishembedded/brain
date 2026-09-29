@@ -693,6 +693,56 @@ mod tests {
         );
     }
 
+    fn downloads(p: &Plan) -> Vec<&str> {
+        p.steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::Download { file, .. } => Some(file.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// deepseek-llm-7b ships only `pytorch_model-*.bin` shards: the plan
+    /// fetches their index and every shard, and the generation config that
+    /// names the model's stop tokens.
+    #[test]
+    fn a_bin_only_repo_plans_its_bin_shards_and_generation_config() {
+        let st = store("modelstore-plan-test-bin-sharded");
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
+        hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "generation_config.json", b"{}".to_vec());
+        hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "pytorch_model.bin.index.json", b"{}".to_vec());
+        hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "pytorch_model-00002-of-00002.bin", vec![0u8; 4]);
+        hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "pytorch_model-00001-of-00002.bin", vec![0u8; 4]);
+        let p = plan(&ModelRef::new("deepseek-ai", "deepseek-llm-7b-base", None), &st, &hub).unwrap();
+        assert_eq!(
+            downloads(&p),
+            vec!["config.json", "generation_config.json", "pytorch_model.bin.index.json", "pytorch_model-00001-of-00002.bin", "pytorch_model-00002-of-00002.bin"]
+        );
+
+        let st = store("modelstore-plan-test-bin-single");
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "deepseek-coder-1.3b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
+        hub.add_file("deepseek-ai", "deepseek-coder-1.3b-base", "main", "pytorch_model.bin", vec![0u8; 4]);
+        let p = plan(&ModelRef::new("deepseek-ai", "deepseek-coder-1.3b-base", None), &st, &hub).unwrap();
+        assert_eq!(downloads(&p), vec!["config.json", "pytorch_model.bin"]);
+    }
+
+    /// A repo that ships both formats is fetched once, as safetensors.
+    #[test]
+    fn safetensors_wins_over_bin() {
+        let st = store("modelstore-plan-test-both-formats");
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
+        hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "model.safetensors.index.json", b"{}".to_vec());
+        hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "model-00001-of-00001.safetensors", vec![0u8; 4]);
+        hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "pytorch_model.bin.index.json", b"{}".to_vec());
+        hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "pytorch_model-00001-of-00001.bin", vec![0u8; 4]);
+        let p = plan(&ModelRef::new("deepseek-ai", "deepseek-coder-6.7b-base", None), &st, &hub).unwrap();
+        assert_eq!(downloads(&p), vec!["config.json", "model.safetensors.index.json", "model-00001-of-00001.safetensors"]);
+    }
+
     #[test]
     fn unsupported_architecture_aborts_before_any_weight_step() {
         let st = store("modelstore-plan-test-unsupported-arch");
