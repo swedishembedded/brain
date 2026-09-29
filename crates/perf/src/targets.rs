@@ -217,7 +217,7 @@ fn two_path_verdict(
 pub struct PagedLlmTarget {
     sched: qwen3::serve::Scheduler,
     info: TargetInfo,
-    eos: Option<u32>,
+    stop: Vec<u32>,
     /// Deterministic synthetic prompt vocabulary bound (avoids tokenizer I/O in
     /// the measurement path; the engine cost is the same for any token id).
     vocab: u32,
@@ -225,8 +225,8 @@ pub struct PagedLlmTarget {
 }
 
 impl PagedLlmTarget {
-    pub fn new(sched: qwen3::serve::Scheduler, info: TargetInfo, eos: Option<u32>, vocab: u32) -> PagedLlmTarget {
-        PagedLlmTarget { sched, info, eos, vocab, submitted: 0 }
+    pub fn new(sched: qwen3::serve::Scheduler, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget {
+        PagedLlmTarget { sched, info, stop, vocab, submitted: 0 }
     }
 
     /// Synthetic prompt of exactly `n` tokens, deterministic in `seed`. Content
@@ -245,10 +245,10 @@ impl PerfTarget for PagedLlmTarget {
     fn submit(&mut self, req: PerfRequest) -> ReqId {
         let prompt = self.prompt(req.input_artifacts, req.seed);
         self.submitted += 1;
-        // `ignore_stop` is expressed by passing no EOS: a synthetic run must
+        // `ignore_stop` is expressed by passing no stop ids: a synthetic run must
         // produce the full requested length, or the workload silently shortens
         // and the reported rate is inflated.
-        self.sched.submit(qwen3::serve::Request { prompt, max_new: req.output_artifacts, eos: self.eos })
+        self.sched.submit(qwen3::serve::Request { prompt, max_new: req.output_artifacts, stop: self.stop.clone() })
     }
 
     fn step(&mut self, out: &mut Vec<Emission>) -> bool {
@@ -361,7 +361,7 @@ impl PerfTarget for PagedLlmTarget {
             let id = self.sched.submit(qwen3::serve::Request {
                 prompt: p.clone(),
                 max_new,
-                eos: None,
+                stop: Vec::new(),
             });
             let done = self.sched.run();
             seq_out.push(done.get(&id).cloned().unwrap_or_default());
@@ -371,7 +371,7 @@ impl PerfTarget for PagedLlmTarget {
         let ids: Vec<u64> = prompts
             .iter()
             .map(|p| {
-                self.sched.submit(qwen3::serve::Request { prompt: p.clone(), max_new, eos: None })
+                self.sched.submit(qwen3::serve::Request { prompt: p.clone(), max_new, stop: Vec::new() })
             })
             .collect();
         let done = self.sched.run();

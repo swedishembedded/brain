@@ -346,7 +346,10 @@ fn argmax(s: &[f32]) -> u32 {
 pub struct Request {
     pub prompt: Vec<u32>,
     pub max_new: usize,
-    pub eos: Option<u32>,
+    /// The ids that end this sequence: a checkpoint may declare several
+    /// (`generation_config.json`'s `eos_token_id` list), and a chat format
+    /// adds its own end-of-turn marker. Empty stops only at `max_new`.
+    pub stop: Vec<u32>,
 }
 
 /// Why a request was refused at admission.
@@ -475,7 +478,7 @@ struct Running {
     table: BlockTable,
     generated: Vec<u32>,
     max_new: usize,
-    eos: Option<u32>,
+    stop: Vec<u32>,
     next_input: u32,
     done: bool,
     /// This sequence's sampling params + its own RNG stream. Kept per-sequence
@@ -487,8 +490,8 @@ struct Running {
 
 /// Accept a freshly sampled token into `r`.
 ///
-/// If `next` is the EOS token, `r` is marked done WITHOUT appending it to
-/// `generated` — EOS is a control signal that ends the sequence, not output
+/// If `next` is one of the sequence's stop ids, `r` is marked done WITHOUT
+/// appending it to `generated` — a stop id is a control signal, not output
 /// text. Appending it (the previous behavior) meant the token's decoded text
 /// (e.g. Qwen's `<|im_end|>`) leaked into every streamed response, since
 /// `generated`/`tokens_of` feed the text returned to callers. Otherwise
@@ -496,7 +499,7 @@ struct Running {
 /// reached. A free function (not `Scheduler<D>::accept_token`) because it
 /// only ever touches `Running`, never `D`/`self`.
 fn accept_token(r: &mut Running, next: u32) {
-    if Some(next) == r.eos {
+    if r.stop.contains(&next) {
         r.done = true;
         return;
     }
@@ -955,7 +958,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let candidates = self.dec.admit_topk(&hidden, k);
                 sample_from_topk(&candidates, sample, &mut rng)
             };
-            let mut r = Running { id, table, generated: Vec::new(), max_new: req.max_new, eos: req.eos, next_input: first, done: false, sample, rng };
+            let mut r = Running { id, table, generated: Vec::new(), max_new: req.max_new, stop: req.stop, next_input: first, done: false, sample, rng };
             accept_token(&mut r, first);
             report.admitted.push(id);
             self.running.push(r);
@@ -1192,13 +1195,13 @@ mod tests {
 
     // ── accept_token ─────────────────────────────────────────────
 
-    fn running(eos: Option<u32>, max_new: usize) -> Running {
+    fn running(stop: &[u32], max_new: usize) -> Running {
         Running {
             id: 0,
             table: BlockTable::new(),
             generated: Vec::new(),
             max_new,
-            eos,
+            stop: stop.to_vec(),
             next_input: 0,
             done: false,
             sample: SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 },
@@ -1212,16 +1215,26 @@ mod tests {
         // (it feeds tokens_of()/completed, which the tokenizer decodes back
         // to text - an appended EOS id decodes to its literal special-token
         // text, e.g. Qwen's "<|im_end|>", leaking into every response).
-        let mut r = running(Some(99), 100);
+        let mut r = running(&[99], 100);
         r.generated.push(5); // a real token already generated this turn
         accept_token(&mut r, 99);
         assert!(r.done, "EOS must mark the sequence done");
         assert_eq!(r.generated, vec![5], "EOS must not be appended to generated");
     }
 
+    /// R1-Distill-Qwen declares two eos ids; each alone ends the sequence.
+    #[test]
+    fn any_stop_id_finishes() {
+        for id in [151643, 151645] {
+            let mut r = running(&[151643, 151645], 100);
+            accept_token(&mut r, id);
+            assert!(r.done && r.generated.is_empty(), "{id}");
+        }
+    }
+
     #[test]
     fn accept_token_normal_token_is_appended_and_not_done() {
-        let mut r = running(Some(99), 100);
+        let mut r = running(&[99], 100);
         accept_token(&mut r, 42);
         assert!(!r.done);
         assert_eq!(r.generated, vec![42]);
@@ -1232,7 +1245,7 @@ mod tests {
     fn accept_token_reaching_max_new_marks_done_and_still_appends() {
         // Unlike EOS, hitting the length cap on a real token must still
         // include that token in the output - only EOS is excluded.
-        let mut r = running(Some(99), 1);
+        let mut r = running(&[99], 1);
         accept_token(&mut r, 42);
         assert!(r.done);
         assert_eq!(r.generated, vec![42]);
@@ -1240,7 +1253,7 @@ mod tests {
 
     #[test]
     fn accept_token_with_no_eos_configured_never_stops_on_token_value() {
-        let mut r = running(None, 100);
+        let mut r = running(&[], 100);
         accept_token(&mut r, 99); // would be EOS if configured
         assert!(!r.done);
         assert_eq!(r.generated, vec![99]);

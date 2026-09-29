@@ -923,14 +923,16 @@ impl ResidentModel for QwenResident {
         // Tokenizer precedence: an explicit sibling `tokenizer.json` (safetensors
         // path, or an override) wins; else a `.gguf` builds from its embedded
         // `tokenizer.ggml.*` KV; else there is nothing to tokenize with.
-        let tok = if !self.tokenizer.is_empty() {
-            data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?
+        let (tok, tok_dir, gguf_eos) = if !self.tokenizer.is_empty() {
+            (data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?, std::path::Path::new(&self.tokenizer).parent(), None)
         } else if let Some(gt) = reader.tokenizer() {
-            data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?
+            (data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?, None, gt.eos)
         } else {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
-        let eos = tok.encode("<|im_end|>").first().copied();
+        // The checkpoint's own eos ids, plus ChatML's end-of-turn marker: this
+        // resident renders every prompt as ChatML.
+        let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen: {e}"))?;
         gpu_core::profile::stage_time(&format!("{}: load tokenizer", self.id), stage_t0);
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
@@ -1076,7 +1078,7 @@ impl ResidentModel for QwenResident {
             Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        Ok(Box::new(QwenInstance { tok, eos, engine }))
+        Ok(Box::new(QwenInstance { tok, stop, engine }))
     }
 }
 
@@ -1096,7 +1098,8 @@ enum QwenEngineKind {
 
 struct QwenInstance {
     tok: data::qwen_tokenizer::QwenBpe,
-    eos: Option<u32>,
+    /// The ids that end a generation (`data::generation::stop_ids`).
+    stop: Vec<u32>,
     engine: QwenEngineKind,
 }
 
@@ -1120,9 +1123,9 @@ impl Instance for QwenInstance {
             QwenEngineKind::Legacy { model, head } => invs
                 .iter()
                 .enumerate()
-                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, self.eos, inv, &mut |p| progress(i, p)))
+                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, &self.stop, inv, &mut |p| progress(i, p)))
                 .collect(),
-            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, self.eos, invs, progress),
+            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, &self.stop, invs, progress),
         }
     }
 
@@ -1156,7 +1159,7 @@ fn run_one_legacy(
     model: &qwen3::model::Qwen,
     head: &[f32],
     tok: &data::qwen_tokenizer::QwenBpe,
-    eos: Option<u32>,
+    stop: &[u32],
     inv: &Invocation,
     progress: &mut dyn FnMut(Progress),
 ) -> ActionResult {
@@ -1165,19 +1168,9 @@ fn run_one_legacy(
     let total = req.max_new as u32;
     progress(Progress::step(0, total, "generating"));
 
-    // `generate_kv_stream_with_head` wants a stop-id SET, not an `Option`.
-    let eos_arr: [u32; 1];
-    let eos_slice: &[u32] = match eos {
-        Some(e) => {
-            eos_arr = [e];
-            &eos_arr
-        }
-        None => &[],
-    };
-
     let mut seq = SeqState::new(&req, inv.cancel.clone());
     let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
-    let gen = qwen3::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, eos_slice, &mut rng, head, &mut |_i, t| {
+    let gen = qwen3::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, stop, &mut rng, head, &mut |_i, t| {
         ids_out.push(t);
         !seq.advance(tok, &ids_out, progress)
     });
@@ -1190,7 +1183,7 @@ fn run_one_legacy(
 fn run_batch_scheduled(
     sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
     tok: &data::qwen_tokenizer::QwenBpe,
-    eos: Option<u32>,
+    stop: &[u32],
     invs: &[Invocation],
     progress: &mut dyn FnMut(usize, Progress),
 ) -> Vec<ActionResult> {
@@ -1210,7 +1203,7 @@ fn run_batch_scheduled(
                 let seed = req.seed;
                 let max_new = req.max_new;
                 let seq = SeqState::new(&req, inv.cancel.clone());
-                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, eos }, sample, seed);
+                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() }, sample, seed);
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 seq_for_bi.push(Some(seq));
                 id_for_bi.push(Some(id));
@@ -1895,7 +1888,7 @@ mod tests {
 
         let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(true)).set("max_new", json!(4));
         let start = std::time::Instant::now();
-        let results = run_batch_scheduled(&mut sched, &tok, None, std::slice::from_ref(&inv), &mut |_i, _p| {});
+        let results = run_batch_scheduled(&mut sched, &tok, &[], std::slice::from_ref(&inv), &mut |_i, _p| {});
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");

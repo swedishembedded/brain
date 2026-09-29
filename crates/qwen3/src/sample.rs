@@ -12,7 +12,7 @@ use crate::model::{PrefillInput, Qwen};
 /// Generate `max_new` tokens continuing `prompt`. The context is cropped to the
 /// model's sized length (`ctx_len`). `temperature <= 0` selects greedy argmax;
 /// `top_k = 0` disables top-k filtering; `top_p` in (0,1) enables nucleus
-/// filtering (>= 1 disables). Stops early at `eos` if provided.
+/// filtering (>= 1 disables). Stops early at any id in `stop`.
 #[allow(clippy::too_many_arguments)]
 pub fn generate(
     model: &Qwen,
@@ -21,7 +21,7 @@ pub fn generate(
     temperature: f32,
     top_k: usize,
     top_p: f32,
-    eos: Option<u32>,
+    stop: &[u32],
     rng: &mut Rng,
 ) -> Vec<u32> {
     let cap = model.ctx_len();
@@ -34,7 +34,7 @@ pub fn generate(
         let logits = model.logits_all(&window);
         let last = &logits[logits.len() - vocab..];
         let next = sample_logits(last, temperature, top_k, top_p, rng);
-        if Some(next) == eos {
+        if stop.contains(&next) {
             break;
         }
         ctx.push(next);
@@ -48,6 +48,7 @@ pub fn generate(
 /// instead of re-running the whole context each time. Produces the same tokens
 /// as [`generate`] for greedy decoding (the cache is algebraically exact). The
 /// tied/untied head is applied on the host to the final-norm hidden state.
+/// Any id in `stop` ends generation; an empty slice runs to `max_new`.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv(
     model: &Qwen,
@@ -56,18 +57,10 @@ pub fn generate_kv(
     temperature: f32,
     top_k: usize,
     top_p: f32,
-    eos: Option<u32>,
+    stop: &[u32],
     rng: &mut Rng,
 ) -> Vec<u32> {
-    let eos_arr: [u32; 1];
-    let eos_slice: &[u32] = match eos {
-        Some(e) => {
-            eos_arr = [e];
-            &eos_arr
-        }
-        None => &[],
-    };
-    generate_kv_stream(model, prompt, max_new, temperature, top_k, top_p, eos_slice, rng, &mut |_, _| true)
+    generate_kv_stream(model, prompt, max_new, temperature, top_k, top_p, stop, rng, &mut |_, _| true)
 }
 
 /// [`generate_kv`] with a per-token callback: `on_token(index, token)` fires as
@@ -343,9 +336,9 @@ mod kv_gen_tests {
         let model = Qwen::new(cfg.clone(), 1, 32, &map);
         let prompt = vec![1u32, 5, 3];
         let mut r1 = data::rng::Rng::new(0);
-        let recompute = generate(&model, &prompt, 16, 0.0, 0, 1.0, None, &mut r1);
+        let recompute = generate(&model, &prompt, 16, 0.0, 0, 1.0, &[], &mut r1);
         let mut r2 = data::rng::Rng::new(0);
-        let kv = generate_kv(&model, &prompt, 16, 0.0, 0, 1.0, None, &mut r2);
+        let kv = generate_kv(&model, &prompt, 16, 0.0, 0, 1.0, &[], &mut r2);
         assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
     }
 
@@ -465,7 +458,7 @@ mod kv_gen_tests {
         for seed in 0..16u64 {
             let model = tiny_model(seed);
             let mut r0 = data::rng::Rng::new(0);
-            let full = generate_kv(&model, &prompt, 16, 1.0, 0, 1.0, None, &mut r0);
+            let full = generate_kv(&model, &prompt, 16, 1.0, 0, 1.0, &[], &mut r0);
             if full.iter().any(|&t| t != full[0]) {
                 found = Some((model, full));
                 break;

@@ -159,7 +159,7 @@ fn host_kv_offload_swap_cost_and_concurrency_on_a_real_checkpoint() {
 
     let reqs = |vocab: u32| {
         (0..SESSIONS as u32)
-            .map(|i| Request { prompt: prompt_of(i + 10, vocab), max_new: MAX_NEW, eos: None })
+            .map(|i| Request { prompt: prompt_of(i + 10, vocab), max_new: MAX_NEW, stop: Vec::new() })
             .collect::<Vec<_>>()
     };
 

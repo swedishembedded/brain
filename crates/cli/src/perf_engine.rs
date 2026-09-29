@@ -98,11 +98,11 @@ pub fn run_cancel(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     for stage in [cancel::Stage::Queued, cancel::Stage::Prefill, cancel::Stage::Decode] {
         let keep: Vec<u64> = (0..2)
             .map(|_| {
-                sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new: 4, eos: None })
+                sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new: 4, stop: Vec::new() })
             })
             .collect();
         let victim =
-            sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new, eos: None });
+            sched.submit(qwen3::serve::Request { prompt: prompt.clone(), max_new, stop: Vec::new() });
 
         // Advance to the stage we want to cancel in.
         let steps = match stage {
@@ -201,7 +201,7 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
         let prompt: Vec<u32> = (0..per_req.saturating_sub(max_new).max(8))
             .map(|k| ((k + i) % 100) as u32 + 1)
             .collect();
-        ids.push(sched.submit(qwen3::serve::Request { prompt, max_new, eos: None }));
+        ids.push(sched.submit(qwen3::serve::Request { prompt, max_new, stop: Vec::new() }));
     }
 
     // Drive to completion, recording every iteration where a request was ready

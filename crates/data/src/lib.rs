@@ -22,6 +22,7 @@ pub mod toolcall;
 pub mod bpe;
 pub mod clip_bpe;
 pub mod episode;
+pub mod generation;
 pub mod hf_pretok;
 pub mod imageset;
 pub mod llama_bpe;

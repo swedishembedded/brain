@@ -58,7 +58,7 @@ fn run(make_gpu: fn(&[(&str, &str)]) -> Gpu) {
     let engine = Engine::from_map_on(&make_gpu(pipelines()), cfg, &init, max_seq_len, 2);
     println!("kv_pool_bytes={} kv_pool_capacity_tokens={}", engine.kv_pool_bytes(), engine.kv_pool_capacity_tokens());
     let mut sched = Scheduler::new(engine, 1);
-    let id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });
+    let id = sched.submit(Request { prompt: prompt.clone(), max_new, stop: Vec::new() });
     let out = sched.run();
     let got = out.get(&id).expect("the admitted request must complete");
 

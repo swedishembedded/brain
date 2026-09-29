@@ -169,7 +169,7 @@ pub fn manifest() -> Manifest {
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(json!("fp32")),
         )
-        .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the tokenizer's <|im_end|>/<|endoftext|> when a tokenizer is given; -1 disables)"))
+        .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the checkpoint's own eos ids and <|im_end|> when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
         .param(ParamSpec::new(
             "messages",
@@ -400,19 +400,20 @@ impl Action for GenerateAction {
         // An explicit empty string opts out of `default_tokenizer` (the
         // resolved pick), for a caller that genuinely wants the raw token-id
         // path despite a resolved tokenizer being configured.
-        let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()).or_else(|| self.default_tokenizer.clone()) {
-            Some(p) => Some(QwenBpe::from_file(&p)?),
+        let tok_path = inv.get_str("tokenizer").filter(|p| !p.is_empty()).or_else(|| self.default_tokenizer.clone());
+        let tok = match &tok_path {
+            Some(p) => Some(QwenBpe::from_file(p)?),
             None => None,
         };
         let plan = match &tok {
             Some(t) => {
                 let req = parse_request(t, inv)?;
-                // Stop tokens: explicit param wins (-1 disables); else both Qwen3
-                // EOS ids (`<|im_end|>` and `<|endoftext|>`) from the tokenizer.
+                // Stop tokens: explicit param wins (-1 disables); else the
+                // checkpoint's own eos ids plus the ChatML turn end.
                 let eos: Vec<u32> = match inv.get_i64("eos") {
                     Some(e) if e >= 0 => vec![e as u32],
                     Some(_) => Vec::new(),
-                    None => ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| t.encode(s).first().copied()).collect(),
+                    None => data::generation::stop_ids(tok_path.as_deref().and_then(|p| std::path::Path::new(p).parent()), t, None, Some("<|im_end|>"))?,
                 };
                 Plan::Chat { req, eos }
             }
@@ -1638,7 +1639,7 @@ mod tests {
             .iter()
             .map(|q| {
                 let mut rng = Rng::new(0);
-                let ids = crate::sample::generate_kv(model, &tok.encode(q), GATE_MAX_NEW, 0.0, 0, 1.0, None, &mut rng);
+                let ids = crate::sample::generate_kv(model, &tok.encode(q), GATE_MAX_NEW, 0.0, 0, 1.0, &[], &mut rng);
                 tok.decode(&ids).lines().next().unwrap_or("").to_string()
             })
             .collect()

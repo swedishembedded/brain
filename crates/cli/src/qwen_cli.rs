@@ -321,7 +321,13 @@ fn serve(args: &[String]) {
             return;
         }
     };
-    let eos = tok.encode("<|im_end|>").first().copied();
+    let stop = match data::generation::stop_ids(std::path::Path::new(&tokenizer).parent(), &tok, None, Some("<|im_end|>")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain qwen3 serve: {e}");
+            return;
+        }
+    };
     let toks: Vec<Vec<u32>> = prompts.iter().map(|p| tok.encode(&tok.apply_chat_template(&[("user", p)], true))).collect();
     let n = prompts.len() as u32;
     let max_prompt = toks.iter().map(|t| t.len()).max().unwrap_or(1) as u32;
@@ -369,7 +375,7 @@ fn serve(args: &[String]) {
     let weights_int8 = eng.weights_int8();
     let kv_calibrated = eng.kv_calibrated();
     let mut sched = qwen3::serve::Scheduler::new(eng, n as usize);
-    let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen3::serve::Request { prompt: t.clone(), max_new, eos })).collect();
+    let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen3::serve::Request { prompt: t.clone(), max_new, stop: stop.clone() })).collect();
 
     let t0 = std::time::Instant::now();
     let out = sched.run();
@@ -505,10 +511,16 @@ fn infer(args: &[String]) {
         }
     };
     let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
-    let eos = tok.encode("<|im_end|>").first().copied();
+    let stop = match data::generation::stop_ids(std::path::Path::new(&tokenizer).parent(), &tok, None, Some("<|im_end|>")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain qwen3 infer: {e}");
+            return;
+        }
+    };
     let mut rng = Rng::new(seed);
     let t_gen = std::time::Instant::now();
-    let gen = qwen3::sample::generate_kv(&model, &ids, max_new, temp, top_k, 1.0, eos, &mut rng);
+    let gen = qwen3::sample::generate_kv(&model, &ids, max_new, temp, top_k, 1.0, &stop, &mut rng);
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
     eprintln!("qwen-timing load_ms={load_ms:.1} gen_ms={gen_ms:.1} tokens={}", gen.len());
     print!("{prompt}");

@@ -66,13 +66,13 @@ fn decode_only_model_from_folded_tensors_matches_the_live_trained_forward() {
     qwen3::lora::fold_adapter_into(&mut base_tensors, adapter_path.to_str().unwrap()).expect("fold_adapter_into");
 
     let prompt = &x[..6];
-    let live_greedy = qwen3::sample::generate(&trained, prompt, 6, 0.0, 0, 1.0, None, &mut Rng::new(1));
+    let live_greedy = qwen3::sample::generate(&trained, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(1));
 
     // The new bit: decode-only construction from the folded tensor map,
     // exactly what `Qwen::from_tensors_decode` (QwenResident::activate's
     // adapter path) builds.
     let served = Qwen::from_tensors_decode(QwenConfig::tiny(), &base_tensors, 32);
-    let served_greedy = qwen3::sample::generate_kv(&served, prompt, 6, 0.0, 0, 1.0, None, &mut Rng::new(1));
+    let served_greedy = qwen3::sample::generate_kv(&served, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(1));
 
     assert_eq!(
         served_greedy, live_greedy,

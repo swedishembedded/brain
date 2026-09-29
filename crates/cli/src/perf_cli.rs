@@ -1836,7 +1836,7 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
         // What actually ran: the int8 request is capability-gated in the engine.
         .with("weights_dtype", if eng.weights_int8() { "int8" } else { "fp32" }.into());
     let sched = qwen3::serve::Scheduler::new(eng, spec.max_batch as usize);
-    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, spec.vocab)))
+    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), spec.vocab)))
 }
 
 /// KV-pool geometry for a workload: `(block_size, max_batch, num_blocks,
@@ -1906,6 +1906,6 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
         .with("max_batch", max_batch.into())
         .with("kv_dtype", kv_dtype.into())
         .with("weights_dtype", if w8_effective { "int8" } else { "fp32" }.into());
-    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
+    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))
 }
 

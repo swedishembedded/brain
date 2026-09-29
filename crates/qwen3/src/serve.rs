@@ -3725,8 +3725,8 @@ mod tests {
         let p1 = vec![7u32, 2, 4];
         let mut r0 = Rng::new(0);
         let mut r1 = Rng::new(0);
-        let ref0 = crate::sample::generate_kv(&model, &p0, 12, 0.0, 0, 1.0, None, &mut r0);
-        let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, 1.0, None, &mut r1);
+        let ref0 = crate::sample::generate_kv(&model, &p0, 12, 0.0, 0, 1.0, &[], &mut r0);
+        let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, 1.0, &[], &mut r1);
 
         for kv_int8 in [false, true] {
             // Engine: run both prompts concurrently (batched paged).
@@ -3956,8 +3956,8 @@ mod tests {
         assert_eq!(eng.max_seq_len(), 16);
         let mut sched = Scheduler::new(eng, 2);
 
-        let huge = sched.submit(Request { prompt: vec![1u32; 64], max_new: 4, eos: None });
-        let ok = sched.submit(Request { prompt: vec![2u32, 3, 4], max_new: 4, eos: None });
+        let huge = sched.submit(Request { prompt: vec![1u32; 64], max_new: 4, stop: Vec::new() });
+        let ok = sched.submit(Request { prompt: vec![2u32, 3, 4], max_new: 4, stop: Vec::new() });
 
         let rep = sched.step_report();
         assert_eq!(rep.rejected.len(), 1, "the oversized request must be refused");
@@ -3985,8 +3985,8 @@ mod tests {
         let map = tiny_weights(&cfg);
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 2, 8, 8, false, false);
         let mut sched = Scheduler::new(eng, 2);
-        let bad = sched.submit(Request { prompt: vec![1, vocab + 7, 2], max_new: 4, eos: None });
-        let ok = sched.submit(Request { prompt: vec![1, 2, 3], max_new: 4, eos: None });
+        let bad = sched.submit(Request { prompt: vec![1, vocab + 7, 2], max_new: 4, stop: Vec::new() });
+        let ok = sched.submit(Request { prompt: vec![1, 2, 3], max_new: 4, stop: Vec::new() });
         let rep = sched.step_report();
         assert_eq!(rep.rejected.len(), 1);
         assert_eq!(rep.rejected[0].0, bad);
@@ -4007,8 +4007,8 @@ mod tests {
         let mut sched = Scheduler::new(eng, 2);
         sched.set_admission(Box::new(MaxQueueDepth(1)));
 
-        let a = sched.submit(Request { prompt: vec![1, 5, 3], max_new: 4, eos: None }); // queued (0 ahead)
-        let b = sched.submit(Request { prompt: vec![2, 6, 4], max_new: 4, eos: None }); // queued (1 ahead? depth=1 => 1 not < 1 => REJECTED)
+        let a = sched.submit(Request { prompt: vec![1, 5, 3], max_new: 4, stop: Vec::new() }); // queued (0 ahead)
+        let b = sched.submit(Request { prompt: vec![2, 6, 4], max_new: 4, stop: Vec::new() }); // queued (1 ahead? depth=1 => 1 not < 1 => REJECTED)
         let rep = sched.step_report();
         assert_eq!(rep.rejected.len(), 1, "the over-depth submit must be refused");
         assert_eq!(rep.rejected[0].0, b);
@@ -4031,7 +4031,7 @@ mod tests {
             free_blocks: 99,
             mean_service_ms: svc,
         };
-        let r = Request { prompt: vec![1], max_new: 1, eos: None };
+        let r = Request { prompt: vec![1], max_new: 1, stop: Vec::new() };
         assert!(p.admit(&r, &mk(50, None)), "no measurement -> cannot prove lateness");
         assert!(p.admit(&r, &mk(4, Some(20.0))), "4 queued at the mocked service time fits the deadline");
         assert!(!p.admit(&r, &mk(6, Some(20.0))), "6 queued at the mocked service time provably misses it");
@@ -4048,9 +4048,9 @@ mod tests {
 
         // Everything long enough to still be decoding after two (windowed)
         // iterations, and inside the per-sequence capacity (12 blocks x 4 = 48).
-        let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 20, eos: None });
-        let doomed = sched.submit(Request { prompt: vec![7u32, 2, 9], max_new: 30, eos: None });
-        let keep_b = sched.submit(Request { prompt: vec![4u32, 4, 1], max_new: 20, eos: None });
+        let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 20, stop: Vec::new() });
+        let doomed = sched.submit(Request { prompt: vec![7u32, 2, 9], max_new: 30, stop: Vec::new() });
+        let keep_b = sched.submit(Request { prompt: vec![4u32, 4, 1], max_new: 20, stop: Vec::new() });
 
         // Admit everything and decode a couple of steps.
         sched.step();
@@ -4083,8 +4083,8 @@ mod tests {
         // One slot, so the second request cannot be admitted.
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 32, 1, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 1);
-        let _a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 4, eos: None });
-        let queued = sched.submit(Request { prompt: vec![2u32, 6, 4], max_new: 4, eos: None });
+        let _a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 4, stop: Vec::new() });
+        let queued = sched.submit(Request { prompt: vec![2u32, 6, 4], max_new: 4, stop: Vec::new() });
         sched.step();
         assert_eq!(sched.waiting_len(), 1);
         assert_eq!(sched.cancel(queued), Some(Vec::new()));
@@ -4844,7 +4844,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let reqs = || {
             (0..4u32)
-                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 5, eos: None })
+                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 5, stop: Vec::new() })
                 .collect::<Vec<_>>()
         };
 
@@ -5062,7 +5062,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let reqs = || {
             (0..4u32)
-                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 8, eos: None })
+                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 8, stop: Vec::new() })
                 .collect::<Vec<_>>()
         };
         // Everything but `num_blocks` is identical between the two engines, so
@@ -5124,7 +5124,7 @@ mod tests {
         let ids: Vec<u64> = wants
             .iter()
             .enumerate()
-            .map(|(i, &n)| sched.submit(Request { prompt: vec![1u32 + i as u32, 5, 3], max_new: n, eos: None }))
+            .map(|(i, &n)| sched.submit(Request { prompt: vec![1u32 + i as u32, 5, 3], max_new: n, stop: Vec::new() }))
             .collect();
 
         let mut produced: HashMap<u64, usize> = HashMap::new();
@@ -5168,8 +5168,8 @@ mod tests {
         let map = tiny_weights(&cfg);
         let reqs = || {
             vec![
-                Request { prompt: vec![1u32, 5, 3], max_new: 7, eos: None },
-                Request { prompt: vec![9u32, 2], max_new: 5, eos: None },
+                Request { prompt: vec![1u32, 5, 3], max_new: 7, stop: Vec::new() },
+                Request { prompt: vec![9u32, 2], max_new: 5, stop: Vec::new() },
             ]
         };
 
@@ -5208,7 +5208,7 @@ mod tests {
             .zip(maxn)
             .map(|(p, n)| {
                 let mut r = Rng::new(0);
-                crate::sample::generate_kv(&model, p, n, 0.0, 0, 1.0, None, &mut r)
+                crate::sample::generate_kv(&model, p, n, 0.0, 0, 1.0, &[], &mut r)
             })
             .collect();
 
@@ -5216,8 +5216,8 @@ mod tests {
         let mut sched = Scheduler::new(eng, 4);
         let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
 
-        let id0 = sched.submit(Request { prompt: prompts[0].clone(), max_new: maxn[0], eos: None });
-        let id1 = sched.submit(Request { prompt: prompts[1].clone(), max_new: maxn[1], eos: None });
+        let id0 = sched.submit(Request { prompt: prompts[0].clone(), max_new: maxn[0], stop: Vec::new() });
+        let id1 = sched.submit(Request { prompt: prompts[1].clone(), max_new: maxn[1], stop: Vec::new() });
         // Run two iterations with only the first two requests active...
         for _ in 0..2 {
             for (id, t) in sched.step() {
@@ -5225,7 +5225,7 @@ mod tests {
             }
         }
         // ...then submit a third mid-flight; it must batch in and still be correct.
-        let id2 = sched.submit(Request { prompt: prompts[2].clone(), max_new: maxn[2], eos: None });
+        let id2 = sched.submit(Request { prompt: prompts[2].clone(), max_new: maxn[2], stop: Vec::new() });
         while sched.pending() {
             for (id, t) in sched.step() {
                 out.insert(id, t);
@@ -5266,7 +5266,7 @@ mod tests {
         let prompt = vec![1u32, 5, 3, 9, 2];
         let max_new = 13usize; // > DECODE_WINDOW (4), so k=4 fires for several rounds
         let mut r = Rng::new(0);
-        let reference = crate::sample::generate_kv(&model, &prompt, max_new, 0.0, 0, 1.0, None, &mut r);
+        let reference = crate::sample::generate_kv(&model, &prompt, max_new, 0.0, 0, 1.0, &[], &mut r);
 
         // Plenty of batch/block headroom: a single request must never fall
         // back to k=1 for lack of free blocks (serve.rs's own guard: `k > 1
@@ -5275,7 +5275,7 @@ mod tests {
         for kv_int8 in [false, true] {
             let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 4, 8, 32, kv_int8, false);
             let mut sched = Scheduler::new(eng, 4);
-            let id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });
+            let id = sched.submit(Request { prompt: prompt.clone(), max_new, stop: Vec::new() });
 
             let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
             let mut saw_a_window_step = false;
@@ -5319,8 +5319,8 @@ mod tests {
             let mut sched = Scheduler::new(eng, 4);
             // A plain greedy sequence rides in the SAME batch, proving the
             // mixed-batch fallback doesn't perturb it.
-            let greedy_id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });
-            let sampled_id = sched.submit_sampled(Request { prompt: prompt.clone(), max_new, eos: None }, params, seed);
+            let greedy_id = sched.submit(Request { prompt: prompt.clone(), max_new, stop: Vec::new() });
+            let sampled_id = sched.submit_sampled(Request { prompt: prompt.clone(), max_new, stop: Vec::new() }, params, seed);
             let out = sched.run();
             (out[&greedy_id].clone(), out[&sampled_id].clone())
         };
@@ -5719,7 +5719,7 @@ mod tests {
         let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 16, 512, n_req as u32, 16, 32, false, false);
         let mut sched = Scheduler::new(eng, n_req);
         for p in &prompts {
-            sched.submit(Request { prompt: p.clone(), max_new, eos: None });
+            sched.submit(Request { prompt: p.clone(), max_new, stop: Vec::new() });
         }
         let t1 = std::time::Instant::now();
         let out = sched.run();

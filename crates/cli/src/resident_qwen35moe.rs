@@ -59,7 +59,6 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use data::qwen_tokenizer::QwenBpe;
-use data::tokenizer::Tokenizer;
 use qwen3::chat::{parse_request, SeqState};
 use qwen35moe::config::{LayerType, Qwen35Config};
 use qwen35moe::serve::{Engine, Scheduler};
@@ -170,14 +169,16 @@ impl ResidentModel for Qwen35Resident {
         // Tokenizer precedence: an explicit sibling tokenizer.json (or an
         // env override) wins; else a .gguf builds from its embedded
         // tokenizer.ggml.* KV; else there is nothing to tokenize with.
-        let tok = if !self.tokenizer.is_empty() {
-            QwenBpe::from_file(&self.tokenizer)?
+        let (tok, tok_dir, gguf_eos) = if !self.tokenizer.is_empty() {
+            (QwenBpe::from_file(&self.tokenizer)?, std::path::Path::new(&self.tokenizer).parent(), None)
         } else if let Some(gt) = reader.tokenizer() {
-            QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen35moe: {e}"))?
+            (QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen35moe: {e}"))?, None, gt.eos)
         } else {
             return Err("qwen35moe: no tokenizer (set BRAIN_QWEN35MOE_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
-        let eos = tok.encode("<|im_end|>").first().copied();
+        // The checkpoint's own eos ids, plus ChatML's end-of-turn marker: this
+        // resident renders every prompt as ChatML.
+        let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
         let ctx = Self::ctx();
         let max_concurrent = Self::max_concurrent();
         let path = self.path.clone();
@@ -190,13 +191,14 @@ impl ResidentModel for Qwen35Resident {
             let engine = Engine::from_map(cfg, &weights, ctx, max_concurrent);
             Scheduler::new(engine, max_concurrent as usize)
         })?;
-        Ok(Box::new(Qwen35Instance { tok, eos, sched }))
+        Ok(Box::new(Qwen35Instance { tok, stop, sched }))
     }
 }
 
 struct Qwen35Instance {
     tok: QwenBpe,
-    eos: Option<u32>,
+    /// The ids that end a generation (`data::generation::stop_ids`).
+    stop: Vec<u32>,
     sched: Scheduler,
 }
 
@@ -212,7 +214,7 @@ impl Instance for Qwen35Instance {
     /// admission/streaming/cancellation/rejection handling), just against
     /// `qwen35moe::serve::Scheduler` instead of `qwen3`'s.
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        run_batch_scheduled(&mut self.sched, &self.tok, self.eos, invs, progress)
+        run_batch_scheduled(&mut self.sched, &self.tok, &self.stop, invs, progress)
     }
 
     /// The paged engine's prefix-cache effectiveness — same shape as
@@ -239,7 +241,7 @@ impl Instance for Qwen35Instance {
 /// `block_size`/`num_blocks`/`max_batch`/`max_blocks_per_seq`/`max_prefill`)
 /// that a shared generic wrapper would need its own abstraction layer, out
 /// of scope for this task.
-fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, eos: Option<u32>, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, stop: &[u32], invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
     let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
     let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
     let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
@@ -251,7 +253,7 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, eos: Option<u32>, i
                 let seed = req.seed;
                 let max_new = req.max_new;
                 let seq = SeqState::new(&req, inv.cancel.clone());
-                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, eos }, sample, seed);
+                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, stop: stop.to_vec() }, sample, seed);
                 progress(bi, Progress::step(0, max_new as u32, "generating"));
                 seq_for_bi.push(Some(seq));
                 id_for_bi.push(Some(id));

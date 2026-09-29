@@ -117,14 +117,20 @@ fn infer(args: &[String]) {
     }
 
     let tok = if !tokenizer.is_empty() {
-        data::qwen_tokenizer::QwenBpe::from_file(&tokenizer)
+        data::qwen_tokenizer::QwenBpe::from_file(&tokenizer).map(|t| (t, None))
     } else {
         checkpoint::gguf::MmapGguf::open(&gguf_for_tok)
             .map_err(|e| format!("open {gguf_for_tok}: {e}"))
             .and_then(|mg| mg.tokenizer().ok_or_else(|| format!("{gguf_for_tok}: no embedded tokenizer")))
-            .and_then(|t| data::qwen_tokenizer::QwenBpe::from_gguf(&t))
+            .and_then(|t| Ok((data::qwen_tokenizer::QwenBpe::from_gguf(&t)?, t.eos)))
     };
-    let tok = match tok {
+    // The checkpoint's own eos ids, plus ChatML's end-of-turn marker when the
+    // prompt is rendered as ChatML.
+    let tok_dir = (!tokenizer.is_empty()).then(|| std::path::Path::new(&tokenizer).parent()).flatten();
+    let (tok, stop) = match tok.and_then(|(t, gguf_eos)| {
+        let stop = data::generation::stop_ids(tok_dir, &t, gguf_eos, chat.then_some("<|im_end|>"))?;
+        Ok((t, stop))
+    }) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("tokenizer load failed: {e}");
@@ -148,10 +154,9 @@ fn infer(args: &[String]) {
     let model = if i8 { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new(cfg, 1, cap, &init) };
     let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
 
-    let eos_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| tok.encode(s).first().copied()).collect();
     let mut rng = Rng::new(seed);
     let t_gen = std::time::Instant::now();
-    let gen = qwen35moe::sample::generate_kv(&model, &ids, max_new, temp, top_k, top_p, &eos_ids, &mut rng);
+    let gen = qwen35moe::sample::generate_kv(&model, &ids, max_new, temp, top_k, top_p, &stop, &mut rng);
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
 
     eprintln!("qwen35moe-timing load_ms={load_ms:.1} gen_ms={gen_ms:.1} tokens={}", gen.len());

@@ -229,7 +229,9 @@ impl Action for CaptionAction {
         let post = hot.tok.encode(&format!("\n{prompt}<|im_end|>\n<|im_start|>assistant\n"));
         let d = 896usize;
         let vocab = hot.dec.cfg.vocab as usize;
-        let eos = hot.tok.encode("<|im_end|>").first().copied();
+        // The checkpoint's own eos ids, plus the end of the ChatML turn this
+        // prompt opens.
+        let stop = data::generation::stop_ids(Some(std::path::Path::new(&dir)), &hot.tok, None, Some("<|im_end|>")).map_err(|e| format!("fastvlm: {e}"))?;
         hot.dec.reset_cache();
         let t_prefill = std::time::Instant::now();
         let mut inputs: Vec<qwen3::model::PrefillInput> = Vec::with_capacity(pre.len() + IMG_TOKENS as usize + post.len());
@@ -250,7 +252,7 @@ impl Action for CaptionAction {
                 .max_by(|a, b| a.1.total_cmp(b.1))
                 .map(|(i, _)| i as u32)
                 .ok_or("fastvlm: empty logits")?;
-            if Some(next) == eos {
+            if stop.contains(&next) {
                 break;
             }
             out_ids.push(next);
