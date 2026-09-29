@@ -14,7 +14,7 @@
 //! | tensor | shape | what its gradient exercises |
 //! |---|---|---|
 //! | `pre_transformer_resblock.{hidden,output,residual}_layer.weight` | `[D, in]` / `[D, D]` | the pre-transformer ResidualBlock: a ReLU branch (`leaky_relu_bwd` at `slope=0`) summed with a bare linear skip, both reading the same input |
-//! | `transformer_stack.{l}.pre_{seq,var}_attn_ln.weight` | `[D]` | `rms_inv_eps` + `rmsnorm_dw` on each sublayer's input norm |
+//! | `transformer_stack.{l}.pre_{seq,var}_attn_ln.weight` | `[D]` | `rms_inv` + `rmsnorm_dw` on each sublayer's input norm |
 //! | `transformer_stack.{l}.{seq,var}_attn.{query,key,value,out}_proj.weight` | `[D, D]` | four SEPARATE square GEMMs (this model fuses no QKV), so `matmul_dw` is gated per projection rather than through one packed region |
 //! | `transformer_stack.{l}.{seq,var}_attn.key_ln.weight` | `[head_dim]` | per-head QK-norm on K, an ordinary trainable gain |
 //! | `transformer_stack.{l}.{seq,var}_attn.query_ln.weight` | `[head_dim]` | **half of the PerDimScale fold** - see below |

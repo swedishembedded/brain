@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 use crate::train;
 
@@ -234,7 +234,7 @@ impl Engine {
             steps.push(self.gpu.step(
                 K_RMSNORM,
                 &[&self.x, self.w(&p("norm1.weight")), &self.xn],
-                &[d, t],
+                &[d, t, f(crate::RMS_EPS)],
                 t,
             ));
             steps.push(self.gpu.step(
@@ -273,7 +273,7 @@ impl Engine {
             steps.push(self.gpu.step(
                 K_RMSNORM,
                 &[&self.x, self.w(&p("norm2.weight")), &self.xn],
-                &[d, t],
+                &[d, t, f(crate::RMS_EPS)],
                 t,
             ));
             steps.push(self.gpu.step(
@@ -331,7 +331,7 @@ impl Engine {
         steps.push(self.gpu.step(
             K_RMSNORM,
             &[&self.x, self.w("norm.weight"), &self.xn],
-            &[d, t],
+            &[d, t, f(crate::RMS_EPS)],
             t,
         ));
         steps.push(self.gpu.step(

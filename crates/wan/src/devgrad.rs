@@ -111,10 +111,10 @@ pub const KERNELS: [(&str, &str); 36] = [
     ("matmul_dw", kernels::MATMUL_DW),
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ("bias_grad", kernels::BIAS_GRAD),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
-    ("rms_inv_eps", kernels::RMS_INV_EPS),
+    ("rmsnorm", kernels::RMSNORM),
+    ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dw", kernels::RMSNORM_DW),
-    ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     // The two-length attention family serves the self-attention (`t == t`) and
     // the text cross-attention alike.
@@ -451,7 +451,7 @@ impl BlockDev {
     }
 
     fn rms_bwd(&self, s: &mut Vec<Step>, x: &str, w: &str, dy: &str, dx: &str, inv: &str, gw: &str, rows: usize) {
-        s.extend(model::block::rmsnorm_eps_bwd(
+        s.extend(model::block::rmsnorm_bwd_at(
             &self.gpu,
             K_RMS_INV,
             K_RMS_DW,

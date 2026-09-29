@@ -392,7 +392,7 @@ impl Trainer {
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
             // attention
-            s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
             s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
             s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
@@ -402,7 +402,7 @@ impl Trainer {
             s.push(self.gpu.step(MATMUL, &[&lb.attn_out, self.w(&pn("attn.out.weight")), &self.proj], &[n, d, d], n * d));
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // moe
-            s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
             // norm=1, scale=1.0: `router_gate_train.wgsl`'s renormalised
             // Switch/Mixtral gate -- this model's behaviour since it was
@@ -421,7 +421,7 @@ impl Trainer {
         }
 
         // final norm + tied lm_head
-        s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n], n));
+        s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n, f(crate::RMS_EPS)], n));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab, IGNORE], n));
 
@@ -459,9 +459,9 @@ impl Trainer {
             self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d),
             self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d),
             // final norm backward -> dres[L]
-            self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n], n),
+            self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n, f(crate::RMS_EPS)], n),
             self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d),
-            self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n], n),
+            self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n, f(crate::RMS_EPS)], n),
         ];
 
         for l in (0..n_layers).rev() {
@@ -492,9 +492,9 @@ impl Trainer {
                 s.push(self.gpu.step(MATMUL_DX, &[&self.d_gate_pre, self.w(&ep("w_gate.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
             }
             // norm2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
-            s.push(self.gpu.step(RMS_INV, &[&lb.xmid, &self.inv], &[d, n], n));
+            s.push(self.gpu.step(RMS_INV, &[&lb.xmid, &self.inv], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &lb.xmid, &self.inv, self.g(&pn("norm2.weight"))], &[d, n], d));
-            s.push(self.gpu.step(RMSNORM_DX, &[&lb.xmid, self.w(&pn("norm2.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM_DX, &[&lb.xmid, self.w(&pn("norm2.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &lb.dxmid], &[n * d], n * d));
 
             // ===== attention backward (d_proj = dxmid) =====
@@ -511,9 +511,9 @@ impl Trainer {
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.xn1, self.g(&pn("attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_xn], &[n, d, 3 * d, 0], n * d));
             // norm1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
-            s.push(self.gpu.step(RMS_INV, &[&self.res[l], &self.inv], &[d, n], n));
+            s.push(self.gpu.step(RMS_INV, &[&self.res[l], &self.inv], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
-            s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 

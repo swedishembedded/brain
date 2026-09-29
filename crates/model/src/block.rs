@@ -137,10 +137,9 @@ impl Gqa {
     }
 }
 
-/// The epsilon `rmsnorm.wgsl` hardcodes. [`rmsnorm_fwd`] has to pass it
-/// explicitly because its two variants share one `Params` layout and the
-/// cooperative one reads a third `eps` field; a two-field list would hand it
-/// whatever the uniform happened to hold.
+/// The epsilon [`rmsnorm_fwd`] and [`rmsnorm_bwd`] normalize at. Every
+/// RMSNorm kernel takes its epsilon as a param; these two helpers do not yet
+/// take one from their caller, so this is the value they pass.
 pub const RMSNORM_EPS: f32 = 1e-6;
 
 /// RMSNorm forward: `out = (x / rms(x)) * w` over the last `dim` axis, one row
@@ -193,12 +192,12 @@ pub fn rmsnorm_bwd(
 ) -> Vec<Step> {
     let mut s = Vec::new();
     if let Some(gw) = gw {
-        s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows], rows));
+        s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows, f(RMSNORM_EPS)], rows));
         s.push(g.step(k.rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim));
     }
     let coop = (k.rmsnorm_dx_rows != UNREGISTERED).then_some(k.rmsnorm_dx_rows);
     let (kind, grid) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);
-    s.push(g.dispatch(kind, &[x, w, dy, dx], &[dim, rows], grid));
+    s.push(g.dispatch(kind, &[x, w, dy, dx], &[dim, rows, f(RMSNORM_EPS)], grid));
     s
 }
 
@@ -2402,10 +2401,10 @@ pub fn kv_expand_bwd(
     g.step(idx, &[d_dst, d_src], &[rows, heads_out, group, hd, src_stride, dst_stride, dst_off], rows * (heads_out / group) * hd)
 }
 
-/// RMSNorm forward with a runtime epsilon (`rmsnorm_eps`); the fixed-eps
-/// [`rmsnorm_fwd`] covers the 1e-6 family (Qwen/GLM), this one models whose
-/// checkpoints carry a different eps (LFM2.5: 1e-5).
-pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Step {
+/// RMSNorm forward on the per-element `rmsnorm` kernel at pipeline slot `idx`,
+/// for a model that keeps its own kernel table rather than a [`KernelIds`]
+/// (no cooperative-variant selection - that is [`rmsnorm_fwd`]'s seam).
+pub fn rmsnorm_fwd_at(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Step {
     g.step(idx, &[x, w, out], &[dim, rows, f(eps)], rows)
 }
 
@@ -2414,7 +2413,7 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 /// measured a win at *every* row width, widest where rows are narrow, because
 /// the per-element kernel's one-thread-per-row layout is uncoalesced) where the
 /// model registered it and the device can run a workgroup reduction, else the
-/// per-element reference (`rmsnorm` / `rmsnorm_eps`).
+/// per-element reference (`rmsnorm`).
 ///
 /// Both variants take the same buffers `[x, w, out]` and the same Params
 /// `[d, rows, eps]`, so only the index and the thread count change - which is
@@ -2422,16 +2421,11 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
 /// buffers (`Gpu::step`) or slices (`Gpu::step_sliced`) and both must share one
 /// selection rule.
 ///
-/// That shared Params layout is a REQUIREMENT on `reference`, not a given.
-/// `rmsnorm` declares only `[d, rows]` and hardcodes a 1e-6 epsilon, so it is
-/// a valid `reference` for a model whose epsilon is [`RMSNORM_EPS`] and for no
-/// other: the third word `rmsnorm_rows` reads is one `rmsnorm` discards. Pass
-/// `rmsnorm_eps` (identical math, epsilon as a parameter) for any other
-/// epsilon. Otherwise the normalization silently depends on which variant the
-/// DEVICE selects, which is a cross-backend correctness bug, not a rounding
-/// difference - a model with an `f32::EPSILON` epsilon measured ~10% relative
-/// divergence in its forward output between a backend with workgroup
-/// reductions and one without.
+/// The shared layout is now true of every RMSNorm kernel by construction:
+/// `rmsnorm` used to hardcode 1e-6 and ignore the third word, so a model with
+/// any other epsilon normalized differently depending on which variant the
+/// DEVICE selected (measured ~10% relative divergence for an `f32::EPSILON`
+/// model between a backend with workgroup reductions and one without).
 ///
 /// The policy itself lives in `backend_api::select`
 /// (`Op::RmsNorm`) keyed on `DeviceCaps`, never on a backend name; the `*_rows`
@@ -2545,10 +2539,11 @@ pub fn assert_rmsnorm_dx_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32
     }
 }
 
-/// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
-/// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
-/// kernel is eps-free - eps enters through the per-row inverse).
-pub fn rmsnorm_eps_bwd(
+/// [`rmsnorm_bwd`] over explicit pipeline slots (`rms_inv`, `rmsnorm_dw`,
+/// `rmsnorm_dx`) for a model that keeps its own kernel table: input grad
+/// always, gain grad only when `gw` is `Some` (the dw kernel is eps-free - eps
+/// enters through the per-row inverse).
+pub fn rmsnorm_bwd_at(
     g: &Gpu,
     inv_idx: usize,
     dw_idx: usize,

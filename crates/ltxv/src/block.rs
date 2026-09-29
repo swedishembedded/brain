@@ -97,7 +97,7 @@ use crate::rope::{apply_rope_step, ltx_rope_tables};
 // Kernel-table indices (order matches KERNELS below).
 const K_MATMUL: usize = 0;
 const K_BIAS_ADD: usize = 1;
-const K_RMSNORM_EPS: usize = 2;
+const K_RMSNORM: usize = 2;
 const K_GELU: usize = 3;
 const K_MUL: usize = 4;
 const K_ADD2: usize = 5;
@@ -231,7 +231,7 @@ const K_RMSNORM_ROWS: usize = 27;
 pub const KERNELS: [(&str, &str); 28] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("gelu", kernels::GELU),
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
@@ -624,7 +624,7 @@ fn attn_context_materialized(
 /// free). That is why it is a gated seam rather than a `gpu_core::upgrade`
 /// row.
 fn rmsnorm(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) {
-    let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM_EPS, Some(K_RMSNORM_ROWS), rows, dim);
+    let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, dim);
     s.push(gpu.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
 }
 

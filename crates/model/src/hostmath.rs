@@ -502,7 +502,7 @@ mod tests {
         let xb = gpu.storage_init("x", &x);
         let gb = gpu.storage_init("g", &g);
         let ob = gpu.storage(rows as u64 * d as u64);
-        let step = gpu.step(0, &[&xb, &gb, &ob], &[d as u32, rows as u32], rows as u32);
+        let step = gpu.step(0, &[&xb, &gb, &ob], &[d as u32, rows as u32, gpu_core::f(eps)], rows as u32);
         gpu.submit(&[], &[step]);
         let want = gpu.read(&ob, rows * d);
 

@@ -47,7 +47,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),

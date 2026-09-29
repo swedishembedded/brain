@@ -2103,13 +2103,13 @@ mod tests {
     /// reads 0. That is how an `eps` field added to a kernel becomes
     /// `eps = 0.0` at every call site nobody updated.
     #[test]
-    #[should_panic(expected = "rmsnorm_eps")]
+    #[should_panic(expected = "rmsnorm")]
     fn a_dispatch_shorter_than_its_params_block_is_refused() {
-        let gpu = Gpu::new_cpu(&[("rmsnorm_eps", kernels::RMSNORM_EPS)]);
+        let gpu = Gpu::new_cpu(&[("rmsnorm", kernels::RMSNORM)]);
         let x = gpu.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
         let w = gpu.storage_init("w", &[1.0; 4]);
         let out = gpu.storage(4);
-        // `rmsnorm_eps` declares {d_model, seq_len, eps}; eps is missing here.
+        // `rmsnorm` declares {d_model, seq_len, eps}; eps is missing here.
         let _ = gpu.step(0, &[&x, &w, &out], &[4, 1], 1);
     }
 
@@ -2118,7 +2118,7 @@ mod tests {
     /// several variants whose blocks differ in length).
     #[test]
     fn a_dispatch_with_the_full_params_block_runs() {
-        let gpu = Gpu::new_cpu(&[("rmsnorm_eps", kernels::RMSNORM_EPS)]);
+        let gpu = Gpu::new_cpu(&[("rmsnorm", kernels::RMSNORM)]);
         let x = gpu.storage_init("x", &[1.0, 2.0, 3.0, 4.0]);
         let w = gpu.storage_init("w", &[1.0; 4]);
         let out = gpu.storage(4);

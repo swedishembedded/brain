@@ -19,6 +19,7 @@
 struct Params {
     d_model: u32,
     n_rows: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -42,7 +43,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let v = x[base + c];
         ss = ss + v * v;
     }
-    let r = inverseSqrt(ss / f32(d) + 1e-6);
+    let r = inverseSqrt(ss / f32(d) + p.eps);
 
     var a = 0.0;
     for (var c: u32 = 0u; c < d; c = c + 1u) {

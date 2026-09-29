@@ -634,19 +634,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "pad1d_edge" => f(0, 8 * p(0)?),
 
         // ---- norms ----------------------------------------------------------
-        // params [d_model, rows(, eps)].
-        "rmsnorm" | "rmsnorm_eps" | "rmsnorm_rows" => {
+        // params [d_model, rows, eps].
+        "rmsnorm" | "rmsnorm_rows" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (4 * d + 2), 4 * (2 * rows * d + d))
         }
-        "rms_inv" | "rms_inv_eps" => {
+        "rms_inv" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (2 * d + 2), 4 * (rows * d + rows))
         }
         // `rmsnorm_dx_rows` is the workgroup-per-row variant: same math, same
         // traffic, only the thread mapping differs (mirrors
         // `layernorm_dx` / `layernorm_dx_rows` below).
-        "rmsnorm_dx" | "rmsnorm_dx_eps" | "rmsnorm_dx_rows" => {
+        "rmsnorm_dx" | "rmsnorm_dx_rows" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (9 * d + 7), 4 * (4 * rows * d + d))
         }

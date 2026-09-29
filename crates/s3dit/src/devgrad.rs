@@ -47,7 +47,7 @@ const K_UNPACK: usize = 19;
 const K_RDW: usize = 20;
 
 const KERNELS: [(&str, &str); 21] = [
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),
@@ -58,8 +58,8 @@ const KERNELS: [(&str, &str); 21] = [
     ("add2", kernels::ADD2),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
-    ("rms_inv_eps", kernels::RMS_INV_EPS),
-    ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
+    ("rms_inv", kernels::RMS_INV),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
     ("attn_bwd_dscores_bidir", kernels::ATTN_BWD_DSCORES_BIDIR),

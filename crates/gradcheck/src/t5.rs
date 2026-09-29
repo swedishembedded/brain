@@ -14,7 +14,7 @@
 //! |---|---|---|
 //! | `shared.weight` | `[vocab, D]` | the token-embedding scatter (`emb_bwd`) |
 //! | `rel_bias.weight` | `[buckets, heads]` | **the learned relative-position bias** — `attn_bwd_dbias` summed over the batch, `axpy`-accumulated over the block stack, `nchw_nlc` (the adjoint of the forward's `nlc_nchw` permute), then the `emb_bwd` scatter over the bucket ids |
-//! | `blocks.{l}.attn_norm.weight` | `[D]` | `rms_inv_eps` + `rmsnorm_dw` on the pre-attention norm |
+//! | `blocks.{l}.attn_norm.weight` | `[D]` | `rms_inv` + `rmsnorm_dw` on the pre-attention norm |
 //! | `blocks.{l}.qkv.weight` | `[3·heads·d_kv, D]` | the fused q‖k‖v GEMM's `matmul_dw`, fed by all three `attn_bwd_d{q,k,v}` regions |
 //! | `blocks.{l}.o.weight` | `[D, heads·d_kv]` | the attention output projection |
 //! | `blocks.{l}.ff_norm.weight` | `[D]` | the pre-FFN norm gain |
@@ -41,8 +41,8 @@
 //!   ±1 direction and keeps the *best* of four, which is the wrong selection
 //!   rule for a *partial* gradient error. The fold is covered by
 //!   [`check_t5_rel_bias_elementwise`], a per-ENTRY check, and by nothing else;
-//! * **RMSNorm with a runtime epsilon and no bias** — `rms_inv_eps` /
-//!   `rmsnorm_dx_eps`, not the eps-hardcoded `rmsnorm_dx`.
+//! * **RMSNorm with a runtime epsilon and no bias** — `rms_inv` /
+//!   `rmsnorm_dx` at T5's own epsilon.
 //!
 //! ## The objective
 //!

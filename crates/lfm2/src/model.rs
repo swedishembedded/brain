@@ -46,7 +46,7 @@ const EMBED_TILE: usize = 0;
 const MATMUL: usize = 1;
 const MATMUL_REG3: usize = 2;
 const MATMUL_TILE: usize = 3;
-const RMSNORM_EPS: usize = 4;
+const RMSNORM: usize = 4;
 const ROPE: usize = 5;
 const ROPE_BWD: usize = 6;
 const KV_EXPAND: usize = 7;
@@ -87,9 +87,9 @@ const GRADNORM_SQ: usize = 39;
 const GRAD_SCALE: usize = 40;
 const CLIP_COEF: usize = 41;
 const GRAD_SCALE_BUF: usize = 42;
-const RMSNORM_EPS_INV: usize = 43;
+const RMS_INV: usize = 43;
 const RMSNORM_DW: usize = 44;
-const RMSNORM_EPS_DX: usize = 45;
+const RMSNORM_DX: usize = 45;
 // Chunked-training set (8k backward + gathered MLM head).
 const DSCORES_CROSS: usize = 46;
 const DQ_CROSS: usize = 47;
@@ -145,7 +145,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_tile", kernels::MATMUL_TILE),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rope_base", kernels::ROPE_BASE),
     ("rope_base_bwd", kernels::ROPE_BASE_BWD),
     ("kv_expand", kernels::KV_EXPAND),
@@ -184,9 +184,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("grad_scale", kernels::GRAD_SCALE),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
-    ("rms_inv_eps", kernels::RMS_INV_EPS),
+    ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dw", kernels::RMSNORM_DW),
-    ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
     ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
@@ -941,8 +941,8 @@ impl Lfm {
         let (mk, mt) = linear_kernel(n as usize, hkv as usize);
         s.push(self.gpu.dispatch(mk, &[xn1, self.w(&p("attn.wv.weight")), &ab.v], &[n, d, hkv], mt));
         // Per-head QK-RMSNorm (head_dim rows), then RoPE in place.
-        s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.q_pre, self.w(&p("attn.q_norm.weight")), &ab.q, hd, n * nh, eps));
-        s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.k_pre, self.w(&p("attn.k_norm.weight")), &ab.k, hd, n * nkv, eps));
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, &ab.q_pre, self.w(&p("attn.q_norm.weight")), &ab.q, hd, n * nh, eps));
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, &ab.k_pre, self.w(&p("attn.k_norm.weight")), &ab.k, hd, n * nkv, eps));
         s.push(self.rope_step(&ab.q, n, nh, hd, hq, self.t, theta));
         s.push(self.rope_step(&ab.k, n, nkv, hd, hkv, self.t, theta));
         // GQA→MHA fused buffer for the trio consumers; the GEMM-attention path
@@ -977,7 +977,7 @@ impl Lfm {
         let n = b_use * self.t;
         let (d, ff, eps) = (self.cfg.d_model, self.cfg.d_ff, self.cfg.norm_eps);
         let p = |name: &str| format!("blocks.{l}.{name}");
-        s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &cb.xmid, self.w(&p("ln2.weight")), &cb.xn2, d, n, eps));
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, &cb.xmid, self.w(&p("ln2.weight")), &cb.xn2, d, n, eps));
         let (mk, mt) = linear_kernel(n as usize, ff as usize);
         s.push(self.gpu.dispatch(mk, &[&cb.xn2, self.w(&p("mlp.gate.weight")), &cb.gate_pre], &[n, d, ff], mt));
         let (mk, mt) = linear_kernel(n as usize, ff as usize);
@@ -1041,7 +1041,7 @@ impl Lfm {
                 }
                 Regime::Chunked { common, attn, conv, .. } => (common, Some(attn), Some(conv)),
             };
-            s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, res_of(l), self.w(&p("ln1.weight")), &common.xn1, d, n, eps));
+            s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, res_of(l), self.w(&p("ln1.weight")), &common.xn1, d, n, eps));
 
             let mixer_out = &self.proj;
             match ty {
@@ -1120,7 +1120,7 @@ impl Lfm {
 
         // Final norm.
         let last = c.n_layers() as usize;
-        s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, res_of(last), self.w("norm.weight"), &self.xn_final, d, n, eps));
+        s.push(block::rmsnorm_fwd_at(&self.gpu, RMSNORM, res_of(last), self.w("norm.weight"), &self.xn_final, d, n, eps));
 
         // Head.
         if let Some(hg) = &self.head {
@@ -1206,11 +1206,11 @@ impl Lfm {
     /// RMSNorm backward via the shared eps-aware builder.
     #[allow(clippy::too_many_arguments)]
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, inv: &DeviceBuffer, dim: u32, rows: u32) {
-        s.extend(block::rmsnorm_eps_bwd(
+        s.extend(block::rmsnorm_bwd_at(
             &self.gpu,
-            RMSNORM_EPS_INV,
+            RMS_INV,
             RMSNORM_DW,
-            RMSNORM_EPS_DX,
+            RMSNORM_DX,
             x,
             self.w(wname),
             dy,
@@ -1700,7 +1700,7 @@ mod tests {
         for (slot, want) in [
             (super::MATMUL, "matmul"),
             (super::MATMUL_REG3, "matmul_reg3"),
-            (super::RMSNORM_EPS, "rmsnorm_eps"),
+            (super::RMSNORM, "rmsnorm"),
             // `ROPE`/`ROPE_BWD` are local shorthands for the `rope_base` pair -
             // lfm's RoPE takes theta as a Params word, which is what
             // `rope_base.wgsl` is (`rope.wgsl` bakes the base in).

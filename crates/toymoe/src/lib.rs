@@ -10,6 +10,11 @@
 //! The model's public CLI entry points ([`run_generate`], [`run_train`],
 //! [`run_eval`]) are re-exported here for the `brain` binary.
 
+/// The epsilon of every RMSNorm in this model. It is brain's own
+/// architecture (no upstream checkpoint), so the value is fixed here once
+/// rather than read from a config.
+pub const RMS_EPS: f32 = 1e-6;
+
 pub mod model;
 pub mod train;
 

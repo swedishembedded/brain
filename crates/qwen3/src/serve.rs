@@ -1858,7 +1858,7 @@ impl Engine {
         let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
         match self.selector.select(Op::RmsNorm, shape, &self.caps) {
             KernelVariant::WorkgroupPerOutput => g.dispatch(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)),
-            _ => g.step(RMSNORM, &[x, w, out], &[d, rows], rows),
+            _ => g.step(RMSNORM, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], rows),
         }
     }
     // qwen3-serve-manual-gemm-dispatch END

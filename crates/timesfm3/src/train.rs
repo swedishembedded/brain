@@ -78,7 +78,7 @@ const K_MATMUL_REG3: usize = 1;
 const K_BIAS_ADD: usize = 2;
 const K_RELU: usize = 3;
 const K_ADD: usize = 4;
-const K_RMSNORM_EPS: usize = 5;
+const K_RMSNORM: usize = 5;
 const K_RMSNORM_ROWS: usize = 6;
 const K_ROPE_PARTIAL: usize = 7;
 const K_ATTN_SCORES_QK_KMASK: usize = 8;
@@ -92,9 +92,9 @@ const K_REGION_COPY: usize = 13;
 // own rule: a kernel name registered twice is rejected by the CPU backend's JIT) ----
 const K_ADD2: usize = 14;
 const K_PACK_QKV: usize = 15;
-const K_RMS_INV_EPS: usize = 16;
+const K_RMS_INV: usize = 16;
 const K_RMSNORM_DW: usize = 17;
-const K_RMSNORM_DX_EPS: usize = 18;
+const K_RMSNORM_DX: usize = 18;
 const K_MATMUL_DX: usize = 19;
 const K_MATMUL_DW: usize = 20;
 const K_ROPE_PARTIAL_BWD: usize = 21;
@@ -127,7 +127,7 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("relu_inplace", kernels::RELU_INPLACE),
     ("add_inplace", kernels::ADD_INPLACE),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope_partial", kernels::ROPE_PARTIAL),
     ("attn_scores_qk_kmask", kernels::ATTN_SCORES_QK_KMASK),
@@ -138,9 +138,9 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("region_copy", kernels::REGION_COPY),
     ("add2", kernels::ADD2),
     ("pack_qkv", kernels::PACK_QKV),
-    ("rms_inv_eps", kernels::RMS_INV_EPS),
+    ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dw", kernels::RMSNORM_DW),
-    ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("rope_partial_bwd", kernels::ROPE_PARTIAL_BWD),
@@ -879,12 +879,11 @@ fn linear(g: &Gpu, ps: &ParamStore, x: &DeviceBuffer, weight_name: &str, out: &D
     g.dispatch(kind, &[x, ps.w(weight_name), out], &[m as u32, k as u32, n as u32], threads)
 }
 
-/// The reference index is `rmsnorm_eps`, never the fixed-1e-6 `rmsnorm` - see
-/// `crate::model::Timesfm3::rmsnorm` for why pairing the latter with
-/// `rmsnorm_rows` makes the epsilon depend on the device.
+/// RMSNorm through `rms_variant` at this model's own epsilon - see
+/// `crate::model::Timesfm3::rmsnorm`.
 fn rmsnorm_w(g: &Gpu, x: &DeviceBuffer, weight: &DeviceBuffer, out: &DeviceBuffer, dim: usize, rows: usize, eps: f32) -> Step {
     let coop = Some(K_RMSNORM_ROWS);
-    let (kind, threads) = block::rms_variant(g, K_RMSNORM_EPS, coop, rows as u32, dim as u32);
+    let (kind, threads) = block::rms_variant(g, K_RMSNORM, coop, rows as u32, dim as u32);
     g.dispatch(kind, &[x, weight, out], &[dim as u32, rows as u32, f(eps)], threads)
 }
 
@@ -1089,7 +1088,7 @@ fn swap12_adjoint(g: &Gpu, d_dst: &DeviceBuffer, d_src: &DeviceBuffer, a0: usize
     swap12(g, d_dst, d_src, a0, a2, a1, d)
 }
 
-/// The `rms_inv_eps -> rmsnorm_dw -> rmsnorm_dx_eps` trio, via
+/// The `rms_inv -> rmsnorm_dw -> rmsnorm_dx` trio, via
 /// `model::block`'s shared helper. `gw`, when given, accumulates into it
 /// (matching `rmsnorm_dw`'s own `+=`); omit it for a norm whose weight is
 /// NOT one of `ps`'s own tensors (the query gain fold - see
@@ -1097,7 +1096,7 @@ fn swap12_adjoint(g: &Gpu, d_dst: &DeviceBuffer, d_src: &DeviceBuffer, a0: usize
 #[allow(clippy::too_many_arguments)]
 fn rmsnorm_bwd(g: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, dy: &DeviceBuffer, dx: &DeviceBuffer, gw: Option<&DeviceBuffer>, dim: usize, rows: usize, eps: f32) -> Vec<Step> {
     let inv = g.storage(rows as u64);
-    block::rmsnorm_eps_bwd(g, K_RMS_INV_EPS, K_RMSNORM_DW, K_RMSNORM_DX_EPS, x, w, dy, dx, &inv, gw, dim as u32, rows as u32, eps)
+    block::rmsnorm_bwd_at(g, K_RMS_INV, K_RMSNORM_DW, K_RMSNORM_DX, x, w, dy, dx, &inv, gw, dim as u32, rows as u32, eps)
 }
 
 /// `rope_partial_bwd`: the transpose rotation, in place on `buf` - same

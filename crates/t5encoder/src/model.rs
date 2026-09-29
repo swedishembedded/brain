@@ -105,7 +105,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
     ("embed", kernels::EMBED),
     ("nlc_nchw", kernels::NLC_NCHW),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("attn_scores_bidir_bias", kernels::ATTN_SCORES_BIDIR_BIAS),

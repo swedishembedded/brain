@@ -44,7 +44,7 @@ pub(crate) const K_FLASH_REG: usize = 15;
 pub(crate) const K_FLASH_REG2: usize = 16;
 
 pub(crate) const KERNELS: [(&str, &str); 17] = [
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),

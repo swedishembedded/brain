@@ -473,13 +473,10 @@ load of it must already be bare-identifier-indexed.
 | [`resize_nearest`](../../crates/kernels/wgsl/resize_nearest.wgsl) | Nearest-neighbour resize, NCHW, ARBITRARY output size | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`resize_nearest_dx`](../../crates/kernels/wgsl/resize_nearest_dx.wgsl) | Nearest-neighbour resize INPUT gradient, NCHW | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rms_inv`](../../crates/kernels/wgsl/rms_inv.wgsl) | Helper: per-row inverse RMS,  inv[n] = 1/sqrt(mean_c(x[n,c]^2) + eps) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
-| [`rms_inv_eps`](../../crates/kernels/wgsl/rms_inv_eps.wgsl) | Per-row inverse RMS with a RUNTIME epsilon | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`rmsnorm`](../../crates/kernels/wgsl/rmsnorm.wgsl) | RMSNorm:  out[t, c] = weight[c] * x[t, c] / sqrt(mean_c(x[t, c]^2) + eps) One invocation per row (token) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_dw`](../../crates/kernels/wgsl/rmsnorm_dw.wgsl) | RMSNorm backward w.r.t. the gain weight | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_dx`](../../crates/kernels/wgsl/rmsnorm_dx.wgsl) | RMSNorm backward w.r.t. the input x | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
-| [`rmsnorm_dx_eps`](../../crates/kernels/wgsl/rmsnorm_dx_eps.wgsl) | RMSNorm backward w.r.t. x, with a RUNTIME epsilon (eps-parameterized twin of rmsnorm_dx, which hardcodes 1e-6) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_dx_rows`](../../crates/kernels/wgsl/rmsnorm_dx_rows.wgsl) | RMSNorm backward w.r.t. x, one WORKGROUP per row - the coalesced variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
-| [`rmsnorm_eps`](../../crates/kernels/wgsl/rmsnorm_eps.wgsl) | RMSNorm with a RUNTIME epsilon | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`rmsnorm_quant_fused`](../../crates/kernels/wgsl/rmsnorm_quant_fused.wgsl) | RMSNorm fused with dynamic per-row int8 activation quantization - | 64-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ | - | int8 | f32 |
 | [`rmsnorm_rows`](../../crates/kernels/wgsl/rmsnorm_rows.wgsl) | RMSNorm, one WORKGROUP per row - the decode-regime variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`roof_dp4a`](../../crates/kernels/wgsl/roof_dp4a.wgsl) | Peak packed-int8 (DP4A) rate probe - the INT8 half of the device roofline | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | int8 | f32 |

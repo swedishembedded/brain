@@ -146,7 +146,7 @@ use crate::import::validate_manifest;
 
 const K_MATMUL: usize = 0;
 const K_BIAS_ADD: usize = 1;
-const K_RMSNORM_EPS: usize = 2;
+const K_RMSNORM: usize = 2;
 const K_SILU_MUL: usize = 3;
 const K_MUL: usize = 4;
 const K_ADD2: usize = 5;
@@ -162,7 +162,7 @@ const K_PIXEL_SHUFFLE3D_CL: usize = 10;
 pub const KERNELS: [(&str, &str); 11] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("silu_mul", kernels::SILU_MUL),
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
@@ -466,7 +466,7 @@ fn linear_step(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer,
 }
 
 fn rmsnorm_step(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) {
-    s.push(gpu.step(K_RMSNORM_EPS, &[x, w, out], &[dim, rows, f(eps)], rows));
+    s.push(gpu.step(K_RMSNORM, &[x, w, out], &[dim, rows, f(eps)], rows));
 }
 
 /// `out = x*(1+scale) + shift`, `scale`/`shift` already row-broadcast to

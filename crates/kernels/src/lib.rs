@@ -905,20 +905,14 @@ pub const RESIZE_NEAREST: &str = include_str!("../wgsl/resize_nearest.wgsl");
 pub const RESIZE_NEAREST_DX: &str = include_str!("../wgsl/resize_nearest_dx.wgsl");
 /// `wgsl/rms_inv.wgsl`
 pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
-/// `wgsl/rms_inv_eps.wgsl`
-pub const RMS_INV_EPS: &str = include_str!("../wgsl/rms_inv_eps.wgsl");
 /// `wgsl/rmsnorm.wgsl`
 pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
 /// `wgsl/rmsnorm_dw.wgsl`
 pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 /// `wgsl/rmsnorm_dx.wgsl`
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
-/// `wgsl/rmsnorm_dx_eps.wgsl`
-pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
 /// `wgsl/rmsnorm_dx_rows.wgsl`
 pub const RMSNORM_DX_ROWS: &str = include_str!("../wgsl/rmsnorm_dx_rows.wgsl");
-/// `wgsl/rmsnorm_eps.wgsl`
-pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rmsnorm_quant_fused.wgsl`
 pub const RMSNORM_QUANT_FUSED: &str = include_str!("../wgsl/rmsnorm_quant_fused.wgsl");
 /// `wgsl/rmsnorm_rows.wgsl`
@@ -1624,13 +1618,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("resize_nearest", RESIZE_NEAREST),
     ("resize_nearest_dx", RESIZE_NEAREST_DX),
     ("rms_inv", RMS_INV),
-    ("rms_inv_eps", RMS_INV_EPS),
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
-    ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
     ("rmsnorm_dx_rows", RMSNORM_DX_ROWS),
-    ("rmsnorm_eps", RMSNORM_EPS),
     ("rmsnorm_quant_fused", RMSNORM_QUANT_FUSED),
     ("rmsnorm_rows", RMSNORM_ROWS),
     ("roof_dp4a", ROOF_DP4A),

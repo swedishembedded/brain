@@ -47,7 +47,7 @@ use model::lora::RuntimeLora;
 
 // Kernel-table indices (order matches KERNELS).
 pub(crate) const K_LAYERNORM: usize = 0;
-pub(crate) const K_RMSNORM_EPS: usize = 1;
+pub(crate) const K_RMSNORM: usize = 1;
 pub(crate) const K_MATMUL: usize = 2;
 pub(crate) const K_BIAS_ADD: usize = 3;
 pub(crate) const K_ROPE: usize = 4;
@@ -95,7 +95,7 @@ pub(crate) const K_LORA_DELTA: usize = 27;
 /// existing kernels at Wan's shapes.
 pub const KERNELS: [(&str, &str); 28] = [
     ("layernorm", kernels::LAYERNORM),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -496,7 +496,7 @@ fn linear(gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, x: &DeviceBuffer, w: &Linear,
 /// `"rms_norm_across_heads"`. Normalising per head instead would divide by a
 /// different scalar for every head and still produce a plausible-looking video.
 fn qk_norm(gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, rows: u32, dim: u32, eps: f32) {
-    let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM_EPS, sel.rms_rows, rows, dim);
+    let (kind, threads) = model::block::rms_variant(gpu, K_RMSNORM, sel.rms_rows, rows, dim);
     s.push(gpu.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], threads));
 }
 

@@ -93,7 +93,7 @@ pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
 // Kernel-table indices (order matches KERNELS below).
 const K_MATMUL: usize = 0;
-const K_RMSNORM_EPS: usize = 1;
+const K_RMSNORM: usize = 1;
 const K_GELU: usize = 2;
 const K_MUL: usize = 3;
 const K_ADD2: usize = 4;
@@ -112,7 +112,7 @@ const K_MATMUL_I8_DYN: usize = 11;
 /// this crate ships).
 pub const KERNELS: [(&str, &str); 12] = [
     ("matmul", kernels::MATMUL),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("gelu", kernels::GELU),
     ("mul", kernels::MUL),
     ("add2", kernels::ADD2),
@@ -334,7 +334,7 @@ fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Proj, out: &Device
 /// (`q_norm`/`k_norm`/the four block-level norms) or the synthesized all-ones
 /// buffer (`v_norm`, `with_scale=False` - see [`AttnWeights`]'s doc).
 fn rmsnorm(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) {
-    s.push(gpu.step(K_RMSNORM_EPS, &[x, w, out], &[dim, rows, gpu_core::f(eps)], rows));
+    s.push(gpu.step(K_RMSNORM, &[x, w, out], &[dim, rows, gpu_core::f(eps)], rows));
 }
 
 fn add2(gpu: &Gpu, s: &mut Vec<Step>, a: &DeviceBuffer, b: &DeviceBuffer, y: &DeviceBuffer, n: u32) {

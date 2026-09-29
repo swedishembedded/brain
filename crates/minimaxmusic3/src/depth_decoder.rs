@@ -614,7 +614,7 @@ pub fn step_batch(w: &DepthDecoderWeights, cfg: &DepthDecoderConfig, caches: &mu
 /// attention sublayer, and is deliberately NOT used: it dispatches RoPE
 /// unconditionally (this architecture has none) and is `b = 1`.
 pub const PIPELINES: &[(&str, &str)] = &[
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
@@ -626,7 +626,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("add2", kernels::ADD2),
 ];
-const K_RMSNORM_EPS: usize = 0;
+const K_RMSNORM: usize = 0;
 const K_RMSNORM_ROWS: usize = 1;
 const K_MATMUL: usize = 2;
 const K_MATMUL_REG3: usize = 3;
@@ -643,7 +643,7 @@ const K_ADD2: usize = 10;
 /// dispatches.
 fn kernel_ids() -> KernelIds {
     KernelIds {
-        rmsnorm: K_RMSNORM_EPS,
+        rmsnorm: K_RMSNORM,
         rms_inv: block::UNREGISTERED,
         rmsnorm_dx: block::UNREGISTERED,
         rmsnorm_dx_rows: block::UNREGISTERED,
@@ -673,7 +673,7 @@ fn kernel_ids() -> KernelIds {
 /// kernel a two-field param list would read whatever the uniform happened to
 /// contain as the epsilon.
 fn rms_step(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, rows: u32, d: u32) -> Step {
-    let (kind, threads) = block::rms_variant(gpu, K_RMSNORM_EPS, Some(K_RMSNORM_ROWS), rows, d);
+    let (kind, threads) = block::rms_variant(gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, d);
     gpu.dispatch(kind, &[x, w, out], &[d, rows, f(RMS_EPS)], threads)
 }
 

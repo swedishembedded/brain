@@ -11,7 +11,7 @@
 // @dtype f32
 //
 // RMSNorm backward w.r.t. x, one WORKGROUP per row - the coalesced twin of
-// `rmsnorm_dx.wgsl`. Same math, same `Params` (`d_model`, `n_rows`), same 4
+// `rmsnorm_dx.wgsl`. Same math, same `Params` (`d_model`, `n_rows`, `eps`), same 4
 // storage bindings; only the row's own two reductions move from one thread
 // walking the whole row twice to 64 threads splitting it once.
 //
@@ -37,6 +37,7 @@
 struct Params {
     d_model: u32,
     n_rows: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -74,7 +75,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         tss = tss + p_ss[i];
         ta = ta + p_a[i];
     }
-    let r = inverseSqrt(tss / f32(d) + 1e-6);
+    let r = inverseSqrt(tss / f32(d) + p.eps);
     let coef = r * r * r * ta / f32(d);
     for (var c = t; c < d; c = c + 64u) {
         dx[base + c] = r * weight[c] * dy[base + c] - coef * x[base + c];

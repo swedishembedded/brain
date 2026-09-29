@@ -130,7 +130,7 @@ impl Fincast {
         self.gpu.submit(&[], &[s]);
     }
     fn rms(&self, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, d: usize, rows: usize) {
-        let s = self.gpu.step(RMSNORM, &[x, self.w(wname), out], &[d as u32, rows as u32], rows as u32);
+        let s = self.gpu.step(RMSNORM, &[x, self.w(wname), out], &[d as u32, rows as u32, gpu_core::f(self.cfg.rms_norm_eps)], rows as u32);
         self.gpu.submit(&[], &[s]);
     }
     fn layernorm(&self, x: &DeviceBuffer, gname: &str, bname: &str, out: &DeviceBuffer, d: usize, rows: usize) {

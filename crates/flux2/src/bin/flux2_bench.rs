@@ -39,7 +39,7 @@ const P40_FP32_TFLOPS: f64 = 11.76;
 const KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul_reg2", kernels::MATMUL_REG2),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
@@ -944,7 +944,7 @@ fn main() {
             gpu.write(&w, bytemuck::cast_slice(&vec![1.25f32; d as usize]));
             let mut outs = Vec::new();
             for (name, kind, prm, threads) in [
-                ("rmsnorm_eps", K_RMS, vec![d, rows, f(1e-6)], rows),
+                ("rmsnorm", K_RMS, vec![d, rows, f(1e-6)], rows),
                 ("rmsnorm_rows", K_RMS_ROWS, vec![d, rows, f(1e-6)], rows * 64),
             ] {
                 let o = gpu.storage(rows as u64 * d as u64);

@@ -36,7 +36,7 @@
 //! compiled-in `1e-6`, which is the checkpoint's own
 //! `attention.layer_norm_rms_epsilon`. [`DeepseekV2::new_on`] asserts the config
 //! agrees rather than silently normalising with a different epsilon than the
-//! reference (`model::block::rmsnorm_eps_fwd` exists for a model that needs a
+//! reference (`model::block::rmsnorm_fwd_at` exists for a model that needs a
 //! different one; this one does not).
 //!
 //! **Router.** `model::moe::RouterKind::Softmax` with `aux_coef = z_coef = 0`:
@@ -756,7 +756,7 @@ impl DeepseekV2 {
         assert!(
             (cfg.rms_eps() - 1e-6).abs() < 1e-9,
             "deepseekv2: rmsnorm.wgsl's epsilon is compiled in at 1e-6 but this config asks for {} -- \
-             use model::block::rmsnorm_eps_fwd/bwd rather than normalising with the wrong epsilon",
+             use model::block::rmsnorm_fwd_at/bwd_at rather than normalising with the wrong epsilon",
             cfg.rms_eps()
         );
         assert!(cfg.top_k() >= 1 && cfg.top_k() <= cfg.n_experts(), "deepseekv2: top_k must be in 1..=n_experts");

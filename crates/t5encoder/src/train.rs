@@ -38,7 +38,7 @@
 //!    the "vocab". Both are gathers; there are no atomics.
 //! 4. **RMSNorm with a runtime epsilon.** T5 is `eps = 1e-6`, and the backward
 //!    recomputes `r = 1/√(mean(x²)+eps)` — so it goes through
-//!    `block::rmsnorm_eps_bwd` (`rms_inv_eps` + `rmsnorm_dw` + `rmsnorm_dx_eps`),
+//!    `block::rmsnorm_bwd_at` (`rms_inv_eps` + `rmsnorm_dw` + `rmsnorm_dx_eps`),
 //!    never the eps-hardcoded `rmsnorm_dx`. All three are barrier-free
 //!    per-row/per-channel gathers, which is why they behave identically on
 //!    `backend-cpu` (which reports `workgroup_reductions == false`) and on the
@@ -93,9 +93,9 @@ const K_GELU: usize = 10;
 const K_MUL: usize = 11;
 const K_RMSNORM_ROWS: usize = 12;
 // ---- backward, APPENDED so every index above is unchanged ----
-const K_RMS_INV_EPS: usize = 13;
+const K_RMS_INV: usize = 13;
 const K_RMSNORM_DW: usize = 14;
-const K_RMSNORM_DX_EPS: usize = 15;
+const K_RMSNORM_DX: usize = 15;
 const K_MATMUL_DX: usize = 16;
 const K_MATMUL_DW: usize = 17;
 const K_MATMUL_DX_REG: usize = 18;
@@ -119,7 +119,7 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
     ("embed", kernels::EMBED),
     ("nlc_nchw", kernels::NLC_NCHW),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("attn_scores_bidir_bias", kernels::ATTN_SCORES_BIDIR_BIAS),
@@ -129,9 +129,9 @@ pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("gelu", kernels::GELU),
     ("mul", kernels::MUL),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
-    ("rms_inv_eps", kernels::RMS_INV_EPS),
+    ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dw", kernels::RMSNORM_DW),
-    ("rmsnorm_dx_eps", kernels::RMSNORM_DX_EPS),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
@@ -453,11 +453,11 @@ impl T5Trainer {
 
         // ---- final RMSNorm ----
         let last = c.layers as usize;
-        s.extend(block::rmsnorm_eps_bwd(
+        s.extend(block::rmsnorm_bwd_at(
             g,
-            K_RMS_INV_EPS,
+            K_RMS_INV,
             K_RMSNORM_DW,
-            K_RMSNORM_DX_EPS,
+            K_RMSNORM_DX,
             &self.x[last],
             self.w("final_norm.weight"),
             &bw.seed_hidden,
@@ -499,11 +499,11 @@ impl T5Trainer {
             s.push(g.dispatch(dx, &[&bw.d_wi0, self.w(&format!("{p}.wi_0.weight")), &bw.d_branch], &[n, d, ff, 0], dxt));
             s.push(g.dispatch(dx, &[&bw.d_wi1, self.w(&format!("{p}.wi_1.weight")), &bw.d_branch], &[n, d, ff, 1], dxt));
 
-            s.extend(block::rmsnorm_eps_bwd(
+            s.extend(block::rmsnorm_bwd_at(
                 g,
-                K_RMS_INV_EPS,
+                K_RMS_INV,
                 K_RMSNORM_DW,
-                K_RMSNORM_DX_EPS,
+                K_RMSNORM_DX,
                 &bb.res,
                 self.w(&format!("{p}.ff_norm.weight")),
                 &bw.d_branch,
@@ -545,11 +545,11 @@ impl T5Trainer {
             let (dx, dxt) = self.bwd_gemm(n, d, K_MATMUL_DX, K_MATMUL_DX_REG);
             s.push(g.dispatch(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, d, 3 * inner, 0], dxt));
 
-            s.extend(block::rmsnorm_eps_bwd(
+            s.extend(block::rmsnorm_bwd_at(
                 g,
-                K_RMS_INV_EPS,
+                K_RMS_INV,
                 K_RMSNORM_DW,
-                K_RMSNORM_DX_EPS,
+                K_RMSNORM_DX,
                 &self.x[l],
                 self.w(&format!("{p}.attn_norm.weight")),
                 &bw.d_branch,

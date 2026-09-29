@@ -432,7 +432,7 @@ impl Dflash2 {
     }
 
     fn rms(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> gpu_core::Step {
-        model::block::rmsnorm_eps_fwd(&self.gpu, self.k.rmsnorm, x, w, out, dim, rows, self.cfg.eps)
+        model::block::rmsnorm_fwd_at(&self.gpu, self.k.rmsnorm, x, w, out, dim, rows, self.cfg.eps)
     }
 
     /// One grouped dynamic causal convolution over the whole block.

@@ -16,6 +16,7 @@
 struct Params {
     d_model: u32,
     seq_len: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -36,7 +37,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let v = x[base + c];
         ss = ss + v * v;
     }
-    let inv = inverseSqrt(ss / f32(p.d_model) + 1e-6);
+    let inv = inverseSqrt(ss / f32(p.d_model) + p.eps);
     for (var c: u32 = 0u; c < p.d_model; c = c + 1u) {
         out[base + c] = weight[c] * x[base + c] * inv;
     }

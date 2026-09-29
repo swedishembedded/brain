@@ -58,7 +58,7 @@ const MATMUL_REG3: usize = 1;
 const BIAS_ADD: usize = 2;
 const RELU: usize = 3;
 const ADD: usize = 4;
-const RMSNORM_EPS: usize = 5;
+const RMSNORM: usize = 5;
 const RMSNORM_ROWS: usize = 6;
 const ROPE_PARTIAL: usize = 7;
 const ATTN_SCORES_QK_KMASK: usize = 8;
@@ -73,7 +73,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("relu_inplace", kernels::RELU_INPLACE),
     ("add_inplace", kernels::ADD_INPLACE),
-    ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm", kernels::RMSNORM),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope_partial", kernels::ROPE_PARTIAL),
     ("attn_scores_qk_kmask", kernels::ATTN_SCORES_QK_KMASK),
@@ -184,24 +184,17 @@ impl Timesfm3 {
     /// cooperative `rmsnorm_rows` (one WORKGROUP of 64 per row) kernel; the two
     /// need DIFFERENT dispatch thread counts (`rows` vs `rows*64`), which is
     /// exactly what `rms_variant` returns alongside the kind - `block::
-    /// rmsnorm_eps_fwd` hardcodes `rows` regardless of kind (it is meant for
+    /// rmsnorm_fwd_at` hardcodes `rows` regardless of kind (it is meant for
     /// the reference kernel only), so the step is built directly here instead
     /// of through that helper, using the thread count `rms_variant` actually
     /// picked for the selected kernel.
     ///
-    /// The reference index is `rmsnorm_eps`, NOT `rmsnorm`: both kernels take
-    /// the same `[x, w, out]` buffers, but `rmsnorm` declares only
-    /// `[d, rows]` and hardcodes a 1e-6 epsilon, while `rmsnorm_rows` reads a
-    /// third `eps` field. Pairing those two would make the normalization
-    /// depend on which variant the DEVICE happens to select - this model's
-    /// epsilon is `f32::EPSILON`, an order of magnitude under 1e-6, so a
-    /// device without workgroup reductions would quietly normalize with a
-    /// different epsilon than one with them. `rmsnorm_eps` is the same
-    /// per-element reference with the epsilon as a parameter, which is what
-    /// makes the pair interchangeable at all.
+    /// Both variants take `[d, rows, eps]`, so this model's `f32::EPSILON`
+    /// (an order of magnitude under 1e-6) reaches whichever one the device
+    /// selects.
     fn rmsnorm(&self, x: &DeviceBuffer, weight: &DeviceBuffer, out: &DeviceBuffer, dim: usize, rows: usize) -> gpu_core::Step {
         let coop = Some(RMSNORM_ROWS);
-        let (kind, threads) = block::rms_variant(&self.gpu, RMSNORM_EPS, coop, rows as u32, dim as u32);
+        let (kind, threads) = block::rms_variant(&self.gpu, RMSNORM, coop, rows as u32, dim as u32);
         self.gpu.dispatch(kind, &[x, weight, out], &[dim as u32, rows as u32, f(self.cfg.rms_norm_eps)], threads)
     }
 

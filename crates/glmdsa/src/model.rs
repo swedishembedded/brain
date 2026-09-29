@@ -758,10 +758,10 @@ impl Glm {
     /// input grad via `rmsnorm_dx` into `dx`.
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         if self.trainable(wname) {
-            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows], rows));
+            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(model::block::RMSNORM_EPS)], rows));
             s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
         }
-        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows], rows));
+        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(model::block::RMSNORM_EPS)], rows));
     }
 
     /// DSA indexer forward for one `Full` layer: project q (from the q residual)
