@@ -215,7 +215,10 @@ fn prelu_bwd_k(
     let dxb = gpu.storage(total as u64);
     let dab = gpu.storage(c as u64);
     let params = [n as u32, c as u32, h as u32, w as u32, nslope as u32];
-    let s = gpu.step(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, (c * tpc) as u32);
+    // A cooperative variant (several threads per channel) is counted in
+    // workgroups, one per channel; the reference in threads.
+    let grid = if tpc > 1 { gpu_core::Dispatch::Workgroups(c as u32) } else { gpu_core::Dispatch::Threads(c as u32) };
+    let s = gpu.dispatch(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, grid);
     gpu.submit(&[&dab], &[s]);
     gpu.poll_wait();
     (gpu.read(&dxb, total), gpu.read(&dab, c))
@@ -587,8 +590,9 @@ fn da_accumulates_into_a_pre_zeroed_buffer() {
         let dyb = gpu.storage_init("dy", &dy);
         let dxb = gpu.storage(total as u64);
         let dab = gpu.storage(c as u64);
-        let s1 = gpu.step(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, (c * tpc) as u32);
-        let s2 = gpu.step(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, (c * tpc) as u32);
+        let grid = if tpc > 1 { gpu_core::Dispatch::Workgroups(c as u32) } else { gpu_core::Dispatch::Threads(c as u32) };
+        let s1 = gpu.dispatch(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, grid);
+        let s2 = gpu.dispatch(kind, &[&xb, &ab, &dyb, &dxb, &dab], &params, grid);
         gpu.submit(&[&dab], &[s1, s2]); // cleared ONCE, dispatched twice
         gpu.poll_wait();
         let twice = gpu.read(&dab, c);

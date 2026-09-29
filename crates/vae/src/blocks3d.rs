@@ -540,20 +540,20 @@ impl<'a> Builder3d<'a> {
                 ],
                 cnt * cinkkk,
             ));
-            self.steps.push(self.gpu.step_sliced(
+            self.steps.push(self.gpu.dispatch_sliced(
                 K_MATMUL,
                 &[&col, wgt, &nlc.buf],
                 &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
                 &[cnt, cinkkk, cout],
-                cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+                gpu_core::Dispatch::Workgroups(cnt.div_ceil(128) * cout.div_ceil(128)),
             ));
             pos += cnt;
         }
-        self.steps.push(self.gpu.step(
+        self.steps.push(self.gpu.dispatch(
             K_NLC_BIAS_NCHW,
             &[&nlc.buf, bias, &y.buf],
             &[pos_n * cout, cout, pos_n],
-            cout.div_ceil(64) * pos_n.div_ceil(64) * 64,
+            gpu_core::Dispatch::Workgroups(cout.div_ceil(64) * pos_n.div_ceil(64)),
         ));
         self.free(nlc);
     }

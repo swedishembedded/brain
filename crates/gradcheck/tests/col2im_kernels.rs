@@ -94,11 +94,11 @@ fn both_ways(gpu: &Gpu, c: &Case) -> (Vec<f32>, Vec<f32>) {
             gpu.step(K_NCHW_NLC, &[&dy_b, &dy_nlc], &[c.cout * hw as u32, c.cout, hw as u32], c.cout * hw as u32),
             // dcol[m,k] = sum_n dY[m,n] * W[n,k];  m=HW, n=Cout, k=CinKK.
             // `accumulate = 0`: dcol is written, not accumulated.
-            gpu.step(
+            gpu.dispatch(
                 K_MM_DX,
                 &[&dy_nlc, &w_b, &dcol],
                 &[hw as u32, cinkk as u32, c.cout, 0],
-                (hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128) * 256,
+                gpu_core::Dispatch::Workgroups((hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128)),
             ),
             gpu.step(
                 K_COL2IM,

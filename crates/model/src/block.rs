@@ -682,11 +682,11 @@ pub fn gqa_chunk_step(
         // doc on `paged_attention_fused` names why decode's arm is the only
         // one batch-dependent).
         if paged_attention_fused(g, true, false, head_dim, 0) {
-            steps.push(g.step(
+            steps.push(g.dispatch(
                 fused,
                 &[q, kcache, vcache, block_ids, seq_lens, ctx],
                 &[n, n_heads, n_kv_heads, head_dim, group, cap, 1],
-                n_heads * n.div_ceil(64) * 256,
+                gpu_core::Dispatch::Workgroups(n_heads * n.div_ceil(64)),
             ));
             return steps;
         }

@@ -350,12 +350,12 @@ pub fn conv1d_bias_fwd(
         // width, so the NN GEMM writes the final NCL tensor and the bias is
         // the one shared `add_chan_inplace` over the whole batch.
         for nn in 0..u64::from(c.n) {
-            steps.push(g.step_sliced(
+            steps.push(g.dispatch_sliced(
                 k.matmul_nn,
                 &[w, x, y],
                 &[(0, 0), (nn * x_row, x_row), (nn * y_row, y_row)],
                 &[c.cout, c.lo, c.cin, 0],
-                reg_tiles(c.cout, c.lo) * 256,
+                gpu_core::Dispatch::Workgroups(reg_tiles(c.cout, c.lo)),
             ));
         }
         steps.push(bias_step(g, k, c, y, bias));
@@ -377,21 +377,21 @@ pub fn conv1d_bias_fwd(
                 &[c.cin, c.l, c.k, c.stride, c.pad, c.dilation, cink, pos, cnt],
                 cnt * cink,
             ));
-            steps.push(g.step_sliced(
+            steps.push(g.dispatch_sliced(
                 k.matmul,
                 &[&col, w, &nlc],
                 &[(0, 0), (0, 0), (u64::from(pos) * u64::from(c.cout), u64::from(cnt) * u64::from(c.cout))],
                 &[cnt, cink, c.cout],
-                reg_tiles(cnt, c.cout) * 256,
+                gpu_core::Dispatch::Workgroups(reg_tiles(cnt, c.cout)),
             ));
             pos += cnt;
         }
-        steps.push(g.step_sliced(
+        steps.push(g.dispatch_sliced(
             k.nlc_bias,
             &[&nlc, bias, y],
             &[(0, 0), (0, 0), yo],
             &[c.lo * c.cout, c.cout, c.lo],
-            c.cout.div_ceil(64) * c.lo.div_ceil(64) * 64,
+            gpu_core::Dispatch::Workgroups(c.cout.div_ceil(64) * c.lo.div_ceil(64)),
         ));
     }
     steps
@@ -446,12 +446,12 @@ pub fn convtr1d_bias_fwd(
     let mut steps = Vec::new();
     for nn in 0..u64::from(c.n) {
         let (xo, yo) = ((nn * x_row, x_row), (nn * y_row, y_row));
-        steps.push(g.step_sliced(
+        steps.push(g.dispatch_sliced(
             k.matmul_tn,
             &[w, x, &col],
             &[(0, 0), xo, (0, 0)],
             &[c.cin, c.l, c.cout * c.k, 1],
-            reg_tiles(c.cout * c.k, c.l) * 256,
+            gpu_core::Dispatch::Workgroups(reg_tiles(c.cout * c.k, c.l)),
         ));
         steps.push(g.step_sliced(
             k.col2im,

@@ -149,12 +149,12 @@ fn both_registered_rmsnorm_kernels_honour_the_configured_epsilon() {
 
         let xb = gpu.storage_init("rms_eps_x", &x);
         let wb = gpu.storage_init("rms_eps_w", &w);
-        for &(kind, threads, what) in
-            &[(RMSNORM, rows as u32, "reference"), (RMSNORM_ROWS, rows as u32 * 64, "cooperative")]
+        for &(kind, grid, what) in
+            &[(RMSNORM, gpu_core::Dispatch::Threads(rows as u32), "reference"), (RMSNORM_ROWS, gpu_core::Dispatch::Workgroups(rows as u32), "cooperative")]
         {
             let ob = gpu.storage((rows * dim) as u64);
             let params = [dim as u32, rows as u32, gpu_core::f(cfg.rms_norm_eps)];
-            gpu.submit(&[], &[gpu.step(kind, &[&xb, &wb, &ob], &params, threads)]);
+            gpu.submit(&[], &[gpu.dispatch(kind, &[&xb, &wb, &ob], &params, grid)]);
             let got = gpu.read(&ob, rows * dim);
             let e = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
             assert!(e <= 2e-5, "{what} rmsnorm ({rows}x{dim}): relative error {e:e} exceeds 2e-5");

@@ -73,11 +73,11 @@ fn int8_gemm_matches_fp32() {
     let steps = [
         gpu.step(K_MAXR, &[&xb, &sx], &[m as u32, k as u32], m as u32),
         gpu.step(K_QP, &[&xb, &sx, &xq], &[m as u32, k as u32], (m * k / 4) as u32),
-        gpu.step(
+        gpu.dispatch(
             K_MM8,
             &[&xq, &wqb, &sx, &swb, &out8],
             &[m as u32, (k / 4) as u32, n as u32],
-            (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256,
+            gpu_core::Dispatch::Workgroups((m as u32).div_ceil(128) * (n as u32).div_ceil(128)),
         ),
     ];
     gpu.submit(&[], &steps);

@@ -256,8 +256,8 @@ fn convbwd_ab(reps: usize) {
         let dcol = gpu.storage(hw * cinkk);
         let t_low = best_of(&gpu, &[
             gpu.step(k_t, &[&dy, &dy_nlc], &[cout * hw as u32, cout, hw as u32], cout * hw as u32),
-            gpu.step(k_mm, &[&dy_nlc, &wt, &dcol], &[hw as u32, cinkk as u32, cout, 0],
-                     (hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128) * 256),
+            gpu.dispatch(k_mm, &[&dy_nlc, &wt, &dcol], &[hw as u32, cinkk as u32, cout, 0],
+                     gpu_core::Dispatch::Workgroups((hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128))),
             gpu.step(k_c2i, &[&dcol, &dx], &[1, cin, h, w, k, st, pad, ho, wo, cinkk as u32], cin * h * w),
         ], reps);
         println!("  sweep cout={cout:4}          {:>10.3} {:>10.3} {:>8.2}x", t_direct * 1e3, t_low * 1e3, t_direct / t_low);
@@ -291,11 +291,11 @@ fn convbwd_ab(reps: usize) {
         let dcol = gpu.storage(hw * cinkk);
         let lowered = vec![
             gpu.step(k_t, &[&dy, &dy_nlc], &[cout * hw as u32, cout, hw as u32], cout * hw as u32),
-            gpu.step(
+            gpu.dispatch(
                 k_mm,
                 &[&dy_nlc, &wt, &dcol],
                 &[hw as u32, cinkk as u32, cout, 0],
-                (hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128) * 256,
+                gpu_core::Dispatch::Workgroups((hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128)),
             ),
             gpu.step(k_c2i, &[&dcol, &dx], &[1, cin, h, w, k, st, pad, ho, wo, cinkk as u32], cin * h * w),
         ];
@@ -496,10 +496,10 @@ fn convfwd_ab(reps: usize) {
         let t_low = best_of(&gpu, &[
             gpu.step(k_im2col, &[&x, &col],
                      &[cin, h, w, k, st, pad, ho, wo, cinkk as u32, 0, hw as u32], hw as u32 * cinkk as u32),
-            gpu.step(k_mm, &[&col, &wt, &nhwc], &[hw as u32, cinkk as u32, cout],
-                     (hw as u32).div_ceil(128) * cout.div_ceil(128) * 256),
-            gpu.step(k_epi, &[&nhwc, &bias, &y], &[hw as u32 * cout, cout, hw as u32],
-                     cout.div_ceil(64) * (hw as u32).div_ceil(64) * 64),
+            gpu.dispatch(k_mm, &[&col, &wt, &nhwc], &[hw as u32, cinkk as u32, cout],
+                     gpu_core::Dispatch::Workgroups((hw as u32).div_ceil(128) * cout.div_ceil(128))),
+            gpu.dispatch(k_epi, &[&nhwc, &bias, &y], &[hw as u32 * cout, cout, hw as u32],
+                     gpu_core::Dispatch::Workgroups(cout.div_ceil(64) * (hw as u32).div_ceil(64))),
         ], reps);
 
         let mark = if t_direct / t_low > 1.0 { " <- lowered wins" } else { "" };

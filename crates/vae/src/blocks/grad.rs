@@ -281,11 +281,11 @@ impl Trace {
                     if slices > 1 {
                         let rc = (*cout as u64) * cinkk as u64;
                         let part = r.tmp(rc * slices as u64);
-                        r.push(r.gpu.step(
+                        r.push(r.gpu.dispatch(
                             r.ids.k(B_MATMUL_DW_SPLITK),
                             &[&t, &col, &part],
                             &[rows_total, cinkk, *cout, slices],
-                            slices * tiles * 256,
+                            gpu_core::Dispatch::Workgroups(slices * tiles),
                         ));
                         r.push(r.gpu.step(
                             r.ids.k(B_DW_SPLITK_REDUCE),
@@ -297,11 +297,11 @@ impl Trace {
                         ));
                         r.give(rc * slices as u64, part);
                     } else {
-                        r.push(r.gpu.step(
+                        r.push(r.gpu.dispatch(
                             r.ids.k(B_MATMUL_DW_REG),
                             &[&t, &col, grads.g(w)],
                             &[rows_total, cinkk, *cout],
-                            tiles * 256,
+                            gpu_core::Dispatch::Workgroups(tiles),
                         ));
                     }
                     r.give((rows_total * cinkk) as u64, col);
@@ -340,11 +340,11 @@ impl Trace {
                 let dx = r.tmp(n_in);
                 if lowered {
                     let dcol = r.tmp((rows_total * cinkk) as u64);
-                    r.push(r.gpu.step(
+                    r.push(r.gpu.dispatch(
                         r.ids.k(B_MATMUL_DX_REG),
                         &[&t, self.weight(w), &dcol],
                         &[rows_total, cinkk, *cout, 0],
-                        rows_total.div_ceil(128) * cinkk.div_ceil(128) * 256,
+                        gpu_core::Dispatch::Workgroups(rows_total.div_ceil(128) * cinkk.div_ceil(128)),
                     ));
                     for ni in 0..bsz {
                         let dcol_off = (ni as u64) * (hw * cinkk) as u64;

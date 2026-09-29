@@ -943,11 +943,11 @@ fn qlinear(
 #[allow(clippy::too_many_arguments)]
 fn qlinear_base(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
     match tier {
-        QTier::Int8 => s.push(gpu.step(
+        QTier::Int8 => s.push(gpu.dispatch(
             K_MATMUL_I8_DYN,
             &[xq, &w.w, sx, &w.sw, out],
             &[rows, k / 4, n],
-            rows.div_ceil(128) * n.div_ceil(128) * 256,
+            gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)),
         )),
         // Naive one-thread-per-output kernel (see matmul_q4_dyn.wgsl's doc):
         // `k` here is the LOGICAL (undivided) K, unlike the int8 branch's

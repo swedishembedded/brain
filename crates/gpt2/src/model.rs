@@ -221,15 +221,13 @@ fn linear_kernel(m: usize, n: usize) -> (usize, gpu_core::Dispatch) {
 /// naive kernels) once both output dims
 /// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT2_NAIVE_MM=1`
 /// forces naive (shares the forward's flag). Same math — gradcheck-gated.
-fn dx_kernel(m: usize, k: usize) -> (usize, u32) {
+fn dx_kernel(m: usize, k: usize) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || m < 128 || k < 128 { (MATMUL_DX, (m * k) as u32) }
-    else { (MATMUL_DX_REG, (m.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
+    model::block::pick_gemm(m, k, MATMUL_DX, MATMUL_DX_REG, naive)
 }
-fn dw_kernel(nrows: usize, k: usize) -> (usize, u32) {
+fn dw_kernel(nrows: usize, k: usize) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_GPT2_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || nrows < 128 || k < 128 { (MATMUL_DW, (nrows * k) as u32) }
-    else { (MATMUL_DW_REG, (nrows.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
+    model::block::pick_gemm(nrows, k, MATMUL_DW, MATMUL_DW_REG, naive)
 }
 
 /// Pick the attn_bwd_dscores kernel + its dispatch thread count
@@ -241,12 +239,12 @@ fn dw_kernel(nrows: usize, k: usize) -> (usize, u32) {
 /// order, so the two agree to floating-point rounding, not to the bit (see
 /// `attn_bwd_dscores_rows.wgsl`'s own doc), gated by
 /// `dp_grad_parity_gpt`/`cpu_register_equals_cpu_naive`.
-fn dscores_kernel(gpu: &Gpu, rows: u32) -> (usize, u32) {
+fn dscores_kernel(gpu: &Gpu, rows: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{DefaultSelector, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: 0, k: 0, dtype: gpu_core::select::Dtype::F32 };
     match DefaultSelector.select(Op::AttnBwdDScores, shape, &gpu.caps()) {
-        KernelVariant::WorkgroupPerOutput => (ATTN_BWD_DSCORES_ROWS, rows * 64),
-        _ => (ATTN_DSCORES, rows),
+        KernelVariant::WorkgroupPerOutput => (ATTN_BWD_DSCORES_ROWS, gpu_core::Dispatch::Workgroups(rows)),
+        _ => (ATTN_DSCORES, gpu_core::Dispatch::Threads(rows)),
     }
 }
 
@@ -802,9 +800,9 @@ impl Gpt {
                 None => &self.d_logits,
             };
             let (bk, bt) = dw_kernel(v as usize, d as usize);
-            s.push(self.gpu.step(bk, &[d_logits_bw, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
+            s.push(self.gpu.dispatch(bk, &[d_logits_bw, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(bk, &[d_logits_bw, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
@@ -817,15 +815,15 @@ impl Gpt {
             // MLP backward (input grad = dres[l+1])
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[l + 1], g(&p(l, "mlp.proj.bias"))], &[n, d], d));
             let (bk, bt) = dw_kernel(d as usize, ff as usize);
-            s.push(self.gpu.step(bk, &[&self.dres[l + 1], &lb.gelu, g(&p(l, "mlp.proj.weight"))], &[n, ff, d], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.dres[l + 1], &lb.gelu, g(&p(l, "mlp.proj.weight"))], &[n, ff, d], bt));
             let (bk, bt) = dx_kernel(n as usize, ff as usize);
-            s.push(self.gpu.step(bk, &[&self.dres[l + 1], self.w(&p(l, "mlp.proj.weight")), &self.d_gelu], &[n, ff, d, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.dres[l + 1], self.w(&p(l, "mlp.proj.weight")), &self.d_gelu], &[n, ff, d, 0], bt));
             s.push(self.gpu.step(GELU_BWD, &[&lb.fc, &self.d_gelu, &self.d_fc], &[n * ff], n * ff));
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_fc, g(&p(l, "mlp.fc.bias"))], &[n, ff], ff));
             let (bk, bt) = dw_kernel(ff as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], bt));
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &lb.xmid, &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xmid, &self.ln_mean, &self.ln_inv, g(&p(l, "ln2.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln2.bias"))], &[d, n], d));
@@ -835,19 +833,19 @@ impl Gpt {
             // attention backward (input grad = dxmid)
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dxmid, g(&p(l, "attn.out.bias"))], &[n, d], d));
             let (bk, bt) = dw_kernel(d as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.dxmid, &lb.attn_ctx, g(&p(l, "attn.out.weight"))], &[n, d, d], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.dxmid, &lb.attn_ctx, g(&p(l, "attn.out.weight"))], &[n, d, d], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.dxmid, self.w(&p(l, "attn.out.weight")), &self.d_attn_ctx], &[n, d, d, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.dxmid, self.w(&p(l, "attn.out.weight")), &self.d_attn_ctx], &[n, d, d, 0], bt));
             let (dk, dt) = dscores_kernel(&self.gpu, self.b * c.n_heads * self.t);
-            s.push(self.gpu.step(dk, &[&self.d_attn_ctx, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], dt));
+            s.push(self.gpu.dispatch(dk, &[&self.d_attn_ctx, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], dt));
             s.push(self.gpu.step(ATTN_DV, &[&lb.probs, &self.d_attn_ctx, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_qkv, g(&p(l, "attn.qkv.bias"))], &[n, 3 * d], 3 * d));
             let (bk, bt) = dw_kernel((3 * d) as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(bk, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], bt));
+            s.push(self.gpu.dispatch(bk, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], bt));
             s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[l], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &self.res[l], &self.ln_mean, &self.ln_inv, g(&p(l, "ln1.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));

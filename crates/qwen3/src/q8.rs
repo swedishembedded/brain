@@ -155,11 +155,11 @@ impl Q8 {
     /// `out = dequant(xq @ wᵀ)`: dynamic per-token scale `self.sx` × group-wise
     /// weight scale. Must be preceded by a matching [`Q8::quant`] on the same input.
     pub fn mm8(&self, gpu: &Gpu, s: &mut Vec<Step>, w: &Lin8, out: &DeviceBuffer, n_tokens: u32) {
-        s.push(gpu.step(
+        s.push(gpu.dispatch(
             self.k_matmul_i8,
             &[&self.xq, &w.packed, &self.sx, &w.scale, out],
             &[n_tokens, w.k / 4, w.n],
-            n_tokens.div_ceil(128) * w.n.div_ceil(128) * 256,
+            gpu_core::Dispatch::Workgroups(n_tokens.div_ceil(128) * w.n.div_ceil(128)),
         ));
     }
 }

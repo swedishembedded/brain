@@ -2285,13 +2285,15 @@ impl PReLU {
     /// `silu_mul` failure mode — `da` would come out inflated by `N*H*W`.
     pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer, d_out: &DeviceBuffer) {
         let c = self.shape.c;
-        let (kind, threads) = if ctx.gpu.caps().workgroup_reductions && ctx.ids.prelu_bwd_wg != crate::NONE {
-            (ctx.ids.prelu_bwd_wg, c * 64)
+        // One workgroup per channel for the cooperative kernel, one thread
+        // per channel for the reference.
+        let (kind, grid) = if ctx.gpu.caps().workgroup_reductions && ctx.ids.prelu_bwd_wg != crate::NONE {
+            (ctx.ids.prelu_bwd_wg, gpu_core::Dispatch::Workgroups(c))
         } else {
-            (ctx.ids.need(ctx.ids.prelu_bwd, "prelu_bwd"), c)
+            (ctx.ids.need(ctx.ids.prelu_bwd, "prelu_bwd"), gpu_core::Dispatch::Threads(c))
         };
         let da = ps.g(&self.name);
-        let s = ctx.step(kind, &[x, ps.w(&self.name), d_out, &self.d_in, da], &self.params(), threads);
+        let s = ctx.dispatch(kind, &[x, ps.w(&self.name), d_out, &self.d_in, da], &self.params(), grid);
         // `da` ACCUMULATES; the model's zero_grads clears it once per step, so
         // it must NOT go in this submit's clear list (that would drop every
         // earlier contribution in the same step).

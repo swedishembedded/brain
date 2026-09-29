@@ -582,12 +582,12 @@ impl BlockDev {
         s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), x, &l.a, xa, xr0 as u32, ab as u64, m as u32, inn as u32, r as u32));
         // y += xa · B̃  (B̃ stored [r,out], so this is the dx-shaped GEMM with
         // its accumulate flag set - no temporary and no second add pass).
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DX,
             &[xa, &l.bt, y],
             &[self.sl(ab, m * r), (0, 0), self.sl(yr0 * out, m * out)],
             &[m as u32, out as u32, r as u32, 1],
-            d128(m) * d128(out) * 256,
+            gpu_core::Dispatch::Workgroups(d128(m) * d128(out)),
         ));
     }
 
@@ -604,36 +604,36 @@ impl BlockDev {
         // dxa = dy · B̃ᵀ  (B̃ᵀ is [r,out]; a plain forward GEMM over k = out)
         s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), dy, &l.bt, dxa, dyr0 as u32, ab as u64, m as u32, out as u32, r as u32));
         // dx = dy · W (+= when this is not the first contributor)
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DX,
             &[dy, &l.w, dx],
             &[dyo, (0, 0), self.sl(dxr0 * inn, m * inn)],
             &[m as u32, inn as u32, out as u32, u32::from(acc)],
-            d128(m) * d128(inn) * 256,
+            gpu_core::Dispatch::Workgroups(d128(m) * d128(inn)),
         ));
         // dx += dxa · A
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DX,
             &[dxa, &l.a, dx],
             &[self.sl(ab, m * r), (0, 0), self.sl(dxr0 * inn, m * inn)],
             &[m as u32, inn as u32, r as u32, 1],
-            d128(m) * d128(inn) * 256,
+            gpu_core::Dispatch::Workgroups(d128(m) * d128(inn)),
         ));
         // dA += dxaᵀ · x   →  [r, inn]
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DW,
             &[dxa, x, &l.ga],
             &[self.sl(ab, m * r), self.sl(xr0 * inn, m * inn), (0, 0)],
             &[m as u32, inn as u32, r as u32],
-            d128(r) * d128(inn) * 256,
+            gpu_core::Dispatch::Workgroups(d128(r) * d128(inn)),
         ));
         // dB̃ += xaᵀ · dy   →  [r, out]
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DW,
             &[xa, dy, &l.gbt],
             &[self.sl(ab, m * r), dyo, (0, 0)],
             &[m as u32, out as u32, r as u32],
-            d128(r) * d128(out) * 256,
+            gpu_core::Dispatch::Workgroups(d128(r) * d128(out)),
         ));
     }
 
@@ -742,36 +742,36 @@ impl BlockDev {
     /// their own head offset.
     #[allow(clippy::too_many_arguments)]
     fn mmh(&self, a: &str, ao: usize, b: &str, bo: usize, o: &str, oo: usize, m: usize, k: usize, nn: usize) -> Step {
-        self.gpu.step_sliced(
+        self.gpu.dispatch_sliced(
             K_MM,
             &[self.g(a), self.g(b), self.g(o)],
             &[self.sl(ao, m * k), self.sl(bo, nn * k), self.sl(oo, m * nn)],
             &[m as u32, k as u32, nn as u32],
-            d128(m) * d128(nn) * 256,
+            gpu_core::Dispatch::Workgroups(d128(m) * d128(nn)),
         )
     }
 
     /// One head's `matmul_dx_reg`: `o[m,k] = Σ_j a[m,j]·b[j,k]`.
     #[allow(clippy::too_many_arguments)]
     fn dxh(&self, a: &str, ao: usize, b: &str, bo: usize, o: &str, oo: usize, m: usize, k: usize, nn: usize) -> Step {
-        self.gpu.step_sliced(
+        self.gpu.dispatch_sliced(
             K_DX,
             &[self.g(a), self.g(b), self.g(o)],
             &[self.sl(ao, m * nn), self.sl(bo, nn * k), self.sl(oo, m * k)],
             &[m as u32, k as u32, nn as u32, 0],
-            d128(m) * d128(k) * 256,
+            gpu_core::Dispatch::Workgroups(d128(m) * d128(k)),
         )
     }
 
     /// One head's `matmul_dw_reg`: `o[nn,k] += Σ_m a[m,nn]·b[m,k]`.
     #[allow(clippy::too_many_arguments)]
     fn dwh(&self, a: &str, ao: usize, b: &str, bo: usize, o: &str, oo: usize, m: usize, k: usize, nn: usize) -> Step {
-        self.gpu.step_sliced(
+        self.gpu.dispatch_sliced(
             K_DW,
             &[self.g(a), self.g(b), self.g(o)],
             &[self.sl(ao, m * nn), self.sl(bo, m * k), self.sl(oo, nn * k)],
             &[m as u32, k as u32, nn as u32],
-            d128(nn) * d128(k) * 256,
+            gpu_core::Dispatch::Workgroups(d128(nn) * d128(k)),
         )
     }
 
@@ -952,12 +952,12 @@ impl BlockDev {
         let (nt, d) = (dm.nt, dm.d);
         assert!(n_pred <= dm.ni, "n_pred {n_pred} past the image rows {}", dm.ni);
         let mut s = Vec::new();
-        s.push(self.gpu.step_sliced(
+        s.push(self.gpu.dispatch_sliced(
             K_DX,
             &[dpred, final_w, self.g("dn1")],
             &[(0, (n_pred * cin) as u64), (0, 0), self.sl(nt * d, n_pred * d)],
             &[n_pred as u32, d as u32, cin as u32, 0],
-            d128(n_pred) * d128(d) * 256,
+            gpu_core::Dispatch::Workgroups(d128(n_pred) * d128(d)),
         ));
         self.site_dsb(&mut s, self.g("xh1"), self.g("dn1"), SITE_FINAL, nt, n_pred);
         let off = self.sl(nt * d, n_pred * d);

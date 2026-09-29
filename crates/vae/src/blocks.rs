@@ -1249,21 +1249,21 @@ impl<'a> Builder<'a> {
                         &[cin, h, w, k, stride, pad, ho, wo, cinkk, pos, cnt],
                         cnt * cinkk,
                     ));
-                    self.steps.push(self.gpu.step_sliced(
+                    self.steps.push(self.gpu.dispatch_sliced(
                         K_MATMUL,
                         &[&col, &wgt, &nhwc],
                         &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
                         &[cnt, cinkk, cout],
-                        cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+                        gpu_core::Dispatch::Workgroups(cnt.div_ceil(128) * cout.div_ceil(128)),
                     ));
                     pos += cnt;
                 }
-                self.steps.push(self.gpu.step_sliced(
+                self.steps.push(self.gpu.dispatch_sliced(
                     K_NLC_BIAS_NCHW,
                     &[&nhwc, &bias, &y],
                     &[(0, 0), (0, 0), (y_off, out_len)],
                     &[hw * cout, cout, hw],
-                    cout.div_ceil(64) * hw.div_ceil(64) * 64,
+                    gpu_core::Dispatch::Workgroups(cout.div_ceil(64) * hw.div_ceil(64)),
                 ));
             }
             self.free((hw * cout) as u64, nhwc);
@@ -1392,11 +1392,11 @@ impl<'a> Builder<'a> {
         if injected.is_some() {
             // Nothing to record: `stats` is already the answer.
         } else if self.coop {
-            self.steps.push(self.gpu.step(
+            self.steps.push(self.gpu.dispatch(
                 K_GN_STATS_WG,
                 &[x, &stats],
                 &[n, c, h, w, g, f(self.eps)],
-                n * g * 256,
+                gpu_core::Dispatch::Workgroups(n * g),
             ));
         } else {
             // No workgroup reductions (backend-cpu): the SERIAL `gn_stats`
@@ -1995,11 +1995,11 @@ impl<'a> Builder<'a> {
                 }
                 // scores[T,T] = q[T,C] · k[T,C]ᵀ  (the 1/√C is folded into q)
                 let scores = self.act((t * t) as u64);
-                self.steps.push(self.gpu.step(
+                self.steps.push(self.gpu.dispatch(
                     K_MATMUL,
                     &[&q_nlc, &k_nlc, &scores],
                     &[t, c, t],
-                    t.div_ceil(128) * t.div_ceil(128) * 256,
+                    gpu_core::Dispatch::Workgroups(t.div_ceil(128) * t.div_ceil(128)),
                 ));
                 self.free((c * t) as u64, q_nlc);
                 self.free((c * t) as u64, k_nlc);
@@ -2009,12 +2009,12 @@ impl<'a> Builder<'a> {
                 // ctx[T,C] = probs[T,T] · v[T,C], with vᵀ = the third channel
                 // block of THIS image's conv output, read in place as the
                 // [n=C, k=T] operand; written into this image's slice of `rows`.
-                self.steps.push(self.gpu.step_sliced(
+                self.steps.push(self.gpu.dispatch_sliced(
                     K_MATMUL,
                     &[&probs, &qkv_chw, &rows],
                     &[(0, 0), (qkv_off + 2 * (c * t) as u64, (c * t) as u64), ((ni as u64) * per_rows, per_rows)],
                     &[t, t, c],
-                    t.div_ceil(128) * c.div_ceil(128) * 256,
+                    gpu_core::Dispatch::Workgroups(t.div_ceil(128) * c.div_ceil(128)),
                 ));
                 self.free((t * t) as u64, probs);
             }
