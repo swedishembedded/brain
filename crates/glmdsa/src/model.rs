@@ -739,29 +739,24 @@ impl Glm {
     /// one, which at GLM-5.2's 78 layers is 313 single-thread reductions per
     /// generated token over widths 6144 / 2048 / 512.
     ///
-    /// The epsilon is passed explicitly - and it is the 1e-6 `rmsnorm.wgsl`
-    /// hardcodes, NOT `cfg.rms_eps` (1e-5). The two kernels must share one
-    /// `Params` layout and the cooperative one reads a third `eps` field, so a
-    /// two-field list would hand it whatever the uniform happened to hold.
-    /// Whether this model should be normalizing at its config's own epsilon is
-    /// a separate question from which kernel does it; changing the value here
-    /// would change what every tape computes, which this is not.
+    /// Normalizes at the checkpoint's own `cfg.rms_eps` (GLM: 1e-5) on both
+    /// variants and in the backward.
     ///
     /// Not a bit-identical swap (64 partial sums fold in a different order,
     /// agreeing to ~3e-6) - gated by `rmsnorm_variant_agreement`.
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
         let (kind, threads) = model::block::rms_variant(&self.gpu, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
-        s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(1e-6)], threads));
+        s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(self.cfg.rms_eps)], threads));
     }
 
     /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then
     /// input grad via `rmsnorm_dx` into `dx`.
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         if self.trainable(wname) {
-            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(1e-6)], rows));
+            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(self.cfg.rms_eps)], rows));
             s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
         }
-        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(1e-6)], rows));
+        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(self.cfg.rms_eps)], rows));
     }
 
     /// DSA indexer forward for one `Full` layer: project q (from the q residual)
