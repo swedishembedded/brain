@@ -72,8 +72,8 @@ fn the_shared_rmsnorm_dx_builder_matches_the_host_reference_at_every_builder_sha
     // Both arms of the seam on the same inputs: registered (the device's own
     // `select` policy then decides) and UNREGISTERED (always the per-element
     // reference).
-    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(1), SHAPES);
-    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(block::UNREGISTERED), SHAPES);
+    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(1), 1e-6, SHAPES);
+    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(block::UNREGISTERED), 1e-6, SHAPES);
 }
 
 /// The CPU JIT cannot run `rmsnorm_dx_rows`'s workgroup barrier, so a model
@@ -84,5 +84,31 @@ fn the_shared_rmsnorm_dx_builder_matches_the_host_reference_at_every_builder_sha
 #[test]
 fn the_reference_kernel_still_computes_dx_when_the_cooperative_slot_is_registered_on_the_cpu_jit() {
     let gpu = gpu_core::Gpu::new_cpu(PIPELINES);
-    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(1), &SHAPES[..3]);
+    assert_rmsnorm_dx_variant_agrees(&gpu, &ids(1), 1e-6, &SHAPES[..3]);
+}
+
+/// The backward's epsilon is the caller's too, on both variants - the twin
+/// of `rmsnorm_variant_agreement.rs`'s forward check, with the same ~1e-3
+/// inputs under which a kernel still adding 1e-6 misses by ~100x.
+#[test]
+fn every_dx_variant_differentiates_at_the_callers_epsilon() {
+    let (rows, dim, eps) = (5usize, 96usize, 1e-2f32);
+    let x: Vec<f32> = (0..rows * dim).map(|i| 1e-3 * (i as f32 * 0.7 + 0.1).sin()).collect();
+    let w: Vec<f32> = (0..dim).map(|i| 0.5 + 0.25 * (i as f32 * 0.31).cos()).collect();
+    let dy: Vec<f32> = (0..rows * dim).map(|i| (i as f32 * 1.1 + 0.5).sin()).collect();
+    let want = model::hostmath::rmsnorm_dx_rows(&x, &w, &dy, rows, dim, eps);
+    for (gpu, device) in [(gpu_core::testgpu::dev(PIPELINES), "device"), (gpu_core::Gpu::new_cpu(PIPELINES), "cpu jit")] {
+        for (coop, arm) in [(1, "registered"), (block::UNREGISTERED, "reference")] {
+            let xb = gpu.storage_init("x", &x);
+            let wb = gpu.storage_init("w", &w);
+            let dyb = gpu.storage_init("dy", &dy);
+            let dxb = gpu.storage((rows * dim) as u64);
+            let inv = gpu.storage(rows as u64);
+            gpu.submit(&[], &block::rmsnorm_bwd(&gpu, &ids(coop), &xb, &wb, &dyb, &dxb, &inv, None, dim as u32, rows as u32, eps));
+            let got = gpu.read(&dxb, rows * dim);
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let err = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+            assert!(err < 1e-5, "{device}/{arm}: relative error {err:e} at eps {eps}");
+        }
+    }
 }

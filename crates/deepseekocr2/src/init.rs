@@ -71,7 +71,7 @@ mod tests {
             n_heads: 4,
             n_kv_heads: 2,
             ffn_hidden: 11,
-            rms_eps: model::block::RMSNORM_EPS,
+            rms_eps: 1e-6,
             rope_theta: 10_000.0,
             n_query_local: 3,
             n_query_global: 5,

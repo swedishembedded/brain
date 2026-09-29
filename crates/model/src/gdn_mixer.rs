@@ -78,6 +78,8 @@ pub struct GdnMixerShape {
     pub gdn: GdnShape,
     pub nkh: u32,
     pub conv_kernel: u32,
+    /// The gated output RMSNorm's epsilon (the checkpoint's `rms_norm_eps`).
+    pub rms_eps: f32,
 }
 
 impl GdnMixerShape {
@@ -427,7 +429,7 @@ pub fn gdn_mixer_stream_fwd(
     g.submit(
         &[],
         &[
-            rmsnorm_fwd(g, &ids.kernels, &out_tok, w.norm_weight, &normed, vhd, n * nvh),
+            rmsnorm_fwd(g, &ids.kernels, &out_tok, w.norm_weight, &normed, vhd, n * nvh, shape.rms_eps),
             g.step(ids.silu, &[z, &z_silu], &[n * value_dim], n * value_dim),
             g.step(ids.mul, &[&normed, &z_silu, &gated], &[n * value_dim], n * value_dim),
         ],
@@ -626,7 +628,7 @@ pub fn gdn_mixer_decode_fwd(
     g.submit(
         &[],
         &[
-            rmsnorm_fwd(g, &ids.kernels, &out_bh, w.norm_weight, &normed, vhd, bh),
+            rmsnorm_fwd(g, &ids.kernels, &out_bh, w.norm_weight, &normed, vhd, bh, shape.rms_eps),
             g.step(ids.silu, &[z, &z_silu], &[b * value_dim], b * value_dim),
             g.step(ids.mul, &[&normed, &z_silu, &gated], &[b * value_dim], b * value_dim),
         ],
@@ -669,7 +671,7 @@ pub fn gdn_mixer_bwd(g: &Gpu, ids: &GdnMixerIds, shape: &GdnMixerShape, w: &GdnM
             g.step(ids.mul, &[d_gated, &la.normed, &d_z_silu], &[n * value_dim], n * value_dim),
             g.step(ids.silu_bwd, &[&la.z, &d_z_silu, &d_z], &[n * value_dim], n * value_dim),
         ];
-        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.out_tok, w.norm_weight, &d_normed, &d_out_tok, &inv, gw.norm_weight, vhd, n * nvh));
+        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.out_tok, w.norm_weight, &d_normed, &d_out_tok, &inv, gw.norm_weight, vhd, n * nvh, shape.rms_eps));
         g.submit(&[], &s);
     }
 

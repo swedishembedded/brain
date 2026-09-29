@@ -1073,12 +1073,12 @@ impl DeepseekV2 {
     }
 
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
-        s.push(block::rmsnorm_fwd(&self.gpu, &kernel_ids(), x, self.w(wname), out, dim, rows));
+        s.push(block::rmsnorm_fwd(&self.gpu, &kernel_ids(), x, self.w(wname), out, dim, rows, self.cfg.rms_eps()));
     }
 
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let gw = self.trainable(wname).then(|| self.g(wname));
-        s.extend(block::rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, self.cfg.rms_eps()));
     }
 
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
@@ -2580,7 +2580,7 @@ mod rmsnorm_variant_agreement {
         let d = c.d_model();
         let shapes = [(1, d, "ln1/ln2/final norm at decode"), (64, d, "the same norms at prefill width")];
         let gpu = gpu_core::testgpu::dev(PIPELINES);
-        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), c.rms_eps(), &shapes);
     }
 }
 
@@ -2617,6 +2617,6 @@ mod rmsnorm_dx_variant_agreement {
             (12, tiny.d_model(), "the gradcheck fixture's block norms"),
         ];
         let gpu = gpu_core::testgpu::dev(PIPELINES);
-        block::assert_rmsnorm_dx_variant_agrees(&gpu, &kernel_ids(), &shapes);
+        block::assert_rmsnorm_dx_variant_agrees(&gpu, &kernel_ids(), big.rms_eps(), &shapes);
     }
 }

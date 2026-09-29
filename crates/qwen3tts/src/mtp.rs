@@ -590,7 +590,7 @@ impl MtpModel {
                 w(&p("ln1.weight")),
                 &lb.xn1,
                 d,
-                n,
+                n, self.cfg.rms_norm_eps,
             ));
             s.push(self.mm(tier, &lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre, n, d, hq));
             s.push(self.mm(tier, &lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre, n, d, hkv));
@@ -602,7 +602,7 @@ impl MtpModel {
                 w(&p("attn.q_norm.weight")),
                 &lb.q,
                 hd,
-                n * nh,
+                n * nh, self.cfg.rms_norm_eps,
             ));
             s.push(block::rmsnorm_fwd(
                 g,
@@ -611,7 +611,7 @@ impl MtpModel {
                 w(&p("attn.k_norm.weight")),
                 &lb.k,
                 hd,
-                n * nkv,
+                n * nkv, self.cfg.rms_norm_eps,
             ));
             s.push(block::rope_fwd(g, &ids, &lb.q, n, nh, hd, hq, n, theta));
             s.push(block::rope_fwd(g, &ids, &lb.k, n, nkv, hd, hkv, n, theta));
@@ -635,7 +635,7 @@ impl MtpModel {
                 w(&p("ln2.weight")),
                 &lb.xn2,
                 d,
-                n,
+                n, self.cfg.rms_norm_eps,
             ));
             s.push(self.mm(tier, &lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre, n, d, ff));
             s.push(self.mm(tier, &lb.xn2, w(&p("mlp.up.weight")), &lb.up, n, d, ff));
@@ -663,7 +663,7 @@ impl MtpModel {
             w("norm.weight"),
             &self.xn_final,
             d,
-            n,
+            n, self.cfg.rms_norm_eps,
         ));
         s
     }
@@ -705,12 +705,12 @@ impl MtpModel {
                 let mut s: Vec<Step> = Vec::new();
                 for l in 0..c.n_layers as usize {
                     let p = |name: &str| format!("blocks.{l}.{name}");
-                    s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
+                    s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1, self.cfg.rms_norm_eps));
                     s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
                     s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
                     s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
                     s.push(g.step(ROPE_AT, &[&sc.q], &[1, nh, hd, hq, 0, pos, theta], nh * half));
                     s.push(g.step(ROPE_AT, &[&sc.k], &[1, nkv, hd, hkv, 0, pos, theta], nkv * half));
                     s.extend(block::gqa_decode_step(
@@ -732,14 +732,14 @@ impl MtpModel {
                     ));
                     s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
                     s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
+                    s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));
                     s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
                     s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
                     s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
                     s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, 1, ff, d));
                     s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
                 }
-                s.push(block::rmsnorm_fwd(g, &ids, &self.res[c.n_layers as usize], w("norm.weight"), &sc.xn_final, d, 1));
+                s.push(block::rmsnorm_fwd(g, &ids, &self.res[c.n_layers as usize], w("norm.weight"), &sc.xn_final, d, 1, self.cfg.rms_norm_eps));
                 s
             })
             .collect()
@@ -1276,7 +1276,7 @@ impl MtpModel {
         let mut s: Vec<Step> = Vec::new();
 
         let last = c.n_layers as usize;
-        s.extend(block::rmsnorm_bwd(g, &ids, &self.res[last], w("norm.weight"), &tr.d_hidden, &tr.d_res[last], &tr.inv, Some(gw("norm.weight")), d, n));
+        s.extend(block::rmsnorm_bwd(g, &ids, &self.res[last], w("norm.weight"), &tr.d_hidden, &tr.d_res[last], &tr.inv, Some(gw("norm.weight")), d, n, self.cfg.rms_norm_eps));
 
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];
@@ -1290,7 +1290,7 @@ impl MtpModel {
             s.push(self.dx_step(&tr.d_up, w(&p("mlp.up.weight")), &tr.d_xn, n, d, ff, 0));
             s.push(self.dw_step(&tr.d_gate_pre, &lb.xn2, gw(&p("mlp.gate.weight")), n, d, ff));
             s.push(self.dx_step(&tr.d_gate_pre, w(&p("mlp.gate.weight")), &tr.d_xn, n, d, ff, 1));
-            s.extend(block::rmsnorm_bwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln2.weight"))), d, n));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln2.weight"))), d, n, self.cfg.rms_norm_eps));
             // The MLP residual: xmid feeds both the norm and the skip.
             s.push(g.step(ADD2, &[&tr.d_res[l + 1], &tr.d_tmp, &tr.dxmid], &[n * d], n * d));
 
@@ -1302,15 +1302,15 @@ impl MtpModel {
             s.extend(block::gqa_bwd(g, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &tr.d_ctx, &tr.d_scores, &tr.d_q, &tr.d_k, &tr.d_v));
             s.push(block::rope_bwd(g, &ids, &tr.d_q, n, nh, hd, hq, n, theta));
             s.push(block::rope_bwd(g, &ids, &tr.d_k, n, nkv, hd, hkv, n, theta));
-            s.extend(block::rmsnorm_bwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &tr.d_q, &tr.dq_pre, &tr.inv, Some(gw(&p("attn.q_norm.weight"))), hd, n * nh));
-            s.extend(block::rmsnorm_bwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &tr.d_k, &tr.dk_pre, &tr.inv, Some(gw(&p("attn.k_norm.weight"))), hd, n * nkv));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &tr.d_q, &tr.dq_pre, &tr.inv, Some(gw(&p("attn.q_norm.weight"))), hd, n * nh, self.cfg.rms_norm_eps));
+            s.extend(block::rmsnorm_bwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &tr.d_k, &tr.dk_pre, &tr.inv, Some(gw(&p("attn.k_norm.weight"))), hd, n * nkv, self.cfg.rms_norm_eps));
             s.push(self.dw_step(&tr.d_v, &lb.xn1, gw(&p("attn.wv.weight")), n, d, hkv));
             s.push(self.dx_step(&tr.d_v, w(&p("attn.wv.weight")), &tr.d_xn, n, d, hkv, 0));
             s.push(self.dw_step(&tr.dk_pre, &lb.xn1, gw(&p("attn.wk.weight")), n, d, hkv));
             s.push(self.dx_step(&tr.dk_pre, w(&p("attn.wk.weight")), &tr.d_xn, n, d, hkv, 1));
             s.push(self.dw_step(&tr.dq_pre, &lb.xn1, gw(&p("attn.wq.weight")), n, d, hq));
             s.push(self.dx_step(&tr.dq_pre, w(&p("attn.wq.weight")), &tr.d_xn, n, d, hq, 1));
-            s.extend(block::rmsnorm_bwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln1.weight"))), d, n));
+            s.extend(block::rmsnorm_bwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &tr.d_xn, &tr.d_tmp, &tr.inv, Some(gw(&p("ln1.weight"))), d, n, self.cfg.rms_norm_eps));
             s.push(g.step(ADD2, &[&tr.dxmid, &tr.d_tmp, &tr.d_res[l]], &[n * d], n * d));
         }
         s
@@ -1729,6 +1729,6 @@ mod rmsnorm_variant_agreement {
         // heads of 128, num_code_groups 16.
         let shapes = [(16, 1024, "ln1/ln2/final norm"), (256, 128, "q_norm (t*n_heads)"), (128, 128, "k_norm (t*n_kv_heads)")];
         let gpu = gpu_core::testgpu::dev(PIPELINES);
-        model::block::assert_rmsnorm_variant_agrees(&gpu, &MtpModel::only_fwd_ids(), &shapes);
+        model::block::assert_rmsnorm_variant_agrees(&gpu, &MtpModel::only_fwd_ids(), crate::config::MtpConfig::tiny().rms_norm_eps, &shapes);
     }
 }

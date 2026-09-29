@@ -146,7 +146,7 @@ fn attn_ids() -> GqaAttnIds {
 }
 
 fn attn_dims(cfg: &MoeTextConfig) -> GqaAttnDims {
-    GqaAttnDims { hidden: cfg.hidden, head_dim: cfg.head_dim, n_heads: cfg.n_heads, n_kv_heads: cfg.n_kv_heads, use_qk_norm: cfg.use_qk_norm }
+    GqaAttnDims { hidden: cfg.hidden, head_dim: cfg.head_dim, n_heads: cfg.n_heads, n_kv_heads: cfg.n_kv_heads, use_qk_norm: cfg.use_qk_norm, rms_eps: cfg.rms_norm_eps }
 }
 
 fn attn_weights<'a>(w: &ThinkerLayerWeights<'a>) -> GqaAttnWeights<'a> {
@@ -261,7 +261,7 @@ fn moe_sublayer(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, xmid: &De
     // here unblocks that profiler for every subsequent optimisation pass on
     // this model, not just the submit-count win itself.
     let mut steps = vec![
-        rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n),
+        rmsnorm_fwd(g, &ids, xmid, w.ln2, &xn2, d, n, cfg.rms_norm_eps),
         g.step(MATMUL, &[&xn2, w.router, &router_logits], &[n, d, cfg.n_experts], n * cfg.n_experts),
     ];
 
@@ -371,7 +371,7 @@ pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer
 pub fn final_norm(g: &Gpu, cfg: &MoeTextConfig, norm_w: &DeviceBuffer, h: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let ids = kernel_ids();
     let normed = g.storage((n * cfg.hidden) as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &ids, h, norm_w, &normed, cfg.hidden, n)]);
+    g.submit(&[], &[rmsnorm_fwd(g, &ids, h, norm_w, &normed, cfg.hidden, n, cfg.rms_norm_eps)]);
     normed
 }
 
@@ -448,6 +448,6 @@ mod rmsnorm_variant_agreement {
             (c.n_kv_heads, c.head_dim, "k_norm at decode"),
         ];
         let gpu = gpu_core::testgpu::dev(thinker_pipelines());
-        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), &shapes);
+        block::assert_rmsnorm_variant_agrees(&gpu, &kernel_ids(), c.rms_norm_eps, &shapes);
     }
 }

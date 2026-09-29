@@ -751,17 +751,17 @@ impl Glm {
     /// agreeing to ~3e-6) - gated by `rmsnorm_variant_agreement`.
     fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
         let (kind, threads) = model::block::rms_variant(&self.gpu, RMSNORM, Some(RMSNORM_ROWS), rows, dim);
-        s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(model::block::RMSNORM_EPS)], threads));
+        s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(1e-6)], threads));
     }
 
     /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then
     /// input grad via `rmsnorm_dx` into `dx`.
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         if self.trainable(wname) {
-            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(model::block::RMSNORM_EPS)], rows));
+            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(1e-6)], rows));
             s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
         }
-        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(model::block::RMSNORM_EPS)], rows));
+        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(1e-6)], rows));
     }
 
     /// DSA indexer forward for one `Full` layer: project q (from the q residual)
@@ -1848,7 +1848,7 @@ mod rmsnorm_variant_agreement {
             silu_da: model::block::UNREGISTERED,
             silu_db: model::block::UNREGISTERED,
         };
-        model::block::assert_rmsnorm_variant_agrees(&gpu, &ids, &shapes);
+        model::block::assert_rmsnorm_variant_agrees(&gpu, &ids, c.rms_eps, &shapes);
     }
 }
 

@@ -142,7 +142,7 @@ fn ids(g: &Gpu) -> GdnMixerIds {
 /// pairwise-distinct shape `gdn_mixer_equivalence.rs` uses, with `t`/`chunk`
 /// supplied per call.
 fn shape(t: u32, chunk: u32) -> GdnMixerShape {
-    GdnMixerShape { gdn: GdnShape { b: 1, h: 2, t, dk: 3, dv: 4, chunk }, nkh: 1, conv_kernel: 3 }
+    GdnMixerShape { gdn: GdnShape { b: 1, h: 2, t, dk: 3, dv: 4, chunk }, nkh: 1, conv_kernel: 3, rms_eps: 1e-6 }
 }
 
 fn maxabs(a: &[f32], b: &[f32]) -> f32 {

@@ -159,7 +159,7 @@ fn batched_decode_matches_per_sequence_decode() {
     let g = gpu_core::testgpu::dev(KERNELS);
     let (nkh, nvh, dk, dv, kw) = (2u32, 4u32, 8u32, 6u32, 4u32);
     let batch = 3u32;
-    let shape_of = |b: u32| GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw };
+    let shape_of = |b: u32| GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
     let one = shape_of(1);
     let (value_dim, conv_dim) = (one.value_dim(), one.conv_dim());
     let state_len = (nvh * dk * dv) as usize;

@@ -1644,7 +1644,7 @@ impl Qwen35 {
     fn rmsnorm_bwd_step(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let inv = self.gpu.storage(rows as u64);
         let gw = self.trainable(wname).then(|| self.g(wname));
-        steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, gw, dim, rows));
+        steps.extend(rmsnorm_bwd(&self.gpu, &kernel_ids(), x, self.w(wname), dy, dx, &inv, gw, dim, rows, self.cfg.rms_eps));
     }
 
     pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
@@ -1820,7 +1820,7 @@ impl Qwen35 {
             GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
             GdnCall::Decode(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
         };
-        let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim };
+        let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
         let weights = model::gdn_mixer::GdnMixerWeights {
             conv1d_weight: self.w(&p("conv1d.weight")),
             a_log: self.w(&p("A_log")),
@@ -1892,7 +1892,7 @@ impl Qwen35 {
         // supply their OWN M-RoPE table (real absolute positions, not `0..t`)
         // and attend the persistent KV cache instead of an isolated `[T,T]`
         // causal block - see `GqaCached`.
-        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
         let (cos, sin) = match &cached {
             None => (&self.cos, &self.sin),
             Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
@@ -2028,8 +2028,8 @@ impl Qwen35 {
         g.submit(
             &[],
             &[
-                rmsnorm_fwd(g, &kernel_ids(), &e, self.w("mtp.pre_fc_norm_embedding.weight"), &en, d, n),
-                rmsnorm_fwd(g, &kernel_ids(), res_last, self.w("mtp.pre_fc_norm_hidden.weight"), &hn, d, n),
+                rmsnorm_fwd(g, &kernel_ids(), &e, self.w("mtp.pre_fc_norm_embedding.weight"), &en, d, n, self.cfg.rms_eps),
+                rmsnorm_fwd(g, &kernel_ids(), res_last, self.w("mtp.pre_fc_norm_hidden.weight"), &hn, d, n, self.cfg.rms_eps),
             ],
         );
 
@@ -2046,21 +2046,21 @@ impl Qwen35 {
         g.submit(&[], &[g.step(ADD2, &[&ehp_e, &ehp_h, &ehp], &[n * d], n * d)]);
 
         let xn1 = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &ehp, self.w("mtp.layers.0.ln1.weight"), &xn1, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &ehp, self.w("mtp.layers.0.ln1.weight"), &xn1, d, n, self.cfg.rms_eps)]);
         let (mixer_out, mixer_acts) = self.layer_gqa_fwd("mtp.layers.0.self_attn", &xn1, n, None);
 
         let xmid = g.storage((n * d) as u64);
         g.submit(&[], &[g.step(ADD2, &[&ehp, &mixer_out, &xmid], &[n * d], n * d)]);
 
         let xn2 = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w("mtp.layers.0.ln2.weight"), &xn2, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w("mtp.layers.0.ln2.weight"), &xn2, d, n, self.cfg.rms_eps)]);
         let (mlp_out, mlp_acts) = self.mlp_fwd("mtp.layers.0.mlp", &xn2, n);
 
         let block_out = g.storage((n * d) as u64);
         g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &block_out], &[n * d], n * d)]);
 
         let final_h = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &block_out, self.w("mtp.norm.weight"), &final_h, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &block_out, self.w("mtp.norm.weight"), &final_h, d, n, self.cfg.rms_eps)]);
         g.submit(&[], &[g.step(MATMUL, &[&final_h, self.w(c.head_weight()), &self.mtp_logits], &[n, d, v], n * v)]);
         g.submit(&[], &[g.step(CE_VALUE, &[&self.mtp_logits, &self.mtp_target, &self.mtp_ce_buf], &[n, v, model::IGNORE], n)]);
 
@@ -2195,7 +2195,7 @@ impl Qwen35 {
             let ty = types[l];
             let xres = &res[l];
             let xn1 = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n)]);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), xres, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, self.cfg.rms_eps)]);
 
             let (mixer_out, mixer_acts) = match ty {
                 LayerType::Linear => {
@@ -2212,7 +2212,7 @@ impl Qwen35 {
             g.submit(&[], &[g.step(ADD2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
 
             let xn2 = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n)]);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, n, self.cfg.rms_eps)]);
 
             let (mlp_out, mlp_acts) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, n);
             g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res[l + 1]], &[n * d], n * d)]);
@@ -2235,7 +2235,7 @@ impl Qwen35 {
         // apply" convention used elsewhere).
         let xn_final = if self.shard.head {
             let xn_final = g.storage((n * d) as u64);
-            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n)]);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
             let v = self.cfg.vocab;
             g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
 
@@ -2282,6 +2282,7 @@ impl Qwen35 {
             gdn: la.internals.shape,
             nkh: c.linear_num_key_heads,
             conv_kernel: c.linear_conv_kernel_dim,
+            rms_eps: c.rms_eps,
         };
         let weights = model::gdn_mixer::GdnMixerWeights {
             conv1d_weight: self.w(&p("conv1d.weight")),
@@ -2338,7 +2339,7 @@ impl Qwen35 {
         }
 
         // Reverse of the hoisted `model::gqa_mixer::gqa_mixer_fwd` internals.
-        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2 };
+        let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos: &self.cos, sin: &self.sin };
         let grads = model::gqa_mixer::GqaMixerGrads {
             q_norm: self.trainable(&p("q_norm.weight")).then(|| self.g(&p("q_norm.weight"))),

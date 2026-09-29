@@ -114,7 +114,7 @@ fn price_one_decode_token_of_rmsnorm_per_model() {
             let mut steps = Vec::new();
             for (&(rows, dim, count), (xb, wb, ob)) in profile.iter().zip(&bufs) {
                 for _ in 0..count {
-                    steps.push(rmsnorm_fwd(&gpu, &ids, xb, wb, ob, dim, rows));
+                    steps.push(rmsnorm_fwd(&gpu, &ids, xb, wb, ob, dim, rows, 1e-6));
                 }
             }
             // `submit` only QUEUES: without a readback to drain it the loop

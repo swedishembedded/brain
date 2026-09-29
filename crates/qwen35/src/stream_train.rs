@@ -469,9 +469,9 @@ fn mlp_backward_lora(gpu: &Gpu, ids: &TrainIds, lora: &LoraStore, cfg: &Qwen35Co
 /// RMSNorm backward against a frozen (never-trainable) gain - `gw: None`
 /// always in this module (no norm is ever a LoRA target). Small helper so
 /// call sites don't repeat the throwaway `inv` scratch allocation.
-fn rmsnorm_bwd_frozen(gpu: &Gpu, ids: &TrainIds, x: &DeviceBuffer, w: &DeviceBuffer, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) -> Vec<Step> {
+fn rmsnorm_bwd_frozen(gpu: &Gpu, ids: &TrainIds, x: &DeviceBuffer, w: &DeviceBuffer, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Vec<Step> {
     let inv = gpu.storage(rows as u64);
-    rmsnorm_bwd(gpu, &ids.kernels, x, w, dy, dx, &inv, None, dim, rows)
+    rmsnorm_bwd(gpu, &ids.kernels, x, w, dy, dx, &inv, None, dim, rows, eps)
 }
 
 /// One Gated DeltaNet layer's activations this layer's backward needs beyond
@@ -497,7 +497,7 @@ struct GdnLayerActsL {
 fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGdnLayer, xres: &DeviceBuffer, n: u32, ones_khd: &DeviceBuffer) -> (DeviceBuffer, GdnLayerActsL) {
     let d = cfg.d_model;
     let xn1 = gpu.storage((n * d) as u64);
-    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, xres, &layer.ln1, &xn1, d, n)]);
+    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, xres, &layer.ln1, &xn1, d, n, cfg.rms_eps)]);
 
     let conv_dim = cfg.linear_conv_dim();
     let value_dim = cfg.linear_value_dim();
@@ -546,7 +546,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         gpu.submit(&[], &s);
     }
 
-    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim };
+    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim, rms_eps: cfg.rms_eps };
     let mix_w = GdnMixerWeights { conv1d_weight: &layer.conv1d_weight, a_log: &layer.a_log, dt_bias: &layer.dt_bias, norm_weight: &layer.norm_weight, ones_khd };
     let (gated, mixer_internals) = gdn_mixer_fwd(gpu, &ids.gdn_mixer, &shape, &mix_w, &mixed_qkv, &bproj, &aproj, &z, n, true);
     let mixer_internals = mixer_internals.expect("stream_train: gdn_mixer_fwd(is_train=true) must return acts");
@@ -568,7 +568,7 @@ fn gdn_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     gpu.submit(&[], &[gpu.step(ids.add2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
 
     let xn2 = gpu.storage((n * d) as u64);
-    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, &xmid, &layer.ln2, &xn2, d, n)]);
+    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, &xmid, &layer.ln2, &xn2, d, n, cfg.rms_eps)]);
 
     let (mlp_out, mlp_acts) = mlp_forward_lora(gpu, ops, ids, cfg, lora, &format!("blocks.{layer_idx}.mlp"), &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, &xn2, n);
 
@@ -600,7 +600,7 @@ fn gdn_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
         gpu.submit(&[], &s);
     }
 
-    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim };
+    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim, rms_eps: cfg.rms_eps };
     let weights = GdnMixerWeights { conv1d_weight: &layer.conv1d_weight, a_log: &layer.a_log, dt_bias: &layer.dt_bias, norm_weight: &layer.norm_weight, ones_khd };
     let grads = GdnMixerGrads { conv1d_weight: None, a_log: None, dt_bias: None, norm_weight: None };
     let (d_mixed_qkv, d_bproj, d_aproj, d_z) = gdn_mixer_bwd(gpu, &ids.gdn_mixer, &shape, &weights, &grads, mixer_acts, &d_gated, n);
@@ -637,7 +637,7 @@ fn gdn_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     {
         let mut s = Vec::new();
         let d_ln2_dx = gpu.storage((n * d) as u64);
-        s.extend(rmsnorm_bwd_frozen(gpu, ids, &acts.xmid, &layer.ln2, &d_xn2, &d_ln2_dx, d, n));
+        s.extend(rmsnorm_bwd_frozen(gpu, ids, &acts.xmid, &layer.ln2, &d_xn2, &d_ln2_dx, d, n, cfg.rms_eps));
         s.push(gpu.step(ids.add2, &[d_res_next, &d_ln2_dx, &d_xmid], &[n * d], n * d));
         gpu.submit(&[], &s);
     }
@@ -649,7 +649,7 @@ fn gdn_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     {
         let mut s = Vec::new();
         let d_ln1_dx = gpu.storage((n * d) as u64);
-        s.extend(rmsnorm_bwd_frozen(gpu, ids, xres_l, &layer.ln1, &d_xn1, &d_ln1_dx, d, n));
+        s.extend(rmsnorm_bwd_frozen(gpu, ids, xres_l, &layer.ln1, &d_xn1, &d_ln1_dx, d, n, cfg.rms_eps));
         s.push(gpu.step(ids.add2, &[&d_xmid, &d_ln1_dx, &d_res_l], &[n * d], n * d));
         gpu.submit(&[], &s);
     }
@@ -672,7 +672,7 @@ struct GqaLayerActsL {
 fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Config, lora: &LoraStore, layer_idx: usize, layer: &OwnedGqaLayer, xres: &DeviceBuffer, n: u32, cos: &DeviceBuffer, sin: &DeviceBuffer) -> (DeviceBuffer, GqaLayerActsL) {
     let d = cfg.d_model;
     let xn1 = gpu.storage((n * d) as u64);
-    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, xres, &layer.ln1, &xn1, d, n)]);
+    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, xres, &layer.ln1, &xn1, d, n, cfg.rms_eps)]);
 
     let (nh, nkv, hd) = (cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
     let (qpd, kvd) = (cfg.q_proj_dim(), cfg.kv_dim());
@@ -705,7 +705,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
         gpu.submit(&[], &s);
     }
 
-    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let mix_w = GqaMixerWeights { q_norm: &layer.q_norm, k_norm: &layer.k_norm, cos, sin };
     let (ctx_gated, mixer_internals) = gqa_mixer_fwd(gpu, &ids.gqa_mixer, &shape, &mix_w, &q_full, &k, &v, n, true);
     let mixer_internals = mixer_internals.expect("stream_train: gqa_mixer_fwd(is_train=true) must return acts");
@@ -727,7 +727,7 @@ fn gqa_layer_forward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Conf
     gpu.submit(&[], &[gpu.step(ids.add2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
 
     let xn2 = gpu.storage((n * d) as u64);
-    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, &xmid, &layer.ln2, &xn2, d, n)]);
+    gpu.submit(&[], &[rmsnorm_fwd(gpu, &ids.kernels, &xmid, &layer.ln2, &xn2, d, n, cfg.rms_eps)]);
 
     let (mlp_out, mlp_acts) = mlp_forward_lora(gpu, ops, ids, cfg, lora, &format!("blocks.{layer_idx}.mlp"), &layer.mlp_gate, &layer.mlp_up, &layer.mlp_down, &xn2, n);
 
@@ -754,7 +754,7 @@ fn gqa_mixer_backward_lora(gpu: &Gpu, ids: &TrainIds, cfg: &Qwen35Config, lora: 
         gpu.submit(&[], &s);
     }
 
-    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let weights = GqaMixerWeights { q_norm: &layer.q_norm, k_norm: &layer.k_norm, cos, sin };
     let grads = GqaMixerGrads { q_norm: None, k_norm: None };
     let (d_q_full, d_k, d_v) = gqa_mixer_bwd(gpu, &ids.gqa_mixer, &shape, &weights, &grads, mixer_acts, &d_ctx_gated, n);
@@ -780,7 +780,7 @@ fn gqa_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     {
         let mut s = Vec::new();
         let d_ln2_dx = gpu.storage((n * d) as u64);
-        s.extend(rmsnorm_bwd_frozen(gpu, ids, &acts.xmid, &layer.ln2, &d_xn2, &d_ln2_dx, d, n));
+        s.extend(rmsnorm_bwd_frozen(gpu, ids, &acts.xmid, &layer.ln2, &d_xn2, &d_ln2_dx, d, n, cfg.rms_eps));
         s.push(gpu.step(ids.add2, &[d_res_next, &d_ln2_dx, &d_xmid], &[n * d], n * d));
         gpu.submit(&[], &s);
     }
@@ -792,7 +792,7 @@ fn gqa_layer_backward_lora(gpu: &Gpu, ops: &Ops, ids: &TrainIds, cfg: &Qwen35Con
     {
         let mut s = Vec::new();
         let d_ln1_dx = gpu.storage((n * d) as u64);
-        s.extend(rmsnorm_bwd_frozen(gpu, ids, xres_l, &layer.ln1, &d_xn1, &d_ln1_dx, d, n));
+        s.extend(rmsnorm_bwd_frozen(gpu, ids, xres_l, &layer.ln1, &d_xn1, &d_ln1_dx, d, n, cfg.rms_eps));
         s.push(gpu.step(ids.add2, &[&d_xmid, &d_ln1_dx, &d_res_l], &[n * d], n * d));
         gpu.submit(&[], &s);
     }
@@ -983,7 +983,7 @@ impl StreamTrainer {
 
                 let x = g.storage_init("stream_train.gen.row", last_row);
                 let normed = g.storage(d as u64);
-                g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &x, &self.final_norm, &normed, d as u32, 1)]);
+                g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &x, &self.final_norm, &normed, d as u32, 1, cfg.rms_eps)]);
                 let vocab = cfg.vocab;
                 let logits_buf = g.storage(vocab as u64);
                 {
@@ -1097,7 +1097,7 @@ impl StreamTrainer {
         // differentiated once per step, not once per layer). ----
         let v = cfg.vocab;
         let xn_final = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &xres_buf, &self.final_norm, &xn_final, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &xres_buf, &self.final_norm, &xn_final, d, n, cfg.rms_eps)]);
         let logits = g.storage((n * v) as u64);
         {
             let mut s = Vec::new();
@@ -1125,7 +1125,7 @@ impl StreamTrainer {
         let mut d_res_next = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            s.extend(rmsnorm_bwd_frozen(g, &self.ids, &xres_buf, &self.final_norm, &d_xn_final, &d_res_next, d, n));
+            s.extend(rmsnorm_bwd_frozen(g, &self.ids, &xres_buf, &self.final_norm, &d_xn_final, &d_res_next, d, n, cfg.rms_eps));
             g.submit(&[], &s);
         }
 

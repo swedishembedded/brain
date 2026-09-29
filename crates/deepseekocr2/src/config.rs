@@ -71,19 +71,6 @@ impl Qwen2EncoderConfig {
     fn check(&self) {
         assert!(self.n_heads > 0 && self.d_model.is_multiple_of(self.n_heads), "d_model must be a whole number of heads");
         assert!(self.n_kv_heads > 0 && self.n_heads.is_multiple_of(self.n_kv_heads), "n_heads must be a whole multiple of n_kv_heads");
-        // `encoder.rs` dispatches `model::block::rmsnorm_fwd`, whose kernel
-        // hardcodes `model::block::RMSNORM_EPS` (1e-6) rather than reading a
-        // runtime value - the same fixed-eps family `qwen3`/`deepseek2` use.
-        // The real checkpoint's own KV states an eps that ROUNDS to 1e-6 but
-        // is not bit-identical to it (9.999999974752427e-07); this assertion
-        // makes that assumption explicit and catches a future checkpoint
-        // whose eps genuinely differs, rather than silently ignoring it.
-        assert!(
-            (self.rms_eps - model::block::RMSNORM_EPS).abs() < 1e-4,
-            "rms_eps {} is too far from the fixed kernel constant {} for rmsnorm_fwd to be a faithful dispatch",
-            self.rms_eps,
-            model::block::RMSNORM_EPS
-        );
     }
 
     /// One layer's flat parameter names, in `vision.encoder.blocks.{l}.*`.

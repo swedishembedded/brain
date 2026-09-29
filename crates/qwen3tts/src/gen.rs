@@ -429,7 +429,7 @@ impl TalkerGen {
                 gpu_core::Dispatch::Workgroups(n * heads),
             ));
         } else {
-            s.push(block::rmsnorm_fwd(g, ids, x, w, out, hd, n * heads));
+            s.push(block::rmsnorm_fwd(g, ids, x, w, out, hd, n * heads, self.cfg.rms_norm_eps));
             s.push(block::rope_fwd(g, ids, out, n, heads, hd, heads * hd, n, theta));
         }
     }
@@ -460,7 +460,7 @@ impl TalkerGen {
 
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
-            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, n));
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, n, self.cfg.rms_norm_eps));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, n, d, hq));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, n, d, hkv));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, n, d, hkv));
@@ -471,7 +471,7 @@ impl TalkerGen {
             s.extend(block::gqa_fwd(g, &ids, &ga, &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
             s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, n, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[n * d], n * d));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, n));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, n, self.cfg.rms_norm_eps));
             s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, n, d, ff));
             s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, n, d, ff));
             s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, n * ff));
@@ -479,7 +479,7 @@ impl TalkerGen {
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
         let last = c.n_layers as usize;
-        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, n));
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, n, self.cfg.rms_norm_eps));
         s
     }
 
@@ -581,7 +581,7 @@ impl TalkerGen {
         };
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
-            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1, self.cfg.rms_norm_eps));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
@@ -593,8 +593,8 @@ impl TalkerGen {
                 add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q], nh * 64), PosUniform::QkNormAtQ);
                 add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k], nkv * 64), PosUniform::QkNormAtK);
             } else {
-                s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
-                s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+                s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
+                s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
                 add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
                 add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half), PosUniform::RopeK);
             }
@@ -605,7 +605,7 @@ impl TalkerGen {
             add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd), PosUniform::Apply);
             s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
-            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));
             s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
             s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
             s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
@@ -613,7 +613,7 @@ impl TalkerGen {
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
-        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, 1));
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, 1, self.cfg.rms_norm_eps));
         (s, pus)
     }
 
@@ -849,7 +849,7 @@ mod qk_norm_rope_base_fused_tests {
 
         let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
             let out = g.storage((n_rows * heads * hd) as u64);
-            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, n_rows * heads);
+            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, n_rows * heads, cfg.rms_norm_eps);
             g.submit(&[], &[rms_step]);
             g.poll_wait();
             let rope_step = block::rope_fwd(g, &ids, &out, n_rows, heads, hd, heads * hd, n_rows, theta);
@@ -929,7 +929,7 @@ mod qk_norm_rope_at_fused_tests {
         // position, on the SAME q_pre/k_pre inputs the fused dispatch read.
         let unfused = |x: &DeviceBuffer, weight_name: &str, heads: u32| -> Vec<f32> {
             let out = g.storage((heads * hd) as u64);
-            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, heads);
+            let rms_step = block::rmsnorm_fwd(g, &ids, x, w(weight_name), &out, hd, heads, cfg.rms_norm_eps);
             g.submit(&[], &[rms_step]);
             g.poll_wait();
             let rope_step = g.step(ROPE_AT, &[&out], &[1, heads, hd, heads * hd, 0, pos, gpu_core::f(theta)], heads * (hd / 2));
@@ -974,6 +974,6 @@ mod rmsnorm_variant_agreement {
         // `rows = 1` and the two QK-norms at a HEAD count.
         let shapes = [(1, 1024, "ln1/ln2/final norm at decode"), (16, 128, "q_norm at decode"), (8, 128, "k_norm at decode")];
         let gpu = gpu_core::testgpu::dev(PIPELINES);
-        block::assert_rmsnorm_variant_agrees(&gpu, &only_fwd_ids(), &shapes);
+        block::assert_rmsnorm_variant_agrees(&gpu, &only_fwd_ids(), crate::config::TalkerConfig::tiny().rms_norm_eps, &shapes);
     }
 }

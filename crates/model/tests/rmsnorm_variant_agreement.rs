@@ -80,19 +80,43 @@ fn the_shared_rmsnorm_builder_matches_the_host_reference_at_every_builder_shape(
     // `select` policy then decides) and UNREGISTERED (always the per-element
     // reference). A model adopting the coalesced kernel must land inside
     // tolerance of the reference AND of the tape it had before.
-    assert_rmsnorm_variant_agrees(&gpu, &ids(1), SHAPES);
-    assert_rmsnorm_variant_agrees(&gpu, &ids(block::UNREGISTERED), SHAPES);
+    assert_rmsnorm_variant_agrees(&gpu, &ids(1), 1e-6, SHAPES);
+    assert_rmsnorm_variant_agrees(&gpu, &ids(block::UNREGISTERED), 1e-6, SHAPES);
 }
 
-/// The reference kernel's `Params` struct declares TWO fields; `rmsnorm_fwd`
-/// now writes three so both variants can share one uniform layout. That is
-/// fine on a GPU backend (a uniform buffer may be larger than the struct bound
-/// to it) but `backend-cpu` has no binding or uniform-size check at dispatch
-/// at all, so "it compiles and the GPU is happy" is not evidence for the JIT.
-/// The CPU device also cannot run the workgroup barrier, so this is exactly
-/// the reference-kernel-with-a-third-param case.
+/// The CPU JIT cannot run the workgroup barrier, so a registered cooperative
+/// slot still lands on the per-element reference there - which must be
+/// correct on its own.
 #[test]
-fn the_reference_kernel_still_normalizes_when_handed_the_three_field_uniform_on_the_cpu_jit() {
+fn the_reference_kernel_normalizes_on_the_cpu_jit() {
     let gpu = gpu_core::Gpu::new_cpu(PIPELINES);
-    assert_rmsnorm_variant_agrees(&gpu, &ids(block::UNREGISTERED), &SHAPES[..3]);
+    assert_rmsnorm_variant_agrees(&gpu, &ids(block::UNREGISTERED), 1e-6, &SHAPES[..3]);
+}
+
+/// Both variants normalize at the CALLER's epsilon.
+///
+/// `rmsnorm.wgsl` used to add a compiled-in 1e-6 whatever the model asked
+/// for, so every Llama-family checkpoint (1e-5), GLM, Kronos and the Mimi
+/// codec were normalized with an epsilon they never declared. The inputs are
+/// ~1e-3 in magnitude, so `mean(x^2)` (~5e-7) is swamped by the requested
+/// 1e-2: a kernel still adding 1e-6 misses by ~100x, far outside tolerance,
+/// where the builder-shape gate's O(1) inputs could not tell the two apart.
+#[test]
+fn every_variant_normalizes_at_the_callers_epsilon() {
+    let (rows, dim, eps) = (5usize, 96usize, 1e-2f32);
+    let x: Vec<f32> = (0..rows * dim).map(|i| 1e-3 * (i as f32 * 0.7 + 0.1).sin()).collect();
+    let w: Vec<f32> = (0..dim).map(|i| 0.5 + 0.25 * (i as f32 * 0.31).cos()).collect();
+    let want = model::hostmath::rmsnorm_rows(&x, &w, rows, dim, eps);
+    for (gpu, device) in [(gpu_core::testgpu::dev(PIPELINES), "device"), (gpu_core::Gpu::new_cpu(PIPELINES), "cpu jit")] {
+        for (coop, arm) in [(1, "registered"), (block::UNREGISTERED, "reference")] {
+            let xb = gpu.storage_init("x", &x);
+            let wb = gpu.storage_init("w", &w);
+            let ob = gpu.storage((rows * dim) as u64);
+            gpu.submit(&[], &[block::rmsnorm_fwd(&gpu, &ids(coop), &xb, &wb, &ob, dim as u32, rows as u32, eps)]);
+            let got = gpu.read(&ob, rows * dim);
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let err = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs())) / scale;
+            assert!(err < 1e-5, "{device}/{arm}: relative error {err:e} at eps {eps}");
+        }
+    }
 }

@@ -54,6 +54,8 @@ pub struct GqaMixerShape {
     /// `config.rotary_dim() / 2` - the M-RoPE table width (partial rotary
     /// factor already folded in).
     pub rotary_half: u32,
+    /// The per-head QK-norm epsilon (the checkpoint's `rms_norm_eps`).
+    pub rms_eps: f32,
 }
 
 impl GqaMixerShape {
@@ -335,8 +337,8 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
     g.submit(
         &[],
         &[
-            rmsnorm_fwd(g, &ids.kernels, &q_value, w.q_norm, &q_normed, hd, n * nh),
-            rmsnorm_fwd(g, &ids.kernels, k, w.k_norm, &k_normed, hd, n * nkv),
+            rmsnorm_fwd(g, &ids.kernels, &q_value, w.q_norm, &q_normed, hd, n * nh, shape.rms_eps),
+            rmsnorm_fwd(g, &ids.kernels, k, w.k_norm, &k_normed, hd, n * nkv, shape.rms_eps),
         ],
     );
 
@@ -412,8 +414,8 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
         let inv_q = g.storage((n * nh) as u64);
         let inv_k = g.storage((n * nkv) as u64);
         let mut s = Vec::new();
-        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.q_value, w.q_norm, &d_q_normed, &d_q_value, &inv_q, gw.q_norm, hd, n * nh));
-        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.k, w.k_norm, &d_k_normed, &d_k, &inv_k, gw.k_norm, hd, n * nkv));
+        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.q_value, w.q_norm, &d_q_normed, &d_q_value, &inv_q, gw.q_norm, hd, n * nh, shape.rms_eps));
+        s.extend(rmsnorm_bwd(g, &ids.kernels, &la.k, w.k_norm, &d_k_normed, &d_k, &inv_k, gw.k_norm, hd, n * nkv, shape.rms_eps));
         g.submit(&[], &s);
     }
 

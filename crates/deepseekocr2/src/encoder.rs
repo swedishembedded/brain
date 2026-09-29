@@ -341,7 +341,7 @@ impl Resampler {
         }
 
         let final_norm = self.gpu.storage((t * d) as u64);
-        self.gpu.submit(&[], &[block::rmsnorm_fwd(&self.gpu, &self.ids.as_block_ids(), &x, self.ps.w("vision.encoder.norm.weight"), &final_norm, d, t)]);
+        self.gpu.submit(&[], &[block::rmsnorm_fwd(&self.gpu, &self.ids.as_block_ids(), &x, self.ps.w("vision.encoder.norm.weight"), &final_norm, d, t, self.cfg.encoder.rms_eps)]);
         let normed = self.gpu.read(&final_norm, (t * d) as usize);
         let query_slice = normed[(n_query * d) as usize..].to_vec();
 
@@ -379,7 +379,7 @@ impl Resampler {
 
         // ---- attention ----
         let xn1 = g.storage((t * d) as u64);
-        g.submit(&[], &[block::rmsnorm_fwd(g, &bids, x, w("norm1.weight"), &xn1, d, t)]);
+        g.submit(&[], &[block::rmsnorm_fwd(g, &bids, x, w("norm1.weight"), &xn1, d, t, self.cfg.encoder.rms_eps)]);
 
         let q = g.storage((t * d) as u64);
         let k = g.storage((t * kv) as u64);
@@ -431,7 +431,7 @@ impl Resampler {
 
         // ---- SwiGLU MLP ----
         let xn2 = g.storage((t * d) as u64);
-        g.submit(&[], &[block::rmsnorm_fwd(g, &bids, x, w("norm2.weight"), &xn2, d, t)]);
+        g.submit(&[], &[block::rmsnorm_fwd(g, &bids, x, w("norm2.weight"), &xn2, d, t, self.cfg.encoder.rms_eps)]);
         let gate = g.storage((t * ff) as u64);
         let up = g.storage((t * ff) as u64);
         let mut steps = vec![g.step(ids.matmul, &[&xn2, w("mlp.gate.weight"), &gate], &[t, d, ff], t * ff)];
@@ -523,7 +523,7 @@ impl Resampler {
         let d_x_mid_from_norm2 = g.storage((t * d) as u64);
         let inv2 = g.storage(t as u64);
         let norm2_grad = self.trainable(&wn("norm2.weight")).then(|| gr("norm2.weight"));
-        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_mid, w("norm2.weight"), &d_xn2, &d_x_mid_from_norm2, &inv2, norm2_grad, d, t).as_slice());
+        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_mid, w("norm2.weight"), &d_xn2, &d_x_mid_from_norm2, &inv2, norm2_grad, d, t, self.cfg.encoder.rms_eps).as_slice());
 
         // Fresh storage is not guaranteed zeroed on every backend, and both
         // dispatches below are `+=` (`add_inplace`) with no prior `=` write -
@@ -604,7 +604,7 @@ impl Resampler {
         let d_x_in_from_norm1 = g.storage((t * d) as u64);
         let inv1 = g.storage(t as u64);
         let norm1_grad = self.trainable(&wn("norm1.weight")).then(|| gr("norm1.weight"));
-        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_in, w("norm1.weight"), &d_xn1, &d_x_in_from_norm1, &inv1, norm1_grad, d, t).as_slice());
+        g.submit(&[], block::rmsnorm_bwd(g, &bids, &st.x_in, w("norm1.weight"), &d_xn1, &d_x_in_from_norm1, &inv1, norm1_grad, d, t, self.cfg.encoder.rms_eps).as_slice());
 
         let d_x_in = g.storage((t * d) as u64);
         g.submit(&[&d_x_in], &[g.step(ids.add_inplace, &[&d_x_in, &d_x_mid], &[t * d], t * d), g.step(ids.add_inplace, &[&d_x_in, &d_x_in_from_norm1], &[t * d], t * d)]);
@@ -722,7 +722,7 @@ impl Resampler {
         }
 
         let final_norm = self.gpu.storage((t * d) as u64);
-        self.gpu.submit(&[], &[block::rmsnorm_fwd(&self.gpu, &self.ids.as_block_ids(), &x, self.ps.w("vision.encoder.norm.weight"), &final_norm, d, t)]);
+        self.gpu.submit(&[], &[block::rmsnorm_fwd(&self.gpu, &self.ids.as_block_ids(), &x, self.ps.w("vision.encoder.norm.weight"), &final_norm, d, t, self.cfg.encoder.rms_eps)]);
         let normed = self.gpu.read(&final_norm, (t * d) as usize);
         let query_slice = normed[(n_query * d) as usize..].to_vec();
 
@@ -777,7 +777,7 @@ impl Resampler {
         let final_norm_grad = self.trainable("vision.encoder.norm.weight").then(|| self.ps.g("vision.encoder.norm.weight"));
         self.gpu.submit(
             &[],
-            block::rmsnorm_bwd(&self.gpu, &self.ids.as_block_ids(), &st.x_final, self.ps.w("vision.encoder.norm.weight"), &d_normed_buf, &d_x_final, &inv, final_norm_grad, d, t).as_slice(),
+            block::rmsnorm_bwd(&self.gpu, &self.ids.as_block_ids(), &st.x_final, self.ps.w("vision.encoder.norm.weight"), &d_normed_buf, &d_x_final, &inv, final_norm_grad, d, t, self.cfg.encoder.rms_eps).as_slice(),
         );
 
         let mut d_x = d_x_final;

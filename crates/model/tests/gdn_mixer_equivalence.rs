@@ -204,7 +204,7 @@ fn gdn_shape() -> GdnMixerShape {
     // nvh=2, khd=3, vhd=4, nkh=1 (group=2), chunk=2, t=4 (2 chunks) - every
     // dim pairwise distinct where it matters, small enough to run instantly
     // on the CPU JIT backend.
-    GdnMixerShape { gdn: GdnShape { b: 1, h: 2, t: 4, dk: 3, dv: 4, chunk: 2 }, nkh: 1, conv_kernel: 3 }
+    GdnMixerShape { gdn: GdnShape { b: 1, h: 2, t: 4, dk: 3, dv: 4, chunk: 2 }, nkh: 1, conv_kernel: 3, rms_eps: 1e-6 }
 }
 
 /// `(gated, d_mixed_qkv, d_bproj, d_aproj, d_z, a_log_grad, dt_bias_grad, conv1d_weight_grad, norm_weight_grad)`.
@@ -288,7 +288,7 @@ fn gdn_mixer_fwd_bwd_bit_identical_across_independently_ordered_pipelines() {
 fn gqa_shape() -> GqaMixerShape {
     // n_heads=2, n_kv_heads=1, head_dim=4, rotary_half=1 (partial rotary:
     // only the first 2 of 4 dims per head rotate).
-    GqaMixerShape { b: 1, t: 4, n_heads: 2, n_kv_heads: 1, head_dim: 4, rotary_half: 1 }
+    GqaMixerShape { b: 1, t: 4, n_heads: 2, n_kv_heads: 1, head_dim: 4, rotary_half: 1, rms_eps: 1e-6 }
 }
 
 /// `(ctx_gated, d_q_full, d_k, d_v, q_norm_grad, k_norm_grad)`.

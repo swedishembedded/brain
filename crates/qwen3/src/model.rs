@@ -1264,7 +1264,7 @@ impl Qwen {
         if self.coop {
             self.gpu.dispatch(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(1e-6)], gpu_core::Dispatch::Workgroups(rows))
         } else {
-            block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows)
+            block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows, 1e-6)
         }
     }
 
@@ -1326,7 +1326,7 @@ impl Qwen {
     /// when the gain is trainable (frozen LoRA base / inference skip it).
     fn rmsnorm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let gw = self.trainable(wname).then(|| self.g(wname));
-        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, 1e-6));
     }
 
     /// True if a LoRA adapter is configured for the given projection leaf.
@@ -2536,7 +2536,7 @@ impl Qwen {
             if fast {
                 s.push(g.dispatch(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)));
             } else {
-                s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows));
+                s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows, 1e-6));
             }
         };
         // B7: the fp32-vs-int8 GEMV pick used to be a SECOND, independent
@@ -4204,7 +4204,7 @@ mod rmsnorm_dx_variant_agreement {
             (12 * 4, QwenConfig::tiny().head_dim, "the gradcheck fixture's QK-norms"),
         ];
         let gpu = gpu_core::testgpu::dev(pipelines());
-        block::assert_rmsnorm_dx_variant_agrees(&gpu, &Qwen::ids(), &shapes);
+        block::assert_rmsnorm_dx_variant_agrees(&gpu, &Qwen::ids(), c.rms_eps, &shapes);
     }
 }
 

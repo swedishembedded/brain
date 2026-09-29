@@ -262,7 +262,7 @@ fn run_layer_parity(l: usize) {
     let x = g.storage_init("x_in", &x_in);
     let ln1w = wbuf(&p("ln1.weight"));
     let xn1 = g.storage((t * d) as u64);
-    g.submit(&[], &[rmsnorm_fwd(&g, &kernel_ids(&g), &x, &ln1w, &xn1, d, t)]);
+    g.submit(&[], &[rmsnorm_fwd(&g, &kernel_ids(&g), &x, &ln1w, &xn1, d, t, cfg.rms_eps)]);
 
     let mixer_out = match ty {
         LayerType::Linear => {
@@ -294,6 +294,7 @@ fn run_layer_parity(l: usize) {
                 gdn: GdnShape { b: 1, h: nvh, t, dk: khd, dv: vhd, chunk: model::gdn::gdn_chunk_size(t) },
                 nkh: cfg.linear_num_key_heads,
                 conv_kernel: cfg.linear_conv_kernel_dim,
+                rms_eps: cfg.rms_eps,
             };
             let ones_khd = g.storage_init("ones_khd", &vec![1.0f32; khd as usize]);
             let weights = GdnMixerWeights {
@@ -333,7 +334,7 @@ fn run_layer_parity(l: usize) {
             let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, cfg.mrope_section, cfg.rotary_dim(), cfg.rope_theta);
             let cos = g.storage_init("cos", &cos);
             let sin = g.storage_init("sin", &sin);
-            let shape = GqaMixerShape { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+            let shape = GqaMixerShape { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
             let weights = GqaMixerWeights {
                 q_norm: &wbuf(&p("self_attn.q_norm.weight")),
                 k_norm: &wbuf(&p("self_attn.k_norm.weight")),
@@ -354,7 +355,7 @@ fn run_layer_parity(l: usize) {
 
     let ln2w = wbuf(&p("ln2.weight"));
     let xn2 = g.storage((t * d) as u64);
-    g.submit(&[], &[rmsnorm_fwd(&g, &kernel_ids(&g), &h1, &ln2w, &xn2, d, t)]);
+    g.submit(&[], &[rmsnorm_fwd(&g, &kernel_ids(&g), &h1, &ln2w, &xn2, d, t, cfg.rms_eps)]);
 
     let ff = cfg.intermediate_size;
     let gatew = wbuf(&p("mlp.gate.weight"));

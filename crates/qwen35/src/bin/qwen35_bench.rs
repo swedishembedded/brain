@@ -277,7 +277,7 @@ fn bench_gdn(gpu: &Gpu, cfg: &Qwen35Config, t: u32, reps: usize) {
     let ones_khd = gpu.storage_init("ones_khd", &vec![1.0f32; khd as usize]);
 
     let ids = gdn_mixer_ids(gpu);
-    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t, dk: khd, dv: vhd, chunk: model::gdn::gdn_chunk_size(t) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim };
+    let shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t, dk: khd, dv: vhd, chunk: model::gdn::gdn_chunk_size(t) }, nkh: cfg.linear_num_key_heads, conv_kernel: cfg.linear_conv_kernel_dim, rms_eps: cfg.rms_eps };
     let weights = GdnMixerWeights { conv1d_weight: &conv1d_weight, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_weight, ones_khd: &ones_khd };
 
     report(gpu, &format!("GDN layer (T={t})"), reps, || {
@@ -318,7 +318,7 @@ fn bench_gqa(gpu: &Gpu, cfg: &Qwen35Config, t: u32, reps: usize) {
     let sin = gpu.storage_init("sin", &sin_h);
 
     let ids = gqa_mixer_ids(gpu);
-    let shape = GqaMixerShape { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+    let shape = GqaMixerShape { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let weights = GqaMixerWeights { q_norm: &q_norm, k_norm: &k_norm, cos: &cos, sin: &sin };
 
     report(gpu, &format!("GQA layer (T={t})"), reps, || {

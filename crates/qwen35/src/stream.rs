@@ -504,7 +504,7 @@ impl StreamState {
         };
 
         let xn1 = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, xres, ln1, &xn1, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, xres, ln1, &xn1, d, n, cfg.rms_eps)]);
 
         let mixer_out = match layer {
             OwnedStreamedLayer::Linear(l) => self.gdn_layer_forward(cfg, l, &xn1, n),
@@ -515,7 +515,7 @@ impl StreamState {
         g.submit(&[], &[g.step(self.ids.add2, &[xres, &mixer_out, &xmid], &[n * d], n * d)]);
 
         let xn2 = g.storage((n * d) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &xmid, ln2, &xn2, d, n)]);
+        g.submit(&[], &[rmsnorm_fwd(g, &self.ids.kernels, &xmid, ln2, &xn2, d, n, cfg.rms_eps)]);
 
         let (mlp_gate, mlp_up, mlp_down) = match layer {
             OwnedStreamedLayer::Linear(l) => (&l.mlp_gate, &l.mlp_up, &l.mlp_down),
@@ -561,6 +561,7 @@ impl StreamState {
             gdn: GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: model::gdn::gdn_chunk_size(n) },
             nkh: cfg.linear_num_key_heads,
             conv_kernel: cfg.linear_conv_kernel_dim,
+            rms_eps: cfg.rms_eps,
         };
         let weights = GdnMixerWeights {
             conv1d_weight: &l.conv1d_weight,
@@ -598,7 +599,7 @@ impl StreamState {
         ops.matmul(&mut s1, &l.v_proj, &act1, &v, 0);
         g.submit(&[], &s1);
 
-        let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+        let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
         let weights = GqaMixerWeights { q_norm: &l.q_norm, k_norm: &l.k_norm, cos: &self.cos, sin: &self.sin };
         let (ctx_gated, _acts) = gqa_mixer_fwd(g, &self.ids.gqa_mixer, &shape, &weights, &q_full, &k, &v, n, false);
 
@@ -681,7 +682,7 @@ fn mtp_mixer_forward(state: &StreamState, cfg: &Qwen35Config, l: &OwnedGqaLayer,
     ops.matmul(&mut s1, &l.v_proj, &act1, &v, 0);
     g.submit(&[], &s1);
 
-    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2 };
+    let shape = GqaMixerShape { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: cfg.rotary_dim() / 2, rms_eps: cfg.rms_eps };
     let weights = GqaMixerWeights { q_norm: &l.q_norm, k_norm: &l.k_norm, cos, sin };
     let (ctx_gated, _acts) = gqa_mixer_fwd(g, &state.ids.gqa_mixer, &shape, &weights, &q_full, &k, &v, n, false);
 
@@ -734,8 +735,8 @@ fn mtp_forward(state: &StreamState, cfg: &Qwen35Config, mtp: &OwnedMtpLayer, lm_
     g.submit(
         &[],
         &[
-            rmsnorm_fwd(g, &state.ids.kernels, &e, &mtp.pre_fc_norm_embedding, &en, d, n),
-            rmsnorm_fwd(g, &state.ids.kernels, hidden_row, &mtp.pre_fc_norm_hidden, &hn, d, n),
+            rmsnorm_fwd(g, &state.ids.kernels, &e, &mtp.pre_fc_norm_embedding, &en, d, n, cfg.rms_eps),
+            rmsnorm_fwd(g, &state.ids.kernels, hidden_row, &mtp.pre_fc_norm_hidden, &hn, d, n, cfg.rms_eps),
         ],
     );
 
@@ -752,7 +753,7 @@ fn mtp_forward(state: &StreamState, cfg: &Qwen35Config, mtp: &OwnedMtpLayer, lm_
     g.submit(&[], &[g.step(state.ids.add2, &[&ehp_e, &ehp_h, &ehp], &[d], d)]);
 
     let xn1 = g.storage(d as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &ehp, &mtp.layer.ln1, &xn1, d, n)]);
+    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &ehp, &mtp.layer.ln1, &xn1, d, n, cfg.rms_eps)]);
 
     let (cos, sin) = single_position_mrope(cfg, g, pos);
     let mixer_out = mtp_mixer_forward(state, cfg, &mtp.layer, &xn1, &cos, &sin, n);
@@ -761,7 +762,7 @@ fn mtp_forward(state: &StreamState, cfg: &Qwen35Config, mtp: &OwnedMtpLayer, lm_
     g.submit(&[], &[g.step(state.ids.add2, &[&ehp, &mixer_out, &xmid], &[d], d)]);
 
     let xn2 = g.storage(d as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &xmid, &mtp.layer.ln2, &xn2, d, n)]);
+    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &xmid, &mtp.layer.ln2, &xn2, d, n, cfg.rms_eps)]);
 
     let mlp_out = state.mlp_forward(cfg, &mtp.layer.mlp_gate, &mtp.layer.mlp_up, &mtp.layer.mlp_down, &xn2, n);
 
@@ -769,7 +770,7 @@ fn mtp_forward(state: &StreamState, cfg: &Qwen35Config, mtp: &OwnedMtpLayer, lm_
     g.submit(&[], &[g.step(state.ids.add2, &[&xmid, &mlp_out, &block_out], &[d], d)]);
 
     let final_h = g.storage(d as u64);
-    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &block_out, &mtp.norm, &final_h, d, n)]);
+    g.submit(&[], &[rmsnorm_fwd(g, &state.ids.kernels, &block_out, &mtp.norm, &final_h, d, n, cfg.rms_eps)]);
 
     let mut s2 = Vec::new();
     let act = ops.act(&mut s2, &final_h, 0, n, d);

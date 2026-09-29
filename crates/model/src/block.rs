@@ -137,13 +137,11 @@ impl Gqa {
     }
 }
 
-/// The epsilon [`rmsnorm_fwd`] and [`rmsnorm_bwd`] normalize at. Every
-/// RMSNorm kernel takes its epsilon as a param; these two helpers do not yet
-/// take one from their caller, so this is the value they pass.
-pub const RMSNORM_EPS: f32 = 1e-6;
-
-/// RMSNorm forward: `out = (x / rms(x)) * w` over the last `dim` axis, one row
-/// per invocation (`rows` total).
+/// RMSNorm forward: `out = (x / sqrt(mean(x^2) + eps)) * w` over the last
+/// `dim` axis, one row per invocation (`rows` total).
+///
+/// `eps` is the checkpoint's own (`rms_norm_eps`): every RMSNorm kernel takes
+/// it as a param, so no model is normalized with an epsilon it did not ask for.
 ///
 /// Dispatches the coalesced `rmsnorm_rows` when the model registered it
 /// ([`KernelIds::rmsnorm_rows`]) and the device can run a workgroup reduction,
@@ -164,10 +162,10 @@ pub const RMSNORM_EPS: f32 = 1e-6;
 /// agreeing to ~3e-6 max_abs. That is why it lives behind a registration a
 /// model opts into, and why every adopting model gates it with a
 /// variant-agreement test against a HOST reference.
-pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
+pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Step {
     let coop = (k.rmsnorm_rows != UNREGISTERED).then_some(k.rmsnorm_rows);
     let (kind, grid) = rms_variant(g, k.rmsnorm, coop, rows, dim);
-    g.dispatch(kind, &[x, w, out], &[dim, rows, f(RMSNORM_EPS)], grid)
+    g.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], grid)
 }
 
 /// RMSNorm backward: always the input grad (`dx`); the gain grad (`gw`, needing
@@ -189,15 +187,16 @@ pub fn rmsnorm_bwd(
     gw: Option<&DeviceBuffer>,
     dim: u32,
     rows: u32,
+    eps: f32,
 ) -> Vec<Step> {
     let mut s = Vec::new();
     if let Some(gw) = gw {
-        s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows, f(RMSNORM_EPS)], rows));
+        s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows, f(eps)], rows));
         s.push(g.step(k.rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim));
     }
     let coop = (k.rmsnorm_dx_rows != UNREGISTERED).then_some(k.rmsnorm_dx_rows);
     let (kind, grid) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);
-    s.push(g.dispatch(kind, &[x, w, dy, dx], &[dim, rows, f(RMSNORM_EPS)], grid));
+    s.push(g.dispatch(kind, &[x, w, dy, dx], &[dim, rows, f(eps)], grid));
     s
 }
 
@@ -744,6 +743,8 @@ pub struct GqaAttnDims {
     pub n_kv_heads: u32,
     /// Qwen3-style per-head RMSNorm on Q/K after the projections.
     pub use_qk_norm: bool,
+    /// Epsilon of the pre-attention and QK RMSNorms (`rms_norm_eps`).
+    pub rms_eps: f32,
 }
 
 /// The sublayer's weights: pre-attention RMSNorm, QKV/out projections, and
@@ -767,7 +768,7 @@ fn gqa_attn_qkv(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeight
     let (hq, hkv) = (nh * hd, nkv * hd);
 
     let xn1 = g.storage((n * d) as u64);
-    let mut steps = vec![rmsnorm_fwd(g, &ids.kernels, x, w.ln1, &xn1, d, n)];
+    let mut steps = vec![rmsnorm_fwd(g, &ids.kernels, x, w.ln1, &xn1, d, n, dims.rms_eps)];
 
     let q_pre = g.storage((n * hq) as u64);
     let k_pre = g.storage((n * hkv) as u64);
@@ -779,8 +780,8 @@ fn gqa_attn_qkv(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &GqaAttnWeight
     let (q, k) = if dims.use_qk_norm {
         let q = g.storage((n * hq) as u64);
         let k = g.storage((n * hkv) as u64);
-        steps.push(rmsnorm_fwd(g, &ids.kernels, &q_pre, w.q_norm, &q, hd, n * nh));
-        steps.push(rmsnorm_fwd(g, &ids.kernels, &k_pre, w.k_norm, &k, hd, n * nkv));
+        steps.push(rmsnorm_fwd(g, &ids.kernels, &q_pre, w.q_norm, &q, hd, n * nh, dims.rms_eps));
+        steps.push(rmsnorm_fwd(g, &ids.kernels, &k_pre, w.k_norm, &k, hd, n * nkv, dims.rms_eps));
         (q, k)
     } else {
         (q_pre, k_pre)
@@ -2466,7 +2467,7 @@ pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d:
 ///
 /// `shapes` are `(rows, dim, what)`; `what` names the dispatch site so a
 /// failure says which tape broke, not just which number.
-pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u32, &str)]) {
+pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, eps: f32, shapes: &[(u32, u32, &str)]) {
     // The kernels differ only in reduction ORDER over the same `dim` squares,
     // so the error is O(sqrt(dim) * eps) on a sum whose scale is `dim`;
     // `rmsnorm_rows`'s own header records 3.3e-6 max_abs over a wide sweep.
@@ -2482,12 +2483,12 @@ pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u
         // coincidentally-unit normalization.
         let x: Vec<f32> = (0..rows_u * dim_u).map(|i| 3.0 * (i as f32 * 0.7 + 0.1).sin()).collect();
         let w: Vec<f32> = (0..dim_u).map(|i| 0.5 * (i as f32 * 0.31 + 0.2).cos()).collect();
-        let want = crate::hostmath::rmsnorm_rows(&x, &w, rows_u, dim_u, RMSNORM_EPS);
+        let want = crate::hostmath::rmsnorm_rows(&x, &w, rows_u, dim_u, eps);
 
         let xb = g.storage_init("rms_agree_x", &x);
         let wb = g.storage_init("rms_agree_w", &w);
         let ob = g.storage((rows_u * dim_u) as u64);
-        g.submit(&[], &[rmsnorm_fwd(g, ids, &xb, &wb, &ob, dim, rows)]);
+        g.submit(&[], &[rmsnorm_fwd(g, ids, &xb, &wb, &ob, dim, rows, eps)]);
         let got = g.read(&ob, rows_u * dim_u);
 
         assert!(got.iter().all(|v| v.is_finite()), "{what} ({rows}x{dim}): produced a non-finite value");
@@ -2509,7 +2510,7 @@ pub fn assert_rmsnorm_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u
 ///
 /// `shapes` are `(rows, dim, what)`; `what` names the dispatch site so a
 /// failure says which tape broke, not just which number.
-pub fn assert_rmsnorm_dx_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32, u32, &str)]) {
+pub fn assert_rmsnorm_dx_variant_agrees(g: &Gpu, ids: &KernelIds, eps: f32, shapes: &[(u32, u32, &str)]) {
     // Same tolerance and reasoning as `assert_rmsnorm_variant_agrees`: the
     // error is O(sqrt(dim) * eps) on a sum whose scale is `dim`, so this stays
     // tight enough that a real defect (wrong eps, a missed tail element, a
@@ -2522,14 +2523,14 @@ pub fn assert_rmsnorm_dx_variant_agrees(g: &Gpu, ids: &KernelIds, shapes: &[(u32
         let x: Vec<f32> = (0..rows_u * dim_u).map(|i| 3.0 * (i as f32 * 0.7 + 0.1).sin()).collect();
         let w: Vec<f32> = (0..dim_u).map(|i| 0.5 * (i as f32 * 0.31 + 0.2).cos()).collect();
         let dy: Vec<f32> = (0..rows_u * dim_u).map(|i| 0.4 * (i as f32 * 1.1 + 0.5).sin()).collect();
-        let want = crate::hostmath::rmsnorm_dx_rows(&x, &w, &dy, rows_u, dim_u, RMSNORM_EPS);
+        let want = crate::hostmath::rmsnorm_dx_rows(&x, &w, &dy, rows_u, dim_u, eps);
 
         let xb = g.storage_init("rms_dx_agree_x", &x);
         let wb = g.storage_init("rms_dx_agree_w", &w);
         let dyb = g.storage_init("rms_dx_agree_dy", &dy);
         let dxb = g.storage((rows_u * dim_u) as u64);
         let inv = g.storage(rows_u as u64);
-        g.submit(&[], &rmsnorm_bwd(g, ids, &xb, &wb, &dyb, &dxb, &inv, None, dim, rows));
+        g.submit(&[], &rmsnorm_bwd(g, ids, &xb, &wb, &dyb, &dxb, &inv, None, dim, rows, eps));
         let got = g.read(&dxb, rows_u * dim_u);
 
         assert!(got.iter().all(|v| v.is_finite()), "{what} ({rows}x{dim}): produced a non-finite value");

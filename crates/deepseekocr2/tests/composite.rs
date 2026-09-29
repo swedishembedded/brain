@@ -68,7 +68,7 @@ impl Fixture {
             n_heads: 3,
             n_kv_heads: 1,
             ffn_hidden: 9,
-            rms_eps: model::block::RMSNORM_EPS,
+            rms_eps: 1e-6,
             rope_theta: 10_000.0,
             n_query_local: 2,
             n_query_global: 3,
