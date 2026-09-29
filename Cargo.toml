@@ -398,6 +398,13 @@ unicode-segmentation = "1"
 # P* category, neither of which std exposes (`char::is_control` is Cc only).
 # Already in the lock via jsonschema, so this adds no new build.
 unicode-general-category = "1"
+# Unicode canonical composition, for the `NFC` normalizer a `tokenizer.json`
+# can declare (`data::hf_pretok`); the unicode-rs implementation, MIT or
+# Apache-2.0.
+unicode-normalization = "0.1"
+# Lookaround-capable regexes, for the `Split` patterns a `tokenizer.json`
+# declares (`\s+(?!\S)`): `regex` alone cannot compile them.
+fancy-regex = "0.18"
 # Safetensors read/write (HF's official pure-Rust container) + half for
 # f16/bf16<->f32. Both are wasm-compatible.
 safetensors = "0.8"

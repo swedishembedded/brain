@@ -218,3 +218,4 @@ What belongs where:
 | 175 | A scaling read by one spelling drops every other | [`175-a-scaling-read-by-one-spelling-drops-every-other.md`](175-a-scaling-read-by-one-spelling-drops-every-other.md) |
 | 176 | A config default is a guess about which model wrote it | [`176-a-config-default-is-a-guess-about-which-model-wrote-it.md`](176-a-config-default-is-a-guess-about-which-model-wrote-it.md) |
 | 177 | A kernel constant and its host oracle agree on the same wrong value | [`177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md`](177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md) |
+| 178 | A tokenizer guessed from one regex feature tokenizes a different model | [`178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md`](178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md) |

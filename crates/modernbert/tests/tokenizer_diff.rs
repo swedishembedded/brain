@@ -13,19 +13,14 @@
 //! THREE axes, not just the two originally suspected (case-sensitive
 //! contractions, uncapped digit runs, AND the letter/digit/symbol branches'
 //! optional prefix being space-only rather than cl100k's "any non-alnum
-//! char" - see `data::qwen_tokenizer`'s own module doc for the full
-//! derivation). `QwenBpe` was extended with a second, GPT-2-default
-//! pre-tokenizer mode ([`data::qwen_tokenizer::pretokenize_gpt2_default`]),
-//! selected automatically from the file's own declared `pre_tokenizer` shape:
-//! no new tokenizer type, no behavior change for existing Qwen/LFM2.5
-//! callers (their own test suites re-run clean, see the M4 commit).
+//! char"). `QwenBpe` applies whatever pre-tokenizer the file declares
+//! (`data::hf_pretok`), so a bare `ByteLevel` gets GPT-2's split.
 //!
 //! Two tests:
 //! 1. [`pretokenizer_boundaries_genuinely_differ`] - unconditional (no
-//!    checkpoint needed): the cl100k scanner
-//!    (`pretokenize_digits(text, 1)`, what `QwenBpe` would have used before
-//!    this milestone) and the GPT-2-default scanner really do disagree on the
-//!    flagged cases, pinned so a future change to either scanner is caught.
+//!    checkpoint needed): the Qwen2/cl100k split and the GPT-2 split really
+//!    do disagree on the flagged cases, pinned so a future change to either
+//!    is caught.
 //! 2. [`qwen_bpe_matches_the_real_tokenizer_on_laya_checkpoint`] - the full
 //!    differential: `QwenBpe::from_file` loaded on the REAL Laya
 //!    `tokenizer.json`, encoding ~50 real, varied strings (contractions both
@@ -35,16 +30,16 @@
 //!    (`Tokenizer.encode(text, add_special_tokens=False)`) this session.
 //!    Skips cleanly when the checkpoint has not been pulled.
 
-use data::qwen_tokenizer::{pretokenize_digits, pretokenize_gpt2_default, QwenBpe};
+use data::hf_pretok::{PreTokenizer, QWEN2_PATTERN};
+use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer as _;
 
 #[test]
 fn pretokenizer_boundaries_genuinely_differ() {
     // (text, cl100k-K1 pretokens, gpt2-default pretokens) - each row is a
-    // REAL divergence, not a hypothetical one; values captured directly from
-    // both functions this session, not hand-derived from the regex text (a
-    // hand derivation got the whitespace-run backtracking wrong once already
-    // during this milestone - see `data::qwen_tokenizer`'s own module doc).
+    // REAL divergence, not a hypothetical one, not hand-derived from the
+    // regex text (a hand derivation got the whitespace-run backtracking wrong
+    // once already).
     let cases: &[(&str, &[&str], &[&str])] = &[
         // cl100k's `(?i:...)` matches "'T" case-INSENSITIVELY as one
         // contraction pre-token; gpt2-default's contraction match is
@@ -64,18 +59,12 @@ fn pretokenizer_boundaries_genuinely_differ() {
         // gpt2-default's does.
         ("a 123", &["a", " ", "1", "2", "3"], &["a", " 123"]),
     ];
+    let qwen = PreTokenizer::isolated_splits(&[QWEN2_PATTERN]).unwrap();
+    let bare = PreTokenizer::from_json(&serde_json::json!({"type": "ByteLevel", "add_prefix_space": false, "use_regex": true})).unwrap();
     for (text, cl100k, gpt2) in cases {
-        let got_cl100k = pretokenize_digits(text, 1);
-        let got_gpt2 = pretokenize_gpt2_default(text);
-        assert_eq!(got_cl100k, *cl100k, "cl100k({text:?})");
-        assert_eq!(got_gpt2, *gpt2, "gpt2_default({text:?})");
+        assert_eq!(qwen.split(text), *cl100k, "cl100k({text:?})");
+        assert_eq!(bare.split(text), *gpt2, "gpt2_default({text:?})");
     }
-    // At least the flagged rows must be genuine divergences (excluding the
-    // lowercase-contraction row, which is deliberately included to show the
-    // axis is case, not contractions-in-general).
-    assert_ne!(pretokenize_digits("DON'T", 1), pretokenize_gpt2_default("DON'T"));
-    assert_ne!(pretokenize_digits("1234567890", 1), pretokenize_gpt2_default("1234567890"));
-    assert_ne!(pretokenize_digits("(hello", 1), pretokenize_gpt2_default("(hello"));
 }
 
 fn battery() -> Vec<(&'static str, &'static [u32])> {

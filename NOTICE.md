@@ -34,6 +34,10 @@ https://github.com/ggml-org/llama.cpp
     Q8_0, Q2_K-Q6_K, MXFP4, IQ4_NL, IQ4_XS, TQ1_0, TQ2_0) are
     transcribed/ported from ggml-common.h and ggml-quants.c (the
     dequantize_row_* family and the kvalues_* lookup tables).
+  - crates/data/src/hf_pretok.rs: the pre-tokenizer split patterns a GGUF
+    selects by `tokenizer.ggml.pre` (deepseek-llm, deepseek-coder,
+    deepseek-v3) are transcribed from src/llama-vocab.cpp
+    (pinned at llama.cpp commit 86ea01d05ec237f89b78b41c8c1ee0f908141ac7).
 
   Permission is hereby granted, free of charge, to any person obtaining a
   copy of this software and associated documentation files (the
