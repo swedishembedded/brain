@@ -1258,13 +1258,11 @@ impl Qwen {
     /// so it does not go away at prefill row counts - measured on the FLUX.2
     /// text encoder (512 tokens, 28 layers, 112 dispatches) as **an order of
     /// magnitude**.
-    /// The reference kernel's epsilon is a hard-coded 1e-6, which is what the
-    /// runtime-eps twin is handed here.
     fn rms_step(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
         if self.coop {
-            self.gpu.dispatch(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(1e-6)], gpu_core::Dispatch::Workgroups(rows))
+            self.gpu.dispatch(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(self.cfg.rms_eps)], gpu_core::Dispatch::Workgroups(rows))
         } else {
-            block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows, 1e-6)
+            block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows, self.cfg.rms_eps)
         }
     }
 
@@ -1326,7 +1324,7 @@ impl Qwen {
     /// when the gain is trainable (frozen LoRA base / inference skip it).
     fn rmsnorm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         let gw = self.trainable(wname).then(|| self.g(wname));
-        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, 1e-6));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, self.cfg.rms_eps));
     }
 
     /// True if a LoRA adapter is configured for the given projection leaf.
@@ -2532,11 +2530,12 @@ impl Qwen {
         // a large share of prefill GPU time across 13k single-thread calls). Same policy
         // the serving engine's selector applies, at the always-m=1 call site.
         let fast = g.caps().workgroup_reductions;
+        let eps = self.cfg.rms_eps;
         let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32| {
             if fast {
-                s.push(g.dispatch(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)));
+                s.push(g.dispatch(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(eps)], gpu_core::Dispatch::Workgroups(rows)));
             } else {
-                s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows, 1e-6));
+                s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows, eps));
             }
         };
         // B7: the fp32-vs-int8 GEMV pick used to be a SECOND, independent

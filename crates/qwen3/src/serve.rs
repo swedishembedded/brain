@@ -1857,8 +1857,8 @@ impl Engine {
         let g = &self.gpu;
         let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
         match self.selector.select(Op::RmsNorm, shape, &self.caps) {
-            KernelVariant::WorkgroupPerOutput => g.dispatch(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], gpu_core::Dispatch::Workgroups(rows)),
-            _ => g.step(RMSNORM, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], rows),
+            KernelVariant::WorkgroupPerOutput => g.dispatch(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(self.cfg.rms_eps)], gpu_core::Dispatch::Workgroups(rows)),
+            _ => g.step(RMSNORM, &[x, w, out], &[d, rows, gpu_core::f(self.cfg.rms_eps)], rows),
         }
     }
     // qwen3-serve-manual-gemm-dispatch END
@@ -1890,7 +1890,7 @@ impl Engine {
                 s.push(self.gpu.dispatch(
                     RMSNORM_QUANT_FUSED,
                     &[x, w, &scratch.sx, scratch.xq_for(d)],
-                    &[d, rows, gpu_core::f(1e-6)],
+                    &[d, rows, gpu_core::f(self.cfg.rms_eps)],
                     gpu_core::Dispatch::Workgroups(rows),
                 ));
             }
@@ -1924,7 +1924,7 @@ impl Engine {
             s.push(g.dispatch(
                 QKNORM_ROPE_FUSED,
                 &[x, w, &self.sc.pos_buf, out],
-                &[rows, heads, hd, gpu_core::f(1e-6), fb(theta)],
+                &[rows, heads, hd, gpu_core::f(self.cfg.rms_eps), fb(theta)],
                 gpu_core::Dispatch::Workgroups(rows),
             ));
         } else {
@@ -1974,7 +1974,7 @@ impl Engine {
             s.push(g.dispatch(
                 QKNORM_ROPE_APPEND_FUSED,
                 &[x, w, &self.sc.pos_buf, &self.sc.blk_buf, &self.sc.off_buf, out, pool],
-                &[rows, heads, hd, gpu_core::f(1e-6), fb(theta), block_size],
+                &[rows, heads, hd, gpu_core::f(self.cfg.rms_eps), fb(theta), block_size],
                 gpu_core::Dispatch::Workgroups(rows),
             ));
         } else {
