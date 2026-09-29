@@ -287,6 +287,35 @@ pub const ARCHS: &[Arch] = &[
             Variant { reference: "Qwen/Qwen3-14B", params: 14_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
             Variant { reference: "Qwen/Qwen3-32B", params: 32_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
         ]),
+    // Llama and Qwen2 are CONFIGURATIONS of the dense decoder `brain-qwen3`
+    // implements, not crates of their own: identical HF tensor names, told
+    // apart only by q/k/v bias, QK-norm and RoPE scaling (`QwenConfig`'s
+    // flags). Each keeps its own id - llama.cpp's `LLM_ARCH_LLAMA` /
+    // `LLM_ARCH_QWEN2` spelling, which is also its GGUF
+    // `general.architecture` - so a checkpoint is named for what it is, and
+    // [`Arch::implementation`] leads from each to the crate that runs it; a new
+    // crate is for new math, not for a flag the config already has. `variants` lists
+    // the DeepSeek checkpoints of each family (deepseek-ai publishes no GGUF
+    // of its own, hence no quants).
+    arch!("llama", "Llama-family dense decoder (config variant of qwen3)", Text, LlamaCpp, "brain-qwen3", hf: &["LlamaForCausalLM", "llama"],
+        variants: &[
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", params: 8_030_261_248, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-base", params: 1_346_471_936, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-instruct", params: 1_346_471_936, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-base", params: 6_740_512_768, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-instruct", params: 6_740_512_768, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-7b-base-v1.5", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-coder-7b-instruct-v1.5", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-llm-7b-base", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-llm-7b-chat", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-math-7b-base", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/deepseek-math-7b-instruct", params: 6_910_365_696, quants: &[] },
+        ]),
+    arch!("qwen2", "Qwen2-family dense decoder (config variant of qwen3)", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen2ForCausalLM", "qwen2"],
+        variants: &[
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", params: 1_777_088_000, quants: &[] },
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params: 7_615_616_512, quants: &[] },
+        ]),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
     // The DENSE sibling of qwen35moe - llama.cpp registers the two as
     // separate architectures (`LLM_ARCH_QWEN35` vs `LLM_ARCH_QWEN35MOE`)
@@ -695,6 +724,19 @@ pub const ARCHS: &[Arch] = &[
     arch!("toyautoencoder", "Bottleneck autoencoder toy task", Domain::Toy, Source::Toy, "brain-toyautoencoder"),
 ];
 
+impl Arch {
+    /// The architecture whose crate implements this one: the row whose `id`
+    /// is this row's `package` crate, or this row itself when no row carries
+    /// that crate's name (its crate is its own, or shared infrastructure like
+    /// `brain-vae`). A config variant such as `llama` resolves to `qwen3`;
+    /// everything that picks a loader, importer or CLI handler by
+    /// architecture goes through this rather than a second table.
+    pub fn implementation(&'static self) -> &'static Arch {
+        let crate_id = self.package.strip_prefix("brain-").unwrap_or(self.package);
+        by_id(crate_id).unwrap_or(self)
+    }
+}
+
 /// The [`Arch`] with this canonical `id`, or `None`.
 pub fn by_id(id: &str) -> Option<&'static Arch> {
     ARCHS.iter().find(|a| a.id == id)
@@ -734,6 +776,25 @@ pub fn public() -> impl Iterator<Item = &'static Arch> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Llama and Qwen2 checkpoints are configurations of the dense decoder
+    /// `brain-qwen3` implements (bias / QK-norm / RoPE-scaling flags), so each
+    /// is its own architecture id - resolvable from its HF class and its
+    /// GGUF spelling - whose implementation is the `qwen3` row.
+    #[test]
+    fn config_variant_rows_resolve_to_the_decoder_that_implements_them() {
+        for (id, hf, model_type) in [("llama", "LlamaForCausalLM", "llama"), ("qwen2", "Qwen2ForCausalLM", "qwen2")] {
+            let a = by_id(id).unwrap_or_else(|| panic!("no {id} row"));
+            assert_eq!(by_hf(hf).map(|a| a.id), Some(id), "{hf}");
+            assert_eq!(by_hf(model_type).map(|a| a.id), Some(id), "model_type {model_type}");
+            assert_eq!(by_gguf(id).map(|a| a.id), Some(id), "gguf {id}");
+            assert_eq!(a.implementation().id, "qwen3", "{id} is implemented by the qwen3 decoder");
+        }
+        // A row whose crate carries its own id implements itself, and so does
+        // one whose crate is shared infrastructure rather than an architecture.
+        assert_eq!(by_id("qwen3").map(|a| a.implementation().id), Some("qwen3"));
+        assert_eq!(by_id("autoencoderkl").map(|a| a.implementation().id), Some("autoencoderkl"));
+    }
 
     #[test]
     fn every_fetchable_ref_parses_as_a_non_reserved_two_segment_ref() {

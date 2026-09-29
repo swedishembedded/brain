@@ -539,6 +539,11 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // the dispatch", so this fails cleanly instead of guessing at a
         // Conv1D-transpose import.
         "gpt2" => Err("gpt2 has no HF import path yet -- fetch and convert manually".to_string()),
+        // Config variants of the qwen3 decoder (`Arch::implementation`),
+        // recognized so a fetch names them for what they are, but the qwen3
+        // importer does not yet honour their bias / QK-norm / RoPE-scaling
+        // flags, so importing one would build the wrong model.
+        "llama" | "qwen2" => Err(format!("{family} checkpoints are recognized but not importable yet")),
         // qwen3omnimoe (Qwen3-Omni) is recognized via an exact HF class-name
         // match, so it is never mis-routed to the dense qwen3 importer even
         // though its class name contains "qwen" as a substring. The importer

@@ -18,6 +18,16 @@ that is "mostly right".
   `ModelCard.architecture`, and the docs page filename - reserving it first
   is what keeps those in sync instead of drifting into four different
   spellings for the same architecture.
+- **A config variant of an existing decoder is a row, not a crate.** When a
+  new architecture is an existing crate's model with different flags - the
+  same tensor names, told apart only by switches the crate's config already
+  has (`llama` and `qwen2` are `brain-qwen3`'s decoder with QK-norm off, and
+  bias on for `qwen2`) - give it its own row (its own id, HF classes, GGUF
+  spelling, docs page) whose `package` names the implementing crate, and add
+  it to `scripts/gates/check-arch-names.sh`'s `permanent_exceptions`.
+  Everything that picks an importer, loader or handler by architecture goes
+  through `Arch::implementation()`, never a second table. A new crate is for
+  new MATH; a flag the existing config lacks is added to that config.
 - **Three independent references, one authority.** Fetch the official repo
   (authority on math), a widely-used reimplementation (tensor naming, pipeline
   glue), and a third ecosystem tool if one exists (a third opinion +

@@ -103,6 +103,8 @@ docs/inference/world-models.md
 docs/models/index.md
 docs/models/optionhead.md
 docs/models/qwen3.md
+docs/models/qwen2.md
+docs/models/llama.md
 docs/models/qwen35moe.md
 docs/models/qwen35.md
 docs/models/gpt2.md
