@@ -261,6 +261,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
     // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("qwen"));
     let mut card = checkpoint::st::ModelCard::new(id, "qwen");
+    card.architecture = Some(crate::hf::decoder_arch(&cfg_json)?.id.to_string());
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(param_count);
 

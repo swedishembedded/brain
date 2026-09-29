@@ -520,7 +520,10 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     )))]
     let _ = (hf_dir, out, &id);
 
-    let result = match family {
+    // A config-variant row (llama, qwen2) converts through the importer of
+    // the decoder that implements it.
+    let implementation = brain_arch::by_id(family).map_or(family, |a| a.implementation().id);
+    let result = match implementation {
         #[cfg(feature = "import-qwen3")]
         "qwen3" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
         #[cfg(not(feature = "import-qwen3"))]
@@ -539,11 +542,6 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
         // the dispatch", so this fails cleanly instead of guessing at a
         // Conv1D-transpose import.
         "gpt2" => Err("gpt2 has no HF import path yet -- fetch and convert manually".to_string()),
-        // Config variants of the qwen3 decoder (`Arch::implementation`),
-        // recognized so a fetch names them for what they are, but the qwen3
-        // importer does not yet honour their bias / QK-norm / RoPE-scaling
-        // flags, so importing one would build the wrong model.
-        "llama" | "qwen2" => Err(format!("{family} checkpoints are recognized but not importable yet")),
         // qwen3omnimoe (Qwen3-Omni) is recognized via an exact HF class-name
         // match, so it is never mis-routed to the dense qwen3 importer even
         // though its class name contains "qwen" as a substring. The importer
@@ -611,21 +609,22 @@ fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), Strin
     convert_files(store, vendor, repo, "qwen3tts", &[("ckpt", "."), ("weights_dir", "brain_tts")])
 }
 
-/// See [`convert_transformers`]'s cleanup note. Handles both shapes
-/// `TransformersRecipe::artifacts` can have downloaded: a single
-/// `model.safetensors`, or a `model.safetensors.index.json` + its
-/// `model-NNNNN-of-NNNNN.safetensors` shard set.
+/// See [`convert_transformers`]'s cleanup note. Handles every shape
+/// `TransformersRecipe::artifacts` can have downloaded, in either format: a
+/// single `model.safetensors` / `pytorch_model.bin`, or its shard index plus
+/// the `model-*.safetensors` / `pytorch_model-*.bin` shards it names.
 fn remove_upstream_weights(dir: &Path) {
-    let single = dir.join("model.safetensors");
-    if single.exists() {
-        std::fs::remove_file(&single).ok();
-        return;
+    for index in ["model.safetensors.index.json", "pytorch_model.bin.index.json"] {
+        std::fs::remove_file(dir.join(index)).ok();
     }
-    std::fs::remove_file(dir.join("model.safetensors.index.json")).ok();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for name in entries.filter_map(|e| e.ok()).map(|e| e.file_name()) {
         let name = name.to_string_lossy();
-        if name.starts_with("model-") && name.ends_with(".safetensors") {
+        let upstream = name == "model.safetensors"
+            || name == "pytorch_model.bin"
+            || (name.starts_with("model-") && name.ends_with(".safetensors"))
+            || (name.starts_with("pytorch_model-") && name.ends_with(".bin"));
+        if upstream {
             std::fs::remove_file(dir.join(&*name)).ok();
         }
     }
@@ -710,6 +709,48 @@ mod tests {
         assert!(out.contains("100%"), "the ladder reaches 100%: {out:?}");
         assert!(!out.contains('\r'), "pipe mode has no carriage returns: {out:?}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Llama config variant of the qwen3 decoder, shipped the way
+    /// deepseek-coder-1.3b-base is (a lone `pytorch_model.bin`), is fetched,
+    /// converted by the qwen3 importer at its own config (no QK-norm, untied
+    /// head, linear RoPE scaling), and its upstream weights removed.
+    #[cfg(feature = "import-qwen3")]
+    #[test]
+    fn a_llama_bin_checkpoint_converts_through_the_qwen3_importer() {
+        let config = br#"{"architectures":["LlamaForCausalLM"],"vocab_size":5,"hidden_size":8,"num_hidden_layers":2,
+            "num_attention_heads":2,"num_key_value_heads":2,"intermediate_size":12,"rope_theta":100000,
+            "rms_norm_eps":1e-6,"tie_word_embeddings":false,"max_position_embeddings":64,
+            "rope_scaling":{"type":"linear","factor":4.0}}"#
+            .to_vec();
+        let cfg = qwen3::hf::decoder_config(std::str::from_utf8(&config).unwrap()).unwrap();
+        let names = qwen3::hf::HfNames::CAUSAL_LM;
+        let init = qwen3::init_weights(&cfg, 3);
+        let tensors: Vec<checkpoint::torchpt_write::TensorOut> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, numel)| checkpoint::torchpt_write::TensorOut { name: names.from_brain(&n).unwrap(), shape: vec![numel], data: init[&n].clone() })
+            .collect();
+        let bin = std::env::temp_dir().join(format!("brain-loader-llama-bin-{}", std::process::id()));
+        checkpoint::torchpt_write::write(bin.to_str().unwrap(), &tensors).unwrap();
+        let mut hub = FakeHub::new();
+        hub.add_file("deepseek-ai", "tiny-llama", "main", "config.json", config);
+        hub.add_file("deepseek-ai", "tiny-llama", "main", "pytorch_model.bin", std::fs::read(&bin).unwrap());
+        std::fs::remove_file(&bin).ok();
+
+        let store = store("loader-supply-test-llama-bin");
+        let reference = ModelRef::parse("deepseek-ai/tiny-llama").unwrap();
+        let plan = brain_modelstore::plan(&reference, &store, &hub).unwrap();
+        execute_plan_reported(&store, &hub, &plan, "deepseek-ai/tiny-llama", Mode::Pipe, &mut Vec::new()).unwrap();
+
+        let dir = store.repo_dir(&reference);
+        let reader = checkpoint::weightio::WeightReader::open(dir.join("model.brain.safetensors").to_str().unwrap()).unwrap();
+        assert_eq!(qwen3::QwenConfig::from_reader(&reader).unwrap(), cfg);
+        assert_eq!(reader.card().unwrap().architecture.as_deref(), Some("llama"));
+        for (n, _) in cfg.param_list() {
+            assert_eq!(reader.tensor(&n).unwrap(), init[&n], "{n}");
+        }
+        assert!(!dir.join("pytorch_model.bin").exists(), "the upstream weights are dead once converted");
     }
 
     #[test]

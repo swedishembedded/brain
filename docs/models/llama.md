@@ -22,6 +22,10 @@ The DeepSeek checkpoints of this family:
 | `deepseek-ai/deepseek-math-7b-base` / `-instruct` | 6.9B | none |
 
 brain recognizes the architecture (HF class `LlamaForCausalLM`, GGUF
-`llama`), but importing and serving these checkpoints is not available yet.
+`llama`). `brain pull deepseek-ai/<checkpoint>` fetches one (as safetensors
+when the repo ships them, otherwise its `pytorch_model*.bin` shards) and
+converts it with the Qwen3 importer at its own configuration, RoPE scaling
+included. Serving these checkpoints is not available yet: their tokenizers
+and chat templates are not read yet.
 
 Package: `brain-qwen3`.

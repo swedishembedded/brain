@@ -18,6 +18,10 @@ The DeepSeek checkpoints of this family are the R1 reasoning distills:
 | `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` | 7.6B |
 
 brain recognizes the architecture (HF class `Qwen2ForCausalLM`, GGUF
-`qwen2`), but importing and serving these checkpoints is not available yet.
+`qwen2`). `brain pull deepseek-ai/<checkpoint>` fetches one (as safetensors
+when the repo ships them, otherwise its `pytorch_model*.bin` shards) and
+converts it with the Qwen3 importer at its own configuration, RoPE scaling
+included. Serving these checkpoints is not available yet: their tokenizers
+and chat templates are not read yet.
 
 Package: `brain-qwen3`.

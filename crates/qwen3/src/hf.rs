@@ -70,13 +70,21 @@ const IMPORT_BLOCK_SIZE: u32 = 2048;
 /// do), so a trimmed config means what it means upstream rather than
 /// whatever brain happened to assume.
 pub fn decoder_config(json: &str) -> Result<QwenConfig, String> {
+    let arch = decoder_arch(json)?;
+    let c: HfDecoderConfig = serde_json::from_str(json).map_err(|e| format!("config.json: {e}"))?;
+    from_hf(c, arch.id)
+}
+
+/// The architecture row a decoder `config.json` declares (`qwen3`, `qwen2`
+/// or `llama`), refusing one this decoder does not implement.
+pub fn decoder_arch(json: &str) -> Result<&'static brain_arch::Arch, String> {
     let c: HfDecoderConfig = serde_json::from_str(json).map_err(|e| format!("config.json: {e}"))?;
     let class = c.architectures.first().cloned().or_else(|| c.model_type.clone()).ok_or("config.json names neither `architectures` nor `model_type`")?;
     let arch = brain_arch::by_hf(&class).ok_or_else(|| format!("config.json: architecture {class:?} is not one brain recognizes"))?;
     if arch.implementation().id != "qwen3" {
         return Err(format!("config.json: {class:?} is `{}`, which is not implemented by this decoder", arch.id));
     }
-    from_hf(c, arch.id)
+    Ok(arch)
 }
 
 /// [`decoder_config`] for a composite checkpoint whose `config.json` names
