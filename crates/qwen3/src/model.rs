@@ -649,11 +649,9 @@ impl Qwen {
     /// host copy. AdamW moments are device zero-init (not read from disk), so
     /// this is byte-identical to the former eager path.
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
-        let reader = checkpoint::weightio::WeightReader::open(path)
-            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
-        let cfg = QwenConfig::from_json(&reader.config());
+        let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, true, shard, Dtype::F32, false)
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, Dtype::F32, false)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -668,7 +666,7 @@ impl Qwen {
     /// `checkpoint::load` + `by_role("")` whole-model host copy. Numerically
     /// identical to [`Qwen::load_inference`]; used by the resident serve path.
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
-        let cfg = QwenConfig::from_json(&reader.config());
+        let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen::new_impl(cfg, b, t, reader, false, shard, Dtype::F32, false)
     }
@@ -685,7 +683,7 @@ impl Qwen {
     /// point on the result panics loudly rather than reading/writing past the
     /// smaller buffers - use the KV-cache decode API instead.
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
-        let cfg = QwenConfig::from_json(&reader.config());
+        let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen::new_impl(cfg, 1, ctx, reader, false, shard, Dtype::F32, true)
     }
@@ -718,11 +716,17 @@ impl Qwen {
     /// [`TensorSource`](checkpoint::TensorSource), feeding `Weight::upload`
     /// per leaf - see `new_impl`'s `weights` construction).
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
-        let reader = checkpoint::weightio::WeightReader::open(path)
-            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
-        let cfg = QwenConfig::from_json(&reader.config());
+        let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, false, shard, dt, false)
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, dt, false)
+    }
+
+    /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
+    /// builders read tensors by brain's names, which a GGUF does not use -
+    /// that goes through [`crate::open_checkpoint`].
+    fn brain_config(reader: &checkpoint::weightio::WeightReader) -> QwenConfig {
+        assert!(reader.gguf().is_none(), "a GGUF is built through qwen3::open_checkpoint, which reads it under brain's names");
+        QwenConfig::from_reader(reader).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {

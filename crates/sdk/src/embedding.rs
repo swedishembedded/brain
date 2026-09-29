@@ -652,7 +652,7 @@ fn load_qwen3(model_id: &str, capacity: u32, tokenizer: Option<String>, download
     };
 
     let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3 embedding: {weights}: {e}")))?;
-    let cfg = qwen3::QwenConfig::from_json(&reader.config());
+    let cfg = qwen3::QwenConfig::from_reader(&reader).map_err(|e| Error::Backend(format!("qwen3 embedding: {weights}: {e}")))?;
 
     let tok = if let Some(t) = &tokenizer {
         data::qwen_tokenizer::QwenBpe::from_file(t).map_err(Error::Backend)?

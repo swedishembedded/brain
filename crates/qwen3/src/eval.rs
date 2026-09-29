@@ -51,16 +51,14 @@ pub struct ChatScore {
 fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32, dt: Dtype) -> Qwen {
     match adapter {
         None => {
-            let reader = checkpoint::weightio::WeightReader::open(weights)
-                .unwrap_or_else(|e| panic!("cannot open {weights}: {e}"));
-            let cfg = QwenConfig::from_json(&reader.config());
+            let (cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
             let shard = crate::Shard::whole(cfg.n_layers as usize);
-            Qwen::new_shard_dt(cfg, 1, t, &reader, shard, dt)
+            Qwen::new_shard_dt(cfg, 1, t, &*src, shard, dt)
         }
         Some(a) => {
             let c = checkpoint::load(weights);
             let mut tensors: HashMap<String, Vec<f32>> = c.by_role("");
-            let mut cfg = QwenConfig::from_json(&c.header["config"]);
+            let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{weights}: {e}"));
             crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");
             // Folded: the delta is already baked into the base tensors, so
             // this Qwen has no separate lora_a/lora_b params to build.
@@ -204,7 +202,7 @@ impl KvMode {
 /// identical tensors.
 fn load_scored_tensors(weights: &str, adapter: Option<&str>) -> (QwenConfig, HashMap<String, Vec<f32>>) {
     let c = checkpoint::load(weights);
-    let mut cfg = QwenConfig::from_json(&c.header["config"]);
+    let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{weights}: {e}"));
     let mut tensors: HashMap<String, Vec<f32>> = c.by_role("");
     if let Some(a) = adapter {
         crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");

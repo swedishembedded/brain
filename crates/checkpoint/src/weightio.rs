@@ -210,6 +210,15 @@ impl WeightReader {
         }
     }
 
+    /// The GGUF mapping, when this reader has one open - its KV metadata is
+    /// the config, which [`Self::config`] returns only as raw keys.
+    pub fn gguf(&self) -> Option<&MmapGguf> {
+        match &self.inner {
+            Inner::Gguf(m) => Some(m),
+            Inner::St(_) | Inner::StSharded(..) => None,
+        }
+    }
+
     /// The [`ModelCard`], if one can be derived (always `Some` for GGUF).
     pub fn card(&self) -> Option<ModelCard> {
         match &self.inner {

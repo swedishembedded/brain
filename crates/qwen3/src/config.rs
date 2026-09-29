@@ -40,7 +40,7 @@ impl LoraCfg {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QwenConfig {
     pub vocab: u32,
     pub block_size: u32,
@@ -287,7 +287,8 @@ impl QwenConfig {
             "head_dim": self.head_dim, "d_ff": self.d_ff,
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_eps,
             "max_position_embeddings": self.max_position_embeddings,
-            "tie_word_embeddings": self.tie_embeddings
+            "tie_word_embeddings": self.tie_embeddings,
+            "qk_norm": self.qk_norm, "attention_bias": self.attn_bias
         });
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
         // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
@@ -341,6 +342,23 @@ impl QwenConfig {
             ));
         }
         Ok(Self::from_json(c))
+    }
+
+    /// The config of the checkpoint `reader` has open, read from what that
+    /// format declares: a GGUF's KV metadata
+    /// ([`crate::gguf_import::config_from_gguf`]) or a brain checkpoint's
+    /// header ([`Self::from_json_checked`]). A Hugging Face directory keeps
+    /// its config in a `config.json` the reader does not see; that is read
+    /// with [`crate::hf::decoder_config`].
+    pub fn from_reader(reader: &checkpoint::weightio::WeightReader) -> Result<QwenConfig, String> {
+        if let Some(mg) = reader.gguf() {
+            return crate::gguf_import::config_from_gguf(mg);
+        }
+        let header = reader.config();
+        if header.is_null() {
+            return Err("checkpoint has no config header - a Hugging Face directory's config.json is read with qwen3::hf::decoder_config".into());
+        }
+        Self::from_json_checked(&header)
     }
 
     pub fn from_json(c: &Value) -> QwenConfig {
@@ -601,5 +619,28 @@ mod tests {
         let (inv_freq, attention_factor) = scaled.rope_table().expect("rope_scaling set -> Some");
         assert_eq!(inv_freq.len(), (scaled.head_dim / 2) as usize);
         assert!(attention_factor > 1.0, "factor=4.0 must produce an attention_factor > 1.0, got {attention_factor}");
+    }
+
+    /// A checkpoint's config is written with `to_json` and read back with
+    /// `from_json`; anything the pair loses is a different model on reload.
+    #[test]
+    fn json_roundtrip_is_identity() {
+        let mut scaled = QwenConfig::qwen2_1_5b();
+        scaled.rope_scaling = Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 });
+        let mut lora = QwenConfig::tiny();
+        lora.lora = Some(LoraCfg { rank: 4, alpha: 8.0, targets: vec!["q".into(), "v".into()] });
+        for cfg in [
+            QwenConfig::tiny(),
+            QwenConfig::tiny_i8(),
+            QwenConfig::qwen3_0_6b(),
+            QwenConfig::qwen3_8b(),
+            QwenConfig::llama2_13b(),
+            QwenConfig::qwen2_0_5b(),
+            QwenConfig::qwen2_7b(),
+            scaled,
+            lora,
+        ] {
+            assert_eq!(QwenConfig::from_json_checked(&cfg.to_json()).unwrap(), cfg);
+        }
     }
 }

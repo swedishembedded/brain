@@ -471,7 +471,10 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).unwrap_or_else(|e| {
+        eprintln!("{}: {e}", o.weights);
+        std::process::exit(1);
+    });
     println!(
         "qwen_kv_bench: {} -- {} layers, d_model={}, n_kv_heads={}, head_dim={}, vocab={}",
         o.weights, cfg.n_layers, cfg.d_model, cfg.n_kv_heads, cfg.head_dim, cfg.vocab
@@ -485,8 +488,6 @@ fn main() {
 
     let parity_ok = verify(&o, &cfg);
 
-    let reader = checkpoint::weightio::WeightReader::open(&o.weights).unwrap();
-    let cfg = QwenConfig::from_json(&reader.config());
     bench_cap(&o, &cfg);
 
     // The timing sweep above is the point of this bin and must always run and

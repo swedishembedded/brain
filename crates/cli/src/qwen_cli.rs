@@ -330,7 +330,7 @@ fn serve(args: &[String]) {
     let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
     // A header-only peek (not a second full checkpoint load), shared by the
     // int8-KV degrade check below and the --kv-calib lookup further down.
-    let header_cfg = checkpoint::weightio::WeightReader::open(&weights).ok().map(|r| QwenConfig::from_json(&r.config()));
+    let header_cfg = checkpoint::weightio::WeightReader::open(&weights).ok().and_then(|r| QwenConfig::from_reader(&r).ok());
     // `--int8` requesting the DEFAULT degrades loudly on an unsupported
     // head_dim rather than hitting `from_map_with_gpu`'s hard assert -- an
     // explicit `--int8` on the command line is, deliberately, still a
@@ -487,7 +487,13 @@ fn infer(args: &[String]) {
             return;
         }
     };
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = match QwenConfig::from_reader(&reader) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("brain qwen3 infer: {weights}: {e}");
+            return;
+        }
+    };
     let shard = qwen3::model::Shard::whole(cfg.n_layers as usize);
     drop(reader);
     let t_load = std::time::Instant::now();
@@ -550,7 +556,13 @@ fn train(args: &[String], base: Option<&str>) {
     // A small default architecture for from-scratch training; finetune reads the
     // architecture from the base checkpoint instead.
     let cfg = match base {
-        Some(p) => QwenConfig::from_json(&checkpoint::read_config(p)),
+        Some(p) => match QwenConfig::from_json_checked(&checkpoint::read_config(p)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("brain qwen3 finetune: {p}: {e}");
+                return;
+            }
+        },
         None => QwenConfig {
             vocab: 0, // filled from the dataset
             block_size: block,
@@ -964,7 +976,7 @@ fn finetune_lora(args: &[String]) {
     let reloaded = {
         let reader = checkpoint::weightio::WeightReader::open(full_ckpt_out.to_str().unwrap_or_default())
             .unwrap_or_else(|e| panic!("cannot reopen {}: {e}", full_ckpt_out.display()));
-        let cfg = qwen3::QwenConfig::from_json(&reader.config());
+        let cfg = qwen3::QwenConfig::from_reader(&reader).unwrap_or_else(|e| panic!("{}: {e}", full_ckpt_out.display()));
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
         Qwen::new_shard(cfg, 1, block, &reader, true, shard)
     };
@@ -1389,8 +1401,13 @@ fn calib(args: &[String]) {
     }
 
     if let Some(path) = clip_out {
-        let ckpt_cfg = checkpoint::read_config(weights_str);
-        let cfg = QwenConfig::from_json(&ckpt_cfg);
+        let cfg = match QwenConfig::from_json_checked(&checkpoint::read_config(weights_str)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("brain qwen3 calib: {weights_str}: {e}");
+                return;
+            }
+        };
         let calib = model::kvcalib::KvCalib::from_collector(
             &base_id,
             cfg.n_layers as usize,

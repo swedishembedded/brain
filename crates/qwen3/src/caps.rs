@@ -461,36 +461,18 @@ impl Action for GenerateAction {
             let dt = if precision == "int8" { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
             // A GGUF is served STRAIGHT off its own mapping, under brain's
             // parameter names, with no ahead-of-time conversion: see
-            // `crate::gguf_import::open_source`. `brain import` would first
+            // `crate::open_checkpoint`. `brain import` would first
             // write an fp32 checkpoint ~4x the GGUF's size (15 GiB from a
             // 4 GiB Q8_0 Qwen3-4B) purely to rename tensors, and the fp32
             // build then does not fit an integrated GPU at all. The
             // quantized bytes on disk are already what a reduced-precision
             // build wants.
-            let is_gguf = std::path::Path::new(&weights)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
-            let model = if is_gguf {
-                let (cfg, src) = crate::gguf_import::open_source(&weights)?;
-                let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-                let build_cfg = cfg.clone();
-                let build_shard = shard.clone();
-                crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", move || {
-                    Qwen::new_shard_dt(build_cfg, 1, cap, &src, build_shard, dt)
-                })?
-            } else {
-                let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen generate: cannot open {weights}: {e}"))?;
-                let cfg = crate::config::QwenConfig::from_json(&reader.config());
-                let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-                drop(reader);
-                crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", || {
-                    if precision == "int8" {
-                        Qwen::load_inference_i8(&weights, 1, cap)
-                    } else {
-                        Qwen::load_inference(&weights, 1, cap)
-                    }
-                })?
-            };
+            let (cfg, src) = crate::open_checkpoint(&weights).map_err(|e| format!("qwen generate: {e}"))?;
+            let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+            let (build_cfg, build_shard) = (cfg.clone(), shard.clone());
+            let model = crate::footprint::place_and_build(&cfg, &shard, dt, 1, cap, false, false, "qwen3", move || {
+                Qwen::new_shard_dt(build_cfg, 1, cap, &*src, build_shard, dt)
+            })?;
             // An incremental decoder re-records its WHOLE tape every token -
             // roughly 800 dispatches for Qwen3-0.6B - and on wgpu each one
             // builds a fresh uniform buffer plus a fresh bind group, both
@@ -655,7 +637,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     // The MODEL's vocab (not the tokenizer's): it must match the checkpoint's
     // own embedding/lm_head row count, which is what `prepare_chat_samples`
     // records in the dataset's meta.json.
-    let vocab = crate::config::QwenConfig::from_json(&checkpoint::read_config(weights)).vocab as usize;
+    let vocab = crate::config::QwenConfig::from_json_checked(&checkpoint::read_config(weights)).map_err(|e| format!("qwen lora_train: {weights}: {e}"))?.vocab as usize;
     let data_dir = scratch.join("data");
     data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
 
@@ -706,7 +688,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     // there is (b = 1, t = 1) - `param_names`/`read_weight` do not depend on
     // it, and the frozen base is uploaded once either way.
     let ck = checkpoint::load(&full.to_string_lossy());
-    let trained_cfg = crate::config::QwenConfig::from_json(&ck.header["config"]);
+    let trained_cfg = crate::config::QwenConfig::from_json_checked(&ck.header["config"]).map_err(|e| format!("qwen lora_train: {e}"))?;
     let trained = Qwen::new(trained_cfg, 1, 1, &ck.by_role(""));
     crate::lora::save_adapter(&adapter_path.to_string_lossy(), &trained, &card_id, &base_id, dataset_id.as_deref())
         .map_err(|e| format!("qwen lora_train: save_adapter: {e}"))?;
@@ -1046,7 +1028,7 @@ fn fold_and_score(
     let adapter_path = scratch.join("candidate.safetensors");
     std::fs::write(&adapter_path, adapter_bytes).map_err(|e| format!("qwen lora_gate: staging the candidate adapter: {e}"))?;
     let ck = checkpoint::load(weights);
-    let cfg = crate::config::QwenConfig::from_json(&ck.header["config"]);
+    let cfg = crate::config::QwenConfig::from_json_checked(&ck.header["config"]).map_err(|e| format!("qwen lora_gate: {weights}: {e}"))?;
     let mut tensors = ck.by_role("");
     // The adapter is caller-supplied bytes: an adapter for a different base
     // (a tensor name the checkpoint does not carry, a rank that does not
@@ -1165,8 +1147,7 @@ impl Action for EmbedAction {
                 Some(t) if tok_reusable => t,
                 _ => QwenBpe::from_file(&tokenizer_path)?,
             };
-            let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen embed: cannot open {weights}: {e}"))?;
-            let cfg = crate::config::QwenConfig::from_json(&reader.config());
+            let (cfg, src) = crate::open_checkpoint(&weights).map_err(|e| format!("qwen embed: {e}"))?;
             if need > cfg.block_size {
                 return Err(format!(
                     "qwen embed: input is {need} tokens, past this checkpoint's configured context of {} - re-export it with a wider block_size/rope_scaling for a longer context",
@@ -1177,9 +1158,9 @@ impl Action for EmbedAction {
             let cap = need.max(64).min(cfg.block_size);
             // Refuse an over-budget checkpoint legibly BEFORE dispatching a
             // device allocation, same discipline as `generate`/`lora_gate`.
-            let (cfg_for_build, shard_for_build) = (cfg.clone(), shard.clone());
-            let model = crate::footprint::place_and_build(&cfg_for_build, &shard_for_build, gpu_core::select::Dtype::F32, 1, cap, false, true, "qwen3", move || {
-                Qwen::from_reader_decode(&reader, cap)
+            let (build_cfg, build_shard) = (cfg.clone(), shard.clone());
+            let model = crate::footprint::place_and_build(&cfg, &shard, gpu_core::select::Dtype::F32, 1, cap, false, true, "qwen3", move || {
+                Qwen::new_shard_dt_decode(build_cfg, cap, &*src, build_shard, gpu_core::select::Dtype::F32)
             })?;
             *guard = Some(HotEmbed { weights: weights.clone(), tokenizer_path: tokenizer_path.clone(), cap, tok: tok_owned, model });
         }

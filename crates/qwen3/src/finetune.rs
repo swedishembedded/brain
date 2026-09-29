@@ -77,7 +77,7 @@ pub fn finetune_from(
         // below is exactly what lets `lora_b` keep the delta it learned in
         // earlier cycles instead of being reset back to its zero-delta init.
         let c = checkpoint::load(out);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
         if let Mode::Lora { rank, alpha } = mode {
             let lora = cfg
                 .lora
@@ -90,7 +90,7 @@ pub fn finetune_from(
     } else {
         // Fresh start: base architecture + weights from the checkpoint.
         let c = checkpoint::load(base);
-        let mut cfg = QwenConfig::from_json(&c.header["config"]);
+        let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
         let base_w = c.by_role("");
         if let Mode::Lora { rank, alpha } = mode {
             cfg.lora = Some(LoraCfg {

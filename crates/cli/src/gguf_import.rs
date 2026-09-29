@@ -709,8 +709,8 @@ mod tests {
 
         // ...and the output really is a loadable brain checkpoint, not just a
         // file that was written.
-        let cfg = qwen3::QwenConfig::from_json(&checkpoint::read_config(&out));
         let r = checkpoint::weightio::WeightReader::open(&out).unwrap();
+        let cfg = qwen3::QwenConfig::from_reader(&r).unwrap();
         for (name, numel) in cfg.param_list() {
             assert_eq!(r.tensor(&name).unwrap_or_else(|| panic!("missing {name}")).len(), numel, "{name}");
         }

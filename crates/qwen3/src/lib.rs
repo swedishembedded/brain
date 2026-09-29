@@ -15,6 +15,7 @@ pub mod gguf_import;
 pub mod hf;
 pub mod init;
 pub mod model;
+pub mod open;
 pub mod q8;
 pub mod sample;
 pub mod serve;
@@ -26,6 +27,7 @@ pub mod toolcall_eval;
 pub mod tp;
 
 pub use config::{LoraCfg, QwenConfig};
+pub use open::open_checkpoint;
 pub use init::init_weights;
 pub use model::{shard_param_list, Qwen, Shard, IGNORE};
 /// The weight **storage tier** [`Qwen::new_shard_dt`] takes, re-exported so a

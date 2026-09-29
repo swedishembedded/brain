@@ -11,7 +11,7 @@ use qwen3::config::QwenConfig;
 /// Build the fp32 ONNX decoder for `seq_len` and return `(bytes, config)`.
 pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_decoder");
     crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
     Ok((g.finish(), cfg))
@@ -53,7 +53,7 @@ pub fn build_talker_hidden_int8_bytes(weights_path: &str, seq_len: usize) -> std
 
 fn talker_hidden_bytes(weights_path: &str, seq_len: usize, quant: bool) -> std::io::Result<(Vec<u8>, QwenConfig)> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_hidden");
     crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
     Ok((g.finish(), cfg))
@@ -72,7 +72,7 @@ pub fn export_talker_hidden_int8(weights_path: &str, out_path: &str, seq_len: us
 
 fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_hidden");
     crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
@@ -97,7 +97,7 @@ pub fn export_talker_decode_int4(weights_path: &str, out_path: &str, cap: usize)
 
 fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_decode");
     crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, quant, &mut g);
     finish_quant(&g, out_path, quant)
@@ -211,7 +211,7 @@ pub fn export_talker_prefill_int4(weights_path: &str, out_path: &str, seq_len: u
 
 fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_prefill");
     crate::qwen_topology::build_talker_prefill_graph(&cfg, &reader, seq_len, quant, &mut g);
     finish_quant(&g, out_path, quant)
@@ -225,7 +225,7 @@ const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 /// large weights). The pair is read back with a file-based OpenVINO loader.
 pub fn export_qwen_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
     let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_json(&reader.config());
+    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_decoder");
     crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)

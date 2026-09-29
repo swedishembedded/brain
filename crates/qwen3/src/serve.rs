@@ -1232,7 +1232,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         let c = checkpoint::load(path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
         let mut map = HashMap::new();
         for (name, _) in decoder_param_list(&cfg) {
             let t = c.find(&name, "").cloned().unwrap_or_else(|| panic!("serve: checkpoint missing tensor {name}"));

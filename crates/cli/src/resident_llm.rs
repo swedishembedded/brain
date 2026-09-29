@@ -639,7 +639,7 @@ impl QwenResident {
             return HISTORICAL_DEFAULT; // the Legacy non-paged decode path - no pool to auto-size
         }
         let Ok(reader) = checkpoint::weightio::WeightReader::open(path) else { return HISTORICAL_DEFAULT };
-        let checkpoint_cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+        let Ok(checkpoint_cfg) = qwen3::config::QwenConfig::from_reader(&reader) else { return HISTORICAL_DEFAULT };
         let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { est_vram(path).vram };
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
     }
@@ -869,7 +869,9 @@ impl ResidentModel for QwenResident {
         let Ok(reader) = checkpoint::weightio::WeightReader::open(&self.path) else {
             return cost;
         };
-        let cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+        let Ok(cfg) = qwen3::config::QwenConfig::from_reader(&reader) else {
+            return cost;
+        };
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap);
         let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg);
         let kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
@@ -944,7 +946,9 @@ impl ResidentModel for QwenResident {
         let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
         let engine = on_device(device, || -> Result<QwenEngineKind, String> {
             if is_gguf {
-                let model = qwen3::model::Qwen::from_reader_decode(&reader, ctx);
+                let (cfg, src) = qwen3::open_checkpoint(&self.path)?;
+                let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+                let model = qwen3::model::Qwen::new_shard_dt_decode(cfg, ctx, &*src, shard, qwen3::Dtype::F32);
                 // Read the (tied-embedding) LM head ONCE here, not per request:
                 // the fix `generate_kv_stream_with_head`'s doc comment asks for
                 // (594 MiB device->host re-read at real vocab/d_model, otherwise
@@ -965,7 +969,7 @@ impl ResidentModel for QwenResident {
             // asked this checkpoint's unusual `head_dim` for int8, so a
             // serving-process panic on activation would be the wrong failure
             // mode -- see `qwen3::serve::kv_int8_supported`'s doc comment.
-            let checkpoint_cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+            let checkpoint_cfg = qwen3::config::QwenConfig::from_reader(&reader).map_err(|e| format!("qwen: {}: {e}", self.path))?;
             let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&checkpoint_cfg);
             if self.kv_int8_requested && !kv_int8 {
                 eprintln!(
@@ -1040,7 +1044,7 @@ impl ResidentModel for QwenResident {
                 // the base once folded.
                 Some(a) => {
                     let mut tensors = checkpoint::load(&self.path).into_by_role("");
-                    let mut cfg = qwen3::config::QwenConfig::from_json(&reader.config());
+                    let mut cfg = checkpoint_cfg.clone();
                     qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
                     Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);

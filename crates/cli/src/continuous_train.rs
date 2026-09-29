@@ -310,18 +310,19 @@ mod tests {
         opts: &model::FitOpts,
     ) -> std::io::Result<PathBuf> {
         let base = checkpoint::load(base_checkpoint.to_str().expect("utf-8 path"));
-        let vocab = QwenConfig::from_json(&base.header["config"]).vocab;
+        let base_cfg = QwenConfig::from_json_checked(&base.header["config"]).map_err(std::io::Error::other)?;
+        let vocab = base_cfg.vocab;
 
         let dataset_dir = training_checkpoint.parent().unwrap_or_else(|| std::path::Path::new(".")).join("dataset");
         let count = rl::atif::ingest_dir(trajectories_dir, tok, tmpl, vocab as usize, &dataset_dir)?;
         assert!(count > 0, "stage_adapter: the fixture trajectory must ingest to a non-empty dataset");
 
-        let mut cfg = QwenConfig::from_json(&base.header["config"]);
+        let mut cfg = base_cfg;
         cfg.lora = Some(qwen3::config::LoraCfg::attn(lora_rank, lora_alpha));
         rl::fit_weighted::<qwen3::model::Qwen>(&dataset_dir, cfg, opts, Some(training_checkpoint))?;
 
         let trained = checkpoint::load(training_checkpoint.to_str().expect("utf-8 path"));
-        let trained_cfg = QwenConfig::from_json(&trained.header["config"]);
+        let trained_cfg = QwenConfig::from_json_checked(&trained.header["config"]).map_err(std::io::Error::other)?;
         let init = trained.by_role("");
         let block = trained_cfg.block_size;
         let model = qwen3::model::Qwen::new(trained_cfg, 1, block, &init);

@@ -189,7 +189,7 @@ fn write_random_init(cfg: &QwenConfig, seed: u64, out: &Path) {
 /// One round of verifier-only GRPO, starting from `base`'s weights.
 fn train_round(base: &Path, out: &Path, env: PositionCopyEnv, args: &Args, round: usize, log: &CycleLog) {
     let c = checkpoint::load(base.to_str().expect("utf-8 path"));
-    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{}: {e}", base.display()));
     let init = c.by_role("");
     let model = Qwen::new(cfg.clone(), 1, cfg.block_size(), &init);
     let grpo = GrpoConfig {

@@ -400,7 +400,7 @@ impl CpuTalker {
     /// [`crate::gen::TalkerGen::load`]).
     pub fn load(path: &str) -> CpuTalker {
         let c = checkpoint::load(path);
-        let qcfg = qwen3::QwenConfig::from_json(&c.header["config"]);
+        let qcfg = qwen3::QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
         let cfg = TalkerConfig::from_qwen(&qcfg);
         let mut map = HashMap::new();
         for l in 0..cfg.n_layers {

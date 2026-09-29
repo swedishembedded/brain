@@ -364,19 +364,30 @@ pub mod testing {
     /// Ships a `rope_freqs.weight` too: a real llama.cpp Qwen3 conversion may,
     /// and the drop must be a counted decision rather than a silent skip.
     pub fn write_synthetic_gguf(path: &str, tied: bool) {
+        write_gguf(path, tied, &seq);
+    }
+
+    /// [`write_synthetic_gguf`] at small, well-conditioned values, for a test
+    /// that runs the model: the identity-tagged values above overflow
+    /// `mean(x^2)` in the first RMSNorm and every output is zero.
+    pub fn write_conditioned_gguf(path: &str, tied: bool) {
+        write_gguf(path, tied, &|base, n| (0..n).map(|i| 0.3 * (0.37 * base + 0.61 * i as f32).sin()).collect());
+    }
+
+    fn write_gguf(path: &str, tied: bool, values: &dyn Fn(f32, usize) -> Vec<f32>) {
         let tensors: Vec<TensorOut> = contents(tied)
             .into_iter()
             .map(|(gname, _, numel, base)| TensorOut {
                 name: gname.to_string(),
                 shape: vec![numel], // flat: only the element count is load-bearing here
                 ty: 0,
-                data: seq(base, numel).iter().flat_map(|v| v.to_le_bytes()).collect(),
+                data: values(base, numel).iter().flat_map(|v| v.to_le_bytes()).collect(),
             })
             .chain(std::iter::once(TensorOut {
                 name: "rope_freqs.weight".to_string(),
                 shape: vec![HEAD_DIM / 2],
                 ty: 0,
-                data: seq(7.0, HEAD_DIM / 2).iter().flat_map(|v| v.to_le_bytes()).collect(),
+                data: values(7.0, HEAD_DIM / 2).iter().flat_map(|v| v.to_le_bytes()).collect(),
             }))
             .collect();
 
@@ -477,7 +488,58 @@ mod tests {
             .collect();
         assert!(missing.is_empty(), "unreadable brain parameters: {missing:?}");
     }
-    use super::testing::{write_synthetic_gguf, write_synthetic_hf_dir};
+    use super::testing::{write_conditioned_gguf, write_synthetic_gguf, write_synthetic_hf_dir};
+
+    /// What a resident serving a GGUF builds: `open_checkpoint` reads it under
+    /// brain's names at the shape its KV metadata declares, and it decodes
+    /// exactly as the brain checkpoint imported from it.
+    #[test]
+    fn a_gguf_decodes_exactly_as_its_import() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let dir = scratch("open-decode");
+        let gguf = dir.join("m.gguf");
+        write_conditioned_gguf(gguf.to_str().unwrap(), false);
+        let st = dir.join("m.safetensors");
+        import_gguf(gguf.to_str().unwrap(), st.to_str().unwrap(), None).unwrap();
+        let decode = |p: &std::path::Path| -> Vec<u32> {
+            let (cfg, src) = crate::open_checkpoint(p.to_str().unwrap()).unwrap();
+            assert_eq!(cfg.vocab, testing::VOCAB as u32);
+            let shard = crate::Shard::whole(cfg.n_layers as usize);
+            let m = crate::Qwen::new_shard_dt_decode(cfg, 8, &*src, shard, crate::Dtype::F32);
+            [1u32, 3, 2].iter().flat_map(|&t| m.step(t)).map(f32::to_bits).collect()
+        };
+        let from_gguf = decode(&gguf);
+        assert!(from_gguf.iter().any(|&b| f32::from_bits(b) != 0.0), "a decode of all zeros compares nothing");
+        assert_eq!(from_gguf, decode(&st));
+    }
+
+    /// Every loader reads a checkpoint's config through `QwenConfig::from_reader`,
+    /// whatever the file is: a GGUF's shape comes from its KV metadata (read
+    /// as a brain config it is all defaults - the `tiny()` shape), a brain
+    /// checkpoint's from its header, and a bare HF directory has no config
+    /// the reader could see.
+    #[test]
+    fn from_reader_reads_the_shape_every_format_declares() {
+        use crate::config::QwenConfig;
+        use checkpoint::weightio::WeightReader;
+        let dir = scratch("from-reader");
+        let gguf = dir.join("m.gguf");
+        write_synthetic_gguf(gguf.to_str().unwrap(), false);
+        let from_gguf = QwenConfig::from_reader(&WeightReader::open(gguf.to_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(from_gguf, config_from_gguf(&MmapGguf::open(gguf.to_str().unwrap()).unwrap()).unwrap());
+        assert_eq!(from_gguf.vocab, testing::VOCAB as u32);
+
+        let st = dir.join("m.safetensors");
+        import_gguf(gguf.to_str().unwrap(), st.to_str().unwrap(), None).unwrap();
+        assert_eq!(QwenConfig::from_reader(&WeightReader::open(st.to_str().unwrap()).unwrap()).unwrap(), from_gguf);
+
+        let hf = dir.join("hf");
+        write_synthetic_hf_dir(&hf, false);
+        let e = QwenConfig::from_reader(&WeightReader::open_hf_dir(&hf).unwrap()).unwrap_err();
+        assert!(e.contains("config.json"), "{e}");
+    }
     use super::*;
     use std::collections::HashMap;
 

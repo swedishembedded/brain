@@ -227,7 +227,7 @@ pub fn finetune_lora(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
     // Load the base config + weights, then re-key under a LoRA config so the
     // parameter list gains `*.lora_a`/`*.lora_b` (base stays frozen).
     let ckpt = checkpoint::load(base);
-    let mut cfg = QwenConfig::from_json(&ckpt.header["config"]);
+    let mut cfg = QwenConfig::from_json_checked(&ckpt.header["config"]).map_err(std::io::Error::other)?;
     cfg.block_size = opts.block;
     cfg.lora = Some(LoraCfg::attn(opts.rank, opts.alpha));
     let base_weights = ckpt.by_role("");
@@ -257,7 +257,7 @@ pub fn finetune_full(base: &str, dir: &Path, out: &str, opts: &FinetuneOpts) -> 
     use qwen3::QwenConfig;
 
     let ckpt = checkpoint::load(base);
-    let mut cfg = QwenConfig::from_json(&ckpt.header["config"]);
+    let mut cfg = QwenConfig::from_json_checked(&ckpt.header["config"]).map_err(std::io::Error::other)?;
     cfg.block_size = opts.block;
     cfg.lora = None;
     let base_weights = ckpt.by_role("");

@@ -235,7 +235,7 @@ impl TalkerGen {
     /// process holds ONE device however many components it loads.
     pub fn load_on(gpu: Gpu, path: &str, max_t: u32) -> TalkerGen {
         let c = checkpoint::load(path);
-        let qcfg = qwen3::QwenConfig::from_json(&c.header["config"]);
+        let qcfg = qwen3::QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
         let take = |name: &str| {
             c.find(name, "")

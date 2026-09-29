@@ -1883,7 +1883,7 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
     // A header-only peek (not a second full checkpoint load) to feed the
     // shared boundary policy -- see resolve_kv_int8.
     let kv_int8 = match checkpoint::weightio::WeightReader::open(weights) {
-        Ok(r) => resolve_kv_int8(&qwen3::QwenConfig::from_json(&r.config()), kv_fp32, weights),
+        Ok(r) => resolve_kv_int8(&qwen3::QwenConfig::from_reader(&r).map_err(|e| format!("{weights}: {e}"))?, kv_fp32, weights),
         Err(_) => !kv_fp32, // let Engine::load raise the real, specific I/O error below
     };
     let eng = qwen3::serve::Engine::load(
