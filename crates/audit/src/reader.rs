@@ -87,8 +87,9 @@ pub struct Scored {
 
 /// Everything the loop needs a model for, and nothing else.
 pub trait Learner {
-    /// Mean loss of `text` under the CURRENT model. One forward pass, and
-    /// the only model cost an episode incurs before the gate.
+    /// Mean loss of `text` under the CURRENT model, over every token of it:
+    /// one forward pass per block of the model's context, and the only model
+    /// cost an episode incurs before the gate.
     fn loss(&mut self, text: &str) -> f64;
 
     /// Train a candidate adapter on `rows`, which already include the

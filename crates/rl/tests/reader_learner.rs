@@ -31,6 +31,7 @@ use audit::bank::{Probe, ProbeFamily, ProbeId};
 use audit::reader::{Arm, Learner};
 use checkpoint::gguf::GgufTokenizer;
 use data::qwen_tokenizer::QwenBpe;
+use data::Tokenizer;
 use model::rollout::RolloutParams;
 use model::serve::SampleParams;
 use model::FitOpts;
@@ -300,4 +301,33 @@ fn training_starts_from_the_served_checkpoint_and_not_from_scratch() {
         marked[0],
         &gains[..gains.len().min(4)]
     );
+}
+
+/// A text longer than the model's block is scored over every token, window
+/// by window, never cut to its first block. Windows overlap by one token, so
+/// with a one-byte-per-token tokenizer a `2 * BLOCK - 1` byte text is exactly
+/// two windows of `BLOCK - 1` predictions each, and its loss is their mean.
+#[test]
+fn a_text_longer_than_the_block_is_scored_over_every_token() {
+    if gpu_disabled() {
+        return;
+    }
+    let dir = tmp("long-text");
+    let base = dir.join("base.safetensors");
+    base_checkpoint(&base, &cfg(), 11);
+    let tok = byte_tokenizer();
+    let rollout = RolloutParams { max_new: 4, sample: SampleParams::greedy(), eos: None };
+    let mut learner: ModelLearner<'_, qwen3::model::Qwen, QwenBpe> =
+        ModelLearner::new(&base, &dir.join("work"), &tok, cfg(), fit_opts(), rollout, RANK, ALPHA).expect("learner");
+
+    let b = BLOCK as usize;
+    let text: String = (0..2 * b - 1).map(|i| (b'a' + (i * 7 % 26) as u8) as char).collect();
+    assert_eq!(tok.encode(&text).len(), 2 * b - 1, "fixture: one token per byte");
+    let whole = learner.loss(&text);
+    let first = learner.loss(&text[..b]);
+    let second = learner.loss(&text[b - 1..]);
+    let mean = (first + second) / 2.0;
+    assert!((whole - mean).abs() < 1e-5 * mean, "loss {whole} must be the mean of its windows ({first}, {second})");
+    assert!((whole - first).abs() > 1e-6, "the loss must not be the first window's alone");
+    let _ = std::fs::remove_dir_all(&dir);
 }

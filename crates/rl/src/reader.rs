@@ -247,27 +247,35 @@ fn adapter_bytes<M: Model>(checkpoint_path: &Path, scratch: &Path, rank: u32, al
 }
 
 impl<M: Model, T: Tokenizer> Learner for ModelLearner<'_, M, T> {
+    /// Mean next-token cross entropy over every token of `text`. A text
+    /// longer than the model's block is scored window by window, each window
+    /// starting on the last token of the one before, so every token after
+    /// the first is predicted exactly once.
     fn loss(&mut self, text: &str) -> f64 {
         let block = self.cfg.block_size() as usize;
-        let mut ids = self.tok.encode(text);
-        ids.truncate(block);
-        if ids.len() < 2 {
+        let ids = self.tok.encode(text);
+        if ids.len() < 2 || block < 2 {
             // Nothing to predict from. Reported as out of reach rather than
             // as a suspiciously perfect score.
             return f64::INFINITY;
         }
         let model = self.incumbent_model();
-        let Some(logits) = model.logits_all(&ids) else {
-            return f64::INFINITY;
-        };
-        let vocab = logits.len() / ids.len();
         let mut total = 0.0f64;
-        for i in 0..ids.len() - 1 {
-            let row = &logits[i * vocab..(i + 1) * vocab];
-            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let sum: f64 = row.iter().map(|x| ((x - max) as f64).exp()).sum();
-            let target = row[ids[i + 1] as usize] as f64;
-            total += (max as f64) + sum.ln() - target;
+        let mut start = 0;
+        while start + 1 < ids.len() {
+            let window = &ids[start..(start + block).min(ids.len())];
+            let Some(logits) = model.logits_all(window) else {
+                return f64::INFINITY;
+            };
+            let vocab = logits.len() / window.len();
+            for i in 0..window.len() - 1 {
+                let row = &logits[i * vocab..(i + 1) * vocab];
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let sum: f64 = row.iter().map(|x| ((x - max) as f64).exp()).sum();
+                let target = row[window[i + 1] as usize] as f64;
+                total += (max as f64) + sum.ln() - target;
+            }
+            start += block - 1;
         }
         total / (ids.len() - 1) as f64
     }
