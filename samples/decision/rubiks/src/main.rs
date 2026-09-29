@@ -937,16 +937,6 @@ fn best_admissible(probs: &[(String, f32)], good: &[bool]) -> usize {
         .expect("the planner always offers an admissible move")
 }
 
-fn argmax(probs: &[(String, f32)]) -> usize {
-    let mut best = 0;
-    for (i, p) in probs.iter().enumerate() {
-        if p.1 > probs[best].1 {
-            best = i;
-        }
-    }
-    best
-}
-
 fn plural(d: u8) -> String {
     if d == 1 {
         "1 move".to_string()

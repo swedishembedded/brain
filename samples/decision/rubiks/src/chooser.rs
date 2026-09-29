@@ -35,22 +35,16 @@ pub struct Episode {
     pub features: Vec<f32>,
     /// Moves remaining from each of those states, to the end of the solve.
     pub to_go: Vec<f32>,
-    pub moves: usize,
-    pub macros: usize,
 }
 
-/// Play one cube to the end, recording every state and what it cost from there.
+/// Play one cube to the end, recording every state and what it cost from
+/// there, driven by a chooser that is already learning (or, with no `net`,
+/// uniformly among admissible macros).
 ///
-/// `explore` picks uniformly among admissible macros rather than following
-/// the library's tiebreak. Training on the tiebreak's own trajectories would
-/// teach the model to reproduce it, which is the one thing that cannot
-/// improve on it; a spread of choices is what lets the regression see that
-/// some are cheaper than others.
-pub fn episode(space: &CubeSpace, book: &Playbook, start: &Cube, explore: bool, rng: &mut Rng) -> Option<Episode> {
-    episode_with(space, book, start, None, if explore { 1.0 } else { 0.0 }, rng)
-}
-
-/// As [`episode`], driven by a chooser that is already learning.
+/// Uniform choice rather than the library's tiebreak, because training on
+/// the tiebreak's own trajectories would teach the model to reproduce it,
+/// which is the one thing that cannot improve on it; a spread of choices is
+/// what lets the regression see that some are cheaper than others.
 ///
 /// This is the step that turns one round of policy evaluation into policy
 /// ITERATION. A value fitted to episodes from a random chooser predicts the
@@ -107,7 +101,7 @@ pub fn episode_with(
     for (i, s) in states.iter().enumerate() {
         space.write_features(s, &mut features[i * width..(i + 1) * width]);
     }
-    Some(Episode { features, to_go, moves: acc, macros: states.len() })
+    Some(Episode { features, to_go })
 }
 
 /// Score every admissible macro by what it costs plus what it leaves behind,

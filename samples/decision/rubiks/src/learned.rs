@@ -137,16 +137,13 @@ pub struct TrainArgs {
     /// How many steps between refreshes of the bootstrap's frozen copy.
     pub refresh: usize,
     /// Weight on the cost-to-go term. Zero trains the move policy alone.
+    ///
+    /// Below one because the squared error over targets that run to the walk
+    /// depth is numerically much larger than a cross-entropy over eighteen
+    /// options, and an unweighted sum would let the value term set the trunk's
+    /// gradients almost alone.
     pub value_weight: f32,
 }
-
-/// How heavily cost-to-go is weighted against the move policy.
-///
-/// Below one because the squared error over targets that run to the walk
-/// depth is numerically much larger than a cross-entropy over eighteen
-/// options, and an unweighted sum would let the value term set the trunk's
-/// gradients almost alone.
-pub const VALUE_WEIGHT: f32 = 0.05;
 
 
 pub fn config(a: &TrainArgs, space: &CubeSpace) -> Config {
@@ -282,9 +279,6 @@ pub fn train(a: &TrainArgs) -> Net {
 pub struct Measured {
     pub solved: usize,
     pub total: usize,
-    pub mean_moves: f32,
-    pub outcomes: Vec<rollout::Outcome>,
-    pub starts: Vec<Cube>,
     pub elapsed: std::time::Duration,
 }
 
@@ -324,12 +318,7 @@ pub fn measure_how(
     let elapsed = t0.elapsed();
 
     let solved = outcomes.iter().filter(|o| o.solved()).count();
-    let mean_moves = if solved > 0 {
-        outcomes.iter().filter(|o| o.solved()).map(|o| o.moves().len() as f32).sum::<f32>() / solved as f32
-    } else {
-        0.0
-    };
-    Measured { solved, total: n, mean_moves, outcomes, starts, elapsed }
+    Measured { solved, total: n, elapsed }
 }
 
 /// One cube's worth of policy output, for the renderer.
