@@ -12,6 +12,7 @@ pub mod eval;
 pub mod footprint;
 pub mod import;
 pub mod gguf_import;
+pub mod hf;
 pub mod init;
 pub mod model;
 pub mod q8;

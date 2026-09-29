@@ -39,7 +39,7 @@ fn the_real_checkpoint_loads_its_linears_as_int8() {
     }
 
     let config_json = std::fs::read_to_string(Path::new(&weights_dir).join("config.json")).expect("read language_model/config.json");
-    let cfg = qwen3::import::config_from_hf(&config_json).expect("config_from_hf");
+    let cfg = qwen3::hf::decoder_config_as(&config_json, "qwen3").expect("decoder config");
     let reader = checkpoint::weightio::WeightReader::open_hf_dir(Path::new(&weights_dir)).expect("open_hf_dir");
     let src = qwen3::import::hf_source(&reader, &cfg).expect("hf_source");
 

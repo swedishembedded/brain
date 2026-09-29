@@ -55,7 +55,7 @@ pub struct QwenConfig {
     /// HF `max_position_embeddings` (the checkpoint's trained RoPE extent),
     /// carried through for reference — NOT what sizes runtime buffers (that is
     /// `block_size`/the `t` an instance is loaded/built with; see
-    /// `import::config_from_hf`'s doc comment on why `block_size` doesn't
+    /// `hf::decoder_config`'s doc comment on why `block_size` doesn't
     /// default to it). Defaults to `block_size` when absent from the source
     /// (HF `config.json` predating this field, or a brain checkpoint written
     /// before this field existed), so old checkpoints keep loading unchanged.

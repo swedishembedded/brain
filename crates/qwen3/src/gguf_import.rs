@@ -209,7 +209,7 @@ pub fn open_source(path: &str) -> Result<(QwenConfig, GgufSource), String> {
 /// ground truth, and a `vocab_size` KV that disagrees with the embedding table
 /// would produce a config that cannot load its own checkpoint.
 ///
-/// `block_size` is 2048, matching [`crate::import::config_from_hf`] - it sizes
+/// `block_size` is 2048, matching [`crate::hf::decoder_config`] - it sizes
 /// buffers, and the trained RoPE extent (`context_length`, carried through as
 /// `max_position_embeddings`) would size them absurdly.
 pub fn config_from_gguf(mg: &MmapGguf) -> Result<QwenConfig, String> {
@@ -416,7 +416,7 @@ pub mod testing {
     pub fn write_synthetic_hf_dir(dir: &std::path::Path, tied: bool) {
         std::fs::create_dir_all(dir).unwrap();
         let json = format!(
-            r#"{{"vocab_size":{VOCAB},"hidden_size":{D_MODEL},"num_hidden_layers":{N_LAYERS},
+            r#"{{"architectures":["Qwen3ForCausalLM"],"vocab_size":{VOCAB},"hidden_size":{D_MODEL},"num_hidden_layers":{N_LAYERS},
             "num_attention_heads":{N_HEADS},"num_key_value_heads":{N_KV_HEADS},"head_dim":{HEAD_DIM},
             "intermediate_size":{D_FF},"rope_theta":1000000,"rms_norm_eps":1e-6,
             "max_position_embeddings":40960,"tie_word_embeddings":{tied}}}"#
@@ -522,7 +522,7 @@ mod tests {
             // they must agree about the model before they can agree about its
             // weights.
             let g_cfg = config_from_gguf(&MmapGguf::open(&gguf).unwrap()).unwrap();
-            let h_cfg = crate::import::config_from_hf(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
+            let h_cfg = crate::hf::decoder_config(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
             assert_eq!(g_cfg.to_json(), h_cfg.to_json(), "the two routes derive different configs (tied={tied})");
 
             let g_out = dir.join("from-gguf.safetensors").to_string_lossy().into_owned();

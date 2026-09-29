@@ -70,7 +70,7 @@ fn shard_streamed_and_eager_imports_agree_bit_for_bit_on_a_real_checkpoint() {
     };
     let dir = std::path::PathBuf::from(dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json")).expect("read config.json");
-    let cfg = qwen3::import::config_from_hf(&cfg_json).expect("parse config.json");
+    let cfg = qwen3::hf::decoder_config(&cfg_json).expect("parse config.json");
 
     // A genuinely partial shard, shaped like the one a mid-stack-tap text
     // encoder builds: the embedding plus the leading three quarters of the

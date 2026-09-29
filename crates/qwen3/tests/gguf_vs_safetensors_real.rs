@@ -64,7 +64,7 @@ fn the_real_q8_gguf_and_the_real_bf16_safetensors_are_the_same_model() {
     // First: the two sources must describe the SAME MODEL. A config
     // disagreement here would make every weight comparison below meaningless,
     // and is also the cheapest way to notice a mismatched pair of files.
-    let hf_cfg = qwen3::import::config_from_hf(&std::fs::read_to_string(std::path::Path::new(&hf_dir).join("config.json")).unwrap()).unwrap();
+    let hf_cfg = qwen3::hf::decoder_config(&std::fs::read_to_string(std::path::Path::new(&hf_dir).join("config.json")).unwrap()).unwrap();
     let gg_cfg = qwen3::gguf_import::config_from_gguf(&checkpoint::gguf::MmapGguf::open(&gguf).unwrap()).unwrap();
     assert_eq!(gg_cfg.to_json(), hf_cfg.to_json(), "the GGUF and the HF checkpoint describe different models");
     eprintln!(
@@ -145,7 +145,7 @@ fn a_real_encoder_built_from_the_gguf_matches_one_built_from_the_safetensors() {
     };
     let layers: usize = std::env::var("BRAIN_QWEN3_PARITY_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
 
-    let cfg = qwen3::import::config_from_hf(&std::fs::read_to_string(std::path::Path::new(&hf_dir).join("config.json")).unwrap()).unwrap();
+    let cfg = qwen3::hf::decoder_config(&std::fs::read_to_string(std::path::Path::new(&hf_dir).join("config.json")).unwrap()).unwrap();
     // The FLUX.2 text-encoder shard shape: embedding + layers [0, end), no
     // final norm and no LM head.
     let shard = qwen3::Shard { start: 0, end: layers, embed: true, head: false, gpu_index: qwen3::Shard::ANY_GPU };

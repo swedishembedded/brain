@@ -23,7 +23,7 @@
 //! `llm.model.model.embed_tokens.weight` (tied, `tie_word_embeddings: true`
 //! in `CosyVoice-BlankEN/config.json`), so it is dropped rather than
 //! imported - the same "tied -> drop" convention
-//! `qwen3::import::hf_to_brain` uses for a released Qwen checkpoint. CosyVoice
+//! `qwen3::hf::HfNames` uses for a released Qwen checkpoint. CosyVoice
 //! itself never reads this backbone `lm_head` at all: `Qwen2Encoder.
 //! forward_one_step` returns `hidden_states`, and `Qwen2LM`/`CosyVoice3LM`
 //! project those through their OWN `llm_decoder`, never through the Qwen

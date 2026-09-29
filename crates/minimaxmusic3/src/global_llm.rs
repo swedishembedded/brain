@@ -114,7 +114,7 @@ fn unconditional_variant(ids: &[u32]) -> Vec<u32> {
 /// `hidden=4096, layers=36, heads=32, kv_heads=8, head_dim=128,
 /// vocab=200000` on the surface. Only `language_model/` is safe to load
 /// through `crates/qwen3::Qwen` verbatim; `qwen_7B/qwen_7B/`'s weights
-/// would either fail `qwen3::import::hf_to_brain`'s name mapping outright
+/// would either fail `qwen3::hf`'s name mapping outright
 /// or, worse, load silently wrong (the alpha/beta scaling `qwen3`'s own
 /// forward has no code path for). The tokenizer lives at a THIRD
 /// location, `qwen_7B/qwen3-8B-tokenizer-music/` (not under
@@ -164,7 +164,7 @@ fn unconditional_variant(ids: &[u32]) -> Vec<u32> {
 pub fn import(dir: &str, b: u32, t: u32) -> Result<(QwenConfig, Qwen), String> {
     let config_path = std::path::Path::new(dir).join("config.json");
     let config_json = std::fs::read_to_string(&config_path).map_err(|e| format!("global_llm::import: reading {}: {e}", config_path.display()))?;
-    let cfg = qwen3::import::config_from_hf(&config_json)?;
+    let cfg = qwen3::hf::decoder_config_as(&config_json, "qwen3")?;
     let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| format!("global_llm::import: {e}"))?;
     let src = qwen3::import::hf_source(&reader, &cfg)?;
     // Decode-only, not the batched-forward shape. The AR stage drives this

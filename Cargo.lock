@@ -1963,6 +1963,7 @@ dependencies = [
 name = "brain-qwen3"
 version = "1.2.0"
 dependencies = [
+ "brain-arch",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
@@ -1977,6 +1978,7 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "pollster",
+ "serde",
  "serde_json",
  "wgpu",
 ]

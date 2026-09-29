@@ -15,70 +15,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::config::QwenConfig;
+use crate::hf::{HfNames, HfTensor};
 
-/// Map an HF Qwen3 tensor name to its brain parameter name, or `None` to drop it
-/// (e.g. a tied `lm_head.weight`, handled by reusing `tok.weight`).
-fn hf_to_brain(name: &str, tie: bool) -> Option<String> {
-    if name == "model.embed_tokens.weight" {
-        return Some("tok.weight".to_string());
+/// The brain parameter one tensor of an HF `*ForCausalLM` checkpoint becomes
+/// (`None` for one the model deliberately does not store), or an error
+/// naming a tensor this decoder does not have - never silently skipped.
+fn hf_param(name: &str, cfg: &QwenConfig) -> Result<Option<String>, String> {
+    match HfNames::CAUSAL_LM.to_brain(name, cfg) {
+        HfTensor::Param(p) => Ok(Some(p)),
+        HfTensor::Dropped => Ok(None),
+        HfTensor::Foreign | HfTensor::Unknown => Err(format!("import: checkpoint tensor '{name}' is not part of this decoder's configuration")),
     }
-    if name == "model.norm.weight" {
-        return Some("norm.weight".to_string());
-    }
-    if name == "lm_head.weight" {
-        return if tie { None } else { Some("lm_head.weight".to_string()) };
-    }
-    // Per-layer: model.layers.{N}.<rest>
-    let rest = name.strip_prefix("model.layers.")?;
-    let (n, rest) = rest.split_once('.')?;
-    let leaf = match rest {
-        "input_layernorm.weight" => "ln1.weight".to_string(),
-        "post_attention_layernorm.weight" => "ln2.weight".to_string(),
-        "self_attn.q_proj.weight" => "attn.wq.weight".to_string(),
-        "self_attn.k_proj.weight" => "attn.wk.weight".to_string(),
-        "self_attn.v_proj.weight" => "attn.wv.weight".to_string(),
-        "self_attn.o_proj.weight" => "attn.wo.weight".to_string(),
-        "self_attn.q_norm.weight" => "attn.q_norm.weight".to_string(),
-        "self_attn.k_norm.weight" => "attn.k_norm.weight".to_string(),
-        "mlp.gate_proj.weight" => "mlp.gate.weight".to_string(),
-        "mlp.up_proj.weight" => "mlp.up.weight".to_string(),
-        "mlp.down_proj.weight" => "mlp.down.weight".to_string(),
-        _ => return None, // unknown per-layer tensor (e.g. a bias Qwen3 doesn't have)
-    };
-    Some(format!("blocks.{n}.{leaf}"))
-}
-
-/// Read an HF `config.json` into a [`QwenConfig`]. `block_size` defaults to 2048
-/// (the actual inference/training sequence length is chosen at load time, not
-/// from `max_position_embeddings`, which would size buffers absurdly).
-pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
-    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let g = |k: &str| v[k].as_u64().map(|x| x as u32);
-    let block_size = 2048;
-    let cfg = QwenConfig {
-        vocab: g("vocab_size").ok_or("config: vocab_size")?,
-        block_size,
-        n_layers: g("num_hidden_layers").ok_or("config: num_hidden_layers")?,
-        d_model: g("hidden_size").ok_or("config: hidden_size")?,
-        n_heads: g("num_attention_heads").ok_or("config: num_attention_heads")?,
-        n_kv_heads: g("num_key_value_heads").ok_or("config: num_key_value_heads")?,
-        head_dim: g("head_dim").unwrap_or(0), // 0 -> derived in with_defaults
-        d_ff: g("intermediate_size").ok_or("config: intermediate_size")?,
-        rope_theta: v["rope_theta"].as_f64().unwrap_or(1.0e6) as f32,
-        rms_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
-        // The HF trained RoPE extent, carried through for reference (`block_size`
-        // is what actually sizes buffers — see `QwenConfig::max_position_embeddings`).
-        // Older `config.json`s lacking the key, and pre-existing brain checkpoints,
-        // fall back to `block_size` for backward compatibility.
-        max_position_embeddings: g("max_position_embeddings").unwrap_or(block_size),
-        tie_embeddings: v["tie_word_embeddings"].as_bool().unwrap_or(true),
-        qk_norm: true,
-        attn_bias: false,
-        lora: None,
-        rope_scaling: None,
-    }
-    .with_defaults();
-    Ok(cfg)
 }
 
 /// Remap a set of HF Qwen3 safetensors into brain's `name → f32 data` init map,
@@ -92,7 +39,7 @@ pub fn brain_init_from_hf(
 ) -> Result<HashMap<String, Vec<f32>>, String> {
     let mut brain: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     for t in tensors {
-        if let Some(bn) = hf_to_brain(&t.name, cfg.tie_embeddings) {
+        if let Some(bn) = hf_param(&t.name, cfg)? {
             if brain.insert(bn.clone(), (t.shape, t.data)).is_some() {
                 return Err(format!("duplicate mapping to {bn}"));
             }
@@ -124,7 +71,7 @@ pub fn brain_init_from_hf(
 /// path, and asking it to also know the format is an invitation to be wrong
 /// about something the bytes already say.
 ///
-/// The two maps meet here and nowhere else: [`hf_to_brain`] and
+/// The two maps meet here and nowhere else: [`crate::hf::HfNames`] and
 /// [`crate::gguf_import::gguf_to_brain`] are the only two implementations, and
 /// every streaming source in this crate goes through [`Naming::to_brain`], so
 /// a third route cannot appear without deleting this enum.
@@ -163,13 +110,14 @@ impl Naming {
         }
     }
 
-    /// The brain parameter `name` becomes under this convention, or `None` if
-    /// it is not one (a tied head, a rope-scaling table, an unrecognized leaf).
-    pub fn to_brain(self, name: &str, tie: bool) -> Option<String> {
+    /// The brain parameter `name` becomes under this convention: `Ok(None)`
+    /// for a tensor the model deliberately does not store (a tied head, a
+    /// rope table), an error for one that is not part of `cfg`'s model.
+    pub fn to_brain(self, name: &str, cfg: &QwenConfig) -> Result<Option<String>, String> {
         match self {
-            Naming::Hf => hf_to_brain(name, tie),
-            Naming::Gguf => crate::gguf_import::gguf_to_brain(name, tie),
-            Naming::Brain => Some(name.to_string()),
+            Naming::Hf => hf_param(name, cfg),
+            Naming::Gguf => Ok(crate::gguf_import::gguf_to_brain(name, cfg.tie_embeddings)),
+            Naming::Brain => Ok(Some(name.to_string())),
         }
     }
 }
@@ -211,7 +159,7 @@ fn plan_source<'a>(
     let naming = Naming::of(r);
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
     for name in r.names() {
-        let Some(bn) = naming.to_brain(name, cfg.tie_embeddings) else { continue };
+        let Some(bn) = naming.to_brain(name, cfg)? else { continue };
         if !allowed.contains(bn.as_str()) {
             return Err(format!("import: '{name}' maps to unexpected brain param '{bn}'"));
         }
@@ -299,7 +247,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
     let dir = Path::new(hf_dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
-    let mut cfg = config_from_hf(&cfg_json)?;
+    let mut cfg = crate::hf::decoder_config(&cfg_json)?;
     if let Some(b) = block_size {
         cfg.block_size = b;
     }
@@ -327,11 +275,15 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
         if err.is_some() {
             return;
         }
-        if let Some(bn) = hf_to_brain(name, cfg.tie_embeddings) {
-            n_written += 1;
-            if let Err(e) = writer.write(&bn, &data) {
-                err = Some(e.to_string());
+        match hf_param(name, &cfg) {
+            Ok(Some(bn)) => {
+                n_written += 1;
+                if let Err(e) = writer.write(&bn, &data) {
+                    err = Some(e.to_string());
+                }
             }
+            Ok(None) => {}
+            Err(e) => err = Some(e),
         }
     });
     if let Some(e) = err {
@@ -347,32 +299,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn name_mapping() {
-        assert_eq!(hf_to_brain("model.embed_tokens.weight", true).unwrap(), "tok.weight");
-        assert_eq!(hf_to_brain("model.norm.weight", true).unwrap(), "norm.weight");
-        assert_eq!(hf_to_brain("lm_head.weight", true), None); // tied -> dropped
-        assert_eq!(hf_to_brain("lm_head.weight", false).unwrap(), "lm_head.weight");
-        assert_eq!(
-            hf_to_brain("model.layers.5.self_attn.q_proj.weight", true).unwrap(),
-            "blocks.5.attn.wq.weight"
-        );
-        assert_eq!(
-            hf_to_brain("model.layers.0.self_attn.k_norm.weight", true).unwrap(),
-            "blocks.0.attn.k_norm.weight"
-        );
-        assert_eq!(
-            hf_to_brain("model.layers.27.mlp.down_proj.weight", true).unwrap(),
-            "blocks.27.mlp.down.weight"
-        );
-    }
-
-    #[test]
     fn parse_qwen3_config() {
-        let json = r#"{"vocab_size":151936,"hidden_size":1024,"num_hidden_layers":28,
+        let json = r#"{"architectures":["Qwen3ForCausalLM"],"vocab_size":151936,"hidden_size":1024,"num_hidden_layers":28,
             "num_attention_heads":16,"num_key_value_heads":8,"head_dim":128,
             "intermediate_size":3072,"rope_theta":1000000,"rms_norm_eps":1e-6,
             "tie_word_embeddings":true}"#;
-        let cfg = config_from_hf(json).unwrap();
+        let cfg = crate::hf::decoder_config(json).unwrap();
         assert_eq!(cfg.d_model, 1024);
         assert_eq!(cfg.n_kv_heads, 8);
         assert_eq!(cfg.head_dim, 128);
@@ -388,7 +320,7 @@ mod tests {
 
     /// Tiny 1-layer tied-embedding checkpoint dir. Ships a redundant
     /// `lm_head.weight` (as real tied Qwen3 checkpoints sometimes do) to exercise
-    /// the "tied -> drop" branch of `hf_to_brain` under streaming.
+    /// the "tied -> drop" branch of the HF name map under streaming.
     ///
     /// Every call gets its OWN directory (pid + a monotonic counter, not pid
     /// alone) — multiple tests in this file call this concurrently, and a
@@ -409,7 +341,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brain-qwen-import-streaming-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let json = format!(
-            r#"{{"vocab_size":5,"hidden_size":6,"num_hidden_layers":{n_layers},
+            r#"{{"architectures":["Qwen3ForCausalLM"],"vocab_size":5,"hidden_size":6,"num_hidden_layers":{n_layers},
             "num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,
             "intermediate_size":8,"rope_theta":1000000,"rms_norm_eps":1e-6,
             "tie_word_embeddings":{tied}}}"#
@@ -421,7 +353,7 @@ mod tests {
             ("model.embed_tokens.weight".into(), vec![30], seq(1_000_000.0, 30)),
             ("model.norm.weight".into(), vec![6], seq(2_000_000.0, 6)),
             // Tied: a redundant head tensor real Qwen3 checkpoints sometimes
-            // ship, which `hf_to_brain` must drop. Untied: the genuine head.
+            // ship, which the HF name map must drop. Untied: the genuine head.
             ("lm_head.weight".into(), vec![30], seq(3_000_000.0, 30)),
         ];
         for l in 0..n_layers {
@@ -476,7 +408,7 @@ mod tests {
         use checkpoint::TensorSource;
 
         let dir = build_hf_dir(4, false);
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         let eager = brain_init_from_hf(checkpoint::safetensors::read_model_dir(&dir).unwrap(), &cfg).unwrap();
 
         let shard = tap_shard(2);
@@ -507,7 +439,7 @@ mod tests {
     #[test]
     fn hf_shard_source_accepts_a_checkpoint_the_full_list_refuses() {
         let dir = build_hf_dir(4, false);
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         retain_tensors(&dir, |n| {
             !(n == "lm_head.weight" || n == "model.norm.weight" || n.starts_with("model.layers.2.") || n.starts_with("model.layers.3."))
         });
@@ -528,7 +460,7 @@ mod tests {
     #[test]
     fn hf_shard_source_still_refuses_a_tensor_the_shard_needs() {
         let dir = build_hf_dir(4, false);
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         retain_tensors(&dir, |n| n != "model.layers.1.self_attn.q_proj.weight");
 
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
@@ -548,7 +480,7 @@ mod tests {
     fn hf_shard_source_still_refuses_a_checkpoint_deeper_than_the_config() {
         let dir = build_hf_dir(4, false);
         // Same tensors, a config claiming two fewer layers.
-        let mut cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let mut cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         cfg.n_layers = 2;
 
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
@@ -556,7 +488,7 @@ mod tests {
             Ok(_) => panic!("a 4-layer checkpoint is not a 2-layer model"),
             Err(e) => e,
         };
-        assert!(err.contains("blocks.2.") || err.contains("blocks.3."), "{err}");
+        assert!(err.contains("layers.2.") || err.contains("layers.3."), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -566,7 +498,7 @@ mod tests {
     #[test]
     fn hf_shard_source_shape_checks_tensors_it_will_never_read() {
         let dir = build_hf_dir(4, false);
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         // Corrupt the ELEMENT COUNT of a layer past the tap.
         let full = checkpoint::safetensors::read_model_dir(&dir).unwrap();
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = full
@@ -598,7 +530,7 @@ mod tests {
 
         import(dir.to_str().unwrap(), out_str).expect("streaming import");
 
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         let m = checkpoint::st::load_safetensors(out_str).unwrap();
 
         let expected = cfg.param_list();
@@ -627,7 +559,7 @@ mod tests {
         use checkpoint::TensorSource;
 
         let dir = build_tiny_hf_dir();
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
 
         let eager_tensors = checkpoint::safetensors::read_model_dir(&dir).unwrap();
         let eager = brain_init_from_hf(eager_tensors, &cfg).unwrap();
@@ -665,7 +597,7 @@ mod tests {
         crate::gguf_import::testing::write_synthetic_hf_dir(&hf, false);
         crate::gguf_import::testing::write_synthetic_gguf(&gguf, false);
 
-        let cfg = config_from_hf(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
 
         // Deliberately opened through the SAME entry point, given two
         // different kinds of path.
@@ -706,7 +638,7 @@ mod tests {
     /// carries names that are the brain param names verbatim -
     /// `Naming::of` recognized only Hf and Gguf, so a brain-native
     /// checkpoint fell through to "absence of GGUF spellings means HF" and
-    /// `hf_to_brain` could not match a single one of its own names, leaving
+    /// the HF name map could not match a single one of its own names, leaving
     /// `source`'s remap plan completely empty.
     #[test]
     fn source_reads_a_checkpoint_already_in_brain_naming_with_no_remap_needed() {
@@ -736,7 +668,7 @@ mod tests {
         std::fs::remove_file(dir.join("model.safetensors")).unwrap();
         checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
 
-        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         let reader = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
         let err = match hf_source(&reader, &cfg) {
             Ok(_) => panic!("a checkpoint missing a required tensor must be refused"),

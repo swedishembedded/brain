@@ -46,7 +46,7 @@ fn real_layer_matches_transformers() {
     }
 
     let config_json = std::fs::read_to_string(Path::new(&weights_dir).join("config.json")).expect("read language_model/config.json");
-    let cfg = qwen3::import::config_from_hf(&config_json).expect("config_from_hf");
+    let cfg = qwen3::hf::decoder_config_as(&config_json, "qwen3").expect("decoder config");
     if !src.require(&[
         ("layer", LAYER as i64),
         ("hidden_size", cfg.d_model as i64),
