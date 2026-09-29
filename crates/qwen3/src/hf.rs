@@ -115,10 +115,7 @@ fn from_hf(c: HfDecoderConfig, arch_id: &str) -> Result<QwenConfig, String> {
     if c.use_sliding_window == Some(true) {
         return Err("config.json: `use_sliding_window: true` (windowed attention) is not implemented by this decoder".into());
     }
-    if let Some(rs) = c.rope_scaling.as_ref().filter(|v| !v.is_null()) {
-        let kind = rs.get("rope_type").or_else(|| rs.get("type")).and_then(|t| t.as_str()).unwrap_or("?");
-        return Err(format!("config.json: rope_scaling type {kind:?} is not implemented yet"));
-    }
+    let rope_scaling = model::rope_scaling::RopeScaling::from_config(c.rope_scaling.as_ref().unwrap_or(&serde_json::Value::Null)).map_err(|e| format!("config.json: {e}"))?;
     let cfg = QwenConfig {
         vocab: c.vocab_size,
         block_size: IMPORT_BLOCK_SIZE,
@@ -135,7 +132,7 @@ fn from_hf(c: HfDecoderConfig, arch_id: &str) -> Result<QwenConfig, String> {
         qk_norm,
         attn_bias: qkv_bias_fixed,
         lora: None,
-        rope_scaling: None,
+        rope_scaling,
     }
     .with_defaults();
     Ok(cfg)
@@ -314,10 +311,17 @@ mod tests {
             let e = decoder_config(&with(k, v)).unwrap_err();
             assert!(e.contains(k), "{k}: {e}");
         }
-        let scaled = LLM_7B.replace("\"rope_scaling\":null", r#""rope_scaling":{"factor":4.0,"type":"linear"}"#);
-        assert!(decoder_config(&scaled).unwrap_err().contains("linear"));
+        let dynamic = LLM_7B.replace("\"rope_scaling\":null", r#""rope_scaling":{"factor":4.0,"type":"dynamic"}"#);
+        assert!(decoder_config(&dynamic).unwrap_err().contains("dynamic"));
         let foreign = LLM_7B.replace("LlamaForCausalLM", "GPT2LMHeadModel");
         assert!(decoder_config(&foreign).is_err());
+    }
+
+    #[test]
+    fn a_declared_rope_scaling_is_read() {
+        let scaled = LLM_7B.replace("\"rope_scaling\":null", r#""rope_scaling":{"factor":4.0,"type":"linear"}"#);
+        let cfg = decoder_config(&scaled).unwrap();
+        assert_eq!(cfg.rope_scaling, Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 }));
     }
 
     #[test]

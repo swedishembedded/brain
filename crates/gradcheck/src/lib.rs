@@ -532,6 +532,21 @@ pub fn check_qwen2(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Gradient-check the decoder at a declared RoPE scaling
+/// (`QwenConfig::rope_scaling`), which swaps the analytic rotation for the
+/// table-driven `rope_base_yarn` pair: the backward must rotate by the same
+/// scaled angles the forward did. Returns the report.
+pub fn check_qwen_rope_scaled(seed: u64, scaling: model::rope_scaling::RopeScaling) -> Report {
+    use qwen3::{Qwen, QwenConfig};
+    let cfg = QwenConfig { rope_scaling: Some(scaling), ..QwenConfig::tiny() };
+    let init = qwen3::init_weights(&cfg, seed);
+    let model = Qwen::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Gradient-check the interleaved-M-RoPE decoder path (`Qwen::enable_mrope`),
 /// which swaps the analytic rope_base for the table-driven `rope2d` on q/k. Uses
 /// simple diagonal per-token position tables (so the rotation is non-trivial but
@@ -1909,6 +1924,22 @@ mod tests {
         let report = check_qwen2(7);
         report.print();
         assert_grad_gate(&report, "Qwen2 (qk-norm off, bias on)");
+    }
+
+    #[test]
+    fn qwen_scaled_rope_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        use model::rope_scaling::RopeScaling;
+        for (scaling, name) in [
+            (RopeScaling::Linear { factor: 4.0 }, "linear"),
+            (RopeScaling::Llama3 { factor: 8.0, low_freq_factor: 1.0, high_freq_factor: 4.0, original_max_position_embeddings: 4 }, "llama3"),
+        ] {
+            let report = check_qwen_rope_scaled(7, scaling);
+            report.print();
+            assert_grad_gate(&report, &format!("Qwen, {name} RoPE scaling"));
+        }
     }
 
     #[test]

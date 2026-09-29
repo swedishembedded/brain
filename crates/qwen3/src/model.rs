@@ -135,6 +135,13 @@ const SCALE_ROW: usize = 54;
 // one workgroup and is coalesced by construction. Appended at the true end so
 // every const above stays put.
 const RMSNORM_DX_ROWS: usize = 55;
+// Table-driven RoPE for a declared `rope_scaling` (`QwenConfig::rope_table`):
+// the same half-split rotation as `rope_base`/`rope_base_bwd`/`rope_at`, with
+// each channel's frequency read from the uploaded table. Appended at the end
+// so every const above stays put.
+const ROPE_TABLE: usize = 56;
+const ROPE_TABLE_BWD: usize = 57;
+const ROPE_TABLE_AT: usize = 58;
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -203,6 +210,9 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // half uses for `rmsnorm_rows`. Registering it here is the whole opt-in;
     // `rmsnorm_dx_variant_agreement` below is the numerical gate that buys it.
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
+    ("rope_base_yarn", kernels::ROPE_BASE_YARN),
+    ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
+    ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -549,6 +559,10 @@ pub struct Qwen {
     decode_mrope_cos: DeviceBuffer,
     decode_mrope_sin: DeviceBuffer,
 
+    /// The scaled RoPE table when the config declares a `rope_scaling`;
+    /// `None` rotates at the analytic `theta` schedule.
+    rope_table: Option<RopeTable>,
+
     // DeepStack (Qwen3-VL): `(row0, n_rows, n_levels)` and one `[n_rows·d]` buffer
     // per level. When set, level `l`'s features are added into the residual at the
     // image rows right after decoder layer `l` (for `l < n_levels`). Write each
@@ -639,6 +653,15 @@ pub struct Qwen {
     /// forward/backward entry points assert against being called on such an
     /// instance instead of silently reading/writing past the smaller buffers.
     decode_only: bool,
+}
+
+/// A declared RoPE scaling, uploaded once: the per-channel `inv_freq` table,
+/// the attention factor every cos/sin is scaled by, and the one-element
+/// position buffer the decode rotation reads.
+struct RopeTable {
+    inv_freq: DeviceBuffer,
+    attention_factor: f32,
+    decode_pos: DeviceBuffer,
 }
 
 impl Qwen {
@@ -1111,6 +1134,11 @@ impl Qwen {
 
         let decode_mrope_cos = st((cfg.head_dim / 2) as u64);
         let decode_mrope_sin = st((cfg.head_dim / 2) as u64);
+        let rope_table = cfg.rope_table().map(|(inv_freq, attention_factor)| RopeTable {
+            inv_freq: gpu.storage_init("rope_inv_freq", &inv_freq),
+            attention_factor,
+            decode_pos: st(1),
+        });
         let mut m = Qwen {
             cfg,
             b,
@@ -1133,6 +1161,7 @@ impl Qwen {
             weighted_ce: None,
             decode_mrope_cos,
             decode_mrope_sin,
+            rope_table,
             deepstack: Cell::new(None),
             deepstack_bufs: Vec::new(),
             proj: st(n * d),
@@ -1309,6 +1338,22 @@ impl Qwen {
     /// GQA shape for `b`×`t` (the buffers are sized for the max `b`/`t`).
     fn gqa(&self, b: u32, t: u32) -> Gqa {
         Gqa { b, t, n_heads: self.cfg.n_heads, n_kv_heads: self.cfg.n_kv_heads, head_dim: self.cfg.head_dim }
+    }
+
+    /// The q or k rotation of the batched forward (`bwd` false) or its inverse
+    /// in the backward: at the declared scaling's table when there is one,
+    /// otherwise at the analytic `theta` schedule.
+    #[allow(clippy::too_many_arguments)]
+    fn rope_step(&self, ids: &KernelIds, buf: &DeviceBuffer, n: u32, heads: u32, head_dim: u32, row_stride: u32, t: u32, theta: f32, bwd: bool) -> Step {
+        match (&self.rope_table, bwd) {
+            (Some(rt), _) => {
+                let kind = if bwd { ROPE_TABLE_BWD } else { ROPE_TABLE };
+                let params = [n, heads, head_dim, row_stride, 0, t, f(rt.attention_factor)];
+                self.gpu.step(kind, &[buf, &rt.inv_freq], &params, n * heads * (head_dim / 2))
+            }
+            (None, false) => block::rope_fwd(&self.gpu, ids, buf, n, heads, head_dim, row_stride, t, theta),
+            (None, true) => block::rope_bwd(&self.gpu, ids, buf, n, heads, head_dim, row_stride, t, theta),
+        }
     }
 
     /// One table-driven M-RoPE rotation (`rope2d`) over the q or k buffer (region
@@ -1657,8 +1702,8 @@ impl Qwen {
                 s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
                 s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
             } else {
-                s.push(block::rope_fwd(&self.gpu, &ids, q_buf, n, nh, hd, hq, t_use, theta));
-                s.push(block::rope_fwd(&self.gpu, &ids, k_buf, n, nkv, hd, hkv, t_use, theta));
+                s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, theta, false));
+                s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, theta, false));
             }
             if self.kmask_on.get() {
                 s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &lb.probs, &lb.ctx));
@@ -1835,8 +1880,8 @@ impl Qwen {
                 s.push(self.rope2d_step(&self.d_q, n, nh, hd, hq, -1.0));
                 s.push(self.rope2d_step(&self.d_k, n, nkv, hd, hkv, -1.0));
             } else {
-                s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, hq, t, theta));
-                s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nkv, hd, hkv, t, theta));
+                s.push(self.rope_step(&ids, &self.d_q, n, nh, hd, hq, t, theta, true));
+                s.push(self.rope_step(&ids, &self.d_k, n, nkv, hd, hkv, t, theta, true));
             }
             // Optional QK-norm backward -> dq_pre/dk_pre; else d_q/d_k is the
             // projection-output grad directly.
@@ -2608,10 +2653,18 @@ impl Qwen {
                     s.push(block::rope2d_fwd(g, ROPE2D, q_buf, cos, sin, 1, nh, hd, hq));
                     s.push(block::rope2d_fwd(g, ROPE2D, k_buf, cos, sin, 1, nkv, hd, hkv));
                 }
-                None => {
-                    s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
-                    s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
-                }
+                None => match &self.rope_table {
+                    Some(rt) => {
+                        g.write(&rt.decode_pos, &[pos]);
+                        let af = f(rt.attention_factor);
+                        s.push(g.step(ROPE_TABLE_AT, &[q_buf, &rt.decode_pos, &rt.inv_freq], &[1, nh, hd, hq, af], nh * half));
+                        s.push(g.step(ROPE_TABLE_AT, &[k_buf, &rt.decode_pos, &rt.inv_freq], &[1, nkv, hd, hkv, af], nkv * half));
+                    }
+                    None => {
+                        s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
+                        s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
+                    }
+                },
             }
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
