@@ -27,6 +27,13 @@
 //! an unused parameter to every OTHER caller just to satisfy the one that
 //! needs it - not a simplification.
 
+// Every surface that selects the `resolve` tier calls one of the two
+// resolvers, but no surface calls both, so each item below compiles only
+// under the surfaces whose modules call it: a surface built alone (the SDK
+// feature sweep builds every one alone) must not carry the other's resolver
+// as dead code. Adding a caller in a new module means adding its surface to
+// that item's `cfg`; the sweep names the item if one is missed.
+
 use std::collections::BTreeMap;
 
 use brain_modelstore::resolve::{ArchSpec, Resolution};
@@ -56,6 +63,7 @@ fn fetch(reference: &brain_modelref::ModelRef, model_id: &str) -> Result<()> {
 ///   "always go through plan/execute" reading
 ///   `loader::supply::ensure_default_weights_with` already established for
 ///   this variant, not a second one invented here.
+#[cfg(any(feature = "audio", feature = "image", feature = "multimodal", feature = "text", feature = "video", feature = "vision"))]
 pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &str, overrides: &BTreeMap<String, String>, download_policy: loader::DownloadPolicy) -> Result<capability::Assembly> {
     let reference = brain_modelref::ModelRef::parse(model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
 
@@ -88,6 +96,7 @@ pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &st
 /// which side won is the caller's own dispatch, not this function's; this
 /// only carries the resolved [`capability::Assembly`] back with that
 /// decision attached.
+#[cfg(any(feature = "audio", feature = "forecast", feature = "image"))]
 pub(crate) enum Resolved2 {
     A(capability::Assembly),
     B(capability::Assembly),
@@ -106,6 +115,7 @@ pub(crate) enum Resolved2 {
 /// around it (`ImagePipelineBuilder` keeps its own progress-reporting fetch
 /// path, per this module's own doc - only the tie-break itself was ever
 /// duplicated).
+#[cfg(any(feature = "audio", feature = "forecast", feature = "image"))]
 pub(crate) fn try_two(a_arch: &str, a_spec: &dyn ArchSpec, b_arch: &str, b_spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolved2> {
     let a_outcome = loader::resolve_structured(a_arch, a_spec, overrides).map_err(Error::Backend)?;
     if matches!(a_outcome, Resolution::Resolved(_)) {
@@ -136,6 +146,7 @@ pub(crate) fn try_two(a_arch: &str, a_spec: &dyn ArchSpec, b_arch: &str, b_spec:
 /// own tie-break instead of one `ArchSpec` - see this module's own doc for
 /// why `tts`/`forecast` need this shape and `ImagePipelineBuilder` does not
 /// use it.
+#[cfg(any(feature = "audio", feature = "forecast"))]
 pub(crate) fn resolve_two_with_policy(
     a_arch: &str,
     a_spec: &dyn ArchSpec,

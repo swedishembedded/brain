@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "reader")]
+
 //! `brain::ContinualReader`'s record surfaces, against a real run directory.
 //!
 //! What a reader learned needs a model. What a reader DID is in the run

@@ -18,7 +18,10 @@
 #      space and still cannot stop a second consumer enabling a different value.
 #   5. Every surface compiles ON ITS OWN, and so does the bare core. This is
 #      the `allnoconfig`/`allyesconfig` sweep: a feature nobody builds alone is
-#      a feature that silently stops compiling.
+#      a feature that silently stops compiling. "Compiles" means with no
+#      warning from the SDK crate itself: an item only one surface uses is
+#      dead code in every build that selects a different one, and a sweep
+#      that only read the exit status passed that straight through.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 export CARGO_HOME="${CARGO_HOME_OVERRIDE:-$HOME/.cargo}"
@@ -54,8 +57,10 @@ TIERS = {"device", "resolve", "imagetype", "full", "default", "viewport"}
 # `crates/sdk/src/study.rs` is qwen3/qwen35/qwen35moe, each already
 # `Domain::Text`), bounded by the tokenizer they share rather than by any
 # one modality - see that module's own doc. Explicit, named exceptions here
-# rather than silently widening rule 1's own check for everyone.
-CROSS_CUTTING = {"auto", "study"}
+# rather than silently widening rule 1's own check for everyone. `reader`
+# is `study` plus the model-free continual-reader policy, cross-cutting for
+# the same reason.
+CROSS_CUTTING = {"auto", "study", "reader"}
 surfaces = sorted(set(feats) - TIERS - CROSS_CUTTING)
 
 # 1. surface names are brain_arch::Domain variants, kebab-cased.
@@ -115,20 +120,32 @@ import tomllib
 f = tomllib.load(open('crates/sdk/Cargo.toml','rb'))['features']
 print('\n'.join(sorted(set(f) - {'device','resolve','imagetype','full','default'})))
 ")
-	printf '  compiling bare core ... '
-	if cargo check -p brain --no-default-features --message-format short >/dev/null 2>&1; then
-		echo ok
-	else
-		echo FAIL; fail=1
-	fi
-	for s in "${surfaces[@]}"; do
-		printf '  compiling surface %s ... ' "$s"
-		if cargo check -p brain --no-default-features --features "$s" \
-			--message-format short >/dev/null 2>&1; then
-			echo ok
-		else
+	# `cargo check` exits 0 on a warning, so its SHORT-format output is read
+	# for warnings located in the SDK's own sources, the unit-test and
+	# integration-test targets included: a test module only one surface
+	# exercises is dead code under every other. A dependency's warnings are
+	# that crate's gate's business, not this one's.
+	sweep() {
+		local label=$1 out
+		shift
+		printf '  compiling %s ... ' "$label"
+		if ! out=$(cargo check -p brain --lib --tests --no-default-features "$@" --message-format short 2>&1); then
 			echo FAIL; fail=1
+			return
 		fi
+		local warned
+		warned=$(grep -E '^crates/sdk/[^ ]+: warning:' <<<"$out" || true)
+		if [ -n "$warned" ]; then
+			echo "FAIL (warnings)"
+			sed 's/^/      /' <<<"$warned"
+			fail=1
+			return
+		fi
+		echo ok
+	}
+	sweep "bare core"
+	for s in "${surfaces[@]}"; do
+		sweep "surface $s" --features "$s"
 	done
 fi
 

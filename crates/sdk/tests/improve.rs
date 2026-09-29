@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "study")]
+
 //! `brain::Improve` end to end: one GRPO cycle over a caller-supplied
 //! `Environment`/`Verifier`, against a tiny CPU-runnable Qwen3 fixture - no
 //! downloaded weights, no tokenizer, no chat template (`Improve` resolves a

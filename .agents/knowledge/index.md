@@ -209,3 +209,4 @@ What belongs where:
 | 166 | A clamp that starts at its kink passes no gradient | [`166-a-clamp-that-starts-at-its-kink-passes-no-gradient.md`](166-a-clamp-that-starts-at-its-kink-passes-no-gradient.md) |
 | 167 | A camera model scored without a camera looks like a loss | [`167-a-camera-model-scored-without-a-camera-looks-like-a-loss.md`](167-a-camera-model-scored-without-a-camera-looks-like-a-loss.md) |
 | 168 | A renamed argument of the same type compiles at every stale caller | [`168-a-renamed-argument-of-the-same-type-compiles-at-every-stale-caller.md`](168-a-renamed-argument-of-the-same-type-compiles-at-every-stale-caller.md) |
+| 169 | A compile sweep that reads only the exit status passes dead code | [`169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md`](169-a-compile-sweep-that-reads-only-the-exit-status-passes-dead-code.md) |

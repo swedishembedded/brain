@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "decision")]
+
 //! End-to-end coverage of `DecisionPipeline`'s M6 dual-backend dispatch:
 //! `crates/decide`'s MiniLM/BERT-family encoder (the pre-existing path,
 //! byte-identical `load_decide`) and `convaiinnovations/laya`'s

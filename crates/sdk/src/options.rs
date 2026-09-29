@@ -497,11 +497,12 @@ impl Options for ViewOptions {
     }
 }
 
-#[cfg(test)]
+// Every test here exercises `ControlOptions`, which only the `decision`
+// surface compiles.
+#[cfg(all(test, feature = "decision"))]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "decision")]
     #[test]
     fn control_defaults_come_from_the_spec_itself() {
         // If these were typed out again here, the two would drift and a sample
@@ -514,7 +515,6 @@ mod tests {
         assert_eq!(o.spec().warmup_episodes, d.warmup_episodes);
     }
 
-    #[cfg(feature = "decision")]
     #[test]
     fn an_application_keeps_its_own_defaults_and_still_takes_the_flags() {
         let argv: Vec<String> =
@@ -529,7 +529,7 @@ mod tests {
         args.finish();
     }
 
-    #[cfg(all(feature = "decision", feature = "viewport"))]
+    #[cfg(feature = "viewport")]
     #[test]
     fn groups_compose_without_stealing_each_others_flags() {
         // The property that makes groups worth having: each takes only its own

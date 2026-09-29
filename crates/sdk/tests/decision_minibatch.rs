@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "decision")]
+
 //! One optimizer step per BATCH, not per example.
 //!
 //! `train_choices` used to take one example per step, and a single decision's

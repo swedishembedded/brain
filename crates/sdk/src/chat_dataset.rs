@@ -35,7 +35,6 @@ use std::path::Path;
 use data::chat::ChatSample;
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
-use data::tokenizer::Tokenizer;
 
 /// What a dataset file contains, once it has been shown to parse.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

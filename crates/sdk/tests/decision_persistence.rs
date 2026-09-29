@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "decision")]
+
 //! A trained decision model must survive the process that trained it.
 //!
 //! `save_head` writes the head alone and names the encoder it attaches to,

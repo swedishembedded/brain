@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![cfg(feature = "study")]
+
 //! `brain::DocumentStudy` end to end: the local (sven + brain, no whale)
 //! entry point to `rl::document::run_document_study`
 //! (continuous-learning roadmap B9).

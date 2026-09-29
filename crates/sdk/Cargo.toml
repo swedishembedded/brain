@@ -99,7 +99,7 @@ decision = ["device", "dep:brain-decide", "dep:brain-modernbert", "dep:brain-rlc
 # `brain::DocumentStudy` - teach a model a batch of documents and gate whether
 # it learned them. Architecture-agnostic machinery (`brain-rl` is generic over
 # `model::Model`), so the decoder crates it monomorphises for come with it.
-study = ["device", "dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
+study = ["dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
 
 # --- `brain::ContinualReader`: a model that keeps reading a directory and can
 #     say what it gained and what that cost. Builds on `study`'s architecture
