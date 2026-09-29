@@ -32,12 +32,8 @@
 //! interchangeable, so [`DeepseekV2::new_on`] asserts `rotary_dim == head_dim`
 //! rather than accepting a partial-rotary config this kernel cannot express.
 //!
-//! **RMSNorm epsilon.** `rmsnorm.wgsl`/`rmsnorm_dx.wgsl`/`rms_inv.wgsl` carry a
-//! compiled-in `1e-6`, which is the checkpoint's own
-//! `attention.layer_norm_rms_epsilon`. [`DeepseekV2::new_on`] asserts the config
-//! agrees rather than silently normalising with a different epsilon than the
-//! reference (`model::block::rmsnorm_fwd_at` exists for a model that needs a
-//! different one; this one does not).
+//! **RMSNorm epsilon.** Every norm runs at the checkpoint's own
+//! `attention.layer_norm_rms_epsilon` (`cfg.rms_eps()`), forward and backward.
 //!
 //! **Router.** `model::moe::RouterKind::Softmax` with `aux_coef = z_coef = 0`:
 //! the load-balancing aux loss and the router z-loss are folded into the router
@@ -752,13 +748,6 @@ impl DeepseekV2 {
         assert!(cfg.head_dim().is_multiple_of(2), "deepseekv2: half-split RoPE needs an even head_dim");
         assert_eq!(cfg.n_kv_heads(), cfg.n_heads(), "deepseekv2 is plain MHA (n_kv_heads == n_heads); got {} vs {}", cfg.n_kv_heads(), cfg.n_heads());
         assert_eq!(cfg.q_dim(), cfg.d_model(), "deepseekv2: the checkpoint's q/k/v/o projections are square [d_model, d_model]");
-        // `rmsnorm.wgsl` and its backward carry a compiled-in eps of 1e-6.
-        assert!(
-            (cfg.rms_eps() - 1e-6).abs() < 1e-9,
-            "deepseekv2: rmsnorm.wgsl's epsilon is compiled in at 1e-6 but this config asks for {} -- \
-             use model::block::rmsnorm_fwd_at/bwd_at rather than normalising with the wrong epsilon",
-            cfg.rms_eps()
-        );
         assert!(cfg.top_k() >= 1 && cfg.top_k() <= cfg.n_experts(), "deepseekv2: top_k must be in 1..=n_experts");
 
         // Role assignment, mirroring `qwen3::model.rs`'s and
