@@ -546,6 +546,19 @@ get_url() {
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 
+  # OpenAI chat top_k far outside the range any generate action declares.
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"top_k":100000}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+
+  # OpenAI chat sampling parameter brain cannot honour: refused by name, not ignored.
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"logit_bias":{"1":5}}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF logit_bias "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+
   # embeddings dimensions oversized (far beyond the model's vector length).
   post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello","dimensions":100000}'
   [ "$STATUS" -eq 400 ]

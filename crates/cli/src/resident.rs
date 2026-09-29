@@ -721,7 +721,7 @@ impl Instance for ZImageInstance {
         if action == "text2image" {
             let pipe = self.pipe.as_ref().ok_or("z-image: text2image instance has no pipeline")?;
             let prompt = inv.get_str("prompt").unwrap_or_default();
-            let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
+            let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
             let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
             let img = pipe.generate(&prompt, seed, steps, &inv.cancel, |s, t, m| progress(Progress::step(s, t, m.to_string())))?;
             return Ok(emit_image(img));

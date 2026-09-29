@@ -286,7 +286,8 @@ const MAX_TOOLS_BYTES: usize = 256 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 64;
 
 /// Parse + validate an OpenAI chat request into `(model, invocation, stream)`.
-/// Enforces `model`/`messages` present, rejects `n > 1`, and enforces every
+/// Enforces `model`/`messages` present, rejects `n > 1` and every sampling
+/// parameter brain cannot honour ([`crate::sampling`]), and enforces every
 /// `tools`/`tool_choice`/`tool_call_id` INPUT BOUND (see [`validate_tools`]/
 /// [`validate_tool_choice`]); builds the contract `generate` invocation, setting
 /// `tools`/`tool_choice`/`enable_thinking` only when the request supplies them
@@ -297,6 +298,7 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if body.get("n").and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
         return Err(ApiError::invalid_request(provider, "'n' > 1 is not supported"));
     }
+    crate::sampling::refuse_unsupported_openai(provider, body)?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Every `role:"tool"` message must carry the `tool_call_id` it answers — a
@@ -315,17 +317,10 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     // tool_call_id/reasoning_content so a multi-turn tool-calling conversation
     // round-trips (see [`flatten_message`]).
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
-    let mut inv = Invocation::new()
+    let inv = Invocation::new()
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
-        .set("max_new", json!(max_new(body)))
-        .set("temp", json!(body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(1.0)))
-        .set("top_p", json!(body.get("top_p").and_then(|v| v.as_f64()).unwrap_or(1.0)))
-        // 40 is the standard top-k default (matches e.g. Google AI Studio): wide
-        // enough to keep text natural while filtering out the improbable tail.
-        // `top_k=1` degenerates to greedy; `0` or negative disables the filter
-        // entirely (`sample_logits` only applies it when `top_k > 0`).
-        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(40)))
-        .set("seed", json!(body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0)));
+        .set("max_new", json!(max_new(body)));
+    let mut inv = crate::sampling::apply(provider, body, inv)?;
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));
     }
@@ -752,7 +747,9 @@ struct ImageRequest {
     width: u32,
     height: u32,
     size_label: String,
-    seed: i64,
+    /// `None` when the caller omitted it: each image's action then draws its
+    /// own random seed.
+    seed: Option<i64>,
     stream: bool,
     /// Non-standard, like `seed`: `"int8"` (default) or `"fp32"` — see
     /// `s3dit::caps`'s `precision` param (`Opts::hifi`). `None` when the
@@ -827,19 +824,26 @@ fn parse_image_request(provider: Provider, body: &Value) -> Result<ImageRequest,
         Some(_) => return Err(ApiError::invalid_request(provider, "'precision' must be \"int8\" or \"fp32\"")),
     };
 
-    let seed = body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0);
+    let seed = match body.get("seed") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_i64().ok_or_else(|| ApiError::invalid_request(provider, "'seed' must be an integer"))?),
+    };
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     Ok(ImageRequest { model, prompt, n, width, height, size_label, seed, stream, precision })
 }
 
-/// The image-action [`Invocation`] for the `i`-th requested image: prompt + size +
-/// a per-image seed (so `n>1` yields distinct images from a seed-driven model).
+/// The image-action [`Invocation`] for the `i`-th requested image: prompt + size,
+/// and with a requested seed a per-image one (`seed + i`, so `n>1` yields
+/// distinct but reproducible images). Without one, every image's action draws
+/// its own random seed.
 fn image_invocation(req: &ImageRequest, i: u32) -> Invocation {
     let mut inv = Invocation::new()
         .set("prompt", json!(req.prompt))
         .set("width", json!(req.width))
-        .set("height", json!(req.height))
-        .set("seed", json!(req.seed.wrapping_add(i as i64)));
+        .set("height", json!(req.height));
+    if let Some(seed) = req.seed {
+        inv = inv.set("seed", json!(seed.wrapping_add(i as i64)));
+    }
     if let Some(p) = &req.precision {
         inv = inv.set("precision", json!(p));
     }
@@ -1157,4 +1161,20 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         yield Ok(Event::default().data("[DONE]"));
     };
     Sse::new(events.boxed()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unseeded image request leaves the seed to each image's action (a
+    /// fresh random one); a seeded one gives image `i` the seed `seed + i`.
+    #[test]
+    fn an_image_seed_is_forwarded_only_when_requested() {
+        let unseeded = parse_image_request(Provider::OpenAI, &json!({"model": "m", "prompt": "p", "n": 2})).unwrap();
+        assert_eq!(image_invocation(&unseeded, 1).get_i64("seed"), None);
+        let seeded = parse_image_request(Provider::OpenAI, &json!({"model": "m", "prompt": "p", "n": 2, "seed": 5})).unwrap();
+        assert_eq!((image_invocation(&seeded, 0).get_i64("seed"), image_invocation(&seeded, 1).get_i64("seed")), (Some(5), Some(6)));
+        assert!(parse_image_request(Provider::OpenAI, &json!({"model": "m", "prompt": "p", "seed": "x"})).is_err());
+    }
 }

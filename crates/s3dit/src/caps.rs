@@ -183,7 +183,7 @@ impl Action for ZAction {
                 // to be refused here or it destroys ~20 GB of working weights
                 // for every caller after it.
                 let key = text2image_key(paths, inv)?;
-                let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
+                let seed = inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed);
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
@@ -314,7 +314,7 @@ fn opts_from(inv: &Invocation, width: u32, height: u32) -> crate::pipeline::Opts
     crate::pipeline::Opts {
         steps: inv.get_i64("steps").unwrap_or(8).max(1) as u32,
         guidance: inv.get_f64("guidance").unwrap_or(0.0) as f32,
-        seed: inv.get_i64("seed").unwrap_or(42).max(0) as u64,
+        seed: inv.get_i64("seed").map(|s| s.max(0) as u64).unwrap_or_else(data::rng::random_seed),
         width,
         height,
         hifi: inv.get_str("precision").as_deref() == Some("fp32"),

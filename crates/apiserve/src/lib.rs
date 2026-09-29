@@ -41,6 +41,7 @@ pub mod models;
 pub mod openai;
 pub mod openrouter;
 pub mod png;
+pub mod sampling;
 pub mod state;
 pub mod surface;
 

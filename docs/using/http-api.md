@@ -50,6 +50,15 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   not known until the model has rendered and encoded the prompt. The
   non-streaming reply and the OpenAI-shaped `usage` chunk carry the real
   numbers.
+- **Sampling parameters.** `temperature` and `top_p` default to 1.0, as in both
+  upstream APIs. `top_k` (an integer in 0..=1000) and `seed` are passed on only
+  when the request sets them; otherwise the model applies its own defaults, and an
+  unseeded request is sampled with a fresh random seed. OpenAI parameters brain
+  cannot honour are refused with 400 `invalid_request_error` naming the
+  parameter rather than ignored: `n` > 1, a non-zero `presence_penalty` or
+  `frequency_penalty`, a non-empty `logit_bias`, `logprobs: true`, a non-zero
+  `top_logprobs`, and a `response_format` other than `text`. Their neutral values
+  are accepted.
 - **Admission / backpressure:** a request that can't start on a lane within
   `BRAIN_ADMIT_DEADLINE_MS` gets **429** (`Retry-After`) - unless the request's own
   model is still cold-building (its first-ever activation, which can take well over a

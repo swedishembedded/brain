@@ -714,12 +714,17 @@ async fn chat_unknown_and_non_chat_models_are_404() {
 
 #[tokio::test]
 async fn chat_bad_bodies_are_400() {
-    // OpenAI: malformed JSON, missing model, missing messages, n > 1.
+    // OpenAI: malformed JSON, missing model, missing messages, n > 1, a
+    // sampling parameter brain cannot honour, an out-of-range top_k.
     let (app, key) = chat_app(Provider::OpenAI);
-    let cases: [Value; 3] = [
-        json!({"messages": [{"role": "user", "content": "hi"}]}),   // no model
+    let msg = json!([{"role": "user", "content": "hi"}]);
+    let cases: [Value; 6] = [
+        json!({"messages": msg}),                                    // no model
         json!({"model": "brain-chat"}),                              // no messages
-        json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}], "n": 2}), // n > 1
+        json!({"model": "brain-chat", "messages": msg, "n": 2}),     // n > 1
+        json!({"model": "brain-chat", "messages": msg, "presence_penalty": 0.5}),
+        json!({"model": "brain-chat", "messages": msg, "logprobs": true}),
+        json!({"model": "brain-chat", "messages": msg, "top_k": 5000}),
     ];
     for body in cases {
         let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
@@ -739,6 +744,10 @@ async fn chat_bad_bodies_are_400() {
     let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
     let (st, _) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "anthropic must 400 without max_tokens");
+    let body = json!({"model": "brain-chat", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}], "seed": "x"});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "anthropic must 400 on a non-integer seed");
+    assert_valid("anthropic.json", "ErrorResponse", &v);
 }
 
 // -------------------------------------------------------------- chat: SSE

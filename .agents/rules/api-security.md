@@ -37,6 +37,12 @@ them, so treat all request input as hostile.
 - [ ] Numeric params are range-checked before use: `max_tokens`/`max_new`,
       `n`, `top_k`, `dimensions`, batch/`input` array length, image `size`. Reject
       absurd values (400) rather than allocating on them.
+- [ ] Sampling parameters go through `crates/apiserve/src/sampling.rs` on every chat
+      surface: an omitted `seed`/`top_k` is NOT filled in (the action's own default
+      applies; an unseeded request must not decode a fixed sequence), `top_k` outside
+      0..=1000 or a non-integer `seed` is a 400, and an OpenAI parameter brain cannot
+      honour (penalties, `logit_bias`, logprobs, non-text `response_format`) is a
+      400 naming it rather than silently ignored.
 - [ ] The request `model` string is treated as an opaque catalog id for DISPATCH — it
       must NOT be interpolated into a shell command. It IS deliberately parsed as a
       `<vendor>/<repo>[-<QUANT>]` model reference for **auto-fetch** classification
