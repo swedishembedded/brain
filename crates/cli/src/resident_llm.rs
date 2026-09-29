@@ -31,7 +31,7 @@ use serde_json::json;
 
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
-use qwen3::chat::{parse_request, sampling_params, text_outcome, SeqState};
+use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat, SeqState};
 
 // ---------------------------------------------------------------- shared
 
@@ -930,9 +930,10 @@ impl ResidentModel for QwenResident {
         } else {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
-        // The checkpoint's own eos ids, plus ChatML's end-of-turn marker: this
-        // resident renders every prompt as ChatML.
-        let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, Some("<|im_end|>")).map_err(|e| format!("qwen: {e}"))?;
+        // Prompts render in the checkpoint's own chat format; generation stops
+        // on its eos ids and on that format's end-of-turn marker.
+        let format = ChatFormat::for_checkpoint(tok_dir, &tok);
+        let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, format.end_of_turn()).map_err(|e| format!("qwen: {e}"))?;
         gpu_core::profile::stage_time(&format!("{}: load tokenizer", self.id), stage_t0);
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
@@ -1078,7 +1079,7 @@ impl ResidentModel for QwenResident {
             Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        Ok(Box::new(QwenInstance { tok, stop, engine }))
+        Ok(Box::new(QwenInstance { tok, format, stop, engine }))
     }
 }
 
@@ -1098,6 +1099,8 @@ enum QwenEngineKind {
 
 struct QwenInstance {
     tok: data::qwen_tokenizer::QwenBpe,
+    /// How requests become prompt text (`ChatFormat`).
+    format: ChatFormat,
     /// The ids that end a generation (`data::generation::stop_ids`).
     stop: Vec<u32>,
     engine: QwenEngineKind,
@@ -1123,9 +1126,9 @@ impl Instance for QwenInstance {
             QwenEngineKind::Legacy { model, head } => invs
                 .iter()
                 .enumerate()
-                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, &self.stop, inv, &mut |p| progress(i, p)))
+                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, &self.format, &self.stop, inv, &mut |p| progress(i, p)))
                 .collect(),
-            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, &self.stop, invs, progress),
+            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, &self.format, &self.stop, invs, progress),
         }
     }
 
@@ -1159,11 +1162,12 @@ fn run_one_legacy(
     model: &qwen3::model::Qwen,
     head: &[f32],
     tok: &data::qwen_tokenizer::QwenBpe,
+    format: &ChatFormat,
     stop: &[u32],
     inv: &Invocation,
     progress: &mut dyn FnMut(Progress),
 ) -> ActionResult {
-    let req = parse_request(tok, inv)?;
+    let req = parse_request_as(tok, format, inv)?;
     let mut rng = Rng::new(req.seed);
     let total = req.max_new as u32;
     progress(Progress::step(0, total, "generating"));
@@ -1183,6 +1187,7 @@ fn run_one_legacy(
 fn run_batch_scheduled(
     sched: &mut model::serve::Scheduler<qwen3::serve::Engine>,
     tok: &data::qwen_tokenizer::QwenBpe,
+    format: &ChatFormat,
     stop: &[u32],
     invs: &[Invocation],
     progress: &mut dyn FnMut(usize, Progress),
@@ -1197,7 +1202,7 @@ fn run_batch_scheduled(
     let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
 
     for (bi, inv) in invs.iter().enumerate() {
-        match parse_request(tok, inv) {
+        match parse_request_as(tok, format, inv) {
             Ok(req) => {
                 let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
                 let seed = req.seed;
@@ -1888,7 +1893,7 @@ mod tests {
 
         let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(true)).set("max_new", json!(4));
         let start = std::time::Instant::now();
-        let results = run_batch_scheduled(&mut sched, &tok, &[], std::slice::from_ref(&inv), &mut |_i, _p| {});
+        let results = run_batch_scheduled(&mut sched, &tok, &ChatFormat::Qwen, &[], std::slice::from_ref(&inv), &mut |_i, _p| {});
         assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");

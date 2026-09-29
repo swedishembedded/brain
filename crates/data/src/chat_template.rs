@@ -34,7 +34,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 
-use minijinja::{Environment, Value};
+use minijinja::Environment;
+/// The value type templates render and [`parse_json_ordered`] produces.
+pub use minijinja::Value;
 
 #[derive(Debug)]
 pub struct TemplateError(String);
@@ -144,6 +146,8 @@ pub struct ChatTemplate {
     /// template's `{{ bos_token }}` rendered as the empty string silently —
     /// a prompt that does not byte-match HF's for the same checkpoint.
     defaults: BTreeMap<String, Value>,
+    /// The template's own Jinja source, as compiled.
+    source: String,
 }
 
 impl ChatTemplate {
@@ -192,7 +196,7 @@ impl ChatTemplate {
             out
         });
         env.add_template_owned("chat", jinja_src.to_string()).map_err(|e| TemplateError(format!("{e:#}")))?;
-        Ok(ChatTemplate { env, defaults: BTreeMap::new() })
+        Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string() })
     }
 
     /// Compile the `chat_template` field out of `<model_dir>/tokenizer_config.json`
@@ -303,6 +307,11 @@ impl ChatTemplate {
     /// further template kwargs a specific model's template reads
     /// (`enable_thinking`, `bos_token`, …) — passed through verbatim, so
     /// this stays generic across templates with different kwarg needs.
+    /// The Jinja source this template was compiled from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
     pub fn render(&self, messages: Value, tools: Option<Value>, add_generation_prompt: bool, extra: &BTreeMap<String, Value>) -> Result<String, TemplateError> {
         let tmpl = self.env.get_template("chat").map_err(|e| TemplateError(format!("{e:#}")))?;
         let mut ctx: BTreeMap<String, Value> = self.defaults.clone();

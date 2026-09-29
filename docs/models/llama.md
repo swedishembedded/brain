@@ -25,7 +25,7 @@ brain recognizes the architecture (HF class `LlamaForCausalLM`, GGUF
 `llama`). `brain pull deepseek-ai/<checkpoint>` fetches one (as safetensors
 when the repo ships them, otherwise its `pytorch_model*.bin` shards) and
 converts it with the Qwen3 importer at its own configuration, RoPE scaling
-included. Serving these checkpoints is not available yet: their tokenizers
-and chat templates are not read yet.
+included, and reads each checkpoint's own tokenizer pipeline, chat template
+and stop tokens. Serving them through `brain serve` is not available yet.
 
 Package: `brain-qwen3`.

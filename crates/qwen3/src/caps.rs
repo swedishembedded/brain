@@ -78,7 +78,7 @@ use promote::env::{Environment, Task, Verifier};
 use promote::gate::{gate, Cause, Decision, GateInput};
 use serde_json::json;
 
-use crate::chat::{parse_request, ParsedRequest, SeqState};
+use crate::chat::{parse_request_as, ChatFormat, ParsedRequest, SeqState};
 use crate::model::Qwen;
 
 /// The model id used on the CLI (`brain do qwen …`) and the event API.
@@ -169,7 +169,7 @@ pub fn manifest() -> Manifest {
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (group-wise 32-element weight scales + dynamic activation quant)")
                 .default(json!("fp32")),
         )
-        .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the checkpoint's own eos ids and <|im_end|> when a tokenizer is given; -1 disables)"))
+        .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the checkpoint's own eos ids and its chat format's turn end when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
         .param(ParamSpec::new(
             "messages",
@@ -407,13 +407,16 @@ impl Action for GenerateAction {
         };
         let plan = match &tok {
             Some(t) => {
-                let req = parse_request(t, inv)?;
+                // The checkpoint's own chat format renders the prompt.
+                let tok_dir = tok_path.as_deref().and_then(|p| std::path::Path::new(p).parent());
+                let format = ChatFormat::for_checkpoint(tok_dir, t);
+                let req = parse_request_as(t, &format, inv)?;
                 // Stop tokens: explicit param wins (-1 disables); else the
-                // checkpoint's own eos ids plus the ChatML turn end.
+                // checkpoint's own eos ids plus the format's turn end.
                 let eos: Vec<u32> = match inv.get_i64("eos") {
                     Some(e) if e >= 0 => vec![e as u32],
                     Some(_) => Vec::new(),
-                    None => data::generation::stop_ids(tok_path.as_deref().and_then(|p| std::path::Path::new(p).parent()), t, None, Some("<|im_end|>"))?,
+                    None => data::generation::stop_ids(tok_dir, t, None, format.end_of_turn())?,
                 };
                 Plan::Chat { req, eos }
             }

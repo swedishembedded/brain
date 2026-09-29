@@ -361,23 +361,7 @@ pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
             return Err(format!("qwen: unsupported template_flavor '{other}' (expected \"qwen3\" or \"qwen3.8\")"))
         }
     };
-    let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
-    let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
-    // Prompt-level tool_choice enforcement:
-    //  - `none` withholds the tool schemas entirely (the model cannot emit a
-    //    well-formed `<tool_call>` for a function it was never shown).
-    //  - `named` must name a function the tools array actually offers - the
-    //    same validation OpenAI/vLLM apply server-side. Without it, a typo'd
-    //    name would silently degrade into an unmet post-hoc demand.
-    match &tool_choice {
-        ToolChoice::None => tools.clear(),
-        ToolChoice::Named(name) => {
-            if !tool_schema_names(&tools).iter().any(|n| n == name) {
-                return Err(format!("qwen: tool_choice names function '{name}' which is not present in tools"));
-            }
-        }
-        _ => {}
-    }
+    let (tool_choice, tools) = resolve_tools(inv)?;
     // The prefill follows the render: only a template-rendered prompt with
     // the Qwen3.8 flavor and thinking enabled ends in an open `<think>\n`
     // (a raw `chat=false` prompt has no template and no prefill).
@@ -412,18 +396,126 @@ pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
     Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open })
 }
 
-/// Build a [`ParsedRequest`] from an [`Invocation`]: the [`render_prompt`]
-/// render, tokenized, plus the sampling params and stop strings.
-pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
+/// The request's `tool_choice` and the tool schemas the prompt shows.
+///
+/// Prompt-level tool_choice enforcement:
+///  - `none` withholds the tool schemas entirely (the model cannot emit a
+///    well-formed tool call for a function it was never shown).
+///  - `named` must name a function the tools array actually offers - the
+///    same validation OpenAI/vLLM apply server-side. Without it, a typo'd
+///    name would silently degrade into an unmet post-hoc demand.
+fn resolve_tools(inv: &Invocation) -> Result<(ToolChoice, Vec<String>), String> {
+    let tool_choice = parse_tool_choice(inv.get_str("tool_choice").as_deref())?;
+    let mut tools = parse_tools(inv.get_str("tools").as_deref())?;
+    match &tool_choice {
+        ToolChoice::None => tools.clear(),
+        ToolChoice::Named(name) => {
+            if !tool_schema_names(&tools).iter().any(|n| n == name) {
+                return Err(format!("qwen: tool_choice names function '{name}' which is not present in tools"));
+            }
+        }
+        _ => {}
+    }
+    Ok((tool_choice, tools))
+}
+
+/// How a checkpoint's chat turns become prompt text.
+pub enum ChatFormat {
+    /// Qwen's ChatML, rendered by `data::qwen_chat`: tool calls, reasoning,
+    /// and the Qwen3.8 flavor, byte-identical to Qwen's own templates.
+    Qwen,
+    /// The checkpoint's own Jinja chat template (R1's `<｜User｜>` turns,
+    /// coder-instruct's `### Instruction:`, ...).
+    Template(data::chat_template::ChatTemplate),
+    /// No chat template: a base model, which accepts only a raw prompt.
+    None,
+}
+
+impl ChatFormat {
+    /// The format of the checkpoint whose tokenizer files are in `dir`: its
+    /// own template, unless that template is ChatML (rendered by the Qwen
+    /// renderer); with no template, ChatML if the vocabulary is ChatML's,
+    /// else none.
+    pub fn for_checkpoint(dir: Option<&std::path::Path>, tok: &QwenBpe) -> ChatFormat {
+        match dir.map(data::chat_template::ChatTemplate::from_model_dir) {
+            Some(Ok(t)) if !t.source().contains("<|im_start|>") => ChatFormat::Template(t),
+            Some(Ok(_)) => ChatFormat::Qwen,
+            _ if tok.special_id("<|im_start|>").is_some() => ChatFormat::Qwen,
+            _ => ChatFormat::None,
+        }
+    }
+
+    /// The token this format closes an assistant turn with, when that is not
+    /// the checkpoint's own eos: ChatML's `<|im_end|>`.
+    pub fn end_of_turn(&self) -> Option<&'static str> {
+        match self {
+            ChatFormat::Qwen => Some("<|im_end|>"),
+            ChatFormat::Template(_) | ChatFormat::None => None,
+        }
+    }
+}
+
+/// [`render_prompt`] in `format`. A template renders the request's messages
+/// (or its single `prompt` as one user turn) with the template's own markup;
+/// the prompt opens a reasoning block when the render ends in `<think>` (R1
+/// prefills it), and tools are refused when the template has no place for
+/// them. A format with no template accepts only a raw prompt.
+pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<RenderedPrompt, String> {
+    let template = match format {
+        ChatFormat::Qwen => return render_prompt(inv),
+        ChatFormat::Template(t) => Some(t),
+        ChatFormat::None => None,
+    };
+    let (tool_choice, tools) = resolve_tools(inv)?;
+    let messages = inv.get_str("messages").filter(|s| !s.is_empty());
+    let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
+    let flavor = qwen_chat::TemplateFlavor::Qwen3;
+    if !chat {
+        return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false });
+    }
+    let t = template.ok_or("this checkpoint ships no chat template: send a raw prompt (`chat: false`) instead of chat messages")?;
+    if !tools.is_empty() && !t.source().contains("tools") {
+        return Err("this checkpoint's chat template has no place for tools".to_string());
+    }
+    let mut turns: Vec<serde_json::Value> = Vec::new();
+    if let Some(system) = inv.get_str("system").filter(|s| !s.is_empty()) {
+        turns.push(json!({"role": "system", "content": system}));
+    }
+    match messages {
+        Some(raw) => {
+            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("messages JSON: {e}"))?;
+            turns.extend(v.as_array().ok_or("messages must be a JSON array")?.iter().cloned());
+        }
+        None => turns.push(json!({"role": "user", "content": inv.get_str("prompt").unwrap_or_default()})),
+    }
+    let turns = data::chat_template::parse_json_ordered(&serde_json::Value::Array(turns).to_string()).map_err(|e| e.to_string())?;
+    let tools = (!tools.is_empty())
+        .then(|| data::chat_template::parse_json_ordered(&format!("[{}]", tools.join(","))).map_err(|e| e.to_string()))
+        .transpose()?;
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(inv.get_bool("enable_thinking").unwrap_or(true)));
+    let text = t.render(turns, tools, true, &extra).map_err(|e| e.to_string())?;
+    let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
+    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open })
+}
+
+/// [`parse_request`] in `format` (see [`render_prompt_as`]).
+pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
     let (max_new, temp, top_k, seed) = sampling_params(inv);
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-    let RenderedPrompt { text, tool_choice, flavor, thinking_open } = render_prompt(inv)?;
+    let RenderedPrompt { text, tool_choice, flavor, thinking_open } = render_prompt_as(format, inv)?;
     let ids = tok.encode(&text);
     if ids.is_empty() {
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
     Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open })
+}
+
+/// Build a [`ParsedRequest`] from an [`Invocation`]: the [`render_prompt`]
+/// render, tokenized, plus the sampling params and stop strings.
+pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
+    parse_request_as(tok, &ChatFormat::Qwen, inv)
 }
 
 /// Parse a completion that was NOT decoded here - a recorded reply, a
@@ -974,5 +1066,55 @@ mod tests {
         assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
         let calls = out.outputs.get("tool_calls").and_then(|v| v.as_str()).unwrap_or("");
         assert!(calls.contains("get_weather") && calls.contains("call_0"), "tool_calls: {calls}");
+    }
+
+    fn byte_tok(specials: &[&str]) -> QwenBpe {
+        let vocab: serde_json::Map<String, serde_json::Value> = data::bpe::bytes_to_unicode().iter().enumerate().map(|(i, c)| (c.to_string(), json!(i))).collect();
+        let added: Vec<serde_json::Value> = specials.iter().enumerate().map(|(i, c)| json!({"content": c, "id": 256 + i})).collect();
+        QwenBpe::from_json_bytes(json!({"model": {"vocab": vocab, "merges": []}, "added_tokens": added}).to_string().as_bytes()).unwrap()
+    }
+
+    fn template_dir(tag: &str, template: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brain-chatformat-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("tokenizer_config.json"), json!({"chat_template": template, "bos_token": "<s>"}).to_string()).unwrap();
+        d
+    }
+
+    const R1_LIKE: &str = "{{ bos_token }}{% for m in messages %}{% if m.role == 'user' %}<｜User｜>{{ m.content }}{% else %}<｜Assistant｜>{{ m.content }}{% endif %}{% endfor %}{% if add_generation_prompt %}<｜Assistant｜><think>\n{% endif %}";
+
+    /// A checkpoint with its own template renders with it, and R1's
+    /// `<think>\n` generation prefill opens the reasoning block.
+    #[test]
+    fn a_checkpoints_own_template_renders_and_its_think_prefill_opens_reasoning() {
+        let tok = byte_tok(&["<s>", "<｜User｜>", "<｜Assistant｜>"]);
+        let format = ChatFormat::for_checkpoint(Some(&template_dir("r1", R1_LIKE)), &tok);
+        assert!(matches!(format, ChatFormat::Template(_)));
+        assert_eq!(format.end_of_turn(), None, "the checkpoint's own eos ends a turn");
+        let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#));
+        let p = render_prompt_as(&format, &inv).unwrap();
+        assert_eq!(p.text, "<s><｜User｜>hi<｜Assistant｜><think>\n");
+        assert!(p.thinking_open);
+        let with_tools = inv.clone().set("tools", json!(r#"[{"type":"function","function":{"name":"f","parameters":{}}}]"#));
+        assert!(render_prompt_as(&format, &with_tools).unwrap_err().contains("tools"));
+    }
+
+    /// A ChatML template, or a ChatML vocabulary with no template, keeps the
+    /// Qwen renderer; a base model with neither accepts only a raw prompt.
+    #[test]
+    fn chatml_keeps_the_qwen_renderer_and_a_base_model_takes_raw_prompts_only() {
+        let chatml = byte_tok(&["<|im_start|>", "<|im_end|>"]);
+        let dir = template_dir("chatml", "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}");
+        assert!(matches!(ChatFormat::for_checkpoint(Some(&dir), &chatml), ChatFormat::Qwen));
+        assert!(matches!(ChatFormat::for_checkpoint(None, &chatml), ChatFormat::Qwen));
+        assert_eq!(ChatFormat::Qwen.end_of_turn(), Some("<|im_end|>"));
+
+        let base = byte_tok(&["<s>"]);
+        let format = ChatFormat::for_checkpoint(None, &base);
+        assert!(matches!(format, ChatFormat::None));
+        let e = render_prompt_as(&format, &Invocation::new().set("prompt", json!("hi"))).unwrap_err();
+        assert!(e.contains("no chat template"), "{e}");
+        let raw = render_prompt_as(&format, &Invocation::new().set("prompt", json!("def f(")).set("chat", json!(false))).unwrap();
+        assert_eq!(raw.text, "def f(");
     }
 }
