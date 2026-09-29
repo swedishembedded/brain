@@ -202,7 +202,10 @@ enum Backend {
     },
     #[cfg(feature = "text")]
     Qwen3 {
-        model: qwen3::Qwen,
+        /// Boxed, like `Lfm2`'s resident model: the backends are otherwise
+        /// kilobytes apart in size, and the enum would be as large as its
+        /// largest model struct whichever backend it holds.
+        model: Box<qwen3::Qwen>,
         tok: data::qwen_tokenizer::QwenBpe,
         /// The context budget this pipeline was BUILT for - fixed at
         /// construction, like `TextGenerationPipeline::capacity`. A request
@@ -226,7 +229,7 @@ enum Backend {
         /// ahead of time the way Qwen3's `capacity` does; this bounds the
         /// chunked-attention slab math instead.
         capacity: u32,
-        hot: std::sync::Mutex<Option<(u32, lfm2::Lfm)>>,
+        hot: std::sync::Mutex<Option<(u32, Box<lfm2::Lfm>)>>,
     },
 }
 
@@ -390,7 +393,7 @@ const LFM2_SLAB_BUDGET: u64 = 512 << 20;
 /// profile from Qwen3's KV-cache reuse, which is why this is a `Mutex`, not
 /// a plain field: [`EmbeddingPipeline::embed`]/`embed_batch` take `&self`.
 #[cfg(feature = "text")]
-fn lfm2_embed_one(weights: &str, tok: &data::qwen_tokenizer::QwenBpe, capacity: u32, hot: &std::sync::Mutex<Option<(u32, lfm2::Lfm)>>, text: &str, opts: &EmbeddingOptions) -> Result<Vec<f32>> {
+fn lfm2_embed_one(weights: &str, tok: &data::qwen_tokenizer::QwenBpe, capacity: u32, hot: &std::sync::Mutex<Option<(u32, Box<lfm2::Lfm>)>>, text: &str, opts: &EmbeddingOptions) -> Result<Vec<f32>> {
     use data::tokenizer::Tokenizer;
 
     let mut ids: Vec<u32> = tok.template_prefix().to_vec();
@@ -412,7 +415,7 @@ fn lfm2_embed_one(weights: &str, tok: &data::qwen_tokenizer::QwenBpe, capacity: 
     let reuse = matches!(&*guard, Some((len, _)) if *len == need);
     if !reuse {
         let model = lfm2::Lfm::load_inference_chunked(weights, 1, need, LFM2_SLAB_BUDGET, 0);
-        *guard = Some((need, model));
+        *guard = Some((need, Box::new(model)));
     }
     let (_, model) = guard.as_ref().expect("hot model present");
 
@@ -677,7 +680,7 @@ fn load_qwen3(model_id: &str, capacity: u32, tokenizer: Option<String>, download
     let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", move || qwen3::Qwen::from_reader_decode(&reader, capacity))
         .map_err(Error::Backend)?;
 
-    Ok(Backend::Qwen3 { model, tok, capacity })
+    Ok(Backend::Qwen3 { model: Box::new(model), tok, capacity })
 }
 
 /// Resolve `model_id` as an LFM2.5-Encoder checkpoint and build a real

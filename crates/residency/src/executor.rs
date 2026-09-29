@@ -172,14 +172,14 @@ enum Msg {
     /// group occupied (in the same order `estimate_multi` named them), all of
     /// which must be freed from `busy` here.
     DoneMulti { key: InstanceKey, devices: Vec<Device>, batch: usize, failed: bool },
-    /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
-    /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
-    /// exposed, but read straight from the manager rather than the counters.
     /// Ask the dispatcher what starting one job would require and disturb
-    /// - see [`Executor::plan`]. Answered on the dispatcher thread because
+    /// (see [`Executor::plan`]). Answered on the dispatcher thread because
     /// that thread owns the manager, so a plan is consistent with the
     /// residency it describes rather than racing it.
     Plan { model: String, action: String, inv: Box<Invocation>, reply: Sender<Result<crate::RunPlan, crate::PlanError>> },
+    /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
+    /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
+    /// exposed, but read straight from the manager rather than the counters.
     Report(Sender<crate::ResidencyReport>),
     /// An in-flight query: the dispatcher replies with one [`InFlightJob`] per job
     /// currently queued OR running. Handled like [`Msg::Report`] - read from the
