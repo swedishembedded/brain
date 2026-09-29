@@ -260,12 +260,13 @@ pub struct CycleOutcome {
     /// positive means regression.
     pub anchor_delta: f64,
     /// The largest single anchor-BLOCK regression this cycle's gate saw,
-    /// never negative - `0.0` when no block regressed or the per-block
-    /// check was not enabled (`promote::gate::GateConfig::max_block_drop`).
-    /// A candidate can clear `anchor_delta`'s pooled budget and still have a
-    /// nonzero number here; that gap is the whole reason the block check
-    /// exists.
-    pub worst_block_delta: f64,
+    /// never negative - `Some(0.0)` when no block regressed, `None` when the
+    /// gate had no anchor blocks to compare. Measured whether or not the
+    /// per-block check is enabled (`promote::gate::GateConfig::
+    /// max_block_drop`). A candidate can clear `anchor_delta`'s pooled budget
+    /// and still have a nonzero number here; that gap is the whole reason
+    /// the block check exists.
+    pub worst_block_delta: Option<f64>,
 }
 
 fn cycle_outcome(rec: &rl::continual::CycleRecord) -> CycleOutcome {
@@ -1079,12 +1080,13 @@ pub struct ImproveOutcome {
     pub decision: Decision,
     pub p_value: f64,
     pub effect_size: f64,
-    /// `anchor_incumbent - anchor_candidate`; positive means regression.
-    /// Always `0.0` here - a single improve cycle has no retention suite to
-    /// pool (see [`Improve::run`]'s own doc comment).
-    pub anchor_delta: f64,
-    /// Always `0.0` for the same reason.
-    pub worst_block_delta: f64,
+    /// `anchor_incumbent - anchor_candidate` over an anchor suite; positive
+    /// means regression. Always `None` here: a single improve cycle has no
+    /// anchor suite (see [`Improve::run`]'s own doc comment), and its gate's
+    /// pooled check runs on the held-out mean instead.
+    pub anchor_delta: Option<f64>,
+    /// The largest anchor-block regression; `None` for the same reason.
+    pub worst_block_delta: Option<f64>,
     pub entropy_ratio: f64,
     /// The published adapter, when the gate promoted.
     pub adapter_path: Option<PathBuf>,
@@ -1227,7 +1229,7 @@ impl Improve {
             decision: outcome.decision,
             p_value: outcome.report.p_value,
             effect_size: outcome.report.effect_size,
-            anchor_delta: outcome.report.anchor_delta,
+            anchor_delta: None,
             worst_block_delta: outcome.report.worst_block_delta,
             entropy_ratio: outcome.report.entropy_ratio,
             adapter_path: published,

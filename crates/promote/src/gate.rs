@@ -128,14 +128,15 @@ pub struct GateReport {
     pub anchor_delta: f64,
     pub entropy_ratio: f64,
     /// Index into `GateInput::anchor_blocks` of the block with the largest
-    /// regression, or `0` when `anchor_blocks` is empty or no block
-    /// regressed - there is nothing meaningful to point at in that case.
-    pub worst_block: usize,
-    /// That block's own `incumbent - candidate`, never negative (clamped to
-    /// `0.0` when every block held or improved). Computed unconditionally,
-    /// like every other number here, regardless of which check (if any)
-    /// actually rejected.
-    pub worst_block_delta: f64,
+    /// regression (the first block when none regressed); `None` when there
+    /// were no anchor blocks to compare.
+    pub worst_block: Option<usize>,
+    /// That block's own `incumbent - candidate`, never negative (`0.0` when
+    /// every block held or improved). `None` when there were no anchor
+    /// blocks: nothing was measured, which is not the same as nothing
+    /// regressed. Computed whenever blocks exist, regardless of which check
+    /// (if any) rejected.
+    pub worst_block_delta: Option<f64>,
 }
 
 /// Score `input` against `cfg` and return the promote/reject decision plus
@@ -198,8 +199,8 @@ pub fn gate(input: &GateInput, cfg: &GateConfig) -> GateReport {
         Decision::Reject(Cause::EffectTooSmall { effect_size, min_effect_size: cfg.min_effect_size })
     } else if anchor_delta > cfg.anchor_budget {
         Decision::Reject(Cause::AnchorRegressed { delta: anchor_delta, budget: cfg.anchor_budget })
-    } else if worst_block_delta > cfg.max_block_drop {
-        Decision::Reject(Cause::BlockRegressed { block: worst_block, delta: worst_block_delta, max_drop: cfg.max_block_drop })
+    } else if let Some((block, delta)) = worst_block.zip(worst_block_delta).filter(|&(_, d)| d > cfg.max_block_drop) {
+        Decision::Reject(Cause::BlockRegressed { block, delta, max_drop: cfg.max_block_drop })
     } else if entropy_ratio < cfg.min_entropy_ratio {
         Decision::Reject(Cause::Degenerate { entropy_ratio, min_entropy_ratio: cfg.min_entropy_ratio })
     } else {
@@ -213,8 +214,12 @@ pub fn gate(input: &GateInput, cfg: &GateConfig) -> GateReport {
 /// clamped to be non-negative, and which block produced it. `(0, 0.0)` when
 /// `blocks` is empty or every block held/improved - "no block regressed"
 /// needs no particular index to point at.
-fn worst_block(blocks: &[(f64, f64)]) -> (usize, f64) {
-    blocks.iter().enumerate().map(|(i, (cand, inc))| (i, inc - cand)).fold((0, 0.0), |acc, cur| if cur.1 > acc.1 { cur } else { acc })
+fn worst_block(blocks: &[(f64, f64)]) -> (Option<usize>, Option<f64>) {
+    if blocks.is_empty() {
+        return (None, None);
+    }
+    let (index, delta) = blocks.iter().enumerate().map(|(i, (cand, inc))| (i, inc - cand)).fold((0, 0.0), |acc, cur| if cur.1 > acc.1 { cur } else { acc });
+    (Some(index), Some(delta))
 }
 
 fn mean(v: &[f64]) -> f64 {
@@ -411,7 +416,27 @@ mod tests {
         let cfg = GateConfig { max_block_drop: 0.10, ..GateConfig::default() };
         let report = gate(&input, &cfg);
         assert_eq!(report.decision, Decision::Promote);
-        assert_eq!(report.worst_block_delta, 0.0);
+        assert_eq!(report.worst_block_delta, Some(0.0));
+    }
+
+    /// No anchor blocks means nothing was measured: the report says so
+    /// instead of a zero that reads as "no block regressed".
+    #[test]
+    fn without_anchor_blocks_the_worst_block_is_not_measured() {
+        let (candidate, incumbent) = winning_pairs();
+        let input = GateInput {
+            candidate_scores: &candidate,
+            incumbent_scores: &incumbent,
+            anchor_candidate: 0.90,
+            anchor_incumbent: 0.90,
+            entropy_candidate: 2.0,
+            entropy_incumbent: 2.0,
+            anchor_blocks: &[],
+        };
+        let report = gate(&input, &GateConfig { max_block_drop: 0.10, ..GateConfig::default() });
+        assert_eq!(report.decision, Decision::Promote);
+        assert_eq!(report.worst_block, None);
+        assert_eq!(report.worst_block_delta, None);
     }
 
     #[test]

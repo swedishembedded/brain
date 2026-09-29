@@ -29,12 +29,12 @@ use gpu_core::select::Dtype;
 /// Aggregate score over a held-out set: `loss` is mean per-token
 /// cross-entropy (NaN if every sample was skipped), `token_accuracy` is the
 /// fraction of trainable positions where greedy argmax matched the true
-/// next token, `samples`/`skipped` account for every input sample so a
+/// next token (`None` when no position was scored - unmeasured, not 0), `samples`/`skipped` account for every input sample so a
 /// caller can tell "scored 0 out of 0" from "scored 0 out of 40".
 #[derive(Debug, Clone, Copy)]
 pub struct ChatScore {
     pub loss: f32,
-    pub token_accuracy: f64,
+    pub token_accuracy: Option<f64>,
     pub positions: usize,
     pub samples: usize,
     pub skipped: usize,
@@ -153,7 +153,7 @@ pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: 
 
     ChatScore {
         loss: if positions > 0 { (total_nll / positions as f64) as f32 } else { f32::NAN },
-        token_accuracy: if positions > 0 { correct as f64 / positions as f64 } else { 0.0 },
+        token_accuracy: (positions > 0).then(|| correct as f64 / positions as f64),
         positions,
         samples: samples.len() - skipped,
         skipped,
@@ -282,7 +282,7 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
 
     ChatScore {
         loss: if positions > 0 { (total_nll / positions as f64) as f32 } else { f32::NAN },
-        token_accuracy: if positions > 0 { correct as f64 / positions as f64 } else { 0.0 },
+        token_accuracy: (positions > 0).then(|| correct as f64 / positions as f64),
         positions,
         samples: samples.len() - skipped,
         skipped,
@@ -362,11 +362,9 @@ mod paged_scoring_tests {
             paged.loss,
             legacy.loss
         );
-        assert!(
-            (legacy.token_accuracy - paged.token_accuracy).abs() < 1e-9,
-            "token accuracy is a discrete count over the same positions -- it must match EXACTLY: legacy {} vs paged {}",
-            legacy.token_accuracy,
-            paged.token_accuracy
+        assert_eq!(
+            legacy.token_accuracy, paged.token_accuracy,
+            "token accuracy is a discrete count over the same positions -- it must match EXACTLY"
         );
 
         std::fs::remove_dir_all(&dir).ok();

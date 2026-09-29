@@ -108,8 +108,8 @@ fn an_improve_cycle_runs_gates_and_publishes_an_adapter_only_on_promote() {
 
     assert!(outcome.p_value.is_finite() && (0.0..=1.0).contains(&outcome.p_value), "p_value must be a probability, got {}", outcome.p_value);
     assert!(outcome.effect_size.is_finite());
-    assert_eq!(outcome.anchor_delta, 0.0, "a single improve cycle has no retention suite to pool");
-    assert_eq!(outcome.worst_block_delta, 0.0, "a single improve cycle has no anchor blocks");
+    assert_eq!(outcome.anchor_delta, None, "a single improve cycle has no anchor suite to pool");
+    assert_eq!(outcome.worst_block_delta, None, "a single improve cycle has no anchor blocks");
 
     let published = rl::improve::latest_adapter(&adapters).expect("the adapter directory must exist either way");
     match outcome.decision {

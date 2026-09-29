@@ -77,7 +77,15 @@ pub struct AtifVerifier;
 
 impl Verifier for AtifVerifier {
     fn verify(&self, task: &Task, _transcript: &[Step], _completion: &[u32]) -> Reward {
-        let value = task.answer.get("reward").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+        // Every task this verifier is meant for comes from
+        // `task_from_trajectory`, which refuses a trajectory without a reward
+        // stamp. A task without one was built some other way; scoring it 0
+        // would fabricate a failure the recording never showed, so a debug
+        // build refuses it and a release build scores NaN, which no gate
+        // counts as a win.
+        let value = task.answer.get("reward").and_then(serde_json::Value::as_f64);
+        debug_assert!(value.is_some(), "AtifVerifier scored task {:?}, which carries no reward stamp", task.id);
+        let value = value.map_or(f32::NAN, |v| v as f32);
         Reward { value, parts: BTreeMap::from([("trajectory_reward".to_string(), value)]) }
     }
 }

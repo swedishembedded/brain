@@ -1140,9 +1140,9 @@ fn eval_chat(args: &[String]) {
     let base_weights_str = base_weights_path.to_str().unwrap_or_default();
     let base_score = qwen3::eval::score_chat(base_weights_str, None, &tok, &chat_template, &samples, block);
     println!(
-        "base {base_id}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+        "base {base_id}: loss {:.4}  token-acc {}  ({}/{} samples scored, {} positions)",
         base_score.loss,
-        base_score.token_accuracy * 100.0,
+        percent(base_score.token_accuracy),
         base_score.samples,
         base_score.samples + base_score.skipped,
         base_score.positions
@@ -1158,10 +1158,10 @@ fn eval_chat(args: &[String]) {
         let score = qwen3::eval::score_chat_paged(base_weights_str, None, &tok, &chat_template, &samples, block, *kv);
         let delta = if base_score.loss.is_finite() { score.loss - base_score.loss } else { f32::NAN };
         println!(
-            "base {base_id} [kv={}]: loss {:.4} ({delta:+.4} vs legacy fp32)  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+            "base {base_id} [kv={}]: loss {:.4} ({delta:+.4} vs legacy fp32)  token-acc {}  ({}/{} samples scored, {} positions)",
             kv.label(),
             score.loss,
-            score.token_accuracy * 100.0,
+            percent(score.token_accuracy),
             score.samples,
             score.samples + score.skipped,
             score.positions
@@ -1199,9 +1199,9 @@ fn eval_chat(args: &[String]) {
     };
     let adapter_score = qwen3::eval::score_chat(base_weights_str, Some(adapter_path.to_str().unwrap_or_default()), &tok, &chat_template, &samples, block);
     println!(
-        "{full_ref_str}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+        "{full_ref_str}: loss {:.4}  token-acc {}  ({}/{} samples scored, {} positions)",
         adapter_score.loss,
-        adapter_score.token_accuracy * 100.0,
+        percent(adapter_score.token_accuracy),
         adapter_score.samples,
         adapter_score.samples + adapter_score.skipped,
         adapter_score.positions
@@ -1698,4 +1698,9 @@ mod lora_gate_cli_tests {
         assert_eq!(a.tokenizer.as_deref(), Some("tok.json"));
         assert_eq!(a.max_new, Some(16));
     }
+}
+
+/// A token accuracy as a percentage, or `n/a` when no position was scored.
+fn percent(accuracy: Option<f64>) -> String {
+    accuracy.map_or_else(|| "n/a".to_string(), |a| format!("{:.1}%", a * 100.0))
 }

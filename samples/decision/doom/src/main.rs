@@ -604,12 +604,12 @@ fn judge(paths: &Paths, args: &Args) -> Result<(), String> {
 
     println!(
         "\ndoom: {} of {} paired episodes favour the candidate (p {:.4}), \
-         score {:+.3}, worst level {:+.3}, entropy ratio {:.2}",
+         score {:+.3}, worst level {}, entropy ratio {:.2}",
         report.k_wins,
         report.n_discordant,
         report.p_value,
         report.effect_size,
-        -report.worst_block_delta,
+        report.worst_block_delta.map_or_else(|| "not measured".to_string(), |d| format!("{:+.3}", -d)),
         report.entropy_ratio
     );
     match report.decision {

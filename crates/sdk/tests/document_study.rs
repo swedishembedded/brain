@@ -251,7 +251,8 @@ fn a_document_study_writes_a_report_and_publishes_an_adapter_only_on_promote() {
         assert!((cyc.baseline_pass_rate - row["baseline_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
         assert!((cyc.post_training_pass_rate - row["post_training_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
         assert!((cyc.anchor_delta - row["anchor_delta"].as_f64().unwrap()).abs() < 1e-12);
-        assert!(cyc.worst_block_delta.is_finite() && cyc.worst_block_delta >= 0.0, "{arm}: worst_block_delta must be a non-negative real number, got {}", cyc.worst_block_delta);
+        let worst = cyc.worst_block_delta.unwrap_or_else(|| panic!("{arm}: a document study gates on anchor blocks, so worst_block_delta is measured"));
+        assert!(worst.is_finite() && worst >= 0.0, "{arm}: worst_block_delta must be a non-negative real number, got {worst}");
         assert!(!cyc.retention_row.is_empty(), "{arm}: a cycle's retention row must carry at least its own diagonal entry");
     }
 
