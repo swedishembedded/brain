@@ -65,16 +65,20 @@ pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &dyn WeightSource, s: usize, g:
     tp.f32("tok.weight", &[cfg.vocab as i64, d as i64], w.get("tok.weight"));
     let mut x = tp.gather("tok.weight", "ids", 0, "emb"); // [1,S,d]
 
-    // Half-split RoPE tables [1,S,1,hd] (full width: cos = cat(f,f)), theta
-    // from the checkpoint config (1e6).
+    // Half-split RoPE tables [1,S,1,hd] (full width: cos = cat(f,f)) at the
+    // checkpoint's theta, through its declared scaling's table when it has one.
     let half = hd / 2;
+    let scaled = cfg.rope_table();
     let (mut cos, mut sin) = (vec![0f32; s * hd], vec![0f32; s * hd]);
     for p in 0..s {
         for j in 0..half {
-            let ang = p as f32 / cfg.rope_theta.powf(j as f32 / half as f32);
+            let (ang, af) = match &scaled {
+                Some((inv_freq, af)) => (p as f32 * inv_freq[j], *af),
+                None => (p as f32 / cfg.rope_theta.powf(j as f32 / half as f32), 1.0),
+            };
             for c in [j, j + half] {
-                cos[p * hd + c] = ang.cos();
-                sin[p * hd + c] = ang.sin();
+                cos[p * hd + c] = ang.cos() * af;
+                sin[p * hd + c] = ang.sin() * af;
             }
         }
     }

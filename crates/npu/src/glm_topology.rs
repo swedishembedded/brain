@@ -65,12 +65,12 @@ fn build_stack(tp: &mut Topo, cfg: &GlmConfig, w: &dyn WeightSource, t: usize, x
     tp.f32("c_eps", &[1], vec![cfg.rms_eps]);
     tp.f32("c_scale", &[1], vec![1.0 / (qkhd as f32).sqrt()]);
     tp.f32("c_rscale", &[1], vec![cfg.routed_scaling_factor]);
-    // interleaved-RoPE cos/sin half tables [1,T,1,rope/2] (base 10000, matches rope_train)
+    // interleaved-RoPE cos/sin half tables [1,T,1,rope/2] at the config's base (as rope_train)
     let half = rope / 2;
     let (mut cos, mut sin) = (vec![0f32; t * half], vec![0f32; t * half]);
     for p in 0..t {
         for j in 0..half {
-            let ang = p as f32 * 10000f32.powf(-(2.0 * j as f32) / rope as f32);
+            let ang = p as f32 * cfg.rope_theta.powf(-(2.0 * j as f32) / rope as f32);
             cos[p * half + j] = ang.cos();
             sin[p * half + j] = ang.sin();
         }

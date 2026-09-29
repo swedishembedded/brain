@@ -332,6 +332,7 @@ fn mtp_decode_step(
     let hkv = nkv * hd;
     let ff = cfg.d_ff as usize;
     let s = pos + 1; // sequence length after appending this token
+    let freqs = rope_freqs(cfg);
     let mut x = x_in.to_string();
     for l in 0..cfg.n_layers as usize {
         let p = |t: &str| format!("blocks.{l}.{t}");
@@ -344,8 +345,8 @@ fn mtp_decode_step(
         let v = tp.reshape(&v, "mf_kv1");
         let q = tp.rmsnorm(&q, &p("attn.q_norm.weight"), w, hd);
         let k = tp.rmsnorm(&k, &p("attn.k_norm.weight"), w, hd);
-        let q = tp.rope_at(&q, pos, hd, cfg.rope_theta);
-        let k = tp.rope_at(&k, pos, hd, cfg.rope_theta);
+        let q = tp.rope_at(&q, pos, hd, &freqs);
+        let k = tp.rope_at(&k, pos, hd, &freqs);
         let q = tp.transpose(&q, &[0, 2, 1, 3]); // [1,nh,1,hd]
         let knew = tp.transpose(&k, &[0, 2, 1, 3]); // [1,nkv,1,hd]
         let vnew = tp.transpose(&v, &[0, 2, 1, 3]); // [1,nkv,1,hd]
@@ -398,6 +399,14 @@ fn mtp_decode_step(
 /// the name of the final-norm hidden states (`[1,T,d]`). Used by both the
 /// token-id graph ([`build_qwen_graph`]) and the input-embedding Talker graph
 /// ([`build_talker_hidden_graph`]).
+/// Per-pair RoPE inverse frequencies and the factor cos/sin are scaled by:
+/// the declared scaling's table (`QwenConfig::rope_table`), or the analytic
+/// `theta^(-2m/hd)` schedule at factor 1.
+fn rope_freqs(cfg: &QwenConfig) -> (Vec<f32>, f32) {
+    let hd = cfg.head_dim as usize;
+    cfg.rope_table().unwrap_or_else(|| ((0..hd / 2).map(|m| cfg.rope_theta.powf(-2.0 * m as f32 / hd as f32)).collect(), 1.0))
+}
+
 fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &dyn WeightSource, t: usize, x_in: &str, emit_kv: bool) -> String {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
@@ -416,13 +425,13 @@ fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &dyn WeightSource, t: usize, 
     tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
     tp.f32("c_two", &[1], vec![2.0]);
     // RoPE cos/sin tables [1,T,1,hd] (half-split / NeoX: emb = cat(freqs,freqs)).
+    let (inv_freq, attention_factor) = rope_freqs(cfg);
     let (mut cos, mut sin) = (vec![0f32; t * hd], vec![0f32; t * hd]);
     for p in 0..t {
         for j in 0..hd {
-            let m = (j % half) as f32;
-            let ang = p as f32 * cfg.rope_theta.powf(-2.0 * m / hd as f32);
-            cos[p * hd + j] = ang.cos();
-            sin[p * hd + j] = ang.sin();
+            let ang = p as f32 * inv_freq[j % half];
+            cos[p * hd + j] = ang.cos() * attention_factor;
+            sin[p * hd + j] = ang.sin() * attention_factor;
         }
     }
     tp.f32("rope_cos", &[1, ti, 1, hd as i64], cos);
@@ -607,17 +616,17 @@ impl<'a> Topo<'a> {
     /// the fused-MTP unroll processes one token at a known position, so this token's
     /// cos/sin are baked as constants (broadcast `[1,1,1,hd]` over the head axis).
     /// Reuses the shared `rh_*` rotate-half slice bounds.
-    fn rope_at(&mut self, x: &str, pos: usize, hd: usize, theta: f32) -> String {
+    fn rope_at(&mut self, x: &str, pos: usize, hd: usize, freqs: &(Vec<f32>, f32)) -> String {
         let half = hd / 2;
         let cosn = format!("mf_cos_{pos}");
         let sinn = format!("mf_sin_{pos}");
         if !self.has(&cosn) {
+            let (inv_freq, attention_factor) = freqs;
             let (mut cos, mut sin) = (vec![0f32; hd], vec![0f32; hd]);
             for j in 0..hd {
-                let m = (j % half) as f32;
-                let ang = pos as f32 * theta.powf(-2.0 * m / hd as f32);
-                cos[j] = ang.cos();
-                sin[j] = ang.sin();
+                let ang = pos as f32 * inv_freq[j % half];
+                cos[j] = ang.cos() * attention_factor;
+                sin[j] = ang.sin() * attention_factor;
             }
             self.f32(&cosn, &[1, 1, 1, hd as i64], cos);
             self.f32(&sinn, &[1, 1, 1, hd as i64], sin);
@@ -664,6 +673,25 @@ impl<'a> Topo<'a> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The exported rotation reads a declared RoPE scaling's table, and an
+    /// undeclared one keeps the analytic schedule.
+    #[test]
+    fn rope_freqs_follow_the_declared_scaling() {
+        let plain = QwenConfig::tiny();
+        let (base, af) = rope_freqs(&plain);
+        assert_eq!(af, 1.0);
+        let hd = plain.head_dim as f32;
+        for (m, f) in base.iter().enumerate() {
+            assert_eq!(*f, plain.rope_theta.powf(-2.0 * m as f32 / hd));
+        }
+        let linear = QwenConfig { rope_scaling: Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 }), ..plain };
+        let (scaled, af) = rope_freqs(&linear);
+        assert_eq!(af, 1.0);
+        for (s, b) in scaled.iter().zip(&base) {
+            assert!((s * 4.0 - b).abs() <= 2.0 * f32::EPSILON * b, "{s} * 4 != {b}");
+        }
+    }
 
     /// Widening `w` from a hardcoded `HashMap` alias to `&dyn WeightSource` must
     /// not change the emitted graph: build once from an eager in-memory HashMap
