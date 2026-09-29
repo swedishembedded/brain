@@ -113,6 +113,13 @@ pub(crate) fn est_vram(path: &str) -> MemCost {
 /// whenever `k` (every real head_dim/d_model/d_ff here) is a multiple of 32
 /// - true for every shipped Qwen3 config, so no separate `n`/`k` split is
 /// needed to compute it.
+/// The device byte footprint of `cfg`'s weights at fp32, with the same 1.3x
+/// allowance [`est_vram`] gives a file - derived from the config, since the
+/// checkpoint on disk may be a directory, or bf16 at half the device size.
+fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
+    cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
+}
+
 fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list()
         .into_iter()
@@ -638,10 +645,16 @@ impl QwenResident {
         if path.to_ascii_lowercase().ends_with(".gguf") {
             return HISTORICAL_DEFAULT; // the Legacy non-paged decode path - no pool to auto-size
         }
-        let Ok(reader) = checkpoint::weightio::WeightReader::open(path) else { return HISTORICAL_DEFAULT };
-        let Ok(checkpoint_cfg) = qwen3::config::QwenConfig::from_reader(&reader) else { return HISTORICAL_DEFAULT };
-        let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { est_vram(path).vram };
+        let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
+        let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { weights_fp32_bytes(&checkpoint_cfg) };
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
+    }
+
+    /// The tensors the serving engine uploads, read from the checkpoint as it
+    /// is on disk and decoded to f32 one tensor at a time.
+    fn engine_tensors(&self) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
+        let (cfg, src) = qwen3::open_checkpoint(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        qwen3::serve::Engine::tensors_from(&cfg, &*src).map_err(|e| format!("qwen: {e}"))
     }
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
@@ -866,10 +879,7 @@ impl ResidentModel for QwenResident {
         if self.path.to_ascii_lowercase().ends_with(".gguf") {
             return cost;
         }
-        let Ok(reader) = checkpoint::weightio::WeightReader::open(&self.path) else {
-            return cost;
-        };
-        let Ok(cfg) = qwen3::config::QwenConfig::from_reader(&reader) else {
+        let Ok(cfg) = qwen3::checkpoint_config(&self.path) else {
             return cost;
         };
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap);
@@ -894,7 +904,7 @@ impl ResidentModel for QwenResident {
         // from - rather than a flat fraction of `cost.vram`. `activate()`
         // below requests the identical `weights_int8` value, so the two
         // cannot silently disagree about which tensors are quantized.
-        let weight_bytes = if self.weights_int8_requested { weights_int8_bytes(&cfg) } else { cost.vram };
+        let weight_bytes = if self.weights_int8_requested { weights_int8_bytes(&cfg) } else { weights_fp32_bytes(&cfg) };
         residency::log::info(&format!(
             "{}: estimate weights={:.2}GiB(int8={}) kv={:.2}GiB scratch={:.2}GiB total={:.2}GiB",
             self.id,
@@ -914,9 +924,10 @@ impl ResidentModel for QwenResident {
         // over a minute, without turning into a per-layer scroll.
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.id));
-        // Stream weights from the mmap (see GptResident::activate). Open first so
-        // a GGUF can supply its own embedded tokenizer.
-        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        // The checkpoint is read as it is on disk (a Hugging Face directory, a
+        // GGUF or a brain file); only a GGUF carries its own tokenizer.
+        let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
+        let gguf_tok = if is_gguf { checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?.tokenizer() } else { None };
         gpu_core::profile::stage_time(&format!("{}: open checkpoint", self.id), stage_t0);
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 2/3 loading tokenizer", self.id));
@@ -925,7 +936,7 @@ impl ResidentModel for QwenResident {
         // `tokenizer.ggml.*` KV; else there is nothing to tokenize with.
         let (tok, tok_dir, gguf_eos) = if !self.tokenizer.is_empty() {
             (data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?, std::path::Path::new(&self.tokenizer).parent(), None)
-        } else if let Some(gt) = reader.tokenizer() {
+        } else if let Some(gt) = gguf_tok {
             (data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?, None, gt.eos)
         } else {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
@@ -938,15 +949,11 @@ impl ResidentModel for QwenResident {
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
         let ctx = self.ctx;
-        // `qwen3::serve::Engine` (the paged, continuous-batching serving engine --
-        // see this plan's W2/W3/W5) reads checkpoints via `checkpoint::load`,
-        // which is SAFETENSORS-ONLY (`checkpoint::parse` -> `st::parse_safetensors`).
-        // A `.gguf` checkpoint therefore cannot build an `Engine` today -- this is
-        // a real, pre-existing gap (not introduced here), so `.gguf` keeps the
-        // original single-sequence decode-only path rather than silently losing
-        // GGUF support. Everything else (the common case: a `.brain.safetensors`
-        // checkpoint, with or without a named LoRA adapter) gets the batched engine.
-        let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
+        // `qwen3::serve::Engine` (the paged, continuous-batching serving engine)
+        // holds f32 or int8 weights, so a quantized GGUF would be expanded to
+        // build one; a `.gguf` keeps the single-sequence decode-only path.
+        // Every other checkpoint - a Hugging Face directory or a brain file,
+        // with or without a named LoRA adapter - gets the batched engine.
         let engine = on_device(device, || -> Result<QwenEngineKind, String> {
             if is_gguf {
                 let (cfg, src) = qwen3::open_checkpoint(&self.path)?;
@@ -972,7 +979,7 @@ impl ResidentModel for QwenResident {
             // asked this checkpoint's unusual `head_dim` for int8, so a
             // serving-process panic on activation would be the wrong failure
             // mode -- see `qwen3::serve::kv_int8_supported`'s doc comment.
-            let checkpoint_cfg = qwen3::config::QwenConfig::from_reader(&reader).map_err(|e| format!("qwen: {}: {e}", self.path))?;
+            let checkpoint_cfg = qwen3::checkpoint_config(&self.path).map_err(|e| format!("qwen: {e}"))?;
             let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&checkpoint_cfg);
             if self.kv_int8_requested && !kv_int8 {
                 eprintln!(
@@ -1035,7 +1042,7 @@ impl ResidentModel for QwenResident {
                     // already uses so both branches share one cfg mutation
                     // point.
                     let load_t0 = std::time::Instant::now();
-                    let tensors = checkpoint::load(&self.path).into_by_role("");
+                    let tensors = self.engine_tensors()?;
                     gpu_core::profile::stage_time(&format!("{}: re-load checkpoint tensors for engine build", self.id), load_t0);
                     let mut cfg = checkpoint_cfg.clone();
                     Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
@@ -1046,7 +1053,7 @@ impl ResidentModel for QwenResident {
                 // is an ordinary frozen base, zero extra inference cost versus
                 // the base once folded.
                 Some(a) => {
-                    let mut tensors = checkpoint::load(&self.path).into_by_role("");
+                    let mut tensors = self.engine_tensors()?;
                     let mut cfg = checkpoint_cfg.clone();
                     qwen3::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
@@ -1460,7 +1467,7 @@ mod tests {
     }
 
     /// End to end through `estimate()`: opting in shrinks the total, opting
-    /// out (the default) leaves it exactly at `est_vram`'s file-size figure
+    /// out (the default) leaves it at the config's fp32 weight bytes
     /// - same env-gated shape `kv_int8`'s own estimate switch already uses.
     #[test]
     fn estimate_shrinks_the_weight_term_when_weights_int8_is_requested() {
@@ -1746,13 +1753,13 @@ mod tests {
         let expected_kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         let cap = max_blocks_per_seq * block_size;
         let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, false);
-        let file_only = est_vram(path.to_str().unwrap()).vram;
+        let weights = weights_fp32_bytes(&cfg);
 
         let got = resident.estimate(&key);
         assert_eq!(
             got.vram,
-            file_only + expected_kv_bytes + expected_scratch_bytes,
-            "estimate() must equal file size + the KV pool + the paged-attention scratch, no more and no less"
+            weights + expected_kv_bytes + expected_scratch_bytes,
+            "estimate() must equal the fp32 weights + the KV pool + the paged-attention scratch, no more and no less"
         );
         assert!(expected_kv_bytes > 0, "the KV pool must contribute a nonzero amount at these test dims");
         assert!(expected_scratch_bytes > 0, "the paged-attention scratch must contribute a nonzero amount at these test dims");
@@ -1768,6 +1775,49 @@ mod tests {
     /// tokens like `<|im_start|>` never index outside the embedding table -
     /// same reasoning as `rejected_admission_resolves_promptly_instead_of_hanging`),
     /// and write it to a scratch dir. Returns the checkpoint path.
+    /// A Llama-shaped checkpoint served straight from its Hugging Face
+    /// directory, as downloaded: the resident reads `config.json`, the
+    /// safetensors under their HF names and the byte-level `tokenizer.json`
+    /// in place, and generates exactly what the decoder built from the same
+    /// weights generates. Nothing is written beside the checkpoint.
+    #[test]
+    fn a_hugging_face_directory_is_served_as_downloaded() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("qwen-resident-hf-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = r#"{"architectures":["LlamaForCausalLM"],"vocab_size":256,"hidden_size":16,"num_hidden_layers":2,
+            "num_attention_heads":4,"num_key_value_heads":2,"intermediate_size":32,"rope_theta":10000,
+            "rms_norm_eps":1e-5,"tie_word_embeddings":false,"max_position_embeddings":64}"#;
+        std::fs::write(dir.join("config.json"), config).unwrap();
+        let cfg = qwen3::hf::decoder_config(config).unwrap();
+        let init = qwen3::init_weights(&cfg, 17);
+        let names = qwen3::hf::HfNames::CAUSAL_LM;
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            cfg.param_list().into_iter().map(|(n, numel)| (names.from_brain(&n).unwrap(), vec![numel as u64], init[&n].clone())).collect();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+        let vocab: serde_json::Map<String, serde_json::Value> = data::bpe::bytes_to_unicode().iter().enumerate().map(|(i, c)| (c.to_string(), json!(i))).collect();
+        let tokenizer = json!({"model": {"vocab": vocab, "merges": []}, "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "use_regex": true}});
+        std::fs::write(dir.join("tokenizer.json"), tokenizer.to_string()).unwrap();
+        let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+
+        let card = checkpoint::st::ModelCard::new("test/tiny-llama", "llama");
+        let resident = QwenResident::from_card(dir.to_str().unwrap(), &card, dir.join("tokenizer.json").to_str(), None);
+        let mut inst = resident.activate(&InstanceKey::new("test/tiny-llama", "default"), Device::Gpu(0)).expect("activate");
+        let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(false)).set("max_new", json!(6)).set("temp", json!(0.0));
+        let got = inst.run("generate", &inv, &mut |_| {}).expect("generate");
+
+        let tok = data::qwen_tokenizer::QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).unwrap();
+        let model = qwen3::model::Qwen::from_tensors_decode(cfg, &init, 64);
+        let ids = qwen3::sample::generate_kv(&model, &tok.encode("hello"), 6, 0.0, 0, 1.0, &[], &mut Rng::new(0));
+        assert_eq!(got.outputs.get("text"), Some(&json!(tok.decode(&ids))));
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before, "serving writes nothing beside the checkpoint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {
         let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
         let init = qwen3::init_weights(&cfg, seed);

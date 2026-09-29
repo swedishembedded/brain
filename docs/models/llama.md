@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# Llama-family decoders (not yet servable)
+# Llama-family decoders
 
 Dense decoder-only transformers in the Llama layout (`LlamaForCausalLM`):
 pre-norm RMSNorm, rotary position embeddings, SwiGLU MLPs, grouped-query or
@@ -23,9 +23,12 @@ The DeepSeek checkpoints of this family:
 
 brain recognizes the architecture (HF class `LlamaForCausalLM`, GGUF
 `llama`). `brain pull deepseek-ai/<checkpoint>` fetches one (as safetensors
-when the repo ships them, otherwise its `pytorch_model*.bin` shards) and
-converts it with the Qwen3 importer at its own configuration, RoPE scaling
-included, and reads each checkpoint's own tokenizer pipeline, chat template
-and stop tokens. Serving them through `brain serve` is not available yet.
+when the repo ships them, otherwise its `pytorch_model*.bin` shards), and
+brain serves it from those files as downloaded, at its own configuration,
+RoPE scaling included, reading each checkpoint's own tokenizer pipeline,
+chat template and stop tokens. `brain serve` serves a pulled checkpoint under
+its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
+`reasoning_content`. At fp32 a 7-8B checkpoint needs more than one 24 GB card;
+`--qwen-weights-int8` serves it on one.
 
 Package: `brain-qwen3`.

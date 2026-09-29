@@ -1,0 +1,41 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# 179. A checkpoint is served as downloaded
+
+`brain pull` used to finish a Qwen3-family fetch in two steps. It wrote an
+fp32 `model.brain.safetensors` beside the download, then deleted the
+download. Both steps were wrong:
+
+- **The copy was bigger than what it replaced.** The upstream files are
+  bf16 or fp16, and the copy was fp32: 28 GB for a 7B, where the download
+  was 14 GB.
+- **Deleting the download destroyed the only faithful record.** Parity
+  tooling, the reference dumps and any later re-import read the upstream
+  files, and after the pull there was nothing left for them to read.
+
+The qwen3 decoder and its `llama`/`qwen2` variant rows are now served from
+the files as downloaded, safetensors or `pytorch_model*.bin`:
+
+- The pull writes one `brain.manifest.json` whose `weights` role is the
+  repo directory itself (role paths are normalized, so `"."` is the
+  directory).
+- `qwen3::open_checkpoint` opens a Hugging Face directory through the
+  renaming source (`import::owned_source`, backed by
+  `RemapSource::owning`), with the config read by `hf::decoder_config`.
+- `serve::Engine::tensors_from` and the resident read each tensor through
+  that source, converting it to f32 as it is read. That conversion happens
+  only because the engine holds f32 or int8 weights; the half-precision
+  tensors are never written back to disk as f32.
+- The resident's fp32 weight estimate comes from the config, since file
+  size means nothing for a directory, or for a bf16 file that doubles on
+  the device.
+
+glmdsa, lfm2 and qwen3omnimoe are still imported to a converted file on
+pull. Their residents read only brain checkpoints, and moving them onto the
+same path is open work.
+
+`a_hugging_face_directory_is_served_as_downloaded` generates from a tiny
+Llama directory and asserts that nothing is written beside it. The loader
+test pulls a `.bin`-only Llama and checks that its original files are kept
+and read back exactly.

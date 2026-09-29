@@ -322,7 +322,8 @@ impl Store {
             if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
                 return Some(Err(LocalError::UnsafeRolePath { role: role.clone(), rel: rel.clone() }));
             }
-            let p = dir.join(rel_path);
+            // Normalized, so a role of "." is the repo directory itself.
+            let p: PathBuf = dir.join(rel_path).components().collect();
             if !p.exists() {
                 return Some(Err(LocalError::MissingRole { role: role.clone(), path: p }));
             }

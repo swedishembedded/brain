@@ -1265,19 +1265,25 @@ impl Engine {
     /// has a packed-int8 path).
     #[allow(clippy::too_many_arguments)]
     pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
-        let c = checkpoint::load(path);
-        let cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
-        let mut map = HashMap::new();
-        for (name, _) in decoder_param_list(&cfg) {
-            let t = c.find(&name, "").cloned().unwrap_or_else(|| panic!("serve: checkpoint missing tensor {name}"));
-            map.insert(name, t);
-        }
-        let hw = cfg.head_weight();
-        if !map.contains_key(hw) {
-            let h = c.find(hw, "").cloned().unwrap_or_else(|| panic!("serve: checkpoint missing head {hw}"));
-            map.insert(hw.to_string(), h);
-        }
+        let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
+        let map = Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{path}: {e}"));
         Engine::from_map(cfg, &map, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    /// The tensors an engine for `cfg` uploads, read from `src` (any checkpoint
+    /// [`crate::open_checkpoint`] opens), each decoded to f32 as it is read.
+    pub fn tensors_from(cfg: &QwenConfig, src: &dyn checkpoint::TensorSource) -> Result<HashMap<String, Vec<f32>>, String> {
+        let mut map = HashMap::new();
+        let names = decoder_param_list(cfg).into_iter().map(|(n, _)| n).chain(std::iter::once(cfg.head_weight().to_string()));
+        for name in names {
+            if map.contains_key(&name) {
+                continue;
+            }
+            let mut data = None;
+            src.with_tensor(&name, &mut |t| data = Some(t.to_vec()));
+            map.insert(name.clone(), data.ok_or_else(|| format!("serve: checkpoint missing tensor {name}"))?);
+        }
+        Ok(map)
     }
 
     /// Install a calibrated KV clip table, uploading its per-layer ceilings

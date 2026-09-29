@@ -140,6 +140,13 @@ pub fn source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -
     Ok(src)
 }
 
+/// [`source`] owning its reader: the remapped view of a checkpoint that
+/// must outlive the scope that opened it (a resident, a cached model).
+pub fn owned_source(r: checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'static>, String> {
+    let plan = source(&r, cfg)?.into_plan();
+    Ok(checkpoint::remap::RemapSource::owning(Box::new(r), plan))
+}
+
 /// The pre-GGUF spelling of [`source`]. A forwarder, not a second
 /// implementation - the only caller left is `flux2::pipeline`, and this goes
 /// away with that call site.

@@ -42,13 +42,38 @@ pub enum Fetch {
 /// materialization of its own for either. `Concat` is the one case that must
 /// build a real (bounded, per-destination-tensor) output buffer.
 pub struct RemapSource<'a> {
-    inner: &'a dyn TensorSource,
+    inner: Inner<'a>,
     plan: HashMap<String, Fetch>,
+}
+
+/// The source a [`RemapSource`] reads from: borrowed from its caller, or
+/// owned, for a remapped view that must outlive the scope that opened the
+/// checkpoint.
+enum Inner<'a> {
+    Borrowed(&'a dyn TensorSource),
+    Owned(Box<dyn TensorSource + 'a>),
 }
 
 impl<'a> RemapSource<'a> {
     pub fn new(inner: &'a dyn TensorSource, plan: HashMap<String, Fetch>) -> RemapSource<'a> {
-        RemapSource { inner, plan }
+        RemapSource { inner: Inner::Borrowed(inner), plan }
+    }
+
+    /// [`Self::new`] over a source this view owns.
+    pub fn owning(inner: Box<dyn TensorSource + 'a>, plan: HashMap<String, Fetch>) -> RemapSource<'a> {
+        RemapSource { inner: Inner::Owned(inner), plan }
+    }
+
+    /// The name-to-fetch plan, for building an owning view of the same plan.
+    pub fn into_plan(self) -> HashMap<String, Fetch> {
+        self.plan
+    }
+
+    fn src(&self) -> &dyn TensorSource {
+        match &self.inner {
+            Inner::Borrowed(s) => *s,
+            Inner::Owned(s) => s.as_ref(),
+        }
     }
 
     /// Whether the plan has a fetch for `name`. A caller narrowing a coverage
@@ -97,9 +122,9 @@ impl<'a> RemapSource<'a> {
     /// mismatch would otherwise yield silently-wrong tail weights).
     fn fetch_numel(&self, fetch: &Fetch) -> Option<usize> {
         match fetch {
-            Fetch::Whole(src) => self.inner.numel(src),
+            Fetch::Whole(src) => self.src().numel(src),
             Fetch::Slice { name, start, len } => {
-                let n = self.inner.numel(name)?;
+                let n = self.src().numel(name)?;
                 let end = start.checked_add(*len)?;
                 (end <= n).then_some(*len)
             }
@@ -122,14 +147,14 @@ impl TensorSource for RemapSource<'_> {
     /// slice has actually been consumed).
     fn advise_drop(&self, name: &str) {
         if let Some(Fetch::Whole(src)) = self.plan.get(name) {
-            self.inner.advise_drop(src);
+            self.src().advise_drop(src);
         }
     }
 
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {
-            Fetch::Whole(src) => self.inner.with_tensor(src, f),
+            Fetch::Whole(src) => self.src().with_tensor(src, f),
             Fetch::Slice { name: src, start, len } => {
                 // An out-of-range slice is a refusal (`false`), exactly like
                 // `raw_words`/`with_tensor_chunks`/`numel` - see fetch_numel.
@@ -137,7 +162,7 @@ impl TensorSource for RemapSource<'_> {
                     return false;
                 }
                 let (start, len) = (*start, *len);
-                self.inner.with_tensor(src, &mut |data| {
+                self.src().with_tensor(src, &mut |data| {
                     // In range by the fetch_numel check above; a violation here
                     // means the SOURCE's numel/with_tensor disagree (a source
                     // impl bug, not user data), which deserves the loud panic.
@@ -163,9 +188,9 @@ impl TensorSource for RemapSource<'_> {
 
     fn raw_words(&self, name: &str) -> Option<&[u32]> {
         match self.plan.get(name)? {
-            Fetch::Whole(src) => self.inner.raw_words(src),
+            Fetch::Whole(src) => self.src().raw_words(src),
             Fetch::Slice { name: src, start, len } => {
-                let words = self.inner.raw_words(src)?;
+                let words = self.src().raw_words(src)?;
                 let end = start.checked_add(*len)?;
                 words.get(*start..end)
             }
@@ -182,9 +207,9 @@ impl TensorSource for RemapSource<'_> {
     /// the identical structural reason `raw_words` does.
     fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
         match self.plan.get(name)? {
-            Fetch::Whole(src) => self.inner.raw_blocks(src),
+            Fetch::Whole(src) => self.src().raw_blocks(src),
             Fetch::Slice { name: src, start, len } => {
-                let (layout, bytes) = self.inner.raw_blocks(src)?;
+                let (layout, bytes) = self.src().raw_blocks(src)?;
                 let (be, bb) = (layout.block_elems(), layout.block_bytes());
                 if !start.is_multiple_of(be) || !len.is_multiple_of(be) {
                     return None;
@@ -203,7 +228,7 @@ impl TensorSource for RemapSource<'_> {
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {
-            Fetch::Whole(src) => self.inner.with_tensor_chunks(src, max_elems, f),
+            Fetch::Whole(src) => self.src().with_tensor_chunks(src, max_elems, f),
             Fetch::Slice { name: src, start, len } => {
                 // Refuse an out-of-range slice up front. Without this check the
                 // overlap-clip below would deliver only the overlapping PREFIX
@@ -212,7 +237,7 @@ impl TensorSource for RemapSource<'_> {
                     return false;
                 }
                 let (start, len) = (*start, *len);
-                self.inner.with_tensor_chunks(src, max_elems, &mut |chunk_off, chunk| {
+                self.src().with_tensor_chunks(src, max_elems, &mut |chunk_off, chunk| {
                     let chunk_off = chunk_off as usize;
                     let chunk_end = chunk_off + chunk.len();
                     // Overlap of [chunk_off, chunk_end) with [start, start+len),
@@ -247,7 +272,7 @@ impl RemapSource<'_> {
                 // length mismatch means the source's numel/with_tensor
                 // disagree - refuse rather than panic in copy_from_slice.
                 let mut ok = false;
-                let found = self.inner.with_tensor(src, &mut |d| {
+                let found = self.src().with_tensor(src, &mut |d| {
                     if d.len() == out.len() {
                         out.copy_from_slice(d);
                         ok = true;
@@ -260,7 +285,7 @@ impl RemapSource<'_> {
                     return false; // out of range: same refusal as every other path
                 }
                 let (start, len) = (*start, *len);
-                self.inner.with_tensor(src, &mut |d| out.copy_from_slice(&d[start..start + len]))
+                self.src().with_tensor(src, &mut |d| out.copy_from_slice(&d[start..start + len]))
             }
             Fetch::Concat(parts) => {
                 let mut off = 0usize;

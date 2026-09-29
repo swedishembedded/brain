@@ -1,8 +1,8 @@
 # Models & weights
 
 Every servable model has a name, and getting its weights onto disk works one
-of two ways: some models fetch and convert themselves automatically the
-first time you use them, others need you to point brain at a checkpoint you
+of two ways: some models fetch themselves automatically the first time you
+use them, others need you to point brain at a checkpoint you
 already have. This page covers both - how model ids are structured, and how
 to get weights in place either way.
 
@@ -65,11 +65,18 @@ directory:
 
 ```
 <models-dir>/Qwen/Qwen3-0.6B/
-    config.json  tokenizer.json  tokenizer_config.json
-    model.safetensors           # upstream, as downloaded
-    model.brain.safetensors     # brain-format conversion (what actually serves)
+    config.json  tokenizer.json  tokenizer_config.json  generation_config.json
+    model.safetensors           # upstream, as downloaded - what serves
+    brain.manifest.json         # names the directory as the model's weights
     Q8_0.gguf                   # a quant, downloaded or locally produced
 ```
+
+The Qwen3 decoder and its Llama and Qwen2 variants (every DeepSeek text
+model) are served from the files exactly as downloaded, safetensors or
+`pytorch_model*.bin`: nothing is rewritten on disk, and each tensor is
+converted in memory only as far as the device needs (bf16 or fp16 to fp32 on
+a GPU without half-precision compute). A few other families are still
+converted once, to a `model.brain.safetensors` beside the download.
 
 `<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` (in practice, absent
 `XDG_DATA_HOME`, `$HOME/.local/share/brain/models` - **not**
@@ -173,8 +180,8 @@ There are two ways a model's weights end up in place, and the model catalog
 tells you which applies (look for the **⤓** marker):
 
 - **`brain pull <model>` / auto-fetch (⤓)** - the same operation, explicit or
-  opt-in. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches and
-  converts a model up front, with a progress bar. Auto-fetch is the same
+  opt-in. `brain pull Qwen/Qwen3-0.6B` (or the HuggingFace URL) fetches a
+  model up front, with a progress bar. Auto-fetch is the same
   fetch run implicitly by a first inference or serve request, but only when
   you ask for it: pass the global `--autofetch` flag (or export
   `BRAIN_AUTO_FETCH=1`). With it off - the default - a run whose weights are
@@ -184,14 +191,14 @@ tells you which applies (look for the **⤓** marker):
   inference. See [The CLI](cli.md#pulling-weights).
 - **Auto-fetch (⤓, opt-in)** - the model id names a real Hugging Face repo
   (e.g. `Qwen/Qwen3-0.6B`, `Ultralytics/YOLOv8`, `LiquidAI/LFM2.5-350M`), and
-  brain fetches and converts it itself the first time it's needed - no manual
+  brain fetches it itself the first time it's needed - no manual
   export, no extra setup. This happens only with `--autofetch` /
   `BRAIN_AUTO_FETCH=1`, on the CLI and on the serving surfaces (`brain
   serve`'s HTTP and D-Bus transports, which resolve a named model on demand);
   `brain do` never auto-fetches - it only reaches models already registered
   locally by name. The first request against a not-yet-fetched model pays a
-  one-time download-and-convert cost; every request after that just loads the
-  cached, already-converted checkpoint.
+  one-time download cost; every request after that loads the checkpoint
+  already on disk.
 - **A local checkpoint** - everything else needs you to point brain at a
   checkpoint on disk, via a `BRAIN_*_WEIGHTS`/`_CKPT`/`_DIR` environment
   variable named on that model's own page (e.g. `BRAIN_YOLOV8`,

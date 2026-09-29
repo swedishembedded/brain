@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# Qwen2-family decoders (not yet servable)
+# Qwen2-family decoders
 
 Dense decoder-only transformers in the Qwen2 layout (`Qwen2ForCausalLM`):
 the [Qwen3](qwen3.md) decoder with a bias on the query/key/value projections
@@ -19,9 +19,12 @@ The DeepSeek checkpoints of this family are the R1 reasoning distills:
 
 brain recognizes the architecture (HF class `Qwen2ForCausalLM`, GGUF
 `qwen2`). `brain pull deepseek-ai/<checkpoint>` fetches one (as safetensors
-when the repo ships them, otherwise its `pytorch_model*.bin` shards) and
-converts it with the Qwen3 importer at its own configuration, RoPE scaling
-included, and reads each checkpoint's own tokenizer pipeline, chat template
-and stop tokens. Serving them through `brain serve` is not available yet.
+when the repo ships them, otherwise its `pytorch_model*.bin` shards), and
+brain serves it from those files as downloaded, at its own configuration,
+RoPE scaling included, reading each checkpoint's own tokenizer pipeline,
+chat template and stop tokens. `brain serve` serves a pulled checkpoint under
+its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
+`reasoning_content`. At fp32 a 7-8B checkpoint needs more than one 24 GB card;
+`--qwen-weights-int8` serves it on one.
 
 Package: `brain-qwen3`.

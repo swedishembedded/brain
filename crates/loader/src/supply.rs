@@ -122,8 +122,16 @@ fn ensure_default_weights_with(arch: &str, store: &Store, hub: &dyn Hub, policy:
 }
 
 fn default_weights_from_local(arch: &str, local: &brain_modelstore::LocalModel) -> Result<DefaultWeights, String> {
-    let weights = local.weights.to_str().map(str::to_string).ok_or_else(|| format!("{arch}: non-UTF8 store path"))?;
-    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
+    // A model served from its downloaded directory names it as its
+    // `weights` role, with the tokenizer that directory ships.
+    let from_role = local.roles.as_ref().and_then(|r| r.get("weights"));
+    let weights_path = from_role.unwrap_or(&local.weights);
+    let weights = weights_path.to_str().map(str::to_string).ok_or_else(|| format!("{arch}: non-UTF8 store path"))?;
+    let tokenizer = match from_role {
+        Some(dir) => Some(dir.join("tokenizer.json")).filter(|t| t.is_file()),
+        None => local.tokenizer.clone(),
+    };
+    let tokenizer = tokenizer.as_deref().and_then(|p| p.to_str()).map(str::to_string);
     Ok(DefaultWeights { weights, tokenizer })
 }
 
@@ -217,7 +225,6 @@ pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::P
 /// there is no arm that can call it, and an always-present helper would be an
 /// unused-function warning in the configuration `brain-cli` actually ships.
 #[cfg(not(all(
-    feature = "import-qwen3",
     feature = "import-glmdsa",
     feature = "import-lfm2",
     feature = "import-qwen3omnimoe",
@@ -467,7 +474,11 @@ const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[(&str, &str)] =
     &[("qwen3vl", "weights"), ("nemotronasr", "weights"), ("deepseek2ocr", "dir"), ("decide", "dir")];
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
-/// Reads `<dir>/config.json` to pick the specific qwen/glm/lfm/gpt importer
+/// A family served from the directory as downloaded (the qwen3 decoder and
+/// its variant rows, and the passthrough families) gets a manifest naming
+/// it; the rest are imported.
+///
+/// Reads `<dir>/config.json` to pick the specific glm/lfm importer
 /// the same way `modelstore::plan`'s `TransformersRecipe` already gated the
 /// download on (`family_of_architecture`) -- one implementation of "which
 /// families brain can serve", not a second guess that could drift from the
@@ -495,6 +506,12 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     if let Some((_, role)) = PASSTHROUGH_TRANSFORMERS_FAMILIES.iter().find(|(f, _)| *f == family) {
         return convert_files(store, vendor, repo, family, &[(role, ".")]);
     }
+    // The qwen3 decoder (and its llama/qwen2 config-variant rows) is served
+    // straight from the downloaded directory, each tensor converted as it is
+    // uploaded: nothing is rewritten on disk and nothing downloaded removed.
+    if brain_arch::by_id(family).map(|a| a.implementation().id) == Some("qwen3") {
+        return convert_files(store, vendor, repo, family, &[("weights", ".")]);
+    }
     // qwen3tts's own repo (`speech_tokenizer/config.json` present) is claimed
     // by the `qwen3tts` `FilesRecipe` ahead of `TransformersRecipe` in
     // `recipes()`'s order, so `family == "qwen3tts"` is never actually
@@ -513,21 +530,13 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     // the bindings are genuinely unused -- said here rather than by prefixing
     // them with `_`, which would also silence a real unused binding later.
     #[cfg(not(any(
-        feature = "import-qwen3",
         feature = "import-glmdsa",
         feature = "import-lfm2",
         feature = "import-qwen3omnimoe"
     )))]
     let _ = (hf_dir, out, &id);
 
-    // A config-variant row (llama, qwen2) converts through the importer of
-    // the decoder that implements it.
-    let implementation = brain_arch::by_id(family).map_or(family, |a| a.implementation().id);
-    let result = match implementation {
-        #[cfg(feature = "import-qwen3")]
-        "qwen3" => qwen3::import::import_as(hf_dir, out, None, Some(&id)),
-        #[cfg(not(feature = "import-qwen3"))]
-        "qwen3" => Err(no_importer(vendor, repo, "qwen3", "import-qwen3")),
+    let result = match family {
         #[cfg(feature = "import-glmdsa")]
         "glmdsa" => glmdsa::import::import_as(hf_dir, out, Some(&id)),
         #[cfg(not(feature = "import-glmdsa"))]
@@ -712,12 +721,12 @@ mod tests {
     }
 
     /// A Llama config variant of the qwen3 decoder, shipped the way
-    /// deepseek-coder-1.3b-base is (a lone `pytorch_model.bin`), is fetched,
-    /// converted by the qwen3 importer at its own config (no QK-norm, untied
-    /// head, linear RoPE scaling), and its upstream weights removed.
-    #[cfg(feature = "import-qwen3")]
+    /// deepseek-coder-1.3b-base is (a lone `pytorch_model.bin`), is fetched
+    /// and served from the directory as downloaded: the pull writes only a
+    /// manifest, the original weights stay, and the qwen3 decoder reads them
+    /// at their own config (no QK-norm, untied head, linear RoPE scaling).
     #[test]
-    fn a_llama_bin_checkpoint_converts_through_the_qwen3_importer() {
+    fn a_llama_bin_checkpoint_is_served_from_its_downloaded_files() {
         let config = br#"{"architectures":["LlamaForCausalLM"],"vocab_size":5,"hidden_size":8,"num_hidden_layers":2,
             "num_attention_heads":2,"num_key_value_heads":2,"intermediate_size":12,"rope_theta":100000,
             "rms_norm_eps":1e-6,"tie_word_embeddings":false,"max_position_embeddings":64,
@@ -744,17 +753,23 @@ mod tests {
         execute_plan_reported(&store, &hub, &plan, "deepseek-ai/tiny-llama", Mode::Pipe, &mut Vec::new()).unwrap();
 
         let dir = store.repo_dir(&reference);
-        let reader = checkpoint::weightio::WeightReader::open(dir.join("model.brain.safetensors").to_str().unwrap()).unwrap();
-        assert_eq!(qwen3::QwenConfig::from_reader(&reader).unwrap(), cfg);
-        assert_eq!(reader.card().unwrap().architecture.as_deref(), Some("llama"));
+        assert!(dir.join("pytorch_model.bin").exists(), "the downloaded weights are kept");
+        assert!(!dir.join("model.brain.safetensors").exists(), "nothing is converted on disk");
+        let local = store.local(&reference).expect("the pulled model resolves");
+        assert_eq!(local.card.as_ref().unwrap().family, "llama");
+        let served = default_weights_from_local("llama", &local).unwrap();
+        assert_eq!(std::path::Path::new(&served.weights), dir);
+        let (got_cfg, src) = qwen3::open_checkpoint(&served.weights).unwrap();
+        assert_eq!(got_cfg, cfg);
         for (n, _) in cfg.param_list() {
-            assert_eq!(reader.tensor(&n).unwrap(), init[&n], "{n}");
+            let mut got = Vec::new();
+            assert!(checkpoint::TensorSource::with_tensor(&*src, &n, &mut |t| got = t.to_vec()), "{n}");
+            assert_eq!(got, init[&n], "{n}");
         }
-        assert!(!dir.join("pytorch_model.bin").exists(), "the upstream weights are dead once converted");
     }
 
     #[test]
-    fn ensure_default_weights_always_check_fetches_converts_and_returns_the_brain_safetensors_path() {
+    fn ensure_default_weights_always_check_fetches_and_returns_the_downloaded_directory() {
         let (config, weights) = tiny_qwen3_hf_files();
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
@@ -762,7 +777,7 @@ mod tests {
         let store = store("loader-supply-test-default-weights-qwen3");
 
         let got = ensure_default_weights_with("qwen3", &store, &hub, DownloadPolicy::AlwaysCheck).unwrap();
-        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{}", got.weights);
+        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B"), "{}", got.weights);
         assert!(std::path::Path::new(&got.weights).exists(), "{} must actually exist on disk", got.weights);
     }
 
@@ -781,7 +796,7 @@ mod tests {
         ensure_default_weights_with("qwen3", &store, &hub, DownloadPolicy::AlwaysCheck).unwrap(); // seed the store
 
         let got = ensure_default_weights_with("qwen3", &store, &FakeHub::new(), DownloadPolicy::IfMissing).unwrap();
-        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B/model.brain.safetensors"), "{}", got.weights);
+        assert!(got.weights.ends_with("Qwen/Qwen3-0.6B"), "{}", got.weights);
     }
 
     /// `IfMissing` still fetches once when nothing local resolves the

@@ -407,7 +407,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles);
+        return resident_for_compound(card, roles, qwen_cfg);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
@@ -417,7 +417,18 @@ pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg:
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
 /// on named roles (a directory or file each) rather than one weights path.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>) -> Result<Arc<dyn ResidentModel>, String> {
+///
+/// A checkpoint of a family the qwen3 decoder implements (`qwen3`, and the
+/// `llama`/`qwen2` config-variant rows) is served straight from the
+/// Hugging Face directory its `weights` role names, as it was downloaded.
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
+    if brain_arch::by_id(&card.family).map(|a| a.implementation().id) == Some("qwen3") {
+        let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
+        let weights = dir.to_str().ok_or("weights path is not valid UTF-8")?;
+        let tokenizer = dir.join("tokenizer.json");
+        let resident = crate::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), None, qwen_cfg);
+        return Ok(Arc::new(resident));
+    }
     match brain_family(&card.family) {
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;
@@ -853,6 +864,22 @@ mod tests {
         }
         let manifest = brain_modelstore::CompoundManifest { id: format!("{vendor}/{repo}"), family: family.to_string(), roles };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    /// A qwen3-decoder checkpoint pulled as downloaded (a manifest whose
+    /// `weights` role is the repo directory itself) is served by the Qwen
+    /// resident under its own id, whatever variant row names it.
+    #[test]
+    fn discover_serves_a_downloaded_llama_directory() {
+        let root = tmp_dir("discover-llama-dir");
+        let repo_dir = root.join("deepseek-ai").join("tiny-llama");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "deepseek-ai/tiny-llama".into(), family: "llama".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let (residents, errors) = discover(&root, crate::resident_llm::QwenServeConfig::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        assert_eq!(ids(&residents), ["deepseek-ai/tiny-llama"]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

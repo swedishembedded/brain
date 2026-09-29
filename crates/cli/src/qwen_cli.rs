@@ -336,7 +336,7 @@ fn serve(args: &[String]) {
     let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
     // A header-only peek (not a second full checkpoint load), shared by the
     // int8-KV degrade check below and the --kv-calib lookup further down.
-    let header_cfg = checkpoint::weightio::WeightReader::open(&weights).ok().and_then(|r| QwenConfig::from_reader(&r).ok());
+    let header_cfg = qwen3::checkpoint_config(&weights).ok();
     // `--int8` requesting the DEFAULT degrades loudly on an unsupported
     // head_dim rather than hitting `from_map_with_gpu`'s hard assert -- an
     // explicit `--int8` on the command line is, deliberately, still a
@@ -486,22 +486,14 @@ fn infer(args: &[String]) {
     // allocation, instead of letting `Qwen::load_inference` OOM the driver -
     // see `qwen3::footprint`'s own doc for why (the qwen3vl sibling of this
     // exact bug: `brain qwen3vl generate` used to crash the same way).
-    let reader = match checkpoint::weightio::WeightReader::open(&weights) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("brain qwen3 infer: cannot open {weights}: {e}");
-            return;
-        }
-    };
-    let cfg = match QwenConfig::from_reader(&reader) {
+    let cfg = match qwen3::checkpoint_config(&weights) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("brain qwen3 infer: {weights}: {e}");
+            eprintln!("brain qwen3 infer: {e}");
             return;
         }
     };
     let shard = qwen3::model::Shard::whole(cfg.n_layers as usize);
-    drop(reader);
     let t_load = std::time::Instant::now();
     let model = match qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, cap, false, false, "qwen3", || Qwen::load_inference(&weights, 1, cap)) {
         Ok(m) => m,
