@@ -534,7 +534,7 @@ impl KronosTrain {
     fn rms_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         // gain grad only when the norm weight trains (frozen under LoRA → dx only).
         let gw = self.trainable(wname).then(|| self.g(wname));
-        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, 1e-6));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows, crate::config::RMS_EPS));
     }
     /// A weight gradient that runs only for a trainable weight (frozen → skipped).
     fn dw(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, m: u32, k: u32, nout: u32) {
@@ -626,7 +626,7 @@ impl KronosTrain {
         for l in 0..c.n_layers {
             let lb = &self.layers[l];
             let p = |nm: &str| format!("transformer.{l}.{nm}");
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("norm1.weight")), &lb.xn1, d, n, 1e-6));
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("norm1.weight")), &lb.xn1, d, n, crate::config::RMS_EPS));
             self.matmul(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
             self.bias(&mut s, &lb.q, &p("self_attn.q_proj.bias"), n, d);
             self.lora_fwd(&mut s, &p("self_attn.q_proj.weight"), &lb.xn1, &lb.q, n, d, d);
@@ -643,7 +643,7 @@ impl KronosTrain {
             self.bias(&mut s, &self.proj, &p("self_attn.out_proj.bias"), n, d);
             self.lora_fwd(&mut s, &p("self_attn.out_proj.weight"), &lb.ctx, &self.proj, n, d, d);
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("norm2.weight")), &lb.xn2, d, n, 1e-6));
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("norm2.weight")), &lb.xn2, d, n, crate::config::RMS_EPS));
             self.matmul(&mut s, &lb.xn2, &p("ffn.w1.weight"), &lb.gate, n, d, ff);
             self.matmul(&mut s, &lb.xn2, &p("ffn.w3.weight"), &lb.up, n, d, ff);
             s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate, &lb.up, &lb.h, n * ff));
@@ -651,7 +651,7 @@ impl KronosTrain {
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
         let last = c.n_layers;
-        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n, 1e-6));
+        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n, crate::config::RMS_EPS));
         self.matmul(&mut s, &self.xn_final, "head.proj_s1.weight", &self.logits, n, d, s1v);
         self.bias(&mut s, &self.logits, "head.proj_s1.bias", n, s1v);
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, s1v, IGNORE], n));
@@ -694,7 +694,7 @@ impl KronosTrain {
         self.matmul(&mut s, &self.dep_ctxo, &dp("out_proj.weight"), &self.mlp_out, n, d, d);
         self.bias(&mut s, &self.mlp_out, &dp("out_proj.bias"), n, d);
         s.push(self.gpu.step(ADD2, &[&self.xn_final, &self.mlp_out, &self.dep_sum], &[n * d], n * d));
-        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.dep_sum, self.w("dep_layer.norm.weight"), &self.dep_normed, d, n, 1e-6));
+        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.dep_sum, self.w("dep_layer.norm.weight"), &self.dep_normed, d, n, crate::config::RMS_EPS));
         self.matmul(&mut s, &self.dep_normed, "head.proj_s2.weight", &self.s2_logits, n, d, s2v);
         self.bias(&mut s, &self.s2_logits, "head.proj_s2.bias", n, s2v);
         s.push(self.gpu.step(CE_VALUE, &[&self.s2_logits, &self.s2_targets, &self.ce_buf2], &[n, s2v, IGNORE], n));

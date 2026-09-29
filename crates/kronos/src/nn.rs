@@ -96,7 +96,7 @@ impl<'a> Ops<'a> {
         out
     }
     pub fn rms(&self, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, d: usize, rows: usize) {
-        let s = self.gpu.step(RMSNORM, &[x, self.wt(wname), out], &[d as u32, rows as u32, gpu_core::f(1e-6)], rows as u32);
+        let s = self.gpu.step(RMSNORM, &[x, self.wt(wname), out], &[d as u32, rows as u32, gpu_core::f(crate::config::RMS_EPS)], rows as u32);
         self.gpu.submit(&[], &[s]);
     }
     pub fn add(&self, src: &DeviceBuffer, dst: &DeviceBuffer, total: usize) {

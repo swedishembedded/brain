@@ -24,6 +24,11 @@
 //! `HierarchicalEmbedding` fusion scales `emb_s1/s2` by `√d_model`, but the
 //! `emb_s1` reused as the dependency-layer sibling embedding is RAW (no scale).
 
+/// Every Kronos RMSNorm's epsilon. The reference's `RMSNorm(dim, eps=1e-5)`
+/// (`model/module.py`) is only ever constructed with its default, so the
+/// value is architectural and absent from every checkpoint's config.
+pub const RMS_EPS: f32 = 1e-5;
+
 /// A named parameter with its shape (row-major; PyTorch `nn.Linear` is `[out, in]`).
 pub type Param = (String, Vec<usize>);
 

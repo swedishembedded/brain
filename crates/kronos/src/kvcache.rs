@@ -73,7 +73,6 @@ pub struct HostW {
 }
 
 const THETA: f32 = 10000.0;
-const EPS: f32 = 1e-6;
 
 /// Growing per-layer K/V + context caches for one rollout. `Clone` so a prefilled
 /// context can be **forked** into N sampling branches (shared-prefill sampling).
@@ -127,7 +126,7 @@ impl HostW {
         }
 
         for l in 0..self.nl {
-            let xn = hostmath::rmsnorm(&x, &self.norm1[l], EPS);
+            let xn = hostmath::rmsnorm(&x, &self.norm1[l], crate::config::RMS_EPS);
             let mut q = linear(&xn, &self.qw[l], &self.qb[l], d, d);
             let mut k = linear(&xn, &self.kw[l], &self.kb[l], d, d);
             let vv = linear(&xn, &self.vw[l], &self.vb[l], d, d);
@@ -144,7 +143,7 @@ impl HostW {
                 x[i] += o[i];
             }
             // SwiGLU FFN (no bias)
-            let xn2 = hostmath::rmsnorm(&x, &self.norm2[l], EPS);
+            let xn2 = hostmath::rmsnorm(&x, &self.norm2[l], crate::config::RMS_EPS);
             let a = hostmath::matvec(&self.w1[l], &xn2, self.ff, d);
             let b = hostmath::matvec(&self.w3[l], &xn2, self.ff, d);
             let g: Vec<f32> = (0..self.ff).map(|i| hostmath::silu(a[i]) * b[i]).collect();
@@ -153,7 +152,7 @@ impl HostW {
                 x[i] += ffo[i];
             }
         }
-        let ctx = hostmath::rmsnorm(&x, &self.normf, EPS);
+        let ctx = hostmath::rmsnorm(&x, &self.normf, crate::config::RMS_EPS);
         cache.ctx.extend_from_slice(&ctx);
         linear(&ctx, &self.ps1w, &self.ps1b, self.s1v, d)
     }
@@ -190,7 +189,7 @@ impl HostW {
         for i in 0..d {
             sum[i] = ctx[pos_last * d + i] + o[i];
         }
-        let normed = hostmath::rmsnorm(&sum, &self.dnorm, EPS);
+        let normed = hostmath::rmsnorm(&sum, &self.dnorm, crate::config::RMS_EPS);
         linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
     }
 
@@ -233,7 +232,7 @@ impl HostW {
         for i in 0..d {
             sum[i] = cache.ctx[pos_last * d + i] + o[i];
         }
-        let normed = hostmath::rmsnorm(&sum, &self.dnorm, EPS);
+        let normed = hostmath::rmsnorm(&sum, &self.dnorm, crate::config::RMS_EPS);
         linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
     }
 }
