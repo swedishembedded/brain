@@ -47,13 +47,13 @@ use brain_testutil::{read_f32, read_i32};
         let tokens: Vec<u32> = tok_raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
 
         // Build the decoder weight map from the checkpoint via the import mapping.
+        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
         let mut init: HashMap<String, Vec<f32>> = HashMap::new();
         for t in tensors {
-            if let Some(name) = map_decoder(&t.name) {
+            if let Some(name) = map_decoder(&t.name, &cfg) {
                 init.insert(name, t.data);
             }
         }
-        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
         // Every decoder parameter must have been imported.
         for (name, _) in cfg.param_list() {
             assert!(init.contains_key(&name), "decoder param not imported: {name}");
@@ -194,7 +194,7 @@ use brain_testutil::{read_f32, read_i32};
                 vt.push((t.name, t.data));
             } else if let Some(k) = map_projector(&t.name) {
                 proj.insert(k, t.data);
-            } else if let Some(k) = map_decoder(&t.name) {
+            } else if let Some(k) = map_decoder(&t.name, &FastVlmConfig::fastvlm_0_5b().decoder) {
                 dec.insert(k, t.data);
             }
         }
@@ -279,13 +279,13 @@ use brain_testutil::{read_f32, read_i32};
         let n_img = embeds.len() / 896;
         assert_eq!(ids.len(), pre_len + post_len);
 
+        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
         let mut init: HashMap<String, Vec<f32>> = HashMap::new();
         for t in tensors {
-            if let Some(name) = map_decoder(&t.name) {
+            if let Some(name) = map_decoder(&t.name, &cfg) {
                 init.insert(name, t.data);
             }
         }
-        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
 
         // Prompt layout: [pre] [n_img image placeholders] [post], image at row pre_len.
         let img_start = pre_len as u32;

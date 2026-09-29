@@ -9,31 +9,15 @@
 //! (0.5B/1.5B) also ship a `lm_head.weight` duplicating `embed_tokens`; the tied
 //! loader uses `embed_tokens` as `tok.weight` and drops `lm_head`.
 
-/// HF FastVLM decoder name → `qwen3::Qwen` (Qwen2 config) parameter key.
-pub fn map_decoder(hf: &str) -> Option<String> {
-    match hf {
-        "model.embed_tokens.weight" => return Some("tok.weight".into()),
-        "model.norm.weight" => return Some("norm.weight".into()),
-        "lm_head.weight" => return Some("lm_head.weight".into()), // untied models only
-        _ => {}
+/// HF FastVLM decoder name → `qwen3::Qwen` parameter key, through the one
+/// `qwen3::hf` name map (`cfg` is the checkpoint's Qwen2 decoder config, which
+/// is what admits the q/k/v biases); `None` for anything that is not one of the
+/// decoder's parameters (the vision tower, the projector, a tied `lm_head`).
+pub fn map_decoder(hf: &str, cfg: &qwen3::QwenConfig) -> Option<String> {
+    match qwen3::hf::HfNames::CAUSAL_LM.to_brain(hf, cfg) {
+        qwen3::hf::HfTensor::Param(p) => Some(p),
+        _ => None,
     }
-    let (n, leaf) = hf.strip_prefix("model.layers.")?.split_once('.')?;
-    let mapped = match leaf {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.q_proj.bias" => "attn.wq.bias",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.k_proj.bias" => "attn.wk.bias",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.v_proj.bias" => "attn.wv.bias",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    };
-    Some(format!("blocks.{n}.{mapped}"))
 }
 
 /// HF `mlp2x_gelu` projector name → projector key (`fc1`/`fc2`).
@@ -67,13 +51,14 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn decoder_names_map_with_bias() {
-        assert_eq!(map_decoder("model.embed_tokens.weight").unwrap(), "tok.weight");
-        assert_eq!(map_decoder("model.norm.weight").unwrap(), "norm.weight");
-        assert_eq!(map_decoder("model.layers.0.input_layernorm.weight").unwrap(), "blocks.0.ln1.weight");
-        assert_eq!(map_decoder("model.layers.7.self_attn.q_proj.weight").unwrap(), "blocks.7.attn.wq.weight");
-        assert_eq!(map_decoder("model.layers.7.self_attn.q_proj.bias").unwrap(), "blocks.7.attn.wq.bias");
-        assert_eq!(map_decoder("model.layers.7.self_attn.v_proj.bias").unwrap(), "blocks.7.attn.wv.bias");
-        assert_eq!(map_decoder("model.layers.23.mlp.down_proj.weight").unwrap(), "blocks.23.mlp.down.weight");
+        let cfg = crate::config::FastVlmConfig::fastvlm_0_5b().decoder;
+        assert_eq!(map_decoder("model.embed_tokens.weight", &cfg).unwrap(), "tok.weight");
+        assert_eq!(map_decoder("model.norm.weight", &cfg).unwrap(), "norm.weight");
+        assert_eq!(map_decoder("model.layers.0.input_layernorm.weight", &cfg).unwrap(), "blocks.0.ln1.weight");
+        assert_eq!(map_decoder("model.layers.7.self_attn.q_proj.weight", &cfg).unwrap(), "blocks.7.attn.wq.weight");
+        assert_eq!(map_decoder("model.layers.7.self_attn.q_proj.bias", &cfg).unwrap(), "blocks.7.attn.wq.bias");
+        assert_eq!(map_decoder("model.layers.7.self_attn.v_proj.bias", &cfg).unwrap(), "blocks.7.attn.wv.bias");
+        assert_eq!(map_decoder("model.layers.23.mlp.down_proj.weight", &cfg).unwrap(), "blocks.23.mlp.down.weight");
     }
 
     #[test]
@@ -105,10 +90,10 @@ fn repo_path(rel: &str) -> String {
         let hdr: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let names: Vec<String> = hdr.as_object().unwrap().keys().filter(|k| *k != "__metadata__").cloned().collect();
 
-        let decoder: std::collections::HashSet<String> = names.iter().filter_map(|n| map_decoder(n)).collect();
+        let cfg = crate::config::FastVlmConfig::fastvlm_0_5b();
+        let decoder: std::collections::HashSet<String> = names.iter().filter_map(|n| map_decoder(n, &cfg.decoder)).collect();
         let projector: Vec<String> = names.iter().filter_map(|n| map_projector(n)).collect();
 
-        let cfg = crate::config::FastVlmConfig::fastvlm_0_5b();
         for (name, _) in cfg.decoder.param_list() {
             assert!(decoder.contains(&name), "decoder param not imported: {name}");
         }

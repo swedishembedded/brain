@@ -298,16 +298,19 @@ fn load_decode(dir: &str, precision: &str) -> Result<DecodeStage, String> {
         .map_err(|e| format!("fastvlm: cannot read {ckpt}: {e}"))?;
     let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir)
         .map_err(|e| format!("fastvlm: tokenizer: {e}"))?;
+    // The decoder is the one this checkpoint's own config.json describes.
+    let config_json = std::fs::read_to_string(format!("{dir}/config.json")).map_err(|e| format!("fastvlm: {dir}/config.json: {e}"))?;
+    let config: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| format!("fastvlm: {dir}/config.json: {e}"))?;
+    let cfg = crate::config::FastVlmConfig::from_hf(&config).decoder;
     let mut dec = HashMap::new();
     for t in tensors {
-        if let Some(k) = crate::import::map_decoder(&t.name) {
+        if let Some(k) = crate::import::map_decoder(&t.name, &cfg) {
             dec.insert(k, t.data);
         }
     }
     // Resident KV decoder, fp32 or int8 (group-wise weight scales + dynamic
     // activation quant through the decode-regime packed GEMV). Context sized
     // for prompt + image span + the longest caption.
-    let cfg = crate::config::FastVlmConfig::fastvlm_0_5b().decoder;
     let head = dec
         .get(cfg.head_weight())
         .or_else(|| dec.get("tok.weight"))

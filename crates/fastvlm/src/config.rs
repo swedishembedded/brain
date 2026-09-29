@@ -122,30 +122,11 @@ impl FastVlmConfig {
     /// (`LlavaQwen2ForCausalLM`). The FastViTHD tower dims are fixed defaults.
     pub fn from_hf(c: &Value) -> FastVlmConfig {
         let u = |k: &str| c[k].as_u64().unwrap_or_else(|| panic!("fastvlm config: missing {k}")) as u32;
-        let hidden = u("hidden_size");
-        let heads = u("num_attention_heads");
         let vision = FastVitHdConfig::fastvithd();
         FastVlmConfig {
             mm_hidden: u("mm_hidden_size"),
             proj_type: c["mm_projector_type"].as_str().unwrap_or("mlp2x_gelu").to_string(),
-            decoder: QwenConfig {
-                vocab: u("vocab_size"),
-                block_size: 2048,
-                n_layers: u("num_hidden_layers"),
-                d_model: hidden,
-                n_heads: heads,
-                n_kv_heads: u("num_key_value_heads"),
-                head_dim: hidden / heads,
-                d_ff: u("intermediate_size"),
-                rope_theta: c["rope_theta"].as_f64().unwrap_or(1e6) as f32,
-                rms_eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
-                max_position_embeddings: c["max_position_embeddings"].as_u64().map(|x| x as u32).unwrap_or(2048),
-                tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(true),
-                qk_norm: false, // Qwen2
-                attn_bias: c["attention_bias"].as_bool().unwrap_or(true),
-                lora: None,
-                rope_scaling: None,
-            },
+            decoder: qwen3::hf::decoder_config_as(&c.to_string(), "qwen2").unwrap_or_else(|e| panic!("fastvlm {e}")),
             image_token_index: -200,
             vision,
         }
