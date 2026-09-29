@@ -217,3 +217,4 @@ What belongs where:
 | 174 | A refusal added at a shared seam breaks every caller nobody ran | [`174-a-refusal-added-at-a-shared-seam-breaks-every-caller-nobody-ran.md`](174-a-refusal-added-at-a-shared-seam-breaks-every-caller-nobody-ran.md) |
 | 175 | A scaling read by one spelling drops every other | [`175-a-scaling-read-by-one-spelling-drops-every-other.md`](175-a-scaling-read-by-one-spelling-drops-every-other.md) |
 | 176 | A config default is a guess about which model wrote it | [`176-a-config-default-is-a-guess-about-which-model-wrote-it.md`](176-a-config-default-is-a-guess-about-which-model-wrote-it.md) |
+| 177 | A kernel constant and its host oracle agree on the same wrong value | [`177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md`](177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md) |

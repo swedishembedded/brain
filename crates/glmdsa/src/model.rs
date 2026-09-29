@@ -144,11 +144,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
 /// RoPE at an EXPLICIT absolute position, INTERLEAVED (adjacent pairs `2j,2j+1`)
 /// convention - the decode-step twin of `kernels::ROPE_TRAIN` (which GLM's
-/// forward uses). Identical math (base 10000, pairs `2j,2j+1`) but the rotary
+/// forward uses). Identical math (base `theta`, pairs `2j,2j+1`) but the rotary
 /// position is `pos_base + row` instead of `row % tcols`. NOT interchangeable
 /// with `kernels::ROPE_AT`, which is the half-split (GPT-NeoX) convention.
 const ROPE_TRAIN_AT_WGSL: &str = r#"
-struct Params { n_rows: u32, n_heads: u32, head_dim: u32, row_stride: u32, base_off: u32, pos_base: u32 };
+struct Params { n_rows: u32, n_heads: u32, head_dim: u32, row_stride: u32, base_off: u32, pos_base: u32, theta: f32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read_write> buf: array<f32>;
 @compute @workgroup_size(64)
@@ -164,7 +164,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let row = tmp / p.n_heads;
     let pos = p.pos_base + row;
     let base = row * p.row_stride + p.base_off + h * p.head_dim + 2u * j;
-    let angle = f32(pos) * pow(10000.0, -f32(2u * j) / f32(p.head_dim));
+    let angle = f32(pos) * pow(p.theta, -f32(2u * j) / f32(p.head_dim));
     let c = cos(angle);
     let sn = sin(angle);
     let e = buf[base];
@@ -777,8 +777,8 @@ impl Glm {
         self.mm(s, &lb.q_c_n, &p("idx.wq_b.weight"), &self.q_idx, n, ql, idx);
         self.mm(s, &lb.xn1, &p("idx.wk.weight"), &self.k_idx_pre, n, d, idh);
         s.push(self.gpu.step(LAYERNORM, &[&self.k_idx_pre, self.w(&p("idx.k_norm.weight")), self.w(&p("idx.k_norm.bias")), &self.k_idx], &[idh, n, f(1e-5)], n));
-        s.push(self.gpu.step(ROPE_SUB, &[&self.q_idx], &[n, nih, idh, rope, idx, t_use], n * nih * (rope / 2)));
-        s.push(self.gpu.step(ROPE_SUB, &[&self.k_idx], &[n, 1, idh, rope, idh, t_use], n * (rope / 2)));
+        s.push(self.gpu.step(ROPE_SUB, &[&self.q_idx], &[n, nih, idh, rope, idx, t_use, f(self.cfg.rope_theta)], n * nih * (rope / 2)));
+        s.push(self.gpu.step(ROPE_SUB, &[&self.k_idx], &[n, 1, idh, rope, idh, t_use, f(self.cfg.rope_theta)], n * (rope / 2)));
         self.mm(s, &lb.xn1, &p("idx.weights_proj.weight"), &self.idx_weights, n, d, nih);
         s.push(self.gpu.step(MLA_INDEX_SCORES, &[&self.q_idx, &self.k_idx, &self.idx_weights, &self.index_scores], &[b_use, nih, t_use, idh], b_use * t_use * t_use));
         s.push(self.gpu.step(TOPK_MASK, &[&self.index_scores, &self.idx_mask], &[b_use, t_use, c.index_topk], b_use * t_use * t_use));
@@ -822,11 +822,11 @@ impl Glm {
             self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
-            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
+            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use, f(self.cfg.rope_theta)], n * nh * half_rope));
             // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
-            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use, f(self.cfg.rope_theta)], n * half_rope));
             self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
@@ -1070,8 +1070,8 @@ impl Glm {
             s.push(self.gpu.step(MLA_BWD_DQ_ROPE, &[&self.d_scores, &lb.k_rot, &self.d_q_rot], &[b_use, nh, t_use, nope_hd, rope1], b_use * nh * t_use * rope1));
             s.push(self.gpu.step(MLA_BWD_DK_ROPE, &[&self.d_scores, &lb.q_rot, &self.d_k_rot], &[b_use, nh, t_use, nope_hd, rope1], b_use * t_use * rope1));
             // RoPE backward on the rope grads (in place)
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_q_rot], &[n, nh, rope1, qrope, 0, t_use, f(self.cfg.rope_theta)], n * nh * half_rope));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_k_rot], &[n, 1, rope1, rope1, 0, t_use, f(self.cfg.rope_theta)], n * half_rope));
             // KV projections backward -> d_xn1 (grad wrt xn1)
             self.mm_bwd(&mut s, &self.d_v, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &self.d_kvcn, n, kvl, vd, 0);
             self.mm_bwd(&mut s, &self.d_k_pass, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &self.d_kvcn, n, kvl, nope, 1);
@@ -1212,10 +1212,10 @@ impl Glm {
             self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
-            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
+            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use, f(self.cfg.rope_theta)], n * nh * half_rope));
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
-            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use, f(self.cfg.rope_theta)], n * half_rope));
             self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
@@ -1396,11 +1396,11 @@ impl Glm {
             self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, 1);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, 1, ql, nope);
             self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, 1, ql, qrope);
-            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.q_rot], &[1, nh, rope1, qrope, 0, pos], nh * half_rope));
+            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.q_rot], &[1, nh, rope1, qrope, 0, pos, f(self.cfg.rope_theta)], nh * half_rope));
             // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, 1, d, kvl);
             self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, 1, d, rope1);
-            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.k_rot], &[1, 1, rope1, rope1, 0, pos], half_rope));
+            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.k_rot], &[1, 1, rope1, rope1, 0, pos, f(self.cfg.rope_theta)], half_rope));
             self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, 1);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, 1, kvl, nope);
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, 1, kvl, vd);
@@ -1499,6 +1499,7 @@ impl Glm {
             h: c.index_n_heads as usize,
             d: c.index_head_dim as usize,
             rope: c.index_rope_dim() as usize,
+            rope_theta: c.rope_theta,
             ql,
             dm: d,
             mla_heads: c.n_heads as usize,

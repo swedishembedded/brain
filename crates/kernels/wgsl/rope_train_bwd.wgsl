@@ -22,6 +22,7 @@ struct Params {
     row_stride: u32,
     base_off: u32,
     tcols: u32,
+    theta: f32,      // RoPE base
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -44,7 +45,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let pos = row % p.tcols;
 
     let base = row * p.row_stride + p.base_off + h * p.head_dim + 2u * j;
-    let angle = f32(pos) * pow(10000.0, -f32(2u * j) / f32(p.head_dim));
+    let angle = f32(pos) * pow(p.theta, -f32(2u * j) / f32(p.head_dim));
     let c = cos(angle);
     let s = sin(angle);
     let de = buf[base];

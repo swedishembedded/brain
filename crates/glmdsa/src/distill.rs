@@ -41,6 +41,7 @@ pub struct IdxDims {
     pub h: usize,   // index_n_heads
     pub d: usize,   // index_head_dim
     pub rope: usize, // index rope slice (= qk_rope_head_dim)
+    pub rope_theta: f32,
     pub ql: usize,  // q_lora_rank
     pub dm: usize,  // d_model
     pub mla_heads: usize, // number of MLA heads (for averaging dense_probs)
@@ -48,15 +49,15 @@ pub struct IdxDims {
 
 const LN_EPS: f32 = 1e-5;
 
-fn rope_angle(pos: usize, pair: usize, rope: usize) -> f32 {
-    pos as f32 * 10000f32.powf(-(2.0 * pair as f32) / rope as f32)
+fn rope_angle(pos: usize, pair: usize, rope: usize, theta: f32) -> f32 {
+    pos as f32 * theta.powf(-(2.0 * pair as f32) / rope as f32)
 }
 
 /// Interleaved RoPE on the first `rope` channels of a `d`-wide head (in place).
-fn rope_fwd(v: &mut [f32], pos: usize, rope: usize) {
+fn rope_fwd(v: &mut [f32], pos: usize, rope: usize, theta: f32) {
     for p in 0..rope / 2 {
         let (c, s) = {
-            let a = rope_angle(pos, p, rope);
+            let a = rope_angle(pos, p, rope, theta);
             (a.cos(), a.sin())
         };
         let (e, o) = (v[2 * p], v[2 * p + 1]);
@@ -66,10 +67,10 @@ fn rope_fwd(v: &mut [f32], pos: usize, rope: usize) {
 }
 
 /// Backward of [`rope_fwd`] (rotate the grad by −angle).
-fn rope_bwd(g: &mut [f32], pos: usize, rope: usize) {
+fn rope_bwd(g: &mut [f32], pos: usize, rope: usize, theta: f32) {
     for p in 0..rope / 2 {
         let (c, s) = {
-            let a = rope_angle(pos, p, rope);
+            let a = rope_angle(pos, p, rope, theta);
             (a.cos(), a.sin())
         };
         let (g0, g1) = (g[2 * p], g[2 * p + 1]);
@@ -82,7 +83,7 @@ fn rope_bwd(g: &mut [f32], pos: usize, rope: usize) {
 /// `xn1` = `[n,dm]` (input_ln output), `q_resid` = `[n,ql]` (q_a_layernorm output),
 /// `dense_probs` = `[b, mla_heads, t, t]` (the MLA attention probs).
 pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_probs: &[f32], w: &IdxWeights) -> (f32, IdxGrads) {
-    let IdxDims { b, t, h, d, rope, ql, dm, mla_heads } = *dm_dims;
+    let IdxDims { b, t, h, d, rope, rope_theta, ql, dm, mla_heads } = *dm_dims;
     let n = b * t;
     let qscale = 1.0 / (d as f32).sqrt();
     let wscale = 1.0 / (h as f32).sqrt();
@@ -115,7 +116,7 @@ pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_prob
                 }
                 q_idx[(r * h + hh) * d + dd] = acc;
             }
-            rope_fwd(&mut q_idx[(r * h + hh) * d..(r * h + hh) * d + d], pos, rope);
+            rope_fwd(&mut q_idx[(r * h + hh) * d..(r * h + hh) * d + d], pos, rope, rope_theta);
         }
         // k_pre = x·Wkᵀ
         for dd in 0..d {
@@ -134,7 +135,7 @@ pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_prob
         for dd in 0..d {
             k[r * d + dd] = (k_pre[r * d + dd] - mean) * inv * w.k_norm_w[dd] + w.k_norm_b[dd];
         }
-        rope_fwd(&mut k[r * d..r * d + d], pos, rope);
+        rope_fwd(&mut k[r * d..r * d + d], pos, rope, rope_theta);
         // weights = x·Wprojᵀ
         for hh in 0..h {
             let mut acc = 0.0;
@@ -234,7 +235,7 @@ pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_prob
     for r in 0..n {
         let pos = r % t;
         for hh in 0..h {
-            rope_bwd(&mut d_q_idx[(r * h + hh) * d..(r * h + hh) * d + d], pos, rope);
+            rope_bwd(&mut d_q_idx[(r * h + hh) * d..(r * h + hh) * d + d], pos, rope, rope_theta);
             // d wq_b[h*D+dd, :] += d_q_idx[r,h,dd] * q_resid[r,:]
             for dd in 0..d {
                 let dg = d_q_idx[(r * h + hh) * d + dd];
@@ -243,7 +244,7 @@ pub fn layer_distill(dm_dims: &IdxDims, xn1: &[f32], q_resid: &[f32], dense_prob
                 }
             }
         }
-        rope_bwd(&mut d_k[r * d..r * d + d], pos, rope);
+        rope_bwd(&mut d_k[r * d..r * d + d], pos, rope, rope_theta);
         // LayerNorm backward: d_k (post-LN, pre-rope now un-roped) -> d_k_pre
         // y_dd = (x_dd - mean)*inv*gw_dd + gb_dd
         let inv = k_inv[r];
@@ -291,7 +292,7 @@ mod tests {
     /// RoPE, relu-weighted scores, softmax-CE) is correct.
     #[test]
     fn distill_grads_match_finite_differences() {
-        let dims = IdxDims { b: 2, t: 4, h: 2, d: 6, rope: 4, ql: 5, dm: 7, mla_heads: 3 };
+        let dims = IdxDims { b: 2, t: 4, h: 2, d: 6, rope: 4, rope_theta: 1.0e4, ql: 5, dm: 7, mla_heads: 3 };
         let n = dims.b * dims.t;
         let mut s = 12345u64;
         let mk = |len: usize, s: &mut u64| (0..len).map(|_| rng(s)).collect::<Vec<f32>>();
@@ -365,7 +366,7 @@ mod tests {
     /// near-uniform attention, which has almost nothing to distill).
     #[test]
     fn distill_training_converges() {
-        let dims = IdxDims { b: 1, t: 6, h: 3, d: 8, rope: 4, ql: 6, dm: 8, mla_heads: 2 };
+        let dims = IdxDims { b: 1, t: 6, h: 3, d: 8, rope: 4, rope_theta: 1.0e4, ql: 6, dm: 8, mla_heads: 2 };
         let n = dims.b * dims.t;
         let mut s = 999u64;
         let mk = |len: usize, s: &mut u64| (0..len).map(|_| rng(s)).collect::<Vec<f32>>();

@@ -28,6 +28,10 @@ use model::IGNORE;
 use optim::Optim;
 use paramstore::ParamStore;
 
+/// This model's RoPE base. Its config declares none; the inference engine's
+/// `rope.wgsl` rotates at the same 10000.
+const ROPE_THETA: f32 = 10_000.0;
+
 // ---- kernel indices (order matches `PIPELINES`) ----
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
@@ -394,8 +398,8 @@ impl Trainer {
             // attention
             s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
-            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
-            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t, f(ROPE_THETA)], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t, f(ROPE_THETA)], n * c.n_heads * half));
             s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * self.t));
             s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[self.b, c.n_heads, self.t], self.b * c.n_heads * self.t));
             s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_out], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
@@ -505,8 +509,8 @@ impl Trainer {
             s.push(self.gpu.step(ATTN_BWD_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_BWD_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             // rope backward on q and k regions of d_qkv
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t, f(ROPE_THETA)], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, d, self.t, f(ROPE_THETA)], n * c.n_heads * half));
             // qkv matmul backward -> grad_Wqkv, d_xn (=d_xn1)
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.xn1, self.g(&pn("attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_xn], &[n, d, 3 * d, 0], n * d));
