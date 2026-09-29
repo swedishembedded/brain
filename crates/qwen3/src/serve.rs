@@ -739,7 +739,7 @@ pub struct Engine {
     clip_k: Vec<DeviceBuffer>,
     clip_v: Vec<DeviceBuffer>,
     /// YaRN's `(inv_freq table, attention_factor)`, uploaded once at
-    /// construction from `cfg.yarn_scaling()` - `[head_dim/2]` f32s every row
+    /// construction from `cfg.rope_table()` - `[head_dim/2]` f32s every row
     /// and head share. `None` unless the config carries `rope_scaling`, and
     /// that `None` is what keeps every existing engine on the analytic
     /// `ROPE_PAGED`/fused-QK-norm path it took before this field existed;
@@ -994,7 +994,7 @@ impl Engine {
         // One upload for the whole engine: the schedule is per-CHANNEL, not
         // per-position, so every row, head, layer and step reads this same
         // `head_dim/2` table.
-        let yarn = cfg.yarn_scaling().map(|(inv_freq, attention_factor)| {
+        let yarn = cfg.rope_table().map(|(inv_freq, attention_factor)| {
             let b = st(inv_freq.len() as u64);
             gpu.write(&b, bytemuck::cast_slice(&inv_freq));
             (b, attention_factor)
@@ -4531,7 +4531,7 @@ mod tests {
         assert!(!kinds(plain).contains(&ROPE_PAGED_YARN), "an unscaled config must not reach the YaRN kernel");
 
         let mut scaled = QwenConfig::tiny();
-        scaled.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 12));
+        scaled.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, 12)));
         let yarn_kinds = kinds(scaled);
         assert!(yarn_kinds.contains(&ROPE_PAGED_YARN), "a scaled config must reach the YaRN kernel");
         assert!(!yarn_kinds.contains(&ROPE_PAGED), "the scaled path must not also run the analytic RoPE over the same rows");
@@ -4547,7 +4547,7 @@ mod tests {
     #[test]
     fn yarn_rope_matches_an_independent_host_recomputation() {
         let mut cfg = QwenConfig::tiny();
-        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 12));
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, 12)));
         let map = tiny_weights(&cfg);
         let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 32, 1, 12, 8, false, false);
         let mut table = BlockTable::new();
@@ -4568,7 +4568,7 @@ mod tests {
         g.poll_wait();
         let normed = g.read(&normed_buf, (rows * nh * hd) as usize);
 
-        let (inv_freq, attention_factor) = cfg.yarn_scaling().expect("rope_scaling was set");
+        let (inv_freq, attention_factor) = cfg.rope_table().expect("rope_scaling was set");
         assert_eq!(inv_freq.len(), half);
         assert!(attention_factor > 1.0, "factor 4.0 must scale attention magnitude, got {attention_factor}");
         let positions: Vec<u32> = g.read(&eng.sc.pos_buf, rows as usize).iter().map(|f| f.to_bits()).collect();

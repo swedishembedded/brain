@@ -26,7 +26,7 @@ use qwen35::model::{pipelines, Qwen35};
 /// "beyond the pretrained context" boundary partway through - not just at
 /// the very last position.
 fn yarn_cfg() -> Qwen35Config {
-    Qwen35Config { rope_scaling: Some(model::yarn::YarnConfig::new(3.0, 6)), ..Qwen35Config::tiny() }
+    Qwen35Config { rope_scaling: Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(3.0, 6))), ..Qwen35Config::tiny() }
 }
 
 /// Building the model and driving `step()` across the whole `block_size`
@@ -85,7 +85,7 @@ fn yarn_scaled_decode_diverges_from_unscaled_beyond_original_context() {
     assert!(diverged_beyond_boundary, "YaRN-scaled decode must diverge from the unscaled baseline once past original_max_position_embeddings=6");
 }
 
-/// **The third M-RoPE call site.** `Qwen35Config::yarn_scaling`'s own doc
+/// **The third M-RoPE call site.** `Qwen35Config::rope_table`'s own doc
 /// claims to be "the one place both of this model's `mrope_tables` call sites
 /// (prefill and single-step decode) derive this, so they cannot drift from
 /// each other" - but CHUNKED prefill (`Qwen35::prefill_chunked`, the tape every
@@ -149,7 +149,7 @@ fn yarn_scaled_chunked_prefill_matches_token_by_token_replay() {
 #[test]
 fn unconfigured_forward_is_unaffected_by_the_yarn_plumbing_existing() {
     let none_cfg = Qwen35Config::tiny();
-    let identity_cfg = Qwen35Config { rope_scaling: Some(model::yarn::YarnConfig::new(1.0, 32768)), ..Qwen35Config::tiny() };
+    let identity_cfg = Qwen35Config { rope_scaling: Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(1.0, 32768))), ..Qwen35Config::tiny() };
     let t = none_cfg.block_size;
     let init = qwen35::init::init_weights(&none_cfg, 5);
 

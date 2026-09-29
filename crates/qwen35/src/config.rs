@@ -93,15 +93,10 @@ pub struct Qwen35Config {
     /// Interleaved M-RoPE section sizes `[t, h, w]` (reference default
     /// `[11, 11, 10]`, summing to `head_dim * partial_rotary_factor / 2`).
     pub mrope_section: [u32; 3],
-    /// YaRN long-context RoPE scaling (`model::yarn`), parsed from the
-    /// checkpoint's `rope_scaling: {"type": "yarn", "factor": ...,
-    /// "original_max_position_embeddings": ...}` - `None` (the default for
-    /// every existing checkpoint's `config.json`, which has no such key)
-    /// means "plain, unscaled RoPE", byte-identical to before this field
-    /// existed (see `model::yarn::scaled_inv_freq`'s own `factor <= 1.0`
-    /// identity gate for why `Some` at `factor == 1.0` would ALSO be a
-    /// no-op, not just `None`).
-    pub rope_scaling: Option<model::yarn::YarnConfig>,
+    /// RoPE frequency scaling (`model::rope_scaling`: linear, llama3, YaRN,
+    /// explicit factors) over the rotated channels. `None` - every checkpoint
+    /// that declares none - is plain, unscaled RoPE.
+    pub rope_scaling: Option<model::rope_scaling::RopeScaling>,
 
     // -- linear-attention (Gated DeltaNet) layer shape --
     /// Layer-type schedule period (reference default 4): every 4th layer
@@ -270,7 +265,7 @@ impl Qwen35Config {
         ((self.head_dim as f32) * self.partial_rotary_factor).round() as u32
     }
 
-    /// This config's YaRN-scaled `(inv_freq, attention_factor)`, ready to
+    /// This config's scaled `(inv_freq, attention_factor)`, ready to
     /// pass straight into `qwen3vl::mrope::mrope_tables_scaled`'s `scaling`
     /// parameter - `None` if `self.rope_scaling` is unset, which is the SAME
     /// `None` `mrope_tables_scaled` already treats as "plain unscaled RoPE,
@@ -285,8 +280,8 @@ impl Qwen35Config {
     /// following decode steps read them with. Gated by
     /// `tests/yarn_rope_scaling.rs`'s
     /// `yarn_scaled_chunked_prefill_matches_token_by_token_replay`.
-    pub fn yarn_scaling(&self) -> Option<(Vec<f32>, f32)> {
-        self.rope_scaling.as_ref().map(|y| model::yarn::scaled_inv_freq(self.rotary_dim(), self.rope_theta, y))
+    pub fn rope_table(&self) -> Option<(Vec<f32>, f32)> {
+        self.rope_scaling.as_ref().map(|s| s.inv_freq(self.rotary_dim(), self.rope_theta))
     }
 
     // -- linear-attention (Gated DeltaNet) derived shapes --
@@ -497,15 +492,8 @@ impl Qwen35Config {
                 "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
             });
         }
-        if let Some(y) = &self.rope_scaling {
-            v["rope_scaling"] = serde_json::json!({
-                "type": "yarn",
-                "factor": y.factor,
-                "original_max_position_embeddings": y.original_max_position_embeddings,
-                "beta_fast": y.beta_fast,
-                "beta_slow": y.beta_slow,
-                "attention_factor": y.attention_factor,
-            });
+        if let Some(scaling) = &self.rope_scaling {
+            v["rope_scaling"] = scaling.to_config();
         }
         v
     }
@@ -531,6 +519,7 @@ impl Qwen35Config {
     /// [`Self::from_json`], but refuses a config that would silently default
     /// any shape-defining key instead of reading it.
     pub fn from_json_checked(c: &Value) -> Result<Qwen35Config, String> {
+        model::rope_scaling::RopeScaling::from_config(&c["rope_scaling"]).map_err(|e| format!("config: {e}"))?;
         let missing = Self::missing_shape_keys(c);
         if !missing.is_empty() {
             return Err(format!(
@@ -551,21 +540,10 @@ impl Qwen35Config {
                 [v.first().copied().unwrap_or(11), v.get(1).copied().unwrap_or(11), v.get(2).copied().unwrap_or(10)]
             })
             .unwrap_or([11, 11, 10]);
-        // Only `"type": "yarn"` is implemented (this workspace's one
-        // long-context scaling scheme so far); any other/missing type -
-        // including a `config.json` that has no `rope_scaling` key at all,
-        // every checkpoint before this field existed - is `None`, i.e.
-        // plain unscaled RoPE.
-        let rope_scaling = c["rope_scaling"].as_object().filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("yarn")).map(
-            |o| model::yarn::YarnConfig {
-                factor: o.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                original_max_position_embeddings: o.get("original_max_position_embeddings").and_then(|v| v.as_u64()).unwrap_or(0)
-                    as u32,
-                beta_fast: o.get("beta_fast").and_then(|v| v.as_f64()).unwrap_or(32.0) as f32,
-                beta_slow: o.get("beta_slow").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                attention_factor: o.get("attention_factor").and_then(|v| v.as_f64()).map(|v| v as f32),
-            },
-        );
+        // An unimplemented scaling type is refused by `from_json_checked`;
+        // this unchecked reader panics on one rather than silently running
+        // unscaled.
+        let rope_scaling = model::rope_scaling::RopeScaling::from_config(&c["rope_scaling"]).unwrap_or_else(|e| panic!("qwen35 config: {e}"));
         Qwen35Config {
             vocab: g("vocab_size", 29),
             block_size,
@@ -848,14 +826,14 @@ mod tests {
     #[test]
     fn rope_scaling_yarn_parses_from_config_json_and_round_trips() {
         let mut cfg = Qwen35Config::tiny();
-        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 32768));
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, 32768)));
         let json = cfg.to_json();
-        assert_eq!(json["rope_scaling"]["type"], "yarn");
+        assert_eq!(json["rope_scaling"]["rope_type"], "yarn");
         assert_eq!(json["rope_scaling"]["factor"], 4.0);
         assert_eq!(json["rope_scaling"]["original_max_position_embeddings"], 32768);
 
         let back = Qwen35Config::from_json(&json);
-        let y = back.rope_scaling.expect("rope_scaling must round-trip");
+        let Some(model::rope_scaling::RopeScaling::Yarn(y)) = back.rope_scaling else { panic!("rope_scaling must round-trip as yarn") };
         assert_eq!(y.factor, 4.0);
         assert_eq!(y.original_max_position_embeddings, 32768);
         assert_eq!(y.beta_fast, 32.0);
@@ -864,26 +842,26 @@ mod tests {
     }
 
     #[test]
-    fn rope_scaling_ignores_a_non_yarn_type() {
-        // Only "yarn" is implemented; an unrecognized `rope_scaling.type`
-        // must not silently apply YaRN's formula under a different name.
-        let c = serde_json::json!({
+    fn a_linear_scaling_is_read_and_an_unknown_one_is_refused() {
+        let with = |scaling: serde_json::Value| serde_json::json!({
             "vocab_size": 29, "block_size": 24, "n_layers": 4, "d_model": 96,
             "n_heads": 3, "n_kv_heads": 1, "head_dim": 40, "rms_norm_eps": 1e-6, "rope_theta": 1e7,
-            "rope_scaling": {"type": "linear", "factor": 4.0, "original_max_position_embeddings": 32768},
+            "rope_scaling": scaling,
         });
-        let cfg = Qwen35Config::from_json(&c);
-        assert!(cfg.rope_scaling.is_none());
+        let linear = Qwen35Config::from_json_checked(&with(serde_json::json!({"type": "linear", "factor": 4.0}))).unwrap();
+        assert_eq!(linear.rope_scaling, Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 }));
+        let e = Qwen35Config::from_json_checked(&with(serde_json::json!({"type": "dynamic", "factor": 4.0}))).unwrap_err();
+        assert!(e.contains("dynamic"), "{e}");
     }
 
     #[test]
-    fn yarn_scaling_is_none_by_default_and_some_shaped_correctly_when_set() {
+    fn rope_table_is_none_by_default_and_some_shaped_correctly_when_set() {
         let cfg = Qwen35Config::tiny();
-        assert!(cfg.yarn_scaling().is_none());
+        assert!(cfg.rope_table().is_none());
 
         let mut scaled = cfg.clone();
-        scaled.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 16));
-        let (inv_freq, attention_factor) = scaled.yarn_scaling().expect("rope_scaling set -> Some");
+        scaled.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, 16)));
+        let (inv_freq, attention_factor) = scaled.rope_table().expect("rope_scaling set -> Some");
         assert_eq!(inv_freq.len(), (scaled.rotary_dim() / 2) as usize);
         assert!(attention_factor > 1.0, "factor=4.0 must produce an attention_factor > 1.0, got {attention_factor}");
     }

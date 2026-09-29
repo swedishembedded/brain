@@ -1378,10 +1378,10 @@ impl Qwen35 {
         // Text-only: every axis of the M-RoPE table carries the same plain
         // sequential position, reset per sequence (row = batch*t + pos).
         let positions: Vec<[u32; 3]> = (0..b).flat_map(|_| (0..t).map(|ti| [ti, ti, ti])).collect();
-        // `yarn_scaling()` is `None` unless `cfg.rope_scaling` is set, which
+        // `rope_table()` is `None` unless `cfg.rope_scaling` is set, which
         // makes this call bit-for-bit today's plain `mrope_tables` output -
-        // see `Qwen35Config::yarn_scaling`'s own doc.
-        let yarn = cfg.yarn_scaling();
+        // see `Qwen35Config::rope_table`'s own doc.
+        let yarn = cfg.rope_table();
         let (cos, sin) = qwen3vl::mrope::mrope_tables_scaled(
             &positions,
             cfg.mrope_section,
@@ -2679,7 +2679,7 @@ impl Qwen35 {
         // table at each sequence's OWN position, and the four paged-KV index
         // buffers. The rows of one batch are unrelated positions and unrelated
         // physical blocks, which is the whole difference from a chunk.
-        let yarn = c.yarn_scaling();
+        let yarn = c.rope_table();
         let positions: Vec<[u32; 3]> = caches.seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
         let (cos_rows, sin_rows) =
             qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
@@ -2902,7 +2902,7 @@ impl Qwen35 {
         // step that later reads them rotates its queries with YaRN applied
         // writes a cache the rest of the sequence silently misreads. See
         // `tests/yarn_rope_scaling.rs`'s chunked-replay gate.
-        let yarn = c.yarn_scaling();
+        let yarn = c.rope_table();
         let (cos, sin) =
             qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
         let cos = g.storage_init("qwen35.prefill_chunk.cos", &cos);

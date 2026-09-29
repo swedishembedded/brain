@@ -666,7 +666,7 @@ impl QwenResident {
         }
         let native = cfg.max_position_embeddings.max(1);
         if ctx > native {
-            cfg.rope_scaling = Some(model::yarn::YarnConfig::new(ctx as f32 / native as f32, native));
+            cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(ctx as f32 / native as f32, native)));
         }
     }
 
@@ -1355,7 +1355,7 @@ mod tests {
         cfg.rope_scaling = None;
         let ctx = native * 4;
         QwenResident::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-        let y = cfg.rope_scaling.expect("ctx past native must derive a YarnConfig");
+        let Some(model::rope_scaling::RopeScaling::Yarn(y)) = cfg.rope_scaling else { panic!("ctx past native must derive a YaRN scaling") };
         assert_eq!(y.factor, 4.0);
         assert_eq!(y.original_max_position_embeddings, native);
     }
@@ -1367,8 +1367,8 @@ mod tests {
     fn apply_yarn_if_serving_past_native_never_overrides_an_already_declared_scaling() {
         let mut cfg = qwen3::config::QwenConfig::qwen3_8b();
         let native = cfg.max_position_embeddings;
-        let declared = model::yarn::YarnConfig::new(2.0, native);
-        cfg.rope_scaling = Some(declared);
+        let declared = model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(2.0, native));
+        cfg.rope_scaling = Some(declared.clone());
         QwenResident::apply_yarn_if_serving_past_native(&mut cfg, native * 10);
         assert_eq!(cfg.rope_scaling, Some(declared), "an already-declared rope_scaling must survive untouched");
     }

@@ -215,3 +215,4 @@ What belongs where:
 | 172 | A gate red for everything hides the failures it was written for | [`172-a-gate-red-for-everything-hides-the-failures-it-was-written-for.md`](172-a-gate-red-for-everything-hides-the-failures-it-was-written-for.md) |
 | 173 | An epsilon a kernel compiles in is a config field nothing reads | [`173-an-epsilon-a-kernel-compiles-in-is-a-config-field-nothing-reads.md`](173-an-epsilon-a-kernel-compiles-in-is-a-config-field-nothing-reads.md) |
 | 174 | A refusal added at a shared seam breaks every caller nobody ran | [`174-a-refusal-added-at-a-shared-seam-breaks-every-caller-nobody-ran.md`](174-a-refusal-added-at-a-shared-seam-breaks-every-caller-nobody-ran.md) |
+| 175 | A scaling read by one spelling drops every other | [`175-a-scaling-read-by-one-spelling-drops-every-other.md`](175-a-scaling-read-by-one-spelling-drops-every-other.md) |

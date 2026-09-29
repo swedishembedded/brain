@@ -703,8 +703,8 @@ impl Lfm {
 
         // Built from `cfg` before it moves into the struct literal below -
         // one upload for the whole engine, mirroring `qwen3::serve`'s own
-        // `cfg.yarn_scaling()` -> uniform-shared-table pattern.
-        let yarn = cfg.yarn_scaling().map(|(inv_freq, attention_factor)| {
+        // `cfg.rope_table()` -> uniform-shared-table pattern.
+        let yarn = cfg.rope_table().map(|(inv_freq, attention_factor)| {
             let buf = st(inv_freq.len() as u64);
             gpu.write(&buf, bytemuck::cast_slice(&inv_freq));
             (buf, attention_factor)
@@ -1790,7 +1790,7 @@ mod tests {
         let init = crate::init::init_weights(&cfg, 5);
         let plain = Lfm::new(cfg.clone(), 1, cfg.block_size, &init);
         let mut yarn_cfg = cfg.clone();
-        yarn_cfg.rope_scaling = Some(model::yarn::YarnConfig::new(1.0, cfg.block_size));
+        yarn_cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(1.0, cfg.block_size)));
         let yarn = Lfm::new(yarn_cfg, 1, cfg.block_size, &init);
 
         let tokens: Vec<u32> = (0..cfg.block_size).map(|i| i % cfg.vocab).collect();
@@ -1816,7 +1816,7 @@ mod tests {
         let init = crate::init::init_weights(&cfg, 5);
         let plain = Lfm::new(cfg.clone(), 1, cfg.block_size, &init);
         let mut yarn_cfg = cfg.clone();
-        yarn_cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, cfg.block_size));
+        yarn_cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, cfg.block_size)));
         let yarn = Lfm::new(yarn_cfg, 1, cfg.block_size, &init);
 
         let tokens: Vec<u32> = (0..cfg.block_size).map(|i| i % cfg.vocab).collect();
@@ -1840,7 +1840,7 @@ mod tests {
         }
         let mut cfg = LfmConfig::tiny();
         cfg.block_size = 32768;
-        cfg.rope_scaling = Some(model::yarn::YarnConfig::new(4.0, 8192));
+        cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(4.0, 8192)));
         let init = crate::init::init_weights(&cfg, 5);
         let m = Lfm::new_impl(cfg.clone(), 1, 256, &init, Some((512 << 20, 0)), false);
         let tokens: Vec<u32> = (0..256).map(|i| i % cfg.vocab).collect();

@@ -39,14 +39,9 @@ pub struct LfmConfig {
     pub tie_embeddings: bool,
     /// Per-layer mixer, index = layer. Length is the layer count.
     pub layer_types: Vec<LayerType>,
-    /// YaRN long-context scaling (arXiv 2309.00071) for the attention
-    /// layers' RoPE table - `None` is the plain analytic `rope_theta`
-    /// schedule every checkpoint imported before this field existed still
-    /// gets (see `model::yarn::scaled_inv_freq`'s own `factor <= 1.0`
-    /// identity gate for why `Some` at `factor == 1.0` would ALSO be a
-    /// no-op, not just `None`). Mirrors `qwen3::QwenConfig::rope_scaling`
-    /// field for field.
-    pub rope_scaling: Option<model::yarn::YarnConfig>,
+    /// RoPE frequency scaling (`model::rope_scaling`) for the attention
+    /// layers' table - `None` is the plain analytic `rope_theta` schedule.
+    pub rope_scaling: Option<model::rope_scaling::RopeScaling>,
 }
 
 /// The HF FFN sizing rule (`Lfm2MLP.__init__`): when `block_auto_adjust_ff_dim`,
@@ -135,12 +130,11 @@ impl LfmConfig {
         }
     }
 
-    /// This config's YaRN-scaled per-channel inverse-frequency table and its
-    /// attention-magnitude correction - `None` if `self.rope_scaling` is
-    /// unset, the same "plain analytic RoPE" path the engine took before
-    /// this field existed. Mirrors `qwen3::QwenConfig::yarn_scaling` exactly.
-    pub fn yarn_scaling(&self) -> Option<(Vec<f32>, f32)> {
-        self.rope_scaling.as_ref().map(|y| model::yarn::scaled_inv_freq(self.head_dim, self.rope_theta, y))
+    /// This config's scaled per-channel inverse-frequency table and its
+    /// attention-magnitude factor - `None` if `self.rope_scaling` is unset,
+    /// the plain analytic RoPE path.
+    pub fn rope_table(&self) -> Option<(Vec<f32>, f32)> {
+        self.rope_scaling.as_ref().map(|s| s.inv_freq(self.head_dim, self.rope_theta))
     }
 
     pub fn to_json(&self) -> Value {
@@ -161,15 +155,8 @@ impl LfmConfig {
             "tie_word_embeddings": self.tie_embeddings,
             "layer_types": layers,
         });
-        if let Some(y) = &self.rope_scaling {
-            v["rope_scaling"] = serde_json::json!({
-                "type": "yarn",
-                "factor": y.factor,
-                "original_max_position_embeddings": y.original_max_position_embeddings,
-                "beta_fast": y.beta_fast,
-                "beta_slow": y.beta_slow,
-                "attention_factor": y.attention_factor,
-            });
+        if let Some(scaling) = &self.rope_scaling {
+            v["rope_scaling"] = scaling.to_config();
         }
         v
     }
@@ -192,6 +179,7 @@ impl LfmConfig {
     /// [`Self::from_json`], but refuses a config that would silently default
     /// any shape-defining key instead of reading it.
     pub fn from_json_checked(c: &Value) -> Result<LfmConfig, String> {
+        model::rope_scaling::RopeScaling::from_config(&c["rope_scaling"]).map_err(|e| format!("config: {e}"))?;
         let missing = Self::missing_shape_keys(c);
         if !missing.is_empty() {
             return Err(format!(
@@ -204,20 +192,10 @@ impl LfmConfig {
     pub fn from_json(c: &Value) -> LfmConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
-        // Only `"type": "yarn"` is implemented; any other/missing type -
-        // including a config with no `rope_scaling` key at all, every
-        // checkpoint before this field existed - is `None`, i.e. plain
-        // unscaled RoPE. Mirrors `qwen3::QwenConfig::from_json` exactly.
-        let rope_scaling = c["rope_scaling"]
-            .as_object()
-            .filter(|o| o.get("type").and_then(|t| t.as_str()) == Some("yarn"))
-            .map(|o| model::yarn::YarnConfig {
-                factor: o.get("factor").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                original_max_position_embeddings: o.get("original_max_position_embeddings").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                beta_fast: o.get("beta_fast").and_then(|v| v.as_f64()).unwrap_or(32.0) as f32,
-                beta_slow: o.get("beta_slow").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-                attention_factor: o.get("attention_factor").and_then(|v| v.as_f64()).map(|v| v as f32),
-            });
+        // An unimplemented scaling type is refused by `from_json_checked`;
+        // this unchecked reader panics on one rather than silently running
+        // unscaled.
+        let rope_scaling = model::rope_scaling::RopeScaling::from_config(&c["rope_scaling"]).unwrap_or_else(|e| panic!("lfm config: {e}"));
         let layer_types = c["layer_types"]
             .as_array()
             .map(|a| {
