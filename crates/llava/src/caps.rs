@@ -143,7 +143,7 @@ impl Action for CaptionAction {
         }
         let (px, w, h) = capability::blob::decode_image(inv, "image")?;
 
-        let cfg = LlavaConfig::llava_1_5_13b();
+        let cfg = LlavaConfig::from_hf(&std::fs::read_to_string(format!("{dir}/config.json")).map_err(|e| format!("llava: cannot read {dir}/config.json: {e}"))?)?;
         let side = cfg.vision.image_size();
         let chw = clip_preprocess_chw(&px, w, h, side);
 
@@ -252,7 +252,7 @@ fn load_decode(dir: &str, precision: &str, cfg: &LlavaConfig) -> Result<DecodeSt
     let tok = LlamaBpe::from_dir(std::path::Path::new(dir)).map_err(|e| format!("llava: tokenizer: {e}"))?;
     let mut dec = HashMap::new();
     for t in &tensors {
-        if let Some(k) = crate::import::map_decoder(&t.name) {
+        if let Some(k) = crate::import::map_decoder(&t.name, &cfg.decoder) {
             dec.insert(k, t.data.clone());
         }
     }

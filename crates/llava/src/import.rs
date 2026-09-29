@@ -39,30 +39,15 @@ pub enum QkvPart {
     V,
 }
 
-/// HF LLaVA/Vicuna decoder name -> `qwen3::QwenConfig` (LLaMA-2 preset)
-/// parameter key. Same shape as FastVLM's `map_decoder`, minus the Qwen2 qkv
-/// bias rows (LLaMA-2 has none).
-pub fn map_decoder(hf: &str) -> Option<String> {
-    match hf {
-        "model.embed_tokens.weight" => return Some("tok.weight".into()),
-        "model.norm.weight" => return Some("norm.weight".into()),
-        "lm_head.weight" => return Some("lm_head.weight".into()),
-        _ => {}
+/// HF LLaVA/Vicuna decoder name -> `qwen3::Qwen` parameter key, through the
+/// one `qwen3::hf` name map keyed on the checkpoint's Llama decoder config;
+/// `None` for anything that is not one of the decoder's parameters (the
+/// vision tower, the projector, a serialized `rotary_emb.inv_freq`).
+pub fn map_decoder(hf: &str, cfg: &qwen3::QwenConfig) -> Option<String> {
+    match qwen3::hf::HfNames::CAUSAL_LM.to_brain(hf, cfg) {
+        qwen3::hf::HfTensor::Param(p) => Some(p),
+        _ => None,
     }
-    let (n, leaf) = hf.strip_prefix("model.layers.")?.split_once('.')?;
-    let mapped = match leaf {
-        "input_layernorm.weight" => "ln1.weight",
-        "post_attention_layernorm.weight" => "ln2.weight",
-        "self_attn.q_proj.weight" => "attn.wq.weight",
-        "self_attn.k_proj.weight" => "attn.wk.weight",
-        "self_attn.v_proj.weight" => "attn.wv.weight",
-        "self_attn.o_proj.weight" => "attn.wo.weight",
-        "mlp.gate_proj.weight" => "mlp.gate.weight",
-        "mlp.up_proj.weight" => "mlp.up.weight",
-        "mlp.down_proj.weight" => "mlp.down.weight",
-        _ => return None,
-    };
-    Some(format!("blocks.{n}.{mapped}"))
 }
 
 /// HF `mlp2x_gelu` projector name -> projector key (`fc1`/`fc2`). Byte-identical
@@ -193,16 +178,17 @@ mod tests {
 
     #[test]
     fn decoder_names_map_with_no_bias_and_plain_mha() {
-        assert_eq!(map_decoder("model.embed_tokens.weight").unwrap(), "tok.weight");
-        assert_eq!(map_decoder("model.norm.weight").unwrap(), "norm.weight");
-        assert_eq!(map_decoder("lm_head.weight").unwrap(), "lm_head.weight");
-        assert_eq!(map_decoder("model.layers.0.input_layernorm.weight").unwrap(), "blocks.0.ln1.weight");
-        assert_eq!(map_decoder("model.layers.39.self_attn.q_proj.weight").unwrap(), "blocks.39.attn.wq.weight");
-        assert_eq!(map_decoder("model.layers.7.mlp.down_proj.weight").unwrap(), "blocks.7.mlp.down.weight");
+        let cfg = QwenConfig::llama2_13b();
+        assert_eq!(map_decoder("model.embed_tokens.weight", &cfg).unwrap(), "tok.weight");
+        assert_eq!(map_decoder("model.norm.weight", &cfg).unwrap(), "norm.weight");
+        assert_eq!(map_decoder("lm_head.weight", &cfg).unwrap(), "lm_head.weight");
+        assert_eq!(map_decoder("model.layers.0.input_layernorm.weight", &cfg).unwrap(), "blocks.0.ln1.weight");
+        assert_eq!(map_decoder("model.layers.39.self_attn.q_proj.weight", &cfg).unwrap(), "blocks.39.attn.wq.weight");
+        assert_eq!(map_decoder("model.layers.7.mlp.down_proj.weight", &cfg).unwrap(), "blocks.7.mlp.down.weight");
         // LLaMA-2 carries no attention bias - a bias tensor name (had one ever
         // appeared) must not silently map onto a weight leaf.
-        assert!(map_decoder("model.layers.0.self_attn.q_proj.bias").is_none());
-        assert!(map_decoder("model.layers.0.self_attn.rotary_emb.inv_freq").is_none());
+        assert!(map_decoder("model.layers.0.self_attn.q_proj.bias", &cfg).is_none());
+        assert!(map_decoder("model.layers.0.self_attn.rotary_emb.inv_freq", &cfg).is_none());
     }
 
     #[test]
@@ -255,30 +241,8 @@ mod tests {
     fn decoder_manifest_is_fully_reachable_by_name() {
         let cfg = QwenConfig::llama2_13b();
         for (name, _) in cfg.param_list() {
-            // Reconstruct a plausible HF name and map it back.
-            let hf = if name == "tok.weight" {
-                "model.embed_tokens.weight".to_string()
-            } else if name == "norm.weight" {
-                "model.norm.weight".to_string()
-            } else if name == "lm_head.weight" {
-                "lm_head.weight".to_string()
-            } else {
-                let (n, leaf) = name.strip_prefix("blocks.").unwrap().split_once('.').unwrap();
-                let hf_leaf = match leaf {
-                    "ln1.weight" => "input_layernorm.weight",
-                    "ln2.weight" => "post_attention_layernorm.weight",
-                    "attn.wq.weight" => "self_attn.q_proj.weight",
-                    "attn.wk.weight" => "self_attn.k_proj.weight",
-                    "attn.wv.weight" => "self_attn.v_proj.weight",
-                    "attn.wo.weight" => "self_attn.o_proj.weight",
-                    "mlp.gate.weight" => "mlp.gate_proj.weight",
-                    "mlp.up.weight" => "mlp.up_proj.weight",
-                    "mlp.down.weight" => "mlp.down_proj.weight",
-                    other => panic!("unhandled decoder leaf {other}"),
-                };
-                format!("model.layers.{n}.{hf_leaf}")
-            };
-            assert_eq!(map_decoder(&hf).as_deref(), Some(name.as_str()), "round trip for {name}");
+            let hf = qwen3::hf::HfNames::CAUSAL_LM.from_brain(&name).unwrap_or_else(|| panic!("no HF name for {name}"));
+            assert_eq!(map_decoder(&hf, &cfg).as_deref(), Some(name.as_str()), "round trip for {name}");
         }
     }
 

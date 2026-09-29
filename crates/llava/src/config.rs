@@ -55,6 +55,33 @@ impl LlavaConfig {
         }
     }
 
+    /// A released checkpoint's configuration, read from its own `config.json`
+    /// (`LlavaLlamaForCausalLM`): the decoder through `qwen3::hf` as the
+    /// Llama it is, the two vision knobs from their `mm_*` keys. The vision
+    /// tower and projector are the fixed CLIP-L/14@336 + `mlp2x_gelu` every
+    /// LLaVA-1.5 release uses; a config naming anything else is refused
+    /// rather than loaded into the wrong tower.
+    pub fn from_hf(json: &str) -> Result<LlavaConfig, String> {
+        let decoder = qwen3::hf::decoder_config_as(json, "llama").map_err(|e| format!("llava {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("llava config.json: {e}"))?;
+        let tower = v["mm_vision_tower"].as_str().ok_or("llava config.json: no mm_vision_tower")?;
+        if !tower.ends_with("clip-vit-large-patch14-336") {
+            return Err(format!("llava config.json: vision tower {tower:?} is not the CLIP-L/14@336 this model implements"));
+        }
+        match v["mm_projector_type"].as_str() {
+            Some("mlp2x_gelu") => {}
+            other => return Err(format!("llava config.json: mm_projector_type {other:?} is not implemented (mlp2x_gelu is)")),
+        }
+        let select_layer = v["mm_vision_select_layer"].as_i64().ok_or("llava config.json: no mm_vision_select_layer")? as i32;
+        // Upstream's `CLIPVisionTower` defaults the feature to "patch".
+        let select_feature = match v["mm_vision_select_feature"].as_str().unwrap_or("patch") {
+            "patch" => SelectFeature::Patch,
+            "cls_patch" => SelectFeature::ClsPatch,
+            other => return Err(format!("llava config.json: mm_vision_select_feature {other:?} is not implemented")),
+        };
+        Ok(LlavaConfig { vision: ClipVisionConfig::clip_l336(), decoder, select_layer, select_feature, image_token_index: -200 })
+    }
+
     /// The 0-based CLIP block [`Self::select_layer`] resolves to.
     /// `-2` -> `vision.penultimate_layer()` (`layers - 2`); `-1` -> the last
     /// block (`layers - 1`). No released checkpoint uses anything else, so
@@ -92,6 +119,21 @@ impl LlavaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The released llava-v1.5-13b `config.json`, verbatim.
+    const LLAVA_1_5_13B: &str = r#"{"_name_or_path": "llava-v1.5-13b", "architectures": ["LlavaLlamaForCausalLM"], "bos_token_id": 1, "eos_token_id": 2, "freeze_mm_mlp_adapter": false, "freeze_mm_vision_resampler": false, "hidden_act": "silu", "hidden_size": 5120, "image_aspect_ratio": "pad", "initializer_range": 0.02, "intermediate_size": 13824, "max_length": 4096, "max_position_embeddings": 4096, "mm_hidden_size": 1024, "mm_projector_type": "mlp2x_gelu", "mm_resampler_type": null, "mm_use_im_patch_token": false, "mm_use_im_start_end": false, "mm_vision_select_feature": "patch", "mm_vision_select_layer": -2, "mm_vision_tower": "openai/clip-vit-large-patch14-336", "model_type": "llava", "num_attention_heads": 40, "num_hidden_layers": 40, "num_key_value_heads": 40, "pad_token_id": 0, "pretraining_tp": 1, "rms_norm_eps": 1e-05, "rope_scaling": null, "tie_word_embeddings": false, "torch_dtype": "float16", "transformers_version": "4.31.0", "tune_mm_mlp_adapter": false, "tune_mm_vision_resampler": false, "unfreeze_mm_vision_tower": false, "use_cache": true, "use_mm_proj": true, "vocab_size": 32000}"#;
+
+    #[test]
+    fn the_released_config_reads_as_the_verified_preset() {
+        let parsed = LlavaConfig::from_hf(LLAVA_1_5_13B).unwrap();
+        let preset = LlavaConfig::llava_1_5_13b();
+        let (p, q) = (&parsed.decoder, &preset.decoder);
+        assert_eq!((p.vocab, p.n_layers, p.d_model, p.n_heads, p.n_kv_heads, p.head_dim, p.d_ff), (q.vocab, q.n_layers, q.d_model, q.n_heads, q.n_kv_heads, q.head_dim, q.d_ff));
+        assert_eq!((p.rope_theta, p.rms_eps, p.tie_embeddings, p.qk_norm, p.attn_bias), (q.rope_theta, q.rms_eps, q.tie_embeddings, q.qk_norm, q.attn_bias));
+        assert_eq!((parsed.select_layer, parsed.select_feature, parsed.vision.clone()), (-2, SelectFeature::Patch, ClipVisionConfig::clip_l336()));
+        let other_tower = LLAVA_1_5_13B.replace("clip-vit-large-patch14-336", "siglip-so400m");
+        assert!(LlavaConfig::from_hf(&other_tower).unwrap_err().contains("vision tower"));
+    }
 
     #[test]
     fn llava_1_5_13b_composes_the_verified_presets() {
