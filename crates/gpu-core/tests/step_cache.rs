@@ -34,6 +34,10 @@
 //!    dispatches, so the offsets are part of the key - a cache that dropped
 //!    them would compute the right arithmetic over the wrong rows.
 //!
+//! 6. **A seam keeps one entry per call site.** A site whose params never
+//!    repeat (a decode position) replaces its own never-reused entry rather
+//!    than accumulating one per call until the cap.
+//!
 //! Both backends: the default device and the CPU Cranelift JIT.
 //!
 //! Each case owns its own pipeline-list constant. `gpu_core::testgpu::dev`
@@ -54,6 +58,7 @@ use gpu_core::Gpu;
 /// separately is meant to avoid.
 const REPLAY_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("axpy", kernels::AXPY)];
 const MISS_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("axpy", kernels::AXPY), ("scale_add", kernels::SCALE_ADD)];
+const SEAM_PIPES: &[(&str, &str)] = &[("add2", kernels::ADD2), ("scale_add", kernels::SCALE_ADD)];
 const SLICED_PIPES: &[(&str, &str)] =
     &[("add2", kernels::ADD2), ("axpy", kernels::AXPY), ("scale_add", kernels::SCALE_ADD), ("gelu_erf", kernels::GELU_ERF)];
 
@@ -174,7 +179,9 @@ fn a_different_call_misses() {
         g.clear_step_cache();
         assert_eq!(hits, 1, "[{label}] only the repeated call may hit ({hits} hits)");
         assert_eq!(misses, 4, "[{label}] four distinct calls must each miss ({misses} misses)");
-        assert_eq!(live, 4, "[{label}] four distinct entries");
+        // The last call shares its call site (kernel, buffers, threads) with
+        // the never-reused `N/2` one, which it therefore replaces - see (6).
+        assert_eq!(live, 3, "[{label}] four distinct entries, one replaced at its site");
     }
 }
 
@@ -194,10 +201,11 @@ fn the_cap_holds_and_clearing_releases_the_pinned_buffers() {
     let out = g.storage(N as u64);
     assert!(out.is_unique(), "the fixture starts with one handle to `out`");
 
-    // Eight calls that never repeat: nothing is ever reused, so eviction has
-    // only unreused entries to drop and the cap is what bounds the map.
+    // Eight calls that never repeat, each its own call site (the thread
+    // count differs): nothing is ever reused, so eviction has only unreused
+    // entries to drop and the cap is what bounds the map.
     for i in 0..8u32 {
-        let s = g.step(ADD2, &[&a, &b, &out], &[N as u32 - i], N as u32);
+        let s = g.step(ADD2, &[&a, &b, &out], &[N as u32], N as u32 - i);
         g.submit(&[], &[s]);
     }
     let (_, _, live) = g.step_cache_stats().unwrap();
@@ -213,6 +221,37 @@ fn the_cap_holds_and_clearing_releases_the_pinned_buffers() {
     g.submit(&[], &[s]);
     assert_eq!(g.read(&out, N)[0], 3.0, "a disarmed handle still dispatches");
     assert!(g.step_cache_stats().is_none(), "a disarmed handle records nothing");
+}
+
+/// (6): a call site whose params never repeat - the seam of a decode tape that
+/// carries the position - keeps ONE entry, not one per call. Each entry holds
+/// a backend's per-dispatch resources until it drops, so a seam piling up
+/// entries until the cap starves the backend's reuse of them. A replaced
+/// entry is only ever one that was never reused: a site's entry that WAS hit
+/// stays.
+#[test]
+fn a_seam_that_never_repeats_keeps_one_entry_per_site() {
+    let g = Gpu::new_cpu(SEAM_PIPES);
+    g.enable_step_cache(1024);
+    let a = g.storage_init("a", &ramp(1.0));
+    let b = g.storage_init("b", &ramp(2.0));
+    let out = g.storage(N as u64);
+    for i in 0..8u32 {
+        let s = g.step(ADD2, &[&a, &b, &out], &[N as u32 - i], N as u32);
+        g.submit(&[], &[s]);
+    }
+    assert_eq!(g.step_cache_stats().unwrap().2, 1, "eight never-repeated params at one site must leave one entry");
+
+    // A reused entry survives the site moving on.
+    let s = g.step(ADD2, &[&a, &b, &out], &[N as u32 - 7], N as u32);
+    g.submit(&[], &[s]);
+    let s = g.step(ADD2, &[&a, &b, &out], &[N as u32], N as u32);
+    g.submit(&[], &[s]);
+    let (hits, _, live) = g.step_cache_stats().unwrap();
+    assert_eq!((hits, live), (1, 2), "the hit entry must be kept beside the new one");
+    let s = g.step(ADD2, &[&a, &b, &out], &[N as u32 - 7], N as u32);
+    g.submit(&[], &[s]);
+    assert_eq!(g.step_cache_stats().unwrap().0, 2, "the kept entry still hits");
 }
 
 /// (5): a sliced dispatch replays, and two sliced calls that differ ONLY in

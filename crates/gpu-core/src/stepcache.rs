@@ -78,18 +78,32 @@ struct Entry {
     _pinned: Box<[DeviceBuffer]>,
 }
 
+/// A call site: a [`Key`] without its params - where one dispatch of a tape
+/// sits, whatever position or step counter it carries this time.
+#[derive(PartialEq, Eq, Hash)]
+struct Site {
+    kind: usize,
+    threads: u32,
+    bufs: Box<[usize]>,
+    offs: Box<[(u64, u64)]>,
+}
+
 /// A bounded memo of recorded dispatches. Not public: reached through
 /// [`super::Gpu`], which owns the arming flag and the lock.
 pub(crate) struct StepCache {
     cap: usize,
     map: HashMap<Key, Entry>,
+    /// Per call site, the params of its newest entry while that entry has
+    /// never been reused - the one [`Self::put`] replaces when the same site
+    /// comes back with different params.
+    fresh: HashMap<Site, Box<[u32]>>,
     hits: u64,
     misses: u64,
 }
 
 impl StepCache {
     pub(crate) fn new(cap: usize) -> StepCache {
-        StepCache { cap: cap.max(1), map: HashMap::new(), hits: 0, misses: 0 }
+        StepCache { cap: cap.max(1), map: HashMap::new(), fresh: HashMap::new(), hits: 0, misses: 0 }
     }
 
     fn key(kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Key {
@@ -126,6 +140,13 @@ impl StepCache {
 
     /// Remember `step` for this call.
     ///
+    /// A call site that comes back with different params replaces its
+    /// previous entry if that one was never reused: the seam that carries a
+    /// decode position keeps ONE entry per site instead of one per token, so
+    /// what it held (a backend's per-dispatch uniform and descriptor set,
+    /// released when the step drops) goes back to the backend for the next
+    /// token's miss rather than piling up until the cap.
+    ///
     /// At capacity, entries that have never been asked for twice are dropped
     /// and the ones that have are kept. That is the whole eviction policy, and
     /// it is self-tuning for the shape this exists for: a decode step's tape
@@ -148,11 +169,19 @@ impl StepCache {
         threads: u32,
         step: &Step,
     ) {
+        let site = Site { kind, threads, bufs: bufs.iter().map(|b| b.alloc_id() as usize).collect(), offs: offsets.into() };
+        if let Some(prev) = self.fresh.insert(site, params.into()) {
+            let key = Key { kind, threads, bufs: bufs.iter().map(|b| b.alloc_id() as usize).collect(), params: prev, offs: offsets.into() };
+            if self.map.get(&key).is_some_and(|e| !e.reused) {
+                self.map.remove(&key);
+            }
+        }
         if self.map.len() >= self.cap {
             self.map.retain(|_, e| e.reused);
             if self.map.len() >= self.cap {
                 self.map.clear();
             }
+            self.fresh.clear();
         }
         self.map.insert(
             Self::key(kind, bufs, offsets, params, threads),
