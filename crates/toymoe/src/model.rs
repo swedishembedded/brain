@@ -34,7 +34,7 @@ struct Weights {
 }
 
 fn load_weights(path: &str) -> Weights {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+    let model = checkpoint::st::load_safetensors(path).unwrap_or_else(|e| {
         eprintln!(
             "error: cannot read MoE weights '{path}': {e}\n\
              \n\
@@ -46,12 +46,8 @@ fn load_weights(path: &str) -> Weights {
         );
         std::process::exit(1);
     });
-    let json_len = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let header = std::str::from_utf8(&bytes[8..8 + json_len]).expect("bad header utf8");
-    let json: serde_json::Value = serde_json::from_str(header).expect("bad header json");
-
-    let c = &json["config"];
-    let g = |k: &str| c[k].as_u64().unwrap_or_else(|| panic!("missing config.{k}")) as u32;
+    let c = model.config();
+    let g = |k: &str| c[k].as_u64().unwrap_or_else(|| panic!("{path}: missing config.{k}")) as u32;
     let cfg = Config {
         vocab_size: g("vocab_size"),
         block_size: g("block_size"),
@@ -62,20 +58,7 @@ fn load_weights(path: &str) -> Weights {
         top_k: g("top_k"),
         d_ff: g("d_ff"),
     };
-
-    let data = &bytes[8 + json_len..];
-    let mut tensors = HashMap::new();
-    for t in json["tensors"].as_array().expect("tensors array") {
-        let name = t["name"].as_str().unwrap().to_string();
-        let offset = t["offset"].as_u64().unwrap() as usize;
-        let numel = t["numel"].as_u64().unwrap() as usize;
-        let floats: Vec<f32> = data[offset * 4..(offset + numel) * 4]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
-        tensors.insert(name, floats);
-    }
-    Weights { cfg, tensors }
+    Weights { cfg, tensors: model.tensors }
 }
 
 const K_EMBED: usize = 0;
@@ -123,9 +106,9 @@ const ENGINE_PIPELINES: &[(&str, &str)] = &[
 
 impl Engine {
     /// Load an inference [`Engine`] from a checkpoint written by the trainer
-    /// (`Trainer::save` / the generic `fit`) or the inference weight format. The
-    /// two share the `[u64 LE json_len][json header][f32 blob]` container, with a
-    /// tied `lm_head.weight`, so a `fit`-saved MoE checkpoint loads here directly.
+    /// (`Trainer::save` / the generic `fit`): a safetensors file with the model
+    /// config under `brain.config` and a tied `lm_head.weight`, so a
+    /// `fit`-saved MoE checkpoint loads here directly.
     pub fn load(path: &str) -> Engine {
         Engine::new(load_weights(path))
     }
@@ -563,6 +546,26 @@ pub fn run_generate() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The inference loader reads the checkpoint the trainer writes
+    /// (`checkpoint::save`: safetensors with the config under `brain.config`),
+    /// config and tensors both.
+    #[test]
+    fn load_weights_reads_a_trainer_checkpoint() {
+        let path = std::env::temp_dir().join(format!("brain-toymoe-load-{}.safetensors", std::process::id()));
+        let path = path.to_str().unwrap();
+        let config = serde_json::json!({
+            "vocab_size": 5, "block_size": 8, "n_layers": 1, "d_model": 2, "n_heads": 1,
+            "n_experts": 2, "top_k": 1, "d_ff": 4
+        });
+        let emb: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        checkpoint::save(path, config, &[("token_emb.weight".to_string(), vec![10], emb.clone()), ("lm_head.weight".to_string(), vec![5, 2], emb.clone())]);
+        let w = load_weights(path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!((w.cfg.vocab_size, w.cfg.block_size, w.cfg.n_experts, w.cfg.d_ff), (5, 8, 2, 4));
+        assert_eq!(w.tensors["token_emb.weight"], emb);
+        assert_eq!(w.tensors["lm_head.weight"], emb);
+    }
 
     #[test]
     fn xorshift_deterministic() {
