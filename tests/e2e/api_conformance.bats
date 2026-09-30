@@ -474,6 +474,12 @@ get_url() {
   [ "$sig" = "89504e470d0a1a0a" ]
 }
 
+@test "openai /images/generations: the whitelisted 384x384 is accepted" {
+  post_json openai /v1/images/generations '{"model":"brain/mock","prompt":"a red cat","size":"384x384"}'
+  [ "$STATUS" -eq 200 ]
+  validate openai.json ImagesResponse "$RESP"
+}
+
 @test "openrouter /images/generations: 200, b64_json decodes to PNG" {
   post_json openrouter /images/generations '{"model":"brain/mock","prompt":"a dog","size":"256x256"}'
   [ "$STATUS" -eq 200 ]

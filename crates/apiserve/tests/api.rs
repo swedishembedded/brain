@@ -1174,6 +1174,19 @@ async fn openai_images_unknown_and_non_image_models_are_404() {
     assert_eq!(st, StatusCode::NOT_FOUND, "a non-image (chat) model must 404");
 }
 
+/// Every whitelisted size a served model generates at is accepted, 384x384
+/// (Janus-Pro's only size) included.
+#[tokio::test]
+async fn openai_images_accept_the_whitelisted_small_sizes() {
+    let (app, key) = image_app(Provider::OpenAI);
+    for size in ["256x256", "384x384", "512x512"] {
+        let body = json!({"model": "brain-image", "prompt": "a red cat", "size": size});
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+        assert_eq!(st, StatusCode::OK, "{size} must 200: {v}");
+        assert_valid("openai.json", "ImagesResponse", &v);
+    }
+}
+
 /// Bad bodies -> 400: missing model, missing prompt, unsupported size, n out of
 /// range, a bad response_format, a bad precision, and malformed JSON.
 #[tokio::test]

@@ -917,6 +917,8 @@ fn event_delta(v: &Value) -> Option<Value> {
 /// landscape sizes; the default is `1024x1024`.
 const IMAGE_SIZES: &[(&str, u32, u32)] = &[
     ("256x256", 256, 256),
+    // Janus-Pro's only size (576 VQ-16 tokens).
+    ("384x384", 384, 384),
     ("512x512", 512, 512),
     ("1024x1024", 1024, 1024),
     ("1024x1536", 1024, 1536),
