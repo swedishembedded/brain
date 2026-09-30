@@ -9,8 +9,13 @@
 //! Janus-Pro shares; `brain_arch::by_hf_config` tells them apart by the
 //! generation heads only Janus-Pro configures.
 //!
-//! This crate reads the configuration ([`config`]). The tower, aligner and
-//! composite, and serving them, are not implemented yet.
+//! * [`config`]: the checkpoint's `config.json`.
+//! * [`preprocess`]: resize, pad to square and rescale, then each branch's
+//!   own resize and normalization.
+//! * [`tower`]: SAM-B and SigLIP-L on one device, joined by the split
+//!   aligner (`model::projector`).
+//! * [`prompt`]: the conversation format and the image splice.
+//! * [`model`]: the composite, with `brain-qwen3`'s decoder.
 //!
 //! Swedish Embedded AB implements vision-language model inference like this
 //! for its clients. If your team needs expertise in multimodal models on
@@ -18,5 +23,11 @@
 //! info@swedishembedded.com.
 
 pub mod config;
+pub mod import;
+pub mod model;
+pub mod preprocess;
+pub mod prompt;
+pub mod tower;
 
 pub use config::{AlignerConfig, DeepseekVlConfig, TowerBranch};
+pub use model::DeepseekVl;

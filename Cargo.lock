@@ -1108,6 +1108,14 @@ dependencies = [
 name = "brain-deepseekvl"
 version = "1.2.0"
 dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-model",
+ "brain-qwen3",
+ "brain-sam1",
  "brain-testutil",
  "serde_json",
 ]

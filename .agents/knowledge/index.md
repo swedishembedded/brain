@@ -231,3 +231,4 @@ What belongs where:
 | 188 | A near-unit codebook hides a missing normalize | [`188-a-near-unit-codebook-hides-a-missing-normalize.md`](188-a-near-unit-codebook-hides-a-missing-normalize.md) |
 | 189 | An in-band example separator is a vocabulary assumption | [`189-an-example-separator-is-a-vocabulary-assumption.md`](189-an-example-separator-is-a-vocabulary-assumption.md) |
 | 190 | A tokenizer hash identifies a library version, not a tokenizer | [`190-a-tokenizer-hash-is-a-library-version.md`](190-a-tokenizer-hash-is-a-library-version.md) |
+| 191 | DeepSeek-VL's processor does not normalize; each tower branch does | [`191-deepseek-vl-normalizes-per-branch.md`](191-deepseek-vl-normalizes-per-branch.md) |
