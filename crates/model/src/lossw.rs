@@ -26,12 +26,14 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-/// Per-position weighted cross-entropy state: an `[n]` weight row and an
-/// `[n·v]` scratch buffer for the weighted CE gradient (`n = b·t`, `v` =
-/// vocab).
+/// Per-position weighted cross-entropy state: an `[n]` weight row and a
+/// `[rows·v]` scratch buffer for the weighted CE gradient (`n = b·t`, `v` =
+/// vocab, `rows` the logits rows a model holds at once - `n` unless its head
+/// works in row chunks).
 pub struct WeightedCe {
     n: u64,
     v: u64,
+    rows: u64,
     loss_weights: DeviceBuffer,
     d_logits_weighted: DeviceBuffer,
 }
@@ -42,7 +44,14 @@ impl WeightedCe {
     /// buffers already exist), sized for that model's `n = b·t` rows and
     /// `v` = vocab.
     pub fn new(gpu: &Gpu, n: u64, v: u64) -> Self {
-        Self { n, v, loss_weights: gpu.storage(n), d_logits_weighted: gpu.storage(n * v) }
+        Self::new_chunked(gpu, n, v, n)
+    }
+
+    /// [`Self::new`] for a model whose logits hold `rows` of the `n` rows at
+    /// a time ([`Self::hook_rows`]).
+    pub fn new_chunked(gpu: &Gpu, n: u64, v: u64, rows: u64) -> Self {
+        assert!(rows > 0 && rows <= n, "WeightedCe: chunk of {rows} rows for {n} rows");
+        Self { n, v, rows, loss_weights: gpu.storage(n), d_logits_weighted: gpu.storage(rows * v) }
     }
 
     /// Append the row-scaling step (the model's own registered kernel index
@@ -53,8 +62,17 @@ impl WeightedCe {
     /// buffer: every downstream backward step (the head's dw/dx and beyond)
     /// must read THIS instead of the raw `d_logits` passed in.
     pub fn hook<'a>(&'a self, gpu: &Gpu, steps: &mut Vec<Step>, scale_row: usize, d_logits: &DeviceBuffer) -> &'a DeviceBuffer {
-        let total = (self.n * self.v) as u32;
-        steps.push(gpu.step(scale_row, &[d_logits, &self.loss_weights, &self.d_logits_weighted], &[total, self.v as u32], total));
+        self.hook_rows(gpu, steps, scale_row, d_logits, 0, self.n as u32)
+    }
+
+    /// [`Self::hook`] for one chunk: `d_logits` holds the gradient of rows
+    /// `r0..r0+rows`, which are scaled by those rows' weights. `r0` must be
+    /// a legal binding offset into the `[n]` weight row (a multiple of 64
+    /// rows is, on every adapter).
+    pub fn hook_rows<'a>(&'a self, gpu: &Gpu, steps: &mut Vec<Step>, scale_row: usize, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> &'a DeviceBuffer {
+        assert!(rows as u64 <= self.rows && (r0 + rows) as u64 <= self.n, "WeightedCe::hook_rows: rows {r0}..{} past the chunk {} / batch {}", r0 + rows, self.rows, self.n);
+        let total = rows * self.v as u32;
+        steps.push(gpu.step_sliced(scale_row, &[d_logits, &self.loss_weights, &self.d_logits_weighted], &[(0, 0), (r0 as u64, rows as u64), (0, 0)], &[total, self.v as u32], total));
         &self.d_logits_weighted
     }
 

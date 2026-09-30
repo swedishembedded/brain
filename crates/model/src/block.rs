@@ -833,7 +833,8 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
         // falls back the same way rather than dispatching a workgroup size
         // the device cannot run.
         Some(flash) if g.caps().workgroup_reductions && g.caps().max_workgroup_size >= 256 => {
-            g.submit(&[], &[flash_gqa_causal_fwd(g, flash, &ga, &q, &k, &v, &ctx)])
+            let lse = g.storage((nh * n) as u64);
+            g.submit(&[], &[flash_gqa_causal_fwd(g, flash, &ga, &q, &k, &v, &ctx, &lse)])
         }
         _ => {
             let scores = g.storage((nh * n * n) as u64);
@@ -865,10 +866,69 @@ pub fn gqa_attn_sublayer_fwd(g: &Gpu, ids: &GqaAttnIds, dims: &GqaAttnDims, w: &
 /// `Gqa::params()`'s field order (`[b, n_heads, n_kv_heads, t, head_dim,
 /// group]`) already matches the kernel's own `Params` struct exactly - same
 /// contract `gqa_fwd`/`gqa_scores.wgsl`/`gqa_apply.wgsl` share.
-pub fn flash_gqa_causal_fwd(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer) -> Step {
+///
+/// `lse` (`[b, n_heads, t]`) receives each row's log-sum-exp of the scaled
+/// scores - all [`flash_gqa_causal_bwd`] needs to rebuild the softmax.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_gqa_causal_fwd(g: &Gpu, kernel: usize, a: &Gqa, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer, lse: &DeviceBuffer) -> Step {
     const BR: u32 = 64; // query rows per workgroup - matches the kernel's own BR
     let nwg = a.b * a.n_heads * a.t.div_ceil(BR);
-    g.dispatch(kernel, &[q, k, v, ctx], &a.params(), gpu_core::Dispatch::Workgroups(nwg))
+    g.dispatch(kernel, &[q, k, v, ctx, lse], &a.params(), gpu_core::Dispatch::Workgroups(nwg))
+}
+
+/// Pipeline indices of the causal GQA flash-attention training trio: the
+/// forward that also writes the row log-sum-exp, and its two backward halves.
+#[derive(Clone, Copy, Debug)]
+pub struct FlashGqaIds {
+    pub fwd: usize,
+    pub bwd_dq: usize,
+    pub bwd_dkv: usize,
+}
+
+impl FlashGqaIds {
+    /// Workgroup memory the backward kernels declare (`flash_attn_causal_gqa
+    /// _bwd_{dq,dkv}.wgsl`: two `[8,128]` tiles plus two `[8,64,4]` partial
+    /// buffers).
+    pub const BWD_WORKGROUP_BYTES: u32 = 24 * 1024;
+
+    /// Whether `g` can run the trio for a `head_dim`-wide head: all three are
+    /// shared-memory, barrier-cooperative kernels at a fixed 256-thread
+    /// workgroup with head_dim tiles of 128. A device that cannot is served
+    /// by the materialised [`gqa_fwd`]/[`gqa_bwd`] chain - same math, `[H,T,T]`
+    /// memory - rather than dispatched a kernel it cannot execute.
+    pub fn supported(g: &Gpu, head_dim: u32) -> bool {
+        let caps = g.caps();
+        caps.workgroup_reductions && caps.max_workgroup_size >= 256 && caps.workgroup_mem_bytes >= Self::BWD_WORKGROUP_BYTES && head_dim <= 128
+    }
+}
+
+/// Backward of [`flash_gqa_causal_fwd`]: `d_q`, `d_k`, `d_v` from the context
+/// gradient, the forward's `q`/`k`/`v`/`ctx` and its `lse` - never the
+/// `[H,T,T]` probabilities [`gqa_bwd`] reads. `dsum` (`[b, n_heads, t]`) is
+/// scratch the first kernel fills with `D_i = dO_i·O_i` for the second. All
+/// three outputs are overwritten.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_gqa_causal_bwd(
+    g: &Gpu,
+    ids: &FlashGqaIds,
+    a: &Gqa,
+    q: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+    lse: &DeviceBuffer,
+    d_ctx: &DeviceBuffer,
+    dsum: &DeviceBuffer,
+    d_q: &DeviceBuffer,
+    d_k: &DeviceBuffer,
+    d_v: &DeviceBuffer,
+) -> [Step; 2] {
+    const BR: u32 = 64; // rows per workgroup in both kernels
+    let tiles = a.t.div_ceil(BR);
+    [
+        g.dispatch(ids.bwd_dq, &[q, k, v, ctx, d_ctx, lse, d_q, dsum], &a.params(), gpu_core::Dispatch::Workgroups(a.b * a.n_heads * tiles)),
+        g.dispatch(ids.bwd_dkv, &[q, k, v, d_ctx, lse, dsum, d_k, d_v], &a.params(), gpu_core::Dispatch::Workgroups(a.b * a.n_kv_heads * tiles)),
+    ]
 }
 
 /// The single-token incremental-decode twin of [`gqa_attn_sublayer_fwd`]:
@@ -2852,6 +2912,17 @@ pub fn tile_budget_words() -> u64 {
         .unwrap_or(TILE_BUDGET_WORDS)
 }
 
+/// The largest budget [`tile_budget_words_for`] can return on any device: a
+/// storage binding's size is a `u32` byte count in both Vulkan and WebGPU. For
+/// a pre-flight estimate made before a device exists, where an upper bound is
+/// the safe side.
+pub fn tile_budget_words_upper_bound() -> u64 {
+    if let Some(w) = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&w| w > 0) {
+        return w;
+    }
+    (u32::MAX as u64 / TILE_BUDGET_FRACTION / 4).max(TILE_BUDGET_WORDS)
+}
+
 /// The budget for `gpu`, from its **queried** max storage-binding size.
 ///
 /// The constant above is a floor for an unknown device, and using it on a known
@@ -3365,7 +3436,8 @@ mod kv_cache_tests {
         let want = gpu.read(&ctx_ref, (t * hq) as usize);
 
         let ctx_flash = gpu.storage((t * hq) as u64);
-        gpu.submit(&[], &[flash_gqa_causal_fwd(&gpu, 3, &ga, &q, &k, &v, &ctx_flash)]);
+        let lse = gpu.storage((n_heads * t) as u64);
+        gpu.submit(&[], &[flash_gqa_causal_fwd(&gpu, 3, &ga, &q, &k, &v, &ctx_flash, &lse)]);
         let got = gpu.read(&ctx_flash, (t * hq) as usize);
 
         let mut worst = 0.0f32;
@@ -3376,6 +3448,102 @@ mod kv_cache_tests {
         }
         assert!(worst > 0.0, "sanity: q/k/v are not all-zero, so a real match should not be a trivial 0==0");
         println!("flash_causal_gqa vs gqa_fwd: worst abs diff = {worst:e}");
+    }
+
+    /// [`flash_gqa_causal_bwd`] must produce the gradients the materialised
+    /// [`gqa_bwd`] (gradient-checked through every qwen3 gradcheck) does,
+    /// from nothing but the forward's `lse` - at a sub-tile head (8, where
+    /// most channels of a 128-wide tile are padding) and at the full 128-wide
+    /// head real Qwen3 uses, with `t` spanning several query AND key tiles and
+    /// ending mid-tile, and a GQA group of 2 so the key kernel's per-group sum
+    /// is exercised.
+    #[test]
+    fn flash_causal_gqa_bwd_matches_materialized_gqa_bwd() {
+        let gpu = gpu_core::testgpu::dev(&[
+            ("gqa_scores", kernels::GQA_SCORES),
+            ("attn_softmax", kernels::ATTN_SOFTMAX),
+            ("gqa_apply", kernels::GQA_APPLY),
+            ("gqa_bwd_dscores", kernels::GQA_BWD_DSCORES),
+            ("gqa_bwd_dv", kernels::GQA_BWD_DV),
+            ("gqa_bwd_dq", kernels::GQA_BWD_DQ),
+            ("gqa_bwd_dk", kernels::GQA_BWD_DK),
+            ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+            ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+            ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+        ]);
+        let ids = KernelIds {
+            rmsnorm: 0,
+            rms_inv: 0,
+            rmsnorm_dx: 0,
+            rmsnorm_dw: 0,
+            rope: 0,
+            rope_bwd: 0,
+            gqa_scores: 0,
+            gqa_apply: 2,
+            attn_softmax: 1,
+            gqa_dscores: 3,
+            gqa_dv: 4,
+            gqa_dq: 5,
+            gqa_dk: 6,
+            silu_mul: 0,
+            silu_da: 0,
+            silu_db: 0,
+            rmsnorm_rows: UNREGISTERED,
+            rmsnorm_dx_rows: UNREGISTERED,
+        };
+        let flash = FlashGqaIds { fwd: 7, bwd_dq: 8, bwd_dkv: 9 };
+        if !FlashGqaIds::supported(&gpu, 128) {
+            eprintln!("skipping: the test device cannot run the flash training kernels");
+            return;
+        }
+        for (t, n_heads, n_kv_heads, head_dim) in [(100u32, 4u32, 2u32, 8u32), (137, 4, 2, 128)] {
+            let (hq, hkv) = (n_heads * head_dim, n_kv_heads * head_dim);
+            let mk = |n: u32, seed: f32| (0..n).map(|i| (i as f32 * 0.37 + seed).sin()).collect::<Vec<f32>>();
+            let q = gpu.storage_init("q", &mk(t * hq, 0.1));
+            let k = gpu.storage_init("k", &mk(t * hkv, 0.2));
+            let v = gpu.storage_init("v", &mk(t * hkv, 0.3));
+            let d_ctx = gpu.storage_init("d_ctx", &mk(t * hq, 0.4));
+            let ga = Gqa { b: 1, t, n_heads, n_kv_heads, head_dim };
+
+            let scores = gpu.storage((n_heads * t * t) as u64);
+            let probs = gpu.storage((n_heads * t * t) as u64);
+            let d_scores = gpu.storage((n_heads * t * t) as u64);
+            let ctx = gpu.storage((t * hq) as u64);
+            let (dq_ref, dk_ref, dv_ref) = (gpu.storage((t * hq) as u64), gpu.storage((t * hkv) as u64), gpu.storage((t * hkv) as u64));
+            let mut steps = gqa_fwd(&gpu, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx);
+            steps.extend(gqa_bwd(&gpu, &ids, &ga, &q, &k, &v, &probs, &d_ctx, &d_scores, &dq_ref, &dk_ref, &dv_ref));
+            gpu.submit(&[], &steps);
+
+            let ctx_flash = gpu.storage((t * hq) as u64);
+            let lse = gpu.storage((n_heads * t) as u64);
+            let dsum = gpu.storage((n_heads * t) as u64);
+            let (dq, dk, dv) = (gpu.storage((t * hq) as u64), gpu.storage((t * hkv) as u64), gpu.storage((t * hkv) as u64));
+            let mut steps = vec![flash_gqa_causal_fwd(&gpu, flash.fwd, &ga, &q, &k, &v, &ctx_flash, &lse)];
+            // The backward is fed the reference context, so a forward
+            // mismatch cannot hide inside a backward one.
+            steps.extend(flash_gqa_causal_bwd(&gpu, &flash, &ga, &q, &k, &v, &ctx, &lse, &d_ctx, &dsum, &dq, &dk, &dv));
+            gpu.submit(&[], &steps);
+
+            for (name, got, want, len) in [("dq", &dq, &dq_ref, t * hq), ("dk", &dk, &dk_ref, t * hkv), ("dv", &dv, &dv_ref, t * hkv)] {
+                let (got, want) = (gpu.read(got, len as usize), gpu.read(want, len as usize));
+                let scale = want.iter().fold(1e-6f32, |m, x| m.max(x.abs()));
+                let worst = got.iter().zip(&want).fold(0.0f32, |m, (g, w)| m.max((g - w).abs()));
+                println!("t={t} hd={head_dim} {name}: worst abs diff {worst:e} (scale {scale:e})");
+                assert!(worst <= 1e-4 * scale.max(1.0), "t={t} hd={head_dim} {name}: flash backward differs from gqa_bwd by {worst:e} at scale {scale:e}");
+            }
+
+            // lse against the host, from the materialised scores.
+            let (s_host, lse_got) = (gpu.read(&scores, (n_heads * t * t) as usize), gpu.read(&lse, (n_heads * t) as usize));
+            for h in 0..n_heads as usize {
+                for i in 0..t as usize {
+                    let row = &s_host[(h * t as usize + i) * t as usize..][..=i];
+                    let m = row.iter().fold(f32::MIN, |a, &b| a.max(b));
+                    let want = m + row.iter().map(|x| (x - m).exp()).sum::<f32>().ln();
+                    let got = lse_got[h * t as usize + i];
+                    assert!((got - want).abs() < 1e-4 * want.abs().max(1.0), "lse h={h} i={i}: {got} vs {want}");
+                }
+            }
+        }
     }
 }
 

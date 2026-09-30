@@ -35,6 +35,13 @@
 //!                                    # `i8w` = int8 weights, `kv8` = int8 KV
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
+//!   qwen_bench lora-train --t T [--weights CKPT] [--steps N] [--rank R] [--profile]
+//!                                    # one LoRA training step (zero_grads +
+//!                                    # forward + backward + AdamW) at batch 1
+//!                                    # and block T, rank R (default 8, alpha
+//!                                    # 2R) over all 7 projections - the SDK
+//!                                    # fine-tune's shape. Real weights with
+//!                                    # --weights, else random at --model
 //!   qwen_bench gemm8   [m k n] [reps]      # A/B `matmul_i8_dyn` at one shape
 //!   qwen_bench gemm8-sweep [k n] [reps]    # `matmul_i8_dyn` GOP/s across an
 //!                                          # `m` sweep at fixed k,n — the D0
@@ -288,6 +295,10 @@ fn main() {
         let seq: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(512);
         let reps: usize = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(20);
         flash_decode_i8_bench(seq, reps);
+        return;
+    }
+    if mode == "lora-train" {
+        lora_train_bench(&a, cfg, model_name);
         return;
     }
     if mode == "flash-prefill" {
@@ -1045,4 +1056,83 @@ fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, 
     let steps = eng.steps_for_profile(cc, &tokens, &positions, &seqlens, &blocks, &offsets, &bt, true);
     let secs = report(&gpu, &format!("SERVE-PREFILL cc={cc} start={start}"), &steps, reps, roofs);
     println!("\none prefill chunk of {cc} rows at start={start}: {:.2} ms  ->  {:.0} tok/s", secs * 1e3, cc as f64 / secs);
+}
+
+/// The value after `flag` in argv, if present.
+fn flag<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
+    a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).map(|s| s.as_str())
+}
+
+/// One LoRA training step's wall time at `--t` - see the `lora-train` usage
+/// line. The step is bracketed by `poll_wait` (E.0), and two untimed steps
+/// ramp the device first (E.0b).
+fn lora_train_bench(a: &[String], shape: QwenConfig, model_name: &str) {
+    let t: u32 = flag(a, "--t").and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let steps: usize = flag(a, "--steps").and_then(|s| s.parse().ok()).unwrap_or(5);
+    let rank: u32 = flag(a, "--rank").and_then(|s| s.parse().ok()).unwrap_or(8);
+    let lora = qwen3::LoraCfg { rank, alpha: 2.0 * rank as f32, targets: qwen3::finetune::default_lora_targets() };
+    let t0 = Instant::now();
+    let (cfg, init) = match flag(a, "--weights") {
+        Some(w) => {
+            let c = checkpoint::load(w);
+            let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{e}"));
+            cfg.lora = Some(lora);
+            let mut init = qwen3::init_weights(&cfg, 7);
+            init.extend(c.by_role(""));
+            eprintln!("lora-train: {w} (real weights)");
+            (cfg, init)
+        }
+        None => {
+            let cfg = QwenConfig { lora: Some(lora), ..shape };
+            eprintln!("lora-train: {model_name} (random weights - valid for cost only)");
+            let init = init_weights_fast(&cfg, 7);
+            (cfg, init)
+        }
+    };
+    let m = Qwen::new(cfg.clone(), 1, t, &init);
+    drop(init);
+    eprintln!("built at T={t}, rank {rank} in {:.1}s", t0.elapsed().as_secs_f32());
+    let x: Vec<u32> = (0..t).map(|i| (i * 131 + 7) % cfg.vocab).collect();
+    let y: Vec<u32> = (0..t).map(|i| (i * 131 + 8) % cfg.vocab).collect();
+    m.set_batch(&x, &y);
+    // `(loss, forward secs)`: the forward reads its loss back, so it ends
+    // synchronised and the rest of the step is timed from there.
+    let step = |i: u32| -> (f32, f64) {
+        m.zero_grads();
+        m.poll_wait();
+        let t0 = Instant::now();
+        let loss = m.forward();
+        let fwd = t0.elapsed().as_secs_f64();
+        m.backward();
+        m.adamw_step(i, 1e-4, 0.1, Default::default(), Some(1.0), 1.0);
+        m.poll_wait();
+        (loss, fwd)
+    };
+    step(1);
+    step(2);
+    let t0 = Instant::now();
+    let (mut loss, mut fwd) = (0.0, 0.0);
+    for i in 0..steps {
+        let (l, f) = step(3 + i as u32);
+        loss = l;
+        fwd += f;
+    }
+    let secs = t0.elapsed().as_secs_f64() / steps as f64;
+    fwd /= steps as f64;
+    assert!(loss.is_finite(), "non-finite loss {loss} at T={t}");
+    println!(
+        "lora-train {model_name} T={t} rank={rank}: {:.3} s/step ({:.3} s forward, {:.3} s backward incl. recompute + AdamW)  {:.3} steps/s  {:.0} tok/s  (loss {loss:.3})",
+        secs,
+        fwd,
+        secs - fwd,
+        1.0 / secs,
+        t as f64 / secs
+    );
+    if a.iter().any(|x| x == "--profile") {
+        // Device time per kernel kind of one forward and one backward tape.
+        let gpu = m.gpu().share();
+        let roofs = banner(&gpu);
+        report(&gpu, &format!("LORA-TRAIN forward T={t}"), m.fwd_steps(), 1, roofs);
+        report(&gpu, &format!("LORA-TRAIN backward T={t}"), m.bwd_steps(), 1, roofs);
+    }
 }

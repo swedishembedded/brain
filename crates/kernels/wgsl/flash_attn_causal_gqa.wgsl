@@ -88,6 +88,10 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       k:   array<f32>;
 @group(0) @binding(3) var<storage, read>       v:   array<f32>;
 @group(0) @binding(4) var<storage, read_write> out: array<f32>;
+// Per-row log-sum-exp of the scaled scores, `[B, n_heads, T]`: everything the
+// backward (`flash_attn_causal_gqa_bwd_{dq,dkv}.wgsl`) needs to rebuild any
+// softmax weight as `exp(s - lse)` without the `[H,T,T]` probabilities.
+@group(0) @binding(5) var<storage, read_write> lse: array<f32>;
 
 var<workgroup> ksh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
 var<workgroup> vsh:  array<f32, 1024>;  // BC*HD  -> 4 KiB
@@ -223,5 +227,6 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             let d = c * LANES + lane;
             if (d < hd) { out[o_base + d] = o[c] * inv; }
         }
+        if (lane == 0u) { lse[(b * p.n_heads + h) * T + i] = m + log(l); }
     }
 }

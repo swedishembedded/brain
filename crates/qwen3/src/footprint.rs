@@ -27,21 +27,26 @@
 //!   so this estimate and what a build actually allocates cannot drift apart.
 //! - The plain (non-paged) KV cache: `new_impl` allocates one `[t, kv_dim]`
 //!   key + value buffer per layer of the WHOLE checkpoint (`0..cfg.n_layers`,
-//!   "regardless of `shard`" - its own comment) for EVERY build, not only a
-//!   `decode_only` one, so this term is never skipped here either.
-//! - The per-layer-boundary residual stream (`res`/`dres`): one `[n, d_model]`
-//!   buffer per boundary this shard owns (`shard.start..=shard.end`), doubled
-//!   when `train` (the backward-only `dres` twin).
-//! - The per-layer activation scratch (`Layer`): allocated ONCE and shared
-//!   across every non-owned-for-backward layer when `!train` (`new_impl`'s
-//!   own `shared`/`Layer::clone` pooling), or once PER owned layer when
-//!   `train` (backward needs every layer's own saved activations resident at
-//!   once).
+//!   "regardless of `shard`" - its own comment) for every inference build. A
+//!   training build allocates it on its first decode instead, so it is not
+//!   counted there.
+//! - The per-layer-boundary residual stream (`res`): one `[n, d_model]`
+//!   buffer per boundary this shard owns (`shard.start..=shard.end`), plus,
+//!   when `train`, the two `[n, d_model]` buffers the backward's `dres`
+//!   alternates between.
+//! - The per-layer activation scratch (`Layer`): allocated ONCE and shared by
+//!   every layer, training included (the backward recomputes each layer from
+//!   its saved `res[l]`), plus the attention scores: `n_heads·T²` for a
+//!   batched inference forward, the decode extent where no `[H,T,T]` slab
+//!   exists (a decode build, and a training build on the flash-attention
+//!   path).
+//! - The backward scratch (`d_*`, the LoRA correction scratch) under `train`.
 //! - The head-only logits/`d_logits` buffer (`shard.head`, skipped entirely
-//!   on a `decode_only` build - the LM head runs host-side there).
+//!   on a `decode_only` build - the LM head runs host-side there), one row
+//!   chunk of it at the largest binding budget any device can report.
 //!
-//! Not counted: `tokens`/`targets` (`[n]` id buffers), the LoRA scratch
-//! (`r · max_out`), and the handful of `[1]`-sized dummies every non-owned
+//! Not counted: `tokens`/`targets` (`[n]` id buffers), the `[n·r]` LoRA
+//! rank scratch, and the handful of `[1]`-sized dummies every non-owned
 //! stage carries - all a rounding error next to the terms above, and what
 //! `crates/cli/src/placement.rs::HEADROOM` (1 GiB, reserved on top of every
 //! automatic placement) exists to absorb, the same way it already does for
@@ -98,63 +103,80 @@ fn weight_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
 }
 
 /// The plain (non-paged) KV cache: one `[t, kv_dim]` key + value buffer per
-/// layer of the WHOLE checkpoint, always - see this module's doc.
-fn kv_cache_bytes(cfg: &QwenConfig, t: u32) -> u64 {
+/// layer of the WHOLE checkpoint for an inference build; none for a training
+/// build until it first decodes - see this module's doc.
+fn kv_cache_bytes(cfg: &QwenConfig, t: u32, train: bool) -> u64 {
+    if train {
+        return 0;
+    }
     2 * cfg.n_layers as u64 * t as u64 * cfg.kv_dim() as u64 * 4
 }
 
 /// The per-layer-boundary residual stream: one `[n, d_model]` buffer per
 /// boundary this shard owns (`shard.start..=shard.end`, inclusive - see
-/// `new_impl`'s own `0..=cfg.n_layers` loop), doubled under `train` for the
-/// backward-only `dres` twin.
+/// `new_impl`'s own `0..=cfg.n_layers` loop), plus under `train` the two
+/// buffers the backward's `dres` alternates between.
 fn residual_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool) -> u64 {
     let live_boundaries = (shard.end.saturating_sub(shard.start) + 1) as u64;
-    let one = live_boundaries * n * cfg.d_model as u64 * 4;
-    if train {
-        one * 2
-    } else {
-        one
-    }
+    let row = n * cfg.d_model as u64 * 4;
+    live_boundaries * row + if train { 2 * row } else { 0 }
 }
 
-/// The per-layer activation scratch (`Layer`): one shared copy when `!train`
-/// (`new_impl`'s own buffer-pooling - every layer reads/overwrites the SAME
-/// physical buffers since only `res[l+1]` ever crosses a layer boundary), or
-/// one copy PER owned layer when `train` (backward needs every layer's own
-/// saved forward activations resident at once).
-fn activation_scratch_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, t: u32, b: u32, train: bool, decode_only: bool) -> u64 {
+/// Whether a training build of `cfg` runs the flash-attention trio, which
+/// keeps no `[H,T,T]` slab: every GPU a placement targets runs its
+/// workgroup-cooperative kernels, and they tile a head of up to 128 channels
+/// (`model::block::FlashGqaIds::supported`).
+fn trains_on_flash(cfg: &QwenConfig) -> bool {
+    cfg.head_dim <= 128
+}
+
+/// The per-layer activation scratch (`Layer`): ONE copy shared by every layer
+/// (`new_impl`'s buffer pooling - only `res[l+1]` crosses a layer boundary,
+/// and the backward recomputes a layer from `res[l]` before differentiating
+/// it), plus the attention `scores`/`probs` pair: `b·n_heads·T²` each for a
+/// batched forward that materialises them, the decode extent otherwise, and
+/// the per-row log-sum-exp pair the flash backward reads.
+fn activation_scratch_bytes(cfg: &QwenConfig, n: u64, t: u32, b: u32, train: bool, decode_only: bool) -> u64 {
     let d = cfg.d_model as u64;
     let hq = cfg.q_dim() as u64;
     let hkv = cfg.kv_dim() as u64;
     let ff = cfg.d_ff as u64;
-    let bht2 = if decode_only { cfg.n_heads as u64 * t as u64 } else { b as u64 * cfg.n_heads as u64 * t as u64 * t as u64 };
-    // xn1, q_pre, q, k_pre, k, v, probs, ctx, xmid, xn2, gate_pre, up, h
-    let one_layer = n * d // xn1
-        + n * hq // q_pre
-        + n * hq // q
-        + n * hkv // k_pre
-        + n * hkv // k
-        + n * hkv // v
-        + bht2 // probs
-        + n * hq // ctx
-        + n * d // xmid
-        + n * d // xn2
-        + n * ff // gate_pre
-        + n * ff // up
-        + n * ff; // h
-    let layer_count = if train { shard.end.saturating_sub(shard.start) as u64 } else { 1 };
-    one_layer * layer_count * 4
+    let flash = train && trains_on_flash(cfg);
+    let bht2 = crate::model::attn_score_elems(decode_only || flash, b, cfg.n_heads, t);
+    let lse = if flash { 2 * b as u64 * cfg.n_heads as u64 * t as u64 } else { 0 };
+    // xn1, q_pre, q, k_pre, k, v, ctx, xmid, xn2, gate_pre, up, h
+    let layer = n * (3 * d + 3 * hq + 3 * hkv + 3 * ff);
+    (layer + 2 * bht2 + lse) * 4
 }
 
-/// The head-only logits/`d_logits` buffer: `[n, vocab]`, doubled under
-/// `train` for `d_logits`, skipped entirely on a `decode_only` build (the LM
-/// head runs host-side there - `new_impl`'s own `hd_or_dummy` gate) or on a
-/// non-head stage.
+/// The backward-only scratch of a training build: the `d_*` activation
+/// gradients, the materialised chain's `d_scores` where the flash path is not
+/// taken, and the LoRA correction's `[n, max_out]` output buffer.
+fn backward_scratch_bytes(cfg: &QwenConfig, n: u64, t: u32, b: u32, train: bool) -> u64 {
+    if !train {
+        return 0;
+    }
+    let d = cfg.d_model as u64;
+    let hq = cfg.q_dim() as u64;
+    let hkv = cfg.kv_dim() as u64;
+    let ff = cfg.d_ff as u64;
+    let d_scores = if trains_on_flash(cfg) { 0 } else { crate::model::attn_score_elems(false, b, cfg.n_heads, t) };
+    // d_xn, d_tmp, dxmid | d_ctx, d_q, dq_pre | d_k, dk_pre, d_v | d_h, d_gate_pre, d_up | lora_out
+    let grads = n * (3 * d + 3 * hq + 3 * hkv + 3 * ff) + n * hq.max(ff).max(d).max(hkv);
+    (grads + d_scores) * 4
+}
+
+/// The head-only logits/`d_logits` buffer: one row chunk of `[n, vocab]`
+/// (`crate::model::head_chunk_rows`, at the largest binding budget a device
+/// can report), doubled under `train` for `d_logits`, skipped entirely on a
+/// `decode_only` build (the LM head runs host-side there - `new_impl`'s own
+/// `hd_or_dummy` gate) or on a non-head stage.
 fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only: bool) -> u64 {
     if !shard.head || decode_only {
         return 0;
     }
-    let one = n * cfg.vocab as u64 * 4;
+    let v = cfg.vocab as u64;
+    let one = crate::model::head_chunk_rows(n, v, model::block::tile_budget_words_upper_bound()) * v * 4;
     if train {
         one * 2
     } else {
@@ -170,9 +192,10 @@ fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only:
 pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: u32, train: bool, decode_only: bool) -> u64 {
     let n = if decode_only { 1u64 } else { b as u64 * t as u64 };
     weight_bytes(cfg, shard, dt)
-        + kv_cache_bytes(cfg, t)
+        + kv_cache_bytes(cfg, t, train)
         + residual_bytes(cfg, shard, n, train)
-        + activation_scratch_bytes(cfg, shard, n, t, b, train, decode_only)
+        + activation_scratch_bytes(cfg, n, t, b, train, decode_only)
+        + backward_scratch_bytes(cfg, n, t, b, train)
         + head_bytes(cfg, shard, n, train, decode_only)
 }
 
@@ -310,27 +333,33 @@ mod tests {
         assert_eq!(quantized_linear_bytes(&cfg, &partial, Dtype::I8), one_linear_i8 * 7 * 2, "2 owned layers x 7 linears each");
     }
 
-    /// `!train` pools the per-layer activation scratch into ONE shared copy
-    /// (`new_impl`'s own `Layer::clone` pooling) - so it must NOT grow with
-    /// `n_layers`, unlike the weight/KV-cache/residual terms above it.
+    /// The per-layer activation scratch is ONE shared copy (`new_impl`'s own
+    /// `Layer::clone` pooling), training included - the backward recomputes
+    /// each layer - so it must NOT grow with `n_layers`, unlike the
+    /// weight/KV-cache/residual terms above it.
     #[test]
-    fn inference_activation_scratch_does_not_scale_with_layer_count() {
+    fn activation_scratch_does_not_scale_with_layer_count() {
         let cfg8 = tiny_cfg(8, 2048, 5632);
         let cfg16 = tiny_cfg(16, 2048, 5632);
-        let a = activation_scratch_bytes(&cfg8, &Shard::whole(8), 512, 512, 1, false, false);
-        let b = activation_scratch_bytes(&cfg16, &Shard::whole(16), 512, 512, 1, false, false);
-        assert_eq!(a, b, "inference (!train) scratch must be pooled to one copy regardless of layer count: 8L={a} 16L={b}");
+        for train in [false, true] {
+            let a = activation_scratch_bytes(&cfg8, 512, 512, 1, train, false);
+            let b = activation_scratch_bytes(&cfg16, 512, 512, 1, train, false);
+            assert_eq!(a, b, "train={train}: scratch must be pooled to one copy regardless of layer count: 8L={a} 16L={b}");
+        }
     }
 
-    /// `train` does NOT pool - backward needs every owned layer's own saved
-    /// activations resident at once, so doubling layers must double this term.
+    /// A training build on the flash path keeps nothing `T²`-sized: past the
+    /// weights, doubling the block at most doubles the estimate. The
+    /// materialised chain's `[H,T,T]` slabs would quadruple it.
     #[test]
-    fn training_activation_scratch_scales_with_layer_count() {
-        let cfg8 = tiny_cfg(8, 2048, 5632);
-        let cfg16 = tiny_cfg(16, 2048, 5632);
-        let a = activation_scratch_bytes(&cfg8, &Shard::whole(8), 512, 512, 1, true, false);
-        let b = activation_scratch_bytes(&cfg16, &Shard::whole(16), 512, 512, 1, true, false);
-        assert_eq!(b, a * 2, "training scratch must scale with owned layer count: 8L={a} 16L={b}");
+    fn training_memory_is_linear_in_the_block() {
+        let cfg = QwenConfig { lora: Some(crate::LoraCfg::attn(8, 16.0)), ..QwenConfig::qwen3_0_6b() };
+        let shard = Shard::whole(cfg.n_layers as usize);
+        let weights = weight_bytes(&cfg, &shard, Dtype::F32);
+        let at = |t: u32| estimate_vram_bytes(&cfg, &shard, Dtype::F32, 1, t, true, false) - weights;
+        for t in [4096u32, 8192] {
+            assert!(at(2 * t) <= 2 * at(t) + (1 << 20), "T={t}: {} -> {} bytes past the weights", at(t), at(2 * t));
+        }
     }
 
     /// A `decode_only` build skips the head logits/`d_logits` buffer entirely

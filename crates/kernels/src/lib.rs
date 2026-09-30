@@ -252,6 +252,8 @@ pub const CE_STATS: &str = include_str!("../wgsl/ce_stats.wgsl");
 pub const CE_VALUE: &str = include_str!("../wgsl/ce_value.wgsl");
 /// `wgsl/ce_value_masked.wgsl`
 pub const CE_VALUE_MASKED: &str = include_str!("../wgsl/ce_value_masked.wgsl");
+/// `wgsl/ce_value_stats_rows.wgsl`
+pub const CE_VALUE_STATS_ROWS: &str = include_str!("../wgsl/ce_value_stats_rows.wgsl");
 /// `wgsl/chan_place.wgsl`
 pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
 /// `wgsl/ciou.wgsl`
@@ -404,6 +406,10 @@ pub const FLASH_ATTN_BIDIR_SPANS: &str = include_str!("../wgsl/flash_attn_bidir_
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
 /// `wgsl/flash_attn_causal_gqa.wgsl`
 pub const FLASH_ATTN_CAUSAL_GQA: &str = include_str!("../wgsl/flash_attn_causal_gqa.wgsl");
+/// `wgsl/flash_attn_causal_gqa_bwd_dkv.wgsl`
+pub const FLASH_ATTN_CAUSAL_GQA_BWD_DKV: &str = include_str!("../wgsl/flash_attn_causal_gqa_bwd_dkv.wgsl");
+/// `wgsl/flash_attn_causal_gqa_bwd_dq.wgsl`
+pub const FLASH_ATTN_CAUSAL_GQA_BWD_DQ: &str = include_str!("../wgsl/flash_attn_causal_gqa_bwd_dq.wgsl");
 /// `wgsl/flash_attn_cross_reg2.wgsl`
 pub const FLASH_ATTN_CROSS_REG2: &str = include_str!("../wgsl/flash_attn_cross_reg2.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
@@ -1308,6 +1314,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ce_stats", CE_STATS),
     ("ce_value", CE_VALUE),
     ("ce_value_masked", CE_VALUE_MASKED),
+    ("ce_value_stats_rows", CE_VALUE_STATS_ROWS),
     ("chan_place", CHAN_PLACE),
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
@@ -1384,6 +1391,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_bidir_spans", FLASH_ATTN_BIDIR_SPANS),
     ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("flash_attn_causal_gqa", FLASH_ATTN_CAUSAL_GQA),
+    ("flash_attn_causal_gqa_bwd_dkv", FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+    ("flash_attn_causal_gqa_bwd_dq", FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
     ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),

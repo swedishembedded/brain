@@ -141,8 +141,17 @@ const RMSNORM_DX_ROWS: usize = 55;
 const ROPE_TABLE: usize = 56;
 const ROPE_TABLE_BWD: usize = 57;
 const ROPE_TABLE_AT: usize = 58;
+// Causal GQA flash attention for training: the forward that also writes the
+// row log-sum-exp, and its two backward halves (`block::FlashGqaIds`).
+const FLASH_GQA_FWD: usize = 59;
+const FLASH_GQA_BWD_DQ: usize = 60;
+const FLASH_GQA_BWD_DKV: usize = 61;
+/// Per-row cross-entropy plus its softmax statistics, one workgroup per row -
+/// the large-vocab replacement of `CE_VALUE` + `CE_STATS` where the device
+/// runs cooperative kernels.
+const CE_VALUE_STATS_ROWS: usize = 62;
 // Column-range copy between row-major matrices (`Qwen::head_tile_passes`).
-const COPY_COLS: usize = 59;
+const COPY_COLS: usize = 63;
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -214,6 +223,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("rope_base_yarn", kernels::ROPE_BASE_YARN),
     ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
+    ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
+    ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+    ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+    ("ce_value_stats_rows", kernels::CE_VALUE_STATS_ROWS),
     ("copy_cols", kernels::COPY_COLS),
 ];
 
@@ -436,7 +449,7 @@ fn align_head_tiles(base: &[(u32, u32)], vocab: u32) -> Vec<(u32, u32)> {
 /// `u32` overflows past `t ~= 16384` (16 heads * 16384^2 already exceeds
 /// `u32::MAX`), silently wrapping in release and panicking in debug, well
 /// inside the long-context range this crate now serves.
-fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) -> u64 {
+pub(crate) fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) -> u64 {
     if decode_only {
         n_heads as u64 * t as u64
     } else {
@@ -632,15 +645,27 @@ pub struct Qwen {
     lora_da: DeviceBuffer,  // [n*r] : grad wrt a
     lora_out: DeviceBuffer, // [n*max_out] : delta = a @ B^T
 
-    fwd_steps: Vec<Step>,
-    bwd_steps: Vec<Step>,
-    ce_grad_uni: DeviceBuffer,
+    fwd_steps: Tape,
+    bwd_steps: Tape,
+    /// `[1]`: `1/count` for the current batch, the CE gradient's scale.
+    inv_count: DeviceBuffer,
+    /// Rows of logits the head holds at once ([`head_chunk_rows`]).
+    head_rows: u32,
+    /// The flash-attention training kernels, where this is a training build
+    /// on a device that runs them; `None` uses the materialised chain.
+    flash: Option<block::FlashGqaIds>,
+    /// `[b, n_heads, t]` row log-sum-exp the flash forward leaves for the
+    /// backward, and the `D = dO·O` scratch the backward pair shares.
+    attn_lse: DeviceBuffer,
+    attn_dsum: DeviceBuffer,
+    /// `[b, n_heads, t, t]` scores/probs for the padded-key-mask forward on a
+    /// flash training build, which otherwise keeps no such slab.
+    kmask_scratch: std::cell::OnceCell<(DeviceBuffer, DeviceBuffer)>,
 
     // Persistent per-layer KV cache for incremental decode ([max_t, kv_dim] each),
     // and the next absolute position `step` will decode (cache fill level). Sized
     // for the whole model; the decode path requires a single-device (whole) shard.
-    kcache: Vec<DeviceBuffer>,
-    vcache: Vec<DeviceBuffer>,
+    kv: std::cell::OnceCell<KvCache>,
     dec_pos: Cell<u32>,
     /// The `Ops` façade (B3/B7) this model dispatches its per-layer linears
     /// through - a second handle onto the SAME device AND compiled pipeline
@@ -670,6 +695,67 @@ pub struct Qwen {
     /// instance instead of silently reading/writing past the smaller buffers.
     decode_only: bool,
 }
+
+/// A recorded batched pass, and the layer boundaries it is submitted at.
+///
+/// Submitted one layer at a time rather than as one list: at a long block a
+/// layer is seconds of device work, and a whole pass handed over in one
+/// `submit` becomes one batch the backend waits on as a unit, which a
+/// 16k-token backward (~80 s on a P40) takes past `BRAIN_GPU_WAIT_S`. Short
+/// blocks are unaffected: a submission the backend's size valve does not
+/// force out still joins the next one.
+#[derive(Default)]
+struct Tape {
+    steps: Vec<Step>,
+    /// Exclusive end indices of each segment but the last.
+    ends: Vec<usize>,
+}
+
+impl Tape {
+    /// End the current segment here.
+    fn mark(&mut self) {
+        self.ends.push(self.steps.len());
+    }
+
+    fn submit(&self, gpu: &Gpu) {
+        let mut start = 0;
+        for &end in self.ends.iter().chain(std::iter::once(&self.steps.len())) {
+            if end > start {
+                gpu.submit(&[], &self.steps[start..end]);
+                start = end;
+            }
+        }
+    }
+}
+
+/// The incremental-decode KV cache: one `[t, kv_dim]` key and value buffer
+/// per layer.
+struct KvCache {
+    k: Vec<DeviceBuffer>,
+    v: Vec<DeviceBuffer>,
+}
+
+impl KvCache {
+    fn new(gpu: &Gpu, n_layers: u32, words: u64) -> KvCache {
+        KvCache { k: (0..n_layers).map(|_| gpu.storage(words)).collect(), v: (0..n_layers).map(|_| gpu.storage(words)).collect() }
+    }
+}
+
+/// Rows of logits the LM head materialises at once, for `n` rows over a
+/// `v`-wide vocab: all of them when `n·v` fits the binding budget, else the
+/// most that do, in whole [`HEAD_ROW_ALIGN`] groups so every chunk's row
+/// offset into `targets`/`ce_buf`/`ce_stats`/`xn_final` is a legal binding
+/// offset.
+pub(crate) fn head_chunk_rows(n: u64, v: u64, budget_words: u64) -> u64 {
+    if n * v <= budget_words {
+        return n;
+    }
+    (budget_words / v / HEAD_ROW_ALIGN * HEAD_ROW_ALIGN).max(HEAD_ROW_ALIGN).min(n)
+}
+
+/// Row granularity of a logits chunk: 64 rows of a `u32`/`f32` per-row buffer
+/// is 256 B, the storage-binding offset alignment.
+const HEAD_ROW_ALIGN: u64 = 64;
 
 /// A declared RoPE scaling, uploaded once: the per-channel `inv_freq` table,
 /// the attention factor every cos/sin is scaled by, and the one-element
@@ -979,7 +1065,12 @@ impl Qwen {
         let v = cfg.vocab as u64;
         let hq = cfg.q_dim() as u64;
         let hkv = cfg.kv_dim() as u64;
-        let bht2 = attn_score_elems(decode_only, b, cfg.n_heads, t);
+        // Training attention runs the flash trio wherever the device can, so
+        // no `[H,T,T]` slab is ever allocated: `scores`/`probs` then keep only
+        // the decode extent (`n_heads·t`, for decoding on a training build).
+        // A device without it (the CPU JIT) trains on the materialised chain.
+        let flash = (train && block::FlashGqaIds::supported(&gpu, cfg.head_dim)).then_some(block::FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: FLASH_GQA_BWD_DQ, bwd_dkv: FLASH_GQA_BWD_DKV });
+        let bht2 = attn_score_elems(decode_only || flash.is_some(), b, cfg.n_heads, t);
         let st = |x: u64| gpu.storage(x);
 
         let tokens = gpu.buffer(
@@ -992,7 +1083,6 @@ impl Qwen {
             n * 4,
             gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
         );
-        let ce_grad_uni = gpu.uniform_dynamic(4); // [n, vocab, IGNORE, count]
 
         // Residual stream: `res[i]` is live only at this shard's boundaries
         // (`start..=end`); non-boundary indices are size-1 dummies so the model's
@@ -1000,6 +1090,11 @@ impl Qwen {
         // whole shard every index is live - identical to the single-device path.
         let mut res = Vec::new();
         let mut dres = Vec::new();
+        // The backward reads `dres[l+1]` and writes `dres[l]` and nothing
+        // else, one layer at a time, so two physical buffers alternating by
+        // parity serve every index - the boundaries (`dres[start]`,
+        // `dres[end]`) included, each still holding its final value when read.
+        let dres_pair = if train { [st(n * d), st(n * d)] } else { [st(1), st(1)] };
         for i in 0..=cfg.n_layers as usize {
             let live = i >= shard.start && i <= shard.end;
             res.push(if live { st(n * d) } else { st(1) });
@@ -1011,30 +1106,27 @@ impl Qwen {
             // have `train == false`, see the `new_impl` assert above, so
             // this is a strict generalisation, not a behaviour change for
             // that case).
-            dres.push(if live && train { st(n * d) } else { st(1) });
+            dres.push(if live && train { dres_pair[i % 2].clone() } else { st(1) });
         }
         let dummy_layer = || Layer {
             xn1: st(1), q_pre: st(1), q: st(1), k_pre: st(1), k: st(1), v: st(1),
             probs: st(1), ctx: st(1), xmid: st(1), xn2: st(1), gate_pre: st(1), up: st(1), h: st(1),
         };
-        // Forward-only per-layer scratch (`!train`, whether decode-only or
-        // the batched forward-only build `Qwen::new_shard(..., train=false,
-        // ...)` uses): `forward_steps`/`decode_submit` process layer `l`
+        // Per-layer scratch: `forward_steps`/`decode_submit` process layer `l`
         // strictly before layer `l+1` and only ever read `lb.*` from WITHIN
         // that one layer's own dispatch sequence - the value that actually
         // crosses a layer boundary is `res[l+1]`, never `lb.xn1`/`lb.q`/etc.
-        // So every layer's temporaries can be the SAME physical buffers,
-        // overwritten each layer, instead of one permanently-resident copy
-        // PER layer - which is where a batched inference build's memory
-        // mostly went (N_LAYERS copies of buffers only one of which is ever
-        // live at a time; ~11+ GiB of the ~17-18 GiB a real Qwen3-0.6B
-        // `train=false` build used to request against a 15.2 GiB card).
-        // `train == true` keeps one buffer PER layer, byte-for-byte as
-        // before: `build_backward_steps` reads every layer's SAVED forward
-        // activation, so they must all stay resident simultaneously - this
-        // pooling must never touch that path, and it does not (`shared` is
-        // `None` whenever `train`).
-        let shared = (!train).then(|| Layer {
+        // So every layer's temporaries are the SAME physical buffers,
+        // overwritten each layer, instead of one resident copy per layer
+        // (N_LAYERS copies of buffers only one of which is ever live).
+        //
+        // Training included: the backward recomputes layer `l`'s forward from
+        // the saved `res[l]` immediately before differentiating it
+        // (`build_backward_steps`), so activation memory is one layer's worth
+        // plus the residual stream rather than every layer's - the difference
+        // between a few thousand trainable tokens and tens of thousands. The
+        // price is one more forward through the layers per step.
+        let shared = Layer {
             xn1: st(n * d),
             q_pre: st(n * hq),
             q: st(n * hq),
@@ -1048,31 +1140,8 @@ impl Qwen {
             gate_pre: st(n * ff),
             up: st(n * ff),
             h: st(n * ff),
-        });
-        let mut layers = Vec::new();
-        for l in 0..cfg.n_layers as usize {
-            layers.push(if !shard.owns(l) {
-                dummy_layer()
-            } else if let Some(sh) = &shared {
-                sh.clone()
-            } else {
-                Layer {
-                    xn1: st(n * d),
-                    q_pre: st(n * hq),
-                    q: st(n * hq),
-                    k_pre: st(n * hkv),
-                    k: st(n * hkv),
-                    v: st(n * hkv),
-                    probs: st(bht2),
-                    ctx: st(n * hq),
-                    xmid: st(n * d),
-                    xn2: st(n * d),
-                    gate_pre: st(n * ff),
-                    up: st(n * ff),
-                    h: st(n * ff),
-                }
-            });
-        }
+        };
+        let layers: Vec<Layer> = (0..cfg.n_layers as usize).map(|l| if shard.owns(l) { shared.clone() } else { dummy_layer() }).collect();
         // `inv` must hold the per-row RMS for the largest norm: QK-norm-q has
         // n*n_heads rows (>= n*n_kv and >= n).
         let inv_rows = n * cfg.n_heads as u64;
@@ -1090,12 +1159,16 @@ impl Qwen {
         // host-side, see `sample::generate_kv_stream`) and all backward scratch
         // (backward never runs - `train` is forced false), regardless of `head`.
         let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
+        // The LM head's logits live one row chunk at a time (`head_chunks`):
+        // `n·vocab` floats is 9.9 GB at 16k tokens and vocab 152k, past both
+        // the storage-binding limit and any sensible share of the card.
+        let head_rows = head_chunk_rows(n, v, block::tile_budget_words_for(&gpu));
         // A head whose vocab needs several storage bindings runs one pass per
         // run of columns of each vocab tile, through a dense scratch of
         // `rows x head_tile_cols` - a quarter of the tile budget - so the
         // passes use the GEMM kernels an untiled head does.
-        let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (n as u64).max(1)).max(64) & !63) as u32;
-        let head_tile = if block::vocab_tiles_on(&gpu, v, d).len() > 1 { hd_or_dummy(n as u64 * head_tile_cols as u64) } else { st(1) };
+        let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (head_rows as u64).max(1)).max(64) & !63) as u32;
+        let head_tile = if block::vocab_tiles_on(&gpu, v, d).len() > 1 { hd_or_dummy(head_rows as u64 * head_tile_cols as u64) } else { st(1) };
         // Backward scratch: read only by `build_backward_steps`/`backward`,
         // which never run unless `train`. The old gate here was
         // `decode_only` alone, so a batched forward-only build
@@ -1167,12 +1240,12 @@ impl Qwen {
 
         // Incremental-decode KV cache: one [t, kv_dim] key/value buffer per layer.
         // Only meaningful for a whole (single-device) model - `step` asserts that -
-        // so allocate for every layer regardless of `shard`.
-        let mut kcache = Vec::with_capacity(cfg.n_layers as usize);
-        let mut vcache = Vec::with_capacity(cfg.n_layers as usize);
-        for _ in 0..cfg.n_layers {
-            kcache.push(st(t as u64 * hkv));
-            vcache.push(st(t as u64 * hkv));
+        // so allocate for every layer regardless of `shard`. A training build
+        // allocates it on its first decode instead: at a long block it is
+        // gigabytes a step never reads.
+        let kv = std::cell::OnceCell::new();
+        if !train {
+            let _ = kv.set(KvCache::new(&gpu, cfg.n_layers, t as u64 * hkv));
         }
 
         let decode_mrope_cos = st((cfg.head_dim / 2) as u64);
@@ -1182,6 +1255,7 @@ impl Qwen {
             attention_factor,
             decode_pos: st(1),
         });
+        let attn_stat_len = if flash.is_some() { b as u64 * cfg.n_heads as u64 * t as u64 } else { 1 };
         let mut m = Qwen {
             cfg,
             b,
@@ -1218,11 +1292,11 @@ impl Qwen {
             kmask_on: Cell::new(false),
             coop: gpu.caps().workgroup_reductions,
             xn_final: hd_v(n * d),
-            logits: hd_or_dummy(n * v),
+            logits: hd_or_dummy(head_rows * v),
             dec_logits: std::cell::RefCell::new(None),
             ce_buf: hd_or_dummy(n),
             dres,
-            d_logits: hd_or_dummy(n * v),
+            d_logits: hd_or_dummy(head_rows * v),
             head_tile,
             head_tile_cols,
             ce_stats: hd_or_dummy(n * 2),
@@ -1230,7 +1304,7 @@ impl Qwen {
             d_tmp: bwd(n * d),
             dxmid: bwd(n * d),
             d_ctx: bwd(n * hq),
-            d_scores: bwd(bht2),
+            d_scores: bwd(if flash.is_some() { 1 } else { bht2 }),
             d_q: bwd(n * hq),
             d_k: bwd(n * hkv),
             dq_pre: bwd(n * hq),
@@ -1243,11 +1317,15 @@ impl Qwen {
             lora_a: st(n * r),
             lora_da: st(n * r),
             lora_out: st(n * max_out),
-            fwd_steps: Vec::new(),
-            bwd_steps: Vec::new(),
-            ce_grad_uni,
-            kcache,
-            vcache,
+            fwd_steps: Tape::default(),
+            bwd_steps: Tape::default(),
+            inv_count: bwd(1),
+            head_rows: head_rows as u32,
+            flash,
+            attn_lse: st(attn_stat_len),
+            attn_dsum: st(attn_stat_len),
+            kmask_scratch: std::cell::OnceCell::new(),
+            kv,
             dec_pos: Cell::new(0),
             ops,
             weights,
@@ -1259,8 +1337,8 @@ impl Qwen {
         // have) - the KV-cache decode path builds its own tape per call
         // (`decode_submit`). `forward()`/`run_forward()` assert against being
         // called on a decode-only instance rather than relying on this being empty.
-        m.fwd_steps = if decode_only { Vec::new() } else { m.forward_steps(m.b, m.t) };
-        m.bwd_steps = if train { m.build_backward_steps() } else { Vec::new() };
+        m.fwd_steps = if decode_only { Tape::default() } else { m.forward_steps(m.b, m.t) };
+        m.bwd_steps = if train { m.build_backward_steps() } else { Tape::default() };
         m
     }
 
@@ -1358,24 +1436,26 @@ impl Qwen {
     /// queries included.) One thread per row vs 64 cooperating on one row, at
     /// [B*H*T = 16384, T = 512]: **several times faster** over the encoder's 28
     /// layers.
+    #[allow(clippy::too_many_arguments)]
     fn gqa_kmask_steps(
         &self,
         a: &block::Gqa,
         q: &DeviceBuffer,
         k: &DeviceBuffer,
         v: &DeviceBuffer,
+        scores: &DeviceBuffer,
         probs: &DeviceBuffer,
         ctx: &DeviceBuffer,
     ) -> Vec<Step> {
         let rows = a.b * a.n_heads * a.t;
         let p = [a.b, a.n_heads, a.n_kv_heads, a.t, a.head_dim, a.group()];
         let softmax = if self.coop {
-            self.gpu.dispatch(SOFTMAX_ROWS, &[&self.scores, probs], &[rows, a.t], gpu_core::Dispatch::Workgroups(rows))
+            self.gpu.dispatch(SOFTMAX_ROWS, &[scores, probs], &[rows, a.t], gpu_core::Dispatch::Workgroups(rows))
         } else {
-            self.gpu.step(ATTN_SOFTMAX, &[&self.scores, probs], &[a.b, a.n_heads, a.t], rows)
+            self.gpu.step(ATTN_SOFTMAX, &[scores, probs], &[a.b, a.n_heads, a.t], rows)
         };
         vec![
-            self.gpu.step(GQA_SCORES_KMASK, &[q, k, &self.kmask, &self.scores], &p, rows * a.t),
+            self.gpu.step(GQA_SCORES_KMASK, &[q, k, &self.kmask, scores], &p, rows * a.t),
             softmax,
             self.gpu.step(GQA_APPLY, &[probs, v, ctx], &p, rows * a.head_dim),
         ]
@@ -1431,18 +1511,6 @@ impl Qwen {
             .map(|lc| (lc.rank, lc.alpha / lc.rank as f32))
     }
 
-    /// Dispatch one per-layer linear `out = act @ Wᵀ` through the `Ops`
-    /// façade (B7): `self.weights[wname]` carries whichever tier `Weight::
-    /// upload` picked for this model at construction (uniformly `F32` unless
-    /// this model was built int8 AND the device's capability allowed it, in
-    /// which case every one of the 7 per-layer linears is `I8`) - the
-    /// forward never branches on a separate int8-on/off flag itself, only on
-    /// what `self.weights` actually holds. Returns whether the dispatch was
-    /// `F32` (LoRA only ever targets an unquantized base weight - `q8.rs`'s
-    /// former module doc: "Inference-only (frozen, no LoRA, no backward)" -
-    /// so a caller only runs `lora_fwd` when this is `true`, matching this
-    /// function's pre-B7 shape exactly: LoRA used to live only in the fp32
-    /// arm of the fp32-vs-int8 fork this replaces).
     /// The activation every per-layer linear on this shard reads, packed for
     /// int8 only where an int8 weight will actually read it.
     ///
@@ -1460,10 +1528,15 @@ impl Qwen {
         self.ops.act(s, x, 0, rows, k)
     }
 
-    fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) -> bool {
+    /// Dispatch one per-layer linear `out = act @ Wᵀ` through the `Ops`
+    /// façade: `self.weights[wname]` carries whichever tier `Weight::upload`
+    /// picked for this model at construction, so the forward never branches
+    /// on a separate int8-on/off flag, only on what `self.weights` holds. A
+    /// LoRA correction is independent of that tier ([`Self::lora_fwd`] reads
+    /// the fp32 activation), so callers apply it unconditionally.
+    fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen: no Ops weight for {wname}"));
         self.ops.matmul(s, w, act, out, 0);
-        matches!(w, Weight::F32 { .. })
     }
 
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
@@ -1683,27 +1756,38 @@ impl Qwen {
         self.decode_logits_tiled(&self.head_tiles())
     }
 
-    fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+    /// The whole batched forward: [`Self::body_steps`], then on the head
+    /// stage the LM head and per-row cross-entropy, one logits chunk at a
+    /// time ([`Self::head_chunks`]).
+    fn forward_steps(&self, b_use: u32, t_use: u32) -> Tape {
+        let mut tape = self.body_tape(b_use, t_use);
+        if self.shard.head && !self.external_head.get() {
+            let v = self.cfg.vocab;
+            for (r0, rows) in self.head_chunks(b_use * t_use) {
+                tape.steps.extend(self.head_logits_steps(r0, rows));
+                tape.steps.push(self.ce_value_step(r0, rows, v));
+            }
+        }
+        tape
+    }
+
+    /// The forward up to the LM head: the token embedding (embed stage),
+    /// every layer this shard owns, and the final norm into `xn_final` (head
+    /// stage).
+    fn body_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+        self.body_tape(b_use, t_use).steps
+    }
+
+    /// [`Self::body_steps`], segmented after every layer.
+    fn body_tape(&self, b_use: u32, t_use: u32) -> Tape {
         assert!(
             !self.decode_only,
             "forward_steps: batched forward called on a decode-only-built Qwen \
              (activations sized for n=1, no logits buffer) - use step/prefill/step_embed instead"
         );
-        let c = &self.cfg;
         let n = b_use * t_use;
-        let d = c.d_model;
-        let ff = c.d_ff;
-        let v = c.vocab;
-        let hd = c.head_dim;
-        let hq = c.q_dim();
-        let hkv = c.kv_dim();
-        let nh = c.n_heads;
-        let nkv = c.n_kv_heads;
-        let ids = Self::ids();
-        let ga = self.gqa(b_use, t_use);
-        let theta = c.rope_theta;
+        let d = self.cfg.d_model;
         let mut s: Vec<Step> = Vec::new();
-        let tiles = self.vocab_tiles();
 
         // Token embedding, tiled over vocab so each `tok.weight` binding stays
         // under the backend's max-binding size (GL: 128MB). Only the embed stage
@@ -1716,144 +1800,149 @@ impl Qwen {
                 s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
             }
         }
-
+        let mut tape = Tape { steps: s, ends: Vec::new() };
         for l in self.shard.start..self.shard.end {
-            let lb = &self.layers[l];
-            let p = |name: &str| format!("blocks.{l}.{name}");
-            // --- attention --- (projections stay here: they carry LoRA/bias;
-            // norms/RoPE/attention-core come from the shared block builders)
-            s.push(self.rms_step(&self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
-            // xn1 quantized once (B7: `Ops::act`), shared by q/k/v.
-            // NOTE - `Ops::act` quantizes UNCONDITIONALLY, unlike the pre-B7
-            // `q8.quant` call this replaces (which only ever ran inside the
-            // int8 fork): on an all-`F32` model, this dispatches two small
-            // kernels (`max_abs_row`/`quant_pack`) whose output nothing
-            // reads. This is `Ops`'s own documented, deliberate limitation
-            // (`model::ops`'s module doc: "a call site that never pairs an
-            // activation with a quantized weight pays for a quantization it
-            // does not use... a reasonable follow-up... deliberately left"),
-            // not something introduced here - see the B7 ledger entry for
-            // the sizing/measurement discussion.
-            let act1 = self.ops_act(&mut s, &lb.xn1, n, d);
-            if self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre) {
-                self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
-            }
-            if self.ops_linear(&mut s, &act1, &p("attn.wk.weight"), &lb.k_pre) {
-                self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
-            }
-            if self.ops_linear(&mut s, &act1, &p("attn.wv.weight"), &lb.v) {
-                self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
-            }
-            // Qwen2 q/k/v projection bias (Qwen3 is bias-free).
-            if self.cfg.attn_bias {
-                s.push(self.gpu.step(BIAS_ADD, &[&lb.q_pre, self.w(&p("attn.wq.bias"))], &[n, hq], n * hq));
-                s.push(self.gpu.step(BIAS_ADD, &[&lb.k_pre, self.w(&p("attn.wk.bias"))], &[n, hkv], n * hkv));
-                s.push(self.gpu.step(BIAS_ADD, &[&lb.v, self.w(&p("attn.wv.bias"))], &[n, hkv], n * hkv));
-            }
-            // Optional per-head QK-RMSNorm (Qwen3); Qwen2 uses q_pre/k_pre directly.
-            let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if self.cfg.qk_norm {
-                s.push(self.rms_step(&lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
-                s.push(self.rms_step(&lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
-                (&lb.q, &lb.k)
-            } else {
-                (&lb.q_pre, &lb.k_pre)
-            };
-            // Half-split RoPE on q/k (in place on the routed buffers).
-            if self.mrope.get() {
-                s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
-                s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
-            } else {
-                s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, theta, false));
-                s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, theta, false));
-            }
-            if self.kmask_on.get() {
-                s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &lb.probs, &lb.ctx));
-            } else {
-                s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
-            }
-            let act_o = self.ops_act(&mut s, &lb.ctx, n, hq);
-            if self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj) {
-                self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
-            }
-            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
-            // --- SwiGLU MLP ---
-            s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
-            // xn2 quantized once, shared by gate/up.
-            let act2 = self.ops_act(&mut s, &lb.xn2, n, d);
-            if self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre) {
-                self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
-            }
-            if self.ops_linear(&mut s, &act2, &p("mlp.up.weight"), &lb.up) {
-                self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
-            }
-            s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
-            let act_h = self.ops_act(&mut s, &lb.h, n, ff);
-            if self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out) {
-                self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
-            }
-            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
-            // DeepStack: add level `l`'s merged vision features into the image rows
-            // of this layer's output (level i -> layer i), for l < n_levels.
-            if let Some((row0, n_rows, nl)) = self.deepstack.get() {
-                if self.shard.embed && (l as u32) < nl {
-                    s.push(self.gpu.step(SPLICE_ADD, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
-                }
-            }
+            self.layer_fwd_steps(&mut tape.steps, l, b_use, t_use, false);
+            tape.mark();
         }
+        if self.shard.head {
+            let last = self.cfg.n_layers as usize;
+            tape.steps.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
+        }
+        tape
+    }
 
-        // Head epilogue (final norm + lm_head + CE): only the head stage.
-        if !self.shard.head {
-            return s;
+    /// Layer `l`'s forward from `res[l]` into the shared layer scratch and
+    /// `res[l+1]`.
+    ///
+    /// `recompute` is the backward's re-run (`build_backward_steps`): it
+    /// rebuilds exactly the activations layer `l`'s backward reads - the same
+    /// dispatches over the same inputs, so the same values - and stops there,
+    /// before the down projection and the residual write. `res[l+1]` already
+    /// holds its forward value, and writing it again (DeepStack's add
+    /// especially) would change it.
+    fn layer_fwd_steps(&self, s: &mut Vec<Step>, l: usize, b_use: u32, t_use: u32, recompute: bool) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let ff = c.d_ff;
+        let hd = c.head_dim;
+        let hq = c.q_dim();
+        let hkv = c.kv_dim();
+        let nh = c.n_heads;
+        let nkv = c.n_kv_heads;
+        let ids = Self::ids();
+        let ga = self.gqa(b_use, t_use);
+        let lb = &self.layers[l];
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        // --- attention --- (projections stay here: they carry LoRA/bias;
+        // norms/RoPE/attention-core come from the shared block builders)
+        s.push(self.rms_step(&self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
+        // xn1 quantized once (`Ops::act`), shared by q/k/v; on an all-fp32
+        // model `ops_act` is a no-op.
+        let act1 = self.ops_act(s, &lb.xn1, n, d);
+        self.ops_linear(s, &act1, &p("attn.wq.weight"), &lb.q_pre);
+        self.lora_fwd(s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
+        self.ops_linear(s, &act1, &p("attn.wk.weight"), &lb.k_pre);
+        self.lora_fwd(s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
+        self.ops_linear(s, &act1, &p("attn.wv.weight"), &lb.v);
+        self.lora_fwd(s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
+        // Qwen2 q/k/v projection bias (Qwen3 is bias-free).
+        if c.attn_bias {
+            s.push(self.gpu.step(BIAS_ADD, &[&lb.q_pre, self.w(&p("attn.wq.bias"))], &[n, hq], n * hq));
+            s.push(self.gpu.step(BIAS_ADD, &[&lb.k_pre, self.w(&p("attn.wk.bias"))], &[n, hkv], n * hkv));
+            s.push(self.gpu.step(BIAS_ADD, &[&lb.v, self.w(&p("attn.wv.bias"))], &[n, hkv], n * hkv));
         }
-        let last = c.n_layers as usize;
-        s.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
-        if self.external_head.get() {
-            return s;
-        }
-        // lm_head. When the whole vocab fits one tile (v0=0, cnt=v - the common
-        // case for a small vocab like the TTS Talker's 3072), it is a plain
-        // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
-        // (`matmul_reg3`) instead of the naive column-tiled `matmul_tile` - the
-        // Talker lm_head was ~50 ms (naive) vs ~2 ms (reg2). Only when the weight
-        // genuinely exceeds a binding budget do we take the tiled passes.
-        let head = c.head_weight();
-        if tiles.len() == 1 && tiles[0] == (0, v) {
-            let (mk, mt) = linear_kernel(n as usize, v as usize);
-            s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
+        // Optional per-head QK-RMSNorm (Qwen3); Qwen2 uses q_pre/k_pre directly.
+        let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if c.qk_norm {
+            s.push(self.rms_step(&lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
+            s.push(self.rms_step(&lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
+            (&lb.q, &lb.k)
         } else {
-            s.extend(self.head_logits_tiled_steps(0, n));
+            (&lb.q_pre, &lb.k_pre)
+        };
+        // Half-split RoPE on q/k (in place on the routed buffers).
+        if self.mrope.get() {
+            s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
+            s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
+        } else {
+            s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, c.rope_theta, false));
+            s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, c.rope_theta, false));
         }
-        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
-        s
-    }
-
-    pub fn forward(&self) -> f32 {
-        assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
-        self.gpu.submit(&[], &self.fwd_steps);
-        let n = (self.b * self.t) as usize;
-        let losses = self.gpu.read(&self.ce_buf, n);
-        match &self.weighted_ce {
-            // Must return the SAME scalar `backward`'s (weighted) `d_logits`
-            // differentiates (the `Model::forward` contract) - see
-            // `model::lossw::WeightedCe::loss`'s own doc comment for why.
-            Some(w) => w.loss(&self.gpu, &losses, self.count.get()),
-            None => losses.iter().sum::<f32>() / self.count.get(),
+        match (self.flash, self.kmask_on.get()) {
+            (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, fl.fwd, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
+            // The padded-key mask is an encoder path the flash kernel does not
+            // take; a training build serves it on materialised scratch
+            // allocated the first time it is asked to.
+            (Some(_), true) => {
+                let (scores, probs) = self.kmask_scratch.get_or_init(|| {
+                    let len = attn_score_elems(false, self.b, nh, self.t);
+                    (self.gpu.storage(len), self.gpu.storage(len))
+                });
+                s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, scores, probs, &lb.ctx));
+            }
+            (None, true) => s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
+            (None, false) => s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
+        }
+        let act_o = self.ops_act(s, &lb.ctx, n, hq);
+        self.ops_linear(s, &act_o, &p("attn.wo.weight"), &self.proj);
+        self.lora_fwd(s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
+        s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+        // --- SwiGLU MLP ---
+        s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
+        // xn2 quantized once, shared by gate/up.
+        let act2 = self.ops_act(s, &lb.xn2, n, d);
+        self.ops_linear(s, &act2, &p("mlp.gate.weight"), &lb.gate_pre);
+        self.lora_fwd(s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
+        self.ops_linear(s, &act2, &p("mlp.up.weight"), &lb.up);
+        self.lora_fwd(s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
+        s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
+        if recompute {
+            return;
+        }
+        let act_h = self.ops_act(s, &lb.h, n, ff);
+        self.ops_linear(s, &act_h, &p("mlp.down.weight"), &self.mlp_out);
+        self.lora_fwd(s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
+        s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+        // DeepStack: add level `l`'s merged vision features into the image rows
+        // of this layer's output (level i -> layer i), for l < n_levels.
+        if let Some((row0, n_rows, nl)) = self.deepstack.get() {
+            if self.shard.embed && (l as u32) < nl {
+                s.push(self.gpu.step(SPLICE_ADD, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
+            }
         }
     }
 
-    /// Per-position `log p_θ(target)` for the batch [`Self::forward`] most
-    /// recently ran: the negation of `ce_buf`, which [`Self::forward`]
-    /// already read back to host to sum into its scalar return. `0.0` at
-    /// IGNORE positions, since `ce_value_masked.wgsl` writes exactly `0.0`
-    /// there. See `model::Model::batch_token_logprobs`'s doc comment for the
-    /// validity window (immediately after `forward`, until the next
-    /// `set_batch`/`forward`).
-    pub fn batch_token_logprobs(&self) -> Vec<f32> {
-        assert!(!self.decode_only, "Qwen::batch_token_logprobs: batched forward called on a decode-only-built model");
-        let n = (self.b * self.t) as usize;
-        self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
+    /// The per-row loss of logits chunk `r0..r0+rows` into `ce_buf`. Where the
+    /// device runs cooperative kernels, the same pass also leaves the rows'
+    /// softmax statistics in `ce_stats`, which the backward then reads
+    /// instead of walking the logits again ([`Self::ce_stats_in_forward`]).
+    fn ce_value_step(&self, r0: u32, rows: u32, v: u32) -> Step {
+        let rows_at = (r0 as u64, rows as u64);
+        if self.ce_stats_in_forward() {
+            let stats_at = (2 * r0 as u64, 2 * rows as u64);
+            return self.gpu.dispatch_sliced(CE_VALUE_STATS_ROWS, &[&self.logits, &self.targets, &self.ce_buf, &self.ce_stats], &[(0, 0), rows_at, rows_at, stats_at], &[rows, v, IGNORE], gpu_core::Dispatch::Workgroups(rows));
+        }
+        self.gpu.step_sliced(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[(0, 0), rows_at, rows_at], &[rows, v, IGNORE], rows)
     }
 
+    /// Whether the forward's loss pass also writes `ce_stats`
+    /// (`ce_value_stats_rows`, a 256-thread cooperative kernel).
+    fn ce_stats_in_forward(&self) -> bool {
+        self.coop && self.gpu.caps().max_workgroup_size >= 256
+    }
+
+    /// The `(first row, rows)` logits chunks covering `n` head rows.
+    fn head_chunks(&self, n: u32) -> Vec<(u32, u32)> {
+        let rows = self.head_rows.max(1);
+        (0..n).step_by(rows as usize).map(|r0| (r0, rows.min(n - r0))).collect()
+    }
+
+    /// The LM head over rows `r0..r0+rows` of `xn_final`, into `logits` rows
+    /// `0..rows`. When the whole vocab fits one tile (`v0=0, cnt=v` - the
+    /// common case) it is a plain `[rows,d]·[v,d]ᵀ` matmul through the
+    /// size-adaptive fast kernel (`matmul_reg3`); only a weight that exceeds
+    /// a binding budget takes [`Self::head_logits_tiled_steps`].
     /// The `(first column, columns)` passes that cover the vocab of a tiled
     /// head: each vocab tile ([`Self::vocab_tiles`]) cut into runs of at most
     /// `head_tile_cols` columns, so one pass's `rows x columns` block fits
@@ -1880,6 +1969,46 @@ impl Qwen {
             s.push(self.gpu.step(COPY_COLS, &[&self.head_tile, &self.logits], &[rows, c, c, 0, v, c0], rows * c));
         }
         s
+    }
+
+    fn head_logits_steps(&self, r0: u32, rows: u32) -> Vec<Step> {
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let dw = d as u64;
+        let head = self.cfg.head_weight();
+        let x = (r0 as u64 * dw, rows as u64 * dw);
+        let tiles = self.vocab_tiles();
+        if tiles.len() == 1 && tiles[0] == (0, v) {
+            let (mk, mt) = linear_kernel(rows as usize, v as usize);
+            return vec![self.gpu.dispatch_sliced(mk, &[&self.xn_final, self.w(head), &self.logits], &[x, (0, 0), (0, 0)], &[rows, d, v], mt)];
+        }
+        self.head_logits_tiled_steps(r0, rows)
+    }
+
+    pub fn forward(&self) -> f32 {
+        assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
+        self.fwd_steps.submit(&self.gpu);
+        let n = (self.b * self.t) as usize;
+        let losses = self.gpu.read(&self.ce_buf, n);
+        match &self.weighted_ce {
+            // Must return the SAME scalar `backward`'s (weighted) `d_logits`
+            // differentiates (the `Model::forward` contract) - see
+            // `model::lossw::WeightedCe::loss`'s own doc comment for why.
+            Some(w) => w.loss(&self.gpu, &losses, self.count.get()),
+            None => losses.iter().sum::<f32>() / self.count.get(),
+        }
+    }
+
+    /// Per-position `log p_θ(target)` for the batch [`Self::forward`] most
+    /// recently ran: the negation of `ce_buf`, which [`Self::forward`]
+    /// already read back to host to sum into its scalar return. `0.0` at
+    /// IGNORE positions, since `ce_value_masked.wgsl` writes exactly `0.0`
+    /// there. See `model::Model::batch_token_logprobs`'s doc comment for the
+    /// validity window (immediately after `forward`, until the next
+    /// `set_batch`/`forward`).
+    pub fn batch_token_logprobs(&self) -> Vec<f32> {
+        assert!(!self.decode_only, "Qwen::batch_token_logprobs: batched forward called on a decode-only-built model");
+        let n = (self.b * self.t) as usize;
+        self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
     }
 
     /// The LM head's backward over the `rows` rows of the logits gradient
@@ -1923,12 +2052,18 @@ impl Qwen {
 
     pub fn backward(&self) {
         assert!(!self.decode_only, "Qwen::backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
-        let n = self.b * self.t;
-        self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
-        self.gpu.submit(&[], &self.bwd_steps);
+        assert!(!self.kmask_on.get(), "Qwen::backward: the padded-key mask is a forward-only encoder path; disarm it before training");
+        self.write_inv_count();
+        self.bwd_steps.submit(&self.gpu);
     }
 
-    fn build_backward_steps(&self) -> Vec<Step> {
+    /// The CE gradient's `1/count` for the current batch, which the recorded
+    /// backward reads from `inv_count`.
+    fn write_inv_count(&self) {
+        self.gpu.write_f32(&self.inv_count, &[1.0 / self.count.get()]);
+    }
+
+    fn build_backward_steps(&self) -> Tape {
         assert!(!self.decode_only, "build_backward_steps: no backward buffers on a decode-only-built Qwen");
         let c = &self.cfg;
         let n = self.b * self.t;
@@ -1950,31 +2085,51 @@ impl Qwen {
         // ---- head + final norm ---- (head stage only; other stages receive
         // dres[end] from the next stage and start straight at the layer loop)
         if self.shard.head {
-            if !self.external_head.get() {
-                // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
-                // then the per-element gradient reads them - O(rows*vocab) instead of
-                // the naive per-element softmax recompute's O(rows*vocab^2). At vocab
-                // 151936 this is the difference between ~10 ms and ~56 s per backward.
-                s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
-                s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
-                // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook` scales the
-                // freshly-computed per-position CE gradient into its own scratch
-                // buffer, and everywhere downstream reads THAT instead of the raw
-                // `d_logits`. An instance that never called `enable_weighted_loss`
-                // never pushes this step and pays no extra dispatch (matches
-                // `model::Batch::LmWeighted`'s doc comment: ordinary training pays
-                // zero extra kernel dispatches).
+            // One logits chunk at a time. A single chunk still holds what the
+            // forward wrote; with several, only the last does, so each is
+            // recomputed from `xn_final` first.
+            let chunks = if self.external_head.get() { Vec::new() } else { self.head_chunks(n) };
+            let recompute_logits = chunks.len() > 1;
+            for (r0, rows) in chunks {
+                if recompute_logits {
+                    s.extend(self.head_logits_steps(r0, rows));
+                }
+                let (tg, st2) = ((r0 as u64, rows as u64), (2 * r0 as u64, 2 * rows as u64));
+                // Two-pass CE gradient: per-row softmax stats ONCE (ce_stats),
+                // then the per-element gradient reads them - O(rows*vocab)
+                // instead of the naive per-element softmax recompute's
+                // O(rows*vocab^2). The stats come from the forward where it
+                // wrote them (`ce_value_step`) - the logits are the same. The
+                // kernel's own `1/count` is 1 here; the batch's count is
+                // applied by `grad_scale_buf` from `inv_count`, which
+                // `backward` writes, so the recorded steps never change with
+                // the batch.
+                if !self.ce_stats_in_forward() {
+                    s.push(self.gpu.step_sliced(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[(0, 0), tg, st2], &[rows, v, IGNORE], rows));
+                }
+                s.push(self.gpu.step_sliced(CE_GRAD_STATS, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], &[(0, 0), tg, st2, (0, 0)], &[rows, v, IGNORE, f(1.0)], rows * v));
+                s.push(self.gpu.step(GRAD_SCALE_BUF, &[&self.d_logits, &self.inv_count], &[rows * v], rows * v));
+                // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook_rows`
+                // scales these rows of the CE gradient into its own scratch,
+                // and everything downstream reads THAT instead of the raw
+                // `d_logits`. An instance that never called
+                // `enable_weighted_loss` pays no extra dispatch.
                 let d_logits_bw: &DeviceBuffer = match &self.weighted_ce {
-                    Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
+                    Some(w) => w.hook_rows(&self.gpu, &mut s, SCALE_ROW, &self.d_logits, r0, rows),
                     None => &self.d_logits,
                 };
-                s.extend(self.head_bwd_steps(d_logits_bw, 0, n));
+                s.extend(self.head_bwd_steps(d_logits_bw, r0, rows));
             }
             let last = c.n_layers as usize;
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
 
+        let mut ends = Vec::new();
         for l in (self.shard.start..self.shard.end).rev() {
+            ends.push(s.len());
+            // Rebuild this layer's activations from the saved `res[l]` (see
+            // `new_impl`'s layer scratch) before differentiating it.
+            self.layer_fwd_steps(&mut s, l, b, t, true);
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -1991,9 +2146,10 @@ impl Qwen {
             // The roped q/k live in q/k (QK-norm) or q_pre/k_pre (Qwen2).
             let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) =
                 if self.cfg.qk_norm { (&lb.q, &lb.k) } else { (&lb.q_pre, &lb.k_pre) };
-            s.extend(block::gqa_bwd(
-                &self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v,
-            ));
+            match &self.flash {
+                Some(fl) => s.extend(block::flash_gqa_causal_bwd(&self.gpu, fl, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse, &self.d_ctx, &self.attn_dsum, &self.d_q, &self.d_k, &self.d_v)),
+                None => s.extend(block::gqa_bwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v)),
+            }
             // RoPE backward (in place on d_q/d_k)
             if self.mrope.get() {
                 s.push(self.rope2d_step(&self.d_q, n, nh, hd, hq, -1.0));
@@ -2046,7 +2202,7 @@ impl Qwen {
         if self.shard.embed && self.trainable("tok.weight") {
             s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
         }
-        s
+        Tape { steps: s, ends }
     }
 
     pub fn zero_grads(&self) {
@@ -2091,7 +2247,7 @@ impl Qwen {
     /// Run the forward graph without reading the loss (non-head stages).
     pub fn run_forward(&self) {
         assert!(!self.decode_only, "Qwen::run_forward: batched forward called on a decode-only-built model");
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.fwd_steps.submit(&self.gpu);
     }
     /// Read this stage's OUTPUT residual `res[end]` (for the next stage's input).
     pub fn read_out_res(&self) -> Vec<f32> {
@@ -2126,7 +2282,7 @@ impl Qwen {
         // best, an oversized/undersized-buffer bind-group mismatch at worst.
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
-            if !self.bwd_steps.is_empty() {
+            if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
         }
@@ -2143,7 +2299,7 @@ impl Qwen {
         self.external_head.set(true);
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
-            if !self.bwd_steps.is_empty() {
+            if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
         }
@@ -2155,7 +2311,7 @@ impl Qwen {
     pub fn forward_hidden(&self) -> Vec<f32> {
         assert!(self.external_head.get(), "Qwen::forward_hidden: call enable_external_head first");
         assert!(!self.decode_only, "Qwen::forward_hidden: batched forward called on a decode-only-built model");
-        self.gpu.submit(&[], &self.fwd_steps);
+        self.fwd_steps.submit(&self.gpu);
         self.gpu.read(&self.xn_final, (self.b * self.t) as usize * self.cfg.d_model as usize)
     }
 
@@ -2168,7 +2324,7 @@ impl Qwen {
         assert!(!self.decode_only, "Qwen::backward_hidden: batched backward called on a decode-only-built model");
         assert_eq!(d_hidden.len(), (self.b * self.t) as usize * self.cfg.d_model as usize, "one gradient row per hidden row");
         self.gpu.write_f32(&self.d_xn, d_hidden);
-        self.gpu.submit(&[], &self.bwd_steps);
+        self.bwd_steps.submit(&self.gpu);
     }
 
     /// Number of spliced image embedding elements (`n_rows·d_model`); 0 if off.
@@ -2224,7 +2380,7 @@ impl Qwen {
         // directly), so rebuilding the batched graph here is skipped for it.
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
-            if !self.bwd_steps.is_empty() {
+            if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
         }
@@ -2244,8 +2400,8 @@ impl Qwen {
     pub fn enable_weighted_loss(&mut self) {
         let n = (self.b * self.t) as u64;
         let v = self.cfg.vocab as u64;
-        self.weighted_ce = Some(model::lossw::WeightedCe::new(&self.gpu, n, v));
-        if !self.bwd_steps.is_empty() {
+        self.weighted_ce = Some(model::lossw::WeightedCe::new_chunked(&self.gpu, n, v, self.head_rows as u64));
+        if !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
     }
@@ -2295,10 +2451,9 @@ impl Qwen {
     pub fn run_backward(&self) {
         assert!(!self.decode_only, "Qwen::run_backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         if self.shard.head {
-            let n = self.b * self.t;
-            self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
+            self.write_inv_count();
         }
-        self.gpu.submit(&[], &self.bwd_steps);
+        self.bwd_steps.submit(&self.gpu);
     }
     /// Read this stage's INPUT-side residual grad `dres[start]` (for the previous stage).
     pub fn read_in_dres(&self) -> Vec<f32> {
@@ -2325,9 +2480,14 @@ impl Qwen {
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.forward_steps(1, t_use);
-        self.gpu.submit(&[], &s);
-        self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
+        self.gpu.submit(&[], &self.body_steps(1, t_use));
+        let v = self.cfg.vocab as usize;
+        let mut out = Vec::with_capacity(t_use as usize * v);
+        for (r0, rows) in self.head_chunks(t_use) {
+            self.gpu.submit(&[], &self.head_logits_steps(r0, rows));
+            out.extend(self.gpu.read(&self.logits, rows as usize * v));
+        }
+        out
     }
 
     /// Hidden state (residual stream) at a given depth for a single sequence,
@@ -2356,8 +2516,7 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.forward_steps(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.gpu.submit(&[], &self.body_steps(1, t_use));
         self.gpu.read(&self.res[layer], (t_use * self.cfg.d_model) as usize)
     }
 
@@ -2466,8 +2625,7 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        let s = self.forward_steps(1, t_use);
-        self.gpu.submit(&[], &s);
+        self.gpu.submit(&[], &self.body_steps(1, t_use));
         layers
             .iter()
             .map(|&l| self.gpu.read(&self.res[l], (t_use * self.cfg.d_model) as usize))
@@ -2475,6 +2633,11 @@ impl Qwen {
     }
 
     // ---- incremental KV-cache decode (the O(T)/token twin of the O(T²) forward) ----
+
+    /// The decode KV cache, allocated on first use by a training build.
+    fn kv_cache(&self) -> &KvCache {
+        self.kv.get_or_init(|| KvCache::new(&self.gpu, self.cfg.n_layers, self.t as u64 * self.cfg.kv_dim() as u64))
+    }
 
     /// Reset the incremental KV cache to an empty sequence (the next [`Self::step`]
     /// decodes absolute position 0).
@@ -2698,6 +2861,7 @@ impl Qwen {
         let theta = c.rope_theta;
         let ids = Self::ids();
         let decode_ids = Self::decode_ids();
+        let kv = self.kv_cache();
         let g = &self.gpu;
         let w = |name: &str| self.ps.w(name);
         // KV decode is m=1 by construction - the decode regime. Use the
@@ -2797,7 +2961,7 @@ impl Qwen {
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
             // shared with qwen3omnimoe::thinker instead of duplicated.
-            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &self.kcache[l], &self.vcache[l], &self.scores, &lb.probs, &lb.ctx));
+            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &kv.k[l], &kv.v[l], &self.scores, &lb.probs, &lb.ctx));
             let act_o = self.ops_act(&mut s, &lb.ctx, 1, hq);
             self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
@@ -2895,12 +3059,12 @@ impl Qwen {
     /// reports only its own layers. The int8 path shows up as `int_ops`
     /// (`matmul_i8_*`), fp32 as `flops`; see `gpu_core::cost`.
     pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.fwd_steps)
+        self.gpu.cost_of(&self.fwd_steps.steps)
     }
 
     /// OFFLINE cost of the recorded backward (empty when built for inference).
     pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
-        self.gpu.cost_of(&self.bwd_steps)
+        self.gpu.cost_of(&self.bwd_steps.steps)
     }
 
     /// The forward dispatches of one batched pass, in submit order.
@@ -2914,13 +3078,13 @@ impl Qwen {
     /// synthetic shape. Same contract and same reason as
     /// `vqgan::train::VqganTrainer::fwd_steps`.
     pub fn fwd_steps(&self) -> &[Step] {
-        &self.fwd_steps
+        &self.fwd_steps.steps
     }
 
     /// The backward dispatches of one training step, in submit order (empty
     /// when the model was built for inference). Profiler-only, as above.
     pub fn bwd_steps(&self) -> &[Step] {
-        &self.bwd_steps
+        &self.bwd_steps.steps
     }
 
     pub fn save(&self, path: &str) {
@@ -3242,7 +3406,7 @@ mod tests {
 
         // The KV cache is the one allocation that DOES scale with ctx.
         let hkv = cfg.kv_dim() as usize;
-        assert!(try_read(&dec.gpu, &dec.kcache[0], ctx as usize * hkv).is_some(), "the KV cache must still be ctx-sized");
+        assert!(try_read(&dec.gpu, &dec.kv_cache().k[0], ctx as usize * hkv).is_some(), "the KV cache must still be ctx-sized");
 
         std::fs::remove_file(&path).ok();
     }
@@ -4373,6 +4537,54 @@ mod rmsnorm_dx_variant_agreement {
     #[test]
     fn the_registered_slot_names_the_coalesced_kernel() {
         assert_eq!(STATIC_PIPELINES[Qwen::ids().rmsnorm_dx_rows].0, "rmsnorm_dx_rows");
+        assert_eq!(STATIC_PIPELINES[FLASH_GQA_FWD].0, "flash_attn_causal_gqa");
+        assert_eq!(STATIC_PIPELINES[FLASH_GQA_BWD_DQ].0, "flash_attn_causal_gqa_bwd_dq");
+        assert_eq!(STATIC_PIPELINES[FLASH_GQA_BWD_DKV].0, "flash_attn_causal_gqa_bwd_dkv");
+        assert_eq!(STATIC_PIPELINES[CE_VALUE_STATS_ROWS].0, "ce_value_stats_rows");
+    }
+
+    /// `ce_value_stats_rows` is `ce_value_masked` + `ce_stats` in one
+    /// cooperative pass: the same losses and statistics, at the real
+    /// 151936-wide vocab and at the tiny fixture's 23, with ignored rows and
+    /// a row count that is not a multiple of anything.
+    #[test]
+    fn the_fused_ce_rows_kernel_matches_the_per_row_pair() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let gpu = gpu_core::testgpu::dev(pipelines());
+        if !(gpu.caps().workgroup_reductions && gpu.caps().max_workgroup_size >= 256) {
+            brain_testutil::skip_unavailable("the device cannot run 256-thread cooperative kernels");
+            return;
+        }
+        for (rows, v) in [(37u32, QwenConfig::qwen3_0_6b().vocab), (13, QwenConfig::tiny().vocab)] {
+            let logits: Vec<f32> = (0..rows as usize * v as usize).map(|i| (i as f32 * 0.37).sin() * 9.0 + (i % 7) as f32).collect();
+            let targets: Vec<u32> = (0..rows).map(|r| if r % 5 == 2 { IGNORE } else { (r * 7919) % v }).collect();
+            let lg = gpu.storage_init("logits", &logits);
+            let tg = gpu.buffer("targets", rows as u64 * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+            gpu.write(&tg, &targets);
+            let (loss_ref, stats_ref, loss, stats) = (gpu.storage(rows as u64), gpu.storage(2 * rows as u64), gpu.storage(rows as u64), gpu.storage(2 * rows as u64));
+            gpu.submit(
+                &[],
+                &[
+                    gpu.step(CE_VALUE, &[&lg, &tg, &loss_ref], &[rows, v, IGNORE], rows),
+                    gpu.step(CE_STATS, &[&lg, &tg, &stats_ref], &[rows, v, IGNORE], rows),
+                    gpu.dispatch(CE_VALUE_STATS_ROWS, &[&lg, &tg, &loss, &stats], &[rows, v, IGNORE], gpu_core::Dispatch::Workgroups(rows)),
+                ],
+            );
+            let close = |got: &[f32], want: &[f32], what: &str| {
+                for (i, (g, w)) in got.iter().zip(want).enumerate() {
+                    assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "v={v} {what}[{i}]: {g} vs {w}");
+                }
+            };
+            close(&gpu.read(&loss, rows as usize), &gpu.read(&loss_ref, rows as usize), "loss");
+            let (st, st_ref) = (gpu.read(&stats, 2 * rows as usize), gpu.read(&stats_ref, 2 * rows as usize));
+            // The max is exact; the sum of exponentials is reassociated.
+            for r in 0..rows as usize {
+                assert_eq!(st[2 * r], st_ref[2 * r], "v={v} row {r} max");
+            }
+            close(&st, &st_ref, "stats");
+        }
     }
 
     #[test]

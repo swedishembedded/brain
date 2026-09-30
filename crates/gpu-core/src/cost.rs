@@ -881,6 +881,28 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             )
         }
 
+        // Causal GQA flash attention and its backward pair; params [b, h, kvh,
+        // t, hd, group] (`Gqa::params`). Counted over the t(t+1)/2 causal
+        // pairs, like the materialised gqa_* chain they replace. Bytes are
+        // the ideal O(T·hd) traffic - no [H,T,T] slab exists: forward reads
+        // q, k, v and writes out + lse; dq reads q, k, v, out, dO, lse and
+        // writes dq + D; dkv reads q, k, v, dO, lse, D and writes dk, dv.
+        // Forward MACs: q·k and p·v per pair; backward dq: q·k, dO·v, dS·k;
+        // dkv: q·k, dO·v, p·dO, dS·q - plus the handful of scalar ops per
+        // pair for the exp and the (dP - D) product.
+        "flash_attn_causal_gqa" | "flash_attn_causal_gqa_bwd_dq" | "flash_attn_causal_gqa_bwd_dkv" => {
+            let (b, h, kvh, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
+            let (macs, pair_ops, rows_q, rows_kv) = match base {
+                "flash_attn_causal_gqa" => (2, 6, 2, 2),
+                "flash_attn_causal_gqa_bwd_dq" => (3, 5, 4, 2),
+                _ => (4, 5, 2, 4),
+            };
+            f(
+                b * h * tri(t) * (2 * macs * hd + pair_ops),
+                4 * (b * t * hd * (rows_q * h + rows_kv * kvh) + 2 * b * h * t),
+            )
+        }
+
         // Fused flash CROSS-attention; params [bsz, n_heads, t_dec, t_enc,
         // head_dim, ...]. Same fused trio as the bidirectional family above,
         // with the two lengths independent: the scores/apply MACs run over
@@ -1067,6 +1089,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "copy_cols" => {
             let n = p(0)? * p(1)?;
             f(0, 8 * n)
+        }
+        // One read of each row for both outputs: an online max/sum-exp per
+        // element, then the loss and the two statistics per row.
+        "ce_value_stats_rows" => {
+            let (rows, v) = (p(0)?, p(1)?);
+            f(4 * rows * v + 3 * rows, 4 * (rows * v + 5 * rows))
         }
         // O(1) per element; threads = rows·v exactly, so the step_buf path
         // (params in a reused uniform buffer) still costs exactly.
