@@ -261,7 +261,8 @@ fn bn_eval_matches_running_stat_forward() {
     let s = gpu.step(
         K_EVAL,
         &[&xb, &mv, &gb, &outb],
-        &[n as u32, c as u32, h as u32, w as u32],
+        // The trailing word is the fused activation: 0 = identity.
+        &[n as u32, c as u32, h as u32, w as u32, 0],
         (n * c * h * w) as u32,
     );
     gpu.submit(&[], &[s]);
