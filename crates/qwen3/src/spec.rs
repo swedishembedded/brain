@@ -60,9 +60,24 @@ pub const GGUF_ARCHITECTURE: &str = "qwen3";
 /// the same reason as [`GGUF_ARCHITECTURE`].
 pub const CARD_FAMILY: &str = "qwen";
 
+/// Every GGUF `general.architecture` this decoder reads - Qwen3 and its
+/// `qwen2`/`llama` config variants (`crate::gguf_import::GGUF_ARCHITECTURES`).
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { return };
-    if g.kv().get("general.architecture").and_then(|v| v.as_str()) == Some(GGUF_ARCHITECTURE) {
+    let arch = g.kv().get("general.architecture").and_then(|v| v.as_str());
+    if arch.is_some_and(|a| crate::gguf_import::GGUF_ARCHITECTURES.contains(&a)) {
+        out.push((idx, "weights".to_string(), Confidence::Declared));
+    }
+}
+
+/// A Hugging Face checkpoint directory whose `config.json` declares an
+/// architecture this decoder implements (`Qwen3ForCausalLM`, and the
+/// `llama`/`qwen2` rows `brain_arch` leads here), read as downloaded.
+fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
+    let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { return };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
+    let family = brain_modelstore::declared_architecture(&config).and_then(|a| brain_modelstore::family_of_architecture(&a));
+    if family.and_then(brain_arch::by_id).is_some_and(|a| a.implementation().id == "qwen3") {
         out.push((idx, "weights".to_string(), Confidence::Declared));
     }
 }
@@ -92,6 +107,7 @@ impl ArchSpec for Qwen3Spec {
             match rec.kind {
                 ArtifactKind::Gguf => classify_gguf(idx, rec, &mut out),
                 ArtifactKind::Safetensors => classify_safetensors(idx, rec, &mut out),
+                ArtifactKind::HfDir => classify_hfdir(idx, rec, &mut out),
                 _ => {}
             }
         }
@@ -121,10 +137,22 @@ impl ArchSpec for Qwen3Spec {
         out
     }
 
-    fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
-        chosen.get("weights").ok_or("qwen3 assemble: no weights chosen")?;
+    /// A downloaded checkpoint directory is named for the repo it came from
+    /// (`<vendor>/<repo>`, the store's own layout), so a served model answers
+    /// to what the client asked for; a single-file checkpoint has no such
+    /// name and stays `local/qwen3`.
+    fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+        let weights = *chosen.get("weights").ok_or("qwen3 assemble: no weights chosen")?;
         chosen.get("tokenizer").ok_or("qwen3 assemble: no tokenizer chosen")?;
-        Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/qwen3".to_string(), variant: None }))
+        let rec = &records[weights];
+        let repo_id = (rec.kind == ArtifactKind::HfDir)
+            .then(|| {
+                let repo = rec.path.file_name()?.to_str()?;
+                let vendor = rec.path.parent()?.file_name()?.to_str()?;
+                Some(format!("{vendor}/{repo}"))
+            })
+            .flatten();
+        Ok(AssembleOutcome::Assembled(AssembledVariant { id: repo_id.unwrap_or_else(|| "local/qwen3".to_string()), variant: None }))
     }
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {

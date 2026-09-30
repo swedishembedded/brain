@@ -213,6 +213,11 @@ pub struct Variant {
     /// round-trip is asserted where both are already in scope -
     /// `crates/modelstore`'s test suite, not here.
     pub quants: &'static [&'static str],
+    /// The licence the upstream repo declares for its weights, in the
+    /// repo card's own spelling (`"mit"`, `"deepseek"` for the DeepSeek
+    /// License Agreement). `None` where no one has read the card yet - never
+    /// a guess.
+    pub license: Option<&'static str>,
 }
 
 /// Every field [`arch!`] does not set explicitly, for its trailing
@@ -280,12 +285,12 @@ pub const ARCHS: &[Arch] = &[
     // `qwen35`'s own row.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
         variants: &[
-            Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-1.7B", params: 1_700_000_000, quants: &["Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-4B", params: 4_000_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-8B", params: 8_200_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-14B", params: 14_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-32B", params: 32_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-0.6B", params: 596_000_000, quants: &["Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-1.7B", params: 1_700_000_000, quants: &["Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-4B", params: 4_000_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-8B", params: 8_200_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-14B", params: 14_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-32B", params: 32_800_000_000, quants: &["Q4_K_M", "Q5_0", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
         ]),
     // Llama and Qwen2 are CONFIGURATIONS of the dense decoder `brain-qwen3`
     // implements, not crates of their own: identical HF tensor names, told
@@ -299,22 +304,22 @@ pub const ARCHS: &[Arch] = &[
     // of its own, hence no quants).
     arch!("llama", "Llama-family dense decoder (config variant of qwen3)", Text, LlamaCpp, "brain-qwen3", hf: &["LlamaForCausalLM", "llama"],
         variants: &[
-            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", params: 8_030_261_248, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-base", params: 1_346_471_936, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-instruct", params: 1_346_471_936, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-base", params: 6_740_512_768, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-instruct", params: 6_740_512_768, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-7b-base-v1.5", params: 6_910_365_696, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-coder-7b-instruct-v1.5", params: 6_910_365_696, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-llm-7b-base", params: 6_910_365_696, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-llm-7b-chat", params: 6_910_365_696, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-math-7b-base", params: 6_910_365_696, quants: &[] },
-            Variant { reference: "deepseek-ai/deepseek-math-7b-instruct", params: 6_910_365_696, quants: &[] },
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", params: 8_030_261_248, quants: &[], license: Some("mit AND llama3.1") },
+            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-base", params: 1_346_471_936, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-coder-1.3b-instruct", params: 1_346_471_936, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-base", params: 6_740_512_768, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-coder-6.7b-instruct", params: 6_740_512_768, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-coder-7b-base-v1.5", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-coder-7b-instruct-v1.5", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-llm-7b-base", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-llm-7b-chat", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-math-7b-base", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
+            Variant { reference: "deepseek-ai/deepseek-math-7b-instruct", params: 6_910_365_696, quants: &[], license: Some("deepseek") },
         ]),
     arch!("qwen2", "Qwen2-family dense decoder (config variant of qwen3)", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen2ForCausalLM", "qwen2"],
         variants: &[
-            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", params: 1_777_088_000, quants: &[] },
-            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params: 7_615_616_512, quants: &[] },
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", params: 1_777_088_000, quants: &[], license: Some("mit") },
+            Variant { reference: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params: 7_615_616_512, quants: &[], license: Some("mit") },
         ]),
     arch!("qwen35moe", "Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder", Text, LlamaCpp, "brain-qwen35moe", gguf: Some("qwen35moe")),
     // The DENSE sibling of qwen35moe - llama.cpp registers the two as
@@ -341,12 +346,12 @@ pub const ARCHS: &[Arch] = &[
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
     arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
         variants: &[
-            Variant { reference: "LiquidAI/LFM2.5-230M", params: 229_693_184, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "LiquidAI/LFM2.5-350M", params: 354_500_000, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "LiquidAI/LFM2.5-1.2B-Instruct", params: 1_170_340_608, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
-            Variant { reference: "LiquidAI/LFM2.5-2.6B", params: 2_697_198_592, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "LiquidAI/LFM2.5-230M", params: 229_693_184, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "LiquidAI/LFM2.5-350M", params: 354_500_000, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "LiquidAI/LFM2.5-1.2B-Instruct", params: 1_170_340_608, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
+            Variant { reference: "LiquidAI/LFM2.5-2.6B", params: 2_697_198_592, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
             // MoE: 32 experts, 4 active/token - `params` is TOTAL, not active.
-            Variant { reference: "LiquidAI/LFM2.5-8B-A1B", params: 8_467_856_128, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"] },
+            Variant { reference: "LiquidAI/LFM2.5-8B-A1B", params: 8_467_856_128, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
         ]),
     // The LTX-2.5 text encoder: Gemma4Unified's text tower (12B, 26 GB bf16 -
     // real-weight import out of scope until a machine that can hold it; see
@@ -375,10 +380,10 @@ pub const ARCHS: &[Arch] = &[
     // variable directly - out of this migration's scope.
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"),
         variants: &[
-            Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-VL-4B-Instruct", params: 4_400_000_000, quants: &["Q4_K_M", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-VL-8B-Instruct", params: 8_767_123_696, quants: &["Q4_K_M", "Q8_0"] },
-            Variant { reference: "Qwen/Qwen3-VL-32B-Instruct", params: 33_357_390_064, quants: &["Q4_K_M", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-VL-2B-Instruct", params: 2_127_532_032, quants: &["Q4_K_M", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-VL-4B-Instruct", params: 4_400_000_000, quants: &["Q4_K_M", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-VL-8B-Instruct", params: 8_767_123_696, quants: &["Q4_K_M", "Q8_0"], license: None },
+            Variant { reference: "Qwen/Qwen3-VL-32B-Instruct", params: 33_357_390_064, quants: &["Q4_K_M", "Q8_0"], license: None },
         ]),
     // Qwen3-VL-30B-A3B: `qwen3vl`'s ViT+PatchMerger+DeepStack vision tower
     // spliced onto a top-k-of-128 sparse-MoE Qwen3 decoder (no shared expert) -
@@ -395,7 +400,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("qwen3vlmoe", "Qwen3-VL-30B-A3B (ViT+PatchMerger+DeepStack + top-k sparse-MoE decoder)", Multimodal, LlamaCpp, "brain-qwen3vlmoe", hf: &["Qwen3VLMoeForConditionalGeneration"],
         variants: &[
             // ~3B active of 31B total.
-            Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"] },
+            Variant { reference: "Qwen/Qwen3-VL-30B-A3B-Instruct", params: 31_070_000_000, quants: &["Q4_K_M", "Q8_0"], license: None },
         ]),
     // `weights_env` is empty: FastVLM's checkpoint is resolved through
     // `fastvlm::spec::FastvlmSpec` (the model-store resolver) instead of
@@ -434,7 +439,7 @@ pub const ARCHS: &[Arch] = &[
     // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
     // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
     arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), hf: &["DeepseekOCRForCausalLM"], default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
-        variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"] }]),
+        variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"], license: None }]),
     // `gguf: None`, deliberately - the LM half's `general.architecture` is
     // the SAME string as `deepseek2ocr`'s (`"deepseek2-ocr"`), because it IS
     // the same unmodified decoder (M0's ledger). `by_gguf` maps one string to
@@ -458,7 +463,7 @@ pub const ARCHS: &[Arch] = &[
     // through `brain_modelstore::resolve` (`crates/nemotronasr/src/spec.rs`),
     // not `BRAIN_NEMOTRONASR`.
     arch!("nemotronasr", "Nemotron-3.5-ASR-Streaming (FastConformer + RNN-T)", Audio, Brain, "brain-nemotronasr", hf: &["Nemotron3_5AsrForRNNT"], default_ref: Some("nvidia/nemotron-3.5-asr-streaming-0.6b"),
-        variants: &[Variant { reference: "nvidia/nemotron-3.5-asr-streaming-0.6b", params: 637_997_088, quants: &["Q8_0"] }]),
+        variants: &[Variant { reference: "nvidia/nemotron-3.5-asr-streaming-0.6b", params: 637_997_088, quants: &["Q8_0"], license: None }]),
     // -- Audio / TTS ------------------------------------------------------
     // No vendor GGUF (safetensors only) - a community-only repo exists but
     // names a different vendor than this row's `reference` could carry; see
@@ -469,7 +474,7 @@ pub const ARCHS: &[Arch] = &[
     // `classify()` recognizes, so there is no `(env var, role)` table for
     // this row to declare any more.
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
-        variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[] }]),
+        variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[], license: None }]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // `weights_env` names the directory containing the released
@@ -531,10 +536,10 @@ pub const ARCHS: &[Arch] = &[
     // not `BRAIN_SAM2_WEIGHTS`.
     arch!("sam2", "SAM 2.1 promptable segmentation (image path)", Vision, Brain, "brain-sam2", default_ref: Some("facebook/sam2.1-hiera-tiny"),
         variants: &[
-            Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[] },
-            Variant { reference: "facebook/sam2.1-hiera-small", params: 46_060_866, quants: &[] },
-            Variant { reference: "facebook/sam2.1-hiera-base-plus", params: 80_850_690, quants: &[] },
-            Variant { reference: "facebook/sam2.1-hiera-large", params: 224_447_154, quants: &[] },
+            Variant { reference: "facebook/sam2.1-hiera-tiny", params: 38_963_010, quants: &[], license: None },
+            Variant { reference: "facebook/sam2.1-hiera-small", params: 46_060_866, quants: &[], license: None },
+            Variant { reference: "facebook/sam2.1-hiera-base-plus", params: 80_850_690, quants: &[], license: None },
+            Variant { reference: "facebook/sam2.1-hiera-large", params: 224_447_154, quants: &[], license: None },
         ]),
     arch!("scrfd", "SCRFD face detector", Vision, Brain, "brain-scrfd"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
@@ -572,9 +577,9 @@ pub const ARCHS: &[Arch] = &[
     arch!("flux2", "FLUX.2 Klein MMDiT text-to-image + editing", Image, Brain, "brain-flux2",
           default_ref: Some("black-forest-labs/FLUX.2-klein-4B"),
           variants: &[
-              Variant { reference: "black-forest-labs/FLUX.2-klein-4B", params: 3_875_544_576, quants: &[] },
+              Variant { reference: "black-forest-labs/FLUX.2-klein-4B", params: 3_875_544_576, quants: &[], license: None },
               // Gated under a non-commercial license, unlike the 4B row above.
-              Variant { reference: "black-forest-labs/FLUX.2-klein-9B", params: 9_078_581_248, quants: &[] },
+              Variant { reference: "black-forest-labs/FLUX.2-klein-9B", params: 9_078_581_248, quants: &[], license: None },
           ]),
     arch!("flux1", "FLUX.1 dev / Kontext / schnell MMDiT", Image, Brain, "brain-flux1"),
     arch!("t5encoder", "T5-XXL encoder (FLUX.1 text conditioning)", Text, LlamaCpp, "brain-t5encoder"),
@@ -642,11 +647,11 @@ pub const ARCHS: &[Arch] = &[
           default_ref: Some("Wan-AI/Wan2.1-T2V-1.3B"),
           weights_env: &[],
           variants: &[
-              Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[] },
-              Variant { reference: "Wan-AI/Wan2.1-T2V-14B", params: 14_288_491_584, quants: &[] },
-              Variant { reference: "Wan-AI/Wan2.2-TI2V-5B", params: 5_000_000_000, quants: &[] },
+              Variant { reference: "Wan-AI/Wan2.1-T2V-1.3B", params: 1_418_996_800, quants: &[], license: None },
+              Variant { reference: "Wan-AI/Wan2.1-T2V-14B", params: 14_288_491_584, quants: &[], license: None },
+              Variant { reference: "Wan-AI/Wan2.2-TI2V-5B", params: 5_000_000_000, quants: &[], license: None },
               // MoE: two 14B experts (HighNoise/LowNoise), 14B active/step.
-              Variant { reference: "Wan-AI/Wan2.2-T2V-A14B", params: 27_000_000_000, quants: &[] },
+              Variant { reference: "Wan-AI/Wan2.2-T2V-A14B", params: 27_000_000_000, quants: &[], license: None },
           ]),
     // `id` IS the GGUF spelling: `general.architecture = "ltxv"` on every
     // LTX-2.x GGUF observed (confirmed by range-reading the header of both
@@ -693,9 +698,9 @@ pub const ARCHS: &[Arch] = &[
     arch!("kronos", "Kronos BSQ-tokenizer candlestick model", Forecast, Brain, "brain-kronos",
           default_ref: Some("NeoQuasar/Kronos-base"),
           variants: &[
-              Variant { reference: "NeoQuasar/Kronos-mini", params: 4_108_192, quants: &[] },
-              Variant { reference: "NeoQuasar/Kronos-small", params: 24_741_696, quants: &[] },
-              Variant { reference: "NeoQuasar/Kronos-base", params: 102_311_008, quants: &[] },
+              Variant { reference: "NeoQuasar/Kronos-mini", params: 4_108_192, quants: &[], license: None },
+              Variant { reference: "NeoQuasar/Kronos-small", params: 24_741_696, quants: &[], license: None },
+              Variant { reference: "NeoQuasar/Kronos-base", params: 102_311_008, quants: &[], license: None },
           ]),
     arch!("fincast", "FinCast patched decoder + sparse MoE", Forecast, Brain, "brain-fincast"),
     // Google's TimesFM 3.0: a 20-layer stacked mixing transformer with
@@ -712,7 +717,7 @@ pub const ARCHS: &[Arch] = &[
     arch!("timesfm3", "TimesFM-3 stacked mixing transformer (variate attention)", Forecast, Brain, "brain-timesfm3",
           default_ref: Some("google/timesfm-3.0-pytorch"),
           variants: &[
-              Variant { reference: "google/timesfm-3.0-pytorch", params: 330_710_976, quants: &[] },
+              Variant { reference: "google/timesfm-3.0-pytorch", params: 330_710_976, quants: &[], license: None },
           ]),
     // -- World models ---------------------------------------------------
     arch!("diamond", "DIAMOND EDM diffusion world model", World, Brain, "brain-diamond"),
@@ -775,6 +780,19 @@ pub fn public() -> impl Iterator<Item = &'static Arch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A DeepSeek checkpoint's licence is read off its own repo card, and
+    /// each one declares it: MIT for the R1 distills, the DeepSeek License
+    /// Agreement for the rest.
+    #[test]
+    fn every_deepseek_reference_declares_its_licence() {
+        let deepseek: Vec<&Variant> = ARCHS.iter().flat_map(|a| a.variants).filter(|v| v.reference.starts_with("deepseek-ai/")).collect();
+        assert_eq!(deepseek.len(), 13);
+        for v in deepseek {
+            let want = if v.reference.contains("R1-Distill") { "mit" } else { "deepseek" };
+            assert!(v.license.is_some_and(|l| l.starts_with(want)), "{}: {:?}", v.reference, v.license);
+        }
+    }
     use std::collections::HashSet;
 
     /// Llama and Qwen2 checkpoints are configurations of the dense decoder

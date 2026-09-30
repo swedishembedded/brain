@@ -439,7 +439,8 @@ fn build_repo_node(arch: &'static brain_arch::Arch, repo: &str, declared: Option
     let params = declared.filter(|v| v.params > 0).map(|v| v.params);
     let params_str = params.map(|p| format!("{:.2}B params", p as f64 / 1e9)).unwrap_or_else(|| "params unknown".to_string());
     let pulled = base_local.is_some() || locals.iter().any(|l| l.reference.quant().is_some());
-    let header = format!("{repo}  {params_str}  {}", if pulled { "local" } else { "not pulled" });
+    let license = declared.and_then(|v| v.license).map(|l| format!("  licence {l}")).unwrap_or_default();
+    let header = format!("{repo}  {params_str}{license}  {}", if pulled { "local" } else { "not pulled" });
 
     let mut leaves = Vec::new();
     if let Some(bl) = base_local {
