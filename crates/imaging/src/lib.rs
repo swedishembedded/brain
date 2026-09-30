@@ -91,9 +91,10 @@
 //! * [`Filter`] - nearest / bilinear / bicubic, each naming the exact reference
 //!   function it reproduces. Note in particular that `Filter::Bicubic` is
 //!   PyTorch's non-antialiased `a = -0.75` cubic and is **not** the same function
-//!   as `worldmirror2::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
-//!   `a = -0.5`) or `resize_bicubic_torch` (antialiased, f64). Antialiased
-//!   downsampling has no kernel; this crate does not pretend otherwise.
+//!   as [`host::resize_bicubic_pil`] (PIL fixed-point, antialiased, `a = -0.5`)
+//!   or [`host::resize_aa_planar`] (torch's antialiased resampler, f64).
+//!   Antialiased downsampling has no kernel; this crate does not pretend
+//!   otherwise.
 //! * [`ChannelPolicy`] - what a 1-channel buffer means when RGB8 is wanted.
 //! * [`Normalization`] - mean/std as data, so ImageNet, `(x-0.5)/0.5` and the
 //!   identity are the same code path.

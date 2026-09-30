@@ -179,9 +179,10 @@ pub enum Filter {
     /// `resize_bicubic.wgsl` — PyTorch's **non-antialiased** cubic convolution,
     /// `a = -0.75`, fixed 4x4 support, clamp-to-edge taps.
     ///
-    /// NOT `worldmirror2::preprocess::resize_bicubic` (PIL fixed-point, antialiased,
+    /// NOT [`crate::host::resize_bicubic_pil`] (PIL fixed-point, antialiased,
     /// `a = -0.5`, bit-exact against a PIL golden) and NOT
-    /// `worldmirror2::preprocess::resize_bicubic_torch` (antialiased, f64 accumulate).
+    /// [`crate::host::resize_aa_planar`] (torch's antialiased resampler, f64
+    /// accumulate).
     /// Those are different mathematical functions, not other implementations of
     /// this one, and antialiased downsampling still has no kernel. Pointing
     /// mirror at this variant would break `t1_pil_bicubic_exact`.

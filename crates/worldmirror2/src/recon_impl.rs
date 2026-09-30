@@ -129,7 +129,7 @@ impl<'a> MirrorRecon<'a> {
             let img = if (f.image.w, f.image.h) == (gw, gh) {
                 f.image.clone()
             } else {
-                preprocess::resize_bicubic(&f.image, gwu, ghu)
+                imaging::host::resize_bicubic_pil(&f.image, gwu, ghu)
             };
             for c in 0..3 {
                 for y in 0..ghu {

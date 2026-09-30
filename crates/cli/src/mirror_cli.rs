@@ -248,7 +248,7 @@ fn load_frames(spec: &str, cfg: &MirrorConfig, sel: &FrameSel, mask: Option<&str
         // third of the reference's sample count.
         let target = preprocess::adaptive_target(iw, ih, target, cfg.patch);
         let (nw, nh) = preprocess::resize_dims(iw, ih, target, cfg.patch);
-        let resized = preprocess::resize_bicubic(img, nw, nh);
+        let resized = imaging::host::resize_bicubic_pil(img, nw, nh);
         let (cw, ch) = (nw.min(target), nh.min(target));
         let (x0, y0) = ((nw - cw) / 2, (nh - ch) / 2);
         for c in 0..3 {

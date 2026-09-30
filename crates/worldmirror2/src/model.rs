@@ -454,7 +454,7 @@ impl Mirror {
                     planar[d * native.0 * native.1 + t] = self.pos_patch[t * c + d];
                 }
             }
-            let resized = crate::preprocess::resize_bicubic_torch(&planar, c, native.0, native.1, hp, wp);
+            let resized = imaging::host::resize_aa_planar(&planar, c, native.0, native.1, hp, wp, imaging::host::AaFilter::Bicubic);
             let mut tok = vec![0.0f32; patches * c];
             for t in 0..patches {
                 for d in 0..c {

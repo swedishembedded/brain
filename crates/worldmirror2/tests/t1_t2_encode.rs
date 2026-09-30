@@ -12,7 +12,8 @@
 
 use worldmirror2::config::MirrorConfig;
 use imaging::{Rgb8, IMAGENET_MEAN, IMAGENET_STD};
-use worldmirror2::preprocess::{resize_bicubic, resize_dims};
+use imaging::host::resize_bicubic_pil;
+use worldmirror2::preprocess::resize_dims;
 
 fn synth_image(w: usize, h: usize) -> Rgb8 {
     let mut rgb = vec![0u8; w * h * 3];
@@ -104,7 +105,7 @@ fn t1_pil_bicubic_exact() {
     let dims = m["t1_dims"].as_array().unwrap();
     let (nw, nh) = (dims[0].as_u64().unwrap() as usize, dims[1].as_u64().unwrap() as usize);
     assert_eq!(resize_dims(600, 400, 518, 14), (nw, nh));
-    let resized = resize_bicubic(&img, nw, nh);
+    let resized = resize_bicubic_pil(&img, nw, nh);
 
     // resized u8: golden sampled from HWC u8 - BIT-exact (tol < 1)
     let got: Vec<f32> = resized.px.iter().map(|&b| b as f32).collect();
@@ -140,7 +141,7 @@ fn t2_dinov2_patch_tokens() {
         let dst = y * 400 * 3;
         crop.px[dst..dst + 1200].copy_from_slice(&img.px[src..src + 1200]);
     }
-    let sq = resize_bicubic(&crop, 518, 518);
+    let sq = resize_bicubic_pil(&crop, 518, 518);
     let got_u8: Vec<f32> = sq.px.iter().map(|&b| b as f32).collect();
     check_sample("t2_input_u8", &got_u8, &get_sample(&m, "t2_input_u8"), 0.5);
 
@@ -202,7 +203,7 @@ fn t2_dinov2_patch_tokens() {
             crop.px[y * 400 * 3..y * 400 * 3 + 1200]
                 .copy_from_slice(&img.px[src..src + 1200]);
         }
-        let rect = resize_bicubic(&crop, 392, 518);
+        let rect = resize_bicubic_pil(&crop, 392, 518);
         let got_u8: Vec<f32> = rect.px.iter().map(|&b| b as f32).collect();
         check_sample("t7_input_u8", &got_u8, &get_sample(&m, "t7_input_u8"), 0.5);
         let (w2, h2) = (392usize, 518usize);
