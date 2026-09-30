@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use checkpoint::weightio::WeightReader;
-use deepseekvl::model::{Parts, Vlm};
+use deepseekvl::model::{Footprint, Parts, Placement, Vlm};
 use deepseekvl::tower::SiglipTower;
 
 use crate::config::JanusProConfig;
@@ -43,10 +43,34 @@ pub fn open(dir: &Path) -> Result<(JanusProConfig, WeightReader), String> {
     Ok((cfg, rd))
 }
 
+/// Janus-Pro's understanding tower on its device: SigLIP-L's and the
+/// aligner's fp32 weights with the activations of one 384-pixel image,
+/// measured on the released checkpoint.
+pub const SIGLIP_TOWER_BYTES: u64 = 13 << 28;
+
+/// The decoder's shape, from the checkpoint's own config.
+pub fn decoder_config(dir: &Path) -> Result<qwen3::QwenConfig, String> {
+    qwen3::hf::decoder_config_as(&JanusProConfig::from_dir(dir)?.language.to_string(), "llama")
+}
+
+/// The understanding build's footprint.
+pub fn understanding_footprint(dir: &Path) -> Result<Footprint, String> {
+    Ok(Footprint::of(&decoder_config(dir)?, SIGLIP_TOWER_BYTES))
+}
+
 /// Load the understanding path from `dir` with the decoder at `dtype`
-/// (the checkpoint's own is bf16), its KV cache sized for `ctx` tokens.
+/// (the checkpoint's own is bf16), its KV cache sized for `ctx` tokens, on the
+/// ambient device.
 pub fn load_understanding(dir: &Path, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
     let (cfg, rd) = open(dir)?;
     let tower = Box::new(SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner)?);
     Vlm::assemble(dir, &rd, Parts { tower, style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language }, dtype, ctx)
+}
+
+/// [`load_understanding`] as `placement` says.
+pub fn load_understanding_placed(dir: &Path, dtype: qwen3::Dtype, placement: Placement) -> Result<Vlm, String> {
+    let (cfg, rd) = open(dir)?;
+    let tower = gpu_core::devices::with_gpu(placement.tower, || SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner))??;
+    let parts = Parts { tower: Box::new(tower), style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language };
+    gpu_core::devices::with_gpu(placement.decoder, || Vlm::assemble(dir, &rd, parts, dtype, placement.context))?
 }

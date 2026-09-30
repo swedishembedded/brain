@@ -714,6 +714,32 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("moondream3", &moondream3::spec::Moondream3Spec)),
             resident: None,
         },
+        // DeepSeek-VL: images and a conversation in, text out; the decoder at
+        // the checkpoint's own fp16. `dir` resolved through
+        // `deepseekvl::spec::DEEPSEEK_VL`; the resident is registered directly
+        // (see `crate::resident_deepseekvl` in `crates/cli`).
+        ModelEntry {
+            manifest: deepseekvl::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(deepseekvl::caps::DeepseekVlProvider::new(dir)) as Arc<dyn Provider>)
+            },
+            spec: Some(("deepseekvl", &deepseekvl::spec::DEEPSEEK_VL)),
+            resident: None,
+        },
+        // Janus-Pro: chat over images, and text to image, from one
+        // checkpoint. `dir` resolved through `januspro::spec::JANUS_PRO`; the
+        // resident is registered directly (see `crate::resident_januspro` in
+        // `crates/cli`).
+        ModelEntry {
+            manifest: januspro::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let dir = assembly.roles.get("dir").map(|p| p.to_string_lossy().into_owned());
+                Ok(Arc::new(januspro::caps::JanusProProvider::new(dir)) as Arc<dyn Provider>)
+            },
+            spec: Some(("januspro", &januspro::spec::JANUS_PRO)),
+            resident: None,
+        },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
             provider: |_assembly: &Assembly| Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry(brain_modelstore::explicit_models_root().as_deref())))) as Arc<dyn Provider>),

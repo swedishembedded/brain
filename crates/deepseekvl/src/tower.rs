@@ -41,7 +41,7 @@ pub struct Features {
 }
 
 /// A vision tower with its aligner.
-pub trait VisionTower {
+pub trait VisionTower: Send {
     /// Image rows per image.
     fn rows(&self) -> usize;
     /// The side of the square `pixel_values` the tower takes.
@@ -85,7 +85,7 @@ impl HybridTower {
         let gpu = Gpu::new(PROJECTOR_PIPELINES);
         let sam = SamEncoder::new_inference(gpu.new_like(sam1::PIPELINES), sam_cfg, &sam_src, 0);
         let siglip = ClipVision::new_on(gpu.new_like(CLIP_VISION_PIPELINES), siglip_cfg, 1, PatchSource::Pixels, &siglip_w);
-        let aligner = MlpProjector::new(&gpu, pcfg, rows, &aligner_w)?;
+        let aligner = MlpProjector::new_frozen(&gpu, pcfg, rows, &aligner_w)?;
         let high_in = gpu.storage((rows * cfg.high.output_dim) as u64);
         let low_in = gpu.storage((rows * cfg.low.output_dim) as u64);
         Ok(HybridTower { cfg: cfg.clone(), sam, siglip, gpu, aligner, high_in, low_in, rows })
@@ -161,7 +161,7 @@ impl SiglipTower {
         let (rows, width, image_size) = (cfg.native_patches(), cfg.d_model(), cfg.image_size());
         let gpu = Gpu::new(PROJECTOR_PIPELINES);
         let siglip = ClipVision::new_on(gpu.new_like(CLIP_VISION_PIPELINES), cfg, 1, PatchSource::Pixels, &siglip_w);
-        let proj = MlpProjector::new(&gpu, pcfg, rows, &aligner_w)?;
+        let proj = MlpProjector::new_frozen(&gpu, pcfg, rows, &aligner_w)?;
         let features = gpu.storage((rows * width) as u64);
         Ok(SiglipTower { siglip, gpu, aligner: proj, features, rows, width, n_embed: pcfg.n_embed, image_size })
     }

@@ -717,6 +717,7 @@ dependencies = [
  "brain-cosyvoice",
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
+ "brain-deepseekvl",
  "brain-fastvlm",
  "brain-florence2",
  "brain-flux1",
@@ -724,6 +725,7 @@ dependencies = [
  "brain-glmdsa",
  "brain-gpu-core",
  "brain-imgpipe",
+ "brain-januspro",
  "brain-lfm2",
  "brain-llava",
  "brain-ltxv",
@@ -812,6 +814,7 @@ dependencies = [
  "brain-dbus",
  "brain-deepseek2ocr",
  "brain-deepseekocr2",
+ "brain-deepseekvl",
  "brain-diamond",
  "brain-ecapatdnn",
  "brain-eval",
@@ -831,6 +834,7 @@ dependencies = [
  "brain-gradcheck",
  "brain-imaging",
  "brain-imgpipe",
+ "brain-januspro",
  "brain-kronos",
  "brain-lfm2",
  "brain-llava",
@@ -1108,12 +1112,14 @@ dependencies = [
 name = "brain-deepseekvl"
 version = "1.2.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-model",
+ "brain-modelstore",
  "brain-qwen3",
  "brain-sam1",
  "brain-testutil",
@@ -1530,6 +1536,7 @@ dependencies = [
 name = "brain-januspro"
 version = "1.2.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",

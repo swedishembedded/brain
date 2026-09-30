@@ -346,6 +346,8 @@ const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "qwen3vl",
     "fastvlm",
     "moondream3",
+    "deepseekvl",
+    "januspro",
     "deepseek2ocr",
     "qwen3asr",
     "nemotronasr",

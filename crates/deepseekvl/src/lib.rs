@@ -15,6 +15,8 @@
 //! * [`tower`]: SAM-B and SigLIP-L on one device, joined by the split
 //!   aligner (`model::projector`).
 //! * [`prompt`]: the conversation format and the image splice.
+//! * [`caps`]: the streaming `generate` action and its provider.
+//! * [`spec`]: model-store resolution of the checkpoint directory.
 //! * [`model`]: the composite, with `brain-qwen3`'s decoder; [`load`]
 //!   builds DeepSeek-VL's.
 //!
@@ -23,11 +25,13 @@
 //! your own hardware, you can procure our services by emailing
 //! info@swedishembedded.com.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;
 pub mod preprocess;
 pub mod prompt;
+pub mod spec;
 pub mod tower;
 
 pub use config::{AlignerConfig, DeepseekVlConfig, TowerBranch};

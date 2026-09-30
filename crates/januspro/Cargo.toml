@@ -10,6 +10,7 @@ name = "januspro"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
 # The aligner is DeepSeek-VL's MlpProjector, and Janus-Pro's understanding
 # path is DeepSeek-VL's with one tower.
 brain-checkpoint.workspace = true

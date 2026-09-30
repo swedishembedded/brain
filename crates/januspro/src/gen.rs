@@ -84,8 +84,8 @@ impl GenHeads {
             return Err(format!("{GEN_EMBED} holds {} values, not {} x {code_dim}", embed.len(), h.image_token_size));
         }
         let gpu = Gpu::new(PROJECTOR_PIPELINES);
-        let head = MlpProjector::new(&gpu, head_cfg, rows, &head_weights(rd, &head_cfg)?)?;
-        let aligner = MlpProjector::new(&gpu, aligner_cfg, rows, &deepseekvl::import::aligner_weights(rd, GEN_ALIGNER_PREFIX, &aligner_cfg)?)?;
+        let head = MlpProjector::new_frozen(&gpu, head_cfg, rows, &head_weights(rd, &head_cfg)?)?;
+        let aligner = MlpProjector::new_frozen(&gpu, aligner_cfg, rows, &deepseekvl::import::aligner_weights(rd, GEN_ALIGNER_PREFIX, &aligner_cfg)?)?;
         let hidden_in = gpu.storage((rows * h.n_embed) as u64);
         let codes_in = gpu.storage(rows as u64 * code_dim as u64);
         Ok(GenHeads { gpu, head, aligner, embed, code_dim, rows, hidden_in, codes_in })

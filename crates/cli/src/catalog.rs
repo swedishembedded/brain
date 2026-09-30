@@ -111,7 +111,12 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         // eventually earned is not claimed here yet.
         return catalog::resident!(crate::resident_deepseekocr2::DeepseekOcr2Resident::from_env);
     }
-    if model_id == moondream3::caps::MODEL {
+    if model_id == deepseekvl::caps::MODEL {
+        // Towers and decoder on separate cards - see
+        // `crate::resident_deepseekvl`'s header.
+        return catalog::resident_multi!(crate::resident_deepseekvl::DeepseekVlResident::from_assembly);
+    }
+    if model_id == moondream3::caps::MODEL || model_id == januspro::caps::MODEL {
         return None; // registered directly in build_executor with a resolved Assembly, see resident.rs
     }
     if model_id == qwen3vl::caps::MODEL {

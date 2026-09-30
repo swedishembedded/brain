@@ -87,6 +87,6 @@ fn deepseek_vl_matches_the_reference_end_to_end() {
     r.finish("DeepSeek-VL composite");
 
     let want = ids_of("greedy_ids");
-    let got = m.generate_greedy(&ids, &f.embeds, want.len(), &mut |_| {}).unwrap();
+    let got = m.generate_greedy(&ids, &f.embeds, want.len(), &mut |_| true).unwrap();
     assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&m.tokenizer, &got));
 }

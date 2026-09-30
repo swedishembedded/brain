@@ -61,16 +61,38 @@ pub struct TextToImage {
     image_size: u32,
 }
 
-/// Paged-cache geometry: 16-token blocks, room for the prompt plus the image.
+/// Paged-cache blocks of 16 tokens; prompts prefill in chunks of 256.
 const BLOCK: u32 = 16;
-const CONTEXT: u32 = 1024;
 const MAX_PREFILL: u32 = 256;
+
+/// What the generation build holds beside the decoder: the generation heads
+/// and the VQ-16 decoder in fp32 with the activations of a 384-pixel decode,
+/// measured on the released checkpoint (about 2.5 GiB) with headroom.
+pub const GENERATION_EXTRA_BYTES: u64 = 3 << 30;
+
+/// The card and per-sequence context for a generation build of `parallel`
+/// images over `cards` (`(index, free bytes)`): the roomiest card, and every
+/// sequence's share of the KV cache that fits beside the weights, in whole
+/// blocks, up to the checkpoint's position table.
+pub fn place(fp: &deepseekvl::model::Footprint, parallel: u32, cards: &[(u32, u64)]) -> Result<(u32, u32), String> {
+    let &(card, free) = cards.iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).ok_or("no GPU to place the model on")?;
+    let rows = 2 * parallel as u64;
+    let per_seq = free.saturating_sub(fp.decoder + GENERATION_EXTRA_BYTES) / (rows * fp.kv_per_token.max(1));
+    let context = (per_seq.min(fp.max_context as u64) as u32) / BLOCK * BLOCK;
+    // The image's own 576 tokens and a prompt.
+    if context < 1024 {
+        return Err(format!("{parallel} image(s) need {} GiB for the decoder and heads plus {} MiB per context token per sequence; the roomiest card has {} GiB free", (fp.decoder + GENERATION_EXTRA_BYTES) >> 30, fp.kv_per_token * rows >> 20, free >> 30));
+    }
+    Ok((card, context))
+}
 
 impl TextToImage {
     /// Load the generation path from `dir` for batches of `parallel` images,
     /// the decoder's linears stored at `tier` (`BF16`, the checkpoint's own,
-    /// keeps its values exactly; see this module's doc before choosing `I8`).
-    pub fn load(dir: &Path, parallel: u32, tier: qwen3::Dtype) -> Result<TextToImage, String> {
+    /// keeps its values exactly; see this module's doc before choosing `I8`),
+    /// every sequence's KV cache sized for `context` tokens (the prompt and
+    /// the image's tokens together).
+    pub fn load(dir: &Path, parallel: u32, tier: qwen3::Dtype, context: u32) -> Result<TextToImage, String> {
         if parallel == 0 {
             return Err("at least one image per batch".into());
         }
@@ -81,7 +103,7 @@ impl TextToImage {
             let src = qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &dcfg)?;
             Engine::tensors_from(&dcfg, &src)?
         };
-        let per_seq = CONTEXT.div_ceil(BLOCK);
+        let per_seq = context.div_ceil(BLOCK);
         let engine = Engine::from_map_tier(dcfg, &weights, BLOCK, rows * per_seq, rows, per_seq, MAX_PREFILL, false, tier);
         drop(weights);
         let heads = GenHeads::load(&rd, &cfg, rows)?;

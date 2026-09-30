@@ -41,7 +41,7 @@ fn janus_pro_generates_images_on_the_engine() {
     let ids = |k: &str| -> Vec<u32> { manifest[k].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect() };
     let g = load(&g_dir.join("golden.safetensors"));
 
-    let mut t2i = TextToImage::load(Path::new(&dir), 1, qwen3::Dtype::BF16).expect("load Janus-Pro generation");
+    let mut t2i = TextToImage::load(Path::new(&dir), 1, qwen3::Dtype::BF16, 1024).expect("load Janus-Pro generation");
     let prompt = "A red apple on a wooden table.";
     let (cond, uncond) = t2i.prompt_ids(prompt).unwrap();
     assert_eq!((cond.clone(), uncond.clone()), (ids("cond_ids"), ids("uncond_ids")), "the guided pair of prompts");

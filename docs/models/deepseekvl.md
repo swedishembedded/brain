@@ -11,22 +11,38 @@ MLP aligner.
 |---|---|---|
 | `deepseek-ai/deepseek-vl-7b-chat` | 7.3B | DeepSeek License |
 
-**Status: runs as a library, not yet served.** `brain-deepseekvl` loads the
-checkpoint as downloaded and runs the whole model: preprocessing, both
-towers, the aligner, the conversation format with images spliced at their
-placeholders, and greedy decoding. The decoder runs at the checkpoint's own
-fp16 weights (about 14 GB of device memory). On the real checkpoint, every stage
-matches the reference implementation, and 16 greedy tokens are identical to
-its fp32 output. `brain serve` does not list the model yet.
+**Status: served.** `brain serve` lists the model as `brain/deepseekvl` when
+the checkpoint is in the models directory, and
+`/v1/chat/completions` (or D-Bus `Run`, action `generate`) takes a
+conversation with up to 8 images: OpenAI `image_url` data URLs over HTTP, or
+`image`, `image1`, ... blobs over D-Bus. Each image part becomes a
+placeholder where it stands in the message; an image sent without one opens
+the last user turn. Decoding is greedy and stops on the end-of-sentence token
+or the next `User:` turn.
+
+The checkpoint is loaded as downloaded and run whole: preprocessing, both
+towers, the aligner and the decoder at the checkpoint's own fp16. On the
+real checkpoint every stage matches the reference implementation, and 16
+greedy tokens are identical to its fp32 output.
+
+**Placement.** The towers hold about 8 GB (SAM's attention at 1024 pixels)
+and the decoder about 15 GB before its KV cache, which takes 0.94 MiB per
+context token. With two cards the towers and the decoder each get one. The
+served context is whatever KV cache fits the decoder's card, up to the
+checkpoint's 16384 tokens; each image is 576 of them. A single 24 GB card
+cannot hold both parts with a useful context, and the model is then not
+served.
+
+As a library:
 
 ```rust
 use deepseekvl::prompt::{Role, Turn};
 
-let m = deepseekvl::load(dir, qwen3::Dtype::F16, 2048)?;
+let m = deepseekvl::load(dir, qwen3::Dtype::F16, 2048)?; // or model::load_placed(dir, dtype, model::place(..)?)
 let turns = [Turn { role: Role::User, content: "<image_placeholder>Describe this image.".into() }];
 let ids = m.prompt_ids(&turns)?;
 let embeds = m.image_embeds(&[image])?;
-let reply = m.generate_greedy(&ids, &embeds, 256, &mut |_| {})?;
+let reply = m.generate_greedy(&ids, &embeds, 256, &mut |_| true)?;
 ```
 
 The checkpoint is recognized by its HF class `MultiModalityCausalLM`, which

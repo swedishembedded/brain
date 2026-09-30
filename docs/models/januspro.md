@@ -12,9 +12,18 @@ guidance, and decodes the finished token grid to pixels.
 |---|---|---|
 | `deepseek-ai/Janus-Pro-7B` | 7.4B | MIT code, DeepSeek Model License |
 
-**Status: runs as a library, not yet served.** `brain-januspro` loads the
-checkpoint as downloaded (bf16 `pytorch_model-*.bin` shards) and runs both
-halves:
+**Status: served.** `brain serve` lists the model as `brain/januspro` when
+the checkpoint is in the models directory, with two actions:
+`/v1/chat/completions` (action `generate`, the same conversation handling as
+DeepSeek-VL) and `/v1/images/generations` (action `text2image`) with
+`"size": "384x384"`, the one size the model draws; any other size is a 400.
+The two run on different builds of the checkpoint, each on one card: the
+chat build (SigLIP tower about 3 GB, bf16 decoder about 15 GB before its KV
+cache) and the drawing build (about 19.5 GB at 1024 tokens a sequence). The
+scheduler swaps them on a card that cannot hold both, or keeps one on each
+card of a two-card host. Every context is what
+the card leaves room for, never a fixed figure. The checkpoint is loaded as
+downloaded (bf16 `pytorch_model-*.bin` shards):
 
 - **Understanding** (`januspro::model::load_understanding`): the same
   composite as DeepSeek-VL, with Janus-Pro's single tower, roles and image
@@ -28,13 +37,12 @@ halves:
   int8 is not offered, because guidance magnifies its error.
 
 ```rust
-let mut t2i = januspro::t2i::TextToImage::load(dir, 1, qwen3::Dtype::BF16)?;
+let mut t2i = januspro::t2i::TextToImage::load(dir, 1, qwen3::Dtype::BF16, 1024)?;
 let req = januspro::t2i::Request { prompt: "A red apple on a wooden table.", cfg_weight: 5.0, temperature: 1.0, seed: 7 };
 let images = t2i.generate(&req, &|| false, &mut |_, _| {})?;
 ```
 
 The checkpoint's config names no class, only DeepSeek-VL's `model_type`; the
 generation heads that only Janus-Pro configures tell the two apart.
-`brain serve` does not list the model yet.
 
 Package: `brain-januspro`.

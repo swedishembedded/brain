@@ -62,6 +62,10 @@ brain-fastvlm.workspace = true
 brain-llava.workspace = true
 # `catalog`/`resident_moondream3` - Moondream 3's caps surface and residency adapter.
 brain-moondream3.workspace = true
+# `catalog`/`resident_deepseekvl` - DeepSeek-VL's caps surface and residency adapter.
+brain-deepseekvl.workspace = true
+# `catalog`/`resident_januspro` - Janus-Pro's caps surface and residency adapter.
+brain-januspro.workspace = true
 brain-glmdsa.workspace = true
 brain-lfm2.workspace = true
 brain-qwen3tts.workspace = true

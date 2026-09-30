@@ -268,6 +268,16 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
         }
         Err(e) => eprintln!("brain: moondream3 not served over the scheduler ({e})"),
     }
+    // Janus-Pro: registered directly, like Moondream 3, because its plan
+    // needs the cards' budgets (see `crate::resident_januspro`).
+    match crate::resolver_cli::try_resolve(models_dir, "januspro", &januspro::spec::JANUS_PRO, &Default::default()) {
+        Ok(assembly) => {
+            if let Some(m) = crate::resident_januspro::JanusProResident::from_assembly(&assembly, gpus, reserved) {
+                models.push(Arc::new(m));
+            }
+        }
+        Err(e) => eprintln!("brain: januspro not served over the scheduler ({e})"),
+    }
     // LLaVA-1.5-13B captioning: same stateless-resident shape as FastVLM
     // above - the provider manages its own weight residency lazily, per
     // checkpoint dir. Same `manifest_resident` reasoning as FastVLM.

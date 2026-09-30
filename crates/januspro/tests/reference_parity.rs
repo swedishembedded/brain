@@ -88,7 +88,7 @@ fn janus_pro_matches_the_reference() {
     m.decoder.prefill(&inputs);
     r.check("logits_last", &m.decoder.decode_logits(), &g["logits_last"].data);
     let want = ids(&um, "greedy_ids");
-    let got = m.generate_greedy(&prompt, &f.embeds, want.len(), &mut |_| {}).unwrap();
+    let got = m.generate_greedy(&prompt, &f.embeds, want.len(), &mut |_| true).unwrap();
     assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&m.tokenizer, &got));
 
     // ---- generation, teacher-forced ----
