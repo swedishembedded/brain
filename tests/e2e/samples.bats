@@ -261,3 +261,10 @@ run_example() {
   [[ "$output" == *"images/generations"* ]]
   [ -f "$OUT/openai_client.png" ]
 }
+
+@test "samples/python/api/deepseek-chat/deepseek_chat.py runs against the mock's --openai surface" {
+  [ -n "$OPENAI_KEY" ]
+  run_example "$REPO/samples/python/api/deepseek-chat/deepseek_chat.py" --base-url "http://127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" --model brain/mock --question "hello there"
+  [[ "$output" == *"answer:    'You said: hello there'"* ]]
+  [[ "$output" == *"streamed:"* ]]
+}

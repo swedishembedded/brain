@@ -141,3 +141,8 @@ that size. Re-run it once that lands.
       today)
 - [ ] Mixture-of-Experts serving - only dense configurations are supported
       end to end
+- [ ] A hard reasoning budget: Anthropic's `thinking.budget_tokens` is
+      validated and treated as the target Anthropic defines it as, with
+      `max_tokens` the only bound. Enforcing it would mean closing the think
+      block (forcing the `</think>` tokens) once the reasoning reaches the
+      budget, a decode-side token-forcing step the engine does not have.

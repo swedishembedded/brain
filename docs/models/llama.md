@@ -28,9 +28,20 @@ brain serves it from those files as downloaded, at its own configuration,
 RoPE scaling included, reading each checkpoint's own tokenizer pipeline,
 chat template and stop tokens. `brain serve` serves a pulled checkpoint under
 its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
-`reasoning_content`. A checkpoint of 6B parameters or more is served with
-int8 linears by default, which fits a 7-8B one on a single 24 GB card;
-`--qwen-weights-fp32` keeps it fp32 (more than one card).
+`reasoning_content` (a `thinking` block on the Anthropic surface). A
+checkpoint of 6B parameters or more is served with int8 linears by default,
+which fits a 7-8B one on a single 24 GB card; `--qwen-weights-fp32` keeps it
+fp32 (more than one card).
+
+The coder base checkpoints fill in the middle of code: `POST /v1/completions`
+with the code before the cursor as `prompt` and the code after it as
+`suffix`, framed with their own FIM tokens. `deepseek-coder-7b-base-v1.5`
+has none and answers `suffix` with a 400. See
+[`samples/python/api/fim-completion`](../../samples/python/api/fim-completion/)
+and, for reasoning,
+[`samples/python/api/deepseek-chat`](../../samples/python/api/deepseek-chat/).
+From Rust, `brain::TextGenerationPipeline::from_pretrained("deepseek-ai/<checkpoint>")`
+loads any of them the same way ([SDK](../using/sdk.md)).
 
 A llama.cpp GGUF of any of them serves too, straight off the file
 (`brain serve` with the `.gguf` as the checkpoint, or `brain import` to

@@ -84,3 +84,20 @@ teardown_file() {
   jq -e '.object == "text_completion"' "$CONF_DIR/fim.json"
   jq -e '.choices[0].text | test("a \\+ b")' "$CONF_DIR/fim.json" || { cat "$CONF_DIR/fim.json" >&3; false; }
 }
+
+
+@test "the deepseek-chat sample reasons and answers against the served checkpoint" {
+  run python3 "$BATS_TEST_DIRNAME/../../samples/python/api/deepseek-chat/deepseek_chat.py" \
+    --base-url "http://127.0.0.1:$PORT" --api-key "$KEY" --model "$MODEL"
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"answer:"*"42"* ]]
+  [[ "$output" == *"finish_reason=stop"* ]]
+}
+
+@test "the fim-completion sample fills in the function body" {
+  [ "$HAVE_CODER" = 1 ] || skip "$CODER is not downloaded"
+  run python3 "$BATS_TEST_DIRNAME/../../samples/python/api/fim-completion/fim_completion.py" \
+    --base-url "http://127.0.0.1:$PORT" --api-key "$KEY" --model "$CODER"
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"def fibonacci(n):"*"return"*"print(fibonacci(10))"* ]]
+}

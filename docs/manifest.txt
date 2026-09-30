@@ -36,6 +36,8 @@ samples/imagegen/generate/README.md
 samples/learning/reader/README.md
 samples/learning/rlcd/README.md
 samples/learning/visualclick/README.md
+samples/python/api/deepseek-chat/README.md
+samples/python/api/fim-completion/README.md
 samples/python/api/openai-client/README.md
 samples/python/asr/bench-streams/README.md
 samples/python/asr/transcribe-mic/README.md
