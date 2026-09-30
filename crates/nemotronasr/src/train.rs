@@ -224,7 +224,9 @@ impl model::Model for Transducer {
             v.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, _clip: Option<f32>, extra_scale: f32) {
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        // The clip and scale every optimiser in the tree applies.
+        let extra_scale = model::grad_multiplier(if clip.is_some() { self.g.borrow().values().flatten().map(|&x| (x as f64).powi(2)).sum() } else { 0.0 }, clip, extra_scale);
         let model::Adam { beta1: b1, beta2: b2, eps } = adam;
         let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
         let g = self.g.borrow();
@@ -598,7 +600,9 @@ impl model::Model for AcousticModel {
             v.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, _clip: Option<f32>, extra: f32) {
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra: f32) {
+        // The clip and scale every optimiser in the tree applies.
+        let extra = model::grad_multiplier(if clip.is_some() { self.g.borrow().values().flatten().map(|&x| (x as f64).powi(2)).sum() } else { 0.0 }, clip, extra);
         let model::Adam { beta1: b1, beta2: b2, eps } = adam;
         let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
         let g = self.g.borrow();

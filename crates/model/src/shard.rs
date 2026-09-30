@@ -690,14 +690,7 @@ impl<M: Shardable> Pipeline<M> {
             self.fused = Some(FusedAdam { state });
         }
 
-        let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
-        let scale = if let Some(max_norm) = clip {
-            let sq: f64 = par::sum_sq_f64(&grads);
-            let norm = (sq.sqrt() as f32) * gscale;
-            gscale * (max_norm / norm.max(max_norm)).min(1.0)
-        } else {
-            gscale
-        };
+        let scale = optim::grad_multiplier(if clip.is_some() { par::sum_sq_f64(&grads) } else { 0.0 }, clip, extra_scale);
 
         let fused = self.fused.as_mut().unwrap();
         par::zip_each(&mut fused.state, &grads, |(_, w, m, v), gi| adam.update_slice(t, lr, wd, scale, w, m, v, gi));

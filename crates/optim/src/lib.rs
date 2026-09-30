@@ -83,6 +83,21 @@ impl Default for Adam {
     }
 }
 
+/// What every gradient is multiplied by before an AdamW update, given the
+/// raw gradient's sum of squares: `extra_scale` (a `1/K` accumulation
+/// average) times the clip coefficient of the scaled gradient,
+/// `min(1, clip / (‖g · extra_scale‖ + 1e-6))` - torch's `clip_grad_norm_` on
+/// the averaged gradient. The device optimiser's clip kernels compute the same.
+pub fn grad_multiplier(raw_sum_sq: f64, clip: Option<f32>, extra_scale: f32) -> f32 {
+    match clip {
+        None => extra_scale,
+        Some(max_norm) => {
+            let norm = raw_sum_sq.sqrt() as f32 * extra_scale;
+            extra_scale * (max_norm / (norm + 1e-6)).min(1.0)
+        }
+    }
+}
+
 impl Adam {
     /// The two bias corrections at 1-based step `t`.
     pub fn bias_corrections(&self, t: u32) -> (f32, f32) {
@@ -277,10 +292,9 @@ impl Optim {
     }
 
     /// One optimiser step at (1-based) step index `t`, run entirely on-device in
-    /// a single submit (no host readback). If `clip` is set, gradients are
-    /// scaled by `min(1, clip/(global_norm+1e-6)) * extra_scale`
-    /// (clip_grad_norm_ semantics, with the accumulation scale folded in);
-    /// otherwise just by `extra_scale`.
+    /// a single submit (no host readback). Gradients are multiplied by
+    /// [`grad_multiplier`]: `extra_scale`, and with `clip` set the clip
+    /// coefficient of the scaled gradient.
     pub fn step(
         &self,
         gpu: &Gpu,

@@ -74,7 +74,7 @@ pub mod rope_scaling;
 pub mod yarn;
 
 pub use collective::{Collective, HostCollective};
-pub use optim::Adam;
+pub use optim::{grad_multiplier, Adam};
 #[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{federated_average, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]

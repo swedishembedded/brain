@@ -12,7 +12,8 @@
 //
 // Global grad-norm clip coefficient from `gradnorm_part`'s partial sums —
 // the cooperative counterpart of `clip_coef.wgsl`:
-//   total = sqrt(sum_i parts[i]);  coef = min(1, max_norm/(total+1e-6)) * extra_scale
+//   total = sqrt(sum_i parts[i]) * extra_scale;  coef = min(1, max_norm/(total+1e-6)) * extra_scale
+// (the clip bounds the gradient scaled by `extra_scale`, as `clip_coef.wgsl`'s does)
 //
 // `clip_coef` folds its input on ONE thread. That was tolerable when the input
 // was one f32 per parameter tensor (77 for a 6-layer GPT), but the cooperative
@@ -53,7 +54,7 @@ fn main(@builtin(local_invocation_id) li: vec3<u32>) {
         for (var k = 0u; k < 64u; k = k + 1u) {
             tot = tot + psum[k];
         }
-        let total = sqrt(tot);
+        let total = sqrt(tot) * p.extra_scale;
         var c = p.max_norm / (total + 1e-6);
         if (c > 1.0) { c = 1.0; }
         coef[0] = c * p.extra_scale;

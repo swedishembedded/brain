@@ -70,14 +70,8 @@ impl FlatAdam {
         let mean_scale = 1.0 / world;
 
         // global grad-norm clip on the mean gradient (deterministic on every rank).
-        let coef = if let Some(max_norm) = clip {
-            let sq: f64 = summed.iter().map(|&x| (x as f64 * mean_scale as f64).powi(2)).sum();
-            let norm = sq.sqrt() as f32;
-            (max_norm / norm.max(max_norm)).min(1.0)
-        } else {
-            1.0
-        };
-        let eff = mean_scale * coef;
+        let raw_sq: f64 = if clip.is_some() { summed.iter().map(|&x| (x as f64).powi(2)).sum() } else { 0.0 };
+        let eff = optim::grad_multiplier(raw_sq, clip, mean_scale);
 
         let n = self.master.len();
         adam.update_slice(t, lr, wd, eff, &mut self.master, &mut self.m, &mut self.v, &summed[..n]);

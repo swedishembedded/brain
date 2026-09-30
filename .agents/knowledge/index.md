@@ -221,3 +221,4 @@ What belongs where:
 | 178 | A tokenizer guessed from one regex feature tokenizes a different model | [`178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md`](178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md) |
 | 179 | A checkpoint is served as downloaded | [`179-a-checkpoint-is-served-as-downloaded.md`](179-a-checkpoint-is-served-as-downloaded.md) |
 | 180 | A declared range is enforced, or it is not a limit | [`180-a-declared-range-is-enforced-or-it-is-not-a-limit.md`](180-a-declared-range-is-enforced-or-it-is-not-a-limit.md) |
+| 181 | One gradient-scale convention; Adam hid the inversion | [`181-one-gradient-scale-convention-adam-hid-the-inversion.md`](181-one-gradient-scale-convention-adam-hid-the-inversion.md) |

@@ -226,14 +226,7 @@ impl<M: Model + Send> DataParallel<M> {
         // summed gradient is on no card, and ‖Σ_r g_r‖ does not decompose into
         // per-rank norms, so the device pair (`gradnorm_part` + `clip_coef_wg`)
         // cannot compute this number without a 2.4 GB upload first.
-        let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
-        let scale = if let Some(max_norm) = clip {
-            let sq: f64 = par::sum_sq_f64(std::slice::from_ref(&g));
-            let norm = (sq.sqrt() as f32) * gscale;
-            gscale * (max_norm / norm.max(max_norm)).min(1.0)
-        } else {
-            gscale
-        };
+        let scale = optim::grad_multiplier(if clip.is_some() { par::sum_sq_f64(std::slice::from_ref(&g)) } else { 0.0 }, clip, extra_scale);
 
         // Phase 4: one AdamW update on the host, parallel over the flat slab
         // (master/m/v mutated together, driven by the read-only summed grad).

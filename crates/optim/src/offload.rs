@@ -54,9 +54,10 @@ impl OffloadAdam {
         OffloadAdam { state }
     }
 
-    /// One AdamW step over the offloaded params. `extra_scale` divides the grads
-    /// (grad-accumulation averaging); `clip` is a global grad-norm clip computed
-    /// host-side across exactly these params. Matches `adamw.wgsl` element-wise.
+    /// One AdamW step over the offloaded params. Every gradient is multiplied
+    /// by [`crate::grad_multiplier`] (the `extra_scale` average and the
+    /// global clip over exactly these params). Matches `adamw.wgsl`
+    /// element-wise.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -75,16 +76,8 @@ impl OffloadAdam {
         let grads: Vec<Vec<f32>> =
             self.state.iter().map(|(name, w, _, _)| gpu.read(ps.g(name), w.len())).collect();
 
-        // Global grad-norm clip (over the offloaded set) — matches the GPU
-        // clip-coef path: coef = min(1, max_norm / (||g||*scale)).
-        let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
-        let scale = if let Some(max_norm) = clip {
-            let sq: f64 = par::sum_sq_f64(&grads);
-            let norm = (sq.sqrt() as f32) * gscale;
-            gscale * (max_norm / norm.max(max_norm)).min(1.0)
-        } else {
-            gscale
-        };
+        // Global grad-norm clip over the offloaded set, as the device path's.
+        let scale = crate::grad_multiplier(if clip.is_some() { par::sum_sq_f64(&grads) } else { 0.0 }, clip, extra_scale);
 
         // Element-wise AdamW per param, parallel across the 48 cores.
         par::zip_each(&mut self.state, &grads, |(_, w, m, v), g| {

@@ -11,8 +11,10 @@
 // @dtype f32
 //
 // Global grad-norm clip coefficient, computed on-device (no host round-trip):
-//   total = sqrt(sum_i norms[i]);  coef = min(1, max_norm/(total+1e-6)) * extra_scale
-// `norms` holds per-parameter sum-of-squares (from gradnorm_sq). Single thread.
+//   total = sqrt(sum_i norms[i]) * extra_scale;  coef = min(1, max_norm/(total+1e-6)) * extra_scale
+// `norms` holds per-parameter sum-of-squares (from gradnorm_sq) of the raw
+// gradient; the clip bounds the gradient scaled by `extra_scale` (a 1/K
+// accumulation average), as torch's clip_grad_norm_ does. Single thread.
 
 struct Params {
     n_params: u32,
@@ -33,7 +35,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var i: u32 = 0u; i < p.n_params; i = i + 1u) {
         sum = sum + norms[i];
     }
-    let total = sqrt(sum);
+    let total = sqrt(sum) * p.extra_scale;
     var c = p.max_norm / (total + 1e-6);
     if (c > 1.0) { c = 1.0; }
     coef[0] = c * p.extra_scale;
