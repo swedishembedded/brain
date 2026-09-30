@@ -141,6 +141,18 @@ that size. Re-run it once that lands.
       today)
 - [ ] Mixture-of-Experts serving - only dense configurations are supported
       end to end
+- [ ] Serving a GGUF at its own quantization. The serving engine
+      (`serve::Engine::from_map_with_gpu`) builds every linear from a
+      whole-model f32 host map and its GEMM dispatch (`Engine::linear`) has
+      F32 and I8 arms only, so a Q4_K/Q5_K/Q6_K file is expanded and, on the
+      int8 tier, requantized; a Q8_0 file round-trips through f32 to the same
+      int8 grid. The device side exists (`model::ops::Weight::KQuant`,
+      `matmul_kq_dyn`/`matmul_kq_gemv`, `gguf::try_kq_rect`'s lossless host
+      relayout) but no decoder builds it. Needed: stream each linear from
+      the source (`model::int8::quantize_from`'s Q8_0 byte repack,
+      `try_kq_rect` for K-quants), a KQuant arm in `Engine::linear` with the
+      activation group-sum prepass, and a per-tensor tier instead of one
+      engine-wide `weights_int8`.
 - [ ] A hard reasoning budget: Anthropic's `thinking.budget_tokens` is
       validated and treated as the target Anthropic defines it as, with
       `max_tokens` the only bound. Enforcing it would mean closing the think
