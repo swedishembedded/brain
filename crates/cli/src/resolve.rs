@@ -44,6 +44,7 @@ const ARCH_HANDLERS: &[(&str, Handler)] = &[
     ("qwen35moe", crate::qwen35moe_cli::run_qwen35moe),
     ("qwen3omnimoe", crate::omni_cli::run_omni),
     ("deepseekvl", crate::deepseekvl_cli::run_deepseekvl),
+    ("januspro", crate::januspro_cli::run_januspro),
     ("glmdsa", crate::glm_cli::run_glm),
     ("lfm2", crate::lfm_cli::run_lfm),
     ("qwen3tts", crate::tts_cli::run_tts),

@@ -41,7 +41,7 @@ pub fn run_deepseekvl(args: &[String]) {
     }
 }
 
-const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
+pub(crate) const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
     [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--seed S] \
     [--base-dtype f32|bf16] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
 
@@ -124,7 +124,7 @@ impl Args {
 /// The checkpoint directory `weights` names, and its `vendor/repo` id: the
 /// directory itself, or a `vendor/repo` reference's directory in the model
 /// store.
-fn checkpoint_dir(weights: &str, models_dir: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
+pub(crate) fn checkpoint_dir(weights: &str, models_dir: Option<&str>) -> Result<(std::path::PathBuf, String), String> {
     let path = Path::new(weights);
     if path.is_dir() {
         let parts: Vec<_> = path.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();

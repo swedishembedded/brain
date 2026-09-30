@@ -55,6 +55,7 @@ mod resident_cosyvoice;
 mod resident_deepseekocr;
 mod resident_deepseekocr2;
 mod deepseekvl_cli;
+mod januspro_cli;
 mod resident_deepseekvl;
 mod resident_januspro;
 mod resident_moondream3;

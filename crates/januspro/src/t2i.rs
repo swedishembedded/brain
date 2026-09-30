@@ -86,6 +86,40 @@ pub fn place(fp: &deepseekvl::model::Footprint, parallel: u32, cards: &[(u32, u6
     Ok((card, context))
 }
 
+/// The begin-of-sequence text and the padding id of the checkpoint in `dir`,
+/// checking that its tokenizer has the begin-of-image tag.
+pub fn prompt_specials(dir: &Path, tokenizer: &QwenBpe) -> Result<(String, u32), String> {
+    let read = |name: &str| -> Result<serde_json::Value, String> {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(name)).map_err(|e| format!("{name}: {e}"))?).map_err(|e| format!("{name}: {e}"))
+    };
+    let bos = read("tokenizer_config.json")?["bos_token"].as_str().ok_or("tokenizer_config.json: no bos_token")?.to_string();
+    let special = read("special_tokens_map.json")?;
+    let pad = special["pad_token"].as_str().ok_or("special_tokens_map.json: no pad_token")?;
+    let pad_id = tokenizer.special_id(pad).ok_or_else(|| format!("the tokenizer has no {pad:?} token"))?;
+    tokenizer.special_id(crate::model::IMAGE_START).ok_or("the tokenizer has no <begin_of_image> token")?;
+    Ok((bos, pad_id))
+}
+
+/// The ids the decoder reads before the first image token: BOS, the user's
+/// turn as Janus-Pro renders it, and the begin-of-image tag.
+pub fn conditional_prompt(tokenizer: &QwenBpe, bos: &str, image_start: &str, prompt: &str) -> Result<Vec<u32>, String> {
+    let turns = [deepseekvl::prompt::Turn { role: deepseekvl::prompt::Role::User, content: prompt.to_string() }];
+    let text = deepseekvl::prompt::render(&deepseekvl::prompt::JANUS, "", &turns, "")?;
+    Ok(tokenizer.encode(&format!("{bos}{text}{image_start}")))
+}
+
+/// The unconditional twin of a conditional prompt: everything between BOS and
+/// the begin-of-image tag replaced by `pad_id`, which is what classifier-free
+/// guidance contrasts against.
+pub fn unconditional_prompt(cond: &[u32], pad_id: u32) -> Vec<u32> {
+    let mut uncond = cond.to_vec();
+    let n = uncond.len();
+    if n > 2 {
+        uncond[1..n - 1].fill(pad_id);
+    }
+    uncond
+}
+
 impl TextToImage {
     /// Load the generation path from `dir` for batches of `parallel` images,
     /// the decoder's linears stored at `tier` (`BF16`, the checkpoint's own,
@@ -123,14 +157,7 @@ impl TextToImage {
 
         let dir_str = dir.to_str().ok_or("checkpoint path is not UTF-8")?;
         let tokenizer = QwenBpe::from_dir(dir_str)?;
-        let tok_cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tokenizer_config.json")).map_err(|e| format!("tokenizer_config.json: {e}"))?)
-            .map_err(|e| format!("tokenizer_config.json: {e}"))?;
-        let bos = tok_cfg["bos_token"].as_str().ok_or("tokenizer_config.json: no bos_token")?.to_string();
-        let special: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("special_tokens_map.json")).map_err(|e| format!("special_tokens_map.json: {e}"))?)
-            .map_err(|e| format!("special_tokens_map.json: {e}"))?;
-        let pad = special["pad_token"].as_str().ok_or("special_tokens_map.json: no pad_token")?;
-        let pad_id = tokenizer.special_id(pad).ok_or_else(|| format!("the tokenizer has no {pad:?} token"))?;
-        tokenizer.special_id(crate::model::IMAGE_START).ok_or("the tokenizer has no <begin_of_image> token")?;
+        let (bos, pad_id) = prompt_specials(dir, &tokenizer)?;
         Ok(TextToImage { engine, heads, vq, tokenizer, bos, image_start: crate::model::IMAGE_START.into(), pad_id, parallel, tokens: (grid * grid) as usize, grid, image_size })
     }
 
@@ -146,14 +173,8 @@ impl TextToImage {
 
     /// The conditional and unconditional prompt ids for `prompt`.
     pub fn prompt_ids(&self, prompt: &str) -> Result<(Vec<u32>, Vec<u32>), String> {
-        let turns = [deepseekvl::prompt::Turn { role: deepseekvl::prompt::Role::User, content: prompt.to_string() }];
-        let text = deepseekvl::prompt::render(&deepseekvl::prompt::JANUS, "", &turns, "")?;
-        let cond = self.tokenizer.encode(&format!("{}{text}{}", self.bos, self.image_start));
-        let mut uncond = cond.clone();
-        let n = uncond.len();
-        if n > 2 {
-            uncond[1..n - 1].fill(self.pad_id);
-        }
+        let cond = conditional_prompt(&self.tokenizer, &self.bos, &self.image_start, prompt)?;
+        let uncond = unconditional_prompt(&cond, self.pad_id);
         Ok((cond, uncond))
     }
 

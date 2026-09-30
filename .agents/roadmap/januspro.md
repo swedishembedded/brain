@@ -9,11 +9,14 @@ and are served as `brain/januspro` (`generate`, `text2image`;
 
 ## Outstanding
 
-- **Training.** Understanding fine-tuning as for DeepSeek-VL, plus the
-  generation objective: cross-entropy of the generation head's logits on
-  VQ-16-encoded target images, back through the decoder into a LoRA
-  adapter, with a trainable generation head and aligner. Needs the decoder
-  to take a gradient at its hidden rows from a head other than its own.
+- **Serving a fine-tune.** `brain januspro finetune` writes an adapter
+  and either an aligner or the generation heads; the served builds cannot
+  attach them yet (no adapter store layout for the composite, and the
+  engine folds adapters only for the plain qwen3 residents).
+- **Generation training beyond one card and one image per example.** The
+  trainer holds a bf16 decoder on one card, one image's 576 tokens per step,
+  and does not guide its loss: a sampled image is the check, not a held-out
+  number.
 - **More than one image per request.** `TextToImage` draws `parallel`
   images in one batch; the served action builds it for one, and the API
   loops over `n`.

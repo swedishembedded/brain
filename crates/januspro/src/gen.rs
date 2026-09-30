@@ -41,7 +41,7 @@ pub struct GenHeads {
 }
 
 /// `gen_head`'s two linears by their brain projector names.
-fn head_weights(rd: &WeightReader, cfg: &ProjectorConfig) -> Result<HashMap<String, Vec<f32>>, String> {
+pub(crate) fn head_weights(rd: &WeightReader, cfg: &ProjectorConfig) -> Result<HashMap<String, Vec<f32>>, String> {
     let mut out = HashMap::new();
     for (name, n) in cfg.param_list() {
         let (module, param) = name.rsplit_once('.').expect("projector params are module.param");

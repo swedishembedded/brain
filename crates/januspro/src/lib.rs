@@ -18,6 +18,8 @@
 //! * [`caps`]: the `generate` and `text2image` actions and their provider.
 //! * [`t2i`]: classifier-free-guided text-to-image on the serving engine,
 //!   decoded by `brain-vqgan`'s VQ-16.
+//! * [`train`]: fine-tuning, understanding (`brain-deepseekvl`'s trainer) and
+//!   generation (a LoRA decoder and the generation heads over VQ tokens).
 //!
 //! Swedish Embedded AB implements multimodal generation like this for its
 //! clients. If your team needs expertise in running image-understanding and
@@ -30,5 +32,6 @@ pub mod gen;
 pub mod model;
 pub mod spec;
 pub mod t2i;
+pub mod train;
 
 pub use config::{GenHeadConfig, GenVisionConfig, JanusProConfig, VisionConfig};
