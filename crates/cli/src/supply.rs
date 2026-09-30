@@ -736,38 +736,35 @@ pub(crate) mod tests {
         let e = exec();
         supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}).unwrap();
 
-        // Registered under the fully-qualified vendor/repo id, NOT the
-        // filename-derived default ("model.brain") each importer falls back
-        // to when called standalone -- this is exactly what `id_override`
-        // exists to fix.
+        // Registered under the fully-qualified vendor/repo id the manifest
+        // carries, not anything derived from a file name.
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Qwen/Qwen3-0.6B".to_string()]);
     }
 
     #[test]
-    fn ensure_deletes_the_upstream_safetensors_once_converted() {
-        // model.safetensors is the download input to convert_transformers;
-        // once model.brain.safetensors exists, Store::local never reads it
-        // again (see remove_upstream_weights's doc comment) -- it must not
-        // survive a successful ensure().
+    fn ensure_serves_the_download_and_keeps_it() {
+        // The download is what serves: ensure() names it in a manifest,
+        // converts nothing on disk and removes nothing.
         let (config, weights) = tiny_qwen3_hf_files();
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", config);
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
-        let dir = store("supply-test-deletes-upstream").root().to_path_buf();
+        let dir = store("supply-test-keeps-upstream").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
         supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}).unwrap();
 
         let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
-        assert!(!repo_dir.join("model.safetensors").exists(), "upstream model.safetensors must be cleaned up after a successful convert");
-        assert!(repo_dir.join("model.brain.safetensors").exists(), "the converted checkpoint must still be there");
+        assert!(repo_dir.join("model.safetensors").exists(), "the downloaded model.safetensors is what serves");
+        assert!(repo_dir.join(brain_modelstore::MANIFEST_FILE).exists(), "the manifest names the download");
+        assert!(!repo_dir.join("model.brain.safetensors").exists(), "nothing is converted on disk");
     }
 
     #[test]
     fn ensure_fails_cleanly_when_the_family_has_no_import_path_yet() {
         // gpt2 is a `family_of_architecture` match (so `plan()` accepts it
-        // and schedules a Convert step) but has no HF importer -- `convert`
+        // and schedules a Convert step) but has no HF checkpoint reader -- `convert`
         // dispatches to an explicit error rather than silently skipping or
         // guessing at an unwritten Conv1D-transpose import.
         let mut hub = FakeHub::new();
@@ -776,7 +773,7 @@ pub(crate) mod tests {
         let supplier = StoreSupplier::new(store("supply-test-gpt-unsupported"), Box::new(hub));
         let e = exec();
         let err = supplier.ensure("openai-community/gpt2", &e, &mut |_, _, _| {}).unwrap_err();
-        assert!(err.contains("no HF import path yet"), "{err}");
+        assert!(err.contains("no HF checkpoint reader yet"), "{err}");
     }
 
     #[test]

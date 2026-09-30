@@ -16,12 +16,10 @@ default = []
 # What `brain-cli` enables, so the CLI's fetch/convert surface is unchanged.
 import-all = [
     "import-qwen3tts",
-    "import-yolov8",
 ]
 # One family, three importers: the Talker/MTP pair, the Mimi-style codec and
 # the ECAPA speaker encoder are all needed to finish a qwen3tts fetch.
 import-qwen3tts = ["dep:brain-qwen3tts", "dep:brain-mimi", "dep:brain-ecapatdnn"]
-import-yolov8 = ["dep:brain-yolov8"]
 
 [dependencies]
 brain-arch.workspace = true
@@ -45,7 +43,6 @@ brain-gpu-core.workspace = true
 brain-qwen3tts = { workspace = true, optional = true }
 brain-mimi = { workspace = true, optional = true }
 brain-ecapatdnn = { workspace = true, optional = true }
-brain-yolov8 = { workspace = true, optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]

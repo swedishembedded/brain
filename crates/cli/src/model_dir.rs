@@ -436,6 +436,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
         };
     }
+    // A pulled YOLOv8 is served from its downloaded `.pt`.
+    if card.family == "yolo" {
+        let pt = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+        return Ok(Arc::new(crate::resident::YoloResident::from_card(pt, card, None)));
+    }
     match brain_family(&card.family) {
         "zimage" => {
             let paths = zimage_paths_from_roles(roles)?;

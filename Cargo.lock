@@ -1603,7 +1603,6 @@ dependencies = [
  "brain-qwen3tts",
  "brain-residency",
  "brain-testutil",
- "brain-yolov8",
  "serde_json",
 ]
 

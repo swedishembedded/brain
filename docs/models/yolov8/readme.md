@@ -20,10 +20,10 @@ into an event-driven pipeline, or exported to run on an Intel NPU.
 
 ## Getting the weights
 
-Reference the model as `Ultralytics/YOLOv8` and brain fetches and converts
-the official nano (`n`) weights itself on first use - no manual `.pt` export,
-no extra setup. The first call downloads `yolov8n.pt` and converts it
-in-process; every call after that just loads the cached checkpoint.
+Reference the model as `Ultralytics/YOLOv8` and brain fetches the official
+nano (`n`) weights itself on first use - no manual `.pt` export, no extra
+setup. The first call downloads `yolov8n.pt`, and every call reads that file
+as it is; nothing is converted on disk.
 
 Detection has no HTTP route, so it's served over D-Bus:
 

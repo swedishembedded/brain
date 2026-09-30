@@ -172,8 +172,10 @@ pub struct Yolo {
 }
 
 impl Yolo {
-    /// Load a model from a `.safetensors` checkpoint, sized for batch `b`. The config
-    /// (channels/depths/nc/input) is read from the checkpoint header; the `t`
+    /// Load a model from a checkpoint, sized for batch `b`: a brain
+    /// `.safetensors` (config read from its header), or an Ultralytics
+    /// YOLOv8n `.pt` as downloaded, read through [`crate::import::import_yolov8n`]
+    /// with nothing written to disk. The `t`
     /// (sequence) seam is unused by detection so it is passed as 0. Mirrors
     /// [`gpt2::Gpt::load`].
     pub fn load(path: &str, b: u32) -> Yolo {
@@ -194,12 +196,16 @@ impl Yolo {
     /// 10/10 at 640 to 3/10 at 256 on weights that are bit-for-bit identical),
     /// so the two are separable here rather than fused in the checkpoint.
     pub fn load_at(path: &str, b: u32, input: u32) -> Yolo {
-        let c = checkpoint::load(path);
-        let mut cfg = YoloConfig::from_json(&c.header["config"]);
+        let (mut cfg, init) = if path.ends_with(".pt") {
+            let tensors = crate::import::import_yolov8n(path).unwrap_or_else(|e| panic!("{e}"));
+            (YoloConfig::yolov8n(), tensors.into_iter().map(|(name, _, data)| (name, data)).collect())
+        } else {
+            let c = checkpoint::load(path);
+            (YoloConfig::from_json(&c.header["config"]), c.by_role(""))
+        };
         if input > 0 {
             cfg.input = input;
         }
-        let init = c.by_role("");
         Yolo::new(cfg, b, 0, &init)
     }
 

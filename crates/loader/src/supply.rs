@@ -223,7 +223,7 @@ pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::P
 /// Compiled only when at least one importer is absent -- with `import-all` on
 /// there is no arm that can call it, and an always-present helper would be an
 /// unused-function warning in the configuration `brain-cli` actually ships.
-#[cfg(not(all(feature = "import-qwen3tts", feature = "import-yolov8")))]
+#[cfg(not(feature = "import-qwen3tts"))]
 fn no_importer(vendor: &str, repo: &str, family: &str, feature: &str) -> String {
     format!(
         "{vendor}/{repo}: convert: this build of brain-loader has no {family} importer \
@@ -323,40 +323,18 @@ fn convert_files(store: &Store, vendor: &str, repo: &str, family: &str, roles_ta
 }
 
 /// The yolo recipe: `YoloRecipe::artifacts` downloaded exactly one
-/// `yolov8*.pt` file into the repo dir; run the pure-Rust importer
-/// (`yolov8::import::import_yolov8n`, built on `checkpoint::torchpt`) and write
-/// the remapped tensors as `model.brain.safetensors` -- the same single-file
-/// convention every transformers-family model already uses, so no store or
-/// `resident_for` changes were needed for this family.
-#[cfg(not(feature = "import-yolov8"))]
-fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
-    let _ = store;
-    Err(no_importer(vendor, repo, "yolov8", "import-yolov8"))
-}
-
-#[cfg(feature = "import-yolov8")]
+/// `yolov8*.pt` file into the repo dir, which `yolov8::Yolo::load` reads as
+/// it is; "finish" is a manifest naming it, with nothing converted and
+/// nothing removed.
 fn convert_yolo(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
     let pt = std::fs::read_dir(&dir)
         .map_err(|e| format!("{vendor}/{repo}: convert: {}: {e}", dir.display()))?
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("yolov8") && n.ends_with(".pt")))
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .find(|n| n.starts_with("yolov8") && n.ends_with(".pt"))
         .ok_or_else(|| format!("{vendor}/{repo}: convert: no downloaded yolov8*.pt file in {}", dir.display()))?;
-    let pt_str = pt.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 path {}", pt.display()))?;
-
-    let tensors = yolov8::import::import_yolov8n(pt_str)?;
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().map(|(name, shape, data)| (name, shape.into_iter().map(|d| d as u64).collect(), data)).collect();
-    let card = checkpoint::st::ModelCard::for_ref(&format!("{vendor}/{repo}"), vendor, repo, None, "yolo");
-    let out = dir.join("model.brain.safetensors");
-    checkpoint::st::save_safetensors(out.to_str().ok_or_else(|| format!("{vendor}/{repo}: convert: non-UTF8 store path"))?, &tensors, &yolov8::config::YoloConfig::yolov8n().to_json(), Some(&card))
-        .map_err(|e| format!("{vendor}/{repo}: convert: write model.brain.safetensors: {e}"))?;
-    // The upstream .pt is never read again -- Store::local/scan only ever load
-    // model.brain.safetensors (see modelstore::BASE_WEIGHTS_FILE) -- so keeping
-    // it around is pure disk waste. Best-effort: a failed cleanup must not fail
-    // an otherwise-successful convert.
-    std::fs::remove_file(&pt).ok();
-    Ok(())
+    convert_files(store, vendor, repo, "yolo", &[("weights", &pt)])
 }
 
 /// The finish step shared by every diffusers-pipeline family

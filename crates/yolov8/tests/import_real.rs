@@ -50,3 +50,33 @@ fn imports_a_real_yolov8n_checkpoint_with_exact_coverage() {
         assert!(data.iter().all(|v| v.is_finite()), "{name}: contains a non-finite value");
     }
 }
+
+/// A real `yolov8n.pt` served as downloaded: `Yolo::load` reads the `.pt`
+/// itself and computes exactly what the same weights converted to a brain
+/// checkpoint compute.
+#[test]
+fn a_real_yolov8n_pt_serves_as_its_conversion_does() {
+    let Some(path) = std::env::var("YOLO_RAW_PT").ok().filter(|p| std::path::Path::new(p).is_file()) else {
+        brain_testutil::skip("a_real_yolov8n_pt_serves_as_its_conversion_does: set YOLO_RAW_PT to a real yolov8n.pt");
+        return;
+    };
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    let tensors = yolov8::import::import_yolov8n(&path).unwrap();
+    let converted = std::env::temp_dir().join(format!("yolov8n-converted-{}.safetensors", std::process::id()));
+    let st: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().map(|(n, s, d)| (n, s.into_iter().map(|x| x as u64).collect(), d)).collect();
+    checkpoint::st::save_safetensors(converted.to_str().unwrap(), &st, &yolov8::config::YoloConfig::yolov8n().to_json(), None).unwrap();
+
+    let side = yolov8::config::YoloConfig::yolov8n().input as usize;
+    let image: Vec<f32> = (0..3 * side * side).map(|i| ((i * 37 % 255) as f32) / 255.0).collect();
+    let logits = |m: yolov8::Yolo| {
+        m.set_eval(true);
+        m.set_image(&image);
+        m.forward_net_pub();
+        let (cls, reg) = m.raw_logits();
+        cls.into_iter().chain(reg).map(f32::to_bits).collect::<Vec<_>>()
+    };
+    assert_eq!(logits(yolov8::Yolo::load(&path, 1)), logits(yolov8::Yolo::load(converted.to_str().unwrap(), 1)));
+    std::fs::remove_file(&converted).ok();
+}
