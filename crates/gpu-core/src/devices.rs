@@ -150,6 +150,19 @@ impl DeviceRegistry {
         if ids.iter().any(|d| d.class == DeviceClass::DiscreteGpu) {
             ids.retain(|d| d.class == DeviceClass::DiscreteGpu);
         }
+        // One index per physical card. A machine with two Vulkan drivers for
+        // the same hardware installed reports every card once per driver;
+        // left alone, each twin would be a separate "card" with its own
+        // budget, and two parts placed on "different" cards would share one.
+        // Only a strong key (UUID or PCI bus) proves two entries are one card.
+        let mut unique: Vec<GpuIdentity> = Vec::with_capacity(ids.len());
+        for d in ids {
+            let strong = d.uuid.is_some() || d.pci_bus.is_some();
+            if !(strong && unique.iter().any(|u| u.same_device(&d))) {
+                unique.push(d);
+            }
+        }
+        let mut ids = unique;
         // Canonical order: PCI bus id when every card reports one (stable
         // across boots and driver updates); otherwise the enumeration order,
         // whose per-(vendor,device) ordinals are at least stable per boot.
@@ -1595,6 +1608,22 @@ mod tests {
         );
         assert_eq!(reg.devices().len(), 1, "--device gpu means discrete when one exists");
         assert_eq!(reg.devices()[0].identity.name, "dGPU");
+    }
+
+    /// A card two installed Vulkan drivers both report is one card: the same
+    /// UUID (or, without one, the same PCI bus) gets one index.
+    #[test]
+    fn a_card_enumerated_twice_gets_one_index() {
+        use backend_api::DeviceClass::DiscreteGpu;
+        let with_uuid = |pci: &str, u: u8, ordinal| GpuIdentity { uuid: Some([u; 16]), ..ident("P40", Some(pci), ordinal, DiscreteGpu) };
+        let reg = DeviceRegistry::from_identities(
+            vec![with_uuid("0000:04:00.0", 1, 0), with_uuid("0000:04:00.0", 1, 1), with_uuid("0000:82:00.0", 2, 2), with_uuid("0000:82:00.0", 2, 3)],
+            "vulkan",
+        );
+        let pci: Vec<_> = reg.devices().iter().map(|d| (d.index, d.identity.pci_bus.clone().unwrap())).collect();
+        assert_eq!(pci, vec![(0, "0000:04:00.0".to_string()), (1, "0000:82:00.0".to_string())]);
+        let reg = DeviceRegistry::from_identities(vec![ident("P40", Some("0000:04:00.0"), 0, DiscreteGpu), ident("P40", Some("0000:04:00.0"), 1, DiscreteGpu)], "wgpu");
+        assert_eq!(reg.devices().len(), 1);
     }
 
     #[test]
