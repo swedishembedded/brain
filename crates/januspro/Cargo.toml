@@ -12,7 +12,16 @@ path = "src/lib.rs"
 [dependencies]
 # The aligner is DeepSeek-VL's MlpProjector, and Janus-Pro's understanding
 # path is DeepSeek-VL's with one tower.
+brain-checkpoint.workspace = true
+brain-clip.workspace = true
+brain-data.workspace = true
 brain-deepseekvl.workspace = true
+brain-gpu-core.workspace = true
+brain-imaging.workspace = true
+brain-model.workspace = true
+brain-qwen3.workspace = true
+brain-runtime.workspace = true
+brain-vqgan.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

@@ -11,8 +11,12 @@
 //! `model_type` as DeepSeek-VL; `brain_arch::by_hf_config` tells them apart
 //! by the generation heads only Janus-Pro configures.
 //!
-//! This crate reads the configuration ([`config`]). The towers, generation
-//! loop and serving are not implemented yet.
+//! * [`config`]: the checkpoint's `config.json`.
+//! * [`model`]: the understanding path, `brain-deepseekvl`'s composite with
+//!   Janus-Pro's tower, roles and image tags.
+//! * [`gen`]: the generation head, embedding table and aligner.
+//! * [`t2i`]: classifier-free-guided text-to-image on the serving engine,
+//!   decoded by `brain-vqgan`'s VQ-16.
 //!
 //! Swedish Embedded AB implements multimodal generation like this for its
 //! clients. If your team needs expertise in running image-understanding and
@@ -20,5 +24,8 @@
 //! by emailing info@swedishembedded.com.
 
 pub mod config;
+pub mod gen;
+pub mod model;
+pub mod t2i;
 
 pub use config::{GenHeadConfig, GenVisionConfig, JanusProConfig, VisionConfig};

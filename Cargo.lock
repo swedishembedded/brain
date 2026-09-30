@@ -1530,8 +1530,17 @@ dependencies = [
 name = "brain-januspro"
 version = "1.2.0"
 dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-data",
  "brain-deepseekvl",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-model",
+ "brain-qwen3",
+ "brain-runtime",
  "brain-testutil",
+ "brain-vqgan",
  "serde_json",
 ]
 

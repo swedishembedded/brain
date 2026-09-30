@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Janus-Pro's understanding path: DeepSeek-VL's composite with one SigLIP-L
+//! tower, a plain `mlp_gelu` aligner, the `<|User|>`/`<|Assistant|>` roles,
+//! and each image wrapped in `<begin_of_image>`/`<end_of_image>`.
+
+use std::path::Path;
+
+use checkpoint::weightio::WeightReader;
+use deepseekvl::model::{Parts, Vlm};
+use deepseekvl::tower::SiglipTower;
+
+use crate::config::JanusProConfig;
+
+/// The understanding tower.
+pub const TOWER_PREFIX: &str = clip::import::siglip::JANUS_PREFIX;
+/// The VQ-16 image tokenizer (`brain-vqgan`'s LlamaGen schedule).
+pub const VQ_PREFIX: &str = "gen_vision_model.";
+/// The tags around each image in the token stream.
+pub const IMAGE_START: &str = "<begin_of_image>";
+pub const IMAGE_END: &str = "<end_of_image>";
+
+/// Every component prefix of a Janus-Pro checkpoint.
+pub const COMPONENTS: [&str; 7] = [
+    TOWER_PREFIX,
+    deepseekvl::import::ALIGNER_PREFIX,
+    crate::gen::GEN_HEAD_PREFIX,
+    crate::gen::GEN_ALIGNER_PREFIX,
+    crate::gen::GEN_EMBED,
+    VQ_PREFIX,
+    "language_model.",
+];
+
+/// Open `dir` and check that every tensor belongs to a component.
+pub fn open(dir: &Path) -> Result<(JanusProConfig, WeightReader), String> {
+    let cfg = JanusProConfig::from_dir(dir)?;
+    if cfg.vision.model_name != "siglip_large_patch16_384" {
+        return Err(format!("understanding tower {} is not the SigLIP-L/16@384 this crate builds", cfg.vision.model_name));
+    }
+    let rd = WeightReader::open_hf_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    deepseekvl::import::check_coverage(&rd, &COMPONENTS)?;
+    Ok((cfg, rd))
+}
+
+/// Load the understanding path from `dir` with the decoder at `dtype`
+/// (the checkpoint's own is bf16), its KV cache sized for `ctx` tokens.
+pub fn load_understanding(dir: &Path, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
+    let (cfg, rd) = open(dir)?;
+    let tower = Box::new(SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner)?);
+    Vlm::assemble(dir, &rd, Parts { tower, style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language }, dtype, ctx)
+}
