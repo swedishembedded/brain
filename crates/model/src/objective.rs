@@ -50,6 +50,16 @@ pub trait Objective<M: Model> {
     /// a few times before training starts to estimate the initial loss.
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32;
 
+    /// A loss on a training batch without differentiating it: what the
+    /// estimate of the loss a run starts from is made of. Defaults to
+    /// [`Self::micro_step`] (which differentiates, into gradients the first
+    /// optimiser step zeroes first); an objective that can read its loss on
+    /// the forward alone overrides it, since on a large model the backward
+    /// is most of a step.
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        self.micro_step(model, rng)
+    }
+
     /// Forward-only evaluation loss averaged over `batches` held-out
     /// batches, or `None` if this objective has no eval split to report
     /// against (default: unsupported, so the training loop simply skips the
@@ -117,6 +127,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).micro_step(model, rng)
+    }
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        (**self).loss_probe(model, rng)
     }
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         (**self).eval(model, rng, batches)

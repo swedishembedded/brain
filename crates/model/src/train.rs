@@ -440,6 +440,13 @@ impl<M: Model> Objective<M> for CausalLm {
         loss
     }
 
+    fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
+        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        let targets = targets_to_u32(&y);
+        model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+        model.forward()
+    }
+
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
@@ -758,7 +765,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         let mut sample_rng = rng.clone();
         let mut total = 0.0;
         for _ in 0..5 {
-            total += obj.micro_step(&model, &mut sample_rng);
+            total += obj.loss_probe(&model, &mut sample_rng);
         }
         total / 5.0
     };
@@ -1238,6 +1245,45 @@ mod tests {
             let i = self.next.get();
             self.next.set(i + 1);
             self.evals.get(i).copied()
+        }
+    }
+
+    /// An objective that counts its loss probes and its training steps.
+    struct Spy {
+        probes: std::rc::Rc<std::cell::Cell<u32>>,
+        steps: std::rc::Rc<std::cell::Cell<u32>>,
+        /// Whether it can read a loss without differentiating it.
+        cheap_probe: bool,
+    }
+    impl Objective<Recorder> for Spy {
+        fn regime(&self) -> &'static str {
+            "spy"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            self.steps.set(self.steps.get() + 1);
+            0.0
+        }
+        fn loss_probe(&mut self, m: &Recorder, r: &mut Rng) -> f32 {
+            if !self.cheap_probe {
+                return self.micro_step(m, r);
+            }
+            self.probes.set(self.probes.get() + 1);
+            0.0
+        }
+    }
+
+    /// The estimate of the loss a run starts from is five losses, and five
+    /// backward passes just to read them cost a 7B fine-tune ten of its
+    /// twelve minutes. An objective that can read a loss without
+    /// differentiating it is asked to; one that cannot is stepped as before.
+    #[test]
+    fn the_initial_loss_is_estimated_without_backward_passes_where_the_objective_can() {
+        for (cheap_probe, want_probes, want_steps) in [(true, 5, 2), (false, 0, 7)] {
+            let (probes, steps) = (std::rc::Rc::new(std::cell::Cell::new(0)), std::rc::Rc::new(std::cell::Cell::new(0)));
+            let spy = Spy { probes: probes.clone(), steps: steps.clone(), cheap_probe };
+            let opts = FitOpts { steps: 2, eval_interval: 0, ..Default::default() };
+            fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), spy, &opts, None, FitControl::default()).expect("fit");
+            assert_eq!((probes.get(), steps.get()), (want_probes, want_steps), "cheap probe: {cheap_probe}");
         }
     }
 
