@@ -462,9 +462,10 @@ pub struct StreamingCodecDecoder {
 }
 
 impl StreamingCodecDecoder {
-    /// Load from a brain codec checkpoint (role "" decoder tensors).
+    /// Load from a codec checkpoint ([`crate::import::open`]: a brain file or
+    /// the tokenizer checkpoint dir), role "" decoder tensors.
     pub fn load(weights_path: &str) -> StreamingCodecDecoder {
-        let c = checkpoint::load(weights_path);
+        let c = crate::import::load(weights_path);
         let cfg = CodecConfig::from_json(&c.header["config"]);
         let w: W = c.by_role("");
         StreamingCodecDecoder { w, cfg }

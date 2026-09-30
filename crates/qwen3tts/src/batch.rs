@@ -235,11 +235,7 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest]) -> Result<Vec<Vec<f3
     if reqs.is_empty() {
         return Err("tts batch: needs at least one request".to_string());
     }
-    for p in [&paths.talker, &paths.mtp, &paths.codec] {
-        if !std::path::Path::new(p).exists() {
-            return Err(format!("tts batch: weights not found at '{p}' (run `brain tts import`)"));
-        }
-    }
+    paths.require(false).map_err(|e| format!("tts batch: {e}"))?;
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
 
@@ -376,14 +372,8 @@ mod tests {
             brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
             return;
         };
-        let paths = TtsPaths {
-            talker: format!("{w}/talker.safetensors"),
-            mtp: format!("{w}/mtp.safetensors"),
-            codec: format!("{w}/codec.safetensors"),
-            speaker: format!("{w}/speaker.safetensors"),
-            ckpt_dir: ckpt,
-        };
-        if !std::path::Path::new(&paths.talker).exists() {
+        let paths = TtsPaths::new(&w, ckpt);
+        if paths.require(false).is_err() {
             brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
             return;
         }

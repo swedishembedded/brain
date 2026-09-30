@@ -61,7 +61,7 @@ const SAMPLE_RATE: u32 = 24_000;
 /// transcribed into a second place that can go stale.
 fn checkpoint_and_sampling_params(spec: ActionSpec) -> ActionSpec {
     const RESOLVED: &str = "unset resolves from the checkpoint's generation_config.json, then the reference default";
-    spec.param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required().host_env("BRAIN_QWEN3TTS_WEIGHTS"))
+    spec.param(ParamSpec::new("weights_dir", ParamType::Str, "the Qwen3-TTS checkpoint dir, or a dir holding talker/mtp/codec(/speaker).safetensors from `brain qwen3tts import`").required().host_env("BRAIN_QWEN3TTS_WEIGHTS"))
         .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required().host_env("BRAIN_QWEN3TTS_CKPT"))
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
         .param(ParamSpec::new("max_frames", ParamType::Int, "max codec frames (length cap)").default(json!(256)))
@@ -107,16 +107,6 @@ fn audio_outcome(wav: Vec<f32>) -> ActionResult {
         .set("sample_rate", json!(SAMPLE_RATE))
         .set("seconds", json!(wav.len() as f64 / SAMPLE_RATE as f64))
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": SAMPLE_RATE, "format": "wav", "channels": 1}))))
-}
-
-fn paths_from(weights_dir: &str, ckpt: String) -> TtsPaths {
-    TtsPaths {
-        talker: format!("{weights_dir}/talker.safetensors"),
-        mtp: format!("{weights_dir}/mtp.safetensors"),
-        codec: format!("{weights_dir}/codec.safetensors"),
-        speaker: format!("{weights_dir}/speaker.safetensors"),
-        ckpt_dir: ckpt,
-    }
 }
 
 /// The full, static capability manifest - safe to build with no weights loaded.
@@ -250,18 +240,10 @@ fn common_run(inv: &Invocation, action: &str, need_speaker: bool) -> Result<(Tts
         return Err(format!("tts {action}: 'text' must be non-empty"));
     }
     let lang = inv.get_str("lang").unwrap_or_else(|| "english".to_string());
-    let paths = paths_from(&weights_dir, ckpt);
+    let paths = TtsPaths::new(&weights_dir, ckpt);
     // Fail cleanly (not a panic in the loaders) when the checkpoints the
     // pipeline loads are absent.
-    let mut need = vec![&paths.talker, &paths.mtp, &paths.codec];
-    if need_speaker {
-        need.push(&paths.speaker);
-    }
-    for p in need {
-        if !Path::new(p).exists() {
-            return Err(format!("tts {action}: weights not found at '{p}' (run `brain tts import`)"));
-        }
-    }
+    paths.require(need_speaker).map_err(|e| format!("tts {action}: {e}"))?;
     Ok((paths, text, lang, gen_opts_from(inv)))
 }
 
@@ -324,7 +306,7 @@ impl Action for BatchAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let weights_dir = inv.get_str("weights_dir").ok_or("tts batch: missing required param 'weights_dir'")?;
         let ckpt = inv.get_str("ckpt").ok_or("tts batch: missing required param 'ckpt'")?;
-        let paths = paths_from(&weights_dir, ckpt);
+        let paths = TtsPaths::new(&weights_dir, ckpt);
         let raw = inv.get_str("requests").ok_or("tts batch: missing required param 'requests'")?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&raw).map_err(|e| format!("tts batch: 'requests' must be a JSON array of objects: {e}"))?;
@@ -544,7 +526,7 @@ mod caps_tests {
             brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
             return;
         };
-        if !Path::new(&format!("{weights_dir}/talker.safetensors")).exists() {
+        if TtsPaths::new(&weights_dir, ckpt.clone()).require(false).is_err() {
             brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
             return;
         }

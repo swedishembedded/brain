@@ -212,25 +212,6 @@ pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::P
     Ok(store.local(reference))
 }
 
-/// What a build without a given family's importer returns.
-///
-/// It names the family AND the cargo feature that would supply it, because a
-/// bare "unsupported family" here is indistinguishable from a genuinely
-/// unknown architecture -- and those two need opposite fixes. A narrow build
-/// (the `brain` SDK, a service, a sample) is a supported configuration, so its
-/// failure mode has to be actionable rather than mysterious.
-///
-/// Compiled only when at least one importer is absent -- with `import-all` on
-/// there is no arm that can call it, and an always-present helper would be an
-/// unused-function warning in the configuration `brain-cli` actually ships.
-#[cfg(not(feature = "import-qwen3tts"))]
-fn no_importer(vendor: &str, repo: &str, family: &str, feature: &str) -> String {
-    format!(
-        "{vendor}/{repo}: convert: this build of brain-loader has no {family} importer \
-         (enable brain-loader/{feature}, or the `brain` SDK surface that selects it)"
-    )
-}
-
 /// Dispatch a `Step::Convert { vendor, repo, recipe }` to the matching
 /// family's finish logic. `recipe` is the `ArtifactRecipe::id` `modelstore::
 /// plan` already picked (`brain_modelstore::recipe`) -- routing on it directly
@@ -248,11 +229,6 @@ pub fn convert(store: &Store, vendor: &str, repo: &str, recipe: &str) -> Result<
         "flux2" => convert_flux2(store, vendor, repo),
         "wan" => convert_wan(store, vendor, repo),
         "yolo" => convert_yolo(store, vendor, repo),
-        // Real conversion (four output files, two roles), not a passthrough
-        // manifest -- special-cased ahead of the generic `files_recipe_roles`
-        // fallback, which would otherwise write the `FilesRecipe` row's
-        // (deliberately empty) `roles` verbatim. See `convert_qwen3tts`.
-        "qwen3tts" => convert_qwen3tts(store, vendor, repo),
         "gguf" => convert_gguf(store, vendor, repo),
         other => match brain_modelstore::recipe::files_recipe_roles(other) {
             Some((family, roles)) => convert_files(store, vendor, repo, family, roles),
@@ -461,48 +437,6 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let role = DIRECTORY_ROLE.iter().find(|(f, _)| *f == family).map_or("weights", |(_, role)| *role);
     convert_files(store, vendor, repo, family, &[(role, ".")])
 }
-
-/// Qwen3-TTS's finish step: unlike every other `convert_transformers` family,
-/// this one produces FOUR converted files (not one `model.brain.safetensors`)
-/// via the exact same three importers `brain qwen3tts import` runs by hand
-/// (`qwen3tts::import::{import_talker,import_mtp}`, `mimi::import::import`
-/// for the codec, `ecapatdnn::import::import` for the speaker encoder) --
-/// this is that command's logic, reused, not reimplemented. The speaker
-/// encoder is best-effort: CustomVoice/VoiceDesign checkpoints ship none
-/// (`tts_model_type != "base"`), so a failure there is a warning, matching
-/// `tts_cli.rs::import`'s own policy, never a hard error for the whole fetch.
-///
-/// Two roles: `ckpt` -> the repo dir itself (still needed for
-/// tokenizer/config at serve time), `weights_dir` -> the new `brain_tts/`
-/// subdirectory holding the four converted files.
-#[cfg(not(feature = "import-qwen3tts"))]
-fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
-    let _ = store;
-    Err(no_importer(vendor, repo, "qwen3tts", "import-qwen3tts"))
-}
-
-#[cfg(feature = "import-qwen3tts")]
-fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
-    let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
-    let ckpt = dir.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
-    let out_dir = dir.join("brain_tts");
-    std::fs::create_dir_all(&out_dir).map_err(|e| format!("{vendor}/{repo}: create {}: {e}", out_dir.display()))?;
-    let path = |name: &str| out_dir.join(name).to_str().map(str::to_string).ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"));
-
-    qwen3tts::import::import_talker(ckpt, &path("talker.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import talker: {e}"))?;
-    qwen3tts::import::import_mtp(ckpt, &path("mtp.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import mtp: {e}"))?;
-    // The speech tokenizer (codec) ships nested inside the Talker's own
-    // checkpoint dir, same default `tts_cli.rs::import` uses.
-    let codec_ckpt = dir.join("speech_tokenizer");
-    let codec_ckpt = codec_ckpt.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
-    mimi::import::import(codec_ckpt, &path("codec.safetensors")?).map_err(|e| format!("{vendor}/{repo}: import codec: {e}"))?;
-    if let Err(e) = ecapatdnn::import::import(ckpt, &path("speaker.safetensors")?) {
-        residency::log::info(&format!("{vendor}/{repo}: import speaker: skipped ({e}) -- fine for CustomVoice/VoiceDesign checkpoints"));
-    }
-
-    convert_files(store, vendor, repo, "qwen3tts", &[("ckpt", "."), ("weights_dir", "brain_tts")])
-}
-
 
 #[cfg(test)]
 mod tests {

@@ -1,71 +1,64 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Import the official Qwen3-TTS `speaker_encoder.*` weights into a brain
-//! `.safetensors` container.
+//! Read the official Qwen3-TTS `speaker_encoder.*` weights as brain's speaker
+//! encoder, as they are downloaded ([`view`]), or write them out as a brain
+//! `.safetensors` container ([`import`]).
 //!
 //! Pure 1:1 name remap: every `speaker_encoder.*` tensor is kept verbatim (just
 //! the `speaker_encoder.` prefix stripped) with its PyTorch layout untouched —
 //! conv weights stay `[Cout, Cin/G, K]` (what `audio::conv::conv1d` expects) and
 //! all biases stay 1-D. There is **no BatchNorm** in this ECAPA variant (the
 //! `TimeDelayNetBlock` is Conv1d + ReLU only), so nothing is folded; the encoder
-//! consumes the conv weight/bias pairs directly. The original `config.json` is
-//! stored so [`crate::SpeakerConfig::from_json`] can recover `enc_dim` /
-//! `sample_rate`. Fails loudly if any `speaker_encoder.*` tensor is unaccounted.
+//! consumes the conv weight/bias pairs directly. The view's config is the
+//! checkpoint's own `config.json`, so [`crate::SpeakerConfig::from_json`] can
+//! recover `enc_dim` / `sample_rate`.
 
 use std::path::Path;
 
-/// Import `<ckpt_dir>/config.json` + `<ckpt_dir>/model.safetensors` into the
-/// brain checkpoint `out_path`. Streams one source tensor at a time — the
-/// output plan (names + shapes) is built first from the source header alone
-/// (no tensor data touched), then the actual tensor bytes stream straight
-/// through to `out_path` without ever holding the whole checkpoint in RAM.
-pub fn import(ckpt_dir: &str, out_path: &str) -> Result<(), String> {
-    let dir = Path::new(ckpt_dir);
-    let cfg_json = std::fs::read_to_string(dir.join("config.json"))
+use checkpoint::weightio::{Renamed, WeightReader};
+
+/// The speaker encoder of `<ckpt_dir>/model.safetensors`, under brain's names,
+/// with `<ckpt_dir>/config.json` as its config. Fails when the checkpoint has
+/// no `speaker_encoder.*` tensor (a CustomVoice/VoiceDesign checkpoint).
+pub fn view(ckpt_dir: &Path) -> Result<WeightReader, String> {
+    let cfg_json = std::fs::read_to_string(ckpt_dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
     let config: serde_json::Value =
         serde_json::from_str(&cfg_json).map_err(|e| format!("parse config.json: {e}"))?;
-
-    let st_path = dir.join("model.safetensors");
-    let reader = checkpoint::weightio::WeightReader::open(st_path.to_str().ok_or("non-utf8 checkpoint path")?)
+    let st_path = ckpt_dir.join("model.safetensors");
+    let src = WeightReader::open(st_path.to_str().ok_or("non-utf8 checkpoint path")?)
         .map_err(|e| format!("import: opening checkpoint: {e}"))?;
-
-    // Header-only pass: every `speaker_encoder.*` tensor's stripped name +
-    // shape, sorted (source names are already unique, so no dedup needed).
-    let mut plan: Vec<(String, Vec<u64>)> = Vec::new();
-    for name in reader.names() {
-        let Some(out_name) = name.strip_prefix("speaker_encoder.") else {
-            continue;
-        };
-        let shape = reader.shape(name).ok_or_else(|| format!("import: missing shape for {name}"))?;
-        plan.push((out_name.to_string(), shape.to_vec()));
-    }
-    if plan.is_empty() {
+    let mut map: Vec<(String, String)> = src
+        .names()
+        .filter_map(|n| n.strip_prefix("speaker_encoder.").map(|out| (out.to_string(), n.to_string())))
+        .collect();
+    if map.is_empty() {
         return Err("no speaker_encoder.* tensors found in checkpoint".to_string());
     }
-    plan.sort_by(|a, b| a.0.cmp(&b.0));
-    let seen = plan.len();
+    map.sort();
+    Ok(WeightReader::derived(Box::new(Renamed::new(src, map, config)?)))
+}
 
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &config, None)
-        .map_err(|e| format!("import: creating output: {e}"))?;
-    let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
-        if err.is_some() {
-            return;
-        }
-        let Some(out_name) = name.strip_prefix("speaker_encoder.") else {
-            return;
-        };
-        if let Err(e) = writer.write(out_name, &data) {
-            err = Some(format!("import: {e}"));
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
-    }
-    writer.finish().map_err(|e| format!("import: {e}"))?;
-    eprintln!("speaker import: {seen} speaker_encoder tensors -> {} params in {out_path}", seen);
+/// A speaker-encoder checkpoint as the loader takes it: a brain file (from
+/// [`import`]) as it is, or the HF checkpoint dir through [`view`].
+pub fn open(path: &str) -> Result<WeightReader, String> {
+    let r = if Path::new(path).is_dir() { view(Path::new(path)) } else { WeightReader::open(path).map_err(|e| e.to_string()) };
+    r.map_err(|e| format!("{path}: {e}"))
+}
+
+/// [`open`], every tensor read as f32, for the eager loader. Panics naming
+/// `path` when it cannot be read, as `checkpoint::load` does.
+pub fn load(path: &str) -> checkpoint::Container {
+    open(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Write the speaker encoder of `<ckpt_dir>` to the brain checkpoint
+/// `out_path` - [`view`], one tensor at a time.
+pub fn import(ckpt_dir: &str, out_path: &str) -> Result<(), String> {
+    let v = view(Path::new(ckpt_dir))?;
+    v.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    eprintln!("speaker import: {} speaker_encoder tensors -> {out_path}", v.names().count());
     Ok(())
 }
 
@@ -109,6 +102,12 @@ mod tests {
         assert_eq!(reader.tensor("tdnn.0.conv.bias").unwrap(), vec![0.5, -0.5]);
         assert!(reader.tensor("talker.model.norm.weight").is_none());
         assert_eq!(reader.config()["enc_dim"], 4);
+
+        // Served as downloaded: the view reads what the import wrote.
+        let viewed = load(dir.to_str().unwrap());
+        let written = checkpoint::load(out.to_str().unwrap());
+        assert_eq!(viewed.header, written.header);
+        assert_eq!(viewed.by_role(""), written.by_role(""));
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&out).ok();

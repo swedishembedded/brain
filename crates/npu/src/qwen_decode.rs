@@ -66,7 +66,7 @@ fn prepare_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Res
                 };
             if !fresh {
                 eprintln!("npu: exporting ONNX decoder for seq={cap} (one-time, ~30s)…");
-                export_qwen_fp32(weights_path, onnx.to_str().unwrap(), cap).map_err(map)?;
+                export_qwen_fp32(&checkpoint::weightio::WeightReader::open(weights_path).map_err(map)?, onnx.to_str().unwrap(), cap).map_err(map)?;
             }
             Ok((onnx, None, fresh))
         }
@@ -75,7 +75,7 @@ fn prepare_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Res
             std::fs::create_dir_all(&dir).map_err(map)?;
             let onnx = dir.join("qwen.onnx");
             eprintln!("npu: exporting ONNX decoder for seq={cap} (one-time, ~30s; no --npu-cache, so not reused)…");
-            export_qwen_fp32(weights_path, onnx.to_str().unwrap(), cap).map_err(map)?;
+            export_qwen_fp32(&checkpoint::weightio::WeightReader::open(weights_path).map_err(map)?, onnx.to_str().unwrap(), cap).map_err(map)?;
             Ok((onnx, Some(dir), false))
         }
     }

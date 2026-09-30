@@ -28,7 +28,7 @@ fn tiny_onnx_matches_brain_cpu() {
     let wpath = dir.join("tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
-    let (bytes, _) = npu::qwen_export::build_qwen_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
+    let (bytes, _) = npu::qwen_export::build_qwen_fp32_bytes(&checkpoint::weightio::WeightReader::open(wpath.to_str().unwrap()).unwrap(), ids.len()).unwrap();
     let mut sess = DecoderSession::load_bytes(
         &bytes,
         &NpuConfig { device: NpuDevice::Cpu, allow_fallback: true, ..Default::default() },

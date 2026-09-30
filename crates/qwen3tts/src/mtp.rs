@@ -1031,7 +1031,7 @@ impl MtpModel {
 
     /// Build on an existing device handle (see `gpu_core::Gpu::share`).
     pub fn load_inference_on(gpu: Gpu, path: &str) -> MtpModel {
-        let c = checkpoint::load(path);
+        let c = crate::import::load_mtp(path);
         let cfg = MtpConfig::from_brain_json(&c.header["config"]);
         let take = |name: &str| {
             c.find(name, "")

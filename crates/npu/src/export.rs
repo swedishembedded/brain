@@ -8,16 +8,17 @@ use onnx::GraphBuilder;
 use crate::quant::Quant;
 use crate::topology::build_graph;
 
-/// The model config stored in a checkpoint header.
+/// The model config of a checkpoint (a brain file's header, or yolov8n's for
+/// an Ultralytics `.pt`).
 pub fn config_of(weights_path: &str) -> yolov8::YoloConfig {
-    let r = checkpoint::weightio::WeightReader::open(weights_path).unwrap_or_else(|e| panic!("open {weights_path}: {e}"));
+    let r = yolov8::import::open(weights_path).unwrap_or_else(|e| panic!("{e}"));
     yolov8::YoloConfig::from_json(&r.config())
 }
 
 /// Open the checkpoint (header only) + config, optionally overriding the
 /// (square) input size.
 fn load(weights_path: &str, input: Option<u32>) -> (yolov8::YoloConfig, checkpoint::weightio::WeightReader) {
-    let r = checkpoint::weightio::WeightReader::open(weights_path).unwrap_or_else(|e| panic!("open {weights_path}: {e}"));
+    let r = yolov8::import::open(weights_path).unwrap_or_else(|e| panic!("{e}"));
     let mut cfg = yolov8::YoloConfig::from_json(&r.config());
     if let Some(s) = input {
         cfg.input = s;

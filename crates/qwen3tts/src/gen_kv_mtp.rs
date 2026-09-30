@@ -97,7 +97,7 @@ impl CpuMtp {
     /// [`crate::import::import_mtp`] — the same container
     /// [`crate::mtp::MtpModel::load_inference`] reads.
     pub fn load(path: &str) -> CpuMtp {
-        let c = checkpoint::load(path);
+        let c = crate::import::load_mtp(path);
         let cfg = MtpConfig::from_brain_json(&c.header["config"]);
         let take = |name: &str| {
             c.find(name, "")

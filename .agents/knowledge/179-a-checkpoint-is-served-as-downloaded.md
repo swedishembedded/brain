@@ -39,8 +39,29 @@ download through `import::Int8View`, a `checkpoint::weightio::DerivedCheckpoint`
 That view packs each weight to int8 when it is read, the conversion the
 30B model needs in order to fit the cards, and it never writes to disk.
 Each crate's explicit `import` command writes out the same view, so there
-is one mapping per family. yolo's `.pt` and qwen3tts's four checkpoints
-are still converted on pull.
+is one mapping per family.
+
+yolo reads its downloaded `.pt` directly. qwen3tts reads its four
+components from the download in the same way:
+
+- the Talker and the MTP through `qwen3tts::import::{talker_view, mtp_view}`,
+  each a `checkpoint::weightio::Renamed` view checked against the
+  component's parameter list;
+- the speaker encoder through `ecapatdnn::import::view`;
+- the codec through `mimi::import::view`, which collapses each codebook to
+  its table as it is read.
+
+A view carries its loader's config (`DerivedCheckpoint::config`), so
+`checkpoint::load_reader` and the NPU exporters, which now take a
+`WeightReader` rather than a path, treat a view exactly as they treat a
+brain file. `qwen3tts::TtsPaths::new` is the one place that knows the
+layout. A directory holding `talker.safetensors` is read as imported files;
+any other is read as the download, with its codec in `speech_tokenizer/`.
+NPU graph caches for a download go under brain's cache directory, never
+into the model store.
+
+No family's pull converts on disk any more, so `brain-loader` links no
+model crate.
 
 `a_hugging_face_directory_is_served_as_downloaded` generates from a tiny
 Llama directory and asserts that nothing is written beside it. The loader

@@ -234,7 +234,7 @@ impl TalkerGen {
     /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
     /// process holds ONE device however many components it loads.
     pub fn load_on(gpu: Gpu, path: &str, max_t: u32) -> TalkerGen {
-        let c = checkpoint::load(path);
+        let c = crate::import::load_talker(path);
         let qcfg = qwen3::QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
         let take = |name: &str| {

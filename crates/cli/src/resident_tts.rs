@@ -21,8 +21,9 @@
 //!
 //! Config is env-only (no hardcoded paths), mirroring `brain tts synth`'s
 //! `--weights-dir` / `--ckpt` flags:
-//!   * `BRAIN_QWEN3TTS_WEIGHTS` - dir holding `talker.safetensors`, `mtp.safetensors`,
-//!     `codec.safetensors`, `speaker.safetensors` (the primary gate; unset ⇒ not served).
+//!   * `BRAIN_QWEN3TTS_WEIGHTS` - the Qwen3-TTS checkpoint dir as downloaded, or a
+//!     dir holding `talker.safetensors`, `mtp.safetensors`, `codec.safetensors`,
+//!     `speaker.safetensors` (the primary gate; unset ⇒ not served).
 //!   * `BRAIN_QWEN3TTS_CKPT`     - HF checkpoint dir (for `config.json` + tokenizer).
 //!   * `BRAIN_QWEN3TTS_LANG`     - default synthesis language (default `english`).
 //!   * `BRAIN_QWEN3TTS_REF`      - optional reference `.wav`: when set, `speak` voice
@@ -40,7 +41,7 @@ use qwen3tts::{GenOpts, TtsPaths};
 /// Qwen3-TTS 24 kHz output sample rate (see `qwen3tts::pipeline` / `brain tts synth`).
 const SAMPLE_RATE: u32 = 24_000;
 
-/// Text-to-speech behind the scheduler. Loads brain-format Qwen3-TTS checkpoints
+/// Text-to-speech behind the scheduler. Loads a Qwen3-TTS checkpoint
 /// (`BRAIN_QWEN3TTS_WEIGHTS`); the resident instance decodes on the CPU (brain's
 /// `CpuTalker` default) - dropping it frees the RAM. One action, `speak`.
 pub struct TtsResident {
@@ -79,15 +80,8 @@ impl TtsResident {
         }
     }
 
-    /// Brain checkpoint paths (same layout as `brain tts`'s `paths()` helper).
     fn paths(&self) -> TtsPaths {
-        TtsPaths {
-            talker: format!("{}/talker.safetensors", self.weights_dir),
-            mtp: format!("{}/mtp.safetensors", self.weights_dir),
-            codec: format!("{}/codec.safetensors", self.weights_dir),
-            speaker: format!("{}/speaker.safetensors", self.weights_dir),
-            ckpt_dir: self.ckpt_dir.clone(),
-        }
+        TtsPaths::new(&self.weights_dir, self.ckpt_dir.clone())
     }
 
 }
@@ -105,13 +99,9 @@ impl ResidentModel for TtsResident {
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // CPU-side decode (CpuTalker/CpuMtp) → the footprint is RAM. Budget ≈ 1.3×
-        // the sum of the weight files it loads (talker + mtp + codec + speaker);
-        // fall back to a conservative 4 GiB if the files aren't stat-able yet.
-        let p = self.paths();
-        let sum: u64 = [&p.talker, &p.mtp, &p.codec, &p.speaker]
-            .iter()
-            .filter_map(|f| std::fs::metadata(f).ok().map(|m| m.len()))
-            .sum();
+        // the f32 weights it loads (talker + mtp + codec + speaker); fall back
+        // to a conservative 4 GiB if they can't be read yet.
+        let sum = self.paths().f32_weight_bytes();
         let ram = if sum > 0 { sum + sum / 3 } else { 4u64 << 30 };
         MemCost::new(0, ram)
     }
@@ -123,9 +113,7 @@ impl ResidentModel for TtsResident {
         // weights from disk. A missing/unreadable checkpoint fails here, at
         // activation, rather than on the first request.
         let paths = self.paths();
-        if !std::path::Path::new(&paths.talker).exists() {
-            return Err(format!("tts: talker weights not found at {} (set BRAIN_QWEN3TTS_WEIGHTS)", paths.talker));
-        }
+        paths.require(false).map_err(|e| format!("tts: {e} (set BRAIN_QWEN3TTS_WEIGHTS)"))?;
         Ok(Box::new(TtsInstance {
             engine: qwen3tts::ResidentEngine::load(&paths)?,
             lang: self.lang.clone(),
@@ -264,7 +252,7 @@ mod tests {
             brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
             return;
         };
-        if !std::path::Path::new(&format!("{weights}/talker.safetensors")).exists() {
+        if TtsPaths::new(&weights, ckpt.clone()).require(false).is_err() {
             brain_testutil::skip("weights not found at BRAIN_QWEN3TTS_WEIGHTS");
             return;
         }

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Import a HuggingFace `Qwen3-TTS` checkpoint (`config.json` +
-//! `model.safetensors`) into brain `.safetensors` containers — one for the Talker
-//! decoder, one for the MTP code-predictor.
+//! Read a HuggingFace `Qwen3-TTS` checkpoint (`config.json` +
+//! `model.safetensors`) as brain's Talker decoder and MTP code-predictor, as
+//! it is downloaded ([`talker_view`], [`mtp_view`]), or write either out as a
+//! brain `.safetensors` container ([`import_talker`], [`import_mtp`]).
 //!
 //! Convention match (identical to `crate::qwen3::import`): brain's `matmul.wgsl`
 //! is `out = x @ Wᵀ` with `W:[out,in]` row-major — exactly HF `nn.Linear.weight`;
 //! the embedding tables are `[vocab, hidden]` row-major in both. So **no tensor
-//! is transposed**; the import is a pure 1:1 name remap + bf16→f32 dequant.
+//! is transposed**; each view is a pure 1:1 name remap + bf16→f32 dequant.
 //!
 //! The Talker decoder is loaded by [`crate::qwen3::Qwen`] with `tie_embeddings =
 //! false`: `talker.model.codec_embedding → tok.weight`, `talker.codec_head →
@@ -17,8 +18,10 @@
 //! `text_embedding.weight` / `text_projection.*` names (ignored by the Qwen
 //! loader, picked up by [`crate::talker::TalkerModel`]).
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use checkpoint::weightio::{Renamed, WeightReader};
 use serde_json::Value;
 
 use crate::config::{MtpConfig, TalkerConfig};
@@ -88,7 +91,7 @@ fn read_config(dir: &Path) -> Result<Value, String> {
     serde_json::from_str(&s).map_err(|e| format!("parse config.json: {e}"))
 }
 
-fn open_source(dir: &Path) -> Result<checkpoint::weightio::WeightReader, String> {
+fn open_source(dir: &Path) -> Result<WeightReader, String> {
     let st = dir.join("model.safetensors");
     if !st.exists() {
         return Err(format!(
@@ -96,7 +99,7 @@ fn open_source(dir: &Path) -> Result<checkpoint::weightio::WeightReader, String>
             st.display()
         ));
     }
-    checkpoint::weightio::WeightReader::open(st.to_str().unwrap())
+    WeightReader::open(st.to_str().unwrap())
         .map_err(|e| format!("import: opening checkpoint: {e}"))
 }
 
@@ -158,89 +161,101 @@ fn mtp_param_specs(cfg: &MtpConfig) -> Vec<(String, usize)> {
     out
 }
 
-/// Stream `reader`'s tensors through `map`, writing each mapped tensor straight
-/// to `writer` (one at a time — never the whole checkpoint in memory). Fails
-/// loudly on a missing tensor, a shape mismatch, or a duplicate mapping — all
-/// caught by `StWriter::write`/`finish` (an unplanned or already-written name,
-/// or a wrong element count), so no separate coverage pass is needed here.
-fn stream_container(
-    reader: &checkpoint::weightio::WeightReader,
-    map: impl Fn(&str) -> Option<String>,
-    writer: &mut checkpoint::weightio::StWriter,
-) -> Result<(usize, usize), String> {
-    let mut dropped = 0usize;
-    let mut mapped = 0usize;
-    let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
-        if err.is_some() {
-            return;
-        }
-        match map(name) {
-            Some(bn) => {
-                mapped += 1;
-                if let Err(e) = writer.write(&bn, &data) {
-                    err = Some(format!("import: {e}"));
-                }
+/// One component of the checkpoint at `dir` under its brain names: every
+/// tensor `map` keeps, checked against the component's parameter list (a
+/// missing tensor, a wrong element count, or a kept tensor the list does not
+/// name is an error), with `config` as the view's config.
+fn component(dir: &Path, specs: &[(String, usize)], map: impl Fn(&str) -> Option<String>, config: Value) -> Result<WeightReader, String> {
+    let src = open_source(dir)?;
+    let mut from: HashMap<String, String> = HashMap::new();
+    for name in src.names() {
+        if let Some(brain) = map(name) {
+            if from.insert(brain.clone(), name.to_string()).is_some() {
+                return Err(format!("import: two tensors map to {brain}"));
             }
-            None => dropped += 1,
         }
-    });
-    if let Some(e) = err {
-        return Err(e);
     }
-    Ok((mapped, dropped))
+    let mut pairs = Vec::with_capacity(specs.len());
+    for (brain, numel) in specs {
+        let hf = from.remove(brain).ok_or_else(|| format!("import: checkpoint has no tensor for {brain}"))?;
+        let got: u64 = src.shape(&hf).unwrap_or_default().iter().product();
+        if got != *numel as u64 {
+            return Err(format!("import: {hf} has {got} elements, {brain} needs {numel}"));
+        }
+        pairs.push((brain.clone(), hf));
+    }
+    if let Some(extra) = from.keys().next() {
+        return Err(format!("import: {} maps to {extra}, which the config does not declare", from[extra]));
+    }
+    Ok(WeightReader::derived(Box::new(Renamed::new(src, pairs, config)?)))
 }
 
-/// Import the Talker decoder (+ text-conditioning tensors) from `<hf_dir>` into a
-/// brain checkpoint at `out_path`. Loadable by [`crate::talker::TalkerModel`].
-/// Streams one source tensor at a time (never the whole checkpoint in memory).
+/// The Talker decoder (+ text-conditioning tensors) of the HF checkpoint at
+/// `dir`, read under brain's names as it is downloaded. Its config is the
+/// Qwen3 decoder config (untied) the shared loader parses; the talker's
+/// M-RoPE/code-group metadata is not needed for the decoder forward.
+pub fn talker_view(dir: &Path) -> Result<WeightReader, String> {
+    let cfg = TalkerConfig::from_json(&read_config(dir)?);
+    component(dir, &talker_param_specs(&cfg), talker_hf_to_brain, cfg.to_qwen(2048).to_json())
+}
+
+/// The MTP code-predictor of the HF checkpoint at `dir`, under brain's names.
+pub fn mtp_view(dir: &Path) -> Result<WeightReader, String> {
+    let cfg = MtpConfig::from_json(&read_config(dir)?);
+    component(dir, &mtp_param_specs(&cfg), mtp_hf_to_brain, cfg.to_json())
+}
+
+/// A Talker checkpoint as the loaders take it: a brain file (from
+/// [`import_talker`]) as it is, or an HF checkpoint dir through [`talker_view`].
+pub fn open_talker(path: &str) -> Result<WeightReader, String> {
+    open(path, talker_view)
+}
+
+/// [`open_talker`] for the MTP.
+pub fn open_mtp(path: &str) -> Result<WeightReader, String> {
+    open(path, mtp_view)
+}
+
+fn open(path: &str, view: fn(&Path) -> Result<WeightReader, String>) -> Result<WeightReader, String> {
+    if Path::new(path).is_dir() {
+        view(Path::new(path)).map_err(|e| format!("{path}: {e}"))
+    } else {
+        WeightReader::open(path).map_err(|e| format!("{path}: {e}"))
+    }
+}
+
+/// [`open_talker`], every tensor read as f32, for the eager loaders.
+/// Panics naming `path` when it cannot be read, as `checkpoint::load` does.
+pub fn load_talker(path: &str) -> checkpoint::Container {
+    open_talker(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`load_talker`] for the MTP.
+pub fn load_mtp(path: &str) -> checkpoint::Container {
+    open_mtp(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Write the Talker decoder (+ text-conditioning tensors) of `<hf_dir>` to a
+/// brain checkpoint at `out_path` - [`talker_view`], one tensor at a time.
 pub fn import_talker(hf_dir: &str, out_path: &str) -> Result<(), String> {
-    let dir = Path::new(hf_dir);
-    let root = read_config(dir)?;
-    let cfg = TalkerConfig::from_json(&root);
-    let specs = talker_param_specs(&cfg);
-    let plan: Vec<(String, Vec<u64>)> = specs.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
-    // The container's config is the Qwen3 decoder config (untied) so the shared
-    // loader parses it directly; the talker's M-RoPE/code-group metadata is not
-    // needed for the decoder forward.
-    let cfg_json = cfg.to_qwen(2048).to_json();
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg_json, None)
-        .map_err(|e| format!("import: creating output: {e}"))?;
-    let reader = open_source(dir)?;
-    let (mapped, dropped) = stream_container(&reader, talker_hf_to_brain, &mut writer)?;
-    writer.finish().map_err(|e| format!("import: {e}"))?;
-    eprintln!(
-        "imported Talker: {} tensors -> {out_path} ({mapped} HF talker.* tensors mapped, {dropped} dropped)",
-        plan.len(),
-    );
+    let view = talker_view(Path::new(hf_dir))?;
+    view.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    eprintln!("imported Talker: {} tensors -> {out_path}", view.names().count());
     Ok(())
 }
 
-/// Import the MTP code-predictor from `<hf_dir>` into a brain checkpoint at
-/// `out_path`. Loadable by [`crate::mtp::MtpModel`].
-/// Streams one source tensor at a time (never the whole checkpoint in memory).
+/// Write the MTP code-predictor of `<hf_dir>` to a brain checkpoint at
+/// `out_path` - [`mtp_view`], one tensor at a time.
 pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
-    let dir = Path::new(hf_dir);
-    let root = read_config(dir)?;
-    let cfg = MtpConfig::from_json(&root);
-    let specs = mtp_param_specs(&cfg);
-    let plan: Vec<(String, Vec<u64>)> = specs.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
-        .map_err(|e| format!("import: creating output: {e}"))?;
-    let reader = open_source(dir)?;
-    let (mapped, dropped) = stream_container(&reader, mtp_hf_to_brain, &mut writer)?;
-    writer.finish().map_err(|e| format!("import: {e}"))?;
-    eprintln!(
-        "imported MTP: {} tensors -> {out_path} ({mapped} HF code_predictor.* tensors mapped, {dropped} dropped)",
-        plan.len(),
-    );
+    let view = mtp_view(Path::new(hf_dir))?;
+    view.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    eprintln!("imported MTP: {} tensors -> {out_path}", view.names().count());
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn talker_name_mapping() {
@@ -445,6 +460,17 @@ mod tests {
         for (name, data) in &expect_mtp {
             assert_eq!(mr.tensor(name).unwrap(), *data, "mtp {name}");
         }
+
+        // Served as downloaded: the views read what the imports wrote, and
+        // opening them writes nothing beside the checkpoint.
+        for (view, file) in [(load_talker(dir.to_str().unwrap()), &talker_out), (load_mtp(dir.to_str().unwrap()), &mtp_out)] {
+            let written = checkpoint::load(file.to_str().unwrap());
+            assert_eq!(view.header, written.header);
+            assert_eq!(view.by_role(""), written.by_role(""));
+        }
+        let mut listed: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        listed.sort();
+        assert_eq!(listed, ["config.json", "model.safetensors"]);
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&talker_out).ok();

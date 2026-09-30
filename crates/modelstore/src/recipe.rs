@@ -281,13 +281,11 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         // tokenizer.json/tokenizer_config.json, model.safetensors) misses
         // the nested `speech_tokenizer/` codec checkpoint entirely, plus
         // `vocab.json`/`merges.txt` this repo needs since it ships no
-        // unified `tokenizer.json`. `roles` is empty here on purpose --
-        // `crates/cli/src/supply.rs::convert` special-cases this recipe id
-        // to `convert_qwen3tts`, which runs the real Talker/MTP/codec/
-        // speaker conversion and writes its OWN two-role manifest, never
-        // `convert_files`.
+        // unified `tokenizer.json`. Both roles are the download itself: the
+        // Talker, MTP, codec and speaker encoder are read from it as they
+        // are (`qwen3tts::TtsPaths::new`), with its config and tokenizer.
         files: &[],
-        roles: &[],
+        roles: &[("ckpt", "."), ("weights_dir", ".")],
     },
     FilesRecipe {
         id: "fastvlm",

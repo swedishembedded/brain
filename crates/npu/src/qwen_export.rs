@@ -5,15 +5,15 @@
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
 //! needed to produce the file.
 
+use checkpoint::weightio::WeightReader;
 use onnx::builder::GraphBuilder;
 use qwen3::config::QwenConfig;
 
 /// Build the fp32 ONNX decoder for `seq_len` and return `(bytes, config)`.
-pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+pub fn build_qwen_fp32_bytes(reader: &WeightReader, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_decoder");
-    crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
+    crate::qwen_topology::build_qwen_graph(&cfg, reader, seq_len, &mut g);
     Ok((g.finish(), cfg))
 }
 
@@ -25,13 +25,13 @@ pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Res
 /// container are simply unused by the decoder graph. Provided as a named entry
 /// point so callers reach for it by intent; the input is `input_ids` (codec
 /// token ids) and the output is the codebook-0 `logits`.
-pub fn build_talker_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    build_qwen_fp32_bytes(weights_path, seq_len)
+pub fn build_talker_fp32_bytes(reader: &WeightReader, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    build_qwen_fp32_bytes(reader, seq_len)
 }
 
 /// Export the fp32 ONNX Talker decoder to `out_path` (+ sidecar).
-pub fn export_talker_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_qwen_fp32(weights_path, out_path, seq_len)
+pub fn export_talker_fp32(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_qwen_fp32(reader, out_path, seq_len)
 }
 
 /// Build the fp32 ONNX **Talker hidden-state** graph for `seq_len` and return
@@ -40,66 +40,63 @@ pub fn export_talker_fp32(weights_path: &str, out_path: &str, seq_len: usize) ->
 /// input `inputs_embeds:[1,seq_len,d]` (f32), output `hidden:[1,seq_len,d]` (f32,
 /// post-final-norm). The codebook-0 head and MTP residual fill stay on the host.
 /// See [`crate::qwen_topology::build_talker_hidden_graph`].
-pub fn build_talker_hidden_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    talker_hidden_bytes(weights_path, seq_len, false)
+pub fn build_talker_hidden_fp32_bytes(reader: &WeightReader, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    talker_hidden_bytes(reader, seq_len, false)
 }
 
 /// As [`build_talker_hidden_fp32_bytes`] but weight-only **INT8** (per-output-
 /// channel symmetric, `DequantizeLinear` -> MatMul): a quarter the bytes, so the 1.7B
 /// Talker fits the NPU and compiles faster.
-pub fn build_talker_hidden_int8_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    talker_hidden_bytes(weights_path, seq_len, true)
+pub fn build_talker_hidden_int8_bytes(reader: &WeightReader, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    talker_hidden_bytes(reader, seq_len, true)
 }
 
-fn talker_hidden_bytes(weights_path: &str, seq_len: usize, quant: bool) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+fn talker_hidden_bytes(reader: &WeightReader, seq_len: usize, quant: bool) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, reader, seq_len, quant, &mut g);
     Ok((g.finish(), cfg))
 }
 
 /// Export the fp32 ONNX Talker hidden-state graph to `out_path` (+ a
 /// `<out_path>.data` sidecar for the large decoder weights).
-pub fn export_talker_hidden_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_hidden(weights_path, out_path, seq_len, false)
+pub fn export_talker_hidden_fp32(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_hidden(reader, out_path, seq_len, false)
 }
 
 /// Export the weight-only **INT8** Talker hidden-state graph to `out_path`.
-pub fn export_talker_hidden_int8(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_hidden(weights_path, out_path, seq_len, true)
+pub fn export_talker_hidden_int8(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_hidden(reader, out_path, seq_len, true)
 }
 
-fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+fn export_talker_hidden(reader: &WeightReader, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, reader, seq_len, quant, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
 /// Export the **KV-cache decode-step** Talker graph (one token + per-layer
 /// past/present K/V) for `cap` cache slots; `quant` selects weight-only INT8.
-pub fn export_talker_decode_fp32(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::F32)
+pub fn export_talker_decode_fp32(reader: &WeightReader, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(reader, out_path, cap, crate::qwen_topology::Quant::F32)
 }
 
 /// INT8 weight-only variant of [`export_talker_decode_fp32`].
-pub fn export_talker_decode_int8(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int8)
+pub fn export_talker_decode_int8(reader: &WeightReader, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(reader, out_path, cap, crate::qwen_topology::Quant::Int8)
 }
 
 /// INT4 weight-only variant (an eighth of fp32's bytes; weight-bandwidth-bound decode
 /// runs faster and RAM roughly halves vs INT8). Lossier than INT8 — validate quality.
-pub fn export_talker_decode_int4(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int4)
+pub fn export_talker_decode_int4(reader: &WeightReader, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(reader, out_path, cap, crate::qwen_topology::Quant::Int4)
 }
 
-fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+fn export_talker_decode(reader: &WeightReader, out_path: &str, cap: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_decode");
-    crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, quant, &mut g);
+    crate::qwen_topology::build_talker_decode_graph(&cfg, reader, cap, quant, &mut g);
     finish_quant(&g, out_path, quant)
 }
 
@@ -119,17 +116,16 @@ fn finish_quant(g: &GraphBuilder, out_path: &str, quant: crate::qwen_topology::Q
 /// the already-projected residual embedding `[1,1,d_mtp]`; the host keeps the
 /// `small_to_mtp_projection`, per-residual `codec_embedding` and `lm_head` tables.
 /// `cap` is `num_code_groups` (the MTP's 16-position sequence). `quant` => INT8.
-pub fn export_mtp_decode_fp32(mtp_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_mtp_decode(mtp_path, out_path, cap, false)
+pub fn export_mtp_decode_fp32(reader: &WeightReader, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_mtp_decode(reader, out_path, cap, false)
 }
 
 /// INT8 weight-only variant of [`export_mtp_decode_fp32`].
-pub fn export_mtp_decode_int8(mtp_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_mtp_decode(mtp_path, out_path, cap, true)
+pub fn export_mtp_decode_int8(reader: &WeightReader, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_mtp_decode(reader, out_path, cap, true)
 }
 
-fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(mtp_path)?;
+fn export_mtp_decode(reader: &WeightReader, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
     let h = reader.config();
     let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
     let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
@@ -153,7 +149,7 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
         rope_scaling: None,
     };
     let mut g = GraphBuilder::new("qwen_mtp_decode");
-    crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
+    crate::qwen_topology::build_talker_decode_graph(&cfg, reader, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
@@ -161,8 +157,7 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
 /// [`crate::qwen_topology::build_mtp_fused_graph`]): the whole per-frame residual
 /// prediction (16 substeps) in ONE inference. Inputs `talker_hidden` + `cb0_embed`,
 /// outputs `codes` (f32, host rounds) + `res_sum`. fp32 weights.
-pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(mtp_path)?;
+pub fn export_mtp_fused(reader: &WeightReader, out_path: &str) -> std::io::Result<()> {
     let h = reader.config();
     let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
     let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
@@ -188,32 +183,31 @@ pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
     let vocab = gu("vocab_size", 2048) as usize;
     let n_groups = gu("num_code_groups", 16) as usize;
     let mut g = GraphBuilder::new("qwen_mtp_fused");
-    crate::qwen_topology::build_mtp_fused_graph(&cfg, emb, vocab, n_groups, &reader, &mut g);
+    crate::qwen_topology::build_mtp_fused_graph(&cfg, emb, vocab, n_groups, reader, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
 /// Export the **prefill** Talker graph (full context -> hidden + per-layer K/V) to
 /// seed the decode KV cache in one inference. `quant` selects weight-only INT8.
-pub fn export_talker_prefill_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::F32)
+pub fn export_talker_prefill_fp32(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(reader, out_path, seq_len, crate::qwen_topology::Quant::F32)
 }
 
 /// INT8 weight-only variant of [`export_talker_prefill_fp32`].
-pub fn export_talker_prefill_int8(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::Int8)
+pub fn export_talker_prefill_int8(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(reader, out_path, seq_len, crate::qwen_topology::Quant::Int8)
 }
 
 /// INT4 weight-only variant of [`export_talker_prefill_fp32`] (pairs with the INT4
 /// decode graph so the prefill-seeded cache and the decode steps use matching weights).
-pub fn export_talker_prefill_int4(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::Int4)
+pub fn export_talker_prefill_int4(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(reader, out_path, seq_len, crate::qwen_topology::Quant::Int4)
 }
 
-fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+fn export_talker_prefill(reader: &WeightReader, out_path: &str, seq_len: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_talker_prefill");
-    crate::qwen_topology::build_talker_prefill_graph(&cfg, &reader, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_prefill_graph(&cfg, reader, seq_len, quant, &mut g);
     finish_quant(&g, out_path, quant)
 }
 
@@ -223,10 +217,9 @@ const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 
 /// Export the fp32 ONNX decoder to `out_path` (+ a `<out_path>.data` sidecar for
 /// large weights). The pair is read back with a file-based OpenVINO loader.
-pub fn export_qwen_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
-    let cfg = QwenConfig::from_reader(&reader).map_err(std::io::Error::other)?;
+pub fn export_qwen_fp32(reader: &WeightReader, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    let cfg = QwenConfig::from_reader(reader).map_err(std::io::Error::other)?;
     let mut g = GraphBuilder::new("qwen_decoder");
-    crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
+    crate::qwen_topology::build_qwen_graph(&cfg, reader, seq_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }

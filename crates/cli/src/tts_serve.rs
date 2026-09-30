@@ -132,7 +132,15 @@ pub fn run_serve(args: &[String]) {
         .ok()
         .and_then(|s| npu::openvino::NpuDevice::parse(&s))
         .unwrap_or(npu::openvino::NpuDevice::Npu);
-    let cache = |w: &str| format!("{w}/npu-cache");
+    // An engine always has a cache dir: when brain's cache directory cannot
+    // be resolved (no HOME), it falls back to one under the temp dir.
+    let cache = |w: &str| {
+        qwen3tts::TtsPaths::new(w, String::new())
+            .npu_cache_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("brain-qwen3tts-npu-cache"))
+            .to_string_lossy()
+            .into_owned()
+    };
     let ref_text = std::fs::read_to_string(&clone_ref_text).unwrap_or_default().trim().to_string();
     for name in &enable {
         let cfg = match name.as_str() {

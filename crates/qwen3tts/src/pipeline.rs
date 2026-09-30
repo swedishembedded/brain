@@ -25,35 +25,93 @@ use crate::mtp::MtpModel;
 use crate::prompt::{self, Prompt, TtsSpecials};
 use crate::sampling::DegenerationWatch;
 
-/// Brain checkpoint paths + the HF checkpoint dir (for `config.json`, tokenizer).
+/// Where each component's weights are read from, plus the HF checkpoint dir
+/// (for `config.json`, tokenizer). A component path is a brain checkpoint
+/// file (`brain qwen3tts import`) or the HF checkpoint dir itself, which its
+/// loader reads as downloaded (see [`crate::import`]).
 pub struct TtsPaths {
     pub talker: String,
     pub mtp: String,
     pub codec: String,
+    /// Empty when the checkpoint has no speaker encoder (CustomVoice and
+    /// VoiceDesign checkpoints ship none).
     pub speaker: String,
     pub ckpt_dir: String,
 }
 
 impl TtsPaths {
+    /// The components under `weights_dir`: the brain files an import wrote
+    /// there (`talker.safetensors`, `mtp.safetensors`, `codec.safetensors`,
+    /// `speaker.safetensors`) when it holds them, otherwise the HF checkpoint
+    /// `weights_dir` is, with its codec in `speech_tokenizer/`.
+    pub fn new(weights_dir: impl AsRef<std::path::Path>, ckpt_dir: impl Into<String>) -> TtsPaths {
+        let dir = weights_dir.as_ref();
+        let at = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+        if dir.join("talker.safetensors").exists() || !dir.join("config.json").exists() {
+            return TtsPaths {
+                talker: at(dir.join("talker.safetensors")),
+                mtp: at(dir.join("mtp.safetensors")),
+                codec: at(dir.join("codec.safetensors")),
+                speaker: at(dir.join("speaker.safetensors")),
+                ckpt_dir: ckpt_dir.into(),
+            };
+        }
+        TtsPaths {
+            talker: at(dir.to_path_buf()),
+            mtp: at(dir.to_path_buf()),
+            codec: at(dir.join("speech_tokenizer")),
+            speaker: if ecapatdnn::import::view(dir).is_ok() { at(dir.to_path_buf()) } else { String::new() },
+            ckpt_dir: ckpt_dir.into(),
+        }
+    }
+
     /// Build `TtsPaths` from an already-resolved [`capability::Assembly`]
-    /// (`crate::spec::Qwen3TtsSpec`'s `weights_dir`/`ckpt` roles) instead of
-    /// `BRAIN_QWEN3TTS_WEIGHTS`/`BRAIN_QWEN3TTS_CKPT` - the same
-    /// `<weights_dir>/talker.safetensors` etc layout every existing caller
-    /// (`crate::caps::paths_from`, `crates/cli/src/tts_cli.rs::paths`)
-    /// already builds by hand from those two variables.
+    /// (`crate::spec::Qwen3TtsSpec`'s `weights_dir`/`ckpt` roles).
     pub fn from_assembly(assembly: &capability::Assembly) -> Result<TtsPaths, String> {
         let get = |role: &str| -> Result<&std::path::Path, String> {
             assembly.roles.get(role).map(|p| p.as_path()).ok_or_else(|| format!("qwen3tts: assembly '{}' has no {role} role", assembly.id))
         };
-        let weights_dir = get("weights_dir")?;
-        let ckpt_dir = get("ckpt")?;
-        Ok(TtsPaths {
-            talker: weights_dir.join("talker.safetensors").to_string_lossy().into_owned(),
-            mtp: weights_dir.join("mtp.safetensors").to_string_lossy().into_owned(),
-            codec: weights_dir.join("codec.safetensors").to_string_lossy().into_owned(),
-            speaker: weights_dir.join("speaker.safetensors").to_string_lossy().into_owned(),
-            ckpt_dir: ckpt_dir.to_string_lossy().into_owned(),
-        })
+        Ok(TtsPaths::new(get("weights_dir")?, get("ckpt")?.to_string_lossy()))
+    }
+
+    /// An error naming the first component that is not there: the Talker,
+    /// MTP and codec always, and the speaker encoder when `need_speaker`.
+    pub fn require(&self, need_speaker: bool) -> Result<(), String> {
+        for (what, p) in [("talker", &self.talker), ("mtp", &self.mtp), ("codec", &self.codec)] {
+            if !std::path::Path::new(p).exists() {
+                return Err(format!("{what} weights not found at '{p}'"));
+            }
+        }
+        if need_speaker && !std::path::Path::new(&self.speaker).exists() {
+            return Err(match self.speaker.as_str() {
+                "" => format!("the checkpoint at '{}' has no speaker encoder", self.talker),
+                p => format!("speaker weights not found at '{p}'"),
+            });
+        }
+        Ok(())
+    }
+
+    /// The bytes of every component's weights as f32 - what a CPU-resident
+    /// engine holds - or 0 for a component that cannot be read.
+    pub fn f32_weight_bytes(&self) -> u64 {
+        use checkpoint::weightio::WeightReader;
+        let bytes = |r: Result<WeightReader, String>| r.map(|r| r.names().map(|n| r.shape(n).unwrap_or_default().iter().product::<u64>() * 4).sum()).unwrap_or(0);
+        let speaker = if self.speaker.is_empty() { 0 } else { bytes(ecapatdnn::import::open(&self.speaker)) };
+        bytes(crate::import::open_talker(&self.talker)) + bytes(crate::import::open_mtp(&self.mtp)) + bytes(mimi::import::open(&self.codec)) + speaker
+    }
+
+    /// Where NPU graph exports and compiles are cached: beside imported brain
+    /// files, or, for a checkpoint read as downloaded, under brain's cache
+    /// directory, keyed by the checkpoint's path so the download is never
+    /// written to.
+    pub fn npu_cache_dir(&self) -> Option<std::path::PathBuf> {
+        let talker = std::path::Path::new(&self.talker);
+        if !talker.is_dir() {
+            return talker.parent().map(|p| p.join("npu-cache"));
+        }
+        let abs = talker.canonicalize().unwrap_or_else(|_| talker.to_path_buf());
+        let key: String = abs.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
+        gpu_core::cache_dir().map(|c| c.join("qwen3tts-npu").join(key))
     }
 }
 

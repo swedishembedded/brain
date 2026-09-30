@@ -71,12 +71,11 @@ directory:
     Q8_0.gguf                   # a quant, downloaded or locally produced
 ```
 
-The Qwen3 decoder and its Llama and Qwen2 variants (every DeepSeek text
-model) are served from the files exactly as downloaded, safetensors or
-`pytorch_model*.bin`: nothing is rewritten on disk, and each tensor is
-converted in memory only as far as the device needs (bf16 or fp16 to fp32 on
-a GPU without half-precision compute). A few other families are still
-converted once, to a `model.brain.safetensors` beside the download.
+Every family is served from the files exactly as downloaded (safetensors,
+`pytorch_model*.bin`, a `.pt` or a GGUF): nothing is rewritten on disk,
+nothing downloaded is removed, and each tensor is converted in memory only as
+far as the device needs (bf16 or fp16 to fp32 on a GPU without half-precision
+compute, int8 packing where a model is served quantized).
 
 `<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` (in practice, absent
 `XDG_DATA_HOME`, `$HOME/.local/share/brain/models` - **not**

@@ -21,35 +21,31 @@ assistant pipeline - all running locally, no external TTS service.
 
 Model id: `brain/qwen3tts`. `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Base only, the
 variant with a speaker encoder for voice cloning) auto-fetches (⤓, opt-in `--autofetch`) on first
-CLI use - no env var, no manual `import` step. That default run:
-downloads the checkpoint (including its nested `speech_tokenizer/` codec),
-converts it exactly the way `brain qwen3tts import` does by hand (below),
-and points `--weights-dir`/`--ckpt` at the result.
+CLI use - no env var, no manual `import` step. The checkpoint (including its
+nested `speech_tokenizer/` codec) is served exactly as downloaded: the
+Talker, MTP, codec and speaker encoder are read from its safetensors, bf16
+converted to f32 in memory as they load, and nothing is written beside it.
 
-For a CustomVoice or VoiceDesign checkpoint, or one you already have
-locally, convert it yourself:
+A CustomVoice or VoiceDesign checkpoint, or one you already have locally, is
+used the same way: point `--weights-dir` (CLI flag, defaults to
+`$BRAIN_QWEN3TTS_WEIGHTS` else `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS` (D-Bus
+serving) and `--ckpt` or `BRAIN_QWEN3TTS_CKPT` at the checkpoint directory.
+Voice cloning needs the speaker encoder, which only the Base checkpoints
+ship.
 
-1. Convert the upstream HF checkpoint into brain's own checkpoint format:
+`--weights-dir` may instead name a directory of brain-format files, which
+`brain qwen3tts import` writes from a checkpoint:
 
-   ```bash
-   brain qwen3tts import --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
-     [--codec-ckpt <dir>] [--speaker-ckpt <dir>] \
-     --out-dir out/tts
-   ```
+```bash
+brain qwen3tts import --ckpt /path/to/Qwen3-TTS-12Hz-0.6B-Base \
+  [--codec-ckpt <dir>] [--speaker-ckpt <dir>] \
+  --out-dir out/tts
+```
 
-   This writes four files into `--out-dir`: `talker.safetensors`,
-   `mtp.safetensors`, `codec.safetensors`, `speaker.safetensors`. (Voice
-   cloning needs `speaker.safetensors`; CustomVoice/VoiceDesign checkpoints
-   don't ship one, so `import` skips it with a warning for those.)
-
-2. Point the CLI or the server at the imported directory and the original HF
-   checkpoint (for its tokenizer/config):
-
-   - `--weights-dir` (CLI flag, defaults to `$BRAIN_QWEN3TTS_WEIGHTS` else
-     `out/tts`) or `BRAIN_QWEN3TTS_WEIGHTS` (D-Bus serving) - the directory
-     from step 1.
-   - `--ckpt` (CLI flag) or `BRAIN_QWEN3TTS_CKPT` - the original HF checkpoint
-     directory.
+That writes `talker.safetensors`, `mtp.safetensors`, `codec.safetensors` and
+(for a Base checkpoint) `speaker.safetensors`, the same tensors the
+checkpoint is read as. A directory holding `talker.safetensors` is read as
+these files; any other is read as the checkpoint itself.
 
 ## Running it
 

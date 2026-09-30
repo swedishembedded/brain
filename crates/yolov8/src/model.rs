@@ -196,13 +196,9 @@ impl Yolo {
     /// 10/10 at 640 to 3/10 at 256 on weights that are bit-for-bit identical),
     /// so the two are separable here rather than fused in the checkpoint.
     pub fn load_at(path: &str, b: u32, input: u32) -> Yolo {
-        let (mut cfg, init) = if path.ends_with(".pt") {
-            let tensors = crate::import::import_yolov8n(path).unwrap_or_else(|e| panic!("{e}"));
-            (YoloConfig::yolov8n(), tensors.into_iter().map(|(name, _, data)| (name, data)).collect())
-        } else {
-            let c = checkpoint::load(path);
-            (YoloConfig::from_json(&c.header["config"]), c.by_role(""))
-        };
+        let c = crate::import::open(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"));
+        let mut cfg = YoloConfig::from_json(&c.header["config"]);
+        let init = c.into_by_role("");
         if input > 0 {
             cfg.input = input;
         }

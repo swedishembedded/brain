@@ -186,6 +186,5 @@ fn decode_one(
 }
 
 fn checkpoint_cfg(weights_path: &str) -> yolov8::YoloConfig {
-    let c = checkpoint::load(weights_path);
-    yolov8::YoloConfig::from_json(&c.header["config"])
+    crate::export::config_of(weights_path)
 }

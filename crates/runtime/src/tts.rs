@@ -60,23 +60,13 @@ pub struct Qwen3TtsSynthModel {
 impl Qwen3TtsSynthModel {
     /// Resolve a checkpoint and validate it eagerly.
     ///
-    /// `weights_dir` holds the brain-format `talker/mtp/codec/speaker.safetensors`;
-    /// `ckpt_dir` is the original HF checkpoint directory (`config.json` +
+    /// `weights_dir` holds the brain-format `talker/mtp/codec/speaker.safetensors`
+    /// or is the HF checkpoint dir itself ([`TtsPaths::new`]); `ckpt_dir` is the original HF checkpoint directory (`config.json` +
     /// tokenizer). Missing files are an error HERE rather than a silent empty
     /// waveform on the first request.
     pub fn load(weights_dir: &str, ckpt_dir: &str) -> Result<Qwen3TtsSynthModel, String> {
-        let paths = TtsPaths {
-            talker: format!("{weights_dir}/talker.safetensors"),
-            mtp: format!("{weights_dir}/mtp.safetensors"),
-            codec: format!("{weights_dir}/codec.safetensors"),
-            speaker: format!("{weights_dir}/speaker.safetensors"),
-            ckpt_dir: ckpt_dir.to_string(),
-        };
-        for f in [&paths.talker, &paths.mtp, &paths.codec, &paths.speaker] {
-            if !std::path::Path::new(f).exists() {
-                return Err(format!("qwen3tts: missing checkpoint file {f}"));
-            }
-        }
+        let paths = TtsPaths::new(weights_dir, ckpt_dir);
+        paths.require(true).map_err(|e| format!("qwen3tts: {e}"))?;
         let cfg = std::path::Path::new(ckpt_dir).join("config.json");
         if !cfg.exists() {
             return Err(format!(

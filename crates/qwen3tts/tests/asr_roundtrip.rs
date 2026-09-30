@@ -70,7 +70,8 @@ fn synth_then_transcribe_recovers_the_text() {
         brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT/BRAIN_NEMOTRONASR not all set");
         return;
     };
-    if !std::path::Path::new(&format!("{weights_dir}/talker.safetensors")).exists() {
+    let paths = TtsPaths::new(&weights_dir, ckpt);
+    if paths.require(false).is_err() {
         brain_testutil::skip("TTS weights not found at BRAIN_QWEN3TTS_WEIGHTS");
         return;
     }
@@ -80,13 +81,6 @@ fn synth_then_transcribe_recovers_the_text() {
     }
 
     let text = "The quick brown fox jumps over the lazy dog.";
-    let paths = TtsPaths {
-        talker: format!("{weights_dir}/talker.safetensors"),
-        mtp: format!("{weights_dir}/mtp.safetensors"),
-        codec: format!("{weights_dir}/codec.safetensors"),
-        speaker: format!("{weights_dir}/speaker.safetensors"),
-        ckpt_dir: ckpt,
-    };
     let opts = GenOpts { max_frames: 200, ..GenOpts::default() };
     let wav24 = qwen3tts::pipeline::synth(&paths, &opts, text, "english", &capability::CancelToken::default()).expect("synth");
     assert!(wav24.iter().all(|x| x.is_finite()), "synth produced a non-finite sample");

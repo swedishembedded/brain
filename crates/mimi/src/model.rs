@@ -113,7 +113,7 @@ impl Codec {
     /// components it loads, and so a caller can put the codec on the same
     /// device the rest of its pipeline runs on.
     pub fn load_inference_on(gpu: Gpu, weights_path: &str) -> Codec {
-        let c = checkpoint::load(weights_path);
+        let c = crate::import::load(weights_path);
         let cfg = CodecConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
         Codec::from_weights_on(gpu, cfg, init)

@@ -62,6 +62,85 @@ pub trait DerivedCheckpoint: Send + Sync {
     fn tensor_f32(&self, name: &str) -> Option<Vec<f32>>;
     /// A `U32` tensor's words; `None` for an unknown name.
     fn tensor_u32(&self, name: &str) -> Option<Vec<u32>>;
+    /// The model config a loader of the derived layout reads
+    /// ([`WeightReader::config`]); `Null` when the caller reads it separately.
+    fn config(&self) -> Value {
+        Value::Null
+    }
+}
+
+/// Another checkpoint's tensors under new names, each read (and converted to
+/// f32) from the source when asked for, with the config the renamed layout's
+/// loader expects.
+pub struct Renamed {
+    src: WeightReader,
+    /// `(name, source name)`, in index order.
+    map: Vec<(String, String)>,
+    by_name: HashMap<String, usize>,
+    config: Value,
+}
+
+impl Renamed {
+    /// Fails naming the first source tensor `map` refers to that `src` lacks,
+    /// or a name mapped twice.
+    pub fn new(src: WeightReader, map: Vec<(String, String)>, config: Value) -> Result<Renamed, String> {
+        let mut by_name = HashMap::with_capacity(map.len());
+        for (i, (name, from)) in map.iter().enumerate() {
+            if src.shape(from).is_none() {
+                return Err(format!("no tensor {from} in the source checkpoint (wanted as {name})"));
+            }
+            if by_name.insert(name.clone(), i).is_some() {
+                return Err(format!("tensor {name} is mapped twice"));
+            }
+        }
+        Ok(Renamed { src, map, by_name, config })
+    }
+}
+
+/// Tensors already decoded into memory (a checkpoint whose container has to
+/// be read whole, such as a torch pickle converted on load), presented as a
+/// reader with its config.
+pub struct InMemory {
+    tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
+    by_name: HashMap<String, usize>,
+    config: Value,
+}
+
+impl InMemory {
+    pub fn new(tensors: Vec<(String, Vec<u64>, Vec<f32>)>, config: Value) -> InMemory {
+        let by_name = tensors.iter().enumerate().map(|(i, (n, _, _))| (n.clone(), i)).collect();
+        InMemory { tensors, by_name, config }
+    }
+}
+
+impl DerivedCheckpoint for InMemory {
+    fn index(&self) -> Vec<(String, Vec<u64>, &'static str)> {
+        self.tensors.iter().map(|(n, s, _)| (n.clone(), s.clone(), "F32")).collect()
+    }
+    fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
+        self.by_name.get(name).map(|&i| self.tensors[i].2.clone())
+    }
+    fn tensor_u32(&self, _name: &str) -> Option<Vec<u32>> {
+        None
+    }
+    fn config(&self) -> Value {
+        self.config.clone()
+    }
+}
+
+impl DerivedCheckpoint for Renamed {
+    fn index(&self) -> Vec<(String, Vec<u64>, &'static str)> {
+        self.map.iter().map(|(name, from)| (name.clone(), self.src.shape(from).unwrap_or_default().to_vec(), "F32")).collect()
+    }
+    fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
+        self.src.tensor(&self.map[*self.by_name.get(name)?].1)
+    }
+    fn tensor_u32(&self, _name: &str) -> Option<Vec<u32>> {
+        None
+    }
+    fn config(&self) -> Value {
+        self.config.clone()
+    }
 }
 
 /// A lazy, mmap-backed reader over a safetensors or GGUF weight file. Decodes
@@ -225,8 +304,27 @@ impl WeightReader {
             Inner::Gguf(m) => m.config(),
             // A foreign checkpoint's config is its own config.json, read
             // separately by the caller -- see open_hf_dir's doc.
-            Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => Value::Null,
+            Inner::StSharded(..) | Inner::Torch(..) => Value::Null,
+            Inner::Derived(d, _) => d.config(),
         }
+    }
+
+    /// Write every tensor, in this reader's order and dtype, with its config,
+    /// to a brain safetensors file at `path` - one tensor in memory at a time.
+    pub fn save(&self, path: &str, card: Option<&ModelCard>) -> io::Result<()> {
+        let plan: Vec<(String, Vec<u64>, Dtype)> = self
+            .names()
+            .map(|n| (n.to_string(), self.shapes[n].clone(), if self.dtype(n) == Some("U32") { Dtype::U32 } else { Dtype::F32 }))
+            .collect();
+        let mut w = StWriter::create_mixed(path, &plan, &self.config(), card)?;
+        for (name, _, dtype) in &plan {
+            let missing = || io::Error::other(format!("{name}: listed but unreadable"));
+            match dtype {
+                Dtype::U32 => w.write_u32(name, &self.tensor_u32(name).ok_or_else(missing)?)?,
+                Dtype::F32 => w.write(name, &self.tensor(name).ok_or_else(missing)?)?,
+            }
+        }
+        w.finish()
     }
 
     /// The GGUF mapping, when this reader has one open - its KV metadata is

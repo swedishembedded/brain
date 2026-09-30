@@ -62,8 +62,8 @@ pub struct SpeakerEncoder {
 }
 
 impl SpeakerEncoder {
-    /// Load an inference-only encoder from a brain checkpoint produced by
-    /// [`crate::import::import`].
+    /// Load an inference-only encoder ([`crate::import::open`]: a brain
+    /// checkpoint or the HF checkpoint dir).
     pub fn load_inference(weights_path: &str) -> SpeakerEncoder {
         Self::load_inference_on(Gpu::new(PIPELINES), weights_path)
     }
@@ -71,7 +71,7 @@ impl SpeakerEncoder {
     /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
     /// process holds ONE device however many components it loads.
     pub fn load_inference_on(gpu: Gpu, weights_path: &str) -> SpeakerEncoder {
-        let c = checkpoint::load(weights_path);
+        let c = crate::import::load(weights_path);
         let cfg = SpeakerConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
         SpeakerEncoder::from_weights_on(gpu, cfg, init)

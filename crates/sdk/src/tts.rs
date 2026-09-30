@@ -453,11 +453,7 @@ fn build_from(arch: ResolvedArch) -> Result<TtsPipeline> {
     match arch {
         ResolvedArch::Qwen3Tts(assembly) => {
             let paths = qwen3tts::pipeline::TtsPaths::from_assembly(&assembly).map_err(Error::Backend)?;
-            for (role, p) in [("talker", &paths.talker), ("mtp", &paths.mtp), ("codec", &paths.codec)] {
-                if !Path::new(p).exists() {
-                    return Err(Error::Backend(format!("qwen3tts: resolved assembly {:?} is missing {role} at {p}", assembly.id)));
-                }
-            }
+            paths.require(false).map_err(|e| Error::Backend(format!("qwen3tts: resolved assembly {:?}: {e}", assembly.id)))?;
             Ok(TtsPipeline { backend: Backend::Qwen3Tts(paths) })
         }
         ResolvedArch::CosyVoice(assembly) => {

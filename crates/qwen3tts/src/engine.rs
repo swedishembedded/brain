@@ -107,11 +107,7 @@ impl ResidentEngine {
     /// not a panic inside a loader) when a file is missing - a served model
     /// must report a bad configuration, not abort the worker.
     pub fn load(paths: &TtsPaths) -> Result<ResidentEngine, String> {
-        for p in [&paths.talker, &paths.mtp, &paths.codec] {
-            if !std::path::Path::new(p).exists() {
-                return Err(format!("tts: weights not found at '{p}' (run `brain tts import`)"));
-            }
-        }
+        paths.require(false).map_err(|e| format!("tts: {e}"))?;
         let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
         let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
         Ok(ResidentEngine {
@@ -298,14 +294,8 @@ mod tests {
         let (Ok(w), Ok(c)) = (std::env::var("BRAIN_QWEN3TTS_WEIGHTS"), std::env::var("BRAIN_QWEN3TTS_CKPT")) else {
             return None;
         };
-        let paths = TtsPaths {
-            talker: format!("{w}/talker.safetensors"),
-            mtp: format!("{w}/mtp.safetensors"),
-            codec: format!("{w}/codec.safetensors"),
-            speaker: format!("{w}/speaker.safetensors"),
-            ckpt_dir: c,
-        };
-        std::path::Path::new(&paths.talker).exists().then_some(paths)
+        let paths = TtsPaths::new(&w, c);
+        paths.require(false).is_ok().then_some(paths)
     }
 
     /// A missing checkpoint must come back as a clean error, not a panic

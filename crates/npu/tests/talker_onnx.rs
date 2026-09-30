@@ -32,7 +32,7 @@ fn talker_onnx_graph_is_well_formed_untied_head() {
     let wpath = dir.join("talker_tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
-    let (bytes, ecfg) = npu::qwen_export::build_talker_fp32_bytes(wpath.to_str().unwrap(), t as usize)
+    let (bytes, ecfg) = npu::qwen_export::build_talker_fp32_bytes(&checkpoint::weightio::WeightReader::open(wpath.to_str().unwrap()).unwrap(), t as usize)
         .expect("build talker onnx");
     std::fs::remove_dir_all(&dir).ok();
     assert!(!ecfg.tie_embeddings, "exported Talker config is untied");
@@ -81,7 +81,7 @@ fn talker_hidden_graph_is_embeds_in_hidden_out() {
     model.save(wpath.to_str().unwrap());
 
     let (bytes, _ecfg) =
-        npu::qwen_export::build_talker_hidden_fp32_bytes(wpath.to_str().unwrap(), t as usize)
+        npu::qwen_export::build_talker_hidden_fp32_bytes(&checkpoint::weightio::WeightReader::open(wpath.to_str().unwrap()).unwrap(), t as usize)
             .expect("build talker hidden onnx");
     std::fs::remove_dir_all(&dir).ok();
 

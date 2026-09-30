@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-TTS's [`ArchSpec`]: `weights_dir` (talker/mtp/codec/speaker,
-//! converted by `brain qwen3tts import`) and `ckpt` (the HF checkpoint dir
-//! for `config.json`/the tokenizer).
+//! Qwen3-TTS's [`ArchSpec`]: `weights_dir` (talker/mtp/codec/speaker - the
+//! checkpoint as downloaded, or the files `brain qwen3tts import` writes, see
+//! [`crate::TtsPaths::new`]) and `ckpt` (the HF checkpoint dir for
+//! `config.json`/the tokenizer).
 //!
-//! Both roles come from a real conversion step
-//! (`crates/cli/src/supply.rs::convert_qwen3tts`) that writes its own
-//! two-role `brain.manifest.json` - `classify()` recognizes that manifest's
+//! Both roles come from the checkpoint's `brain.manifest.json` (`brain pull`
+//! names the download for both) - `classify()` recognizes that manifest's
 //! roles directly, at [`Confidence::Recorded`], through the shared
-//! [`classify_compound_manifest`] helper every architecture with an
-//! identical real-conversion shape uses, rather than re-deriving `ckpt`/
+//! [`classify_compound_manifest`] helper, rather than re-deriving `ckpt`/
 //! `weights_dir` from raw checkpoint content a second time.
 
 use std::collections::BTreeMap;
@@ -80,34 +79,43 @@ mod tests {
         checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
     }
 
-    /// The exact on-disk shape `convert_qwen3tts` writes: an HF checkpoint
-    /// dir (`config.json`) carrying a `brain_tts/` subdirectory of imported
-    /// brain-format weights and its own `brain.manifest.json` naming both
-    /// as this architecture's two roles.
-    fn write_qwen3tts_checkpoint(dir: &std::path::Path) {
+    /// An HF checkpoint dir (`config.json`) with its own `brain.manifest.json`
+    /// naming `weights_dir` as the given subdirectory: `"."`, the download
+    /// itself (what `brain pull` writes), or a subdirectory of imported
+    /// brain-format weights.
+    fn write_qwen3tts_checkpoint(dir: &std::path::Path, weights_dir: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("config.json"), serde_json::to_vec(&serde_json::json!({"architectures": ["Qwen3TTSForConditionalGeneration"]})).unwrap()).unwrap();
-        tiny_safetensors(&dir.join("brain_tts").join("talker.safetensors"));
-        tiny_safetensors(&dir.join("brain_tts").join("mtp.safetensors"));
-        tiny_safetensors(&dir.join("brain_tts").join("codec.safetensors"));
-        tiny_safetensors(&dir.join("brain_tts").join("speaker.safetensors"));
+        tiny_safetensors(&dir.join("model.safetensors"));
+        tiny_safetensors(&dir.join("speech_tokenizer").join("model.safetensors"));
+        if weights_dir != "." {
+            for f in ["talker", "mtp", "codec", "speaker"] {
+                tiny_safetensors(&dir.join(weights_dir).join(format!("{f}.safetensors")));
+            }
+        }
         let manifest = CompoundManifest {
             id: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
             family: "qwen3tts".to_string(),
-            roles: BTreeMap::from([("ckpt".to_string(), ".".to_string()), ("weights_dir".to_string(), "brain_tts".to_string())]),
+            roles: BTreeMap::from([("ckpt".to_string(), ".".to_string()), ("weights_dir".to_string(), weights_dir.to_string())]),
         };
         std::fs::write(dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
 
-    /// The whole point of this migration: a converted checkpoint resolves
-    /// through the model-store resolver with ZERO `BRAIN_QWEN3TTS_*`
-    /// environment variables set - the manifest `brain qwen3tts import`
-    /// already wrote is the only signal this needs.
+    /// A pulled checkpoint resolves through the model-store resolver with
+    /// ZERO `BRAIN_QWEN3TTS_*` environment variables set - its manifest is the
+    /// only signal this needs - and every component is read from the
+    /// download itself; so does a store dir holding imported brain files.
     #[test]
-    fn resolves_a_converted_checkpoint_with_no_env_vars_set() {
+    fn resolves_a_checkpoint_with_no_env_vars_set() {
+        for (weights_dir, talker) in [(".", "."), ("brain_tts", "brain_tts/talker.safetensors")] {
+            resolves(weights_dir, talker);
+        }
+    }
+
+    fn resolves(weights_dir: &str, talker: &str) {
         let dir = tmp("resolves-clean");
         let repo = dir.join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base");
-        write_qwen3tts_checkpoint(&repo);
+        write_qwen3tts_checkpoint(&repo, weights_dir);
         // A second, unrelated vendor's own file - `resolve()`'s own root
         // inference (the deepest common ancestor of every record) needs
         // this present to land on `dir` rather than collapsing onto the
@@ -124,7 +132,9 @@ mod tests {
             Resolution::Resolved(a) => {
                 assert_eq!(a.id, "Qwen/Qwen3-TTS-12Hz-0.6B-Base");
                 assert_eq!(a.roles["ckpt"], repo);
-                assert_eq!(a.roles["weights_dir"], repo.join("brain_tts"));
+                assert_eq!(a.roles["weights_dir"], repo.join(weights_dir).components().collect::<PathBuf>());
+                let paths = crate::TtsPaths::from_assembly(&a).unwrap();
+                assert_eq!(Path::new(&paths.talker), repo.join(talker).components().collect::<PathBuf>());
             }
             other => panic!("expected Resolved, got {other:?}"),
         }

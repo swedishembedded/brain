@@ -107,17 +107,11 @@ fn default_sampled_decode_does_not_collapse_to_silence() {
         brain_testutil::skip("BRAIN_QWEN3TTS_WEIGHTS/BRAIN_QWEN3TTS_CKPT not set");
         return;
     };
-    if !std::path::Path::new(&format!("{weights_dir}/talker.safetensors")).exists() {
+    let paths = TtsPaths::new(&weights_dir, ckpt);
+    if paths.require(false).is_err() {
         brain_testutil::skip("TTS weights not found at BRAIN_QWEN3TTS_WEIGHTS");
         return;
     }
-    let paths = TtsPaths {
-        talker: format!("{weights_dir}/talker.safetensors"),
-        mtp: format!("{weights_dir}/mtp.safetensors"),
-        codec: format!("{weights_dir}/codec.safetensors"),
-        speaker: format!("{weights_dir}/speaker.safetensors"),
-        ckpt_dir: ckpt,
-    };
 
     // The exact configuration that reproduced the collapse. `GenOpts::default()`
     // pins NO sampling knob, so this also gates the resolution chain: whatever

@@ -115,14 +115,15 @@ impl TalkerModel {
         }
     }
 
-    /// Load an inference-only Talker from a brain checkpoint written by
-    /// [`crate::import::import_talker`]: the Qwen decoder (frozen weights) plus
-    /// the text-projection tensors (and, if present, the text-embedding table).
+    /// Load an inference-only Talker ([`crate::import::open_talker`]: a brain
+    /// checkpoint or the HF checkpoint dir): the Qwen decoder (frozen weights)
+    /// plus the text-projection tensors (and, if present, the text-embedding
+    /// table).
     pub fn load_inference(path: &str, b: u32, t: u32) -> TalkerModel {
-        let inner = Qwen::load_inference(path, b, t);
+        let reader = crate::import::open_talker(path).unwrap_or_else(|e| panic!("{e}"));
+        let inner = Qwen::from_reader_inference(&reader, b, t);
         let mut cfg = TalkerConfig::from_qwen(&inner.cfg);
-        let c = checkpoint::load(path);
-        let take = |name: &str| c.find(name, "").cloned();
+        let take = |name: &str| reader.tensor(name);
         let text = match (
             take("text_projection.fc1.weight"),
             take("text_projection.fc1.bias"),

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Import the official `Qwen3-TTS-Tokenizer-12Hz` safetensors checkpoint into a
-//! brain `.safetensors` container — decode path **and** (additively) the encode path.
+//! Read the official `Qwen3-TTS-Tokenizer-12Hz` safetensors checkpoint as
+//! brain's codec, as it is downloaded ([`view`]), or write it out as a brain
+//! `.safetensors` container ([`import`]) — decode path **and** (additively) the
+//! encode path.
 //!
 //! The decoder lives under the `decoder.*` prefix (271 tensors); the encoder
 //! lives under `encoder.*` (225 tensors, a HuggingFace `MimiModel`). We do a
 //! near 1:1 name remap (the decoder strips its `decoder.` prefix; the encoder
 //! keeps its `encoder.` prefix so the two never collide) with these transforms:
-//!   * each Euclidean codebook is collapsed at import time from its two stored
+//!   * each Euclidean codebook is collapsed, when it is read, from its two stored
 //!     tensors `embedding_sum/embed_sum [bins,dim]` + `cluster_usage [bins]` into
 //!     the usable embedding table `table = embed_sum / clamp(cluster_usage, eps)`
 //!     (matches `EuclideanCodebook.decode`/`MimiEuclideanCodebook.embed`, eps =
@@ -25,8 +27,10 @@
 //! `nn.Linear.weight`, and conv weights keep PyTorch `[Cout,Cin/G,K]` /
 //! `[Cin,Cout/G,K]` layout that `conv1d`/`convtr1d` already expect.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+
+use checkpoint::weightio::{DerivedCheckpoint, WeightReader};
 
 /// Clamp epsilon for `EuclideanCodebook` (the reference's default `epsilon`).
 const CODEBOOK_EPS: f32 = 1e-5;
@@ -50,10 +54,8 @@ fn quant_layer_in_range(name: &str, n_aco_keep: usize) -> bool {
 }
 
 /// Where one HF source tensor ends up: a plain 1:1 passthrough (with its final
-/// output name), one half of a codebook pair to accumulate (namespaced `d:`/`e:`
-/// parent key — decoder and encoder codebooks never collide), or dropped.
-/// Single source of truth for both the header-only planning pass and the real
-/// streaming pass, so the two can never disagree about a tensor's fate.
+/// output name), one half of a codebook pair (namespaced `d:`/`e:` parent key —
+/// decoder and encoder codebooks never collide), or dropped.
 enum Slot {
     Out(String),
     EmbSum(String),
@@ -96,23 +98,57 @@ fn classify(full_name: &str, n_aco_keep: usize) -> Slot {
     Slot::Out(format!("encoder.{name}"))
 }
 
-/// Import `<ckpt_dir>/config.json` + `<ckpt_dir>/model.safetensors` into the
-/// brain checkpoint `out_path`. Fails loudly (never writes a partial file) if any
-/// `decoder.*` tensor is left unaccounted for. Streams: a header-only pass
-/// plans every output tensor (names + shapes, no data), then a single data pass
-/// writes passthrough tensors straight through and accumulates ONLY the small
-/// codebook `embed_sum`/`cluster_usage` halves (bounded by codebook count ×
-/// bins × dim — a handful of small codec tables, not the whole model) until
-/// both halves of a pair are seen and can be collapsed.
-pub fn import(ckpt_dir: &str, out_path: &str) -> Result<(), String> {
-    let dir = Path::new(ckpt_dir);
-    let cfg_json = std::fs::read_to_string(dir.join("config.json"))
+/// How one codec tensor is read from the source checkpoint.
+enum Derive {
+    /// Verbatim, from this source tensor.
+    Direct(String),
+    /// `embed_sum / clamp(cluster_usage, eps)` of a codebook's two halves.
+    Table { sum: String, usage: String },
+}
+
+/// The codec of a `Qwen3-TTS-Tokenizer-12Hz` checkpoint under brain's names,
+/// each codebook collapsed into its table when it is read.
+struct CodecView {
+    src: WeightReader,
+    index: Vec<(String, Vec<u64>)>,
+    how: HashMap<String, Derive>,
+    config: serde_json::Value,
+}
+
+impl DerivedCheckpoint for CodecView {
+    fn index(&self) -> Vec<(String, Vec<u64>, &'static str)> {
+        self.index.iter().map(|(n, s)| (n.clone(), s.clone(), "F32")).collect()
+    }
+    fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
+        match self.how.get(name)? {
+            Derive::Direct(hf) => self.src.tensor(hf),
+            Derive::Table { sum, usage } => {
+                let (sum, usage) = (self.src.tensor(sum)?, self.src.tensor(usage)?);
+                let dim = sum.len() / usage.len();
+                Some(sum.iter().enumerate().map(|(i, s)| s / usage[i / dim].max(CODEBOOK_EPS)).collect())
+            }
+        }
+    }
+    fn tensor_u32(&self, _name: &str) -> Option<Vec<u32>> {
+        None
+    }
+    fn config(&self) -> serde_json::Value {
+        self.config.clone()
+    }
+}
+
+/// The codec of the checkpoint at `ckpt_dir` (`config.json` +
+/// `model.safetensors`), read under brain's names as it is downloaded. Fails
+/// when there is no `decoder.*` tensor, or a codebook lacks one of its halves
+/// or their shapes disagree.
+pub fn view(ckpt_dir: &Path) -> Result<WeightReader, String> {
+    let cfg_json = std::fs::read_to_string(ckpt_dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
     let config: serde_json::Value =
         serde_json::from_str(&cfg_json).map_err(|e| format!("parse config.json: {e}"))?;
 
-    let st_path = dir.join("model.safetensors");
-    let reader = checkpoint::weightio::WeightReader::open(st_path.to_str().ok_or("non-utf8 checkpoint path")?)
+    let st_path = ckpt_dir.join("model.safetensors");
+    let src = WeightReader::open(st_path.to_str().ok_or("non-utf8 checkpoint path")?)
         .map_err(|e| format!("import: opening checkpoint: {e}"))?;
 
     // How many encoder quantizers to keep (1 semantic + 15 acoustic by default).
@@ -120,129 +156,74 @@ pub fn import(ckpt_dir: &str, out_path: &str) -> Result<(), String> {
     let n_sem = config["encoder_config"]["num_semantic_quantizers"].as_u64().unwrap_or(1) as usize;
     let n_aco_keep = valid_q.saturating_sub(n_sem);
 
-    // ---- phase 1: header-only pass — build the output plan, no tensor data ----
-    let mut plan: Vec<(String, Vec<u64>)> = Vec::new();
-    let mut plan_names: HashSet<String> = HashSet::new();
-    let mut emb_shape: HashMap<String, Vec<u64>> = HashMap::new();
-    let mut cluster_present: HashSet<String> = HashSet::new();
+    let mut index: Vec<(String, Vec<u64>)> = Vec::new();
+    let mut how: HashMap<String, Derive> = HashMap::new();
+    let mut sums: BTreeMap<String, String> = BTreeMap::new();
+    let mut usages: BTreeMap<String, String> = BTreeMap::new();
     let mut decoder_seen = 0usize;
-    let mut encoder_seen = 0usize;
-    let mut dropped = 0usize;
-
-    for full_name in reader.names() {
+    for full_name in src.names() {
         if full_name.starts_with("decoder.") {
             decoder_seen += 1;
-        } else if full_name.starts_with("encoder.") {
-            encoder_seen += 1;
-        } else {
-            continue; // neither decoder nor encoder — ignore
         }
         match classify(full_name, n_aco_keep) {
             Slot::Out(out_name) => {
-                if !plan_names.insert(out_name.clone()) {
+                let shape = src.shape(full_name).unwrap_or_default().to_vec();
+                if how.insert(out_name.clone(), Derive::Direct(full_name.to_string())).is_some() {
                     return Err(format!("duplicate tensor {out_name}"));
                 }
-                let shape = reader
-                    .shape(full_name)
-                    .ok_or_else(|| format!("import: missing shape for {full_name}"))?
-                    .to_vec();
-                plan.push((out_name, shape));
+                index.push((out_name, shape));
             }
             Slot::EmbSum(key) => {
-                let shape = reader
-                    .shape(full_name)
-                    .ok_or_else(|| format!("import: missing shape for {full_name}"))?
-                    .to_vec();
-                emb_shape.insert(key, shape);
+                sums.insert(key, full_name.to_string());
             }
             Slot::Cluster(key) => {
-                cluster_present.insert(key);
+                usages.insert(key, full_name.to_string());
             }
-            Slot::Drop => dropped += 1,
+            Slot::Drop => {}
         }
     }
     if decoder_seen == 0 {
         return Err("no decoder.* tensors found in checkpoint".to_string());
     }
-    if emb_shape.len() != cluster_present.len() {
-        return Err(format!(
-            "codebook pairing mismatch: {} embedding_sum vs {} cluster_usage",
-            emb_shape.len(),
-            cluster_present.len()
-        ));
+    if sums.len() != usages.len() {
+        return Err(format!("codebook pairing mismatch: {} embedding_sum vs {} cluster_usage", sums.len(), usages.len()));
     }
-    for (key, shape) in &emb_shape {
-        if !cluster_present.contains(key) {
-            return Err(format!("codebook {key}: missing cluster_usage"));
+    for (key, sum) in sums {
+        let usage = usages.remove(&key).ok_or_else(|| format!("codebook {key}: missing cluster_usage"))?;
+        let shape = src.shape(&sum).unwrap_or_default().to_vec();
+        let bins = src.shape(&usage).unwrap_or_default().iter().product::<u64>();
+        if shape.len() != 2 || shape[0] != bins {
+            return Err(format!("codebook {key}: usage has {bins} bins, embedding sum is {shape:?}"));
         }
         let bare = key.split_once(':').map(|(_, r)| r).unwrap_or(key.as_str());
         let out_name = format!("{bare}.table");
-        if !plan_names.insert(out_name.clone()) {
+        if how.insert(out_name.clone(), Derive::Table { sum, usage }).is_some() {
             return Err(format!("duplicate tensor {out_name}"));
         }
-        plan.push((out_name, shape.clone()));
+        index.push((out_name, shape));
     }
+    Ok(WeightReader::derived(Box::new(CodecView { src, index, how, config })))
+}
 
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &config, None)
-        .map_err(|e| format!("import: creating output: {e}"))?;
+/// A codec checkpoint as the loaders take it: a brain file (from [`import`])
+/// as it is, or the tokenizer checkpoint dir through [`view`].
+pub fn open(path: &str) -> Result<WeightReader, String> {
+    let r = if Path::new(path).is_dir() { view(Path::new(path)) } else { WeightReader::open(path).map_err(|e| e.to_string()) };
+    r.map_err(|e| format!("{path}: {e}"))
+}
 
-    // ---- phase 2: the real streaming pass — one tensor at a time ----
-    // Codebook halves are the ONLY thing held aside (bounded: a handful of
-    // small codec tables), everything else writes straight through.
-    let mut emb_sum: HashMap<String, (Vec<u64>, Vec<f32>)> = HashMap::new();
-    let mut cluster: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut err: Option<String> = None;
-    reader.for_each(|full_name, shape, data| {
-        if err.is_some() {
-            return;
-        }
-        if !full_name.starts_with("decoder.") && !full_name.starts_with("encoder.") {
-            return;
-        }
-        match classify(full_name, n_aco_keep) {
-            Slot::Out(out_name) => {
-                if let Err(e) = writer.write(&out_name, &data) {
-                    err = Some(format!("import: {e}"));
-                }
-            }
-            Slot::EmbSum(key) => {
-                emb_sum.insert(key, (shape.to_vec(), data));
-            }
-            Slot::Cluster(key) => {
-                cluster.insert(key, data);
-            }
-            Slot::Drop => {}
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
-    }
+/// [`open`], every tensor read as f32, for the eager loaders. Panics naming
+/// `path` when it cannot be read, as `checkpoint::load` does.
+pub fn load(path: &str) -> checkpoint::Container {
+    open(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"))
+}
 
-    // Collapse each codebook into its embedding table (`table = embed_sum /
-    // clamp(cluster_usage, eps)`) now that both halves are in hand.
-    for (key, (shape, sum)) in emb_sum {
-        let usage = cluster.remove(&key).ok_or_else(|| format!("codebook {key}: missing cluster_usage"))?;
-        let (bins, dim) = (shape[0] as usize, shape[1] as usize);
-        if usage.len() != bins {
-            return Err(format!("codebook {key}: usage {} != bins {bins}", usage.len()));
-        }
-        let mut table = vec![0.0f32; bins * dim];
-        for b in 0..bins {
-            let denom = usage[b].max(CODEBOOK_EPS);
-            for c in 0..dim {
-                table[b * dim + c] = sum[b * dim + c] / denom;
-            }
-        }
-        let bare = key.split_once(':').map(|(_, r)| r).unwrap_or(&key);
-        writer.write(&format!("{bare}.table"), &table).map_err(|e| format!("import: {e}"))?;
-    }
-
-    writer.finish().map_err(|e| format!("import: {e}"))?;
-    eprintln!(
-        "codec import: {decoder_seen} decoder + {encoder_seen} encoder tensors -> {} params \
-         in {out_path} ({dropped} dropped, codebooks collapsed)",
-        plan.len()
-    );
+/// Write the codec of `<ckpt_dir>` to the brain checkpoint `out_path` -
+/// [`view`], one tensor at a time.
+pub fn import(ckpt_dir: &str, out_path: &str) -> Result<(), String> {
+    let v = view(Path::new(ckpt_dir))?;
+    v.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    eprintln!("codec import: {} params in {out_path} (codebooks collapsed)", v.names().count());
     Ok(())
 }
 
@@ -385,6 +366,15 @@ mod tests {
             .is_none());
 
         assert_eq!(reader.names().count(), 6, "2 passthrough + 4 collapsed tables");
+
+        // Served as downloaded: the view reads what the import wrote, and
+        // writes nothing beside the checkpoint.
+        let (viewed, written) = (load(dir.to_str().unwrap()), checkpoint::load(out.to_str().unwrap()));
+        assert_eq!(viewed.header, written.header);
+        assert_eq!(viewed.by_role(""), written.by_role(""));
+        let mut listed: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        listed.sort();
+        assert_eq!(listed, ["config.json", "model.safetensors"]);
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&out).ok();

@@ -299,6 +299,17 @@ pub fn load(path: &str) -> Container {
     container(st::load_safetensors(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}")))
 }
 
+/// Every tensor of `r` as f32, with its config - [`load`] for a reader, such
+/// as a [`weightio::DerivedCheckpoint`] view of a download.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_reader(r: &weightio::WeightReader) -> Result<Container, String> {
+    let tensors = r
+        .names()
+        .map(|name| r.tensor(name).map(|data| LoadedTensor { name: name.to_string(), role: String::new(), data }).ok_or_else(|| format!("{name}: listed but unreadable")))
+        .collect::<Result<_, _>>()?;
+    Ok(Container { header: serde_json::json!({ "config": r.config() }), tensors })
+}
+
 /// The model config of the checkpoint at `path`, for the cost of a header
 /// parse - no tensor data is read.
 ///

@@ -324,12 +324,10 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
     (CommonArgs { paths, out, lang, opts }, extra)
 }
 
-/// The resolved `weights_dir` role, recovered from `c.paths.talker`'s own
-/// parent (every file `TtsPaths::from_assembly` builds lives directly under
-/// it) - the NPU export/compile cache lives beside those weights, the same
-/// place it always has.
-fn weights_dir_of(c: &CommonArgs) -> String {
-    std::path::Path::new(&c.paths.talker).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+/// The NPU export/compile cache of the resolved checkpoint
+/// ([`qwen3tts::TtsPaths::npu_cache_dir`]).
+fn npu_cache_of(c: &CommonArgs) -> Option<String> {
+    c.paths.npu_cache_dir().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Read a `[T,16]` u32 codes file: 8-byte little-endian count header + u32 data
@@ -394,9 +392,9 @@ fn clone(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", weights_dir_of(&c));
+        let cache = npu_cache_of(&c);
         qwen3tts::pipeline::clone_npu(
-            &c.paths, &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
+            &c.paths, &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, cache.as_deref(),
         )
     } else {
         // Unarmed: this is a foreground one-shot command, so Ctrl-C ends the
@@ -435,8 +433,8 @@ fn synth(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", weights_dir_of(&c));
-        qwen3tts::pipeline::synth_npu(&c.paths, &c.opts, &text, &c.lang, Some(&cache))
+        let cache = npu_cache_of(&c);
+        qwen3tts::pipeline::synth_npu(&c.paths, &c.opts, &text, &c.lang, cache.as_deref())
     } else {
         let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
         qwen3tts::pipeline::synth(&c.paths, &c.opts, &text, &c.lang, &cancel)
@@ -477,8 +475,8 @@ fn design(args: &[String]) {
         c.out
     );
     let result = if npu {
-        let cache = format!("{}/npu-cache", weights_dir_of(&c));
-        qwen3tts::pipeline::design_npu(&c.paths, &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
+        let cache = npu_cache_of(&c);
+        qwen3tts::pipeline::design_npu(&c.paths, &c.opts, &text, &c.lang, &instruct, speaker, cache.as_deref())
     } else {
         let cancel = capability::CancelToken::default(); // unarmed, as in `clone`
         qwen3tts::pipeline::design(&c.paths, &c.opts, &text, &c.lang, &instruct, speaker, &cancel)

@@ -159,6 +159,18 @@ fn ultra_to_brain(name: &str) -> Option<String> {
 /// extra tensor) rather than writing a checkpoint that would silently load
 /// wrong. Returns brain-named `(name, shape, data)` tensors, ready for
 /// `checkpoint::st::save_safetensors`.
+/// A yolov8 checkpoint as every consumer takes it: the Ultralytics `.pt` as
+/// downloaded (read whole through [`import_yolov8n`], as the yolov8n config),
+/// or a brain checkpoint file.
+pub fn open(path: &str) -> Result<checkpoint::weightio::WeightReader, String> {
+    use checkpoint::weightio::{InMemory, WeightReader};
+    if !path.ends_with(".pt") {
+        return WeightReader::open(path).map_err(|e| format!("open {path}: {e}"));
+    }
+    let tensors = import_yolov8n(path)?.into_iter().map(|(n, s, d)| (n, s.into_iter().map(|x| x as u64).collect(), d)).collect();
+    Ok(WeightReader::derived(Box::new(InMemory::new(tensors, crate::YoloConfig::yolov8n().to_json()))))
+}
+
 pub fn import_yolov8n(path: &str) -> Result<Vec<BrainTensor>, String> {
     let raw = checkpoint::torchpt::read(path)?;
 

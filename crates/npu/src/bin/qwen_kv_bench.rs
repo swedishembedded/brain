@@ -199,7 +199,7 @@ fn bench_cap(o: &Opts, cfg: &QwenConfig) {
         let decode_path = o.out.join(format!("qwen-decode-int8-{cap}.onnx"));
         let t_export = Instant::now();
         if let Err(e) =
-            npu::qwen_export::export_talker_decode_int8(&o.weights, decode_path.to_str().unwrap(), cap)
+            checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_talker_decode_int8(&r, decode_path.to_str().unwrap(), cap))
         {
             eprintln!("cap={cap}: decode export failed: {e}");
             continue;
@@ -278,7 +278,7 @@ fn bench_cap(o: &Opts, cfg: &QwenConfig) {
         let prefill_path = o.out.join(format!("qwen-prefill-int8-{cap}.onnx"));
         let t_export = Instant::now();
         if let Err(e) =
-            npu::qwen_export::export_talker_prefill_int8(&o.weights, prefill_path.to_str().unwrap(), cap)
+            checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_talker_prefill_int8(&r, prefill_path.to_str().unwrap(), cap))
         {
             eprintln!("cap={cap}: prefill export failed: {e}");
         } else {
@@ -311,7 +311,7 @@ fn bench_cap(o: &Opts, cfg: &QwenConfig) {
         // ---- Incumbent: cache-free O(T^2) DecoderSession at the same cap ----
         let base_path = o.out.join(format!("qwen-decoder-fp32-{cap}.onnx"));
         let t_export = Instant::now();
-        if let Err(e) = npu::qwen_export::export_qwen_fp32(&o.weights, base_path.to_str().unwrap(), cap) {
+        if let Err(e) = checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_qwen_fp32(&r, base_path.to_str().unwrap(), cap)) {
             eprintln!("cap={cap}: baseline export failed: {e}");
         } else {
             let base_export_ms = t_export.elapsed().as_secs_f64() * 1e3;
@@ -391,9 +391,9 @@ fn verify(o: &Opts, cfg: &QwenConfig) -> bool {
     let decode_path = o.out.join(format!("qwen-decode-verify-{cap}.onnx"));
     std::fs::create_dir_all(&o.out).ok();
     let export_result = match o.verify_quant {
-        Quant::F32 => npu::qwen_export::export_talker_decode_fp32(&o.weights, decode_path.to_str().unwrap(), cap),
-        Quant::Int8 => npu::qwen_export::export_talker_decode_int8(&o.weights, decode_path.to_str().unwrap(), cap),
-        Quant::Int4 => npu::qwen_export::export_talker_decode_int4(&o.weights, decode_path.to_str().unwrap(), cap),
+        Quant::F32 => checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_talker_decode_fp32(&r, decode_path.to_str().unwrap(), cap)),
+        Quant::Int8 => checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_talker_decode_int8(&r, decode_path.to_str().unwrap(), cap)),
+        Quant::Int4 => checkpoint::weightio::WeightReader::open(&o.weights).and_then(|r| npu::qwen_export::export_talker_decode_int4(&r, decode_path.to_str().unwrap(), cap)),
     };
     if let Err(e) = export_result {
         eprintln!("verify: decode export failed: {e}");

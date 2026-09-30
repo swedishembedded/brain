@@ -100,7 +100,7 @@ impl TalkerTables {
     /// Load the CPU tables from the brain Talker checkpoint (the same container
     /// [`crate::gen::TalkerGen::load`] reads, minus the decoder upload).
     pub fn load(path: &str) -> TalkerTables {
-        let c = checkpoint::load(path);
+        let c = crate::import::load_talker(path);
         let qcfg = qwen3::QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{path}: {e}"));
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
         let take = |name: &str| {
@@ -591,7 +591,7 @@ impl KvMtp {
         cache_dir: Option<&Path>,
         quant: bool,
     ) -> Result<KvMtp, String> {
-        let c = checkpoint::load(mtp_path);
+        let c = crate::import::load_mtp(mtp_path);
         let cfg = crate::config::MtpConfig::from_brain_json(&c.header["config"]);
         let cap = cfg.num_code_groups as usize;
         let d = cfg.d_model as usize;
@@ -758,7 +758,7 @@ impl FusedMtp {
         cache_dir: Option<&Path>,
     ) -> Result<FusedMtp, String> {
         let (emb, nres) = {
-            let c = checkpoint::load(mtp_path);
+            let c = crate::import::load_mtp(mtp_path);
             let cfg = crate::config::MtpConfig::from_brain_json(&c.header["config"]);
             (cfg.embedding_dim as usize, cfg.n_residual() as usize)
         };
@@ -801,7 +801,7 @@ impl MtpEngine for FusedMtp {
 
 fn prepare_mtp_fused_onnx(mtp_path: &str, cache_dir: Option<&Path>) -> Result<PathBuf, String> {
     prepare_graph(mtp_path, cache_dir, "mtp-fused.onnx", "brain_tts_npu_mtp_fused", |out| {
-        npu::qwen_export::export_mtp_fused(mtp_path, out)
+        npu::qwen_export::export_mtp_fused(&mtp_reader(mtp_path)?, out)
     })
 }
 
@@ -928,8 +928,23 @@ fn npu_config(device: NpuDevice, allow_fallback: bool, cache_dir: Option<&Path>)
     }
 }
 
+/// When a component's weights last changed: a brain file's own mtime, or,
+/// for a checkpoint read as downloaded, its `model.safetensors`'s.
 fn mtime(p: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+    let file = if p.is_dir() { p.join("model.safetensors") } else { p.to_path_buf() };
+    std::fs::metadata(file).and_then(|m| m.modified()).ok()
+}
+
+fn talker_reader(path: &str) -> std::io::Result<checkpoint::weightio::WeightReader> {
+    crate::import::open_talker(path).map_err(std::io::Error::other)
+}
+
+fn mtp_reader(path: &str) -> std::io::Result<checkpoint::weightio::WeightReader> {
+    crate::import::open_mtp(path).map_err(std::io::Error::other)
+}
+
+fn codec_reader(path: &str) -> std::io::Result<checkpoint::weightio::WeightReader> {
+    mimi::import::open(path).map_err(std::io::Error::other)
 }
 
 /// Cache-aware ONNX export: write `<dir>/<file>` (+ `.data` sidecar) via `export`
@@ -972,9 +987,9 @@ fn prepare_talker_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>,
     let tag = if quant { "brain_tts_npu_talker_int8" } else { "brain_tts_npu_talker" };
     prepare_graph(weights_path, cache_dir, &file, tag, |out| {
         if quant {
-            npu::qwen_export::export_talker_hidden_int8(weights_path, out, cap)
+            npu::qwen_export::export_talker_hidden_int8(&talker_reader(weights_path)?, out, cap)
         } else {
-            npu::qwen_export::export_talker_hidden_fp32(weights_path, out, cap)
+            npu::qwen_export::export_talker_hidden_fp32(&talker_reader(weights_path)?, out, cap)
         }
     })
 }
@@ -989,11 +1004,11 @@ fn prepare_prefill_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>
     };
     prepare_graph(weights_path, cache_dir, &file, tag, |out| {
         if int4 {
-            npu::qwen_export::export_talker_prefill_int4(weights_path, out, cap)
+            npu::qwen_export::export_talker_prefill_int4(&talker_reader(weights_path)?, out, cap)
         } else if quant {
-            npu::qwen_export::export_talker_prefill_int8(weights_path, out, cap)
+            npu::qwen_export::export_talker_prefill_int8(&talker_reader(weights_path)?, out, cap)
         } else {
-            npu::qwen_export::export_talker_prefill_fp32(weights_path, out, cap)
+            npu::qwen_export::export_talker_prefill_fp32(&talker_reader(weights_path)?, out, cap)
         }
     })
 }
@@ -1007,9 +1022,9 @@ fn prepare_mtp_decode_onnx(mtp_path: &str, cap: usize, cache_dir: Option<&Path>,
     let tag = if quant { "brain_tts_npu_mtp_int8" } else { "brain_tts_npu_mtp" };
     prepare_graph(mtp_path, cache_dir, &file, tag, |out| {
         if quant {
-            npu::qwen_export::export_mtp_decode_int8(mtp_path, out, cap)
+            npu::qwen_export::export_mtp_decode_int8(&mtp_reader(mtp_path)?, out, cap)
         } else {
-            npu::qwen_export::export_mtp_decode_fp32(mtp_path, out, cap)
+            npu::qwen_export::export_mtp_decode_fp32(&mtp_reader(mtp_path)?, out, cap)
         }
     })
 }
@@ -1024,11 +1039,11 @@ fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>,
     };
     prepare_graph(weights_path, cache_dir, &file, tag, |out| {
         if int4 {
-            npu::qwen_export::export_talker_decode_int4(weights_path, out, cap)
+            npu::qwen_export::export_talker_decode_int4(&talker_reader(weights_path)?, out, cap)
         } else if quant {
-            npu::qwen_export::export_talker_decode_int8(weights_path, out, cap)
+            npu::qwen_export::export_talker_decode_int8(&talker_reader(weights_path)?, out, cap)
         } else {
-            npu::qwen_export::export_talker_decode_fp32(weights_path, out, cap)
+            npu::qwen_export::export_talker_decode_fp32(&talker_reader(weights_path)?, out, cap)
         }
     })
 }
@@ -1259,7 +1274,7 @@ fn prepare_codec_onnx(weights_path: &str, code_len: usize, cache_dir: Option<&Pa
         cache_dir,
         &format!("codec-clen{code_len}.onnx"),
         "brain_tts_npu_codec",
-        |out| npu::codec_export::export_codec_fp32(weights_path, out, code_len),
+        |out| npu::codec_export::export_codec_fp32(&codec_reader(weights_path)?, out, code_len),
     )
 }
 
@@ -1269,7 +1284,7 @@ fn prepare_codec_front_onnx(weights_path: &str, t: usize, cache_dir: Option<&Pat
         cache_dir,
         &format!("codec-front-t{t}.onnx"),
         "brain_tts_npu_codec_front",
-        |out| npu::codec_export::export_codec_front_fp32(weights_path, out, t).map(|_| ()),
+        |out| npu::codec_export::export_codec_front_fp32(&codec_reader(weights_path)?, out, t).map(|_| ()),
     )
 }
 
@@ -1308,7 +1323,7 @@ impl NpuStreamCodec {
         let dir = cache_dir.map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let bpath = dir.join(format!("codec-back-stream-chunk{chunk}.onnx"));
-        let (_, specs) = npu::codec_export::export_codec_back_stream_fp32(codec_path, bpath.to_str().ok_or("path")?, chunk)
+        let (_, specs) = npu::codec_export::export_codec_back_stream_fp32(&codec_reader(codec_path).map_err(|e| e.to_string())?, bpath.to_str().ok_or("path")?, chunk)
             .map_err(|e| e.to_string())?;
         let back = BackStreamSession::load_path(&bpath, &ncfg, specs, latent_dim, chunk).map_err(|e| e.to_string())?;
         let bufs = back.zero_buffers();

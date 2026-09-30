@@ -189,7 +189,8 @@ fn export(args: &[String]) {
         eprintln!("usage: brain qwen3 export --weights F --out model.onnx [--seq T]");
         return;
     }
-    match npu::qwen_export::export_qwen_fp32(&weights, &out, seq) {
+    let exported = checkpoint::weightio::WeightReader::open(&weights).and_then(|r| npu::qwen_export::export_qwen_fp32(&r, &out, seq));
+    match exported {
         Ok(()) => println!("ok: wrote {out} (seq_len {seq})"),
         Err(e) => eprintln!("export failed: {e}"),
     }
