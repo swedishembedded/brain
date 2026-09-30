@@ -9,11 +9,14 @@ greedy tokens (`tests/composite_parity.rs`), and is served as
 
 ## Outstanding
 
-- **Supervised fine-tuning.** Frozen towers, a trainable aligner
-  (`model::projector::MlpProjector` has its backward) and a LoRA decoder.
-  The decoder does not fit one 24 GB card for training, so this needs the
-  two-card pipeline fine-tune and a decoder backward that hands the image
-  rows' gradient back to the aligner.
+- **Serving a fine-tune.** `brain deepseekvl finetune` writes an adapter and
+  an aligner; the served composite cannot attach either yet (no adapter
+  store layout for it, and its tower loads the checkpoint's aligner).
+- **Fine-tuning beyond one card and one image.** The trainer holds a
+  bf16 decoder on one card, which bounds the context (each image is 576
+  rows). A decoder split across cards needs the decoder hook to hand the
+  image rows' gradient across a pipeline stage boundary, and an example
+  with several images needs the splice to take several regions.
 - **One image over HTTP.** `apiserve::media::extract_openai` forwards the
   first `image_url` of a request; D-Bus callers can send up to 8 images.
 - **Serial decoding.** Each request prefills and decodes alone on

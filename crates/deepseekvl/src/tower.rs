@@ -49,6 +49,8 @@ pub trait VisionTower: Send {
     /// Run one image's `pixel_values` (`[3, S, S]`, from
     /// [`preprocess::ImageProcessor::pixel_values`]).
     fn encode(&self, pixel_values: &[f32]) -> Features;
+    /// The aligner's shape: what a trainable copy of it is built from.
+    fn aligner_config(&self) -> ProjectorConfig;
 }
 
 pub struct HybridTower {
@@ -100,6 +102,10 @@ impl VisionTower for HybridTower {
 
     fn image_size(&self) -> usize {
         self.cfg.high.image_size as usize
+    }
+
+    fn aligner_config(&self) -> ProjectorConfig {
+        self.aligner.cfg
     }
 
     fn encode(&self, pixel_values: &[f32]) -> Features {
@@ -174,6 +180,10 @@ impl VisionTower for SiglipTower {
 
     fn image_size(&self) -> usize {
         self.image_size as usize
+    }
+
+    fn aligner_config(&self) -> ProjectorConfig {
+        self.aligner.cfg
     }
 
     fn encode(&self, pixel_values: &[f32]) -> Features {

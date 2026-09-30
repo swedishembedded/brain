@@ -45,6 +45,36 @@ let embeds = m.image_embeds(&[image])?;
 let reply = m.generate_greedy(&ids, &embeds, 256, &mut |_| true)?;
 ```
 
+### Fine-tuning
+
+```text
+brain deepseekvl finetune --weights deepseek-ai/deepseek-vl-7b-chat \
+    --dataset DIR --out DIR [--rank 16 --steps 200 --lr 1e-4 --aligner-lr X ...]
+```
+
+`DIR/train.jsonl` holds one example per line: an `image` (a path relative to
+`DIR`) and `messages`, ending with the assistant reply to learn:
+
+```json
+{"image": "cat.png", "messages": [
+  {"role": "user", "content": "<image_placeholder>\nWhat is this?"},
+  {"role": "assistant", "content": "A cat."}]}
+```
+
+The towers stay frozen: each image's features are extracted once and the
+towers released, so the decoder gets the whole card. The aligner trains from
+the checkpoint's own weights (at `--aligner-lr`, a tenth of `--lr` unless
+set), and the decoder trains as a LoRA over its frozen base, held at `bf16`
+unless `--base-dtype f32`. Only the reply and its end-of-sentence are
+supervised; each example carries one image. The checkpoint is read as
+downloaded and nothing is written beside it: `--out` receives
+`adapter.safetensors` and `aligner.safetensors`. The schedule and optimiser
+flags (`--weight-decay`, `--grad-clip`, `--warmup`, `--min-lr`) are
+`brain qwen3 finetune --lora`'s.
+
+As a library: `deepseekvl::train::finetune`, or `Frontend::prepare` and
+`Trainer` for your own loop.
+
 The checkpoint is recognized by its HF class `MultiModalityCausalLM`, which
 Janus-Pro shares. The generation heads that only Janus-Pro configures tell the
 two apart.

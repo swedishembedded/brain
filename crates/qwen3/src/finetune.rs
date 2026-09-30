@@ -321,12 +321,18 @@ pub enum LoraStart<'a> {
 /// The initial weights of a LoRA fine-tune: the adapter factors held in
 /// memory over the base checkpoint, which stays wherever it is (mapped,
 /// decoded one tensor at a time as the model is built).
-pub struct LoraInit {
+pub struct LoraInit<'a> {
     adapters: HashMap<String, Vec<f32>>,
-    base: Box<dyn TensorSource>,
+    base: Box<dyn TensorSource + 'a>,
 }
 
-impl LoraInit {
+impl<'a> LoraInit<'a> {
+    /// Zero-delta adapters for `cfg` (whose `lora` is set), drawn from
+    /// `seed`, over `base`.
+    pub fn fresh(cfg: &QwenConfig, base: Box<dyn TensorSource + 'a>, seed: u64) -> LoraInit<'a> {
+        LoraInit { adapters: crate::init::init_adapter_weights(cfg, seed), base }
+    }
+
     /// The adapter tensors' names.
     pub fn adapter_names(&self) -> impl Iterator<Item = &str> {
         self.adapters.keys().map(String::as_str)
@@ -341,7 +347,7 @@ impl LoraInit {
     }
 }
 
-impl TensorSource for LoraInit {
+impl TensorSource for LoraInit<'_> {
     fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
         self.owner(name).with_tensor(name, f)
     }
@@ -375,7 +381,7 @@ impl TensorSource for LoraInit {
 /// Continuing an adapter at a different rank or alpha than it was trained
 /// at is refused: its factors only mean what they mean at their own shape
 /// and scale.
-pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, LoraInit)> {
+pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, LoraInit<'static>)> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, why);
     let (targets, adapter) = match start {
         LoraStart::Fresh => (LORA_TARGETS.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None),
@@ -397,10 +403,7 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
     cfg.lora = Some(LoraCfg { rank, alpha, targets });
     // A fresh adapter starts at its zero-delta init; the base's own weights
     // are never copied, they stay behind `base_src`.
-    let mut init = LoraInit {
-        adapters: crate::init::init_adapter_weights(&cfg, seed),
-        base: base_src,
-    };
+    let mut init = LoraInit::fresh(&cfg, base_src, seed);
     if let Some(tensors) = adapter {
         for (name, values) in tensors {
             match init.adapters.get(&name) {

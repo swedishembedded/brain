@@ -26,11 +26,12 @@ use crate::preprocess::ImageProcessor;
 use crate::prompt::{self, ImageSplice, Style, Turn};
 use crate::tower::{HybridTower, VisionTower};
 
-pub struct Vlm {
+/// Everything of the composite but the decoder's weights: what turns an
+/// image and a conversation into the decoder's inputs.
+pub struct Frontend {
     pub decoder_cfg: QwenConfig,
     pub processor: ImageProcessor,
     pub tower: Box<dyn VisionTower>,
-    pub decoder: Qwen,
     pub tokenizer: QwenBpe,
     pub style: Style,
     pub splice: ImageSplice,
@@ -39,6 +40,20 @@ pub struct Vlm {
     pub bos: String,
     pub eos: String,
     pub eos_id: u32,
+}
+
+/// The composite: its [`Frontend`] (reachable as the composite's own fields)
+/// and the decoder.
+pub struct Vlm {
+    frontend: Frontend,
+    pub decoder: Qwen,
+}
+
+impl std::ops::Deref for Vlm {
+    type Target = Frontend;
+    fn deref(&self) -> &Frontend {
+        &self.frontend
+    }
 }
 
 fn special(tok_cfg: &serde_json::Value, key: &str) -> Result<String, String> {
@@ -57,20 +72,16 @@ pub struct Parts {
     pub language: serde_json::Value,
 }
 
-impl Vlm {
-    /// Assemble a composite from `parts` and the tokenizer, processor config
-    /// and decoder in `dir` (read through `rd`), the decoder at `dtype` with
-    /// a KV cache for `ctx` tokens.
-    pub fn assemble(dir: &Path, rd: &WeightReader, parts: Parts, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
+impl Frontend {
+    /// Open the tokenizer, processor and splice of the composite in `dir`
+    /// around `parts.tower`, reading the decoder's shape from
+    /// `parts.language`.
+    pub fn open(dir: &Path, parts: Parts) -> Result<Frontend, String> {
         let decoder_cfg = qwen3::hf::decoder_config_as(&parts.language.to_string(), "llama")?;
         let processor = ImageProcessor::from_dir(dir)?;
         if processor.image_size as usize != parts.tower.image_size() {
             return Err(format!("the processor makes {} px squares for a {} px tower", processor.image_size, parts.tower.image_size()));
         }
-        let src = qwen3::import::nested_source(rd, crate::import::DECODER, &decoder_cfg)?;
-        let decoder = Qwen::new_shard_dt_decode(decoder_cfg.clone(), ctx, &src, Shard::whole(decoder_cfg.n_layers as usize), dtype);
-        drop(src);
-
         let dir_str = dir.to_str().ok_or("checkpoint path is not UTF-8")?;
         let tokenizer = QwenBpe::from_dir(dir_str)?;
         let tok_cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("tokenizer_config.json")).map_err(|e| format!("tokenizer_config.json: {e}"))?)
@@ -84,7 +95,7 @@ impl Vlm {
             None => None,
         };
         let splice = ImageSplice { image_id: id(prompt::IMAGE_TAG)?, rows: parts.tower.rows(), wrap };
-        Ok(Vlm { decoder_cfg, processor, tower: parts.tower, decoder, tokenizer, style: parts.style, splice, bos, eos, eos_id })
+        Ok(Frontend { decoder_cfg, processor, tower: parts.tower, tokenizer, style: parts.style, splice, bos, eos, eos_id })
     }
 
     /// The prompt's token ids, BOS first, with one placeholder id per image,
@@ -111,6 +122,21 @@ impl Vlm {
     /// The prefill inputs for `ids` with `embeds` spliced at the placeholders.
     pub fn inputs<'a>(&self, ids: &[u32], embeds: &'a [f32]) -> Result<Vec<PrefillInput<'a>>, String> {
         self.splice.inputs(ids, embeds, self.decoder_cfg.d_model as usize)
+    }
+
+}
+
+impl Vlm {
+    /// Assemble a composite from `parts` and the tokenizer, processor config
+    /// and decoder in `dir` (read through `rd`), the decoder at `dtype` with
+    /// a KV cache for `ctx` tokens.
+    pub fn assemble(dir: &Path, rd: &WeightReader, parts: Parts, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
+        let frontend = Frontend::open(dir, parts)?;
+        let decoder_cfg = &frontend.decoder_cfg;
+        let src = qwen3::import::nested_source(rd, crate::import::DECODER, decoder_cfg)?;
+        let decoder = Qwen::new_shard_dt_decode(decoder_cfg.clone(), ctx, &src, Shard::whole(decoder_cfg.n_layers as usize), dtype);
+        drop(src);
+        Ok(Vlm { frontend, decoder })
     }
 
     /// Prefill `ids` with `embeds` spliced at the placeholders, then decode
