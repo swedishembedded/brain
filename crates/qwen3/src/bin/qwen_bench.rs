@@ -42,6 +42,17 @@
 //!                                    # 2R) over all 7 projections - the SDK
 //!                                    # fine-tune's shape. Real weights with
 //!                                    # --weights, else random at --model
+//!   qwen_bench lora-decode --weights CKPT --adapter ADAPTER [--ctx N] [--tokens N]
+//!                          [--rounds N] [--step-cache]
+//!                                    # REAL weights: greedy decode tok/s of the
+//!                                    # base alone, the adapter attached at
+//!                                    # runtime (`Qwen::attach_adapter`) and the
+//!                                    # adapter folded into the base, plus the
+//!                                    # attached-vs-folded logit agreement and
+//!                                    # the attached step's per-kernel profile.
+//!                                    # --step-cache replays recorded dispatches
+//!                                    # as the served path does
+//!                                    # (`Gpu::enable_step_cache`)
 //!   qwen_bench gemm8   [m k n] [reps]      # A/B `matmul_i8_dyn` at one shape
 //!   qwen_bench gemm8-sweep [k n] [reps]    # `matmul_i8_dyn` GOP/s across an
 //!                                          # `m` sweep at fixed k,n — the D0
@@ -299,6 +310,10 @@ fn main() {
     }
     if mode == "lora-train" {
         lora_train_bench(&a, cfg, model_name);
+        return;
+    }
+    if mode == "lora-decode" {
+        lora_decode_bench(&a);
         return;
     }
     if mode == "flash-prefill" {
@@ -1061,6 +1076,112 @@ fn serve_prefill_bench(cfg: &QwenConfig, model_name: &str, cc: u32, start: u32, 
 /// The value after `flag` in argv, if present.
 fn flag<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
     a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).map(|s| s.as_str())
+}
+
+/// Greedy-decode `n` tokens after `prompt` from an empty cache, applying the
+/// head on the device each step - the loop a served generation runs. Returns
+/// the per-token wall time of the generated tokens only (prefill excluded)
+/// and every step's logits for the first `keep` positions.
+fn greedy_timed(m: &Qwen, prompt: &[u32], n: usize, keep: usize) -> (f64, Vec<Vec<f32>>) {
+    m.reset_cache();
+    let mut kept = Vec::new();
+    let mut logits = Vec::new();
+    for &t in prompt {
+        m.step(t);
+        logits = m.decode_logits();
+        if kept.len() < keep {
+            kept.push(logits.clone());
+        }
+    }
+    let argmax = |v: &[f32]| v.iter().enumerate().fold((0usize, f32::MIN), |b, (i, &x)| if x > b.1 { (i, x) } else { b }).0 as u32;
+    let mut next = argmax(&logits);
+    let t0 = Instant::now();
+    for _ in 0..n {
+        m.step(next);
+        let l = m.decode_logits();
+        next = argmax(&l);
+    }
+    (t0.elapsed().as_secs_f64() / n as f64, kept)
+}
+
+/// Runtime LoRA vs folded LoRA vs the bare base, on real weights - see the
+/// `lora-decode` usage line. Each configuration is timed `rounds` times,
+/// interleaved so clock or thermal drift lands on all three alike, and the
+/// median is reported.
+fn lora_decode_bench(a: &[String]) {
+    let weights = flag(a, "--weights").unwrap_or_else(|| panic!("lora-decode needs --weights CKPT"));
+    let adapter = flag(a, "--adapter").unwrap_or_else(|| panic!("lora-decode needs --adapter FILE"));
+    let ctx: u32 = flag(a, "--ctx").and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let n: usize = flag(a, "--tokens").and_then(|s| s.parse().ok()).unwrap_or(128);
+    let rounds: usize = flag(a, "--rounds").and_then(|s| s.parse().ok()).unwrap_or(3);
+    let step_cache = a.iter().any(|x| x == "--step-cache");
+
+    let (cfg, src) = qwen3::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
+    let shard = qwen3::Shard::whole(cfg.n_layers as usize);
+    let t0 = Instant::now();
+    let mut base = Qwen::new_shard_dt_decode(cfg.clone(), ctx, &*src, shard.clone(), qwen3::Dtype::F32);
+    let mut tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{e}"));
+    drop(src);
+    qwen3::lora::fold_adapter_into(&mut tensors, adapter).unwrap_or_else(|e| panic!("{e}"));
+    let folded = Qwen::new_shard_dt_decode(cfg.clone(), ctx, &tensors, shard, qwen3::Dtype::F32);
+    drop(tensors);
+    eprintln!("built base + folded in {:.1}s", t0.elapsed().as_secs_f32());
+    if step_cache {
+        // The served path's entry count (`qwen3::caps`).
+        base.gpu().enable_step_cache(65536);
+        folded.gpu().enable_step_cache(65536);
+    }
+    let t0 = Instant::now();
+    base.attach_adapter(adapter).unwrap_or_else(|e| panic!("{e}"));
+    let (rank, alpha) = base.attached_adapter().unwrap();
+    eprintln!("attached rank-{rank} alpha-{alpha} adapter in {:.3}s", t0.elapsed().as_secs_f32());
+
+    let prompt: Vec<u32> = (0..32u32).map(|i| (i * 131 + 7) % cfg.vocab).collect();
+    // Warm the device (E.0b: an idle GPU is not the GPU) and check parity.
+    let (_, att_logits) = greedy_timed(&base, &prompt, 16, prompt.len());
+    let (_, fold_logits) = greedy_timed(&folded, &prompt, 16, prompt.len());
+    let (mut diff, mut scale) = (0.0f32, 0.0f32);
+    for (x, y) in att_logits.iter().zip(&fold_logits) {
+        for (p, q) in x.iter().zip(y) {
+            diff = diff.max((p - q).abs());
+            scale = scale.max(q.abs());
+        }
+    }
+    println!("attached vs folded logits over {} prompt positions: max |diff| {diff:.3e} (logit scale {scale:.2})", prompt.len());
+
+    let mut times: [Vec<f64>; 3] = Default::default();
+    for _ in 0..rounds {
+        times[0].push(greedy_timed(&folded, &prompt, n, 0).0);
+        times[1].push(greedy_timed(&base, &prompt, n, 0).0);
+        base.detach_adapter();
+        times[2].push(greedy_timed(&base, &prompt, n, 0).0);
+        base.attach_adapter(adapter).unwrap_or_else(|e| panic!("{e}"));
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let cache = if step_cache { "step cache on" } else { "step cache off" };
+    println!("\ngreedy decode, {n} tokens after a {}-token prompt, device LM head, {cache}, median of {rounds}:", prompt.len());
+    for (label, v) in ["folded ", "attached", "no adapter"].iter().zip(times.iter_mut()) {
+        let s = median(v);
+        println!("  {label:<10} {:7.3} ms/token  {:6.1} tok/s", s * 1e3, 1.0 / s);
+    }
+
+    // Device time of one decode step at the end of the context, per
+    // configuration: timestamp queries, so host load cannot move it.
+    let gpu = base.gpu().share();
+    let roofs = banner(&gpu);
+    let pos = ctx - 1;
+    let attached = report(&gpu, &format!("DECODE + attached adapter @pos {pos}"), &base.decode_steps(Some(1), pos, None, None), 5, roofs);
+    base.detach_adapter();
+    let bare = gpu_core::profile::profile(&gpu, "bare", &base.decode_steps(Some(1), pos, None, None), 5).total_secs;
+    let fgpu = folded.gpu().share();
+    let fold = gpu_core::profile::profile(&fgpu, "folded", &folded.decode_steps(Some(1), pos, None, None), 5).total_secs;
+    println!("\ndevice time of one decode step @pos {pos} (transformer body, no LM head):");
+    for (label, secs) in [("folded", fold), ("attached", attached), ("no adapter", bare)] {
+        println!("  {label:<10} {:7.3} ms", secs * 1e3);
+    }
 }
 
 /// One LoRA training step's wall time at `--t` - see the `lora-train` usage

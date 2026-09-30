@@ -48,6 +48,10 @@ pub fn save_adapter_with_lineage<M: model::Model<Config = QwenConfig>>(
     model::lora::device_adapter::save_adapter_with_lineage(path, model, lora.rank, lora.alpha, &lora.targets, card_id, base_id, "qwen", dataset_id, training)
 }
 
+/// An adapter file read and validated into host memory, with no base model
+/// involved - what [`crate::Qwen::attach_adapter_pairs`] applies at runtime.
+pub use model::lora::device_adapter::{read_adapter, AdapterSite, DeviceAdapter};
+
 /// Fold an adapter saved by [`save_adapter`] into a base model's host tensor
 /// map (name -> row-major `[out, in]` data), in place. `base` must already
 /// contain every targeted linear's weight under its plain name (e.g.

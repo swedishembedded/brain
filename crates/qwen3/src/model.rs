@@ -141,6 +141,10 @@ const RMSNORM_DX_ROWS: usize = 55;
 const ROPE_TABLE: usize = 56;
 const ROPE_TABLE_BWD: usize = 57;
 const ROPE_TABLE_AT: usize = 58;
+/// `matmul_gemv`: the first kernel [`pipelines`] appends after the static
+/// table. Registered for the `Ops` façade; the LoRA `x·Aᵀ` projection also
+/// dispatches it directly in the decode regime ([`block::gemv_tier`]).
+const MATMUL_GEMV: usize = STATIC_PIPELINES.len();
 // Causal GQA flash attention for training: the forward that also writes the
 // row log-sum-exp, and its two backward halves (`block::FlashGqaIds`).
 const FLASH_GQA_FWD: usize = 59;
@@ -289,6 +293,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
         v.push(("max_abs_row", kernels::MAX_ABS_ROW));
         v.push(("quant_pack", kernels::QUANT_PACK));
+        // The runtime LoRA epilogue an attached adapter dispatches
+        // (`Qwen::attach_adapter`, `model::dispatch::lora_rows_off`).
+        v.push(("lora_delta", kernels::LORA_DELTA));
         // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
         // variants (B4/B5/B8/B9/B10) even though this crate never builds a
         // `Weight::BF16`/`Weight::F16` and has its own KV-cache mechanism
@@ -644,6 +651,11 @@ pub struct Qwen {
     lora_a: DeviceBuffer,   // [n*r] : a = x @ A^T
     lora_da: DeviceBuffer,  // [n*r] : grad wrt a
     lora_out: DeviceBuffer, // [n*max_out] : delta = a @ B^T
+    /// What the forward applies in place of this build's own adapter state
+    /// ([`Self::attach_adapter`], [`Self::bypass_adapter`]); `None` applies
+    /// the build's own: nothing on a plain build, `cfg.lora`'s trainable
+    /// pairs on a LoRA build.
+    attached: Option<AdapterOverride>,
 
     fwd_steps: Tape,
     bwd_steps: Tape,
@@ -753,6 +765,16 @@ pub(crate) fn head_chunk_rows(n: u64, v: u64, budget_words: u64) -> u64 {
     (budget_words / v / HEAD_ROW_ALIGN * HEAD_ROW_ALIGN).max(HEAD_ROW_ALIGN).min(n)
 }
 
+/// The layer of `name` when it is one of a block's seven linears
+/// (`blocks.<l>.attn.{wq,wk,wv,wo}.weight`, `blocks.<l>.mlp.{gate,up,down}.weight`)
+/// in an `n_layers`-deep model - the tensors a LoRA adapter may correct.
+fn linear_layer(name: &str, n_layers: u32) -> Option<usize> {
+    const LEAVES: [&str; 7] = ["attn.wq", "attn.wk", "attn.wv", "attn.wo", "mlp.gate", "mlp.up", "mlp.down"];
+    let (layer, leaf) = name.strip_prefix("blocks.")?.strip_suffix(".weight")?.split_once('.')?;
+    let layer: u32 = layer.parse().ok()?;
+    (layer < n_layers && LEAVES.contains(&leaf)).then_some(layer as usize)
+}
+
 /// Row granularity of a logits chunk: 64 rows of a `u32`/`f32` per-row buffer
 /// is 256 B, the storage-binding offset alignment.
 const HEAD_ROW_ALIGN: u64 = 64;
@@ -764,6 +786,47 @@ struct RopeTable {
     inv_freq: DeviceBuffer,
     attention_factor: f32,
     decode_pos: DeviceBuffer,
+}
+
+/// A LoRA adapter held on the device beside an unmodified base: each targeted
+/// linear keeps its runtime correction ([`model::dispatch::LoraW`]: `A`, and
+/// `B` transposed with `alpha/r` folded in), and every forward adds
+/// `B·(A·x)` onto the base linear's output through
+/// [`model::dispatch::lora_rows_off`] - the engine's one runtime-LoRA path.
+///
+/// Because nothing is folded, one resident base serves any adapter or none,
+/// switching costs an upload of the adapter alone, and the correction arrives
+/// in full on a quantized base, where a fold would be rounded back onto the
+/// weight grid (`model::dispatch::LoraW` documents that failure).
+struct AttachedLora {
+    rank: u32,
+    alpha: f32,
+    /// Base-weight name (`blocks.<l>.<leaf>`) -> its correction.
+    sites: HashMap<String, model::dispatch::LoraW>,
+    /// `[rows · rank]` scratch for `A·x`; rows is 1 on a decode-only build.
+    xa: DeviceBuffer,
+    /// This model's `lora_delta` pipeline index.
+    delta_kernel: usize,
+}
+
+/// An inference-time replacement for a build's own adapter state. Training
+/// refuses to run under one: the backward differentiates the build's own
+/// parameters, which an override is not.
+enum AdapterOverride {
+    /// Apply this adapter instead.
+    Lora(AttachedLora),
+    /// Apply no adapter at all: exactly the base weights.
+    BaseOnly,
+}
+
+/// One linear's low-rank correction as the forward consumes it, whichever
+/// store it lives in.
+enum LoraSite<'a> {
+    /// A LoRA build's own trainable pair, `A [r, in]` and unscaled `B [out, r]`
+    /// - the layout its backward differentiates.
+    Trainable { a: &'a DeviceBuffer, b: &'a DeviceBuffer, rank: u32, scale: f32 },
+    /// An attached adapter's runtime correction.
+    Attached { lora: &'a model::dispatch::LoraW, xa: &'a DeviceBuffer, delta_kernel: usize },
 }
 
 impl Qwen {
@@ -814,11 +877,10 @@ impl Qwen {
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
-    /// a mmap'd checkpoint file -- for serving a named LoRA adapter, whose delta
-    /// must be folded into the base tensors (`qwen3::lora::fold_adapter_into`)
-    /// before a decode-only KV-cache model can be built from the result. Pays
-    /// the whole-model host copy `from_reader_decode` avoids, but only for the
-    /// (rare, one-off-per-activation) adapter-serving path.
+    /// a mmap'd checkpoint file -- e.g. base tensors with a LoRA adapter folded
+    /// in (`qwen3::lora::fold_adapter_into`). Pays the whole-model host copy
+    /// `from_reader_decode` avoids. To switch adapters on a resident base
+    /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, Dtype::F32, true)
@@ -1317,6 +1379,7 @@ impl Qwen {
             lora_a: st(n * r),
             lora_da: st(n * r),
             lora_out: st(n * max_out),
+            attached: None,
             fwd_steps: Tape::default(),
             bwd_steps: Tape::default(),
             inv_count: bwd(1),
@@ -1539,15 +1602,50 @@ impl Qwen {
         self.ops.matmul(s, w, act, out, 0);
     }
 
+    /// The adapter pair correcting base linear `wname` (leaf `leaf`), if any:
+    /// an attached adapter's, or a LoRA build's own trainable one. `own`
+    /// ignores any override - the backward's recompute, which must rebuild
+    /// the activations of the parameters it differentiates.
+    fn lora_site(&self, leaf: &str, wname: &str, own: bool) -> Option<LoraSite<'_>> {
+        match (&self.attached, own) {
+            (Some(AdapterOverride::Lora(at)), false) => {
+                return at.sites.get(wname).map(|lora| LoraSite::Attached { lora, xa: &at.xa, delta_kernel: at.delta_kernel });
+            }
+            (Some(AdapterOverride::BaseOnly), false) => return None,
+            _ => {}
+        }
+        let (rank, scale) = self.lora_for(leaf)?;
+        Some(LoraSite::Trainable { a: self.w(&format!("{wname}.lora_a")), b: self.w(&format!("{wname}.lora_b")), rank, scale })
+    }
+
     /// Forward LoRA delta for a targeted linear: `y += (alpha/r)·(x·Aᵀ)·Bᵀ`.
     /// No-op for an untargeted leaf. `m`×`k` is the input, `nout` the output.
-    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        let Some((r, scale)) = self.lora_for(leaf) else { return };
-        let a = format!("{wname}.lora_a");
-        let bnm = format!("{wname}.lora_b");
-        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
-        s.push(self.gpu.step(MATMUL, &[&self.lora_a, self.w(&bnm), &self.lora_out], &[m, r, nout], m * nout));
-        s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+    ///
+    /// `x` is the fp32 activation whatever tier the base linear ran at, so the
+    /// correction is exact on a quantized base too. `own`: see
+    /// [`Self::lora_site`].
+    #[allow(clippy::too_many_arguments)]
+    fn lora_fwd(&self, s: &mut Vec<Step>, leaf: &str, x: &DeviceBuffer, wname: &str, y: &DeviceBuffer, m: u32, k: u32, nout: u32, own: bool) {
+        // The A projection of both stores: the fp32 GEMM selector's tier, with
+        // the workgroup-per-output GEMV on a device that runs it - at decode
+        // (`m = 1`) the naive kernel would run `r` threads down a serial
+        // `k`-long loop.
+        let gemv = if self.coop { Some(MATMUL_GEMV) } else { None };
+        let tier = block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 };
+        match self.lora_site(leaf, wname, own) {
+            None => {}
+            Some(LoraSite::Attached { lora, xa, delta_kernel }) => {
+                s.extend(model::dispatch::lora_rows_off(&self.gpu, tier, delta_kernel, lora, xa, x, y, 0, 0, m, k, nout));
+            }
+            Some(LoraSite::Trainable { a, b, rank: r, scale }) => {
+                s.push(match block::gemv_tier(&self.gpu, m, r) {
+                    Some(grid) => self.gpu.dispatch(MATMUL_GEMV, &[x, a, &self.lora_a], &[m, k, r], grid),
+                    None => self.gpu.step(MATMUL, &[x, a, &self.lora_a], &[m, k, r], m * r),
+                });
+                s.push(self.gpu.step(MATMUL, &[&self.lora_a, b, &self.lora_out], &[m, r, nout], m * nout));
+                s.push(self.gpu.step(AXPY, &[y, &self.lora_out], &[m * nout, f(scale)], m * nout));
+            }
+        }
     }
 
     /// Backward for a (possibly-LoRA) linear `y = x·Wᵀ`. Accumulates the input
@@ -1820,7 +1918,9 @@ impl Qwen {
     /// dispatches over the same inputs, so the same values - and stops there,
     /// before the down projection and the residual write. `res[l+1]` already
     /// holds its forward value, and writing it again (DeepStack's add
-    /// especially) would change it.
+    /// especially) would change it. It applies the build's own adapter state,
+    /// never an inference override, because that is what the backward
+    /// differentiates.
     fn layer_fwd_steps(&self, s: &mut Vec<Step>, l: usize, b_use: u32, t_use: u32, recompute: bool) {
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -1842,11 +1942,11 @@ impl Qwen {
         // model `ops_act` is a no-op.
         let act1 = self.ops_act(s, &lb.xn1, n, d);
         self.ops_linear(s, &act1, &p("attn.wq.weight"), &lb.q_pre);
-        self.lora_fwd(s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
+        self.lora_fwd(s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq, recompute);
         self.ops_linear(s, &act1, &p("attn.wk.weight"), &lb.k_pre);
-        self.lora_fwd(s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
+        self.lora_fwd(s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv, recompute);
         self.ops_linear(s, &act1, &p("attn.wv.weight"), &lb.v);
-        self.lora_fwd(s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
+        self.lora_fwd(s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv, recompute);
         // Qwen2 q/k/v projection bias (Qwen3 is bias-free).
         if c.attn_bias {
             s.push(self.gpu.step(BIAS_ADD, &[&lb.q_pre, self.w(&p("attn.wq.bias"))], &[n, hq], n * hq));
@@ -1886,23 +1986,23 @@ impl Qwen {
         }
         let act_o = self.ops_act(s, &lb.ctx, n, hq);
         self.ops_linear(s, &act_o, &p("attn.wo.weight"), &self.proj);
-        self.lora_fwd(s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
+        self.lora_fwd(s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d, recompute);
         s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
         // --- SwiGLU MLP ---
         s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
         // xn2 quantized once, shared by gate/up.
         let act2 = self.ops_act(s, &lb.xn2, n, d);
         self.ops_linear(s, &act2, &p("mlp.gate.weight"), &lb.gate_pre);
-        self.lora_fwd(s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
+        self.lora_fwd(s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff, recompute);
         self.ops_linear(s, &act2, &p("mlp.up.weight"), &lb.up);
-        self.lora_fwd(s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
+        self.lora_fwd(s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff, recompute);
         s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
         if recompute {
             return;
         }
         let act_h = self.ops_act(s, &lb.h, n, ff);
         self.ops_linear(s, &act_h, &p("mlp.down.weight"), &self.mlp_out);
-        self.lora_fwd(s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
+        self.lora_fwd(s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d, false);
         s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         // DeepStack: add level `l`'s merged vision features into the image rows
         // of this layer's output (level i -> layer i), for l < n_levels.
@@ -2053,6 +2153,7 @@ impl Qwen {
     pub fn backward(&self) {
         assert!(!self.decode_only, "Qwen::backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         assert!(!self.kmask_on.get(), "Qwen::backward: the padded-key mask is a forward-only encoder path; disarm it before training");
+        self.assert_trainable_state("backward");
         self.write_inv_count();
         self.bwd_steps.submit(&self.gpu);
     }
@@ -2324,6 +2425,7 @@ impl Qwen {
         assert!(!self.decode_only, "Qwen::backward_hidden: batched backward called on a decode-only-built model");
         assert_eq!(d_hidden.len(), (self.b * self.t) as usize * self.cfg.d_model as usize, "one gradient row per hidden row");
         self.gpu.write_f32(&self.d_xn, d_hidden);
+        self.assert_trainable_state("backward");
         self.bwd_steps.submit(&self.gpu);
     }
 
@@ -2450,6 +2552,7 @@ impl Qwen {
     /// [`Self::write_out_dres`].
     pub fn run_backward(&self) {
         assert!(!self.decode_only, "Qwen::run_backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
+        self.assert_trainable_state("run_backward");
         if self.shard.head {
             self.write_inv_count();
         }
@@ -2911,15 +3014,16 @@ impl Qwen {
             // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
             rms(&mut s, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1);
             // Int8 (m=1): quantize the input row once per distinct input
-            // (`Ops::act`), then every linear reading it - decode never
-            // applies LoRA (a decode-only build's adapter, if any, was
-            // already folded into the base weights before construction -
-            // `Self::from_tensors_decode`'s own doc), so `ops_linear`'s
-            // returned "was this F32" bool is intentionally unused here.
+            // (`Ops::act`), then every linear reading it. Each linear then
+            // takes its LoRA correction, if an adapter is attached or this
+            // is a LoRA build - the same `lora_fwd` the batched forward runs.
             let act1 = self.ops_act(&mut s, &lb.xn1, 1, d);
             self.ops_linear(&mut s, &act1, &p("attn.wq.weight"), &lb.q_pre);
+            self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, 1, d, hq, false);
             self.ops_linear(&mut s, &act1, &p("attn.wk.weight"), &lb.k_pre);
+            self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, 1, d, hkv, false);
             self.ops_linear(&mut s, &act1, &p("attn.wv.weight"), &lb.v);
+            self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, 1, d, hkv, false);
             // Qwen2-style biased projections and Qwen3-style QK-norm, gated
             // exactly as the batched forward gates them.
             if c.attn_bias {
@@ -2964,15 +3068,19 @@ impl Qwen {
             s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &kv.k[l], &kv.v[l], &self.scores, &lb.probs, &lb.ctx));
             let act_o = self.ops_act(&mut s, &lb.ctx, 1, hq);
             self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
+            self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, 1, hq, d, false);
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
             // --- SwiGLU MLP ---
             rms(&mut s, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1);
             let act2 = self.ops_act(&mut s, &lb.xn2, 1, d);
             self.ops_linear(&mut s, &act2, &p("mlp.gate.weight"), &lb.gate_pre);
+            self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, 1, d, ff, false);
             self.ops_linear(&mut s, &act2, &p("mlp.up.weight"), &lb.up);
+            self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, 1, d, ff, false);
             s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
             let act_h = self.ops_act(&mut s, &lb.h, 1, ff);
             self.ops_linear(&mut s, &act_h, &p("mlp.down.weight"), &self.mlp_out);
+            self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, 1, ff, d, false);
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
             // DeepStack decode: this step's row IS one of the image rows
             // (`deepstack_row = Some(local_row)`, the row's 0-based offset
@@ -3012,6 +3120,123 @@ impl Qwen {
         let last = c.n_layers as usize;
         rms(&mut s, &self.res[last], w("norm.weight"), &self.xn_final, d, 1);
         s
+    }
+
+    /// Attach the LoRA adapter at `path` (written by
+    /// [`crate::lora::save_adapter`]) to this model's resident base, applied
+    /// at runtime: the base weights are neither reloaded nor modified, so
+    /// [`Self::detach_adapter`] returns the model to exactly what it was, and
+    /// a different adapter can be attached in its place at the cost of
+    /// uploading the adapter alone. Replaces any adapter already attached.
+    ///
+    /// Works at every weight tier: the correction is computed in fp32 from
+    /// the fp32 activation, so it is not rounded away on an int8 base the way
+    /// a fold would be.
+    ///
+    /// On a LoRA training build the attached adapter replaces the trainable
+    /// one for inference, so one resident base serves training and any
+    /// adapter; training ([`Self::backward`]) is refused until it is
+    /// detached.
+    ///
+    /// The KV cache is reset: its keys and values were computed under the
+    /// previous adapter and are not valid under this one.
+    ///
+    /// Refused, leaving the model unchanged, when the adapter names a tensor
+    /// that is not one of this model's linears or disagrees with its shape. A
+    /// pair for a layer another pipeline stage holds is not this shard's to
+    /// apply and is skipped.
+    pub fn attach_adapter(&mut self, path: &str) -> Result<(), String> {
+        let adapter = crate::lora::read_adapter(path).map_err(|e| format!("{path}: {e}"))?;
+        self.attach_adapter_pairs(&adapter)
+    }
+
+    /// [`Self::attach_adapter`] from an adapter already in host memory
+    /// ([`crate::lora::read_adapter`], or pairs a caller assembled itself).
+    pub fn attach_adapter_pairs(&mut self, adapter: &crate::lora::DeviceAdapter) -> Result<(), String> {
+        let r = adapter.rank;
+        if r == 0 {
+            return Err("attach_adapter: adapter rank is 0".into());
+        }
+        let mut owned = Vec::with_capacity(adapter.sites.len());
+        for site in &adapter.sites {
+            let Some(layer) = linear_layer(&site.base, self.cfg.n_layers) else {
+                return Err(format!("attach_adapter: {} is not a linear of this model", site.base));
+            };
+            if !self.shard.owns(layer) {
+                continue;
+            }
+            let w = self.weights.get(&site.base).ok_or_else(|| format!("attach_adapter: {} is not resident on this shard", site.base))?;
+            let (out, inn) = site.dims(r);
+            if (out, inn) != (w.n() as usize, w.k() as usize) || site.a.len() != r as usize * inn || site.b.len() != out * r as usize {
+                return Err(format!("attach_adapter: {} is [{}, {}] but the rank-{r} adapter pair is A {} / B {} values", site.base, w.n(), w.k(), site.a.len(), site.b.len()));
+            }
+            owned.push(site);
+        }
+        let delta_kernel = self.gpu.kernel_index("lora_delta").expect("qwen3::pipelines registers lora_delta");
+        let rows = if self.decode_only { 1 } else { self.b as u64 * self.t as u64 };
+        let scale = adapter.scale();
+        let sites = owned
+            .into_iter()
+            .map(|site| {
+                let (out, _) = site.dims(r);
+                // `B [out, r]` -> `[r, out]`, scaled: the layout `lora_delta`
+                // reads coalesced.
+                let bt: Vec<f32> = (0..r as usize).flat_map(|k| site.b.iter().skip(k).step_by(r as usize).map(move |&v| v * scale)).collect();
+                debug_assert_eq!(bt.len(), out * r as usize);
+                let lora = model::dispatch::LoraW { a: self.gpu.storage_init("lora_a", &site.a), bt: self.gpu.storage_init("lora_bt", &bt), r };
+                (site.base.clone(), lora)
+            })
+            .collect();
+        self.set_override(Some(AdapterOverride::Lora(AttachedLora { rank: r, alpha: adapter.alpha, sites, xa: self.gpu.storage(rows * r as u64), delta_kernel })));
+        Ok(())
+    }
+
+    /// Serve exactly the base weights: no attached adapter, and on a LoRA
+    /// build not its trainable one either. On a plain build this is
+    /// [`Self::detach_adapter`]; on a LoRA build it is undone by
+    /// [`Self::detach_adapter`], and training is refused until then. Resets
+    /// the KV cache.
+    pub fn bypass_adapter(&mut self) {
+        let over = self.cfg.lora.is_some().then_some(AdapterOverride::BaseOnly);
+        self.set_override(over);
+    }
+
+    /// Return to this build's own adapter state: exactly the base on a plain
+    /// build, the trainable adapter on a LoRA build (the forward records the
+    /// build's own dispatches again). Resets the KV cache, as
+    /// [`Self::attach_adapter`] does. `false` when there was nothing to undo.
+    pub fn detach_adapter(&mut self) -> bool {
+        if self.attached.is_none() {
+            return false;
+        }
+        self.set_override(None);
+        true
+    }
+
+    /// `(rank, alpha)` of the attached adapter, `None` when none is attached.
+    pub fn attached_adapter(&self) -> Option<(u32, f32)> {
+        match &self.attached {
+            Some(AdapterOverride::Lora(a)) => Some((a.rank, a.alpha)),
+            _ => None,
+        }
+    }
+
+    /// Install `over` and invalidate everything recorded under the previous
+    /// adapter state: the KV cache, and the batched forward tape (a decode
+    /// tape is rebuilt per token, and the backward's recompute never reads
+    /// an override, so neither needs more).
+    fn set_override(&mut self, over: Option<AdapterOverride>) {
+        self.attached = over;
+        self.reset_cache();
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+        }
+    }
+
+    /// Refuse to train under an inference override: the recorded forward
+    /// then computes a loss the backward does not differentiate.
+    fn assert_trainable_state(&self, what: &str) {
+        assert!(self.attached.is_none(), "Qwen::{what}: an adapter override (attach_adapter/bypass_adapter) is inference-only; detach_adapter before training");
     }
 
     /// The device this model runs on (profiling/observability).
@@ -4537,6 +4762,7 @@ mod rmsnorm_dx_variant_agreement {
     #[test]
     fn the_registered_slot_names_the_coalesced_kernel() {
         assert_eq!(STATIC_PIPELINES[Qwen::ids().rmsnorm_dx_rows].0, "rmsnorm_dx_rows");
+        assert_eq!(pipelines()[MATMUL_GEMV].0, "matmul_gemv");
         assert_eq!(STATIC_PIPELINES[FLASH_GQA_FWD].0, "flash_attn_causal_gqa");
         assert_eq!(STATIC_PIPELINES[FLASH_GQA_BWD_DQ].0, "flash_attn_causal_gqa_bwd_dq");
         assert_eq!(STATIC_PIPELINES[FLASH_GQA_BWD_DKV].0, "flash_attn_causal_gqa_bwd_dkv");

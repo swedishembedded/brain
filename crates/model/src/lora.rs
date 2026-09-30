@@ -1197,6 +1197,96 @@ pub mod device_adapter {
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
     }
 
+    /// One linear's low-rank pair as an adapter file stores it: `A [r, in]`
+    /// and `B [out, r]`, row-major, UNSCALED - the adapter's `alpha/rank`
+    /// lives once on [`DeviceAdapter`], not multiplied into either factor.
+    pub struct AdapterSite {
+        /// The base weight this pair corrects (e.g. `blocks.0.attn.wq.weight`).
+        pub base: String,
+        pub a: Vec<f32>,
+        pub b: Vec<f32>,
+    }
+
+    impl AdapterSite {
+        /// `(out, in)` of the base weight this pair corrects, for a rank-`r`
+        /// adapter.
+        pub fn dims(&self, r: u32) -> (usize, usize) {
+            (self.b.len() / r as usize, self.a.len() / r as usize)
+        }
+    }
+
+    /// An adapter written by [`save_adapter`], read into host memory and
+    /// validated, with no base model involved. Both dispositions of an
+    /// adapter start here: [`fold_adapter_into`] adds its delta into a host
+    /// base, and a model that applies it at runtime uploads the pairs beside
+    /// an unmodified resident base.
+    pub struct DeviceAdapter {
+        pub rank: u32,
+        pub alpha: f32,
+        /// Every targeted linear, sorted by base name.
+        pub sites: Vec<AdapterSite>,
+    }
+
+    impl DeviceAdapter {
+        /// The factor the low-rank product is scaled by: `alpha / rank`.
+        pub fn scale(&self) -> f32 {
+            self.alpha / self.rank as f32
+        }
+    }
+
+    fn invalid(path: &str, what: String) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {what}"))
+    }
+
+    /// Read and validate an adapter file written by [`save_adapter`].
+    ///
+    /// Everything the file claims is checked before a caller sees it: the
+    /// card must describe a `"lora"` adapter with a rank, every `.lora_a`
+    /// needs its `.lora_b` (and the reverse), and both factors must be whole
+    /// multiples of the rank. A card with per-target ranks is refused: this
+    /// family writes one rank for every target, and applying the scalar pair
+    /// to a file that says otherwise would scale some targets wrongly.
+    pub fn read_adapter(adapter_path: &str) -> std::io::Result<DeviceAdapter> {
+        let mut st = checkpoint::st::load_safetensors(adapter_path)?;
+        let card = st.card().ok_or_else(|| invalid(adapter_path, "has no ModelCard".into()))?;
+        let a = card.adapter.as_ref().ok_or_else(|| invalid(adapter_path, "its card has no adapter descriptor".into()))?;
+        // `Adapter.kind` is load-bearing: the math below IS the lora
+        // product, and a DoRA/LoKr file applied through it would be silently
+        // wrong - the "loader that quietly drops keys" failure
+        // `read_external_adapter` refuses for third-party files.
+        if a.kind != "lora" {
+            return Err(invalid(adapter_path, format!("adapter kind is {:?}, but only \"lora\" is implemented", a.kind)));
+        }
+        if a.per_target.is_some() {
+            return Err(invalid(adapter_path, "declares per-target rank/alpha, which device adapters do not carry".into()));
+        }
+        let rank = a.rank.ok_or_else(|| invalid(adapter_path, "adapter has no rank".into()))?;
+        if rank == 0 {
+            return Err(invalid(adapter_path, "adapter rank is 0".into()));
+        }
+        let alpha = a.alpha.unwrap_or(rank as f32);
+
+        if let Some(orphan) = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_b")).find(|base| !st.tensors.contains_key(&format!("{base}.lora_a"))) {
+            return Err(invalid(adapter_path, format!("{orphan}.lora_b has no matching .lora_a")));
+        }
+        let mut names: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).map(str::to_string).collect();
+        names.sort();
+        let r = rank as usize;
+        let mut sites = Vec::with_capacity(names.len());
+        for base in names {
+            let a = st.tensors.remove(&format!("{base}.lora_a")).expect("listed above");
+            let b = st.tensors.remove(&format!("{base}.lora_b")).ok_or_else(|| invalid(adapter_path, format!("missing {base}.lora_b")))?;
+            if a.is_empty() || b.is_empty() || a.len() % r != 0 || b.len() % r != 0 {
+                return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
+            }
+            sites.push(AdapterSite { base, a, b });
+        }
+        if sites.is_empty() {
+            return Err(invalid(adapter_path, "contains no .lora_a/.lora_b pairs".into()));
+        }
+        Ok(DeviceAdapter { rank, alpha, sites })
+    }
+
     /// Fold an adapter saved by [`save_adapter`] into a base model's host
     /// tensor map (name -> row-major `[out, in]` data), in place. `base`
     /// must already contain every targeted linear's weight under its plain
@@ -1206,42 +1296,24 @@ pub mod device_adapter {
     /// the tensor names actually present in the file), so callers build
     /// their own crate-local `LoraCfg` from this plus whatever `targets`
     /// they already know.
+    ///
+    /// Every target is checked against `base` before any weight is written,
+    /// so a refused adapter leaves `base` untouched.
     pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &str) -> std::io::Result<(u32, f32)> {
-        let st = checkpoint::st::load_safetensors(adapter_path)?;
-        let card = st
-            .card()
-            .unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path} has no ModelCard"));
-        let a = card.adapter.as_ref().unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s card has no adapter descriptor"));
-        // `Adapter.kind` is a free-form string nothing branched on before
-        // this - make it load-bearing: an unknown kind is a hard error
-        // naming it, not a silent "treat everything as lora" (this fold's
-        // math IS the lora fold; a DoRA/LoKr file would need a different
-        // one, and getting that wrong silently would be the exact
-        // "loader that quietly drops keys" failure `read_external_adapter`
-        // already refuses to allow for third-party files).
-        assert_eq!(a.kind, "lora", "fold_adapter_into: {adapter_path}'s adapter kind is {:?}, but this fold only implements \"lora\"", a.kind);
-        let rank = a.rank.unwrap_or_else(|| panic!("fold_adapter_into: {adapter_path}'s adapter has no rank"));
-        let alpha = a.alpha.unwrap_or(rank as f32);
-        let scale = alpha / rank as f32;
-
-        let mut names: Vec<&str> = st
-            .tensors
-            .keys()
-            .filter_map(|n| n.strip_suffix(".lora_a"))
-            .collect();
-        names.sort();
-        for base_name in names {
-            let a_name = format!("{base_name}.lora_a");
-            let b_name = format!("{base_name}.lora_b");
-            let a_data = st.tensors.get(&a_name).unwrap_or_else(|| panic!("{adapter_path}: missing {a_name}"));
-            let b_data = st.tensors.get(&b_name).unwrap_or_else(|| panic!("{adapter_path}: missing {b_name}"));
-            let w = base
-                .get_mut(base_name)
-                .unwrap_or_else(|| panic!("fold_adapter_into: base has no weight named {base_name}"));
-            fold_delta(w, a_data, b_data, rank as usize, scale);
+        let adapter = read_adapter(adapter_path)?;
+        for site in &adapter.sites {
+            let (out, inn) = site.dims(adapter.rank);
+            let w = base.get(&site.base).ok_or_else(|| invalid(adapter_path, format!("base has no weight named {}", site.base)))?;
+            if w.len() != out * inn {
+                return Err(invalid(adapter_path, format!("{}: adapter is [{out}, {inn}] but the base weight holds {} values", site.base, w.len())));
+            }
         }
-
-        Ok((rank, alpha))
+        let scale = adapter.scale();
+        for site in &adapter.sites {
+            let w = base.get_mut(&site.base).expect("checked above");
+            fold_delta(w, &site.a, &site.b, adapter.rank as usize, scale);
+        }
+        Ok((adapter.rank, adapter.alpha))
     }
 
     /// `W[o,i] += scale * sum_k B[o,k] * A[k,i]`, `A` is `[r,in]`, `B` is
