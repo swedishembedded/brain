@@ -22,7 +22,7 @@ its fp32 output. `brain serve` does not list the model yet.
 ```rust
 use deepseekvl::prompt::{Role, Turn};
 
-let m = deepseekvl::DeepseekVl::load(dir, qwen3::Dtype::F16, 2048)?;
+let m = deepseekvl::load(dir, qwen3::Dtype::F16, 2048)?;
 let turns = [Turn { role: Role::User, content: "<image_placeholder>Describe this image.".into() }];
 let ids = m.prompt_ids(&turns)?;
 let embeds = m.image_embeds(&[image])?;

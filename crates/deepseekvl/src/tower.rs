@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The hybrid vision tower and its aligner: an image's `pixel_values` in, the
-//! decoder-width rows that replace its placeholder out.
+//! The vision towers and their aligners: an image's `pixel_values` in, the
+//! decoder-width rows that replace its placeholder out ([`VisionTower`]).
+//!
+//! [`HybridTower`] is DeepSeek-VL's:
 //!
 //! * High resolution: SAM-B over the whole `[3, 1024, 1024]` square (with the
 //!   neck resize and HD branch, [`sam1::SamViTConfig::deepseek_vl`]), giving a
@@ -13,6 +15,10 @@
 //!
 //! The three stages share one device; the features cross between them
 //! through the host, which is two `[576, 1024]` reads per image.
+//!
+//! [`SiglipTower`] is Janus-Pro's understanding tower: SigLIP-L over the
+//! processor's already normalized 384-pixel square, then a plain `mlp_gelu`
+//! aligner.
 
 use checkpoint::weightio::WeightReader;
 use clip::config::ClipVisionConfig;
@@ -24,15 +30,25 @@ use sam1::{SamEncoder, SamViTConfig};
 use crate::config::DeepseekVlConfig;
 use crate::preprocess;
 
-/// One image through the tower: both branches' features and the aligner's
-/// output.
+/// One image through a tower: each feature stream the aligner reads (the
+/// hybrid tower's high then low branch, or the single tower's one) and the
+/// aligner's output.
 pub struct Features {
-    /// `[rows, high.output_dim]`: the SAM map, one row per cell.
-    pub high: Vec<f32>,
-    /// `[rows, low.output_dim]`.
-    pub low: Vec<f32>,
+    /// `[rows, width]` per stream.
+    pub streams: Vec<Vec<f32>>,
     /// `[rows, n_embed]`: what the decoder reads.
     pub embeds: Vec<f32>,
+}
+
+/// A vision tower with its aligner.
+pub trait VisionTower {
+    /// Image rows per image.
+    fn rows(&self) -> usize;
+    /// The side of the square `pixel_values` the tower takes.
+    fn image_size(&self) -> usize;
+    /// Run one image's `pixel_values` (`[3, S, S]`, from
+    /// [`preprocess::ImageProcessor::pixel_values`]).
+    fn encode(&self, pixel_values: &[f32]) -> Features;
 }
 
 pub struct HybridTower {
@@ -75,14 +91,18 @@ impl HybridTower {
         Ok(HybridTower { cfg: cfg.clone(), sam, siglip, gpu, aligner, high_in, low_in, rows })
     }
 
-    /// Image rows per image (576).
-    pub fn rows(&self) -> usize {
+}
+
+impl VisionTower for HybridTower {
+    fn rows(&self) -> usize {
         self.rows as usize
     }
 
-    /// Run one image's `pixel_values` (`[3, S, S]` in `[0, 1]`, from
-    /// [`preprocess::ImageProcessor::pixel_values`]).
-    pub fn encode(&self, pixel_values: &[f32]) -> Features {
+    fn image_size(&self) -> usize {
+        self.cfg.high.image_size as usize
+    }
+
+    fn encode(&self, pixel_values: &[f32]) -> Features {
         let (high_cfg, low_cfg) = (&self.cfg.high, &self.cfg.low);
         let side = high_cfg.image_size as usize;
         assert_eq!(pixel_values.len(), 3 * side * side, "pixel_values is not [3, {side}, {side}]");
@@ -110,6 +130,62 @@ impl HybridTower {
         self.gpu.write_f32(&self.low_in, &low);
         self.gpu.submit(&[], &self.aligner.forward(&self.gpu, &[&self.high_in, &self.low_in]));
         let embeds = self.gpu.read(self.aligner.out(), rows * self.cfg.aligner.n_embed as usize);
-        Features { high, low, embeds }
+        Features { streams: vec![high, low], embeds }
+    }
+}
+
+/// SigLIP-L over the processor's normalized square, then a single-stream
+/// aligner.
+pub struct SiglipTower {
+    siglip: ClipVision,
+    gpu: Gpu,
+    aligner: MlpProjector,
+    features: DeviceBuffer,
+    rows: u32,
+    width: u32,
+    n_embed: u32,
+    image_size: u32,
+}
+
+impl SiglipTower {
+    /// The tower under `tower_prefix` and the aligner under `aligner_prefix`
+    /// of `rd`, the aligner described by `aligner`.
+    pub fn load(rd: &WeightReader, tower_prefix: &str, aligner_prefix: &str, aligner: &crate::AlignerConfig) -> Result<SiglipTower, String> {
+        let cfg = ClipVisionConfig::siglip_large_patch16_384();
+        let pcfg = ProjectorConfig::from_type(&aligner.projector_type, aligner.depth, aligner.input_dim, aligner.n_embed)?;
+        if pcfg.inputs() != 1 || pcfg.input_dim != cfg.d_model() {
+            return Err(format!("a {} aligner over {} inputs does not read one {}-wide SigLIP stream", aligner.projector_type, aligner.input_dim, cfg.d_model()));
+        }
+        let aligner_w = crate::import::aligner_weights(rd, aligner_prefix, &pcfg)?;
+        let (siglip_w, _) = clip::import::siglip::import_timm(rd, tower_prefix, &cfg)?;
+        let (rows, width, image_size) = (cfg.native_patches(), cfg.d_model(), cfg.image_size());
+        let gpu = Gpu::new(PROJECTOR_PIPELINES);
+        let siglip = ClipVision::new_on(gpu.new_like(CLIP_VISION_PIPELINES), cfg, 1, PatchSource::Pixels, &siglip_w);
+        let proj = MlpProjector::new(&gpu, pcfg, rows, &aligner_w)?;
+        let features = gpu.storage((rows * width) as u64);
+        Ok(SiglipTower { siglip, gpu, aligner: proj, features, rows, width, n_embed: pcfg.n_embed, image_size })
+    }
+}
+
+impl VisionTower for SiglipTower {
+    fn rows(&self) -> usize {
+        self.rows as usize
+    }
+
+    fn image_size(&self) -> usize {
+        self.image_size as usize
+    }
+
+    fn encode(&self, pixel_values: &[f32]) -> Features {
+        let side = self.image_size as usize;
+        assert_eq!(pixel_values.len(), 3 * side * side, "pixel_values is not [3, {side}, {side}]");
+        self.siglip.set_pixels(pixel_values);
+        self.siglip.forward();
+        let feats = self.siglip.read_output();
+        debug_assert_eq!(feats.len(), (self.rows * self.width) as usize);
+        self.gpu.write_f32(&self.features, &feats);
+        self.gpu.submit(&[], &self.aligner.forward(&self.gpu, &[&self.features]));
+        let embeds = self.gpu.read(self.aligner.out(), (self.rows * self.n_embed) as usize);
+        Features { streams: vec![feats], embeds }
     }
 }

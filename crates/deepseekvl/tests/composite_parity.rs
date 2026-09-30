@@ -20,7 +20,6 @@ use std::path::Path;
 
 use brain_testutil::parity::{load, rel_l2, Report};
 use deepseekvl::prompt::{Role, Turn};
-use deepseekvl::DeepseekVl;
 use imaging::pixels::Rgb8;
 use qwen3::model::PrefillInput;
 
@@ -45,7 +44,7 @@ fn deepseek_vl_matches_the_reference_end_to_end() {
     let ids_of = |k: &str| -> Vec<u32> { manifest[k].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect() };
     let g = load(&golden_dir.join("golden.safetensors"));
 
-    let m = DeepseekVl::load(Path::new(&dir), qwen3::Dtype::F16, 1024).expect("load DeepSeek-VL");
+    let m = deepseekvl::load(Path::new(&dir), qwen3::Dtype::F16, 1024).expect("load DeepSeek-VL");
     let mut r = Report::new(FLOOR);
 
     // ---- 1. preprocessing ----
@@ -59,22 +58,21 @@ fn deepseek_vl_matches_the_reference_end_to_end() {
 
     // ---- 2. the prompt ----
     let turns = [Turn { role: Role::User, content: "<image_placeholder>Describe this image.".into() }];
-    assert_eq!(deepseekvl::prompt::render(deepseekvl::prompt::SYSTEM_PROMPT, &turns, &m.eos).unwrap(), manifest["prompt"].as_str().unwrap());
+    assert_eq!(deepseekvl::prompt::render(&m.style, deepseekvl::prompt::SYSTEM_PROMPT, &turns, &m.eos).unwrap(), manifest["prompt"].as_str().unwrap());
     let ids = m.prompt_ids(&turns).unwrap();
-    assert_eq!(manifest["image_token_id"].as_u64(), Some(m.image_id as u64));
-    assert_eq!(deepseekvl::prompt::expand_image_ids(&ids, m.image_id, m.tower.rows()), ids_of("input_ids"), "prompt token ids");
+    assert_eq!(manifest["image_token_id"].as_u64(), Some(m.splice.image_id as u64));
+    assert_eq!(m.splice.expand_ids(&ids), ids_of("input_ids"), "prompt token ids");
 
     // ---- 3. the tower ----
     let f = m.tower.encode(&g["pixel_values"].data);
-    r.check("high_features", &f.high, &g["high_features"].data);
-    r.check("low_features", &f.low, &g["low_features"].data);
+    r.check("high_features", &f.streams[0], &g["high_features"].data);
+    r.check("low_features", &f.streams[1], &g["low_features"].data);
     r.check("aligner_out", &f.embeds, &g["aligner_out"].data);
     let rel = rel_l2(&f.embeds, &g["aligner_out"].data);
     assert!(rel < 1e-2, "aligner_out rel_l2 {rel:.3e}");
 
     // ---- 4. the decoder ----
-    let d = m.decoder_cfg.d_model as usize;
-    let inputs = deepseekvl::prompt::splice(&ids, m.image_id, &f.embeds, m.tower.rows(), d).unwrap();
+    let inputs = m.inputs(&ids, &f.embeds).unwrap();
     let spliced: Vec<f32> = inputs
         .iter()
         .flat_map(|i| match i {

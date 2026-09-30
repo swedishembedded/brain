@@ -8,11 +8,11 @@
 //!    `image_size`, the short side floored and at least `min_size`.
 //! 2. It is pasted centred on an `image_size` square filled with the
 //!    background colour `int(image_mean * 255)`.
-//! 3. The bytes are rescaled to `[0, 1]`. The processor does not normalize
-//!    (`do_normalize: false`); each tower branch does, with its own mean and
-//!    standard deviation.
-//! 4. The low-resolution branch sees the square resized to its own side by
-//!    torch's antialiased bilinear filter.
+//! 3. The bytes are rescaled to `[0, 1]`, and normalized when the config says
+//!    `do_normalize` (Janus-Pro). DeepSeek-VL's processor does not normalize;
+//!    each branch of its hybrid tower does, with its own statistics.
+//! 4. DeepSeek-VL's low-resolution branch sees the square resized to its own
+//!    side by torch's antialiased bilinear filter.
 
 use imaging::host::{resize_aa_planar, resize_bicubic_pil, AaFilter};
 use imaging::pixels::Rgb8;
@@ -26,22 +26,25 @@ pub struct ImageProcessor {
     /// The square's fill, `int(image_mean * 255)` per channel.
     pub background: [u8; 3],
     pub rescale_factor: f64,
+    /// `(image_mean, image_std)` when the processor normalizes.
+    pub normalize: Option<([f32; 3], [f32; 3])>,
+}
+
+fn rgb(v: &Value, key: &str) -> Result<[f64; 3], String> {
+    let a = v.get(key).and_then(Value::as_array).filter(|a| a.len() == 3).ok_or_else(|| format!("preprocessor_config.json: '{key}' is not three numbers"))?;
+    let n = |i: usize| a[i].as_f64().ok_or_else(|| format!("preprocessor_config.json: '{key}' is not three numbers"));
+    Ok([n(0)?, n(1)?, n(2)?])
 }
 
 impl ImageProcessor {
     pub fn from_json(v: &Value) -> Result<ImageProcessor, String> {
         let num = |k: &str| v.get(k).and_then(Value::as_f64).ok_or_else(|| format!("preprocessor_config.json: missing number '{k}'"));
-        if v.get("do_normalize").and_then(Value::as_bool) != Some(false) {
-            return Err("preprocessor_config.json: `do_normalize` must be false; the tower branches normalize".into());
-        }
-        let mean = v.get("image_mean").and_then(Value::as_array).filter(|a| a.len() == 3).ok_or("preprocessor_config.json: 'image_mean' is not three numbers")?;
-        let mut background = [0u8; 3];
-        for (b, m) in background.iter_mut().zip(mean) {
-            let m = m.as_f64().ok_or("preprocessor_config.json: 'image_mean' is not three numbers")?;
-            // Python's `int(x * 255)`: truncation toward zero.
-            *b = (m * 255.0) as u8;
-        }
-        Ok(ImageProcessor { image_size: num("image_size")? as u32, min_size: num("min_size")? as u32, background, rescale_factor: num("rescale_factor")? })
+        let do_normalize = v.get("do_normalize").and_then(Value::as_bool).ok_or("preprocessor_config.json: missing boolean 'do_normalize'")?;
+        let mean = rgb(v, "image_mean")?;
+        // Python's `int(x * 255)`: truncation toward zero.
+        let background = mean.map(|m| (m * 255.0) as u8);
+        let normalize = if do_normalize { Some((mean.map(|m| m as f32), rgb(v, "image_std")?.map(|x| x as f32))) } else { None };
+        Ok(ImageProcessor { image_size: num("image_size")? as u32, min_size: num("min_size")? as u32, background, rescale_factor: num("rescale_factor")?, normalize })
     }
 
     pub fn from_dir(dir: &std::path::Path) -> Result<ImageProcessor, String> {
@@ -50,8 +53,8 @@ impl ImageProcessor {
         ImageProcessor::from_json(&serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?)
     }
 
-    /// The processor's `pixel_values` for one image: planar `[3, S, S]` in
-    /// `[0, 1]`, `S = image_size`.
+    /// The processor's `pixel_values` for one image: planar `[3, S, S]`,
+    /// `S = image_size`, in `[0, 1]` or normalized.
     pub fn pixel_values(&self, img: &Rgb8) -> Result<Vec<f32>, String> {
         let (w, h) = (img.w as usize, img.h as usize);
         if w == 0 || h == 0 {
@@ -78,6 +81,9 @@ impl ImageProcessor {
                     out[c * plane + dst] = scale(resized.px[src + c]);
                 }
             }
+        }
+        if let Some((mean, std)) = self.normalize {
+            normalize(&mut out, mean, std);
         }
         Ok(out)
     }
@@ -130,8 +136,12 @@ mod tests {
     }
 
     #[test]
-    fn normalizing_a_config_that_already_normalizes_is_refused() {
-        let v = serde_json::json!({"do_normalize": true, "image_mean": [0.5, 0.5, 0.5], "image_size": 16, "min_size": 2, "rescale_factor": 0.1});
-        assert!(ImageProcessor::from_json(&v).unwrap_err().contains("do_normalize"));
+    fn a_normalizing_processor_normalizes_after_padding() {
+        let v = serde_json::json!({"do_normalize": true, "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5], "image_size": 4, "min_size": 2, "rescale_factor": 0.00392156862745098});
+        let p = ImageProcessor::from_json(&v).unwrap();
+        assert_eq!(p.background, [127; 3]);
+        let px = p.pixel_values(&Rgb8 { w: 4, h: 2, px: vec![255; 4 * 2 * 3] }).unwrap();
+        assert_eq!(px[4], 1.0, "a white pixel");
+        assert_eq!(px[0], (127.0 * p.rescale_factor) as f32 * 2.0 - 1.0, "the background, normalized too");
     }
 }

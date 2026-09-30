@@ -15,7 +15,8 @@
 //! * [`tower`]: SAM-B and SigLIP-L on one device, joined by the split
 //!   aligner (`model::projector`).
 //! * [`prompt`]: the conversation format and the image splice.
-//! * [`model`]: the composite, with `brain-qwen3`'s decoder.
+//! * [`model`]: the composite, with `brain-qwen3`'s decoder; [`load`]
+//!   builds DeepSeek-VL's.
 //!
 //! Swedish Embedded AB implements vision-language model inference like this
 //! for its clients. If your team needs expertise in multimodal models on
@@ -30,4 +31,4 @@ pub mod prompt;
 pub mod tower;
 
 pub use config::{AlignerConfig, DeepseekVlConfig, TowerBranch};
-pub use model::DeepseekVl;
+pub use model::{load, Vlm};
