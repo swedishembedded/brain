@@ -130,7 +130,8 @@ chat-template and generation files are copied from `--tokenizer-dir`, which
 defaults to `--weights` when that is a checkpoint directory. Any checkpoint
 the decoder reads can be the input: a brain file, a Hugging Face directory or
 a GGUF. Tensors stream one at a time. The default dtype is bf16; `--dtype
-f32` exports losslessly.
+f32` exports losslessly. `--adapter ADAPTER.safetensors` folds a LoRA adapter
+into the weights it targets as they are written.
 
 `--format gguf --out model.gguf [--dtype f16|f32]` writes a llama.cpp GGUF
 under the architecture the checkpoint is (`qwen3`, `qwen2`, `llama`), with its

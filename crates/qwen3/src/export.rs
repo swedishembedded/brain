@@ -79,11 +79,14 @@ pub struct HfExport<'a> {
     /// (`tokenizer.json`, `tokenizer_config.json`, `special_tokens_map.json`,
     /// `generation_config.json`), copied beside the weights when present.
     pub tokenizer_dir: Option<&'a Path>,
+    /// A LoRA adapter (as `qwen3::lora::save_adapter` writes it) folded into
+    /// the weights it targets as they are written: `W + (alpha/r)·B·A`.
+    pub adapter: Option<&'a str>,
 }
 
 impl Default for HfExport<'_> {
     fn default() -> Self {
-        HfExport { dtype: HfDtype::Bf16, shard_bytes: 5_000_000_000, tokenizer_dir: None }
+        HfExport { dtype: HfDtype::Bf16, shard_bytes: 5_000_000_000, tokenizer_dir: None, adapter: None }
     }
 }
 
@@ -190,12 +193,32 @@ pub fn export_hf(src: &dyn TensorSource, cfg: &QwenConfig, out: &Path, opts: &Hf
         filled += p.bytes;
     }
 
+    let fold: std::collections::HashMap<String, model::lora::Pair> = match opts.adapter {
+        None => Default::default(),
+        Some(path) => {
+            let lora = read_lora(path)?;
+            let scale = lora.alpha / lora.r as f32;
+            lora.pairs
+                .into_iter()
+                .map(|(base, a, b)| {
+                    let (out_dim, in_dim) = (b.len() / lora.r, a.len() / lora.r);
+                    let expected = plan.iter().find(|p| p.brain == base).map(|p| p.shape.iter().product::<u64>() as usize);
+                    if expected != Some(out_dim * in_dim) {
+                        return Err(format!("{path}: {base} is not a [{out_dim}, {in_dim}] weight of this checkpoint"));
+                    }
+                    // `Pair::delta` adds B·A scaled by its argument; the
+                    // scale is folded into B once here.
+                    Ok((base, model::lora::Pair::from_ab(out_dim, in_dim, lora.r, a, b.into_iter().map(|v| v * scale).collect())))
+                })
+                .collect::<Result<_, String>>()?
+        }
+    };
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let n = shards.len();
     let mut weight_map = serde_json::Map::new();
     for (i, shard) in shards.iter().enumerate() {
         let file = if n == 1 { "model.safetensors".to_string() } else { format!("model-{:05}-of-{n:05}.safetensors", i + 1) };
-        write_shard(src, shard, opts.dtype, &out.join(&file))?;
+        write_shard(src, shard, opts.dtype, &fold, &out.join(&file))?;
         for p in shard {
             weight_map.insert(p.hf.clone(), json!(file));
         }
@@ -225,7 +248,7 @@ fn write_json(path: &Path, v: &Value) -> Result<(), String> {
 /// One safetensors file: the header, then each tensor as it is read -
 /// written to a temporary name and renamed into place, so an interrupted
 /// export never leaves a truncated shard under its final name.
-fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, path: &Path) -> Result<(), String> {
+fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, fold: &std::collections::HashMap<String, model::lora::Pair>, path: &Path) -> Result<(), String> {
     let mut header = serde_json::Map::new();
     header.insert("__metadata__".to_string(), json!({ "format": "pt" }));
     let mut offset = 0u64;
@@ -245,7 +268,14 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, path:
     let mut buf = Vec::new();
     for p in shard {
         buf.clear();
-        let found = src.with_tensor(&p.brain, &mut |x| dtype.encode(x, &mut buf));
+        let found = match fold.get(&p.brain) {
+            None => src.with_tensor(&p.brain, &mut |x| dtype.encode(x, &mut buf)),
+            Some(pair) => src.with_tensor(&p.brain, &mut |x| {
+                let mut w = x.to_vec();
+                pair.delta(1.0, &mut w);
+                dtype.encode(&w, &mut buf);
+            }),
+        };
         if !found {
             return Err(format!("export: the checkpoint has no tensor {:?}", p.brain));
         }
@@ -553,6 +583,41 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
     w.finish().map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// A LoRA adapter as `qwen3::lora::save_adapter` writes it: rank, alpha, the
+/// base it was trained on, and each targeted base weight's `A [r, in]` and
+/// `B [out, r]`, sorted by base name.
+struct LoraFile {
+    r: usize,
+    alpha: f32,
+    base: Option<String>,
+    pairs: Vec<(String, Vec<f32>, Vec<f32>)>,
+}
+
+fn read_lora(adapter_path: &str) -> Result<LoraFile, String> {
+    let mut st = checkpoint::st::load_safetensors(adapter_path).map_err(|e| format!("{adapter_path}: {e}"))?;
+    let card = st.card().ok_or_else(|| format!("{adapter_path}: no ModelCard"))?;
+    let adapter = card.adapter.as_ref().ok_or_else(|| format!("{adapter_path}: its card describes no adapter"))?;
+    if adapter.kind != "lora" {
+        return Err(format!("{adapter_path}: a {:?} adapter is not a LoRA", adapter.kind));
+    }
+    let r = adapter.rank.filter(|&r| r > 0).ok_or_else(|| format!("{adapter_path}: the adapter has no rank"))? as usize;
+    let mut bases: Vec<String> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).map(str::to_string).collect();
+    bases.sort();
+    if bases.is_empty() {
+        return Err(format!("{adapter_path}: no .lora_a/.lora_b pairs"));
+    }
+    let mut pairs = Vec::with_capacity(bases.len());
+    for base in bases {
+        let a = st.tensors.remove(&format!("{base}.lora_a")).expect("listed");
+        let b = st.tensors.remove(&format!("{base}.lora_b")).ok_or_else(|| format!("{adapter_path}: {base}.lora_a has no .lora_b"))?;
+        if a.len() % r != 0 || b.len() % r != 0 {
+            return Err(format!("{adapter_path}: {base}'s factors are not rank-{r} matrices"));
+        }
+        pairs.push((base, a, b));
+    }
+    Ok(LoraFile { r, alpha: adapter.alpha.unwrap_or(r as f32), base: adapter.base.clone(), pairs })
+}
+
 /// Write a LoRA adapter brain trained for this decoder (`adapter_path`, as
 /// `qwen3::lora::save_adapter` writes it) as a PEFT adapter directory:
 /// `adapter_model.safetensors` under PEFT's names
@@ -563,30 +628,13 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
 /// `base_model` names the HF checkpoint it applies to; `None` takes the base
 /// the adapter's own card records.
 pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> Result<(), String> {
-    let st = checkpoint::st::load_safetensors(adapter_path).map_err(|e| format!("{adapter_path}: {e}"))?;
-    let card = st.card().ok_or_else(|| format!("{adapter_path}: no ModelCard"))?;
-    let adapter = card.adapter.as_ref().ok_or_else(|| format!("{adapter_path}: its card describes no adapter"))?;
-    if adapter.kind != "lora" {
-        return Err(format!("{adapter_path}: a {:?} adapter has no PEFT LoRA form", adapter.kind));
-    }
-    let r = adapter.rank.filter(|&r| r > 0).ok_or_else(|| format!("{adapter_path}: the adapter has no rank"))? as usize;
-    let alpha = adapter.alpha.unwrap_or(r as f32);
-    let base_model = base_model.map(str::to_string).or_else(|| adapter.base.clone()).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
+    let LoraFile { r, alpha, base, pairs } = read_lora(adapter_path)?;
+    let base_model = base_model.map(str::to_string).or(base).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
 
     let names = HfNames::CAUSAL_LM;
-    let mut bases: Vec<&str> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).collect();
-    bases.sort();
-    if bases.is_empty() {
-        return Err(format!("{adapter_path}: no .lora_a/.lora_b pairs"));
-    }
     let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
     let mut modules: Vec<String> = Vec::new();
-    for base in bases {
-        let a = &st.tensors[&format!("{base}.lora_a")];
-        let b = st.tensors.get(&format!("{base}.lora_b")).ok_or_else(|| format!("{adapter_path}: {base}.lora_a has no .lora_b"))?;
-        if a.len() % r != 0 || b.len() % r != 0 {
-            return Err(format!("{adapter_path}: {base}'s factors are not rank-{r} matrices"));
-        }
+    for (base, a, b) in &pairs {
         let hf = names.from_brain(base).ok_or_else(|| format!("{adapter_path}: no HF name for {base}"))?;
         let stem = hf.strip_suffix(".weight").ok_or_else(|| format!("{adapter_path}: {base} is not a weight"))?;
         let module = stem.rsplit('.').next().unwrap_or(stem).to_string();

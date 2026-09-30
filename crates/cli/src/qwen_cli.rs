@@ -217,7 +217,7 @@ fn export(args: &[String]) {
     }
     if weights.is_empty() {
         eprintln!("usage: brain qwen3 export --weights F [--format onnx] --out model.onnx [--seq T]");
-        eprintln!("       brain qwen3 export --weights F --format hf --out DIR [--dtype bf16|f16|f32] [--tokenizer-dir D]");
+        eprintln!("       brain qwen3 export --weights F --format hf --out DIR [--dtype bf16|f16|f32] [--tokenizer-dir D] [--adapter A]");
         eprintln!("       brain qwen3 export --weights F --format gguf --out FILE.gguf [--dtype f16|f32] [--tokenizer-dir D]");
         eprintln!("       brain qwen3 export --format peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]");
         return;
@@ -249,7 +249,12 @@ fn export(args: &[String]) {
                 d => bad_dtype(d, "f32, bf16 or f16"),
             };
             let exported = qwen3::open_checkpoint(&weights).and_then(|(cfg, src)| {
-                let opts = qwen3::export::HfExport { dtype, tokenizer_dir: tokenizer_dir.as_deref().map(std::path::Path::new), ..Default::default() };
+                let opts = qwen3::export::HfExport {
+                    dtype,
+                    tokenizer_dir: tokenizer_dir.as_deref().map(std::path::Path::new),
+                    adapter: (!adapter.is_empty()).then_some(adapter.as_str()),
+                    ..Default::default()
+                };
                 qwen3::export::export_hf(&*src, &cfg, std::path::Path::new(&out), &opts)
             });
             match exported {
