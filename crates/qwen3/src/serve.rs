@@ -226,6 +226,34 @@ const PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
 ];
 
+/// [`PIPELINES`] plus the half-precision (bf16 and f16) weight variants of
+/// the three GEMMs, which an engine built at a half tier dispatches
+/// ([`Engine::from_map_tier`]). Appended, so every index in [`PIPELINES`]
+/// stays put; the engine resolves these by name.
+fn pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = PIPELINES.to_vec();
+        for dt in HALF_TIERS {
+            for (name, src) in [("matmul", kernels::MATMUL), ("matmul_gemv", kernels::MATMUL_GEMV), ("matmul_reg3", kernels::MATMUL_REG3)] {
+                v.push(kernels::template::dtype_variant(name, src, "w", dt).expect("brain-kernels ships the bf16/f16 GEMM variants"));
+            }
+        }
+        v
+    })
+}
+
+/// The storage tiers that keep a checkpoint's own half-precision values.
+const HALF_TIERS: [Dtype; 2] = [Dtype::BF16, Dtype::F16];
+
+/// The half-tier GEMMs by kernel index: `(plain, gemv, tiled)`.
+#[derive(Clone, Copy, Debug)]
+struct HalfGemm {
+    plain: usize,
+    gemv: usize,
+    tiled: usize,
+}
+
 /// The `model::ops::Ops` façade's required kernel set (B7), registered on a
 /// throwaway side `Gpu` (`Gpu::new_like`) purely so `from_map_with_gpu` can
 /// call `Weight::upload` for its capability-aware quantize+upload - this
@@ -778,6 +806,10 @@ pub struct Engine {
     /// module's own `weights: &HashMap<String, Vec<f32>>` constructor
     /// parameter (the raw host checkpoint tensors this is built FROM).
     lin_weights: HashMap<String, Weight>,
+    /// The storage tier the linears landed on (after the device's gates).
+    tier: Dtype,
+    /// The half-tier GEMMs, when `tier` is BF16 or F16.
+    half_gemm: Option<HalfGemm>,
     /// Int8 activation-quantization scratch (`model::dispatch::I8Scratch` -
     /// the SAME struct `model::ops::Ops::act` wraps, B3's façade) - `Some`
     /// only when at least one `Weight` in `weights` is `I8` (mirrors the old
@@ -870,7 +902,7 @@ impl Engine {
     /// concurrent sequences of at most `max_blocks_per_seq * block_size` tokens.
     #[allow(clippy::too_many_arguments)]
     pub fn from_map(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
-        Self::from_map_with_gpu(Gpu::new(PIPELINES), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
     }
 
     /// [`Engine::from_map`] on an EXISTING device (F1 warm start): the caller's
@@ -881,11 +913,36 @@ impl Engine {
     /// devices on one card is both slow and hostile to the driver).
     #[allow(clippy::too_many_arguments)]
     pub fn from_map_on(parent: &Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
-        Self::from_map_with_gpu(parent.new_like(PIPELINES), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// [`Self::from_map`] with the linears (and head) stored at `tier`:
+    /// `F32`, `I8` (quantized, where the device has the packed-int8 path), or
+    /// `BF16`/`F16`, which keep a half-precision checkpoint's own values at
+    /// half fp32's memory - a 7B decoder in about 14 GB - and compute in fp32.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_map_tier(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+        Self::build(Gpu::new(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+    }
+
+    /// [`Self::from_map_tier`] on `parent`'s device.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_map_tier_on(parent: &Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+        Self::build(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn from_map_with_gpu(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
+        let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
+        Self::build(gpu, cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tier: Dtype) -> Engine {
+        assert!(matches!(tier, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16), "serve: {tier:?} weights are not a serving tier (F32, I8, BF16, F16)");
+        let weights_int8 = tier == Dtype::I8;
+        let half = HALF_TIERS.contains(&tier);
         // Int8 weights are capability-driven, never assumed: the request only
         // takes effect where the packed-dot GEMM executes (the selector's
         // PackedInt8 gate). Elsewhere - the CPU JIT - fp32 weights stay, and
@@ -906,6 +963,15 @@ impl Engine {
         if weights_int8 && !w8_on {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
+        // The half tiers decode inline in the GEMM (`#w=bf16`/`#w=f16`), which
+        // every backend runs; they need only the kernels [`pipelines`] adds.
+        let half_gemm = half.then(|| {
+            let tag = if tier == Dtype::BF16 { "bf16" } else { "f16" };
+            let id = |name: &str| gpu.kernel_index(&format!("{name}#w={tag}")).unwrap_or_else(|| panic!("serve: {name}#w={tag} is not registered; build a half-tier engine with Engine::from_map_tier"));
+            HalfGemm { plain: id("matmul"), gemv: id("matmul_gemv"), tiled: id("matmul_reg3") }
+        });
+        // The linears live in the packed bank when it is on.
+        let packed = w8_on || half;
         // The 7 per-layer linears live in the int8 bank when it is on - loading
         // them into the fp32 ParamStore as well would keep both copies resident
         // and forfeit the memory the quantisation buys.
@@ -918,7 +984,7 @@ impl Engine {
         // names any more) and cost real resident memory for nothing.
         let roles = decoder_param_list(&cfg)
             .into_iter()
-            .filter(|(n, _)| !(is_fused_source_leaf(n) || QKV_BIAS.iter().any(|b| n.ends_with(b)) || (w8_on && crate::q8::Q8::is_i8_linear(n))))
+            .filter(|(n, _)| !(is_fused_source_leaf(n) || QKV_BIAS.iter().any(|b| n.ends_with(b)) || (packed && crate::q8::Q8::is_i8_linear(n))))
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
             .collect();
         let stage_t0 = std::time::Instant::now();
@@ -1095,7 +1161,7 @@ impl Engine {
         // SAME kind of seam `Ops::matmul` does instead of hand-checking a
         // private `HashMap` before falling back to a second, separate
         // selector field.
-        let want = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
+        let want = if half { tier } else if weights_int8 { Dtype::I8 } else { Dtype::F32 };
         let ops = Ops::new(gpu.new_like(ops_kernel_list())).unwrap_or_else(|e| panic!("serve: Ops::new: {e}"));
         let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
         let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
@@ -1117,9 +1183,9 @@ impl Engine {
                 }
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
-                let w = if w8_on {
+                let w = if packed {
                     let raw = weights.get(&name).unwrap_or_else(|| panic!("serve: missing weight {name}"));
-                    Weight::upload(&ops, raw, wn, wk, Dtype::I8)
+                    Weight::upload(&ops, raw, wn, wk, want)
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
@@ -1162,6 +1228,13 @@ impl Engine {
         // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
         // this replaces already paid.
         lin_weights.insert(head_name, Weight::upload(&ops, &head, cfg.vocab as usize, cfg.d_model as usize, want));
+        if half {
+            // A half weight is bound whole: two bytes a value.
+            if let Some((name, w)) = lin_weights.iter().find(|(_, w)| w.n() as u64 * w.k() as u64 * 2 > gpu.max_storage_binding_bytes()) {
+                panic!("serve: {name} ({} x {}) does not fit one storage binding at {tier:?}", w.n(), w.k());
+            }
+        }
+        let tier = if half { tier } else if w8_on { Dtype::I8 } else { Dtype::F32 };
         gpu_core::profile::stage_time("qwen engine build: per-layer linear weight quantize+upload", stage_t0);
         let stage_t0 = std::time::Instant::now();
         // Int8 activation-quantization scratch (`model::dispatch::I8Scratch`,
@@ -1245,6 +1318,8 @@ impl Engine {
             clip_v,
             yarn,
             lin_weights,
+            tier,
+            half_gemm,
             i8_scratch,
             tuned_i8,
             tuned_splitk,
@@ -1326,6 +1401,12 @@ impl Engine {
     /// was asked for.
     pub fn weights_int8(&self) -> bool {
         self.i8_scratch.is_some()
+    }
+
+    /// The storage tier the linears and head landed on: what was asked for,
+    /// or fp32 where the device could not honour int8.
+    pub fn weights_tier(&self) -> Dtype {
+        self.tier
     }
 
     /// True when the KV cache is packed int8 rather than fp32 (unlike
@@ -1684,7 +1765,15 @@ impl Engine {
                 let scratch = self.i8_scratch.as_ref().expect("qwen3 serve: I8 weight built without i8_scratch");
                 self.mm8(s, scratch, w, sw, *n, *k, out, rows);
             }
-            _ => unreachable!("qwen3 serve only ever builds F32/I8 weights (Weight::upload's `want` is always one of the two - see `from_map_with_gpu`)"),
+            Weight::BF16 { w, n, k } | Weight::F16 { w, n, k } => {
+                // Same kernels, same selection as the fp32 path, with the
+                // weight decoded inline; no split-K variant exists for them.
+                let h = self.half_gemm.expect("qwen3 serve: half weight built without its GEMM kernels");
+                let tier = if self.caps.workgroup_reductions { block::GemmVariants::Fast { gemv: Some(h.gemv), tiled: h.tiled } } else { block::GemmVariants::Reference(h.plain) };
+                let (kind, threads) = block::gemm_variant(tier, rows, *n);
+                s.push(self.gpu.dispatch(kind, &[x, w, out], &[rows, *k, *n], threads));
+            }
+            _ => unreachable!("qwen3 serve builds F32, I8, BF16 or F16 weights only (see `Engine::build`)"),
         }
     }
 
