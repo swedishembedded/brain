@@ -4,9 +4,16 @@ VQ autoencoder (`crates/vqgan`) behind CodeFormer blind face restoration:
 encoder, nearest-neighbour vector quantizer, and generator. Forward and
 backward are both implemented and verified against the reference
 implementation; the basic serving contract (`encode`/`decode` over D-Bus) is
-in place.
+in place. The same crate runs LlamaGen's VQ-16 (Janus-Pro's image
+tokenizer, `VqganConfig::llamagen_vq16`), parity-gated on the real
+Janus-Pro weights and gradient-checked (`gradcheck::check_vqgan_llamagen`).
 
 ## Not yet done
+
+- [ ] Serving the LlamaGen VQ-16 preset - `caps`, the CLI and D-Bus load
+      the CodeFormer checkpoints only
+- [ ] LlamaGen's entropy loss (`entropy_loss_ratio`, 0 in its released
+      training recipe)
 
 - [ ] Gradient checkpointing for training — every activation is currently
       kept live, so training memory scales with the fully-tapped graph

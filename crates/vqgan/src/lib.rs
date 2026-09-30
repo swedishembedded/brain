@@ -16,6 +16,13 @@
 //! The codebook search is the existing `vq_argmin` kernel dispatched through
 //! [`wm_core::vq::Vq`]; the code lookup is the existing `embed` gather.
 //!
+//! The same graph is LlamaGen's VQ-16 - Janus-Pro's image tokenizer - under
+//! [`config::VqganConfig::llamagen_vq16`]: its differences from `basicsr` are
+//! configuration (decoder resnet count, head SiLU, `quant_conv` bridges, the
+//! L2-normalised codebook, which loss term `beta` weights) plus a name map
+//! from LlamaGen's hierarchical module names, parity-gated on the real
+//! Janus-Pro weights (`tests/llamagen_parity.rs`).
+//!
 //! What this crate owns is the **schedule** ([`config::VqganConfig`], a flat
 //! `nn.ModuleList` whose indices the checkpoint names positionally), the
 //! two-way-validated [`import`], and the graph wiring in [`model`].
@@ -37,7 +44,7 @@ pub mod model;
 pub mod spec;
 pub mod train;
 
-pub use config::{Block, VqganConfig};
+pub use config::{BetaTerm, Block, VqganConfig};
 pub use import::Import;
 pub use model::{Codebook, Reconstruction, Vqgan, KERNELS};
 pub use train::{VqganTrainer, TRAIN_KERNELS, TRAIN_PIPELINES};

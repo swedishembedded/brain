@@ -50,7 +50,7 @@ use crate::{directional_check, CheckModel, Report};
 use data::rng::Rng;
 use std::cell::Cell;
 use vae::blocks::Tensors;
-use vqgan::{VqganConfig, VqganTrainer};
+use vqgan::{BetaTerm, VqganConfig, VqganTrainer};
 
 /// A tiny VQGAN — 10 encoder blocks and 10 generator blocks over an 8×8 image,
 /// with an attention block on each side and one down/up level. The check is
@@ -68,11 +68,16 @@ pub fn tiny_config() -> VqganConfig {
         nf: 4,
         ch_mult: vec![1, 2],
         res_blocks: 1,
+        dec_res_blocks: 1,
         attn_resolutions: vec![4],
         img_size: 8,
         codebook_size: 6,
         emb_dim: 4,
+        z_channels: None,
+        head_act: false,
+        codebook_l2_norm: false,
         beta: 0.25,
+        beta_on: BetaTerm::Codebook,
         norm_groups: 2,
         norm_eps: 1e-6,
     }
@@ -161,11 +166,16 @@ pub fn lowered_config() -> VqganConfig {
         nf: 32,
         ch_mult: vec![1],
         res_blocks: 1,
+        dec_res_blocks: 1,
         attn_resolutions: vec![],
         img_size: 8,
         codebook_size: 6,
         emb_dim: 4,
+        z_channels: None,
+        head_act: false,
+        codebook_l2_norm: false,
         beta: 0.25,
+        beta_on: BetaTerm::Codebook,
         norm_groups: 2,
         norm_eps: 1e-6,
     }
@@ -194,6 +204,29 @@ pub fn check_vqgan(seed: u64) -> Report {
 /// would not show.
 pub fn check_vqgan_lowered(seed: u64) -> Report {
     check_config(lowered_config(), seed, 1.25e-4)
+}
+
+/// [`tiny_config`] with every LlamaGen VQ-16 knob on: two decoder resnets per
+/// level against the encoder's one (`dec_res_blocks`), a SiLU in both heads,
+/// the 1×1 `quant_conv`/`post_quant_conv` bridge from a 6-channel latent to
+/// the 4-dim codebook, the L2-normalised codebook search (both
+/// normalisations on the graph, so `l2norm_scale_dx` carries the encoder's
+/// AND the raw codebook's gradient), and `beta` on the commitment term.
+pub fn llamagen_config() -> VqganConfig {
+    VqganConfig {
+        dec_res_blocks: 2,
+        z_channels: Some(6),
+        head_act: true,
+        codebook_l2_norm: true,
+        beta_on: BetaTerm::Commitment,
+        ..tiny_config()
+    }
+}
+
+/// [`check_vqgan`] over [`llamagen_config`] - the finite-difference gate on
+/// the LlamaGen VQ-16 schedule's training graph.
+pub fn check_vqgan_llamagen(seed: u64) -> Report {
+    check_config(llamagen_config(), seed, 5e-4)
 }
 
 fn check_config(cfg: VqganConfig, seed: u64, eps: f32) -> Report {
@@ -232,6 +265,25 @@ mod tests {
         r.print();
         let (atol, rtol) = (4e-3, 8e-2);
         println!("check_vqgan: {} tensors, max_rel = {:.3e}", r.checks.len(), r.max_rel());
+        let bad = r.failures(atol, rtol);
+        assert!(bad.is_empty(), "{} tensors outside tolerance: {:?}", bad.len(), bad);
+    }
+
+    #[test]
+    fn vqgan_llamagen_gradients_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let r = super::check_vqgan_llamagen(7);
+        r.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        println!("check_vqgan_llamagen: {} tensors, max_rel = {:.3e}", r.checks.len(), r.max_rel());
+        // Every tensor the knobs add is in the sweep, not just the ones the
+        // basicsr schedule already had.
+        let names: Vec<&str> = r.checks.iter().map(|c| c.param.as_str()).collect();
+        for want in ["encoder.blocks.10.weight", "generator.blocks.0.weight", "quantize.embedding.weight"] {
+            assert!(names.contains(&want), "{want} was not checked: {names:?}");
+        }
         let bad = r.failures(atol, rtol);
         assert!(bad.is_empty(), "{} tensors outside tolerance: {:?}", bad.len(), bad);
     }

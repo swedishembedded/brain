@@ -78,10 +78,27 @@
 //! latch point. `crates/codec`'s `StraightThroughVq::surrogate_loss` is the same
 //! construction on the host, for the same reason.
 //!
-//! `beta` is [`VqganConfig::beta`] — 0.25 in the CodeFormer preset. The codebook
+//! `beta` is [`VqganConfig::beta`] - 0.25 in the CodeFormer preset - and which
+//! term it weights is [`VqganConfig::beta_on`]: the codebook term above for
+//! `basicsr` ([`BetaTerm::Codebook`]), the commitment term for LlamaGen
+//! ([`BetaTerm::Commitment`], `commit_loss = beta * mean((z_q.detach() - z)**2)`,
+//! with an unweighted `vq_loss`). The other term carries weight 1. The codebook
 //! is trained by **gradient**, not by the EMA alternative
 //! (`wm_core::vq::ema_update`), so `quantize.embedding.weight` is a trainable
-//! tensor here.
+//! tensor here. LlamaGen's entropy term (`entropy_loss_ratio`, 0 in its
+//! released recipe) is not implemented.
+//!
+//! # The L2-normalised codebook
+//!
+//! With [`VqganConfig::codebook_l2_norm`], LlamaGen normalises BOTH sides
+//! before anything else sees them: `z = F.normalize(z)` replaces the query
+//! (so the straight-through estimator and both loss terms are on the
+//! normalised rows), and `F.normalize(embedding.weight)` replaces the codebook.
+//! Both normalisations are on the graph, so their gradients flow: the query's
+//! through `l2norm_scale_dx` into the encoder, the codebook's through the same
+//! kernel into the raw `quantize.embedding.weight`, which stays the trainable
+//! tensor. Everything written above about `z`, `q` and the latch applies to
+//! the normalised rows.
 //!
 //! # Reconstruction loss
 //!
@@ -106,12 +123,12 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use vae::blocks::grad::{BwdIds, Grads, Reverse, Trace};
 use vae::blocks::{BlockNames, Builder, Tensors};
 
-use crate::config::VqganConfig;
-use crate::model::{record_assign, record_lookup, run_blocks};
+use crate::config::{BetaTerm, VqganConfig};
+use crate::model::{l2norm_step, record_assign, record_lookup, run_blocks, L2_EPS};
 
 /// Where [`vae::blocks::BWD_KERNELS`] sits in [`TRAIN_KERNELS`] — right after
 /// the inference set ([`crate::KERNELS`]).
-const BWD_BASE: usize = vae::blocks::NEXT_SLOT + 3;
+const BWD_BASE: usize = crate::KERNELS.len();
 const TAIL: usize = BWD_BASE + vae::blocks::BWD_KERNELS.len();
 
 const K_EMB_BWD: usize = TAIL;
@@ -119,6 +136,7 @@ const K_MASKED_L1: usize = TAIL + 1;
 const K_MASKED_L1_GRAD: usize = TAIL + 2;
 const K_MSE_VALUE: usize = TAIL + 3;
 const K_MSE_GRAD: usize = TAIL + 4;
+const K_L2NORM_DX: usize = TAIL + 5;
 /// The quantiser seam is recorded outside any `Builder`, so it needs `axpy` and
 /// `add2` directly — but it must REUSE the shared set's pipelines rather than
 /// register a second copy under the same kernel name: the CPU backend's
@@ -134,16 +152,16 @@ const K_AXPY: usize = BwdIds::at(BWD_BASE).axpy();
 const K_ADD2: usize = vae::blocks::ADD2_SLOT;
 
 /// This model's TRAINING kernel set: the inference set ([`crate::KERNELS`] —
-/// shared blocks, the two VQ assignment kernels, `embed`), then the shared
-/// block backward set, then the quantiser-seam and loss kernels.
-pub const TRAIN_KERNELS: [(&str, &str); TAIL + 5] = train_kernel_set();
+/// shared blocks, the two VQ assignment kernels, `embed`, `l2norm_scale`), then
+/// the shared block backward set, then the quantiser-seam and loss kernels.
+pub const TRAIN_KERNELS: [(&str, &str); TAIL + 6] = train_kernel_set();
 
 /// [`TRAIN_KERNELS`] as a `'static` slice — what `gpu_core::testgpu::dev` and
 /// `Gpu::new_like` want.
 pub const TRAIN_PIPELINES: &[(&str, &str)] = &TRAIN_KERNELS;
 
-const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 5] {
-    let mut k = [("", ""); TAIL + 5];
+const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 6] {
+    let mut k = [("", ""); TAIL + 6];
     let mut i = 0;
     while i < crate::KERNELS.len() {
         k[i] = crate::KERNELS[i];
@@ -159,7 +177,17 @@ const fn train_kernel_set() -> [(&'static str, &'static str); TAIL + 5] {
     k[K_MASKED_L1_GRAD] = ("masked_l1_grad", kernels::MASKED_L1_GRAD);
     k[K_MSE_VALUE] = ("mse_value", kernels::MSE_VALUE);
     k[K_MSE_GRAD] = ("mse_grad", kernels::MSE_GRAD);
+    k[K_L2NORM_DX] = ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX);
     k
+}
+
+/// The weights `(codebook term, commitment term)` of the two VQ losses:
+/// `beta` on the one [`VqganConfig::beta_on`] names, 1 on the other.
+fn term_weights(cfg: &VqganConfig) -> (f32, f32) {
+    match cfg.beta_on {
+        BetaTerm::Codebook => (cfg.beta, 1.0),
+        BetaTerm::Commitment => (1.0, cfg.beta),
+    }
 }
 
 /// A trainable VQGAN for a fixed input size: one forward step list, one reverse
@@ -226,10 +254,25 @@ impl VqganTrainer {
         let ids = BwdIds::at(BWD_BASE);
         let empty = Tensors::new();
 
+        let (w_cb, w_com) = term_weights(&cfg);
         let codebook = {
             let (_, data) =
                 tensors.get(CODEBOOK).unwrap_or_else(|| panic!("vqgan: missing {CODEBOOK}"));
             gpu.storage_init(CODEBOOK, data)
+        };
+        // The all-ones gain `l2norm_scale` and its backward take; allocated
+        // only when the codebook search is L2-normalised.
+        let l2_ones = cfg.codebook_l2_norm.then(|| gpu.storage_init("quantize.l2norm.ones", &vec![1.0f32; emb as usize]));
+        // `cb_q` is the codebook the quantiser READS: the parameter itself, or
+        // its row-normalised image, recomputed from the live parameter by
+        // `cb_norm` at the head of every graph that reads it.
+        let (cb_q, cb_norm) = match &l2_ones {
+            Some(ones) => {
+                let cb_n = gpu.storage((ncode * emb) as u64);
+                let step = l2norm_step(&gpu, ncode, emb, &codebook, ones, &cb_n);
+                (cb_n, vec![step])
+            }
+            None => (codebook.clone(), Vec::new()),
         };
         let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let target = gpu.storage(n_out);
@@ -242,12 +285,26 @@ impl VqganTrainer {
         let z = run_blocks(&mut be, "encoder", &cfg.encoder_blocks(), 0, h, w, &img_in).0;
         let z_flat = be.nchw_to_rows(emb, t, &z);
         let enc = be.trace();
+        // `query` is what the quantiser sees: the encoder rows, or their L2
+        // normalisation. The normalisation is recorded OUTSIDE the builder's
+        // tape (its reverse is the explicit `l2norm_scale_dx` below), so the
+        // encoder trace still ends at `z_flat`.
+        let query = match &l2_ones {
+            Some(ones) => {
+                let zn = gpu.storage(te);
+                be.push_step(l2norm_step(&gpu, t, emb, &z_flat, ones, &zn));
+                zn
+            }
+            None => z_flat.clone(),
+        };
         let (enc_steps, _) = be.finish();
 
         // ---- the frozen assignment, through the ONE `vq_argmin` site -------
         let mut ba = Builder::new(&gpu, &empty, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
-        let packed = record_assign(&mut ba, &codebook, t, ncode, emb, &z_flat);
-        let (assign_steps, _) = ba.finish();
+        let packed = record_assign(&mut ba, &cb_q, t, ncode, emb, &query);
+        let (record_steps, _) = ba.finish();
+        let mut assign_steps = cb_norm.clone();
+        assign_steps.extend(record_steps);
 
         // ---- the codebook gather, through the ONE `embed` site -------------
         // TWO gathers, deliberately: `q_rows` is LIVE (it moves when the
@@ -255,10 +312,10 @@ impl VqganTrainer {
         // the DETACHED copy latched at the linearisation point. `sg[q]` in the
         // commitment term is exactly `q0`.
         let mut bl = Builder::new(&gpu, &empty, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
-        let q_rows = record_lookup(&mut bl, &codebook, t, emb, &idx_in);
+        let q_rows = record_lookup(&mut bl, &cb_q, t, emb, &idx_in);
         let (lookup_steps, _) = bl.finish();
         let mut bl0 = Builder::new(&gpu, &empty, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
-        let q0 = record_lookup(&mut bl0, &codebook, t, emb, &idx_in);
+        let q0 = record_lookup(&mut bl0, &cb_q, t, emb, &idx_in);
         let (q0_steps, _) = bl0.finish();
 
         // ---- straight-through: z_q_st = z + sub0, sub0 = (q0 - z0) ---------
@@ -274,11 +331,11 @@ impl VqganTrainer {
         let sub0 = gpu.storage(te);
         let zq_st = gpu.storage(te);
         let mut latch_steps = q0_steps;
-        latch_steps.push(gpu.step(K_AXPY, &[&z0, &z_flat], &[te as u32, f(1.0)], te as u32));
+        latch_steps.push(gpu.step(K_AXPY, &[&z0, &query], &[te as u32, f(1.0)], te as u32));
         latch_steps.push(gpu.step(K_AXPY, &[&sub0, &q0], &[te as u32, f(1.0)], te as u32));
         latch_steps.push(gpu.step(K_AXPY, &[&sub0, &z0], &[te as u32, f(-1.0)], te as u32));
         let ste_steps =
-            vec![gpu.step(K_ADD2, &[&z_flat, &sub0, &zq_st], &[te as u32], te as u32)];
+            vec![gpu.step(K_ADD2, &[&query, &sub0, &zq_st], &[te as u32], te as u32)];
 
         // ---- generator -----------------------------------------------------
         let mut bg = Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
@@ -297,18 +354,15 @@ impl VqganTrainer {
         let com_val = gpu.storage(te);
         let loss_steps = vec![
             gpu.step(K_MASKED_L1, &[&out, &target, &mask, &l1_val], &[n_out as u32], n_out as u32),
-            // L_cb  = ||sg[z] - q||^2 / n : z frozen (`z0`), q live. Weighted by
-            // beta on the host, where the reduction happens — this is the
-            // `self.beta * torch.mean((z_q - z.detach())**2)` half of
-            // `vqgan_arch.py:55` (see the module docs: `beta` sits on the
-            // CODEBOOK term in the reference's code, not the commitment one).
+            // L_cb  = ||sg[z] - q||^2 / n : z frozen (`z0`), q live. Weighted
+            // on the host, where the reduction happens (`term_weights`).
             gpu.step(K_MSE_VALUE, &[&q_rows, &z0, &cb_val], &[te as u32], te as u32),
-            // L_com = ||z - sg[q]||^2 / n : q frozen (`q0`), z live. UNWEIGHTED
-            // — `torch.mean((z_q.detach()-z)**2)` carries no beta.
-            gpu.step(K_MSE_VALUE, &[&z_flat, &q0, &com_val], &[te as u32], te as u32),
+            // L_com = ||z - sg[q]||^2 / n : q frozen (`q0`), z live.
+            gpu.step(K_MSE_VALUE, &[&query, &q0, &com_val], &[te as u32], te as u32),
         ];
 
         let mut fwd_steps = enc_steps.clone();
+        fwd_steps.extend(cb_norm);
         fwd_steps.extend(lookup_steps);
         fwd_steps.extend(ste_steps);
         fwd_steps.extend(gen_steps);
@@ -347,28 +401,54 @@ impl VqganTrainer {
         // lives entirely in the choice to freeze `sub0`, which is the
         // stop-gradient itself.
         bwd_steps.push(gpu.step(K_AXPY, &[&d_z, &d_zq_st], &[te as u32, f(1.0)], te as u32));
-        // Codebook term dL_cb/dq = beta * 2(q - z0)/n, scattered into the
+        // Codebook term dL_cb/dq = w_cb * 2(q - z0)/n, scattered into the
         // assigned codebook rows ONLY. `sg[z]` is why `z0` is bound and why
-        // `d_z` gets nothing from this term; `beta` is here (not on the
-        // commitment term) because `vqgan_arch.py:55` puts it on the
-        // `z.detach()` half — see the module docs.
+        // `d_z` gets nothing from this term.
         bwd_steps.push(gpu.step(K_MSE_GRAD, &[&q_rows, &z0, &dq_cb], &[te as u32], te as u32));
-        bwd_steps.push(gpu.step(K_AXPY, &[&dq_cb_b, &dq_cb], &[te as u32, f(cfg.beta)], te as u32));
-        bwd_steps.push(gpu.step(
-            K_EMB_BWD,
-            &[&idx_in, &dq_cb_b, &codebook_g],
-            &[t, emb, ncode],
-            ncode * emb,
-        ));
-        // Commitment term dL_com/dz = 2(z - q0)/n, into the ENCODER only, and
-        // UNWEIGHTED. `sg[q]` is why `q0` is bound and why the codebook gets
-        // nothing here.
-        bwd_steps.push(gpu.step(K_MSE_GRAD, &[&z_flat, &q0, &dz_com], &[te as u32], te as u32));
-        bwd_steps.push(gpu.step(K_AXPY, &[&d_z, &dz_com], &[te as u32, f(1.0)], te as u32));
-        let enc_rev: Reverse = enc.backward(&gpu, ids, &enc_g, &z_flat, &d_z);
+        bwd_steps.push(gpu.step(K_AXPY, &[&dq_cb_b, &dq_cb], &[te as u32, f(w_cb)], te as u32));
+        // The scatter lands on the codebook the quantiser read. Normalised,
+        // that is `cb_q`, whose gradient is taken back through the
+        // normalisation onto the parameter; raw, it IS the parameter.
+        let mut bwd_clears = gen_rev.clears;
+        match &l2_ones {
+            Some(ones) => {
+                let d_cb_q = gpu.storage((ncode * emb) as u64);
+                let d_cb_raw = gpu.storage((ncode * emb) as u64);
+                bwd_steps.push(gpu.step(K_EMB_BWD, &[&idx_in, &dq_cb_b, &d_cb_q], &[t, emb, ncode], ncode * emb));
+                bwd_steps.push(gpu.step(
+                    K_L2NORM_DX,
+                    &[&codebook, ones, &d_cb_q, &d_cb_raw],
+                    &[ncode, emb, f(L2_EPS)],
+                    ncode * emb,
+                ));
+                bwd_steps.push(gpu.step(K_AXPY, &[&codebook_g, &d_cb_raw], &[ncode * emb, f(1.0)], ncode * emb));
+                bwd_clears.push(d_cb_q);
+            }
+            None => bwd_steps.push(gpu.step(
+                K_EMB_BWD,
+                &[&idx_in, &dq_cb_b, &codebook_g],
+                &[t, emb, ncode],
+                ncode * emb,
+            )),
+        }
+        // Commitment term dL_com/dz = w_com * 2(z - q0)/n, into the ENCODER
+        // only. `sg[q]` is why `q0` is bound and why the codebook gets nothing
+        // here.
+        bwd_steps.push(gpu.step(K_MSE_GRAD, &[&query, &q0, &dz_com], &[te as u32], te as u32));
+        bwd_steps.push(gpu.step(K_AXPY, &[&d_z, &dz_com], &[te as u32, f(w_com)], te as u32));
+        // `d_z` is the gradient at the quantiser's query; through the
+        // normalisation (when there is one) it becomes the encoder's.
+        let d_enc = match &l2_ones {
+            Some(ones) => {
+                let d = gpu.storage(te);
+                bwd_steps.push(gpu.step(K_L2NORM_DX, &[&z_flat, ones, &d_z, &d], &[t, emb, f(L2_EPS)], te as u32));
+                d
+            }
+            None => d_z.clone(),
+        };
+        let enc_rev: Reverse = enc.backward(&gpu, ids, &enc_g, &z_flat, &d_enc);
         bwd_steps.extend(enc_rev.steps);
 
-        let mut bwd_clears = gen_rev.clears;
         bwd_clears.push(d_z);
         bwd_clears.push(dq_cb_b);
         bwd_clears.extend(enc_rev.clears);
@@ -495,11 +575,11 @@ impl VqganTrainer {
     /// One forward pass over the installed batch; returns the scalar objective
     ///
     /// ```text
-    /// L = mean |G(z + sub0) - target|  +  beta*||sg[z] - q||^2/n  +  ||z - sg[q]||^2/n
+    /// L = mean |G(z + sub0) - target|  +  w_cb*||sg[z] - q||^2/n  +  w_com*||z - sg[q]||^2/n
     /// ```
     ///
-    /// The two VQ terms are `vqgan_arch.py:55` verbatim (`beta` on the
-    /// `z.detach()` / codebook half — see the module docs).
+    /// with `beta` on the term [`VqganConfig::beta_on`] names and 1 on the
+    /// other (see the module docs).
     ///
     /// At the latch point this equals the real VQ-VAE objective (`z + sub0` IS
     /// the quantised latent, `sg[z]` IS `z`, `sg[q]` IS `q`) — and unlike the
@@ -519,7 +599,8 @@ impl VqganTrainer {
         let rec = sum(&self.l1_val, n_out) / n_out as f64;
         let cb = sum(&self.cb_val, te);
         let com = sum(&self.com_val, te);
-        (rec + self.cfg.beta as f64 * cb + com) as f32
+        let (w_cb, w_com) = term_weights(&self.cfg);
+        (rec + w_cb as f64 * cb + w_com as f64 * com) as f32
     }
 
     /// The reconstruction `[out_channels·H·W]` from the last [`Self::loss`].
@@ -642,11 +723,16 @@ mod tests {
             nf: 4,
             ch_mult: vec![1, 2],
             res_blocks: 1,
+            dec_res_blocks: 1,
             attn_resolutions: vec![4],
             img_size: 8,
             codebook_size: 6,
             emb_dim: 4,
+            z_channels: None,
+            head_act: false,
+            codebook_l2_norm: false,
             beta: 0.25,
+            beta_on: BetaTerm::Codebook,
             norm_groups: 2,
             norm_eps: 1e-6,
         }
@@ -702,5 +788,77 @@ mod tests {
         assert!(worst < 1e-5, "straight-through latent differs from the gather by {worst:e}");
         // And the codes are in range.
         assert!(m.codes().iter().all(|&i| i < cfg.codebook_size));
+    }
+
+    /// [`tiny`] with every LlamaGen knob on: decoder resnet asymmetry, head
+    /// SiLU, a `quant_conv`/`post_quant_conv` bridge from a wider latent, the
+    /// L2-normalised codebook search, and `beta` on the commitment term.
+    fn tiny_llamagen() -> VqganConfig {
+        VqganConfig {
+            dec_res_blocks: 2,
+            z_channels: Some(6),
+            head_act: true,
+            codebook_l2_norm: true,
+            beta_on: BetaTerm::Commitment,
+            ..tiny()
+        }
+    }
+
+    /// The training graph's forward IS the inference graph's: same code
+    /// assignment, same reconstruction (the straight-through latent equals
+    /// the gathered codes at the latch). A finite-difference check cannot
+    /// see a forward that is missing a feature - it only checks the backward
+    /// against whatever forward was emitted - so this pins the forward.
+    #[test]
+    fn llamagen_trainer_forward_matches_the_inference_graph() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = tiny_llamagen();
+        let tensors = fixture(&cfg);
+        let s = cfg.img_size;
+        let n_in = (cfg.in_channels * s * s) as usize;
+        let n_out = (cfg.out_channels * s * s) as usize;
+        let image = fill(n_in, 1, 1.0);
+
+        let inf = crate::Vqgan::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(&crate::KERNELS), false);
+        let want = inf.reconstruct(&image);
+
+        let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES));
+        m.set_batch(&image, &fill(n_out, 2, 1.0));
+        assert_eq!(m.codes(), want.indices, "training and inference graphs assign different codes");
+        m.loss();
+        let worst = m.output().iter().zip(&want.image).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "training forward differs from the inference forward by {worst:e}");
+    }
+
+    /// `beta` weights the term [`VqganConfig::beta_on`] names. The codebook's
+    /// ONLY gradient is the codebook term (the straight-through path routes
+    /// the decoder's gradient to the encoder), so moving `beta` off that term
+    /// scales the codebook gradient by exactly `1/beta`.
+    #[test]
+    fn beta_weights_the_term_its_config_names() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let s = tiny().img_size;
+        let codebook_grad = |beta_on| {
+            let cfg = VqganConfig { beta_on, ..tiny_llamagen() };
+            let tensors = fixture(&cfg);
+            let m = VqganTrainer::new(cfg.clone(), &tensors, s, s, gpu_core::testgpu::dev(TRAIN_PIPELINES));
+            let n_in = (cfg.in_channels * s * s) as usize;
+            let n_out = (cfg.out_channels * s * s) as usize;
+            m.set_batch(&fill(n_in, 1, 1.0), &fill(n_out, 2, 1.0));
+            m.zero_grads();
+            m.loss();
+            m.backward();
+            m.read_grad(CODEBOOK)
+        };
+        let on_codebook = codebook_grad(BetaTerm::Codebook);
+        let on_commitment = codebook_grad(BetaTerm::Commitment);
+        assert!(on_commitment.iter().any(|&g| g.abs() > 1e-6), "the codebook got no gradient");
+        for (a, b) in on_codebook.iter().zip(&on_commitment) {
+            assert!((a - 0.25 * b).abs() <= 1e-6 + 1e-4 * b.abs(), "codebook grad {a} != beta * {b}");
+        }
     }
 }

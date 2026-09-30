@@ -50,3 +50,13 @@ fine-tuning path is exposed on the CLI, and there is no HTTP endpoint - use
 `brain do` or D-Bus. Pick one checkpoint (`vqgan_code1024.pth` or
 `codeformer.pth`) and stick with it: codes from one are not compatible with
 the other.
+
+## LlamaGen VQ-16 (Janus-Pro's image tokenizer)
+
+The same codec also runs LlamaGen's VQ-16, the tokenizer Janus-Pro uses
+for image generation (a 16384-entry codebook, 16x downsampling, so a
+384x384 image is 24x24 = 576 codes). It is available from the library
+only (`vqgan::VqganConfig::llamagen_vq16` and
+`vqgan::import::load_hf_dir(dir, "gen_vision_model.", ..)` over a
+downloaded `deepseek-ai/Janus-Pro-7B`). The CLI, D-Bus and `brain/vqgan`
+entries above serve the CodeFormer checkpoints only.

@@ -40,7 +40,7 @@ pub use rrdbnet::{check_rrdbnet, check_rrdbnet_elementwise};
 /// `check_unet` - the SDXL UNet2DConditionModel backward, the first diffusion
 /// BACKBONE (rather than autoencoder) gated here.
 pub mod unet;
-pub use vqgan::check_vqgan;
+pub use vqgan::{check_vqgan, check_vqgan_llamagen};
 
 /// `check_supir` / `check_supir_elementwise` - the SUPIR control trunk +
 /// adaptors training graph, recorded alongside the frozen SDXL backbone.

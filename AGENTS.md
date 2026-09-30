@@ -349,7 +349,15 @@ application", "an orchestrator"). Enforced by `make check/scope`
     (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `samples/python/restore/vq-roundtrip/`. **Training /
     backward done** (`crates/vqgan/src/train.rs`, gated by
     `gradcheck::check_vqgan`). *(`run_batch` is the serial default and says
-    why.)*
+    why.)* The same crate is **LlamaGen's VQ-16** (Janus-Pro's image
+    tokenizer, `VqganConfig::llamagen_vq16`) through config knobs, not a
+    second model: `dec_res_blocks`, `head_act`, `z_channels`
+    (`quant_conv`/`post_quant_conv`), `codebook_l2_norm`, `beta_on`, and a
+    LlamaGen/Janus name map (`import::load_hf_dir` reads
+    `gen_vision_model.*` out of the Janus-Pro checkpoint in place). Real
+    weights gated in fp32 (`tests/llamagen_parity.rs`): decode 1-cos 5.8e-12,
+    encode indices with zero disagreements; training gated by
+    `gradcheck::check_vqgan_llamagen`.
 
 12c-ter. **Real-ESRGAN super-resolution** (`crates/rrdbnet`) - the imaging
     pipeline's upscale tail: `RRDBNet`, a residual-in-residual dense block

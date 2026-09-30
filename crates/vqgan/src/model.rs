@@ -8,16 +8,19 @@
 //! single-head spatial attention / asymmetric-pad strided downsample /
 //! nearest-2× upsample) selected with [`BlockNames::vqgan`]; the codebook
 //! search is the existing `vq_argmin` kernel dispatched through
-//! [`wm_core::vq::Vq`]; the code lookup is the existing `embed` gather. This
-//! crate adds no kernel and no block.
+//! [`wm_core::vq::Vq`]; the code lookup is the existing `embed` gather; the
+//! L2-normalised codebook search ([`VqganConfig::codebook_l2_norm`]) is the
+//! existing `l2norm_scale` kernel with an all-ones gain. This crate adds no
+//! kernel and no block.
 //!
 //! Two deliberate departures from `crates/vae`'s `AutoencoderKL` schedule,
 //! both verified against the reference source:
 //!
-//! 1. **The heads have no activation.** VQGAN is `GroupNorm → Conv2d`
-//!    (`vqgan_arch.py:265` and `:313`); the diffusers VAE is
-//!    `GroupNorm → SiLU → conv_out`. Reusing the VAE head would insert a
-//!    spurious SiLU.
+//! 1. **The `basicsr` heads have no activation.** VQGAN is
+//!    `GroupNorm → Conv2d` (`vqgan_arch.py:265` and `:313`); the diffusers VAE
+//!    is `GroupNorm → SiLU → conv_out`. Reusing the VAE head would insert a
+//!    spurious SiLU. LlamaGen's heads DO carry one
+//!    ([`VqganConfig::head_act`]).
 //! 2. **Attention is not mid-block-only.** At `attn_resolutions`, an
 //!    `AttnBlock` follows *every* residual block, plus the mid triple — the
 //!    encoder gets them at indices 17/19/21 and the generator at 2/5/7.
@@ -34,11 +37,18 @@
 //! is the natural seam for CodeFormer, whose transformer *replaces* the argmin:
 //!
 //! ```text
-//! encode_steps : img_in → enc blocks → z[emb,lh,lw] → z_flat[T,emb] → packed[2T]
+//! encode_steps : img_in → enc blocks → z[emb,lh,lw] → z_flat[T,emb] (→ z_norm) → packed[2T]
 //!   (host)     : packed → indices u32[T] → idx_in
 //! decode_steps : [gather] idx_in,codebook → rows[T,emb] → z_q[emb,lh,lw]
 //!                [gen]    z_q → gen blocks → out[3,H,W]
 //! ```
+//!
+//! With [`VqganConfig::codebook_l2_norm`] the search compares `z_norm` (the
+//! query rows L2-normalised) against the L2-normalised codebook, and the
+//! gather reads the normalised codebook too: LlamaGen passes
+//! `embedding.weight` through `F.normalize` on every read, so the raw table
+//! is never what the model sees. The normalised copy is computed once, at
+//! construction.
 //!
 //! `decode_steps[gather_end..]` is the generator alone, so a caller that has a
 //! latent already (CodeFormer's fused features) writes `z_q` and submits that
@@ -53,19 +63,52 @@ use crate::config::{Block, VqganConfig};
 const K_VQ_ARGMIN: usize = vae::blocks::NEXT_SLOT;
 const K_VQ_ARGMAX_DOT: usize = vae::blocks::NEXT_SLOT + 1;
 const K_EMBED: usize = vae::blocks::NEXT_SLOT + 2;
+const K_L2NORM: usize = vae::blocks::NEXT_SLOT + 3;
 
 /// This model's kernel set: the shared block kernels (slots `0..NEXT_SLOT`,
 /// copied — never restated — by [`vae::blocks::kernels_with`]), then the two
 /// VQ assignment kernels in [`wm_core::vq::Vq::kernel_sources`] order, then the
-/// `embed` gather.
-pub const KERNELS: [(&str, &str); vae::blocks::NEXT_SLOT + 3] = kernel_set();
+/// `embed` gather, then the row L2 normalisation.
+pub const KERNELS: [(&str, &str); vae::blocks::NEXT_SLOT + 4] = kernel_set();
 
-const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT + 3] {
-    let mut k = vae::blocks::kernels_with::<{ vae::blocks::NEXT_SLOT + 3 }>();
+const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT + 4] {
+    let mut k = vae::blocks::kernels_with::<{ vae::blocks::NEXT_SLOT + 4 }>();
     k[K_VQ_ARGMIN] = ("vq_argmin", kernels::VQ_ARGMIN);
     k[K_VQ_ARGMAX_DOT] = ("vq_argmax_dot", kernels::VQ_ARGMAX_DOT);
     k[K_EMBED] = ("embed", kernels::EMBED);
+    k[K_L2NORM] = ("l2norm_scale", kernels::L2NORM_SCALE);
     k
+}
+
+/// `l2norm_scale`'s epsilon, `y = x · rsqrt(Σx² + eps)`. `F.normalize` is
+/// `x / max(‖x‖, 1e-12)`; squaring its clamp gives the same floor on `Σx²`,
+/// and it is far below fp32 resolution for any row that is not all zeros.
+pub const L2_EPS: f32 = 1e-24;
+
+/// Record a row-wise L2 normalisation, `rows[n,d] → y[n,d]`,
+/// `y = rows / ‖rows‖`. `ones` is an all-ones `[d]` gain: the kernel is the
+/// QK-norm form with a learnable scale, which this quantiser does not have.
+///
+/// Slot [`K_L2NORM`] is the one [`KERNELS`] registers; the training set keeps
+/// it at the same index.
+pub fn l2norm_step(gpu: &Gpu, n: u32, d: u32, rows: &DeviceBuffer, ones: &DeviceBuffer, y: &DeviceBuffer) -> Step {
+    gpu.step(K_L2NORM, &[rows, ones, y], &[n, d, gpu_core::f(L2_EPS)], n * d)
+}
+
+/// Upload the codebook as the quantiser reads it: raw, or (with
+/// [`VqganConfig::codebook_l2_norm`]) row-normalised once on the device.
+fn upload_codebook(gpu: &Gpu, cfg: &VqganConfig, tensors: &Tensors) -> DeviceBuffer {
+    let name = "quantize.embedding.weight";
+    let (_, data) = tensors.get(name).unwrap_or_else(|| panic!("vqgan: missing {name}"));
+    let raw = gpu.storage_init(name, data);
+    if !cfg.codebook_l2_norm {
+        return raw;
+    }
+    let (k, d) = (cfg.codebook_size, cfg.emb_dim);
+    let ones = gpu.storage_init("quantize.l2norm.ones", &vec![1.0f32; d as usize]);
+    let normed = gpu.storage((k * d) as u64);
+    gpu.submit(&[], &[l2norm_step(gpu, k, d, &raw, &ones, &normed)]);
+    normed
 }
 
 /// The shared VQ dispatch helper bound to this crate's slots.
@@ -269,11 +312,7 @@ impl Vqgan {
         let nq = n * t; // queries the codebook search/gather cover: n images x t positions each.
 
         // The codebook is read by both graphs; upload it once.
-        let codebook = {
-            let name = "quantize.embedding.weight";
-            let (_, data) = tensors.get(name).unwrap_or_else(|| panic!("vqgan: missing {name}"));
-            gpu.storage_init(name, data)
-        };
+        let codebook = upload_codebook(&gpu, &cfg, tensors);
 
         // ---- encoder + assignment ------------------------------------------
         let img_in = gpu.storage((n * cfg.in_channels * h * w) as u64);
@@ -287,8 +326,18 @@ impl Vqgan {
         // NCHW→NLC permutation (batched - see `Builder::nchw_to_rows`).
         let z_flat = b.nchw_to_rows(emb, t, &z);
         b.tap("z_flat".into(), &z_flat, nq * emb);
-        let packed = record_assign(&mut b, &codebook, nq, cfg.codebook_size, emb, &z_flat);
-        b.free((nq * emb) as u64, z_flat);
+        let query = if cfg.codebook_l2_norm {
+            let ones = gpu.storage_init("quantize.l2norm.ones", &vec![1.0f32; emb as usize]);
+            let z_norm = b.act((nq * emb) as u64);
+            b.push_step(l2norm_step(&gpu, nq, emb, &z_flat, &ones, &z_norm));
+            b.tap("z_norm".into(), &z_norm, nq * emb);
+            b.free((nq * emb) as u64, z_flat);
+            z_norm
+        } else {
+            z_flat
+        };
+        let packed = record_assign(&mut b, &codebook, nq, cfg.codebook_size, emb, &query);
+        b.free((nq * emb) as u64, query);
         let (encode_steps, mut all_taps) = b.finish();
 
         // ---- codebook gather + generator ------------------------------------
@@ -464,6 +513,7 @@ pub fn run_blocks(
         // `resnet` and `attn` tap their own output under `p`; the others do not.
         let (nx, self_tapped) = match *blk {
             Block::Conv { cin, cout } => (b.conv(&p, cin, cout, 3, 1, hh, ww, &x), false),
+            Block::Proj { cin, cout } => (b.conv(&p, cin, cout, 1, 0, hh, ww, &x), false),
             Block::Res { cin, cout } => (b.resnet(&p, cin, cout, hh, ww, &x), true),
             Block::Attn { c } => (b.attn(&p, c, hh, ww, &x), true),
             Block::Down { c } => {
@@ -480,8 +530,19 @@ pub fn run_blocks(
                 b.free(bn * (c * hh * ww) as u64, up);
                 (y, false)
             }
-            // The VQGAN head is GroupNorm → Conv2d: no activation between them.
-            Block::Norm { c } => (b.gn(&p, c, hh, ww, &x), false),
+            // `basicsr`'s head is GroupNorm → Conv2d; LlamaGen's puts a SiLU
+            // between them.
+            Block::Norm { c, silu } => {
+                let y = b.gn(&p, c, hh, ww, &x);
+                if silu {
+                    let n = bn as u32 * c * hh * ww;
+                    let a = b.silu(n, &y);
+                    b.free(n as u64, y);
+                    (a, false)
+                } else {
+                    (y, false)
+                }
+            }
         };
         let prev = std::mem::replace(&mut x, nx);
         if xlen != 0 {
