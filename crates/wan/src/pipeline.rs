@@ -685,7 +685,7 @@ fn denoise(
         let pred = if cfg_on {
             dit.set_context_embed(emb_uncond);
             let uncond = dit.forward(&latent, t);
-            cond.iter().zip(&uncond).map(|(&c, &u)| u + o.guidance * (c - u)).collect()
+            model::hostmath::cfg_blend(&cond, &uncond, o.guidance)
         } else {
             cond
         };

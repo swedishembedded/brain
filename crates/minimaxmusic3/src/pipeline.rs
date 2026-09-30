@@ -64,7 +64,7 @@
 //! frame.
 
 use data::rng::Lcg;
-use model::hostmath::matvec_par;
+use model::hostmath::{cfg_blend, matvec_par};
 use qwen3::model::PrefillInput;
 use qwen3::Qwen;
 
@@ -93,13 +93,6 @@ fn masked_logits(hidden: &[f32], head: &[f32], vocab: usize, d_model: usize) -> 
         }
     }
     logits
-}
-
-/// `unconditional + (conditional - unconditional) * scale`, element-wise -
-/// the reference's own CFG combine, used identically for the semantic-code
-/// logits and the depth decoder's residual-code logits.
-fn cfg_blend(conditional: &[f32], unconditional: &[f32], scale: f32) -> Vec<f32> {
-    unconditional.iter().zip(conditional).map(|(&u, &c)| u + (c - u) * scale).collect()
 }
 
 /// The `k`-th largest FINITE value in `values` (1-indexed: `k=1` is the
@@ -458,14 +451,6 @@ mod tests {
         }
         assert_eq!(kth_largest(&v, v.len() + 5), *sorted.last().unwrap(), "k beyond length clamps to the smallest");
         assert_eq!(kth_largest(&[], 1), f32::NEG_INFINITY);
-    }
-
-    #[test]
-    fn cfg_blend_at_scale_one_is_the_conditional_branch() {
-        let cond = [1.0f32, -2.0, 3.0];
-        let uncond = [0.5f32, 0.5, 0.5];
-        assert_eq!(cfg_blend(&cond, &uncond, 1.0), cond);
-        assert_eq!(cfg_blend(&cond, &uncond, 0.0), uncond);
     }
 
     /// `sample_top_k` must never return an index whose logit was masked to

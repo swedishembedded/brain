@@ -104,6 +104,7 @@ use crate::longform::Scene;
 use crate::upsampler::{LatentUpsampler, LatentUpsamplerConfig};
 use crate::vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
 use diffusion::scheduler::{euler_ancestral_step, ltx2_sigmas, LTX2_DISTILLED_SIGMAS, LTX2_STAGE2_DISTILLED_SIGMAS};
+use model::hostmath::cfg_blend;
 
 /// The real distilled schedule's own step count (`LTX2_DISTILLED_SIGMAS.len() -
 /// 1`), exposed so a caller (e.g. `crates/cli/src/ltxv_cli.rs`'s own
@@ -2734,9 +2735,7 @@ fn denoise(
                     // shape, not to this call site.
                     let (vc, ac) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
                     let (vu, au) = dit.forward_av(&inputs, &ai, ctx_uncond, a.ctx_uncond);
-                    let v: Vec<f32> = vc.iter().zip(&vu).map(|(&c, &u)| u + guidance * (c - u)).collect();
-                    let aa: Vec<f32> = ac.iter().zip(&au).map(|(&c, &u)| u + guidance * (c - u)).collect();
-                    (v, Some(aa))
+                    (cfg_blend(&vc, &vu, guidance), Some(cfg_blend(&ac, &au, guidance)))
                 } else {
                     tracing::trace!(step = i + 1, branch = "cond", sigma, "joint audio+video forward starting");
                     let (v, aa) = dit.forward_av(&inputs, &ai, ctx_cond, a.ctx_cond);
@@ -2746,7 +2745,7 @@ fn denoise(
             None if cfg_on => {
                 tracing::trace!(step = i + 1, branch = "cond+uncond", sigma, "forward pair starting");
                 let (cond, uncond) = dit.forward_cfg_pair(&inputs, ctx_cond, ctx_uncond)?;
-                (cond.iter().zip(&uncond).map(|(&c, &u)| u + guidance * (c - u)).collect(), None)
+                (cfg_blend(&cond, &uncond, guidance), None)
             }
             None => {
                 tracing::trace!(step = i + 1, branch = "cond", sigma, "forward starting");

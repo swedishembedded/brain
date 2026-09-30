@@ -163,6 +163,15 @@ pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
+/// Classifier-free guidance: `unconditional + (conditional - unconditional)
+/// * scale`, element-wise. Scale 1 is the conditional branch alone, 0 the
+/// unconditional one; the diffusion samplers apply it to the predicted
+/// velocity or noise, the autoregressive ones to the logits.
+pub fn cfg_blend(conditional: &[f32], unconditional: &[f32], scale: f32) -> Vec<f32> {
+    assert_eq!(conditional.len(), unconditional.len(), "cfg_blend: the two branches differ in length");
+    unconditional.iter().zip(conditional).map(|(&u, &c)| u + (c - u) * scale).collect()
+}
+
 /// Elementwise [`silu`].
 pub fn silu_slice(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| silu(v)).collect()
@@ -487,6 +496,14 @@ mod embed_tests {
 mod tests {
     use super::*;
     use data::rng::Lcg;
+
+    #[test]
+    fn cfg_blend_interpolates_from_the_unconditional_to_the_conditional_branch() {
+        let (cond, uncond) = ([1.0f32, -2.0, 3.0], [0.5f32, 0.5, 0.5]);
+        assert_eq!(cfg_blend(&cond, &uncond, 1.0), cond);
+        assert_eq!(cfg_blend(&cond, &uncond, 0.0), uncond);
+        assert_eq!(cfg_blend(&cond, &uncond, 3.0), [2.0, -7.0, 8.0], "guidance extrapolates past the conditional branch");
+    }
 
     /// The point of this module: the host result must equal what the WGSL
     /// kernel computes. Run through the CPU backend so the check is

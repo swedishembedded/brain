@@ -351,7 +351,7 @@ pub fn denoise_chunk(
             }
         }
         let (v_cond, v_uncond) = residents.cfg_pair(dit_cfg, dit_w, &latents, &condition, &zero_condition, t, length);
-        let velocity: Vec<f32> = v_cond.iter().zip(&v_uncond).map(|(c, u)| u + (c - u) * GUIDANCE_SCALE).collect();
+        let velocity = model::hostmath::cfg_blend(&v_cond, &v_uncond, GUIDANCE_SCALE);
         latents = scheduler.step(&velocity, &latents);
         // On the orchestrating thread, after both branches have joined - see
         // `ChunkResidents::cfg_pair` for why this may never move inside one.
