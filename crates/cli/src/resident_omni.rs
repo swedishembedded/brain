@@ -241,10 +241,10 @@ impl Instance for OmniInstance {
 /// this one is genuinely GPU-resident, and the two are not interchangeable.
 ///
 /// Config is env-only:
-///   * `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` - a brain-native int8-quantized checkpoint
-///     (the output of `qwen3omnimoe::import`'s int8-native path, which
-///     `brain omni import` produces from a raw HF directory). Unset ⇒ not
-///     served.
+///   * `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` - the downloaded Hugging Face
+///     checkpoint directory, quantized to int8 as it is loaded
+///     (`qwen3omnimoe::import::Int8View`), or a brain-native int8 file
+///     `brain omni import` wrote. Unset ⇒ not served.
 ///   * `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` - where to read `tokenizer.json` (or
 ///     `vocab.json` + `merges.txt`) for the CHAT request shape. Optional: it
 ///     defaults to the checkpoint's own directory when that holds tokenizer
@@ -291,7 +291,8 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // why this model does not read them). Reuses BRAIN_QWEN3OMNIMOE_HF_DIR -- the
     // same variable brain/qwen3omnimoe itself is configured from -- rather than
     // inventing a second one; unset ⇒ this model still serves text-only.
-    let hf_dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty());
+    // A checkpoint that IS the downloaded directory is its own tower source.
+    let hf_dir = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty()).or_else(|| std::path::Path::new(&checkpoint_path).is_dir().then(|| checkpoint_path.clone()));
     if hf_dir.is_none() {
         eprintln!("brain: {} has no BRAIN_QWEN3OMNIMOE_HF_DIR -- it will serve text-only generate (no audio/image/video input).", qwen3omnimoe::int8_thinker_resident::MODEL);
     }
@@ -313,7 +314,10 @@ fn int8_tokenizer_dir(checkpoint_path: &str) -> Option<String> {
         dir.join("tokenizer.json").exists() || (dir.join("vocab.json").exists() && dir.join("merges.txt").exists())
     };
     let explicit = std::env::var("BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR").ok().filter(|p| !p.is_empty());
-    let beside = std::path::Path::new(checkpoint_path).parent().map(|p| p.to_string_lossy().into_owned());
+    // A downloaded checkpoint directory holds its own tokenizer; a converted
+    // file has it beside it.
+    let path = std::path::Path::new(checkpoint_path);
+    let beside = if path.is_dir() { Some(checkpoint_path.to_string()) } else { path.parent().map(|p| p.to_string_lossy().into_owned()) };
     let hf = std::env::var("BRAIN_QWEN3OMNIMOE_HF_DIR").ok().filter(|p| !p.is_empty());
     [explicit, beside, hf].into_iter().flatten().find(|d| has_tokenizer(std::path::Path::new(d)))
 }

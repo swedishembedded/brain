@@ -351,155 +351,129 @@ pub fn should_quantize(shape: &[u64]) -> bool {
     shape.len() == 2 && shape[1].is_multiple_of(model::int8::GROUP as u64)
 }
 
-/// Buffers one audio-tower layer's q/k/v weight+bias until all six sibling
-/// tensors have streamed past (they are not necessarily adjacent in the
-/// source's iteration order), then hands the fused pair to the caller.
-#[derive(Default)]
-struct QkvBuf {
-    q_w: Option<Vec<f32>>,
-    k_w: Option<Vec<f32>>,
-    v_w: Option<Vec<f32>>,
-    q_b: Option<Vec<f32>>,
-    k_b: Option<Vec<f32>>,
-    v_b: Option<Vec<f32>>,
+/// How one brain tensor of [`Int8View`] is computed from the Hugging Face
+/// checkpoint.
+enum Derive {
+    /// The HF tensor as is (f32), or its int8 packing when `quant`.
+    Direct { hf: String, quant: bool },
+    /// The per-group scale of the int8 packing of HF tensor `hf`.
+    Scale { hf: String },
+    /// An audio-tower layer's q, k and v (weights or biases) concatenated.
+    Qkv([String; 3]),
 }
 
-/// Stream `<hf_dir>/config.json` + sharded safetensors into an int8-native
-/// brain checkpoint at `out_path`. Peak host memory is one HF tensor's f32
-/// expansion at a time (the audio q/k/v fuse buffers at most 32 layers' worth
-/// of small attention-projection tensors concurrently — a few MB, not a
-/// concern next to a single MoE expert's own ~5 MB).
-///
-/// Fails loudly and writes nothing on error (`StWriter::finish` refuses a
-/// plan with holes) — this streams the SOURCE in the source's own natural
-/// order, not the output plan's order, which is exactly what
-/// `StWriter::write`/`write_u32` support (write any planned name once, in any
-/// order).
-pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
-    let dir = std::path::Path::new(hf_dir);
-    let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
-    // Parsed only as a validity gate -- a malformed config.json must fail
-    // import before any tensor byte streams, not partway through. The
-    // fields aren't otherwise consumed here: name mapping and the
-    // quantize/keep-f32 decision are shape-driven (from the source tensors
-    // themselves), not config-driven.
-    let _cfg = crate::config::OmniConfig::parse(&cfg_json).map_err(|e| format!("parse config.json: {e}"))?;
+/// A Hugging Face Qwen3-Omni checkpoint directory read as the int8-native
+/// brain checkpoint [`import_as`] would write, computed as each tensor is
+/// read: names mapped, the audio q/k/v fused, and every
+/// [`should_quantize`] weight packed to int8 with its `.scale` sibling. The
+/// download stays exactly as it is.
+pub struct Int8View {
+    reader: checkpoint::weightio::WeightReader,
+    index: Vec<(String, Vec<u64>, &'static str)>,
+    derive: HashMap<String, Derive>,
+    /// The last weight packed: its brain name, words and scale - the packing
+    /// and its scale are read back to back, and are one computation.
+    last: std::sync::Mutex<Option<(String, Vec<u32>, Vec<f32>)>>,
+}
 
-    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
-
-    // Pass 1: decide the brain-side name, shape and dtype for every source
-    // tensor (header-only — `shape()` never touches tensor bytes), fusing
-    // the audio qkv triples into one planned entry. This is what
-    // `StWriter::create_mixed` needs up front; pass 2 (below) streams data.
-    enum PlanItem {
-        Direct { brain_name: String, quant: bool },
-        /// One of the six audio q/k/v HF leaves — folded into a single fused
-        /// `audio.blocks.{b}.qkv.{weight,bias}` plan entry the first time any
-        /// sibling of that (layer, weight-or-bias) pair is seen.
-        QkvLeaf,
-    }
-    let mut items: HashMap<String, PlanItem> = HashMap::new();
-    let mut plan: Vec<(String, Vec<u64>, checkpoint::weightio::Dtype)> = Vec::new();
-    let mut fused_qkv_planned: std::collections::HashSet<(u32, bool)> = std::collections::HashSet::new(); // (layer, is_weight)
-    for name in reader.names() {
-        let shape = reader.shape(name).unwrap_or_else(|| panic!("no shape for {name}")).to_vec();
-        if is_qkv_fuse_leaf(name) {
-            let b: u32 = name.strip_prefix("thinker.audio_tower.layers.").unwrap().split_once('.').unwrap().0.parse().unwrap();
-            let is_weight = name.ends_with(".weight");
-            if fused_qkv_planned.insert((b, is_weight)) {
-                let leaf = if is_weight { "qkv.weight" } else { "qkv.bias" };
-                let fused_name = format!("audio.blocks.{b}.{leaf}");
-                // qkv fuse concatenates 3 equal-sized rows/elements along dim 0.
-                let mut fused_shape = shape.clone();
-                fused_shape[0] *= 3;
-                plan.push((fused_name, fused_shape, checkpoint::weightio::Dtype::F32));
+impl Int8View {
+    pub fn open(dir: &std::path::Path) -> Result<Int8View, String> {
+        let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
+        crate::config::OmniConfig::parse(&cfg_json).map_err(|e| format!("parse config.json: {e}"))?;
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
+        let mut index = Vec::new();
+        let mut derive = HashMap::new();
+        for name in reader.names() {
+            let shape = reader.shape(name).ok_or_else(|| format!("no shape for {name}"))?.to_vec();
+            if is_qkv_fuse_leaf(name) {
+                let (layer, _) = name.strip_prefix("thinker.audio_tower.layers.").and_then(|r| r.split_once('.')).ok_or_else(|| format!("bad audio layer name {name}"))?;
+                let leaf = if name.ends_with(".weight") { "weight" } else { "bias" };
+                let fused = format!("audio.blocks.{layer}.qkv.{leaf}");
+                if !derive.contains_key(&fused) {
+                    let proj = |p: &str| format!("thinker.audio_tower.layers.{layer}.self_attn.{p}_proj.{leaf}");
+                    let mut fused_shape = shape.clone();
+                    fused_shape[0] *= 3;
+                    index.push((fused.clone(), fused_shape, "F32"));
+                    derive.insert(fused, Derive::Qkv([proj("q"), proj("k"), proj("v")]));
+                }
+                continue;
             }
-            items.insert(name.to_string(), PlanItem::QkvLeaf);
-            continue;
+            let brain = hf_to_brain(name).ok_or_else(|| format!("import: no mapping for HF tensor {name:?}"))?;
+            let quant = should_quantize(&shape);
+            if quant {
+                let (n, k) = (shape[0], shape[1]);
+                index.push((brain.clone(), vec![n, k / 4], "U32"));
+                index.push((format!("{brain}.scale"), vec![n, k / model::int8::GROUP as u64], "F32"));
+                derive.insert(format!("{brain}.scale"), Derive::Scale { hf: name.to_string() });
+            } else {
+                index.push((brain.clone(), shape, "F32"));
+            }
+            derive.insert(brain, Derive::Direct { hf: name.to_string(), quant });
         }
-        let brain_name = hf_to_brain(name).ok_or_else(|| format!("import: no mapping for HF tensor {name:?}"))?;
-        let quant = should_quantize(&shape);
-        if quant {
-            let (n, k) = (shape[0], shape[1]);
-            plan.push((brain_name.clone(), vec![n, k / 4], checkpoint::weightio::Dtype::U32));
-            plan.push((format!("{brain_name}.scale"), vec![n, k / model::int8::GROUP as u64], checkpoint::weightio::Dtype::F32));
-        } else {
-            plan.push((brain_name.clone(), shape, checkpoint::weightio::Dtype::F32));
-        }
-        items.insert(name.to_string(), PlanItem::Direct { brain_name, quant });
+        Ok(Int8View { reader, index, derive, last: std::sync::Mutex::new(None) })
     }
 
+    /// The int8 packing of HF weight `hf`, under brain name `brain`.
+    fn packed(&self, brain: &str, hf: &str) -> Option<(Vec<u32>, Vec<f32>)> {
+        let mut last = self.last.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((name, words, scale)) = last.as_ref() {
+            if name == brain {
+                return Some((words.clone(), scale.clone()));
+            }
+        }
+        let shape = self.reader.shape(hf)?;
+        let (n, k) = (shape[0] as usize, shape[1] as usize);
+        let (words, scale) = model::int8::quantize_weight(&self.reader.tensor(hf)?, n, k);
+        *last = Some((brain.to_string(), words.clone(), scale.clone()));
+        Some((words, scale))
+    }
+}
+
+impl checkpoint::weightio::DerivedCheckpoint for Int8View {
+    fn index(&self) -> Vec<(String, Vec<u64>, &'static str)> {
+        self.index.clone()
+    }
+
+    fn tensor_f32(&self, name: &str) -> Option<Vec<f32>> {
+        match self.derive.get(name)? {
+            Derive::Direct { hf, quant: false } => self.reader.tensor(hf),
+            Derive::Direct { quant: true, .. } => None,
+            Derive::Scale { hf } => self.packed(name.strip_suffix(".scale")?, hf).map(|(_, scale)| scale),
+            Derive::Qkv(parts) => parts.iter().map(|p| self.reader.tensor(p)).collect::<Option<Vec<_>>>().map(|v| v.concat()),
+        }
+    }
+
+    fn tensor_u32(&self, name: &str) -> Option<Vec<u32>> {
+        match self.derive.get(name)? {
+            Derive::Direct { hf, quant: true } => self.packed(name, hf).map(|(words, _)| words),
+            _ => None,
+        }
+    }
+}
+
+/// Write `<hf_dir>`'s [`Int8View`] out as an int8-native brain checkpoint at
+/// `out_path` - the explicit export for a caller that wants one file; serving
+/// reads the directory itself. One tensor's f32 expansion at a time. Fails
+/// loudly and writes nothing on error (`StWriter::finish` refuses a plan with
+/// holes).
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+    use checkpoint::weightio::{DerivedCheckpoint, Dtype};
+    let dir = std::path::Path::new(hf_dir);
+    let view = Int8View::open(dir)?;
+    let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
+    let plan: Vec<(String, Vec<u64>, Dtype)> = view.index().into_iter().map(|(n, s, t)| (n, s, if t == "U32" { Dtype::U32 } else { Dtype::F32 })).collect();
     let param_count: u64 = plan.iter().map(|(_, s, _)| s.iter().product::<u64>()).sum();
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("omni"));
     let mut card = checkpoint::st::ModelCard::new(id, "omni");
     card.param_count = Some(param_count);
     let mut writer = checkpoint::weightio::StWriter::create_mixed(out_path, &plan, &serde_json::to_value(&cfg_json).unwrap_or(Value::Null), Some(&card))
         .map_err(|e| format!("create {out_path}: {e}"))?;
-
-    // Pass 2: stream tensor DATA through in the source's own order, writing
-    // each planned entry as it completes. qkv triples accumulate in `qkv_buf`
-    // until all three weights (or biases) for a layer have arrived.
-    let mut qkv_buf: HashMap<u32, QkvBuf> = HashMap::new();
-    let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
-        if err.is_some() {
-            return;
-        }
-        match items.get(name) {
-            Some(PlanItem::QkvLeaf) => {
-                let b: u32 = name.strip_prefix("thinker.audio_tower.layers.").unwrap().split_once('.').unwrap().0.parse().unwrap();
-                let buf = qkv_buf.entry(b).or_default();
-                let is_weight = name.ends_with(".weight");
-                let slot = if name.contains(".q_proj.") {
-                    if is_weight { &mut buf.q_w } else { &mut buf.q_b }
-                } else if name.contains(".k_proj.") {
-                    if is_weight { &mut buf.k_w } else { &mut buf.k_b }
-                } else {
-                    if is_weight { &mut buf.v_w } else { &mut buf.v_b }
-                };
-                *slot = Some(data);
-                // `.take()` unconditionally clears the field it's called on,
-                // even inside a tuple whose `if let` pattern ends up not
-                // matching — checking `is_some()` on all three FIRST (never
-                // touching the buffer) is what makes taking them afterward
-                // safe: a partial arrival (e.g. only q_w so far) leaves every
-                // field untouched for the next call to find.
-                if buf.q_w.is_some() && buf.k_w.is_some() && buf.v_w.is_some() {
-                    let mut w = buf.q_w.take().unwrap();
-                    w.extend(buf.k_w.take().unwrap());
-                    w.extend(buf.v_w.take().unwrap());
-                    if let Err(e) = writer.write(&format!("audio.blocks.{b}.qkv.weight"), &w) {
-                        err = Some(e.to_string());
-                    }
-                }
-                if buf.q_b.is_some() && buf.k_b.is_some() && buf.v_b.is_some() {
-                    let mut bias = buf.q_b.take().unwrap();
-                    bias.extend(buf.k_b.take().unwrap());
-                    bias.extend(buf.v_b.take().unwrap());
-                    if let Err(e) = writer.write(&format!("audio.blocks.{b}.qkv.bias"), &bias) {
-                        err = Some(e.to_string());
-                    }
-                }
-            }
-            Some(PlanItem::Direct { brain_name, quant }) => {
-                if *quant {
-                    let shape = reader.shape(name).unwrap();
-                    let (n, k) = (shape[0] as usize, shape[1] as usize);
-                    let (packed, scale) = model::int8::quantize_weight(&data, n, k);
-                    if let Err(e) = writer.write_u32(brain_name, &packed) {
-                        err = Some(e.to_string());
-                    } else if let Err(e) = writer.write(&format!("{brain_name}.scale"), &scale) {
-                        err = Some(e.to_string());
-                    }
-                } else if let Err(e) = writer.write(brain_name, &data) {
-                    err = Some(e.to_string());
-                }
-            }
-            None => err = Some(format!("import: streamed tensor {name:?} was not in the plan (bug: pass 1/pass 2 drifted)")),
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
+    for (name, _, dtype) in &plan {
+        let written = match dtype {
+            Dtype::U32 => view.tensor_u32(name).map(|w| writer.write_u32(name, &w)),
+            _ => view.tensor_f32(name).map(|v| writer.write(name, &v)),
+        };
+        written.ok_or_else(|| format!("import: {name} has no source"))?.map_err(|e| e.to_string())?;
     }
     writer.finish().map_err(|e| e.to_string())?;
     eprintln!("omni: imported {} planned tensors -> {out_path}", plan.len());
@@ -660,6 +634,25 @@ mod import_as_tests {
         // code_predictor's rename (qwen3tts::import::mtp_hf_to_brain) reached the
         // output under its unprefixed MtpModel-loader-compatible name.
         assert!(meta.tensors().iter().any(|(n, _)| n == "blocks.0.attn.wq.weight"));
+
+        // Serving reads the directory itself: the view the int8 resident opens
+        // presents exactly the tensors the written checkpoint holds, without a
+        // byte written beside the download.
+        let served = crate::int8_thinker_resident::open_checkpoint(dir.to_str().unwrap()).unwrap();
+        let written = checkpoint::weightio::WeightReader::open(out_path.to_str().unwrap()).unwrap();
+        let mut names: Vec<&str> = served.names().collect();
+        let mut want_names: Vec<&str> = written.names().collect();
+        names.sort();
+        want_names.sort();
+        assert_eq!(names, want_names);
+        for name in want_names {
+            assert_eq!(served.dtype(name), written.dtype(name), "{name}");
+            assert_eq!(served.shape(name), written.shape(name), "{name}");
+            match written.dtype(name) {
+                Some("U32") => assert_eq!(served.tensor_u32(name), written.tensor_u32(name), "{name}"),
+                _ => assert_eq!(served.tensor(name), written.tensor(name), "{name}"),
+            }
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }

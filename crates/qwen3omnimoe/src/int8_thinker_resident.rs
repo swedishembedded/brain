@@ -250,6 +250,19 @@ fn logical_shape(reader: &WeightReader, name: &str) -> Result<(usize, usize), St
     Ok((n, k))
 }
 
+/// The int8-native checkpoint at `path`: a brain file as written, or a
+/// downloaded Hugging Face directory read through
+/// [`crate::import::Int8View`], each weight quantized as it is loaded and
+/// nothing written to disk.
+pub fn open_checkpoint(path: &str) -> std::io::Result<WeightReader> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        let view = crate::import::Int8View::open(p).map_err(std::io::Error::other)?;
+        return Ok(WeightReader::derived(Box::new(view)));
+    }
+    WeightReader::open(path)
+}
+
 /// One tensor, real, host-resident: plain f32 if the checkpoint stored it
 /// that way, or unpacked via [`model::int8::dequantize_weight`] if
 /// `qwen3omnimoe::import` quantized it (`should_quantize`: rank-2, last dim a
@@ -963,7 +976,7 @@ impl Int8ThinkerResident {
     /// the honest answer to "will this fit at all?" when compared against the
     /// sum of the available cards.
     pub fn total_device_bytes(&self) -> Result<u64, String> {
-        let reader = WeightReader::open(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
+        let reader = open_checkpoint(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
         let cost = layer_cost(&reader, &self.cfg.text).ok_or_else(|| format!("{MODEL}: '{}' is missing tensors this model needs", self.checkpoint_path))?;
         Ok(cost.total())
     }
@@ -992,7 +1005,7 @@ impl Int8ThinkerResident {
         if self.devices.is_empty() {
             return Plan::default();
         }
-        let reader = match WeightReader::open(&self.checkpoint_path) {
+        let reader = match open_checkpoint(&self.checkpoint_path) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{MODEL}: cannot open '{}': {e} -- reporting zero devices so the claim fails placement instead of panicking", self.checkpoint_path);
@@ -1094,7 +1107,7 @@ impl MultiDeviceResidentModel for Int8ThinkerResident {
             ));
         }
 
-        let reader = WeightReader::open(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
+        let reader = open_checkpoint(&self.checkpoint_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.checkpoint_path))?;
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (dev, range, _) in &plan.stages {
             let idx = match dev {

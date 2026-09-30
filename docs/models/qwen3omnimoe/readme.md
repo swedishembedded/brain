@@ -61,30 +61,35 @@ weights never leave VRAM between calls. Measure the actual ratio on your own
 hardware with `brain perf run`; a number here would describe one specific
 machine at one point in time.
 
-It wants a brain-native W8A16 checkpoint, which is not the format you
-downloaded - convert once (~8 minutes, 66 GB in, 33.6 GB out):
+It reads the checkpoint directory exactly as you downloaded it, quantizing
+every rank-2 weight to int8 as it loads - one tensor at a time, nothing
+written to disk:
+
+```bash
+BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+  brain serve --openai --dbus --device vulkan
+```
+
+The directory also supplies the tokenizer and the audio/vision towers.
+`BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` and `BRAIN_QWEN3OMNIMOE_HF_DIR` still
+override where those come from.
+
+If you would rather pay the quantization once than at every cold start,
+`brain qwen3omnimoe import` writes the same int8 tensors to a single file
+(~8 minutes, 66 GB in, 33.6 GB out) that `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT`
+can name instead:
 
 ```bash
 brain qwen3omnimoe import --hf /path/to/Qwen3-Omni-30B-A3B-Instruct \
                   --out /path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors
 ```
 
-The conversion streams one tensor at a time (peak host memory is roughly one
-tensor's f32 expansion, never the whole ~70 GB checkpoint) and quantizes
-every rank-2 weight to int8. Then serve it:
-
-```bash
-BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT=/path/to/Qwen3-Omni-30B-A3B-Instruct-W8A16.safetensors \
-BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
-  brain serve --openai --dbus --device vulkan
-```
-
-An int8 checkpoint is a single `.safetensors` and carries no tokenizer, so
-`BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR` says where to read `tokenizer.json` (or
-`vocab.json` + `merges.txt`) from - normally the HF directory you converted
-from. It defaults to the checkpoint's own directory when that holds tokenizer
-files, then to `BRAIN_QWEN3OMNIMOE_HF_DIR`. Without any of them the model still loads
-and still serves raw token ids, but it is not on the chat endpoints.
+Such a file carries no tokenizer, so `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`
+says where to read `tokenizer.json` (or `vocab.json` + `merges.txt`) from -
+normally the directory you converted from. It defaults to the checkpoint's
+own directory when that holds tokenizer files, then to
+`BRAIN_QWEN3OMNIMOE_HF_DIR`. Without any of them the model still loads and
+still serves raw token ids, but it is not on the chat endpoints.
 
 How the sharding decides itself:
 

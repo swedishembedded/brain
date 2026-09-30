@@ -45,6 +45,23 @@ enum Inner {
     /// `pytorch_model.bin.index.json` names): one mapping per file + which
     /// file owns each tensor name. See [`WeightReader::open_hf_dir`].
     Torch(Vec<crate::torchpt::MmapTorch>, HashMap<String, usize>),
+    /// A checkpoint computed from another as it is read; see
+    /// [`WeightReader::derived`]. The map is each tensor's dtype.
+    Derived(Box<dyn DerivedCheckpoint>, HashMap<String, &'static str>),
+}
+
+/// A checkpoint whose tensors are computed from another's as they are read -
+/// renamed, fused, or quantized - so a model built for one on-disk layout
+/// reads a checkpoint in another layout as it was downloaded, with nothing
+/// written back. [`WeightReader::derived`] presents one as a reader.
+pub trait DerivedCheckpoint: Send + Sync {
+    /// Every tensor: its name, shape, and dtype (`"F32"`, or `"U32"` for
+    /// brain's packed-int8 words, see [`PACKED_INT8_LAYOUT`]).
+    fn index(&self) -> Vec<(String, Vec<u64>, &'static str)>;
+    /// An `F32` tensor's values; `None` for an unknown name.
+    fn tensor_f32(&self, name: &str) -> Option<Vec<f32>>;
+    /// A `U32` tensor's words; `None` for an unknown name.
+    fn tensor_u32(&self, name: &str) -> Option<Vec<u32>>;
 }
 
 /// A lazy, mmap-backed reader over a safetensors or GGUF weight file. Decodes
@@ -70,7 +87,7 @@ impl WeightReader {
         let (order, shapes) = match &inner {
             Inner::St(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
             Inner::Gguf(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
-            Inner::StSharded(..) | Inner::Torch(..) => unreachable!("open() constructs only St/Gguf; see open_hf_dir"),
+            Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => unreachable!("open() constructs only St/Gguf; see open_hf_dir"),
         };
         Ok(WeightReader { inner, order, shapes })
     }
@@ -145,6 +162,15 @@ impl WeightReader {
         Ok(WeightReader { inner: Inner::Torch(readers, owner), order, shapes })
     }
 
+    /// A reader over a [`DerivedCheckpoint`], in its index's name order.
+    pub fn derived(d: Box<dyn DerivedCheckpoint>) -> WeightReader {
+        let index = d.index();
+        let order = index.iter().map(|(n, _, _)| n.clone()).collect();
+        let shapes = index.iter().map(|(n, s, _)| (n.clone(), s.clone())).collect();
+        let dtypes = index.into_iter().map(|(n, _, t)| (n, t)).collect();
+        WeightReader { inner: Inner::Derived(d, dtypes), order, shapes }
+    }
+
     /// Tensor names, in the underlying file's order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.order.iter().map(|s| s.as_str())
@@ -174,6 +200,7 @@ impl WeightReader {
             Inner::Gguf(m) => m.dtype(name),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].dtype(name),
             Inner::Torch(readers, owner) => readers[*owner.get(name)?].dtype(name),
+            Inner::Derived(_, dtypes) => dtypes.get(name).copied(),
         }
     }
 
@@ -187,6 +214,7 @@ impl WeightReader {
             Inner::Gguf(m) => m.raw_tensor_bytes(name).map(|(raw, _ty)| raw.len() as u64),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].nbytes(name),
             Inner::Torch(readers, owner) => readers[*owner.get(name)?].nbytes(name),
+            Inner::Derived(..) => self.shapes.get(name).map(|s| s.iter().product::<u64>() * 4),
         }
     }
 
@@ -197,7 +225,7 @@ impl WeightReader {
             Inner::Gguf(m) => m.config(),
             // A foreign checkpoint's config is its own config.json, read
             // separately by the caller -- see open_hf_dir's doc.
-            Inner::StSharded(..) | Inner::Torch(..) => Value::Null,
+            Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => Value::Null,
         }
     }
 
@@ -206,7 +234,7 @@ impl WeightReader {
     pub fn gguf(&self) -> Option<&MmapGguf> {
         match &self.inner {
             Inner::Gguf(m) => Some(m),
-            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => None,
         }
     }
 
@@ -215,7 +243,7 @@ impl WeightReader {
         match &self.inner {
             Inner::St(m) => m.card(),
             Inner::Gguf(m) => Some(m.model_card()),
-            Inner::StSharded(..) | Inner::Torch(..) => None,
+            Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => None,
         }
     }
 
@@ -223,7 +251,7 @@ impl WeightReader {
     /// Always `None` for safetensors (whose tokenizer is a sibling file).
     pub fn tokenizer(&self) -> Option<crate::gguf::GgufTokenizer> {
         match &self.inner {
-            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => None,
             Inner::Gguf(m) => m.tokenizer(),
         }
     }
@@ -237,6 +265,7 @@ impl WeightReader {
             Inner::Gguf(m) => m.tensor(name).map(|r| r.unwrap_or_else(|e| panic!("gguf dequant '{name}': {e}"))),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_f32(name),
             Inner::Torch(readers, owner) => readers[*owner.get(name)?].tensor_f32(name).map(|r| r.unwrap_or_else(|e| panic!("torch decode '{name}': {e}"))),
+            Inner::Derived(d, _) => d.tensor_f32(name),
         }
     }
 
@@ -254,6 +283,7 @@ impl WeightReader {
             Inner::Gguf(_) => panic!("tensor_u32: '{name}': GGUF has no U32 packed-weight convention -- this is a safetensors-only accessor"),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_u32(name),
             Inner::Torch(..) => panic!("tensor_u32: '{name}': a torch checkpoint has no U32 packed-weight convention -- this is a safetensors-only accessor"),
+            Inner::Derived(d, _) => d.tensor_u32(name),
         }
     }
 
@@ -289,7 +319,7 @@ impl crate::TensorSource for WeightReader {
             Inner::St(m) => m.raw_words(name),
             Inner::Gguf(_) => None,
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].raw_words(name),
-            Inner::Torch(..) => None,
+            Inner::Torch(..) | Inner::Derived(..) => None,
         }
     }
 
@@ -308,8 +338,9 @@ impl crate::TensorSource for WeightReader {
                 None => false,
             },
             // A torch storage is decoded whole (it may back several views),
-            // then lent out chunk by chunk.
-            Inner::Torch(..) => match self.tensor(name) {
+            // and a derived tensor computed whole; either is then lent out
+            // chunk by chunk.
+            Inner::Torch(..) | Inner::Derived(..) => match self.tensor(name) {
                 Some(v) => {
                     for (i, c) in v.chunks(max_elems.max(1)).enumerate() {
                         f((i * max_elems.max(1)) as u64, c);
@@ -334,6 +365,15 @@ impl crate::TensorSource for WeightReader {
                 None => false,
             },
             Inner::Torch(..) => false,
+            Inner::Derived(d, _) => match d.tensor_u32(name) {
+                Some(v) => {
+                    for (i, c) in v.chunks(max_elems.max(1)).enumerate() {
+                        f((i * max_elems.max(1)) as u64, c);
+                    }
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -352,7 +392,7 @@ impl crate::TensorSource for WeightReader {
                     readers[si].advise_dontneed_tensor(name);
                 }
             }
-            Inner::Torch(..) => {}
+            Inner::Torch(..) | Inner::Derived(..) => {}
         }
     }
 
@@ -361,7 +401,7 @@ impl crate::TensorSource for WeightReader {
             Inner::St(m) => m.numel(name),
             Inner::Gguf(_) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
             Inner::StSharded(readers, owner) => readers[*owner.get(name)?].numel(name),
-            Inner::Torch(..) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
+            Inner::Torch(..) | Inner::Derived(..) => self.shapes.get(name).map(|s| s.iter().product::<u64>() as usize),
         }
     }
 
@@ -370,7 +410,7 @@ impl crate::TensorSource for WeightReader {
     /// already covers the case where safetensors bytes bind as-is).
     fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
         match &self.inner {
-            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) => None,
+            Inner::St(_) | Inner::StSharded(..) | Inner::Torch(..) | Inner::Derived(..) => None,
             Inner::Gguf(m) => m.raw_blocks(name),
         }
     }

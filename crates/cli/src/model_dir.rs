@@ -418,16 +418,23 @@ pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg:
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
 /// on named roles (a directory or file each) rather than one weights path.
 ///
-/// A checkpoint of a family the qwen3 decoder implements (`qwen3`, and the
-/// `llama`/`qwen2` config-variant rows) is served straight from the
-/// Hugging Face directory its `weights` role names, as it was downloaded.
+/// A checkpoint of a family whose model reads a downloaded Hugging Face
+/// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
+/// is served straight from the directory its `weights` role names.
 fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
-    if brain_arch::by_id(&card.family).map(|a| a.implementation().id) == Some("qwen3") {
+    let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
+    if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
         let weights = dir.to_str().ok_or("weights path is not valid UTF-8")?;
         let tokenizer = dir.join("tokenizer.json");
-        let resident = crate::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), None, qwen_cfg);
-        return Ok(Arc::new(resident));
+        return match implementation {
+            Some("qwen3") => Ok(Arc::new(crate::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), None, qwen_cfg))),
+            Some("glmdsa") => Ok(Arc::new(crate::resident_llm::GlmResident::from_card(weights, card, None))),
+            Some("lfm2") => Ok(Arc::new(crate::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?)),
+            // Sharded across several GPUs, so it is registered on its own
+            // multi-device path rather than from the model directory.
+            _ => Err(format!("{} is served across GPUs: set BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT={weights}", card.id)),
+        };
     }
     match brain_family(&card.family) {
         "zimage" => {
@@ -879,6 +886,21 @@ mod tests {
         let (residents, errors) = discover(&root, crate::resident_llm::QwenServeConfig::default());
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
         assert_eq!(ids(&residents), ["deepseek-ai/tiny-llama"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pulled GLM-DSA directory is served by the GLM resident from the
+    /// download, like the qwen3 decoder's.
+    #[test]
+    fn discover_serves_a_downloaded_glm_directory() {
+        let root = tmp_dir("discover-glm-dir");
+        let repo_dir = root.join("zai-org").join("tiny-glm");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "zai-org/tiny-glm".into(), family: "glmdsa".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let (residents, errors) = discover(&root, crate::resident_llm::QwenServeConfig::default());
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        assert_eq!(ids(&residents), ["zai-org/tiny-glm"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -19,7 +19,11 @@
 //! Phase-2 tensors (the DSA `indexer.*`) and any MTP (`layers.{n_layers}.*`) are
 //! dropped - the Phase-1 model does not carry them.
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use checkpoint::remap::{Fetch, RemapSource};
+use checkpoint::TensorSource;
 
 use crate::config::GlmConfig;
 
@@ -76,214 +80,169 @@ pub fn config_from_hf(json: &str) -> Result<GlmConfig, String> {
     Ok(cfg)
 }
 
-/// De-interleave the per-head rows of a `[H*(a+bdim), in]` row-major matrix into
-/// two contiguous `[H*a, in]` and `[H*bdim, in]` matrices (head h contributes its
-/// first `a` output rows to the first, its next `bdim` to the second).
-fn split_heads(src: &[f32], h: usize, a: usize, bdim: usize, inw: usize) -> (Vec<f32>, Vec<f32>) {
-    let mut first = vec![0.0f32; h * a * inw];
-    let mut second = vec![0.0f32; h * bdim * inw];
-    for head in 0..h {
-        let base = head * (a + bdim);
-        for r in 0..a {
-            let s = (base + r) * inw;
-            let d = (head * a + r) * inw;
-            first[d..d + inw].copy_from_slice(&src[s..s + inw]);
-        }
-        for r in 0..bdim {
-            let s = (base + a + r) * inw;
-            let d = (head * bdim + r) * inw;
-            second[d..d + inw].copy_from_slice(&src[s..s + inw]);
-        }
-    }
-    (first, second)
+/// The rows of a `[H*(a+b), in]` row-major matrix that belong to each head's
+/// first `a` rows (`second == false`) or its following `b` rows, as the fetch
+/// that concatenates them head by head: HF interleaves them per head, brain
+/// keeps each part contiguous.
+fn head_rows(name: &str, h: usize, a: usize, b: usize, inw: usize, second: bool) -> Fetch {
+    let (off, rows) = if second { (a, b) } else { (0, a) };
+    Fetch::Concat((0..h).map(|head| Fetch::Slice { name: name.to_string(), start: (head * (a + b) + off) * inw, len: rows * inw }).collect())
 }
 
-/// Transform one HF source tensor into 0, 1, or 2·E brain-named `(name, data)`
-/// pairs - the same match as the eager importer, just returning outputs
-/// instead of inserting them into a HashMap. `dropped` tallies skipped source
-/// tensors (indexer/MTP/tied) for the final log line.
-fn transform_tensor(n: &str, data: Vec<f32>, cfg: &GlmConfig, dropped: &mut usize) -> Result<Vec<(String, Vec<f32>)>, String> {
+/// Where each brain parameter of `cfg` lives in a Hugging Face GLM checkpoint
+/// whose tensors are `names`: the plan [`source`] reads the checkpoint
+/// through, as downloaded.
+///
+/// HF keeps two structures brain splits (see the module doc): the per-head
+/// interleaved `q_b_proj`/`kv_b_proj` rows and the `kv_a_proj_with_mqa`
+/// prefix/suffix become contiguous slices, and the packed routed experts
+/// become one slice per expert. MTP layers (index `>= n_layers`) and a tied
+/// head have no brain parameter.
+pub fn plan<'n>(names: impl IntoIterator<Item = &'n str>, cfg: &GlmConfig) -> Result<HashMap<String, Fetch>, String> {
     let d = cfg.d_model as usize;
     let h = cfg.n_heads as usize;
     let nope = cfg.qk_nope_head_dim as usize;
     let rope = cfg.qk_rope_head_dim as usize;
     let vhd = cfg.v_head_dim as usize;
     let kvl = cfg.kv_lora_rank as usize;
+    let ql = cfg.q_lora_rank as usize;
     let moe_ff = cfg.moe_intermediate_size as usize;
-
-    if n == "model.embed_tokens.weight" {
-        return Ok(vec![("tok.weight".into(), data)]);
-    }
-    if n == "model.norm.weight" {
-        return Ok(vec![("norm.weight".into(), data)]);
-    }
-    if n == "lm_head.weight" {
-        return if cfg.tie_embeddings {
-            *dropped += 1;
-            Ok(vec![])
-        } else {
-            Ok(vec![("lm_head.weight".into(), data)])
-        };
-    }
-    let Some(rest) = n.strip_prefix("model.layers.") else {
-        *dropped += 1;
-        return Ok(vec![]);
-    };
-    let Some((li, leaf)) = rest.split_once('.') else {
-        *dropped += 1;
-        return Ok(vec![]);
-    };
-    let layer: u32 = li.parse().map_err(|_| format!("bad layer index in {n}"))?;
-    if layer >= cfg.n_layers {
-        *dropped += 1; // MTP / extra head layers
-        return Ok(vec![]);
-    }
-    let bp = |s: &str| format!("blocks.{layer}.{s}");
-    Ok(match leaf {
-        "input_layernorm.weight" => vec![(bp("input_ln.weight"), data)],
-        "post_attention_layernorm.weight" => vec![(bp("post_ln.weight"), data)],
-        "self_attn.q_a_proj.weight" => vec![(bp("attn.q_a.weight"), data)],
-        "self_attn.q_a_layernorm.weight" => vec![(bp("attn.q_a_norm.weight"), data)],
-        "self_attn.kv_a_layernorm.weight" => vec![(bp("attn.kv_a_norm.weight"), data)],
-        "self_attn.o_proj.weight" => vec![(bp("attn.o.weight"), data)],
-        // DSA indexer (only present on "full" layers in HF)
-        "self_attn.indexer.wq_b.weight" => vec![(bp("idx.wq_b.weight"), data)],
-        "self_attn.indexer.wk.weight" => vec![(bp("idx.wk.weight"), data)],
-        "self_attn.indexer.k_norm.weight" => vec![(bp("idx.k_norm.weight"), data)],
-        "self_attn.indexer.k_norm.bias" => vec![(bp("idx.k_norm.bias"), data)],
-        "self_attn.indexer.weights_proj.weight" => vec![(bp("idx.weights_proj.weight"), data)],
-        "self_attn.q_b_proj.weight" => {
-            let (nope_w, rope_w) = split_heads(&data, h, nope, rope, cfg.q_lora_rank as usize);
-            vec![(bp("attn.q_b_nope.weight"), nope_w), (bp("attn.q_b_rope.weight"), rope_w)]
-        }
-        "self_attn.kv_b_proj.weight" => {
-            let (nope_w, v_w) = split_heads(&data, h, nope, vhd, kvl);
-            vec![(bp("attn.kv_b_nope.weight"), nope_w), (bp("attn.kv_b_v.weight"), v_w)]
-        }
-        "self_attn.kv_a_proj_with_mqa.weight" => {
-            // [(kv_lora+rope), d] -> kv_a_c [kv_lora,d] (prefix) + kv_a_rope [rope,d] (suffix)
-            let (c_w, rope_w) = split_heads(&data, 1, kvl, rope, d);
-            vec![(bp("attn.kv_a_c.weight"), c_w), (bp("attn.kv_a_rope.weight"), rope_w)]
-        }
-        // dense MLP (first_k_dense layers)
-        "mlp.gate_proj.weight" => vec![(bp("mlp.gate.weight"), data)],
-        "mlp.up_proj.weight" => vec![(bp("mlp.up.weight"), data)],
-        "mlp.down_proj.weight" => vec![(bp("mlp.down.weight"), data)],
-        // MoE router + shared expert
-        "mlp.gate.weight" => vec![(bp("moe.router.weight"), data)],
-        "mlp.gate.e_score_correction_bias" => vec![(bp("moe.router.bias"), data)],
-        "mlp.shared_experts.gate_proj.weight" => vec![(bp("moe.shared.gate.weight"), data)],
-        "mlp.shared_experts.up_proj.weight" => vec![(bp("moe.shared.up.weight"), data)],
-        "mlp.shared_experts.down_proj.weight" => vec![(bp("moe.shared.down.weight"), data)],
-        // packed routed experts: gate_up_proj [E, 2*moe_ff, d], down_proj [E, d, moe_ff] - this
-        // one source tensor is held once (up to hundreds of MB across 256 experts) for exactly
-        // as long as it takes to slice its 2·E outputs, then dropped by the caller.
-        "mlp.experts.gate_up_proj" => {
-            let e = cfg.n_routed_experts as usize;
-            let per = 2 * moe_ff * d;
-            let mut out = Vec::with_capacity(2 * e);
-            for ei in 0..e {
-                let slab = &data[ei * per..(ei + 1) * per];
-                let (gate, up) = (slab[..moe_ff * d].to_vec(), slab[moe_ff * d..].to_vec());
-                out.push((format!("blocks.{layer}.moe.experts.{ei}.gate.weight"), gate));
-                out.push((format!("blocks.{layer}.moe.experts.{ei}.up.weight"), up));
+    let mut plan = HashMap::new();
+    let whole = |n: &str| Fetch::Whole(n.to_string());
+    for n in names {
+        match n {
+            "model.embed_tokens.weight" => {
+                plan.insert("tok.weight".to_string(), whole(n));
+                continue;
             }
-            out
+            "model.norm.weight" => {
+                plan.insert("norm.weight".to_string(), whole(n));
+                continue;
+            }
+            "lm_head.weight" => {
+                if !cfg.tie_embeddings {
+                    plan.insert("lm_head.weight".to_string(), whole(n));
+                }
+                continue;
+            }
+            _ => {}
         }
-        "mlp.experts.down_proj" => {
-            let e = cfg.n_routed_experts as usize;
-            let per = d * moe_ff;
-            (0..e)
-                .map(|ei| (format!("blocks.{layer}.moe.experts.{ei}.down.weight"), data[ei * per..(ei + 1) * per].to_vec()))
-                .collect()
+        let Some((li, leaf)) = n.strip_prefix("model.layers.").and_then(|r| r.split_once('.')) else { continue };
+        let layer: u32 = li.parse().map_err(|_| format!("bad layer index in {n}"))?;
+        if layer >= cfg.n_layers {
+            continue; // MTP layers: brain's MTP head is its own, not imported
         }
-        _ => {
-            *dropped += 1; // indexer.*, biases GLM-5.2 doesn't have, etc.
-            vec![]
+        let bp = |s: &str| format!("blocks.{layer}.{s}");
+        let one = |brain: &str| vec![(bp(brain), whole(n))];
+        let fetches = match leaf {
+            "input_layernorm.weight" => one("input_ln.weight"),
+            "post_attention_layernorm.weight" => one("post_ln.weight"),
+            "self_attn.q_a_proj.weight" => one("attn.q_a.weight"),
+            "self_attn.q_a_layernorm.weight" => one("attn.q_a_norm.weight"),
+            "self_attn.kv_a_layernorm.weight" => one("attn.kv_a_norm.weight"),
+            "self_attn.o_proj.weight" => one("attn.o.weight"),
+            // DSA indexer (only present on "full" layers in HF)
+            "self_attn.indexer.wq_b.weight" => one("idx.wq_b.weight"),
+            "self_attn.indexer.wk.weight" => one("idx.wk.weight"),
+            "self_attn.indexer.k_norm.weight" => one("idx.k_norm.weight"),
+            "self_attn.indexer.k_norm.bias" => one("idx.k_norm.bias"),
+            "self_attn.indexer.weights_proj.weight" => one("idx.weights_proj.weight"),
+            "self_attn.q_b_proj.weight" => vec![(bp("attn.q_b_nope.weight"), head_rows(n, h, nope, rope, ql, false)), (bp("attn.q_b_rope.weight"), head_rows(n, h, nope, rope, ql, true))],
+            "self_attn.kv_b_proj.weight" => vec![(bp("attn.kv_b_nope.weight"), head_rows(n, h, nope, vhd, kvl, false)), (bp("attn.kv_b_v.weight"), head_rows(n, h, nope, vhd, kvl, true))],
+            // [(kv_lora+rope), d] -> kv_a_c [kv_lora,d] (prefix) + kv_a_rope [rope,d] (suffix)
+            "self_attn.kv_a_proj_with_mqa.weight" => vec![
+                (bp("attn.kv_a_c.weight"), Fetch::Slice { name: n.to_string(), start: 0, len: kvl * d }),
+                (bp("attn.kv_a_rope.weight"), Fetch::Slice { name: n.to_string(), start: kvl * d, len: rope * d }),
+            ],
+            // dense MLP (first_k_dense layers)
+            "mlp.gate_proj.weight" => one("mlp.gate.weight"),
+            "mlp.up_proj.weight" => one("mlp.up.weight"),
+            "mlp.down_proj.weight" => one("mlp.down.weight"),
+            // MoE router + shared expert
+            "mlp.gate.weight" => one("moe.router.weight"),
+            "mlp.gate.e_score_correction_bias" => one("moe.router.bias"),
+            "mlp.shared_experts.gate_proj.weight" => one("moe.shared.gate.weight"),
+            "mlp.shared_experts.up_proj.weight" => one("moe.shared.up.weight"),
+            "mlp.shared_experts.down_proj.weight" => one("moe.shared.down.weight"),
+            // packed routed experts: gate_up_proj [E, 2*moe_ff, d] (gate || up per
+            // expert), down_proj [E, d, moe_ff]
+            "mlp.experts.gate_up_proj" => {
+                let per = 2 * moe_ff * d;
+                (0..cfg.n_routed_experts as usize)
+                    .flat_map(|ei| {
+                        [
+                            (bp(&format!("moe.experts.{ei}.gate.weight")), Fetch::Slice { name: n.to_string(), start: ei * per, len: moe_ff * d }),
+                            (bp(&format!("moe.experts.{ei}.up.weight")), Fetch::Slice { name: n.to_string(), start: ei * per + moe_ff * d, len: moe_ff * d }),
+                        ]
+                    })
+                    .collect()
+            }
+            "mlp.experts.down_proj" => (0..cfg.n_routed_experts as usize)
+                .map(|ei| (bp(&format!("moe.experts.{ei}.down.weight")), Fetch::Slice { name: n.to_string(), start: ei * d * moe_ff, len: d * moe_ff }))
+                .collect(),
+            _ => Vec::new(), // an HF tensor the Phase-1 model does not carry
+        };
+        for (brain, fetch) in fetches {
+            if plan.insert(brain.clone(), fetch).is_some() {
+                return Err(format!("glm import: two checkpoint tensors map to {brain}"));
+            }
         }
-    })
+    }
+    Ok(plan)
+}
+
+/// A Hugging Face GLM checkpoint read under brain's names, as downloaded:
+/// every parameter of `cfg` present at its size, checked before a byte of
+/// weight data is read.
+pub fn source(reader: checkpoint::weightio::WeightReader, cfg: &GlmConfig) -> Result<RemapSource<'static>, String> {
+    let plan = plan(reader.names(), cfg)?;
+    let src = RemapSource::owning(Box::new(reader), plan);
+    src.validate(&cfg.param_list())?;
+    Ok(src)
+}
+
+/// The config and the brain-named source of the Hugging Face GLM checkpoint
+/// directory `dir`.
+pub fn open_dir(dir: &Path) -> Result<(GlmConfig, RemapSource<'static>), String> {
+    let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("{}: {e}", dir.join("config.json").display()))?)?;
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
+    Ok((cfg.clone(), source(reader, &cfg)?))
 }
 
 /// Import `<hf_dir>` (config.json + single/sharded safetensors) into `out_path`.
 /// Validates full coverage of the model's parameter list; fails loudly (never
-/// writes a partial checkpoint). Streams one HF source tensor at a time - the
-/// only tensor ever fully materialized is the packed-expert one, and only for
-/// the duration of producing its own per-expert outputs.
+/// writes a partial checkpoint). Streams one brain parameter at a time through
+/// [`source`].
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     import_as(hf_dir, out_path, None)
 }
 
 /// Like [`import`] but overrides the card's `id` (defaults to the output
-/// filename stem). Used by the model-store auto-fetch dispatcher, which needs
-/// the id to be the fully-qualified `vendor/repo` reference rather than a
-/// filesystem-derived name.
+/// filename stem).
 pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
-    let dir = Path::new(hf_dir);
-    let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
-    let cfg = config_from_hf(&cfg_json)?;
-
-    let plan: Vec<(String, Vec<u64>)> =
-        cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
-    // A card so this file auto-serves from the global model directory (P2) with
-    // no BRAIN_GLMDSA_WEIGHTS env var - id defaults to the output filename stem,
-    // matching how the model dir keys catalog entries, unless the caller
-    // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
+    let (cfg, src) = open_dir(Path::new(hf_dir))?;
+    let plan: Vec<(String, Vec<u64>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("glm"));
     let mut card = checkpoint::st::ModelCard::new(id, "glm");
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(param_count);
-
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card))
-        .map_err(|e| format!("create {out_path}: {e}"))?;
-    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
-
-    let mut err: Option<String> = None;
-    let mut dropped = 0usize;
-    let mut n_written = 0usize;
-    reader.for_each(|name, _shape, data| {
-        if err.is_some() {
-            return;
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card)).map_err(|e| format!("create {out_path}: {e}"))?;
+    for (name, _) in &plan {
+        let mut result = Ok(());
+        if !src.with_tensor(name, &mut |t| result = writer.write(name, t).map_err(|e| e.to_string())) {
+            return Err(format!("glm import: {name} has no source"));
         }
-        match transform_tensor(name, data, &cfg, &mut dropped) {
-            Ok(pairs) => {
-                for (n, d) in pairs {
-                    n_written += 1;
-                    if let Err(e) = writer.write(&n, &d) {
-                        err = Some(e.to_string());
-                        return;
-                    }
-                }
-            }
-            Err(e) => err = Some(e),
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
+        result?;
     }
     writer.finish().map_err(|e| e.to_string())?;
-    eprintln!("imported {n_written} tensors -> {out_path} ({dropped} HF tensors dropped: indexer/MTP/tied)");
+    eprintln!("imported {} tensors -> {out_path}", plan.len());
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn split_heads_deinterleaves_per_head() {
-        // H=2, a=2, bdim=1, inw=1 -> src rows per head = [n0, n1, r0]. Values chosen
-        // so head h row r = 100*h + 10*kind + r  (kind: 0=nope, 1=rope).
-        let src = vec![
-            0.0, 1.0, // head0 nope rows 0,1
-            10.0, // head0 rope row 0
-            100.0, 101.0, // head1 nope rows 0,1
-            110.0, // head1 rope row 0
-        ];
-        let (nope, rope) = split_heads(&src, 2, 2, 1, 1);
-        assert_eq!(nope, vec![0.0, 1.0, 100.0, 101.0]); // [h0n0,h0n1,h1n0,h1n1]
-        assert_eq!(rope, vec![10.0, 110.0]); // [h0r0, h1r0]
-    }
 
     #[test]
     fn config_from_hf_parses_glm52_shape() {
@@ -312,8 +271,8 @@ mod tests {
     /// checkpoint dir: config.json + a single model.safetensors. Layer 1's packed
     /// `gate_up_proj`/`down_proj` are hand-crafted (not `seq`) so expert 0 vs 1's
     /// gate/up/down values are distinguishable and can't pass a swapped/aliased test.
-    fn build_tiny_hf_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-glm-import-streaming-{}", std::process::id()));
+    fn build_tiny_hf_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-glm-import-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let json = r#"{"vocab_size":5,"hidden_size":8,"num_hidden_layers":2,
             "num_attention_heads":2,"q_lora_rank":4,"kv_lora_rank":4,
@@ -379,7 +338,7 @@ mod tests {
 
     #[test]
     fn import_streams_and_matches_param_list_with_expert_fan_out_not_swapped() {
-        let dir = build_tiny_hf_dir();
+        let dir = build_tiny_hf_dir("streaming");
         let out = std::env::temp_dir().join(format!("brain-glm-import-streaming-out-{}.st", std::process::id()));
         let out_str = out.to_str().unwrap();
 
@@ -408,6 +367,37 @@ mod tests {
         assert_eq!(m.tensors["blocks.1.moe.experts.0.down.weight"], seq(200.0, 32));
         assert_eq!(m.tensors["blocks.1.moe.experts.1.down.weight"], seq(10200.0, 32));
 
+        // Per-head de-interleave: q_b_proj rows are [h0 nope | h0 rope | h1 nope | h1 rope].
+        let q_b = seq(40.0, 32);
+        let ql = cfg.q_lora_rank as usize;
+        let (nope, rope) = (cfg.qk_nope_head_dim as usize, cfg.qk_rope_head_dim as usize);
+        let rows = |head: usize, off: usize, n: usize| q_b[(head * (nope + rope) + off) * ql..(head * (nope + rope) + off + n) * ql].to_vec();
+        assert_eq!(m.tensors["blocks.0.attn.q_b_nope.weight"], [rows(0, 0, nope), rows(1, 0, nope)].concat());
+        assert_eq!(m.tensors["blocks.0.attn.q_b_rope.weight"], [rows(0, nope, rope), rows(1, nope, rope)].concat());
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&out).ok();
+    }
+
+    /// Serving reads the downloaded directory itself: a model loaded from it
+    /// computes exactly what one loaded from the imported file computes, and
+    /// nothing is written beside the download.
+    #[test]
+    fn the_downloaded_directory_serves_as_its_import_does() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let dir = build_tiny_hf_dir("served");
+        let out = std::env::temp_dir().join(format!("brain-glm-import-served-{}.st", std::process::id()));
+        import(dir.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let tokens = [1u32, 3, 2];
+        let bits = |m: crate::model::Glm| m.logits_all(&tokens).into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        let from_dir = bits(crate::model::Glm::load_inference(dir.to_str().unwrap(), 1, 4));
+        let from_file = bits(crate::model::Glm::load_inference(out.to_str().unwrap(), 1, 4));
+        assert_eq!(from_dir, from_file);
+        let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before);
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&out).ok();
     }

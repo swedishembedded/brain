@@ -15,15 +15,9 @@ path = "src/lib.rs"
 default = []
 # What `brain-cli` enables, so the CLI's fetch/convert surface is unchanged.
 import-all = [
-    "import-glmdsa",
-    "import-lfm2",
-    "import-qwen3omnimoe",
     "import-qwen3tts",
     "import-yolov8",
 ]
-import-glmdsa = ["dep:brain-glmdsa"]
-import-lfm2 = ["dep:brain-lfm2"]
-import-qwen3omnimoe = ["dep:brain-qwen3omnimoe"]
 # One family, three importers: the Talker/MTP pair, the Mimi-style codec and
 # the ECAPA speaker encoder are all needed to finish a qwen3tts fetch.
 import-qwen3tts = ["dep:brain-qwen3tts", "dep:brain-mimi", "dep:brain-ecapatdnn"]
@@ -42,15 +36,12 @@ brain-gpu-core.workspace = true
 # fetch and convert on an embedder's behalf, mirroring `brain-cli`'s own
 # dependency on each (this is a pure move of that dispatch, not new scope).
 #
-# OPTIONAL, one feature each: these seven are why this crate's dependency
+# OPTIONAL, one feature each: these are why this crate's dependency
 # closure is 65 brain crates while the rest of it is 18. An embedder that only
 # resolves and loads (the `brain` SDK, a service, a second binary) needs none
 # of them; `brain-cli` turns them all on with `import-all` so its `brain pull`
 # behaviour is byte-identical. A family whose importer is absent fails with an
 # error naming the feature to enable, never a silent "unsupported family".
-brain-glmdsa = { workspace = true, optional = true }
-brain-lfm2 = { workspace = true, optional = true }
-brain-qwen3omnimoe = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
 brain-mimi = { workspace = true, optional = true }
 brain-ecapatdnn = { workspace = true, optional = true }

@@ -89,10 +89,9 @@ fn run_parity(env_var: &str, fixture_name: &str, cfg: LfmConfig) {
     let tokens = golden.ids("tokens");
     let logit_rows = golden.ids("logit_rows");
 
-    // Import the released weights in memory (same path `brain lfm import` takes).
-    let tensors = checkpoint::safetensors::read_model_dir(Path::new(&hf_dir)).expect("read weights");
-    let init = lfm2::import::brain_init_from_hf(tensors, &cfg).expect("brain_init_from_hf");
-    let model = Lfm::new(cfg.clone(), 1, tokens.len() as u32, &init);
+    // The released weights read as downloaded (the path `brain serve` takes).
+    let (_, src) = lfm2::import::open_dir(Path::new(&hf_dir)).expect("open checkpoint");
+    let model = Lfm::new(cfg.clone(), 1, tokens.len() as u32, &src);
     model.set_tokens(&tokens);
     model.forward();
 
@@ -126,9 +125,7 @@ fn run_parity(env_var: &str, fixture_name: &str, cfg: LfmConfig) {
 
     // The chunked inference regime against the same goldens (hidden + the
     // probe-row logits through the gathered head).
-    let tensors = checkpoint::safetensors::read_model_dir(Path::new(&hf_dir)).expect("read weights");
-    let init = lfm2::import::brain_init_from_hf(tensors, &cfg).expect("brain_init_from_hf");
-    let model = Lfm::new_chunked(cfg.clone(), 1, tokens.len() as u32, &init, 1 << 30, logit_rows.len() as u32);
+    let model = Lfm::new_chunked(cfg.clone(), 1, tokens.len() as u32, &src, 1 << 30, logit_rows.len() as u32);
     model.set_tokens(&tokens);
     model.set_probe_rows(&logit_rows);
     model.forward();

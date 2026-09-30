@@ -14,6 +14,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use checkpoint::remap::{Fetch, RemapSource};
+use checkpoint::TensorSource;
+
 use crate::config::{adjust_ff_dim, LayerType, LfmConfig};
 
 /// Map an HF LFM2.5 tensor name to its brain parameter name, or `None` to drop
@@ -110,106 +113,69 @@ pub fn config_from_hf(json: &str) -> Result<LfmConfig, String> {
     })
 }
 
-/// Remap HF LFM2.5 safetensors into brain's `name → f32 data` init map,
-/// validating full coverage against `cfg.param_list()` (every brain parameter
-/// produced exactly once with the right element count) and that no mapped HF
-/// tensor is left over. Fails loudly.
-pub fn brain_init_from_hf(
-    tensors: Vec<checkpoint::safetensors::StTensor>,
-    cfg: &LfmConfig,
-) -> Result<HashMap<String, Vec<f32>>, String> {
-    let mut brain: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut unmapped: Vec<String> = Vec::new();
-    for t in tensors {
-        match hf_to_brain(&t.name) {
+/// Where each brain parameter lives in a Hugging Face LFM2.5 checkpoint whose
+/// tensors are `names` - a pure rename, with the tied `lm_head.weight`
+/// dropped. A tensor this model has no parameter for is an error, never
+/// skipped.
+pub fn plan<'n>(names: impl IntoIterator<Item = &'n str>) -> Result<HashMap<String, Fetch>, String> {
+    let mut plan = HashMap::new();
+    let mut unmapped = Vec::new();
+    for n in names {
+        match hf_to_brain(n) {
             Some(bn) => {
-                if brain.insert(bn.clone(), t.data).is_some() {
+                if plan.insert(bn.clone(), Fetch::Whole(n.to_string())).is_some() {
                     return Err(format!("duplicate mapping to {bn}"));
                 }
             }
-            None if t.name == "lm_head.weight" => {} // tied, deliberately dropped
-            None => unmapped.push(t.name),
+            None if n == "lm_head.weight" => {} // tied, deliberately dropped
+            None => unmapped.push(n.to_string()),
         }
     }
     if !unmapped.is_empty() {
         return Err(format!("import: {} unmapped HF tensors: {unmapped:?}", unmapped.len()));
     }
-    let mut init: HashMap<String, Vec<f32>> = HashMap::new();
-    for (name, numel) in cfg.param_list() {
-        let data = brain
-            .remove(&name)
-            .ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;
-        if data.len() != numel {
-            return Err(format!("import: {name} element count {} != expected {numel}", data.len()));
-        }
-        init.insert(name, data);
-    }
-    if !brain.is_empty() {
-        let extra: Vec<&String> = brain.keys().collect();
-        return Err(format!("import: {} mapped HF tensors unused: {extra:?}", brain.len()));
-    }
-    Ok(init)
+    Ok(plan)
+}
+
+/// The config and the brain-named source of the Hugging Face LFM2.5
+/// checkpoint directory `dir`, read as downloaded: every parameter present at
+/// its size, checked before a byte of weight data is read.
+pub fn open_dir(dir: &Path) -> Result<(LfmConfig, RemapSource<'static>), String> {
+    let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("{}: {e}", dir.join("config.json").display()))?)?;
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {}: {e}", dir.display()))?;
+    let plan = plan(reader.names())?;
+    let src = RemapSource::owning(Box::new(reader), plan);
+    src.validate(&cfg.param_list())?;
+    Ok((cfg, src))
 }
 
 /// Import `<hf_dir>/config.json` + `model.safetensors` into the brain
-/// checkpoint `out_path`. Never writes a partial checkpoint. Streams one HF
-/// source tensor at a time.
+/// checkpoint `out_path`. Never writes a partial checkpoint. Streams one
+/// parameter at a time through [`open_dir`]'s source.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     import_as(hf_dir, out_path, None)
 }
 
 /// Like [`import`] but overrides the card's `id` (defaults to the output
-/// filename stem). Used by the model-store auto-fetch dispatcher, which needs
-/// the id to be the fully-qualified `vendor/repo` reference rather than a
-/// filesystem-derived name.
+/// filename stem).
 pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
-    let dir = Path::new(hf_dir);
-    let cfg_json = std::fs::read_to_string(dir.join("config.json"))
-        .map_err(|e| format!("read config.json: {e}"))?;
-    let cfg = config_from_hf(&cfg_json)?;
-
-    let plan: Vec<(String, Vec<u64>)> =
-        cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
+    let (cfg, src) = open_dir(Path::new(hf_dir))?;
+    let plan: Vec<(String, Vec<u64>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
-    // A card so this file auto-serves from the global model directory (P2) with
-    // no BRAIN_LFM2_WEIGHTS env var - id defaults to the output filename stem,
-    // matching how the model dir keys catalog entries, unless the caller
-    // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("lfm"));
     let mut card = checkpoint::st::ModelCard::new(id, "lfm");
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(param_count);
-
-    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card))
-        .map_err(|e| format!("create {out_path}: {e}"))?;
-    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
-
-    let mut err: Option<String> = None;
-    let mut unmapped: Vec<String> = Vec::new();
-    let mut n_written = 0usize;
-    reader.for_each(|name, _shape, data| {
-        if err.is_some() {
-            return;
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card)).map_err(|e| format!("create {out_path}: {e}"))?;
+    for (name, _) in &plan {
+        let mut result = Ok(());
+        if !src.with_tensor(name, &mut |t| result = writer.write(name, t).map_err(|e| e.to_string())) {
+            return Err(format!("lfm import: {name} has no source"));
         }
-        match hf_to_brain(name) {
-            Some(bn) => {
-                n_written += 1;
-                if let Err(e) = writer.write(&bn, &data) {
-                    err = Some(e.to_string());
-                }
-            }
-            None if name == "lm_head.weight" => {} // tied, deliberately dropped
-            None => unmapped.push(name.to_string()),
-        }
-    });
-    if let Some(e) = err {
-        return Err(e);
-    }
-    if !unmapped.is_empty() {
-        return Err(format!("import: {} unmapped HF tensors: {unmapped:?}", unmapped.len()));
+        result?;
     }
     writer.finish().map_err(|e| e.to_string())?;
-    eprintln!("imported {n_written} tensors -> {out_path}");
+    eprintln!("imported {} tensors -> {out_path}", plan.len());
     Ok(())
 }
 
@@ -340,6 +306,15 @@ mod tests {
         assert_eq!(m.tensors["blocks.0.conv.conv.weight"], seq(140.0, 18));
         assert_eq!(m.tensors["blocks.1.attn.wq.weight"], seq(410.0, 36));
         assert_eq!(m.tensors["blocks.1.mlp.down.weight"], seq(660.0, 48));
+
+        // Serving reads the directory itself: its source yields exactly what
+        // the import wrote.
+        let (_, src) = open_dir(&dir).unwrap();
+        for (name, _) in &expected {
+            let mut got = Vec::new();
+            assert!(src.with_tensor(name, &mut |t| got = t.to_vec()), "{name}");
+            assert_eq!(&got, &m.tensors[name], "{name}");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&out).ok();

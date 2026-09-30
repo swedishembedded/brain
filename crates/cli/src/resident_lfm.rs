@@ -71,7 +71,14 @@ impl LfmResident {
         let tokenizer_path = tokenizer_path.filter(|t| !t.is_empty()).ok_or("lfm: a sibling tokenizer.json is required")?;
         let tok = Arc::new(QwenBpe::from_file(tokenizer_path)?);
         let batch = std::env::var("BRAIN_LFM2_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(2u32).max(1);
-        let weight_bytes = std::fs::metadata(weights).map(|m| m.len()).unwrap_or(1 << 30);
+        // fp32 on the device: from the config for a downloaded directory (whose
+        // files may be bf16), else the brain file's own size.
+        let weight_bytes = if std::path::Path::new(weights).is_dir() {
+            let cfg = std::fs::read_to_string(std::path::Path::new(weights).join("config.json")).map_err(|e| format!("lfm: {e}"))?;
+            lfm2::import::config_from_hf(&cfg)?.param_list().into_iter().map(|(_, n)| n as u64 * 4).sum()
+        } else {
+            std::fs::metadata(weights).map(|m| m.len()).unwrap_or(1 << 30)
+        };
         Ok(LfmResident {
             id: card.id.clone(),
             weights: weights.to_string(),
@@ -135,10 +142,14 @@ impl ResidentModel for LfmResident {
             .ok_or_else(|| format!("lfm: bad instance key '{}' (empty/untokenizable input)", key.config))?;
         // Stream weights from the mmap: peak host allocation is ~one tensor, not
         // a whole-model f32 copy on top of the device weights.
-        let reader = checkpoint::weightio::WeightReader::open(&self.weights).map_err(|e| format!("lfm: {e}"))?;
-        let model = crate::resident_llm::on_device(device, || {
-            Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP)
-        })?;
+        // A downloaded directory is read as it is, through its renaming source.
+        let model = if std::path::Path::new(&self.weights).is_dir() {
+            let (cfg, src) = lfm2::import::open_dir(std::path::Path::new(&self.weights)).map_err(|e| format!("lfm: {e}"))?;
+            crate::resident_llm::on_device(device, || Lfm::new_chunked(cfg, self.batch, t, &src, SLAB_BUDGET, PROBE_CAP))?
+        } else {
+            let reader = checkpoint::weightio::WeightReader::open(&self.weights).map_err(|e| format!("lfm: {e}"))?;
+            crate::resident_llm::on_device(device, || Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP))?
+        };
         Ok(Box::new(LfmInstance { model, tok: self.tok.clone(), tokenizer_path: self.tokenizer_path.clone(), t, batch: self.batch as usize }))
     }
 }

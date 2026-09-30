@@ -31,9 +31,16 @@ the files as downloaded, safetensors or `pytorch_model*.bin`:
   size means nothing for a directory, or for a bf16 file that doubles on
   the device.
 
-glmdsa, lfm2 and qwen3omnimoe are still imported to a converted file on
-pull. Their residents read only brain checkpoints, and moving them onto the
-same path is open work.
+glmdsa and lfm2 read their downloads the same way: a fetch plan per
+parameter over the Hugging Face tensors (`glmdsa::import::plan`, where the
+per-head de-interleave and the packed experts are plain slices, and a
+rename for `lfm2::import::plan`). qwen3omnimoe's int8 resident reads its
+download through `import::Int8View`, a `checkpoint::weightio::DerivedCheckpoint`.
+That view packs each weight to int8 when it is read, the conversion the
+30B model needs in order to fit the cards, and it never writes to disk.
+Each crate's explicit `import` command writes out the same view, so there
+is one mapping per family. yolo's `.pt` and qwen3tts's four checkpoints
+are still converted on pull.
 
 `a_hugging_face_directory_is_served_as_downloaded` generates from a tiny
 Llama directory and asserts that nothing is written beside it. The loader

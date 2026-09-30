@@ -409,11 +409,23 @@ impl Glm {
         Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, &reader, true)
     }
 
-    /// Inference load, streaming - see [`Glm::from_reader_inference`].
+    /// Inference load, streaming - see [`Glm::from_reader_inference`]. A
+    /// Hugging Face checkpoint directory is read as downloaded, through
+    /// [`crate::import::open_dir`].
     pub fn load_inference(path: &str, b: u32, t: u32) -> Glm {
+        if std::path::Path::new(path).is_dir() {
+            let (cfg, src) = crate::import::open_dir(std::path::Path::new(path)).unwrap_or_else(|e| panic!("{e}"));
+            return Glm::from_source_inference(cfg, &src, b, t);
+        }
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         Glm::from_reader_inference(&reader, b, t)
+    }
+
+    /// Inference build from any brain-named tensor source, one tensor at a
+    /// time.
+    pub fn from_source_inference(cfg: GlmConfig, src: &dyn checkpoint::TensorSource, b: u32, t: u32) -> Glm {
+        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, src, false)
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],

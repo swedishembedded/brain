@@ -336,9 +336,16 @@ impl GlmResident {
         Some(Self::from_card(&path, &ModelCard::new("brain/glm", "glm"), None))
     }
 
-    /// Construct under the card's id. `_tokenizer` is unused - GLM is char-level.
+    /// Construct under the card's id. `path` is a brain checkpoint (char-level,
+    /// carrying its own vocabulary) or a Hugging Face GLM checkpoint directory,
+    /// served as downloaded with its own `tokenizer.json`; `_tokenizer` is
+    /// unused either way.
     pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GlmResident {
         GlmResident { id: card.id.clone(), path: path.to_string() }
+    }
+
+    fn is_hf_dir(&self) -> bool {
+        std::path::Path::new(&self.path).is_dir()
     }
 }
 
@@ -357,9 +364,24 @@ impl ResidentModel for GlmResident {
         InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        est_vram(&self.path)
+        if !self.is_hf_dir() {
+            return est_vram(&self.path);
+        }
+        // fp32 on the device, whatever the download's dtype; the same 1.3x
+        // allowance `est_vram` gives a file.
+        let cfg = std::fs::read_to_string(std::path::Path::new(&self.path).join("config.json")).ok().and_then(|j| glmdsa::import::config_from_hf(&j).ok());
+        let bytes = cfg.map_or(0, |c| c.param_list().into_iter().map(|(_, n)| n as u64 * 4).sum::<u64>() * 13 / 10);
+        MemCost::new(bytes, 0)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if self.is_hf_dir() {
+            let dir = std::path::Path::new(&self.path);
+            let (cfg, src) = glmdsa::import::open_dir(dir).map_err(|e| format!("glm: {e}"))?;
+            let tok = data::qwen_tokenizer::QwenBpe::from_file(dir.join("tokenizer.json").to_str().ok_or("glm: non-UTF8 path")?).map_err(|e| format!("glm: {e}"))?;
+            let block = cfg.block_size;
+            let model = on_device(device, || glmdsa::model::Glm::from_source_inference(cfg, &src, 1, block))?;
+            return Ok(Box::new(GlmInstance { model, tok: Box::new(tok) }));
+        }
         // Stream weights from the mmap (see GptResident::activate).
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("glm: {e}"))?;
         let itos = glmdsa::model::Glm::itos_from_config(&reader.config())
@@ -367,13 +389,15 @@ impl ResidentModel for GlmResident {
         let tok = CharTokenizer::from_itos(itos);
         let block = glmdsa::config::GlmConfig::from_json(&reader.config()).block_size;
         let model = on_device(device, || glmdsa::model::Glm::from_reader_inference(&reader, 1, block))?;
-        Ok(Box::new(GlmInstance { model, tok }))
+        Ok(Box::new(GlmInstance { model, tok: Box::new(tok) }))
     }
 }
 
 struct GlmInstance {
     model: glmdsa::model::Glm,
-    tok: CharTokenizer,
+    /// The checkpoint's own vocabulary: brain's char-level one, or a
+    /// downloaded checkpoint's `tokenizer.json`.
+    tok: Box<dyn Tokenizer + Send>,
 }
 
 impl Instance for GlmInstance {

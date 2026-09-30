@@ -413,7 +413,13 @@ impl Lfm {
     /// scratch bounded by `slab_budget_bytes`, MLM head evaluated at up to
     /// `probe_cap` gathered rows (0 = hidden-states only). Streaming - see
     /// [`Lfm::from_reader_chunked`].
+    /// A Hugging Face checkpoint directory is read as downloaded, through
+    /// [`crate::import::open_dir`].
     pub fn load_inference_chunked(path: &str, b: u32, t: u32, slab_budget_bytes: u64, probe_cap: u32) -> Lfm {
+        if std::path::Path::new(path).is_dir() {
+            let (cfg, src) = crate::import::open_dir(std::path::Path::new(path)).unwrap_or_else(|e| panic!("{e}"));
+            return Lfm::new_chunked(cfg, b, t, &src, slab_budget_bytes, probe_cap);
+        }
         let reader = checkpoint::weightio::WeightReader::open(path)
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         Lfm::from_reader_chunked(&reader, b, t, slab_budget_bytes, probe_cap)
@@ -437,7 +443,7 @@ impl Lfm {
 
     /// Materialized-attention model, frozen weights (parity / short-context
     /// inference). For training use [`Lfm::new_train`].
-    pub fn new(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Lfm {
+    pub fn new(cfg: LfmConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource) -> Lfm {
         Lfm::new_impl(cfg, b, t, init, None, false)
     }
 
@@ -490,7 +496,7 @@ impl Lfm {
         cfg: LfmConfig,
         b: u32,
         t: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &dyn checkpoint::TensorSource,
         slab_budget_bytes: u64,
         probe_cap: u32,
     ) -> Lfm {

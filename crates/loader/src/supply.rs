@@ -27,7 +27,6 @@
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
-use std::path::Path;
 
 use brain_modelref::ModelRef;
 use brain_modelstore::recipe::{WanRecipe, ZimageRecipe};
@@ -224,13 +223,7 @@ pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::P
 /// Compiled only when at least one importer is absent -- with `import-all` on
 /// there is no arm that can call it, and an always-present helper would be an
 /// unused-function warning in the configuration `brain-cli` actually ships.
-#[cfg(not(all(
-    feature = "import-glmdsa",
-    feature = "import-lfm2",
-    feature = "import-qwen3omnimoe",
-    feature = "import-qwen3tts",
-    feature = "import-yolov8"
-)))]
+#[cfg(not(all(feature = "import-qwen3tts", feature = "import-yolov8")))]
 fn no_importer(vendor: &str, repo: &str, family: &str, feature: &str) -> String {
     format!(
         "{vendor}/{repo}: convert: this build of brain-loader has no {family} importer \
@@ -448,132 +441,47 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
 
-/// Families whose model crate loads the downloaded HF checkpoint directory
-/// directly (`BRAIN_QWEN3VL_WEIGHTS`/`BRAIN_FASTVLM_WEIGHTS`/
-/// `BRAIN_NEMOTRONASR`/`BRAIN_QWEN3ASR` each name a DIRECTORY, not a
-/// brain-format file) rather than through a `model.brain.safetensors`
-/// conversion -- see [`convert_transformers`]'s branch for why that changes
-/// both what "finish" writes and whether the upstream weights get deleted.
-/// Only families whose upstream repo ships a unified `tokenizer.json` --
-/// `TransformersRecipe`'s curated fetch (config.json, tokenizer.json,
-/// tokenizer_config.json, weights) is actually sufficient for those. `fastvlm`
-/// and `qwen3asr` do NOT belong here even though their model crate ALSO reads
-/// the directory verbatim: their upstream repos ship only `vocab.json`+
-/// `merges.txt` (no `tokenizer.json`), so they need the WHOLE repo, which is
-/// what their own `FilesRecipe` rows in `crates/modelstore/src/recipe.rs`
-/// fetch instead -- confirmed the hard way for `fastvlm` (a checkpoint
-/// converted through this curated path fails at load: "read .../vocab.json:
-/// No such file or directory").
+/// The manifest role a family's resolver reads its downloaded directory
+/// under, where that is not `weights`: `deepseek2ocr` composes four
+/// checkpoints out of one directory and calls it `dir`
+/// (`deepseek2ocr::spec::Deepseek2ocrSpec`), as does `decide`.
 ///
-/// Each entry carries the ROLE name its model crate's resolver expects, since
-/// that is not uniform: most want a single `weights` role pointing at the
-/// directory, but `deepseek2ocr` composes four checkpoints out of one
-/// directory and calls that role `dir`
-/// (`deepseek2ocr::spec::Deepseek2ocrSpec`).
-const PASSTHROUGH_TRANSFORMERS_FAMILIES: &[(&str, &str)] =
-    &[("qwen3vl", "weights"), ("nemotronasr", "weights"), ("deepseek2ocr", "dir"), ("decide", "dir")];
+/// `fastvlm` and `qwen3asr` are not transformers-recipe families at all:
+/// their upstream repos ship only `vocab.json` + `merges.txt` (no
+/// `tokenizer.json`), so they need the WHOLE repo, which their own
+/// `FilesRecipe` rows in `crates/modelstore/src/recipe.rs` fetch.
+const DIRECTORY_ROLE: &[(&str, &str)] = &[("deepseek2ocr", "dir"), ("decide", "dir")];
 
 /// The original (and still only) family: an HF `transformers`-shaped repo.
-/// A family served from the directory as downloaded (the qwen3 decoder and
-/// its variant rows, and the passthrough families) gets a manifest naming
-/// it; the rest are imported.
+/// Every family brain serves from one reads the directory exactly as
+/// downloaded - config, tokenizer and weights (safetensors or
+/// `pytorch_model*.bin`), converted per tensor in memory as they load - so
+/// "finish" is a `brain.manifest.json` naming the directory: nothing is
+/// rewritten on disk and nothing downloaded is removed.
 ///
-/// Reads `<dir>/config.json` to pick the specific glm/lfm importer
-/// the same way `modelstore::plan`'s `TransformersRecipe` already gated the
-/// download on (`family_of_architecture`) -- one implementation of "which
-/// families brain can serve", not a second guess that could drift from the
-/// first. The produced card's `id` is overridden to `vendor/repo` (each
-/// importer otherwise derives it from the output filename) so the resident
-/// registers under the fully-qualified reference the client actually asked
-/// for, not `"model.brain"`.
+/// Reads `<dir>/config.json` to learn the family the same way
+/// `modelstore::plan`'s `TransformersRecipe` already gated the download on
+/// (`family_of_architecture`) -- one implementation of "which families brain
+/// can serve", not a second guess that could drift from the first. The
+/// manifest's `id` is the fully-qualified `vendor/repo` reference, so the
+/// resident registers under what the client actually asked for.
 fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
     let config_bytes = std::fs::read(dir.join("config.json")).map_err(|e| format!("{vendor}/{repo}: read config.json: {e}"))?;
     let config: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(|e| format!("{vendor}/{repo}: config.json: {e}"))?;
     let arch = brain_modelstore::declared_architecture(&config).ok_or_else(|| format!("{vendor}/{repo}: config.json has no architecture"))?;
     let family = brain_modelstore::family_of_architecture(&arch).ok_or_else(|| format!("{vendor}/{repo}: unsupported architecture {arch:?}"))?;
-
-    // A handful of families read the downloaded HF directory VERBATIM at
-    // load time (own config.json + model.safetensors[.index.json] +
-    // tokenizer.json, HF tensor names used as-is by the model crate's own
-    // loader) -- there is no brain-format tensor rewrite to do, so "finish"
-    // is a manifest naming the directory itself as the `weights` role,
-    // never `convert_transformers`'s `model.brain.safetensors` step below.
-    // Critically this means `remove_upstream_weights` must NOT run either:
-    // for every other family the upstream `model.safetensors` is dead
-    // weight once the brain-format file exists; for these it IS what gets
-    // served.
-    if let Some((_, role)) = PASSTHROUGH_TRANSFORMERS_FAMILIES.iter().find(|(f, _)| *f == family) {
-        return convert_files(store, vendor, repo, family, &[(role, ".")]);
-    }
-    // The qwen3 decoder (and its llama/qwen2 config-variant rows) is served
-    // straight from the downloaded directory, each tensor converted as it is
-    // uploaded: nothing is rewritten on disk and nothing downloaded removed.
-    if brain_arch::by_id(family).map(|a| a.implementation().id) == Some("qwen3") {
-        return convert_files(store, vendor, repo, family, &[("weights", ".")]);
+    // gpt2 is nanogpt-style, trained from scratch -- brain has no reader for
+    // an HF GPT-2 checkpoint (a Conv1D-transpose layout), so this fails
+    // cleanly instead of registering a model nothing can load.
+    if family == "gpt2" {
+        return Err(format!("{vendor}/{repo}: gpt2 has no HF checkpoint reader yet -- fetch and convert manually"));
     }
     // qwen3tts's own repo (`speech_tokenizer/config.json` present) is claimed
     // by the `qwen3tts` `FilesRecipe` ahead of `TransformersRecipe` in
-    // `recipes()`'s order, so `family == "qwen3tts"` is never actually
-    // reachable here -- `hf: &["Qwen3TTSForConditionalGeneration"]` on its
-    // `Arch` row exists for `family_of_architecture` completeness/documentation,
-    // not because this path converts it. See `convert_qwen3tts` (dispatched
-    // from `convert`'s `"qwen3tts"` recipe-id arm instead).
-
-    let hf_dir = dir.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
-    let out_path = dir.join("model.brain.safetensors");
-    let out = out_path.to_str().ok_or_else(|| format!("{vendor}/{repo}: non-UTF8 store path"))?;
-    let id = format!("{vendor}/{repo}");
-
-    // Every consumer of these three is behind an `import-*` feature. In a build
-    // with none of them on, the match below is nothing but diagnostic arms and
-    // the bindings are genuinely unused -- said here rather than by prefixing
-    // them with `_`, which would also silence a real unused binding later.
-    #[cfg(not(any(
-        feature = "import-glmdsa",
-        feature = "import-lfm2",
-        feature = "import-qwen3omnimoe"
-    )))]
-    let _ = (hf_dir, out, &id);
-
-    let result = match family {
-        #[cfg(feature = "import-glmdsa")]
-        "glmdsa" => glmdsa::import::import_as(hf_dir, out, Some(&id)),
-        #[cfg(not(feature = "import-glmdsa"))]
-        "glmdsa" => Err(no_importer(vendor, repo, "glmdsa", "import-glmdsa")),
-        #[cfg(feature = "import-lfm2")]
-        "lfm2" => lfm2::import::import_as(hf_dir, out, Some(&id)),
-        #[cfg(not(feature = "import-lfm2"))]
-        "lfm2" => Err(no_importer(vendor, repo, "lfm2", "import-lfm2")),
-        // gpt2 is nanogpt-style, trained from scratch -- brain has never had
-        // an HF importer for it (unlike glmdsa/qwen3/lfm2, all
-        // production-tested). Writing one is real new-crate work, not "wire
-        // the dispatch", so this fails cleanly instead of guessing at a
-        // Conv1D-transpose import.
-        "gpt2" => Err("gpt2 has no HF import path yet -- fetch and convert manually".to_string()),
-        // qwen3omnimoe (Qwen3-Omni) is recognized via an exact HF class-name
-        // match, so it is never mis-routed to the dense qwen3 importer even
-        // though its class name contains "qwen" as a substring. The importer
-        // itself streams from the sharded HF dir fine -- what is NOT yet
-        // true is that the resulting unified checkpoint is directly loadable
-        // by qwen3tts::mtp::MtpModel/mimi::Codec for the Talker/Code2Wav pieces
-        // (two open naming gaps); Thinker-only generation is unaffected by
-        // either gap.
-        #[cfg(feature = "import-qwen3omnimoe")]
-        "qwen3omnimoe" => qwen3omnimoe::import::import_as(hf_dir, out, Some(&id)),
-        #[cfg(not(feature = "import-qwen3omnimoe"))]
-        "qwen3omnimoe" => Err(no_importer(vendor, repo, "qwen3omnimoe", "import-qwen3omnimoe")),
-        other => Err(format!("architecture {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
-    };
-    result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))?;
-    // The upstream weights (single model.safetensors, or a model-*-of-*.safetensors
-    // shard set + its index) are never read again once model.brain.safetensors
-    // exists -- Store::local/scan only ever load BASE_WEIGHTS_FILE -- so keeping
-    // them is pure disk waste (often larger than the converted file itself, e.g.
-    // a bf16 upstream vs. brain's fp32-only format). Best-effort: a failed
-    // cleanup must not fail an otherwise-successful convert.
-    remove_upstream_weights(&dir);
-    Ok(())
+    // `recipes()`'s order, so `family == "qwen3tts"` never reaches here.
+    let role = DIRECTORY_ROLE.iter().find(|(f, _)| *f == family).map_or("weights", |(_, role)| *role);
+    convert_files(store, vendor, repo, family, &[(role, ".")])
 }
 
 /// Qwen3-TTS's finish step: unlike every other `convert_transformers` family,
@@ -586,10 +494,9 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
 /// (`tts_model_type != "base"`), so a failure there is a warning, matching
 /// `tts_cli.rs::import`'s own policy, never a hard error for the whole fetch.
 ///
-/// Two roles, both kept (no `remove_upstream_weights` -- the downloaded
-/// checkpoint dir doubles as `ckpt`, still needed for tokenizer/config at
-/// serve time): `ckpt` -> the repo dir itself, `weights_dir` -> the new
-/// `brain_tts/` subdirectory holding the four converted files.
+/// Two roles: `ckpt` -> the repo dir itself (still needed for
+/// tokenizer/config at serve time), `weights_dir` -> the new `brain_tts/`
+/// subdirectory holding the four converted files.
 #[cfg(not(feature = "import-qwen3tts"))]
 fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     let _ = store;
@@ -618,26 +525,6 @@ fn convert_qwen3tts(store: &Store, vendor: &str, repo: &str) -> Result<(), Strin
     convert_files(store, vendor, repo, "qwen3tts", &[("ckpt", "."), ("weights_dir", "brain_tts")])
 }
 
-/// See [`convert_transformers`]'s cleanup note. Handles every shape
-/// `TransformersRecipe::artifacts` can have downloaded, in either format: a
-/// single `model.safetensors` / `pytorch_model.bin`, or its shard index plus
-/// the `model-*.safetensors` / `pytorch_model-*.bin` shards it names.
-fn remove_upstream_weights(dir: &Path) {
-    for index in ["model.safetensors.index.json", "pytorch_model.bin.index.json"] {
-        std::fs::remove_file(dir.join(index)).ok();
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for name in entries.filter_map(|e| e.ok()).map(|e| e.file_name()) {
-        let name = name.to_string_lossy();
-        let upstream = name == "model.safetensors"
-            || name == "pytorch_model.bin"
-            || (name.starts_with("model-") && name.ends_with(".safetensors"))
-            || (name.starts_with("pytorch_model-") && name.ends_with(".bin"));
-        if upstream {
-            std::fs::remove_file(dir.join(&*name)).ok();
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -765,6 +652,26 @@ mod tests {
             let mut got = Vec::new();
             assert!(checkpoint::TensorSource::with_tensor(&*src, &n, &mut |t| got = t.to_vec()), "{n}");
             assert_eq!(got, init[&n], "{n}");
+        }
+    }
+
+    /// Every transformers-shaped family finishes a pull by naming the
+    /// downloaded directory: no converted copy, and the download untouched.
+    #[test]
+    fn a_pull_finishes_with_a_manifest_and_keeps_the_download() {
+        for (class, family) in [("Lfm2ForCausalLM", "lfm2"), ("Qwen3OmniMoeForConditionalGeneration", "qwen3omnimoe"), ("LlamaForCausalLM", "llama")] {
+            let store = store(&format!("loader-supply-test-manifest-{family}"));
+            let reference = ModelRef::parse(&format!("test/{family}")).unwrap();
+            let dir = store.repo_dir(&reference);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), serde_json::json!({"architectures": [class]}).to_string()).unwrap();
+            std::fs::write(dir.join("model.safetensors"), b"downloaded").unwrap();
+            convert_transformers(&store, "test", family).unwrap();
+            let manifest: CompoundManifest = serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+            assert_eq!(manifest.family, family);
+            assert_eq!(manifest.roles.get("weights").map(String::as_str), Some("."));
+            assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap(), b"downloaded", "{family}: the download is kept as is");
+            assert!(!dir.join("model.brain.safetensors").exists(), "{family}: nothing is converted on disk");
         }
     }
 
