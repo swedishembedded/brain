@@ -14,6 +14,60 @@
 
 use serde_json::Value;
 
+/// The largest JSON header a safetensors file may declare, in bytes. The same
+/// cap the format's reference implementation (the `safetensors` crate's
+/// `MAX_HEADER_SIZE`) enforces; a real header is kilobytes to a few
+/// megabytes even for checkpoints with tens of thousands of tensors.
+pub const MAX_HEADER_BYTES: u64 = 100_000_000;
+
+/// A safetensors length prefix that no header in this file can satisfy: it
+/// claims more bytes than follow the prefix, or more than
+/// [`MAX_HEADER_BYTES`]. The file is corrupt, truncated, or not safetensors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderLenError {
+    /// The file (or buffer description) the prefix was read from.
+    pub file: String,
+    /// The header length the first 8 bytes claim.
+    pub claimed: u64,
+    /// The total size of the file, prefix included.
+    pub file_len: u64,
+}
+
+impl std::fmt::Display for HeaderLenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "safetensors: {}: header length prefix claims {} bytes, but the file is {} bytes and a header may be at most {} bytes - corrupt, truncated, or not a safetensors file",
+            self.file, self.claimed, self.file_len, MAX_HEADER_BYTES
+        )
+    }
+}
+
+impl std::error::Error for HeaderLenError {}
+
+impl From<HeaderLenError> for std::io::Error {
+    fn from(e: HeaderLenError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    }
+}
+
+/// Validate a safetensors header length prefix before anything is sized by
+/// it. `claimed` is the file's first 8 bytes read as a little-endian `u64`,
+/// `file_len` the file's total size. On success the header occupies bytes
+/// `8..8 + len` and that range lies inside the file, so the returned length
+/// is safe both to allocate and to slice with.
+///
+/// Every reader of a safetensors length prefix goes through this: the value
+/// comes straight from an untrusted file, and trusting it turns a corrupt
+/// download into an allocation the process cannot survive.
+pub fn validate_header_len(file: &str, claimed: u64, file_len: u64) -> Result<usize, HeaderLenError> {
+    if claimed > MAX_HEADER_BYTES || claimed > file_len.saturating_sub(8) {
+        return Err(HeaderLenError { file: file.to_string(), claimed, file_len });
+    }
+    // Bounded by MAX_HEADER_BYTES above, so this fits any target's usize.
+    Ok(claimed as usize)
+}
+
 /// A tensor read from a safetensors file: name, shape, and fp32 values.
 pub struct StTensor {
     pub name: String,
@@ -201,16 +255,13 @@ fn decode_elems(raw: &[u8], width: usize, f: fn(&[u8]) -> f32) -> Vec<f32> {
 }
 
 /// Split a safetensors buffer into its parsed header and the tensor blob
-/// behind it.
-fn header_and_blob(bytes: &[u8]) -> Result<(Value, &[u8]), String> {
+/// behind it. `source` names the file (or buffer) in errors.
+fn header_and_blob<'a>(bytes: &'a [u8], source: &str) -> Result<(Value, &'a [u8]), String> {
     if bytes.len() < 8 {
         return Err("safetensors: file too short".into());
     }
-    let hlen = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let hend = 8 + hlen;
-    if bytes.len() < hend {
-        return Err("safetensors: truncated header".into());
-    }
+    let claimed = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+    let hend = 8 + validate_header_len(source, claimed, bytes.len() as u64).map_err(|e| e.to_string())?;
     let header: Value = serde_json::from_slice(&bytes[8..hend])
         .map_err(|e| format!("safetensors: bad header json: {e}"))?;
     Ok((header, &bytes[hend..]))
@@ -218,8 +269,8 @@ fn header_and_blob(bytes: &[u8]) -> Result<(Value, &[u8]), String> {
 
 /// The tensors' on-disk byte total declared by the header - what a
 /// [`crate::load_progress::LoadMeter`] for this file counts against.
-fn tensor_byte_total(bytes: &[u8]) -> Result<u64, String> {
-    let (header, _) = header_and_blob(bytes)?;
+fn tensor_byte_total(bytes: &[u8], source: &str) -> Result<u64, String> {
+    let (header, _) = header_and_blob(bytes, source)?;
     let obj = header.as_object().ok_or("safetensors: header is not an object")?;
     let mut total = 0u64;
     for (name, meta) in obj {
@@ -236,14 +287,15 @@ fn tensor_byte_total(bytes: &[u8]) -> Result<u64, String> {
 
 /// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
 pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
-    parse_inner(bytes, |_| {})
+    parse_inner(bytes, "in-memory buffer", |_| {})
 }
 
 /// [`parse`] for callers that materialize a whole file: `on_tensor` receives
 /// each tensor's on-disk byte length as it is decoded, the hook the mmap
-/// readers' load-progress reporting hangs on.
-fn parse_inner(bytes: &[u8], mut on_tensor: impl FnMut(usize)) -> Result<Vec<StTensor>, String> {
-    let (header, blob) = header_and_blob(bytes)?;
+/// readers' load-progress reporting hangs on. `source` names the file (or
+/// buffer) in errors.
+fn parse_inner(bytes: &[u8], source: &str, mut on_tensor: impl FnMut(usize)) -> Result<Vec<StTensor>, String> {
+    let (header, blob) = header_and_blob(bytes, source)?;
     let obj = header.as_object().ok_or("safetensors: header is not an object")?;
 
     let mut out = Vec::new();
@@ -314,8 +366,8 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
     // `crate::gguf::MmapGguf::open` already rely on for every mapped
     // checkpoint in this crate.
     let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("cannot mmap {path}: {e}"))?;
-    let meter = crate::load_progress::LoadMeter::new(path.to_string(), tensor_byte_total(&mmap)?);
-    parse_inner(&mmap, |raw| meter.note(raw as u64))
+    let meter = crate::load_progress::LoadMeter::new(path.to_string(), tensor_byte_total(&mmap, path)?);
+    parse_inner(&mmap, path, |raw| meter.note(raw as u64))
 }
 
 /// Read all tensors from a HuggingFace model directory, handling both the

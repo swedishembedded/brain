@@ -76,19 +76,12 @@ fn repo_path(rel: &str) -> String {
     /// projector tensors. Skips if the checkpoint isn't present.
     #[test]
     fn real_checkpoint_decoder_and_projector_covered() {
-        use std::io::Read;
         let path = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
-        let Ok(mut f) = std::fs::File::open(path) else {
+        if !std::path::Path::new(&path).is_file() {
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
-        };
-        let mut len = [0u8; 8];
-        f.read_exact(&mut len).unwrap();
-        let n = u64::from_le_bytes(len) as usize;
-        let mut buf = vec![0u8; n];
-        f.read_exact(&mut buf).unwrap();
-        let hdr: serde_json::Value = serde_json::from_slice(&buf).unwrap();
-        let names: Vec<String> = hdr.as_object().unwrap().keys().filter(|k| *k != "__metadata__").cloned().collect();
+        }
+        let names: Vec<String> = checkpoint::mmap::MmapSafetensors::open(&path).unwrap().names().to_vec();
 
         let cfg = crate::config::FastVlmConfig::fastvlm_0_5b();
         let decoder: std::collections::HashSet<String> = names.iter().filter_map(|n| map_decoder(n, &cfg.decoder)).collect();

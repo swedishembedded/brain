@@ -92,11 +92,8 @@ impl MmapSafetensors {
         if mmap.len() < 8 {
             return Err("safetensors: file too short".into());
         }
-        let hlen = u64::from_le_bytes(mmap[0..8].try_into().unwrap()) as usize;
-        let hend = 8 + hlen;
-        if mmap.len() < hend {
-            return Err("safetensors: truncated header".into());
-        }
+        let claimed = u64::from_le_bytes(mmap[0..8].try_into().unwrap());
+        let hend = 8 + crate::safetensors::validate_header_len(&path.to_string_lossy(), claimed, mmap.len() as u64).map_err(|e| e.to_string())?;
         let header: Value = serde_json::from_slice(&mmap[8..hend]).map_err(|e| format!("safetensors: bad header json: {e}"))?;
         let obj = header.as_object().ok_or("safetensors: header is not an object")?;
         let mut index = HashMap::new();

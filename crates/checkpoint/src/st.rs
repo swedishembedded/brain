@@ -382,9 +382,6 @@ pub fn load_safetensors(path: &str) -> io::Result<StModel> {
     Ok(StModel { tensors, metadata: m.metadata().clone() })
 }
 
-/// Write tensors as F32 safetensors. `config` is stored under `brain.config`
-/// and `card` (if any) via [`ModelCard::to_metadata`]. The write is atomic
-/// (tmp + rename), mirroring the custom-format `save`.
 #[cfg(not(target_arch = "wasm32"))]
 /// Rewrite a serialised file's header with its keys in sorted order.
 ///
@@ -402,8 +399,9 @@ pub fn load_safetensors(path: &str) -> io::Result<StModel> {
 /// corrupted one.
 fn canonical_header(mut out: Vec<u8>) -> io::Result<Vec<u8>> {
     let Some(len_bytes) = out.get(..8) else { return Ok(out) };
-    let n = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes")) as usize;
-    let Some(header) = out.get(8..8 + n) else { return Ok(out) };
+    let claimed = u64::from_le_bytes(len_bytes.try_into().expect("8 bytes"));
+    let Ok(n) = crate::safetensors::validate_header_len("serialised checkpoint", claimed, out.len() as u64) else { return Ok(out) };
+    let header = &out[8..8 + n];
     // `serde_json::Map` is a `BTreeMap` unless `preserve_order` is on, which
     // this workspace deliberately leaves off, so parsing and re-emitting
     // sorts the keys.
@@ -418,6 +416,9 @@ fn canonical_header(mut out: Vec<u8>) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Write tensors as F32 safetensors. `config` is stored under `brain.config`
+/// and `card` (if any) via [`ModelCard::to_metadata`]. The write is atomic
+/// (tmp + rename), mirroring the custom-format `save`.
 pub fn save_safetensors(
     path: &str,
     tensors: &[(String, Vec<u64>, Vec<f32>)],
@@ -467,22 +468,25 @@ pub fn save_safetensors(
 }
 
 /// Read only the leading `[u64 len][JSON header]` of a safetensors file, never
-/// the tensor blob.
+/// the tensor blob: the header's byte length and its parsed JSON. The length
+/// prefix is validated against the file's size before anything is allocated.
 #[cfg(not(target_arch = "wasm32"))]
-fn read_header_json(path: &str) -> io::Result<Value> {
+fn read_header(path: &str) -> io::Result<(u64, Value)> {
     let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes)?;
-    let hlen = u64::from_le_bytes(len_bytes) as usize;
+    let hlen = crate::safetensors::validate_header_len(path, u64::from_le_bytes(len_bytes), file_len)?;
     let mut hbytes = vec![0u8; hlen];
     file.read_exact(&mut hbytes)?;
-    serde_json::from_slice(&hbytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let header = serde_json::from_slice(&hbytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok((hlen as u64, header))
 }
 
 /// Read the `__metadata__` map from a safetensors header without loading tensors.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_metadata(path: &str) -> io::Result<BTreeMap<String, String>> {
-    let header = read_header_json(path)?;
+    let (_, header) = read_header(path)?;
     let mut out = BTreeMap::new();
     if let Some(obj) = header.get("__metadata__").and_then(|m| m.as_object()) {
         for (k, v) in obj {
@@ -510,13 +514,7 @@ pub fn read_card(path: &str) -> io::Result<Option<ModelCard>> {
 /// through the tensor blob (the case this exists to detect).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn declared_data_extent(path: &str) -> io::Result<u64> {
-    let mut file = std::fs::File::open(path)?;
-    let mut len_bytes = [0u8; 8];
-    file.read_exact(&mut len_bytes)?;
-    let hlen = u64::from_le_bytes(len_bytes);
-    let mut hbytes = vec![0u8; hlen as usize];
-    file.read_exact(&mut hbytes)?;
-    let header: Value = serde_json::from_slice(&hbytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let (hlen, header) = read_header(path)?;
     let obj = header.as_object().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "st: header not an object"))?;
     let mut max_end: u64 = 0;
     for (name, meta) in obj {
@@ -533,7 +531,7 @@ pub fn declared_data_extent(path: &str) -> io::Result<u64> {
 /// Sum tensor element counts from a safetensors header without loading tensors.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn param_count_from_header(path: &str) -> io::Result<u64> {
-    let header = read_header_json(path)?;
+    let (_, header) = read_header(path)?;
     let obj = header
         .as_object()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "st: header not an object"))?;
