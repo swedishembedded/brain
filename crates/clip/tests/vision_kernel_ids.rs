@@ -27,8 +27,8 @@
 
 use std::collections::HashMap;
 
-use clip::config::EvaVisionConfig;
-use clip::model::{EvaVision, TEXT_PIPELINES, VISION_PIPELINES};
+use clip::config::{ClipVisionConfig, EvaVisionConfig, TextAct, VisionStem};
+use clip::model::{ClipVision, EvaVision, PatchSource, CLIP_VISION_PIPELINES, TEXT_PIPELINES, VISION_PIPELINES};
 
 /// A tower small enough to build in milliseconds but structurally complete:
 /// two blocks (so residuals and the block loop run), a 2x2 patch grid, and a
@@ -107,5 +107,47 @@ fn eva_vision_resolves_its_kernels_by_name_on_a_shared_device() {
         shared.read_cls_embed_l2norm(),
         want_cls,
         "EVA CLS embedding differs on a shared device: kernels were resolved by position, not by name"
+    );
+}
+
+/// The same spec for [`ClipVision`], whose consumers put it on a device shared
+/// with a text tower (LLaVA), a SAM trunk (DeepSeek-OCR) or a connector and a
+/// pooling kernel (Moondream). `CLIP_VISION_PIPELINES` placed AFTER another
+/// tower's list shifts every one of its positions; the SigLIP stem at the
+/// tanh-GELU is the configuration that list order reaches last.
+#[test]
+fn clip_vision_resolves_its_kernels_by_name_on_a_shared_device() {
+    let cfg = ClipVisionConfig {
+        shape: gguf::deepseek_ocr_vision::ClipConfig {
+            d_model: 64,
+            n_layers: 2,
+            n_heads: 4,
+            ffn_hidden: 48,
+            patch_size: 2,
+            image_size: 8,
+            n_positions: 16,
+            layer_norm_eps: 1e-6,
+        },
+        act: TextAct::GeluTanh,
+        stem: VisionStem::Siglip,
+    };
+    let w = clip::init::init_vision_weights(&cfg, 5);
+    let px = clip::init::fixed_pixels(&cfg, 1, 9);
+
+    let dev = gpu_core::testgpu::dev(CLIP_VISION_PIPELINES);
+    let bare = ClipVision::new_on(dev.share(), cfg.clone(), 1, PatchSource::Pixels, &w);
+    bare.set_pixels(&px);
+    bare.forward();
+    let want = bare.read_output();
+    drop(bare);
+
+    let union: Vec<(&str, &str)> = TEXT_PIPELINES.iter().chain(CLIP_VISION_PIPELINES.iter()).copied().collect();
+    let shared = ClipVision::new_on(dev.new_like(&union), cfg, 1, PatchSource::Pixels, &w);
+    shared.set_pixels(&px);
+    shared.forward();
+    assert_eq!(
+        shared.read_output(),
+        want,
+        "ClipVision output differs on a shared device: kernels were resolved by position, not by name"
     );
 }

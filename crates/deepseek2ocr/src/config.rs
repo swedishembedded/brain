@@ -26,7 +26,7 @@
 //! is modelled here as [`DeepseekOcrConfig::patch_bypass`] -- off by default,
 //! settable only by a fixture, and refused by `check_real_scale_shaped`.
 
-use clip::config::{ClipVisionConfig, TextAct};
+use clip::config::{ClipVisionConfig, TextAct, VisionStem};
 use deepseek2::DeepseekV2Config;
 use sam1::SamViTConfig;
 
@@ -199,6 +199,7 @@ impl DeepseekOcrConfig {
                     layer_norm_eps: 1e-5,
                 },
                 act: TextAct::QuickGelu,
+                stem: VisionStem::Clip,
             },
             decoder: DeepseekV2Config::tiny(),
             // c_out 11 != clip_width 14 -- the concat-order gate. See the header.

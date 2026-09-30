@@ -199,6 +199,7 @@ mod tests {
                 layer_norm_eps: 1e-5,
             },
             act: clip::config::TextAct::QuickGelu,
+            stem: clip::config::VisionStem::Clip,
         };
         let hidden = 24usize;
         let n_visual = vision_cfg.native_patches(); // 4

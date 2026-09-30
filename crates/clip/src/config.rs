@@ -15,13 +15,43 @@
 //! is asserted against `testdata/clip/manifest.json` by the parity test.
 
 /// MLP activation. CLIP-L uses OpenAI's sigmoid approximation, bigG the exact
-/// erf form - they differ by ~1e-2 and are NOT interchangeable.
+/// erf form - they differ by ~1e-2 and are NOT interchangeable. The same three
+/// are what the vision towers run, so the image configs carry this type too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextAct {
     /// `x * sigmoid(1.702 x)` (`quick_gelu.wgsl`).
     QuickGelu,
-    /// `0.5 x (1 + erf(x/sqrt 2))` (`gelu_erf.wgsl`) - transformers' `"gelu"`.
+    /// `0.5 x (1 + erf(x/sqrt 2))` (`gelu_erf.wgsl`) - transformers' `"gelu"`,
+    /// torch's default `nn.GELU`.
     GeluErf,
+    /// `0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))` (`gelu.wgsl`) -
+    /// `nn.GELU(approximate="tanh")`, Moondream's `gelu_approx`.
+    GeluTanh,
+}
+
+impl TextAct {
+    /// The registered name of the forward kernel. All three are `(x) -> (y)`
+    /// with a `Params { total }` signature, so a tower resolves the one its
+    /// config names and dispatches it through the same slot.
+    pub fn kernel(self) -> &'static str {
+        match self {
+            TextAct::QuickGelu => "quick_gelu",
+            TextAct::GeluErf => "gelu_erf",
+            TextAct::GeluTanh => "gelu",
+        }
+    }
+
+    /// The registered name of THIS activation's adjoint. Pairing a forward
+    /// with another activation's backward is a real bug that a gradient check
+    /// comparing the tower against itself cannot see - so the pair lives here,
+    /// in one place, rather than as two independent lookups.
+    pub fn bwd_kernel(self) -> &'static str {
+        match self {
+            TextAct::QuickGelu => "quick_gelu_bwd",
+            TextAct::GeluErf => "gelu_erf_bwd",
+            TextAct::GeluTanh => "gelu_bwd",
+        }
+    }
 }
 
 /// One CLIP text tower.
@@ -340,13 +370,55 @@ impl EvaVisionConfig {
 /// what `model::vit::vit_block_fwd_cached` / `vit_block_bwd` express, so
 /// `crate::model::ClipVision` composes those instead of carrying its own block
 /// graph.
+///
+/// The same blocks sit under two stems ([`VisionStem`]): OpenAI CLIP's and
+/// SigLIP's. The blocks are identical; what differs is only what happens
+/// before the first block and after the last one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipVisionConfig {
-    /// The checkpoint-side shape, owned by `crates/gguf`.
+    /// The checkpoint-side shape, owned by `crates/gguf`. `n_positions` is the
+    /// learned position table's row count, class-token row included when the
+    /// stem has one.
     pub shape: gguf::deepseek_ocr_vision::ClipConfig,
     /// MLP activation (`quick_gelu` for every released CLIP-L; `gelu_erf` is
-    /// the OpenCLIP-style alternative the same graph runs unchanged).
+    /// the OpenCLIP-style alternative the same graph runs unchanged, and the
+    /// `nn.GELU` timm's SigLIP uses; `gelu` (tanh) is Moondream's SigLIP).
     pub act: TextAct,
+    /// Which stem wraps the blocks.
+    pub stem: VisionStem,
+}
+
+/// What sits around the shared pre-LN blocks of a [`ClipVisionConfig`] tower.
+///
+/// ```text
+///          class token  patch conv  positions        before blocks  after blocks
+/// Clip     prepended    no bias     1 + patches      pre_norm       -
+/// Siglip   none         bias        patches          -              post_norm
+/// ```
+///
+/// Both learn one absolute position row per token and resample the patch rows
+/// onto a non-native grid the same way; SigLIP simply has no class row to lift
+/// out first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VisionStem {
+    /// OpenAI CLIP ViT (`CLIPVisionEmbeddings` + `pre_layrnorm`), as
+    /// DeepSeek-OCR's DeepEncoder and LLaVA consume it: the last block's
+    /// hidden states, no post-LayerNorm.
+    Clip,
+    /// SigLIP (timm `VisionTransformer(class_token=False, global_pool="map")`
+    /// read at `forward_features`, and Moondream's copy of the same tower):
+    /// the final `norm` is part of the output.
+    Siglip,
+}
+
+impl VisionStem {
+    /// Rows the stem prepends to the patch tokens (the class token).
+    pub fn prefix_tokens(self) -> u32 {
+        match self {
+            VisionStem::Clip => 1,
+            VisionStem::Siglip => 0,
+        }
+    }
 }
 
 /// The epsilon DeepSeek-OCR's CLIP body actually runs its LayerNorms at.
@@ -408,6 +480,7 @@ impl ClipVisionConfig {
                 layer_norm_eps: DEEPSEEK_OCR_CLIP_EPS,
             },
             act: TextAct::GeluErf,
+            stem: VisionStem::Clip,
         }
     }
 
@@ -429,7 +502,11 @@ impl ClipVisionConfig {
     pub fn from_gguf(cfg: &gguf::deepseek_ocr_vision::DeepseekOcrVisionConfig) -> ClipVisionConfig {
         let mut shape = cfg.clip.clone();
         shape.layer_norm_eps = DEEPSEEK_OCR_CLIP_EPS;
-        ClipVisionConfig { shape, act: if cfg.use_gelu { TextAct::GeluErf } else { TextAct::QuickGelu } }
+        ClipVisionConfig {
+            shape,
+            act: if cfg.use_gelu { TextAct::GeluErf } else { TextAct::QuickGelu },
+            stem: VisionStem::Clip,
+        }
     }
 
     pub fn d_model(&self) -> u32 {
@@ -456,7 +533,8 @@ impl ClipVisionConfig {
     pub fn eps(&self) -> f32 {
         self.shape.layer_norm_eps
     }
-    /// Learned position rows in the checkpoint (class token + native patches).
+    /// Learned position rows in the checkpoint (the stem's class-token row, if
+    /// any, + native patches).
     pub fn n_positions(&self) -> u32 {
         self.shape.n_positions
     }
@@ -499,33 +577,69 @@ impl ClipVisionConfig {
                 layer_norm_eps: 1e-5,
             },
             act: TextAct::QuickGelu,
+            stem: VisionStem::Clip,
+        }
+    }
+
+    /// `siglip_large_patch16_384` - DeepSeek-VL's low-resolution tower and
+    /// Janus-Pro's understanding tower (both build it with
+    /// `create_siglip_vit(select_layer=-1)`, i.e. all 24 blocks): 1024-d, 16
+    /// heads, `mlp_ratio` 4, patch 16 at 384px, 576 learned positions (no
+    /// class token), LayerNorm eps 1e-6 (the builder's
+    /// `partial(nn.LayerNorm, eps=1e-6)`), exact-erf GELU (`nn.GELU`).
+    pub fn siglip_large_patch16_384() -> ClipVisionConfig {
+        ClipVisionConfig {
+            shape: gguf::deepseek_ocr_vision::ClipConfig {
+                d_model: 1024,
+                n_layers: 24,
+                n_heads: 16,
+                ffn_hidden: 4096,
+                patch_size: 16,
+                image_size: 384,
+                n_positions: 576,
+                layer_norm_eps: 1e-6,
+            },
+            act: TextAct::GeluErf,
+            stem: VisionStem::Siglip,
         }
     }
 
     /// Canonical brain-side tensor manifest (see
     /// [`ClipTextConfig::tensor_manifest`]).
     ///
-    /// Names and ORDER are `gguf::deepseek_ocr_vision`'s `param_list()` entries
-    /// with the `vision.clip.` prefix stripped, so the importer is a prefix
-    /// strip and the two lists cannot drift - asserted by
-    /// `manifest_matches_the_gguf_param_list`.
-    ///
-    /// Two absences are real, not oversights:
+    /// For the [`VisionStem::Clip`] stem, names and ORDER are
+    /// `gguf::deepseek_ocr_vision`'s `param_list()` entries with the
+    /// `vision.clip.` prefix stripped, so the importer is a prefix strip and the
+    /// two lists cannot drift - asserted by
+    /// `manifest_matches_the_gguf_param_list`. Two absences there are real, not
+    /// oversights:
     ///   * **no `patch_embed.bias`** - CLIP's patch embedding is
     ///     `Conv2d(3, D, k, stride=k, bias=False)`.
     ///   * **no post-LayerNorm** - DeepSeek-OCR consumes the last block's
     ///     hidden states directly, so the mmproj carries `pre_norm` only.
+    ///
+    /// The [`VisionStem::Siglip`] stem is the mirror image: `patch_embed.bias`
+    /// and `post_norm.*` present, `class_embed` and `pre_norm.*` absent, and
+    /// `pos_embed` one row per native patch.
     pub fn tensor_manifest(&self) -> Vec<(String, Vec<usize>)> {
         let d = self.d_model() as usize;
         let ff = self.mlp_hidden() as usize;
         let p = self.patch() as usize;
-        let mut v: Vec<(String, Vec<usize>)> = vec![
-            ("class_embed".into(), vec![d]),
-            ("patch_embed.weight".into(), vec![d, 3, p, p]),
-            ("pos_embed".into(), vec![self.n_positions() as usize, d]),
-            ("pre_norm.weight".into(), vec![d]),
-            ("pre_norm.bias".into(), vec![d]),
-        ];
+        let pos = ("pos_embed".to_string(), vec![self.n_positions() as usize, d]);
+        let mut v: Vec<(String, Vec<usize>)> = match self.stem {
+            VisionStem::Clip => vec![
+                ("class_embed".into(), vec![d]),
+                ("patch_embed.weight".into(), vec![d, 3, p, p]),
+                pos,
+                ("pre_norm.weight".into(), vec![d]),
+                ("pre_norm.bias".into(), vec![d]),
+            ],
+            VisionStem::Siglip => vec![
+                ("patch_embed.weight".into(), vec![d, 3, p, p]),
+                ("patch_embed.bias".into(), vec![d]),
+                pos,
+            ],
+        };
         for l in 0..self.layers() {
             let b = format!("blocks.{l}");
             v.push((format!("{b}.norm1.weight"), vec![d]));
@@ -540,6 +654,10 @@ impl ClipVisionConfig {
             v.push((format!("{b}.mlp.fc1.bias"), vec![ff]));
             v.push((format!("{b}.mlp.fc2.weight"), vec![d, ff]));
             v.push((format!("{b}.mlp.fc2.bias"), vec![d]));
+        }
+        if self.stem == VisionStem::Siglip {
+            v.push(("post_norm.weight".into(), vec![d]));
+            v.push(("post_norm.bias".into(), vec![d]));
         }
         v
     }
@@ -736,6 +854,35 @@ mod tests {
         assert_eq!(c.penultimate_layer(), 22, "hidden_states[-2] = block 22's output");
         // 5 stem + 24 blocks x 12.
         assert_eq!(c.tensor_manifest().len(), 5 + 24 * 12);
+    }
+
+    /// timm/DeepSeek-VL `siglip_large_patch16_384` - the low-resolution tower
+    /// of DeepSeek-VL and Janus-Pro's understanding tower. Every number is the
+    /// reference's `SigLIP_MODEL_CONFIG` row, and the manifest's stem half is
+    /// what separates it from CLIP: no class token (so 576 positions, not 577),
+    /// a biased patch conv, no pre-norm, a final post-norm.
+    #[test]
+    fn siglip_large_patch16_384_matches_the_reference_shape() {
+        let c = ClipVisionConfig::siglip_large_patch16_384();
+        assert_eq!(c.stem, VisionStem::Siglip);
+        assert_eq!((c.d_model(), c.layers(), c.heads(), c.mlp_hidden()), (1024, 24, 16, 4096));
+        assert_eq!((c.patch(), c.image_size(), c.native_grid()), (16, 384, 24));
+        assert_eq!(c.n_positions(), 576, "no class-token row");
+        assert_eq!(c.eps(), 1e-6);
+        assert_eq!(c.act, TextAct::GeluErf, "nn.GELU is the exact-erf form");
+
+        let m = c.tensor_manifest();
+        let names: Vec<&str> = m.iter().map(|(n, _)| n.as_str()).collect();
+        for absent in ["class_embed", "pre_norm.weight", "pre_norm.bias"] {
+            assert!(!names.contains(&absent), "{absent} is a CLIP-stem tensor");
+        }
+        let shape = |n: &str| m.iter().find(|(k, _)| k == n).map(|(_, s)| s.clone());
+        assert_eq!(shape("patch_embed.weight"), Some(vec![1024, 3, 16, 16]));
+        assert_eq!(shape("patch_embed.bias"), Some(vec![1024]));
+        assert_eq!(shape("pos_embed"), Some(vec![576, 1024]));
+        assert_eq!(shape("post_norm.weight"), Some(vec![1024]));
+        // 3 stem + 24 blocks x 12 + post-norm(2).
+        assert_eq!(m.len(), 3 + 24 * 12 + 2);
     }
 
     #[test]

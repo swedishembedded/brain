@@ -16,12 +16,17 @@
 //! builder expresses exactly - so it composes `model::vit::vit_block_fwd_cached`
 //! / `vit_block_bwd` and adds no second block graph.
 //!
+//! `ClipVision` carries two stems around those blocks
+//! ([`config::VisionStem`]): OpenAI CLIP's (class token, pre-norm) and SigLIP's
+//! (no class token, biased patch conv, post-norm). The SigLIP stem is what
+//! DeepSeek-VL's and Janus-Pro's timm tower ([`import::siglip`]) runs.
+//!
 //! `ClipVision` is also where the **`PatchSource` seam** lives: DeepSeek-OCR
 //! injects its SAM branch's compressed feature map as CLIP's patch tokens,
 //! bypassing the conv patch embedding entirely, and that bypass is a first-class
 //! (and bit-identity-tested) API rather than a per-model branch.
 //!
-//! The **text** and **vanilla-CLIP image** towers are trainable:
+//! The **text** and **CLIP/SigLIP image** towers are trainable:
 //! `ClipText::new_train_on` / `ClipVision::new_train_on` add the reverse pass
 //! over the same forward. The EVA image tower is still forward-only, as are the
 //! `capability` Provider / residency adapter / D-Bus surface and the CLIP BPE

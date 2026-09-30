@@ -40,7 +40,7 @@ use std::sync::OnceLock;
 use data::rng::Rng;
 use gpu_core::Gpu;
 
-use clip::config::{ClipVisionConfig, TextAct};
+use clip::config::{ClipVisionConfig, TextAct, VisionStem};
 use clip::model::{ClipVision, PatchSource, CLIP_VISION_PIPELINES};
 
 // ---------------------------------------------------------------------------
@@ -69,6 +69,7 @@ fn tiny(act: TextAct) -> ClipVisionConfig {
             layer_norm_eps: 1e-5,
         },
         act,
+        stem: VisionStem::Clip,
     }
 }
 
@@ -504,6 +505,7 @@ fn tiled(act: TextAct) -> ClipVisionConfig {
             layer_norm_eps: 1e-5,
         },
         act,
+        stem: VisionStem::Clip,
     }
 }
 
@@ -589,4 +591,190 @@ fn a_gradient_step_reduces_the_proxy_objective() {
     let l1 = h.loss();
     eprintln!("proxy loss {l0:.6} -> {l1:.6} (grad norm {gnorm:.4})");
     assert!(l1 < l0, "a descent step did not decrease the loss: {l0} -> {l1}");
+}
+
+// ---------------------------------------------------------------------------
+// 6. the SigLIP stem
+// ---------------------------------------------------------------------------
+
+/// A SigLIP-stem tower at [`tiny`]'s block dimensions: no class token, so the
+/// `4x4` native grid is the whole sequence (16 rows, `16*32 = 512 = 8*64`
+/// floats per sample - the `B = 2` span alignment [`tiny`] documents).
+fn tiny_siglip(act: TextAct) -> ClipVisionConfig {
+    ClipVisionConfig {
+        shape: gguf::deepseek_ocr_vision::ClipConfig {
+            d_model: 32,
+            n_layers: 2,
+            n_heads: 4,
+            ffn_hidden: 20,
+            patch_size: 2,
+            image_size: 8, // native grid 4x4
+            n_positions: 16,
+            layer_norm_eps: 1e-6,
+        },
+        act,
+        stem: VisionStem::Siglip,
+    }
+}
+
+/// `LayerNorm` over the last axis of a `[rows, d]` host matrix, f64.
+fn host_layernorm(x: &[f64], d: usize, g: &[f32], b: &[f32], eps: f64) -> Vec<f64> {
+    let mut out = vec![0f64; x.len()];
+    for (row, o) in x.chunks(d).zip(out.chunks_mut(d)) {
+        let mean = row.iter().sum::<f64>() / d as f64;
+        let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / d as f64;
+        let inv = 1.0 / (var + eps).sqrt();
+        for c in 0..d {
+            o[c] = (row[c] - mean) * inv * g[c] as f64 + b[c] as f64;
+        }
+    }
+    out
+}
+
+/// `x @ W^T + b` for a `[rows, k]` host matrix and a `[n, k]` weight, f64.
+fn host_linear(x: &[f64], k: usize, w: &[f32], b: &[f32]) -> Vec<f64> {
+    let n = b.len();
+    let rows = x.len() / k;
+    let mut out = vec![0f64; rows * n];
+    for r in 0..rows {
+        for o in 0..n {
+            let wr = &w[o * k..(o + 1) * k];
+            out[r * n + o] = b[o] as f64 + x[r * k..(r + 1) * k].iter().zip(wr).map(|(a, w)| a * *w as f64).sum::<f64>();
+        }
+    }
+    out
+}
+
+/// The whole SigLIP tower on the host in f64, written out from the reference
+/// (`siglip_vit.VisionTransformer.forward_features`): biased patch conv,
+/// per-patch learned positions, pre-LN blocks with bidirectional MHA and a
+/// tanh-GELU MLP, then the final `norm`. Shares no code with the device graph.
+fn host_siglip(cfg: &ClipVisionConfig, w: &HashMap<String, Vec<f32>>, b: u32, px: &[f32]) -> Vec<f32> {
+    let (d, g) = (cfg.d_model() as usize, cfg.native_grid() as usize);
+    let (heads, mlp) = (cfg.heads() as usize, cfg.mlp_hidden() as usize);
+    let (np, hd, eps) = (g * g, d / heads, cfg.eps() as f64);
+    let conv = host_patch_tokens(cfg, b, px, &w["patch_embed.weight"]);
+    let mut x: Vec<f64> = conv
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| v as f64 + w["patch_embed.bias"][i % d] as f64 + w["pos_embed"][i % (np * d)] as f64)
+        .collect();
+    let gelu_tanh = |v: f64| 0.5 * v * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (v + 0.044715 * v * v * v)).tanh());
+    for l in 0..cfg.layers() {
+        let wt = |leaf: &str| &w[&format!("blocks.{l}.{leaf}")];
+        let ln1 = host_layernorm(&x, d, wt("norm1.weight"), wt("norm1.bias"), eps);
+        let qkv = host_linear(&ln1, d, wt("attn.qkv.weight"), wt("attn.qkv.bias"));
+        let mut ctx = vec![0f64; x.len()];
+        for si in 0..b as usize {
+            for h in 0..heads {
+                let at = |t: usize, part: usize, c: usize| qkv[(si * np + t) * 3 * d + part * d + h * hd + c];
+                for qi in 0..np {
+                    let scores: Vec<f64> = (0..np)
+                        .map(|ki| (0..hd).map(|c| at(qi, 0, c) * at(ki, 1, c)).sum::<f64>() / (hd as f64).sqrt())
+                        .collect();
+                    let mx = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let e: Vec<f64> = scores.iter().map(|v| (v - mx).exp()).collect();
+                    let z: f64 = e.iter().sum();
+                    for c in 0..hd {
+                        ctx[(si * np + qi) * d + h * hd + c] = (0..np).map(|ki| e[ki] / z * at(ki, 2, c)).sum();
+                    }
+                }
+            }
+        }
+        let proj = host_linear(&ctx, d, wt("attn.proj.weight"), wt("attn.proj.bias"));
+        let res: Vec<f64> = x.iter().zip(&proj).map(|(a, b)| a + b).collect();
+        let ln2 = host_layernorm(&res, d, wt("norm2.weight"), wt("norm2.bias"), eps);
+        let h: Vec<f64> = host_linear(&ln2, d, wt("mlp.fc1.weight"), wt("mlp.fc1.bias")).into_iter().map(gelu_tanh).collect();
+        let fc2 = host_linear(&h, mlp, wt("mlp.fc2.weight"), wt("mlp.fc2.bias"));
+        x = res.iter().zip(&fc2).map(|(a, b)| a + b).collect();
+    }
+    host_layernorm(&x, d, &w["post_norm.weight"], &w["post_norm.bias"], eps).iter().map(|&v| v as f32).collect()
+}
+
+/// **The stem is SigLIP's, not CLIP's with pieces switched off.** Against the
+/// independent host tower: one row per patch (no class token), the conv bias
+/// and per-patch position rows added, and the final LayerNorm applied - on
+/// both backends. A stem that kept the class row, dropped the bias or skipped
+/// the post-norm fails the length check or lands orders of magnitude outside
+/// the tolerance.
+#[test]
+fn siglip_stem_matches_the_host_reference() {
+    let cfg = tiny_siglip(TextAct::GeluTanh);
+    let init = clip::init::init_vision_weights(&cfg, 61);
+    let px = clip::init::fixed_pixels(&cfg, B, 67);
+    let want = host_siglip(&cfg, &init, B, &px);
+
+    for (label, dev) in devices() {
+        let m = ClipVision::new_on(dev.gpu(), cfg.clone(), B, PatchSource::Pixels, &init);
+        assert_eq!(m.seq_len(), cfg.native_patches(), "[{label}] a SigLIP sequence is the patches alone");
+        m.set_pixels(&px);
+        m.forward();
+        let got = m.read_output();
+        assert_eq!(got.len(), want.len(), "[{label}] output is [B*patches, D]");
+        let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 2e-4, "[{label}] SigLIP tower differs from the host reference by {worst:e}");
+    }
+}
+
+/// The SigLIP stem's backward - the conv bias, the per-patch position rows and
+/// the post-norm are all new adjoints - through the pixels path at the exact
+/// GELU DeepSeek-VL and Janus run.
+#[test]
+fn siglip_pixels_path_grads_match_finite_differences() {
+    for (label, dev) in devices() {
+        let h = Harness::new(dev.gpu(), tiny_siglip(TextAct::GeluErf), PatchSource::Pixels, 71);
+        gate(directional(&h, 5e-4, 4, 0x5161), &format!("ClipVision/siglip pixels [{label}]"));
+    }
+}
+
+/// The tanh-GELU arm (Moondream's `gelu_approx`), through the injected-token
+/// path: `gelu_bwd` must be the adjoint the forward slot's `gelu` needs.
+#[test]
+fn siglip_gelu_tanh_grads_match_finite_differences() {
+    let h = Harness::new(Dev::CpuJit.gpu(), tiny_siglip(TextAct::GeluTanh), PatchSource::Tokens { grid: (4, 4) }, 73);
+    gate(directional(&h, 5e-4, 4, 0x5162), "ClipVision/siglip gelu_tanh [cpu-jit]");
+}
+
+/// **The dynamic-batch encoder computes the resident graph's function.** A
+/// weights-only build has no graph of its own; `encode(b, ..)` records one for
+/// the batch it is handed, over shared per-block scratch instead of the
+/// resident graph's per-block activation cache - bit-identical on the GPU, for
+/// both stems. And a per-sample run must reproduce its rows of the batched one
+/// bit for bit on either backend - each sample is its own attention span.
+#[test]
+fn encode_at_any_batch_is_the_resident_forward() {
+    for cfg in [tiny_siglip(TextAct::GeluTanh), tiny(TextAct::QuickGelu)] {
+        let stem = cfg.stem;
+        let init = clip::init::init_vision_weights(&cfg, 79);
+        let px = clip::init::fixed_pixels(&cfg, B, 83);
+        for (label, dev) in devices() {
+            let resident = ClipVision::new_on(dev.gpu(), cfg.clone(), B, PatchSource::Pixels, &init);
+            resident.set_pixels(&px);
+            resident.forward();
+            let want = resident.read_output();
+            drop(resident);
+
+            let enc = ClipVision::new_encoder_on(dev.gpu(), cfg.clone(), PatchSource::Pixels, &init);
+            let got = enc.encode(B, &px);
+            assert_eq!(got.len(), want.len(), "[{label}] {stem:?}: encode output length");
+            match dev {
+                // Same kernels, same per-span dispatch shape: the same bits.
+                Dev::Default => assert!(got == want, "[{label}] {stem:?}: encode is not bit-identical to the resident forward"),
+                // On `backend-cpu`, `matmul_rows` (the shared builder's GEMM)
+                // and `matmul` (the cached one's) are two implementations with
+                // two summation orders - see `model::vit::gemm_step`.
+                Dev::CpuJit => {
+                    let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+                    assert!(worst < 1e-5, "[{label}] {stem:?}: encode differs from the resident forward by {worst:e}");
+                }
+            }
+
+            let per = px.len() / B as usize;
+            let rows = got.len() / B as usize;
+            for si in 0..B as usize {
+                let one = enc.encode(1, &px[si * per..(si + 1) * per]);
+                assert_eq!(one, got[si * rows..(si + 1) * rows], "[{label}] {stem:?}: sample {si} differs when batched");
+            }
+        }
+    }
 }

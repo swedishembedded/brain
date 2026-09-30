@@ -418,6 +418,15 @@ application", "an orchestrator"). Enforced by `make check/scope`
     (`gradcheck::check_clip`, wired in
     `crates/gradcheck/tests/imaging_models.rs`; `check_clip_bigg` and
     `check_clip_tiled` cover the bigG tower and the tiled path).
+    The crate also owns the **shared pre-LN image tower `ClipVision`** with two
+    stems (`config::VisionStem`): **CLIP** (class token, bias-free patch conv,
+    pre-norm - DeepSeek-OCR's DeepEncoder, LLaVA) and **SigLIP** (no class
+    token, biased conv, post-norm, activation from the config - DeepSeek-VL's
+    low-res tower and Janus-Pro via `ClipVisionConfig::siglip_large_patch16_384`
+    + `import::siglip::import_timm`). SigLIP-L/16 on
+    the real DeepSeek-VL weights is parity-gated at cosine >= 0.9999 against
+    `tools/goldens/siglip_dump_reference.py` (`tests/siglip_real.rs`);
+    `ClipVision::encode` runs any batch over one shared block scratch.
 
 12e. **SDXL UNet2DConditionModel** (`crates/sdxlunet`) - the first UNet *diffusion
     backbone* in the imaging stack (`crates/diamond` has a UNet-shaped world

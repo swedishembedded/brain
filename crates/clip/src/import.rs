@@ -6,13 +6,16 @@
 //! no source tensor is left unused. A mismatch is an error naming the tensor -
 //! never a silent zero-fill (the `flux2::import` / `qwen3::import` discipline).
 //!
-//! Two source layouts:
+//! Source layouts:
 //!   * **HF `CLIPTextModel(WithProjection)`** (`text_model.*`) - q/k/v already
 //!     split, so the only surgery is FUSING them into brain's `[3H, H]` qkv.
 //!   * **EVA02-CLIP `.pt`** (`visual.*`) - three bias-asymmetric linears fused
 //!     the same way (k's bias third is zero, because the reference's k linear
 //!     genuinely has none), and the q/k rows permuted into brain's half-split
 //!     RoPE channel order (see [`EvaVisionConfig::head_perm`]).
+//!   * **DeepSeek-OCR's CLIP-L mmproj** - a prefix strip.
+//!   * **timm SigLIP** ([`siglip`]) - DeepSeek-VL's and Janus-Pro's tower, a
+//!     rename plus an explicit skip list for the unused MAP head.
 //!
 //! An open_clip-native bigG checkpoint (fused `in_proj_weight`, `ln_final`,
 //! `text_projection` as a bare Parameter) is a DIFFERENT layout and is not
@@ -511,6 +514,141 @@ pub mod gguf_mmproj {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SigLIP image tower, timm layout (DeepSeek-VL, Janus-Pro)
+// ---------------------------------------------------------------------------
+
+/// Import a timm `siglip_vit.VisionTransformer` - the SigLIP tower DeepSeek-VL
+/// and Janus-Pro build with `create_siglip_vit` - into a
+/// [`VisionStem::Siglip`](crate::config::VisionStem::Siglip) tower.
+pub mod siglip {
+    use std::collections::HashMap;
+
+    use checkpoint::weightio::WeightReader;
+
+    use super::{put, validate, Tensors};
+    use crate::config::ClipVisionConfig;
+
+    /// DeepSeek-VL's `HybridVisionTower`: the SigLIP half is the LOW-resolution
+    /// tower (the high one is a SAM trunk, a different architecture).
+    pub const DEEPSEEK_VL_LOW_PREFIX: &str = "vision_model.vision_tower_low.vision_tower.";
+    /// Janus-Pro's `CLIPVisionTower` (understanding path).
+    pub const JANUS_PREFIX: &str = "vision_model.vision_tower.";
+
+    /// The MAP attention-pooling head (`global_pool="map"`). The reference
+    /// module builds it, so the checkpoints carry it, but both consumers
+    /// construct the tower with `ignore_head=True` and read `forward_features`
+    /// (`select_layer=-1`, `select_feature="same"`) - it never runs. Skipped
+    /// by exact name so that any OTHER unrecognised tensor still refuses the
+    /// import.
+    pub const UNUSED_ATTN_POOL: [&str; 13] = [
+        "attn_pool.latent",
+        "attn_pool.q.weight",
+        "attn_pool.q.bias",
+        "attn_pool.kv.weight",
+        "attn_pool.kv.bias",
+        "attn_pool.proj.weight",
+        "attn_pool.proj.bias",
+        "attn_pool.norm.weight",
+        "attn_pool.norm.bias",
+        "attn_pool.mlp.fc1.weight",
+        "attn_pool.mlp.fc1.bias",
+        "attn_pool.mlp.fc2.weight",
+        "attn_pool.mlp.fc2.bias",
+    ];
+
+    /// What [`import_timm`] did with the tensors under its prefix, so a caller
+    /// can assert it rather than trust it.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct TimmReport {
+        /// Tensors mapped into the tower's manifest.
+        pub mapped: usize,
+        /// [`UNUSED_ATTN_POOL`] entries found and skipped, by leaf name.
+        pub skipped: Vec<String>,
+    }
+
+    /// The brain name for one timm leaf (prefix stripped), or `None` when the
+    /// leaf is not part of the tower's forward.
+    fn leaf_name(leaf: &str) -> Option<String> {
+        let direct = match leaf {
+            "patch_embed.proj.weight" => Some("patch_embed.weight"),
+            "patch_embed.proj.bias" => Some("patch_embed.bias"),
+            // `[1, N, D]` in the checkpoint; the manifest's shape flattens it.
+            "pos_embed" => Some("pos_embed"),
+            // timm's final `norm` is the SigLIP stem's post-norm.
+            "norm.weight" => Some("post_norm.weight"),
+            "norm.bias" => Some("post_norm.bias"),
+            _ => None,
+        };
+        if let Some(brain) = direct {
+            return Some(brain.to_string());
+        }
+        let (n, rest) = leaf.strip_prefix("blocks.")?.split_once('.')?;
+        n.parse::<u32>().ok()?;
+        // The block leaves are brain's names verbatim - `model::vit`'s block
+        // weights are named after timm's `Block`.
+        matches!(
+            rest,
+            "norm1.weight"
+                | "norm1.bias"
+                | "attn.qkv.weight"
+                | "attn.qkv.bias"
+                | "attn.proj.weight"
+                | "attn.proj.bias"
+                | "norm2.weight"
+                | "norm2.bias"
+                | "mlp.fc1.weight"
+                | "mlp.fc1.bias"
+                | "mlp.fc2.weight"
+                | "mlp.fc2.bias"
+        )
+        .then(|| leaf.to_string())
+    }
+
+    /// Import the SigLIP tower under `prefix` from `rd`, streaming one tensor
+    /// at a time (fp16/bf16 widen to f32 exactly), into the init map
+    /// [`crate::model::ClipVision::new_on`] takes.
+    ///
+    /// Two-way coverage over the prefix: every manifest tensor must arrive with
+    /// the right element count, and every tensor under the prefix must either
+    /// map or be one of [`UNUSED_ATTN_POOL`] - an unknown one is an error
+    /// naming it. Tensors outside the prefix (the language model, the aligner,
+    /// DeepSeek-VL's SAM tower) belong to other crates and are not read.
+    pub fn import_timm(
+        rd: &WeightReader,
+        prefix: &str,
+        cfg: &ClipVisionConfig,
+    ) -> Result<(HashMap<String, Vec<f32>>, TimmReport), String> {
+        let manifest = cfg.tensor_manifest();
+        let shapes: HashMap<&str, &Vec<usize>> = manifest.iter().map(|(n, s)| (n.as_str(), s)).collect();
+        let mut map: Tensors = HashMap::new();
+        let mut rep = TimmReport::default();
+        let names: Vec<String> = rd.names().filter(|n| n.starts_with(prefix)).map(str::to_string).collect();
+        for name in &names {
+            let leaf = &name[prefix.len()..];
+            if UNUSED_ATTN_POOL.contains(&leaf) {
+                rep.skipped.push(leaf.to_string());
+                continue;
+            }
+            let Some(brain) = leaf_name(leaf) else {
+                return Err(format!("clip import: unrecognized SigLIP tensor {name}"));
+            };
+            let Some(shape) = shapes.get(brain.as_str()) else {
+                return Err(format!("clip import: {name} maps to {brain}, which this config's manifest does not have"));
+            };
+            let data = rd.tensor(name).ok_or_else(|| format!("clip import: {name} is indexed but unreadable"))?;
+            let want: usize = shape.iter().product();
+            if data.len() != want {
+                return Err(format!("clip import: {name} has {} values, {brain} needs {want} ({shape:?})", data.len()));
+            }
+            put(&mut map, brain, (*shape).clone(), data)?;
+            rep.mapped += 1;
+        }
+        let map = validate(map, &manifest)?;
+        Ok((map.into_iter().map(|(n, (_, d))| (n, d)).collect(), rep))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +927,7 @@ mod tests {
                 layer_norm_eps: 1e-5,
             },
             act: crate::config::TextAct::QuickGelu,
+            stem: crate::config::VisionStem::Clip,
         }
     }
 
@@ -835,5 +974,110 @@ mod tests {
         });
         let err = import_deepseek_ocr_vision(extra, &cfg).unwrap_err();
         assert!(err.contains("post_norm.weight"), "{err}");
+    }
+
+    fn tiny_siglip() -> crate::config::ClipVisionConfig {
+        crate::config::ClipVisionConfig {
+            shape: gguf::deepseek_ocr_vision::ClipConfig {
+                d_model: 6,
+                n_layers: 2,
+                n_heads: 2,
+                ffn_hidden: 10,
+                patch_size: 2,
+                image_size: 4,
+                n_positions: 4,
+                layer_norm_eps: 1e-6,
+            },
+            act: crate::config::TextAct::GeluErf,
+            stem: crate::config::VisionStem::Siglip,
+        }
+    }
+
+    /// A timm `siglip_vit.VisionTransformer` state dict under `prefix`, in the
+    /// checkpoint's own shapes (`pos_embed` is `[1, N, D]`), with the MAP head
+    /// the reference builds but never runs, plus a tensor of another tower.
+    fn timm_source(cfg: &crate::config::ClipVisionConfig, prefix: &str) -> Vec<(String, Vec<u64>, Vec<f32>)> {
+        let (d, f, p) = (cfg.d_model() as u64, cfg.mlp_hidden() as u64, cfg.patch() as u64);
+        let mut v: Vec<(String, Vec<u64>)> = vec![
+            ("patch_embed.proj.weight".into(), vec![d, 3, p, p]),
+            ("patch_embed.proj.bias".into(), vec![d]),
+            ("pos_embed".into(), vec![1, cfg.n_positions() as u64, d]),
+            ("norm.weight".into(), vec![d]),
+            ("norm.bias".into(), vec![d]),
+        ];
+        for l in 0..cfg.layers() {
+            for (leaf, s) in [
+                ("norm1.weight", vec![d]),
+                ("norm1.bias", vec![d]),
+                ("attn.qkv.weight", vec![3 * d, d]),
+                ("attn.qkv.bias", vec![3 * d]),
+                ("attn.proj.weight", vec![d, d]),
+                ("attn.proj.bias", vec![d]),
+                ("norm2.weight", vec![d]),
+                ("norm2.bias", vec![d]),
+                ("mlp.fc1.weight", vec![f, d]),
+                ("mlp.fc1.bias", vec![f]),
+                ("mlp.fc2.weight", vec![d, f]),
+                ("mlp.fc2.bias", vec![d]),
+            ] {
+                v.push((format!("blocks.{l}.{leaf}"), s));
+            }
+        }
+        for name in siglip::UNUSED_ATTN_POOL {
+            v.push((name.to_string(), vec![2]));
+        }
+        let mut out: Vec<(String, Vec<u64>, Vec<f32>)> = v
+            .into_iter()
+            .enumerate()
+            .map(|(i, (n, s))| {
+                let numel = s.iter().product::<u64>() as usize;
+                (format!("{prefix}{n}"), s, vec![i as f32; numel])
+            })
+            .collect();
+        out.push(("vision_model.vision_tower_high.vision_tower.pos_embed".into(), vec![1, 2], vec![0.0; 2]));
+        out
+    }
+
+    fn reader(t: Vec<(String, Vec<u64>, Vec<f32>)>) -> checkpoint::weightio::WeightReader {
+        checkpoint::weightio::WeightReader::derived(Box::new(checkpoint::weightio::InMemory::new(t, serde_json::Value::Null)))
+    }
+
+    /// The timm name map covers the tower both ways: every manifest tensor
+    /// lands (the position table flattened to `[N, D]`, `norm` as the
+    /// post-norm), the MAP head is skipped BY NAME and reported, and another
+    /// tower's tensors outside the prefix are not this import's business.
+    #[test]
+    fn timm_siglip_import_maps_the_tower_and_skips_the_map_head_by_name() {
+        let cfg = tiny_siglip();
+        for prefix in [siglip::DEEPSEEK_VL_LOW_PREFIX, siglip::JANUS_PREFIX] {
+            let (w, rep) = siglip::import_timm(&reader(timm_source(&cfg, prefix)), prefix, &cfg).expect("import");
+            assert_eq!(w.len(), cfg.tensor_manifest().len(), "{prefix}");
+            assert_eq!(rep.mapped, cfg.tensor_manifest().len());
+            let mut skipped = rep.skipped.clone();
+            skipped.sort();
+            let mut want: Vec<String> = siglip::UNUSED_ATTN_POOL.iter().map(|s| s.to_string()).collect();
+            want.sort();
+            assert_eq!(skipped, want);
+            assert_eq!(w["pos_embed"].len(), (cfg.n_positions() * cfg.d_model()) as usize);
+            assert_eq!(w["post_norm.weight"], vec![3.0; 6], "timm `norm` is the post-norm");
+            assert_eq!(w["patch_embed.bias"], vec![1.0; 6]);
+        }
+    }
+
+    /// An unknown tensor inside the tower is an error naming it (no catch-all
+    /// skip), and so is a missing one.
+    #[test]
+    fn timm_siglip_import_rejects_an_unknown_and_a_missing_tensor() {
+        let cfg = tiny_siglip();
+        let p = siglip::JANUS_PREFIX;
+        let mut extra = timm_source(&cfg, p);
+        extra.push((format!("{p}attn_pool.mystery"), vec![1], vec![0.0]));
+        let err = siglip::import_timm(&reader(extra), p, &cfg).unwrap_err();
+        assert!(err.contains("attn_pool.mystery"), "{err}");
+
+        let mut short = timm_source(&cfg, p);
+        short.retain(|(n, _, _)| !n.ends_with("blocks.1.mlp.fc2.bias"));
+        let err = siglip::import_timm(&reader(short), p, &cfg).unwrap_err();
+        assert!(err.contains("blocks.1.mlp.fc2.bias"), "{err}");
     }
 }

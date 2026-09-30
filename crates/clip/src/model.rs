@@ -60,7 +60,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block;
 use paramstore::{ParamStore, Role};
 
-use crate::config::{ClipTextConfig, EvaVisionConfig, TextAct};
+use crate::config::{ClipTextConfig, EvaVisionConfig, VisionStem};
 
 // ---------------------------------------------------------------------------
 // text tower
@@ -77,8 +77,8 @@ const T_SCORES: usize = 7;
 const T_SOFTMAX: usize = 8;
 const T_APPLY: usize = 9;
 const T_ADD2: usize = 10;
-const T_QUICK_GELU: usize = 11;
-const T_GELU_ERF: usize = 12;
+// 11-12 are the forward activations and 29-30 their adjoints - resolved BY NAME
+// from the config's `TextAct`, like the tanh pair appended at the end.
 // `layernorm_rows` is 13 - resolved BY NAME, never indexed directly.
 // ---- backward (appended, so every index above is unchanged) ----
 const T_LN_STATS: usize = 14;
@@ -94,8 +94,6 @@ const T_ATTN_DSCORES: usize = 25;
 const T_ATTN_DV: usize = 26;
 const T_ATTN_DQ: usize = 27;
 const T_ATTN_DK: usize = 28;
-const T_QUICK_GELU_BWD: usize = 29;
-const T_GELU_ERF_BWD: usize = 30;
 const T_POS_BWD: usize = 31;
 const T_EMB_BWD: usize = 32;
 
@@ -142,6 +140,8 @@ pub const TEXT_PIPELINES: &[(&str, &str)] = &[
     ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
     ("pos_bwd", kernels::POS_BWD),
     ("emb_bwd", kernels::EMB_BWD),
+    ("gelu", kernels::GELU),
+    ("gelu_bwd", kernels::GELU_BWD),
 ];
 
 /// One text layer's SSA activations.
@@ -359,6 +359,14 @@ impl ClipText {
         self.ps.w(name)
     }
 
+    /// The pipeline index of activation kernel `name` (a
+    /// [`crate::config::TextAct`] forward or adjoint), resolved by name.
+    fn act_kernel(&self, name: &str) -> usize {
+        self.gpu.kernel_index(name).unwrap_or_else(|| {
+            panic!("clip: text activation kernel `{name}` is not registered on this handle - use clip::model::TEXT_PIPELINES")
+        })
+    }
+
     fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
         block::pick_gemm(m as usize, n as usize, T_MATMUL, T_MATMUL_REG3, false)
     }
@@ -384,10 +392,7 @@ impl ClipText {
         // `layernorm_rows` are consulted, so this is identical to the
         // `resolve_fwd` an inference-only tower would build.
         let ln = block::LayerNormIds::resolve(g, T_LAYERNORM, T_LN_STATS, T_LAYERNORM_DX);
-        let act = match c.act {
-            TextAct::QuickGelu => T_QUICK_GELU,
-            TextAct::GeluErf => T_GELU_ERF,
-        };
+        let act = self.act_kernel(c.act.kernel());
         let mut s = Vec::new();
 
         // ---- embeddings ----
@@ -507,10 +512,7 @@ impl ClipText {
         let inter = c.intermediate;
         let hd = c.head_dim();
         let ln = block::LayerNormIds::resolve(g, T_LAYERNORM, T_LN_STATS, T_LAYERNORM_DX);
-        let act_bwd = match c.act {
-            TextAct::QuickGelu => T_QUICK_GELU_BWD,
-            TextAct::GeluErf => T_GELU_ERF_BWD,
-        };
+        let act_bwd = self.act_kernel(c.act.bwd_kernel());
         let gr = |name: &str| self.ps.g(name);
         let mut s: Vec<Step> = Vec::new();
 
@@ -1209,60 +1211,18 @@ pub enum VisionTap {
 }
 
 // ---------------------------------------------------------------------------
-// vanilla CLIP-L/14 image tower (`ClipVision`)
+// the shared pre-LN image tower (`ClipVision`): CLIP and SigLIP stems
 // ---------------------------------------------------------------------------
-
-/// Kernel-pipeline indices into [`CLIP_VISION_PIPELINES`]. Forward first,
-/// backward appended - reordering the list is silently wrong.
-const C_CONV2D: usize = 0;
-const C_NCHW_NLC: usize = 1;
-const C_NLC_NCHW: usize = 2;
-const C_RESIZE_BICUBIC: usize = 3;
-const C_EMBED: usize = 4;
-const C_ROW_SCATTER: usize = 5;
-const C_POS_ADD: usize = 6;
-const C_LAYERNORM: usize = 7;
-const C_MATMUL: usize = 8;
-const C_BIAS_ADD: usize = 9;
-const C_ADD2: usize = 10;
-const C_QUICK_GELU: usize = 11;
-const C_GELU_ERF: usize = 12;
-const C_SCORES: usize = 13;
-const C_SOFTMAX: usize = 14;
-const C_APPLY: usize = 15;
-const C_AXPY: usize = 16;
-// `layernorm_rows` is 17 - resolved BY NAME, never indexed directly.
-// ---- backward (appended, so every index above is unchanged) ----
-const C_LN_STATS: usize = 18;
-// `ln_stats_rows` is 19, `layernorm_dx_rows` 21 - also by name.
-const C_LAYERNORM_DX: usize = 20;
-const C_LN_DGAMMA: usize = 22;
-const C_LN_DBETA: usize = 23;
-const C_MATMUL_DX: usize = 24;
-const C_MATMUL_DW: usize = 25;
-const C_BIAS_GRAD: usize = 26;
-const C_QUICK_GELU_BWD: usize = 27;
-const C_GELU_ERF_BWD: usize = 28;
-const C_DSCORES: usize = 29;
-const C_DV: usize = 30;
-const C_DQ: usize = 31;
-const C_DK: usize = 32;
-const C_POS_BWD: usize = 33;
-const C_EMB_BWD: usize = 34;
-const C_CONV2D_DW: usize = 35;
-const C_RESIZE_BICUBIC_DX: usize = 36;
-const C_KV_K_HEADT: usize = 37;
-const C_SCORES_KT: usize = 38;
-
-/// A `VitKernelIds` / `VitBwdIds` slot this tower never dispatches. `usize::MAX`
-/// makes an accidental dispatch panic on the pipeline lookup instead of quietly
-/// running some other kernel - the same discipline [`EvaVision`] uses for its
-/// unregistered attention-backward slots.
-const UNREGISTERED: usize = usize::MAX;
 
 /// Every kernel [`ClipVision`] dispatches - forward AND backward in one list, so
 /// an inference build and a training build share one device handle
 /// (`gpu_core::testgpu::dev` keys on the slice address).
+///
+/// **Resolved BY NAME, never by position.** Every consumer shares its device
+/// with something else - LLaVA's text tower, DeepSeek-OCR's SAM trunk,
+/// Moondream's connector and pooling kernel - so these entries do not start at
+/// pipeline index 0 on a real handle. Order here is therefore free; what a
+/// caller's own list must do is CONTAIN every entry (chain this slice into it).
 pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     ("conv2d", kernels::CONV2D),
     ("nchw_nlc", kernels::NCHW_NLC),
@@ -1307,21 +1267,31 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
     // span buys the same sweep coalesced loads.
     ("kv_k_headt", kernels::KV_K_HEADT),
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
-    // The 128x128 register-tiled GEMM `model::vit::vit_block_fwd_cached`
-    // resolves BY NAME for a block's four large linears. `matmul` (one thread
-    // per output ELEMENT, serial inner reduction) re-reads both operands out
-    // of DRAM for every one of them, which at CLIP-L/14's 1024/4096 widths is
-    // the tower's whole cost; the tiled kernel contracts the SAME `k` axis in
-    // the SAME order per accumulator, so the values are bit-identical (see
+    // The 128x128 register-tiled GEMM `model::vit`'s block builders resolve BY
+    // NAME for a block's four large linears. `matmul` (one thread per output
+    // ELEMENT, serial inner reduction) re-reads both operands out of DRAM for
+    // every one of them, which at CLIP-L/14's 1024/4096 widths is the tower's
+    // whole cost; the tiled kernel contracts the SAME `k` axis in the SAME
+    // order per accumulator, so the values are bit-identical (see
     // `model::vit::gemm_step`'s doc, and
     // `tests/vision.rs::the_tiled_gemm_is_bit_identical_to_the_naive_one`).
-    // Appended, so every index above is unchanged.
     ("matmul_reg3", kernels::MATMUL_REG3),
+    // The tanh-GELU pair (`TextAct::GeluTanh`, Moondream's SigLIP).
+    ("gelu", kernels::GELU),
+    ("gelu_bwd", kernels::GELU_BWD),
+    // `model::vit::vit_block_fwd`'s reference GEMM - the shared-scratch block
+    // builder [`ClipVision::encode`] records.
+    ("matmul_rows", kernels::MATMUL_ROWS),
 ];
 
+/// Entries of [`CLIP_VISION_PIPELINES`] a handle may leave out: the tiled GEMM
+/// is an opt-in the block builders resolve by name themselves, falling back to
+/// the reference kernel for the same values.
+const OPTIONAL_KERNELS: &[&str] = &["matmul_reg3"];
+
 /// **Where [`ClipVision`]'s patch tokens come from.** The tower is IDENTICAL
-/// downstream of this point in both cases - same class-token prepend, same
-/// position embedding, same pre-LayerNorm, same blocks - which is what
+/// downstream of this point in both cases - same class-token prepend (CLIP
+/// stem), same position embedding, same blocks - which is what
 /// `crates/clip/tests/vision.rs::pixels_and_tokens_paths_are_bit_identical`
 /// proves rather than asserts.
 ///
@@ -1336,77 +1306,70 @@ pub const CLIP_VISION_PIPELINES: &[(&str, &str)] = &[
 /// [`ClipVision::set_tokens`] (host).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PatchSource {
-    /// The tower's own `Conv2d(3, D, k=patch, stride=patch, bias=False)` over
-    /// `[B, 3, S, S]` pixels. The grid is `image_size / patch_size` - the
-    /// checkpoint's native one.
+    /// The tower's own `Conv2d(3, D, k=patch, stride=patch)` over `[B, 3, S, S]`
+    /// pixels (bias-free for the CLIP stem, biased for SigLIP). The grid is
+    /// `image_size / patch_size` - the checkpoint's native one.
     Pixels,
-    /// Pre-computed patch tokens `[B*gh*gw, D]`, **bypassing `conv_patch_embed`
-    /// entirely** - DeepSeek-OCR injects its SAM branch's 16x-compressed map
-    /// here. `grid` is given because the learned absolute position embedding
-    /// must be resampled to `1 + gh*gw` rows.
+    /// Pre-computed patch tokens `[B*gh*gw, D]`, **bypassing the patch
+    /// embedding entirely** (conv AND its bias) - DeepSeek-OCR injects its SAM
+    /// branch's 16x-compressed map here. `grid` is given because the learned
+    /// absolute position embedding must be resampled to `gh*gw` patch rows.
     Tokens { grid: (u32, u32) },
 }
 
-/// The reverse-pass buffers and recorded step list, allocated ONLY by
-/// [`ClipVision::new_train_on`].
-///
-/// The blocks' own gradients live in the shared `model::vit` scratch; only the
-/// stem needs buffers here. `d_x[l]` is the grad of block `l`'s input, so
-/// `d_x[0]` is the grad of the pre-LayerNorm OUTPUT.
-struct VisionBwd {
-    seed_out: DeviceBuffer,
-    d_x: Vec<DeviceBuffer>,
-    /// Grad of `x0` (`[cls; tokens] + pos`, the pre-LayerNorm input).
-    d_x0: DeviceBuffer,
-    d_cls_rep: DeviceBuffer,
-    d_tokens: DeviceBuffer,
-    d_patch_nchw: Option<DeviceBuffer>,
-    /// `[seq, D]` - ACCUMULATED by `pos_bwd`, so it is in the backward submit's
-    /// clears list.
-    d_pos_full: DeviceBuffer,
-    d_pos_cls: DeviceBuffer,
-    d_pos_interp: DeviceBuffer,
-    d_pos_dst_nchw: DeviceBuffer,
-    d_pos_src_nchw: DeviceBuffer,
-    d_pos_src_nlc: DeviceBuffer,
-    mean: DeviceBuffer,
-    inv: DeviceBuffer,
-    scratch: model::vit::VitBwdScratch,
-    steps: Vec<Step>,
+impl PatchSource {
+    /// The patch grid this source feeds the tower at.
+    fn grid(self, cfg: &crate::config::ClipVisionConfig) -> (u32, u32) {
+        match self {
+            PatchSource::Pixels => (cfg.native_grid(), cfg.native_grid()),
+            PatchSource::Tokens { grid } => grid,
+        }
+    }
 }
 
-/// A vanilla CLIP-L/14 image tower, forward and backward.
-///
-/// ```text
-/// tokens = conv_patch_embed(pixels)   |   tokens = <injected>      [B*n, D]
-/// x0     = scatter([cls ; tokens])                                 [B*seq, D]
-/// x0    += pos(interpolated to 1 + gh*gw rows)
-/// x      = pre_layernorm(x0)
-/// per block l:  the shared `model::vit` pre-LN block
-///   LN1 -> fused qkv+bias -> BIDIRECTIONAL MHA -> proj+bias -> residual
-///   LN2 -> fc1+bias -> quick_gelu -> fc2+bias -> residual
-/// out    = x_L                       (no post-LayerNorm - see the config)
-/// ```
-///
-/// **No second block graph.** Every block is `model::vit::vit_block_fwd_cached`
-/// / `vit_block_bwd` with `qk_norm: None`, `rope: None`, `ls1/ls2: None` - the
-/// exact opposite of [`EvaVision`], which needs its own graph because
-/// `inner_attn_ln` and the SwiGLU-with-`ffn_ln` have no hook in that builder.
-///
-/// **One forward, not two.** The graph is always the *cached* builder, so a
-/// training build and an inference build record byte-identical steps and cannot
-/// drift; the price is the per-block activation cache (~18 MB per block at
-/// CLIP-L/224 with B=1). An inference-only path over `vit_block_fwd`'s shared
-/// scratch would halve that and is deliberately deferred - it is a second graph,
-/// and this crate has already paid for one of those.
-pub struct ClipVision {
-    pub gpu: Gpu,
-    pub cfg: crate::config::ClipVisionConfig,
-    pub ps: ParamStore,
+/// The CLIP stem's class-token rows: the learned `class_embed` scattered to row
+/// `si*seq` of every sample, and position row 0 lifted out of the table around
+/// the patch-grid resample. Absent for the SigLIP stem, which has no class
+/// token.
+struct ClassToken {
+    /// `[B, D]` - `class_embed` gathered once per sample.
+    rep: DeviceBuffer,
+    /// `[1, D]` - position row 0.
+    pos: DeviceBuffer,
+    /// `[B]` zeros: `class_embed`'s one row, per sample.
+    idx_src: DeviceBuffer,
+    /// `[B]`: `si * seq`, the class row of each sample.
+    idx_dst: DeviceBuffer,
+    /// `[1]` zero: row 0 of the position table AND of `pos_full`.
+    idx_pos: DeviceBuffer,
+}
+
+/// How a graph runs its blocks.
+enum Blocks {
+    /// Per-block SSA activation caches (`model::vit::vit_block_fwd_cached`) -
+    /// what the backward reads, and what [`ClipVision::read_block_out`] taps.
+    /// Every resident graph is this form, so a training build and an inference
+    /// build record byte-identical forwards.
+    Cached {
+        caches: Vec<model::vit::VitBlockCache>,
+        x_last: DeviceBuffer,
+        scr_tmp: DeviceBuffer,
+        scores: DeviceBuffer,
+    },
+    /// One activation buffer the blocks update in place and ONE scratch shared
+    /// by every block (`model::vit::vit_block_fwd`) - inference only, and what
+    /// [`ClipVision::encode`] records. The cached form's per-block cache is
+    /// ~0.7 GB per block for thirteen 729-token crops at 1152/4304 widths; this
+    /// form holds one block's worth.
+    Shared { x: DeviceBuffer, scr: model::vit::VitScratch },
+}
+
+/// One recorded forward at a fixed batch: every activation buffer the step list
+/// binds, and the steps themselves.
+struct Graph {
     b: u32,
-    src: PatchSource,
     grid: (u32, u32),
-    /// `1 + grid.0*grid.1`.
+    /// `prefix_tokens + grid.0*grid.1`.
     seq: u32,
     spans: Vec<(u32, u32)>,
     // ---- stem ----
@@ -1414,161 +1377,38 @@ pub struct ClipVision {
     patch_nchw: Option<DeviceBuffer>,
     /// **The seam.** `[B*np, D]` patch tokens, whatever produced them.
     tokens: DeviceBuffer,
-    cls_rep: DeviceBuffer,
-    x0: DeviceBuffer,
+    /// CLIP stem only.
+    cls: Option<ClassToken>,
+    /// The CLIP stem's pre-LayerNorm input `[cls ; tokens] + pos`. The SigLIP
+    /// stem has no pre-norm, so `tokens + pos` is written straight into the
+    /// first block's input and this is `None`.
+    x0: Option<DeviceBuffer>,
     pos_src_nlc: DeviceBuffer,
     pos_src_nchw: DeviceBuffer,
     pos_dst_nchw: DeviceBuffer,
     pos_interp: DeviceBuffer,
-    pos_cls: DeviceBuffer,
     pos_full: DeviceBuffer,
-    // ---- index vectors (u32), built once ----
-    idx_cls_src: DeviceBuffer,
-    idx_cls_dst: DeviceBuffer,
     idx_patch_dst: DeviceBuffer,
     idx_pos_src_patch: DeviceBuffer,
-    idx_pos_src_cls: DeviceBuffer,
-    idx_pos_dst_cls: DeviceBuffer,
     idx_pos_dst_patch: DeviceBuffer,
     // ---- blocks ----
-    caches: Vec<model::vit::VitBlockCache>,
-    x_last: DeviceBuffer,
-    scr_tmp: DeviceBuffer,
-    scores: DeviceBuffer,
+    blocks: Blocks,
+    /// The SigLIP stem's post-LayerNorm output; `None` for CLIP, whose output
+    /// is the last block's raw hidden states.
+    out: Option<DeviceBuffer>,
     steps: Vec<Step>,
-    bwd: Option<VisionBwd>,
 }
 
-impl ClipVision {
-    /// Inference build on an existing device: every parameter `Frozen`, no
-    /// gradient buffers, no reverse step list.
-    pub fn new_on(
-        gpu: Gpu,
-        cfg: crate::config::ClipVisionConfig,
-        b: u32,
-        src: PatchSource,
-        init: &HashMap<String, Vec<f32>>,
-    ) -> ClipVision {
-        ClipVision::build(gpu, cfg, b, src, init, false)
-    }
-
-    /// Trainable build: every parameter `Role::Trainable` plus the reverse step
-    /// list. The forward is the SAME `build_steps` an inference build records.
-    pub fn new_train_on(
-        gpu: Gpu,
-        cfg: crate::config::ClipVisionConfig,
-        b: u32,
-        src: PatchSource,
-        init: &HashMap<String, Vec<f32>>,
-    ) -> ClipVision {
-        ClipVision::build(gpu, cfg, b, src, init, true)
-    }
-
-    /// The one builder [`Self::new_on`] and [`Self::new_train_on`] delegate to,
-    /// exposed for a composite that must decide `train` at run time and cannot
-    /// afford an eager weight map.
-    ///
-    /// `weights` is a [`checkpoint::TensorSource`], so an eager
-    /// `&HashMap<String, Vec<f32>>` coerces (that is what the two wrappers
-    /// pass) **and** an mmap-backed `WeightReader`/`MmapGguf` streams, peak host
-    /// allocation one tensor. Shaped after `DeepseekV2::new_on`.
-    pub fn new_on_src(
-        gpu: Gpu,
-        cfg: crate::config::ClipVisionConfig,
-        b: u32,
-        src: PatchSource,
-        weights: &dyn checkpoint::TensorSource,
-        train: bool,
-    ) -> ClipVision {
-        ClipVision::build(gpu, cfg, b, src, weights, train)
-    }
-
-    fn shape(&self) -> model::vit::VitShape {
-        model::vit::VitShape {
-            dim: self.cfg.d_model(),
-            heads: self.cfg.heads(),
-            mlp: self.cfg.mlp_hidden(),
-            eps: self.cfg.eps(),
-        }
-    }
-
-    fn vit_ids(&self) -> model::vit::VitKernelIds {
-        model::vit::VitKernelIds {
-            layernorm: C_LAYERNORM,
-            matmul: C_MATMUL,
-            // `vit_block_fwd` (the uncached inference builder) is never called
-            // here, and it is the only consumer of this slot.
-            matmul_rows: UNREGISTERED,
-            bias_add: C_BIAS_ADD,
-            // The slot names the ROLE, not one kernel: `quick_gelu` and
-            // `gelu_erf` are both `(x)->(y)` with a `Params{total}` signature.
-            mlp_act: match self.cfg.act {
-                TextAct::QuickGelu => C_QUICK_GELU,
-                TextAct::GeluErf => C_GELU_ERF,
-            },
-            scale_chan: UNREGISTERED, // no LayerScale
-            add2: C_ADD2,
-            attn_scores_cross: C_SCORES,
-            attn_softmax_cross: C_SOFTMAX,
-            attn_apply_cross: C_APPLY,
-            kv_k_headt: C_KV_K_HEADT,
-            attn_scores_cross_kt: C_SCORES_KT,
-            ln_head: UNREGISTERED, // no QK-norm
-            rope2d: UNREGISTERED,  // learned absolute positions, not RoPE
-        }
-    }
-
-    fn vit_bwd_ids(&self) -> model::vit::VitBwdIds {
-        model::vit::VitBwdIds {
-            layernorm_dx: C_LAYERNORM_DX,
-            ln_dgamma: C_LN_DGAMMA,
-            ln_dbeta: C_LN_DBETA,
-            matmul_dx: C_MATMUL_DX,
-            matmul_dw: C_MATMUL_DW,
-            bias_grad: C_BIAS_GRAD,
-            // MUST be the adjoint of the forward slot - a `gelu_bwd` standing in
-            // for `quick_gelu_bwd` is a real, gradcheck-invisible bug.
-            mlp_act_bwd: match self.cfg.act {
-                TextAct::QuickGelu => C_QUICK_GELU_BWD,
-                TextAct::GeluErf => C_GELU_ERF_BWD,
-            },
-            scale_chan_dg: UNREGISTERED,
-            ln_head_dx: UNREGISTERED,
-            ln_head_dgb: UNREGISTERED,
-            attn_bwd_dscores_cross: C_DSCORES,
-            attn_bwd_dv_cross: C_DV,
-            attn_bwd_dq_cross: C_DQ,
-            attn_bwd_dk_cross: C_DK,
-            ln_stats: C_LN_STATS,
-            region_copy: UNREGISTERED, // qk-norm's v pass-through only
-            axpy: C_AXPY,
-        }
-    }
-
-    fn build(
-        gpu: Gpu,
-        cfg: crate::config::ClipVisionConfig,
-        b: u32,
-        src: PatchSource,
-        init: &dyn checkpoint::TensorSource,
-        train: bool,
-    ) -> ClipVision {
+impl Graph {
+    fn new(gpu: &Gpu, cfg: &crate::config::ClipVisionConfig, src: PatchSource, b: u32, cached: bool) -> Graph {
         let d = cfg.d_model();
-        let grid = match src {
-            PatchSource::Pixels => (cfg.native_grid(), cfg.native_grid()),
-            PatchSource::Tokens { grid } => grid,
-        };
+        let grid = src.grid(cfg);
+        assert!(b > 0, "a vision graph needs at least one sample");
         assert!(grid.0 > 0 && grid.1 > 0, "patch grid must be non-empty, got {grid:?}");
+        let pre = cfg.stem.prefix_tokens();
         let np = grid.0 * grid.1;
-        let seq = np + 1;
+        let seq = pre + np;
         let n = b * seq;
-        assert_eq!(
-            cfg.n_positions(),
-            cfg.native_patches() + 1,
-            "pos_embed has {} rows but image_size/patch_size imply {}",
-            cfg.n_positions(),
-            cfg.native_patches() + 1
-        );
         // `attn_apply_cross` has no output-offset Param, so each span's `ctx`
         // binding is sliced at `row0 * D` and that must be 64-float (256 B)
         // aligned. Checked here, with the shape that produced it, rather than as
@@ -1577,15 +1417,6 @@ impl ClipVision {
             b == 1 || (seq as u64 * d as u64).is_multiple_of(64),
             "batch > 1 needs seq*D = {seq}*{d} to be a multiple of 64 floats (the ctx binding alignment)"
         );
-
-        let role = if train { Role::Trainable } else { Role::Frozen };
-        let roles: Vec<(String, usize, Role)> = cfg
-            .tensor_manifest()
-            .into_iter()
-            .map(|(name, s)| (name, s.iter().product::<usize>(), role))
-            .collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
-
         let sh = model::vit::VitShape { dim: d, heads: cfg.heads(), mlp: cfg.mlp_hidden(), eps: cfg.eps() };
         let (dl, nl, npl, seql) = (d as u64, n as u64, np as u64, seq as u64);
         let npn = cfg.native_patches();
@@ -1604,76 +1435,320 @@ impl ClipVision {
         // adjoints of one another - which is the whole reason the class token is
         // prepended with a scatter rather than a sliced `region_copy` (a slice
         // would impose a 256-byte alignment on `si*seq*D`).
-        let cls_src: Vec<u32> = vec![0; b as usize];
-        let cls_dst: Vec<u32> = (0..b).map(|si| si * seq).collect();
-        let patch_dst: Vec<u32> =
-            (0..b).flat_map(|si| (0..np).map(move |p| si * seq + 1 + p)).collect();
-        let pos_src_patch: Vec<u32> = (0..npn).map(|i| 1 + i).collect();
-        let pos_dst_patch: Vec<u32> = (0..np).map(|i| 1 + i).collect();
+        let patch_dst: Vec<u32> = (0..b).flat_map(|si| (0..np).map(move |p| si * seq + pre + p)).collect();
+        let pos_src_patch: Vec<u32> = (0..npn).map(|i| pre + i).collect();
+        let pos_dst_patch: Vec<u32> = (0..np).map(|i| pre + i).collect();
+        let cls = (cfg.stem == VisionStem::Clip).then(|| ClassToken {
+            rep: gpu.storage(b as u64 * dl),
+            pos: gpu.storage(dl),
+            idx_src: idx("clip_vision_cls_src", &vec![0; b as usize]),
+            idx_dst: idx("clip_vision_cls_dst", &(0..b).map(|si| si * seq).collect::<Vec<u32>>()),
+            idx_pos: idx("clip_vision_pos_cls", &[0]),
+        });
 
-        let caches: Vec<model::vit::VitBlockCache> =
-            (0..cfg.layers()).map(|_| model::vit::VitBlockCache::new(&gpu, &sh, n, seq)).collect();
-
-        let mut m = ClipVision {
-            pixels: matches!(src, PatchSource::Pixels)
-                .then(|| gpu.storage(b as u64 * 3 * cfg.image_size() as u64 * cfg.image_size() as u64)),
-            patch_nchw: matches!(src, PatchSource::Pixels).then(|| gpu.storage(b as u64 * dl * npl)),
+        let blocks = if cached {
+            Blocks::Cached {
+                caches: (0..cfg.layers()).map(|_| model::vit::VitBlockCache::new(gpu, &sh, n, seq)).collect(),
+                x_last: gpu.storage(nl * dl),
+                scr_tmp: gpu.storage(nl * dl),
+                scores: gpu.storage(cfg.heads() as u64 * seql * seql),
+            }
+        } else {
+            // chunk == span: one score slab per sample, the same per-span
+            // dispatch shape the cached form records.
+            Blocks::Shared { x: gpu.storage(nl * dl), scr: model::vit::VitScratch::new(gpu, &sh, n, seq, seq) }
+        };
+        let pixels = matches!(src, PatchSource::Pixels);
+        Graph {
+            pixels: pixels.then(|| gpu.storage(b as u64 * 3 * cfg.image_size() as u64 * cfg.image_size() as u64)),
+            patch_nchw: pixels.then(|| gpu.storage(b as u64 * dl * npl)),
             tokens: gpu.storage(b as u64 * npl * dl),
-            cls_rep: gpu.storage(b as u64 * dl),
-            x0: gpu.storage(nl * dl),
+            x0: cls.is_some().then(|| gpu.storage(nl * dl)),
+            cls,
             pos_src_nlc: gpu.storage(npn as u64 * dl),
             pos_src_nchw: gpu.storage(npn as u64 * dl),
             pos_dst_nchw: gpu.storage(npl * dl),
             pos_interp: gpu.storage(npl * dl),
-            pos_cls: gpu.storage(dl),
             pos_full: gpu.storage(seql * dl),
-            idx_cls_src: idx("clip_vision_cls_src", &cls_src),
-            idx_cls_dst: idx("clip_vision_cls_dst", &cls_dst),
             idx_patch_dst: idx("clip_vision_patch_dst", &patch_dst),
             idx_pos_src_patch: idx("clip_vision_pos_src_patch", &pos_src_patch),
-            idx_pos_src_cls: idx("clip_vision_pos_src_cls", &[0]),
-            idx_pos_dst_cls: idx("clip_vision_pos_dst_cls", &[0]),
             idx_pos_dst_patch: idx("clip_vision_pos_dst_patch", &pos_dst_patch),
-            caches,
-            x_last: gpu.storage(nl * dl),
-            scr_tmp: gpu.storage(nl * dl),
-            scores: gpu.storage(cfg.heads() as u64 * seql * seql),
+            blocks,
+            out: (cfg.stem == VisionStem::Siglip).then(|| gpu.storage(nl * dl)),
             spans: (0..b).map(|si| (si * seq, seq)).collect(),
             grid,
             seq,
             b,
-            src,
-            gpu,
-            cfg,
-            ps,
             steps: Vec::new(),
-            bwd: None,
-        };
-        m.steps = m.build_steps();
+        }
+    }
+
+    /// The first block's input.
+    fn block_in(&self) -> &DeviceBuffer {
+        match &self.blocks {
+            Blocks::Cached { caches, .. } => &caches[0].x_in,
+            Blocks::Shared { x, .. } => x,
+        }
+    }
+
+    /// The last block's raw output.
+    fn block_last(&self) -> &DeviceBuffer {
+        match &self.blocks {
+            Blocks::Cached { x_last, .. } => x_last,
+            Blocks::Shared { x, .. } => x,
+        }
+    }
+
+    /// `[cls ;] tokens + pos`: the pre-norm input (CLIP) or the first block's
+    /// input itself (SigLIP).
+    fn x0(&self) -> &DeviceBuffer {
+        self.x0.as_ref().unwrap_or_else(|| self.block_in())
+    }
+
+    /// The tower output: post-norm for SigLIP, the last block for CLIP.
+    fn output(&self) -> &DeviceBuffer {
+        self.out.as_ref().unwrap_or_else(|| self.block_last())
+    }
+
+    fn cached(&self) -> (&[model::vit::VitBlockCache], &DeviceBuffer) {
+        match &self.blocks {
+            Blocks::Cached { caches, x_last, .. } => (caches, x_last),
+            Blocks::Shared { .. } => unreachable!("the resident graph is always the cached form"),
+        }
+    }
+
+    fn rows(&self) -> u32 {
+        self.b * self.seq
+    }
+}
+
+/// The reverse-pass buffers and recorded step list, allocated ONLY by
+/// [`ClipVision::new_train_on`].
+///
+/// The blocks' own gradients live in the shared `model::vit` scratch; only the
+/// stem needs buffers here. `d_x[l]` is the grad of block `l`'s input.
+struct VisionBwd {
+    seed_out: DeviceBuffer,
+    /// SigLIP: grad of the last block's output, through the post-norm.
+    d_last: Option<DeviceBuffer>,
+    d_x: Vec<DeviceBuffer>,
+    /// CLIP: grad of `x0` (`[cls; tokens] + pos`, the pre-LayerNorm input). For
+    /// SigLIP `x0` IS block 0's input, so its grad is `d_x[0]`.
+    d_x0: Option<DeviceBuffer>,
+    d_cls_rep: Option<DeviceBuffer>,
+    d_pos_cls: Option<DeviceBuffer>,
+    d_tokens: DeviceBuffer,
+    d_patch_nchw: Option<DeviceBuffer>,
+    /// `[seq, D]` - ACCUMULATED by `pos_bwd`, so it is in the backward submit's
+    /// clears list.
+    d_pos_full: DeviceBuffer,
+    d_pos_interp: DeviceBuffer,
+    d_pos_dst_nchw: DeviceBuffer,
+    d_pos_src_nchw: DeviceBuffer,
+    d_pos_src_nlc: DeviceBuffer,
+    mean: DeviceBuffer,
+    inv: DeviceBuffer,
+    scratch: model::vit::VitBwdScratch,
+    steps: Vec<Step>,
+}
+
+/// A pre-LN ViT image tower - OpenAI CLIP's or SigLIP's - forward and backward.
+///
+/// ```text
+/// tokens = patch_conv(pixels) (+ bias, SigLIP)  |  tokens = <injected>   [B*n, D]
+/// x0     = [cls ;] tokens                  (class row: CLIP stem only)
+/// x0    += pos(resampled to this grid)
+/// x      = pre_layernorm(x0)               (CLIP stem only)
+/// per block l:  the shared `model::vit` pre-LN block
+///   LN1 -> fused qkv+bias -> BIDIRECTIONAL MHA -> proj+bias -> residual
+///   LN2 -> fc1+bias -> act -> fc2+bias -> residual      act from the config
+/// out    = x_L                             (CLIP: no post-LayerNorm)
+/// out    = post_layernorm(x_L)             (SigLIP)
+/// ```
+///
+/// **No second block graph, and one SigLIP.** Every block is
+/// `model::vit::vit_block_fwd_cached` / `vit_block_bwd` (or, for
+/// [`ClipVision::encode`], `vit_block_fwd`) with `qk_norm: None`,
+/// `rope: None`, `ls1/ls2: None` - the exact opposite of [`EvaVision`], which
+/// needs its own graph because `inner_attn_ln` and the SwiGLU-with-`ffn_ln`
+/// have no hook in that builder. The [`VisionStem`] only decides what sits
+/// before the first block and after the last one, so DeepSeek-VL's and
+/// Janus-Pro's timm SigLIP and Moondream's SigLIP are this one tower.
+///
+/// **Two ways to run it.** A resident build ([`Self::new_on`] /
+/// [`Self::new_train_on`]) records ONE graph at a fixed batch at construction,
+/// always over the per-block activation cache, so a training build and an
+/// inference build record byte-identical forwards and cannot drift (~18 MB per
+/// block at CLIP-L/224 with B=1). [`Self::encode`] records a graph for whatever
+/// batch it is handed, over one shared block scratch instead - the form a
+/// caller whose batch varies per request (Moondream's crop count) and whose
+/// activations would not fit per block needs. [`Self::new_encoder_on`] uploads
+/// the weights with no resident graph at all.
+pub struct ClipVision {
+    pub gpu: Gpu,
+    pub cfg: crate::config::ClipVisionConfig,
+    pub ps: ParamStore,
+    src: PatchSource,
+    /// `None` for a [`Self::new_encoder_on`] build.
+    graph: Option<Graph>,
+    bwd: Option<VisionBwd>,
+}
+
+impl ClipVision {
+    /// Inference build on an existing device: every parameter `Frozen`, no
+    /// gradient buffers, no reverse step list.
+    pub fn new_on(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        b: u32,
+        src: PatchSource,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> ClipVision {
+        ClipVision::build(gpu, cfg, src, init, Some((b, false)))
+    }
+
+    /// Trainable build: every parameter `Role::Trainable` plus the reverse step
+    /// list. The forward is the SAME `record` an inference build runs.
+    pub fn new_train_on(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        b: u32,
+        src: PatchSource,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> ClipVision {
+        ClipVision::build(gpu, cfg, src, init, Some((b, true)))
+    }
+
+    /// The one builder [`Self::new_on`] and [`Self::new_train_on`] delegate to,
+    /// exposed for a composite that must decide `train` at run time and cannot
+    /// afford an eager weight map.
+    ///
+    /// `weights` is a [`checkpoint::TensorSource`], so an eager
+    /// `&HashMap<String, Vec<f32>>` coerces (that is what the two wrappers
+    /// pass) **and** an mmap-backed `WeightReader`/`MmapGguf` streams, peak host
+    /// allocation one tensor. Shaped after `DeepseekV2::new_on`.
+    pub fn new_on_src(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        b: u32,
+        src: PatchSource,
+        weights: &dyn checkpoint::TensorSource,
+        train: bool,
+    ) -> ClipVision {
+        ClipVision::build(gpu, cfg, src, weights, Some((b, train)))
+    }
+
+    /// Weights only, `Frozen`, no resident graph: the build [`Self::encode`] is
+    /// for. Everything that reads or drives the resident graph
+    /// ([`Self::forward`], [`Self::set_pixels`], the `read_*` taps) refuses on
+    /// such a build.
+    pub fn new_encoder_on(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        src: PatchSource,
+        weights: &dyn checkpoint::TensorSource,
+    ) -> ClipVision {
+        ClipVision::build(gpu, cfg, src, weights, None)
+    }
+
+    fn build(
+        gpu: Gpu,
+        cfg: crate::config::ClipVisionConfig,
+        src: PatchSource,
+        init: &dyn checkpoint::TensorSource,
+        resident: Option<(u32, bool)>,
+    ) -> ClipVision {
+        let want_pos = cfg.native_patches() + cfg.stem.prefix_tokens();
+        assert_eq!(
+            cfg.n_positions(),
+            want_pos,
+            "pos_embed has {} rows but image_size/patch_size and the {:?} stem imply {want_pos}",
+            cfg.n_positions(),
+            cfg.stem
+        );
+        let train = resident.is_some_and(|(_, t)| t);
+        let role = if train { Role::Trainable } else { Role::Frozen };
+        let roles: Vec<(String, usize, Role)> = cfg
+            .tensor_manifest()
+            .into_iter()
+            .map(|(name, s)| (name, s.iter().product::<usize>(), role))
+            .collect();
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, init);
+        let mut m = ClipVision { gpu, cfg, ps, src, graph: None, bwd: None };
+        // Refuse a handle that lacks a kernel now, by name, rather than at the
+        // first `encode` or as an out-of-range pipeline index at submit.
+        for (name, _) in CLIP_VISION_PIPELINES.iter().filter(|(n, _)| !OPTIONAL_KERNELS.contains(n)) {
+            m.k(name);
+        }
+        let Some((b, train)) = resident else { return m };
+
+        let mut graph = Graph::new(&m.gpu, &m.cfg, src, b, true);
+        graph.steps = m.record(&graph);
         if train {
             let g = &m.gpu;
-            m.bwd = Some(VisionBwd {
-                seed_out: g.storage(nl * dl),
-                d_x: (0..m.cfg.layers()).map(|_| g.storage(nl * dl)).collect(),
-                d_x0: g.storage(nl * dl),
-                d_cls_rep: g.storage(b as u64 * dl),
-                d_tokens: g.storage(b as u64 * npl * dl),
-                d_patch_nchw: matches!(src, PatchSource::Pixels).then(|| g.storage(b as u64 * dl * npl)),
-                d_pos_full: g.storage(seql * dl),
-                d_pos_cls: g.storage(dl),
-                d_pos_interp: g.storage(npl * dl),
-                d_pos_dst_nchw: g.storage(npl * dl),
-                d_pos_src_nchw: g.storage(npn as u64 * dl),
-                d_pos_src_nlc: g.storage(npn as u64 * dl),
+            let d = m.cfg.d_model() as u64;
+            let (nl, npl, seql) = (graph.rows() as u64, (graph.grid.0 * graph.grid.1) as u64, graph.seq as u64);
+            let npn = m.cfg.native_patches() as u64;
+            let sh = m.shape();
+            let clip = m.cfg.stem == VisionStem::Clip;
+            let mut bwd = VisionBwd {
+                seed_out: g.storage(nl * d),
+                d_last: (!clip).then(|| g.storage(nl * d)),
+                d_x: (0..m.cfg.layers()).map(|_| g.storage(nl * d)).collect(),
+                d_x0: clip.then(|| g.storage(nl * d)),
+                d_cls_rep: clip.then(|| g.storage(b as u64 * d)),
+                d_pos_cls: clip.then(|| g.storage(d)),
+                d_tokens: g.storage(b as u64 * npl * d),
+                d_patch_nchw: matches!(src, PatchSource::Pixels).then(|| g.storage(b as u64 * d * npl)),
+                d_pos_full: g.storage(seql * d),
+                d_pos_interp: g.storage(npl * d),
+                d_pos_dst_nchw: g.storage(npl * d),
+                d_pos_src_nchw: g.storage(npn * d),
+                d_pos_src_nlc: g.storage(npn * d),
                 mean: g.storage(nl),
                 inv: g.storage(nl),
-                scratch: model::vit::VitBwdScratch::new(g, &sh, n, seq),
+                scratch: model::vit::VitBwdScratch::new(g, &sh, graph.rows(), graph.seq),
                 steps: Vec::new(),
-            });
-            let steps = m.build_bwd_steps();
-            m.bwd.as_mut().expect("bwd allocated").steps = steps;
+            };
+            bwd.steps = m.record_bwd(&graph, &bwd);
+            m.bwd = Some(bwd);
         }
+        m.graph = Some(graph);
         m
+    }
+
+    fn shape(&self) -> model::vit::VitShape {
+        model::vit::VitShape {
+            dim: self.cfg.d_model(),
+            heads: self.cfg.heads(),
+            mlp: self.cfg.mlp_hidden(),
+            eps: self.cfg.eps(),
+        }
+    }
+
+    /// `name`'s pipeline index on this handle - resolved by name, see
+    /// [`CLIP_VISION_PIPELINES`].
+    fn k(&self, name: &str) -> usize {
+        self.gpu.kernel_index(name).unwrap_or_else(|| {
+            panic!("clip: vision kernel `{name}` is not registered on this handle - chain clip::model::CLIP_VISION_PIPELINES into its kernel list")
+        })
+    }
+
+    /// The block builders' forward slots, by name. The MLP activation is the
+    /// one the config names; every slot this tower never fills (LayerScale,
+    /// QK-norm, RoPE) stays unused because the block weights carry `None` there.
+    fn vit_ids(&self) -> model::vit::VitKernelIds {
+        model::vit::VitKernelIds::by_name(&self.gpu, self.cfg.act.kernel())
+    }
+
+    /// The backward slots, by name. `mlp_act_bwd` is [`TextAct::bwd_kernel`] -
+    /// the adjoint of the SAME activation the forward slot holds.
+    fn vit_bwd_ids(&self) -> model::vit::VitBwdIds {
+        model::vit::VitBwdIds::by_name(&self.gpu, self.cfg.act.bwd_kernel())
+    }
+
+    fn ln_ids(&self) -> block::LayerNormIds {
+        block::LayerNormIds::resolve(&self.gpu, self.k("layernorm"), self.k("ln_stats"), self.k("layernorm_dx"))
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -1702,88 +1777,110 @@ impl ClipVision {
         }
     }
 
-    /// The stem: patch tokens (however produced) -> `x0` -> pre-LayerNorm ->
-    /// block 0's input.
+    /// The forward of graph `gr`: stem -> blocks -> (post-norm).
     ///
-    /// **The `PatchSource` seam is the first two dispatches and nothing else.**
-    /// Everything from `cls_rep` down is source-independent, which is why the
-    /// two paths are bit-identical by construction rather than by coincidence.
-    fn build_steps(&self) -> Vec<Step> {
+    /// **The `PatchSource` seam is the first dispatches and nothing else.**
+    /// Everything from the position table down is source-independent, which is
+    /// why the two paths are bit-identical by construction rather than by
+    /// coincidence.
+    fn record(&self, gr: &Graph) -> Vec<Step> {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model();
-        let (gh, gw) = self.grid;
+        let (gh, gw) = gr.grid;
         let np = gh * gw;
-        let n = self.b * self.seq;
+        let n = gr.rows();
         let gn = c.native_grid();
         let npn = c.native_patches();
-        let ln = block::LayerNormIds::resolve(g, C_LAYERNORM, C_LN_STATS, C_LAYERNORM_DX);
+        let ln = self.ln_ids();
         let mut s: Vec<Step> = Vec::new();
 
         // ---- the seam ----
-        if let (PatchSource::Pixels, Some(px), Some(nchw)) =
-            (self.src, self.pixels.as_ref(), self.patch_nchw.as_ref())
-        {
+        if let (Some(px), Some(nchw)) = (gr.pixels.as_ref(), gr.patch_nchw.as_ref()) {
             let sz = c.image_size();
             // `conv2d` Params: [N, Cin, H, W, Cout, K, stride, pad, Ho, Wo].
-            // CLIP's patch embedding has NO bias (`Conv2d(..., bias=False)`).
             s.push(g.step(
-                C_CONV2D,
+                self.k("conv2d"),
                 &[px, self.w("patch_embed.weight"), nchw],
-                &[self.b, 3, sz, sz, d, c.patch(), c.patch(), 0, gh, gw],
-                self.b * d * np,
+                &[gr.b, 3, sz, sz, d, c.patch(), c.patch(), 0, gh, gw],
+                gr.b * d * np,
             ));
             // `nchw_nlc` Params: [total, c, hw].
-            s.push(g.step(C_NCHW_NLC, &[nchw, &self.tokens], &[self.b * d * np, d, np], self.b * d * np));
+            s.push(g.step(self.k("nchw_nlc"), &[nchw, &gr.tokens], &[gr.b * d * np, d, np], gr.b * d * np));
+            if c.stem == VisionStem::Siglip {
+                // SigLIP's conv carries a bias (CLIP's is `bias=False`).
+                // `bias_add` Params: [rows, cols]; bufs [x(rw), bias].
+                s.push(g.step(self.k("bias_add"), &[&gr.tokens, self.w("patch_embed.bias")], &[gr.b * np, d], gr.b * np * d));
+            }
         }
 
         // ---- learned absolute position embedding, resampled to this grid ----
-        // The class-token row is position 0 and is NOT part of the patch grid, so
+        // A class-token row is position 0 and is NOT part of the patch grid, so
         // it is lifted out before the resample and put back after - torch's
-        // `interpolate_pos_encoding` does exactly this.
+        // `interpolate_pos_encoding` does exactly this. SigLIP has no such row.
         // `embed` Params: [d_model, seq_len]; bufs [idx(u32), table, out].
-        s.push(g.step(C_EMBED, &[&self.idx_pos_src_patch, self.w("pos_embed"), &self.pos_src_nlc], &[d, npn], npn * d));
+        s.push(g.step(self.k("embed"), &[&gr.idx_pos_src_patch, self.w("pos_embed"), &gr.pos_src_nlc], &[d, npn], npn * d));
         // `nlc_nchw` / `nchw_nlc` Params: [total, c, hw] - N = 1 here.
-        s.push(g.step(C_NLC_NCHW, &[&self.pos_src_nlc, &self.pos_src_nchw], &[d * npn, d, npn], d * npn));
+        s.push(g.step(self.k("nlc_nchw"), &[&gr.pos_src_nlc, &gr.pos_src_nchw], &[d * npn, d, npn], d * npn));
         // `resize_bicubic` Params: [N, C, H, W, Ho, Wo, align_corners].
         // align_corners = 0 is torch's `F.interpolate(mode="bicubic")` default,
         // and at `(Ho, Wo) == (H, W)` the 4-tap stencil collapses to weight 1 on
         // the identity tap - so a native grid reproduces the table BITWISE
         // (asserted by `native_grid_pos_embed_is_the_table_bit_for_bit`).
-        s.push(g.step(C_RESIZE_BICUBIC, &[&self.pos_src_nchw, &self.pos_dst_nchw], &[1, d, gn, gn, gh, gw, 0], d * np));
-        s.push(g.step(C_NCHW_NLC, &[&self.pos_dst_nchw, &self.pos_interp], &[d * np, d, np], d * np));
-        s.push(g.step(C_EMBED, &[&self.idx_pos_src_cls, self.w("pos_embed"), &self.pos_cls], &[d, 1], d));
+        s.push(g.step(self.k("resize_bicubic"), &[&gr.pos_src_nchw, &gr.pos_dst_nchw], &[1, d, gn, gn, gh, gw, 0], d * np));
+        s.push(g.step(self.k("nchw_nlc"), &[&gr.pos_dst_nchw, &gr.pos_interp], &[d * np, d, np], d * np));
         // `row_scatter` Params: [n_idx, d, n_rows_out]; bufs [idx(u32), src, out].
-        // The two scatters together cover every row of `pos_full`, so it needs no
+        // The scatters together cover every row of `pos_full`, so it needs no
         // clear.
-        s.push(g.step(C_ROW_SCATTER, &[&self.idx_pos_dst_cls, &self.pos_cls, &self.pos_full], &[1, d, self.seq], d));
-        s.push(g.step(C_ROW_SCATTER, &[&self.idx_pos_dst_patch, &self.pos_interp, &self.pos_full], &[np, d, self.seq], np * d));
+        if let Some(cls) = &gr.cls {
+            s.push(g.step(self.k("embed"), &[&cls.idx_pos, self.w("pos_embed"), &cls.pos], &[d, 1], d));
+            s.push(g.step(self.k("row_scatter"), &[&cls.idx_pos, &cls.pos, &gr.pos_full], &[1, d, gr.seq], d));
+        }
+        s.push(g.step(self.k("row_scatter"), &[&gr.idx_pos_dst_patch, &gr.pos_interp, &gr.pos_full], &[np, d, gr.seq], np * d));
 
-        // ---- [cls ; tokens] + pos ----
-        s.push(g.step(C_EMBED, &[&self.idx_cls_src, self.w("class_embed"), &self.cls_rep], &[d, self.b], self.b * d));
-        s.push(g.step(C_ROW_SCATTER, &[&self.idx_cls_dst, &self.cls_rep, &self.x0], &[self.b, d, n], self.b * d));
-        s.push(g.step(C_ROW_SCATTER, &[&self.idx_patch_dst, &self.tokens, &self.x0], &[self.b * np, d, n], self.b * np * d));
+        // ---- [cls ;] tokens + pos ----
+        let x0 = gr.x0();
+        if let Some(cls) = &gr.cls {
+            s.push(g.step(self.k("embed"), &[&cls.idx_src, self.w("class_embed"), &cls.rep], &[d, gr.b], gr.b * d));
+            s.push(g.step(self.k("row_scatter"), &[&cls.idx_dst, &cls.rep, x0], &[gr.b, d, n], gr.b * d));
+        }
+        s.push(g.step(self.k("row_scatter"), &[&gr.idx_patch_dst, &gr.tokens, x0], &[gr.b * np, d, n], gr.b * np * d));
         // `pos_add` Params: [total, d_model, t] - the row modulo broadcasts the
         // `[seq, D]` table over the `[B*seq, D]` batch.
-        s.push(g.step(C_POS_ADD, &[&self.x0, &self.pos_full], &[n * d, d, self.seq], n * d));
+        s.push(g.step(self.k("pos_add"), &[x0, &gr.pos_full], &[n * d, d, gr.seq], n * d));
 
-        // ---- pre-LayerNorm, then the blocks ----
-        let first = &self.caches[0].x_in;
-        s.push(block::layernorm_fwd(g, &ln, &self.x0, self.w("pre_norm.weight"), self.w("pre_norm.bias"), first, d, n, c.eps()));
+        // ---- pre-LayerNorm (CLIP), then the blocks ----
+        if gr.x0.is_some() {
+            s.push(block::layernorm_fwd(g, &ln, x0, self.w("pre_norm.weight"), self.w("pre_norm.bias"), gr.block_in(), d, n, c.eps()));
+        }
         let sh = self.shape();
         let ids = self.vit_ids();
-        let kb = self.vit_bwd_ids();
-        for l in 0..c.layers() as usize {
-            let bw = self.block_weights(l as u32);
-            let x_out = if l + 1 < self.caches.len() { &self.caches[l + 1].x_in } else { &self.x_last };
-            model::vit::vit_block_fwd_cached(
-                g, &ids, &kb, &sh, &bw, &self.caches[l], x_out, n, &self.spans, &self.scr_tmp, &self.scores, &mut s,
-            );
+        match &gr.blocks {
+            Blocks::Cached { caches, x_last, scr_tmp, scores } => {
+                let kb = self.vit_bwd_ids();
+                for l in 0..c.layers() as usize {
+                    let bw = self.block_weights(l as u32);
+                    let x_out = if l + 1 < caches.len() { &caches[l + 1].x_in } else { x_last };
+                    model::vit::vit_block_fwd_cached(g, &ids, &kb, &sh, &bw, &caches[l], x_out, n, &gr.spans, scr_tmp, scores, &mut s);
+                }
+            }
+            Blocks::Shared { x, scr } => {
+                for l in 0..c.layers() {
+                    let bw = self.block_weights(l);
+                    model::vit::vit_block_fwd(g, &ids, &sh, &bw, x, n, &gr.spans, gr.seq, scr, &mut s);
+                }
+            }
+        }
+
+        // ---- post-LayerNorm (SigLIP) ----
+        if let Some(out) = &gr.out {
+            s.push(block::layernorm_fwd(g, &ln, gr.block_last(), self.w("post_norm.weight"), self.w("post_norm.bias"), out, d, n, c.eps()));
         }
         s
     }
 
-    /// The exact adjoint of [`ClipVision::build_steps`], walked bottom-up.
+    /// The exact adjoint of [`ClipVision::record`] over the resident (cached)
+    /// graph, walked bottom-up.
     ///
     /// Clears (see [`ClipVision::backward`]): `d_pos_full` because `pos_bwd`
     /// ACCUMULATES, and the block scratch's `d_qkv`/`d_qkv_pre` because
@@ -1792,96 +1889,125 @@ impl ClipVision {
     /// invocation; `embed`, `matmul_dx`, `layernorm_dx` and the four cross
     /// backward kernels all overwrite), and the PARAMETER grads accumulate and
     /// are cleared exactly once per step by `ParamStore::zero_grads`.
-    fn build_bwd_steps(&self) -> Vec<Step> {
+    fn record_bwd(&self, gr: &Graph, bw: &VisionBwd) -> Vec<Step> {
         let g = &self.gpu;
         let c = &self.cfg;
-        let bw = self.bwd.as_ref().expect("build_bwd_steps in training mode only");
         let d = c.d_model();
-        let (gh, gw) = self.grid;
+        let (gh, gw) = gr.grid;
         let np = gh * gw;
-        let n = self.b * self.seq;
+        let n = gr.rows();
         let gn = c.native_grid();
         let npn = c.native_patches();
-        let ln = block::LayerNormIds::resolve(g, C_LAYERNORM, C_LN_STATS, C_LAYERNORM_DX);
-        let gr = |name: &str| self.ps.g(name);
+        let ln = self.ln_ids();
+        let grad = |name: &str| self.ps.g(name);
         let sh = self.shape();
         let ids = self.vit_ids();
         let kb = self.vit_bwd_ids();
+        let (caches, x_last) = gr.cached();
         let mut s: Vec<Step> = Vec::new();
+
+        // ---- post-LayerNorm (SigLIP) ----
+        // `layernorm_dgamma` Params: [d_model, n_rows]; bufs [dy, x, mean, inv, dgamma].
+        let d_last: &DeviceBuffer = match &bw.d_last {
+            Some(dl) => {
+                s.push(block::ln_stats_fwd(g, &ln, x_last, &bw.mean, &bw.inv, d, n, c.eps()));
+                s.push(g.step(self.k("layernorm_dgamma"), &[&bw.seed_out, x_last, &bw.mean, &bw.inv, grad("post_norm.weight")], &[d, n], d));
+                s.push(g.step(self.k("layernorm_dbeta"), &[&bw.seed_out, grad("post_norm.bias")], &[d, n], d));
+                s.push(block::layernorm_dx_bwd(g, &ln, x_last, self.w("post_norm.weight"), &bw.seed_out, dl, d, n, c.eps()));
+                dl
+            }
+            None => &bw.seed_out,
+        };
 
         // ---- blocks, in reverse ----
         for l in (0..c.layers() as usize).rev() {
             let w = self.block_weights(l as u32);
             let p = format!("blocks.{l}");
             let vg = model::vit::VitBlockGrads {
-                norm1_w: gr(&format!("{p}.norm1.weight")),
-                norm1_b: gr(&format!("{p}.norm1.bias")),
-                qkv_w: gr(&format!("{p}.attn.qkv.weight")),
-                qkv_b: gr(&format!("{p}.attn.qkv.bias")),
+                norm1_w: grad(&format!("{p}.norm1.weight")),
+                norm1_b: grad(&format!("{p}.norm1.bias")),
+                qkv_w: grad(&format!("{p}.attn.qkv.weight")),
+                qkv_b: grad(&format!("{p}.attn.qkv.bias")),
                 q_norm_w: None,
                 q_norm_b: None,
                 k_norm_w: None,
                 k_norm_b: None,
-                proj_w: gr(&format!("{p}.attn.proj.weight")),
-                proj_b: gr(&format!("{p}.attn.proj.bias")),
+                proj_w: grad(&format!("{p}.attn.proj.weight")),
+                proj_b: grad(&format!("{p}.attn.proj.bias")),
                 ls1: None,
-                norm2_w: gr(&format!("{p}.norm2.weight")),
-                norm2_b: gr(&format!("{p}.norm2.bias")),
-                fc1_w: gr(&format!("{p}.mlp.fc1.weight")),
-                fc1_b: gr(&format!("{p}.mlp.fc1.bias")),
-                fc2_w: gr(&format!("{p}.mlp.fc2.weight")),
-                fc2_b: gr(&format!("{p}.mlp.fc2.bias")),
+                norm2_w: grad(&format!("{p}.norm2.weight")),
+                norm2_b: grad(&format!("{p}.norm2.bias")),
+                fc1_w: grad(&format!("{p}.mlp.fc1.weight")),
+                fc1_b: grad(&format!("{p}.mlp.fc1.bias")),
+                fc2_w: grad(&format!("{p}.mlp.fc2.weight")),
+                fc2_b: grad(&format!("{p}.mlp.fc2.bias")),
                 ls2: None,
             };
-            let d_out = if l + 1 < bw.d_x.len() { &bw.d_x[l + 1] } else { &bw.seed_out };
-            model::vit::vit_block_bwd(
-                g, &ids, &kb, &sh, &w, &vg, &self.caches[l], d_out, &bw.d_x[l], n, &self.spans, &bw.scratch, &mut s,
-            );
+            let d_out = if l + 1 < bw.d_x.len() { &bw.d_x[l + 1] } else { d_last };
+            model::vit::vit_block_bwd(g, &ids, &kb, &sh, &w, &vg, &caches[l], d_out, &bw.d_x[l], n, &gr.spans, &bw.scratch, &mut s);
         }
 
-        // ---- pre-LayerNorm ----
+        // ---- pre-LayerNorm (CLIP) ----
         // Its input is `x0` AFTER `pos_add` (which is in place), which is exactly
-        // what the forward normalized.
-        s.push(block::ln_stats_fwd(g, &ln, &self.x0, &bw.mean, &bw.inv, d, n, c.eps()));
-        // `layernorm_dgamma` Params: [d_model, n_rows]; bufs [dy, x, mean, inv, dgamma].
-        s.push(g.step(C_LN_DGAMMA, &[&bw.d_x[0], &self.x0, &bw.mean, &bw.inv, gr("pre_norm.weight")], &[d, n], d));
-        s.push(g.step(C_LN_DBETA, &[&bw.d_x[0], gr("pre_norm.bias")], &[d, n], d));
-        s.push(block::layernorm_dx_bwd(g, &ln, &self.x0, self.w("pre_norm.weight"), &bw.d_x[0], &bw.d_x0, d, n, c.eps()));
+        // what the forward normalized. Without a pre-norm, `x0` is block 0's
+        // input and `d_x[0]` already is its grad.
+        let x0 = gr.x0();
+        let d_x0: &DeviceBuffer = match &bw.d_x0 {
+            Some(dx0) => {
+                s.push(block::ln_stats_fwd(g, &ln, x0, &bw.mean, &bw.inv, d, n, c.eps()));
+                s.push(g.step(self.k("layernorm_dgamma"), &[&bw.d_x[0], x0, &bw.mean, &bw.inv, grad("pre_norm.weight")], &[d, n], d));
+                s.push(g.step(self.k("layernorm_dbeta"), &[&bw.d_x[0], grad("pre_norm.bias")], &[d, n], d));
+                s.push(block::layernorm_dx_bwd(g, &ln, x0, self.w("pre_norm.weight"), &bw.d_x[0], dx0, d, n, c.eps()));
+                dx0
+            }
+            None => &bw.d_x[0],
+        };
 
         // ---- position embedding ----
         // `pos_bwd` Params: [b, t, d_model]; bufs [d_x, dpos] - ACCUMULATES.
-        s.push(g.step(C_POS_BWD, &[&bw.d_x0, &bw.d_pos_full], &[self.b, self.seq, d], self.seq * d));
+        s.push(g.step(self.k("pos_bwd"), &[d_x0, &bw.d_pos_full], &[gr.b, gr.seq, d], gr.seq * d));
         // A `row_scatter`'s adjoint is the `embed` gather with the SAME index.
-        s.push(g.step(C_EMBED, &[&self.idx_pos_dst_cls, &bw.d_pos_full, &bw.d_pos_cls], &[d, 1], d));
-        s.push(g.step(C_EMBED, &[&self.idx_pos_dst_patch, &bw.d_pos_full, &bw.d_pos_interp], &[d, np], np * d));
-        s.push(g.step(C_NLC_NCHW, &[&bw.d_pos_interp, &bw.d_pos_dst_nchw], &[d * np, d, np], d * np));
+        s.push(g.step(self.k("embed"), &[&gr.idx_pos_dst_patch, &bw.d_pos_full, &bw.d_pos_interp], &[d, np], np * d));
+        s.push(g.step(self.k("nlc_nchw"), &[&bw.d_pos_interp, &bw.d_pos_dst_nchw], &[d * np, d, np], d * np));
         // `resize_bicubic_dx` Params: the forward's, unchanged; bufs [dy, dx].
-        s.push(g.step(C_RESIZE_BICUBIC_DX, &[&bw.d_pos_dst_nchw, &bw.d_pos_src_nchw], &[1, d, gn, gn, gh, gw, 0], d * npn));
-        s.push(g.step(C_NCHW_NLC, &[&bw.d_pos_src_nchw, &bw.d_pos_src_nlc], &[d * npn, d, npn], d * npn));
+        s.push(g.step(self.k("resize_bicubic_dx"), &[&bw.d_pos_dst_nchw, &bw.d_pos_src_nchw], &[1, d, gn, gn, gh, gw, 0], d * npn));
+        s.push(g.step(self.k("nchw_nlc"), &[&bw.d_pos_src_nchw, &bw.d_pos_src_nlc], &[d * npn, d, npn], d * npn));
         // `emb_bwd` Params: [n_rows, d_model, vocab]; bufs [idx(u32), d_x, grad].
-        // Two contributions into one table (patch rows and the class row), which
-        // is why it accumulates.
-        s.push(g.step(C_EMB_BWD, &[&self.idx_pos_src_patch, &bw.d_pos_src_nlc, gr("pos_embed")], &[npn, d, c.n_positions()], c.n_positions() * d));
-        s.push(g.step(C_EMB_BWD, &[&self.idx_pos_src_cls, &bw.d_pos_cls, gr("pos_embed")], &[1, d, c.n_positions()], c.n_positions() * d));
+        // Two contributions into one table under the CLIP stem (patch rows and
+        // the class row), which is why it accumulates.
+        s.push(g.step(self.k("emb_bwd"), &[&gr.idx_pos_src_patch, &bw.d_pos_src_nlc, grad("pos_embed")], &[npn, d, c.n_positions()], c.n_positions() * d));
 
-        // ---- class token ----
-        s.push(g.step(C_EMBED, &[&self.idx_cls_dst, &bw.d_x0, &bw.d_cls_rep], &[d, self.b], self.b * d));
-        s.push(g.step(C_EMB_BWD, &[&self.idx_cls_src, &bw.d_cls_rep, gr("class_embed")], &[self.b, d, 1], d));
+        // ---- class token (CLIP) ----
+        if let (Some(cls), Some(d_pos_cls), Some(d_cls_rep)) = (&gr.cls, &bw.d_pos_cls, &bw.d_cls_rep) {
+            s.push(g.step(self.k("embed"), &[&cls.idx_pos, &bw.d_pos_full, d_pos_cls], &[d, 1], d));
+            s.push(g.step(self.k("emb_bwd"), &[&cls.idx_pos, d_pos_cls, grad("pos_embed")], &[1, d, c.n_positions()], c.n_positions() * d));
+            s.push(g.step(self.k("embed"), &[&cls.idx_dst, d_x0, d_cls_rep], &[d, gr.b], gr.b * d));
+            s.push(g.step(self.k("emb_bwd"), &[&cls.idx_src, d_cls_rep, grad("class_embed")], &[gr.b, d, 1], d));
+        }
 
         // ---- the seam, in reverse ----
-        s.push(g.step(C_EMBED, &[&self.idx_patch_dst, &bw.d_x0, &bw.d_tokens], &[d, self.b * np], self.b * np * d));
-        if let (Some(px), Some(dn)) = (self.pixels.as_ref(), bw.d_patch_nchw.as_ref()) {
+        s.push(g.step(self.k("embed"), &[&gr.idx_patch_dst, d_x0, &bw.d_tokens], &[d, gr.b * np], gr.b * np * d));
+        if let (Some(px), Some(dn)) = (gr.pixels.as_ref(), bw.d_patch_nchw.as_ref()) {
+            if c.stem == VisionStem::Siglip {
+                // `bias_grad` Params: [rows, cols]; bufs [dy, grad] - ACCUMULATES.
+                s.push(g.step(self.k("bias_grad"), &[&bw.d_tokens, grad("patch_embed.bias")], &[gr.b * np, d], d));
+            }
             let sz = c.image_size();
-            s.push(g.step(C_NLC_NCHW, &[&bw.d_tokens, dn], &[self.b * d * np, d, np], self.b * d * np));
+            s.push(g.step(self.k("nlc_nchw"), &[&bw.d_tokens, dn], &[gr.b * d * np, d, np], gr.b * d * np));
             // `conv2d_dw` Params: the forward's; bufs [dy, x, dw] - ACCUMULATES.
             s.push(g.step(
-                C_CONV2D_DW,
-                &[dn, px, gr("patch_embed.weight")],
-                &[self.b, 3, sz, sz, d, c.patch(), c.patch(), 0, gh, gw],
+                self.k("conv2d_dw"),
+                &[dn, px, grad("patch_embed.weight")],
+                &[gr.b, 3, sz, sz, d, c.patch(), c.patch(), 0, gh, gw],
                 d * 3 * c.patch() * c.patch(),
             ));
         }
         s
+    }
+
+    /// The resident graph, or a refusal naming the build that has none.
+    fn resident(&self) -> &Graph {
+        self.graph.as_ref().expect("this ClipVision was built by new_encoder_on and has no resident graph - use encode()")
     }
 
     // ---- inputs ----
@@ -1890,8 +2016,8 @@ impl ClipVision {
     /// normalized - `crates/imaging` owns decode/resize/normalize).
     /// [`PatchSource::Pixels`] builds only.
     pub fn set_pixels(&self, px: &[f32]) {
-        let buf = self.pixels.as_ref().expect("set_pixels needs PatchSource::Pixels");
-        let want = self.b as usize * 3 * (self.cfg.image_size() * self.cfg.image_size()) as usize;
+        let buf = self.resident().pixels.as_ref().expect("set_pixels needs PatchSource::Pixels");
+        let want = self.resident().b as usize * 3 * (self.cfg.image_size() * self.cfg.image_size()) as usize;
         assert_eq!(px.len(), want, "pixel count");
         self.gpu.write_f32(buf, px);
     }
@@ -1905,21 +2031,51 @@ impl ClipVision {
             "set_tokens needs PatchSource::Tokens - a Pixels build recomputes them from the conv"
         );
         assert_eq!(tokens.len(), self.token_count(), "token count");
-        self.gpu.write_f32(&self.tokens, tokens);
+        self.gpu.write_f32(&self.resident().tokens, tokens);
     }
 
     /// The patch-token buffer itself - the device-side half of the seam, for a
     /// producer (a SAM trunk + compressor) that already has its output on this
     /// device and must not round-trip through the host.
     pub fn tokens_buffer(&self) -> &DeviceBuffer {
-        &self.tokens
+        &self.resident().tokens
     }
 
     pub fn forward(&self) {
+        let gr = self.resident();
         // Every `cache.qkv` is `axpy`-accumulated by `vit_block_fwd_cached`, so
         // it MUST be zeroed each forward or a second forward doubles it.
-        let clears: Vec<&DeviceBuffer> = self.caches.iter().map(|c| &c.qkv).collect();
-        self.gpu.submit(&clears, &self.steps);
+        let (caches, _) = gr.cached();
+        let clears: Vec<&DeviceBuffer> = caches.iter().map(|c| &c.qkv).collect();
+        self.gpu.submit(&clears, &gr.steps);
+    }
+
+    /// Run the tower over `b` samples - pixels `[b, 3, S, S]` for a
+    /// [`PatchSource::Pixels`] build, tokens `[b*gh*gw, D]` for
+    /// [`PatchSource::Tokens`] - and return the output `[b*seq, D]`.
+    ///
+    /// Records a graph for THIS batch over one shared block scratch
+    /// (`model::vit::vit_block_fwd`), runs it and drops it; weights are the
+    /// build's, uploaded once. Each sample is its own attention span, so a
+    /// sample's rows do not depend on what it is batched with. Works on any
+    /// build, resident or not; inference only.
+    pub fn encode(&self, b: u32, input: &[f32]) -> Vec<f32> {
+        let mut gr = Graph::new(&self.gpu, &self.cfg, self.src, b, false);
+        let dst = match self.src {
+            PatchSource::Pixels => {
+                let want = b as usize * 3 * (self.cfg.image_size() * self.cfg.image_size()) as usize;
+                assert_eq!(input.len(), want, "encode: pixel count for {b} sample(s)");
+                gr.pixels.as_ref().expect("a Pixels graph has a pixel buffer")
+            }
+            PatchSource::Tokens { grid: (gh, gw) } => {
+                assert_eq!(input.len(), (b * gh * gw * self.cfg.d_model()) as usize, "encode: token count for {b} sample(s)");
+                &gr.tokens
+            }
+        };
+        self.gpu.write_f32(dst, input);
+        gr.steps = self.record(&gr);
+        self.gpu.submit(&[], &gr.steps);
+        self.gpu.read(gr.output(), (gr.rows() * self.cfg.d_model()) as usize)
     }
 
     /// Reverse pass for the objective whose gradient w.r.t. the tower output
@@ -1955,57 +2111,67 @@ impl ClipVision {
     // ---- geometry / taps ----
 
     pub fn grid(&self) -> (u32, u32) {
-        self.grid
+        self.src.grid(&self.cfg)
     }
-    /// Tokens per sample INCLUDING the class token.
+    /// Tokens per sample, INCLUDING the class token under the CLIP stem.
     pub fn seq_len(&self) -> u32 {
-        self.seq
+        let (gh, gw) = self.grid();
+        self.cfg.stem.prefix_tokens() + gh * gw
     }
     pub fn source(&self) -> PatchSource {
         self.src
     }
-    /// Elements of the `[B*gh*gw, D]` token buffer.
+    /// Elements of the resident `[B*gh*gw, D]` token buffer.
     pub fn token_count(&self) -> usize {
-        (self.b * self.grid.0 * self.grid.1) as usize * self.cfg.d_model() as usize
+        let (gh, gw) = self.grid();
+        (self.resident().b * gh * gw) as usize * self.cfg.d_model() as usize
     }
-    /// Elements of the `[B*seq, D]` tower output.
+    /// Elements of the resident `[B*seq, D]` tower output.
     pub fn out_len(&self) -> usize {
-        (self.b * self.seq) as usize * self.cfg.d_model() as usize
+        self.resident().rows() as usize * self.cfg.d_model() as usize
     }
 
-    /// Parameter names this build actually DISPATCHES. `patch_embed.weight` is
-    /// bound only by the [`PatchSource::Pixels`] path, so a `Tokens` build must
-    /// not be gradient-checked against it - its gradient is legitimately zero.
+    /// Parameter names this build actually DISPATCHES. The patch embedding
+    /// (`patch_embed.weight`, and SigLIP's `patch_embed.bias`) is bound only by
+    /// the [`PatchSource::Pixels`] path, so a `Tokens` build must not be
+    /// gradient-checked against it - its gradient is legitimately zero.
     pub fn dispatched_params(&self) -> Vec<String> {
+        let pixels = matches!(self.src, PatchSource::Pixels);
         self.ps
             .params
             .iter()
             .map(|(n, _)| n.clone())
-            .filter(|n| n != "patch_embed.weight" || matches!(self.src, PatchSource::Pixels))
+            .filter(|n| pixels || !n.starts_with("patch_embed."))
             .collect()
     }
 
-    /// The tower output `[B*seq, D]` - the last block's hidden states. There is
-    /// no post-LayerNorm: the DeepSeek-OCR mmproj carries `pre_norm` only.
+    /// The tower output `[B*seq, D]`: the last block's hidden states under the
+    /// CLIP stem (the DeepSeek-OCR mmproj carries `pre_norm` only), the
+    /// post-LayerNorm features under SigLIP.
     pub fn read_output(&self) -> Vec<f32> {
-        self.gpu.read(&self.x_last, self.out_len())
+        self.gpu.read(self.resident().output(), self.out_len())
     }
-    /// The patch tokens the tower consumed, whatever produced them.
+    /// The patch tokens the tower consumed, whatever produced them (the conv
+    /// output plus its bias, for a SigLIP `Pixels` build).
     pub fn read_tokens(&self) -> Vec<f32> {
-        self.gpu.read(&self.tokens, self.token_count())
+        self.gpu.read(&self.resident().tokens, self.token_count())
     }
-    /// `[cls ; tokens] + pos`, the pre-LayerNorm input.
+    /// `[cls ;] tokens + pos`: the pre-LayerNorm input (CLIP), block 0's input
+    /// (SigLIP).
     pub fn read_x0(&self) -> Vec<f32> {
-        self.gpu.read(&self.x0, self.out_len())
+        self.gpu.read(self.resident().x0(), self.out_len())
     }
-    /// The `[seq, D]` position table as this grid consumes it (class row +
-    /// resampled patch rows).
+    /// The `[seq, D]` position table as this grid consumes it (class row, if
+    /// any, + resampled patch rows).
     pub fn read_pos_full(&self) -> Vec<f32> {
-        self.gpu.read(&self.pos_full, (self.seq * self.cfg.d_model()) as usize)
+        let gr = self.resident();
+        self.gpu.read(&gr.pos_full, (gr.seq * self.cfg.d_model()) as usize)
     }
-    /// Output of block `l` - `l = layers-1` is [`ClipVision::read_output`].
+    /// Raw output of block `l` (no post-norm) - `l = layers-1` is the CLIP
+    /// stem's [`ClipVision::read_output`].
     pub fn read_block_out(&self, l: usize) -> Vec<f32> {
-        let buf = if l + 1 < self.caches.len() { &self.caches[l + 1].x_in } else { &self.x_last };
+        let (caches, x_last) = self.resident().cached();
+        let buf = if l + 1 < caches.len() { &caches[l + 1].x_in } else { x_last };
         self.gpu.read(buf, self.out_len())
     }
     /// Gradient w.r.t. the injected patch tokens - what a device-side producer
