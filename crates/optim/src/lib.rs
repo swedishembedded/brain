@@ -66,6 +66,52 @@ use paramstore::ParamStore;
 pub mod offload;
 pub use offload::OffloadAdam;
 
+/// AdamW's moment decay rates and denominator epsilon. The default is
+/// `torch.optim.AdamW`'s; a run that wants others (β2 0.95 is common for
+/// large language models) sets them, and every optimiser in the tree
+/// honours them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Adam {
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+}
+
+impl Default for Adam {
+    fn default() -> Adam {
+        Adam { beta1: 0.9, beta2: 0.999, eps: 1e-8 }
+    }
+}
+
+impl Adam {
+    /// The two bias corrections at 1-based step `t`.
+    pub fn bias_corrections(&self, t: u32) -> (f32, f32) {
+        (1.0 - self.beta1.powi(t as i32), 1.0 - self.beta2.powi(t as i32))
+    }
+
+    /// One element of a decoupled-weight-decay AdamW step, as `adamw.wgsl`
+    /// computes it: `g` already carries any grad scale and clip coefficient,
+    /// `bc` is [`Self::bias_corrections`] at this step.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&self, bc: (f32, f32), lr: f32, wd: f32, g: f32, w: &mut f32, m: &mut f32, v: &mut f32) {
+        *m = self.beta1 * *m + (1.0 - self.beta1) * g;
+        *v = self.beta2 * *v + (1.0 - self.beta2) * g * g;
+        let (mhat, vhat) = (*m / bc.0, *v / bc.1);
+        *w -= lr * wd * *w;
+        *w -= lr * mhat / (vhat.sqrt() + self.eps);
+    }
+
+    /// [`Self::update`] over whole slices, every gradient multiplied by `scale`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_slice(&self, t: u32, lr: f32, wd: f32, scale: f32, w: &mut [f32], m: &mut [f32], v: &mut [f32], g: &[f32]) {
+        let bc = self.bias_corrections(t);
+        for i in 0..w.len() {
+            self.update(bc, lr, wd, g[i] * scale, &mut w[i], &mut m[i], &mut v[i]);
+        }
+    }
+}
+
 /// The optimiser dispatch graph, built once and reused. The bind groups (and
 /// the storage buffers they reference) are fixed; only the uniform *contents*
 /// change between steps (lr, bias corrections, clip factor), so each
@@ -242,14 +288,11 @@ impl Optim {
         t: u32,
         lr: f32,
         wd: f32,
-        beta1: f32,
-        beta2: f32,
-        eps: f32,
+        adam: Adam,
         clip: Option<f32>,
         extra_scale: f32,
     ) {
-        let bc1 = 1.0 - beta1.powi(t as i32);
-        let bc2 = 1.0 - beta2.powi(t as i32);
+        let (bc1, bc2) = adam.bias_corrections(t);
         let clipped = clip.is_some();
 
         // (Re)build the cached graph only if absent, the clip mode changed, or
@@ -277,7 +320,7 @@ impl Optim {
         // device-computed clip coefficient to fold it into instead (`build`
         // already folded it into `clip_coef`'s own `extra_scale` field).
         let scale = if clipped { 1.0 } else { extra_scale };
-        gpu.write(&g.hparams, &[f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2), f(scale)]);
+        gpu.write(&g.hparams, &[f(lr), f(adam.beta1), f(adam.beta2), f(adam.eps), f(wd), f(bc1), f(bc2), f(scale)]);
 
         gpu.submit(&[], &g.steps);
     }
@@ -302,7 +345,7 @@ mod tests {
         // grad = 2.0 everywhere => global L2 norm = sqrt(16) = 4 > 1 => clipped by 1/4.
         gpu.write(ps.g("p"), bytemuck::cast_slice(&[2.0f32; 4]));
 
-        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, Adam::default(), Some(1.0), 1.0);
         let w = ps.read_weight(&gpu, "p");
 
         // expected: clip to g=0.5; AdamW t=1: mhat=g, vhat=g^2 => step = lr*g/|g| = lr.
@@ -352,7 +395,7 @@ mod tests {
             for (n, _) in &shapes {
                 gpu.write(ps.g(n), bytemuck::cast_slice(&grads[n]));
             }
-            opt.step(&gpu, &ps, 1, 0.01, 0.01, 0.9, 0.999, 1e-8, Some(0.5), 1.0);
+            opt.step(&gpu, &ps, 1, 0.01, 0.01, Adam::default(), Some(0.5), 1.0);
             shapes.iter().map(|(n, _)| ps.read_weight(&gpu, n)).collect()
         };
         let (a, b) = (run(BASE), run(COOP));
@@ -391,7 +434,7 @@ mod tests {
         // No clip; extra_scale folds in directly => effective g = 2.0*0.25 = 0.5,
         // the same effective gradient `adamw_with_clip_matches_hand_computation`
         // reaches via a clip coefficient of 0.25 instead.
-        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, None, 0.25);
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, Adam::default(), None, 0.25);
         let w = ps.read_weight(&gpu, "p");
         for &v in &w {
             assert!((v - 0.9).abs() < 1e-4, "AdamW+scale got {v}, expected ~0.9");
@@ -429,12 +472,12 @@ mod tests {
             // one-off build-time writes (gradnorm uniforms, descriptors) - not
             // part of the per-step contract this test pins, so only the
             // SECOND call's deltas are asserted against.
-            opt.step(&gpu, &ps, 1, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            opt.step(&gpu, &ps, 1, 0.01, 0.0, Adam::default(), Some(1.0), 1.0);
             let (d0, w0) = {
                 let s = stats();
                 (s.dispatches, s.writes)
             };
-            opt.step(&gpu, &ps, 2, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            opt.step(&gpu, &ps, 2, 0.01, 0.0, Adam::default(), Some(1.0), 1.0);
             let s = stats();
             (s.dispatches - d0, s.writes - w0, n_tensors as u64)
         };
@@ -466,7 +509,7 @@ mod tests {
         gpu.write(ps.g("a"), bytemuck::cast_slice(&[2.0f32; 4]));
         gpu.write(ps.g("b"), bytemuck::cast_slice(&[2.0f32; 4]));
 
-        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, None, 1.0);
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, Adam::default(), None, 1.0);
         let wa = ps.read_weight(&gpu, "a");
         let wb = ps.read_weight(&gpu, "b");
 
@@ -506,7 +549,7 @@ mod tests {
             gpu.write(ps.g(n), bytemuck::cast_slice(&[2.0f32; 4]));
         }
         let before = ps.read_weight(&gpu, "keep");
-        opt.step(&gpu, &ps, 1, 0.1, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 1, 0.1, 0.01, Adam::default(), Some(1.0), 1.0);
         assert_eq!(
             ps.read_weight(&gpu, "keep").iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             before.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -516,7 +559,7 @@ mod tests {
         // Weight decay is part of the AdamW step, so it must not reach a frozen
         // tensor either - the subtle way a "frozen" weight still decays to zero.
         for t in 2..6 {
-            opt.step(&gpu, &ps, t, 0.1, 0.5, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            opt.step(&gpu, &ps, t, 0.1, 0.5, Adam::default(), Some(1.0), 1.0);
         }
         assert_eq!(ps.read_weight(&gpu, "keep"), before, "weight decay reached a frozen tensor");
         // And the frozen tensor's gradient is still cleared each batch, so it
@@ -539,7 +582,7 @@ mod tests {
         init.insert("p".to_string(), vec![1.0f32; 4]);
         let ps = ParamStore::new(&gpu, vec![("p".to_string(), 4)], &init);
         gpu.write(ps.g("p"), bytemuck::cast_slice(&[2.0f32; 4]));
-        opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 1, 0.1, 0.0, Adam::default(), Some(1.0), 1.0);
         let w = ps.read_weight(&gpu, "p");
         for &v in &w {
             assert!((v - 0.9).abs() < 1e-4, "expected the untouched AdamW+clip result ~0.9, got {v}");
@@ -569,12 +612,12 @@ mod tests {
         ps.set_lr_mult("p1", 4.0);
         let stats = || gpu.stats().expect("this backend must report DeviceStats");
 
-        opt.step(&gpu, &ps, 1, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 1, 0.01, 0.0, Adam::default(), Some(1.0), 1.0);
         let (d0, w0) = {
             let s = stats();
             (s.dispatches, s.writes)
         };
-        opt.step(&gpu, &ps, 2, 0.01, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 2, 0.01, 0.0, Adam::default(), Some(1.0), 1.0);
         let s = stats();
         assert_eq!(s.dispatches - d0, 2 * 3 + 1, "lr_mult must not add dispatches");
         assert!(s.writes - w0 <= 2, "lr_mult must not add per-step writes");

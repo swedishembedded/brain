@@ -691,8 +691,8 @@ impl Qwen3Vl {
     }
 
     /// One AdamW step over the decoder's trainable parameters.
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.decoder.adamw_step(t, lr, wd, clip, extra_scale);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.decoder.adamw_step(t, lr, wd, adam, clip, extra_scale);
     }
 
     /// Names of the decoder's trainable parameters (LoRA: `.lora_a`/`.lora_b`
@@ -2255,7 +2255,7 @@ mod tests {
             model.zero_grads();
             model.forward(&tokens, &targets, (4, 4), &pixels);
             model.backward();
-            model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+            model.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         }
 
         let loss = |m: &Qwen3Vl| m.forward(&tokens, &targets, (4, 4), &pixels);

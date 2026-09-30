@@ -80,14 +80,14 @@ fn bench_step() {
         let stats = || gpu.stats().expect("wgpu backend always reports DeviceStats");
 
         // Warm-up: builds the graph (one-off dispatch registration + writes).
-        opt.step(&gpu, &ps, 1, 1e-3, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(&gpu, &ps, 1, 1e-3, 0.01, optim::Adam::default(), Some(1.0), 1.0);
         gpu.poll_wait();
 
         let reps = 10;
         let d0 = stats();
         let t0 = std::time::Instant::now();
         for t in 2..2 + reps {
-            opt.step(&gpu, &ps, t, 1e-3, 0.01, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+            opt.step(&gpu, &ps, t, 1e-3, 0.01, optim::Adam::default(), Some(1.0), 1.0);
         }
         gpu.poll_wait();
         let elapsed = t0.elapsed().as_secs_f64() / reps as f64;

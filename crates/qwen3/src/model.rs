@@ -1936,9 +1936,9 @@ impl Qwen {
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
     }
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
         // GPU optimiser for `Trainable` params.
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
         // Host (RAM-resident) optimiser for `Offload` params - built lazily on the
         // first step from the store's current weights.
         if !self.ps.offload.is_empty() {
@@ -1946,7 +1946,7 @@ impl Qwen {
             if slot.is_none() {
                 *slot = Some(optim::OffloadAdam::new(&self.gpu, &self.ps));
             }
-            slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+            slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
         }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
@@ -2153,36 +2153,6 @@ impl Qwen {
     /// Overwrite gradient buffer `name` (used to write back a summed tied grad).
     pub fn write_grad(&self, name: &str, data: &[f32]) {
         self.gpu.write(self.g(name), bytemuck::cast_slice(data));
-    }
-
-    /// Build the host offload optimiser on first use (full-offload training).
-    fn ensure_offload(&self) {
-        if self.ps.offload.is_empty() {
-            return;
-        }
-        let mut slot = self.offload_opt.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(optim::OffloadAdam::new(&self.gpu, &self.ps));
-        }
-    }
-    /// Sum-of-squares of this stage's offloaded grads, excluding `exclude`
-    /// (the pipeline excludes a replicated tied weight on all but one stage so it
-    /// is counted exactly once in the global grad-norm).
-    pub fn grad_sq(&self, exclude: &[&str]) -> f64 {
-        self.ensure_offload();
-        self.offload_opt
-            .borrow()
-            .as_ref()
-            .map(|o| o.grad_sq(&self.gpu, &self.ps, exclude))
-            .unwrap_or(0.0)
-    }
-    /// AdamW step over this stage's offloaded params, scaling grads by a
-    /// caller-supplied (globally-reduced) `scale`. Keeps tied replicas identical.
-    pub fn opt_step_scaled(&self, t: u32, lr: f32, wd: f32, scale: f32) {
-        self.ensure_offload();
-        if let Some(o) = self.offload_opt.borrow_mut().as_mut() {
-            o.step_with_scale(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, scale);
-        }
     }
 
     /// The maximum sequence length this instance was sized for (the `t` it was
@@ -2910,8 +2880,8 @@ impl model::Model for Qwen {
     fn zero_grads(&self) {
         Qwen::zero_grads(self)
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        Qwen::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        Qwen::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn poll_wait(&self) {
         Qwen::poll_wait(self)
@@ -3865,7 +3835,7 @@ mod tests {
             model.zero_grads();
             model.forward();
             model.backward();
-            model.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+            model.adamw_step(step, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
             model.poll_wait();
         }
         let after = model.forward();

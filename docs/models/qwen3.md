@@ -130,6 +130,15 @@ Which checkpoint/tokenizer to serve is still selected through env vars
 everything about HOW to serve it is a `brain serve` flag:
 
 - `--lora N` - LoRA rank for `finetune`.
+- `--lora-targets LIST` - the projections a `finetune --lora` adapter
+  covers, comma-separated from `wq,wk,wv,wo,gate,up,down` (the default is
+  all seven). An unknown or repeated name is refused.
+- `--weight-decay W`, `--grad-clip C` (0 disables), `--warmup N`,
+  `--min-lr X`, `--beta1 B`, `--beta2 B`, `--adam-eps E` - the LoRA
+  finetune schedule and AdamW settings. The defaults are 0.1, 1.0, 5% of the
+  steps, `lr/10`, and torch's AdamW (0.9, 0.999, 1e-8). The `lora_train`
+  action takes the same settings as `targets`, `weight_decay`, `grad_clip`,
+  `warmup`, `min_lr`, `beta1`, `beta2` and `eps`.
 - `--device cpu|gpu|vulkan` - backend selection.
 - `--qwen-ctx N` - built context length. Unset by default: the resident
   auto-sizes it to the target device's real usable VRAM instead of a fixed
@@ -197,9 +206,7 @@ cached token that the GPU pool spends - a swap is a verbatim copy.
 
 ## Hardware and limits
 
-The LoRA finetune target set is fixed - the four attention projections plus
-the three MLP projections - there's no `--targets` flag to narrow or widen
-it yet. The serving engine doesn't yet reuse a shared prompt prefix across
+The serving engine doesn't yet reuse a shared prompt prefix across
 separate requests (each request's prefill is independent). Mixture-of-experts
 style configs are defined in the parameter layout but the serving engine
 currently serves dense configs only.

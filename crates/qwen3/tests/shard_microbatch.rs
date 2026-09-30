@@ -110,10 +110,10 @@ fn microbatch_train_step_reduces_loss() {
     let batches: Vec<Batch> = mbs.iter().map(|(x, y)| Batch::Lm { tokens: x, targets: y }).collect();
 
     let mut pipe = Pipeline::<Qwen>::new(cfg, b, t, &init, &stage_gpus());
-    let before = pipe.train_step(&batches, 1, 1e-2, 0.0, Some(1.0));
+    let before = pipe.train_step(&batches, 1, 1e-2, 0.0, model::Adam::default(), Some(1.0));
     let mut last = before;
     for step in 2..=30 {
-        last = pipe.train_step(&batches, step, 1e-2, 0.0, Some(1.0));
+        last = pipe.train_step(&batches, step, 1e-2, 0.0, model::Adam::default(), Some(1.0));
     }
     eprintln!("microbatch train_step  loss {before:.4} -> {last:.4}");
     assert!(last < before, "micro-batched training did not reduce loss: {before} -> {last}");

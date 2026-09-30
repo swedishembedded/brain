@@ -224,8 +224,8 @@ impl model::Model for Transducer {
             v.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, _clip: Option<f32>, extra_scale: f32) {
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, _clip: Option<f32>, extra_scale: f32) {
+        let model::Adam { beta1: b1, beta2: b2, eps } = adam;
         let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
         let g = self.g.borrow();
         let bc1 = 1.0 - b1.powi(t as i32);
@@ -332,7 +332,7 @@ mod tests {
             m.zero_grads();
             m.forward();
             m.backward();
-            m.adamw_step(step, 0.03, 0.0, None, 1.0);
+            m.adamw_step(step, 0.03, 0.0, Default::default(), None, 1.0);
         }
         let l1 = m.forward();
         eprintln!("acoustic loss {l0:.4} -> {l1:.4}");
@@ -354,7 +354,7 @@ mod tests {
             m.zero_grads();
             m.forward();
             m.backward();
-            m.adamw_step(step, 0.05, 0.0, None, 1.0);
+            m.adamw_step(step, 0.05, 0.0, Default::default(), None, 1.0);
         }
         let l1 = m.forward();
         eprintln!("transducer loss {l0:.4} -> {l1:.4}");
@@ -598,8 +598,8 @@ impl model::Model for AcousticModel {
             v.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, _clip: Option<f32>, extra: f32) {
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, _clip: Option<f32>, extra: f32) {
+        let model::Adam { beta1: b1, beta2: b2, eps } = adam;
         let (mut m, mut v) = (self.m.borrow_mut(), self.v.borrow_mut());
         let g = self.g.borrow();
         let (bc1, bc2) = (1.0 - b1.powi(t as i32), 1.0 - b2.powi(t as i32));

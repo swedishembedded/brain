@@ -181,7 +181,7 @@ impl EncoderFineTuner {
         self.model.gpu.write_f32(self.model.seed_buf(), &seed);
         self.model.backward_seeded();
         self.step += 1;
-        self.model.adamw_step(self.step, lr, 0.0, Some(1.0), 1.0);
+        self.model.adamw_step(self.step, lr, 0.0, Default::default(), Some(1.0), 1.0);
 
         Ok(loss)
     }

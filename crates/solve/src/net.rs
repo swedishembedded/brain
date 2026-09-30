@@ -295,7 +295,7 @@ impl Net {
     }
 
     pub fn adamw(&self, t: u32, lr: f32, wd: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, optim::Adam::default(), Some(1.0), 1.0);
     }
 
     /// Move probabilities for a batch of states. No label, no loss, no

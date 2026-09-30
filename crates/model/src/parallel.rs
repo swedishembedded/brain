@@ -176,7 +176,7 @@ impl<M: Model + Send> DataParallel<M> {
     /// shape. Bit-identical: each element's AdamW update depends only on its own
     /// `(g, m, v, w)`, never on a neighbour, so concatenation order does not
     /// change a single computed value.
-    pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+    pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
         // Phase 1: pull every grad off each card, both cards concurrently, each
         // flattened into ONE Vec<f32> as it arrives (not P nested per-tensor Vecs).
         let mut grads: Vec<Vec<f32>> = Vec::new();
@@ -237,18 +237,10 @@ impl<M: Model + Send> DataParallel<M> {
 
         // Phase 4: one AdamW update on the host, parallel over the flat slab
         // (master/m/v mutated together, driven by the read-only summed grad).
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-        let bc1 = 1.0 - b1.powi(t as i32);
-        let bc2 = 1.0 - b2.powi(t as i32);
+        let bc = adam.bias_corrections(t);
         let fused = self.fused.as_mut().unwrap();
         par::zip3_mut(&mut fused.master, &mut fused.m, &mut fused.v, &g, |wi, mi, vi, &gi| {
-            let gg = gi * scale;
-            *mi = b1 * *mi + (1.0 - b1) * gg;
-            *vi = b2 * *vi + (1.0 - b2) * gg * gg;
-            let mhat = *mi / bc1;
-            let vhat = *vi / bc2;
-            *wi -= lr * wd * *wi;
-            *wi -= lr * mhat / (vhat.sqrt() + eps);
+            adam.update(bc, lr, wd, gi * scale, wi, mi, vi);
         });
 
         // Phase 5: broadcast updated weights to every card, concurrently - ONE
@@ -363,7 +355,7 @@ mod tests {
                 v.iter_mut().for_each(|x| *x = 0.0);
             }
         }
-        fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {}
+        fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: crate::Adam, _clip: Option<f32>, _extra_scale: f32) {}
         fn poll_wait(&self) {}
         fn param_names(&self) -> Vec<String> {
             self.w.borrow().keys().cloned().collect()
@@ -414,7 +406,7 @@ mod tests {
         r1.seed_grad("c", vec![0.0, 0.0, 0.0, 0.0]);
         let mut dp = DataParallel { replicas: vec![r0, r1], names: names.clone(), fused: None };
 
-        dp.adamw_step(1, 0.1, 0.0, None, 1.0);
+        dp.adamw_step(1, 0.1, 0.0, Default::default(), None, 1.0);
 
         for r in &dp.replicas {
             assert_eq!(r.grad_reads.load(Ordering::SeqCst), names.len(), "must read each tensor's grad exactly once per replica, no more");

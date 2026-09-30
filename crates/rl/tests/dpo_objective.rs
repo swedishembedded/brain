@@ -92,7 +92,7 @@ fn dpo_training_raises_chosen_logprob_and_lowers_rejected_logprob() {
         model.zero_grads();
         let loss = obj.micro_step(&model, &mut rng);
         assert!(loss.is_finite(), "step {step}: DPO loss {loss} is not finite");
-        model.adamw_step(step, 5e-3, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 5e-3, 0.0, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
     }
 

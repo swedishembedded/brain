@@ -84,6 +84,7 @@ fn opts(seed: u64, steps: u32, block_size: u32) -> model::FitOpts {
         align_to_lines: false,
         patience: 0,
         seed,
+        adam: Default::default(),
     }
 }
 

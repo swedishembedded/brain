@@ -158,7 +158,7 @@ pub fn train_loop(
         let s = gpu.step(k_l1g, &[m.out(), &tgt, &mask, &d_out], &[total, f(1.0 / total as f32)], total);
         gpu.submit(&[], &[s]);
         m.backward(&ctx, &ps, &xb, &d_out);
-        opt.step(gpu, &ps, step + 1, t.lr, t.wd, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
+        opt.step(gpu, &ps, step + 1, t.lr, t.wd, optim::Adam::default(), Some(1.0), 1.0);
         gpu.poll_wait();
 
         if step == 0 {

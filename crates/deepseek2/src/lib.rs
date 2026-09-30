@@ -82,4 +82,4 @@ pub mod shard;
 
 pub use config::DeepseekV2Config;
 pub use init::init_weights;
-pub use model::{DeepseekV2, Sizes, IGNORE, PIPELINES};
+pub use model::{DeepseekV2, Sizes, ADAM, IGNORE, PIPELINES};

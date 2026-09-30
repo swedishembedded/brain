@@ -318,7 +318,7 @@ impl LoraStore {
     }
 
     pub fn adamw_step(&self, gpu: &Gpu, t: u32, lr: f32) {
-        self.opt.step(gpu, &self.ps, t, lr, 0.0, 0.9, 0.999, 1e-8, None, 1.0);
+        self.opt.step(gpu, &self.ps, t, lr, 0.0, optim::Adam::default(), None, 1.0);
     }
 
     pub fn zero_grads(&self, gpu: &Gpu) {

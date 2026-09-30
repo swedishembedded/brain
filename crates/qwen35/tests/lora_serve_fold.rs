@@ -60,7 +60,7 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
         trained.zero_grads();
         trained.forward();
         trained.backward();
-        trained.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        trained.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         trained.poll_wait();
     }
 

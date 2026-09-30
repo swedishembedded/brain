@@ -20,6 +20,8 @@ pub struct MlmTrainOpts {
     pub warmup: u32,
     pub weight_decay: f32,
     pub clip: Option<f32>,
+    /// AdamW's β1, β2 and ε.
+    pub adam: model::Adam,
     pub seed: u64,
     pub eval_every: u32,
     pub eval_batches: u32,
@@ -34,6 +36,7 @@ impl Default for MlmTrainOpts {
             warmup: 10,
             weight_decay: 0.01,
             clip: Some(1.0),
+            adam: model::Adam::default(),
             seed: 0,
             eval_every: 50,
             eval_batches: 8,
@@ -106,7 +109,7 @@ pub fn finetune(
         model.zero_grads();
         let loss = model.forward();
         model.backward();
-        model.adamw_step(step + 1, lr_at(step, o), o.weight_decay, o.clip, 1.0);
+        model.adamw_step(step + 1, lr_at(step, o), o.weight_decay, o.adam, o.clip, 1.0);
         if step % o.log_every.max(1) == 0 {
             log(format!("step {step:>5}  loss {loss:.4}  ppl {:.2}  lr {:.2e}", loss.exp(), lr_at(step, o)));
         }

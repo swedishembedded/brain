@@ -120,7 +120,7 @@ fn shard_overfit_reduces_loss() {
         pipe.zero_grads();
         pipe.forward(Batch::Lm { tokens: &x, targets: &y });
         pipe.backward();
-        pipe.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+        pipe.adamw_step(step, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
     }
     let after = pipe.forward(Batch::Lm { tokens: &x, targets: &y });
     eprintln!("sharded overfit  loss {before:.4} -> {after:.4}");

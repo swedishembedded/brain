@@ -423,7 +423,7 @@ mod tests {
         fn zero_grads(&self) {
             unimplemented!()
         }
-        fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {
+        fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: crate::Adam, _clip: Option<f32>, _extra_scale: f32) {
             unimplemented!()
         }
         fn poll_wait(&self) {}

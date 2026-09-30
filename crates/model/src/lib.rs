@@ -74,6 +74,7 @@ pub mod rope_scaling;
 pub mod yarn;
 
 pub use collective::{Collective, HostCollective};
+pub use optim::Adam;
 #[cfg(not(target_arch = "wasm32"))]
 pub use distributed::{federated_average, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]
@@ -284,8 +285,9 @@ pub trait Model {
     fn backward(&self);
     fn zero_grads(&self);
 
-    /// One AdamW step (with optional global-norm clip and a grad-accum scale).
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32);
+    /// One AdamW step with the run's `adam` hyperparameters (with optional
+    /// global-norm clip and a grad-accum scale).
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: Adam, clip: Option<f32>, extra_scale: f32);
 
     /// Block until submitted device work completes (memory-aperture hygiene).
     fn poll_wait(&self);

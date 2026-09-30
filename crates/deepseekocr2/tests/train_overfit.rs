@@ -106,8 +106,8 @@ fn overfit(lora: bool, seeds: &[u64], epochs: u32) -> (f32, f32) {
             m.zero_grads();
             let (loss, st) = m.forward(&ex.tiles, &ex.global);
             let _ = m.backward(st);
-            m.encoder().adamw_step(epoch, lr, 0.0, None);
-            m.decoder().adamw_step(epoch, lr, 0.0, None, 1.0);
+            m.encoder().adamw_step(epoch, lr, 0.0, deepseek2::ADAM, None);
+            m.decoder().adamw_step(epoch, lr, 0.0, deepseek2::ADAM, None, 1.0);
             mean += loss;
         }
         mean /= examples.len() as f32;
@@ -197,8 +197,8 @@ fn lora_overfits_a_single_example_against_a_real_base() {
         base.zero_grads();
         let (loss, st) = base.forward(&base_ex.tiles, &base_ex.global);
         let _ = base.backward(st);
-        base.encoder().adamw_step(epoch, 5e-2, 0.0, None);
-        base.decoder().adamw_step(epoch, 5e-2, 0.0, None, 1.0);
+        base.encoder().adamw_step(epoch, 5e-2, 0.0, deepseek2::ADAM, None);
+        base.decoder().adamw_step(epoch, 5e-2, 0.0, deepseek2::ADAM, None, 1.0);
         base_loss = loss;
     }
     assert!(base_loss < 0.05, "phase 1 (building a real base) did not converge: {base_loss}");
@@ -259,8 +259,8 @@ fn lora_overfits_a_single_example_against_a_real_base() {
         lora_m.zero_grads();
         let (loss, st) = lora_m.forward(&lora_ex.tiles, &lora_ex.global);
         let _ = lora_m.backward(st);
-        lora_m.encoder().adamw_step(epoch, lr, 0.0, None);
-        lora_m.decoder().adamw_step(epoch, lr, 0.0, None, 1.0);
+        lora_m.encoder().adamw_step(epoch, lr, 0.0, deepseek2::ADAM, None);
+        lora_m.decoder().adamw_step(epoch, lr, 0.0, deepseek2::ADAM, None, 1.0);
         if epoch == 1 {
             first = loss;
         }

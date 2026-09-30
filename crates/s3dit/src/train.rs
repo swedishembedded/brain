@@ -730,7 +730,7 @@ impl Model for ZTrainModel {
             slot.iter_mut().for_each(|x| *x = 0.0);
         }
     }
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra: f32) {
+    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: model::Adam, _clip: Option<f32>, _extra: f32) {
         // The distributed path drives the optimiser via model::DdpOptimizer (grads
         // reduced through a Collective); a single-device local optimiser can be
         // added here later if needed.

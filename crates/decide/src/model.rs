@@ -774,7 +774,7 @@ impl Encoder {
         clip: Option<f32>,
         scale: f32,
     ) {
-        opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
+        opt.step(&self.gpu, &self.ps, t, lr, wd, optim::Adam::default(), clip, scale);
     }
 
     /// Block until this device has finished what it was given.

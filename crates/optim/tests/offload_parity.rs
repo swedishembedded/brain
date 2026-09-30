@@ -48,9 +48,10 @@ fn run(clip: Option<f32>) {
         gpu.write(ps_g.g("w"), bytemuck::cast_slice(&g));
         gpu.write(ps_o.g("w"), bytemuck::cast_slice(&g));
 
-        let (lr, wd, b1, b2, eps, scale) = (1e-3, 0.01, 0.9, 0.999, 1e-8, 2.0);
-        opt.step(&gpu, &ps_g, t, lr, wd, b1, b2, eps, clip, scale);
-        off.step(&gpu, &ps_o, t, lr, wd, b1, b2, eps, clip, scale);
+        let (lr, wd, scale) = (1e-3, 0.01, 2.0);
+        let adam = optim::Adam { beta1: 0.8, beta2: 0.95, eps: 1e-6 };
+        opt.step(&gpu, &ps_g, t, lr, wd, adam, clip, scale);
+        off.step(&gpu, &ps_o, t, lr, wd, adam, clip, scale);
     }
 
     let wg = gpu.read(ps_g.w("w"), n);

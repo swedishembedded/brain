@@ -107,7 +107,7 @@ fn streaming_lora_trainer_matches_the_resident_trainer_exactly() {
             assert!(maxdiff < 1e-4, "step {step}: {name}: grad maxdiff {maxdiff} (resident vs streaming)");
         }
 
-        resident.adamw_step(step, lr, 0.0, None, 1.0);
+        resident.adamw_step(step, lr, 0.0, Default::default(), None, 1.0);
         streaming.lora.adamw_step(&streaming.gpu, step, lr);
 
         for name in &names {

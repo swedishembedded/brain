@@ -79,6 +79,8 @@ pub struct TrainOpts {
     /// Wall-clock checkpoint cadence, seconds; 0 disables periodic saves
     /// (only the final one runs). Same convention as `model::FitOpts`.
     pub checkpoint_secs: u64,
+    /// AdamW's β1, β2 and ε.
+    pub adam: model::Adam,
 }
 
 impl Default for TrainOpts {
@@ -96,6 +98,7 @@ impl Default for TrainOpts {
             seq_len: 256,
             seed: 0,
             checkpoint_secs: 300,
+            adam: model::Adam::default(),
         }
     }
 }
@@ -184,7 +187,7 @@ pub fn run(
         let loss = model.forward(tokens, targets, (gh, gw), pixels);
         model.backward();
         let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, clip, 1.0);
+        model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, 1.0);
         last = loss;
         progress(step + 1, opts.steps, format!("step {} loss {:.4}", step + 1, loss));
 

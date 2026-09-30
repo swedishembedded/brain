@@ -85,7 +85,7 @@ impl Model for Lin {
     fn zero_grads(&self) {
         self.grad.borrow_mut().iter_mut().for_each(|x| *x = 0.0);
     }
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _c: Option<f32>, _s: f32) {}
+    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: model::Adam, _c: Option<f32>, _s: f32) {}
     fn poll_wait(&self) {}
     fn param_names(&self) -> Vec<String> {
         vec!["w".into()]
@@ -126,7 +126,7 @@ fn train_dp(world: usize, targets: Vec<Vec<f32>>, make_coll: impl Fn(usize) -> A
                     model.zero_grads();
                     model.forward();
                     model.backward();
-                    opt.step(&model, &*coll, r, t, 0.05, 0.0, None);
+                    opt.step(&model, &*coll, r, t, 0.05, 0.0, model::Adam::default(), None);
                 }
                 *out[r].lock().unwrap() = model.read_weight("w");
             });

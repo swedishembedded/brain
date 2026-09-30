@@ -606,6 +606,7 @@ fn train(args: &[String], base: Option<&str>) {
         align_to_lines: align,
         patience: 0,
         seed,
+        adam: Default::default(),
     };
     // finetune: seed weights from the base checkpoint by pre-writing `out`.
     if let Some(p) = base {
@@ -720,9 +721,32 @@ fn finetune_lora(args: &[String]) {
     let mut seed = 1234u64;
     let mut models_dir: Option<String> = None;
     let mut dataset_id: Option<String> = None;
+    let mut hyper = qwen3::finetune::LoraHyper::default();
+    let mut targets = qwen3::finetune::default_lora_targets();
     let mut i = 0;
     while i < args.len() {
+        // A schedule value that does not parse is an error, never the default.
+        let num = |i: &mut usize, flag: &str| -> f32 {
+            let v = val(args, i, flag);
+            v.parse().unwrap_or_else(|_| {
+                eprintln!("{flag} {v:?} is not a number");
+                std::process::exit(2)
+            })
+        };
         match args[i].as_str() {
+            "--lora-targets" => {
+                targets = qwen3::finetune::parse_lora_targets(&val(args, &mut i, "--lora-targets")).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                })
+            }
+            "--weight-decay" => hyper.weight_decay = num(&mut i, "--weight-decay"),
+            "--grad-clip" => hyper.grad_clip = num(&mut i, "--grad-clip"),
+            "--warmup" => hyper.warmup = Some(num(&mut i, "--warmup") as u32),
+            "--min-lr" => hyper.min_lr = Some(num(&mut i, "--min-lr")),
+            "--beta1" => hyper.adam.beta1 = num(&mut i, "--beta1"),
+            "--beta2" => hyper.adam.beta2 = num(&mut i, "--beta2"),
+            "--adam-eps" => hyper.adam.eps = num(&mut i, "--adam-eps"),
             "--weights" => base = val(args, &mut i, "--weights"),
             "--adapter" => adapter_spec = val(args, &mut i, "--adapter"),
             "--dataset" => dataset_dir = val(args, &mut i, "--dataset"),
@@ -743,7 +767,8 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
-             [--patience N] \
+             [--patience N] [--lora-targets wq,wk,...] \
+             [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
         return;
@@ -872,26 +897,11 @@ fn finetune_lora(args: &[String]) {
         val_samples.len()
     );
     let opts = model::FitOpts {
-        steps,
-        batch_size: batch,
-        block_size: block,
-        lr,
-        min_lr: lr * 0.1,
-        warmup: (steps / 20).max(1),
-        decay_iters: steps,
-        weight_decay: 0.1,
-        grad_clip: 1.0,
-        grad_accum: 1,
         // Evaluated often enough that patience means something: ten chances
         // to notice the turn is too few on a short run.
         eval_interval: if val_samples.is_empty() { 0 } else { (steps / 20).max(1) },
-        eval_batches: 20,
-        checkpoint_secs: 0,
-        mask_before: None,
-        mask_per_line: false,
-        align_to_lines: false,
         patience,
-        seed,
+        ..hyper.fit_opts(steps, batch, block, lr, seed)
     };
     if patience > 0 && val_samples.is_empty() {
         // Said rather than silently ignored: a run asked to stop early with
@@ -899,7 +909,7 @@ fn finetune_lora(args: &[String]) {
         // the caller asked not to have.
         eprintln!("--patience {patience} needs a validation.jsonl to watch; there is none, so nothing will stop early");
     }
-    let mode = qwen3::finetune::Mode::Lora { rank, alpha };
+    let mode = qwen3::finetune::Mode::Lora { rank, alpha, targets };
     let full_ckpt_out = scratch.join("full.safetensors");
     let (l0, l1) = match qwen3::finetune::finetune(
         base_weights_path.to_str().unwrap_or_default(),

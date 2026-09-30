@@ -207,10 +207,18 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(8)).min(1.0).max(256.0).step(1.0))
         .param(ParamSpec::new("alpha", ParamType::Float, "LoRA alpha; omit for 2*rank").min(0.0).max(1024.0))
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)).min(1.0).max(1_000_000.0).step(1.0))
-        .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to lr/10)").default(json!(5e-5)))
+        .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to min_lr)").default(json!(5e-5)).min(0.0))
         .param(ParamSpec::new("batch", ParamType::Int, "sequences per step").default(json!(4)).min(1.0).max(256.0).step(1.0))
         .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").default(json!(1024)).min(1.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(1234)))
+        .param(ParamSpec::new("targets", ParamType::Str, "comma-separated projections to adapt, of wq,wk,wv,wo,gate,up,down").default(json!(crate::finetune::LORA_TARGETS.join(","))))
+        .param(ParamSpec::new("weight_decay", ParamType::Float, "AdamW decoupled weight decay").default(json!(0.1)).min(0.0).max(1.0))
+        .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(1.0)).min(0.0))
+        .param(ParamSpec::new("warmup", ParamType::Int, "linear warmup steps; omit for 5% of steps").min(0.0).step(1.0))
+        .param(ParamSpec::new("min_lr", ParamType::Float, "rate the cosine decays to; omit for lr/10").min(0.0))
+        .param(ParamSpec::new("beta1", ParamType::Float, "AdamW first-moment decay").default(json!(0.9)).min(0.0).max(0.9999))
+        .param(ParamSpec::new("beta2", ParamType::Float, "AdamW second-moment decay").default(json!(0.999)).min(0.0).max(0.99999))
+        .param(ParamSpec::new("eps", ParamType::Float, "AdamW denominator epsilon").default(json!(1e-8)).min(1e-12).max(1e-3))
         .param(ParamSpec::new("dataset_id", ParamType::Str, "provenance id recorded in the adapter's ModelCard"))
         .input(BlobSpec::new("dataset", Media::Bytes, "the training set: data::chat 'generic-messages-v2' JSONL, one packed sample per line").required())
         .input(BlobSpec::new("validation", Media::Bytes, "optional held-out set, same JSONL schema; enables periodic eval"))
@@ -609,6 +617,25 @@ pub fn train_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Actio
     out
 }
 
+/// `lora_train`'s schedule, optimiser and targets from its params, each
+/// defaulting to [`crate::finetune::LoraHyper::default`]'s recipe.
+fn lora_schedule(inv: &Invocation) -> Result<(crate::finetune::LoraHyper, Vec<String>), String> {
+    let d = crate::finetune::LoraHyper::default();
+    let f = |name: &str, default: f32| inv.get_f64(name).map_or(default, |v| v as f32);
+    let hyper = crate::finetune::LoraHyper {
+        weight_decay: f("weight_decay", d.weight_decay),
+        grad_clip: f("grad_clip", d.grad_clip),
+        warmup: inv.get_i64("warmup").map(|w| w.max(0) as u32),
+        min_lr: inv.get_f64("min_lr").map(|v| v as f32),
+        adam: model::Adam { beta1: f("beta1", d.adam.beta1), beta2: f("beta2", d.adam.beta2), eps: f("eps", d.adam.eps) },
+    };
+    let targets = match inv.get_str("targets") {
+        Some(t) => crate::finetune::parse_lora_targets(&t).map_err(|e| format!("qwen lora_train: {e}"))?,
+        None => crate::finetune::default_lora_targets(),
+    };
+    Ok((hyper, targets))
+}
+
 /// [`train_lora`]'s body, with `scratch` already created and owned by the
 /// caller (which removes it however this returns).
 fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
@@ -620,6 +647,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     let block = inv.get_i64("block").unwrap_or(1024).max(1) as u32;
     let seed = inv.get_i64("seed").unwrap_or(1234).max(0) as u64;
     let dataset_id = inv.get_str("dataset_id").filter(|s| !s.is_empty());
+    let (hyper, targets) = lora_schedule(inv)?;
 
     progress(Progress::step(1, 4, "preparing dataset"));
 
@@ -651,32 +679,13 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     let data_dir = scratch.join("data");
     data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
 
-    let opts = model::FitOpts {
-        steps,
-        batch_size: batch,
-        block_size: block,
-        lr,
-        min_lr: lr * 0.1,
-        warmup: (steps / 20).max(1),
-        decay_iters: steps,
-        weight_decay: 0.1,
-        grad_clip: 1.0,
-        grad_accum: 1,
-        eval_interval: if val.is_empty() { 0 } else { (steps / 10).max(1) },
-        eval_batches: 20,
-        checkpoint_secs: 0,
-        // The token mask file `prepare_chat_samples` writes supersedes
-        // character-offset masking; `model::load_dataset` prefers it.
-        mask_before: None,
-        mask_per_line: false,
-        align_to_lines: false,
-        patience: 0,
-        seed,
-    };
+    // The token mask file `prepare_chat_samples` writes supersedes
+    // character-offset masking; `model::load_dataset` prefers it.
+    let opts = model::FitOpts { eval_interval: if val.is_empty() { 0 } else { (steps / 10).max(1) }, ..hyper.fit_opts(steps, batch, block, lr, seed) };
 
     progress(Progress::step(2, 4, format!("training {steps} steps (rank {rank}, alpha {alpha})")));
     let full = scratch.join("full.safetensors");
-    let (l0, l1) = crate::finetune::finetune(weights, &data_dir, &opts, &crate::finetune::Mode::Lora { rank, alpha }, &full.to_string_lossy())
+    let (l0, l1) = crate::finetune::finetune(weights, &data_dir, &opts, &crate::finetune::Mode::Lora { rank, alpha, targets }, &full.to_string_lossy())
         .map_err(|e| format!("qwen lora_train: {e}"))?;
 
     progress(Progress::step(3, 4, "saving adapter"));
@@ -1525,9 +1534,41 @@ mod tests {
         }
         let lt = served.actions.iter().find(|a| a.name == "lora_train").expect("lora_train survives for_serving");
         let names: Vec<&str> = lt.params.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "dataset_id"]);
+        assert_eq!(
+            names,
+            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id"]
+        );
         assert!(lt.inputs.iter().any(|b| b.name == "dataset"), "the dataset survives as a blob");
         assert!(lt.outputs.iter().any(|b| b.name == "adapter"), "the adapter survives as a blob");
+    }
+
+    /// Every schedule knob `lora_train` declares reaches the run, the
+    /// declared defaults are the recipe, and a target that is not a
+    /// projection is refused rather than silently not adapted.
+    #[test]
+    fn lora_train_schedule_params_reach_the_run() {
+        let spec = manifest().actions.into_iter().find(|a| a.name == "lora_train").unwrap();
+        let data = || Invocation::new().blob("dataset", Blob::new(Media::Bytes, Vec::new()));
+        let defaults = spec.validate(data()).unwrap();
+        assert_eq!(lora_schedule(&defaults).unwrap(), (crate::finetune::LoraHyper::default(), crate::finetune::default_lora_targets()));
+
+        let inv = data()
+            .set("weight_decay", json!(0.0))
+            .set("grad_clip", json!(0.5))
+            .set("warmup", json!(7))
+            .set("min_lr", json!(1e-6))
+            .set("beta1", json!(0.8))
+            .set("beta2", json!(0.95))
+            .set("eps", json!(1e-6))
+            .set("targets", json!("wq,down"));
+        let (h, t) = lora_schedule(&spec.validate(inv).unwrap()).unwrap();
+        let adam = model::Adam { beta1: 0.8, beta2: 0.95, eps: 1e-6 };
+        assert_eq!(h, crate::finetune::LoraHyper { weight_decay: 0.0, grad_clip: 0.5, warmup: Some(7), min_lr: Some(1e-6), adam });
+        assert_eq!(t, ["wq", "down"]);
+
+        assert!(lora_schedule(&Invocation::new().set("targets", json!("wq,lm_head"))).unwrap_err().contains("lm_head"));
+        let e = spec.validate(data().set("beta2", json!(1.0))).unwrap_err();
+        assert!(e.contains("beta2"), "β2 = 1 never forgets a gradient: {e}");
     }
 
     /// The real round-trip: drive `lora_train` through the Registry on the

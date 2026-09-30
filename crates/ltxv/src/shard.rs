@@ -201,7 +201,7 @@ impl Model for LtxDit {
     fn zero_grads(&self) {
         // Nothing to zero - there is no gradient accumulator (see `backward`'s doc).
     }
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {
+    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: model::Adam, _clip: Option<f32>, _extra_scale: f32) {
         // No-op: with no working `backward`, there is never a real gradient to
         // apply here (mirrors `s3dit::train::ZTrainModel::adamw_step`, whose
         // own real optimizer path is a `Collective`, not this trait method).
@@ -400,7 +400,7 @@ impl Model for LtxAvDit {
         unimplemented!("ltxv::LtxAvDit: no backward pass exists yet (forward-only pipeline-sharding slice) - see crate::shard's module doc for the tracked gap");
     }
     fn zero_grads(&self) {}
-    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra_scale: f32) {}
+    fn adamw_step(&self, _t: u32, _lr: f32, _wd: f32, _adam: model::Adam, _clip: Option<f32>, _extra_scale: f32) {}
     fn poll_wait(&self) {}
 
     fn param_names(&self) -> Vec<String> {

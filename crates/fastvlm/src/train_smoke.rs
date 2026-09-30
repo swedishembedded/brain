@@ -46,7 +46,7 @@ mod tests {
             qwen.write_img_embeds(&img);
             qwen.forward();
             qwen.backward();
-            qwen.adamw_step(step + 1, 3e-3, 0.0, None, 1.0);
+            qwen.adamw_step(step + 1, 3e-3, 0.0, Default::default(), None, 1.0);
         }
         let loss1 = loss_at(&qwen);
 

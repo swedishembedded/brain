@@ -144,12 +144,13 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         align_to_lines: false,
         patience: 0,
         seed: 1234,
+        adam: Default::default(),
     };
     // rank=3 is coprime with this config's head_dim=8 / d_model=16
     // (a degenerate rank equal to head_dim or d_model
     // would hide a whole shape-transposition bug class) -- same choice as
     // crates/qwen3/tests/lora_roundtrip.rs.
-    qwen3::finetune::finetune(base_path, out_dir, &opts, &qwen3::finetune::Mode::Lora { rank: 3, alpha: 6.0 }, adapter_out.to_str().unwrap())
+    qwen3::finetune::finetune(base_path, out_dir, &opts, &qwen3::finetune::Mode::Lora { rank: 3, alpha: 6.0, targets: qwen3::finetune::default_lora_targets() }, adapter_out.to_str().unwrap())
         .expect("finetune (the same qwen3::finetune::finetune brain qwen finetune --lora calls)")
 }
 

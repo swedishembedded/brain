@@ -116,6 +116,7 @@ fn opts(seed: u64, steps: u32) -> model::FitOpts {
         align_to_lines: false,
         patience: 0,
         seed,
+        adam: Default::default(),
     }
 }
 
@@ -184,7 +185,7 @@ fn lora_resume_continues_the_same_adapter_instead_of_resetting_it() {
     let data_dir = scratch.join("data");
     write_dataset(&data_dir);
 
-    let mode = qwen3::finetune::Mode::Lora { rank: RANK, alpha: ALPHA };
+    let mode = qwen3::finetune::Mode::Lora { rank: RANK, alpha: ALPHA, targets: qwen3::finetune::default_lora_targets() };
     let out = scratch.join("adapter.safetensors");
     let out_str = out.to_str().unwrap();
 
@@ -275,7 +276,7 @@ fn resume_with_mismatched_lora_rank_panics() {
         base_str,
         &data_dir,
         &opts(1, 2),
-        &qwen3::finetune::Mode::Lora { rank: RANK, alpha: ALPHA },
+        &qwen3::finetune::Mode::Lora { rank: RANK, alpha: ALPHA, targets: qwen3::finetune::default_lora_targets() },
         out.to_str().unwrap(),
         false,
     )
@@ -286,7 +287,7 @@ fn resume_with_mismatched_lora_rank_panics() {
             base_str,
             &data_dir,
             &opts(1, 2),
-            &qwen3::finetune::Mode::Lora { rank: RANK + 1, alpha: ALPHA },
+            &qwen3::finetune::Mode::Lora { rank: RANK + 1, alpha: ALPHA, targets: qwen3::finetune::default_lora_targets() },
             out.to_str().unwrap(),
             true,
         )

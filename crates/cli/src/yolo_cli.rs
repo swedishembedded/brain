@@ -312,7 +312,7 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
         model.zero_grads();
         let loss = model.forward();
         model.backward();
-        model.adamw_step((step + 1) as u32, cfg.lr, cfg.wd, Some(1.0), 1.0);
+        model.adamw_step((step + 1) as u32, cfg.lr, cfg.wd, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
 
         if first.is_nan() {

@@ -146,7 +146,7 @@ fn one_step_update_moves_weights_and_clears_grads() {
     }
     assert!(grad_l2 > 0.0, "all grads were exactly zero — backward produced no signal");
 
-    model.adamw_step(1, 1e-2, 0.0, Some(10.0), 1.0);
+    model.adamw_step(1, 1e-2, 0.0, Default::default(), Some(10.0), 1.0);
     model.poll_wait();
 
     // At least SOME trainable weight changed (a sizeable fraction, since AdamW's
@@ -381,7 +381,7 @@ fn frozen_backbone_unchanged_head_changes() {
         let l = model.forward();
         assert!(l.is_finite(), "step {step}: non-finite loss");
         model.backward();
-        model.adamw_step(step, 1e-2, 0.0, Some(10.0), 1.0);
+        model.adamw_step(step, 1e-2, 0.0, Default::default(), Some(10.0), 1.0);
         model.poll_wait();
         for (n, w) in &snap {
             model.write_weight(n, w); // freeze: undo the backbone update.

@@ -1085,16 +1085,10 @@ pub fn fold_external_into(path: &str, ts: &mut Tensors, strength: f32, arch: &st
     Ok(ExternalFold { pairs: pairs.len(), rank, scale: strength, family })
 }
 
-/// In-place bias-corrected Adam (β 0.9/0.999, eps 1e-8, no weight decay).
+/// In-place bias-corrected Adam at the default hyperparameters
+/// ([`crate::Adam::default`]), no weight decay.
 pub fn adam(p: &mut [f32], m: &mut [f32], v: &mut [f32], g: &[f32], lr: f32, t: u64) {
-    let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-    let bc1 = 1.0 - b1.powi(t as i32);
-    let bc2 = 1.0 - b2.powi(t as i32);
-    for i in 0..p.len() {
-        m[i] = b1 * m[i] + (1.0 - b1) * g[i];
-        v[i] = b2 * v[i] + (1.0 - b2) * g[i] * g[i];
-        p[i] -= lr * (m[i] / bc1) / ((v[i] / bc2).sqrt() + eps);
-    }
+    crate::Adam::default().update_slice(t as u32, lr, 0.0, 1.0, p, m, v, g);
 }
 
 /// Project `dw` onto `p`'s adapter grads and Adam-step them - the one-liner

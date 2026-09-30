@@ -38,7 +38,7 @@ fn train_steps<O: Objective<Qwen>>(model: &Qwen, mut obj: O, steps: u32, lr: f32
     for step in 0..steps {
         model.zero_grads();
         obj.micro_step(model, &mut rng);
-        model.adamw_step(step + 1, lr, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step + 1, lr, 0.0, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
     }
 }

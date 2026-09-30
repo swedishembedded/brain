@@ -24,7 +24,7 @@ fn train_batch(model: &Glm, x: &[u32], y: &[u32], steps: u32, lr: f32) {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, lr, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, lr, 0.0, glmdsa::ADAM, Some(1.0), 1.0);
         model.poll_wait();
     }
 }

@@ -96,7 +96,7 @@ fn indexer_distillation_updates_weights() {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 1e-2, 0.0, glmdsa::ADAM, Some(1.0), 1.0);
         model.poll_wait();
     }
     let loss = model.distill_step(0.0);
@@ -131,7 +131,7 @@ fn indexer_model_still_learns() {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 1e-2, 0.0, glmdsa::ADAM, Some(1.0), 1.0);
         model.poll_wait();
     }
     let after = model.forward();

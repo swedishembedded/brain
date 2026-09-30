@@ -2533,8 +2533,8 @@ impl Qwen35 {
         self.ps.zero_grads(&self.gpu);
     }
 
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
 
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
@@ -2914,8 +2914,8 @@ impl model::Model for Qwen35 {
     fn zero_grads(&self) {
         Qwen35::zero_grads(self)
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        Qwen35::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        Qwen35::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn poll_wait(&self) {
         Qwen35::poll_wait(self)

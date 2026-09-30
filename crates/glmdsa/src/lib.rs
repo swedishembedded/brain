@@ -26,4 +26,4 @@ pub mod sample;
 
 pub use config::GlmConfig;
 pub use init::init_weights;
-pub use model::{Glm, IGNORE};
+pub use model::{Glm, ADAM, IGNORE};

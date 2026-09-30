@@ -142,6 +142,7 @@ fn train(args: &[String], base: Option<&str>) {
         align_to_lines: align,
         patience: 0,
         seed,
+        adam: glmdsa::ADAM,
     };
     if let Some(p) = base {
         if !Path::new(&out).exists() {

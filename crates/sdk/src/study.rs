@@ -1256,6 +1256,7 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
         mask_per_line: false,
         align_to_lines: false,
         patience: 0,
+        adam: Default::default(),
     };
 
     let train_out = work_dir.join("train.safetensors");

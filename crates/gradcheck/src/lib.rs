@@ -511,7 +511,7 @@ pub fn check_qwen_lora(seed: u64) -> Report {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
     }
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
@@ -1576,7 +1576,7 @@ pub fn check_qwen35moe_lora(seed: u64) -> Report {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
     }
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
@@ -1624,7 +1624,7 @@ pub fn check_qwen35_lora(seed: u64) -> Report {
         model.zero_grads();
         model.forward();
         model.backward();
-        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
     }
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)

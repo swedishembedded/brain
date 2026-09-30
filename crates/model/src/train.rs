@@ -67,6 +67,8 @@ pub struct FitOpts {
     /// Needs `eval_interval > 0` and a validation split; without either
     /// there is no held-out loss to watch and this is inert.
     pub patience: u32,
+    /// AdamW's β1, β2 and ε for every step of the run.
+    pub adam: crate::Adam,
 }
 
 impl Default for FitOpts {
@@ -92,6 +94,7 @@ impl Default for FitOpts {
             // Off: unchanged behaviour for every caller that has not asked
             // to stop early.
             patience: 0,
+            adam: crate::Adam::default(),
         }
     }
 }
@@ -757,7 +760,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         // average grads over accumulation steps
         let scale = 1.0 / opts.grad_accum.max(1) as f32;
         let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, clip, scale);
+        model.adamw_step(step + 1, lr, opts.weight_decay, opts.adam, clip, scale);
         model.poll_wait();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
         last_train = Some(loss);
@@ -1121,6 +1124,8 @@ mod tests {
     struct Recorder {
         w: std::cell::RefCell<Vec<f32>>,
         saves: std::rc::Rc<std::cell::RefCell<Vec<Vec<f32>>>>,
+        /// The AdamW hyperparameters of every step, in order.
+        adams: std::rc::Rc<std::cell::RefCell<Vec<optim::Adam>>>,
     }
 
     #[derive(Clone)]
@@ -1149,7 +1154,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), saves: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())) }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), saves: Default::default(), adams: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -1165,8 +1170,9 @@ mod tests {
         fn zero_grads(&self) {}
         /// The step number IS the weight, so a saved checkpoint says which
         /// step it came from.
-        fn adamw_step(&self, t: u32, _lr: f32, _wd: f32, _clip: Option<f32>, _extra: f32) {
+        fn adamw_step(&self, t: u32, _lr: f32, _wd: f32, adam: optim::Adam, _clip: Option<f32>, _extra: f32) {
             *self.w.borrow_mut() = vec![t as f32];
+            self.adams.borrow_mut().push(adam);
         }
         fn poll_wait(&self) {}
         fn param_names(&self) -> Vec<String> {
@@ -1234,6 +1240,18 @@ mod tests {
         // Step 4's eval (index 3) was the best, and `adamw_step` is called
         // with t = step + 1, so the best parameters are 4.0.
         assert_eq!(saves[0], vec![4.0], "the checkpoint must hold the best step's parameters");
+    }
+
+    /// Every step runs with the run's AdamW hyperparameters, not constants.
+    #[test]
+    fn every_step_uses_the_runs_adam_hyperparameters() {
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let adams = std::rc::Rc::clone(&model.adams);
+        let adam = optim::Adam { beta1: 0.8, beta2: 0.95, eps: 1e-6 };
+        let opts = FitOpts { steps: 3, eval_interval: 0, adam, ..Default::default() };
+        let obj = Curve { evals: vec![], next: std::cell::Cell::new(0) };
+        fit_with(model, obj, &opts, None).expect("fit");
+        assert_eq!(*adams.borrow(), vec![adam; 3]);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

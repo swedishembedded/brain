@@ -550,7 +550,7 @@ fn composite_lora_backward_freezes_the_base_and_descends() {
         let _ = loss(&m);
         let _ = m.backward();
         m.decoder().poll_wait();
-        m.decoder().adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        m.decoder().adamw_step(step, 5e-2, 0.0, deepseek2::ADAM, Some(1.0), 1.0);
         m.decoder().poll_wait();
     }
 

@@ -282,6 +282,10 @@ struct LayerBufs {
     mlp: Mlp,
 }
 
+/// GLM's AdamW recipe: β2 0.95, the large-language-model value, rather than
+/// torch's 0.999.
+pub const ADAM: model::Adam = model::Adam { beta1: 0.9, beta2: 0.95, eps: 1e-8 };
+
 pub struct Glm {
     pub gpu: Gpu,
     pub cfg: GlmConfig,
@@ -1131,8 +1135,8 @@ impl Glm {
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
     }
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.95, 1e-8, clip, extra_scale);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
@@ -1634,8 +1638,8 @@ impl model::Model for Glm {
     fn zero_grads(&self) {
         Glm::zero_grads(self)
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        Glm::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        Glm::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn poll_wait(&self) {
         Glm::poll_wait(self)

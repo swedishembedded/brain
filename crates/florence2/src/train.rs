@@ -370,7 +370,7 @@ impl Florence2Trainer {
     }
 
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, optim::Adam::default(), clip, 1.0);
     }
 
     pub fn poll_wait(&self) {

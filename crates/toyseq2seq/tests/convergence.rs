@@ -123,7 +123,7 @@ fn engine_learns_copy_via_cross_attention() {
         model.zero_grads();
         last = model.forward();
         model.backward();
-        model.adamw_step(step + 1, lr, opts.weight_decay, Some(opts.grad_clip), 1.0);
+        model.adamw_step(step + 1, lr, opts.weight_decay, Default::default(), Some(opts.grad_clip), 1.0);
         model.poll_wait();
     }
 

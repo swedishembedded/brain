@@ -501,6 +501,10 @@ struct Decode {
     vcache: Vec<DeviceBuffer>,
 }
 
+/// DeepSeek-V2's AdamW recipe: β2 0.95, the large-language-model value,
+/// rather than torch's 0.999.
+pub const ADAM: model::Adam = model::Adam { beta1: 0.9, beta2: 0.95, eps: 1e-8 };
+
 pub struct DeepseekV2 {
     pub gpu: Gpu,
     pub cfg: DeepseekV2Config,
@@ -1440,8 +1444,8 @@ impl DeepseekV2 {
     pub fn poll_wait(&self) {
         self.gpu.poll_wait();
     }
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.95, 1e-8, clip, extra_scale);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
@@ -2264,8 +2268,8 @@ impl model::Model for DeepseekV2 {
     fn zero_grads(&self) {
         DeepseekV2::zero_grads(self)
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        DeepseekV2::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        DeepseekV2::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn poll_wait(&self) {
         DeepseekV2::poll_wait(self)

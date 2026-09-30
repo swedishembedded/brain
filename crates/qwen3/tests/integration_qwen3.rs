@@ -447,7 +447,7 @@ fn qwen3_dataparallel_speedup() {
         }
         single.poll_wait();
         let fb = a.elapsed().as_secs_f64();
-        single.adamw_step(step, 1e-4, 0.0, Some(1.0), inv_k);
+        single.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k);
         single.poll_wait();
         if meas {
             single_fb += fb;
@@ -471,7 +471,7 @@ fn qwen3_dataparallel_speedup() {
         dp.forward_backward(&batches);
         let fb = a.elapsed().as_secs_f64();
         let a = Instant::now();
-        dp.adamw_step(step, 1e-4, 0.0, Some(1.0), inv_k); // fused reduce+opt+broadcast
+        dp.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k); // fused reduce+opt+broadcast
         let op = a.elapsed().as_secs_f64();
         if meas {
             t_fb += fb;
@@ -583,7 +583,7 @@ fn qwen3_full_vs_lora_toolcall() {
     // for a fair comparison — aggressive scale/LR makes the adapters memorise the
     // tiny synthetic set (train loss -> 0) without generalising.
     let lora_ckpt = out.join("lora.safetensors");
-    let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0 }, lora_ckpt.to_str().unwrap()).unwrap();
+    let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets() }, lora_ckpt.to_str().unwrap()).unwrap();
     let (exl, _) = eval_toolcall(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &held);
 
     println!("\n=== Qwen3-0.6B tool-call: FULL (offload) vs LoRA, {steps} steps ===");

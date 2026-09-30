@@ -23,7 +23,7 @@ fn train_batch(m: &Qwen35, x: &[u32], y: &[u32], steps: u32, lr: f32) {
         m.zero_grads();
         m.forward();
         m.backward();
-        m.adamw_step(step, lr, 0.0, Some(1.0), 1.0);
+        m.adamw_step(step, lr, 0.0, Default::default(), Some(1.0), 1.0);
         m.poll_wait();
     }
 }

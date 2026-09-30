@@ -265,7 +265,7 @@ mod tests {
             m.zero_grads();
             m.forward();
             m.backward();
-            m.adamw_step(step + 1, 1e-2, wd, Some(1.0), 1.0);
+            m.adamw_step(step + 1, 1e-2, wd, Default::default(), Some(1.0), 1.0);
             m.poll_wait();
         }
     }

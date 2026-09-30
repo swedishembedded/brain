@@ -160,7 +160,7 @@ mod tests {
             model.zero_grads();
             model.forward(&s.tokens, &s.targets, (4, 4), &s.pixels);
             model.backward();
-            model.adamw_step(step + 1, 1e-2, 0.0, Some(1.0), 1.0);
+            model.adamw_step(step + 1, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
         }
         let loss1 = avg_loss(&model);
 

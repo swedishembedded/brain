@@ -218,7 +218,7 @@ impl Benchmark for MadCompress {
             model.backward();
             // Linear warmup then constant LR (the corpus is tiny + stationary).
             let lr = if step <= warmup { self.lr * step as f32 / warmup as f32 } else { self.lr };
-            model.adamw_step(step, lr, 0.0, Some(1.0), 1.0);
+            model.adamw_step(step, lr, 0.0, Default::default(), Some(1.0), 1.0);
             model.poll_wait();
             if step == 1 {
                 init_loss = loss;

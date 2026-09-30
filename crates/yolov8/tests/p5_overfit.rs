@@ -188,7 +188,7 @@ fn one_image_overfit_recovers_objects() {
         model.zero_grads();
         let l = model.forward();
         model.backward();
-        model.adamw_step(step, lr, 0.0, Some(10.0), 1.0);
+        model.adamw_step(step, lr, 0.0, Default::default(), Some(10.0), 1.0);
         last = l;
         if step % 50 == 0 || step == 1 {
             println!("  step {step:>3}: loss {l:.4}");
@@ -274,7 +274,7 @@ fn tiny_dataset_overfit_high_recall() {
         model.zero_grads();
         let l = model.forward();
         model.backward();
-        model.adamw_step(step, lr, 0.0, Some(10.0), 1.0);
+        model.adamw_step(step, lr, 0.0, Default::default(), Some(10.0), 1.0);
         last = l;
         if step % 50 == 0 || step == 1 {
             println!("  step {step:>3}: loss {l:.4}");

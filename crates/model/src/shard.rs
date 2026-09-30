@@ -661,7 +661,7 @@ impl<M: Shardable> Pipeline<M> {
     /// stage(s) — summed for a replicated tied weight — to the host, one AdamW
     /// update with a global grad-norm clip, write the new weights back to the
     /// owning stage(s). Mirrors the single-device `adamw_step(.., 1/K)`.
-    pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+    pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
         // Gather grads (summed across holders for replicated params).
         let grads: Vec<Vec<f32>> = self
             .holders
@@ -699,25 +699,8 @@ impl<M: Shardable> Pipeline<M> {
             gscale
         };
 
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-        let bc1 = 1.0 - b1.powi(t as i32);
-        let bc2 = 1.0 - b2.powi(t as i32);
         let fused = self.fused.as_mut().unwrap();
-        par::zip_each(&mut fused.state, &grads, |(_, w, m, v), gi| {
-            for i in 0..w.len() {
-                let gg = gi[i] * scale;
-                let mi = b1 * m[i] + (1.0 - b1) * gg;
-                let vi = b2 * v[i] + (1.0 - b2) * gg * gg;
-                m[i] = mi;
-                v[i] = vi;
-                let mhat = mi / bc1;
-                let vhat = vi / bc2;
-                let mut wi = w[i];
-                wi -= lr * wd * wi;
-                wi -= lr * mhat / (vhat.sqrt() + eps);
-                w[i] = wi;
-            }
-        });
+        par::zip_each(&mut fused.state, &grads, |(_, w, m, v), gi| adam.update_slice(t, lr, wd, scale, w, m, v, gi));
 
         // Scatter updated weights back to every holder stage.
         let Pipeline { stages, holders, fused, .. } = self;
@@ -840,11 +823,11 @@ impl<M: Shardable> Pipeline<M> {
 
     /// A full micro-batched training step: [`Self::pipelined_fwd_bwd`] then the
     /// fused optimiser (grads averaged by `1/m`). Returns the mean loss.
-    pub fn train_step(&mut self, microbatches: &[crate::Batch], t: u32, lr: f32, wd: f32, clip: Option<f32>) -> f32 {
+    pub fn train_step(&mut self, microbatches: &[crate::Batch], t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) -> f32 {
         self.zero_grads();
         let total = self.pipelined_fwd_bwd(microbatches);
         let m = microbatches.len().max(1);
-        self.adamw_step(t, lr, wd, clip, 1.0 / m as f32);
+        self.adamw_step(t, lr, wd, adam, clip, 1.0 / m as f32);
         total / m as f32
     }
 

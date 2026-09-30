@@ -660,7 +660,7 @@ mod tests {
             Model::set_batch(&qwen, Batch::LmWeighted { tokens: &tokens, targets: &targets, weights: &weights });
             loss = Model::forward(&qwen);
             Model::backward(&qwen);
-            Model::adamw_step(&qwen, step, 5e-2, 0.0, Some(1.0), 1.0);
+            Model::adamw_step(&qwen, step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
             Model::poll_wait(&qwen);
         }
         assert!(loss < loss0 * 0.1, "audio-code CE training did not collapse the loss: start={loss0} end={loss} (300 steps)");

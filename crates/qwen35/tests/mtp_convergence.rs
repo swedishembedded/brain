@@ -40,7 +40,7 @@ fn run_overfit(gpu: Gpu) {
         m.zero_grads();
         m.forward();
         m.backward();
-        m.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+        m.adamw_step(step, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
         m.poll_wait();
     }
     let after = m.forward();

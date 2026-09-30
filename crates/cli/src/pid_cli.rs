@@ -159,7 +159,7 @@ fn train(args: &[String]) {
             model.forward_submit();
             model.backward();
         }
-        model.adamw_step(step, tc.lr, tc.wd, Some(1.0), 1.0 / n_accum as f32);
+        model.adamw_step(step, tc.lr, tc.wd, Default::default(), Some(1.0), 1.0 / n_accum as f32);
         // Wait for this step's GPU work and reclaim its transient submit memory.
         // The loop is otherwise submit-only between log intervals, so without
         // this the per-submit staging/command buffers accumulate until the GPU

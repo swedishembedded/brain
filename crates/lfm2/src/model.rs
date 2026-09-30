@@ -1438,8 +1438,8 @@ impl Lfm {
     pub fn zero_grads(&self) {
         self.ps.zero_grads(&self.gpu);
     }
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.opt.as_ref().expect("train mode").step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.as_ref().expect("train mode").step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)
@@ -1624,8 +1624,8 @@ impl model::Model for Lfm {
     fn zero_grads(&self) {
         Lfm::zero_grads(self)
     }
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        Lfm::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        Lfm::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
     fn poll_wait(&self) {
         Lfm::poll_wait(self)

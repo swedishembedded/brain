@@ -300,8 +300,8 @@ impl Resampler {
     /// when `cfg.lora` is `None` (full fine-tune), or just the adapter pair
     /// when it is set (LoRA), exactly as `ParamStore`'s role assignment in
     /// [`Self::new_on`] already decided.
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.95, 1e-8, clip, 1.0);
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, 1.0);
     }
 
     /// Write `vision.view_separator`'s own gradient. Unlike every other

@@ -464,7 +464,7 @@ impl ModernBert {
     pub fn adamw_step_scaled(&mut self, lr: f32, wd: f32, clip: Option<f32>, scale: f32) {
         let opt = self.opt.as_ref().expect("adamw_step on a trunk built with new_on, not new_train_on");
         self.step += 1;
-        opt.step(&self.gpu, &self.ps, self.step, lr, wd, 0.9, 0.999, 1e-8, clip, scale);
+        opt.step(&self.gpu, &self.ps, self.step, lr, wd, optim::Adam::default(), clip, scale);
     }
 
     /// The AdamW time index - what a resumed run must carry so the bias

@@ -51,12 +51,12 @@ impl FlatAdam {
     /// the **mean** gradient (`sum / world`), with an optional global-norm clip.
     /// Returns the updated weights (identical on every rank). `t` is the 1-based
     /// step (Adam bias correction).
-    // (coll, rank) address the collective and (t, lr, wd, clip) are AdamW's
+    // (coll, rank) address the collective and (t, lr, wd, adam, clip) are AdamW's
     // hyperparameters. Boxing the latter into a struct would need the same
     // struct threaded through `DataParallel::step` and every caller in
     // `crates/{qwen,gpt,moe}`; the flat list matches `optim`'s existing API.
     #[allow(clippy::too_many_arguments)]
-    pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, clip: Option<f32>) -> &[f32] {
+    pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) -> &[f32] {
         assert_eq!(local_grad.len(), self.master.len(), "grad/param length mismatch");
         // `Collective::all_reduce` is async and `Result`-based (M7.2); every
         // caller here is a plain OS thread, not an async task, so this bridges
@@ -79,20 +79,8 @@ impl FlatAdam {
         };
         let eff = mean_scale * coef;
 
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
-        let bc1 = 1.0 - b1.powi(t as i32);
-        let bc2 = 1.0 - b2.powi(t as i32);
-        for (i, &s) in summed.iter().enumerate().take(self.master.len()) {
-            let g = s * eff;
-            self.m[i] = b1 * self.m[i] + (1.0 - b1) * g;
-            self.v[i] = b2 * self.v[i] + (1.0 - b2) * g * g;
-            let mhat = self.m[i] / bc1;
-            let vhat = self.v[i] / bc2;
-            let mut wi = self.master[i];
-            wi -= lr * wd * wi;
-            wi -= lr * mhat / (vhat.sqrt() + eps);
-            self.master[i] = wi;
-        }
+        let n = self.master.len();
+        adam.update_slice(t, lr, wd, eff, &mut self.master, &mut self.m, &mut self.v, &summed[..n]);
         &self.master
     }
 }
@@ -146,12 +134,12 @@ impl DdpOptimizer {
     /// [`FlatAdam::step`], scatter the new weights back to the model.
     // Same AdamW hyperparameter list as [`FlatAdam::step`], which it forwards to.
     #[allow(clippy::too_many_arguments)]
-    pub fn step<M: Model>(&mut self, model: &M, coll: &dyn Collective, rank: usize, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
+    pub fn step<M: Model>(&mut self, model: &M, coll: &dyn Collective, rank: usize, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>) {
         let mut flat = Vec::with_capacity(self.adam.master.len());
         for n in &self.names {
             flat.extend(model.read_grad(n));
         }
-        self.adam.step(coll, rank, flat, t, lr, wd, clip);
+        self.adam.step(coll, rank, flat, t, lr, wd, adam, clip);
         let w = self.adam.weights();
         for (n, &(o, l)) in self.names.iter().zip(&self.offs) {
             model.write_weight(n, &w[o..o + l]);
@@ -224,7 +212,7 @@ mod tests {
             run(2, move |c, r| {
                 let mut opt = FlatAdam::new(w0.clone());
                 for t in 1..=5 {
-                    opt.step(c, r, g[r].clone(), t, lr, wd, None);
+                    opt.step(c, r, g[r].clone(), t, lr, wd, crate::Adam::default(), None);
                 }
                 opt.weights().to_vec()
             })
@@ -234,7 +222,7 @@ mod tests {
         let solo = HostCollective::new(1);
         let mean: Vec<f32> = (0..3).map(|i| (g[0][i] + g[1][i]) / 2.0).collect();
         for t in 1..=5 {
-            base.step(&*solo, 0, mean.clone(), t, lr, wd, None);
+            base.step(&*solo, 0, mean.clone(), t, lr, wd, crate::Adam::default(), None);
         }
         assert_eq!(out[0], out[1], "replicas diverged");
         for (a, b) in out[0].iter().zip(base.weights()) {

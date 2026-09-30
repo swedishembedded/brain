@@ -118,14 +118,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
-/// MoE's fixed AdamW betas/eps (the established values matched against the
-/// PyTorch reference). The unified trait [`model::Model::adamw_step`] does not
-/// thread per-call betas, so the trait path uses these; the inherent
-/// [`Trainer::adamw_step_betas`] still accepts explicit betas for callers that
-/// need them (e.g. federated expert training).
-const MOE_BETA1: f32 = 0.9;
-const MOE_BETA2: f32 = 0.95;
-const MOE_EPS: f32 = 1e-8;
+/// MoE's AdamW recipe (the values matched against the PyTorch reference).
+pub const MOE_ADAM: model::Adam = model::Adam { beta1: 0.9, beta2: 0.95, eps: 1e-8 };
 
 #[derive(Clone)]
 pub struct Config {
@@ -527,18 +521,10 @@ impl Trainer {
         s
     }
 
-    /// One AdamW step with MoE's fixed betas/eps and no grad clipping - the
-    /// signature the existing CLI / federated callers use. `t` is the
-    /// (1-based) step index for bias correction. Delegates to the shared
-    /// optimizer so the dispatch graph is cached across steps.
-    pub fn adamw_step_betas(&self, t: u32, lr: f32, wd: f32, beta1: f32, beta2: f32, eps: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, beta1, beta2, eps, None, 1.0);
-    }
-
     /// One AdamW step matching the unified [`model::Model`] signature (optional
-    /// global-norm clip + grad-accum scale), using MoE's fixed betas/eps.
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(&self.gpu, &self.ps, t, lr, wd, MOE_BETA1, MOE_BETA2, MOE_EPS, clip, extra_scale);
+    /// global-norm clip + grad-accum scale); MoE trains with [`MOE_ADAM`].
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale);
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
@@ -667,8 +653,8 @@ impl model::Model for Trainer {
         Trainer::zero_grads(self)
     }
 
-    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
-        Trainer::adamw_step(self, t, lr, wd, clip, extra_scale)
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        Trainer::adamw_step(self, t, lr, wd, adam, clip, extra_scale)
     }
 
     fn poll_wait(&self) {
@@ -848,6 +834,7 @@ pub fn train(args: TrainArgs) {
         eval_interval: 50,
         eval_batches: 10,
         seed: args.seed,
+        adam: MOE_ADAM,
         ..Default::default()
     };
     let out = std::path::Path::new(&args.out);
@@ -895,7 +882,7 @@ pub fn train_expert(args: ExpertTrainArgs) {
         trainer.zero_grads();
         trainer.backward();
         trainer.freeze_grads_except_expert(args.expert); // freeze the shared backbone
-        trainer.adamw_step_betas(step, args.lr, 0.0, 0.9, 0.95, 1e-8); // wd=0 keeps frozen params fixed
+        trainer.adamw_step(step, args.lr, 0.0, MOE_ADAM, None, 1.0); // wd=0 keeps frozen params fixed
         if step == 1 || step % 50 == 0 || step == args.steps {
             println!("expert {} | step {:5} | loss {:.4}", args.expert, step, loss);
         }
@@ -995,7 +982,7 @@ mod tests {
             tr.zero_grads();
             tr.backward();
             tr.freeze_grads_except_expert(1); // freeze everything but expert 1
-            tr.adamw_step_betas(step, 1e-2, 0.0, 0.9, 0.95, 1e-8); // wd=0 -> frozen params fixed
+            tr.adamw_step(step, 1e-2, 0.0, MOE_ADAM, None, 1.0); // wd=0 -> frozen params fixed
         }
 
         let backbone1 = tr.read_weight("token_emb.weight");

@@ -58,7 +58,7 @@ fn step_timing() {
         m.zero_grads();
         m.forward();
         m.backward();
-        m.adamw_step(1, 1e-4, 0.0, Some(1.0), 1.0);
+        m.adamw_step(1, 1e-4, 0.0, Default::default(), Some(1.0), 1.0);
         m.gpu.poll_wait();
         sbest = sbest.min(ts.elapsed().as_secs_f64() * 1e3);
     }

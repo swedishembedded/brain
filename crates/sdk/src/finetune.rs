@@ -562,6 +562,7 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         mask_per_line: false,
         align_to_lines: false,
         patience: 0,
+        adam: Default::default(),
     }
 }
 

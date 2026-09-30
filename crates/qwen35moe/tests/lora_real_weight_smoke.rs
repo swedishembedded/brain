@@ -165,7 +165,7 @@ fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
         pipe.zero_grads();
         let loss = pipe.forward(Batch::Lm { tokens: &x, targets: &y });
         pipe.backward();
-        pipe.adamw_step(step as u32, lr, 0.0, Some(1.0), 1.0);
+        pipe.adamw_step(step as u32, lr, 0.0, Default::default(), Some(1.0), 1.0);
         losses.push(loss);
         eprintln!("step {step}: loss={loss:.6}  ({:.2}s)", ts.elapsed().as_secs_f64());
     }

@@ -103,7 +103,7 @@ fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
         m.zero_grads();
         l = m.forward();
         m.backward();
-        opt.step(&m, &*coll, 0, t, 3e-3, 0.0, None);
+        opt.step(&m, &*coll, 0, t, 3e-3, 0.0, model::Adam::default(), None);
     }
     eprintln!("Z-Image via DdpOptimizer: loss {l0:.3e} -> {l:.3e}");
     assert!(l < l0 * 0.1, "Z-Image did not train through DdpOptimizer: {l0:.3e} -> {l:.3e}");

@@ -62,7 +62,7 @@ fn lora_adapter_survives_save_and_reload() {
         trained.zero_grads();
         trained.forward();
         trained.backward();
-        trained.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        trained.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         trained.poll_wait();
     }
     let logits_before_save = trained.logits_all(&x);

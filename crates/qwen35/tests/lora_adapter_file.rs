@@ -48,7 +48,7 @@ fn trained_model() -> (Qwen35, Vec<u32>) {
         m.zero_grads();
         m.forward();
         m.backward();
-        m.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        m.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
         m.poll_wait();
     }
     (m, x)
