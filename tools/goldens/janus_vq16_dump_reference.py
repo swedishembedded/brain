@@ -42,7 +42,7 @@ usage:
   python tools/goldens/janus_vq16_dump_reference.py \
       --janus   /path/to/Janus \
       --weights /path/to/deepseek-ai/Janus-Pro-7B \
-      --out     /tmp/brain-testdata/janus/vq16
+      --out     "$BRAIN_TESTDATA/janus/vq16"
 """
 
 import argparse
