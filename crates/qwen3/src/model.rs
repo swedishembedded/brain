@@ -779,6 +779,12 @@ impl Qwen {
     /// [`Self::new_shard_dt`]): ask [`Self::linear_dtype`] what landed.
     pub fn new_lora_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_lora_shard_dt(cfg, b, t, init, shard, dt)
+    }
+
+    /// [`Self::new_lora_dt`] for one pipeline stage: only `shard`'s layers
+    /// (and endpoint weights) are built, read from `init` a tensor at a time.
+    pub fn new_lora_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
         Qwen::new_impl(cfg, b, t, init, true, shard, dt, false)
     }
 

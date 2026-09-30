@@ -37,4 +37,4 @@ pub use model::{shard_param_list, Qwen, Shard, IGNORE};
 pub use gpu_core::select::Dtype;
 /// Generic multi-GPU training (see [`::model`]); use as `Pipeline::<Qwen>::new(..)`
 /// / `DataParallel::<Qwen>::new(..)`.
-pub use ::model::{DataParallel, Pipeline};
+pub use ::model::{DataParallel, Pipeline, PipelineModel};

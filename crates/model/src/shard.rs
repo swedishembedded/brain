@@ -59,7 +59,10 @@
 //! optimiser (fused host AdamW over the stages' disjoint params, plus summed
 //! gradients for any replicated/tied weight), and placement are all generic here.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+use gpu_core::select::Dtype;
 
 use backend_cpu::par;
 
@@ -119,6 +122,25 @@ pub trait Shardable: Model + Send {
     fn new_shard(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Self
     where
         Self: Sized;
+    /// Build one stage from any tensor source, its frozen base linears held
+    /// at storage tier `dt` (a LoRA build's base; everything else stays
+    /// fp32). The default reads the stage's weights out of `init` into a host
+    /// map and builds through [`Shardable::new_shard`], so it serves fp32
+    /// only; a model that streams from the source and supports a reduced
+    /// tier overrides it.
+    fn new_shard_from(cfg: Self::Config, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Self
+    where
+        Self: Sized,
+    {
+        assert_eq!(dt, Dtype::F32, "{}: no {dt:?} weight tier", std::any::type_name::<Self>());
+        let mut all = HashMap::new();
+        for (name, _) in crate::ModelConfig::param_list(&cfg) {
+            init.with_tensor(&name, &mut |data| {
+                all.insert(name.clone(), data.to_vec());
+            });
+        }
+        Self::new_shard(cfg, b, t, &all, shard)
+    }
     /// Weights replicated across stages (a tied embedding used by both the embed
     /// and head stages); their gradients are summed. Empty when nothing is tied.
     fn replicated_params(&self) -> Vec<String> {
@@ -570,6 +592,25 @@ impl<M: Shardable> Pipeline<M> {
 
     /// Build with explicit shards (bypasses [`plan_balanced`]).
     pub fn with_shards(cfg: M::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shards: Vec<Shard>) -> Pipeline<M> {
+        Pipeline::from_stages(cfg, shards, |cfg, sh| M::new_shard(cfg, b, t, init, sh))
+    }
+
+    /// [`Self::new`] over any tensor source, the frozen base held at `dt`
+    /// (see [`Shardable::new_shard_from`]): nothing is held whole in host
+    /// RAM, each stage pulls its own tensors one at a time.
+    pub fn new_dt(cfg: M::Config, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gpus: &[usize], dt: Dtype) -> Pipeline<M> {
+        let cost = M::shard_cost(&cfg, b, t);
+        let shards = plan_balanced(&cost, gpus);
+        Pipeline::with_shards_dt(cfg, b, t, init, shards, dt)
+    }
+
+    /// [`Self::with_shards`] over any tensor source at tier `dt`.
+    pub fn with_shards_dt(cfg: M::Config, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shards: Vec<Shard>, dt: Dtype) -> Pipeline<M> {
+        Pipeline::from_stages(cfg, shards, |cfg, sh| M::new_shard_from(cfg, b, t, init, sh, dt))
+    }
+
+    /// Build every stage with `make`, each on its shard's card.
+    fn from_stages(cfg: M::Config, shards: Vec<Shard>, make: impl Fn(M::Config, Shard) -> M) -> Pipeline<M> {
         let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
         std::env::set_var("BRAIN_OFFLOAD_ADAM", "1"); // stages keep weight+grad on GPU; moments in RAM
         let mut stages = Vec::with_capacity(shards.len());
@@ -577,12 +618,10 @@ impl<M: Shardable> Pipeline<M> {
             // Scoped (thread-local, race-free) placement on the shard's card;
             // an ANY_GPU shard keeps the ambient selection.
             let stage = if sh.gpu_index == Shard::ANY_GPU {
-                M::new_shard(cfg.clone(), b, t, init, sh.clone())
+                make(cfg.clone(), sh.clone())
             } else {
-                gpu_core::devices::with_gpu(sh.gpu_index as u32, || {
-                    M::new_shard(cfg.clone(), b, t, init, sh.clone())
-                })
-                .unwrap_or_else(|e| panic!("pipeline stage placement: {e}"))
+                gpu_core::devices::with_gpu(sh.gpu_index as u32, || make(cfg.clone(), sh.clone()))
+                    .unwrap_or_else(|e| panic!("pipeline stage placement: {e}"))
             };
             stages.push(stage);
         }
@@ -623,9 +662,19 @@ impl<M: Shardable> Pipeline<M> {
     /// Forward `batch` through every stage, returning the loss. The residual is
     /// carried host-staged from each stage to the next.
     pub fn forward(&self, batch: crate::Batch) -> f32 {
+        self.set_batch(batch);
+        self.forward_loaded()
+    }
+
+    /// Upload `batch` to every stage (each holds its own copy of the tokens).
+    pub fn set_batch(&self, batch: crate::Batch) {
         for st in &self.stages {
             st.set_batch(clone_batch(&batch));
         }
+    }
+
+    /// [`Self::forward`] on the batch [`Self::set_batch`] last uploaded.
+    pub fn forward_loaded(&self) -> f32 {
         let last = self.stages.len() - 1;
         let mut carry: Option<Vec<f32>> = None;
         for (i, st) in self.stages.iter().enumerate() {
@@ -824,6 +873,34 @@ impl<M: Shardable> Pipeline<M> {
         total / m as f32
     }
 
+    /// Every parameter a stage optimises, once (a replicated weight is named
+    /// once), in first-seen stage order.
+    pub fn param_names(&self) -> Vec<String> {
+        self.holders.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// `name`'s weight, read from its first holder (replicas agree: a step
+    /// writes the same update to every holder).
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));
+        self.stages[hs[0]].read_weight(name)
+    }
+
+    /// Write `name`'s weight to every stage that holds it.
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));
+        for &si in hs {
+            self.stages[si].write_weight(name, data);
+        }
+    }
+
+    /// Block until every stage's submitted device work completes.
+    pub fn poll_wait(&self) {
+        for st in &self.stages {
+            st.poll_wait();
+        }
+    }
+
     /// The true gradient for `name` (summed across replicas / read from its owner).
     pub fn reduced_grad(&self, name: &str) -> Vec<f32> {
         let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));
@@ -834,6 +911,83 @@ impl<M: Shardable> Pipeline<M> {
             }
         }
         g
+    }
+}
+
+/// A [`Pipeline`] as a [`Model`], so the generic fit loop trains a model
+/// split across cards exactly as it trains one on a single card. The fit
+/// loop's micro-steps run the stages one after another (forward, then
+/// backward); the optimiser is the pipeline's fused host AdamW, so the
+/// trainable set is gathered and scattered once a step.
+///
+/// What it does not offer: a whole-checkpoint `save` (a stage holds only its
+/// slice, and a reduced-precision base lives outside the parameter stores -
+/// save what was trained, e.g. an adapter, from [`Model::read_weight`]),
+/// weighted-loss objectives and exact-resume optimiser state.
+pub struct PipelineModel<M: Shardable> {
+    pipe: RefCell<Pipeline<M>>,
+    cfg: M::Config,
+}
+
+impl<M: Shardable> PipelineModel<M> {
+    /// Wrap `pipe`, which was built from `cfg`.
+    pub fn new(pipe: Pipeline<M>, cfg: M::Config) -> PipelineModel<M> {
+        PipelineModel { pipe: RefCell::new(pipe), cfg }
+    }
+}
+
+impl<M: Shardable> Model for PipelineModel<M> {
+    type Config = M::Config;
+
+    /// A one-stage pipeline on the ambient device.
+    fn new(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        let pipe = Pipeline::<M>::new(cfg.clone(), b, t, init, &[Shard::ANY_GPU]);
+        PipelineModel::new(pipe, cfg)
+    }
+    fn init_weights(cfg: &Self::Config, seed: u64) -> HashMap<String, Vec<f32>> {
+        M::init_weights(cfg, seed)
+    }
+    fn config(&self) -> &Self::Config {
+        &self.cfg
+    }
+    fn set_batch(&self, batch: crate::Batch) {
+        self.pipe.borrow().set_batch(batch);
+    }
+    fn forward(&self) -> f32 {
+        self.pipe.borrow().forward_loaded()
+    }
+    fn backward(&self) {
+        self.pipe.borrow().backward();
+    }
+    fn zero_grads(&self) {
+        self.pipe.borrow().zero_grads();
+    }
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: crate::Adam, clip: Option<f32>, extra_scale: f32) {
+        self.pipe.borrow_mut().adamw_step(t, lr, wd, adam, clip, extra_scale);
+    }
+    fn poll_wait(&self) {
+        self.pipe.borrow().poll_wait();
+    }
+    fn param_names(&self) -> Vec<String> {
+        self.pipe.borrow().param_names()
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.pipe.borrow().read_weight(name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        self.pipe.borrow().write_weight(name, data);
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.pipe.borrow().reduced_grad(name)
+    }
+    fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
+        None
+    }
+    fn save(&self, _path: &str) {
+        panic!("a pipeline holds one slice per stage and no reduced-precision base: save the trained parameters (an adapter) instead of a whole checkpoint");
+    }
+    fn config_json(&self) -> serde_json::Value {
+        crate::ModelConfig::to_json(&self.cfg)
     }
 }
 

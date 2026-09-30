@@ -48,6 +48,10 @@ impl Shardable for Qwen {
         Qwen::new_shard(cfg, b, t, init, true, shard)
     }
 
+    fn new_shard_from(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: gpu_core::select::Dtype) -> Qwen {
+        Qwen::new_lora_shard_dt(cfg, b, t, init, shard, dt)
+    }
+
     fn replicated_params(&self) -> Vec<String> {
         if self.cfg.head_weight() == "tok.weight" {
             vec!["tok.weight".to_string()]
