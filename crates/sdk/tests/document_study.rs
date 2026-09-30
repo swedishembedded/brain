@@ -359,3 +359,16 @@ fn a_dry_run_reports_the_specific_failure_and_exits_non_zero_without_touching_a_
     assert!(e.contains("held-out probes"), "the failure must name the specific rule, got:\n{e}");
     assert!(e.contains("below the pre-registered floor of 48"), "the failure must name the floor, got:\n{e}");
 }
+
+/// A consumer that only trains (`study`, without `decision`) still has to
+/// decide whether what it trained replaces what it had, so the promotion
+/// gate's statistics are part of this surface: `brain::promote` resolves
+/// here, and its sign test is the one the study's own gate computes.
+#[test]
+fn the_promotion_gate_is_reachable_from_the_study_surface() {
+    let candidate = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0];
+    let baseline = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let t = brain::promote::stats::sign_test(&candidate, &baseline);
+    assert_eq!((t.n, t.k), (5, 5), "the tied pair carries no evidence");
+    assert!((t.p_value - 1.0 / 32.0).abs() < 1e-12, "P(Binomial(5, 0.5) >= 5): {t:?}");
+}

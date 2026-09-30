@@ -101,8 +101,11 @@ decision = ["device", "dep:brain-decide", "dep:brain-modernbert", "dep:brain-rlc
 # `model::Model`), so the decoder crates it monomorphises for come with it.
 # `brain::ChatFineTune`/`brain::score_chat` - LoRA fine-tuning of a Qwen3 chat
 # model and its held-out score - train through the same crates; `device` is
-# for the run's own `.device(..)` choice.
-study = ["device", "dep:brain-rl", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
+# for the run's own `.device(..)` choice. `brain::promote` - the promotion
+# gate and its sign test - is exported here too: a caller that trains has to
+# decide whether the result replaces what it had. `brain-rl` already links
+# `brain-promote`, so naming it adds no crate to this surface's build.
+study = ["device", "dep:brain-rl", "dep:brain-promote", "dep:brain-data", "dep:brain-checkpoint", "dep:brain-model", "dep:brain-loader", "dep:brain-qwen3", "dep:brain-qwen35", "dep:brain-qwen35moe", "dep:serde_json", "dep:serde"]
 
 # --- `brain::ContinualReader`: a model that keeps reading a directory and can
 #     say what it gained and what that cost. Builds on `study`'s architecture

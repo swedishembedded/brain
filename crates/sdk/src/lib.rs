@@ -197,8 +197,9 @@ pub use search;
 /// ratchet and wanders. `brain-promote` is a leaf in the training-substrate
 /// layer that knows nothing of models - a paired sign test and four bars over
 /// already-scored episodes - so it is re-exported rather than wrapped, for
-/// the same reason `search` is.
-#[cfg(feature = "decision")]
+/// the same reason `search` is. Exported by `study` as well as `decision`:
+/// a caller that only fine-tunes still has to gate what it trained.
+#[cfg(any(feature = "study", feature = "decision"))]
 pub use promote;
 
 /// `brain::RlcdPipeline` - training a decision model directly against exact
