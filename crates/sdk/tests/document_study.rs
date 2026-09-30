@@ -251,8 +251,9 @@ fn a_document_study_writes_a_report_and_publishes_an_adapter_only_on_promote() {
         assert!((cyc.baseline_pass_rate - row["baseline_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
         assert!((cyc.post_training_pass_rate - row["post_training_pass_rate"].as_f64().unwrap()).abs() < 1e-12);
         assert!((cyc.anchor_delta - row["anchor_delta"].as_f64().unwrap()).abs() < 1e-12);
-        let worst = cyc.worst_block_delta.unwrap_or_else(|| panic!("{arm}: a document study gates on anchor blocks, so worst_block_delta is measured"));
-        assert!(worst.is_finite() && worst >= 0.0, "{arm}: worst_block_delta must be a non-negative real number, got {worst}");
+        // The gate's anchor blocks are the EARLIER cycles' probes, so the
+        // first cycle has none and nothing is measured for them.
+        assert_eq!(cyc.worst_block_delta, None, "{arm}: a first cycle has no earlier facts, so no anchor block is measured");
         assert!(!cyc.retention_row.is_empty(), "{arm}: a cycle's retention row must carry at least its own diagonal entry");
     }
 
