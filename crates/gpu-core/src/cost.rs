@@ -1062,6 +1062,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (rows, v) = (p(0)?, p(1)?);
             f(4 * rows * v, 4 * (rows * v + 3 * rows))
         }
+        // A strided column-block copy; params [rows, cnt, src_stride,
+        // src_off, dst_stride, dst_off]: pure data movement.
+        "copy_cols" => {
+            let n = p(0)? * p(1)?;
+            f(0, 8 * n)
+        }
         // O(1) per element; threads = rows·v exactly, so the step_buf path
         // (params in a reused uniform buffer) still costs exactly.
         "ce_grad_stats" => {
