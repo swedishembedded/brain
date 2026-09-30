@@ -282,7 +282,7 @@ impl ChatFineTune {
             Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
             None => qwen3::finetune::LoraStart::Fresh,
         };
-        let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control, qwen3::Dtype::F32).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
         let mut outcome = ChatFineTuneOutcome {
             status: FineTuneStatus::Completed,

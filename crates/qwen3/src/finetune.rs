@@ -14,6 +14,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use checkpoint::TensorSource;
+use gpu_core::select::Dtype;
 use model::FitOpts;
 
 use crate::config::{LoraCfg, QwenConfig};
@@ -71,7 +73,7 @@ pub fn finetune_from(
         Mode::Lora { .. } => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
     }
 
-    let (cfg, init) = if resume && Path::new(out).exists() {
+    let (cfg, init): (QwenConfig, Box<dyn TensorSource>) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
         // continued, not `base` - the adapter's (or full model's)
         // accumulated state must survive. Skipping the fresh-init overlay
@@ -88,20 +90,21 @@ pub fn finetune_from(
             assert_eq!(lora.alpha, *alpha, "resume checkpoint {out} LoRA alpha {} does not match requested alpha {alpha}", lora.alpha);
             assert_eq!(&lora.targets, targets, "resume checkpoint {out} adapts {:?}, not the requested {targets:?}", lora.targets);
         }
-        (cfg, c.by_role(""))
+        (cfg, Box::new(c.by_role("")))
     } else if let Mode::Lora { rank, alpha, targets } = mode {
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-        lora_start(base, *rank, *alpha, opts.seed, &LoraStart::FreshOn(&targets))?
+        let (cfg, init) = lora_start(base, *rank, *alpha, opts.seed, &LoraStart::FreshOn(&targets))?;
+        (cfg, Box::new(init))
     } else {
         // Fresh full fine-tune: base architecture + weights from the checkpoint.
         let c = checkpoint::load(base);
         let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
         let mut init: HashMap<String, Vec<f32>> = crate::init_weights(&cfg, opts.seed);
         init.extend(c.by_role(""));
-        (cfg, init)
+        (cfg, Box::new(init))
     };
 
-    let m = build_for_training(cfg, opts, &init);
+    let m = build_for_training(cfg, opts, &*init, Dtype::F32);
     match prev_off {
         Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
         None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
@@ -112,14 +115,19 @@ pub fn finetune_from(
     model::fit_with(m, obj, opts, Some(Path::new(out)))
 }
 
-/// The trainable model at `opts`' batch and context, placed through the
-/// footprint check: a context the devices cannot hold is refused by name
-/// before anything is allocated, rather than by an arbitrary length cap.
-fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &HashMap<String, Vec<f32>>) -> std::io::Result<Qwen> {
+/// The trainable model at `opts`' batch and context, its frozen base
+/// linears at `dt` (anything but fp32 needs a LoRA configuration), placed
+/// through the footprint check: a context the devices cannot hold is refused
+/// by name before anything is allocated, rather than by an arbitrary length
+/// cap.
+pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Qwen> {
     let shard = crate::model::Shard::whole(cfg.n_layers as usize);
-    let dt = gpu_core::select::Dtype::F32;
-    crate::footprint::place_and_build(&cfg.clone(), &shard, dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
-        Qwen::new(cfg, opts.batch_size, opts.block_size, init)
+    crate::footprint::place_and_build(&cfg.clone(), &shard.clone(), dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
+        if dt == Dtype::F32 {
+            Qwen::new_shard(cfg, opts.batch_size, opts.block_size, init, true, shard)
+        } else {
+            Qwen::new_lora_dt(cfg, opts.batch_size, opts.block_size, init, dt)
+        }
     })
     .map_err(std::io::Error::other)
 }
@@ -214,16 +222,64 @@ pub enum LoraStart<'a> {
     Continue(&'a str),
 }
 
+/// The initial weights of a LoRA fine-tune: the adapter factors held in
+/// memory over the base checkpoint, which stays wherever it is (mapped,
+/// decoded one tensor at a time as the model is built).
+pub struct LoraInit {
+    adapters: HashMap<String, Vec<f32>>,
+    base: Box<dyn TensorSource>,
+}
+
+impl LoraInit {
+    /// The adapter tensors' names.
+    pub fn adapter_names(&self) -> impl Iterator<Item = &str> {
+        self.adapters.keys().map(String::as_str)
+    }
+
+    fn owner(&self, name: &str) -> &dyn TensorSource {
+        if self.adapters.contains_key(name) {
+            &self.adapters
+        } else {
+            &*self.base
+        }
+    }
+}
+
+impl TensorSource for LoraInit {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        self.owner(name).with_tensor(name, f)
+    }
+    fn raw_words(&self, name: &str) -> Option<&[u32]> {
+        self.owner(name).raw_words(name)
+    }
+    fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
+        self.owner(name).with_tensor_chunks(name, max_elems, f)
+    }
+    fn with_tensor_u32_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[u32])) -> bool {
+        self.owner(name).with_tensor_u32_chunks(name, max_elems, f)
+    }
+    fn numel(&self, name: &str) -> Option<usize> {
+        self.owner(name).numel(name)
+    }
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
+        self.owner(name).raw_blocks(name)
+    }
+    fn advise_drop(&self, name: &str) {
+        self.owner(name).advise_drop(name)
+    }
+}
+
 /// The configuration and initial weights of a LoRA fine-tune of `base`:
-/// the base's own architecture and weights, a `rank`/`alpha` adapter over
-/// [`LORA_TARGETS`], the chosen targets, or the continued adapter's own, and the
-/// adapter factors either freshly initialised from `seed` (zero delta) or
-/// read from the adapter being continued.
+/// the base's own architecture and weights (a brain checkpoint, a GGUF or a
+/// `transformers` directory, read as it is on disk), a `rank`/`alpha` adapter
+/// over [`LORA_TARGETS`], the chosen targets, or the continued adapter's own,
+/// and the adapter factors either freshly initialised from `seed` (zero
+/// delta) or read from the adapter being continued.
 ///
 /// Continuing an adapter at a different rank or alpha than it was trained
 /// at is refused: its factors only mean what they mean at their own shape
 /// and scale.
-pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, HashMap<String, Vec<f32>>)> {
+pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStart<'_>) -> std::io::Result<(QwenConfig, LoraInit)> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, why);
     let (targets, adapter) = match start {
         LoraStart::Fresh => (LORA_TARGETS.iter().map(|s| s.to_string()).collect::<Vec<_>>(), None),
@@ -241,18 +297,19 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
             (targets, Some(st.tensors))
         }
     };
-    let c = checkpoint::load(base);
-    let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
+    let (mut cfg, base_src) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
     cfg.lora = Some(LoraCfg { rank, alpha, targets });
-    // Fresh init for the LoRA-extended param set, then the base's own
-    // weights over it; a fresh adapter stays at its zero-delta init.
-    let mut init: HashMap<String, Vec<f32>> = crate::init_weights(&cfg, seed);
-    init.extend(c.by_role(""));
+    // A fresh adapter starts at its zero-delta init; the base's own weights
+    // are never copied, they stay behind `base_src`.
+    let mut init = LoraInit {
+        adapters: crate::init_weights(&cfg, seed).into_iter().filter(|(name, _)| model::adapter::device::is_adapter_param(name)).collect(),
+        base: base_src,
+    };
     if let Some(tensors) = adapter {
         for (name, values) in tensors {
-            match init.get(&name) {
+            match init.adapters.get(&name) {
                 Some(slot) if slot.len() == values.len() => {
-                    init.insert(name, values);
+                    init.adapters.insert(name, values);
                 }
                 Some(slot) => return Err(invalid(format!("adapter tensor {name} holds {} values, this base's has {}", values.len(), slot.len()))),
                 None => return Err(invalid(format!("adapter tensor {name} has no counterpart in this base's LoRA parameters"))),
@@ -266,6 +323,8 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
 /// caller in the loop (progress, stopping, exact resume - see
 /// `model::FitControl`), returning the trained model rather than writing a
 /// whole checkpoint: the caller saves what it wants of it (its adapter).
+/// The frozen base linears are held at `base_dtype` ([`Dtype::BF16`]: half
+/// the bytes of fp32, the adapters staying fp32).
 pub fn finetune_lora_controlled(
     base: &str,
     dir: &Path,
@@ -274,6 +333,7 @@ pub fn finetune_lora_controlled(
     alpha: f32,
     start: &LoraStart<'_>,
     control: model::FitControl<'_>,
+    base_dtype: Dtype,
 ) -> std::io::Result<(model::FitReport, Qwen)> {
     let (cfg, init) = lora_start(base, rank, alpha, opts.seed, start)?;
     // A LoRA build never offloads its moments; the process-wide switch is
@@ -281,7 +341,7 @@ pub fn finetune_lora_controlled(
     // does.
     let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let m = build_for_training(cfg, opts, &init);
+    let m = build_for_training(cfg, opts, &init, base_dtype);
     if let Some(v) = prev_off {
         std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
     }
@@ -332,7 +392,7 @@ mod tests {
 
         let (cfg, init) = lora_start(base.to_str().unwrap(), 2, 4.0, 1, &LoraStart::FreshOn(&["wq", "up"])).unwrap();
         assert_eq!(cfg.lora.as_ref().unwrap().targets, ["wq", "up"]);
-        let adapted: std::collections::BTreeSet<&str> = init.keys().filter_map(|k| k.strip_suffix(".lora_a")).filter_map(|k| k.rsplit('.').nth(1)).collect();
+        let adapted: std::collections::BTreeSet<&str> = init.adapter_names().filter_map(|k| k.strip_suffix(".lora_a")).filter_map(|k| k.rsplit('.').nth(1)).collect();
         assert_eq!(adapted.into_iter().collect::<Vec<_>>(), ["up", "wq"]);
         let _ = std::fs::remove_dir_all(&dir);
     }

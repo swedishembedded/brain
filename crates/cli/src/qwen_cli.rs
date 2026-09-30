@@ -19,7 +19,7 @@
 //!                     --probes PROBES.jsonl [--anchor ANCHOR.jsonl]
 //!                     [--tokenizer TOK --max-new N]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use capability::{Blob, Invocation, Media, Progress};
 use data::rng::Rng;
@@ -786,6 +786,16 @@ fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
     Ok((owner.to_string(), name.to_string(), tag))
 }
 
+/// The rendered dataset of one fine-tune run, removed when the run ends
+/// however it ends (an error return or a panic included).
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// `brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
 ///     --dataset DIR [--alpha A --steps N --lr X --batch B --block T --seed S
 ///     --models-dir DIR --dataset-id ID]`
@@ -825,6 +835,9 @@ fn finetune_lora(args: &[String]) {
     // Train each answer's `<think>` reasoning even where the chat template
     // drops it from history (DeepSeek-R1's always does).
     let mut keep_reasoning = false;
+    // The storage dtype of the frozen base. bf16 is half the bytes of fp32;
+    // the adapters and the optimiser stay fp32 either way.
+    let mut base_dtype = gpu_core::select::Dtype::F32;
     let mut i = 0;
     while i < args.len() {
         // A schedule value that does not parse is an error, never the default.
@@ -843,6 +856,16 @@ fn finetune_lora(args: &[String]) {
                 })
             }
             "--keep-reasoning" => keep_reasoning = true,
+            "--base-dtype" => {
+                base_dtype = match val(args, &mut i, "--base-dtype").as_str() {
+                    "f32" => gpu_core::select::Dtype::F32,
+                    "bf16" => gpu_core::select::Dtype::BF16,
+                    other => {
+                        eprintln!("--base-dtype {other:?}: expected f32 or bf16");
+                        std::process::exit(2)
+                    }
+                }
+            }
             "--weight-decay" => hyper.weight_decay = num(&mut i, "--weight-decay"),
             "--grad-clip" => hyper.grad_clip = num(&mut i, "--grad-clip"),
             "--warmup" => hyper.warmup = Some(num(&mut i, "--warmup") as u32),
@@ -870,7 +893,7 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
-             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] \
+             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-dtype f32|bf16] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
@@ -961,15 +984,22 @@ fn finetune_lora(args: &[String]) {
         }
     };
 
-    let base_cfg_json = checkpoint::read_config(base_weights_path.to_str().unwrap_or_default());
-    let vocab = base_cfg_json["vocab_size"].as_u64().unwrap_or(0) as usize;
-    if vocab == 0 {
-        eprintln!("{}: could not read vocab_size from the base checkpoint's config", base_weights_path.display());
-        return;
-    }
+    // A `transformers` directory is trained from as downloaded: the store
+    // answers its `config.json` as the weights anchor, the directory is what
+    // is opened.
+    let base_open = if base_weights_path.file_name().is_some_and(|n| n == "config.json") { base_dir.clone() } else { base_weights_path.clone() };
+    let base_open = base_open.to_str().unwrap_or_default().to_string();
+    let vocab = match qwen3::checkpoint_config(&base_open) {
+        Ok(cfg) => cfg.vocab as usize,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
 
-    let scratch = std::env::temp_dir().join(format!("brain-qwen-lora-train-{}", std::process::id()));
-    let prepared = match data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, data::chat::RenderOpts { keep_reasoning }, vocab, &scratch) {
+    let scratch_dir = ScratchDir(std::env::temp_dir().join(format!("brain-qwen-lora-train-{}", std::process::id())));
+    let scratch = scratch_dir.0.as_path();
+    let prepared = match data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, data::chat::RenderOpts { keep_reasoning }, vocab, scratch) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("preparing training data: {e}");
@@ -1012,44 +1042,21 @@ fn finetune_lora(args: &[String]) {
         // the caller asked not to have.
         eprintln!("--patience {patience} needs a validation.jsonl to watch; there is none, so nothing will stop early");
     }
-    let mode = qwen3::finetune::Mode::Lora { rank, alpha, targets };
-    let full_ckpt_out = scratch.join("full.safetensors");
-    let (l0, l1) = match qwen3::finetune::finetune(
-        base_weights_path.to_str().unwrap_or_default(),
-        &scratch,
-        &opts,
-        &mode,
-        full_ckpt_out.to_str().unwrap_or_default(),
-    ) {
+    let target_names: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let start = qwen3::finetune::LoraStart::FreshOn(&target_names);
+    let trained = qwen3::finetune::finetune_lora_controlled(&base_open, scratch, &opts, rank, alpha, &start, model::FitControl::default(), base_dtype);
+    let (report, trained) = match trained {
         Ok(r) => r,
         Err(e) => {
             eprintln!("finetune error: {e}");
             return;
         }
     };
-    println!("trained: loss {l0:.4} -> {l1:.4}");
-
-    // Reloaded with the adapters TRAINABLE, not as an inference build.
-    //
-    // `Model::param_names` is the optimised set - trainable plus offload,
-    // never frozen - and an inference build freezes everything, adapters
-    // included. A checkpoint reloaded that way carries its adapters and
-    // reports none, so `save_adapter` fails with "no .lora_a/.lora_b tensors
-    // in the param store" against a file that visibly holds hundreds of
-    // them, at the very end of a training run that worked.
-    let reloaded = {
-        let reader = checkpoint::weightio::WeightReader::open(full_ckpt_out.to_str().unwrap_or_default())
-            .unwrap_or_else(|e| panic!("cannot reopen {}: {e}", full_ckpt_out.display()));
-        let cfg = qwen3::QwenConfig::from_reader(&reader).unwrap_or_else(|e| panic!("{}: {e}", full_ckpt_out.display()));
-        let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-        Qwen::new_shard(cfg, 1, block, &reader, true, shard)
-    };
-    if let Err(e) = qwen3::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &reloaded, &full_ref_str, &base_id, dataset_id.as_deref())
-    {
+    println!("trained: loss {:.4} -> {}", report.initial_loss, report.final_loss.map_or("n/a".to_string(), |l| format!("{l:.4}")));
+    if let Err(e) = qwen3::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &trained, &full_ref_str, &base_id, dataset_id.as_deref()) {
         eprintln!("save_adapter: {e}");
         return;
     }
-    let _ = std::fs::remove_dir_all(&scratch);
     println!("saved: {full_ref_str} -> {}", adapter_out_path.display());
 }
 

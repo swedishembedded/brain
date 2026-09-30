@@ -487,12 +487,9 @@ fn lora_model(weights: &str, rank: u32, alpha: f32, opts: &model::FitOpts, start
     let (cfg, init) = qwen3::finetune::lora_start(weights, rank, alpha, opts.seed, start).map_err(|e| Error::Backend(format!("{weights}: {e}")))?;
     let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-    let built = qwen3::footprint::place_and_build(&cfg.clone(), &shard, gpu_core::select::Dtype::F32, opts.batch_size, opts.block_size, true, false, "preference fine-tune", || {
-        qwen3::Qwen::new(cfg, opts.batch_size, opts.block_size, &init)
-    });
+    let built = qwen3::finetune::build_for_training(cfg, opts, &init, gpu_core::select::Dtype::F32);
     if let Some(v) = prev_off {
         std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
     }
-    built.map_err(Error::Backend)
+    built.map_err(|e| Error::Backend(e.to_string()))
 }
