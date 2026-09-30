@@ -233,4 +233,6 @@ What belongs where:
 | 190 | A tokenizer hash identifies a library version, not a tokenizer | [`190-a-tokenizer-hash-is-a-library-version.md`](190-a-tokenizer-hash-is-a-library-version.md) |
 | 191 | DeepSeek-VL's processor does not normalize; each tower branch does | [`191-deepseek-vl-normalizes-per-branch.md`](191-deepseek-vl-normalizes-per-branch.md) |
 | 192 | Classifier-free guidance multiplies a quantized decoder's error | [`192-guidance-multiplies-quantization-error.md`](192-guidance-multiplies-quantization-error.md) |
+| 193 | Qwen3 LoRA training length was capped by one T² buffer; now attention speed caps it | [`193-qwen3-lora-training-length-is-an-attention-kernel-question.md`](193-qwen3-lora-training-length-is-an-attention-kernel-question.md) |
+| 194 | A recorded tape must own its bindings, or the next recording rewrites them | [`194-a-recorded-tape-must-own-its-bindings.md`](194-a-recorded-tape-must-own-its-bindings.md) |
 | 195 | The LM head's backward bound the whole table | [`195-the-head-backward-binds-the-whole-table.md`](195-the-head-backward-binds-the-whole-table.md) |
