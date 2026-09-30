@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use checkpoint::remap::{Fetch, RemapSource};
 use checkpoint::TensorSource;
 
-use crate::config::SamViTConfig;
+use crate::config::{SamViTConfig, HD_ALPHA};
 
 /// Which release's spelling of the tower's non-block tensors a checkpoint uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +33,11 @@ pub enum Spelling {
     /// `deepseek-ai/DeepSeek-OCR` (`model.sam_model.*`): the two compressor
     /// convs are `net_2` / `net_3`.
     DeepseekOcr,
+    /// `deepseek-ai/deepseek-vl-*`'s high-resolution tower
+    /// (`vision_model.vision_tower_high.vision_tower.*`, `sam_b_downsample`):
+    /// the compressor convs are `downsamples.0` / `downsamples.1`, and the HD
+    /// branch adds `neck_hd.*` and `hd_alpha_downsamples`.
+    DeepseekVl,
 }
 
 /// The brain-side name of one upstream SAM tensor.
@@ -54,12 +59,20 @@ pub fn brain_name(leaf: &str, cfg: &SamViTConfig, spelling: Spelling) -> Result<
     if let Some(rest) = leaf.strip_prefix("neck.") {
         return neck_leaf(rest, "neck").ok_or_else(unknown);
     }
-    let compress = match spelling {
-        Spelling::DeepseekOcr => match leaf {
-            "net_2.weight" => Some("compress.conv1.weight"),
-            "net_3.weight" => Some("compress.conv2.weight"),
-            _ => None,
-        },
+    // The HD branch's tensors exist only in a config that runs the branch; in
+    // any other they are a tensor the graph would silently not read.
+    if spelling == Spelling::DeepseekVl && cfg.hd_branch {
+        if let Some(rest) = leaf.strip_prefix("neck_hd.") {
+            return neck_leaf(rest, "neck_hd").ok_or_else(unknown);
+        }
+        if leaf == "hd_alpha_downsamples" {
+            return Ok(HD_ALPHA.to_string());
+        }
+    }
+    let compress = match (spelling, leaf) {
+        (Spelling::DeepseekOcr, "net_2.weight") | (Spelling::DeepseekVl, "downsamples.0.weight") => Some("compress.conv1.weight"),
+        (Spelling::DeepseekOcr, "net_3.weight") | (Spelling::DeepseekVl, "downsamples.1.weight") => Some("compress.conv2.weight"),
+        _ => None,
     };
     if let Some(c) = compress {
         return p(c);
@@ -186,6 +199,59 @@ mod tests {
         let header = ocr_header();
         assert_eq!(header.len(), 179, "the real release carries 179 SAM tensors");
         assert_bijection(&header, &SamViTConfig::deepseek_ocr(), Spelling::DeepseekOcr);
+    }
+
+    /// The DeepSeek-VL high-resolution tower's header: DeepSeek-OCR's with the
+    /// compressor renamed, plus the HD branch's seven tensors.
+    fn vl_header() -> Vec<(String, usize)> {
+        let mut v: Vec<(String, usize)> = ocr_header()
+            .into_iter()
+            .map(|(n, s)| match n.as_str() {
+                "net_2.weight" => ("downsamples.0.weight".to_string(), s),
+                "net_3.weight" => ("downsamples.1.weight".to_string(), s),
+                _ => (n, s),
+            })
+            .collect();
+        for (leaf, n) in [("0.weight", 256 * 768), ("1.weight", 256), ("1.bias", 256), ("2.weight", 256 * 256 * 9), ("3.weight", 256), ("3.bias", 256)] {
+            v.push((format!("neck_hd.{leaf}"), n));
+        }
+        v.push(("hd_alpha_downsamples".into(), 1));
+        v
+    }
+
+    #[test]
+    fn the_deepseek_vl_spelling_covers_the_vl_manifest_exactly() {
+        let header = vl_header();
+        assert_eq!(header.len(), 186, "the real release carries 186 high-resolution tower tensors");
+        assert_bijection(&header, &SamViTConfig::deepseek_vl(), Spelling::DeepseekVl);
+    }
+
+    /// An HD tensor in a checkpoint loaded without the HD branch is refused,
+    /// not dropped: the graph would never read it.
+    #[test]
+    fn hd_tensors_need_a_config_that_runs_the_hd_branch() {
+        let no_hd = SamViTConfig { hd_branch: false, ..SamViTConfig::deepseek_vl() };
+        for leaf in ["neck_hd.0.weight", "hd_alpha_downsamples"] {
+            assert!(brain_name(leaf, &no_hd, Spelling::DeepseekVl).is_err(), "{leaf}");
+            assert!(brain_name(leaf, &SamViTConfig::deepseek_ocr(), Spelling::DeepseekOcr).is_err(), "{leaf}");
+        }
+    }
+
+    /// Header-only coverage against the REAL checkpoint when it is in the
+    /// model store: every tensor under the tower prefix maps and every
+    /// manifest entry is produced at its size.
+    #[test]
+    fn the_real_deepseek_vl_header_covers_the_manifest() {
+        const REPO: &str = "deepseek-ai/deepseek-vl-7b-chat";
+        let Some(dir) = brain_testutil::model_dir(REPO).filter(|d| std::path::Path::new(d).join("model.safetensors.index.json").exists()) else {
+            return brain_testutil::skip(&format!("{REPO} not in the model store"));
+        };
+        let reader = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(&dir)).expect("open checkpoint");
+        let cfg = SamViTConfig::deepseek_vl();
+        let prefix = "vision_model.vision_tower_high.vision_tower.";
+        let n = reader.names().filter(|n| n.starts_with(prefix)).count();
+        assert_eq!(n, cfg.param_list().len(), "tensors under {prefix}");
+        source(&reader, reader.names(), prefix, &cfg, Spelling::DeepseekVl).unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]

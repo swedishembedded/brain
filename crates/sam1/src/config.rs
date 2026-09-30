@@ -69,6 +69,27 @@ pub struct SamViTConfig {
     /// run at a resolution other than the one it was trained at, and the only
     /// way to exercise the two-tap interpolation from a fixture.
     pub rel_pos_table_rows: Vec<(u32, u32)>,
+    /// Bilinear resize of the neck output to this `(h, w)` before the
+    /// compressor (`F.interpolate(mode="bilinear", align_corners=False)`).
+    /// `None` feeds the neck output to the compressor at the patch grid.
+    ///
+    /// DeepSeek-VL's high-resolution tower resizes its 64x64 neck output to
+    /// 96x96, which is what makes its compressor emit a 24x24 grid (576
+    /// tokens) where DeepSeek-OCR's emits 16x16.
+    pub neck_resize: Option<(u32, u32)>,
+    /// DeepSeek-VL's "HD" branch: the output of the FIRST global-attention
+    /// block goes through a second neck (`neck_hd.*`, the same shape as
+    /// `neck.*`), the same [`Self::neck_resize`], and the SAME compressor
+    /// weights as the main path, and is added to the main output scaled by the
+    /// learned scalar `hd_alpha`:
+    ///
+    /// ```text
+    /// out = compress(resize(neck(x_last))) + hd_alpha * compress(resize(neck_hd(x_first_global)))
+    /// ```
+    ///
+    /// The compressor tensors are therefore read twice per forward and their
+    /// gradient is the sum over both uses.
+    pub hd_branch: bool,
 }
 
 impl SamViTConfig {
@@ -106,10 +127,25 @@ impl SamViTConfig {
         let (h, w) = self.attn_extent(l);
         (2 * h - 1, 2 * w - 1)
     }
-    /// Compressor output grid -- two stride-2 `3x3` convs at pad 1.
+    /// The grid the compressor reads: the neck's patch grid, or
+    /// [`Self::neck_resize`]'s target when the neck output is resized.
+    pub fn compress_in_grid(&self) -> (u32, u32) {
+        self.neck_resize.unwrap_or((self.grid_h, self.grid_w))
+    }
+    /// Compressor output grid -- two stride-2 `3x3` convs at pad 1 over
+    /// [`Self::compress_in_grid`].
     pub fn compress_grid(&self) -> (u32, u32) {
         let half = |n: u32| (n + 2 - 3) / 2 + 1;
-        (half(half(self.grid_h)), half(half(self.grid_w)))
+        let (h, w) = self.compress_in_grid();
+        (half(half(h)), half(half(w)))
+    }
+    /// The block whose output feeds the HD branch -- the first global-attention
+    /// block -- or `None` without [`Self::hd_branch`].
+    pub fn hd_block(&self) -> Option<u32> {
+        if !self.hd_branch {
+            return None;
+        }
+        self.global_attn_layers.iter().copied().min()
     }
 
     /// Panic with the numbers in scope if this config cannot be dispatched.
@@ -117,6 +153,15 @@ impl SamViTConfig {
     /// Two invariants, both paid for by the kernels' own ABI rather than by
     /// taste; see [`Self::attn_chunk`] for the binding-alignment one.
     pub fn check_bindable(&self) {
+        assert!(
+            !self.hd_branch || self.hd_block().is_some_and(|l| l < self.n_layers),
+            "hd_branch taps the first global-attention block, and global_attn_layers {:?} names none of the {} blocks",
+            self.global_attn_layers,
+            self.n_layers
+        );
+        if let Some((h, w)) = self.neck_resize {
+            assert!(h > 0 && w > 0, "neck_resize to {h}x{w} is an empty grid");
+        }
         assert!(
             self.n_heads > 0 && self.d_model.is_multiple_of(self.n_heads),
             "d_model {} not divisible by n_heads {}",
@@ -178,14 +223,20 @@ impl SamViTConfig {
             out.push((b("mlp.fc2.bias"), d));
         }
         let n = self.neck_channels as usize;
-        out.push(("vision.sam.neck.conv1.weight".into(), n * d));
-        out.push(("vision.sam.neck.norm1.weight".into(), n));
-        out.push(("vision.sam.neck.norm1.bias".into(), n));
-        out.push(("vision.sam.neck.conv2.weight".into(), n * n * 3 * 3));
-        out.push(("vision.sam.neck.norm2.weight".into(), n));
-        out.push(("vision.sam.neck.norm2.bias".into(), n));
+        let necks: &[&str] = if self.hd_branch { &[NECK, NECK_HD] } else { &[NECK] };
+        for neck in necks {
+            out.push((format!("{neck}.conv1.weight"), n * d));
+            out.push((format!("{neck}.norm1.weight"), n));
+            out.push((format!("{neck}.norm1.bias"), n));
+            out.push((format!("{neck}.conv2.weight"), n * n * 3 * 3));
+            out.push((format!("{neck}.norm2.weight"), n));
+            out.push((format!("{neck}.norm2.bias"), n));
+        }
         out.push(("vision.sam.compress.conv1.weight".into(), self.compress_mid as usize * n * 3 * 3));
         out.push(("vision.sam.compress.conv2.weight".into(), self.compress_out as usize * self.compress_mid as usize * 3 * 3));
+        if self.hd_branch {
+            out.push((HD_ALPHA.into(), 1));
+        }
         out
     }
 
@@ -214,7 +265,18 @@ impl SamViTConfig {
             eps: 1e-6,
             attn_chunk: 256,
             rel_pos_table_rows: Vec::new(),
+            neck_resize: None,
+            hd_branch: false,
         }
+    }
+
+    /// DeepSeek-VL's high-resolution tower (`sam_b_downsample` at 1024²): the
+    /// DeepSeek-OCR tower plus the 96x96 neck resize and the HD branch, so its
+    /// compressor emits a 24x24 grid. Every width is the one the
+    /// `deepseek-ai/deepseek-vl-7b-chat` checkpoint's
+    /// `vision_model.vision_tower_high.vision_tower.*` tensors carry.
+    pub fn deepseek_vl() -> SamViTConfig {
+        SamViTConfig { neck_resize: Some((96, 96)), hd_branch: true, ..SamViTConfig::deepseek_ocr() }
     }
 
     /// The gradient-check fixture. See this crate's `tests/gradcheck.rs` header
@@ -247,9 +309,37 @@ impl SamViTConfig {
             // (11 > 2*3-1); block 1 (global 13x7): h UPsample (15 < 2*13-1),
             // w identity (13 == 2*7-1). All three `get_rel_pos` cases, once.
             rel_pos_table_rows: vec![(7, 11), (15, 13)],
+            neck_resize: None,
+            hd_branch: false,
+        }
+    }
+
+    /// The HD-branch gradient-check fixture: [`Self::tiny`] grown to three
+    /// blocks so the tapped global block (1) sits in the MIDDLE of the stack
+    /// and its HD adjoint has to join a downstream block's `d_x`, plus a neck
+    /// resize whose two axes go opposite ways (13 -> 10 down, 7 -> 9 up) at
+    /// non-integer ratios. The compressor widths shrink so a per-entry check of
+    /// the shared compressor weights stays affordable.
+    pub fn tiny_hd() -> SamViTConfig {
+        SamViTConfig {
+            n_layers: 3,
+            compress_mid: 5,
+            compress_out: 7,
+            // block 2 is windowed 4x3 again, at its canonical table heights.
+            rel_pos_table_rows: vec![(7, 11), (15, 13), (7, 5)],
+            neck_resize: Some((10, 9)),
+            hd_branch: true,
+            ..SamViTConfig::tiny()
         }
     }
 }
+
+/// The main neck's parameter prefix.
+pub const NECK: &str = "vision.sam.neck";
+/// The HD branch's neck (upstream `neck_hd`), same shape as [`NECK`].
+pub const NECK_HD: &str = "vision.sam.neck_hd";
+/// The HD branch's learned output scale (upstream `hd_alpha_downsamples`).
+pub const HD_ALPHA: &str = "vision.sam.hd_alpha";
 
 /// Greatest common divisor -- only used to phrase [`SamViTConfig::check_bindable`].
 fn gcd(a: u64, b: u64) -> u64 {
@@ -284,6 +374,8 @@ impl From<&SamConfig> for SamViTConfig {
             eps: 1e-6,
             attn_chunk: 256,
             rel_pos_table_rows: Vec::new(),
+            neck_resize: None,
+            hd_branch: false,
         }
     }
 }
@@ -359,6 +451,45 @@ mod tests {
     fn real_compressor_quarters_the_grid() {
         assert_eq!(SamViTConfig::deepseek_ocr().compress_grid(), (16, 16));
         SamViTConfig::deepseek_ocr().check_bindable();
+    }
+
+    /// DeepSeek-VL's tower is DeepSeek-OCR's plus exactly seven tensors (the
+    /// second neck and the HD scale), and the 96x96 resize is what turns the
+    /// compressor's 16x16 into 24x24 = 576 tokens.
+    #[test]
+    fn deepseek_vl_is_the_ocr_tower_plus_the_hd_branch() {
+        let vl = SamViTConfig::deepseek_vl();
+        vl.check_bindable();
+        assert_eq!(vl.compress_in_grid(), (96, 96));
+        assert_eq!(vl.compress_grid(), (24, 24));
+        assert_eq!(vl.hd_block(), Some(2), "the first global-attention block");
+        let ocr: Vec<String> = SamViTConfig::deepseek_ocr().param_list().into_iter().map(|(n, _)| n).collect();
+        let extra: Vec<(String, usize)> = vl.param_list().into_iter().filter(|(n, _)| !ocr.contains(n)).collect();
+        let mut want: Vec<(String, usize)> = ["conv1.weight", "norm1.weight", "norm1.bias", "conv2.weight", "norm2.weight", "norm2.bias"]
+            .iter()
+            .map(|leaf| format!("{NECK_HD}.{leaf}"))
+            .zip([256 * 768, 256, 256, 256 * 256 * 9, 256, 256])
+            .collect();
+        want.push((HD_ALPHA.to_string(), 1));
+        assert_eq!(extra, want);
+        assert_eq!(vl.param_list().len(), ocr.len() + 7);
+    }
+
+    #[test]
+    fn tiny_hd_taps_a_middle_block_and_resizes_both_ways() {
+        let c = SamViTConfig::tiny_hd();
+        c.check_bindable();
+        assert_eq!(c.hd_block(), Some(1));
+        assert!(c.hd_block().unwrap() + 1 < c.n_layers, "the tapped block must not be the last one");
+        let (rh, rw) = c.neck_resize.unwrap();
+        assert!(rh < c.grid_h && rw > c.grid_w, "one axis must shrink and the other grow");
+        assert_eq!(c.compress_grid(), (3, 3));
+    }
+
+    #[test]
+    fn an_hd_branch_without_a_global_block_is_rejected() {
+        let cfg = SamViTConfig { global_attn_layers: vec![], ..SamViTConfig::tiny_hd() };
+        assert!(std::panic::catch_unwind(|| cfg.check_bindable()).is_err());
     }
 
     /// The golden dumper's `sam_embed = 10` is NOT dispatchable through

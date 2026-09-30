@@ -86,6 +86,11 @@ pub use bf16_train::{check_matmul_bf16_weight, check_matmul_bf16_weight_eps_swee
 pub mod deepseekocr2;
 pub use deepseekocr2::check_deepseekocr2;
 
+/// The SAM tower's DeepSeek-VL HD branch: the learned `hd_alpha` scale and the
+/// compressor weights it shares with the main path.
+pub mod sam_hd;
+pub use sam_hd::{check_sam_hd, check_sam_hd_shared};
+
 /// TimesFM-3's stacked mixing transformer (`crates/timesfm3`) - the causal
 /// sequence attention and the non-causal cross-VARIATE attention on one
 /// residual stream, plus the PerDimScale query-gain fold that has no kernel

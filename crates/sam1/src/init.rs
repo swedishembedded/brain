@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use data::rng::Rng;
 
-use crate::config::SamViTConfig;
+use crate::config::{SamViTConfig, HD_ALPHA};
 
 /// LayerNorm / LayerNorm2d gain (initialised to 1.0).
 fn is_norm_gain(name: &str) -> bool {
@@ -27,7 +27,9 @@ pub fn init_weights(cfg: &SamViTConfig, seed: u64) -> HashMap<String, Vec<f32>> 
     for (name, numel) in cfg.param_list() {
         let v = if is_norm_gain(&name) {
             vec![1.0; numel]
-        } else if name.ends_with(".bias") {
+        } else if name.ends_with(".bias") || name == HD_ALPHA {
+            // The reference zero-initializes `hd_alpha_downsamples` too: a
+            // fresh HD branch starts as a no-op on the output.
             vec![0.0; numel]
         } else {
             let s = if name.ends_with("attn.proj.weight") || name.ends_with("mlp.fc2.weight") { proj_std } else { 0.02 };
@@ -67,6 +69,10 @@ pub fn init_dense(cfg: &SamViTConfig, seed: u64) -> HashMap<String, Vec<f32>> {
             u(numel, 0.2, &mut rng)
         } else if name.contains("rel_pos") {
             u(numel, 0.5, &mut rng)
+        } else if name == HD_ALPHA {
+            // Well away from zero: a small scale would put the HD branch's share
+            // of every shared gradient below finite-difference resolution.
+            u(numel, 0.2, &mut rng).iter().map(|x| 0.6 + x).collect()
         } else {
             u(numel, 0.35, &mut rng)
         };

@@ -1023,7 +1023,7 @@ front-end to depend on.
 | `atif` / `rl` | the training-from-trajectories pair: `atif` is brain's implementation of the Agent Trajectory Interchange Format (ATIF) v1.7 trajectory model, its validator, and persistence helpers (how brain reads the trajectories an agent runtime records), `rl` is `model::train::fit` lifted to reward-weighted batches over any `Model` that implements `enable_weighted_loss` (today only `qwen3`) |
 | `qwen3asr` | Whisper-style + Nemotron 3.5 FastConformer streaming ASR |
 | `qwen3omnimoe` / `qwen3vl` / `fastvlm` / `moondream3` | Qwen3-Omni-30B Thinker (multi-GPU resident); Qwen3-VL-4B; FastVLM-0.5B; Moondream 3 - see `docs/models/vlm.md` for the latter three |
-| `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on |
+| `deepseek2ocr` / `deepseek2` / `sam1` | DeepSeek-OCR: the composite (DeepEncoder + splice + decoder, `import`/`caps` incl. the served `generate`); its DeepSeek-V2-family MoE decoder; the SAM-1 ViT-B tower the DeepEncoder is built on (also DeepSeek-VL's high-resolution tower: `SamViTConfig::deepseek_vl`, 96x96 neck resize + HD branch; upstream names in `sam1::hf`) |
 | `deepseekocr2` | DeepSeek-OCR-2: SAM (shared with `deepseek2ocr`) + a new Qwen2-GQA prefix-LM resampler, spliced into the unmodified `deepseek2` decoder; own `import`/`caps`/`train` |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` / `timesfm3` | forecasting seam, backtester, four imported models |
 | `wm-core` / `diamond` / `genieredux` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |

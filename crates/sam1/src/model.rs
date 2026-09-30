@@ -64,7 +64,7 @@
 //!    windowed block and ~289 MB per global one - ~3.2 GB over the 12 blocks,
 //!    the single largest line item in this tower.
 //!
-//! An inference build therefore has no `d_image`/`d_neck`/per-block adjoint
+//! An inference build therefore has no `d_image`/neck/per-block adjoint
 //! buffers; the accessors that hand those out say so rather than returning a
 //! buffer that was never sized.
 
@@ -80,7 +80,7 @@ use model::vit::{
 use paramstore::{ParamStore, Role};
 use vision::{Act, Conv, ConvNames, ConvSpec, Ctx, LayerNorm2d, Ln2dNames, Norm, Shape};
 
-use crate::config::SamViTConfig;
+use crate::config::{SamViTConfig, HD_ALPHA, NECK, NECK_HD};
 
 /// Kernels this crate dispatches, by name. Nothing here holds a positional
 /// index: `vision::ConvKernelIds::resolve` and `Gpu::kernel_index` both key on
@@ -144,7 +144,20 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // once per span buys the same sweep coalesced loads.
     ("kv_k_headt", kernels::KV_K_HEADT),
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
+    // ---- neck resize (DeepSeek-VL: `F.interpolate(bilinear, align_corners=False)`) ----
+    ("resize_bilinear", kernels::RESIZE_BILINEAR),
+    ("resize_bilinear_dx", kernels::RESIZE_BILINEAR_DX),
+    // ---- HD branch: `out = main + hd_alpha * hd` and `d hd_alpha = <d_out, hd>` ----
+    ("scale_chan", kernels::SCALE_CHAN),
+    ("mul", kernels::MUL),
+    ("bias_grad_part", kernels::BIAS_GRAD_PART),
+    ("bias_grad_final", kernels::BIAS_GRAD_FINAL),
 ];
+
+/// Partial sums per `hd_alpha` gradient reduction: `bias_grad_part` over a
+/// single column, so this is the reduction's whole parallelism. At DeepSeek-VL's
+/// 1024x24x24 output each partial folds 2304 elements.
+const ALPHA_GRAD_P: u32 = 256;
 
 /// Pipeline indices resolved by NAME.
 struct Ids {
@@ -171,6 +184,12 @@ struct Ids {
     cross_bwd: CrossBwdIds,
     rel: RelPosIds,
     tbl: RelPosTableIds,
+    resize: usize,
+    resize_dx: usize,
+    scale_chan: usize,
+    mul: usize,
+    bias_grad_part: usize,
+    bias_grad_final: usize,
 }
 
 impl Ids {
@@ -217,6 +236,12 @@ impl Ids {
                 nlc_nchw: k("nlc_nchw"),
                 emb_bwd: k("emb_bwd"),
             },
+            resize: k("resize_bilinear"),
+            resize_dx: k("resize_bilinear_dx"),
+            scale_chan: k("scale_chan"),
+            mul: k("mul"),
+            bias_grad_part: k("bias_grad_part"),
+            bias_grad_final: k("bias_grad_final"),
         }
     }
 }
@@ -440,19 +465,215 @@ impl Block {
     }
 }
 
-/// The tower-level backward scratch: the neck/compressor/patch-embed adjoints
-/// and the image gradient. Like [`BlockBwd`], nothing but
-/// [`SamEncoder::backward`] touches it, so an inference build omits it.
+/// The tower-level backward scratch: the patch-embed adjoint and the image
+/// gradient. Like [`BlockBwd`], nothing but [`SamEncoder::backward`] touches
+/// it, so an inference build omits it.
 struct SamBwd {
     /// `[1, 3, image_h, image_w]`.
     d_image: DeviceBuffer,
-    /// `[rows, C]` -- the neck's gradient w.r.t. the last block's output. Its own
-    /// buffer, NOT that block's `d_x`, so no block ever reads and writes one
-    /// buffer in the same submit.
-    d_feats: DeviceBuffer,
-    d_top: DeviceBuffer,
     d_embed_nchw: DeviceBuffer,
-    d_neck: Vec<DeviceBuffer>,
+}
+
+/// A raw (no norm, no activation, no bias) conv spec -- every conv of the
+/// neck and the compressor.
+fn raw_conv(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
+    ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::None, act: Act::None, bias: false }
+}
+
+/// A bilinear resize, `align_corners = false` -- torch's `F.interpolate`
+/// default half-pixel mapping.
+struct Resize {
+    src: Shape,
+    dst: Shape,
+    out: DeviceBuffer,
+}
+
+impl Resize {
+    /// `resize_bilinear{,_dx}`'s `[N, C, H, W, Ho, Wo, align_corners]`.
+    fn params(&self) -> [u32; 7] {
+        [self.src.n, self.src.c, self.src.h, self.src.w, self.dst.h, self.dst.w, 0]
+    }
+}
+
+/// One head's backward scratch, in adjoint order.
+struct HeadBwd {
+    d_comp1: DeviceBuffer,
+    /// Present iff the head resizes.
+    d_resized: Option<DeviceBuffer>,
+    d_norm2: DeviceBuffer,
+    d_conv2: DeviceBuffer,
+    d_norm1: DeviceBuffer,
+    d_conv1: DeviceBuffer,
+    /// `[1, C, grid_h, grid_w]` -- the gradient w.r.t. the head's NCHW input.
+    d_feats: DeviceBuffer,
+    /// `[rows, C]` -- the same, back in NLC: the gradient w.r.t. the tapped
+    /// block's output. Its own buffer, NOT that block's `d_x`, so no block ever
+    /// reads and writes one buffer in the same submit.
+    d_top: DeviceBuffer,
+}
+
+/// Everything after the ViT blocks on one path: NLC -> NCHW, the neck
+/// (`Conv 1x1 -> LayerNorm2d -> Conv 3x3 -> LayerNorm2d`), the optional
+/// [`SamViTConfig::neck_resize`], and the two stride-2 compressor convs.
+///
+/// The main path owns one and the HD branch a second. Both heads' compressor
+/// convs name the SAME `vision.sam.compress.*` tensors: the weights are read
+/// twice, and because `conv2d_dw` ACCUMULATES into the ParamStore gradient,
+/// running both heads' backwards sums the two uses with no extra dispatch.
+struct Head {
+    /// `[1, C, grid_h, grid_w]` -- the tapped block's output, in NCHW.
+    feats: DeviceBuffer,
+    neck_c1: Conv,
+    neck_n1: LayerNorm2d,
+    neck_c2: Conv,
+    neck_n2: LayerNorm2d,
+    resize: Option<Resize>,
+    comp_c1: Conv,
+    comp_c2: Conv,
+    bwd: Option<HeadBwd>,
+}
+
+impl Head {
+    fn new(ctx: &Ctx, cfg: &SamViTConfig, neck: &str, train: bool) -> Head {
+        let g = ctx.gpu;
+        let grid = Shape::new(1, cfg.d_model, cfg.grid_h, cfg.grid_w);
+        let conv = |name: &str, input: Shape, spec: ConvSpec| Conv::with_names(ctx, name, ConvNames::torch_flat(name), input, spec, false);
+        let neck_c1 = conv(&format!("{neck}.conv1"), grid, raw_conv(cfg.neck_channels, 1, 1, 0));
+        let neck_n1 = LayerNorm2d::new(ctx, Ln2dNames::torch(&format!("{neck}.norm1")), neck_c1.out_shape, cfg.eps);
+        let neck_c2 = conv(&format!("{neck}.conv2"), neck_c1.out_shape, raw_conv(cfg.neck_channels, 3, 1, 1));
+        let neck_n2 = LayerNorm2d::new(ctx, Ln2dNames::torch(&format!("{neck}.norm2")), neck_c2.out_shape, cfg.eps);
+        let resize = cfg.neck_resize.map(|(h, w)| {
+            let src = neck_n2.shape;
+            let dst = Shape::new(src.n, src.c, h, w);
+            Resize { src, dst, out: g.storage(dst.numel() as u64) }
+        });
+        let comp_in = resize.as_ref().map_or(neck_n2.shape, |r| r.dst);
+        let comp_c1 = conv("vision.sam.compress.conv1", comp_in, raw_conv(cfg.compress_mid, 3, 2, 1));
+        let comp_c2 = conv("vision.sam.compress.conv2", comp_c1.out_shape, raw_conv(cfg.compress_out, 3, 2, 1));
+        let (ch, cw) = cfg.compress_grid();
+        assert_eq!(comp_c2.out_shape, Shape::new(1, cfg.compress_out, ch, cw), "compressor output disagrees with the config");
+        let st = |n: u32| g.storage(n as u64);
+        let bwd = train.then(|| HeadBwd {
+            d_comp1: st(comp_c1.out_shape.numel()),
+            d_resized: resize.as_ref().map(|r| st(r.dst.numel())),
+            d_norm2: st(neck_n2.shape.numel()),
+            d_conv2: st(neck_c2.out_shape.numel()),
+            d_norm1: st(neck_n1.shape.numel()),
+            d_conv1: st(neck_c1.out_shape.numel()),
+            d_feats: st(grid.numel()),
+            d_top: st(grid.numel()),
+        });
+        Head { feats: st(grid.numel()), neck_c1, neck_n1, neck_c2, neck_n2, resize, comp_c1, comp_c2, bwd }
+    }
+
+    fn bwd(&self) -> &HeadBwd {
+        self.bwd.as_ref().expect("sam1: this is an inference build (train = false); it has no backward scratch")
+    }
+
+    /// The neck's tensors (never the shared compressor's).
+    fn neck_params(&self) -> Vec<String> {
+        let convs = [&self.neck_c1, &self.neck_c2].into_iter().flat_map(|cv| cv.param_list());
+        let norms = [&self.neck_n1, &self.neck_n2].into_iter().flat_map(|ln| ln.param_list());
+        convs.chain(norms).map(|(n, _)| n).collect()
+    }
+
+    fn compressor_params(&self) -> Vec<String> {
+        [&self.comp_c1, &self.comp_c2].into_iter().flat_map(|cv| cv.param_list()).map(|(n, _)| n).collect()
+    }
+
+    /// What the compressor reads: the resized neck output, or the neck output.
+    fn compress_in(&self) -> &DeviceBuffer {
+        self.resize.as_ref().map_or(self.neck_n2.out(), |r| &r.out)
+    }
+
+    fn output(&self) -> &DeviceBuffer {
+        self.comp_c2.out()
+    }
+
+    /// `tokens` `[rows, C]` NLC -> the compressor output.
+    fn forward(&self, ctx: &Ctx, ids: &Ids, ps: &ParamStore, tokens: &DeviceBuffer, perm: &[u32; 3]) {
+        let g = ctx.gpu;
+        g.submit(&[], &[g.step(ids.nlc_nchw, &[tokens, &self.feats], perm, perm[0])]);
+        self.neck_c1.forward(ctx, ps, &self.feats);
+        self.neck_n1.forward(ctx, ps, self.neck_c1.out());
+        self.neck_c2.forward(ctx, ps, self.neck_n1.out());
+        self.neck_n2.forward(ctx, ps, self.neck_c2.out());
+        if let Some(r) = &self.resize {
+            g.submit(&[], &[g.step(ids.resize, &[self.neck_n2.out(), &r.out], &r.params(), r.dst.numel())]);
+        }
+        self.comp_c1.forward(ctx, ps, self.compress_in());
+        self.comp_c2.forward(ctx, ps, self.comp_c1.out());
+    }
+
+    /// `d_out` (w.r.t. the compressor output) -> [`HeadBwd::d_top`], parameter
+    /// gradients accumulated into the ParamStore.
+    fn backward(&self, ctx: &Ctx, ids: &Ids, ps: &ParamStore, d_out: &DeviceBuffer, perm: &[u32; 3]) {
+        let g = ctx.gpu;
+        let bw = self.bwd();
+        self.comp_c2.backward(ctx, ps, self.comp_c1.out(), d_out, &bw.d_comp1);
+        match (&self.resize, &bw.d_resized) {
+            (Some(r), Some(d_resized)) => {
+                self.comp_c1.backward(ctx, ps, &r.out, &bw.d_comp1, d_resized);
+                // `resize_bilinear_dx` gathers, so it ASSIGNS every element of
+                // `d_norm2` -- nothing to clear.
+                g.submit(&[], &[g.step(ids.resize_dx, &[d_resized, &bw.d_norm2], &r.params(), r.src.numel())]);
+            }
+            _ => self.comp_c1.backward(ctx, ps, self.neck_n2.out(), &bw.d_comp1, &bw.d_norm2),
+        }
+        self.neck_n2.backward(ctx, ps, &bw.d_norm2, &bw.d_conv2);
+        self.neck_c2.backward(ctx, ps, self.neck_n1.out(), &bw.d_conv2, &bw.d_norm1);
+        self.neck_n1.backward(ctx, ps, &bw.d_norm1, &bw.d_conv1);
+        self.neck_c1.backward(ctx, ps, &self.feats, &bw.d_conv1, &bw.d_feats);
+        g.submit(&[], &[g.step(ids.nchw_nlc, &[&bw.d_feats, &bw.d_top], perm, perm[0])]);
+    }
+
+    /// The head's stages in dispatch order, each with its element count.
+    fn stages(&self) -> Vec<(&'static str, &DeviceBuffer, usize)> {
+        let n = |c: &Conv| c.out_shape.numel() as usize;
+        let mut v = vec![
+            ("neck_conv1", self.neck_c1.out(), n(&self.neck_c1)),
+            ("neck_norm1", self.neck_n1.out(), self.neck_n1.shape.numel() as usize),
+            ("neck_conv2", self.neck_c2.out(), n(&self.neck_c2)),
+            ("neck_norm2", self.neck_n2.out(), self.neck_n2.shape.numel() as usize),
+        ];
+        if let Some(r) = &self.resize {
+            v.push(("neck_resize", &r.out, r.dst.numel() as usize));
+        }
+        v.push(("compress1", self.comp_c1.out(), n(&self.comp_c1)));
+        v.push(("compress2", self.comp_c2.out(), n(&self.comp_c2)));
+        v
+    }
+}
+
+/// DeepSeek-VL's HD branch ([`SamViTConfig::hd_branch`]): a second [`Head`]
+/// over the first global block's output, scaled by `hd_alpha` and added to the
+/// main head's output.
+struct Hd {
+    /// The tapped block.
+    block: usize,
+    head: Head,
+    /// `hd_alpha * head output`.
+    scaled: DeviceBuffer,
+    /// The tower output: main head output + `scaled`.
+    out: DeviceBuffer,
+    bwd: Option<HdBwd>,
+}
+
+impl Hd {
+    fn bwd(&self) -> &HdBwd {
+        self.bwd.as_ref().expect("sam1: this is an inference build (train = false); it has no backward scratch")
+    }
+}
+
+struct HdBwd {
+    /// `hd_alpha * d_out` -- the HD head's upstream gradient.
+    d_head: DeviceBuffer,
+    /// `d_out * head output`, elementwise, reduced into `hd_alpha`'s gradient.
+    prod: DeviceBuffer,
+    part: DeviceBuffer,
+    /// `[rows, C]` -- the tapped block's full upstream gradient: the next
+    /// block's `d_x` plus the HD head's `d_top`.
+    d_join: DeviceBuffer,
 }
 
 /// The SAM-1 tower: image in, `[1, compress_out, grid_h/4, grid_w/4]` out, plus
@@ -465,12 +686,10 @@ pub struct SamEncoder {
     conv_ids: vision::ConvKernelIds,
 
     patch: Conv,
-    neck_c1: Conv,
-    neck_n1: LayerNorm2d,
-    neck_c2: Conv,
-    neck_n2: LayerNorm2d,
-    comp_c1: Conv,
-    comp_c2: Conv,
+    /// Neck, optional resize and compressor over the last block's output.
+    head: Head,
+    /// `None` without [`SamViTConfig::hd_branch`].
+    hd: Option<Hd>,
     blocks: Vec<Block>,
 
     /// `[1, 3, image_h, image_w]` -- the fixed input.
@@ -478,8 +697,6 @@ pub struct SamEncoder {
     /// `[rows, C]` NLC patch tokens, and the same plus `pos_embed`.
     patch_nlc: DeviceBuffer,
     embed: DeviceBuffer,
-    /// `[1, C, grid_h, grid_w]` -- the last block's output, back in NCHW.
-    feats: DeviceBuffer,
 
     /// Fixed unit-scale direction defining the scalar objective.
     dir: Vec<f32>,
@@ -527,64 +744,33 @@ impl SamEncoder {
 
         let ctx = Ctx::new(&gpu, &conv_ids);
         let img = Shape::new(1, 3, cfg.image_h(), cfg.image_w());
-        let raw = |cout: u32, k: u32, stride: u32, pad: u32| ConvSpec {
-            cout,
-            k,
-            stride,
-            pad,
-            groups: 1,
-            dilation: 1,
-            norm: Norm::None,
-            act: Act::None,
-            bias: false,
-        };
         let patch = Conv::with_names(
             &ctx,
             "vision.sam.patch_embed",
             ConvNames::torch_flat("vision.sam.patch_embed"),
             img,
-            raw(c, cfg.patch_size, cfg.patch_size, 0).with_bias(),
+            raw_conv(c, cfg.patch_size, cfg.patch_size, 0).with_bias(),
             false,
         );
         assert_eq!(patch.out_shape, Shape::new(1, c, cfg.grid_h, cfg.grid_w), "patch embed must produce the config's grid");
 
-        let grid = Shape::new(1, c, cfg.grid_h, cfg.grid_w);
-        let neck_c1 = Conv::with_names(
-            &ctx,
-            "vision.sam.neck.conv1",
-            ConvNames::torch_flat("vision.sam.neck.conv1"),
-            grid,
-            raw(cfg.neck_channels, 1, 1, 0),
-            false,
-        );
-        let neck_n1 = LayerNorm2d::new(&ctx, Ln2dNames::torch("vision.sam.neck.norm1"), neck_c1.out_shape, cfg.eps);
-        let neck_c2 = Conv::with_names(
-            &ctx,
-            "vision.sam.neck.conv2",
-            ConvNames::torch_flat("vision.sam.neck.conv2"),
-            neck_c1.out_shape,
-            raw(cfg.neck_channels, 3, 1, 1),
-            false,
-        );
-        let neck_n2 = LayerNorm2d::new(&ctx, Ln2dNames::torch("vision.sam.neck.norm2"), neck_c2.out_shape, cfg.eps);
-        let comp_c1 = Conv::with_names(
-            &ctx,
-            "vision.sam.compress.conv1",
-            ConvNames::torch_flat("vision.sam.compress.conv1"),
-            neck_c2.out_shape,
-            raw(cfg.compress_mid, 3, 2, 1),
-            false,
-        );
-        let comp_c2 = Conv::with_names(
-            &ctx,
-            "vision.sam.compress.conv2",
-            ConvNames::torch_flat("vision.sam.compress.conv2"),
-            comp_c1.out_shape,
-            raw(cfg.compress_out, 3, 2, 1),
-            false,
-        );
-        let (ch, cw) = cfg.compress_grid();
-        assert_eq!(comp_c2.out_shape, Shape::new(1, cfg.compress_out, ch, cw), "compressor output disagrees with the config");
+        let head = Head::new(&ctx, &cfg, NECK, train);
+        let hd = cfg.hd_block().map(|l| {
+            let head = Head::new(&ctx, &cfg, NECK_HD, train);
+            let n = head.comp_c2.out_shape.numel() as u64;
+            Hd {
+                block: l as usize,
+                bwd: train.then(|| HdBwd {
+                    d_head: gpu.storage(n),
+                    prod: gpu.storage(n),
+                    part: gpu.storage(ALPHA_GRAD_P as u64),
+                    d_join: gpu.storage(rows as u64 * c as u64),
+                }),
+                head,
+                scaled: gpu.storage(n),
+                out: gpu.storage(n),
+            }
+        });
 
         let blocks: Vec<Block> = (0..cfg.n_layers).map(|l| Block::new(&gpu, &cfg, l, train)).collect();
 
@@ -592,11 +778,15 @@ impl SamEncoder {
         // graph reads is declared, and every declared tensor is read. Without
         // this a renamed leaf is a silently frozen parameter, not an error.
         let mut used: Vec<String> = vec!["vision.sam.pos_embed".to_string()];
-        for cv in [&patch, &neck_c1, &neck_c2, &comp_c1, &comp_c2] {
-            used.extend(cv.param_list().into_iter().map(|(n, _)| n));
-        }
-        for ln in [&neck_n1, &neck_n2] {
-            used.extend(ln.param_list().into_iter().map(|(n, _)| n));
+        used.extend(patch.param_list().into_iter().map(|(n, _)| n));
+        used.extend(head.neck_params());
+        used.extend(head.compressor_params());
+        if let Some(hd) = &hd {
+            used.extend(hd.head.neck_params());
+            used.push(HD_ALPHA.to_string());
+            // The HD head reads the main head's compressor tensors -- the one
+            // intended double read, so it is asserted rather than counted.
+            assert_eq!(hd.head.compressor_params(), head.compressor_params(), "the HD branch must share the compressor weights");
         }
         for b in &blocks {
             used.extend(b.param_names());
@@ -610,26 +800,16 @@ impl SamEncoder {
 
         let mut rng = data::rng::Rng::new(seed ^ 0x5A11);
         let image: Vec<f32> = (0..img.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
-        let dir: Vec<f32> = (0..comp_c2.out_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let dir: Vec<f32> = (0..head.comp_c2.out_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
 
         let bwd = train.then(|| SamBwd {
             d_image: gpu.storage(img.numel() as u64),
-            d_feats: gpu.storage(rows as u64 * c as u64),
-            d_top: gpu.storage(rows as u64 * c as u64),
             d_embed_nchw: gpu.storage(rows as u64 * c as u64),
-            d_neck: vec![
-                gpu.storage(comp_c1.out_shape.numel() as u64),
-                gpu.storage(neck_n2.shape.numel() as u64),
-                gpu.storage(neck_c2.out_shape.numel() as u64),
-                gpu.storage(neck_n1.shape.numel() as u64),
-                gpu.storage(neck_c1.out_shape.numel() as u64),
-            ],
         });
         SamEncoder {
             image: gpu.storage_init("sam1_image", &image),
             patch_nlc: gpu.storage(rows as u64 * c as u64),
             embed: gpu.storage(rows as u64 * c as u64),
-            feats: gpu.storage(rows as u64 * c as u64),
             d_out: gpu.storage_init("sam1_dir", &dir),
             bwd,
             dir,
@@ -640,12 +820,8 @@ impl SamEncoder {
             ids,
             conv_ids,
             patch,
-            neck_c1,
-            neck_n1,
-            neck_c2,
-            neck_n2,
-            comp_c1,
-            comp_c2,
+            head,
+            hd,
             blocks,
         }
     }
@@ -701,9 +877,10 @@ impl SamEncoder {
         [rows * c, c, rows]
     }
 
-    /// The compressor output -- valid after [`Self::run`].
+    /// The tower output -- the compressor output, plus `hd_alpha` times the
+    /// HD branch's when there is one. Valid after [`Self::run`].
     pub fn output(&self) -> &DeviceBuffer {
-        self.comp_c2.out()
+        self.hd.as_ref().map_or(self.head.output(), |hd| &hd.out)
     }
 
     // -----------------------------------------------------------------------
@@ -733,7 +910,7 @@ impl SamEncoder {
 
         // ---- patch embed + learned absolute position ----
         self.patch.forward(&ctx, &self.ps, &self.image);
-        let mut steps = vec![
+        let steps = vec![
             g.step(self.ids.nchw_nlc, &[self.patch.out(), &self.patch_nlc], &self.perm_params(), rows * c),
             g.step(self.ids.add2, &[&self.patch_nlc, self.ps.w("vision.sam.pos_embed"), &self.embed], &[rows * c], rows * c),
         ];
@@ -745,15 +922,20 @@ impl SamEncoder {
             self.block_fwd(&self.blocks[i], x);
         }
 
-        // ---- NLC -> NCHW, neck, compressor ----
-        steps = vec![g.step(self.ids.nlc_nchw, &[&self.blocks[self.blocks.len() - 1].out, &self.feats], &self.perm_params(), rows * c)];
-        g.submit(&[], &steps);
-        self.neck_c1.forward(&ctx, &self.ps, &self.feats);
-        self.neck_n1.forward(&ctx, &self.ps, self.neck_c1.out());
-        self.neck_c2.forward(&ctx, &self.ps, self.neck_n1.out());
-        self.neck_n2.forward(&ctx, &self.ps, self.neck_c2.out());
-        self.comp_c1.forward(&ctx, &self.ps, self.neck_n2.out());
-        self.comp_c2.forward(&ctx, &self.ps, self.comp_c1.out());
+        // ---- NLC -> NCHW, neck, (resize), compressor; then the HD branch ----
+        let perm = self.perm_params();
+        self.head.forward(&ctx, &self.ids, &self.ps, &self.blocks[self.blocks.len() - 1].out, &perm);
+        if let Some(hd) = &self.hd {
+            hd.head.forward(&ctx, &self.ids, &self.ps, &self.blocks[hd.block].out, &perm);
+            let n = self.out_len() as u32;
+            g.submit(
+                &[],
+                &[
+                    g.step(self.ids.scale_chan, &[hd.head.output(), self.ps.w(HD_ALPHA), &hd.scaled], &[n, 1, 1], n),
+                    g.step(self.ids.add2, &[self.head.output(), &hd.scaled, &hd.out], &[n], n),
+                ],
+            );
+        }
 
         self.fwd_done.set(true);
     }
@@ -835,18 +1017,41 @@ impl SamEncoder {
         let ctx = self.ctx();
         let (c, rows) = (self.cfg.d_model, self.cfg.rows());
 
-        self.comp_c2.backward(&ctx, &self.ps, self.comp_c1.out(), &self.d_out, &bw.d_neck[0]);
-        self.comp_c1.backward(&ctx, &self.ps, self.neck_n2.out(), &bw.d_neck[0], &bw.d_neck[1]);
-        self.neck_n2.backward(&ctx, &self.ps, &bw.d_neck[1], &bw.d_neck[2]);
-        self.neck_c2.backward(&ctx, &self.ps, self.neck_n1.out(), &bw.d_neck[2], &bw.d_neck[3]);
-        self.neck_n1.backward(&ctx, &self.ps, &bw.d_neck[3], &bw.d_neck[4]);
-        self.neck_c1.backward(&ctx, &self.ps, &self.feats, &bw.d_neck[4], &bw.d_feats);
+        let perm = self.perm_params();
+        self.head.backward(&ctx, &self.ids, &self.ps, &self.d_out, &perm);
+        if let Some(hd) = &self.hd {
+            let hb = hd.bwd();
+            let n = self.out_len() as u32;
+            let pp = [n, 1, ALPHA_GRAD_P];
+            g.submit(
+                &[],
+                &[
+                    g.step(self.ids.scale_chan, &[&self.d_out, self.ps.w(HD_ALPHA), &hb.d_head], &[n, 1, 1], n),
+                    // `d hd_alpha += <d_out, hd head output>`: a whole-output
+                    // reduction, split `ALPHA_GRAD_P` ways and folded into the
+                    // (accumulating) ParamStore gradient.
+                    g.step(self.ids.mul, &[&self.d_out, hd.head.output(), &hb.prod], &[n], n),
+                    g.step(self.ids.bias_grad_part, &[&hb.prod, &hb.part], &pp, ALPHA_GRAD_P),
+                    g.step(self.ids.bias_grad_final, &[&hb.part, self.ps.g(HD_ALPHA)], &pp, 1),
+                ],
+            );
+            hd.head.backward(&ctx, &self.ids, &self.ps, &hb.d_head, &perm);
+        }
 
         let last = self.blocks.len() - 1;
-        g.submit(&[], &[g.step(self.ids.nchw_nlc, &[&bw.d_feats, &bw.d_top], &self.perm_params(), rows * c)]);
         for i in (0..self.blocks.len()).rev() {
             let x = if i == 0 { &self.embed } else { &self.blocks[i - 1].out };
-            let d_out: &DeviceBuffer = if i == last { &bw.d_top } else { &self.blocks[i + 1].bwd().d_x };
+            let downstream: &DeviceBuffer = if i == last { &self.head.bwd().d_top } else { &self.blocks[i + 1].bwd().d_x };
+            // The tapped block's output feeds two consumers, so its adjoint is
+            // the sum of both.
+            let d_out: &DeviceBuffer = match &self.hd {
+                Some(hd) if hd.block == i => {
+                    let join = &hd.bwd().d_join;
+                    g.submit(&[], &[g.step(self.ids.add2, &[downstream, &hd.head.bwd().d_top, join], &[rows * c], rows * c)]);
+                    join
+                }
+                _ => downstream,
+            };
             self.block_bwd(&self.blocks[i], x, d_out);
         }
 
@@ -1010,24 +1215,25 @@ impl SamEncoder {
         &self.blocks[l].out
     }
 
-    /// The six neck/compressor stages in dispatch order, each with its element
-    /// count: `conv1, norm1, conv2, norm2, compress1, compress2`. The last is
+    /// The main path's neck/compressor stages in dispatch order, each with its
+    /// element count: `neck_conv1, neck_norm1, neck_conv2, neck_norm2,
+    /// [neck_resize,] compress1, compress2` (`neck_resize` only with a
+    /// [`SamViTConfig::neck_resize`]). Without the HD branch the last is
     /// [`Self::output`].
     pub fn neck_stages(&self) -> Vec<(&'static str, &DeviceBuffer, usize)> {
-        let n = |c: &Conv| c.out_shape.numel() as usize;
-        vec![
-            ("neck_conv1", self.neck_c1.out(), n(&self.neck_c1)),
-            ("neck_norm1", self.neck_n1.out(), self.neck_n1.shape.numel() as usize),
-            ("neck_conv2", self.neck_c2.out(), n(&self.neck_c2)),
-            ("neck_norm2", self.neck_n2.out(), self.neck_n2.shape.numel() as usize),
-            ("compress1", self.comp_c1.out(), n(&self.comp_c1)),
-            ("compress2", self.comp_c2.out(), n(&self.comp_c2)),
-        ]
+        self.head.stages()
     }
 
-    /// Element count of [`Self::output`] (`compress_out * grid_h/4 * grid_w/4`).
+    /// The HD branch's stages, under the same names as [`Self::neck_stages`];
+    /// `compress2` is the branch output BEFORE the `hd_alpha` scale. Empty
+    /// without [`SamViTConfig::hd_branch`].
+    pub fn hd_stages(&self) -> Vec<(&'static str, &DeviceBuffer, usize)> {
+        self.hd.as_ref().map_or_else(Vec::new, |hd| hd.head.stages())
+    }
+
+    /// Element count of [`Self::output`] (`compress_out` x [`SamViTConfig::compress_grid`]).
     pub fn out_len(&self) -> usize {
-        self.comp_c2.out_shape.numel() as usize
+        self.head.comp_c2.out_shape.numel() as usize
     }
 
     // -----------------------------------------------------------------------
