@@ -404,7 +404,7 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
 ///
 /// Reads `<dir>/config.json` to learn the family the same way
 /// `modelstore::plan`'s `TransformersRecipe` already gated the download on
-/// (`family_of_architecture`) -- one implementation of "which families brain
+/// (`family_of_config`) -- one implementation of "which families brain
 /// can serve", not a second guess that could drift from the first. The
 /// manifest's `id` is the fully-qualified `vendor/repo` reference, so the
 /// resident registers under what the client actually asked for.
@@ -413,7 +413,7 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let config_bytes = std::fs::read(dir.join("config.json")).map_err(|e| format!("{vendor}/{repo}: read config.json: {e}"))?;
     let config: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(|e| format!("{vendor}/{repo}: config.json: {e}"))?;
     let arch = brain_modelstore::declared_architecture(&config).ok_or_else(|| format!("{vendor}/{repo}: config.json has no architecture"))?;
-    let family = brain_modelstore::family_of_architecture(&arch).ok_or_else(|| format!("{vendor}/{repo}: unsupported architecture {arch:?}"))?;
+    let family = brain_modelstore::family_of_config(&config).ok_or_else(|| format!("{vendor}/{repo}: unsupported architecture {arch:?}"))?;
     // A family with no reader for its HF checkpoint (gpt2, trained from
     // scratch in brain's own layout) fails cleanly instead of registering a
     // model nothing can load.

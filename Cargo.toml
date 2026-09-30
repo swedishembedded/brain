@@ -305,6 +305,8 @@ brain-vqgan = { path = "crates/vqgan" }
 brain-clip = { path = "crates/clip" }
 brain-deepseek2ocr = { path = "crates/deepseek2ocr" }
 brain-deepseekocr2 = { path = "crates/deepseekocr2" }
+brain-deepseekvl = { path = "crates/deepseekvl" }
+brain-januspro = { path = "crates/januspro" }
 brain-t5encoder = { path = "crates/t5encoder" }
 brain-flux1 = { path = "crates/flux1" }
 brain-codeformer = { path = "crates/codeformer" }

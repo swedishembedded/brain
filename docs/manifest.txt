@@ -125,6 +125,8 @@ docs/models/moondream3.md
 docs/models/florence2.md
 docs/models/llava.md
 docs/models/deepseek2ocr.md
+docs/models/deepseekvl.md
+docs/models/januspro.md
 docs/models/deepseekocr2.md
 docs/models/asr.md
 docs/models/qwen3asr.md

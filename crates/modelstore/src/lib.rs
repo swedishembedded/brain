@@ -40,7 +40,7 @@ use brain_modelref::{AdapterRef, ModelRef, Quant};
 use serde::{Deserialize, Serialize};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
-pub use plan::{declared_architecture, execute, family_of_architecture, plan, plan_at, plan_file, remaining_download, Plan, PlanError, Remaining, Step};
+pub use plan::{declared_architecture, execute, family_of_architecture, family_of_config, plan, plan_at, plan_file, remaining_download, Plan, PlanError, Remaining, Step};
 
 /// The on-disk container format backing a [`LocalModel`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,8 +100,9 @@ pub const MANIFEST_FILE: &str = "brain.manifest.json";
 
 /// Families with a Hugging Face `config.json` architecture but no reader for
 /// its checkpoint directory: `gpt2` is trained from scratch in brain's own
-/// layout (an HF GPT-2's Conv1D weights are transposed from it).
-pub const NO_CHECKPOINT_DIR_READER: &[&str] = &["gpt2"];
+/// layout (an HF GPT-2's Conv1D weights are transposed from it), and
+/// `deepseekvl`/`januspro` are recognized but not yet served.
+pub const NO_CHECKPOINT_DIR_READER: &[&str] = &["gpt2", "deepseekvl", "januspro"];
 
 /// The role a family's Hugging Face checkpoint directory plays in its
 /// manifest: `weights` for every decoder served from one, `dir` where a
@@ -122,7 +123,7 @@ pub fn checkpoint_dir_role(family: &str) -> &'static str {
 /// complete directory that has none.
 pub fn checkpoint_dir_manifest(dir: &Path, id: &str) -> Option<CompoundManifest> {
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
-    let family = plan::family_of_architecture(&plan::declared_architecture(&config)?)?;
+    let family = plan::family_of_config(&config)?;
     if NO_CHECKPOINT_DIR_READER.contains(&family) {
         return None;
     }

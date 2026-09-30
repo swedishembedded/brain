@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use brain_modelref::{ModelRef, Quant};
 
 use crate::hub::Hub;
-use crate::plan::{declared_architecture, is_supported_architecture, PlanError, REVISION};
+use crate::plan::{declared_architecture, family_of_config, PlanError, REVISION};
 
 /// One upstream file to fetch, and the name it lands under in the repo's
 /// store directory.
@@ -932,7 +932,7 @@ impl ArtifactRecipe for TransformersRecipe {
             .map_err(|e| Box::new(PlanError::NoUpstreamArtifact(reference.clone(), format!("unparseable config.json: {e}"))))?;
         let arch =
             declared_architecture(&config).ok_or_else(|| Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "config.json has no architecture".to_string())))?;
-        if !is_supported_architecture(&arch) {
+        if family_of_config(&config).is_none() {
             return Err(Box::new(PlanError::UnsupportedArchitecture(reference.clone(), arch)));
         }
 

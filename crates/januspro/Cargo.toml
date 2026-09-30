@@ -1,0 +1,19 @@
+[package]
+name = "brain-januspro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Janus-Pro: SigLIP-L understanding tower, VQ-16 image tokenizer and generation heads around a Llama decoder."
+
+[lib]
+name = "januspro"
+path = "src/lib.rs"
+
+[dependencies]
+# The aligner is DeepSeek-VL's MlpProjector, and Janus-Pro's understanding
+# path is DeepSeek-VL's with one tower.
+brain-deepseekvl.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

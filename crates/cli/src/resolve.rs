@@ -743,6 +743,7 @@ mod tests {
             package: "brain-toy",
             gguf: None,
             hf: &[],
+            hf_config_key: None,
             default_ref: Some("test-vendor/test-repo"),
             extra_refs: &[],
             weights_env: &[("BRAIN_RESOLVETESTARCH_DIT", "dit"), ("BRAIN_RESOLVETESTARCH_VAE", "vae")],

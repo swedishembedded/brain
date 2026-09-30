@@ -1105,6 +1105,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-deepseekvl"
+version = "1.2.0"
+dependencies = [
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-diamond"
 version = "1.2.0"
 dependencies = [
@@ -1508,6 +1516,15 @@ dependencies = [
  "brain-model",
  "brain-sdxlunet",
  "brain-testutil",
+]
+
+[[package]]
+name = "brain-januspro"
+version = "1.2.0"
+dependencies = [
+ "brain-deepseekvl",
+ "brain-testutil",
+ "serde_json",
 ]
 
 [[package]]

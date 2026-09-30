@@ -76,7 +76,7 @@ fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String,
 fn classify_hfdir(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { return };
     let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return };
-    let family = brain_modelstore::declared_architecture(&config).and_then(|a| brain_modelstore::family_of_architecture(&a));
+    let family = brain_modelstore::family_of_config(&config);
     if family.and_then(brain_arch::by_id).is_some_and(|a| a.implementation().id == "qwen3") {
         out.push((idx, "weights".to_string(), Confidence::Declared));
     }

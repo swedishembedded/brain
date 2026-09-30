@@ -353,8 +353,15 @@ pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
     brain_arch::by_hf(arch).map(|a| a.id)
 }
 
-pub(crate) fn is_supported_architecture(arch: &str) -> bool {
-    family_of_architecture(arch).is_some()
+/// The canonical architecture id a whole `config.json` declares: its
+/// [`declared_architecture`], resolved against the config itself where
+/// several architectures share that class (`brain_arch::by_hf_config` -
+/// DeepSeek-VL and Janus-Pro are both `MultiModalityCausalLM`). Every caller
+/// holding the config asks this rather than [`family_of_architecture`],
+/// which cannot tell such a class's architectures apart.
+pub fn family_of_config(config: &serde_json::Value) -> Option<&'static str> {
+    let class = declared_architecture(config)?;
+    brain_arch::by_hf_config(&class, |key| config.get(key).is_some()).map(|a| a.id)
 }
 
 /// Runs every [`Step::Download`] in `plan.steps` against `hub`, writing into
@@ -554,6 +561,21 @@ mod tests {
         let reference = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let p = plan(&reference, &st, &hub).unwrap();
         assert_eq!(remaining_download(&st, &hub, &p).unwrap(), Remaining { files: 4, bytes: 0, sizes_known: false });
+    }
+
+    /// Janus-Pro's config names no class, only DeepSeek-VL's `model_type`;
+    /// the whole config tells the two apart.
+    #[test]
+    fn a_shared_class_resolves_by_its_config() {
+        for (repo, want) in [("deepseek-vl-7b-chat", "deepseekvl"), ("Janus-Pro-7B", "januspro")] {
+            let Some(Ok(bytes)) = crate::default_root().map(|root| std::fs::read(root.join("deepseek-ai").join(repo).join("config.json"))) else {
+                eprintln!("SKIP: {repo} not downloaded");
+                continue;
+            };
+            let config: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(family_of_architecture(&declared_architecture(&config).unwrap()), None, "{repo}: the class alone is ambiguous");
+            assert_eq!(family_of_config(&config), Some(want), "{repo}");
+        }
     }
 
     #[test]

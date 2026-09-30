@@ -1,0 +1,16 @@
+[package]
+name = "brain-deepseekvl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DeepSeek-VL: SAM-B high-resolution plus SigLIP-L low-resolution vision tower, hybrid split aligner, Llama decoder."
+
+[lib]
+name = "deepseekvl"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

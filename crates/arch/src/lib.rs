@@ -126,6 +126,12 @@ pub struct Arch {
     /// the dense Qwen3 importer). Empty when no HF-checkpoint fetch path
     /// exists yet for this architecture.
     pub hf: &'static [&'static str],
+    /// For an [`hf`](Self::hf) class several rows share, the `config.json`
+    /// key that tells them apart and whether this row's configs carry it
+    /// (DeepSeek-VL and Janus-Pro are both `MultiModalityCausalLM`; only
+    /// Janus-Pro configures `gen_head_config`). [`by_hf`] answers only for a
+    /// class no other row shares; [`by_hf_config`] resolves a shared one.
+    pub hf_config_key: Option<(&'static str, bool)>,
     /// The `<vendor>/<repo>` this architecture auto-fetches by default when a
     /// verb needs weights and none were named explicitly (`brain infer
     /// zipdepth --in image=x.jpg` with no `--weights`). `None` when no small,
@@ -230,6 +236,7 @@ const DEFAULT: Arch = Arch {
     package: "",
     gguf: None,
     hf: &[],
+    hf_config_key: None,
     default_ref: None,
     extra_refs: &[],
     weights_env: &[],
@@ -438,6 +445,19 @@ pub const ARCHS: &[Arch] = &[
     // `deepseek2ocr::spec::Deepseek2ocrSpec` (the model-store resolver)
     // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
     // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
+    // DeepSeek-VL and Janus-Pro: a Llama decoder behind a vision tower, one
+    // HF class and one `model_type` between them. DeepSeek-VL's tower is a
+    // SAM-B high-resolution branch plus a SigLIP-L low-resolution one;
+    // Janus-Pro's is SigLIP-L for understanding, plus a VQ-16 image tokenizer
+    // and generation heads that make it a text-to-image model too. llama.cpp
+    // names Janus-Pro's projector (`PROJECTOR_TYPE_JANUS_PRO`) but no
+    // architecture for either, hence `Brain`.
+    arch!("deepseekvl", "DeepSeek-VL (SAM-B + SigLIP-L hybrid tower + Llama decoder)", Multimodal, Brain, "brain-deepseekvl",
+        hf: &["MultiModalityCausalLM", "multi_modality"], hf_config_key: Some(("gen_head_config", false)),
+        variants: &[Variant { reference: "deepseek-ai/deepseek-vl-7b-chat", params: 7_343_990_017, quants: &[], license: Some("deepseek") }]),
+    arch!("januspro", "Janus-Pro (SigLIP-L + VQ-16 + Llama decoder, understanding and generation)", Multimodal, Brain, "brain-januspro",
+        hf: &["MultiModalityCausalLM", "multi_modality"], hf_config_key: Some(("gen_head_config", true)),
+        variants: &[Variant { reference: "deepseek-ai/Janus-Pro-7B", params: 7_420_434_059, quants: &[], license: Some("mit AND deepseek") }]),
     arch!("deepseek2ocr", "DeepSeek-OCR (SAM+CLIP DeepEncoder + DeepSeek-V2 decoder)", Multimodal, LlamaCpp, "brain-deepseek2ocr", gguf: Some("deepseek2-ocr"), hf: &["DeepseekOCRForCausalLM"], default_ref: Some("ggml-org/DeepSeek-OCR-GGUF"),
         variants: &[Variant { reference: "ggml-org/DeepSeek-OCR-GGUF", params: 3_336_106_240, quants: &["Q8_0"], license: None }]),
     // `gguf: None`, deliberately - the LM half's `general.architecture` is
@@ -748,10 +768,23 @@ pub fn by_id(id: &str) -> Option<&'static Arch> {
 }
 
 /// The [`Arch`] whose [`Arch::hf`] list contains this EXACT HF
-/// `architectures[0]` class name, or `None`. Exact match only - see
-/// [`Arch::hf`]'s doc for why a substring scan is the defect this replaces.
+/// `architectures[0]` class name, or `None` - also `None` for a class
+/// several rows share, which only [`by_hf_config`] can resolve. Exact match
+/// only - see [`Arch::hf`]'s doc for why a substring scan is the defect this
+/// replaces.
 pub fn by_hf(class_name: &str) -> Option<&'static Arch> {
-    ARCHS.iter().find(|a| a.hf.contains(&class_name))
+    let mut rows = ARCHS.iter().filter(|a| a.hf.contains(&class_name));
+    let first = rows.next()?;
+    rows.next().is_none().then_some(first)
+}
+
+/// [`by_hf`] with the checkpoint's `config.json` at hand, as `has_key`
+/// answers for a top-level key: a class several rows share resolves to the
+/// one whose [`Arch::hf_config_key`] the config satisfies.
+pub fn by_hf_config(class_name: &str, has_key: impl Fn(&str) -> bool) -> Option<&'static Arch> {
+    let mut rows = ARCHS.iter().filter(|a| a.hf.contains(&class_name)).filter(|a| a.hf_config_key.is_none_or(|(key, present)| has_key(key) == present));
+    let first = rows.next()?;
+    rows.next().is_none().then_some(first)
 }
 
 /// The [`Arch`] this recipe/manifest family string means: `id` first, then
@@ -787,9 +820,9 @@ mod tests {
     #[test]
     fn every_deepseek_reference_declares_its_licence() {
         let deepseek: Vec<&Variant> = ARCHS.iter().flat_map(|a| a.variants).filter(|v| v.reference.starts_with("deepseek-ai/")).collect();
-        assert_eq!(deepseek.len(), 13);
+        assert_eq!(deepseek.len(), 15);
         for v in deepseek {
-            let want = if v.reference.contains("R1-Distill") { "mit" } else { "deepseek" };
+            let want = if v.reference.contains("R1-Distill") || v.reference.contains("Janus") { "mit" } else { "deepseek" };
             assert!(v.license.is_some_and(|l| l.starts_with(want)), "{}: {:?}", v.reference, v.license);
         }
     }
@@ -812,6 +845,21 @@ mod tests {
         // one whose crate is shared infrastructure rather than an architecture.
         assert_eq!(by_id("qwen3").map(|a| a.implementation().id), Some("qwen3"));
         assert_eq!(by_id("autoencoderkl").map(|a| a.implementation().id), Some("autoencoderkl"));
+    }
+
+    /// DeepSeek-VL and Janus-Pro share an HF class and a `model_type`
+    /// (Janus-Pro's config has no `architectures` at all); the generation
+    /// heads only Janus-Pro configures tell them apart, so the class alone
+    /// resolves to neither, and the class plus the config to exactly one.
+    #[test]
+    fn a_shared_hf_class_resolves_only_with_its_config() {
+        for class in ["MultiModalityCausalLM", "multi_modality"] {
+            assert_eq!(by_hf(class), None, "{class} alone is ambiguous");
+            assert_eq!(by_hf_config(class, |k| k == "gen_head_config").map(|a| a.id), Some("januspro"), "{class}");
+            assert_eq!(by_hf_config(class, |_| false).map(|a| a.id), Some("deepseekvl"), "{class}");
+        }
+        // An unshared class needs no probe.
+        assert_eq!(by_hf_config("LlamaForCausalLM", |_| false).map(|a| a.id), Some("llama"));
     }
 
     #[test]
@@ -886,13 +934,24 @@ mod tests {
         }
     }
 
+    /// An HF class names one architecture, unless the rows sharing it each
+    /// probe the same config key with a different expectation - so that
+    /// `by_hf_config` always resolves it to exactly one.
     #[test]
-    fn hf_class_names_are_unique_across_archs() {
-        let mut seen = HashSet::new();
+    fn hf_class_names_resolve_to_one_arch() {
+        let mut sharing: std::collections::BTreeMap<&str, Vec<&Arch>> = Default::default();
         for a in ARCHS {
             for hf in a.hf {
-                assert!(seen.insert(*hf), "{:?}: hf class name {:?} claimed by more than one arch", a.id, hf);
+                sharing.entry(*hf).or_default().push(a);
             }
+        }
+        for (hf, rows) in sharing.into_iter().filter(|(_, rows)| rows.len() > 1) {
+            let probes: Vec<_> = rows.iter().map(|a| a.hf_config_key).collect();
+            let ids: Vec<_> = rows.iter().map(|a| a.id).collect();
+            assert!(probes.iter().all(Option::is_some), "{hf:?} is claimed by {ids:?} and not every one probes the config");
+            let keys: HashSet<_> = probes.iter().flatten().map(|(key, _)| *key).collect();
+            let present: HashSet<_> = probes.iter().flatten().map(|(_, present)| *present).collect();
+            assert!(keys.len() == 1 && present.len() == rows.len(), "{hf:?}: {ids:?} probe {probes:?}, which does not tell them apart");
         }
     }
 
