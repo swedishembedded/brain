@@ -31,4 +31,13 @@ its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
 `reasoning_content`. At fp32 a 7-8B checkpoint needs more than one 24 GB card;
 `--qwen-weights-int8` serves it on one.
 
+A llama.cpp GGUF of any of them serves too, straight off the file
+(`brain serve` with the `.gguf` as the checkpoint, or `brain import` to
+write a brain checkpoint). llama.cpp stores a Llama GGUF's q/k projections
+with each head's rows interleaved. brain reorders whole rows as it reads
+them, quantized ones included, and reads the RoPE scaling from the file:
+the `rope.scaling.*` keys, or `rope_freqs.weight` for llama3. The quantized
+file is expanded to f32 (or requantized to int8 with `--qwen-weights-int8`)
+as it is uploaded; serving it at its own quantization is not supported yet.
+
 Package: `brain-qwen3`.

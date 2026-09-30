@@ -209,6 +209,26 @@ impl GgufArchitectureImporter for Qwen3Importer {
     }
 }
 
+/// The Qwen2 and Llama config variants of the Qwen3 decoder (every DeepSeek
+/// text model), read and imported by the same name map, with llama's q/k
+/// rows un-interleaved - see `qwen3::gguf_import::GGUF_ARCHITECTURES`.
+struct Qwen3VariantImporter(&'static str, &'static str);
+
+impl GgufArchitectureImporter for Qwen3VariantImporter {
+    fn architecture(&self) -> &'static str {
+        self.0
+    }
+    fn loads_directly(&self) -> bool {
+        true
+    }
+    fn summary(&self) -> &'static str {
+        self.1
+    }
+    fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+        qwen3::gguf_import::import_mmap(gguf, out_path, id_override).map(|_| ())
+    }
+}
+
 /// Z-Image (S³-DiT), DiT only (`general.architecture = "lumina2"` - shared
 /// with real Lumina2 releases; `s3dit::import::import_gguf` refuses to guess
 /// and checks for a Z-Image-only tensor before converting anything, since
@@ -451,6 +471,8 @@ fn direct_only(arch: &str, how: &str) -> String {
 /// the whole registration surface (see this module's doc).
 const IMPORTERS: &[&dyn GgufArchitectureImporter] = &[
     &Qwen3Importer,
+    &Qwen3VariantImporter("qwen2", "Qwen2 dense decoder (the Qwen3 decoder with q/k/v bias, no QK-norm); DeepSeek-R1-Distill-Qwen"),
+    &Qwen3VariantImporter("llama", "Llama dense decoder (the Qwen3 decoder without QK-norm, q/k un-interleaved); DeepSeek coder/llm/math, R1-Distill-Llama"),
     &Qwen35MoeImporter,
     &Qwen35Importer,
     &S3ditImporter,
@@ -655,7 +677,9 @@ mod tests {
     fn the_registry_is_keyed_by_the_real_gguf_architecture_string() {
         assert_eq!(importer_for("qwen35moe").map(|i| i.architecture()), Some("qwen35moe"));
         assert_eq!(importer_for("qwen35moe").map(|i| i.architecture()), Some(qwen35moe::import::GGUF_ARCHITECTURE));
-        assert!(importer_for("llama").is_none());
+        assert_eq!(importer_for("llama").map(|i| i.architecture()), Some("llama"));
+        assert_eq!(importer_for("qwen2").map(|i| i.architecture()), Some("qwen2"));
+        assert!(importer_for("falcon").is_none());
         assert!(architectures().contains(&"qwen35moe"));
     }
 
@@ -1002,9 +1026,9 @@ mod tests {
     fn an_unregistered_architecture_is_a_clear_error_not_a_panic_or_a_silent_no_op() {
         let dir = tmp("unknown");
         let src = dir.join("mystery.gguf").to_string_lossy().into_owned();
-        write_gguf(&src, "llama");
+        write_gguf(&src, "falcon");
         let err = import_file(&src, None, None).unwrap_err();
-        assert!(err.contains("llama"), "the error must name the unsupported architecture: {err}");
+        assert!(err.contains("falcon"), "the error must name the unsupported architecture: {err}");
         assert!(err.contains("qwen35moe"), "the error must list what IS registered: {err}");
         // Nothing was written.
         assert!(!std::path::Path::new(&default_out_path(&src)).exists(), "a failed dispatch must not leave an output file");

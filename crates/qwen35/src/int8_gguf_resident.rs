@@ -310,9 +310,10 @@ pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, max_batch: u3
 /// (It did, once: every `A_log` vanished from the plan the moment `classify`
 /// stopped returning `Simple` for it, and the load failed by name - loudly,
 /// which is the only reason that was a five-minute fix rather than a silent
-/// hole.) `Mapped::Split` genuinely has no place here: it produces SEVERAL
-/// destinations from one source and `Fetch::Whole` cannot express that; this
-/// architecture is dense and emits none.
+/// hole.) `Mapped::Split` and `Mapped::Permuted` genuinely have no place
+/// here: one produces SEVERAL destinations from one source, the other
+/// reorders rows, and a plain rename can express neither; this
+/// architecture's map emits neither.
 fn gguf_name_map(mg: &MmapGguf, cfg: &Qwen35Config) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for name in mg.names() {
@@ -320,7 +321,7 @@ fn gguf_name_map(mg: &MmapGguf, cfg: &Qwen35Config) -> HashMap<String, String> {
             Mapped::Simple(brain) | Mapped::Transformed { into: brain, .. } => {
                 out.insert(brain, name.clone());
             }
-            Mapped::Split { .. } | Mapped::Dropped(_) => {}
+            Mapped::Split { .. } | Mapped::Permuted { .. } | Mapped::Dropped(_) => {}
         }
     }
     out

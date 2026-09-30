@@ -164,6 +164,13 @@ fn plan_source<'a>(
 ) -> Result<checkpoint::remap::RemapSource<'a>, String> {
     let allowed: std::collections::HashSet<&str> = allowed.iter().map(|(n, _)| n.as_str()).collect();
     let naming = Naming::of(r);
+    if let (Naming::Gguf, Some(mg)) = (naming, r.gguf()) {
+        let plan = crate::gguf_import::gguf_plan(mg, cfg)?;
+        if let Some(bn) = plan.keys().find(|bn| !allowed.contains(bn.as_str())) {
+            return Err(format!("import: the GGUF maps to unexpected brain param '{bn}'"));
+        }
+        return Ok(checkpoint::remap::RemapSource::new(r, plan));
+    }
     let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
     for name in r.names() {
         let Some(bn) = naming.to_brain(name, cfg)? else { continue };

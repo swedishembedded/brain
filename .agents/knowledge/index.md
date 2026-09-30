@@ -222,3 +222,4 @@ What belongs where:
 | 179 | A checkpoint is served as downloaded | [`179-a-checkpoint-is-served-as-downloaded.md`](179-a-checkpoint-is-served-as-downloaded.md) |
 | 180 | A declared range is enforced, or it is not a limit | [`180-a-declared-range-is-enforced-or-it-is-not-a-limit.md`](180-a-declared-range-is-enforced-or-it-is-not-a-limit.md) |
 | 181 | One gradient-scale convention; Adam hid the inversion | [`181-one-gradient-scale-convention-adam-hid-the-inversion.md`](181-one-gradient-scale-convention-adam-hid-the-inversion.md) |
+| 183 | A Llama GGUF stores its q/k rows interleaved | [`183-a-llama-gguf-stores-q-k-rows-interleaved.md`](183-a-llama-gguf-stores-q-k-rows-interleaved.md) |

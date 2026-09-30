@@ -51,7 +51,7 @@
 //! | `blk.N.ffn_gate.weight` | `…mlp.gate_proj.weight` | `blocks.N.mlp.gate.weight` |
 //! | `blk.N.ffn_up.weight` | `…mlp.up_proj.weight` | `blocks.N.mlp.up.weight` |
 //! | `blk.N.ffn_down.weight` | `…mlp.down_proj.weight` | `blocks.N.mlp.down.weight` |
-//! | `rope_freqs.weight` | (rope-scaling factors) | dropped, by name |
+//! | `rope_freqs.weight` | (rope-scaling factors) | the config's `RopeScaling::Factors` |
 //!
 //! `blk.N.attn_{q,k,v}.bias` are accepted too. Qwen3 has no attention bias, so
 //! a Qwen3 GGUF never carries them - but [`crate::QwenConfig`] describes Qwen2
@@ -68,6 +68,8 @@ use std::collections::HashMap;
 
 use checkpoint::gguf::MmapGguf;
 use checkpoint::gguf_src::GgufSource;
+use checkpoint::remap::{Fetch, RemapSource};
+use model::rope_scaling::RopeScaling;
 use checkpoint::st::ModelCard;
 use gguf::import::{self, ImportStats, Leaf, Mapped};
 use gguf::leaf::Role;
@@ -79,10 +81,18 @@ use crate::config::QwenConfig;
 /// (`MODEL_ARCH_NAMES[MODEL_ARCH.QWEN3]`).
 pub const GGUF_ARCHITECTURE: &str = "qwen3";
 
+/// Every `general.architecture` this decoder reads: Qwen3 and its two
+/// config variants. `qwen2` differs only in its q/k/v bias and missing
+/// QK-norm, both declared by which tensors the file carries. `llama` also
+/// stores q/k with llama.cpp's per-head row interleave
+/// (`conversion/llama.py`'s `LlamaModel.permute`, `undo_permute = True`),
+/// which [`llama_unpermute_order`] undoes; a Qwen2 conversion never permutes.
+pub const GGUF_ARCHITECTURES: [&str; 3] = [GGUF_ARCHITECTURE, "qwen2", "llama"];
+
 /// Not imported, by reason - [`Mapped::Dropped`]'s payload, counted and
 /// printed by the shared driver so a drop is always on the record.
 const DROP_TIED_HEAD: &str = "output.weight on a tied-embedding checkpoint (the head reuses tok.weight)";
-const DROP_ROPE_FREQS: &str = "rope_freqs.weight (RoPE scaling factors, recomputed from rope_theta)";
+const DROP_ROPE_FREQS: &str = "rope_freqs.weight (read into the config as its RoPE scaling)";
 
 /// Map one GGUF tensor name to its brain parameter name.
 ///
@@ -138,9 +148,20 @@ pub fn gguf_to_brain(name: &str, tie: bool) -> Option<String> {
 /// import loudly rather than quietly produce a checkpoint missing a
 /// projection, and "we didn't recognize it" is exactly the case where a
 /// missing projection would otherwise look like a clean run.
-fn classify(name: &str, tie: bool) -> Result<Mapped, String> {
+fn classify(name: &str, cfg: &QwenConfig, llama: bool) -> Result<Mapped, String> {
+    let tie = cfg.tie_embeddings;
     if let Some(brain) = gguf_to_brain(name, tie) {
-        return Ok(Mapped::Simple(brain));
+        let heads = if brain.ends_with("attn.wq.weight") {
+            Some(cfg.n_heads)
+        } else if brain.ends_with("attn.wk.weight") {
+            Some(cfg.n_kv_heads)
+        } else {
+            None
+        };
+        return Ok(match heads {
+            Some(n) if llama => Mapped::Permuted { into: brain, order: llama_unpermute_order(n as usize, cfg.head_dim as usize) },
+            _ => Mapped::Simple(brain),
+        });
     }
     match import::split_name(name, u32::MAX) {
         Leaf::Output => Ok(Mapped::Dropped(DROP_TIED_HEAD)),
@@ -149,57 +170,70 @@ fn classify(name: &str, tie: bool) -> Result<Mapped, String> {
     }
 }
 
-/// Open a GGUF and present it under **brain's own** qwen3 parameter names,
-/// ready to build from directly - no ahead-of-time conversion, no fp32
-/// intermediate on disk, no whole-model host copy.
-///
-/// # Why this is the route that matters
-///
-/// [`import_gguf`] exists to WRITE a brain-format checkpoint, and that is a
-/// genuinely different job: it produces an fp32 `.safetensors` roughly 4x
-/// the GGUF's size (a 4 GiB Q8_0 Qwen3-4B becomes ~15 GiB) purely so the
-/// tensors are stored under brain's names. Paying that - in disk, in
-/// conversion time, and then in device memory when the fp32 build does not
-/// fit an integrated GPU - to serve a model that was already quantized is
-/// backwards.
-///
-/// The quantized bytes are already exactly what a reduced-precision build
-/// wants. So this hands the mapping to [`checkpoint::gguf_src::GgufSource`]
-/// (the one shared GGUF-under-a-model's-own-names source, as `wan`, `ltxv`
-/// and `gemma4` already use) and lets the builder stream straight off the
-/// mapping, one leaf at a time.
-///
-/// # Errors
-///
-/// A human-readable message if the file cannot be mapped or its KV metadata
-/// does not describe a qwen3.
-pub fn open_source(path: &str) -> Result<(QwenConfig, GgufSource), String> {
-    let mg = MmapGguf::open(path).map_err(|e| format!("cannot open gguf {path:?}: {e}"))?;
-    let cfg = config_from_gguf(&mg)?;
-    let tie = cfg.tie_embeddings;
+/// The source row order that undoes llama.cpp's q/k permute for `n_head`
+/// heads of `head_dim` rows: llama.cpp stores head `h`'s row `half * hd/2 + i`
+/// (HF order) at `h * hd + 2i + half`, so brain's row `h*hd + half*hd/2 + i`
+/// reads source row `h*hd + 2i + half`.
+pub fn llama_unpermute_order(n_head: usize, head_dim: usize) -> Vec<u32> {
+    let half = head_dim / 2;
+    (0..n_head * head_dim)
+        .map(|r| {
+            let (h, within) = (r / head_dim, r % head_dim);
+            let (two, i) = (within / half, within % half);
+            (h * head_dim + 2 * i + two) as u32
+        })
+        .collect()
+}
 
-    let mut plan: HashMap<String, String> = HashMap::new();
+/// Every brain parameter of `cfg` as a fetch over the GGUF's own tensors:
+/// a rename, or - llama's q/k - a row permutation, which moves quantized
+/// rows whole. The one name map both [`open_source`] and
+/// [`crate::import::source`] read through, as strict as the importer's: an
+/// unrecognized tensor is an error.
+pub fn gguf_plan(mg: &MmapGguf, cfg: &QwenConfig) -> Result<HashMap<String, Fetch>, String> {
+    let llama = gguf::kv::architecture(mg) == Some("llama");
+    let mut plan: HashMap<String, Fetch> = HashMap::new();
     let mut embed_source: Option<String> = None;
     for g in mg.names() {
         if matches!(import::split_name(g, u32::MAX), Leaf::TokenEmbd) {
             embed_source = Some(g.clone());
         }
-        if let Some(brain) = gguf_to_brain(g, tie) {
-            plan.insert(brain, g.clone());
+        let (brain, fetch) = match classify(g, cfg, llama)? {
+            Mapped::Simple(brain) => (brain, Fetch::Whole(g.clone())),
+            Mapped::Permuted { into, order } => (into, Fetch::RowPermute { name: g.clone(), order }),
+            Mapped::Dropped(_) => continue,
+            other => return Err(format!("qwen3: {g} maps to {other:?}, which a decoder source cannot read")),
+        };
+        if plan.insert(brain.clone(), fetch).is_some() {
+            return Err(format!("qwen3: two GGUF tensors map to {brain}"));
         }
     }
     // A tied checkpoint carries no `output.weight`: the head IS the embedding
-    // table, and `gguf_to_brain` deliberately returns `None` for the head so
-    // an importer drops it rather than inventing one. A SOURCE has the
-    // opposite obligation - the model still asks for `lm_head.weight`, and it
-    // must resolve, or the head builds uninitialised.
-    if tie {
+    // table. The model still asks for `lm_head.weight`, and it must resolve.
+    if cfg.tie_embeddings {
         if let Some(embed) = embed_source {
-            plan.insert("lm_head.weight".to_string(), embed);
+            plan.insert("lm_head.weight".to_string(), Fetch::Whole(embed));
         }
     }
+    Ok(plan)
+}
 
-    Ok((cfg, GgufSource::renaming(mg, plan)))
+/// Open a GGUF and present it under **brain's own** qwen3 parameter names,
+/// ready to build from directly - no ahead-of-time conversion, no fp32
+/// intermediate on disk, no whole-model host copy. The quantized bytes are
+/// already what a reduced-precision build wants, so the builder streams
+/// straight off the mapping, one leaf at a time, through [`gguf_plan`].
+///
+/// # Errors
+///
+/// A human-readable message if the file cannot be mapped, its KV metadata
+/// does not describe one of [`GGUF_ARCHITECTURES`], or a tensor is not one
+/// the decoder has.
+pub fn open_source(path: &str) -> Result<(QwenConfig, RemapSource<'static>), String> {
+    let mg = MmapGguf::open(path).map_err(|e| format!("cannot open gguf {path:?}: {e}"))?;
+    let cfg = config_from_gguf(&mg)?;
+    let plan = gguf_plan(&mg, &cfg)?;
+    Ok((cfg, RemapSource::owning(Box::new(GgufSource::identity(mg)), plan)))
 }
 
 /// Derive a [`QwenConfig`] from a GGUF's KV metadata.
@@ -213,8 +247,12 @@ pub fn open_source(path: &str) -> Result<(QwenConfig, GgufSource), String> {
 /// buffers, and the trained RoPE extent (`context_length`, carried through as
 /// `max_position_embeddings`) would size them absurdly.
 pub fn config_from_gguf(mg: &MmapGguf) -> Result<QwenConfig, String> {
-    let kv = ArchKv::expect_architecture(mg, GGUF_ARCHITECTURE)?;
-    config_from_kv(&kv, mg)
+    let got = gguf::kv::architecture(mg).unwrap_or("");
+    let arch = GGUF_ARCHITECTURES
+        .iter()
+        .find(|a| **a == got)
+        .ok_or_else(|| format!("gguf: general.architecture {got:?} is not one of {GGUF_ARCHITECTURES:?}"))?;
+    config_from_kv(&ArchKv::new(mg, arch), mg)
 }
 
 /// [`config_from_gguf`]'s core, against an already-scoped KV view.
@@ -229,21 +267,32 @@ pub fn config_from_kv(kv: &ArchKv, mg: &MmapGguf) -> Result<QwenConfig, String> 
         .shape("token_embd.weight")
         .and_then(|s| s.first().copied())
         .ok_or("qwen3: missing token_embd.weight (cannot determine vocab)")? as u32;
-    let head_dim = kv.req_u32("attention.key_length")?;
+    let d_model = kv.req_u32("embedding_length")?;
+    let n_heads = kv.req_u32("attention.head_count")?;
+    // A llama conversion writes no key_length; its rope.dimension_count is the
+    // HF head_dim (`conversion/llama.py`), and d_model / n_heads failing both.
+    let head_dim = kv.u32("attention.key_length").or_else(|| kv.u32("rope.dimension_count")).unwrap_or(d_model / n_heads.max(1));
     let value_len = kv.u32_or("attention.value_length", head_dim);
     if value_len != head_dim {
         return Err(format!("qwen3: attention.key_length {head_dim} != value_length {value_len} (asymmetric head_dim is unsupported)"));
     }
+    let rope_dim = kv.u32_or("rope.dimension_count", head_dim);
+    if rope_dim != head_dim {
+        return Err(format!("qwen3: rope.dimension_count {rope_dim} != head_dim {head_dim} (partial rotary embedding is unsupported)"));
+    }
+    let has = |suffix: &str| mg.names().iter().any(|n| n.ends_with(suffix));
+    // Qwen3's own default; a llama or qwen2 conversion always writes one.
+    let theta_default = if matches!(kv.prefix(), "qwen3" | "qwen3vl") { 1.0e6 } else { 1.0e4 };
     Ok(QwenConfig {
         vocab,
         block_size,
         n_layers: kv.req_u32("block_count")?,
-        d_model: kv.req_u32("embedding_length")?,
-        n_heads: kv.req_u32("attention.head_count")?,
+        d_model,
+        n_heads,
         n_kv_heads: kv.req_u32("attention.head_count_kv")?,
         head_dim,
         d_ff: kv.req_u32("feed_forward_length")?,
-        rope_theta: kv.f32_or("rope.freq_base", 1.0e6),
+        rope_theta: kv.f32_or("rope.freq_base", theta_default),
         rms_eps: kv.f32_or("attention.layer_norm_rms_epsilon", 1e-6),
         max_position_embeddings: kv.u32_or("context_length", block_size),
         // A GGUF states tying by OMITTING `output.weight` - there is no
@@ -253,14 +302,43 @@ pub fn config_from_kv(kv: &ArchKv, mg: &MmapGguf) -> Result<QwenConfig, String> 
         // one anyway (HF Qwen3 checkpoints sometimes do), and dropping it with
         // a stated reason beats failing on it.
         tie_embeddings: !mg.names().iter().any(|n| n == "output.weight"),
-        qk_norm: true,
-        attn_bias: mg.names().iter().any(|n| n.ends_with("attn_q.bias")),
+        // Declared by the tensors the file carries: Qwen3 has QK-norm, Qwen2
+        // has q/k/v biases, llama neither.
+        qk_norm: has("attn_q_norm.weight"),
+        attn_bias: has("attn_q.bias"),
         lora: None,
-        // GGUF spells YaRN as its own `rope.scaling.*` key family, which this
-        // importer does not read - a GGUF-sourced config is plain RoPE.
-        rope_scaling: None,
+        rope_scaling: rope_scaling(kv, mg)?,
     }
     .with_defaults())
+}
+
+/// The RoPE scaling a GGUF declares: `rope_freqs.weight`, the per-frequency
+/// divisors llama.cpp writes for a llama3 scaling, or the
+/// `{arch}.rope.scaling.*` keys it writes for linear and YaRN. Any other
+/// declared type is refused rather than run unscaled.
+fn rope_scaling(kv: &ArchKv, mg: &MmapGguf) -> Result<Option<RopeScaling>, String> {
+    use checkpoint::TensorSource;
+    let declared = kv.str("rope.scaling.type").filter(|t| *t != "none");
+    if mg.names().iter().any(|n| n == "rope_freqs.weight") {
+        if let Some(t) = declared {
+            return Err(format!("qwen3: both rope_freqs.weight and rope.scaling.type {t:?} - which scaling applies is ambiguous"));
+        }
+        let mut factors = Vec::new();
+        mg.with_tensor("rope_freqs.weight", &mut |d| factors = d.to_vec());
+        return Ok(Some(RopeScaling::Factors(factors)));
+    }
+    Ok(match declared {
+        None => None,
+        Some("linear") => Some(RopeScaling::Linear { factor: kv.req_f32("rope.scaling.factor")? }),
+        Some("yarn") => Some(RopeScaling::Yarn(model::yarn::YarnConfig {
+            factor: kv.req_f32("rope.scaling.factor")?,
+            original_max_position_embeddings: kv.req_u32("rope.scaling.original_context_length")?,
+            beta_fast: kv.f32_or("rope.scaling.yarn_beta_fast", 32.0),
+            beta_slow: kv.f32_or("rope.scaling.yarn_beta_slow", 1.0),
+            attention_factor: kv.f32("rope.scaling.yarn_attn_factor"),
+        })),
+        Some(other) => return Err(format!("qwen3: rope.scaling.type {other:?} is not implemented")),
+    })
 }
 
 /// Import a Qwen3 GGUF into a brain-native safetensors checkpoint.
@@ -285,8 +363,8 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(params.iter().map(|(_, n)| *n as u64).sum());
 
-    let tie = cfg.tie_embeddings;
-    import::to_st(mg, &params, &|n| classify(n, tie), out_path, &cfg.to_json(), Some(&card), "qwen3")
+    let llama = gguf::kv::architecture(mg) == Some("llama");
+    import::to_st(mg, &params, &|n| classify(n, &cfg, llama), out_path, &cfg.to_json(), Some(&card), "qwen3")
 }
 
 /// Test fixtures for this importer, shared across crates.
@@ -361,20 +439,24 @@ pub mod testing {
     /// nothing else - a quantized fixture would fold a lossy dequant into the
     /// same assertion and make bit-identity unavailable for no gain.
     ///
-    /// Ships a `rope_freqs.weight` too: a real llama.cpp Qwen3 conversion may,
-    /// and the drop must be a counted decision rather than a silent skip.
     pub fn write_synthetic_gguf(path: &str, tied: bool) {
-        write_gguf(path, tied, &seq);
+        write_gguf(path, tied, &seq, None);
+    }
+
+    /// [`write_synthetic_gguf`] (untied) plus a `rope_freqs.weight` of
+    /// `factors` - how llama.cpp stores a llama3 RoPE scaling.
+    pub fn write_synthetic_gguf_with_rope_freqs(path: &str, factors: &[f32]) {
+        write_gguf(path, false, &seq, Some(factors));
     }
 
     /// [`write_synthetic_gguf`] at small, well-conditioned values, for a test
     /// that runs the model: the identity-tagged values above overflow
     /// `mean(x^2)` in the first RMSNorm and every output is zero.
     pub fn write_conditioned_gguf(path: &str, tied: bool) {
-        write_gguf(path, tied, &|base, n| (0..n).map(|i| 0.3 * (0.37 * base + 0.61 * i as f32).sin()).collect());
+        write_gguf(path, tied, &|base, n| (0..n).map(|i| 0.3 * (0.37 * base + 0.61 * i as f32).sin()).collect(), None);
     }
 
-    fn write_gguf(path: &str, tied: bool, values: &dyn Fn(f32, usize) -> Vec<f32>) {
+    fn write_gguf(path: &str, tied: bool, values: &dyn Fn(f32, usize) -> Vec<f32>, rope_freqs: Option<&[f32]>) {
         let tensors: Vec<TensorOut> = contents(tied)
             .into_iter()
             .map(|(gname, _, numel, base)| TensorOut {
@@ -383,11 +465,11 @@ pub mod testing {
                 ty: 0,
                 data: values(base, numel).iter().flat_map(|v| v.to_le_bytes()).collect(),
             })
-            .chain(std::iter::once(TensorOut {
+            .chain(rope_freqs.map(|f| TensorOut {
                 name: "rope_freqs.weight".to_string(),
-                shape: vec![HEAD_DIM / 2],
+                shape: vec![f.len()],
                 ty: 0,
-                data: values(7.0, HEAD_DIM / 2).iter().flat_map(|v| v.to_le_bytes()).collect(),
+                data: f.iter().flat_map(|v| v.to_le_bytes()).collect(),
             }))
             .collect();
 
@@ -488,7 +570,13 @@ mod tests {
             .collect();
         assert!(missing.is_empty(), "unreadable brain parameters: {missing:?}");
     }
-    use super::testing::{write_conditioned_gguf, write_synthetic_gguf, write_synthetic_hf_dir};
+    use super::testing::{write_conditioned_gguf, write_synthetic_gguf, write_synthetic_gguf_with_rope_freqs, write_synthetic_hf_dir, D_FF, D_MODEL, HEAD_DIM, N_HEADS, N_KV_HEADS, N_LAYERS, VOCAB};
+    use checkpoint::gguf::GgufValue;
+    use checkpoint::gguf_write::{write, TensorOut};
+
+    fn seq(base: f32, n: usize) -> Vec<f32> {
+        (0..n).map(|i| base + i as f32).collect()
+    }
 
     /// What a resident serving a GGUF builds: `open_checkpoint` reads it under
     /// brain's names at the shape its KV metadata declares, and it decodes
@@ -643,7 +731,7 @@ mod tests {
                 } else {
                     n.to_string()
                 };
-                classify(&n, false)
+                classify(&n, &tie_cfg(false), false)
             }
         };
 
@@ -678,12 +766,12 @@ mod tests {
     /// the import loudly rather than write a checkpoint missing a projection.
     #[test]
     fn an_unrecognized_tensor_is_refused_by_name() {
-        let err = classify("blk.0.attn_wibble.weight", false).unwrap_err();
+        let err = classify("blk.0.attn_wibble.weight", &tie_cfg(false), false).unwrap_err();
         assert!(err.contains("attn_wibble"), "{err}");
         // ...while the two real drops are decisions with stated reasons.
-        assert!(matches!(classify("rope_freqs.weight", false), Ok(Mapped::Dropped(_))));
-        assert!(matches!(classify("output.weight", true), Ok(Mapped::Dropped(_))));
-        assert!(matches!(classify("output.weight", false), Ok(Mapped::Simple(_))));
+        assert!(matches!(classify("rope_freqs.weight", &tie_cfg(false), false), Ok(Mapped::Dropped(_))));
+        assert!(matches!(classify("output.weight", &tie_cfg(true), false), Ok(Mapped::Dropped(_))));
+        assert!(matches!(classify("output.weight", &tie_cfg(false), false), Ok(Mapped::Simple(_))));
     }
 
     /// Two-way coverage, second direction, and the drop accounting: every
@@ -693,13 +781,15 @@ mod tests {
     fn import_covers_every_planned_tensor_and_counts_the_rope_freqs_drop() {
         let dir = scratch("coverage");
         let gguf = dir.join("m.gguf").to_string_lossy().into_owned();
-        write_synthetic_gguf(&gguf, false);
+        write_synthetic_gguf_with_rope_freqs(&gguf, &[1.0, 2.0]);
         let out = dir.join("out.safetensors").to_string_lossy().into_owned();
 
         let stats = import_gguf(&gguf, &out, None).unwrap();
         let cfg = config_from_gguf(&MmapGguf::open(&gguf).unwrap()).unwrap();
         assert_eq!(stats.written, cfg.param_list().len());
         assert_eq!(stats.dropped.get(DROP_ROPE_FREQS), Some(&1), "the dropped tensor must be on the record: {stats}");
+        let written = QwenConfig::from_json_checked(&checkpoint::read_config(&out)).unwrap();
+        assert_eq!(written.rope_scaling, cfg.rope_scaling, "the factors travel in the written config");
         assert_eq!(stats.source_tensors, stats.written + 1);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -717,7 +807,7 @@ mod tests {
         let mut cfg = config_from_gguf(&mg).unwrap();
         cfg.n_layers = 1; // the file has 2
 
-        let err = gguf::import::dry_run(&mg, &cfg.param_list(), &|n| classify(n, false), "qwen3").unwrap_err();
+        let err = gguf::import::dry_run(&mg, &cfg.param_list(), &|n| classify(n, &tie_cfg(false), false), "qwen3").unwrap_err();
         assert!(err.contains("blocks.1."), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -748,5 +838,123 @@ mod tests {
 
         // A GGUF that is not a qwen3 is refused by name, not silently defaulted.
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// llama.cpp's `LlamaModel.permute` (`conversion/llama.py`), transcribed:
+    /// `w.reshape(n_head, 2, rows / n_head / 2, cols).swapaxes(1, 2).reshape(rows, cols)`.
+    /// A config whose only relevant field here is its tying.
+    fn tie_cfg(tie: bool) -> QwenConfig {
+        QwenConfig { tie_embeddings: tie, ..QwenConfig::tiny() }
+    }
+
+    fn llamacpp_permute(w: &[f32], rows: usize, cols: usize, n_head: usize) -> Vec<f32> {
+        let half = rows / n_head / 2;
+        let mut out = vec![0.0; w.len()];
+        for h in 0..n_head {
+            for two in 0..2 {
+                for i in 0..half {
+                    let src = (h * 2 + two) * half + i; // [h][two][i]
+                    let dst = (h * half + i) * 2 + two; // [h][i][two]
+                    out[dst * cols..(dst + 1) * cols].copy_from_slice(&w[src * cols..(src + 1) * cols]);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn unpermute_inverts_llamacpp_permute() {
+        for (n_head, head_dim, cols) in [(2usize, 4usize, 3usize), (4, 8, 5), (1, 2, 1)] {
+            let rows = n_head * head_dim;
+            let hf: Vec<f32> = (0..rows * cols).map(|i| i as f32).collect();
+            let gguf = llamacpp_permute(&hf, rows, cols, n_head);
+            let order = llama_unpermute_order(n_head, head_dim);
+            let back: Vec<f32> = order.iter().flat_map(|&o| gguf[o as usize * cols..(o as usize + 1) * cols].to_vec()).collect();
+            assert_eq!(back, hf, "n_head {n_head} head_dim {head_dim}");
+        }
+    }
+
+    /// A llama-architecture GGUF (q/k stored permuted, no QK-norm, linear
+    /// RoPE scaling in its KV) reads back as the checkpoint it was converted
+    /// from, under brain's names and a Llama config.
+    #[test]
+    fn a_llama_gguf_reads_as_the_checkpoint_it_was_converted_from() {
+        use checkpoint::TensorSource;
+        let dir = scratch("llama-gguf");
+        let path = dir.join("m.gguf");
+        let path = path.to_str().unwrap();
+        let (hq, hkv) = (N_HEADS * HEAD_DIM, N_KV_HEADS * HEAD_DIM);
+        let mut hf: Vec<(String, String, Vec<usize>, Vec<f32>)> = vec![
+            ("token_embd.weight".into(), "tok.weight".into(), vec![VOCAB, D_MODEL], seq(1_000.0, VOCAB * D_MODEL)),
+            ("output_norm.weight".into(), "norm.weight".into(), vec![D_MODEL], seq(2_000.0, D_MODEL)),
+            ("output.weight".into(), "lm_head.weight".into(), vec![VOCAB, D_MODEL], seq(3_000.0, VOCAB * D_MODEL)),
+        ];
+        for l in 0..N_LAYERS {
+            let b = 10_000.0 * (l + 1) as f32;
+            let t = |g: &str, br: &str, shape: Vec<usize>, base: f32| (format!("blk.{l}.{g}"), format!("blocks.{l}.{br}"), shape.clone(), seq(base, shape.iter().product()));
+            hf.extend([
+                t("attn_norm.weight", "ln1.weight", vec![D_MODEL], b),
+                t("attn_q.weight", "attn.wq.weight", vec![hq, D_MODEL], b + 100.0),
+                t("attn_k.weight", "attn.wk.weight", vec![hkv, D_MODEL], b + 200.0),
+                t("attn_v.weight", "attn.wv.weight", vec![hkv, D_MODEL], b + 300.0),
+                t("attn_output.weight", "attn.wo.weight", vec![D_MODEL, hq], b + 400.0),
+                t("ffn_norm.weight", "ln2.weight", vec![D_MODEL], b + 500.0),
+                t("ffn_gate.weight", "mlp.gate.weight", vec![D_FF, D_MODEL], b + 600.0),
+                t("ffn_up.weight", "mlp.up.weight", vec![D_FF, D_MODEL], b + 700.0),
+                t("ffn_down.weight", "mlp.down.weight", vec![D_MODEL, D_FF], b + 800.0),
+            ]);
+        }
+        let tensors: Vec<TensorOut> = hf
+            .iter()
+            .map(|(g, _, shape, v)| {
+                let stored = if g.ends_with("attn_q.weight") {
+                    llamacpp_permute(v, hq, D_MODEL, N_HEADS)
+                } else if g.ends_with("attn_k.weight") {
+                    llamacpp_permute(v, hkv, D_MODEL, N_KV_HEADS)
+                } else {
+                    v.clone()
+                };
+                TensorOut { name: g.clone(), shape: shape.clone(), ty: 0, data: stored.iter().flat_map(|x| x.to_le_bytes()).collect() }
+            })
+            .collect();
+        let kv = |k: &str, v: GgufValue| (k.to_string(), v);
+        let kvs = vec![
+            kv("general.architecture", GgufValue::String("llama".into())),
+            kv("llama.block_count", GgufValue::U32(N_LAYERS as u32)),
+            kv("llama.embedding_length", GgufValue::U32(D_MODEL as u32)),
+            kv("llama.feed_forward_length", GgufValue::U32(D_FF as u32)),
+            kv("llama.attention.head_count", GgufValue::U32(N_HEADS as u32)),
+            kv("llama.attention.head_count_kv", GgufValue::U32(N_KV_HEADS as u32)),
+            kv("llama.rope.dimension_count", GgufValue::U32(HEAD_DIM as u32)),
+            kv("llama.attention.layer_norm_rms_epsilon", GgufValue::F32(1e-5)),
+            kv("llama.rope.freq_base", GgufValue::F32(100_000.0)),
+            kv("llama.rope.scaling.type", GgufValue::String("linear".into())),
+            kv("llama.rope.scaling.factor", GgufValue::F32(4.0)),
+            kv("llama.context_length", GgufValue::U32(16384)),
+        ];
+        write(path, &kvs, &tensors, 32).unwrap();
+
+        let (cfg, src) = open_source(path).expect("a llama gguf opens");
+        assert!(!cfg.qk_norm && !cfg.attn_bias && !cfg.tie_embeddings);
+        assert_eq!((cfg.head_dim, cfg.rms_eps, cfg.rope_theta), (HEAD_DIM as u32, 1e-5, 100_000.0));
+        assert_eq!(cfg.rope_scaling, Some(model::rope_scaling::RopeScaling::Linear { factor: 4.0 }));
+        for (_, brain, _, want) in &hf {
+            let mut got = Vec::new();
+            assert!(src.with_tensor(brain, &mut |d| got = d.to_vec()), "{brain} missing");
+            assert_eq!(&got, want, "{brain}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// llama.cpp stores a llama3 RoPE scaling as `rope_freqs.weight`, a
+    /// divisor per frequency; it is the config's scaling, never dropped.
+    #[test]
+    fn rope_freqs_is_the_configs_rope_scaling() {
+        let dir = scratch("rope-freqs");
+        let path = dir.join("m.gguf");
+        write_synthetic_gguf_with_rope_freqs(path.to_str().unwrap(), &[1.0, 2.5]);
+        let cfg = config_from_gguf(&MmapGguf::open(path.to_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(cfg.rope_scaling, Some(model::rope_scaling::RopeScaling::Factors(vec![1.0, 2.5])));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

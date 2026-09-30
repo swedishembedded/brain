@@ -673,9 +673,6 @@ impl QwenResident {
             return explicit.max(1);
         }
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
-        if path.to_ascii_lowercase().ends_with(".gguf") {
-            return HISTORICAL_DEFAULT; // the Legacy non-paged decode path - no pool to auto-size
-        }
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
         let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { weights_fp32_bytes(&checkpoint_cfg) };
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
@@ -909,13 +906,8 @@ impl ResidentModel for QwenResident {
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
-        // A .gguf checkpoint uses the Legacy (non-paged) decode path -- no KV
-        // pool to add. The header peek is cheap (WeightReader never loads
-        // tensors); any failure here just defers to the real, specific error
+        // Any failure here just defers to the real, specific error
         // `activate()` raises -- `estimate()` must never itself hard-fail.
-        if self.path.to_ascii_lowercase().ends_with(".gguf") {
-            return cost;
-        }
         let Ok(cfg) = qwen3::checkpoint_config(&self.path) else {
             return cost;
         };
@@ -986,23 +978,10 @@ impl ResidentModel for QwenResident {
         let stage_t0 = std::time::Instant::now();
         residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
         let ctx = self.ctx;
-        // `qwen3::serve::Engine` (the paged, continuous-batching serving engine)
-        // holds f32 or int8 weights, so a quantized GGUF would be expanded to
-        // build one; a `.gguf` keeps the single-sequence decode-only path.
-        // Every other checkpoint - a Hugging Face directory or a brain file,
-        // with or without a named LoRA adapter - gets the batched engine.
-        let engine = on_device(device, || -> Result<QwenEngineKind, String> {
-            if is_gguf {
-                let (cfg, src) = qwen3::open_checkpoint(&self.path)?;
-                let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-                let model = qwen3::model::Qwen::new_shard_dt_decode(cfg, ctx, &*src, shard, qwen3::Dtype::F32);
-                // Read the (tied-embedding) LM head ONCE here, not per request:
-                // the fix `generate_kv_stream_with_head`'s doc comment asks for
-                // (594 MiB device->host re-read at real vocab/d_model, otherwise
-                // paid on every single chat request).
-                let head = model.read_weight(model.cfg.head_weight());
-                return Ok(QwenEngineKind::Legacy { model: Box::new(model), head });
-            }
+        // Every checkpoint - a Hugging Face directory, a GGUF or a brain file,
+        // with or without a named LoRA adapter - gets the paged,
+        // continuous-batching engine, which holds f32 or int8 weights.
+        let engine = on_device(device, || -> Result<Box<model::serve::Scheduler<qwen3::serve::Engine>>, String> {
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
             // the two cannot silently drift apart.
@@ -1120,25 +1099,11 @@ impl ResidentModel for QwenResident {
             // host memory, and a box that has none to spare must not be made
             // to.
             eng.set_kv_offload_bytes(self.kv_offload_bytes);
-            Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
+            Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
         Ok(Box::new(QwenInstance { tok, format, stop, engine }))
     }
-}
-
-/// Which serving path this instance drives - see [`QwenResident::activate`]'s
-/// `.gguf` note for why both still exist.
-enum QwenEngineKind {
-    /// The original single-sequence KV-cache decode path (`Qwen::
-    /// from_reader_decode` + `generate_kv_stream_with_head`) -- GGUF only.
-    /// `model` boxed: `qwen3::model::Qwen` is ~1.6 KB by value, which would
-    /// otherwise size every `QwenEngineKind` (even a `Batched` one) to it.
-    Legacy { model: Box<qwen3::model::Qwen>, head: Vec<f32> },
-    /// The paged, continuous-batching serving engine (this plan's W2/W3) --
-    /// every safetensors checkpoint, the common case. Boxed for the same
-    /// reason as `Legacy.model`: `Scheduler<Engine>` is large by value too.
-    Batched(Box<model::serve::Scheduler<qwen3::serve::Engine>>),
 }
 
 struct QwenInstance {
@@ -1147,7 +1112,9 @@ struct QwenInstance {
     format: ChatFormat,
     /// The ids that end a generation (`data::generation::stop_ids`).
     stop: Vec<u32>,
-    engine: QwenEngineKind,
+    /// The paged, continuous-batching serving engine, whatever the
+    /// checkpoint's format. Boxed: `Scheduler<Engine>` is large by value.
+    engine: Box<model::serve::Scheduler<qwen3::serve::Engine>>,
 }
 
 impl Instance for QwenInstance {
@@ -1155,10 +1122,7 @@ impl Instance for QwenInstance {
         self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
-    /// `Legacy` (GGUF): the original sequential loop, one full generation per
-    /// invocation, unchanged from before this rewiring.
-    ///
-    /// `Batched`: every invocation in `invs` is submitted into the SAME
+    /// Every invocation in `invs` is submitted into the SAME
     /// persistent `Scheduler` (built once at `activate`, so the paged KV pool
     /// and prefix cache are shared and reused across calls, not rebuilt) and
     /// driven to completion together - real continuous batching for
@@ -1166,64 +1130,21 @@ impl Instance for QwenInstance {
     /// work into an ALREADY-running call is a separate, known gap this does
     /// not yet do).
     fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        match &mut self.engine {
-            QwenEngineKind::Legacy { model, head } => invs
-                .iter()
-                .enumerate()
-                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, &self.format, &self.stop, inv, &mut |p| progress(i, p)))
-                .collect(),
-            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, &self.format, &self.stop, invs, progress),
-        }
+        run_batch_scheduled(&mut self.engine, &self.tok, &self.format, &self.stop, invs, progress)
     }
 
-    /// `Batched`'s prefix-cache effectiveness, surfaced through
-    /// `Executor::stats().metrics` - reachable from HTTP/D-Bus for the first
-    /// time (previously only observable from `brain perf`'s in-process
-    /// `PagedLlmTarget`, which bypasses the served path entirely). `Legacy`
-    /// (GGUF) has no prefix cache, so it reports nothing extra.
+    /// The prefix cache's effectiveness, surfaced through
+    /// `Executor::stats().metrics` (reachable from HTTP/D-Bus).
     fn metrics(&self) -> Vec<(String, serde_json::Value)> {
-        match &self.engine {
-            QwenEngineKind::Legacy { .. } => Vec::new(),
-            QwenEngineKind::Batched(sched) => {
-                let (hit, looked, cached) = sched.prefix_stats();
-                let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
-                vec![
-                    ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
-                    ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
-                    ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
-                    ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
-                ]
-            }
-        }
+        let (hit, looked, cached) = self.engine.prefix_stats();
+        let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
+        vec![
+            ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
+            ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
+            ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
+            ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
+        ]
     }
-}
-
-/// One full generation on the legacy single-sequence decode path - the exact
-/// logic `QwenInstance::run` had before this rewiring, extracted so
-/// `run_batch`'s sequential loop and the (unlikely, but possible) direct
-/// `run` call share one implementation.
-fn run_one_legacy(
-    model: &qwen3::model::Qwen,
-    head: &[f32],
-    tok: &data::qwen_tokenizer::QwenBpe,
-    format: &ChatFormat,
-    stop: &[u32],
-    inv: &Invocation,
-    progress: &mut dyn FnMut(Progress),
-) -> ActionResult {
-    let req = parse_request_as(tok, format, inv)?;
-    let mut rng = Rng::new(req.seed);
-    let total = req.max_new as u32;
-    progress(Progress::step(0, total, "generating"));
-
-    let mut seq = SeqState::new(&req, inv.cancel.clone());
-    let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
-    let gen = qwen3::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, stop, &mut rng, head, &mut |_i, t| {
-        ids_out.push(t);
-        !seq.advance(tok, &ids_out, progress)
-    });
-
-    Ok(seq.finish(tok, &gen, progress))
 }
 
 /// Drive every invocation in `invs` to completion on the SAME persistent

@@ -57,6 +57,10 @@ pub enum Mapped {
     /// checkpoint holds. See [`ElemOp`] - there is exactly one such tensor
     /// family today and it is not optional.
     Transformed { into: String, op: ElemOp },
+    /// A 1:1 rename whose ROWS are reordered: the tensor as `order.len()`
+    /// equal rows, destination row `i` taken from source row `order[i]` -
+    /// llama.cpp's per-head q/k interleave on a llama GGUF, undone.
+    Permuted { into: String, order: Vec<u32> },
     /// Not imported. The `&'static str` is the reason, counted and reported by
     /// [`ImportStats`] - "dropped" must always be a decision on the record.
     Dropped(&'static str),
@@ -316,6 +320,18 @@ fn run<S: Sink>(
             }
             Mapped::Simple(brain_name) => {
                 put(sink, &mut written, &brain_name, numel, &data)?;
+                stats.written += 1;
+            }
+            Mapped::Permuted { into, order } => {
+                let rows = order.len();
+                if rows == 0 || numel % rows != 0 || order.iter().any(|&o| o as usize >= rows) {
+                    return Err(format!("{label} import: {name}: a {rows}-row order does not tile {numel} elements"));
+                }
+                if S::NEEDS_DATA {
+                    let re = numel / rows;
+                    data = order.iter().flat_map(|&o| data[o as usize * re..(o as usize + 1) * re].to_vec()).collect();
+                }
+                put(sink, &mut written, &into, numel, &data)?;
                 stats.written += 1;
             }
             Mapped::Split { into } => {
