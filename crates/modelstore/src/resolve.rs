@@ -20,7 +20,7 @@
 //! your team needs deterministic, never-silently-guessing model assembly, you
 //! can procure our services by emailing info@swedishembedded.com.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use capability::Assembly;
@@ -637,13 +637,89 @@ pub fn vendor_dir(path: &Path, root: &Path) -> Option<PathBuf> {
     rel.components().next().map(|c| root.join(c))
 }
 
-/// A tokenizer's own vocabulary size: the BPE `vocab` table plus
-/// `added_tokens` - real content, not the file's name.
-pub fn tokenizer_vocab_count(bytes: &[u8]) -> Option<usize> {
-    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let base = v.get("model")?.get("vocab")?.as_object()?.len();
-    let added = v.get("added_tokens").and_then(|a| a.as_array()).map_or(0, Vec::len);
-    Some(base + added)
+/// Resolving the store asks the same few files the same question once per
+/// candidate combination - thousands of times for a store with many models.
+/// Each answer is remembered against the file's length and modification
+/// time, so an edited file is read again; the table is bounded by
+/// [`FILE_MEMO_CAP`] entries and starts over when full.
+fn file_memo(table: &'static std::sync::OnceLock<std::sync::Mutex<FileMemo>>, file: &Path, answer: impl FnOnce() -> Option<usize>) -> Option<usize> {
+    let meta = std::fs::metadata(file).ok()?;
+    let key = (file.to_path_buf(), meta.len(), meta.modified().ok());
+    let table = table.get_or_init(Default::default);
+    if let Some(hit) = table.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return *hit;
+    }
+    let value = answer();
+    let mut t = table.lock().unwrap_or_else(|p| p.into_inner());
+    if t.len() >= FILE_MEMO_CAP {
+        t.clear();
+    }
+    t.insert(key, value);
+    value
+}
+
+type FileMemo = HashMap<(PathBuf, u64, Option<std::time::SystemTime>), Option<usize>>;
+
+/// How many files' answers [`file_memo`] keeps before starting over.
+const FILE_MEMO_CAP: usize = 4096;
+
+/// The vocabulary size of the tokenizer at `path`: a `tokenizer.json`'s BPE
+/// `vocab` table plus `added_tokens`, or the token list a GGUF embeds (read
+/// from its mapped header, never the whole file) - real content, not the
+/// file's name. `None` for anything else, including a `tokenizer.json`
+/// without a BPE-shaped (object) vocabulary.
+pub fn tokenizer_vocab_count(path: &Path) -> Option<usize> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<FileMemo>> = std::sync::OnceLock::new();
+    if path.extension().is_some_and(|e| e == "gguf") {
+        return file_memo(&MEMO, path, || gguf_token_count(path));
+    }
+    file_memo(&MEMO, path, || count_tokenizer_vocab(&std::fs::read(path).ok()?))
+}
+
+/// The length of the token list a GGUF embeds.
+fn gguf_token_count(path: &Path) -> Option<usize> {
+    let g = checkpoint::gguf::MmapGguf::open(&path.to_string_lossy()).ok()?;
+    g.kv().get("tokenizer.ggml.tokens").and_then(|v| if let checkpoint::gguf::GgufValue::Array(a) = v { Some(a.len()) } else { None })
+}
+
+/// [`tokenizer_vocab_count`] of a file's bytes, counted without building
+/// the document: a real `tokenizer.json` is several megabytes.
+fn count_tokenizer_vocab(bytes: &[u8]) -> Option<usize> {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    /// The number of entries in a JSON object, skipping every key and value.
+    struct Entries(usize);
+    impl<'de> serde::Deserialize<'de> for Entries {
+        fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Count;
+            impl<'de> Visitor<'de> for Count {
+                type Value = Entries;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("a vocabulary object")
+                }
+                fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Entries, A::Error> {
+                    let mut n = 0;
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+                        n += 1;
+                    }
+                    Ok(Entries(n))
+                }
+            }
+            d.deserialize_map(Count)
+        }
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        vocab: Entries,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tokenizer {
+        model: Model,
+        #[serde(default)]
+        added_tokens: Option<Vec<IgnoredAny>>,
+    }
+    let t: Tokenizer = serde_json::from_slice(bytes).ok()?;
+    Some(t.model.vocab.0 + t.added_tokens.map_or(0, |a| a.len()))
 }
 
 /// The embedding table row count a checkpoint declares: an HF directory's
@@ -651,9 +727,15 @@ pub fn tokenizer_vocab_count(bytes: &[u8]) -> Option<usize> {
 /// length (the real embedded vocab, present on every real release regardless
 /// of whether a separate `vocab_size` KV is).
 pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
-    if path.extension().is_some_and(|e| e == "gguf") {
-        let g = checkpoint::gguf::MmapGguf::open(&path.to_string_lossy()).ok()?;
-        g.kv().get("tokenizer.ggml.tokens").and_then(|v| if let checkpoint::gguf::GgufValue::Array(a) = v { Some(a.len()) } else { None })
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<FileMemo>> = std::sync::OnceLock::new();
+    let is_gguf = path.extension().is_some_and(|e| e == "gguf");
+    let read = if is_gguf { path.to_path_buf() } else { path.join("config.json") };
+    file_memo(&MEMO, &read, || declared_vocab_size(path, is_gguf))
+}
+
+fn declared_vocab_size(path: &Path, is_gguf: bool) -> Option<usize> {
+    if is_gguf {
+        gguf_token_count(path)
     } else {
         let bytes = std::fs::read(path.join("config.json")).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -689,12 +771,13 @@ pub fn classify_tokenizer_role(records: &[ArtifactRecord], root: &Path, role: &s
         if !rec.usable() || rec.kind != crate::inventory::ArtifactKind::TokenizerJson {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&rec.path) else { continue };
-        let Some(tok_count) = tokenizer_vocab_count(&bytes) else { continue };
+        // The vendor first: reading and sizing a tokenizer no candidate
+        // shares a vendor with is wasted work on every other model's files.
         let Some(vendor) = vendor_dir(&rec.path, root) else { continue };
         if !vendor_dirs.contains(&vendor) {
             continue;
         }
+        let Some(tok_count) = tokenizer_vocab_count(&rec.path) else { continue };
         let compatible = dependency_candidates.iter().filter(|p| vendor_dir(p, root).as_deref() == Some(vendor.as_path())).any(|p| checkpoint_vocab_size(p).is_some_and(|v| vocab_is_compatible(tok_count, v)));
         if compatible {
             out.push((idx, role.to_string(), Confidence::Declared));
@@ -752,6 +835,32 @@ pub fn classify_compound_manifest(records: &[ArtifactRecord], root: &Path, famil
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tokenizers_vocabulary_is_its_bpe_table_plus_its_added_tokens() {
+        let bpe = br#"{"added_tokens":[{"id":3,"content":"<s>"}],"model":{"type":"BPE","vocab":{"a":0,"b":1,"ab":2},"merges":["a b"]}}"#;
+        assert_eq!(count_tokenizer_vocab(bpe), Some(4));
+        assert_eq!(count_tokenizer_vocab(br#"{"model":{"vocab":{"a":0}}}"#), Some(1), "no added_tokens");
+        assert_eq!(count_tokenizer_vocab(br#"{"added_tokens":null,"model":{"vocab":{"a":0}}}"#), Some(1));
+        // A Unigram vocabulary is a list, not a table: not this signal.
+        assert_eq!(count_tokenizer_vocab(br#"{"model":{"type":"Unigram","vocab":[["a",-1.0]]}}"#), None);
+        assert_eq!(count_tokenizer_vocab(b"not json"), None);
+    }
+
+    /// A remembered answer is the file's, not the path's: rewriting the
+    /// tokenizer changes it.
+    #[test]
+    fn a_rewritten_tokenizer_is_sized_again() {
+        let dir = std::env::temp_dir().join(format!("brain-vocab-memo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokenizer.json");
+        std::fs::write(&path, br#"{"model":{"vocab":{"a":0}}}"#).unwrap();
+        assert_eq!(tokenizer_vocab_count(&path), Some(1));
+        assert_eq!(tokenizer_vocab_count(&path), Some(1));
+        std::fs::write(&path, br#"{"model":{"vocab":{"a":0,"b":1,"c":2}}}"#).unwrap();
+        assert_eq!(tokenizer_vocab_count(&path), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn rec(path: &str) -> ArtifactRecord {
         ArtifactRecord { path: PathBuf::from(path), size: 1, mtime_ns: 0, kind: crate::inventory::ArtifactKind::Opaque, completeness: Completeness::Complete }

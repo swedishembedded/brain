@@ -130,8 +130,7 @@ fn classify_tokenizer(records: &[ArtifactRecord], root: &Path, te_candidates: &[
         if !rec.usable() || rec.kind != ArtifactKind::TokenizerJson {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&rec.path) else { continue };
-        let Some(tok_count) = tokenizer_vocab_count(&bytes) else { continue };
+        let Some(tok_count) = tokenizer_vocab_count(&rec.path) else { continue };
         let Some(vendor) = vendor_dir(&rec.path, root) else { continue };
         if !vendor_dirs.contains(&vendor) {
             continue;

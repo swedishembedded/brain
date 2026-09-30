@@ -135,8 +135,7 @@ impl ArchSpec for Qwen3Spec {
         // safetensors checkpoint's vocab lives in its OWN header, not
         // something `checkpoint_vocab_size` can read from a bare file path.
         let Some(checkpoint_vocab) = brain_modelstore::resolve::checkpoint_vocab_size(weights) else { return Ok(()) };
-        let Ok(bytes) = std::fs::read(tokenizer) else { return Ok(()) };
-        let Some(tok_count) = brain_modelstore::resolve::tokenizer_vocab_count(&bytes) else { return Ok(()) };
+        let Some(tok_count) = brain_modelstore::resolve::tokenizer_vocab_count(tokenizer) else { return Ok(()) };
         if !brain_modelstore::resolve::vocab_is_compatible(tok_count, checkpoint_vocab) {
             return Err(format!(
                 "qwen3 validate: tokenizer vocab ({tok_count}) is not compatible with {}'s embedded vocab ({checkpoint_vocab}) - weights={}, tokenizer={}",
