@@ -98,6 +98,23 @@ pub fn resolve_structured(models_dir: Option<&Path>, arch: &str, spec: &dyn Arch
     Ok(brain_modelstore::resolve::resolve(arch, &records, &specs, overrides))
 }
 
+/// [`resolve_structured`] for one named model: only what `reference`'s own
+/// repo directory holds is considered, so a store with several checkpoints
+/// of `arch` resolves the one asked for - never an ambiguity over, or a pick
+/// of, another repo's. A reserved vendor (`local/...`: files dropped into the
+/// store with no upstream repo) names no directory, so it resolves over the
+/// whole store.
+pub fn resolve_reference(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, reference: &brain_modelref::ModelRef, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
+    let root = models_dir.ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
+    let mut records = brain_modelstore::inventory::scan(root);
+    if !reference.is_reserved() {
+        let repo = brain_modelstore::Store::new(root).repo_dir(reference);
+        records.retain(|r| r.path.starts_with(&repo));
+    }
+    let specs: [&dyn ArchSpec; 1] = [spec];
+    Ok(brain_modelstore::resolve::resolve_under(root, arch, &records, &specs, overrides))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

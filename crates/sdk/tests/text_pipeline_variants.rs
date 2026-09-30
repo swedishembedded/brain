@@ -16,9 +16,14 @@ use common::{tiny_tokenizer, PROMPT_WITHIN_VOCAB};
 /// `cfg` as a Llama checkpoint directory: HF tensor names, a
 /// `LlamaForCausalLM` config, no QK-norm, an untied head.
 fn tiny_llama_dir(tag: &str, cfg: qwen3::QwenConfig) -> std::path::PathBuf {
-    let cfg = qwen3::QwenConfig { qk_norm: false, tie_embeddings: false, ..cfg };
     let dir = common::scratch_path(tag, "d");
-    std::fs::create_dir_all(&dir).unwrap();
+    write_tiny_llama(&dir, tag, cfg);
+    dir
+}
+
+fn write_tiny_llama(dir: &std::path::Path, tag: &str, cfg: qwen3::QwenConfig) {
+    let cfg = qwen3::QwenConfig { qk_norm: false, tie_embeddings: false, ..cfg };
+    std::fs::create_dir_all(dir).unwrap();
     let names = qwen3::hf::HfNames::CAUSAL_LM;
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
@@ -38,7 +43,6 @@ fn tiny_llama_dir(tag: &str, cfg: qwen3::QwenConfig) -> std::path::PathBuf {
     });
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
     std::fs::copy(&*tiny_tokenizer(tag), dir.join("tokenizer.json")).unwrap();
-    dir
 }
 
 #[test]
@@ -65,12 +69,30 @@ fn the_precision_asked_for_is_the_one_built() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A hub id names one repo: with two checkpoints of the same architecture in
+/// the store, the one asked for is the one loaded, never an ambiguity over
+/// (or a silent pick of) the other.
+#[test]
+fn a_hub_id_loads_that_repo_and_no_other() {
+    let _serial = brain_testutil::env_lock();
+    let root = common::scratch_path("text-store-two", "d");
+    write_tiny_llama(&root.join("acme").join("one"), "text-store-one", qwen3::QwenConfig::tiny());
+    write_tiny_llama(&root.join("acme").join("two"), "text-store-two", qwen3::QwenConfig::tiny());
+    std::env::set_var("BRAIN_MODELS_DIR", &root);
+    let loaded = brain::TextGenerationPipeline::builder("acme/two").download_policy(brain::DownloadPolicy::Offline).load();
+    std::env::remove_var("BRAIN_MODELS_DIR");
+    let _ = std::fs::remove_dir_all(&root);
+    let pipe = loaded.expect("acme/two resolves on its own");
+    assert!(pipe.identity().base.path.ends_with("acme/two"), "{:?}", pipe.identity());
+}
+
 #[test]
 fn deepseek_r1_by_its_hub_id_reasons_and_stops_on_its_own_end_token() {
     let Some(_) = brain_testutil::model_dir("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B").filter(|d| std::path::Path::new(d).join("config.json").exists()) else {
         brain_testutil::skip("DeepSeek-R1-Distill-Qwen-1.5B not downloaded");
         return;
     };
+    let _serial = brain_testutil::env_lock();
     let pipe = brain::TextGenerationPipeline::builder("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
         .download_policy(brain::DownloadPolicy::Offline)
         .capacity(2048)

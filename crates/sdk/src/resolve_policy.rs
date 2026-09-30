@@ -49,11 +49,12 @@ fn fetch(reference: &brain_modelref::ModelRef, model_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve `model_id` against `spec` (named `arch`, the same string every
-/// caller already passes `resolve_structured` today), honoring
+/// Resolve `model_id` against `spec` (named `arch`), over what `model_id`'s
+/// own repo directory holds (`loader::resolver::resolve_reference`: another
+/// repo of the same architecture is never a candidate), honoring
 /// `download_policy`:
 ///
-/// - `Offline`: `resolve_structured` only, ONCE - a `Missing` result returns
+/// - `Offline`: one resolve only - a `Missing` result returns
 ///   immediately as [`Error::Missing`], never a fetch attempt.
 /// - `IfMissing` (the default every existing caller already had): the same
 ///   resolve-first order, and only on `Missing` does this fetch (skipped if
@@ -74,7 +75,7 @@ pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &st
     // The SDK takes no models-directory argument here, so the store is the
     // resolver's documented default (`BRAIN_MODELS_DIR`, then XDG/HOME).
     let models_dir = loader::model_dir::resolve(None);
-    match loader::resolve_structured(models_dir.as_deref(), arch, spec, overrides).map_err(Error::Backend)? {
+    match loader::resolver::resolve_reference(models_dir.as_deref(), arch, spec, &reference, overrides).map_err(Error::Backend)? {
         Resolution::Resolved(a) => Ok(*a),
         Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),
         Resolution::Missing(m) => {
@@ -86,7 +87,7 @@ pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &st
             if store.local(&reference).is_none() {
                 fetch(&reference, model_id)?;
             }
-            match loader::resolve_structured(models_dir.as_deref(), arch, spec, overrides).map_err(Error::Backend)? {
+            match loader::resolver::resolve_reference(models_dir.as_deref(), arch, spec, &reference, overrides).map_err(Error::Backend)? {
                 Resolution::Resolved(a) => Ok(*a),
                 Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),
                 Resolution::Missing(m) => Err(Error::Missing(m)),

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use brain_modelstore::resolve::{resolve, ArchSpec, Resolution};
+use brain_modelstore::resolve::{resolve_under, ArchSpec, Resolution};
 
 const TEXT: &[&str] = &[
     "DeepSeek-R1-Distill-Qwen-1.5B",
@@ -44,11 +44,9 @@ fn every_deepseek_text_checkpoint_resolves_to_its_own_id() {
             brain_testutil::skip(&format!("{repo} not downloaded"));
             continue;
         }
-        // This checkpoint's own records, plus one other vendor's so the
-        // resolver's root inference lands on the store rather than the repo.
-        let mut records: Vec<_> = all.iter().filter(|r| r.path.starts_with(&dir)).cloned().collect();
-        records.extend(all.iter().find(|r| !r.path.starts_with(root.join("deepseek-ai"))).cloned());
-        match resolve("qwen3", &records, &specs, &BTreeMap::new()) {
+        // This checkpoint's own records, resolved under the store root.
+        let records: Vec<_> = all.iter().filter(|r| r.path.starts_with(&dir)).cloned().collect();
+        match resolve_under(&root, "qwen3", &records, &specs, &BTreeMap::new()) {
             Resolution::Resolved(a) => {
                 assert_eq!(a.id, format!("deepseek-ai/{repo}"));
                 assert_eq!(a.roles["weights"], dir, "{repo}");

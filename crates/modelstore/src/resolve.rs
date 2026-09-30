@@ -399,10 +399,17 @@ fn role_ambiguity(spec: &dyn ArchSpec, arch: &str, role: &str, candidates: &[(us
 /// If `specs` names no [`ArchSpec`] for `arch` - a caller error (the wrong
 /// spec list was passed in), not a real resolution outcome.
 pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], overrides: &BTreeMap<String, String>) -> Resolution {
+    resolve_under(&common_root(records), arch, records, specs, overrides)
+}
+
+/// [`resolve`] with the store root given rather than inferred as the
+/// records' common ancestor: for a record set narrowed to one repo, whose
+/// common ancestor is that repo rather than the store, and whose vendor a
+/// spec reads relative to the root.
+pub fn resolve_under(root: &Path, arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], overrides: &BTreeMap<String, String>) -> Resolution {
     let spec = *specs.iter().find(|s| s.arch() == arch).unwrap_or_else(|| panic!("resolve: no ArchSpec registered for arch {arch:?}"));
 
-    let root = common_root(records);
-    let classifications = spec.classify(records, &root);
+    let classifications = spec.classify(records, root);
     let mut by_role: BTreeMap<&str, Vec<(usize, Confidence)>> = BTreeMap::new();
     for (idx, role, conf) in &classifications {
         by_role.entry(role.as_str()).or_default().push((*idx, *conf));
@@ -459,7 +466,7 @@ pub fn resolve(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], 
     let missing: Vec<MissingRole> = per_role
         .iter()
         .filter(|(role, r)| matches!(r, RoleResult::None) && !optional.contains(role))
-        .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records, &root, &classifications) })
+        .map(|(role, _)| MissingRole { role: role.to_string(), doc: spec.missing_doc(role), near_misses: near_misses(records, root, &classifications) })
         .collect();
     if !missing.is_empty() {
         return Resolution::Missing(Box::new(Missing { arch: arch.to_string(), roles: missing }));
