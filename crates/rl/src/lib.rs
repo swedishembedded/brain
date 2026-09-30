@@ -38,6 +38,7 @@ pub mod document;
 pub mod improve;
 pub mod reader;
 pub mod objective;
+pub mod verify;
 
 /// The `Environment`/`Verifier` reward seam and the promote/reject gate,
 /// re-exported from [`promote`] - their real home since the milestone that
