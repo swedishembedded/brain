@@ -536,6 +536,9 @@ pub struct Qwen {
     // token-embedding gather, and the backward routes those rows' gradient into
     // `d_img_embeds` (read via `read_d_img_embeds`) instead of `tok.weight`.
     mm_splice: Cell<Option<(u32, u32)>>,
+    /// The decoder stops at its final-norm hidden states and a caller's own
+    /// head takes over the loss ([`Self::enable_external_head`]).
+    external_head: Cell<bool>,
     img_embeds: DeviceBuffer,
     d_img_embeds: DeviceBuffer,
 
@@ -1193,6 +1196,7 @@ impl Qwen {
             res,
             layers,
             mm_splice: Cell::new(None),
+            external_head: Cell::new(false),
             img_embeds: st(1),
             d_img_embeds: st(1),
             mrope: Cell::new(false),
@@ -1803,6 +1807,9 @@ impl Qwen {
         }
         let last = c.n_layers as usize;
         s.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
+        if self.external_head.get() {
+            return s;
+        }
         // lm_head. When the whole vocab fits one tile (v0=0, cnt=v - the common
         // case for a small vocab like the TTS Talker's 3072), it is a plain
         // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
@@ -1943,24 +1950,26 @@ impl Qwen {
         // ---- head + final norm ---- (head stage only; other stages receive
         // dres[end] from the next stage and start straight at the layer loop)
         if self.shard.head {
-            // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
-            // then the per-element gradient reads them - O(rows*vocab) instead of
-            // the naive per-element softmax recompute's O(rows*vocab^2). At vocab
-            // 151936 this is the difference between ~10 ms and ~56 s per backward.
-            s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
-            s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
-            // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook` scales the
-            // freshly-computed per-position CE gradient into its own scratch
-            // buffer, and everywhere downstream reads THAT instead of the raw
-            // `d_logits`. An instance that never called `enable_weighted_loss`
-            // never pushes this step and pays no extra dispatch (matches
-            // `model::Batch::LmWeighted`'s doc comment: ordinary training pays
-            // zero extra kernel dispatches).
-            let d_logits_bw: &DeviceBuffer = match &self.weighted_ce {
-                Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
-                None => &self.d_logits,
-            };
-            s.extend(self.head_bwd_steps(d_logits_bw, 0, n));
+            if !self.external_head.get() {
+                // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
+                // then the per-element gradient reads them - O(rows*vocab) instead of
+                // the naive per-element softmax recompute's O(rows*vocab^2). At vocab
+                // 151936 this is the difference between ~10 ms and ~56 s per backward.
+                s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+                s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
+                // `enable_weighted_loss()`-opt-in only: `WeightedCe::hook` scales the
+                // freshly-computed per-position CE gradient into its own scratch
+                // buffer, and everywhere downstream reads THAT instead of the raw
+                // `d_logits`. An instance that never called `enable_weighted_loss`
+                // never pushes this step and pays no extra dispatch (matches
+                // `model::Batch::LmWeighted`'s doc comment: ordinary training pays
+                // zero extra kernel dispatches).
+                let d_logits_bw: &DeviceBuffer = match &self.weighted_ce {
+                    Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
+                    None => &self.d_logits,
+                };
+                s.extend(self.head_bwd_steps(d_logits_bw, 0, n));
+            }
             let last = c.n_layers as usize;
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
@@ -2121,6 +2130,45 @@ impl Qwen {
                 self.bwd_steps = self.build_backward_steps();
             }
         }
+    }
+
+    /// Stop the decoder at its final-norm hidden states and let the caller
+    /// own the head and the loss, as a model with an output head of its own
+    /// needs (Janus-Pro's image-token head). [`Self::forward_hidden`] then
+    /// returns the hidden states and [`Self::backward_hidden`] takes their
+    /// gradient back; the built-in head, its loss and [`Self::forward`]'s
+    /// number are not computed. Rebuilds the forward and backward graphs -
+    /// call once after construction, before the first forward.
+    pub fn enable_external_head(&mut self) {
+        self.external_head.set(true);
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            if !self.bwd_steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+    }
+
+    /// The batch's final-norm hidden states, `[b·t, d_model]` row-major, after
+    /// running the decoder on the batch set by [`Self::set_batch`]
+    /// ([`Self::enable_external_head`] builds only).
+    pub fn forward_hidden(&self) -> Vec<f32> {
+        assert!(self.external_head.get(), "Qwen::forward_hidden: call enable_external_head first");
+        assert!(!self.decode_only, "Qwen::forward_hidden: batched forward called on a decode-only-built model");
+        self.gpu.submit(&[], &self.fwd_steps);
+        self.gpu.read(&self.xn_final, (self.b * self.t) as usize * self.cfg.d_model as usize)
+    }
+
+    /// Backward from the gradient of the loss with respect to the hidden
+    /// states [`Self::forward_hidden`] returned (`[b·t, d_model]`; zero at
+    /// positions the head does not read), accumulating every trainable
+    /// gradient as [`Self::backward`] does.
+    pub fn backward_hidden(&self, d_hidden: &[f32]) {
+        assert!(self.external_head.get(), "Qwen::backward_hidden: call enable_external_head first");
+        assert!(!self.decode_only, "Qwen::backward_hidden: batched backward called on a decode-only-built model");
+        assert_eq!(d_hidden.len(), (self.b * self.t) as usize * self.cfg.d_model as usize, "one gradient row per hidden row");
+        self.gpu.write_f32(&self.d_xn, d_hidden);
+        self.gpu.submit(&[], &self.bwd_steps);
     }
 
     /// Number of spliced image embedding elements (`n_rows·d_model`); 0 if off.
