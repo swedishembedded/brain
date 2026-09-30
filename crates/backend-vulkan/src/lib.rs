@@ -25,8 +25,10 @@
 //! submissions can be outstanding on the device at once per handle. The
 //! Intel-ANV sliced-binding workaround and `BRAIN_PROFILE` device timing
 //! still fence-wait synchronously (see `flush`'s own doc for why). Transient
-//! per-dispatch uniform buffers and descriptor sets are reclaimed once a
-//! batch is confirmed complete, not merely submitted; model storage buffers
+//! per-dispatch uniform buffers and descriptor sets are reclaimed once no
+//! step names them any more - the caller has dropped every clone AND the
+//! batches that ran it are confirmed complete, not merely submitted - so a
+//! kept step (a recorded tape) can be resubmitted indefinitely; model storage buffers
 //! are host-visible and live until the process exits (a one-shot CLI never
 //! frees them mid-run - see the note on `VkOwnedBuffer`).
 //!
@@ -78,9 +80,9 @@ struct VkAccess {
 const MAX_STORAGE_BINDINGS: usize = 8;
 
 /// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y), plus
-/// its storage-buffer read/write set for hazard analysis. All fields are
-/// `Copy`, so `VkStep` is `Clone` like the wgpu backend's.
-#[derive(Clone, Copy)]
+/// its storage-buffer read/write set for hazard analysis. `Clone` like the
+/// wgpu backend's; every clone shares one [`StepLease`].
+#[derive(Clone)]
 pub struct VkStep {
     kind: usize,
     set: vk::DescriptorSet,
@@ -91,16 +93,15 @@ pub struct VkStep {
     /// bindings (flaky stale reads); a submit+fence boundary is honoured, so a
     /// batch containing a sliced step is serialized in `flush`.
     sliced: bool,
-    /// True for steps built by `step`/`step_sliced` (backend-owned uniform +
-    /// descriptor set, recycled after the flush that runs them). False for
-    /// `step_buf` steps (caller-owned uniform, e.g. the `uniform_dynamic`
-    /// training-loop reuse pattern), which stay valid across flushes.
-    ///
-    /// CONTRACT: a transient step is submit-once — re-submitting it after a
-    /// flush may read a recycled (rewritten) uniform/descriptor set. Every
-    /// in-repo model builds its transient steps and submits them immediately;
-    /// hold-and-resubmit code must use `uniform_dynamic` + `step_buf`.
-    transient: bool,
+    /// The backend-owned uniform and descriptor set of a step built by
+    /// `step`/`step_sliced`, returned to this handle's pools when the last
+    /// clone of the step drops - the caller's, and the ones a pending or
+    /// in-flight batch holds until it retires. So a step a caller keeps (a
+    /// model's recorded tape) keeps its bindings for as long as it is kept,
+    /// and is resubmittable any number of times, as on wgpu, where a step owns
+    /// its bind group. `None` for `step_buf` steps, whose uniform is the
+    /// caller's and whose set is never recycled.
+    lease: Option<Arc<StepLease>>,
     /// This dispatch's storage-buffer bindings (uniforms excluded - they are
     /// shader-read-only and any host rewrite already flushes first, so they
     /// carry no cross-dispatch hazard). Only `accesses[..n_access]` is valid;
@@ -111,6 +112,56 @@ pub struct VkStep {
     /// dispatch.
     accesses: [VkAccess; MAX_STORAGE_BINDINGS],
     n_access: u8,
+}
+
+/// A transient step's backend-owned resources, recycled into [`Recycler`]
+/// when the last [`VkStep`] naming them drops. Dropping happens only after
+/// the device is done with them: every batch holds clones of its steps until
+/// it retires.
+struct StepLease {
+    kind: usize,
+    set: vk::DescriptorSet,
+    uniform: VkBuffer,
+    recycler: Arc<Recycler>,
+}
+
+impl Drop for StepLease {
+    fn drop(&mut self) {
+        // Idle and about to be rewritten before any reuse, so it stops
+        // pinning the buffers it named (`VkContext::reclaim_dead`).
+        self.recycler.ctx.set_released(self.set);
+        self.recycler.free_sets.lock().unwrap_or_else(|e| e.into_inner()).entry(self.kind).or_default().push(self.set);
+        let u = VkBuffer { ..self.uniform };
+        self.recycler.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
+    }
+}
+
+/// One handle's idle transient uniforms and descriptor sets, ready for reuse.
+/// Shared with every [`StepLease`] the handle issued, so a step that outlives
+/// its handle still has somewhere to return to; the uniforms are destroyed
+/// when the last of them is gone.
+struct Recycler {
+    ctx: Arc<VkContext>,
+    /// Idle transient uniform buffers, keyed by byte size. A steady-state
+    /// frame allocates ZERO uniforms (and performs zero queue submits building
+    /// its steps - the uniforms are host-visible, written by direct map).
+    free_uniforms: Mutex<std::collections::HashMap<u64, Vec<VkBuffer>>>,
+    /// Idle descriptor sets, keyed by pipeline index (sets are
+    /// layout-specific). Rewriting an idle set via `update_descriptor_sets` is
+    /// legal; a set is only here once no recorded step names it.
+    free_sets: Mutex<std::collections::HashMap<usize, Vec<vk::DescriptorSet>>>,
+    /// Transient uniforms in existence: leased plus idle.
+    uniforms_alive: AtomicU64,
+}
+
+impl Drop for Recycler {
+    fn drop(&mut self) {
+        for (_, us) in std::mem::take(&mut *self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
+            for u in us {
+                self.ctx.destroy_buffer(u);
+            }
+        }
+    }
 }
 
 /// Submissions in flight per handle's asynchronous ring (M6.2) - see
@@ -127,13 +178,10 @@ const RING_SIZE: usize = 3;
 struct Outstanding {
     /// The timeline value this submission signals on completion.
     value: u64,
-    /// The dispatches this submission ran - needed to release their
-    /// descriptor sets and decrement `ctx.pending_steps`.
+    /// The dispatches this submission ran - needed to decrement
+    /// `ctx.pending_steps`, and held so their leases cannot recycle a
+    /// uniform or set a live dispatch may still be reading.
     steps: Vec<VkStep>,
-    /// This submission's transient uniform buffers - safe to recycle into
-    /// `free_uniforms` only once `value` is confirmed reached (a live
-    /// dispatch may still be reading one).
-    uniforms: Vec<VkBuffer>,
 }
 
 /// One persistent, reused command buffer in [`VulkanBackend::ring`]. Reset
@@ -478,22 +526,9 @@ pub struct VulkanBackend {
     /// before an unbounded, un-synchronised accumulation of dispatches (M6.9).
     /// Reset to 0 wherever `pending` is drained (`flush`).
     pending_workgroups: AtomicU64,
-    /// Transient uniforms of steps built but not yet passed to `submit`.
-    uniforms: Mutex<Vec<VkBuffer>>,
-    /// Transient uniforms of submitted-but-not-yet-flushed steps. Moved from
-    /// `uniforms` at `submit`, recycled into `free_uniforms` after the flush's
-    /// fence wait — never earlier, or an in-flight dispatch could see its
-    /// params rewritten.
-    inflight_uniforms: Mutex<Vec<VkBuffer>>,
-    /// Recycled transient uniform buffers, keyed by byte size. A steady-state
-    /// frame allocates ZERO uniforms (and performs zero queue submits building
-    /// its steps — the uniforms are host-visible, written by direct map).
-    free_uniforms: Mutex<std::collections::HashMap<u64, Vec<VkBuffer>>>,
-    /// Recycled descriptor sets of flushed transient steps, keyed by pipeline
-    /// index (sets are layout-specific). Rewriting an idle set via
-    /// `update_descriptor_sets` is legal; the flush's fence wait is what makes
-    /// them idle.
-    free_sets: Mutex<std::collections::HashMap<usize, Vec<vk::DescriptorSet>>>,
+    /// Idle transient uniforms and descriptor sets, refilled as the steps
+    /// leasing them drop (see [`VkStep::lease`]).
+    recycler: Arc<Recycler>,
     /// Per-kernel-kind device timestamp timing (`BRAIN_PROFILE`). See
     /// `VkProfile`'s doc — degrades to "unavailable" on a device/queue that
     /// cannot write timestamps, never substitutes host time.
@@ -504,13 +539,13 @@ pub struct VulkanBackend {
     /// This handle's persistent command-buffer ring for asynchronous
     /// submission (M6.2) - see [`CmdSlot`]/[`RING_SIZE`]. Allocated once in
     /// [`VulkanBackend::from_shared`]; never shared with a `share()`/
-    /// `new_like()` sibling, matching `pending`/`uniforms` above.
+    /// `new_like()` sibling, matching `pending`/`recycler` above.
     ring: Mutex<Vec<CmdSlot>>,
     /// Round-robin cursor into `ring`, advanced once per asynchronous flush.
     ring_cursor: AtomicU64,
     /// Kernels registered at runtime via [`Backend::register_native`] (M8.9) -
     /// indexed by `kind - self.native_base()`, see [`Self::resolve_kernel`].
-    /// Per-HANDLE, like `pending`/`uniforms`/`free_sets` above (never
+    /// Per-HANDLE, like `pending`/`recycler` above (never
     /// `Arc`-shared the way the WGSL catalogue's `pipelines` is with a
     /// `share()` sibling): a kernel registered on one handle is not visible
     /// on another, which matches every other piece of handle-local command-
@@ -819,7 +854,7 @@ impl VulkanBackend {
     /// Build a `VulkanBackend` handle around an existing `ctx`/`pipelines` —
     /// the common tail of fresh construction, [`VulkanBackend::share`] and
     /// [`VulkanBackend::new_like`]. Every handle gets its OWN descriptor pool
-    /// and command-stream state (`pending`/`uniforms`/`free_sets`/...): those
+    /// and command-stream state (`pending`/`recycler`/`ring`/...): those
     /// must never be shared, or two handles' batches would interleave.
     fn from_shared(
         ctx: Arc<VkContext>,
@@ -848,6 +883,12 @@ impl VulkanBackend {
                 .map(|cmd| CmdSlot { cmd, outstanding: None })
                 .collect()
         };
+        let recycler = Arc::new(Recycler {
+            ctx: ctx.clone(),
+            free_uniforms: Mutex::new(std::collections::HashMap::new()),
+            free_sets: Mutex::new(std::collections::HashMap::new()),
+            uniforms_alive: AtomicU64::new(0),
+        });
         Ok(VulkanBackend {
             ctx,
             caps,
@@ -857,10 +898,7 @@ impl VulkanBackend {
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
             pending_workgroups: AtomicU64::new(0),
-            uniforms: Mutex::new(Vec::new()),
-            inflight_uniforms: Mutex::new(Vec::new()),
-            free_uniforms: Mutex::new(std::collections::HashMap::new()),
-            free_sets: Mutex::new(std::collections::HashMap::new()),
+            recycler,
             profile,
             names,
             ring: Mutex::new(ring),
@@ -1156,17 +1194,16 @@ impl VulkanBackend {
 
     // ---- dispatch ----
 
-    /// Build a dispatch with a fresh single-use uniform buffer (tracked transient).
+    /// Build a dispatch around a backend-owned uniform holding `params`,
+    /// leased to the returned step (see [`VkStep::lease`]).
     pub fn step(&self, kind: usize, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> VkStep {
-        let ubuf = self.make_uniform(params);
-        let step = self.record(kind, &ubuf, bufs, &[], threads, true);
-        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).push(ubuf);
-        step
+        self.step_sliced(kind, bufs, &[], params, threads)
     }
 
     /// Build a dispatch around a caller-owned uniform buffer (reused across runs).
     pub fn step_buf(&self, kind: usize, ubuf: &VkOwnedBuffer, bufs: &[&VkOwnedBuffer], threads: u32) -> VkStep {
-        self.record(kind, &ubuf.inner, bufs, &[], threads, false)
+        let set = self.alloc_set(self.resolve_kernel(kind).set_layout);
+        self.record(kind, set, &ubuf.inner, bufs, &[], threads)
     }
 
     /// Build a dispatch where each storage buffer binds the sub-range
@@ -1179,9 +1216,11 @@ impl VulkanBackend {
         params: &[u32],
         threads: u32,
     ) -> VkStep {
-        let ubuf = self.make_uniform(params);
-        let step = self.record(kind, &ubuf, bufs, offsets, threads, true);
-        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).push(ubuf);
+        let uniform = self.make_uniform(params);
+        let recycled = self.recycler.free_sets.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&kind).and_then(Vec::pop);
+        let set = recycled.unwrap_or_else(|| self.alloc_set(self.resolve_kernel(kind).set_layout));
+        let mut step = self.record(kind, set, &uniform, bufs, offsets, threads);
+        step.lease = Some(Arc::new(StepLease { kind, set, uniform, recycler: self.recycler.clone() }));
         step
     }
 
@@ -1235,12 +1274,11 @@ impl VulkanBackend {
         self.stats.barriers.load(Ordering::Relaxed)
     }
 
-    /// Transient uniform buffers currently alive (unsubmitted + in-flight +
-    /// recycled). Bounded by the largest single frame, not by frame count.
+    /// Transient uniform buffers currently alive (leased to a live step, or
+    /// idle for reuse). Bounded by the steps alive at once, not by how many
+    /// were ever built.
     pub fn transient_uniform_count(&self) -> usize {
-        self.uniforms.lock().unwrap_or_else(|e| e.into_inner()).len()
-            + self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).len()
-            + self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).values().map(Vec::len).sum::<usize>()
+        self.recycler.uniforms_alive.load(Ordering::Relaxed) as usize
     }
 
     /// A transient per-dispatch uniform: recycled from `free_uniforms` when one
@@ -1252,13 +1290,11 @@ impl VulkanBackend {
     fn make_uniform(&self, params: &[u32]) -> VkBuffer {
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         let size = ((params.len() * 4).div_ceil(16) * 16).max(16) as u64;
-        let b = self
-            .free_uniforms
-            .lock()
-            .unwrap()
-            .get_mut(&size)
-            .and_then(Vec::pop)
-            .unwrap_or_else(|| self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER));
+        let idle = self.recycler.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&size).and_then(Vec::pop);
+        let b = idle.unwrap_or_else(|| {
+            self.recycler.uniforms_alive.fetch_add(1, Ordering::Relaxed);
+            self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER)
+        });
         self.ctx.zero(&b); // pad bytes beyond `params` must be 0 (mapped memset)
         if !params.is_empty() {
             self.ctx.upload(&b, bytemuck::cast_slice(params)); // mapped memcpy
@@ -1266,29 +1302,20 @@ impl VulkanBackend {
         b
     }
 
-    /// Allocate a descriptor set for `kind`, wire the uniform (binding 0) and the
-    /// storage buffers (bindings 1..) — optionally sub-ranged — and return the step.
+    /// Wire `set` (for `kind`'s layout, and named by no live step) with the
+    /// uniform (binding 0) and the storage buffers (bindings 1..) - optionally
+    /// sub-ranged - and return the step, without a lease.
     fn record(
         &self,
         kind: usize,
+        set: vk::DescriptorSet,
         ubuf: &VkBuffer,
         bufs: &[&VkOwnedBuffer],
         offsets: &[(u64, u64)],
         threads: u32,
-        transient: bool,
     ) -> VkStep {
         let rk = self.resolve_kernel(kind);
         let dev = &self.ctx.device;
-        // Transient sets recycle through `free_sets` (same pipeline => same
-        // layout; the flush's fence wait made them idle, so rewriting below via
-        // `update_descriptor_sets` is legal). Caller-held `step_buf` sets must
-        // stay valid across flushes, so they always allocate fresh.
-        let set = if transient {
-            self.free_sets.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&kind).and_then(Vec::pop)
-        } else {
-            None
-        }
-        .unwrap_or_else(|| self.alloc_set(rk.set_layout));
 
         // Build the binding metadata first (binding 0 = uniform; the storage
         // bindings consume `bufs` in order), then materialise the buffer-info
@@ -1332,7 +1359,7 @@ impl VulkanBackend {
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
         // The set now names these raw handles, and will keep naming them until
-        // it is retired (`recycle_transients`) or, for a caller-held
+        // its lease drops (`StepLease::drop`) or, for a caller-held
         // `step_buf` set, for as long as this backend lives. Registering HERE
         // rather than at `submit` is the whole point: a buffer dropped between
         // building a step and submitting it must not be destroyed - see
@@ -1344,7 +1371,7 @@ impl VulkanBackend {
         self.ctx.set_names(set, &named);
         let (gx, gy) = backend_api::grid_ws(threads, rk.wgsize);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
-        VkStep { kind, set, gx, gy, sliced, transient, accesses, n_access: n_access as u8 }
+        VkStep { kind, set, gx, gy, sliced, lease: None, accesses, n_access: n_access as u8 }
     }
 
     pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[VkStep]) {
@@ -1367,11 +1394,6 @@ impl VulkanBackend {
         // `VkContext::reclaim_dead`).
         self.ctx.steps_recorded(steps.len() as u64);
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(steps);
-        // These steps' transient uniforms are now in flight: eligible for
-        // recycling once the flush that runs them has been confirmed complete.
-        // Uniforms of steps NOT yet submitted stay in `uniforms`, untouched by
-        // a flush that races between their creation and their own submit.
-        self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()).append(&mut self.uniforms.lock().unwrap_or_else(|e| e.into_inner()));
 
         // M6.9 safety valve (see `max_unsynced_workgroups`'s doc): a caller
         // that never calls `read`/`poll_wait`/`Backend::flush` between
@@ -1432,13 +1454,6 @@ impl VulkanBackend {
             self.ctx.reclaim_dead();
             return;
         }
-        // Taken together with `steps` above so the uniforms this specific
-        // batch owns are scoped correctly regardless of how many later
-        // `submit()`/`flush()` calls happen before this batch is actually
-        // retired (the asynchronous path defers retirement past this call
-        // returning) - see [`Self::retire_batch`].
-        let uniforms: Vec<VkBuffer> =
-            std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner()));
         let dev = &self.ctx.device;
         // Serialize (submit+fence per dispatch) when the batch contains a sliced
         // (sub-range) binding: **Intel ANV's** compute-compute pipeline barrier
@@ -1486,7 +1501,7 @@ impl VulkanBackend {
                     }
                 }
             }
-            self.retire_batch(&steps, uniforms);
+            self.retire_batch(steps);
             return;
         }
         let time_this = self.timing_active();
@@ -1506,7 +1521,7 @@ impl VulkanBackend {
                     self.flush_chunk(chunk, true);
                 }
             }
-            self.retire_batch(&steps, uniforms);
+            self.retire_batch(steps);
             return;
         }
         // The fast path: no Intel workaround, no profiling. Asynchronous when
@@ -1514,10 +1529,10 @@ impl VulkanBackend {
         // has run on); a fence-based single submission otherwise, matching
         // this backend's behaviour before M6.2 exactly.
         if self.ctx.timeline_supported() {
-            unsafe { self.flush_async(steps, uniforms) };
+            unsafe { self.flush_async(steps) };
         } else {
             unsafe { self.flush_chunk(&steps, false) };
-            self.retire_batch(&steps, uniforms);
+            self.retire_batch(steps);
         }
     }
 
@@ -1531,7 +1546,7 @@ impl VulkanBackend {
     ///
     /// # Safety
     /// Requires `self.ctx.timeline_supported()` and a live device/queue.
-    unsafe fn flush_async(&self, steps: Vec<VkStep>, uniforms: Vec<VkBuffer>) {
+    unsafe fn flush_async(&self, steps: Vec<VkStep>) {
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         let n = ring.len();
         let idx = (self.ring_cursor.fetch_add(1, Ordering::Relaxed) as usize) % n;
@@ -1543,7 +1558,7 @@ impl VulkanBackend {
         // waiting on every flush.
         if let Some(prev) = ring[idx].outstanding.take() {
             self.ctx.timeline_wait(prev.value);
-            self.retire_batch(&prev.steps, prev.uniforms);
+            self.retire_batch(prev.steps);
         }
         let cmd = ring[idx].cmd;
         let value = self.ctx.timeline_next();
@@ -1570,7 +1585,7 @@ impl VulkanBackend {
             dev.queue_submit(self.ctx.queue, &[submit], vk::Fence::null()).expect("queue_submit (async)");
             self.ctx.submits.fetch_add(1, Ordering::Relaxed);
         }
-        ring[idx].outstanding = Some(Outstanding { value, steps, uniforms });
+        ring[idx].outstanding = Some(Outstanding { value, steps });
     }
 
     /// Wait for every one of THIS handle's own outstanding asynchronous
@@ -1595,7 +1610,7 @@ impl VulkanBackend {
         }
         for slot in ring.iter_mut() {
             if let Some(o) = slot.outstanding.take() {
-                self.retire_batch(&o.steps, o.uniforms);
+                self.retire_batch(o.steps);
             }
         }
     }
@@ -1745,45 +1760,21 @@ impl VulkanBackend {
         self.ctx.reclaim_event_count()
     }
 
-    /// Release a completed batch's TRANSIENT resources - the caller has
-    /// already proven the batch idle, either by a real fence wait
-    /// (`end_and_wait`, the serial/timed paths) or by a confirmed timeline
-    /// value (`flush_async`/`drain`, M6.2's asynchronous path). Uniforms go
-    /// back to the size-keyed pool, descriptor sets to the per-pipeline pool
-    /// (deduped: the same step submitted twice in one batch must not donate
-    /// its set twice). `step_buf` steps (transient = false) are caller-owned
-    /// and left alone, so the `uniform_dynamic` reuse pattern keeps working
-    /// across flushes.
-    ///
-    /// `uniforms` is passed in rather than drained from `inflight_uniforms`
-    /// here (the pre-M6.2 shape) because the asynchronous path must snapshot
-    /// exactly the uniforms THIS batch owns at `flush()` time, before any
-    /// later `submit()` call can add a DIFFERENT, still-in-flight batch's
-    /// uniforms into that shared list - see `flush`'s own doc.
-    fn retire_batch(&self, steps: &[VkStep], uniforms: Vec<VkBuffer>) {
+    /// Retire a completed batch - the caller has already proven it idle,
+    /// either by a real fence wait (`end_and_wait`, the serial/timed paths) or
+    /// by a confirmed timeline value (`flush_async`/`drain`, the
+    /// asynchronous path). Dropping the batch's step clones here is what lets
+    /// a transient step's lease recycle its uniform and descriptor set - once
+    /// the caller's own clones are gone too (see [`VkStep::lease`]).
+    fn retire_batch(&self, steps: Vec<VkStep>) {
         // This batch has now run to completion, so it no longer names
         // anything. The count is dropped HERE rather than when the batch
         // left the pending list, so it never reads zero while this batch's
         // buffers are in use.
         self.ctx.steps_submitted(steps.len() as u64);
-        for u in uniforms {
-            self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner()).entry(u.size).or_default().push(u);
-        }
-        {
-            let mut seen = std::collections::HashSet::new();
-            let mut free = self.free_sets.lock().unwrap_or_else(|e| e.into_inner());
-            for s in steps {
-                if s.transient && seen.insert(s.set) {
-                    // Idle and about to be rewritten before any reuse, so it
-                    // stops pinning the buffers it named - which is what lets
-                    // the reclaim below actually free this batch's scratch.
-                    self.ctx.set_released(s.set);
-                    free.entry(s.kind).or_default().push(s.set);
-                }
-            }
-        }
+        drop(steps);
         // Buffers dropped while this batch was recorded: with nothing left
-        // recorded anywhere and this batch's sets released just above, this is
+        // recorded anywhere and this batch's unheld sets released just above, this is
         // where they are actually destroyed (see `impl Drop for
         // VkOwnedBuffer`). Strictly after the release, or every buffer this
         // batch touched would still read as referenced and stay buried an
@@ -1941,9 +1932,8 @@ impl Drop for VulkanBackend {
             // outstanding is now provably complete (`device_wait_idle` just
             // proved it, a strictly stronger guarantee than any one
             // timeline value), so it is safe to retire them immediately
-            // rather than waiting on the semaphore again. Retiring pushes
-            // their uniforms into `free_uniforms`, which the loop below
-            // already drains and destroys; this must run BEFORE that loop.
+            // rather than waiting on the semaphore again. Idle uniforms are
+            // destroyed with the `Recycler`, once no step still leases one.
             // The ring's command buffers are freed here too - they were
             // allocated once in `from_shared` and reused in place ever
             // since, unlike the serial/timed paths' per-flush
@@ -1952,24 +1942,13 @@ impl Drop for VulkanBackend {
             let cmds: Vec<vk::CommandBuffer> = ring.iter().map(|s| s.cmd).collect();
             for slot in ring.iter_mut() {
                 if let Some(o) = slot.outstanding.take() {
-                    self.retire_batch(&o.steps, o.uniforms);
+                    self.retire_batch(o.steps);
                 }
             }
             drop(ring);
             if !cmds.is_empty() {
                 let _guard = self.ctx.queue_guard();
                 dev.free_command_buffers(self.ctx.command_pool, &cmds);
-            }
-            for u in std::mem::take(&mut *self.uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
-                self.ctx.destroy_buffer(u);
-            }
-            for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
-                self.ctx.destroy_buffer(u);
-            }
-            for (_, us) in std::mem::take(&mut *self.free_uniforms.lock().unwrap_or_else(|e| e.into_inner())) {
-                for u in us {
-                    self.ctx.destroy_buffer(u);
-                }
             }
             for &pool in self.pools.lock().unwrap_or_else(|e| e.into_inner()).iter() {
                 dev.destroy_descriptor_pool(pool, None);
@@ -2196,7 +2175,7 @@ impl Backend for VulkanBackend {
     }
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
         let cs: Vec<&VkOwnedBuffer> = clears.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
-        let ss: Vec<VkStep> = steps.iter().map(|s| *s.downcast_ref::<VkStep>()).collect();
+        let ss: Vec<VkStep> = steps.iter().map(|s| s.downcast_ref::<VkStep>().clone()).collect();
         VulkanBackend::submit(self, &cs, &ss);
     }
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {

@@ -117,6 +117,35 @@ fn transient_uniforms_are_recycled_across_flushes() {
     );
 }
 
+/// A recorded dispatch a caller keeps and submits again - a model's forward
+/// and backward tapes are exactly that - must still read ITS OWN buffers and
+/// params after other dispatches were built and flushed in between.
+/// Recycling a transient's uniform and descriptor set at the flush that ran
+/// it handed both to the next dispatch built, which rewrote them, and the
+/// held step then silently ran with the newcomer's bindings.
+#[test]
+fn a_held_step_keeps_its_bindings_across_recycling() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(be) = backend() else { return };
+    let a = be.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+    let b = be.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
+    let out = be.storage(4);
+    let held = be.step(0, &[&a, &b, &out], &[4], 4);
+    be.submit(&[], std::slice::from_ref(&held));
+    assert_eq!(be.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0]);
+
+    // Other work, built after the held step's batch retired.
+    let (c, d, other) = (be.storage_init("c", &[100.0; 8]), be.storage_init("d", &[1000.0; 8]), be.storage(8));
+    let steps: Vec<_> = (0..8).map(|_| be.step(0, &[&c, &d, &other], &[8], 8)).collect();
+    be.submit(&[], &steps);
+    assert_eq!(be.read(&other, 8), vec![1100.0; 8]);
+
+    be.write(&a, bytemuck::cast_slice(&[2.0f32, 3.0, 4.0, 5.0]));
+    be.submit(&[], std::slice::from_ref(&held));
+    assert_eq!(be.read(&out, 4), vec![12.0, 23.0, 34.0, 45.0], "the held step must still add a and b into out");
+    assert_eq!(be.read(&other, 8), vec![1100.0; 8], "the held step must not write another dispatch's output");
+}
+
 /// `storage()`/`storage_init()` used to hardcode `host_visible: false` on
 /// every buffer, regardless of the memory type actually bound — so on a
 /// unified-memory device (an integrated GPU with no separate VRAM, where the
