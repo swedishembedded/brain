@@ -149,3 +149,69 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
     assert!(initial.is_finite(), "initial loss {initial} is not finite");
     assert!(last.is_finite(), "final loss {last} is not finite");
 }
+
+/// A rollout that is not the trained model: it records what it is synced
+/// with, and hands back fixed completions whose own logprobs are absurd, so
+/// only a trainer that recomputes them gets the on-policy ratio of one.
+struct RecordingRollout {
+    syncs: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+}
+
+impl model::rollout::Rollout for RecordingRollout {
+    fn sample_n(&mut self, _prompt: &[u32], n: usize, params: &model::rollout::RolloutParams, _rng: &mut data::rng::Rng) -> Vec<model::rollout::Completion> {
+        let fixed = [vec![4u32, 5, 6], vec![7, 7, 7]];
+        (0..n)
+            .map(|i| model::rollout::Completion { tokens: fixed[i % 2][..params.max_new].to_vec(), logprobs: vec![100.0; params.max_new], stop: model::rollout::StopReason::MaxNew })
+            .collect()
+    }
+}
+
+impl model::rollout::SyncRollout for RecordingRollout {
+    fn sync(&mut self, trained: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+        let mut names: Vec<String> = trained.keys().cloned().collect();
+        names.sort();
+        self.syncs.borrow_mut().push(names);
+        Ok(())
+    }
+}
+
+/// GRPO sampling through an external rollout (a serving engine on another
+/// card, say): the rollout is synced with the trainer's trainable tensors
+/// before its first group and then every `sync_every` groups, and the
+/// trainer recomputes the sampled tokens' old logprobs itself, so a fresh
+/// group's first update sees a probability ratio of exactly one.
+#[test]
+fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
+    if gpu_disabled() {
+        return;
+    }
+    let cfg = QwenConfig { lora: Some(qwen3::LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() };
+    let init = qwen3::init_weights(&cfg, 7);
+    let mut model = Qwen::new(cfg, 1, 8, &init);
+    let syncs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let grpo_cfg = GrpoConfig {
+        group_size: 2,
+        clip_eps: 0.2,
+        kl_beta: 0.0,
+        seq_len: 8,
+        rollout: model::rollout::RolloutParams { max_new: 3, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0 }, eos: None },
+        max_attempts: 1,
+    };
+    let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
+    let mut obj = Grpo::new(env, FracMatchVerifier, grpo_cfg).with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);
+    use model::Objective;
+    obj.prepare(&mut model);
+    let mut rng = data::rng::Rng::new(5);
+    // Each group yields two rows: eight micro-steps are four groups.
+    let losses: Vec<f32> = (0..8).map(|_| obj.micro_step(&model, &mut rng)).collect();
+
+    // The first row is the target (advantage +1): at a ratio of one its
+    // per-token loss is -1.
+    assert!((losses[0] + 1.0).abs() < 1e-3, "on-policy loss {} (the rollout's own logprobs were used)", losses[0]);
+    let mut want: Vec<String> = model::Model::optimized_params(&model).expect("a LoRA model trains its adapters only");
+    want.sort();
+    let syncs = syncs.borrow();
+    assert_eq!(syncs.len(), 2, "synced before groups 0 and 2");
+    assert!(syncs.iter().all(|s| *s == want), "the payload is the trainable tensors: {:?}", syncs[0]);
+    assert!(want.iter().all(|n| n.contains(".lora_")), "{want:?}");
+}

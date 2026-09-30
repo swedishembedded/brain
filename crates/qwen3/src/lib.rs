@@ -18,6 +18,7 @@ pub mod init;
 pub mod model;
 pub mod open;
 pub mod q8;
+pub mod rollout;
 pub mod sample;
 pub mod serve;
 pub mod finetune;

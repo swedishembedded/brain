@@ -27,6 +27,8 @@
 //! on top of a from-scratch training stack, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
+use std::collections::HashMap;
+
 use data::rng::Rng;
 
 use crate::paged::BlockTable;
@@ -81,6 +83,17 @@ pub struct RolloutParams {
 /// byte-identical to its pre-rollout implementation).
 pub trait Rollout {
     fn sample_n(&mut self, prompt: &[u32], n: usize, params: &RolloutParams, rng: &mut Rng) -> Vec<Completion>;
+}
+
+/// A [`Rollout`] that samples from its own copy of a policy (a serving engine,
+/// possibly on another device) rather than from the model being trained, and
+/// so has to be told what the trained model now holds. `trained` maps every
+/// trainable tensor of the model to its current value
+/// ([`crate::Model::optimized_params`], or every parameter when the whole
+/// model trains); what the rollout does with them (replace, or fold LoRA
+/// adapters into its base) is its own business.
+pub trait SyncRollout: Rollout {
+    fn sync(&mut self, trained: &HashMap<String, Vec<f32>>) -> Result<(), String>;
 }
 
 /// Build the sorted-descending `(token id, logit)` candidate list
@@ -260,6 +273,11 @@ pub struct PagedRollout<D: PagedDecoder> {
 impl<D: PagedDecoder> PagedRollout<D> {
     pub fn new(dec: D) -> PagedRollout<D> {
         PagedRollout { dec }
+    }
+
+    /// The decoder, borrowed.
+    pub fn decoder(&self) -> &D {
+        &self.dec
     }
 
     /// Hand the decoder back - the caller's own accounting (`prefix_stats`,

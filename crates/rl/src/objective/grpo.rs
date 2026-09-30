@@ -355,6 +355,8 @@ pub struct Grpo<E: Environment, V: Verifier> {
     /// valid when `cfg.kl_beta <= 0.0`.
     ref_logprobs: Option<RefLogprobFn>,
     pending: std::collections::VecDeque<PackedRow>,
+    /// Sampling from a policy copy other than the trained model, when set.
+    external: Option<External>,
     last_mean_reward: f32,
     last_kept_frac: f32,
     log: CycleLog,
@@ -369,6 +371,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             cfg,
             ref_logprobs: None,
             pending: std::collections::VecDeque::new(),
+            external: None,
             last_mean_reward: 0.0,
             last_kept_frac: 0.0,
             log: CycleLog::default(),
@@ -384,6 +387,19 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         F: Fn(&crate::env::Task, &Completion) -> Vec<f32> + 'static,
     {
         self.ref_logprobs = Some(Box::new(f));
+        self
+    }
+
+    /// Sample through `rollout` (a serving engine holding its own copy of the
+    /// policy, possibly on another device) instead of the trained model. The
+    /// rollout is synced with the model's trainable tensors before the first
+    /// group and then every `sync_every` groups, so it samples from a policy
+    /// at most `sync_every - 1` groups stale. The trainer recomputes every
+    /// sampled token's old logprob on its own model when the group is packed:
+    /// a different device or kernel never enters the probability ratio.
+    pub fn with_rollout(mut self, rollout: Box<dyn model::rollout::SyncRollout>, sync_every: usize) -> Grpo<E, V> {
+        assert!(sync_every >= 1, "Grpo: sync_every must be >= 1");
+        self.external = Some(External { rollout, sync_every, groups: 0 });
         self
     }
 
@@ -419,12 +435,29 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// 0.0 ... masked-out and reward=0 collapse to the same thing".
     fn refill<M: Model>(&mut self, model: &M, rng: &mut Rng) {
         let task = self.env.tasks(rng.next_u64()).into_iter().next().expect("Grpo: Environment::tasks produced no task");
-        let mut roll = ModelRollout::new(model);
+        let queued = self.pending.len();
+        let mut own = ModelRollout::new(model);
+        let roll: &mut dyn Rollout = match &mut self.external {
+            Some(ext) => {
+                if ext.groups % ext.sync_every == 0 {
+                    let names = model.optimized_params().unwrap_or_else(|| model.param_names());
+                    let trained: std::collections::HashMap<String, Vec<f32>> = names.into_iter().map(|n| {
+                        let w = model.read_weight(&n);
+                        (n, w)
+                    }).collect();
+                    ext.rollout.sync(&trained).unwrap_or_else(|e| panic!("Grpo: syncing the rollout failed: {e}"));
+                }
+                ext.groups += 1;
+                &mut *ext.rollout
+            }
+            None => &mut own,
+        };
 
         if self.cfg.group_size == 1 {
             // RFT/STaR: bounded rejection sampling for one verified correct,
             // deduplicated completion - see module doc comment.
             let mut rewards = Vec::with_capacity(self.cfg.max_attempts.max(1));
+            let mut kept = None;
             for _ in 0..self.cfg.max_attempts.max(1) {
                 let c = roll.sample_n(&task.prompt, 1, &self.cfg.rollout, rng).pop().expect("sample_n(1) returns exactly one completion");
                 self.log.push_sampled(c.tokens.clone());
@@ -432,15 +465,16 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                 self.log.push_reward(reward);
                 rewards.push(reward);
                 if reward > 0.0 {
-                    let rl = self.ref_logprobs.as_ref().map(|f| f(&task, &c));
-                    self.pending.push_back(self.pack(&task.prompt, &c, 1.0, rl.as_deref()));
-                    self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len() as f32;
-                    self.last_kept_frac = 1.0;
-                    return;
+                    kept = Some(c);
+                    break;
                 }
             }
             self.last_mean_reward = rewards.iter().sum::<f32>() / rewards.len() as f32;
-            self.last_kept_frac = 0.0;
+            self.last_kept_frac = if kept.is_some() { 1.0 } else { 0.0 };
+            if let Some(c) = kept {
+                let rl = self.ref_logprobs.as_ref().map(|f| f(&task, &c));
+                self.pending.push_back(self.pack(&task.prompt, &c, 1.0, rl.as_deref()));
+            }
         } else {
             let group = roll.sample_n(&task.prompt, self.cfg.group_size, &self.cfg.rollout, rng);
             for c in &group {
@@ -459,6 +493,32 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                     self.pending.push_back(self.pack(&task.prompt, c, a, rl.as_deref()));
                 }
             }
+        }
+        if self.external.is_some() {
+            for row in self.pending.iter_mut().skip(queued) {
+                recompute_old_logprobs(model, row);
+            }
+        }
+    }
+}
+
+/// The sampling policy copy [`Grpo::with_rollout`] installs.
+struct External {
+    rollout: Box<dyn model::rollout::SyncRollout>,
+    sync_every: usize,
+    /// Groups sampled so far.
+    groups: usize,
+}
+
+/// Overwrite `row`'s old logprobs with the trained model's own, at every
+/// trained position.
+fn recompute_old_logprobs<M: Model>(model: &M, row: &mut PackedRow) {
+    model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
+    let _ = model.forward();
+    let lp = model.batch_token_logprobs().expect("Grpo: model must implement Model::batch_token_logprobs");
+    for (i, old) in row.old_lp.iter_mut().enumerate() {
+        if row.targets[i] != IGNORE {
+            *old = lp[i];
         }
     }
 }
