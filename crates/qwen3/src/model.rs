@@ -757,6 +757,18 @@ impl Qwen {
         Qwen::new_impl(cfg, b, t, init, true, shard, Dtype::F32, false)
     }
 
+    /// A LoRA training build whose frozen base linears are held at the
+    /// `dt` storage tier ([`Dtype::BF16`]: half the fp32 bytes), the
+    /// adapters and everything else staying fp32. The forward reads the base
+    /// through the tier and the backward's input gradient goes through the
+    /// same tier's `matmul_dx`, so the adapters see the gradient of the
+    /// model the forward computed. The tier is a request (see
+    /// [`Self::new_shard_dt`]): ask [`Self::linear_dtype`] what landed.
+    pub fn new_lora_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, init, true, shard, dt, false)
+    }
+
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
     /// in `shard` are allocated on this device. `train` selects the parameter
     /// roles (offload/LoRA/frozen) exactly as the whole-model path does.
@@ -857,7 +869,10 @@ impl Qwen {
         // was: the trainable master copy lives in the fp32 `ParamStore`, and
         // a packed/quantized `Weight` is built ONCE at construction from the
         // source tensor, never re-derived after an optimiser step.
-        assert!(!(dt != Dtype::F32 && train), "the {dt:?} weight tier is inference-only");
+        assert!(
+            !(dt != Dtype::F32 && train) || (dt == Dtype::BF16 && cfg.lora.is_some()),
+            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a bf16 frozen base)"
+        );
         assert!(!(decode_only && train), "decode-only build is inference-only");
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
@@ -1442,8 +1457,7 @@ impl Qwen {
                 // base: dx += d_out·W (frozen weight - no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad, so the adapter scale is folded into the private scratch.
-                let (bk, bt) = dx_kernel_bw(m, k);
-                s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
+                self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
                 // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
@@ -1465,6 +1479,19 @@ impl Qwen {
                     let (bk, bt) = dw_kernel_bw(nout, k);
                     s.push(self.gpu.dispatch(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
                 }
+                self.base_dx(s, d_out, wname, dx, m, k, nout, acc);
+            }
+        }
+    }
+
+    /// `dx (+)= d_out · W` through the tier the base linear `wname` was
+    /// built at: the fp32 weight lives in the parameter store, a bf16 one
+    /// only as its packed `Weight`.
+    #[allow(clippy::too_many_arguments)]
+    fn base_dx(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+        match self.weights.get(wname) {
+            Some(w @ Weight::BF16 { .. }) => self.ops.matmul_dx(s, w, d_out, m, dx, acc == 1),
+            _ => {
                 let (bk, bt) = dx_kernel_bw(m, k);
                 s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
             }
