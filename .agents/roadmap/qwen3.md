@@ -158,3 +158,27 @@ that size. Re-run it once that lands.
       `max_tokens` the only bound. Enforcing it would mean closing the think
       block (forcing the `</think>` tokens) once the reasoning reaches the
       budget, a decode-side token-forcing step the engine does not have.
+
+## Training: not yet done
+
+- [ ] An int8 frozen base for LoRA. A bf16 base holds a 7B decoder at 15 GB,
+      which leaves a 24 GB card a little over 3k tokens of context; int8
+      would return about 7 GB to activations. It needs the activations'
+      quantization error measured on real layers before it is worth building
+      (the input gradient runs through dynamically quantized activations),
+      an I8 arm of `Ops::matmul_dx`, and `quantize_transposed_from` so the
+      transpose is quantized, not the weight.
+- [ ] DPO, GRPO and distillation on a pipeline. `model::PipelineModel`
+      trains through the generic fit loop; the weighted-loss and
+      per-token-logprob hooks those objectives use
+      (`Model::enable_weighted_loss`, `set_loss_weights`,
+      `batch_token_logprobs`) are not forwarded to the stages.
+- [ ] Exact resume of a pipeline run: the pipeline's fused host optimiser
+      does not expose its moments through `Model::read_moments`.
+- [ ] The pipeline runs its stages one after another inside the fit loop;
+      `Pipeline::pipelined_fwd_bwd` overlaps them across micro-batches but
+      the fit loop does not use it.
+- [ ] A bf16 head and embedding. They stay fp32 in a bf16-base build: two
+      2.2 GB tables at 152k x 3584, which a single bf16 binding would hold
+      in half the bytes and on the fast GEMM kernels without tiling.
+

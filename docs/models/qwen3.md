@@ -175,6 +175,12 @@ everything about HOW to serve it is a `brain serve` flag:
   and optimiser stay fp32. `--weights` may name a `transformers` checkpoint
   directory (a model-store `vendor/repo`): it is read as downloaded, one
   tensor at a time, and nothing is written beside it.
+  A model that does not fit one card is laid out across the cards by what
+  each has free, with no flag: the whole model on one card when one has room,
+  otherwise a pipeline of the fewest stages that fit (printed as `pipeline of
+  N stages`), otherwise a refusal naming the bytes. An explicit `--device`
+  pins one card. A 7B decoder with a bf16 base trains on one 24 GB card to
+  about 3k tokens, and at 7.6k tokens across two.
 - `--keep-reasoning` - train each answer's `<think>...</think>` reasoning.
   A reasoning model's chat template drops it from the assistant turns it
   renders as history (DeepSeek-R1's drops it from every turn), which is
