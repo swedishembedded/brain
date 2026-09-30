@@ -70,6 +70,7 @@ samples/python/vision/qwen3vl-caption/README.md
 samples/python/vision/segment-image/README.md
 samples/python/vision/splat/README.md
 samples/python/vision/worldmirror2-reconstruct/README.md
+samples/reconstruction/splat/README.md
 samples/shell/api/claude-with-brain/README.md
 samples/shell/dbus/busctl-smoke/README.md
 samples/shell/forecast/cooling-loop/README.md
@@ -80,6 +81,7 @@ samples/shell/imagegen/lora/README.md
 samples/shell/imagegen/portrait-from-refs/README.md
 samples/shell/restore/upscale/README.md
 samples/shell/videogen/ltxv/README.md
+samples/study/chat/README.md
 samples/study/document/README.md
 samples/text/embed-train/README.md
 samples/text/embed/README.md

@@ -5825,6 +5825,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-study-chat"
+version = "1.2.0"
+dependencies = [
+ "brain",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-study-document"
 version = "1.2.0"
 dependencies = [

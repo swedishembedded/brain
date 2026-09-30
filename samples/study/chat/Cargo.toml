@@ -1,0 +1,25 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/study/chat` -> `sample-study-chat`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-study-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: LoRA fine-tune a chat model on a tiny dataset, score it held-out, resume a cancelled run exactly, and chat with the adapter, through the public brain SDK."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. `study` is
+# the fine-tune and its held-out score; `text` is the chat pipeline that
+# serves the result.
+brain = { workspace = true, features = ["text", "study"] }
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Measured at 52: the `study` closure (the same one samples/study/document
+# carries) already holds everything `text` adds.
+max-brain-crates = 52
