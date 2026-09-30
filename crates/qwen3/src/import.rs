@@ -736,7 +736,10 @@ mod tests {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64], vec![0.0f32; numel])).collect();
         checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
 
-        let r = checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap();
+        // Opened by its own path, the way the resolver hands it over: a
+        // `*.brain.safetensors` inside a directory is never taken for the
+        // directory's upstream checkpoint (`WeightReader::open_hf_dir`).
+        let r = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
         assert_eq!(Naming::of(&r), Naming::Brain, "a checkpoint whose own names already match cfg.param_list() must sniff as Naming::Brain");
         source(&r, &cfg).expect("a brain-native checkpoint needs no remap - source() must not report a missing fetch plan for every tensor");
         std::fs::remove_dir_all(&dir).ok();
