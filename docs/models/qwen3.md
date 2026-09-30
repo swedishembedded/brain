@@ -110,8 +110,8 @@ brain qwen3 infer --weights … --device gpu     # portable GPU backend (default
 brain qwen3 infer --weights … --device vulkan  # native Vulkan
 ```
 
-Other verbs: `brain qwen3 export` (to ONNX, or `--format hf` for a
-`transformers` directory, see below), `brain qwen3 precompile` (precompile
+Other verbs: `brain qwen3 export` (to ONNX, or `--format hf|gguf` for a
+`transformers` directory or a llama.cpp GGUF, see below), `brain qwen3 precompile` (precompile
 kernels for a target device), `brain qwen3 toolcall` (tool-call evaluation).
 
 ### Exporting to Hugging Face
@@ -131,6 +131,17 @@ defaults to `--weights` when that is a checkpoint directory. Any checkpoint
 the decoder reads can be the input: a brain file, a Hugging Face directory or
 a GGUF. Tensors stream one at a time. The default dtype is bf16; `--dtype
 f32` exports losslessly.
+
+`--format gguf --out model.gguf [--dtype f16|f32]` writes a llama.cpp GGUF
+under the architecture the checkpoint is (`qwen3`, `qwen2`, `llama`), with its
+tokenizer embedded, which llama.cpp needs. A Llama's q/k rows are stored in
+llama.cpp's interleaved RoPE order. A llama3 RoPE scaling becomes the
+`rope_freqs.weight` divisors. The tokenizer's pre-tokenizer is identified from
+its `tokenizer.json`, and one this exporter does not know is refused rather
+than guessed. Norms and biases stay f32, as llama.cpp writes them; the
+default dtype for the matrices is f16. Exporting deepseek-coder-1.3b-instruct
+gives tensors byte-identical to llama.cpp's own converter, the same metadata,
+and the same tokenization under llama.cpp.
 
 ### LoRA adapters
 

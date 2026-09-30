@@ -173,12 +173,13 @@ fn want_npu() -> bool {
 /// decoder graph (for OpenVINO / `brain npu check`).
 /// `brain qwen3 export`: `--format onnx` (the default) writes the NPU's ONNX
 /// graph; `--format hf` writes a `transformers` directory
-/// (`qwen3::export::export_hf`) from any checkpoint this decoder reads.
+/// (`qwen3::export::export_hf`) and `--format gguf` a llama.cpp GGUF
+/// (`qwen3::export::export_gguf`), from any checkpoint this decoder reads.
 fn export(args: &[String]) {
     let mut weights = String::new();
     let mut out = String::new();
     let mut format = "onnx".to_string();
-    let mut dtype = qwen3::export::HfDtype::Bf16;
+    let mut dtype: Option<String> = None;
     let mut tokenizer_dir: Option<String> = None;
     let mut seq = 32usize;
     let mut i = 0;
@@ -188,17 +189,7 @@ fn export(args: &[String]) {
             "--out" => out = val(args, &mut i, "--out"),
             "--format" => format = val(args, &mut i, "--format"),
             "--tokenizer-dir" => tokenizer_dir = Some(val(args, &mut i, "--tokenizer-dir")),
-            "--dtype" => {
-                dtype = match val(args, &mut i, "--dtype").as_str() {
-                    "f32" => qwen3::export::HfDtype::F32,
-                    "bf16" => qwen3::export::HfDtype::Bf16,
-                    "f16" => qwen3::export::HfDtype::F16,
-                    other => {
-                        eprintln!("--dtype {other:?}: expected f32, bf16 or f16");
-                        std::process::exit(2)
-                    }
-                }
-            }
+            "--dtype" => dtype = Some(val(args, &mut i, "--dtype")),
             "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
@@ -207,7 +198,18 @@ fn export(args: &[String]) {
     if weights.is_empty() {
         eprintln!("usage: brain qwen3 export --weights F [--format onnx] --out model.onnx [--seq T]");
         eprintln!("       brain qwen3 export --weights F --format hf --out DIR [--dtype bf16|f16|f32] [--tokenizer-dir D]");
+        eprintln!("       brain qwen3 export --weights F --format gguf --out FILE.gguf [--dtype f16|f32] [--tokenizer-dir D]");
         return;
+    }
+    let bad_dtype = |d: &str, allowed: &str| -> ! {
+        eprintln!("--dtype {d:?}: expected {allowed} for --format {format}");
+        std::process::exit(2)
+    };
+    // A checkpoint directory carries its own tokenizer files.
+    let tokenizer_dir = tokenizer_dir.or_else(|| std::path::Path::new(&weights).is_dir().then(|| weights.clone()));
+    if matches!(format.as_str(), "hf" | "gguf") && out.is_empty() {
+        eprintln!("--format {format} needs --out");
+        std::process::exit(2);
     }
     match format.as_str() {
         "onnx" => {
@@ -219,12 +221,12 @@ fn export(args: &[String]) {
             }
         }
         "hf" => {
-            if out.is_empty() {
-                eprintln!("--format hf needs --out DIR");
-                std::process::exit(2);
-            }
-            // A checkpoint directory carries its own tokenizer files.
-            let tokenizer_dir = tokenizer_dir.or_else(|| std::path::Path::new(&weights).is_dir().then(|| weights.clone()));
+            let dtype = match dtype.as_deref().unwrap_or("bf16") {
+                "f32" => qwen3::export::HfDtype::F32,
+                "bf16" => qwen3::export::HfDtype::Bf16,
+                "f16" => qwen3::export::HfDtype::F16,
+                d => bad_dtype(d, "f32, bf16 or f16"),
+            };
             let exported = qwen3::open_checkpoint(&weights).and_then(|(cfg, src)| {
                 let opts = qwen3::export::HfExport { dtype, tokenizer_dir: tokenizer_dir.as_deref().map(std::path::Path::new), ..Default::default() };
                 qwen3::export::export_hf(&*src, &cfg, std::path::Path::new(&out), &opts)
@@ -237,8 +239,31 @@ fn export(args: &[String]) {
                 }
             }
         }
+        "gguf" => {
+            let dtype = match dtype.as_deref().unwrap_or("f16") {
+                "f32" => qwen3::export::GgufDtype::F32,
+                "f16" => qwen3::export::GgufDtype::F16,
+                d => bad_dtype(d, "f32 or f16"),
+            };
+            let Some(tok) = tokenizer_dir else {
+                eprintln!("--format gguf embeds the tokenizer: pass --tokenizer-dir (a checkpoint directory is its own)");
+                std::process::exit(2)
+            };
+            let name = std::path::Path::new(&out).file_stem().and_then(|s| s.to_str()).unwrap_or("model").to_string();
+            let exported = qwen3::open_checkpoint(&weights).and_then(|(cfg, src)| {
+                let opts = qwen3::export::GgufExport { dtype, tokenizer_dir: std::path::Path::new(&tok), name: &name };
+                qwen3::export::export_gguf(&*src, &cfg, std::path::Path::new(&out), &opts)
+            });
+            match exported {
+                Ok(()) => println!("ok: wrote {out}"),
+                Err(e) => {
+                    eprintln!("export failed: {e}");
+                    std::process::exit(1)
+                }
+            }
+        }
         other => {
-            eprintln!("--format {other:?}: expected onnx or hf");
+            eprintln!("--format {other:?}: expected onnx, hf or gguf");
             std::process::exit(2)
         }
     }

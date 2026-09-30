@@ -141,6 +141,27 @@ pub fn gguf_to_brain(name: &str, tie: bool) -> Option<String> {
     }
 }
 
+/// The llama.cpp spelling of every block tensor this decoder has, in the
+/// canonical form llama.cpp's converter writes (`ffn_norm`, never Qwen3.5's
+/// `post_attention_norm`).
+const CANONICAL_BLOCK_LEAVES: [&str; 14] = [
+    "attn_norm.weight", "ffn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight", "attn_output.weight", "attn_q_norm.weight",
+    "attn_k_norm.weight", "attn_q.bias", "attn_k.bias", "attn_v.bias", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+];
+
+/// The inverse of [`gguf_to_brain`]: the llama.cpp name of a brain
+/// parameter, found through the same map so the two directions cannot
+/// disagree. `None` for a name this decoder has no GGUF spelling for.
+pub fn brain_to_gguf(name: &str) -> Option<String> {
+    for top in ["token_embd.weight", "output_norm.weight", "output.weight"] {
+        if gguf_to_brain(top, false).as_deref() == Some(name) {
+            return Some(top.to_string());
+        }
+    }
+    let (layer, _) = name.strip_prefix("blocks.")?.split_once('.')?;
+    CANONICAL_BLOCK_LEAVES.iter().map(|leaf| format!("blk.{layer}.{leaf}")).find(|g| gguf_to_brain(g, false).as_deref() == Some(name))
+}
+
 /// [`gguf_to_brain`] with the importer's strictness: an unrecognized tensor is
 /// an **error**, not a silent skip, and each drop states its reason.
 ///

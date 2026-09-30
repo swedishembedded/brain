@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Export a checkpoint of this decoder as a Hugging Face `transformers`
-//! directory: sharded safetensors under the HF tensor names, a `config.json`
-//! naming the class the configuration is (`Qwen3ForCausalLM` with QK-norm,
+//! directory ([`export_hf`]) or a llama.cpp GGUF ([`export_gguf`]).
+//!
+//! The `transformers` directory holds sharded safetensors under the HF tensor
+//! names, a `config.json` naming the class the configuration is (`Qwen3ForCausalLM` with QK-norm,
 //! `Qwen2ForCausalLM` with q/k/v bias, `LlamaForCausalLM` with neither), and
 //! the tokenizer files beside it. What brain trains, any `transformers`
 //! stack loads.
@@ -20,7 +22,9 @@
 use std::io::Write;
 use std::path::Path;
 
+use checkpoint::gguf::GgufValue;
 use checkpoint::TensorSource;
+use model::rope_scaling::RopeScaling;
 use serde_json::{json, Value};
 
 use crate::config::QwenConfig;
@@ -252,4 +256,299 @@ fn write_shard(src: &dyn TensorSource, shard: &[&Planned], dtype: HfDtype, path:
     }
     w.into_inner().map_err(|e| io(e.into_error()))?.sync_all().map_err(io)?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The element type of a GGUF export's matrices (norms and biases are
+/// always F32, as llama.cpp writes them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GgufDtype {
+    F32,
+    F16,
+}
+
+/// How [`export_gguf`] writes.
+#[derive(Clone, Debug)]
+pub struct GgufExport<'a> {
+    pub dtype: GgufDtype,
+    /// The checkpoint's tokenizer directory (`tokenizer.json`,
+    /// `tokenizer_config.json`), embedded as the file's `tokenizer.ggml.*`
+    /// keys: llama.cpp loads no GGUF without its vocabulary.
+    pub tokenizer_dir: &'a Path,
+    /// `general.name`.
+    pub name: &'a str,
+}
+
+/// The pre-tokenizer of every tokenizer family this exporter embeds, by the
+/// SHA-256 of its `tokenizer.json` `pre_tokenizer` (compact, keys sorted),
+/// and the `tokenizer.ggml.pre` llama.cpp runs that pre-tokenizer as.
+const PRE_TOKENIZERS: [(&str, &str); 4] = [
+    // Qwen2/2.5/3 and the R1 Qwen distills.
+    ("78d576476d401e55be4850cbdeeb3183809b5bb60da2d2e20872c6d43a2db99e", "qwen2"),
+    // Llama 3 and the R1 Llama distill.
+    ("65e1fe6fbe22e0df7a3877257a5e19e7b0336324a8678a75de61b6fc0df0e147", "llama-bpe"),
+    // deepseek-coder 1.3b/6.7b.
+    ("421985d88074b163d9dcc3f29f9b34dcac5cfd5a43e9eeae965ede66f7ac82cb", "deepseek-coder"),
+    // deepseek-llm, deepseek-math and deepseek-coder v1.5.
+    ("3fbf36c22d6c95d88cb3fdec944559ffbb3b7ed6df84913bd6bd16db03fc878d", "deepseek-llm"),
+];
+
+/// The `tokenizer.ggml.pre` for a `tokenizer.json`, or an error naming the
+/// unknown pre-tokenizer: llama.cpp would split text differently from the
+/// model's training, so an unrecognized one is refused, not guessed.
+pub fn gguf_pre_tokenizer(tokenizer_json: &Value) -> Result<&'static str, String> {
+    let pre = tokenizer_json.get("pre_tokenizer").ok_or("tokenizer.json has no pre_tokenizer")?;
+    let hash = brain_modelstore::fetch::bytes_digest(serde_json::to_string(pre).map_err(|e| e.to_string())?.as_bytes());
+    PRE_TOKENIZERS
+        .iter()
+        .find(|(h, _)| *h == hash)
+        .map(|(_, name)| *name)
+        .ok_or_else(|| format!("tokenizer.json: pre-tokenizer {hash} is not one this exporter knows the llama.cpp name of"))
+}
+
+/// A control token by its look, as llama.cpp's converter decides it for an
+/// added token not flagged special (`does_token_look_special`:
+/// deepseek-coder's `<pad>` is one).
+fn looks_special(t: &str) -> bool {
+    matches!(t, "<pad>" | "<mask>" | "<2mass>" | "[@BOS@]")
+        || (t.starts_with("<|") && t.ends_with("|>"))
+        || (t.starts_with("<｜") && t.ends_with("｜>"))
+        || (t.starts_with("<unused") && t.ends_with('>'))
+}
+
+/// Whether encoding adds a BOS and an EOS, as llama.cpp's converter reads it
+/// (`gguf.SpecialVocab`): the post-processor decides - `ByteLevel` adds
+/// neither, a `TemplateProcessing` adds each its single-sequence template
+/// opens or closes with - and `tokenizer_config.json`'s `add_*_token` only
+/// where the post-processor says nothing.
+fn adds_bos_eos(tj: &Value, tc: &Value) -> (Option<bool>, Option<bool>) {
+    let (mut bos, mut eos) = (None, None);
+    let post = &tj["post_processor"];
+    let processors: Vec<&Value> = match post["processors"].as_array() {
+        Some(list) => list.iter().collect(),
+        None if !post.is_null() => vec![post],
+        None => Vec::new(),
+    };
+    for p in processors {
+        match p["type"].as_str() {
+            Some("ByteLevel") => {
+                bos.get_or_insert(false);
+                eos.get_or_insert(false);
+            }
+            Some("TemplateProcessing") => {
+                let single = p["single"].as_array().map(Vec::as_slice).unwrap_or_default();
+                let special = |v: Option<&Value>| v.is_some_and(|v| v.get("SpecialToken").is_some());
+                if single.len() > 1 {
+                    bos = Some(special(single.first()));
+                    eos = Some(special(single.last()));
+                }
+            }
+            _ => {}
+        }
+    }
+    (bos.or(tc["add_bos_token"].as_bool()), eos.or(tc["add_eos_token"].as_bool()))
+}
+
+/// The `tokenizer.ggml.*` keys (and chat template) of a BPE `tokenizer.json`
+/// for a model with `rows` embedding rows: every id's token (`[PADn]` for a
+/// row no token uses), its type (normal 1, control 3, user-defined 4,
+/// unused 5), the merges, the pre-tokenizer and the special ids.
+fn tokenizer_kv(dir: &Path, rows: u32) -> Result<Vec<(String, GgufValue)>, String> {
+    let read = |f: &str| -> Result<Value, String> {
+        let p = dir.join(f);
+        serde_json::from_str(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?).map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let tj = read("tokenizer.json")?;
+    if tj["model"]["type"] != "BPE" {
+        return Err(format!("tokenizer.json: model type {} - only BPE tokenizers are exported", tj["model"]["type"]));
+    }
+    let pre = gguf_pre_tokenizer(&tj)?;
+    let mut tokens: Vec<Option<(String, i32)>> = vec![None; rows as usize];
+    let mut put = |id: u64, text: &str, ty: i32| -> Result<(), String> {
+        let slot = tokens.get_mut(id as usize).ok_or_else(|| format!("tokenizer.json: token {text:?} has id {id}, past the model's {rows} rows"))?;
+        *slot = Some((text.to_string(), ty));
+        Ok(())
+    };
+    for (text, id) in tj["model"]["vocab"].as_object().ok_or("tokenizer.json: model.vocab is not an object")? {
+        put(id.as_u64().ok_or("tokenizer.json: non-integer vocab id")?, text, 1)?;
+    }
+    for t in tj["added_tokens"].as_array().into_iter().flatten() {
+        let (Some(id), Some(text)) = (t["id"].as_u64(), t["content"].as_str()) else { continue };
+        if t["special"].as_bool() == Some(true) || looks_special(text) {
+            put(id, text, 3)?;
+        } else {
+            put(id, &text.replace('▁', " "), 4)?;
+        }
+    }
+    let (texts, types): (Vec<GgufValue>, Vec<GgufValue>) = tokens
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (text, ty) = t.unwrap_or_else(|| (format!("[PAD{i}]"), 5));
+            (GgufValue::String(text), GgufValue::I32(ty))
+        })
+        .unzip();
+    let merges: Vec<GgufValue> = tj["model"]["merges"]
+        .as_array()
+        .ok_or("tokenizer.json: model.merges is not an array")?
+        .iter()
+        .map(|m| match m {
+            Value::String(s) => Ok(GgufValue::String(s.clone())),
+            Value::Array(p) if p.len() == 2 => Ok(GgufValue::String(format!("{} {}", p[0].as_str().unwrap_or(""), p[1].as_str().unwrap_or("")))),
+            other => Err(format!("tokenizer.json: merge {other} is neither \"a b\" nor [a, b]")),
+        })
+        .collect::<Result<_, String>>()?;
+
+    let mut kv = vec![
+        ("tokenizer.ggml.model".to_string(), GgufValue::String("gpt2".into())),
+        ("tokenizer.ggml.pre".to_string(), GgufValue::String(pre.into())),
+        ("tokenizer.ggml.tokens".to_string(), GgufValue::Array(texts)),
+        ("tokenizer.ggml.token_type".to_string(), GgufValue::Array(types)),
+        ("tokenizer.ggml.merges".to_string(), GgufValue::Array(merges)),
+    ];
+    // Special ids and the chat template, from tokenizer_config.json.
+    if let Ok(tc) = read("tokenizer_config.json") {
+        let content = |v: &Value| v.as_str().map(str::to_string).or_else(|| v["content"].as_str().map(str::to_string));
+        let id_of = |text: &str| -> Option<u32> {
+            tj["added_tokens"].as_array().into_iter().flatten().find(|t| t["content"] == text).and_then(|t| t["id"].as_u64()).map(|i| i as u32).or_else(|| tj["model"]["vocab"][text].as_u64().map(|i| i as u32))
+        };
+        for (key, field) in [("bos_token_id", "bos_token"), ("eos_token_id", "eos_token"), ("unknown_token_id", "unk_token"), ("padding_token_id", "pad_token")] {
+            if let Some(id) = content(&tc[field]).and_then(|t| id_of(&t)) {
+                kv.push((format!("tokenizer.ggml.{key}"), GgufValue::U32(id)));
+            }
+        }
+        let (bos, eos) = adds_bos_eos(&tj, &tc);
+        for (key, add) in [("add_bos_token", bos), ("add_eos_token", eos)] {
+            if let Some(add) = add {
+                kv.push((format!("tokenizer.ggml.{key}"), GgufValue::Bool(add)));
+            }
+        }
+        if let Some(t) = tc["chat_template"].as_str() {
+            kv.push(("tokenizer.chat_template".to_string(), GgufValue::String(t.to_string())));
+        }
+    }
+    Ok(kv)
+}
+
+/// Write `cfg`'s checkpoint, read from `src`, as one llama.cpp GGUF at
+/// `path`, under the architecture the configuration is (`qwen3`, `qwen2`,
+/// `llama`), with its tokenizer embedded. A llama checkpoint's q/k rows are
+/// permuted into the interleaved order llama.cpp's RoPE expects (the inverse
+/// of what the importer undoes), and a llama3 or per-frequency RoPE scaling
+/// is written as the `rope_freqs.weight` divisors llama.cpp reads.
+pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: &GgufExport) -> Result<(), String> {
+    use checkpoint::gguf::GgmlType;
+    let (_, arch) = hf_class(cfg)?;
+    if cfg.lora.is_some() {
+        return Err("export: a LoRA training configuration is not a checkpoint".to_string());
+    }
+    let a = |k: &str| format!("{arch}.{k}");
+    let mut kv = vec![
+        ("general.architecture".to_string(), GgufValue::String(arch.into())),
+        ("general.name".to_string(), GgufValue::String(opts.name.into())),
+        ("general.file_type".to_string(), GgufValue::U32(if opts.dtype == GgufDtype::F16 { 1 } else { 0 })),
+        ("general.quantization_version".to_string(), GgufValue::U32(2)),
+        (a("vocab_size"), GgufValue::U32(cfg.vocab)),
+        (a("context_length"), GgufValue::U32(cfg.max_position_embeddings)),
+        (a("embedding_length"), GgufValue::U32(cfg.d_model)),
+        (a("block_count"), GgufValue::U32(cfg.n_layers)),
+        (a("feed_forward_length"), GgufValue::U32(cfg.d_ff)),
+        (a("attention.head_count"), GgufValue::U32(cfg.n_heads)),
+        (a("attention.head_count_kv"), GgufValue::U32(cfg.n_kv_heads)),
+        (a("attention.key_length"), GgufValue::U32(cfg.head_dim)),
+        (a("attention.value_length"), GgufValue::U32(cfg.head_dim)),
+        (a("rope.dimension_count"), GgufValue::U32(cfg.head_dim)),
+        (a("rope.freq_base"), GgufValue::F32(cfg.rope_theta)),
+        (a("attention.layer_norm_rms_epsilon"), GgufValue::F32(cfg.rms_eps)),
+    ];
+    let mut rope_freqs: Option<Vec<f32>> = None;
+    match &cfg.rope_scaling {
+        None => {}
+        Some(RopeScaling::Linear { factor }) => {
+            kv.push((a("rope.scaling.type"), GgufValue::String("linear".into())));
+            kv.push((a("rope.scaling.factor"), GgufValue::F32(*factor)));
+        }
+        Some(RopeScaling::Yarn(y)) => {
+            kv.push((a("rope.scaling.type"), GgufValue::String("yarn".into())));
+            kv.push((a("rope.scaling.factor"), GgufValue::F32(y.factor)));
+            kv.push((a("rope.scaling.original_context_length"), GgufValue::U32(y.original_max_position_embeddings)));
+            kv.push((a("rope.scaling.yarn_beta_fast"), GgufValue::F32(y.beta_fast)));
+            kv.push((a("rope.scaling.yarn_beta_slow"), GgufValue::F32(y.beta_slow)));
+            if let Some(f) = y.attention_factor {
+                kv.push((a("rope.scaling.yarn_attn_factor"), GgufValue::F32(f)));
+            }
+        }
+        Some(s @ (RopeScaling::Llama3 { .. } | RopeScaling::Factors(_))) => {
+            // llama.cpp divides the base inverse frequencies by these.
+            let base = model::rope_scaling::base_inv_freq(cfg.head_dim, cfg.rope_theta);
+            let (scaled, _) = s.inv_freq(cfg.head_dim, cfg.rope_theta);
+            rope_freqs = Some(match s {
+                RopeScaling::Factors(f) => f.clone(),
+                _ => base.iter().zip(&scaled).map(|(b, s)| b / s).collect(),
+            });
+        }
+    }
+    kv.extend(tokenizer_kv(opts.tokenizer_dir, cfg.vocab)?);
+
+    // Every tensor's name, shape, type and permutation, planned up front: the
+    // header carries each one's offset before any bytes are written.
+    let permute_heads = |name: &str| -> Option<u32> {
+        (arch == "llama").then_some(()).and_then(|_| {
+            if name.ends_with("attn.wq.weight") {
+                Some(cfg.n_heads)
+            } else if name.ends_with("attn.wk.weight") {
+                Some(cfg.n_kv_heads)
+            } else {
+                None
+            }
+        })
+    };
+    struct Out {
+        brain: Option<String>,
+        gguf: String,
+        shape: Vec<usize>,
+        ty: GgmlType,
+        permute: Option<u32>,
+    }
+    let mut outs: Vec<Out> = Vec::new();
+    for (brain, _) in cfg.param_list() {
+        let gguf = crate::gguf_import::brain_to_gguf(&brain).ok_or_else(|| format!("export: no GGUF name for {brain:?}"))?;
+        let shape: Vec<usize> = hf_shape(&brain, cfg)?.into_iter().map(|d| d as usize).collect();
+        let ty = if shape.len() == 1 || opts.dtype == GgufDtype::F32 { GgmlType::F32 } else { GgmlType::F16 };
+        outs.push(Out { permute: permute_heads(&brain), brain: Some(brain), gguf, shape, ty });
+    }
+    if let Some(f) = &rope_freqs {
+        outs.push(Out { brain: None, gguf: "rope_freqs.weight".into(), shape: vec![f.len()], ty: GgmlType::F32, permute: None });
+    }
+    let bytes = |o: &Out| o.shape.iter().product::<usize>() * if o.ty == GgmlType::F16 { 2 } else { 4 };
+    let plan = outs.iter().map(|o| checkpoint::gguf_write::TensorPlan { name: o.gguf.clone(), shape: o.shape.clone(), ty: o.ty.id(), nbytes: bytes(o) }).collect();
+    let mut w = checkpoint::gguf_write::Writer::create(&path.to_string_lossy(), &kv, plan, 32).map_err(|e| format!("{}: {e}", path.display()))?;
+    for o in &outs {
+        let mut data = match &o.brain {
+            None => rope_freqs.clone().expect("planned with it"),
+            Some(brain) => {
+                let mut v = Vec::new();
+                if !src.with_tensor(brain, &mut |x| v.extend_from_slice(x)) {
+                    return Err(format!("export: the checkpoint has no tensor {brain:?}"));
+                }
+                v
+            }
+        };
+        if let Some(n) = o.permute {
+            // The importer reads brain row r from stored row order[r]; the
+            // export stores brain row r at order[r].
+            let cols = o.shape[1];
+            let order = crate::gguf_import::llama_unpermute_order(n as usize, cfg.head_dim as usize);
+            let mut stored = vec![0f32; data.len()];
+            for (r, &from) in order.iter().enumerate() {
+                stored[from as usize * cols..(from as usize + 1) * cols].copy_from_slice(&data[r * cols..(r + 1) * cols]);
+            }
+            data = stored;
+        }
+        let encoded: Vec<u8> = match o.ty {
+            GgmlType::F16 => data.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect(),
+            _ => data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        };
+        w.write_tensor(&o.gguf, &encoded).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    w.finish().map_err(|e| format!("{}: {e}", path.display()))
 }
