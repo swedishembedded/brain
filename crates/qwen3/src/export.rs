@@ -552,3 +552,63 @@ pub fn export_gguf(src: &dyn TensorSource, cfg: &QwenConfig, path: &Path, opts: 
     }
     w.finish().map_err(|e| format!("{}: {e}", path.display()))
 }
+
+/// Write a LoRA adapter brain trained for this decoder (`adapter_path`, as
+/// `qwen3::lora::save_adapter` writes it) as a PEFT adapter directory:
+/// `adapter_model.safetensors` under PEFT's names
+/// (`base_model.model.<HF module>.lora_A.weight` `[r, in]`, `.lora_B.weight`
+/// `[out, r]`) and an `adapter_config.json` carrying the rank, `lora_alpha`
+/// and target modules, so `peft.PeftModel.from_pretrained` applies it to the
+/// HF checkpoint exactly as brain applies it to its own: `(alpha / r) · B·A`.
+/// `base_model` names the HF checkpoint it applies to; `None` takes the base
+/// the adapter's own card records.
+pub fn export_peft(adapter_path: &str, out: &Path, base_model: Option<&str>) -> Result<(), String> {
+    let st = checkpoint::st::load_safetensors(adapter_path).map_err(|e| format!("{adapter_path}: {e}"))?;
+    let card = st.card().ok_or_else(|| format!("{adapter_path}: no ModelCard"))?;
+    let adapter = card.adapter.as_ref().ok_or_else(|| format!("{adapter_path}: its card describes no adapter"))?;
+    if adapter.kind != "lora" {
+        return Err(format!("{adapter_path}: a {:?} adapter has no PEFT LoRA form", adapter.kind));
+    }
+    let r = adapter.rank.filter(|&r| r > 0).ok_or_else(|| format!("{adapter_path}: the adapter has no rank"))? as usize;
+    let alpha = adapter.alpha.unwrap_or(r as f32);
+    let base_model = base_model.map(str::to_string).or_else(|| adapter.base.clone()).ok_or_else(|| format!("{adapter_path}: no base model given and none on its card"))?;
+
+    let names = HfNames::CAUSAL_LM;
+    let mut bases: Vec<&str> = st.tensors.keys().filter_map(|n| n.strip_suffix(".lora_a")).collect();
+    bases.sort();
+    if bases.is_empty() {
+        return Err(format!("{adapter_path}: no .lora_a/.lora_b pairs"));
+    }
+    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+    let mut modules: Vec<String> = Vec::new();
+    for base in bases {
+        let a = &st.tensors[&format!("{base}.lora_a")];
+        let b = st.tensors.get(&format!("{base}.lora_b")).ok_or_else(|| format!("{adapter_path}: {base}.lora_a has no .lora_b"))?;
+        if a.len() % r != 0 || b.len() % r != 0 {
+            return Err(format!("{adapter_path}: {base}'s factors are not rank-{r} matrices"));
+        }
+        let hf = names.from_brain(base).ok_or_else(|| format!("{adapter_path}: no HF name for {base}"))?;
+        let stem = hf.strip_suffix(".weight").ok_or_else(|| format!("{adapter_path}: {base} is not a weight"))?;
+        let module = stem.rsplit('.').next().unwrap_or(stem).to_string();
+        if !modules.contains(&module) {
+            modules.push(module);
+        }
+        tensors.push((format!("base_model.model.{stem}.lora_A.weight"), vec![r as u64, (a.len() / r) as u64], a.clone()));
+        tensors.push((format!("base_model.model.{stem}.lora_B.weight"), vec![(b.len() / r) as u64, r as u64], b.clone()));
+    }
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    checkpoint::st::save_safetensors(&out.join("adapter_model.safetensors").to_string_lossy(), &tensors, &Value::Null, None).map_err(|e| format!("{}: {e}", out.display()))?;
+    let config = json!({
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+        "base_model_name_or_path": base_model,
+        "r": r,
+        "lora_alpha": alpha,
+        "target_modules": modules,
+        "lora_dropout": 0.0,
+        "bias": "none",
+        "fan_in_fan_out": false,
+        "inference_mode": true,
+    });
+    write_json(&out.join("adapter_config.json"), &config)
+}

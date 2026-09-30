@@ -174,13 +174,17 @@ fn want_npu() -> bool {
 /// `brain qwen3 export`: `--format onnx` (the default) writes the NPU's ONNX
 /// graph; `--format hf` writes a `transformers` directory
 /// (`qwen3::export::export_hf`) and `--format gguf` a llama.cpp GGUF
-/// (`qwen3::export::export_gguf`), from any checkpoint this decoder reads.
+/// (`qwen3::export::export_gguf`), from any checkpoint this decoder reads;
+/// `--format peft` writes a LoRA adapter (`--adapter`) as a PEFT adapter
+/// directory (`qwen3::export::export_peft`).
 fn export(args: &[String]) {
     let mut weights = String::new();
     let mut out = String::new();
     let mut format = "onnx".to_string();
     let mut dtype: Option<String> = None;
     let mut tokenizer_dir: Option<String> = None;
+    let mut adapter = String::new();
+    let mut base_model: Option<String> = None;
     let mut seq = 32usize;
     let mut i = 0;
     while i < args.len() {
@@ -189,16 +193,33 @@ fn export(args: &[String]) {
             "--out" => out = val(args, &mut i, "--out"),
             "--format" => format = val(args, &mut i, "--format"),
             "--tokenizer-dir" => tokenizer_dir = Some(val(args, &mut i, "--tokenizer-dir")),
+            "--adapter" => adapter = val(args, &mut i, "--adapter"),
+            "--base-model" => base_model = Some(val(args, &mut i, "--base-model")),
             "--dtype" => dtype = Some(val(args, &mut i, "--dtype")),
             "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
+    if format == "peft" {
+        if adapter.is_empty() || out.is_empty() {
+            eprintln!("usage: brain qwen3 export --format peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]");
+            std::process::exit(2);
+        }
+        match qwen3::export::export_peft(&adapter, std::path::Path::new(&out), base_model.as_deref()) {
+            Ok(()) => println!("ok: wrote {out}"),
+            Err(e) => {
+                eprintln!("export failed: {e}");
+                std::process::exit(1)
+            }
+        }
+        return;
+    }
     if weights.is_empty() {
         eprintln!("usage: brain qwen3 export --weights F [--format onnx] --out model.onnx [--seq T]");
         eprintln!("       brain qwen3 export --weights F --format hf --out DIR [--dtype bf16|f16|f32] [--tokenizer-dir D]");
         eprintln!("       brain qwen3 export --weights F --format gguf --out FILE.gguf [--dtype f16|f32] [--tokenizer-dir D]");
+        eprintln!("       brain qwen3 export --format peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]");
         return;
     }
     let bad_dtype = |d: &str, allowed: &str| -> ! {
@@ -263,7 +284,7 @@ fn export(args: &[String]) {
             }
         }
         other => {
-            eprintln!("--format {other:?}: expected onnx, hf or gguf");
+            eprintln!("--format {other:?}: expected onnx, hf, gguf or peft");
             std::process::exit(2)
         }
     }

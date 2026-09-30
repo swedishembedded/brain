@@ -143,6 +143,12 @@ default dtype for the matrices is f16. Exporting deepseek-coder-1.3b-instruct
 gives tensors byte-identical to llama.cpp's own converter, the same metadata,
 and the same tokenization under llama.cpp.
 
+`--format peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]`
+writes a LoRA adapter as a PEFT adapter directory (`adapter_model.safetensors`
+and `adapter_config.json`, with `lora_alpha` and the target modules) that
+`peft.PeftModel.from_pretrained` applies to the HF export of its base.
+`--base-model` defaults to the base on the adapter's card.
+
 ### LoRA adapters
 
 A named LoRA adapter is stored beside its base checkpoint in the model store,
