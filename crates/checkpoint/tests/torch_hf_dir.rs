@@ -64,5 +64,10 @@ fn a_single_bin_checkpoint_opens_and_safetensors_wins_when_both_ship() {
     let st = [("model.norm.weight".to_string(), vec![5u64], vec![7.0f32; 5])];
     checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &st, &serde_json::Value::Null, None).unwrap();
     assert_eq!(WeightReader::open_hf_dir(&dir).unwrap().tensor("model.norm.weight").unwrap(), vec![7.0; 5]);
+
+    // A brain-format file beside the download (sorting first) is not it.
+    let brain = [("model.norm.weight".to_string(), vec![5u64], vec![-1.0f32; 5])];
+    checkpoint::st::save_safetensors(dir.join("model.brain.safetensors").to_str().unwrap(), &brain, &serde_json::Value::Null, None).unwrap();
+    assert_eq!(WeightReader::open_hf_dir(&dir).unwrap().tensor("model.norm.weight").unwrap(), vec![7.0; 5]);
     let _ = std::fs::remove_dir_all(&dir);
 }

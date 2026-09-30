@@ -113,11 +113,13 @@ impl WeightReader {
             return Ok(WeightReader { inner: Inner::StSharded(readers, owner), order, shapes });
         }
         // No index: exactly one *.safetensors file (mirrors
-        // crate::safetensors::read_model_dir's single-file fallback).
+        // crate::safetensors::read_model_dir's single-file fallback). A
+        // `*.brain.safetensors` beside the download is brain's own format,
+        // never the checkpoint's upstream weights.
         let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
+            .filter(|p| p.extension().is_some_and(|e| e == "safetensors") && !p.to_string_lossy().ends_with(".brain.safetensors"))
             .collect();
         candidates.sort();
         if let Some(path) = candidates.into_iter().next() {
