@@ -78,7 +78,8 @@ fn image_manifest() -> Manifest {
             .streaming()
             .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
             .param(ParamSpec::new("width", ParamType::Int, "width").default(json!(1024)))
-            .param(ParamSpec::new("height", ParamType::Int, "height").default(json!(1024)))
+            // The tallest image this model draws.
+            .param(ParamSpec::new("height", ParamType::Int, "height").default(json!(1024)).max(1024.0))
             .param(ParamSpec::new("seed", ParamType::Int, "seed"))
             .output(BlobSpec::new("image", Media::Image, "the generated image"))],
     )
@@ -1185,6 +1186,20 @@ async fn openai_images_accept_the_whitelisted_small_sizes() {
         assert_eq!(st, StatusCode::OK, "{size} must 200: {v}");
         assert_valid("openai.json", "ImagesResponse", &v);
     }
+}
+
+/// A whitelisted size the model itself does not draw (its text2image action
+/// bounds `width`/`height`) is refused up front, naming the bound, rather
+/// than queued behind the model's load and refused there.
+#[tokio::test]
+async fn openai_images_refuse_a_size_outside_the_models_own_bounds() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let body = json!({"model": "brain-image", "prompt": "a tall cat", "size": "1024x1536"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {v}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("height") && msg.contains("1024"), "{msg}");
 }
 
 /// Bad bodies -> 400: missing model, missing prompt, unsupported size, n out of

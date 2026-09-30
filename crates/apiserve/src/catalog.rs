@@ -134,6 +134,27 @@ pub fn resolve_image(manifests: &[Manifest], model: &str) -> Option<String> {
     manifests.iter().find(|m| m.model == model && api_caps(m).image).and_then(text2image_action)
 }
 
+/// Whether `model`'s text-to-image `action` draws a `width` x `height` image:
+/// each of its `width`/`height` params that declares a bound must hold the
+/// requested value. `Err` names the dimension and the bound, what a client
+/// can act on; nothing about the model's internals.
+pub fn image_size_fits(manifests: &[Manifest], model: &str, action: &str, width: u32, height: u32) -> Result<(), String> {
+    let Some(spec) = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == action)) else {
+        return Ok(());
+    };
+    for (name, value) in [("width", width), ("height", height)] {
+        let Some(p) = spec.params.iter().find(|p| p.name == name) else { continue };
+        let v = value as f64;
+        match (p.min, p.max) {
+            (Some(lo), Some(hi)) if lo == hi && v != lo => return Err(format!("{model} draws images of {name} {lo} only, not {value}")),
+            (Some(lo), _) if v < lo => return Err(format!("{model} draws images of {name} at least {lo}, not {value}")),
+            (_, Some(hi)) if v > hi => return Err(format!("{model} draws images of {name} at most {hi}, not {value}")),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Strip a leading `"<segment>/"` provider namespace from an OpenRouter-style model
 /// id: `anything/qwen3-4b` -> `Some("qwen3-4b")`, `openai/gpt-4o` -> `Some("gpt-4o")`.
 /// Only the FIRST segment is removed (`a/b/c` -> `b/c`). Returns `None` when there is

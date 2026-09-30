@@ -1112,6 +1112,11 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
         }
     };
 
+    // A size the model does not draw is the client's to fix, not something
+    // to queue behind the model's load.
+    if let Err(e) = catalog::image_size_fits(&state.exec.manifests(), &req.model, &action, req.width, req.height) {
+        return ApiError::invalid_request(provider, format!("unsupported 'size' {:?}: {e}", req.size_label)).into_response();
+    }
     if req.stream {
         return stream_images(state, req, action).await;
     }
