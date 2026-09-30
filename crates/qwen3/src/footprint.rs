@@ -176,6 +176,17 @@ pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t
         + head_bytes(cfg, shard, n, train, decode_only)
 }
 
+/// The parameter count from which a decoder is served with int8 linears
+/// unless its caller says otherwise: a 6-8B decoder is 24-32 GB of fp32
+/// weights, more than a 24 GB card holds.
+pub const INT8_WEIGHTS_FROM_PARAMS: u64 = 6_000_000_000;
+
+/// Whether `cfg`'s linears default to int8 - [`INT8_WEIGHTS_FROM_PARAMS`]
+/// parameters and up. The serving resident and the SDK both default by it.
+pub fn int8_by_default(cfg: &QwenConfig) -> bool {
+    cfg.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() >= INT8_WEIGHTS_FROM_PARAMS
+}
+
 /// Declares [`estimate_vram_bytes`]'s figure to [`gpu_core::devices::place`]
 /// before `f` builds anything, so an over-budget checkpoint is refused BY
 /// NAME (which part, how many bytes, what each card has free - see

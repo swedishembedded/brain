@@ -233,6 +233,7 @@ impl TextGenerationPipeline {
             device: Device::default(),
             capacity: DEFAULT_CAPACITY,
             download_policy: loader::DownloadPolicy::default(),
+            precision: None,
         }
     }
 
@@ -248,7 +249,7 @@ impl TextGenerationPipeline {
     /// doc.
     pub fn generate_with(&self, prompt: &str, opts: TextGenerationOptions) -> Result<GeneratedText> {
         let inv = opts.into_invocation(prompt)?;
-        let req = qwen3::chat::parse_request(&self.engine.tok, &inv).map_err(Error::Backend)?;
+        let req = qwen3::chat::parse_request_as(&self.engine.tok, &self.engine.format, &inv).map_err(Error::Backend)?;
 
         let need = req.ids.len() as u64 + req.max_new as u64;
         if need > self.engine.capacity as u64 {
@@ -269,6 +270,12 @@ impl TextGenerationPipeline {
         &self.engine.identity
     }
 
+    /// The storage tier the decoder's linears were built at: `"fp32"` or
+    /// `"int8"`.
+    pub fn precision(&self) -> &'static str {
+        self.engine.precision.name()
+    }
+
     /// The loaded engine, for the chat surface built on this same load.
     pub(crate) fn into_engine(self) -> Engine {
         self.engine
@@ -287,8 +294,15 @@ pub(crate) struct Engine {
     /// the sampler. Read once at load: reading it per request is a whole
     /// head's device-to-host copy on every call.
     head: Vec<f32>,
-    /// `<|im_end|>` and `<|endoftext|>`, whichever the tokenizer has.
+    /// The ids that end a generation: the checkpoint's own
+    /// (`data::generation::stop_ids`, from its `generation_config.json`,
+    /// tokenizer config or GGUF) plus its chat format's end-of-turn token.
     eos: Vec<u32>,
+    /// How a request becomes prompt text: the checkpoint's own chat template
+    /// (`qwen3::chat::ChatFormat::for_checkpoint`).
+    pub(crate) format: qwen3::chat::ChatFormat,
+    /// The storage tier the decoder's linears were built at.
+    precision: Precision,
     /// The context budget (prompt + completion, in tokens) the KV cache was
     /// BUILT for - fixed at construction, like `s3dit`'s build-time size
     /// (see `ImagePipelineBuilder::size`'s own doc for the same asymmetry).
@@ -365,6 +379,37 @@ pub struct TextGenerationPipelineBuilder {
     device: Device,
     capacity: u32,
     download_policy: loader::DownloadPolicy,
+    precision: Option<Precision>,
+}
+
+/// The decoder's storage tier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Precision {
+    Fp32,
+    /// Group-wise int8 linears with dynamic activation quantization - lossy.
+    Int8,
+}
+
+impl Precision {
+    fn from_name(name: &str) -> Result<Precision> {
+        match name {
+            "fp32" => Ok(Precision::Fp32),
+            "int8" => Ok(Precision::Int8),
+            other => Err(Error::Backend(format!("precision {other:?}: expected \"fp32\" or \"int8\""))),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Precision::Fp32 => "fp32",
+            Precision::Int8 => "int8",
+        }
+    }
+    fn dtype(self) -> qwen3::Dtype {
+        match self {
+            Precision::Fp32 => qwen3::Dtype::F32,
+            Precision::Int8 => qwen3::Dtype::I8,
+        }
+    }
 }
 
 impl TextGenerationPipelineBuilder {
@@ -408,6 +453,15 @@ impl TextGenerationPipelineBuilder {
         self
     }
 
+    /// The decoder's storage tier: `"fp32"` (exact) or `"int8"` (LOSSY:
+    /// group-wise int8 linears, a quarter of the memory). Unset, a checkpoint
+    /// of 6B parameters or more is loaded int8 - its fp32 weights do not fit
+    /// one 24 GB card - and a smaller one fp32. `Err` for any other spelling.
+    pub fn precision(mut self, precision: impl AsRef<str>) -> Result<Self> {
+        self.precision = Some(Precision::from_name(precision.as_ref())?);
+        Ok(self)
+    }
+
     /// How [`TextGenerationPipelineBuilder::load`] may use the network to
     /// resolve a hub-id `weights_path` (unused for a literal local path).
     /// Defaults to [`loader::DownloadPolicy::IfMissing`] -- see that type's
@@ -441,11 +495,11 @@ impl TextGenerationPipelineBuilder {
     ///    budget (within whatever step 1 already narrowed the ambient
     ///    selection to) and builds the inference-only model.
     pub fn load(self) -> Result<TextGenerationPipeline> {
-        let TextGenerationPipelineBuilder { weights, adapter, tokenizer, device, capacity, download_policy } = self;
+        let TextGenerationPipelineBuilder { weights, adapter, tokenizer, device, capacity, download_policy, precision } = self;
 
         crate::device::apply(&device)?;
 
-        let (weights, resolved_tokenizer) = if Path::new(&weights).is_file() {
+        let (weights, resolved_tokenizer) = if Path::new(&weights).exists() {
             check_local_weights_architecture(&weights)?;
             (weights, None)
         } else if let Some(local) = resolve_in_store(&weights) {
@@ -460,54 +514,59 @@ impl TextGenerationPipelineBuilder {
             resolve_hub_weights(&weights, download_policy)?
         };
 
-        let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}")))?;
-        let cfg = qwen3::QwenConfig::from_reader(&reader).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}")))?;
+        // Any format the decoder reads: a Hugging Face checkpoint directory
+        // (Llama and Qwen2 included), a GGUF or a brain file, read as it is.
+        let (cfg, src) = qwen3::open_checkpoint(&weights).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
+        // A single file may carry its own tokenizer (a GGUF) and card.
+        let file = Path::new(&weights)
+            .is_file()
+            .then(|| checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3: {weights}: {e}"))))
+            .transpose()?;
+        let embedded = file.as_ref().and_then(|r| r.tokenizer());
+        let beside = Path::new(&weights).is_dir().then(|| Path::new(&weights).join("tokenizer.json")).filter(|t| t.is_file()).map(|t| t.to_string_lossy().into_owned());
 
-        let tok = if let Some(t) = &tokenizer {
-            data::qwen_tokenizer::QwenBpe::from_file(t).map_err(Error::Backend)?
-        } else if let Some(gt) = reader.tokenizer() {
-            data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(Error::Backend)?
-        } else if let Some(rt) = &resolved_tokenizer {
-            data::qwen_tokenizer::QwenBpe::from_file(rt).map_err(Error::Backend)?
+        let (tok, tok_file) = if let Some(t) = &tokenizer {
+            (data::qwen_tokenizer::QwenBpe::from_file(t).map_err(Error::Backend)?, Some(t.clone()))
+        } else if let Some(gt) = &embedded {
+            (data::qwen_tokenizer::QwenBpe::from_gguf(gt).map_err(Error::Backend)?, None)
+        } else if let Some(rt) = resolved_tokenizer.or(beside) {
+            (data::qwen_tokenizer::QwenBpe::from_file(&rt).map_err(Error::Backend)?, Some(rt))
         } else {
-            return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf), none resolved, and none given; call .tokenizer(path)")));
+            return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf), none beside it, none resolved, and none given; call .tokenizer(path)")));
         };
+        // The tokenizer's directory holds the checkpoint's chat template and
+        // generation config.
+        let tok_dir = tok_file.as_deref().and_then(|t| Path::new(t).parent()).map(Path::to_path_buf);
+        let format = qwen3::chat::ChatFormat::for_checkpoint(tok_dir.as_deref(), &tok);
+        let eos = data::generation::stop_ids(tok_dir.as_deref(), &tok, embedded.as_ref().and_then(|g| g.eos), format.end_of_turn()).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
+        let precision = precision.unwrap_or(if qwen3::footprint::int8_by_default(&cfg) { Precision::Int8 } else { Precision::Fp32 });
+        let dt = precision.dtype();
+
         // Built for KV-cache DECODE, which is the only thing a generation
         // ever drives (`Engine::run`: prefill, then one token at a time).
-        //
-        // The batched constructor sizes per-layer activations at `b*t`,
-        // attention scores at `n_heads*ctx^2` and a logits buffer at
-        // `t*vocab` - none of which a decode reads. On a large-vocabulary
-        // model that logits buffer alone is bigger than the device will bind:
-        // Qwen3-0.6B at the default 4096 capacity asks for 2.32 GiB against
-        // the 2 GiB `maxStorageBufferBindingSize` that Vulkan and WebGPU both
-        // standardise, so the default pipeline could not load it at all, and
-        // failed inside a bind group rather than anywhere that named a
-        // capacity. A decode build has no logits buffer - the LM head is
-        // applied host-side - and its KV cache is the only thing that scales
-        // with the context at all.
+        // A decode build has no logits buffer - the LM head is applied
+        // host-side - and its KV cache is the only thing that scales with the
+        // context: the batched constructor's `t*vocab` logits buffer alone
+        // exceeds the 2 GiB binding limit for Qwen3-0.6B at 4096 tokens.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-        let base_id = reader.card().map(|card| card.id);
+        let base_id = file.as_ref().and_then(|r| r.card()).map(|card| card.id);
         let model = if let Some(path) = &adapter {
-            // Folded on the host, then built decode-shaped from the result -
-            // the one path `from_tensors_decode` exists for.
-            drop(reader);
-            let base = checkpoint::load(&weights);
-            let mut tensors = base.by_role("");
+            // Folded on the host, then built from the result.
+            let mut tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
+            drop(src);
             qwen3::lora::fold_adapter_into(&mut tensors, path).map_err(|e| Error::Backend(format!("{path}: {e}")))?;
             let folded = cfg.clone();
-            qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
-                qwen3::Qwen::from_tensors_decode(folded.clone(), &tensors, capacity)
+            qwen3::footprint::place_and_build(&cfg, &shard, dt, 1, capacity, false, true, "qwen3", || {
+                qwen3::Qwen::new_shard_dt_decode(folded.clone(), capacity, &tensors, shard.clone(), dt)
             })
             .map_err(Error::Backend)?
         } else {
-            let built = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
-                qwen3::Qwen::from_reader_decode(&reader, capacity)
+            qwen3::footprint::place_and_build(&cfg, &shard, dt, 1, capacity, false, true, "qwen3", || {
+                qwen3::Qwen::new_shard_dt_decode(cfg.clone(), capacity, &*src, shard.clone(), dt)
             })
-            .map_err(Error::Backend)?;
-            drop(reader);
-            built
+            .map_err(Error::Backend)?
         };
+        drop(file);
 
         // What was loaded, by content: hashed after the build, so a file that
         // could not be loaded is never reported, and before the pipeline is
@@ -519,11 +578,10 @@ impl TextGenerationPipelineBuilder {
             }
             None => None,
         };
-        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_file(&weights, base_id)?, adapter: adapter_identity };
+        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: adapter_identity };
 
         let head = model.read_weight(model.cfg.head_weight());
-        let eos: Vec<u32> = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| tok.special_id(s)).collect();
-        Ok(TextGenerationPipeline { engine: Engine { model, tok, head, eos, capacity, identity } })
+        Ok(TextGenerationPipeline { engine: Engine { model, tok, head, eos, format, precision, capacity, identity } })
     }
 }
 

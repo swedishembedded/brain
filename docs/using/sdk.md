@@ -91,15 +91,24 @@ println!("{}", out.text);
 ```
 
 Takes a local checkpoint path or a `<vendor>/<repo>` hub id through the same
-call - a string naming a real file on disk is always the local path. A
-`.gguf` checkpoint carries its own tokenizer; a brain-format `.safetensors`
-checkpoint needs one named explicitly:
+call - a string naming a real file or directory on disk is always the local
+path. Any Qwen3, Qwen2 or Llama checkpoint loads as downloaded: a Hugging Face
+directory, a GGUF or a brain `.safetensors` file. A directory reads the
+`tokenizer.json`, chat template and `generation_config.json` beside its
+weights, and a `.gguf` carries its own tokenizer; a brain-format
+`.safetensors` file needs one named explicitly:
 
 ```rust
 let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors")
     .tokenizer("/models/qwen3-4b/tokenizer.json")
     .load()?;
 ```
+
+Generation stops on the checkpoint's own end tokens, and chat requests render
+through its own template. A checkpoint of 6B parameters or more loads with
+int8 linears (its fp32 weights do not fit one 24 GB card);
+`.precision("fp32")` or `.precision("int8")` chooses explicitly, and
+`pipe.precision()` reports what was built.
 
 `pipe.generate_with(prompt, brain::TextGenerationOptions::new().max_new_tokens(256).temperature(0.7))`
 layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/

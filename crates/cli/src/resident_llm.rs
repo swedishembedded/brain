@@ -453,8 +453,8 @@ pub struct QwenServeConfig {
     pub kv_offload_gb: f64,
     /// `--qwen-weights-int8` (`Some(true)`) or `--qwen-weights-fp32`
     /// (`Some(false)`); `None` (the default) quantizes the linears of a
-    /// checkpoint of [`INT8_WEIGHTS_FROM_PARAMS`] parameters or more, which
-    /// at fp32 does not fit one 24 GB card.
+    /// checkpoint of `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters
+    /// or more, which at fp32 does not fit one 24 GB card.
     pub weights_int8: Option<bool>,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
@@ -466,15 +466,10 @@ impl Default for QwenServeConfig {
     }
 }
 
-/// The parameter count from which a checkpoint is served with int8 linears
-/// unless the operator says otherwise: a 6-8B decoder is 24-32 GB of fp32
-/// weights, more than a 24 GB card holds.
-pub const INT8_WEIGHTS_FROM_PARAMS: u64 = 6_000_000_000;
-
 /// Whether `checkpoint`'s linears are served int8: the operator's explicit
-/// choice, else [`INT8_WEIGHTS_FROM_PARAMS`] and up.
+/// choice, else `qwen3::footprint::int8_by_default` (6B parameters and up).
 fn weights_int8_for(requested: Option<bool>, checkpoint: &qwen3::config::QwenConfig) -> bool {
-    requested.unwrap_or_else(|| checkpoint.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() >= INT8_WEIGHTS_FROM_PARAMS)
+    requested.unwrap_or_else(|| qwen3::footprint::int8_by_default(checkpoint))
 }
 
 /// Context-length tiers [`QwenResident::resolve_ctx`]'s auto-sizing path

@@ -440,6 +440,31 @@ impl WeightsIdentity {
         let digest = brain_modelstore::fetch::file_digest(std::path::Path::new(path)).map_err(|e| Error::Backend(format!("{path}: hashing the loaded weights: {e}")))?;
         Ok(WeightsIdentity { id, path: PathBuf::from(path), digest })
     }
+
+    /// [`Self::of_file`] for a checkpoint that may be a directory: a
+    /// directory's digest covers each weight file (safetensors or
+    /// `pytorch_model*.bin`) by name and content, in name order, so it names
+    /// exactly the bytes a load of it reads.
+    pub(crate) fn of_path(path: &str, id: Option<String>) -> Result<WeightsIdentity> {
+        let dir = std::path::Path::new(path);
+        if !dir.is_dir() {
+            return Self::of_file(path, id);
+        }
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .map_err(|e| Error::Backend(format!("{path}: {e}")))?
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.ends_with(".safetensors") || n.ends_with(".bin") || n.ends_with(".gguf"))
+            .collect();
+        files.sort();
+        let mut listing = String::new();
+        for f in &files {
+            let d = brain_modelstore::fetch::file_digest(&dir.join(f)).map_err(|e| Error::Backend(format!("{path}/{f}: hashing the loaded weights: {e}")))?;
+            listing.push_str(&format!("{f} {d}\n"));
+        }
+        let digest = format!("sha256:{}", brain_modelstore::fetch::bytes_digest(listing.as_bytes()));
+        Ok(WeightsIdentity { id, path: PathBuf::from(path), digest })
+    }
 }
 
 /// Multi-turn chat with tool calling. See this module's doc.
@@ -501,7 +526,7 @@ impl ChatPipeline {
     /// Tool calls arrive complete in the response, not as deltas.
     pub fn generate_stream(&self, request: &ChatRequest, cancel: &CancelToken, mut on_delta: impl FnMut(ChatDelta)) -> Result<ChatResponse> {
         let inv = request.to_invocation()?;
-        let mut parsed = qwen3::chat::parse_request(&self.engine.tok, &inv).map_err(Error::Backend)?;
+        let mut parsed = qwen3::chat::parse_request_as(&self.engine.tok, &self.engine.format, &inv).map_err(Error::Backend)?;
         let capacity = self.engine.capacity as usize;
         if parsed.ids.len() >= capacity {
             return Err(Error::Backend(format!(

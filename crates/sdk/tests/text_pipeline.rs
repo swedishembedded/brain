@@ -21,10 +21,8 @@
 //!
 //! ## Why this stops short of a successful `.generate(...)` -- most of it, not all of it
 //!
-//! `QwenConfig::from_json`'s own defaults happen to equal `QwenConfig::tiny()`
-//! exactly (both default to `vocab: 23, n_layers: 2, d_model: 16, ...`), so
-//! an empty `{}` config header is enough to prove the checkpoint opens and
-//! parses - genuinely cheaper than `ImagePipeline`'s fixtures, which need
+//! A header carrying `QwenConfig::tiny()`'s config and one dummy tensor is
+//! enough to prove the checkpoint opens and parses - genuinely cheaper than `ImagePipeline`'s fixtures, which need
 //! real classifiable tensor shapes. Most tests below stop there: a clean,
 //! named `Error::MissingArgument` at the tokenizer-resolution step - never a
 //! panic, and never reaching the (much heavier) `Qwen::load_inference` call.
@@ -48,11 +46,10 @@ use common::{scratch_path, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMP
 
 /// A minimal, real, valid safetensors checkpoint: one dummy tensor (this
 /// pipeline never reaches a real weight read - see this file's module doc)
-/// and an EMPTY `{}` config, which `QwenConfig::from_json` resolves to
-/// exactly `QwenConfig::tiny()` via its own defaults.
+/// and `QwenConfig::tiny()`'s config in its header.
 fn tiny_checkpoint(tag: &str) -> Scratch {
     let path = scratch_path(&format!("text-pipeline-{tag}"), "safetensors");
-    checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &qwen3::QwenConfig::tiny().to_json(), None).unwrap();
     Scratch(path)
 }
 

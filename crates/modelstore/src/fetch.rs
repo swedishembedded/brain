@@ -92,6 +92,12 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hex_lower(&hasher.finalize()))
 }
 
+/// Lowercase hex sha256 of `bytes` - [`sha256_file`] for data already in
+/// memory.
+pub fn bytes_digest(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
 /// `sha256:<lowercase hex>` of a file's bytes: [`sha256_file`] tagged with
 /// its algorithm. The one spelling of a weights file's identity - a
 /// fine-tune's adapter digest, a loaded pipeline's identity and the adapter

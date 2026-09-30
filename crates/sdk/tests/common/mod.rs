@@ -5,21 +5,24 @@
 //! by the `text`-surface test binaries that need a real generation without a
 //! real model.
 //!
-//! `QwenConfig::from_json`'s own defaults equal `QwenConfig::tiny()` exactly
-//! (`vocab: 23, n_layers: 2, d_model: 16, ...`), so an empty `{}` config
-//! header plus every tensor `tiny().param_list()` names is a complete
-//! checkpoint. The tokenizer is a curated 23-letter vocabulary, not a
+//! The checkpoint is `QwenConfig::tiny()` (`vocab: 23, n_layers: 2,
+//! d_model: 16, ...`): its config in the safetensors header plus every tensor
+//! `tiny().param_list()` names. The tokenizer is a curated 23-letter vocabulary, not a
 //! universal one: it covers [`PROMPT_WITHIN_VOCAB`] and every id the tiny
 //! model's 23-wide LM head can sample, so the decode side round-trips too.
 
 use std::path::{Path, PathBuf};
 
-/// A fixture file that deletes itself when the test ends.
+/// A fixture file or directory that deletes itself when the test ends.
 pub struct Scratch(pub PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
+        if self.0.is_dir() {
+            std::fs::remove_dir_all(&self.0).ok();
+        } else {
+            std::fs::remove_file(&self.0).ok();
+        }
     }
 }
 
@@ -66,7 +69,8 @@ pub fn tiny_tokenizer(tag: &str) -> Scratch {
 /// indexing bug.
 pub fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
     let path = scratch_path(tag, "safetensors");
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = qwen3::QwenConfig::tiny()
+    let cfg = qwen3::QwenConfig::tiny();
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
         .into_iter()
         .map(|(name, numel)| {
@@ -74,6 +78,6 @@ pub fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
             (name, vec![numel as u64], data)
         })
         .collect();
-    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), None).unwrap();
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
     Scratch(path)
 }

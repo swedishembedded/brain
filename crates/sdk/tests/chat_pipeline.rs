@@ -168,13 +168,23 @@ fn an_unmet_tool_demand_is_reported() {
 
 // ---- real generations on the synthetic checkpoint ----
 
+/// The fixture tokenizer in a directory with a chat template that joins the
+/// turns' text, the way a checkpoint's tokenizer ships beside its template.
+fn tiny_chat_tokenizer(tag: &str) -> Scratch {
+    let dir = Scratch(scratch_path(tag, "d"));
+    std::fs::create_dir_all(&*dir).unwrap();
+    std::fs::copy(&*tiny_tokenizer(tag), dir.join("tokenizer.json")).unwrap();
+    std::fs::write(dir.join("chat_template.jinja"), "{% for m in messages %}{{ m['content'] }}{% endfor %}").unwrap();
+    dir
+}
+
 /// The synthetic checkpoint and tokenizer, loaded as a chat pipeline through
 /// the text pipeline's own builder. The returned scratch files must outlive
 /// any use of their paths.
 fn tiny_chat(tag: &str, capacity: Option<u32>) -> (ChatPipeline, Scratch, Scratch) {
     let ckpt = tiny_qwen3_checkpoint(&format!("chat-{tag}"));
-    let tok = tiny_tokenizer(&format!("chat-{tag}"));
-    let mut builder = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap()).tokenizer(tok.to_str().unwrap());
+    let tok = tiny_chat_tokenizer(&format!("chat-{tag}"));
+    let mut builder = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap()).tokenizer(tok.join("tokenizer.json").to_str().unwrap());
     if let Some(capacity) = capacity {
         builder = builder.capacity(capacity);
     }
