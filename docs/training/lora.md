@@ -60,6 +60,15 @@ A served adapter is folded into its base weights at load time, so there is
 no extra per-token cost to serving a fine-tuned model versus the base
 model.
 
+The SDK pipelines (`ChatPipeline`, `TextGenerationPipeline`) fold an
+adapter named at load into an fp32 base the same way. On an int8 base, and
+for an adapter switched in with `attach_adapter`, they apply it beside the
+resident base instead, which keeps the correction exact and needs no reload.
+The cost is an extra low-rank product per projection per token. For Qwen3-0.6B with a rank-8 adapter on all seven
+projections, greedy decode on one P40 measured 35.5 tok/s attached, against
+41.6 tok/s folded and 41.8 tok/s with no adapter (`qwen_bench lora-decode`,
+1024-token context, median of 11).
+
 ## Teaching a model a document, with a gate
 
 This is a **library capability**, reached through the SDK rather than a

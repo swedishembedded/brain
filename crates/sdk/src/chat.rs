@@ -7,7 +7,8 @@
 // can procure our services by sending an email to info@swedishembedded.com.
 
 //! [`ChatPipeline`]: multi-turn chat with tool calling, over a Qwen3 model
-//! (optionally with a LoRA adapter folded in), in-process.
+//! (optionally with a LoRA adapter, attachable and detachable on the resident
+//! base), in-process.
 //!
 //! ```no_run
 //! use brain::{ChatMessage, ChatPipeline, ChatRequest};
@@ -417,7 +418,7 @@ pub enum ChatDelta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelIdentity {
     pub base: WeightsIdentity,
-    /// Present exactly when an adapter was folded into the base.
+    /// Present exactly when an adapter is applied to the base.
     pub adapter: Option<WeightsIdentity>,
 }
 
@@ -504,9 +505,32 @@ impl ChatPipeline {
         self
     }
 
-    /// The base weights, and the adapter when one is folded in, by content.
+    /// The base weights, and the adapter when one is applied, by content.
     pub fn identity(&self) -> &ModelIdentity {
         &self.engine.identity
+    }
+
+    /// Apply the LoRA adapter at `path` (as written by [`crate::ChatFineTune`])
+    /// to the resident base from the next turn on, replacing any adapter
+    /// already applied. The adapter's low-rank correction runs beside the
+    /// resident base, so switching costs reading the adapter alone (plus,
+    /// once, restoring the linears of an adapter folded in at load), and
+    /// [`Self::detach_adapter`] returns to exactly the base. The correction
+    /// is exact at every precision.
+    ///
+    /// Refused - the pipeline keeps serving what it served - for a file that
+    /// is not a LoRA adapter, or one whose linears do not fit this base.
+    pub fn attach_adapter(&mut self, path: impl AsRef<str>) -> Result<()> {
+        self.engine.attach_adapter(path.as_ref())
+    }
+
+    /// Remove the applied adapter: turns run on exactly the base again.
+    /// `false` when none was applied. An adapter folded in at load
+    /// ([`crate::TextGenerationPipelineBuilder::adapter`] on an fp32 base) is
+    /// taken out by restoring its linears from the base checkpoint, which is
+    /// the one way this can fail.
+    pub fn detach_adapter(&mut self) -> Result<bool> {
+        self.engine.detach_adapter()
     }
 
     /// Generate the next assistant turn.

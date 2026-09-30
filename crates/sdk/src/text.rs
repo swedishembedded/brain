@@ -276,6 +276,20 @@ impl TextGenerationPipeline {
         self.engine.precision.name()
     }
 
+    /// Apply the LoRA adapter at `path` to the resident base from the next
+    /// generation on, replacing any adapter already applied - no reload. See
+    /// [`crate::ChatPipeline::attach_adapter`].
+    pub fn attach_adapter(&mut self, path: impl AsRef<str>) -> Result<()> {
+        self.engine.attach_adapter(path.as_ref())
+    }
+
+    /// Remove the applied adapter: generations run on exactly the base
+    /// again. `false` when none was applied. See
+    /// [`crate::ChatPipeline::detach_adapter`].
+    pub fn detach_adapter(&mut self) -> Result<bool> {
+        self.engine.detach_adapter()
+    }
+
     /// The loaded engine, for the chat surface built on this same load.
     pub(crate) fn into_engine(self) -> Engine {
         self.engine
@@ -308,9 +322,81 @@ pub(crate) struct Engine {
     /// (see `ImagePipelineBuilder::size`'s own doc for the same asymmetry).
     pub(crate) capacity: u32,
     pub(crate) identity: crate::chat::ModelIdentity,
+    /// The checkpoint the base was loaded from, which a folded adapter's
+    /// linears are restored from.
+    weights: String,
+    /// The linears whose resident weights carry a folded adapter
+    /// ([`Engine::fold_adapter`]); empty when none is folded.
+    folded: Vec<String>,
 }
 
 impl Engine {
+    /// Fold the adapter at `path` into the resident base, one targeted linear
+    /// at a time: each is read from `src`, corrected by
+    /// `qwen3::lora::fold_adapter_into` - the same arithmetic serving uses -
+    /// and written over its device weight. Only for an fp32 base, where the
+    /// fold is exact; decode then pays nothing for the adapter.
+    fn fold_adapter(&mut self, path: &str, src: &dyn checkpoint::TensorSource) -> Result<()> {
+        let identity = adapter_identity(path)?;
+        let names: Vec<String> = qwen3::lora::read_adapter(path).map_err(|e| Error::Backend(format!("{path}: {e}")))?.sites.into_iter().map(|s| s.base).collect();
+        let mut linears = std::collections::HashMap::new();
+        for name in &names {
+            let mut data = None;
+            src.with_tensor(name, &mut |t| data = Some(t.to_vec()));
+            linears.insert(name.clone(), data.ok_or_else(|| Error::Backend(format!("{path}: the base has no weight named {name}")))?);
+        }
+        qwen3::lora::fold_adapter_into(&mut linears, path).map_err(|e| Error::Backend(format!("{path}: {e}")))?;
+        for (name, w) in &linears {
+            self.model.write_weight(name, w);
+        }
+        self.folded = names;
+        self.identity.adapter = Some(identity);
+        Ok(())
+    }
+
+    /// Put the base's own weights back under a folded adapter, from the
+    /// checkpoint - the linears it touched and nothing else.
+    fn unfold(&mut self) -> Result<()> {
+        if self.folded.is_empty() {
+            return Ok(());
+        }
+        let (_, src) = qwen3::open_checkpoint(&self.weights).map_err(|e| Error::Backend(format!("qwen3: {}: restoring the base under a folded adapter: {e}", self.weights)))?;
+        for name in &self.folded {
+            let mut data = None;
+            src.with_tensor(name, &mut |t| data = Some(t.to_vec()));
+            let data = data.ok_or_else(|| Error::Backend(format!("qwen3: {}: no tensor {name} to restore", self.weights)))?;
+            self.model.write_weight(name, &data);
+        }
+        self.folded.clear();
+        self.identity.adapter = None;
+        Ok(())
+    }
+
+    /// Apply the adapter at `path` beside the resident base
+    /// (`qwen3::Qwen::attach_adapter`) and name it in the identity. The file
+    /// is read, hashed and validated against the base before anything
+    /// changes, so a refused adapter leaves the engine serving what it
+    /// served before. A folded adapter is taken back out of the base first.
+    pub(crate) fn attach_adapter(&mut self, path: &str) -> Result<()> {
+        let identity = adapter_identity(path)?;
+        self.model.attach_adapter(path).map_err(Error::Backend)?;
+        if let Err(e) = self.unfold() {
+            self.model.detach_adapter();
+            return Err(e);
+        }
+        self.identity.adapter = Some(identity);
+        Ok(())
+    }
+
+    /// Serve exactly the base again; `false` when no adapter was applied.
+    pub(crate) fn detach_adapter(&mut self) -> Result<bool> {
+        let folded = !self.folded.is_empty();
+        self.unfold()?;
+        let attached = self.model.detach_adapter();
+        self.identity.adapter = None;
+        Ok(folded || attached)
+    }
+
     /// One generation: the served path's `SeqState` over the cancellable,
     /// chunk-prefilling KV sampler. `cancel` is polled between prefill
     /// chunks of `prefill_chunk` tokens and after every decoded token;
@@ -342,6 +428,12 @@ impl Engine {
         );
         seq.finish(&self.tok, &generated, progress)
     }
+}
+
+/// An adapter file's identity: its card id and content digest.
+fn adapter_identity(path: &str) -> Result<crate::chat::WeightsIdentity> {
+    let card = checkpoint::st::read_card(path).map_err(|e| Error::Backend(format!("{path}: reading the adapter card: {e}")))?;
+    crate::chat::WeightsIdentity::of_file(path, card.map(|card| card.id))
 }
 
 /// `pub(crate)`: also reused by `crate::vlm`, which shares the exact same
@@ -428,18 +520,19 @@ impl TextGenerationPipelineBuilder {
         self
     }
 
-    /// Serve `weights` with a LoRA adapter folded into it.
+    /// Serve `weights` with a LoRA adapter applied.
     ///
     /// Without this a caller can train an adapter with this engine and has
     /// no way to serve it through this surface, which makes the whole
-    /// fine-tune unmeasurable from here. The delta is folded into the base
-    /// tensors at load (`qwen3::lora::fold_adapter_into`), which is what
-    /// `Qwen::from_tensors_decode` exists for; rank and alpha come from the
-    /// adapter's own `ModelCard` rather than from the caller, so an adapter
-    /// cannot be served at a shape it was not trained at.
-    ///
-    /// It costs a whole-model host copy that the streaming path avoids -
-    /// paid once, at load.
+    /// fine-tune unmeasurable from here. On an fp32 base the adapter's delta
+    /// is folded into the targeted linears at load - exact, and decode then
+    /// costs what the base's does. On an int8 base a fold would round the
+    /// delta back onto the weight grid, so the adapter runs beside the base
+    /// instead ([`TextGenerationPipeline::attach_adapter`]). Either way the
+    /// pipeline can switch or drop the adapter later without reloading. Rank
+    /// and alpha come from the adapter's own `ModelCard` rather than from the
+    /// caller, so an adapter cannot be served at a shape it was not trained
+    /// at.
     pub fn adapter(mut self, path: impl Into<String>) -> Self {
         self.adapter = Some(path.into());
         self
@@ -550,38 +643,28 @@ impl TextGenerationPipelineBuilder {
         // exceeds the 2 GiB binding limit for Qwen3-0.6B at 4096 tokens.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
         let base_id = file.as_ref().and_then(|r| r.card()).map(|card| card.id);
-        let model = if let Some(path) = &adapter {
-            // Folded on the host, then built from the result.
-            let mut tensors = qwen3::serve::Engine::tensors_from(&cfg, &*src).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
-            drop(src);
-            qwen3::lora::fold_adapter_into(&mut tensors, path).map_err(|e| Error::Backend(format!("{path}: {e}")))?;
-            let folded = cfg.clone();
-            qwen3::footprint::place_and_build(&cfg, &shard, dt, 1, capacity, false, true, "qwen3", || {
-                qwen3::Qwen::new_shard_dt_decode(folded.clone(), capacity, &tensors, shard.clone(), dt)
-            })
-            .map_err(Error::Backend)?
-        } else {
-            qwen3::footprint::place_and_build(&cfg, &shard, dt, 1, capacity, false, true, "qwen3", || {
-                qwen3::Qwen::new_shard_dt_decode(cfg.clone(), capacity, &*src, shard.clone(), dt)
-            })
-            .map_err(Error::Backend)?
-        };
+        let model = qwen3::footprint::place_and_build(&cfg, &shard, dt, 1, capacity, false, true, "qwen3", || {
+            qwen3::Qwen::new_shard_dt_decode(cfg.clone(), capacity, &*src, shard.clone(), dt)
+        })
+        .map_err(Error::Backend)?;
         drop(file);
 
         // What was loaded, by content: hashed after the build, so a file that
         // could not be loaded is never reported, and before the pipeline is
         // handed out, so the digest describes the bytes this load read.
-        let adapter_identity = match &adapter {
-            Some(path) => {
-                let card = checkpoint::st::read_card(path).map_err(|e| Error::Backend(format!("{path}: reading the adapter card: {e}")))?;
-                Some(crate::chat::WeightsIdentity::of_file(path, card.map(|card| card.id))?)
-            }
-            None => None,
-        };
-        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: adapter_identity };
-
+        let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: None };
         let head = model.read_weight(model.cfg.head_weight());
-        Ok(TextGenerationPipeline { engine: Engine { model, tok, head, eos, format, precision, capacity, identity } })
+        let mut engine = Engine { model, tok, head, eos, format, precision, capacity, identity, weights: weights.clone(), folded: Vec::new() };
+        match &adapter {
+            // An fp32 base takes the adapter's delta exactly, so it is folded
+            // in and decode costs what the base's does.
+            Some(path) if precision == Precision::Fp32 => engine.fold_adapter(path, &*src)?,
+            // A quantized base would round the delta back onto its grid, so
+            // the adapter runs beside it instead.
+            Some(path) => engine.attach_adapter(path)?,
+            None => {}
+        }
+        Ok(TextGenerationPipeline { engine })
     }
 }
 

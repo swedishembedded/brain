@@ -129,9 +129,9 @@ let reply = chat.generate(&ChatRequest::new(vec![ChatMessage::user("Explain DMA 
 println!("{}", reply.text);
 ```
 
-Every loader knob - tokenizer, a LoRA adapter folded in at load, context
-capacity, device - is `TextGenerationPipeline::builder`'s; a chat pipeline is
-the model that builder loaded. Tools, streaming and cancellation:
+Every loader knob - tokenizer, a LoRA adapter, context capacity, device - is
+`TextGenerationPipeline::builder`'s; a chat pipeline is the model that
+builder loaded. Tools, streaming and cancellation:
 
 ```rust
 use brain::chat::{ChatDelta, ToolChoice, ToolSchema};
@@ -176,6 +176,15 @@ for call in &reply.tool_calls {
 - `chat.identity()` names what was loaded by content: the base weights file
   and, when one is attached, the adapter - each with its card id and a
   `sha256:` digest of the file.
+- The builder's `.adapter(path)` folds the adapter into an fp32 base at
+  load, which is exact and leaves decode as fast as the base. On an int8
+  base, where a fold would round the adapter away, the adapter runs beside
+  the base instead. `chat.attach_adapter(path)` switches to another adapter
+  from the next turn on, beside the base, and `chat.detach_adapter()`
+  returns to exactly the base. Neither reloads the model; taking out a
+  folded adapter re-reads only the linears it changed. A file that is not a
+  LoRA adapter for this base is refused, and the pipeline keeps what it had.
+  `TextGenerationPipeline` has the same two methods.
 - `request.render_prompt()` and `request.parse_reply(raw)` need no model:
   the prompt the request renders to, and a recorded completion parsed the way
   a generation's own is.

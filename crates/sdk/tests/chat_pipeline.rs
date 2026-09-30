@@ -303,6 +303,30 @@ fn tiny_adapter(tag: &str, card_id: &str) -> Scratch {
     Scratch(path)
 }
 
+/// A rank-1 adapter over every value and output projection, large enough to
+/// move the tiny model's greedy decode.
+fn moving_adapter(tag: &str) -> Scratch {
+    moving_adapter_for(tag, &qwen3::QwenConfig::tiny())
+}
+
+/// [`moving_adapter`] for the linears of `cfg`.
+fn moving_adapter_for(tag: &str, cfg: &qwen3::QwenConfig) -> Scratch {
+    let wave = |n: u32, f: f32, amp: f32| -> Vec<f32> { (0..n).map(|i| (i as f32 * f).sin() * amp).collect() };
+    let mut tensors = Vec::new();
+    for l in 0..cfg.n_layers {
+        for (leaf, inn, out) in [("attn.wv", cfg.d_model, cfg.kv_dim()), ("attn.wo", cfg.q_dim(), cfg.d_model)] {
+            let target = format!("blocks.{l}.{leaf}.weight");
+            tensors.push((format!("{target}.lora_a"), vec![1, inn as u64], wave(inn, 0.7 + l as f32, 1.0)));
+            tensors.push((format!("{target}.lora_b"), vec![out as u64, 1], wave(out, 1.3, 2.0)));
+        }
+    }
+    let mut card = checkpoint::st::ModelCard::new("acme/moving-adapter", "qwen");
+    card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(1), alpha: Some(1.0), ..Default::default() });
+    let path = scratch_path(&format!("chat-{tag}"), "adapter.safetensors");
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), Some(&card)).unwrap();
+    Scratch(path)
+}
+
 /// The identity names what was loaded, by content: the base checkpoint's
 /// path and digest, and - only when one is attached - the adapter's card id
 /// and digest.
@@ -325,6 +349,94 @@ fn the_identity_names_the_loaded_base_and_adapter_by_digest() {
     assert_eq!(attached.path, adapter.to_path_buf());
     assert_eq!(attached.digest, file_digest(&adapter));
     assert_ne!(attached.digest, identity.base.digest);
+}
+
+/// The tiny chat pipeline built with `adapter` named at load, at `precision`.
+fn tiny_chat_with_adapter(tag: &str, adapter: &std::path::Path, precision: &str) -> (ChatPipeline, Scratch, Scratch) {
+    let ckpt = if precision == "int8" { int8_able_checkpoint(&format!("chat-{tag}")) } else { tiny_qwen3_checkpoint(&format!("chat-{tag}")) };
+    let tok = tiny_chat_tokenizer(&format!("chat-{tag}"));
+    let pipe = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap())
+        .tokenizer(tok.join("tokenizer.json").to_str().unwrap())
+        .precision(precision)
+        .unwrap()
+        .adapter(adapter.to_str().unwrap())
+        .load()
+        .unwrap();
+    (ChatPipeline::from(pipe), ckpt, tok)
+}
+
+/// One resident base serves an adapter attached at runtime and, detached,
+/// exactly the base again - no reload in between. Attaching is the same
+/// model as naming the adapter at load, and the identity follows what is
+/// applied.
+#[test]
+fn an_adapter_attaches_and_detaches_on_the_resident_base() {
+    let (mut pipe, ckpt, _tok) = tiny_chat("attach", None);
+    let adapter = moving_adapter("attach-adapter");
+    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(3).temperature(0.0);
+    let base = pipe.generate(&request).unwrap().text;
+
+    pipe.attach_adapter(adapter.to_str().unwrap()).expect("the adapter attaches");
+    let attached = pipe.identity().adapter.clone().expect("an attached adapter is part of the identity");
+    assert_eq!(attached.id.as_deref(), Some("acme/moving-adapter"));
+    assert_eq!(attached.digest, file_digest(&adapter));
+    let adapted = pipe.generate(&request).unwrap().text;
+    assert_ne!(adapted, base, "the fixture adapter must move the greedy decode, or the parity below proves nothing");
+
+    assert!(pipe.detach_adapter().unwrap());
+    assert!(pipe.identity().adapter.is_none());
+    assert_eq!(pipe.generate(&request).unwrap().text, base, "detached, the pipeline serves exactly the base");
+    assert!(!pipe.detach_adapter().unwrap(), "nothing left to detach");
+
+    // A file that is not an adapter is refused and changes nothing.
+    let err = pipe.attach_adapter(ckpt.to_str().unwrap()).unwrap_err();
+    assert!(err.to_string().contains(ckpt.to_str().unwrap()), "{err}");
+    assert!(pipe.identity().adapter.is_none());
+    assert_eq!(pipe.generate(&request).unwrap().text, base);
+
+    // Named at load on this fp32 base, the adapter is folded in: the same
+    // model, and still switchable - detaching restores exactly the base,
+    // and attaching after that serves the adapter again.
+    let (mut loaded, _c, _t) = tiny_chat_with_adapter("attach-folded", &adapter, "fp32");
+    assert_eq!(loaded.identity().adapter.as_ref().map(|a| a.digest.clone()), Some(file_digest(&adapter)));
+    assert_eq!(loaded.generate(&request).unwrap().text, adapted, "folding at load must be the same model as attaching");
+    assert!(loaded.detach_adapter().unwrap());
+    assert!(loaded.identity().adapter.is_none());
+    assert_eq!(loaded.generate(&request).unwrap().text, base, "detaching a folded adapter restores exactly the base");
+    loaded.attach_adapter(adapter.to_str().unwrap()).unwrap();
+    assert_eq!(loaded.generate(&request).unwrap().text, adapted);
+    // Attaching over a folded adapter replaces it rather than stacking.
+    let (mut refolded, _c2, _t2) = tiny_chat_with_adapter("attach-refolded", &adapter, "fp32");
+    refolded.attach_adapter(adapter.to_str().unwrap()).unwrap();
+    assert_eq!(refolded.generate(&request).unwrap().text, adapted, "an attach over a folded adapter must not apply it twice");
+}
+
+/// `tiny_qwen3_checkpoint` at `QwenConfig::tiny_i8`'s widths, which int8
+/// linears can take (the same vocab, so the same tokenizer).
+fn int8_able_checkpoint(tag: &str) -> Scratch {
+    let path = scratch_path(tag, "safetensors");
+    let cfg = qwen3::QwenConfig::tiny_i8();
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+        cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64], (0..numel).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect())).collect();
+    checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
+    Scratch(path)
+}
+
+/// On an int8 base a fold would round the adapter's delta onto the weight
+/// grid, so an adapter named at load runs beside the base, and detaching it
+/// needs no restore.
+#[test]
+fn an_adapter_named_at_load_on_an_int8_base_runs_beside_it() {
+    let adapter = moving_adapter_for("int8-adapter", &qwen3::QwenConfig::tiny_i8());
+    let request = ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(6).thinking(false).seed(3).temperature(0.0);
+    let (mut base, _c0, _t0) = tiny_chat_with_adapter("int8-base", &adapter, "int8");
+    assert!(base.detach_adapter().unwrap());
+    let base_text = base.generate(&request).unwrap().text;
+    base.attach_adapter(adapter.to_str().unwrap()).unwrap();
+    let attached = base.generate(&request).unwrap().text;
+    let (loaded, _c, _t) = tiny_chat_with_adapter("int8-loaded", &adapter, "int8");
+    assert_eq!(loaded.generate(&request).unwrap().text, attached, "named at load and attached at runtime are one model");
+    assert_ne!(attached, base_text, "the adapter must survive an int8 base");
 }
 
 /// A pipeline can be moved onto the thread that runs its generations.
