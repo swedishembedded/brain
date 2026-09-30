@@ -63,6 +63,36 @@ pub struct VitKernelIds {
 pub const UNREGISTERED: usize = usize::MAX;
 
 impl VitKernelIds {
+    /// Every slot resolved BY NAME off `g`'s own kernel list, [`UNREGISTERED`]
+    /// where the handle has no such kernel; `mlp_act` names the activation
+    /// kernel for the MLP slot (see [`VitKernelIds::mlp_act`]).
+    ///
+    /// For a tower that is built on devices it does not own: a model shared
+    /// between crates sits on whatever union of kernel lists its caller
+    /// registered, where a position in its OWN list names some other
+    /// pipeline. The slot names are the kernels' registered names throughout
+    /// the workspace; the opt-in paths ([`Self::key_minor`], the tiled GEMM)
+    /// follow from what the handle carries, exactly as they do for a literal.
+    pub fn by_name(g: &Gpu, mlp_act: &str) -> VitKernelIds {
+        let k = |name: &str| g.kernel_index(name).unwrap_or(UNREGISTERED);
+        VitKernelIds {
+            layernorm: k("layernorm"),
+            matmul: k("matmul"),
+            matmul_rows: k("matmul_rows"),
+            bias_add: k("bias_add"),
+            mlp_act: k(mlp_act),
+            scale_chan: k("scale_chan"),
+            add2: k("add2"),
+            attn_scores_cross: k("attn_scores_cross"),
+            attn_softmax_cross: k("attn_softmax_cross"),
+            attn_apply_cross: k("attn_apply_cross"),
+            kv_k_headt: k("kv_k_headt"),
+            attn_scores_cross_kt: k("attn_scores_cross_kt"),
+            ln_head: k("ln_head"),
+            rope2d: k("rope2d"),
+        }
+    }
+
     /// The coalesced score path bound to `kt`, or `None` when this model has
     /// not registered both of its kernels.
     pub fn key_minor<'a>(&self, kt: &'a DeviceBuffer) -> Option<crate::block::KeyMinor<'a>> {
@@ -241,9 +271,9 @@ fn gemm_step(
 /// [`gemm_step`] for [`vit_block_fwd_cached`], whose reference kernel is
 /// `matmul` rather than `matmul_rows`.
 ///
-/// The cached builder's callers do not all register `matmul_rows` -
-/// `crates/clip`'s `ClipVision` leaves that slot [`UNREGISTERED`] - so the
-/// two builders cannot share one fallback. Everything else is [`gemm_step`]'s
+/// The cached builder's callers need not register `matmul_rows` (a
+/// training-only tower has no use for it), so the two builders cannot share
+/// one fallback. Everything else is [`gemm_step`]'s
 /// contract verbatim, including the 128x128 tile floor and the opt-in by
 /// NAME: a model that does not register `matmul_reg3` records exactly the
 /// dispatch it recorded before, and one that does gets the tiled kernel for
@@ -349,6 +379,34 @@ pub struct VitBwdIds {
     pub ln_stats: usize,
     pub region_copy: usize,
     pub axpy: usize,
+}
+
+impl VitBwdIds {
+    /// [`VitKernelIds::by_name`] for the backward: every slot resolved by its
+    /// registered name, [`UNREGISTERED`] where the handle has none.
+    /// `mlp_act_bwd` names the adjoint of the forward's activation.
+    pub fn by_name(g: &Gpu, mlp_act_bwd: &str) -> VitBwdIds {
+        let k = |name: &str| g.kernel_index(name).unwrap_or(UNREGISTERED);
+        VitBwdIds {
+            layernorm_dx: k("layernorm_dx"),
+            ln_dgamma: k("layernorm_dgamma"),
+            ln_dbeta: k("layernorm_dbeta"),
+            matmul_dx: k("matmul_dx"),
+            matmul_dw: k("matmul_dw"),
+            bias_grad: k("bias_grad"),
+            mlp_act_bwd: k(mlp_act_bwd),
+            scale_chan_dg: k("scale_chan_dg"),
+            ln_head_dx: k("ln_head_dx"),
+            ln_head_dgb: k("ln_head_dgb"),
+            attn_bwd_dscores_cross: k("attn_bwd_dscores_cross"),
+            attn_bwd_dv_cross: k("attn_bwd_dv_cross"),
+            attn_bwd_dq_cross: k("attn_bwd_dq_cross"),
+            attn_bwd_dk_cross: k("attn_bwd_dk_cross"),
+            ln_stats: k("ln_stats"),
+            region_copy: k("region_copy"),
+            axpy: k("axpy"),
+        }
+    }
 }
 
 /// Forward-side caches the backward needs (SSA: fresh buffers per block).
