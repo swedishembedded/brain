@@ -290,7 +290,7 @@ impl checkpoint::TensorSource for DitWeights<'_> {
     /// `TensorSource` seam (M2), so the LoRA-touched decline checked here is
     /// the ONLY place it is checked - `try_i8_rect`'s own body no longer
     /// repeats it.
-    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         match self {
             DitWeights::Map(ts) => ts.raw_blocks(name),
             DitWeights::Gguf { gguf, lora, .. } => {

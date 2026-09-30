@@ -613,7 +613,7 @@ impl checkpoint::TensorSource for SsmALogFix<'_> {
     /// current default (declining) would happen to be correct here too - so
     /// this rule survives a future change to what "declining" means, rather
     /// than depending on it staying accidentally right.
-    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         if Self::needs_fix(name) {
             return None;
         }

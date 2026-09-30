@@ -329,7 +329,7 @@ pub fn q8_0_rect(
     backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |i, prow, srow| {
         let mut row = Vec::with_capacity(k);
         let e0 = (r0 + i) * stride + c0;
-        block_expand(GgmlType::Q8_0, raw, e0, e0 + k, &mut row).expect("block-aligned above");
+        block_expand(GgmlType::Q8_0, &raw, e0, e0 + k, &mut row).expect("block-aligned above");
         group_scales(&row, srow);
         pack_row(&row, srow, prow);
     });

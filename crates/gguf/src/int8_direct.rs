@@ -54,7 +54,7 @@ pub fn try_i8_rect(src: &dyn TensorSource, name: &str, stride: usize, r0: usize,
     backend_cpu::par::chunks2_mut(&mut packed, kg, &mut sw, gs, |i, prow, srow| {
         let mut row = Vec::with_capacity(k);
         let e0 = (r0 + i) * stride + c0;
-        checkpoint::gguf::q8_0_expand(raw, e0, e0 + k, &mut row).expect("block-aligned above");
+        checkpoint::gguf::q8_0_expand(&raw, e0, e0 + k, &mut row).expect("block-aligned above");
         model::int8::group_scales(&row, srow);
         model::int8::pack_row(&row, srow, prow);
     });

@@ -168,7 +168,7 @@ impl checkpoint::TensorSource for Gemma4GgufSource {
         self.src.with_tensor_chunks(name, max_elems, f)
     }
 
-    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(checkpoint::gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         self.src.raw_blocks(name)
     }
 

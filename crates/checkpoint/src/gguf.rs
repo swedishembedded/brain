@@ -1913,11 +1913,11 @@ impl crate::TensorSource for MmapGguf {
     /// codebook) - a caller wanting the raw bytes of an unrecognized type
     /// regardless wants [`Self::raw_tensor_bytes`], which has a wider
     /// contract on purpose (see its doc).
-    fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         let &(part, ty, start, nbytes, numel) = self.index.get(name)?;
         let ty = GgmlType::from_id(ty)?;
         self.meter.note(nbytes as u64);
-        Some((BlockLayout { ty, numel }, &self.mmaps[part][start..start + nbytes]))
+        Some((BlockLayout { ty, numel }, std::borrow::Cow::Borrowed(&self.mmaps[part][start..start + nbytes])))
     }
 
     /// Element count of `name`, without decoding - known from the header for

@@ -122,8 +122,10 @@ pub trait TensorSource {
     /// The lend is the WHOLE tensor; a caller wanting a sub-rectangle slices
     /// it itself using `layout.block_elems()`/`block_bytes()` to find the cut
     /// points - a quant block is the smallest independently decodable unit,
-    /// so there is no meaningful finer-grained lend. Borrowed from the
-    /// source's own storage: no allocation, valid for the lifetime of `&self`.
+    /// so there is no meaningful finer-grained lend. Usually borrowed from
+    /// the source's own storage (no allocation, valid for the lifetime of
+    /// `&self`); owned when the source rearranges whole blocks without
+    /// decoding them (`remap::Fetch::RowPermute`).
     ///
     /// Unlike [`raw_words`](Self::raw_words) there is no alignment
     /// precondition - `&[u8]` has nothing to align - so a correct
@@ -140,7 +142,7 @@ pub trait TensorSource {
     /// worked example, and `remap::RemapSource`'s `Fetch::Concat` arm for the
     /// structural case (a destination assembled from several source pieces
     /// has no single contiguous block range to lend).
-    fn raw_blocks(&self, _name: &str) -> Option<(gguf::BlockLayout, &[u8])> {
+    fn raw_blocks(&self, _name: &str) -> Option<(gguf::BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         None
     }
 

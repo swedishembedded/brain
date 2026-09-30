@@ -90,7 +90,7 @@ impl TensorSource for GgufSource {
         }
     }
 
-    fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(BlockLayout, std::borrow::Cow<'_, [u8]>)> {
         self.mg.raw_blocks(self.source_name(name)?)
     }
 

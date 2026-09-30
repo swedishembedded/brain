@@ -15,6 +15,7 @@
 //! `brain_init_from_hf` does today, but from shapes alone - no tensor data is
 //! read.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::TensorSource;
@@ -33,6 +34,13 @@ pub enum Fetch {
     /// real materialization - bounded by the concatenated tensor's own
     /// size, never by the whole model's.
     Concat(Vec<Fetch>),
+    /// Source tensor `name` as `order.len()` equal rows, destination row `i`
+    /// being source row `order[i]` - a permutation of whole rows, such as
+    /// undoing llama.cpp's per-head q/k row interleave. A quantized source
+    /// moves block-row by block-row (each row must be a whole number of
+    /// blocks), never through f32. An `order` that does not tile the source
+    /// (a length that does not divide it, an index out of range) is refused.
+    RowPermute { name: String, order: Vec<u32> },
 }
 
 /// A [`TensorSource`] that wraps an inner one with a rename/reslice [`Fetch`]
@@ -129,7 +137,17 @@ impl<'a> RemapSource<'a> {
                 (end <= n).then_some(*len)
             }
             Fetch::Concat(parts) => parts.iter().map(|p| self.fetch_numel(p)).sum(),
+            Fetch::RowPermute { name, order } => self.row_elems(name, order).map(|re| re * order.len()),
         }
+    }
+
+    /// Elements per row of a [`Fetch::RowPermute`], or `None` when `order`
+    /// does not tile the source.
+    fn row_elems(&self, name: &str, order: &[u32]) -> Option<usize> {
+        let n = self.src().numel(name)?;
+        let rows = order.len();
+        let valid = rows > 0 && n.is_multiple_of(rows) && order.iter().all(|&o| (o as usize) < rows);
+        valid.then_some(n / rows)
     }
 }
 
@@ -183,6 +201,14 @@ impl TensorSource for RemapSource<'_> {
                 f(&buf);
                 true
             }
+            Fetch::RowPermute { .. } => {
+                let Some(total) = self.fetch_numel(fetch) else { return false };
+                let mut buf = vec![0.0f32; total];
+                self.fetch_into(fetch, &mut buf) && {
+                    f(&buf);
+                    true
+                }
+            }
         }
     }
 
@@ -194,9 +220,9 @@ impl TensorSource for RemapSource<'_> {
                 let end = start.checked_add(*len)?;
                 words.get(*start..end)
             }
-            // A contiguous destination built from several source pieces has
-            // no single borrowed slice to hand back.
-            Fetch::Concat(_) => None,
+            // A contiguous destination built from several source pieces, or
+            // from reordered rows, has no single borrowed slice to hand back.
+            Fetch::Concat(_) | Fetch::RowPermute { .. } => None,
         }
     }
 
@@ -205,7 +231,7 @@ impl TensorSource for RemapSource<'_> {
     /// independently decodable unit - a cut through the middle of one has no
     /// byte range that means anything on its own), and `Concat` declines for
     /// the identical structural reason `raw_words` does.
-    fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, &[u8])> {
+    fn raw_blocks(&self, name: &str) -> Option<(crate::gguf::BlockLayout, Cow<'_, [u8]>)> {
         match self.plan.get(name)? {
             Fetch::Whole(src) => self.src().raw_blocks(src),
             Fetch::Slice { name: src, start, len } => {
@@ -219,9 +245,28 @@ impl TensorSource for RemapSource<'_> {
                     return None;
                 }
                 let byte_range = (start / be * bb)..(end / be * bb);
-                Some((crate::gguf::BlockLayout { ty: layout.ty, numel: *len }, bytes.get(byte_range)?))
+                let part = match bytes {
+                    Cow::Borrowed(b) => Cow::Borrowed(b.get(byte_range)?),
+                    Cow::Owned(b) => Cow::Owned(b.get(byte_range)?.to_vec()),
+                };
+                Some((crate::gguf::BlockLayout { ty: layout.ty, numel: *len }, part))
             }
             Fetch::Concat(_) => None,
+            // Whole block-rows, moved: the row permutation needs no decode.
+            Fetch::RowPermute { name: src, order } => {
+                let re = self.row_elems(src, order)?;
+                let (layout, bytes) = self.src().raw_blocks(src)?;
+                let (be, bb) = (layout.block_elems(), layout.block_bytes());
+                if !re.is_multiple_of(be) {
+                    return None;
+                }
+                let row_bytes = re / be * bb;
+                let mut out = Vec::with_capacity(row_bytes * order.len());
+                for &o in order {
+                    out.extend_from_slice(bytes.get(o as usize * row_bytes..(o as usize + 1) * row_bytes)?);
+                }
+                Some((crate::gguf::BlockLayout { ty: layout.ty, numel: re * order.len() }, Cow::Owned(out)))
+            }
         }
     }
 
@@ -251,8 +296,8 @@ impl TensorSource for RemapSource<'_> {
             }
             // Default (materialize once, hand over as one chunk) - bounded by
             // this destination tensor's own size, which is the same cost
-            // `with_tensor` above already pays for Concat.
-            Fetch::Concat(_) => self.with_tensor(name, &mut |d| f(0, d)),
+            // `with_tensor` above already pays for Concat and RowPermute.
+            Fetch::Concat(_) | Fetch::RowPermute { .. } => self.with_tensor(name, &mut |d| f(0, d)),
         }
     }
 
@@ -286,6 +331,19 @@ impl RemapSource<'_> {
                 }
                 let (start, len) = (*start, *len);
                 self.src().with_tensor(src, &mut |d| out.copy_from_slice(&d[start..start + len]))
+            }
+            Fetch::RowPermute { name: src, order } => {
+                let Some(re) = self.row_elems(src, order) else { return false };
+                let mut ok = false;
+                let found = self.src().with_tensor(src, &mut |data| {
+                    if data.len() == re * order.len() && out.len() == data.len() {
+                        for (i, &o) in order.iter().enumerate() {
+                            out[i * re..(i + 1) * re].copy_from_slice(&data[o as usize * re..(o as usize + 1) * re]);
+                        }
+                        ok = true;
+                    }
+                });
+                found && ok
             }
             Fetch::Concat(parts) => {
                 let mut off = 0usize;
@@ -480,7 +538,7 @@ mod tests {
         assert_eq!(blk1_layout.numel, 32);
         assert_eq!(blk1_bytes.len(), 34, "one Q8_0 block");
         let mut decoded = Vec::new();
-        crate::gguf::block_expand(GgmlType::Q8_0, blk1_bytes, 0, 32, &mut decoded).unwrap();
+        crate::gguf::block_expand(GgmlType::Q8_0, &blk1_bytes, 0, 32, &mut decoded).unwrap();
         assert!(decoded.iter().all(|&v| v == -6.0), "block 1 is d=2.0, q=-3 -> -6.0 everywhere, not block 0's 5.0: {decoded:?}");
 
         // Non-block-aligned slice: declines, never widens to a wrong range.
@@ -489,6 +547,51 @@ mod tests {
         // Concat: no single contiguous byte range, same rule as raw_words.
         assert!(r.raw_blocks("cat").is_none());
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `Rows` gathers whole rows in a new order: the f32 reads, the chunked
+    /// reads and the quantized blocks all see the same reordered tensor, and
+    /// the quantized one is moved block-row by block-row, never dequantized.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn rows_reorders_whole_rows_on_every_read_path() {
+        use crate::gguf::{GgmlType, MmapGguf};
+        use crate::gguf_write::{write, TensorOut};
+
+        // 4 rows x 32 columns, one Q8_0 block per row; row r decodes to r+1.
+        let mut data = Vec::new();
+        for r in 0..4u8 {
+            data.extend(half::f16::from_f32(1.0).to_le_bytes());
+            data.extend([r + 1; 32]);
+        }
+        let path = std::env::temp_dir().join(format!("brain-remap-rows-{}.gguf", std::process::id()));
+        let path = path.to_str().unwrap().to_string();
+        write(&path, &[], &[TensorOut { name: "w".to_string(), shape: vec![4, 32], ty: crate::gguf::T_Q8_0, data }], 32).unwrap();
+        let mg = MmapGguf::open(&path).unwrap();
+
+        let order = vec![2u32, 0, 3, 1];
+        let mut plan = HashMap::new();
+        plan.insert("p".to_string(), Fetch::RowPermute { name: "w".to_string(), order: order.clone() });
+        let r = RemapSource::new(&mg, plan);
+        let want: Vec<f32> = order.iter().flat_map(|&o| std::iter::repeat_n(o as f32 + 1.0, 32)).collect();
+
+        assert_eq!(r.numel("p"), Some(128));
+        let mut got = Vec::new();
+        assert!(r.with_tensor("p", &mut |d| got = d.to_vec()));
+        assert_eq!(got, want);
+        let (layout, bytes) = r.raw_blocks("p").expect("whole block-rows move without a dequant");
+        assert_eq!((layout.ty, layout.numel), (GgmlType::Q8_0, 128));
+        let mut decoded = Vec::new();
+        crate::gguf::block_expand(GgmlType::Q8_0, &bytes, 0, 128, &mut decoded).unwrap();
+        assert_eq!(decoded, want);
+        crate::srccheck::assert_read_paths_agree(&r, "p", 128);
+
+        // An order that does not tile the tensor is refused, not truncated.
+        let mut plan = HashMap::new();
+        plan.insert("bad".to_string(), Fetch::RowPermute { name: "w".to_string(), order: vec![0, 1, 7] });
+        let r = RemapSource::new(&mg, plan);
+        assert!(!r.with_tensor("bad", &mut |_| {}) && r.raw_blocks("bad").is_none() && r.numel("bad").is_none());
         std::fs::remove_file(&path).ok();
     }
 }

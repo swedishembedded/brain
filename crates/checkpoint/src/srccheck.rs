@@ -96,7 +96,7 @@ pub fn assert_read_paths_agree(src: &dyn TensorSource, name: &str, numel: usize)
         // here: `with_tensor` would report the transformed values while this
         // reconstructs the PRE-transform ones from the raw blocks, and the
         // two would disagree.
-        let via_blocks = crate::gguf::dequantize(layout.ty.id(), bytes, numel)
+        let via_blocks = crate::gguf::dequantize(layout.ty.id(), &bytes, numel)
             .unwrap_or_else(|e| panic!("srccheck: '{name}' raw_blocks dequant failed: {e}"));
         assert_eq!(via_blocks, via_with_tensor, "srccheck: '{name}' raw_blocks disagrees with with_tensor");
     }
