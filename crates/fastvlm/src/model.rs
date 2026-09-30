@@ -17,58 +17,8 @@ use qwen3::{Qwen, QwenConfig};
 
 use crate::encoder::{ctx, Encoder, PIPELINES};
 
-/// mlp2x_gelu projector weights (host): `Linear(mm_hidden→hidden)`, erf-GELU,
-/// `Linear(hidden→hidden)`.
-pub struct Projector {
-    pub fc1_w: Vec<f32>, // [hidden, mm_hidden] (row-major, torch layout)
-    pub fc1_b: Vec<f32>, // [hidden]
-    pub fc2_w: Vec<f32>, // [hidden, hidden]
-    pub fc2_b: Vec<f32>, // [hidden]
-    pub mm_hidden: usize,
-    pub hidden: usize,
-}
-
-impl Projector {
-    /// Project `[tokens, mm_hidden]` → `[tokens, hidden]` on the host.
-    fn forward(&self, feats: &[f32], tokens: usize) -> Vec<f32> {
-        let gelu = |x: f32| 0.5 * x * (1.0 + libm_erf(x / std::f32::consts::SQRT_2));
-        let mut out = vec![0f32; tokens * self.hidden];
-        for t in 0..tokens {
-            // h = gelu(fc1 · feat + b1)
-            let mut h = vec![0f32; self.hidden];
-            for (o, ho) in h.iter_mut().enumerate() {
-                let mut acc = self.fc1_b[o];
-                let wrow = &self.fc1_w[o * self.mm_hidden..(o + 1) * self.mm_hidden];
-                let frow = &feats[t * self.mm_hidden..(t + 1) * self.mm_hidden];
-                for i in 0..self.mm_hidden {
-                    acc += wrow[i] * frow[i];
-                }
-                *ho = gelu(acc);
-            }
-            // out = fc2 · h + b2
-            for o in 0..self.hidden {
-                let mut acc = self.fc2_b[o];
-                let wrow = &self.fc2_w[o * self.hidden..(o + 1) * self.hidden];
-                for i in 0..self.hidden {
-                    acc += wrow[i] * h[i];
-                }
-                out[t * self.hidden + o] = acc;
-            }
-        }
-        out
-    }
-}
-
-/// Abramowitz-Stegun erf (matches the gelu_erf kernel) for the host projector.
-fn libm_erf(x: f32) -> f32 {
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0 - (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72) * t + 0.254_829_6) * t * (-x * x).exp();
-    if x < 0.0 {
-        -y
-    } else {
-        y
-    }
-}
+/// The `mlp2x_gelu` projector, run on the host.
+pub use model::projector::HostProjector as Projector;
 
 /// An assembled FastVLM (forward path). Image tokens occupy a contiguous run of
 /// `image_token_index` (-200) in the text stream at `image_row0`.
@@ -167,14 +117,14 @@ mod tests {
             .collect();
         let n_visual = enc.tokens(); // 4
 
-        let projector = Projector {
-            fc1_w: rvec(hidden * feature_dim as usize, &mut rng),
-            fc1_b: rvec(hidden, &mut rng),
-            fc2_w: rvec(hidden * hidden, &mut rng),
-            fc2_b: rvec(hidden, &mut rng),
-            mm_hidden: feature_dim as usize,
+        let projector = Projector::mlp2x(
+            rvec(hidden * feature_dim as usize, &mut rng),
+            rvec(hidden, &mut rng),
+            rvec(hidden * hidden, &mut rng),
+            rvec(hidden, &mut rng),
+            feature_dim as usize,
             hidden,
-        };
+        );
 
         let dcfg = QwenConfig::qwen2(23, 2, hidden as u32, 4, 2, 64, true);
         let dweights = qwen3::init_weights(&dcfg, 3);

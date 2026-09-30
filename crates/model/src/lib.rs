@@ -62,6 +62,7 @@ pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;
 pub mod plan;
+pub mod projector;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
 pub mod rollout;

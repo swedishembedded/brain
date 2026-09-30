@@ -177,7 +177,7 @@ impl Action for CaptionAction {
                 *vguard = Some(load_vision(&dir)?);
             }
             let hot = vguard.as_ref().unwrap();
-            use crate::encoder::{ctx as ectx, kidx, Encoder};
+            use crate::encoder::{ctx as ectx, Encoder};
             let gpu = &hot.gpu;
             let ctx = ectx(gpu);
             let enc = Encoder::mobileclip_l(&ctx, VISION_SIDE);
@@ -186,26 +186,17 @@ impl Action for CaptionAction {
             let feat = enc.forward(&ctx, &hot.vision_ps, &img);
             let d = 896u32;
             let featb = gpu.storage_init("feat", &feat);
-            let f1w = gpu.storage_init("f1w", &hot.proj["fc1.weight"]);
-            let f1b = gpu.storage_init("f1b", &hot.proj["fc1.bias"]);
-            let f2w = gpu.storage_init("f2w", &hot.proj["fc2.weight"]);
-            let f2b = gpu.storage_init("f2b", &hot.proj["fc2.bias"]);
-            let (a, b, e) = (
-                gpu.storage((IMG_TOKENS * d) as u64),
-                gpu.storage((IMG_TOKENS * d) as u64),
-                gpu.storage((IMG_TOKENS * d) as u64),
+            let proj = model::projector::HostProjector::mlp2x(
+                hot.proj["fc1.weight"].clone(),
+                hot.proj["fc1.bias"].clone(),
+                hot.proj["fc2.weight"].clone(),
+                hot.proj["fc2.bias"].clone(),
+                VISION_DIM as usize,
+                d as usize,
             );
-            gpu.submit(
-                &[],
-                &[
-                    gpu.step(kidx("matmul"), &[&featb, &f1w, &a], &[IMG_TOKENS, VISION_DIM, d], IMG_TOKENS * d),
-                    gpu.step(kidx("bias_add"), &[&a, &f1b], &[IMG_TOKENS, d], IMG_TOKENS * d),
-                    gpu.step(kidx("gelu_erf"), &[&a, &b], &[IMG_TOKENS * d], IMG_TOKENS * d),
-                    gpu.step(kidx("matmul"), &[&b, &f2w, &e], &[IMG_TOKENS, d, d], IMG_TOKENS * d),
-                    gpu.step(kidx("bias_add"), &[&e, &f2b], &[IMG_TOKENS, d], IMG_TOKENS * d),
-                ],
-            );
-            let out = gpu.read(&e, (IMG_TOKENS * 896) as usize);
+            let projector = model::projector::MlpProjector::new(gpu, proj.cfg, IMG_TOKENS, &proj.weights)?;
+            gpu.submit(&[], &projector.forward(gpu, &[&featb]));
+            let out = gpu.read(projector.out(), (IMG_TOKENS * d) as usize);
             // A resident device never drops, so its BRAIN_PROFILE table would
             // otherwise never print; surface it while the stage lock is held.
             gpu.dump_profile();

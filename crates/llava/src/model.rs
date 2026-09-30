@@ -37,59 +37,9 @@ pub const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
 pub const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
-/// `mlp2x_gelu` projector weights (host): `Linear(mm_hidden -> hidden)`,
-/// erf-GELU, `Linear(hidden -> hidden)`. Identical shape to
-/// `fastvlm::model::Projector` - LLaVA-1.5 and FastVLM both use this
-/// projector type, just at different `mm_hidden`/`hidden` widths.
-pub struct Projector {
-    pub fc1_w: Vec<f32>, // [hidden, mm_hidden] (row-major, torch layout)
-    pub fc1_b: Vec<f32>, // [hidden]
-    pub fc2_w: Vec<f32>, // [hidden, hidden]
-    pub fc2_b: Vec<f32>, // [hidden]
-    pub mm_hidden: usize,
-    pub hidden: usize,
-}
-
-impl Projector {
-    /// Project `[tokens, mm_hidden]` -> `[tokens, hidden]` on the host.
-    pub fn forward(&self, feats: &[f32], tokens: usize) -> Vec<f32> {
-        let gelu = |x: f32| 0.5 * x * (1.0 + libm_erf(x / std::f32::consts::SQRT_2));
-        let mut out = vec![0f32; tokens * self.hidden];
-        for t in 0..tokens {
-            let mut h = vec![0f32; self.hidden];
-            for (o, ho) in h.iter_mut().enumerate() {
-                let mut acc = self.fc1_b[o];
-                let wrow = &self.fc1_w[o * self.mm_hidden..(o + 1) * self.mm_hidden];
-                let frow = &feats[t * self.mm_hidden..(t + 1) * self.mm_hidden];
-                for i in 0..self.mm_hidden {
-                    acc += wrow[i] * frow[i];
-                }
-                *ho = gelu(acc);
-            }
-            for o in 0..self.hidden {
-                let mut acc = self.fc2_b[o];
-                let wrow = &self.fc2_w[o * self.hidden..(o + 1) * self.hidden];
-                for i in 0..self.hidden {
-                    acc += wrow[i] * h[i];
-                }
-                out[t * self.hidden + o] = acc;
-            }
-        }
-        out
-    }
-}
-
-/// Abramowitz-Stegun erf (matches the `gelu_erf` kernel) for the host
-/// projector - the same approximation `fastvlm::model::libm_erf` uses.
-fn libm_erf(x: f32) -> f32 {
-    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0 - (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72) * t + 0.254_829_6) * t * (-x * x).exp();
-    if x < 0.0 {
-        -y
-    } else {
-        y
-    }
-}
+/// The `mlp2x_gelu` projector, run on the host - the same one FastVLM uses,
+/// at LLaVA-1.5's widths.
+pub use model::projector::HostProjector as Projector;
 
 /// Extract the `n_visual` patch-token rows the projector consumes from a
 /// `ClipVision::read_block_out` tap: `[1 + n_visual, d]` (class token first,
@@ -211,14 +161,14 @@ mod tests {
             .map(|(n, s)| (n.clone(), rvec(s.iter().product(), &mut rng)))
             .collect();
 
-        let projector = Projector {
-            fc1_w: rvec(hidden * vision_cfg.d_model() as usize, &mut rng),
-            fc1_b: rvec(hidden, &mut rng),
-            fc2_w: rvec(hidden * hidden, &mut rng),
-            fc2_b: rvec(hidden, &mut rng),
-            mm_hidden: vision_cfg.d_model() as usize,
+        let projector = Projector::mlp2x(
+            rvec(hidden * vision_cfg.d_model() as usize, &mut rng),
+            rvec(hidden, &mut rng),
+            rvec(hidden * hidden, &mut rng),
+            rvec(hidden, &mut rng),
+            vision_cfg.d_model() as usize,
             hidden,
-        };
+        );
 
         let dcfg = QwenConfig {
             vocab: 23,

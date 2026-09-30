@@ -221,14 +221,7 @@ fn run_vision(gpu: &Gpu, vision_weights: &HashMap<String, Vec<f32>>, cfg: &Llava
     let f1b = proj.get("fc1.bias").ok_or("llava: mm_projector fc1.bias missing")?;
     let f2w = proj.get("fc2.weight").ok_or("llava: mm_projector fc2.weight missing")?;
     let f2b = proj.get("fc2.bias").ok_or("llava: mm_projector fc2.bias missing")?;
-    let projector = crate::model::Projector {
-        fc1_w: f1w.clone(),
-        fc1_b: f1b.clone(),
-        fc2_w: f2w.clone(),
-        fc2_b: f2b.clone(),
-        mm_hidden: cfg.projector_in() as usize,
-        hidden: cfg.projector_out() as usize,
-    };
+    let projector = crate::model::Projector::mlp2x(f1w.clone(), f1b.clone(), f2w.clone(), f2b.clone(), cfg.projector_in() as usize, cfg.projector_out() as usize);
     Ok(projector.forward(&feats, n))
 }
 

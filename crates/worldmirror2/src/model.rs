@@ -131,19 +131,6 @@ struct PriorMlp {
     ray_w0: Vec<f32>, ray_b0: Vec<f32>, ray_w2: Vec<f32>, ray_b2: Vec<f32>,
 }
 
-fn gelu_erf(x: f32) -> f32 {
-    0.5 * x * (1.0 + libm_erf(x * std::f32::consts::FRAC_1_SQRT_2))
-}
-
-/// Abramowitz-Stegun 7.1.26, which is what the GELU kernel evaluates.
-fn libm_erf(x: f32) -> f32 {
-    let s = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0 - (((((1.061_405_4 * t - 1.453_152) * t) + 1.421_413_7) * t - 0.284_496_74) * t + 0.254_829_6) * t * (-x * x).exp();
-    s * y
-}
-
 impl PriorMlp {
     fn eval(&self, w0: &[f32], b0: &[f32], w2: &[f32], b2: &[f32], x: &[f32]) -> Vec<f32> {
         let (d, n) = (self.dim, x.len());
@@ -153,7 +140,7 @@ impl PriorMlp {
             for (i, xv) in x.iter().enumerate().take(n) {
                 a += w0[o * n + i] * xv;
             }
-            *hv = gelu_erf(a);
+            *hv = model::hostmath::gelu_exact(a);
         }
         let mut out = vec![0.0f32; d];
         for (o, ov) in out.iter_mut().enumerate() {
