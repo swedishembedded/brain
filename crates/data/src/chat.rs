@@ -10,27 +10,31 @@
 //! and reasoning fine-tuning, where training on the (given) prompt would teach
 //! the model to hallucinate user turns.
 //!
-//! Output (consumed unchanged by `model::fit` / `brain qwen finetune`):
-//!   * `train.u32.bin` / `val.u32.bin` — `u32` token ids (Qwen's 151936 vocab).
+//! Output (consumed unchanged by `model::fit` / `brain qwen finetune`), per
+//! split ([`write_split`]):
+//!   * `train.u32.bin` / `val.u32.bin` — `u32` token ids.
 //!   * `train.mask.bin` / `val.mask.bin` — `u8` per-token mask (1 = trainable).
+//!   * `train.ex.bin` / `val.ex.bin` — `u64` start offset of every example, so
+//!     a trainer can give each example a row of its own.
 //!   * `meta.json` — `{ vocab_size, token_width: 32 }`.
 //!
-//! Prompt and response are encoded **separately** and concatenated — exactly how
-//! inference sees them (the prompt is encoded alone, the model then generates) —
-//! so there is no train/inference tokenization skew across the boundary. Each
-//! example is terminated by `<|endoftext|>` so windows can be sampled aligned to
-//! example starts.
+//! Every conversation is rendered through the checkpoint's own chat template
+//! and encoded message by message, so framing, the BOS the template writes
+//! and the end-of-turn token after each assistant turn are the checkpoint's
+//! own. Examples are delimited out of band: the stream holds nothing but the
+//! conversations' tokens, whatever the vocabulary.
 
 use std::io;
 use std::path::Path;
 
 use crate::binio;
 use crate::chat_template::{ChatTemplate, TemplateError};
-use crate::qwen_tokenizer::QwenBpe;
 use crate::tokenizer::Tokenizer;
 
-/// `<|endoftext|>` — the document/example separator (also Qwen's pad/eos base).
-pub const ENDOFTEXT: u32 = 151643;
+/// The in-band separator (Qwen's `<|endoftext|>`) that closed every example of
+/// a dataset written before examples were indexed out of band. Only a trainer
+/// reading such a dataset needs it; nothing writes it any more.
+pub const LEGACY_EXAMPLE_SEPARATOR: u32 = 151643;
 
 /// One supervised chat example: a prompt (system optional + user) and the
 /// assistant response the model must learn to produce.
@@ -39,7 +43,8 @@ pub struct ChatExample {
     pub system: Option<String>,
     pub user: String,
     /// The assistant turn content to train on (e.g. a `<tool_call>…</tool_call>`
-    /// block, or a `<think>…</think>` + answer). `<|im_end|>` is appended for you.
+    /// block, or a `<think>…</think>` + answer). The chat template closes the
+    /// turn with the checkpoint's own end-of-turn token.
     pub assistant: String,
 }
 
@@ -51,43 +56,14 @@ impl ChatExample {
         ChatExample { system: Some(system.into()), user: user.into(), assistant: assistant.into() }
     }
 
-    /// The prompt string through `<|im_start|>assistant\n` (what inference sees).
-    pub fn prompt_str(&self, tok: &QwenBpe) -> String {
-        let mut msgs: Vec<(&str, &str)> = Vec::new();
-        if let Some(s) = &self.system {
-            msgs.push(("system", s));
-        }
-        msgs.push(("user", &self.user));
-        tok.apply_chat_template(&msgs, true)
+    /// This example as a conversation: the optional system turn and the
+    /// user turn as context, the assistant turn trained.
+    pub fn to_sample(&self) -> ChatSample {
+        let mut messages: Vec<ChatMessage> = self.system.iter().map(ChatMessage::system).collect();
+        messages.push(ChatMessage::user(self.user.clone()));
+        messages.push(ChatMessage::assistant(self.assistant.clone(), true));
+        ChatSample { messages, tools: Vec::new() }
     }
-
-    /// Encode to `(ids, mask)`: prompt ids masked (false), response ids trained
-    /// (true), then a masked `<|endoftext|>` separator.
-    pub fn encode(&self, tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
-        let prompt = tok.encode(&self.prompt_str(tok));
-        let resp = tok.encode(&format!("{}<|im_end|>\n", self.assistant));
-        let mut ids = Vec::with_capacity(prompt.len() + resp.len() + 1);
-        let mut mask = Vec::with_capacity(ids.capacity());
-        ids.extend_from_slice(&prompt);
-        mask.extend(std::iter::repeat_n(false, prompt.len()));
-        ids.extend_from_slice(&resp);
-        mask.extend(std::iter::repeat_n(true, resp.len()));
-        ids.push(ENDOFTEXT);
-        mask.push(false);
-        (ids, mask)
-    }
-}
-
-/// Encode a set of examples into one `(ids, mask)` stream.
-pub fn encode_split(examples: &[ChatExample], tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
-    let mut ids = Vec::new();
-    let mut mask = Vec::new();
-    for ex in examples {
-        let (i, m) = ex.encode(tok);
-        ids.extend_from_slice(&i);
-        mask.extend_from_slice(&m);
-    }
-    (ids, mask)
 }
 
 /// A tool call within an assistant turn. `arguments` is the RAW JSON text (a
@@ -199,29 +175,44 @@ pub struct ChatSample {
 }
 
 impl ChatSample {
+    /// [`ChatSample::encode_with`] at the default [`RenderOpts`].
+    pub fn encode(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        self.encode_with(tok, tmpl, RenderOpts::default())
+    }
+
     /// Encode to `(ids, mask)` by rendering the WHOLE conversation through
     /// `tmpl` once (via [`ChatTemplate::render_with_message_boundaries`]),
     /// then encoding each message's own byte range of that single rendered
-    /// text and concatenating -- so tool-call/tool-response framing and
-    /// think-block placement all come from the checkpoint's OWN template,
-    /// not a hand-rolled approximation. Terminated by a masked
-    /// `<|endoftext|>`. Fails (does not silently mismask) if the template's
-    /// rendering of some message is not prefix-stable -- see
-    /// `render_with_message_boundaries`'s doc for exactly when that happens.
-    pub fn encode(&self, tok: &QwenBpe, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
-        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
+    /// text and concatenating -- so tool-call/tool-response framing,
+    /// think-block placement, the BOS the template writes and the end-of-turn
+    /// token closing each assistant turn all come from the checkpoint's OWN
+    /// template, not a hand-rolled approximation. A message's whole range is
+    /// masked by its `train` flag, so a trained assistant turn trains its
+    /// end-of-turn token too: that token is how the model learns to stop.
+    /// Fails (does not silently mismask) if the template's rendering of some
+    /// message is not prefix-stable -- see `render_with_message_boundaries`'s
+    /// doc for exactly when that happens.
+    pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        let messages: Vec<ChatMessage> = if opts.keep_reasoning {
+            self.messages
+                .iter()
+                .map(|m| if m.role == "assistant" && m.train { ChatMessage { content: m.content.replace(THINK_END, THINK_END_SENTINEL), ..m.clone() } } else { m.clone() })
+                .collect()
+        } else {
+            self.messages.clone()
+        };
+        let values: Vec<minijinja::Value> = messages.iter().map(ChatMessage::to_template_value).collect();
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, ranges) = tmpl.render_with_message_boundaries(&values, tools)?;
 
         let mut ids = Vec::new();
         let mut mask = Vec::new();
         for (m, range) in self.messages.iter().zip(ranges) {
-            let tid = tok.encode(&full[range]);
+            let text = &full[range];
+            let tid = if opts.keep_reasoning { tok.encode(&text.replace(THINK_END_SENTINEL, THINK_END)) } else { tok.encode(text) };
             mask.extend(std::iter::repeat_n(m.train, tid.len()));
             ids.extend(tid);
         }
-        ids.push(ENDOFTEXT);
-        mask.push(false);
         Ok((ids, mask))
     }
 
@@ -405,53 +396,90 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
     Ok(messages)
 }
 
-/// Encode a set of packed samples into one `(ids, mask)` stream.
-pub fn encode_sample_split(samples: &[ChatSample], tok: &QwenBpe, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
-    let mut ids = Vec::new();
-    let mut mask = Vec::new();
-    for s in samples {
-        let (i, m) = s.encode(tok, tmpl)?;
-        ids.extend_from_slice(&i);
-        mask.extend_from_slice(&m);
-    }
-    Ok((ids, mask))
+/// How a sample renders for training.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderOpts {
+    /// Train the reasoning of trained assistant turns. A reasoning model's
+    /// template drops `<think>...</think>` from the assistant turns it
+    /// renders as history - DeepSeek-R1's keeps only what follows the last
+    /// `</think>` - which is right at inference and wrong for reasoning SFT,
+    /// where the reasoning is what is being taught. With this set, a trained
+    /// assistant turn's `</think>` is hidden from the template and restored
+    /// in its rendered text, whatever the template's own rule.
+    pub keep_reasoning: bool,
 }
 
-/// Write a train/val split of packed [`ChatSample`]s to `dir`, in the same
-/// on-disk layout as [`prepare_chat`]. `tmpl` is the checkpoint's OWN
-/// chat template (compiled once by the caller; see `chat_template`).
+const THINK_END: &str = "</think>";
+/// Stands in for `</think>` while the template renders: private-use code
+/// points no tokenizer maps and no template matches.
+const THINK_END_SENTINEL: &str = "\u{F8FF}brain-think-end\u{F8FF}";
+
+/// A split's token stream, supervision mask and the start offset of each
+/// example in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EncodedSplit {
+    pub ids: Vec<u32>,
+    pub mask: Vec<bool>,
+    pub starts: Vec<usize>,
+}
+
+impl EncodedSplit {
+    /// Append one example.
+    pub fn push(&mut self, ids: &[u32], mask: &[bool]) {
+        assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
+        if ids.is_empty() {
+            return;
+        }
+        self.starts.push(self.ids.len());
+        self.ids.extend_from_slice(ids);
+        self.mask.extend_from_slice(mask);
+    }
+
+    /// The longest example, in tokens.
+    pub fn longest_example(&self) -> usize {
+        self.starts.iter().enumerate().map(|(i, &a)| self.starts.get(i + 1).copied().unwrap_or(self.ids.len()) - a).max().unwrap_or(0)
+    }
+}
+
+/// Encode a set of packed samples into one split.
+pub fn encode_sample_split(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSplit, TemplateError> {
+    let mut out = EncodedSplit::default();
+    for s in samples {
+        let (i, m) = s.encode_with(tok, tmpl, opts)?;
+        out.push(&i, &m);
+    }
+    Ok(out)
+}
+
+/// Write one split - `<split>.u32.bin`, `<split>.mask.bin` and the example
+/// index `<split>.ex.bin` - into `dir`: the one layout every chat dataset
+/// writer produces.
+pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<()> {
+    binio::write_u32_bin(&dir.join(format!("{split}.u32.bin")), &data.ids)?;
+    binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
+    let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
+    binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)
+}
+
+/// Write a train/val split of packed [`ChatSample`]s to `dir` (see the
+/// module doc for the layout). `tmpl` is the checkpoint's OWN chat template
+/// (compiled once by the caller; see `chat_template`).
 pub fn prepare_chat_samples(
     train: &[ChatSample],
     val: &[ChatSample],
-    tok: &QwenBpe,
+    tok: &dyn Tokenizer,
     tmpl: &ChatTemplate,
+    opts: RenderOpts,
     vocab: usize,
     dir: &Path,
 ) -> Result<Prepared, PrepareError> {
     std::fs::create_dir_all(dir).map_err(PrepareError::Io)?;
-    let (train_ids, train_mask) = encode_sample_split(train, tok, tmpl).map_err(PrepareError::Template)?;
-    let (val_ids, val_mask) = encode_sample_split(val, tok, tmpl).map_err(PrepareError::Template)?;
-    let longest = longest_example(&train_ids).max(longest_example(&val_ids));
-    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids).map_err(PrepareError::Io)?;
-    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask).map_err(PrepareError::Io)?;
-    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids).map_err(PrepareError::Io)?;
-    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask).map_err(PrepareError::Io)?;
+    let train = encode_sample_split(train, tok, tmpl, opts).map_err(PrepareError::Template)?;
+    let val = encode_sample_split(val, tok, tmpl, opts).map_err(PrepareError::Template)?;
+    write_split(dir, "train", &train).map_err(PrepareError::Io)?;
+    write_split(dir, "val", &val).map_err(PrepareError::Io)?;
     std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab)).map_err(PrepareError::Io)?;
-    Ok(Prepared { longest_example: longest })
-}
-
-/// The longest `ENDOFTEXT`-terminated record in a prepared stream, including
-/// its separator. A trailing unterminated record counts as one.
-fn longest_example(ids: &[u32]) -> usize {
-    let mut longest = 0usize;
-    let mut start = 0usize;
-    for (i, &t) in ids.iter().enumerate() {
-        if t == ENDOFTEXT {
-            longest = longest.max(i + 1 - start);
-            start = i + 1;
-        }
-    }
-    longest.max(ids.len() - start)
+    Ok(Prepared { longest_example: train.longest_example().max(val.longest_example()) })
 }
 
 /// What [`prepare_chat_samples`] measured while writing, so a caller can size
@@ -480,25 +508,14 @@ impl std::fmt::Display for PrepareError {
 
 impl std::error::Error for PrepareError {}
 
-/// Write a train/val split to `dir` as brain's masked token-dataset layout.
-/// `vocab` is the MODEL's vocab (from its `config.json`), which must match the
-/// checkpoint's `lm_head` — not the tokenizer's derived size.
-pub fn prepare_chat(
-    train: &[ChatExample],
-    val: &[ChatExample],
-    tok: &QwenBpe,
-    vocab: usize,
-    dir: &Path,
-) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let (train_ids, train_mask) = encode_split(train, tok);
-    let (val_ids, val_mask) = encode_split(val, tok);
-    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
-    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
-    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
-    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask)?;
-    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab))?;
-    Ok(())
+/// Write a train/val split of single-turn [`ChatExample`]s to `dir`, through
+/// the checkpoint's own chat template - [`prepare_chat_samples`] over
+/// [`ChatExample::to_sample`]. `vocab` is the MODEL's vocabulary (from its
+/// `config.json`, matching its `lm_head`), not the tokenizer's derived size.
+pub fn prepare_chat(train: &[ChatExample], val: &[ChatExample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, vocab: usize, dir: &Path) -> Result<Prepared, PrepareError> {
+    let train: Vec<ChatSample> = train.iter().map(ChatExample::to_sample).collect();
+    let val: Vec<ChatSample> = val.iter().map(ChatExample::to_sample).collect();
+    prepare_chat_samples(&train, &val, tok, tmpl, RenderOpts::default(), vocab, dir)
 }
 
 #[cfg(test)]

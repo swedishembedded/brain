@@ -161,7 +161,7 @@ struct WeightedSample {
 
 /// A weighted training block, one entry per token: `(token ids, loss mask,
 /// per-token reward weight)`.
-type WeightedTokens = (Vec<u32>, Vec<bool>, Vec<f32>);
+type WeightedTokens = (data::chat::EncodedSplit, Vec<f32>);
 
 /// [`data::chat::encode_sample_split`], but tracking each sample's own
 /// token span so its reward can be broadcast across exactly those
@@ -173,16 +173,14 @@ fn encode_weighted(
     tok: &QwenBpe,
     tmpl: &ChatTemplate,
 ) -> Result<WeightedTokens, String> {
-    let mut ids = Vec::new();
-    let mut mask = Vec::new();
+    let mut split = data::chat::EncodedSplit::default();
     let mut weights = Vec::new();
     for ws in samples {
         let (i, m) = ws.sample.encode(tok, tmpl).map_err(|e| e.to_string())?;
         weights.extend(std::iter::repeat_n(ws.reward, i.len()));
-        ids.extend(i);
-        mask.extend(m);
+        split.push(&i, &m);
     }
-    Ok((ids, mask, weights))
+    Ok((split, weights))
 }
 
 /// Ingest every `*.json` ATIF trajectory file directly under
@@ -228,9 +226,8 @@ pub fn ingest_dir(trajectories_dir: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, v
 
     std::fs::create_dir_all(out_dir)?;
     let count = samples.len();
-    let (ids, mask, weights) = encode_weighted(&samples, tok, tmpl).map_err(std::io::Error::other)?;
-    data::binio::write_u32_bin(&out_dir.join("train.u32.bin"), &ids)?;
-    data::binio::write_mask_bin(&out_dir.join("train.mask.bin"), &mask)?;
+    let (split, weights) = encode_weighted(&samples, tok, tmpl).map_err(std::io::Error::other)?;
+    data::chat::write_split(out_dir, "train", &split)?;
     data::binio::write_f32_bin(&out_dir.join("train.weight.bin"), &weights)?;
     data::binio::write_u32_bin(&out_dir.join("val.u32.bin"), &[])?;
     std::fs::write(out_dir.join("meta.json"), data::binio::Meta::vocab_only(vocab))?;

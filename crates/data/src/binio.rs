@@ -125,6 +125,21 @@ pub fn read_u32_bin(path: &Path) -> io::Result<Vec<u32>> {
         .collect())
 }
 
+/// Write a `u64` array as a raw little-endian `.bin` file (a dataset's
+/// example index: offsets into a token stream that may pass 4G tokens).
+pub fn write_u64_bin(path: &Path, values: &[u64]) -> io::Result<()> {
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    fs::write(path, bytes)
+}
+
+/// Read a raw little-endian `u64` `.bin` array. Truncation is an error — see
+/// [`read_u16_bin`].
+pub fn read_u64_bin(path: &Path) -> io::Result<Vec<u64>> {
+    let bytes = fs::read(path)?;
+    reject_trailing(path, bytes.len(), 8)?;
+    Ok(bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk"))).collect())
+}
+
 /// Read a token split as `u32`, choosing the width from what exists on disk:
 /// a `<stem>.u32.bin` (raw `u32`) takes precedence over `<stem>.bin` (raw
 /// `u16`, upcast). `stem` is e.g. `dir.join("train")`. This lets the same

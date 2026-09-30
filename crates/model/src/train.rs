@@ -219,6 +219,27 @@ pub fn load_dataset_with_itos(
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
 }
 
+/// Where each example of `split` starts: its `<split>.ex.bin` index when the
+/// dataset has one, checked against the stream it indexes. A dataset written
+/// before examples were indexed closed each one with
+/// [`data::chat::LEGACY_EXAMPLE_SEPARATOR`] in band; its examples are found
+/// there when the stream holds that id and the vocabulary covers it. `None`:
+/// a token stream without example boundaries, sampled in windows.
+#[cfg(not(target_arch = "wasm32"))]
+fn example_starts(dir: &Path, split: &str, tok: &[u32], vocab: u32) -> std::io::Result<Option<Vec<usize>>> {
+    let index = dir.join(format!("{split}.ex.bin"));
+    if index.exists() {
+        let starts: Vec<usize> = binio::read_u64_bin(&index)?.into_iter().map(|s| s as usize).collect();
+        let ascending = starts.first().is_none_or(|&s| s == 0) && starts.windows(2).all(|w| w[0] < w[1]) && starts.last().is_none_or(|&s| s < tok.len());
+        if !ascending || (starts.is_empty() && !tok.is_empty()) {
+            return Err(std::io::Error::other(format!("{}: not an index of {} tokens (starts must ascend from 0 within the stream)", index.display(), tok.len())));
+        }
+        return Ok(Some(starts));
+    }
+    let sep = data::chat::LEGACY_EXAMPLE_SEPARATOR;
+    Ok((sep < vocab && tok.contains(&sep)).then(|| TokenDataset::separator_starts(tok, sep)))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     // Width-detecting read: `train.u32.bin` (large-vocab, e.g. Qwen) wins over
@@ -245,12 +266,14 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     };
 
     // Chat / tool-call fine-tuning: a `train.mask.bin` (u8, from `data::chat`)
-    // supervises only the assistant span at the TOKEN level, aligning windows to
-    // the `<|endoftext|>` example separator. When present it takes precedence
-    // over the char-boundary `mask_before_token`.
+    // supervises only the assistant span at the TOKEN level, and
+    // `train.ex.bin` indexes where each example starts. When present the mask
+    // takes precedence over the char-boundary `mask_before_token`.
     let train_mask = binio::read_mask_bin(&dir.join("train.mask.bin")).ok();
     let val_mask = binio::read_mask_bin(&dir.join("val.mask.bin")).ok();
     let has_token_mask = train_mask.is_some();
+    let train_starts = example_starts(dir, "train", &train_tok, vocab)?;
+    let val_starts = example_starts(dir, "val", &val_tok, vocab)?;
 
     let batch_cfg = BatchConfig {
         batch_size: opts.batch_size as usize,
@@ -262,7 +285,7 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         // start: the window used to START at an example and then run on
         // through two dozen more.
         align_to_lines: opts.align_to_lines && !has_token_mask,
-        newline_token: if has_token_mask { Some(data::chat::ENDOFTEXT) } else { newline_id },
+        newline_token: if has_token_mask { None } else { newline_id },
     };
     // A split shorter than `block_size` has no valid sampling window at all
     // (`TokenDataset::sample_start`'s `data.len() - block_size - 1` requires
@@ -285,20 +308,21 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         Ok(())
     };
 
-    // A chat/tool-call dataset carries a token mask AND `<|endoftext|>`
-    // example separators, so its examples can be told apart and each given a
-    // row of its own. Packing them into a shared window instead lets one
+    // A chat/tool-call dataset carries a token mask AND an example index, so
+    // its examples can be told apart and each given a row of its own. Packing them into a shared window instead lets one
     // example attend to its neighbours' answers - which, for short
     // instruction-tuning examples, is most of the row - so the model can
     // drive both training and held-out loss down by copying rather than
     // learning, and neither number then says anything about how it will do on
     // a single question at serving time.
-    let mk = |label: &str, tok: Vec<u32>, mask: Option<Vec<bool>>| -> std::io::Result<TokenDataset> {
-        let (tok, mask) = match mask {
+    let mk = |label: &str, tok: Vec<u32>, mask: Option<Vec<bool>>, starts: Option<Vec<usize>>| -> std::io::Result<TokenDataset> {
+        let (tok, mask) = match (mask, starts) {
             // One example per row needs no window at all, so it is the one
-            // path that does not care how long the split is.
-            Some(m) if m.len() == tok.len() && has_token_mask && !tok.is_empty() => {
-                match TokenDataset::new_examples(tok, m, data::chat::ENDOFTEXT, &batch_cfg) {
+            // path that does not care how long the split is. Padding is id 0:
+            // any id the vocabulary holds, since a pad position is never a
+            // target and nothing before it attends to it.
+            (Some(m), Some(starts)) if m.len() == tok.len() && has_token_mask && !tok.is_empty() => {
+                match TokenDataset::new_examples(tok, m, &starts, 0, &batch_cfg) {
                     Ok(d) => return Ok(d),
                     // Examples too long to be rows of their own: this is
                     // document-scale data, where a window IS the unit of
@@ -314,7 +338,7 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
                     }
                 }
             }
-            other => (tok, other),
+            (other, _) => (tok, other),
         };
         // Every remaining path draws windows, which needs a split longer than
         // one of them.
@@ -325,8 +349,8 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         })
     };
     Ok(Loaded {
-        train: mk("train", train_tok, train_mask)?,
-        val: mk("validation", val_tok, val_mask)?,
+        train: mk("train", train_tok, train_mask, train_starts)?,
+        val: mk("validation", val_tok, val_mask, val_starts)?,
         vocab,
         batch_cfg,
         itos,
@@ -1296,18 +1320,15 @@ mod tests {
     #[test]
     fn a_masked_chat_dataset_loads_one_example_per_row() {
         let dir = tmp("chat-one-per-row");
-        // Four 5-token examples: two prompt tokens, two supervised, separator.
-        let mut tokens: Vec<u32> = Vec::new();
-        let mut mask: Vec<bool> = Vec::new();
+        // Four 4-token examples - two prompt tokens, two supervised - in a
+        // 64-id vocabulary, indexed out of band.
+        let mut split = data::chat::EncodedSplit::default();
         for e in 0..4u32 {
-            tokens.extend_from_slice(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3, data::chat::ENDOFTEXT]);
-            mask.extend_from_slice(&[false, false, true, true, false]);
+            split.push(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3], &[false, false, true, true]);
         }
-        binio::write_u32_bin(&dir.join("train.u32.bin"), &tokens).unwrap();
-        binio::write_mask_bin(&dir.join("train.mask.bin"), &mask).unwrap();
-        binio::write_u32_bin(&dir.join("val.u32.bin"), &tokens).unwrap();
-        binio::write_mask_bin(&dir.join("val.mask.bin"), &mask).unwrap();
-        std::fs::write(dir.join("meta.json"), Meta::vocab_only(200000)).unwrap();
+        data::chat::write_split(&dir, "train", &split).unwrap();
+        data::chat::write_split(&dir, "val", &split).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(64)).unwrap();
 
         // A row twice the length of an example: the old stream-window sampler
         // would have filled the rest of it with the following examples.
@@ -1322,13 +1343,30 @@ mod tests {
                 let row = &x[b * 10..(b + 1) * 10];
                 let base = row[0];
                 assert_eq!(&row[..4], &[base, base + 1, base + 2, base + 3], "row {row:?} is not one example");
-                // Past its own separator the row is padding, and padding is
-                // never a target.
+                // The example's last token predicts nothing, and past it the
+                // row is padding, which is never a target.
                 for t in 3..10 {
                     assert_eq!(y[b * 10 + t], data::loader::IGNORE, "row {row:?} supervises position {t}");
                 }
             }
         }
+    }
+
+    /// A chat dataset written before examples were indexed closed each one
+    /// with Qwen's `<|endoftext|>`; it still loads one example per row.
+    #[test]
+    fn a_legacy_separator_dataset_still_loads_one_example_per_row() {
+        let dir = tmp("chat-legacy-separator");
+        let sep = data::chat::LEGACY_EXAMPLE_SEPARATOR;
+        let tokens: Vec<u32> = (0..3u32).flat_map(|e| [e * 10, e * 10 + 1, e * 10 + 2, sep]).collect();
+        let mask: Vec<bool> = tokens.iter().map(|&t| t != sep).collect();
+        binio::write_u32_bin(&dir.join("train.u32.bin"), &tokens).unwrap();
+        binio::write_mask_bin(&dir.join("train.mask.bin"), &mask).unwrap();
+        binio::write_u32_bin(&dir.join("val.u32.bin"), &[]).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(151936)).unwrap();
+        let opts = FitOpts { block_size: 8, batch_size: 2, ..Default::default() };
+        let (train, ..) = load_dataset(&dir, &opts).expect("load");
+        assert_eq!(train.example_count(), Some(3));
     }
 
     #[test]

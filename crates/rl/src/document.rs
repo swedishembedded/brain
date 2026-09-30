@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use model::Model;
 use thiserror::Error;
 
-use data::chat::{ChatMessage, ChatSample, ENDOFTEXT};
+use data::chat::{ChatMessage, ChatSample};
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 use data::rng::Rng;
@@ -50,17 +50,6 @@ pub enum CurriculumError {
          is one document alone, which is the cue-independent shortcut continual::rehearsal_pool exists to remove"
     )]
     NoAnchors,
-    /// `vocab` does not span [`data::chat::ENDOFTEXT`].
-    #[error(
-        "vocab {vocab} does not span data::chat::ENDOFTEXT ({endoftext}), the record separator every prepare_chat_samples dataset \
-         carries - a model trained on one would index past its own embedding table"
-    )]
-    VocabTooSmall {
-        /// The vocabulary size actually given.
-        vocab: usize,
-        /// [`data::chat::ENDOFTEXT`].
-        endoftext: u32,
-    },
     /// Cycle `cycle`'s own batch failed [`train_probe_split`].
     #[error("cycle {cycle}: {source}")]
     Cycle {
@@ -111,10 +100,6 @@ impl<'a> DocumentCurriculum<'a> {
     /// - no cycles, or no anchor suite ([`crate::continual::run_study`] refuses
     ///   a zero-length rehearsal pool under `Regime::Sft` anyway; failing here
     ///   says WHICH input was empty);
-    /// - a `vocab` that does not span [`data::chat::ENDOFTEXT`] - every
-    ///   dataset [`Self::write_sft_dataset`] writes terminates its records
-    ///   with that id, so a model whose embedding is shorter would index off
-    ///   the end of its own table;
     /// - anything [`train_probe_split`] refuses on any cycle's batch (the
     ///   held-out floor, and the probe/training id disjointness). Running B2's
     ///   check on every cycle HERE is what makes "explore/eval splits disjoint
@@ -143,9 +128,6 @@ impl<'a> DocumentCurriculum<'a> {
         }
         if anchors.is_empty() {
             return Err(CurriculumError::NoAnchors);
-        }
-        if vocab <= ENDOFTEXT as usize {
-            return Err(CurriculumError::VocabTooSmall { vocab, endoftext: ENDOFTEXT });
         }
         for (cycle, batch) in cycles.iter().enumerate() {
             train_probe_split(batch, tok).map_err(|source| CurriculumError::Cycle { cycle, source })?;
@@ -261,7 +243,7 @@ impl<'a> Curriculum for DocumentCurriculum<'a> {
                 record(env, row)
             })
             .collect();
-        data::chat::prepare_chat_samples(&samples, &[], self.tok, self.tmpl, self.vocab, out_dir)
+        data::chat::prepare_chat_samples(&samples, &[], self.tok, self.tmpl, data::chat::RenderOpts::default(), self.vocab, out_dir)
             .map(|_| ())
             .map_err(std::io::Error::other)
     }

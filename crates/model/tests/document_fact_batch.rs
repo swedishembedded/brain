@@ -45,7 +45,7 @@
 //! sending an email to info@swedishembedded.com.
 
 use checkpoint::gguf::GgufTokenizer;
-use data::chat::{ChatMessage, ChatSample, ENDOFTEXT};
+use data::chat::{ChatMessage, ChatSample, RenderOpts};
 use data::chat_template::ChatTemplate;
 use data::loader::IGNORE;
 use data::qwen_tokenizer::QwenBpe;
@@ -125,51 +125,55 @@ fn a_document_fact_batch_writes_a_masked_chat_dataset_load_dataset_accepts() {
     let samples: Vec<ChatSample> = TRIPLES.iter().map(to_chat_sample).collect();
     let tok = byte_tokenizer();
     let tmpl = tagged_line_template();
-    // The MODEL's vocab, not the tokenizer's: `prepare_chat_samples`
-    // terminates every record with `ENDOFTEXT`, so a shorter embedding table
-    // would index past its own last row on the separator alone.
-    let vocab = ENDOFTEXT as usize + 1;
+    // The byte tokenizer's 256 ids: the dataset holds nothing else.
+    let vocab = 256;
 
     let dir = std::env::temp_dir().join(format!("brain-model-document-fact-batch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    data::chat::prepare_chat_samples(&samples, &[], &tok, &tmpl, vocab, &dir).expect("prepare_chat_samples writes a train.mask.bin-backed dataset");
+    data::chat::prepare_chat_samples(&samples, &[], &tok, &tmpl, RenderOpts::default(), vocab, &dir).expect("prepare_chat_samples writes a train.mask.bin-backed dataset");
 
     let ids = data::binio::read_tokens_u32(&dir.join("train")).expect("read train tokens");
     let mask = data::binio::read_mask_bin(&dir.join("train.mask.bin")).expect("read train mask");
     assert_eq!(ids.len(), mask.len(), "the token stream and its mask must be parallel");
 
-    // `block_size = len - 1` with one row leaves exactly one valid aligned
-    // window, start 0: a record start is offered only when
-    // `start + block_size < len`, which no separator-following position
-    // satisfies at this width. So the assertions below cover the WHOLE
-    // dataset on every run rather than whichever window the draw happened to
-    // land on, and `x` is checked against the stream to prove it.
-    let block = ids.len() - 1;
-    let opts = FitOpts { block_size: block as u32, batch_size: 1, ..Default::default() };
+    let starts: Vec<usize> = data::binio::read_u64_bin(&dir.join("train.ex.bin")).expect("read the example index").into_iter().map(|s| s as usize).collect();
+    assert_eq!(starts.len(), TRIPLES.len(), "one indexed example per triple");
+    let bounds: Vec<(usize, usize)> = starts.iter().enumerate().map(|(i, &a)| (a, starts.get(i + 1).copied().unwrap_or(ids.len()))).collect();
+
+    // One example per row: a row as long as the longest example, drawn
+    // until every example has been seen.
+    let block = bounds.iter().map(|&(a, e)| e - a).max().unwrap();
+    let opts = FitOpts { block_size: block as u32, batch_size: 4, ..Default::default() };
     let (train, _val, batch_cfg, loaded_vocab) =
         model::load_dataset(&dir, &opts).expect("load_dataset accepts a prepare_chat_samples dataset built from confirmed fact triples");
     assert_eq!(loaded_vocab as usize, vocab, "load_dataset must carry the dataset's own model vocab through, not the tokenizer's");
+    assert_eq!(train.example_count(), Some(TRIPLES.len()));
 
     let mut rng = data::rng::Rng::new(1337);
-    let (x, y) = train.get_batch(&batch_cfg, &mut rng);
-    assert_eq!(x, ids[..block], "the single aligned window must start at the first record, so the checks below are total");
-
-    // The load-bearing assertion: `y[t]` predicts `x[t+1]`, so the mask entry
-    // that governs it is `mask[t+1]`. Supervised there and only there.
-    for t in 0..block {
-        if mask[t + 1] {
-            assert_eq!(y[t], ids[t + 1] as i32, "position {t} is marked trainable, so its target must be the real next token");
-        } else {
-            assert_eq!(y[t], IGNORE, "position {t} is marked context, so it must not enter the loss");
+    let mut runs_by_example: Vec<Option<Vec<String>>> = vec![None; bounds.len()];
+    for _ in 0..50 {
+        let (x, y) = train.get_batch(&batch_cfg, &mut rng);
+        for row in 0..batch_cfg.batch_size {
+            let (xr, yr) = (&x[row * block..(row + 1) * block], &y[row * block..(row + 1) * block]);
+            let k = bounds.iter().position(|&(a, e)| ids[a..e] == xr[..e - a]).expect("a row is one whole indexed example");
+            let (a, e) = bounds[k];
+            // The load-bearing assertion: `y[t]` predicts `x[t+1]`, so the
+            // mask entry that governs it is `mask[a+t+1]`. Supervised there
+            // and only there, and never past the example.
+            for t in 0..block {
+                let supervised = a + t + 1 < e && mask[a + t + 1];
+                let want = if supervised { ids[a + t + 1] as i32 } else { IGNORE };
+                assert_eq!(yr[t], want, "example {k}, position {t}");
+            }
+            runs_by_example[k] = Some(supervised_runs(yr, &tok));
         }
     }
-    assert!(y.iter().any(|&v| v != IGNORE), "a batch with no supervised target trains nothing");
-    assert!(y.contains(&IGNORE), "a batch with nothing masked would be training on the questions too");
 
-    // And what that mask means in words: the answers, each framed by the
-    // template exactly as written, and nothing else in the whole batch.
+    // And what that mask means in words: each example trains its answer,
+    // framed by the template exactly as written, and nothing else.
+    let runs: Vec<String> = runs_by_example.into_iter().map(|r| r.expect("every example is drawn")).flatten().collect();
     let expected: Vec<String> = TRIPLES.iter().map(|(_, _, answer)| format!("[assistant] {answer}\n")).collect();
-    assert_eq!(supervised_runs(&y, &tok), expected, "the supervised spans must be the fact answers and nothing else");
+    assert_eq!(runs, expected, "the supervised spans must be the fact answers and nothing else");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

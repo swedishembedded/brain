@@ -144,9 +144,9 @@ fn write_base_dir(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
 
     let cfg = QwenConfig {
-        // `data::chat::prepare_chat_samples` terminates every record with
-        // `ENDOFTEXT`, so the model's embedding table has to span that id.
-        vocab: data::chat::ENDOFTEXT + 1,
+        // The byte-level tokenizer's 256 ids: a prepared chat dataset holds
+        // nothing but the conversations' own tokens.
+        vocab: 256,
         block_size: BLOCK,
         max_position_embeddings: BLOCK,
         ..QwenConfig::tiny()

@@ -7,6 +7,7 @@
 //! per case, exact-match on the parsed call + mean response-token accuracy. Used
 //! by `brain qwen toolcall eval` and the integration tests.
 
+use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use data::toolcall::{self, ToolCase};
@@ -23,23 +24,23 @@ fn argmax(s: &[f32]) -> usize {
     bi
 }
 
-/// Teacher-forced tool-call eval over `cases`. Returns `(exact_match, token_acc)`.
-pub fn eval(model: &Qwen, t: &QwenBpe, cases: &[ToolCase]) -> (f64, f64) {
+/// Teacher-forced tool-call eval over `cases`, each rendered through the
+/// checkpoint's own chat template `tmpl`: the answer is the trained span of
+/// the rendered conversation, its end-of-turn token included. Returns
+/// `(exact_match, token_acc)`.
+pub fn eval(model: &Qwen, t: &QwenBpe, tmpl: &ChatTemplate, cases: &[ToolCase]) -> (f64, f64) {
     let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
     let (mut exact, mut counted) = (0usize, 0usize);
     let mut tok_acc = 0f64;
     for c in cases {
-        let ex = c.to_chat_example();
-        let prompt = t.encode(&ex.prompt_str(t));
-        let resp = t.encode(&format!("{}<|im_end|>\n", ex.assistant));
-        if prompt.len() + resp.len() + 1 > cap {
+        let Ok((full, mask)) = c.to_chat_example().to_sample().encode(t, tmpl) else { continue };
+        let Some(p) = mask.iter().position(|&m| m) else { continue };
+        if p == 0 || full.len() > cap {
             continue;
         }
-        let mut full = prompt.clone();
-        full.extend_from_slice(&resp);
+        let resp = &full[p..];
         let logits = model.logits_all(&full);
-        let p = prompt.len();
         let mut preds = Vec::with_capacity(resp.len());
         let mut correct = 0usize;
         for j in 0..resp.len() {
@@ -62,8 +63,8 @@ pub fn eval(model: &Qwen, t: &QwenBpe, cases: &[ToolCase]) -> (f64, f64) {
 }
 
 /// Load `weights`, generate `n` held-out cases (`tools` candidates each), score.
-pub fn score(weights: &str, tok: &QwenBpe, n: usize, tools: usize, seq: usize, seed: u64) -> (f64, f64) {
+pub fn score(weights: &str, tok: &QwenBpe, tmpl: &ChatTemplate, n: usize, tools: usize, seq: usize, seed: u64) -> (f64, f64) {
     let model = Qwen::load_inference(weights, 1, seq as u32);
     let cases = toolcall::generate(n, tools, seed);
-    eval(&model, tok, &cases)
+    eval(&model, tok, tmpl, &cases)
 }

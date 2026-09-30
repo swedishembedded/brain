@@ -60,15 +60,14 @@ pub struct TokenDataset {
     /// token implicitly weights `1.0`, matching `model::Batch::Lm`'s
     /// semantics on a weighted-loss-enabled model.
     weights: Option<Vec<f32>>,
-    /// Example boundaries `(start, end)` into `data`, `end` exclusive and
-    /// pointing one past the example's separator. `Some` puts the dataset in
-    /// one-example-per-row mode (see [`TokenDataset::new_examples`]), where a
-    /// row is a single example rather than an arbitrary window of the stream.
+    /// Example boundaries `(start, end)` into `data`, `end` exclusive. `Some`
+    /// puts the dataset in one-example-per-row mode (see
+    /// [`TokenDataset::new_examples`]), where a row is a single example rather
+    /// than an arbitrary window of the stream.
     examples: Option<Examples>,
 }
 
-/// Example boundaries plus the token a short row is padded with - the
-/// separator itself, so a padded row reads as "example, then nothing".
+/// Example boundaries plus the token a short row is padded with.
 struct Examples {
     bounds: Vec<(usize, usize)>,
     pad: u32,
@@ -129,8 +128,9 @@ impl TokenDataset {
         d
     }
 
-    /// Wrap a token array whose examples are delimited by `separator`, so that
-    /// **one row is one example**.
+    /// Wrap a token array whose examples start at `starts` (ascending offsets
+    /// into `data`, the first 0, each running to the next or to the end), so
+    /// that **one row is one example**.
     ///
     /// The alternative - drawing an arbitrary `block_size` window from the
     /// concatenated stream - packs however many examples happen to fit into
@@ -144,31 +144,26 @@ impl TokenDataset {
     /// generalisation.
     ///
     /// Each row here holds exactly one example, left-aligned and padded with
-    /// `separator`. Padding carries [`IGNORE`] targets, so it contributes no
-    /// gradient; causal attention inside the row only ever reaches the
-    /// example's own earlier tokens.
+    /// `pad`, any id the model's vocabulary holds. Padding carries [`IGNORE`]
+    /// targets, so it contributes no gradient; causal attention inside the row
+    /// only ever reaches the example's own earlier tokens.
     ///
     /// Errors when an example does not fit in `cfg.block_size`, rather than
     /// truncating a training answer to fit.
+    ///
+    /// # Panics
+    /// If `starts` is not strictly ascending from 0 within `data`.
     pub fn new_examples(
         data: Vec<u32>,
         mask: Vec<bool>,
-        separator: u32,
+        starts: &[usize],
+        pad: u32,
         cfg: &BatchConfig,
     ) -> Result<Self, ExampleTooLong> {
         assert_eq!(data.len(), mask.len(), "mask length must match data length");
-        let mut examples = Vec::new();
-        let mut start = 0usize;
-        for (i, &t) in data.iter().enumerate() {
-            if t == separator {
-                examples.push((start, i + 1));
-                start = i + 1;
-            }
-        }
-        // A trailing example the writer did not terminate is still an example.
-        if start < data.len() {
-            examples.push((start, data.len()));
-        }
+        assert!(starts.first().is_none_or(|&s| s == 0), "the first example starts at 0");
+        assert!(starts.windows(2).all(|w| w[0] < w[1]) && starts.last().is_none_or(|&s| s < data.len()), "example starts must ascend within the data");
+        let examples: Vec<(usize, usize)> = starts.iter().enumerate().map(|(i, &a)| (a, starts.get(i + 1).copied().unwrap_or(data.len()))).collect();
         if let Some((index, &(a, b))) = examples.iter().enumerate().find(|(_, &(a, b))| b - a > cfg.block_size) {
             return Err(ExampleTooLong {
                 index,
@@ -182,8 +177,27 @@ impl TokenDataset {
             line_starts: None,
             mask: Some(mask),
             weights: None,
-            examples: Some(Examples { bounds: examples, pad: separator }),
+            examples: Some(Examples { bounds: examples, pad }),
         })
+    }
+
+    /// The example starts of a stream whose examples each END with
+    /// `separator` (the separator belongs to the example it closes); a
+    /// trailing unterminated run is an example too. For datasets written
+    /// before examples were indexed out of band.
+    pub fn separator_starts(data: &[u32], separator: u32) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut start = 0usize;
+        for (i, &t) in data.iter().enumerate() {
+            if t == separator {
+                starts.push(start);
+                start = i + 1;
+            }
+        }
+        if start < data.len() {
+            starts.push(start);
+        }
+        starts
     }
 
     /// How many examples this dataset holds, when built by
@@ -537,14 +551,13 @@ mod tests {
         assert!(y.contains(&IGNORE), "the mask attached via with_mask must still apply");
     }
 
-    /// Three 4-token examples behind a separator, in a row twice that long.
-    const SEP: u32 = 9;
+    /// Three 4-token examples, indexed by their starts; rows pad with `PAD`.
+    const PAD: u32 = 99;
+    const STARTS: [usize; 3] = [0, 4, 8];
 
     fn three_examples() -> (Vec<u32>, Vec<bool>) {
-        // [0 1 2 SEP][3 4 5 SEP][6 7 8 SEP]; the separator is never a target,
-        // matching what `data::chat` writes.
-        let data = vec![0, 1, 2, SEP, 3, 4, 5, SEP, 6, 7, 8, SEP];
-        let mask = data.iter().map(|&t| t != SEP).collect();
+        let data = vec![0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23];
+        let mask = vec![true; data.len()];
         (data, mask)
     }
 
@@ -555,19 +568,19 @@ mod tests {
     fn an_example_row_never_reaches_into_the_next_example() {
         let (data, mask) = three_examples();
         let cfg = BatchConfig { batch_size: 6, block_size: 8, ..Default::default() };
-        let ds = TokenDataset::new_examples(data, mask, SEP, &cfg).expect("each example fits");
+        let ds = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).expect("each example fits");
         let mut rng = Rng::new(1);
-        let whole = [vec![0, 1, 2, SEP], vec![3, 4, 5, SEP], vec![6, 7, 8, SEP]];
+        let whole = [vec![0, 1, 2, 3], vec![10, 11, 12, 13], vec![20, 21, 22, 23]];
 
         for _ in 0..40 {
             let (x, y) = ds.get_batch(&cfg, &mut rng);
             for b in 0..cfg.batch_size {
                 let row = &x[b * 8..(b + 1) * 8];
-                let end = row.iter().position(|&t| t == SEP).expect("the example's own separator") + 1;
-                assert!(whole.iter().any(|e| e == &row[..end]), "row {row:?} is not one whole example");
-                // Everything from the separator on is padding or another
-                // example's business: it must carry no gradient.
-                for t in (end - 1)..8 {
+                assert!(whole.iter().any(|e| e == &row[..4]), "row {row:?} is not one whole example");
+                assert!(row[4..].iter().all(|&t| t == PAD), "row {row:?} runs past its example");
+                // The example's last token predicts nothing, and padding is
+                // no one's business: neither carries gradient.
+                for t in 3..8 {
                     assert_eq!(y[b * 8 + t], IGNORE, "row {row:?} supervises position {t}");
                 }
             }
@@ -581,7 +594,7 @@ mod tests {
     fn every_example_can_be_drawn() {
         let (data, mask) = three_examples();
         let cfg = BatchConfig { batch_size: 4, block_size: 8, ..Default::default() };
-        let ds = TokenDataset::new_examples(data, mask, SEP, &cfg).expect("each example fits");
+        let ds = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).expect("each example fits");
         assert_eq!(ds.example_count(), Some(3));
         assert_eq!(ds.longest_example(), Some(4));
         let mut rng = Rng::new(5);
@@ -592,7 +605,7 @@ mod tests {
                 seen.insert(x[b * 8]);
             }
         }
-        assert_eq!(seen, [0, 3, 6].into_iter().collect(), "some example is unreachable");
+        assert_eq!(seen, [0, 10, 20].into_iter().collect(), "some example is unreachable");
     }
 
     /// Refused, not truncated: a row too short for an example would cut the
@@ -601,10 +614,19 @@ mod tests {
     fn an_example_longer_than_the_row_is_refused() {
         let (data, mask) = three_examples();
         let cfg = BatchConfig { batch_size: 2, block_size: 3, ..Default::default() };
-        let err = TokenDataset::new_examples(data.clone(), mask, SEP, &cfg).map(|_| ()).expect_err("must refuse");
+        let err = TokenDataset::new_examples(data.clone(), mask, &STARTS, PAD, &cfg).map(|_| ()).expect_err("must refuse");
         assert_eq!((err.index, err.tokens, err.block_size), (0, 4, 3));
         assert!(err.to_string().contains("--block"), "the message must say how to fix it: {err}");
         // The caller gets its buffers back rather than having to re-encode.
         assert_eq!(err.returned().0, data);
+    }
+
+    /// A stream written with each example closed by a separator indexes to
+    /// the same starts, the separator staying with the example it closes.
+    #[test]
+    fn separator_terminated_examples_index_to_their_starts() {
+        assert_eq!(TokenDataset::separator_starts(&[5, 6, 9, 7, 9, 8], 9), vec![0, 3, 5]);
+        assert_eq!(TokenDataset::separator_starts(&[5, 9], 9), vec![0]);
+        assert!(TokenDataset::separator_starts(&[], 9).is_empty());
     }
 }

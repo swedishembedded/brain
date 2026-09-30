@@ -723,6 +723,9 @@ fn finetune_lora(args: &[String]) {
     let mut dataset_id: Option<String> = None;
     let mut hyper = qwen3::finetune::LoraHyper::default();
     let mut targets = qwen3::finetune::default_lora_targets();
+    // Train each answer's `<think>` reasoning even where the chat template
+    // drops it from history (DeepSeek-R1's always does).
+    let mut keep_reasoning = false;
     let mut i = 0;
     while i < args.len() {
         // A schedule value that does not parse is an error, never the default.
@@ -740,6 +743,7 @@ fn finetune_lora(args: &[String]) {
                     std::process::exit(2)
                 })
             }
+            "--keep-reasoning" => keep_reasoning = true,
             "--weight-decay" => hyper.weight_decay = num(&mut i, "--weight-decay"),
             "--grad-clip" => hyper.grad_clip = num(&mut i, "--grad-clip"),
             "--warmup" => hyper.warmup = Some(num(&mut i, "--warmup") as u32),
@@ -767,7 +771,7 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
-             [--patience N] [--lora-targets wq,wk,...] \
+             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
@@ -866,7 +870,7 @@ fn finetune_lora(args: &[String]) {
     }
 
     let scratch = std::env::temp_dir().join(format!("brain-qwen-lora-train-{}", std::process::id()));
-    let prepared = match data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, vocab, &scratch) {
+    let prepared = match data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, data::chat::RenderOpts { keep_reasoning }, vocab, &scratch) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("preparing training data: {e}");
@@ -989,10 +993,17 @@ fn toolcall_gen(args: &[String]) {
         Ok(t) => t,
         Err(e) => { eprintln!("tokenizer: {e}"); return; }
     };
+    // The chat template ships beside the tokenizer, in the checkpoint's
+    // tokenizer_config.json.
+    let tok_dir = std::path::Path::new(&tokenizer).parent().unwrap_or(std::path::Path::new("."));
+    let tmpl = match data::chat_template::ChatTemplate::from_model_dir(tok_dir) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("chat template: {e}"); return; }
+    };
     let train: Vec<_> = data::toolcall::generate(n, tools, seed).iter().map(|c| c.to_chat_example()).collect();
     let val: Vec<_> = data::toolcall::generate(held, tools, seed ^ 0xDEAD).iter().map(|c| c.to_chat_example()).collect();
-    match data::chat::prepare_chat(&train, &val, &tok, vocab, std::path::Path::new(&out)) {
-        Ok(()) => println!("ok: wrote {n} train + {held} val tool-call examples -> {out}"),
+    match data::chat::prepare_chat(&train, &val, &tok, &tmpl, vocab, std::path::Path::new(&out)) {
+        Ok(_) => println!("ok: wrote {n} train + {held} val tool-call examples -> {out}"),
         Err(e) => eprintln!("prepare failed: {e}"),
     }
 }
@@ -1021,7 +1032,12 @@ fn toolcall_eval(args: &[String]) {
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
         Ok(t) => t, Err(e) => { eprintln!("tokenizer: {e}"); return; }
     };
-    let (exact, tacc) = qwen3::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
+    let tok_dir = std::path::Path::new(&tokenizer).parent().unwrap_or(std::path::Path::new("."));
+    let tmpl = match data::chat_template::ChatTemplate::from_model_dir(tok_dir) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("chat template: {e}"); return; }
+    };
+    let (exact, tacc) = qwen3::toolcall_eval::score(&weights, &tok, &tmpl, n, tools, seq, seed);
     println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
 }
 

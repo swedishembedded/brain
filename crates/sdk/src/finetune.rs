@@ -256,7 +256,7 @@ impl ChatFineTune {
         let val = held_out.as_deref().unwrap_or(&training[..]);
         let cfg = qwen3::QwenConfig::from_json(&checkpoint::weightio::WeightReader::open(weights_str).map_err(|e| Error::Backend(format!("{weights_str}: {e}")))?.config());
         let prepared_dir = out_dir.join(PREPARED_DIR);
-        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, data::chat::RenderOpts::default(), cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;
 
         crate::device::resolve(&self.device)?;

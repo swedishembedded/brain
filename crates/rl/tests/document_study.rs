@@ -54,10 +54,9 @@ const FACTS_PER_CYCLE: usize = 20;
 /// pre-registered held-out floor B2 sized its statistics against.
 const PROBES_PER_FACT: usize = 3;
 const CYCLES: usize = 2;
-/// `data::chat::prepare_chat_samples` terminates every record with
-/// `data::chat::ENDOFTEXT`, so any model trained on its output needs a
-/// vocabulary that includes that id.
-const VOCAB: u32 = data::chat::ENDOFTEXT + 1;
+/// The byte tokenizer's 256 ids: a prepared chat dataset holds nothing but
+/// the conversations' own tokens.
+const VOCAB: u32 = 256;
 
 fn cycle_batch(cycle: usize) -> FactBatch {
     let triples: Vec<FactProbe> = (0..FACTS_PER_CYCLE)

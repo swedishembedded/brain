@@ -344,14 +344,6 @@ struct Inputs<'a> {
 fn run_for<A: StudyArch>(i: &Inputs) -> std::io::Result<DocumentStudyReport> {
     let base_cfg = <<A::M as Model>::Config as ModelConfig>::from_json(&checkpoint::read_config(i.base_weights.to_str().unwrap_or_default()));
     let vocab = base_cfg.vocab();
-    if vocab <= data::chat::ENDOFTEXT {
-        return Err(std::io::Error::other(format!(
-            "{}: vocabulary {vocab} does not span data::chat::ENDOFTEXT ({}), the record separator every document dataset carries - \
-             a model trained on one would index past its own embedding table",
-            i.base_weights.display(),
-            data::chat::ENDOFTEXT
-        )));
-    }
 
     let curr = DocumentCurriculum::new(i.cycles, i.anchors, i.tok, i.tmpl, vocab as usize).map_err(std::io::Error::other)?;
 

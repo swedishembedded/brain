@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
-use data::toolcall::{self, ToolCase};
+use data::toolcall;
 use gpu_core::{set_default_backend, Backend};
 use qwen3::{Qwen, QwenConfig};
 
@@ -47,6 +47,11 @@ fn weights(d: &Path) -> PathBuf {
 fn weights_ft(d: &Path) -> PathBuf {
     d.join("brain/qwen3-0.6b-ft512.safetensors")
 }
+/// The checkpoint's own chat template, from its `tokenizer_config.json`.
+fn chat_template(d: &std::path::Path) -> data::chat_template::ChatTemplate {
+    data::chat_template::ChatTemplate::from_model_dir(d).expect("the checkpoint's chat template")
+}
+
 fn tok(d: &Path) -> QwenBpe {
     QwenBpe::from_file(d.join("tokenizer.json").to_str().unwrap()).expect("tokenizer.json")
 }
@@ -75,51 +80,6 @@ fn argmax(s: &[f32]) -> usize {
     bi
 }
 
-/// Teacher-forced tool-call eval: for each case, run one forward over
-/// prompt+response and read the greedy prediction at each response position.
-/// Returns (exact-match rate over the *parsed* call, mean response-token accuracy).
-/// One forward per case — fast, and a faithful proxy for greedy generation
-/// (all-correct teacher-forced ⇒ greedy reproduces the call).
-fn eval_toolcall(model: &Qwen, t: &QwenBpe, cases: &[ToolCase]) -> (f64, f64) {
-    let vocab = model.cfg.vocab as usize;
-    let cap = model.ctx_len();
-    let mut exact = 0usize;
-    let mut tok_acc = 0f64;
-    let mut counted = 0usize;
-    for c in cases {
-        let ex = c.to_chat_example();
-        let prompt = t.encode(&ex.prompt_str(t));
-        let resp = t.encode(&format!("{}<|im_end|>\n", ex.assistant));
-        if prompt.len() + resp.len() + 1 > cap {
-            continue;
-        }
-        let mut full = prompt.clone();
-        full.extend_from_slice(&resp);
-        let logits = model.logits_all(&full);
-        // predictions at positions [p-1 .. p+r-1] target resp[0..r]
-        let p = prompt.len();
-        let mut preds = Vec::with_capacity(resp.len());
-        let mut correct = 0usize;
-        for (j, &want) in resp.iter().enumerate() {
-            let pos = p - 1 + j;
-            let pred = argmax(&logits[pos * vocab..(pos + 1) * vocab]) as u32;
-            preds.push(pred);
-            if pred == want {
-                correct += 1;
-            }
-        }
-        tok_acc += correct as f64 / resp.len() as f64;
-        counted += 1;
-        let text = t.decode(&preds);
-        if let Some(got) = toolcall::parse_tool_call(&text) {
-            if toolcall::calls_match(&c.call, &got) {
-                exact += 1;
-            }
-        }
-    }
-    let n = counted.max(1) as f64;
-    (exact as f64 / n, tok_acc / n)
-}
 
 // ---------------------------------------------------------------------------
 
@@ -160,10 +120,10 @@ fn qwen3_training_validity() {
         "Repeat the secret phrase.",
         "The secret phrase is: velvet thunder over the quiet harbor.",
     );
-    // Repeat so the token stream exceeds the 512 window (loader samples windows).
+    // Repeated: forty rows of the same example, one example per row.
     let corpus: Vec<_> = std::iter::repeat_n(ex.clone(), 40).collect();
     let out = std::env::temp_dir().join("qwen3_train_validity");
-    data::chat::prepare_chat(&corpus, &corpus, &t, 151936, &out).unwrap();
+    data::chat::prepare_chat(&corpus, &corpus, &t, &chat_template(&d), 151936, &out).unwrap();
 
     let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
     let steps = env_usize("QWEN3_TV_STEPS", 40);
@@ -207,11 +167,11 @@ fn qwen3_toolcall_finetune() {
     let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
 
     let out = std::env::temp_dir().join("qwen3_toolcall");
-    data::chat::prepare_chat(&train_ex, &val_ex, &t, 151936, &out).unwrap();
+    data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
 
     // Eval BEFORE.
     let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
-    let (ex0, ta0) = eval_toolcall(&base, &t, &held);
+    let (ex0, ta0) = qwen3::toolcall_eval::eval(&base, &t, &chat_template(&d), &held);
     println!("tool-call BEFORE finetune: exact-match {:.1}%  token-acc {:.1}%", ex0 * 100.0, ta0 * 100.0);
     drop(base);
 
@@ -240,7 +200,7 @@ fn qwen3_toolcall_finetune() {
 
     // Eval AFTER.
     let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
-    let (ex1, ta1) = eval_toolcall(&ft, &t, &held);
+    let (ex1, ta1) = qwen3::toolcall_eval::eval(&ft, &t, &chat_template(&d), &held);
     println!("tool-call AFTER  finetune: exact-match {:.1}%  token-acc {:.1}%", ex1 * 100.0, ta1 * 100.0);
 
     // The pipeline must produce a large, real improvement in the model's ability
@@ -276,24 +236,19 @@ fn parse_answer(text: &str) -> Option<i64> {
     tail.parse().ok()
 }
 
-fn eval_reasoning(model: &Qwen, t: &QwenBpe, cases: &[(i64, i64, i64)]) -> f64 {
+fn eval_reasoning(model: &Qwen, t: &QwenBpe, tmpl: &data::chat_template::ChatTemplate, cases: &[(i64, i64, i64)]) -> f64 {
     let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
     let mut ok = 0usize;
     let mut n = 0usize;
     for &(a, b, c) in cases {
-        let ex = arith_case(a, b, c);
-        let prompt = t.encode(&ex.prompt_str(t));
-        let resp = t.encode(&format!("{}<|im_end|>
-", ex.assistant));
-        if prompt.len() + resp.len() + 1 > cap { continue; }
-        let mut full = prompt.clone();
-        full.extend_from_slice(&resp);
+        // The answer is the trained span of the template-rendered sample.
+        let (full, mask) = arith_case(a, b, c).to_sample().encode(t, tmpl).expect("renders");
+        let Some(p) = mask.iter().position(|&m| m) else { continue };
+        if full.len() > cap { continue; }
         let logits = model.logits_all(&full);
-        let p = prompt.len();
-        let mut preds = Vec::with_capacity(resp.len());
-        for j in 0..resp.len() {
-            let pos = p - 1 + j;
+        let mut preds = Vec::with_capacity(full.len() - p);
+        for pos in p - 1..full.len() - 1 {
             preds.push(argmax(&logits[pos * vocab..(pos + 1) * vocab]) as u32);
         }
         let text = t.decode(&preds);
@@ -318,10 +273,10 @@ fn qwen3_reasoning_finetune() {
     let held: Vec<_> = held_nums.iter().map(|&(a,b,c)| arith_case(a,b,c)).collect();
 
     let out = std::env::temp_dir().join("qwen3_reasoning");
-    data::chat::prepare_chat(&train, &held, &t, 151936, &out).unwrap();
+    data::chat::prepare_chat(&train, &held, &t, &chat_template(&d), 151936, &out).unwrap();
 
     let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
-    let acc0 = eval_reasoning(&base, &t, &held_nums);
+    let acc0 = eval_reasoning(&base, &t, &chat_template(&d), &held_nums);
     println!("reasoning BEFORE finetune: answer-acc {:.1}%", acc0 * 100.0);
     drop(base);
 
@@ -338,7 +293,7 @@ fn qwen3_reasoning_finetune() {
     println!("reasoning finetune: loss {l0:.4} -> {l1:.4}");
 
     let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
-    let acc1 = eval_reasoning(&ft, &t, &held_nums);
+    let acc1 = eval_reasoning(&ft, &t, &chat_template(&d), &held_nums);
     println!("reasoning AFTER  finetune: answer-acc {:.1}%", acc1 * 100.0);
     assert!(l1 < l0, "reasoning finetune loss did not decrease");
     assert!(acc1 > acc0 + 0.2, "reasoning accuracy did not improve enough: {:.1}% -> {:.1}%", acc0*100.0, acc1*100.0);
@@ -560,7 +515,7 @@ fn qwen3_full_vs_lora_toolcall() {
     let train_ex: Vec<_> = train.iter().map(|c| c.to_chat_example()).collect();
     let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
     let out = std::env::temp_dir().join("qwen3_fvl");
-    data::chat::prepare_chat(&train_ex, &val_ex, &t, 151936, &out).unwrap();
+    data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
 
     let base = weights_ft(&d);
     let base_s = base.to_str().unwrap();
@@ -572,19 +527,19 @@ fn qwen3_full_vs_lora_toolcall() {
     };
 
     // Baseline held-out score.
-    let (ex0, _) = eval_toolcall(&Qwen::load_inference(base_s, 1, 512), &t, &held);
+    let (ex0, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(base_s, 1, 512), &t, &chat_template(&d), &held);
 
     // Full (offloaded) fine-tune.
     let full_ckpt = out.join("full.safetensors");
     let (fl0, fl1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::FullOffload, full_ckpt.to_str().unwrap()).unwrap();
-    let (exf, _) = eval_toolcall(&Qwen::load_inference(full_ckpt.to_str().unwrap(), 1, 512), &t, &held);
+    let (exf, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(full_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
 
     // LoRA fine-tune (adapters only). Same LR as full and scale 1.0 (alpha==rank)
     // for a fair comparison — aggressive scale/LR makes the adapters memorise the
     // tiny synthetic set (train loss -> 0) without generalising.
     let lora_ckpt = out.join("lora.safetensors");
     let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets() }, lora_ckpt.to_str().unwrap()).unwrap();
-    let (exl, _) = eval_toolcall(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &held);
+    let (exl, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
 
     println!("\n=== Qwen3-0.6B tool-call: FULL (offload) vs LoRA, {steps} steps ===");
     println!("  baseline held-out exact-match: {:.1}%", ex0 * 100.0);

@@ -133,6 +133,11 @@ everything about HOW to serve it is a `brain serve` flag:
 - `--lora-targets LIST` - the projections a `finetune --lora` adapter
   covers, comma-separated from `wq,wk,wv,wo,gate,up,down` (the default is
   all seven). An unknown or repeated name is refused.
+- `--keep-reasoning` - train each answer's `<think>...</think>` reasoning.
+  A reasoning model's chat template drops it from the assistant turns it
+  renders as history (DeepSeek-R1's drops it from every turn), which is
+  right when serving and wrong when the reasoning is what the data teaches.
+  The `lora_train` action takes it as `keep_reasoning`.
 - `--weight-decay W`, `--grad-clip C` (0 disables), `--warmup N`,
   `--min-lr X`, `--beta1 B`, `--beta2 B`, `--adam-eps E` - the LoRA
   finetune schedule and AdamW settings. The defaults are 0.1, 1.0, 5% of the

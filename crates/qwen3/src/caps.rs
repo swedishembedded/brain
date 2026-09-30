@@ -217,6 +217,11 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").default(json!(1024)).min(1.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(1234)))
         .param(ParamSpec::new("targets", ParamType::Str, "comma-separated projections to adapt, of wq,wk,wv,wo,gate,up,down").default(json!(crate::finetune::LORA_TARGETS.join(","))))
+        .param(ParamSpec::new(
+            "keep_reasoning",
+            ParamType::Bool,
+            "train each trained answer's <think> reasoning even where the chat template drops it from history (DeepSeek-R1's always does)",
+        ).default(json!(false)))
         .param(ParamSpec::new("weight_decay", ParamType::Float, "AdamW decoupled weight decay").default(json!(0.1)).min(0.0).max(1.0))
         .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(1.0)).min(0.0))
         .param(ParamSpec::new("warmup", ParamType::Int, "linear warmup steps; omit for 5% of steps").min(0.0).step(1.0))
@@ -685,7 +690,8 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     // records in the dataset's meta.json.
     let vocab = crate::config::QwenConfig::from_json_checked(&checkpoint::read_config(weights)).map_err(|e| format!("qwen lora_train: {weights}: {e}"))?.vocab as usize;
     let data_dir = scratch.join("data");
-    data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
+    let render = data::chat::RenderOpts { keep_reasoning: inv.get_bool("keep_reasoning").unwrap_or(false) };
+    data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, render, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
 
     // The token mask file `prepare_chat_samples` writes supersedes
     // character-offset masking; `model::load_dataset` prefers it.
@@ -1544,7 +1550,7 @@ mod tests {
         let names: Vec<&str> = lt.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id"]
+            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "keep_reasoning", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "dataset_id"]
         );
         assert!(lt.inputs.iter().any(|b| b.name == "dataset"), "the dataset survives as a blob");
         assert!(lt.outputs.iter().any(|b| b.name == "adapter"), "the adapter survives as a blob");
@@ -1587,9 +1593,8 @@ mod tests {
     /// this fails if the action returns a plausible file that was not trained.
     #[test]
     fn a_trained_adapter_blob_folds_into_the_base_and_changes_its_weights() {
-        // `ChatSample::encode` terminates every sample with `data::chat::
-        // ENDOFTEXT` (151643), so the checkpoint's vocab has to cover it -
-        // `QwenConfig::tiny`'s own 23 would index outside the embedding.
+        // The dataset is rendered through a real Qwen3 chat template, whose
+        // special tokens sit near the top of the 151936-id vocabulary.
         let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
         let dir = std::env::temp_dir().join(format!("qwen-caps-lora-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1729,8 +1734,8 @@ mod tests {
     #[test]
     fn an_anchor_destroying_candidate_adapter_is_rejected_as_anchor_regressed() {
         // vocab 96 covers exactly `write_byte_tokenizer`'s id range and
-        // nothing else: no chat template and no `ENDOFTEXT` are involved
-        // here, so the model stays tiny instead of carrying a 151936-row
+        // nothing else: no chat template is involved here, so the model
+        // stays tiny instead of carrying a 151936-row
         // embedding this test would then softmax over twice per task.
         let cfg = QwenConfig { vocab: 96, ..QwenConfig::tiny() };
         let dir = std::env::temp_dir().join(format!("qwen-caps-gate-{}", std::process::id()));

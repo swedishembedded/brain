@@ -226,3 +226,4 @@ What belongs where:
 | 183 | A Llama GGUF stores its q/k rows interleaved | [`183-a-llama-gguf-stores-q-k-rows-interleaved.md`](183-a-llama-gguf-stores-q-k-rows-interleaved.md) |
 | 184 | A hub id names one repo, not an architecture | [`184-a-hub-id-names-one-repo.md`](184-a-hub-id-names-one-repo.md) |
 | 185 | A raw completion is not a chat turn | [`185-a-raw-completion-is-not-a-chat-turn.md`](185-a-raw-completion-is-not-a-chat-turn.md) |
+| 189 | An in-band example separator is a vocabulary assumption | [`189-an-example-separator-is-a-vocabulary-assumption.md`](189-an-example-separator-is-a-vocabulary-assumption.md) |
