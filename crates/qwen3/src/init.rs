@@ -52,3 +52,52 @@ pub fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     }
     w
 }
+
+/// The LoRA factors of `cfg` alone - what a fine-tune of an existing base
+/// needs, without drawing (and holding) random numbers for every base
+/// weight it is about to overwrite: `A` Normal(0, 0.02), `B` zero, so the
+/// adapter starts as a no-op. Deterministic for a fixed seed.
+pub fn init_adapter_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    let mut rng = Rng::new(seed);
+    cfg.param_list()
+        .into_iter()
+        .filter_map(|(name, numel)| {
+            let v = if name.ends_with(".lora_b") {
+                vec![0.0; numel]
+            } else if name.ends_with(".lora_a") {
+                (0..numel).map(|_| (rng.next_gaussian() as f32) * 0.02).collect()
+            } else {
+                return None;
+            };
+            Some((name, v))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LoraCfg;
+
+    #[test]
+    fn adapter_init_is_the_adapters_alone_and_a_no_op() {
+        let cfg = QwenConfig { lora: Some(LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() };
+        let w = init_adapter_weights(&cfg, 5);
+        let adapters: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).filter(|n| n.contains(".lora_")).collect();
+        assert!(!adapters.is_empty());
+        let mut names: Vec<&String> = w.keys().collect();
+        names.sort();
+        let mut want: Vec<&String> = adapters.iter().collect();
+        want.sort();
+        assert_eq!(names, want, "exactly the adapter tensors, no base weight");
+        for (name, v) in &w {
+            if name.ends_with(".lora_b") {
+                assert!(v.iter().all(|x| *x == 0.0), "{name}: B starts at zero");
+            } else {
+                assert!(v.iter().any(|x| *x != 0.0), "{name}: A is random");
+            }
+        }
+        assert_eq!(w, init_adapter_weights(&cfg, 5), "deterministic for a seed");
+        assert_ne!(w, init_adapter_weights(&cfg, 6), "and different for another");
+    }
+}

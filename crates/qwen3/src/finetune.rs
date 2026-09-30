@@ -302,7 +302,7 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
     // A fresh adapter starts at its zero-delta init; the base's own weights
     // are never copied, they stay behind `base_src`.
     let mut init = LoraInit {
-        adapters: crate::init_weights(&cfg, seed).into_iter().filter(|(name, _)| model::adapter::device::is_adapter_param(name)).collect(),
+        adapters: crate::init::init_adapter_weights(&cfg, seed),
         base: base_src,
     };
     if let Some(tensors) = adapter {
