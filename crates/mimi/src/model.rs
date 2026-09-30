@@ -32,6 +32,7 @@ use bytemuck::cast_slice;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu};
 use backend_cpu::par;
 use model::block::{self, Gqa, KernelIds};
+use model::hostmath::gelu_exact;
 use paramstore::{ParamStore, Role};
 
 use crate::config::CodecConfig;
@@ -1015,29 +1016,3 @@ fn par_gelu(buf: &mut [f32]) {
     }
 }
 
-/// Exact (erf) GELU, matching `nn.GELU()` (default `approximate='none'`).
-fn gelu_exact(x: f32) -> f32 {
-    0.5 * x * (1.0 + erf(x * std::f32::consts::FRAC_1_SQRT_2))
-}
-
-/// erf via the Numerical-Recipes `erfc` rational approximation (|err| < 1.2e-7).
-fn erf(x: f32) -> f32 {
-    let z = x.abs();
-    let t = 1.0 / (1.0 + 0.5 * z);
-    let erfc = t
-        * (-z * z - 1.265_512_2
-            + t * (1.000_023_7
-                + t * (0.37409196
-                    + t * (0.09678418
-                        + t * (-0.18628806
-                            + t * (0.27886807
-                                + t * (-1.135_204
-                                    + t * (1.488_515_9 + t * (-0.82215223 + t * 0.17087277)))))))))
-        .exp();
-    let e = 1.0 - erfc;
-    if x >= 0.0 {
-        e
-    } else {
-        -e
-    }
-}

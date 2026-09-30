@@ -33,18 +33,6 @@ pub(crate) type W = HashMap<String, Vec<f32>>;
 
 // ---- small host ops (flat slices; NCL = [C,L] index c*L+l, TM = [L,C] l*C+c) ----
 
-fn erf(x: f32) -> f32 {
-    // Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7).
-    let s = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0
-        - (((((1.061_405_4 * t - 1.453_152) * t) + 1.421_413_7) * t - 0.284_496_74) * t + 0.254_829_6)
-            * t
-            * (-x * x).exp();
-    s * y
-}
-
 /// `y[t,o] = sum_i x[t,i] * w[o,i]` for `x:[rows,inp]`, `w:[out,inp]`.
 fn matmul(x: &[f32], w: &[f32], rows: usize, inp: usize, out: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; rows * out];
@@ -79,7 +67,7 @@ fn transpose(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 /// Exact GELU in place: `0.5·x·(1 + erf(x/√2))`.
 fn gelu_inplace(x: &mut [f32]) {
     for v in x.iter_mut() {
-        *v = 0.5 * *v * (1.0 + erf(*v * std::f32::consts::FRAC_1_SQRT_2));
+        *v = model::hostmath::gelu_exact(*v);
     }
 }
 
