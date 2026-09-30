@@ -27,6 +27,7 @@ use model::paged::{BlockAllocator, BlockTable, PrefixCache};
 use paramstore::ParamStore;
 
 use crate::config::QwenConfig;
+use crate::model::PrefillInput;
 
 // The untiled whole-table gather `Self::embed_tiled`/`EMBED_TILE` replaced in
 // `Self::batched_tape` - kept registered (and named) only as the oracle
@@ -2603,49 +2604,76 @@ impl Engine {
     /// stream through without a giant single forward. Returns the last token's
     /// final-norm hidden `[d_model]`.
     pub(crate) fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        let inputs: Vec<PrefillInput> = prompt.iter().map(|&t| PrefillInput::Token(t)).collect();
+        self.prefill_mixed(table, &inputs)
+    }
+
+    /// [`Engine::prefill`] over a prompt that mixes token ids with ready-made
+    /// `d_model` embedding rows (a vision-language model's image features
+    /// spliced into the text stream) - the engine counterpart of
+    /// [`crate::Qwen::prefill`], taking the same inputs. A chunk never mixes
+    /// the two kinds, so chunks also end at every token/embedding boundary.
+    /// Only the leading token run takes part in the prefix cache: an
+    /// embedding row has no token id to key a block on, and every block after
+    /// the first one depends on it.
+    pub fn prefill_mixed(&mut self, table: &mut BlockTable, inputs: &[PrefillInput<'_>]) -> Vec<f32> {
         assert!(table.is_empty(), "prefill expects a fresh sequence");
+        assert!(!inputs.is_empty(), "prefill of nothing");
         // A prompt longer than the per-sequence capacity would write past its
         // row of the block table (`bt` is sized cc * max_blocks_per_seq), which
         // silently corrupts the next row's mapping. Callers must check
         // `max_seq_len()`; the scheduler rejects such requests at admission.
         assert!(
-            prompt.len() <= self.max_seq_len(),
+            inputs.len() <= self.max_seq_len(),
             "prompt of {} tokens exceeds the engine's per-sequence capacity of {} \
              (max_blocks_per_seq {} x block_size {})",
-            prompt.len(),
+            inputs.len(),
             self.max_seq_len(),
             self.max_blocks_per_seq,
             self.block_size,
         );
+        let d = self.cfg.d_model as usize;
         // An out-of-vocab id would make the embedding gather read out of
         // bounds - the kernels are trusted (no per-access clamps on either
         // backend), so the failure is silent garbage, not a clean error. The
         // scheduler rejects such requests at admission; this backstop catches
         // callers that bypass it.
-        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
-            panic!("prompt token {bad} is outside the model vocabulary ({})", self.cfg.vocab);
+        for input in inputs {
+            match input {
+                PrefillInput::Token(t) if *t >= self.cfg.vocab => panic!("prompt token {t} is outside the model vocabulary ({})", self.cfg.vocab),
+                PrefillInput::Embed(row) if row.len() != d => panic!("embedding row of {} values, the model's d_model is {d}", row.len()),
+                _ => {}
+            }
         }
-        let d = self.cfg.d_model as usize;
+        let lead: Vec<u32> = inputs
+            .iter()
+            .map_while(|i| match i {
+                PrefillInput::Token(t) => Some(*t),
+                PrefillInput::Embed(_) => None,
+            })
+            .collect();
         let bs = self.block_size;
         let mbt = self.max_blocks_per_seq as usize;
-        let n = prompt.len() as u32;
+        let n = inputs.len() as u32;
         let chunk = self.max_prefill.max(1);
         // Prefix reuse (D): adopt the longest cached chain of full prompt
         // blocks and compute only the tail. Always leave at least one token to
         // compute - the caller needs the LAST token's hidden state, which only
         // a real forward produces.
-        let max_reuse = prompt.len().saturating_sub(1);
-        let hits = self.prefix.lookup(prompt, bs, max_reuse);
+        let max_reuse = lead.len().min(inputs.len() - 1);
+        let hits = self.prefix.lookup(&lead, bs, max_reuse);
         let matched = hits.len();
         if matched > 0 {
             table.adopt_prefix(&hits, &mut self.alloc);
         }
-        self.prefix_lookup_tokens += prompt.len() as u64;
+        self.prefix_lookup_tokens += inputs.len() as u64;
         self.prefix_hit_tokens += (matched as u64) * bs as u64;
         let mut last = Vec::new();
         let mut start = matched as u32 * bs;
         while start < n {
-            let cc = (n - start).min(chunk);
+            let embeds = matches!(inputs[start as usize], PrefillInput::Embed(_));
+            let run = inputs[start as usize..].iter().take(chunk as usize).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
+            let cc = run as u32;
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
             let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let mut bt = vec![0u32; cc as usize * mbt];
@@ -2660,13 +2688,22 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt, true);
-            let cu = cc as usize;
-            last = hidden[(cu - 1) * d..cu * d].to_vec();
+            let part = &inputs[start as usize..start as usize + run];
+            let (mut tokens, mut rows) = (Vec::new(), Vec::new());
+            for input in part {
+                match input {
+                    PrefillInput::Token(t) => tokens.push(*t),
+                    PrefillInput::Embed(row) => rows.extend_from_slice(row),
+                }
+            }
+            let input = if embeds { Input::Embeds(&rows) } else { Input::Tokens(&tokens) };
+            let hidden = self.run_batched(cc, input, &positions, &seqlens, &blocks, &offsets, &bt, true);
+            last = hidden[(run - 1) * d..run * d].to_vec();
             start += cc;
         }
-        // Index this prompt's freshly-computed full blocks for later prompts.
-        self.prefix.insert_chain(prompt, table.blocks(), matched, &mut self.alloc);
+        // Index this prompt's freshly-computed full leading-token blocks for
+        // later prompts.
+        self.prefix.insert_chain(&lead, table.blocks(), matched, &mut self.alloc);
         last
     }
 
