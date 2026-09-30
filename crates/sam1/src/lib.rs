@@ -41,6 +41,7 @@
 //!   run (that is the phase that consumes [`import::weights_from_gguf`]).
 
 pub mod config;
+pub mod hf;
 pub mod import;
 pub mod init;
 pub mod model;

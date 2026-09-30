@@ -115,7 +115,11 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
         _ => {}
     }
     if let Some(rest) = name.strip_prefix("model.sam_model.") {
-        return sam_leaf(rest, name, cfg).map(Half::Encoder);
+        // The SAM tower's names are `sam1`'s to own; they keep its
+        // `vision.sam.` prefix, as the GGUF path's own names do.
+        return sam1::hf::brain_name(rest, &cfg.sam, sam1::hf::Spelling::DeepseekOcr)
+            .map(Half::Encoder)
+            .map_err(|e| format!("{LABEL}: {name}: {e}"));
     }
     if let Some(rest) = name.strip_prefix("model.vision_model.") {
         return clip_leaf(rest, name, cfg).map(Half::Encoder);
@@ -124,42 +128,6 @@ pub fn classify(name: &str, cfg: &DeepseekOcrConfig) -> Result<Half, String> {
         return decoder_leaf(rest, name, cfg);
     }
     Err(unknown(name))
-}
-
-/// The SAM ViT-B tower. Keeps its `vision.sam.` prefix, as the GGUF path's own
-/// names do.
-fn sam_leaf(rest: &str, full: &str, cfg: &DeepseekOcrConfig) -> Result<String, String> {
-    let p = |s: &str| Ok(format!("vision.sam.{s}"));
-    match rest {
-        "pos_embed" => return p("pos_embed"),
-        "patch_embed.proj.weight" => return p("patch_embed.weight"),
-        "patch_embed.proj.bias" => return p("patch_embed.bias"),
-        // `neck` is an `nn.Sequential(conv, LayerNorm2d, conv, LayerNorm2d)`,
-        // so upstream indexes it positionally and brain names the four parts.
-        "neck.0.weight" => return p("neck.conv1.weight"),
-        "neck.1.weight" => return p("neck.norm1.weight"),
-        "neck.1.bias" => return p("neck.norm1.bias"),
-        "neck.2.weight" => return p("neck.conv2.weight"),
-        "neck.3.weight" => return p("neck.norm2.weight"),
-        "neck.3.bias" => return p("neck.norm2.bias"),
-        // The two stride-2 compressor convs.
-        "net_2.weight" => return p("compress.conv1.weight"),
-        "net_3.weight" => return p("compress.conv2.weight"),
-        _ => {}
-    }
-    let rest = rest.strip_prefix("blocks.").ok_or_else(|| unknown(full))?;
-    let (l, leaf) = split_indexed(rest, full, cfg.sam.n_layers, "SAM block")?;
-    let b = |s: &str| Ok(format!("vision.sam.blocks.{l}.{s}"));
-    match leaf {
-        "norm1.weight" | "norm1.bias" | "norm2.weight" | "norm2.bias" => b(leaf),
-        "attn.qkv.weight" | "attn.qkv.bias" | "attn.rel_pos_h" | "attn.rel_pos_w" => b(leaf),
-        "attn.proj.weight" | "attn.proj.bias" => b(leaf),
-        "mlp.lin1.weight" => b("mlp.fc1.weight"),
-        "mlp.lin1.bias" => b("mlp.fc1.bias"),
-        "mlp.lin2.weight" => b("mlp.fc2.weight"),
-        "mlp.lin2.bias" => b("mlp.fc2.bias"),
-        _ => Err(unknown(full)),
-    }
 }
 
 /// The CLIP-L/14 tower. Emitted as BARE leaves - the name space
