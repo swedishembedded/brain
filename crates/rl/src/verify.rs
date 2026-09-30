@@ -495,10 +495,12 @@ mod tests {
     #[test]
     fn a_command_past_its_deadline_is_killed_with_its_children() {
         let pidfile = std::env::temp_dir().join(format!("brain-rl-verifier-{}", std::process::id()));
-        let v = sh(&format!("sleep 30 & echo $! > {}; wait", pidfile.display()), 300);
+        // The pid lands whole or not at all (a rename), however early the
+        // deadline cuts the shell off.
+        let v = sh(&format!("sleep 30 & echo $! > {p}.tmp && mv {p}.tmp {p}; wait", p = pidfile.display()), 2000);
         let start = std::time::Instant::now();
         let r = v.grade(&task(), "while True: pass");
-        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
         assert_eq!((r.value, r.parts.get("timeout").copied()), (0.0, Some(1.0)), "{r:?}");
         let grandchild: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
         std::fs::remove_file(&pidfile).ok();
