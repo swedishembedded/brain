@@ -30,6 +30,8 @@ brain-arch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+# `export` writes BF16/F16 safetensors.
+half.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 

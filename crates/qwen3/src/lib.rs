@@ -9,6 +9,7 @@ pub mod caps;
 pub mod chat;
 pub mod config;
 pub mod eval;
+pub mod export;
 pub mod footprint;
 pub mod import;
 pub mod gguf_import;

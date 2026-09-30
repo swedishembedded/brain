@@ -1989,6 +1989,7 @@ dependencies = [
  "brain-promote",
  "brain-testutil",
  "bytemuck",
+ "half",
  "pollster",
  "serde",
  "serde_json",

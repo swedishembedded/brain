@@ -110,9 +110,27 @@ brain qwen3 infer --weights … --device gpu     # portable GPU backend (default
 brain qwen3 infer --weights … --device vulkan  # native Vulkan
 ```
 
-Other verbs: `brain qwen3 export` (to ONNX), `brain qwen3 precompile`
-(precompile kernels for a target device), `brain qwen3 toolcall` (tool-call
-evaluation).
+Other verbs: `brain qwen3 export` (to ONNX, or `--format hf` for a
+`transformers` directory, see below), `brain qwen3 precompile` (precompile
+kernels for a target device), `brain qwen3 toolcall` (tool-call evaluation).
+
+### Exporting to Hugging Face
+
+```bash
+brain qwen3 export --weights model.safetensors --format hf --out my-model \
+    --tokenizer-dir path/to/base-checkpoint [--dtype bf16|f16|f32]
+```
+
+writes a directory `transformers` loads with `from_pretrained`: sharded
+safetensors (5 GB shards and an index, or one `model.safetensors`) under the
+HF tensor names, and a `config.json` naming the class the checkpoint is:
+`Qwen3ForCausalLM` with QK-norm, `Qwen2ForCausalLM` with q/k/v bias,
+`LlamaForCausalLM` with neither, RoPE scaling included. The tokenizer,
+chat-template and generation files are copied from `--tokenizer-dir`, which
+defaults to `--weights` when that is a checkpoint directory. Any checkpoint
+the decoder reads can be the input: a brain file, a Hugging Face directory or
+a GGUF. Tensors stream one at a time. The default dtype is bf16; `--dtype
+f32` exports losslessly.
 
 ### LoRA adapters
 
