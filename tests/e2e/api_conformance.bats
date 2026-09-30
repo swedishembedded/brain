@@ -372,6 +372,41 @@ get_url() {
 
 # ------------------------------------------------------------- embeddings
 
+@test "openai /completions: 200, raw prompt, validates CreateCompletionResponse" {
+  post_json openai /v1/completions '{"model":"brain/mock","prompt":"hello there"}'
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.object' "$RESP")" = "text_completion" ]
+  [ "$(jq -r '.id' "$RESP" | cut -c1-5)" = "cmpl-" ]
+  [ "$(jq -r '.choices[0].text' "$RESP")" = "You said: hello there" ]
+  [ "$(jq -r '.choices[0].finish_reason' "$RESP")" = "stop" ]
+  validate openai.json CreateCompletionResponse "$RESP"
+}
+
+@test "openai /completions SSE: text_completion frames concat to the text, [DONE] terminal" {
+  local sse="$CONF_DIR/completion_sse.txt"
+  curl -sS -N --max-time 20 \
+    -H "$(auth_hdr openai)" -H 'content-type: application/json' \
+    -X POST "$(base openai)/v1/completions" \
+    -d '{"model":"brain/mock","prompt":"hello there","stream":true,"stream_options":{"include_usage":true}}' \
+    >"$sse"
+  [ "$(grep '^data: ' "$sse" | tail -n1)" = "data: [DONE]" ]
+  local content=""
+  while IFS= read -r line; do
+    local payload="${line#data: }"
+    [ "$payload" = "[DONE]" ] && continue
+    echo "$payload" > "$CONF_DIR/chunk.json"
+    [ "$(jq -r '.object' "$CONF_DIR/chunk.json")" = "text_completion" ]
+    # Frames before the last carry finish_reason null (as OpenAI streams it),
+    # which the vendored non-streaming schema does not admit.
+    if [ "$(jq -r '.choices[0].finish_reason // "null"' "$CONF_DIR/chunk.json")" != "null" ]; then
+      validate openai.json CreateCompletionResponse "$CONF_DIR/chunk.json"
+    fi
+    content="$content$(echo "$payload" | jq -r '.choices[0].text // empty')"
+  done < <(grep '^data: ' "$sse")
+  [ "$content" = "You said: hello there" ]
+  grep '^data: ' "$sse" | grep -q '"usage"'
+}
+
 @test "openai /embeddings: 200, validates CreateEmbeddingResponse, float dim 8" {
   post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello world"}'
   [ "$STATUS" -eq 200 ]
@@ -581,6 +616,23 @@ get_url() {
     '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"logit_bias":{"1":5}}'
   [ "$STATUS" -eq 400 ]
   grep -qF logit_bias "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+
+  # Completions: a suffix for a model with no fill-in-the-middle, several
+  # prompts, token-id prompts and echo are refused by name.
+  post_json openai /v1/completions '{"model":"brain/mock","prompt":"def f(","suffix":")"}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF suffix "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/completions '{"model":"brain/mock","prompt":["a","b"]}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/completions '{"model":"brain/mock","prompt":[1,2,3]}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/completions '{"model":"brain/mock","prompt":"a","echo":true}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF echo "$RESP"
   validate openai.json ErrorResponse "$RESP"
 
   # embeddings dimensions oversized (far beyond the model's vector length).

@@ -442,6 +442,7 @@ impl Resident {
             tool_choice: tool_choice.clone(),
             flavor: TemplateFlavor::Qwen3,
             thinking_open: false,
+            raw: false,
         };
         if let Some((frames, fps)) = video_frames {
             let p = PreparedVideo::build(self, &frames, fps, &prompt, max_new, tools)?;

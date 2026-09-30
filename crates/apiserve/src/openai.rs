@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The OpenAI-compatible surface: `POST /chat/completions` (non-streaming and SSE
-//! token streaming), plus the still-stubbed embeddings/image routes. Chat dispatches
-//! to the shared executor's `generate` action via [`crate::bridge`]. The OpenRouter
-//! surface reuses [`handle_chat`] with `native = true` (adds `native_finish_reason`
-//! + `system_fingerprint`).
+//! The OpenAI-compatible surface: `POST /chat/completions` and the legacy raw-prompt
+//! `POST /completions` (both non-streaming and SSE token streaming, `suffix` on the
+//! latter for fill-in-the-middle), embeddings and image generation. Both text
+//! routes dispatch to the shared executor's `generate` action via [`crate::bridge`].
+//! The OpenRouter surface reuses [`handle_chat`] with `native = true` (adds
+//! `native_finish_reason` + `system_fingerprint`).
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -33,6 +34,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/chat/completions", post(chat_completions))
+        .route("/v1/completions", post(completions))
+        .route("/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/embeddings", post(embeddings))
         .route("/v1/images/generations", post(images_generations))
@@ -42,6 +45,12 @@ pub fn routes() -> Router<AppState> {
 /// `POST /chat/completions` — real chat (non-stream + SSE) on the OpenAI dialect.
 async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
     handle_chat(state, body, false).await
+}
+
+/// `POST /completions` — a raw-prompt completion (no chat template); `suffix`
+/// makes it fill-in-the-middle on a model whose vocabulary has the FIM tokens.
+async fn completions(State(state): State<AppState>, body: Bytes) -> Response {
+    handle_generate(state, body, TextSurface::Completion).await
 }
 
 /// `POST /v1/embeddings` — real embeddings on the OpenAI dialect (shared with
@@ -223,17 +232,66 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     Json(resp).into_response()
 }
 
+/// Which OpenAI text endpoint a `generate` request came through.
+#[derive(Clone, Copy)]
+enum TextSurface {
+    /// `/chat/completions`; `native` adds OpenRouter's fields.
+    Chat { native: bool },
+    /// The legacy raw-prompt `/completions`.
+    Completion,
+}
+
+impl TextSurface {
+    fn parse(self, provider: Provider, body: &Value) -> Result<(String, Invocation, bool), ApiError> {
+        match self {
+            TextSurface::Chat { .. } => to_invocation(provider, body),
+            TextSurface::Completion => to_completion_invocation(provider, body),
+        }
+    }
+
+    fn body(self, model: &str, co: &bridge::ChatOutcome) -> Value {
+        match self {
+            TextSurface::Chat { native } => non_stream_body(model, co, native),
+            TextSurface::Completion => completion_body(model, co),
+        }
+    }
+
+    fn render_stream(self, src: bridge::EventStream, model: String, want_usage: bool) -> Response {
+        match self {
+            TextSurface::Chat { native } => render_chat_stream(src, model, native, want_usage),
+            TextSurface::Completion => render_completion_stream(src, model, want_usage),
+        }
+    }
+}
+
 /// The chat handler shared by the OpenAI and OpenRouter surfaces. `native` adds
 /// OpenRouter's `native_finish_reason` (the contract finish_reason, verbatim -
 /// it may carry values the OpenAI enum collapses) and the
 /// `system_fingerprint` its `ChatResult` requires.
 pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response {
+    handle_generate(state, body, TextSurface::Chat { native }).await
+}
+
+/// A `suffix` asks for fill-in-the-middle, which only a model whose `generate`
+/// declares it can do; any other model is told so rather than handed a
+/// parameter it would reject or ignore.
+fn check_suffix(provider: Provider, inv: &Invocation, fim: bool) -> Result<(), ApiError> {
+    if inv.get_str("suffix").is_some() && !fim {
+        return Err(ApiError::invalid_request(provider, "'suffix' (fill-in-the-middle) is not supported by this model"));
+    }
+    Ok(())
+}
+
+/// Every OpenAI text route: parse the request for `surface`, resolve the model
+/// against the chat-capable manifests, dispatch `generate` and answer in the
+/// surface's own shape, streamed or not.
+async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> Response {
     let provider = state.provider;
     let body: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
     };
-    let (requested, inv, stream) = match to_invocation(provider, &body) {
+    let (requested, inv, stream) = match surface.parse(provider, &body) {
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };
@@ -243,13 +301,21 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
     // OpenRouter surface this also strips a `"<provider>/"` prefix and walks a `models`
     // fallback array (see [`catalog::resolve_model`]); OpenAI is exact-match only.
     let manifests = state.exec.manifests(); // one catalog snapshot per request (see catalog::resolve_chat)
-    match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&manifests, id).then_some(())) {
-        Some((model, ())) => {
+    match catalog::resolve_model(provider, &body, |id| catalog::resolve_text(&manifests, id)) {
+        Some((model, fim)) => {
+            if let Err(e) = check_suffix(provider, &inv, fim) {
+                return e.into_response();
+            }
             if stream {
-                stream_chat(state, model, inv, native, want_usage()).await
+                // Admit BEFORE returning the SSE body - a shed request is a
+                // plain 429, not an event-stream that immediately errors.
+                match bridge::stream(&state, &model, "generate", inv).await {
+                    Ok(src) => surface.render_stream(src, model, want_usage()),
+                    Err(e) => e.into_response(),
+                }
             } else {
                 match bridge::submit(&state, &model, "generate", inv).await {
-                    Ok(outcome) => Json(non_stream_body(&model, &bridge::read_chat_outcome(&outcome), native)).into_response(),
+                    Ok(outcome) => Json(surface.body(&model, &bridge::read_chat_outcome(&outcome))).into_response(),
                     Err(e) => e.into_response(),
                 }
             }
@@ -260,17 +326,25 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
         // -- but only once classify() has ALREADY confirmed Fetchable with
         // zero I/O, so an Unknown/no-supplier model still never opens a
         // stream that would just immediately error.
+        // A model fetched on the way is only known once it is resident, so
+        // its `suffix` support is checked by the model itself.
         None if stream => match state.supplier.clone() {
             Some(supplier) if matches!(supplier.classify(&requested), Supply::Fetchable) => {
-                stream_chat_with_autofetch(state, supplier, requested, inv, native, want_usage())
+                let src = bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, false);
+                surface.render_stream(src, requested, want_usage())
             }
             _ => ApiError::model_not_found(provider, &requested).into_response(),
         },
-        None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_chat(&state.exec.manifests(), id).then_some(())).await {
-            Ok(()) => match bridge::submit(&state, &requested, "generate", inv).await {
-                Ok(outcome) => Json(non_stream_body(&requested, &bridge::read_chat_outcome(&outcome), native)).into_response(),
-                Err(e) => e.into_response(),
-            },
+        None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_text(&state.exec.manifests(), id)).await {
+            Ok(fim) => {
+                if let Err(e) = check_suffix(provider, &inv, fim) {
+                    return e.into_response();
+                }
+                match bridge::submit(&state, &requested, "generate", inv).await {
+                    Ok(outcome) => Json(surface.body(&requested, &bridge::read_chat_outcome(&outcome))).into_response(),
+                    Err(e) => e.into_response(),
+                }
+            }
             Err(e) => e.into_response(),
         },
     }
@@ -402,6 +476,48 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         inv = inv.blob("audio", a);
     }
 
+    Ok((model.to_string(), inv, stream))
+}
+
+/// Parse + validate an OpenAI legacy completion request into `(model,
+/// invocation, stream)`: one text `prompt` (a string, or an array holding one),
+/// continued raw - no chat template - and `suffix`, when present, for
+/// fill-in-the-middle. Several prompts, token-id prompts, `n`/`best_of` above
+/// one, `echo` and `logprobs` are refused by name, as is every sampling
+/// parameter brain cannot honour ([`crate::sampling`]).
+fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String, Invocation, bool), ApiError> {
+    let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?;
+    let prompt = match body.get("prompt") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(a)) if a.len() == 1 && a[0].is_string() => a[0].as_str().unwrap_or_default().to_string(),
+        Some(Value::Array(a)) if a.iter().all(Value::is_string) => {
+            return Err(ApiError::invalid_request(provider, "'prompt' with more than one prompt is not supported; send one request per prompt"))
+        }
+        Some(Value::Array(_)) => return Err(ApiError::invalid_request(provider, "token-id 'prompt' is not supported; pass the prompt as text")),
+        Some(Value::Null) | None => return Err(ApiError::invalid_request(provider, "'prompt' is required")),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'prompt' must be a string")),
+    };
+    for name in ["n", "best_of"] {
+        if body.get(name).and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
+            return Err(ApiError::invalid_request(provider, format!("'{name}' > 1 is not supported")));
+        }
+    }
+    if body.get("echo").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(ApiError::invalid_request(provider, "'echo' is not supported"));
+    }
+    crate::sampling::refuse_unsupported_openai(provider, body)?;
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(max_new(provider, body)?));
+    let mut inv = crate::sampling::apply(provider, body, inv)?;
+    if let Some(stop) = normalize_stop(body.get("stop")) {
+        inv = inv.set("stop", json!(stop));
+    }
+    match body.get("suffix") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(suffix)) => inv = inv.set("suffix", json!(suffix)),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'suffix' must be a string")),
+    }
     Ok((model.to_string(), inv, stream))
 }
 
@@ -645,13 +761,84 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
         "created": CREATED_UNIX,
         "model": model,
         "choices": [choice],
-        "usage": { "prompt_tokens": co.prompt_tokens, "completion_tokens": co.completion_tokens, "total_tokens": co.prompt_tokens + co.completion_tokens },
+        "usage": usage(co.prompt_tokens, co.completion_tokens),
     });
     if native {
         // OpenRouter's ChatResult requires system_fingerprint (nullable).
         body["system_fingerprint"] = Value::Null;
     }
     body
+}
+
+/// One `text_completion` object: the whole response, or one streamed frame
+/// (the legacy endpoint streams the same shape). A raw completion never
+/// carries tool calls, so the contract reason maps to `length` or `stop`.
+fn completion_object(id: &str, model: &str, text: &str, finish: Option<&str>) -> Value {
+    let finish = finish.map(|f| if f == "length" { "length" } else { "stop" });
+    json!({
+        "id": id,
+        "object": "text_completion",
+        "created": CREATED_UNIX,
+        "model": model,
+        "choices": [{ "text": text, "index": 0, "logprobs": Value::Null, "finish_reason": finish }],
+    })
+}
+
+fn usage(prompt: i64, completion: i64) -> Value {
+    json!({ "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion })
+}
+
+/// The non-streaming `text_completion` body.
+fn completion_body(model: &str, co: &bridge::ChatOutcome) -> Value {
+    let mut body = completion_object(&format!("cmpl-{}", Uuid::new_v4().simple()), model, &co.text, Some(&co.finish));
+    body["usage"] = usage(co.prompt_tokens, co.completion_tokens);
+    body
+}
+
+/// The SSE `text_completion` stream: one frame per token delta, a terminal
+/// frame carrying `finish_reason`, a usage-only frame (empty `choices`) when
+/// `stream_options.include_usage`, then `data: [DONE]`. A failure is the same
+/// named `error` event the chat stream sends.
+fn render_completion_stream(mut src: bridge::EventStream, model: String, want_usage: bool) -> Response {
+    use futures::StreamExt;
+    let id = format!("cmpl-{}", Uuid::new_v4().simple());
+    let events = async_stream::stream! {
+        let (mut prompt, mut completion) = (0i64, 0i64);
+        let mut finish = String::from("stop");
+        let mut saw_delta = false;
+        while let Some(msg) = src.next().await {
+            match msg {
+                StreamMsg::Delta(piece) => {
+                    saw_delta = true;
+                    yield Ok::<Event, Infallible>(Event::default().data(completion_object(&id, &model, &piece, None).to_string()));
+                }
+                StreamMsg::Event(_) | StreamMsg::Progress(..) => {}
+                StreamMsg::Fetching(p) => yield Ok(Event::default().comment(p.comment_text())),
+                StreamMsg::Done(outcome) => {
+                    let co = bridge::read_chat_outcome(&outcome);
+                    (prompt, completion, finish) = (co.prompt_tokens, co.completion_tokens, co.finish);
+                    // A resident that reports no token deltas still answers.
+                    if !saw_delta && !co.text.is_empty() {
+                        yield Ok(Event::default().data(completion_object(&id, &model, &co.text, None).to_string()));
+                    }
+                }
+                StreamMsg::Err(e) => {
+                    yield Ok(Event::default().event("error").data(e.body().to_string()));
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+            }
+        }
+        yield Ok(Event::default().data(completion_object(&id, &model, "", Some(&finish)).to_string()));
+        if want_usage {
+            let mut frame = completion_object(&id, &model, "", None);
+            frame["choices"] = json!([]);
+            frame["usage"] = usage(prompt, completion);
+            yield Ok(Event::default().data(frame.to_string()));
+        }
+        yield Ok(Event::default().data("[DONE]"));
+    };
+    Sse::new(events.boxed()).into_response()
 }
 
 /// The internal `{id,name,arguments}` tool-call shape ([`bridge::ChatOutcome`]) →
@@ -1027,30 +1214,7 @@ async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Re
 
 /// The SSE `chat.completion.chunk` stream: a role chunk, one content chunk per token
 /// delta, a terminal chunk carrying `finish_reason`, an optional usage-only chunk
-/// (when `stream_options.include_usage`), then `data: [DONE]`. Runs the admission
-/// race FIRST: if the job cannot start on a lane within `state.admit_deadline`, this
-/// returns a plain 429 body (with `Retry-After`) instead of an event-stream.
-async fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, want_usage: bool) -> Response {
-    // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
-    // event-stream that immediately errors.
-    let src = match bridge::stream(&state, &model, "generate", inv).await {
-        Ok(src) => src,
-        Err(e) => return e.into_response(),
-    };
-    render_chat_stream(src, model, native, want_usage)
-}
-
-/// Like [`stream_chat`], but for a `model` that ISN'T already resident and
-/// classifies `Fetchable`: opens the SSE body immediately and interleaves
-/// [`StreamMsg::Fetching`] progress (as SSE comment lines) ahead of the usual
-/// chunks — see [`bridge::stream_with_autofetch`]. Never called for a model
-/// that's already resident or that classifies `Unknown`/has no supplier —
-/// those stay a plain, zero-I/O 404 (see `handle_chat`).
-fn stream_chat_with_autofetch(state: AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: String, inv: Invocation, native: bool, want_usage: bool) -> Response {
-    let src = bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false);
-    render_chat_stream(src, model, native, want_usage)
-}
-
+/// (when `stream_options.include_usage`), then `data: [DONE]`.
 fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool, want_usage: bool) -> Response {
     use futures::StreamExt;
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
@@ -1159,7 +1323,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 "created": CREATED_UNIX,
                 "model": model,
                 "choices": [],
-                "usage": { "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion },
+                "usage": usage(prompt, completion),
             });
             yield Ok(Event::default().data(usage_chunk.to_string()));
         }

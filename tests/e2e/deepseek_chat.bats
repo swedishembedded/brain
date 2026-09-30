@@ -8,13 +8,16 @@
 # under its own id, and an OpenAI chat completion comes back with the R1
 # reasoning split out as `reasoning_content`, a final answer, and
 # finish_reason "stop" - generation ended on the checkpoint's own
-# end-of-sentence token, not on the length cap.
+# end-of-sentence token, not on the length cap. deepseek-coder-1.3b-base,
+# served beside it, fills in the middle of a function through
+# /v1/completions with its own FIM tokens.
 #
-# Needs a GPU and the checkpoint under $BRAIN_MODELS_DIR (default
-# ~/.local/share/brain/models); skips otherwise.
+# Needs a GPU and the checkpoints under $BRAIN_MODELS_DIR (default
+# ~/.local/share/brain/models); skips what is not downloaded.
 # Run: BRAIN_BIN=./target/debug/brain bats tests/e2e/deepseek_chat.bats
 
 MODEL="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+CODER="deepseek-ai/deepseek-coder-1.3b-base"
 
 setup_file() {
   command -v jq >/dev/null 2>&1 || skip "jq not installed"
@@ -28,6 +31,11 @@ setup_file() {
   export CONF_DIR="$(mktemp -d)"
   mkdir -p "$CONF_DIR/models/deepseek-ai"
   ln -s "$store/$MODEL" "$CONF_DIR/models/$MODEL"
+  export HAVE_CODER=0
+  if [ -f "$store/$CODER/config.json" ]; then
+    ln -s "$store/$CODER" "$CONF_DIR/models/$CODER"
+    HAVE_CODER=1
+  fi
   export PORT="${DEEPSEEK_CHAT_PORT:-8906}"
   "$BRAIN" serve --models-dir "$CONF_DIR/models" --openai "$PORT" \
     --api-keys-out "$CONF_DIR/keys.json" --ready-file "$CONF_DIR/ready" >"$CONF_DIR/serve.log" 2>&1 &
@@ -62,4 +70,17 @@ teardown_file() {
   jq -e '.choices[0].message.reasoning_content | length > 0' "$CONF_DIR/chat.json"
   jq -e '.choices[0].message.content | test("42")' "$CONF_DIR/chat.json"
   jq -e '.choices[0].finish_reason == "stop"' "$CONF_DIR/chat.json"
+}
+
+@test "a completion with a suffix fills in the middle of the code" {
+  [ "$HAVE_CODER" = 1 ] || skip "$CODER is not downloaded"
+  local body
+  body=$(jq -n --arg m "$CODER" '{model: $m, prompt: "def add(a, b):\n    return ", suffix: "\n\n\nprint(add(1, 2))\n", max_tokens: 16, temperature: 0}')
+  local status
+  status=$(curl -sS --max-time 900 -o "$CONF_DIR/fim.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$PORT/v1/completions" -d "$body")
+  [ "$status" -eq 200 ] || { cat "$CONF_DIR/fim.json" >&3; false; }
+  jq -e '.object == "text_completion"' "$CONF_DIR/fim.json"
+  jq -e '.choices[0].text | test("a \\+ b")' "$CONF_DIR/fim.json" || { cat "$CONF_DIR/fim.json" >&3; false; }
 }

@@ -107,6 +107,14 @@ pub fn resolve_chat(manifests: &[Manifest], model: &str) -> bool {
     manifests.iter().any(|m| m.model == model && api_caps(m).chat)
 }
 
+/// [`resolve_chat`] for a text request that may carry a `suffix`: `Some` when
+/// `model` serves text, holding whether its `generate` action declares
+/// `suffix` (fill-in-the-middle).
+pub fn resolve_text(manifests: &[Manifest], model: &str) -> Option<bool> {
+    let m = manifests.iter().find(|m| m.model == model && api_caps(m).chat)?;
+    Some(m.actions.iter().any(|a| a.name == "generate" && a.params.iter().any(|p| p.name == "suffix")))
+}
+
 /// Resolve an embeddings request's `model` string: is there a manifest whose
 /// `model == id` AND that advertises the embeddings capability? The `/embeddings`
 /// dispatch (the `embed` action) gates on this — an unknown or non-embeddings model

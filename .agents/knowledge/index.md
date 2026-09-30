@@ -225,3 +225,4 @@ What belongs where:
 | 182 | A length prefix is untrusted input | [`182-a-length-prefix-is-untrusted-input.md`](182-a-length-prefix-is-untrusted-input.md) |
 | 183 | A Llama GGUF stores its q/k rows interleaved | [`183-a-llama-gguf-stores-q-k-rows-interleaved.md`](183-a-llama-gguf-stores-q-k-rows-interleaved.md) |
 | 184 | A hub id names one repo, not an architecture | [`184-a-hub-id-names-one-repo.md`](184-a-hub-id-names-one-repo.md) |
+| 185 | A raw completion is not a chat turn | [`185-a-raw-completion-is-not-a-chat-turn.md`](185-a-raw-completion-is-not-a-chat-turn.md) |

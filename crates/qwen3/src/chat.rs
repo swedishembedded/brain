@@ -311,6 +311,9 @@ pub struct ParsedRequest {
     /// (the Qwen3.8 flavor with thinking enabled): the model continues
     /// INSIDE the think block, so the scanner must start reasoning-open.
     pub thinking_open: bool,
+    /// A raw completion (no chat template): the output is plain text, with
+    /// no reasoning or tool-call markup read out of it.
+    pub raw: bool,
 }
 
 /// The chat-template render of one request, before tokenization: the prompt
@@ -323,6 +326,8 @@ pub struct RenderedPrompt {
     pub tool_choice: ToolChoice,
     pub flavor: qwen_chat::TemplateFlavor,
     pub thinking_open: bool,
+    /// The prompt is the request's own text, with no template around it.
+    pub raw: bool,
 }
 
 /// Render an [`Invocation`]'s prompt: `messages` (chat template,
@@ -366,6 +371,7 @@ pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
     // the Qwen3.8 flavor and thinking enabled ends in an open `<think>\n`
     // (a raw `chat=false` prompt has no template and no prefill).
     let mut thinking_open = flavor == qwen_chat::TemplateFlavor::Qwen38 && enable_thinking;
+    let mut raw = false;
     let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
         Some(raw) => {
             let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
@@ -389,11 +395,12 @@ pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
                 })?
             } else {
                 thinking_open = false; // no template, no prefilled `<think>`
+                raw = true;
                 prompt
             }
         }
     };
-    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open })
+    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw })
 }
 
 /// The request's `tool_choice` and the tool schemas the prompt shows.
@@ -471,7 +478,7 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
     let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
     let flavor = qwen_chat::TemplateFlavor::Qwen3;
     if !chat {
-        return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false });
+        return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false, raw: true });
     }
     let t = template.ok_or("this checkpoint ships no chat template: send a raw prompt (`chat: false`) instead of chat messages")?;
     if !tools.is_empty() && !t.source().contains("tools") {
@@ -496,21 +503,33 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
     extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(inv.get_bool("enable_thinking").unwrap_or(true)));
     let text = t.render(turns, tools, true, &extra).map_err(|e| e.to_string())?;
     let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
-    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open })
+    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw: false })
 }
 
 /// [`parse_request`] in `format` (see [`render_prompt_as`]).
 pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
     let (max_new, temp, top_k, seed) = sampling_params(inv);
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-    let RenderedPrompt { text, tool_choice, flavor, thinking_open } = render_prompt_as(format, inv)?;
+    let RenderedPrompt { mut text, tool_choice, flavor, thinking_open, raw } = render_prompt_as(format, inv)?;
+    if let Some(suffix) = inv.get_str("suffix") {
+        if !raw {
+            return Err("'suffix' fills in the middle of a raw prompt (`chat: false`), not of chat messages".to_string());
+        }
+        let fim = data::fim::FimFormat::of(|t| tok.special_id(t).is_some()).ok_or(NO_FIM_TOKENS)?;
+        text = fim.prompt(&text, &suffix);
+    }
     let ids = tok.encode(&text);
     if ids.is_empty() {
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
-    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open })
+    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, seed, stops, tool_choice, flavor, thinking_open, raw })
 }
+
+/// Why a `suffix` cannot be honoured: the vocabulary has no
+/// fill-in-the-middle tokens (`data::fim`). A fixed phrase, which the API
+/// surface recognizes and reports as the client's error.
+pub const NO_FIM_TOKENS: &str = "qwen: 'suffix' needs fill-in-the-middle, and this checkpoint has no fill-in-the-middle tokens";
 
 /// Build a [`ParsedRequest`] from an [`Invocation`]: the [`render_prompt`]
 /// render, tokenized, plus the sampling params and stop strings.
@@ -572,7 +591,7 @@ impl SeqState {
             stops: req.stops.clone(),
             cancel,
             printed: String::new(),
-            scan: ChatScanner::with_flavor(req.thinking_open, req.flavor),
+            scan: if req.raw { ChatScanner::raw() } else { ChatScanner::with_flavor(req.thinking_open, req.flavor) },
             stop_at: None,
             cancelled: false,
             max_new: req.max_new,

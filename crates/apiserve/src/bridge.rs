@@ -137,9 +137,17 @@ fn parse_exceeds_capacity(e: &str) -> Option<(u64, u64)> {
 /// server-side runtime/activation failure (backend/device errors, and potentially
 /// on-disk model paths in the message): its raw text is NEVER reflected to the client.
 /// The detail is logged for the operator; the client gets a generic message.
+/// How a text model's `generate` reports a `suffix` its vocabulary cannot fill
+/// in the middle of (the end of `qwen3::chat::NO_FIM_TOKENS`'s message).
+const NO_FIM_TOKENS: &str = "has no fill-in-the-middle tokens";
+
 pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
     if e.starts_with("no model") || e.contains("no action") {
         ApiError::model_not_found(provider, model)
+    } else if e.ends_with(NO_FIM_TOKENS) {
+        // A fixed phrase naming no path or internal: the one thing the client
+        // can act on is to drop `suffix`.
+        ApiError::invalid_request(provider, "'suffix' (fill-in-the-middle) is not supported: this model's vocabulary has no fill-in-the-middle tokens")
     } else if let Some((need, capacity)) = parse_exceeds_capacity(e) {
         eprintln!("apiserve: model '{model}' request failed: {e}");
         ApiError::context_length_exceeded(
@@ -435,7 +443,7 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 /// model with its progress forwarded as [`StreamMsg::Fetching`] ticks, and only
 /// once it's ready submits the real job under the normal admission race,
 /// continuing to forward `Delta`/`Progress`/`Done`/`Err` into the SAME stream.
-/// The caller (e.g. `openai::stream_chat_with_autofetch`) is expected to have
+/// The caller (e.g. `openai::handle_generate`) is expected to have
 /// already confirmed `state.supplier.is_some()` and classified `Fetchable`
 /// with zero I/O (`ModelSupplier::classify`) BEFORE calling this — an `Unknown`
 /// or no-supplier model must still be a plain 404 with no SSE body opened at

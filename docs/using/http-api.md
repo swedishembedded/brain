@@ -31,14 +31,27 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 |---|---|---|---|
 | `GET /models`, `/models/{id}` | ✓ | ✓ | ✓ (rich card) |
 | chat (non-stream + SSE) | `POST /v1/messages` | `POST /chat/completions` | `POST /chat/completions` |
+| raw completion + fill-in-the-middle (non-stream + SSE) | - | `POST /completions` | - |
 | token count | `POST /v1/messages/count_tokens` | - | - |
 | embeddings | - | `POST /embeddings` | `POST /embeddings` |
 | image generation | - | `POST /images/generations` | `POST /images/generations` |
 
 - **Streaming** (`stream:true`): Anthropic emits `message_start → content_block_start →
   content_block_delta* → content_block_stop → message_delta → message_stop`; OpenAI/
-  OpenRouter emit `chat.completion.chunk`s ending in `data: [DONE]`. Client disconnect
+  OpenRouter emit `chat.completion.chunk`s (`text_completion` objects on
+  `/completions`) ending in `data: [DONE]`. Client disconnect
   cancels the running job (frees the lane).
+- **Completions** (`POST /v1/completions`): the `prompt` is continued as it is,
+  with no chat template, and the `text` is the raw generation. `prompt` is one
+  string (or an array holding one); several prompts and token-id prompts are a 400.
+  `suffix` makes it fill-in-the-middle: the prompt is the code before the
+  insertion point, the suffix the code after it, and the generation what goes
+  between, framed with the checkpoint's own FIM tokens (DeepSeek-Coder's
+  `<｜fim▁begin｜>`/`<｜fim▁hole｜>`/`<｜fim▁end｜>`, or the Qwen vocabulary's
+  `<|fim_prefix|>`/`<|fim_suffix|>`/`<|fim_middle|>`). A model whose vocabulary
+  has neither set answers `suffix` with a 400. `echo`, `best_of` > 1 and
+  `logprobs` are refused by name. Streamed frames are `text_completion` objects;
+  every frame before the last has `finish_reason: null`.
 - **Token counts.** `usage` on a non-streaming reply is the served model's own
   count: `input_tokens`/`prompt_tokens` is the tokenizer's count of the fully
   rendered prompt (chat template and tool schemas included), and the output

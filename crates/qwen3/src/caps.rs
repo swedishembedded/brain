@@ -172,6 +172,11 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the checkpoint's own eos ids and its chat format's turn end when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
         .param(ParamSpec::new(
+            "suffix",
+            ParamType::Str,
+            "fill-in-the-middle: the text after the insertion point, with the raw prompt (chat false) the text before it; the generation is what goes between (needs a tokenizer whose vocabulary has FIM tokens)",
+        ))
+        .param(ParamSpec::new(
             "messages",
             ParamType::Str,
             "JSON array of {role,content,reasoning_content?,tool_calls?,tool_call_id?} chat turns (overrides prompt; needs a tokenizer)",
@@ -429,6 +434,9 @@ impl Action for GenerateAction {
                 Plan::Chat { req, eos }
             }
             None => {
+                if inv.get_str("suffix").is_some() {
+                    return Err("qwen: 'suffix' (fill-in-the-middle) needs a tokenizer".into());
+                }
                 let prompt = inv.get_str("prompt").unwrap_or_default();
                 let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).max(0) as usize;
                 let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;

@@ -2818,3 +2818,163 @@ async fn a_text_only_request_attaches_no_media_blobs() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["choices"][0]["message"]["content"], "seen:", "{v}");
 }
+
+// ============================================================== completions
+
+/// A completion model: `generate` declares `suffix` (fill-in-the-middle) and
+/// echoes what reached it - the prompt, the suffix and whether a chat
+/// template was asked for - streamed as two token deltas. A prompt of
+/// `"no-fim"` fails the way a checkpoint without FIM tokens does.
+struct FakeFim;
+struct FakeFimInst;
+impl ResidentModel for FakeFim {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-fim",
+            "a completion model with fill-in-the-middle",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("suffix", ParamType::Str, "text after the insertion point"))
+                .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-fim", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeFimInst))
+    }
+}
+impl Instance for FakeFimInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let prompt = inv.get_str("prompt").unwrap_or_default();
+        if prompt == "no-fim" {
+            return Err("qwen: this checkpoint has no fill-in-the-middle tokens".into());
+        }
+        let head = format!("[{prompt}|");
+        let tail = format!("{}|chat={}]", inv.get_str("suffix").unwrap_or_else(|| "-".into()), inv.get_bool("chat").map_or("-".to_string(), |c| c.to_string()));
+        progress(Progress::token(0, 2, head.clone()));
+        progress(Progress::token(1, 2, tail.clone()));
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(3))
+            .set("completion_tokens", json!(2))
+            .set("finish_reason", json!("length"))
+            .blob("text", Blob::new(Media::Text, format!("{head}{tail}").into_bytes())))
+    }
+}
+fn completion_app() -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeFim), Arc::new(FakeChat), Arc::new(Carded(embed_manifest()))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    (router(AppState::new(exec, key.clone(), Provider::OpenAI)), key)
+}
+
+/// A completion continues the raw prompt - no chat template - and answers in
+/// the legacy `text_completion` shape.
+#[tokio::test]
+async fn openai_completion_continues_the_raw_prompt() {
+    let (app, key) = completion_app();
+    for path in ["/v1/completions", "/completions"] {
+        let body = json!({"model": "brain-fim", "prompt": "def f(", "max_tokens": 2});
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, path, &body).await;
+        assert_eq!(st, StatusCode::OK, "{path}: {v}");
+        assert_valid("openai.json", "CreateCompletionResponse", &v);
+        assert_eq!(v["object"], "text_completion");
+        assert!(v["id"].as_str().unwrap().starts_with("cmpl-"), "{v}");
+        assert_eq!(v["choices"][0]["text"], "[def f(|-|chat=false]", "{v}");
+        assert_eq!(v["choices"][0]["finish_reason"], "length");
+        assert_eq!(v["usage"]["total_tokens"], 5);
+    }
+    // A one-element prompt array is the same request.
+    let body = json!({"model": "brain-fim", "prompt": ["def f("]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &body).await;
+    assert_eq!((st, v["choices"][0]["text"].as_str()), (StatusCode::OK, Some("[def f(|-|chat=false]")), "{v}");
+}
+
+/// `suffix` reaches a model that declares fill-in-the-middle; a model that
+/// does not, or whose vocabulary has no FIM tokens, is a 400 naming it.
+#[tokio::test]
+async fn a_suffix_is_fill_in_the_middle_or_a_400() {
+    let (app, key) = completion_app();
+    let body = json!({"model": "brain-fim", "prompt": "def f(", "suffix": "\n    return x"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["text"], "[def f(|\n    return x|chat=false]");
+
+    for model in ["brain-chat", "brain-fim"] {
+        let prompt = if model == "brain-fim" { "no-fim" } else { "def f(" };
+        let body = json!({"model": model, "prompt": prompt, "suffix": "x"});
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{model}: {v}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+        assert!(v["error"]["message"].as_str().unwrap().contains("suffix"), "{model}: {v}");
+    }
+}
+
+/// Streamed `text_completion` frames add up to the text, the last carries
+/// the finish reason, usage follows when asked for, then `[DONE]`.
+#[tokio::test]
+async fn openai_completion_stream_concatenates_to_the_text() {
+    let (app, key) = completion_app();
+    let body = json!({"model": "brain-fim", "prompt": "a", "stream": true, "stream_options": {"include_usage": true}});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"));
+    let (mut content, mut finish, mut usage) = (String::new(), None, None);
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        let v: Value = serde_json::from_str(d).unwrap();
+        assert_eq!(v["object"], "text_completion", "{v}");
+        // A frame before the last has no reason yet: `null`, as OpenAI streams
+        // it, which the vendored (non-streaming) schema does not admit.
+        if v["choices"].get(0).is_none_or(|c| !c["finish_reason"].is_null()) {
+            assert_valid("openai.json", "CreateCompletionResponse", &v);
+        }
+        if let Some(c) = v["choices"].get(0) {
+            content.push_str(c["text"].as_str().unwrap());
+            if let Some(f) = c["finish_reason"].as_str() {
+                finish = Some(f.to_string());
+            }
+        }
+        if !v["usage"].is_null() {
+            usage = Some(v["usage"]["total_tokens"].clone());
+        }
+    }
+    assert_eq!(content, "[a|-|chat=false]");
+    assert_eq!(finish.as_deref(), Some("length"));
+    assert_eq!(usage, Some(json!(5)));
+}
+
+#[tokio::test]
+async fn completion_bad_bodies_are_400() {
+    let (app, key) = completion_app();
+    let cases: [Value; 9] = [
+        json!({"prompt": "a"}),                                     // no model
+        json!({"model": "brain-fim"}),                              // no prompt
+        json!({"model": "brain-fim", "prompt": ["a", "b"]}),        // several prompts
+        json!({"model": "brain-fim", "prompt": [1, 2, 3]}),         // token ids
+        json!({"model": "brain-fim", "prompt": "a", "n": 2}),
+        json!({"model": "brain-fim", "prompt": "a", "best_of": 2}),
+        json!({"model": "brain-fim", "prompt": "a", "echo": true}),
+        json!({"model": "brain-fim", "prompt": "a", "logprobs": 1}),
+        json!({"model": "brain-fim", "prompt": "a", "max_tokens": 0}),
+    ];
+    for body in cases {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {body}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &json!({"model": "brain-embed", "prompt": "a"})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "a model with no generate action");
+    // The route is behind the key like every other.
+    let (st, _) = post_json(&app, Provider::OpenAI, "nope", "/v1/completions", &json!({"model": "brain-fim", "prompt": "a"})).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+}
+

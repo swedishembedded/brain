@@ -795,6 +795,8 @@ pub enum ChatEvent {
 /// blocks → `</function>`).
 #[derive(Debug)]
 enum St {
+    /// A raw completion: every byte is visible text, nothing is markup.
+    Raw,
     Content,
     Think,
     CallHeader,
@@ -879,6 +881,12 @@ impl ChatScanner {
         }
     }
 
+    /// A scanner for a raw completion (no chat template): the whole output is
+    /// content, with no reasoning or tool-call markup recognized in it.
+    pub fn raw() -> ChatScanner {
+        ChatScanner { state: St::Raw, ..ChatScanner::new(false) }
+    }
+
     /// Feed the next chunk of generated text (a token, several tokens, or the
     /// whole output at once — chunking must not change the resulting events).
     pub fn push(&mut self, delta: &str, out: &mut Vec<ChatEvent>) {
@@ -893,6 +901,7 @@ impl ChatScanner {
     /// silently dropped call.
     pub fn finish(&mut self, out: &mut Vec<ChatEvent>) {
         match self.state {
+            St::Raw => return,
             St::Content => self.flush_pending_as(out, false),
             St::Think => self.flush_pending_as(out, true),
             St::CallHeader => {
@@ -1028,6 +1037,10 @@ impl ChatScanner {
     fn drain(&mut self, out: &mut Vec<ChatEvent>) {
         loop {
             match &self.state {
+                St::Raw => {
+                    self.flush_pending_as(out, false);
+                    return;
+                }
                 St::Content => {
                     if !self.scan_for_marker(out, &MARKERS_CONTENT, false) {
                         return;

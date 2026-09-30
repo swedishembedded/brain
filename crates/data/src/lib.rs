@@ -23,6 +23,7 @@ pub mod toolcall;
 pub mod bpe;
 pub mod clip_bpe;
 pub mod episode;
+pub mod fim;
 pub mod generation;
 pub mod hf_pretok;
 pub mod imageset;

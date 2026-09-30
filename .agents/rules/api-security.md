@@ -37,8 +37,8 @@ them, so treat all request input as hostile.
 - [ ] Numeric params are range-checked before use: `max_tokens`/`max_new`,
       `n`, `top_k`, `dimensions`, batch/`input` array length, image `size`. Reject
       absurd values (400) rather than allocating on them.
-- [ ] Sampling parameters go through `crates/apiserve/src/sampling.rs` on every chat
-      surface: an omitted `seed`/`top_k` is NOT filled in (the action's own default
+- [ ] Sampling parameters go through `crates/apiserve/src/sampling.rs` on every text
+      surface (chat and `/completions`): an omitted `seed`/`top_k` is NOT filled in (the action's own default
       applies; an unseeded request must not decode a fixed sequence), `top_k` outside
       0..=1000 or a non-integer `seed` is a 400, and an OpenAI parameter brain cannot
       honour (penalties, `logit_bias`, logprobs, non-text `response_format`) is a
@@ -82,7 +82,7 @@ them, so treat all request input as hostile.
       OpenRouter passthrough fields). Either resolve locally or reject; never let a
       request cause brain to make an outbound request to an arbitrary host.
 - [ ] **Auto-fetch is the one sanctioned exception** — a dispatch request (chat/
-      embeddings/images on HTTP; `Run`/`Subscribe`/`StreamTranscribe` on D-Bus) for a
+      completions/embeddings/images on HTTP; `Run`/`Subscribe`/`StreamTranscribe` on D-Bus) for a
       model that classifies `Fetchable` DOES cause an outbound request, to
       `huggingface.co` only (`crates/modelstore/src/hub.rs`'s `HfHub`, whose redirect
       handling is host-allowlisted — verify `hub.rs`'s allowlist test still covers this).
@@ -134,6 +134,12 @@ them, so treat all request input as hostile.
       `delta.content` — only `ChatEvent::Content` ever feeds those fields (see
       `bridge::StreamMsg`'s doc comment and `openai.rs::event_delta`, which is the
       ONLY path that builds `reasoning_content`/`tool_calls` deltas).
+- [ ] `/completions` is the one exception, by design: its `text` is the raw
+      generation (the resident's `ChatScanner::raw`), markup included, because the
+      client sent a raw prompt and asked for its continuation. It is still only
+      model output; `suffix` reaches the model only as the text after a
+      fill-in-the-middle hole, and a vocabulary with no FIM tokens is a 400 with a
+      fixed message (`bridge::map_reply_err`), never the resident's error text.
 
 ### 7. Transport
 - [ ] Servers bind `127.0.0.1` by default (localhost only); binding a public interface

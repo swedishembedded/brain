@@ -59,6 +59,11 @@ pub(crate) fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
                 "JSON array of {role,content,reasoning_content?,tool_calls?,tool_call_id?} chat turns (overrides prompt)",
             ))
             .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))
+            .param(ParamSpec::new(
+                "suffix",
+                ParamType::Str,
+                "fill-in-the-middle: the text after the insertion point, with the raw prompt (chat false) the text before it (needs FIM tokens in the vocabulary)",
+            ))
             .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
             .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
