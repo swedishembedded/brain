@@ -92,6 +92,15 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hex_lower(&hasher.finalize()))
 }
 
+/// `sha256:<lowercase hex>` of a file's bytes: [`sha256_file`] tagged with
+/// its algorithm. The one spelling of a weights file's identity - a
+/// fine-tune's adapter digest, a loaded pipeline's identity and the adapter
+/// a server reports it serves are all this string, so any two of them
+/// compare directly.
+pub fn file_digest(path: &Path) -> std::io::Result<String> {
+    Ok(format!("sha256:{}", sha256_file(path)?))
+}
+
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -154,6 +163,9 @@ mod tests {
         // sha256("abc") -- the FIPS 180-2 example vector.
         assert_eq!(sha256_file(&path).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert!(sha256_file(&dir.join("absent.bin")).is_err());
+        // The algorithm-tagged form every identity and record carries.
+        assert_eq!(file_digest(&path).unwrap(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert!(file_digest(&dir.join("absent.bin")).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

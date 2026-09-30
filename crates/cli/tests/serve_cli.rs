@@ -144,3 +144,127 @@ fn status_exits_nonzero_when_no_server_is_running() {
 
     std::fs::remove_dir_all(&state).ok();
 }
+
+/// A scratch directory for one test, removed when it ends.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("brain-serve-cli-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// A stand-in base file (startup verification reads only its bytes) and a
+/// LoRA adapter whose card records the digest of `trained_on` (default: that
+/// base) as the base it was trained against.
+fn write_base_and_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&std::path::Path>) -> (std::path::PathBuf, std::path::PathBuf) {
+    let base = dir.join(format!("base-{fill}.safetensors"));
+    checkpoint::st::save_safetensors(base.to_str().unwrap(), &[("embed.weight".to_string(), vec![4], vec![fill; 4])], &serde_json::json!({}), None).unwrap();
+    let adapter = dir.join("adapter.safetensors");
+    let mut card = checkpoint::st::ModelCard::new("support:v3", "qwen");
+    card.adapter = Some(checkpoint::st::Adapter { kind: "lora".to_string(), rank: Some(2), base: Some("local/base".to_string()), alpha: Some(4.0), ..Default::default() });
+    card.training = Some(checkpoint::st::TrainingProvenance {
+        code_revision: "test".to_string(),
+        regime: "sft_lora".to_string(),
+        seed: 1,
+        hyperparams: serde_json::Value::Null,
+        environment: "cpu".to_string(),
+        gate: None,
+        trained_from: None,
+        base_digest: Some(brain_modelstore::fetch::file_digest(trained_on.unwrap_or(&base)).unwrap()),
+        cycle: 0,
+    });
+    let tensors = vec![("blocks.0.attn.wq.lora_a".to_string(), vec![2, 4], vec![0.5; 8]), ("blocks.0.attn.wq.lora_b".to_string(), vec![4, 2], vec![0.5; 8])];
+    checkpoint::st::save_safetensors(adapter.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2}), Some(&card)).unwrap();
+    (base, adapter)
+}
+
+fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) -> Command {
+    let models = dir.join("models");
+    std::fs::create_dir_all(&models).unwrap();
+    let mut cmd = Command::new(bin());
+    cmd.args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap()])
+        .args(extra)
+        .stdin(Stdio::null())
+        .env("BRAIN_DEVICE", "cpu")
+        // Every resolver reads the store, not only the startup scan: an
+        // empty one keeps a real store on the machine out of the test.
+        .env("BRAIN_MODELS_DIR", &models)
+        .env("BRAIN_QWEN_WEIGHTS", base)
+        .env("BRAIN_RUNTIME_DIR", dir.join("run"))
+        .env_remove("BRAIN_AUTO_FETCH");
+    cmd
+}
+
+/// `--adapter FILE` pins one release: the startup line names it by the
+/// digest a fine-tune reports for that file.
+#[test]
+fn a_pinned_adapter_is_reported_by_digest_at_startup() {
+    let dir = Scratch::new("pin");
+    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
+    let digest = brain_modelstore::fetch::file_digest(&adapter).unwrap();
+    let mut child = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
+
+    let expected = format!("brain serve: brain/qwen3 adapter=support:v3 digest={digest}");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut seen = Vec::new();
+    let found = loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(line) if line == expected => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    child.kill().ok();
+    child.wait().ok();
+    assert!(found, "expected {expected:?} on stderr; saw:\n{}", seen.join("\n"));
+}
+
+/// An adapter trained against another base is refused before anything
+/// binds, naming both digests.
+#[test]
+fn a_pinned_adapter_for_another_base_is_a_startup_error() {
+    let dir = Scratch::new("pin-mismatch");
+    let trained_on = dir.0.join("trained-on.safetensors");
+    checkpoint::st::save_safetensors(trained_on.to_str().unwrap(), &[("embed.weight".to_string(), vec![4], vec![9.0; 4])], &serde_json::json!({}), None).unwrap();
+    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, Some(&trained_on));
+    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a mismatched base must not serve; stderr:\n{stderr}");
+    for file in [&trained_on, &base] {
+        let digest = brain_modelstore::fetch::file_digest(file).unwrap();
+        assert!(stderr.contains(&digest), "the error must name {digest}; stderr:\n{stderr}");
+    }
+}
+
+/// A pinned adapter cannot be combined with a mode that would replace it,
+/// nor given where no Qwen3 is served.
+#[test]
+fn a_pinned_adapter_cannot_also_follow_releases() {
+    let out = run(&["serve", "--adapter", "a.safetensors", "--watch-adapters", "adapters/"]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&["serve", "--adapter", "a.safetensors", "--adapter-manifest", "release.json"]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    // The stdio controller serves no Qwen3: the flag would be ignored.
+    let out = run(&["serve", "--stdio", "--adapter", "a.safetensors"]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}

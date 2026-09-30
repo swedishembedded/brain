@@ -7,7 +7,8 @@ one scheduler, and exposes them over one or more transports at once.
 ```
 brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
-            [--ready-file PATH] [--watch-adapters DIR]
+            [--ready-file PATH] \
+            [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR]
 ```
 
 - `--openai[:PORT]` - serve an OpenAI-compatible HTTP API (default port if
@@ -24,6 +25,9 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--ready-file PATH` - see **Readiness** below.
 - `--watch-adapters DIR` - see **Hot-swapping a LoRA adapter** below. Off
   unless given.
+- `--adapter FILE`, `--adapter-manifest FILE` - see **Serving an adapter
+  release** below. At most one of these two and `--watch-adapters` may be
+  given.
 
 At least one surface flag is meaningful for a useful server; an unknown flag
 is a hard error (exit 2), not a warning. Run `brain serve --help` for the
@@ -45,6 +49,49 @@ the newest one **without a restart**. It is off unless the flag is given.
   so a swapped-in adapter costs nothing per request compared with the base.
 - Only the Qwen3 resident (`BRAIN_QWEN_WEIGHTS`) is watched. With no Qwen3
   configured, the flag has nothing to swap and no watcher runs.
+
+## Serving an adapter release
+
+`--adapter FILE` serves the Qwen3 with exactly one LoRA adapter, and nothing
+replaces it while the server runs. Before any surface binds, the adapter is
+read and bound to the served base: when its card records the digest of the
+base it was trained against (`brain::ChatFineTune` records it), the served
+base must have that digest; an adapter without one must name the served
+base's id. A mismatch stops the server with both digests in the message.
+The startup line then says what is served:
+
+```
+brain serve: brain/qwen3 adapter=<card id> digest=sha256:<hex>
+```
+
+The digest is the SHA-256 of the adapter file, the same value
+`ChatFineTuneOutcome::adapter_digest` reports for it.
+
+`--adapter-manifest FILE` follows a release manifest instead:
+
+```json
+{ "adapter": "releases/support-3.safetensors", "digest": "sha256:<hex>" }
+```
+
+- A relative `adapter` path is relative to the manifest's directory.
+- The manifest is re-read when it changes. A new release is swapped in only
+  once the adapter file hashes to `digest` and binds to the served base, and
+  the new `adapter=... digest=...` line is printed. A manifest that fails any
+  check - unparseable, a digest that does not match the file, an adapter for
+  another base - keeps the previous adapter served and prints why.
+- Replace the manifest atomically (write it beside, then rename it over the
+  old one), and publish every release under a new file name: an adapter file
+  is verified when its manifest changes and read again when the model next
+  loads, so rewriting a published file in place is served unverified.
+- At startup a manifest that exists must verify, or the server does not
+  start. A manifest that does not exist yet serves the base until one is
+  published.
+- As with `--watch-adapters`, a request already running finishes on the
+  adapter it started with.
+
+All three adapter flags need a served Qwen3 (`BRAIN_QWEN_WEIGHTS`) behind an
+HTTP or D-Bus surface; `--adapter` and `--adapter-manifest` without one stop
+the server, and the stdio controller refuses all three.
 
 ## Access control is always on
 

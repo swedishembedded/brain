@@ -30,6 +30,7 @@
 
 use std::io::{BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use events::Envelope;
@@ -153,6 +154,22 @@ SERVING OPTIONS
                          adapter-NNNNNN.safetensors, never the newest mtime.
                          A request already running is never interrupted: the
                          swap applies to the next one.
+  --adapter FILE         serve the Qwen3 with exactly this LoRA adapter release,
+                         never replaced. It must verify against the served base
+                         (the base digest its card records, else its base id)
+                         or the server does not start. Prints
+                         \"brain serve: <model> adapter=<id> digest=sha256:<hex>\".
+  --adapter-manifest FILE
+                         follow a release manifest,
+                         {\"adapter\": \"<path>\", \"digest\": \"sha256:<hex>\"}
+                         (a relative path is relative to FILE), re-read when it
+                         changes: a new release is swapped in only once the file
+                         hashes to that digest and verifies against the base;
+                         a bad manifest keeps the previous adapter and says why.
+                         Replace FILE atomically (write aside, rename over it)
+                         and never rewrite a published adapter file.
+                         --adapter, --adapter-manifest and --watch-adapters are
+                         mutually exclusive.
   --ready-file PATH      create PATH (empty) once EVERY surface requested above
                          has bound its listener. Because the APIKEY lines and
                          --api-keys-out are both written BEFORE any bind, PATH
@@ -366,6 +383,10 @@ pub fn run_serve(args: &[String]) {
     // silently reloads its weights because a file appeared on disk is not
     // something an operator should get without asking for it.
     let mut watch_adapters: Option<String> = None;
+    // `--adapter FILE` / `--adapter-manifest FILE`: an explicit release, pinned
+    // or followed through a manifest (see `continuous_train::AdapterMode`).
+    let mut adapter: Option<String> = None;
+    let mut adapter_manifest: Option<String> = None;
     // Every `--qwen-*` flag, built up as its own arm below is matched -
     // `crate::resident_llm::QwenServeConfig`'s own `Default` is every
     // historical env-var default, byte for byte.
@@ -429,6 +450,8 @@ pub fn run_serve(args: &[String]) {
             "--reserve-gb" => dbus_reserve_gb = parsed(args, &mut i, "--reserve-gb"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
+            "--adapter" => adapter = Some(val(args, &mut i, "--adapter")),
+            "--adapter-manifest" => adapter_manifest = Some(val(args, &mut i, "--adapter-manifest")),
             "--qwen-ctx" => qwen_cfg.ctx = Some(parsed(args, &mut i, "--qwen-ctx")),
             "--qwen-max-batch" => qwen_cfg.max_batch = parsed(args, &mut i, "--qwen-max-batch"),
             "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
@@ -464,6 +487,14 @@ pub fn run_serve(args: &[String]) {
     // parser above so an unknown-flag error is never raised for them; by the
     // time this runs, their work is done.
     let _ = (detach, reload, do_stop, do_status);
+
+    let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from)) {
+        Ok(mode) => mode,
+        Err(e) => {
+            eprintln!("brain serve: {e}");
+            std::process::exit(2);
+        }
+    };
 
     if !args.iter().any(|a| a == "--seed") {
         cfg.seed = data::rng::random_seed();
@@ -505,9 +536,16 @@ pub fn run_serve(args: &[String]) {
             openrouter,
             api_keys_out,
             ready,
-            watch_adapters,
+            adapter_mode,
             qwen_cfg,
         });
+    }
+
+    // The stdio controller serves no Qwen3, so an adapter flag here would be
+    // ignored while the operator believes it is in effect.
+    if adapter_mode != crate::continuous_train::AdapterMode::Base {
+        eprintln!("brain serve: --adapter, --adapter-manifest and --watch-adapters apply to the Qwen3 the HTTP and D-Bus surfaces serve; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
+        std::process::exit(2);
     }
 
     // Build the registry: a real GPT if a checkpoint was given, else a fake echo
@@ -750,9 +788,9 @@ struct RunApis {
     /// Notified once per bound surface (HTTP + D-Bus); disabled unless
     /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
     ready: brain_shutdown::ready::Gate,
-    /// `--watch-adapters DIR`: the continuous-learning hot-swap watcher's
-    /// directory, `None` (no watcher) unless the flag was given.
-    watch_adapters: Option<String>,
+    /// Where the served Qwen3's adapter comes from: `--adapter`,
+    /// `--adapter-manifest`, `--watch-adapters`, or none of them.
+    adapter_mode: crate::continuous_train::AdapterMode,
     /// Every `--qwen-*` flag, parsed once here - see
     /// `resident_llm::QwenServeConfig`'s own doc for each field.
     qwen_cfg: crate::resident_llm::QwenServeConfig,
@@ -845,12 +883,27 @@ fn run_apis(a: RunApis) {
     let (trigger, shutdown) = brain_shutdown::channel();
     brain_shutdown::install_signals(trigger);
 
-    // The continuous-learning hot swap, opt-in (`--watch-adapters DIR`). Held
-    // for the whole serving lifetime: the handle stops and joins its thread on
-    // drop, so the watcher cannot outlive the surfaces it was swapping models
-    // under. `qwen` is the CONCRETE resident handle -- `set_adapter` is
-    // inherent, so the erased one the executor holds could not do this.
-    let _adapter_watcher = crate::continuous_train::spawn_adapter_watcher(a.watch_adapters.as_ref().map(std::path::Path::new), qwen, &executor);
+    // The served adapter, put in effect before any surface binds: a release
+    // that does not verify ends the process here rather than serving a model
+    // nobody asked for. Then the continuous-learning hot swap, opt-in
+    // (`--watch-adapters DIR` / `--adapter-manifest FILE`). Held for the whole
+    // serving lifetime: the handle stops and joins its thread on drop, so the
+    // watcher cannot outlive the surfaces it was swapping models under. `qwen`
+    // is the CONCRETE resident handle -- `set_adapter` is inherent, so the
+    // erased one the executor holds could not do this.
+    let follow = match crate::continuous_train::start_adapter_mode(a.adapter_mode, qwen.as_ref(), &executor) {
+        Ok((follow, serving_line)) => {
+            if let Some(line) = serving_line {
+                eprintln!("{line}");
+            }
+            follow
+        }
+        Err(e) => {
+            eprintln!("brain serve: {e}");
+            std::process::exit(1);
+        }
+    };
+    let _adapter_watcher = crate::continuous_train::spawn_adapter_watcher(follow, qwen, &executor);
 
     let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {

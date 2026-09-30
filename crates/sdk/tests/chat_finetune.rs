@@ -129,6 +129,9 @@ fn a_fine_tune_exports_an_adapter_that_scores_and_serves() {
     assert_eq!(training.seed, 7);
     assert_eq!(training.trained_from, None);
     assert_eq!(training.environment, "cpu", "these tests run on the CPU backend");
+    // The base is named by content, so a server can refuse to fold this
+    // adapter into any other base.
+    assert_eq!(training.base_digest.as_deref(), Some(brain_modelstore::fetch::file_digest(&model.join("model.safetensors")).unwrap().as_str()));
     let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.as_ref().expect("a training record")).unwrap()).unwrap();
     assert_eq!(record["adapter_digest"].as_str(), outcome.adapter_digest.as_deref());
 

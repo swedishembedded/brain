@@ -1056,6 +1056,7 @@ front-end to depend on.
 | GPT model / training / sampling | `crates/gpt2/src/{model,train,sample,init}.rs` |
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
+| Which LoRA adapter `brain serve` puts on its Qwen3 (`--adapter` pin, `--adapter-manifest` digest-verified release, `--watch-adapters` newest version) | `crates/cli/src/adapter_release.rs` (binding an adapter to the served base by digest, the manifest follower), `crates/cli/src/continuous_train.rs` (the modes, the swap, the watcher); a fine-tune records its base's digest on the adapter card (`TrainingProvenance::base_digest`) |
 | Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35moe.md` |
 | Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `samples/python/llm/qwen35moe/` |
 | Qwen3.8-27B dense model / import / LoRA / finetune / sharding / MTP / vision splice | `crates/qwen35/src/{model,import,finetune,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |

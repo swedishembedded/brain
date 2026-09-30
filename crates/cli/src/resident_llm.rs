@@ -554,6 +554,11 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 pub struct QwenResident {
     id: String,
     path: String,
+    /// The id `BRAIN_QWEN_WEIGHTS` resolved the base under (`local/<stem>`
+    /// for a bare file, `vendor/repo` for a store directory) - the id a
+    /// trainer resolving the same spelling writes on an adapter's card.
+    /// `None` for a catalog entry, which is served under its card's id.
+    base_id: Option<String>,
     tokenizer: String,
     /// A named LoRA adapter's own weight file (`qwen3::lora::save_adapter`'s
     /// output), when this resident is the ADAPTER's catalog entry rather than
@@ -597,9 +602,9 @@ impl QwenResident {
         // inside it, and leaves a plain file path alone. Unresolvable is not
         // fatal - the path travels on verbatim so `activate` reports it against
         // the real open, which is where every other bad path is reported.
-        let (path, dir) = match crate::qwen_cli::resolve_base(&spec, None) {
-            Ok((weights, dir, _)) => (weights.to_string_lossy().into_owned(), Some(dir)),
-            Err(_) => (spec, None),
+        let (path, dir, base_id) = match crate::qwen_cli::resolve_base(&spec, None) {
+            Ok((weights, dir, id)) => (weights.to_string_lossy().into_owned(), Some(dir), Some(id)),
+            Err(_) => (spec, None, None),
         };
 
         // A tokenizer beside the checkpoint needs no second variable.
@@ -613,7 +618,8 @@ impl QwenResident {
         };
 
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        Some(Self::from_card_configured(&path, &ModelCard::new("brain/qwen3", "qwen"), Some(&tokenizer), None, cfg))
+        let resident = Self::from_card_configured(&path, &ModelCard::new("brain/qwen3", "qwen"), Some(&tokenizer), None, cfg);
+        Some(QwenResident { base_id, ..resident })
     }
 
     /// [`Self::from_card_configured`] at every historical default -
@@ -637,6 +643,7 @@ impl QwenResident {
         QwenResident {
             id: card.id.clone(),
             path: path.to_string(),
+            base_id: None,
             tokenizer: tokenizer.unwrap_or_default().to_string(),
             adapter: std::sync::RwLock::new(adapter.filter(|a| !a.is_empty()).map(str::to_string)),
             ctx,
@@ -717,6 +724,12 @@ impl QwenResident {
     /// exactly that pairing.
     pub fn set_adapter(&self, adapter: Option<String>) {
         *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());
+    }
+
+    /// The base checkpoint this resident folds adapters into, for
+    /// `crate::adapter_release` to bind an adapter to before it is set.
+    pub fn served_base(&self) -> crate::adapter_release::ServedBase {
+        crate::adapter_release::ServedBase::new(&self.path, self.base_id.clone())
     }
 
     /// KV-pool geometry for the batched serving engine - the ONE place

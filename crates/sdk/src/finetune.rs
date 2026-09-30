@@ -278,8 +278,9 @@ impl ChatFineTune {
         let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block));
 
         let opts = fit_opts(self.steps, block, self.lr, self.seed);
+        let base_digest = digest(&weights)?;
         let identity = serde_json::json!({
-            "base": digest(&weights)?,
+            "base": base_digest,
             "dataset": digest(dataset)?,
             "replay": self.replay.iter().map(|p| digest(p)).collect::<Result<Vec<_>>>()?,
             "parent": parent,
@@ -342,6 +343,7 @@ impl ChatFineTune {
             environment: gpu_core::backend_name().to_string(),
             gate: None,
             trained_from: parent,
+            base_digest: Some(base_digest),
             cycle: self.cycle,
         };
         let dataset_id = digest(dataset)?;
@@ -556,8 +558,7 @@ fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
 }
 
 fn digest(path: &Path) -> Result<String> {
-    let hex = brain_modelstore::fetch::sha256_file(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
-    Ok(format!("sha256:{hex}"))
+    brain_modelstore::fetch::file_digest(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
 fn utf8(path: &Path) -> Result<&str> {

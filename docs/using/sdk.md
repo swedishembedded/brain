@@ -222,6 +222,12 @@ let chat = brain::ChatPipeline::from(
   a run with different data, options or starting point is refused.
 - The outcome's losses and scores are `Option`s: a value that was not
   measured (no held-out set, a cancelled run) is `None`.
+- The adapter card records the digest of the base it was trained against
+  (`base_digest` in its training provenance), so `brain serve --adapter`
+  refuses to fold it into any other base. `outcome.adapter_digest` is the
+  digest `brain serve` prints for the adapter it serves.
+- `samples/study/chat` is the worked example: train, score, resume a
+  cancelled run, chat with the adapter.
 
 ## Text embedding
 

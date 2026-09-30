@@ -189,6 +189,13 @@ pub struct TrainingProvenance {
     /// from-scratch run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trained_from: Option<String>,
+    /// `sha256:<hex>` of the base checkpoint file the run trained against,
+    /// when the trainer recorded it. An adapter is only meaningful folded
+    /// into that exact base, so a server compares this with the digest of
+    /// the base it serves rather than trusting a base id. Additive: absent on
+    /// any card written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_digest: Option<String>,
     /// The continuous-loop cycle number that produced this checkpoint.
     pub cycle: u64,
 }
@@ -671,6 +678,7 @@ mod tests {
                 entropy_ratio: 0.97,
             }),
             trained_from: Some("qwen3-0.6b-cycle-3".into()),
+            base_digest: Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()),
             cycle: 4,
         });
 

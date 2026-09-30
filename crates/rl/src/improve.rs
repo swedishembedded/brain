@@ -482,6 +482,7 @@ pub fn cycle<M: Model, O: Objective<M>>(
                 environment: provenance.environment,
                 gate: Some(gate_outcome(&report)),
                 trained_from: Some(adapter.base_id.to_string()),
+                base_digest: None,
                 cycle: provenance.cycle,
             };
             model::lora::device_adapter::save_adapter_with_lineage(

@@ -12,6 +12,7 @@
 //!
 //! Run `brain help` for the full usage with examples.
 
+mod adapter_release;
 mod args;
 mod caps_cli;
 mod catalog;

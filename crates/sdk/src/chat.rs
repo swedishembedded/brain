@@ -437,8 +437,8 @@ pub struct WeightsIdentity {
 impl WeightsIdentity {
     /// Hashes `path`, streaming: a whole-file read, paid once at load.
     pub(crate) fn of_file(path: &str, id: Option<String>) -> Result<WeightsIdentity> {
-        let hex = brain_modelstore::fetch::sha256_file(std::path::Path::new(path)).map_err(|e| Error::Backend(format!("{path}: hashing the loaded weights: {e}")))?;
-        Ok(WeightsIdentity { id, path: PathBuf::from(path), digest: format!("sha256:{hex}") })
+        let digest = brain_modelstore::fetch::file_digest(std::path::Path::new(path)).map_err(|e| Error::Backend(format!("{path}: hashing the loaded weights: {e}")))?;
+        Ok(WeightsIdentity { id, path: PathBuf::from(path), digest })
     }
 }
 
