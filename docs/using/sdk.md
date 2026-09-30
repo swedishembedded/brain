@@ -224,8 +224,10 @@ let chat = brain::ChatPipeline::from(
   measured (no held-out set, a cancelled run) is `None`.
 - The adapter card records the digest of the base it was trained against
   (`base_digest` in its training provenance), so `brain serve --adapter`
-  refuses to fold it into any other base. `outcome.adapter_digest` is the
-  digest `brain serve` prints for the adapter it serves.
+  refuses to fold it into any other base. `outcome.base_digest` is that
+  same digest, so a caller binding the adapter to its base need not hash the
+  base again; `outcome.adapter_digest` is the digest `brain serve` prints
+  for the adapter it serves.
 - `samples/study/chat` is the worked example: train, score, resume a
   cancelled run, chat with the adapter.
 
@@ -299,7 +301,8 @@ copy is held while training, and the first step's margin is exactly zero
   digest, and in its hyperparameters `beta` and the reference
   (`reference.base_digest`, `reference.adapter_digest` - the continued
   adapter, or null). `training.json` beside it records the same, plus the
-  scores.
+  scores. `outcome.base_digest` is the base's digest, as on
+  `ChatFineTuneOutcome`.
 - `brain::score_preference(base, adapter, pairs)` scores base plus `adapter`
   against the base alone: `mean_margin` is the mean of `(log pi(chosen) -
   log ref(chosen)) - (log pi(rejected) - log ref(rejected))` in nats (without

@@ -301,6 +301,7 @@ impl ChatFineTune {
             rank,
             alpha,
             trained_from: parent.clone(),
+            base_digest: Some(base_digest.clone()),
             base_score,
             tuned_score: None,
         };
@@ -401,6 +402,11 @@ pub struct ChatFineTuneOutcome {
     pub alpha: f32,
     /// The digest of the adapter this run continued, if it continued one.
     pub trained_from: Option<String>,
+    /// `sha256:<hex>` of the base checkpoint file the adapter was trained on -
+    /// the digest its card records as `TrainingProvenance::base_digest`, so a
+    /// caller binding the adapter to its base need not hash the base again.
+    /// `None` when the run did not compute it.
+    pub base_digest: Option<String>,
     /// The base on the held-out records; `None` without [`ChatFineTune::held_out`].
     pub base_score: Option<HeldOutScore>,
     /// Base plus the new adapter on the same records; `None` unless
@@ -415,6 +421,7 @@ impl ChatFineTuneOutcome {
         };
         serde_json::json!({
             "base": base_id,
+            "base_digest": self.base_digest,
             "dataset": dataset_id,
             "adapter_digest": self.adapter_digest,
             "trained_from": self.trained_from,

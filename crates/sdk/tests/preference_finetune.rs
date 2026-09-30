@@ -111,6 +111,7 @@ fn dpo_raises_the_training_preference_margin_and_exports_its_record() {
     let training = card.training.expect("the card records its training run");
     assert_eq!(training.regime, "dpo");
     assert_eq!(training.base_digest.as_deref(), Some(base_digest.as_str()));
+    assert_eq!(outcome.base_digest, training.base_digest, "the outcome reports the base digest the card records");
     assert_eq!(training.hyperparams["beta"].as_f64(), Some(0.1f32 as f64));
     assert_eq!(training.hyperparams["reference"]["base_digest"].as_str(), Some(base_digest.as_str()));
     assert!(training.hyperparams["reference"]["adapter_digest"].is_null(), "a fresh run's reference is the base alone");

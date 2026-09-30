@@ -293,7 +293,7 @@ impl PreferenceFineTune {
             alpha,
             beta: self.beta,
             trained_from: parent.clone(),
-            reference_digest: base_digest.clone(),
+            base_digest: Some(base_digest.clone()),
             train_score: None,
             held_out_score: None,
         };
@@ -378,8 +378,11 @@ pub struct PreferenceFineTuneOutcome {
     /// The digest of the adapter this run continued - also the reference's
     /// adapter - if it continued one.
     pub trained_from: Option<String>,
-    /// The digest of the base the reference (and the adapter) is built on.
-    pub reference_digest: String,
+    /// `sha256:<hex>` of the base checkpoint file the reference (and the
+    /// adapter) is built on - the digest the adapter's card records as
+    /// `TrainingProvenance::base_digest`. `None` when the run did not compute
+    /// it.
+    pub base_digest: Option<String>,
     /// The tuned adapter against the run's reference on the training pairs;
     /// `None` unless completed.
     pub train_score: Option<PreferenceScore>,
@@ -397,7 +400,7 @@ impl PreferenceFineTuneOutcome {
             "dataset": dataset_id,
             "adapter_digest": self.adapter_digest,
             "trained_from": self.trained_from,
-            "reference": { "base_digest": self.reference_digest, "adapter_digest": self.trained_from },
+            "reference": { "base_digest": self.base_digest, "adapter_digest": self.trained_from },
             "steps": self.steps,
             "steps_completed": self.steps_completed,
             "resumed_at": self.resumed_at,
