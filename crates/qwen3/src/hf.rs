@@ -38,13 +38,13 @@ struct HfDecoderConfig {
     #[serde(default)]
     architectures: Vec<String>,
     model_type: Option<String>,
-    vocab_size: u32,
-    hidden_size: u32,
-    num_hidden_layers: u32,
-    num_attention_heads: u32,
+    vocab_size: Option<u32>,
+    hidden_size: Option<u32>,
+    num_hidden_layers: Option<u32>,
+    num_attention_heads: Option<u32>,
     num_key_value_heads: Option<u32>,
     head_dim: Option<u32>,
-    intermediate_size: u32,
+    intermediate_size: Option<u32>,
     rope_theta: Option<f64>,
     rms_norm_eps: Option<f64>,
     max_position_embeddings: Option<u32>,
@@ -97,16 +97,30 @@ pub fn decoder_config_as(json: &str, arch_id: &str) -> Result<QwenConfig, String
     from_hf(c, arch_id)
 }
 
+/// A `transformers` config class's defaults for the shape fields a config may
+/// omit (DeepSeek-VL's `language_config` names only the depth, vocabulary and
+/// context, and leaves the width to `LlamaConfig`). `head_dim: None` derives it
+/// as `hidden / heads`.
+struct Defaults {
+    vocab: u32,
+    hidden: u32,
+    ff: u32,
+    layers: u32,
+    heads: u32,
+    head_dim: Option<u32>,
+    max_pos: u32,
+}
+
 fn from_hf(c: HfDecoderConfig, arch_id: &str) -> Result<QwenConfig, String> {
     // Per-architecture: which attention switches the class hardwires, and
     // the defaults of the fields it lets a config omit
     // (`transformers.{Qwen3,Qwen2,Llama}Config`).
-    let (qk_norm, qkv_bias_fixed, max_pos_default) = match arch_id {
-        "qwen3" => (true, false, 32768),
+    let (qk_norm, qkv_bias_fixed, d) = match arch_id {
+        "qwen3" => (true, false, Defaults { vocab: 151936, hidden: 4096, ff: 22016, layers: 32, heads: 32, head_dim: Some(128), max_pos: 32768 }),
         // Qwen2Attention builds q/k/v with `bias=True` unconditionally and
         // o_proj without; there is no `attention_bias` switch.
-        "qwen2" => (false, true, 32768),
-        "llama" => (false, false, 2048),
+        "qwen2" => (false, true, Defaults { vocab: 151936, hidden: 4096, ff: 22016, layers: 32, heads: 32, head_dim: None, max_pos: 32768 }),
+        "llama" => (false, false, Defaults { vocab: 32000, hidden: 4096, ff: 11008, layers: 32, heads: 32, head_dim: None, max_pos: 2048 }),
         other => return Err(format!("config.json: no decoder profile for architecture `{other}`")),
     };
     // Llama and Qwen3 put `attention_bias` on ALL FOUR projections, o_proj
@@ -124,18 +138,19 @@ fn from_hf(c: HfDecoderConfig, arch_id: &str) -> Result<QwenConfig, String> {
         return Err("config.json: `use_sliding_window: true` (windowed attention) is not implemented by this decoder".into());
     }
     let rope_scaling = model::rope_scaling::RopeScaling::from_config(c.rope_scaling.as_ref().unwrap_or(&serde_json::Value::Null)).map_err(|e| format!("config.json: {e}"))?;
+    let n_heads = c.num_attention_heads.unwrap_or(d.heads);
     let cfg = QwenConfig {
-        vocab: c.vocab_size,
+        vocab: c.vocab_size.unwrap_or(d.vocab),
         block_size: IMPORT_BLOCK_SIZE,
-        n_layers: c.num_hidden_layers,
-        d_model: c.hidden_size,
-        n_heads: c.num_attention_heads,
-        n_kv_heads: c.num_key_value_heads.unwrap_or(c.num_attention_heads),
-        head_dim: c.head_dim.unwrap_or(0), // 0 -> derived in with_defaults
-        d_ff: c.intermediate_size,
+        n_layers: c.num_hidden_layers.unwrap_or(d.layers),
+        d_model: c.hidden_size.unwrap_or(d.hidden),
+        n_heads,
+        n_kv_heads: c.num_key_value_heads.unwrap_or(n_heads),
+        head_dim: c.head_dim.or(d.head_dim).unwrap_or(0), // 0 -> derived in with_defaults
+        d_ff: c.intermediate_size.unwrap_or(d.ff),
         rope_theta: c.rope_theta.unwrap_or(10_000.0) as f32,
         rms_eps: c.rms_norm_eps.unwrap_or(1e-6) as f32,
-        max_position_embeddings: c.max_position_embeddings.unwrap_or(max_pos_default),
+        max_position_embeddings: c.max_position_embeddings.unwrap_or(d.max_pos),
         tie_embeddings: c.tie_word_embeddings.unwrap_or(false),
         qk_norm,
         attn_bias: qkv_bias_fixed,
@@ -310,6 +325,15 @@ mod tests {
             "num_attention_heads":4,"vocab_size":32}"#;
         let c = decoder_config(trimmed).unwrap();
         assert_eq!((c.n_kv_heads, c.rope_theta, c.rms_eps, c.tie_embeddings, c.max_position_embeddings), (4, 10_000.0, 1e-6, false, 2048));
+        // DeepSeek-VL's `language_config`, verbatim: the shape itself comes
+        // from `LlamaConfig`'s defaults.
+        let partial = r#"{"max_position_embeddings":16384,"model_type":"llama","num_hidden_layers":30,"torch_dtype":"float16","vocab_size":102400}"#;
+        let c = decoder_config(partial).unwrap();
+        assert_eq!((c.d_model, c.d_ff, c.n_heads, c.n_kv_heads, c.head_dim), (4096, 11008, 32, 32, 128));
+        assert_eq!((c.n_layers, c.vocab, c.max_position_embeddings), (30, 102400, 16384));
+        // `Qwen3Config` fixes head_dim at 128 whatever the width.
+        let qwen3 = r#"{"architectures":["Qwen3ForCausalLM"],"hidden_size":1024,"num_attention_heads":16}"#;
+        assert_eq!(decoder_config(qwen3).unwrap().head_dim, 128);
     }
 
     #[test]
