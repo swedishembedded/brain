@@ -96,3 +96,24 @@ fn an_unknown_projector_or_an_odd_hybrid_width_is_refused() {
     let hybrid = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 1, 4, 8).unwrap();
     assert!(hybrid.with_out_dim(6).is_err(), "a one-linear hybrid's output is its two halves");
 }
+
+/// A frozen projector (inference: no gradient buffers) computes the same
+/// forward, and refuses a backward it has nowhere to accumulate into.
+#[test]
+fn a_frozen_projector_forwards_the_same_and_refuses_backward() {
+    let g = gpu_core::testgpu::dev(PROJECTOR_PIPELINES);
+    let cfg = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 6, 8).unwrap();
+    let mut rng = Rng::new(3);
+    let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
+    let x: Vec<_> = (0..2).map(|_| g.storage_init("x", &random(ROWS * 6, &mut rng))).collect();
+    let refs: Vec<&_> = x.iter().collect();
+    let run = |p: &MlpProjector| {
+        g.submit(&[], &p.forward(&g, &refs));
+        g.read(p.out(), ROWS * 8)
+    };
+    let (live, frozen) = (MlpProjector::new(&g, cfg, ROWS as u32, &weights).unwrap(), MlpProjector::new_frozen(&g, cfg, ROWS as u32, &weights).unwrap());
+    assert_eq!(run(&frozen), run(&live));
+    let d_out = g.storage(ROWS as u64 * 8);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frozen.backward(&g, &refs, &d_out, None)));
+    assert!(refused.is_err(), "a frozen projector has no gradients to accumulate");
+}

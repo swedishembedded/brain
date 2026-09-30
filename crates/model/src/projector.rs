@@ -260,6 +260,16 @@ impl MlpProjector {
     /// Upload `weights` (every [`ProjectorConfig::param_list`] name) onto
     /// `gpu`, which must register [`PROJECTOR_PIPELINES`].
     pub fn new(gpu: &Gpu, cfg: ProjectorConfig, rows: u32, weights: &HashMap<String, Vec<f32>>) -> Result<MlpProjector, String> {
+        Self::build(gpu, cfg, rows, weights, true)
+    }
+
+    /// [`Self::new`] for inference: no gradient or backward scratch is
+    /// allocated, and [`Self::backward`] refuses to run.
+    pub fn new_frozen(gpu: &Gpu, cfg: ProjectorConfig, rows: u32, weights: &HashMap<String, Vec<f32>>) -> Result<MlpProjector, String> {
+        Self::build(gpu, cfg, rows, weights, false)
+    }
+
+    fn build(gpu: &Gpu, cfg: ProjectorConfig, rows: u32, weights: &HashMap<String, Vec<f32>>, trainable: bool) -> Result<MlpProjector, String> {
         let ids = Ids::resolve(gpu, cfg.kind)?;
         let mut params = HashMap::new();
         let mut grads = HashMap::new();
@@ -269,9 +279,13 @@ impl MlpProjector {
                 return Err(format!("projector: {name} holds {} values, expected {n}", w.len()));
             }
             params.insert(name.clone(), gpu.storage_init(&name, w));
-            grads.insert(name, gpu.storage(n as u64));
+            if trainable {
+                grads.insert(name, gpu.storage(n as u64));
+            }
         }
         let e = (rows * cfg.n_embed) as u64;
+        // A frozen build's backward scratch is a placeholder word.
+        let scratch = |n: u64| gpu.storage(if trainable { n } else { 1 });
         let halves = if cfg.kind == ProjectorKind::HybridSplit { vec![gpu.storage(e / 2), gpu.storage(e / 2)] } else { Vec::new() };
         let layer = |_| gpu.storage(e);
         Ok(MlpProjector {
@@ -284,9 +298,9 @@ impl MlpProjector {
             pre: (0..cfg.depth).map(layer).collect(),
             post: (0..cfg.depth).map(layer).collect(),
             out: gpu.storage((rows * cfg.out_dim) as u64),
-            d_a: gpu.storage(e),
-            d_b: gpu.storage(e),
-            d_half: gpu.storage(e / 2),
+            d_a: scratch(e),
+            d_b: scratch(e),
+            d_half: scratch(e / 2),
         })
     }
 
@@ -372,6 +386,7 @@ impl MlpProjector {
     /// # Panics
     /// On a device that does not register the backward's kernels.
     pub fn backward(&self, g: &Gpu, inputs: &[&DeviceBuffer], d_out: &DeviceBuffer, d_inputs: Option<&[&DeviceBuffer]>) -> Vec<Step> {
+        assert!(!self.grads.is_empty(), "projector backward: this projector was built frozen (MlpProjector::new_frozen)");
         let id = self.ids.bwd.as_ref().expect("projector backward: the device does not register the backward kernels (see PROJECTOR_PIPELINES)");
         let (m, i, e) = (self.rows, self.cfg.input_dim, self.cfg.n_embed);
         let mut s = Vec::new();
