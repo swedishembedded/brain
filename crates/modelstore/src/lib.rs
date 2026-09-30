@@ -98,6 +98,37 @@ pub struct CompoundManifest {
 /// The manifest file name inside a compound model's repo directory.
 pub const MANIFEST_FILE: &str = "brain.manifest.json";
 
+/// Families with a Hugging Face `config.json` architecture but no reader for
+/// its checkpoint directory: `gpt2` is trained from scratch in brain's own
+/// layout (an HF GPT-2's Conv1D weights are transposed from it).
+pub const NO_CHECKPOINT_DIR_READER: &[&str] = &["gpt2"];
+
+/// The role a family's Hugging Face checkpoint directory plays in its
+/// manifest: `weights` for every decoder served from one, `dir` where a
+/// family composes several checkpoints out of the one directory
+/// (`deepseek2ocr`, `decide`).
+pub fn checkpoint_dir_role(family: &str) -> &'static str {
+    match family {
+        "deepseek2ocr" | "decide" => "dir",
+        _ => "weights",
+    }
+}
+
+/// The manifest describing the Hugging Face checkpoint directory `dir` - its
+/// `config.json`'s architecture mapped to a family brain serves from one,
+/// the directory itself as that family's role - or `None` for an
+/// architecture brain does not know or cannot read. What `brain pull`
+/// writes for a transformers repo, and what [`Store::local`] reads off a
+/// complete directory that has none.
+pub fn checkpoint_dir_manifest(dir: &Path, id: &str) -> Option<CompoundManifest> {
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
+    let family = plan::family_of_architecture(&plan::declared_architecture(&config)?)?;
+    if NO_CHECKPOINT_DIR_READER.contains(&family) {
+        return None;
+    }
+    Some(CompoundManifest { id: id.to_string(), family: family.to_string(), roles: BTreeMap::from([(checkpoint_dir_role(family).to_string(), ".".to_string())]) })
+}
+
 /// Why a PRESENT `brain.manifest.json` failed to resolve into a servable
 /// compound model -- distinguished from "no manifest here at all" (which
 /// [`Store::local_compound`]-style lookups report separately, not as one of
@@ -281,7 +312,9 @@ impl Store {
             Some(q) => self.local_quant(reference, &dir, q).ok_or(LocalError::NotFound),
             None => match self.local_compound(reference, &dir) {
                 Some(result) => result,
-                None => open_local(reference.clone(), dir.clone(), dir.join(BASE_WEIGHTS_FILE), Format::Safetensors).ok_or(LocalError::NotFound),
+                None => open_local(reference.clone(), dir.clone(), dir.join(BASE_WEIGHTS_FILE), Format::Safetensors)
+                    .or_else(|| self.local_checkpoint_dir(reference, &dir))
+                    .ok_or(LocalError::NotFound),
             },
         }
     }
@@ -291,7 +324,18 @@ impl Store {
             return result.ok();
         }
         let weights = dir.join(BASE_WEIGHTS_FILE);
-        open_local(reference.clone(), dir.to_path_buf(), weights, Format::Safetensors)
+        open_local(reference.clone(), dir.to_path_buf(), weights, Format::Safetensors).or_else(|| self.local_checkpoint_dir(reference, dir))
+    }
+
+    /// A complete Hugging Face checkpoint directory with no manifest - one
+    /// downloaded some other way than `brain pull` - read as the manifest
+    /// [`checkpoint_dir_manifest`] describes it. Nothing is written.
+    fn local_checkpoint_dir(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
+        if !inventory::hf_checkpoint_is_complete(dir) {
+            return None;
+        }
+        let manifest = checkpoint_dir_manifest(dir, &format!("{}/{}", reference.vendor(), reference.repo()))?;
+        self.compound_from(reference, dir, &manifest, dir.join("config.json"))?.ok()
     }
 
     /// A [`CompoundManifest`]-described model: tried before the single-file
@@ -316,6 +360,12 @@ impl Store {
         }
         let bytes = std::fs::read(&manifest_path).ok()?;
         let manifest: CompoundManifest = serde_json::from_slice(&bytes).ok()?;
+        self.compound_from(reference, dir, &manifest, manifest_path)
+    }
+
+    /// The [`LocalModel`] `manifest` describes for `dir`, anchored at
+    /// `anchor` (the manifest file, or what stands in for one).
+    fn compound_from(&self, reference: &ModelRef, dir: &Path, manifest: &CompoundManifest, anchor: PathBuf) -> Option<Result<LocalModel, LocalError>> {
         let mut roles = BTreeMap::new();
         for (role, rel) in &manifest.roles {
             let rel_path = Path::new(rel);
@@ -333,7 +383,7 @@ impl Store {
         Some(Ok(LocalModel {
             reference: reference.clone(),
             dir: dir.to_path_buf(),
-            weights: manifest_path,
+            weights: anchor,
             tokenizer: None,
             card: Some(card),
             format: Format::Compound,
@@ -528,6 +578,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         Store::new(dir)
+    }
+
+    /// A checkpoint downloaded some other way than `brain pull` - a complete
+    /// Hugging Face directory with no manifest - is local exactly as the
+    /// manifest `brain pull` would have written describes it, and a repo
+    /// missing a declared shard is not local at all.
+    #[test]
+    fn a_downloaded_checkpoint_directory_is_local_without_a_manifest() {
+        let store = scratch_store("brain-modelstore-hf-dir-no-manifest");
+        let r = ModelRef::new("deepseek-ai", "tiny-coder", None);
+        let dir = store.repo_dir(&r);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), json!({"architectures": ["LlamaForCausalLM"]}).to_string()).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &[("w".to_string(), vec![2], vec![1.0, 2.0])], &json!({}), None).unwrap();
+
+        let local = store.local(&r).expect("a complete checkpoint directory is local");
+        assert_eq!(local.format, Format::Compound);
+        assert_eq!(local.roles.as_ref().unwrap()["weights"], dir);
+        assert_eq!(local.card.as_ref().unwrap().family, "llama");
+        assert!(store.scan().iter().any(|m| m.reference == r), "listed by a scan too");
+        assert!(!dir.join(MANIFEST_FILE).exists(), "nothing is written into the store");
+
+        // A shard the index declares but the directory lacks: an
+        // interrupted download, not a model.
+        std::fs::write(dir.join("model.safetensors.index.json"), json!({"weight_map": {"w": "model-00002-of-00002.safetensors"}}).to_string()).unwrap();
+        assert!(store.local(&r).is_none());
+        // An architecture brain does not know is not a local model either.
+        let other = ModelRef::new("someone", "mystery", None);
+        let odir = store.repo_dir(&other);
+        std::fs::create_dir_all(&odir).unwrap();
+        std::fs::write(odir.join("config.json"), json!({"architectures": ["MysteryForCausalLM"]}).to_string()).unwrap();
+        checkpoint::st::save_safetensors(odir.join("model.safetensors").to_str().unwrap(), &[("w".to_string(), vec![1], vec![1.0])], &json!({}), None).unwrap();
+        assert!(store.local(&other).is_none());
     }
 
     fn write_base_fixture(store: &Store, vendor: &str, repo: &str) {

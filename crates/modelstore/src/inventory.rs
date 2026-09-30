@@ -442,6 +442,14 @@ fn push_file_record(path: &Path, scan_root: &Path, kind: ArtifactKind, cache: &B
     }
 }
 
+/// Whether `dir` is a Hugging Face checkpoint directory (`config.json` plus a
+/// shard set) with every declared shard fully present - the same test the
+/// inventory's own [`ArtifactKind::HfDir`] record makes.
+pub(crate) fn hf_checkpoint_is_complete(dir: &Path) -> bool {
+    let shards = shard_filenames(dir);
+    dir.join("config.json").is_file() && !shards.is_empty() && hfdir_completeness(dir, &shards) == Completeness::Complete
+}
+
 /// The shard indexes an HF checkpoint directory may carry, safetensors first.
 const INDEX_FILES: [&str; 2] = ["model.safetensors.index.json", "pytorch_model.bin.index.json"];
 

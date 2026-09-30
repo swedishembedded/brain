@@ -395,17 +395,6 @@ fn convert_wan(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
     std::fs::write(dir.join(MANIFEST_FILE), bytes).map_err(|e| format!("{vendor}/{repo}: convert: write manifest: {e}"))
 }
 
-/// The manifest role a family's resolver reads its downloaded directory
-/// under, where that is not `weights`: `deepseek2ocr` composes four
-/// checkpoints out of one directory and calls it `dir`
-/// (`deepseek2ocr::spec::Deepseek2ocrSpec`), as does `decide`.
-///
-/// `fastvlm` and `qwen3asr` are not transformers-recipe families at all:
-/// their upstream repos ship only `vocab.json` + `merges.txt` (no
-/// `tokenizer.json`), so they need the WHOLE repo, which their own
-/// `FilesRecipe` rows in `crates/modelstore/src/recipe.rs` fetch.
-const DIRECTORY_ROLE: &[(&str, &str)] = &[("deepseek2ocr", "dir"), ("decide", "dir")];
-
 /// The original (and still only) family: an HF `transformers`-shaped repo.
 /// Every family brain serves from one reads the directory exactly as
 /// downloaded - config, tokenizer and weights (safetensors or
@@ -425,17 +414,16 @@ fn convert_transformers(store: &Store, vendor: &str, repo: &str) -> Result<(), S
     let config: serde_json::Value = serde_json::from_slice(&config_bytes).map_err(|e| format!("{vendor}/{repo}: config.json: {e}"))?;
     let arch = brain_modelstore::declared_architecture(&config).ok_or_else(|| format!("{vendor}/{repo}: config.json has no architecture"))?;
     let family = brain_modelstore::family_of_architecture(&arch).ok_or_else(|| format!("{vendor}/{repo}: unsupported architecture {arch:?}"))?;
-    // gpt2 is nanogpt-style, trained from scratch -- brain has no reader for
-    // an HF GPT-2 checkpoint (a Conv1D-transpose layout), so this fails
-    // cleanly instead of registering a model nothing can load.
-    if family == "gpt2" {
-        return Err(format!("{vendor}/{repo}: gpt2 has no HF checkpoint reader yet -- fetch and convert manually"));
+    // A family with no reader for its HF checkpoint (gpt2, trained from
+    // scratch in brain's own layout) fails cleanly instead of registering a
+    // model nothing can load.
+    if brain_modelstore::NO_CHECKPOINT_DIR_READER.contains(&family) {
+        return Err(format!("{vendor}/{repo}: {family} has no HF checkpoint reader yet -- fetch and convert manually"));
     }
     // qwen3tts's own repo (`speech_tokenizer/config.json` present) is claimed
     // by the `qwen3tts` `FilesRecipe` ahead of `TransformersRecipe` in
     // `recipes()`'s order, so `family == "qwen3tts"` never reaches here.
-    let role = DIRECTORY_ROLE.iter().find(|(f, _)| *f == family).map_or("weights", |(_, role)| *role);
-    convert_files(store, vendor, repo, family, &[(role, ".")])
+    convert_files(store, vendor, repo, family, &[(brain_modelstore::checkpoint_dir_role(family), ".")])
 }
 
 #[cfg(test)]
