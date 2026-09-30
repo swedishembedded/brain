@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use data::binio::{self, Meta};
 use model::FitControl;
 use qwen3::export::{export_hf, HfDtype, HfExport};
-use qwen3::finetune::{finetune_lora_controlled, LoraStart};
+use qwen3::finetune::{finetune_lora_controlled, LoraStart, Trained};
 use qwen3::{Dtype, QwenConfig};
 
 const VOCAB: u32 = 24;
@@ -84,6 +84,7 @@ fn an_adapter_trains_on_a_bf16_base_read_from_a_transformers_directory() {
         ..Default::default()
     };
     let (report, trained) = finetune_lora_controlled(base.to_str().unwrap(), &scratch.join("data"), &opts, 3, 6.0, &LoraStart::Fresh, FitControl::default(), Dtype::BF16).unwrap();
+    let Trained::Single(trained) = trained else { panic!("a tiny model fits one card") };
     if trained.linear_dtype() != Some(Dtype::BF16) {
         return; // no bf16 storage path on this device
     }
