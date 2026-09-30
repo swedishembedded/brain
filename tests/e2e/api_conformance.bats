@@ -50,8 +50,14 @@ setup_file() {
   export ANTHROPIC_PORT="${ANTHROPIC_PORT:-8897}"
   export OPENROUTER_PORT="${OPENROUTER_PORT:-8898}"
 
+  # An empty model store: the suite exercises the mock alone, and resolving
+  # whatever an operator has downloaded would only make startup slower.
+  export MODELS_DIR="$CONF_DIR/models"
+  mkdir -p "$MODELS_DIR"
+
   # ONE server, all three surfaces, CPU-only, backed by the mock. Record its PID.
   BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve \
+    --models-dir "$MODELS_DIR" \
     --openai "$OPENAI_PORT" \
     --anthropic "$ANTHROPIC_PORT" \
     --openrouter "$OPENROUTER_PORT" \
@@ -596,7 +602,7 @@ get_url() {
   # A SECOND server: one CPU lane, a 3s mock delay (pins the lane), a 500ms admit
   # deadline (fast shed). OpenAI surface only. Record its PID for teardown.
   BRAIN_MOCK=1 BRAIN_DEVICE=cpu BRAIN_MOCK_DELAY_MS=3000 BRAIN_ADMIT_DEADLINE_MS=500 \
-    "$BRAIN" serve --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
+    "$BRAIN" serve --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
   local pid2=$!
   echo "$pid2" > "$CONF_DIR/pid2"
 
