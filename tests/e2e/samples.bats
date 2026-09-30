@@ -262,6 +262,15 @@ run_example() {
   [ -f "$OUT/openai_client.png" ]
 }
 
+@test "samples/python/vision/deepseek-multimodal/deepseek_multimodal.py chats and draws against the mock's --openai surface" {
+  [ -n "$OPENAI_KEY" ]
+  local s="$REPO/samples/python/vision/deepseek-multimodal/deepseek_multimodal.py"
+  run_example "$s" chat --base-url "http://127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" --model brain/mock
+  [[ "$output" == *"answer: "* ]]
+  run_example "$s" draw --base-url "http://127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" --model brain/mock --out "$OUT/deepseek_multimodal.png"
+  [ -f "$OUT/deepseek_multimodal.png" ]
+}
+
 @test "samples/python/api/deepseek-chat/deepseek_chat.py runs against the mock's --openai surface" {
   [ -n "$OPENAI_KEY" ]
   run_example "$REPO/samples/python/api/deepseek-chat/deepseek_chat.py" --base-url "http://127.0.0.1:$OPENAI_PORT" --api-key "$OPENAI_KEY" --model brain/mock --question "hello there"

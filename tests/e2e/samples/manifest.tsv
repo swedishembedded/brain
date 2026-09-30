@@ -49,6 +49,7 @@ samples/shell/videogen/ltxv/_resolve_ltxv_weights.sh	skip	sourced, not run direc
 samples/shell/videogen/ltxv/text_to_video.sh	skip	direct-CLI (no D-Bus); needs real BRAIN_LTXV_{DIT,TEXT_ENCODER,VAE,AUDIO_VAE} weights (no LTX_TINY path on this one)
 samples/python/vision/deepseek-ocr/ocr_document.py	skip	needs BRAIN_DEEPSEEK_OCR_DIR (both shipped GGUFs); the mock model serves no deepseek-ai/DeepSeek-OCR generate, and a real run is minutes per token (see this sample's README)
 samples/python/vision/face-id/face_id.py	skip	needs BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR (antelopev2 scrfd + glintr100); the mock model serves no detect/embed
+samples/python/vision/deepseek-multimodal/deepseek_multimodal.py	run	--model brain/mock exercises chat with an image and images.generations at 384x384 against the shared harness server
 samples/python/vision/moondream3-caption/moondream3_caption.py	skip	hardcodes brain/moondream3 (no --model override); needs BRAIN_MOONDREAM3_WEIGHTS
 samples/python/vision/qwen3vl-caption/qwen3vl_caption.py	skip	hardcodes brain/qwen3vl (no --model override); needs BRAIN_QWEN3VL_WEIGHTS
 samples/python/vision/segment-image/segment_image.py	skip	needs BRAIN_SAM2_WEIGHTS (sam2.1_hiera_*.pt); the mock model serves no segment
