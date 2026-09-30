@@ -298,9 +298,9 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, stop: &[u32], invs:
 /// `crates/residency/src/multi.rs`' module doc).
 ///
 /// The `.gguf` comes from `qwen35::spec::Qwen35Spec`'s resolved `weights`
-/// role (see [`resolve_qwen35_gguf`]) - anywhere under the models directory,
-/// never a hardcoded machine path. Nothing resolving ⇒ not served, and this
-/// returns `None`.
+/// role (see [`resolve_qwen35_gguf`]) - anywhere under `models_dir`, the
+/// serving process's resolved models directory, never a hardcoded machine
+/// path. Nothing resolving ⇒ not served, and this returns `None`.
 ///
 /// `gpus` is `build_executor`'s own budgeted GPU list as `(index, TOTAL
 /// bytes)` and `reserved` the per-card headroom it keeps free, so what is
@@ -308,8 +308,8 @@ fn run_batch_scheduled(sched: &mut Scheduler, tok: &QwenBpe, stop: &[u32], invs:
 /// scheduler budgets against. Passing capacity (not just identity) is what
 /// lets `model::shard::plan_fewest_devices` size the split to the hardware
 /// instead of assuming matched cards.
-pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwen35::int8_gguf_resident::Qwen35GgufResident> {
-    let path = resolve_qwen35_gguf()?;
+pub fn multi_gpu_gguf_from_env(models_dir: Option<&std::path::Path>, gpus: &[(u32, u64)], reserved: u64) -> Option<qwen35::int8_gguf_resident::Qwen35GgufResident> {
+    let path = resolve_qwen35_gguf(models_dir)?;
     if gpus.is_empty() {
         eprintln!(
             "brain: {} not served (no GPU budgeted -- its weights are int8 device buffers, there is no CPU path)",
@@ -342,12 +342,12 @@ pub fn multi_gpu_gguf_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option<qwe
 /// `qwen35::spec::Qwen35Spec::classify`'s self-tokenizer fallback): naming
 /// one file must not leave `tokenizer` tied between it and whatever OTHER
 /// `qwen35` GGUF happens to share the store.
-fn resolve_qwen35_gguf() -> Option<String> {
+fn resolve_qwen35_gguf(models_dir: Option<&std::path::Path>) -> Option<String> {
     let bindings = [
         crate::resolver_cli::RoleEnv { role: "weights", var: "BRAIN_QWEN35_GGUF" },
         crate::resolver_cli::RoleEnv { role: "tokenizer", var: "BRAIN_QWEN35_GGUF" },
     ];
-    let assembly = crate::resolver_cli::served_assembly("qwen35", &qwen35::spec::Qwen35Spec, &bindings)?;
+    let assembly = crate::resolver_cli::served_assembly(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &bindings)?;
     assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()).filter(|p| p.ends_with(".gguf"))
 }
 

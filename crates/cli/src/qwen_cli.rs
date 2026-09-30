@@ -19,7 +19,7 @@
 //!                     --probes PROBES.jsonl [--anchor ANCHOR.jsonl]
 //!                     [--tokenizer TOK --max-new N]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use capability::{Blob, Invocation, Media, Progress};
 use data::rng::Rng;
@@ -670,60 +670,6 @@ fn finetune(args: &[String]) {
     train(&rest, Some(&base));
 }
 
-/// Resolve `--weights` to `(weights_file, its_directory, canonical_base_id)`
-/// -- a `vendor/repo[-QUANT]` model-store reference, a direct filesystem path
-/// to a `.safetensors` file (its sibling directory then supplies
-/// `tokenizer.json`/`tokenizer_config.json`), or the repo DIRECTORY holding
-/// one. Filesystem existence is checked FIRST: a relative path like
-/// `out/qwen.safetensors` also parses as a syntactically valid (if unlikely)
-/// `ModelRef`, so "is this a real file" must win before "is this a ref" is
-/// even considered.
-pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathBuf, String), String> {
-    let path = Path::new(base);
-    if path.is_dir() {
-        return resolve_repo_dir(path);
-    }
-    if path.is_file() {
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-        // Synthesize under the "local" reserved vendor (`brain_modelref::is_reserved`)
-        // so the id is always a valid `vendor/repo` -- required a moment later to
-        // build `vendor/repo:owner:name:tag` for the adapter ref, which a bare
-        // filename (no '/') could never parse as.
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("base");
-        let id = format!("local/{stem}");
-        return Ok((path.to_path_buf(), dir, id));
-    }
-    let r = brain_modelref::ModelRef::parse(base).map_err(|e| format!("{base}: not a file, and not a valid model ref ({e})"))?;
-    let root = store_root.ok_or_else(|| "no models directory resolved (set --models-dir, BRAIN_MODELS_DIR, or HOME)".to_string())?;
-    let store = brain_modelstore::Store::new(root);
-    let local = store.local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
-    Ok((local.weights, local.dir, r.to_string()))
-}
-
-/// A repo directory -> the same `(weights, dir, id)` a `vendor/repo` ref
-/// resolves to.
-///
-/// A directory in the store IS `<root>/<vendor>/<repo>`, so splitting those
-/// three parts back out and going through [`brain_modelstore::Store`] reuses
-/// the compound/quant/manifest resolution instead of guessing at a filename.
-/// Every other weights variable names a directory; without this, the one that
-/// does not accepted a directory happily and failed with "Is a directory" at
-/// the first request, long after the operator could connect it to what they
-/// typed.
-fn resolve_repo_dir(dir: &Path) -> Result<(PathBuf, PathBuf, String), String> {
-    let unservable =
-        || format!("{}: a directory with no servable checkpoint in it", dir.display());
-
-    let repo = dir.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
-    let parent = dir.parent().ok_or_else(unservable)?;
-    let vendor = parent.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
-    let root = parent.parent().ok_or_else(unservable)?;
-
-    let r = brain_modelref::ModelRef::parse(&format!("{vendor}/{repo}")).map_err(|_| unservable())?;
-    let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(unservable)?;
-    Ok((local.weights, local.dir, r.to_string()))
-}
-
 /// `OWNER/NAME[:TAG]` -> `(owner, name, tag)`, `tag` defaulting to `"latest"`
 /// (Docker-style mutable tags -- retraining with the same `--adapter`
 /// overwrites that tag; a content-addressed tag scheme beyond `latest` is
@@ -813,7 +759,7 @@ fn finetune_lora(args: &[String]) {
     }
 
     let store_root = loader::model_dir::resolve(models_dir.as_deref());
-    let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
+    let (base_weights_path, base_dir, base_id) = match loader::model_dir::resolve_base(&base, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -1118,7 +1064,7 @@ fn eval_chat(args: &[String]) {
     }
 
     let store_root = loader::model_dir::resolve(models_dir.as_deref());
-    let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
+    let (base_weights_path, base_dir, base_id) = match loader::model_dir::resolve_base(&base, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -1288,7 +1234,7 @@ fn calib(args: &[String]) {
     }
 
     let store_root = loader::model_dir::resolve(models_dir.as_deref());
-    let (weights_path, base_dir, base_id) = match resolve_base(&weights, store_root.as_deref()) {
+    let (weights_path, base_dir, base_id) = match loader::model_dir::resolve_base(&weights, store_root.as_deref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
@@ -1550,13 +1496,6 @@ fn lora_gate(args: &[String]) {
 mod lora_finetune_cli_tests {
     use super::*;
 
-    fn tmp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-qwen-cli-lora-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     #[test]
     fn parse_adapter_spec_defaults_the_tag_to_latest() {
         assert_eq!(
@@ -1581,95 +1520,6 @@ mod lora_finetune_cli_tests {
         assert!(parse_adapter_spec("/name").is_err());
         assert!(parse_adapter_spec("owner/").is_err());
         assert!(parse_adapter_spec("owner/name:").is_err());
-    }
-
-    #[test]
-    fn resolve_base_prefers_a_real_file_over_parsing_it_as_a_model_ref() {
-        // "out/qwen.safetensors" is ALSO a syntactically valid ModelRef
-        // ("out" as vendor, "qwen" as repo) -- the file on disk must win.
-        let dir = tmp("file-path");
-        let weights = dir.join("qwen.safetensors");
-        std::fs::write(&weights, b"not a real checkpoint, just needs to exist").unwrap();
-
-        let (path, base_dir, id) = resolve_base(weights.to_str().unwrap(), None).unwrap();
-        assert_eq!(path, weights);
-        assert_eq!(base_dir, dir);
-        // Synthesized under the "local" reserved vendor so it is always a
-        // valid `vendor/repo` -- required a moment later to build
-        // `vendor/repo:owner:name:tag` for the adapter ref.
-        assert_eq!(id, "local/qwen");
-        assert!(brain_modelref::ModelRef::parse(&format!("{id}:o:n:latest")).is_ok(), "id {id:?} must combine into a parseable adapter ref");
-    }
-
-    #[test]
-    fn resolve_base_reports_neither_a_file_nor_a_valid_ref_by_name_not_a_panic() {
-        let err = resolve_base("not-a-file-and-not-a-ref-either", None).unwrap_err();
-        assert!(err.contains("not a file"), "{err}");
-    }
-
-    #[test]
-    fn resolve_base_reports_a_missing_models_dir_by_name_not_a_panic() {
-        let err = resolve_base("Qwen/Qwen3-0.6B", None).unwrap_err();
-        assert!(err.contains("no models directory"), "{err}");
-    }
-
-    #[test]
-    fn resolve_base_resolves_a_store_ref_via_the_model_store() {
-        let dir = tmp("store-ref");
-        let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
-        checkpoint::st::save_safetensors(
-            repo_dir.join("model.brain.safetensors").to_str().unwrap(),
-            &[("weight".to_string(), vec![2], vec![1.0, 2.0])],
-            &serde_json::json!({"vocab_size": 23}),
-            Some(&card),
-        )
-        .unwrap();
-        std::fs::write(repo_dir.join("tokenizer.json"), b"{}").unwrap();
-
-        let (path, base_dir, id) = resolve_base("Qwen/Qwen3-0.6B", Some(&dir)).unwrap();
-        assert_eq!(path, repo_dir.join("model.brain.safetensors"));
-        assert_eq!(base_dir, repo_dir);
-        assert_eq!(id, "Qwen/Qwen3-0.6B");
-    }
-
-    #[test]
-    fn resolve_base_resolves_a_repo_directory_to_the_checkpoint_inside_it() {
-        let dir = tmp("repo-dir");
-        let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
-        checkpoint::st::save_safetensors(
-            repo_dir.join("model.brain.safetensors").to_str().unwrap(),
-            &[("weight".to_string(), vec![2], vec![1.0, 2.0])],
-            &serde_json::json!({"vocab_size": 23}),
-            Some(&card),
-        )
-        .unwrap();
-        std::fs::write(repo_dir.join("tokenizer.json"), b"{}").unwrap();
-
-        // The directory is what `ls` and every other weights variable hand you.
-        let (path, base_dir, id) = resolve_base(repo_dir.to_str().unwrap(), None).unwrap();
-        assert_eq!(path, repo_dir.join("model.brain.safetensors"));
-        assert_eq!(base_dir, repo_dir);
-        assert_eq!(id, "Qwen/Qwen3-0.6B");
-    }
-
-    #[test]
-    fn resolve_base_reports_a_directory_with_no_checkpoint_by_name() {
-        let dir = tmp("empty-repo-dir");
-        let repo_dir = dir.join("Qwen").join("Nothing-Here");
-        std::fs::create_dir_all(&repo_dir).unwrap();
-        let err = resolve_base(repo_dir.to_str().unwrap(), None).unwrap_err();
-        assert!(err.contains("no servable checkpoint"), "{err}");
-    }
-
-    #[test]
-    fn resolve_base_reports_a_ref_not_found_in_the_store_by_name_not_a_panic() {
-        let dir = tmp("store-ref-missing");
-        let err = resolve_base("Qwen/Qwen3-0.6B", Some(&dir)).unwrap_err();
-        assert!(err.contains("not found in the model store"), "{err}");
     }
 }
 

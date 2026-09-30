@@ -42,6 +42,7 @@
 //! the residency-specific invariants layered on top (every adapter here is
 //! also listed here; no model registered through both claim paths).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use capability::{Assembly, Manifest, Provider};
@@ -59,13 +60,13 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         return catalog::resident!(crate::resident_sam2::Sam2Resident::from_env);
     }
     if model_id == scrfd::caps::MODEL {
-        return catalog::resident!(crate::resident_scrfd::ScrfdResident::from_env);
+        return catalog::resident_in_store!(crate::resident_scrfd::ScrfdResident::from_env);
     }
     if model_id == florence2::caps::MODEL {
-        return catalog::resident!(crate::resident_florence2::Florence2Resident::from_env);
+        return catalog::resident_in_store!(crate::resident_florence2::Florence2Resident::from_env);
     }
     if model_id == arcface::caps::MODEL {
-        return catalog::resident!(crate::resident_arcface::ArcFaceResident::from_env);
+        return catalog::resident_in_store!(crate::resident_arcface::ArcFaceResident::from_env);
     }
     if model_id == vqgan::caps::MODEL {
         return catalog::resident!(crate::resident_restore::VqganResident::from_env);
@@ -77,7 +78,7 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         return catalog::resident!(crate::resident_upscale::UpscaleResident::from_env);
     }
     if model_id == clip::caps::MODEL {
-        return catalog::resident!(crate::resident_clip::ClipResident::from_env);
+        return catalog::resident_in_store!(crate::resident_clip::ClipResident::from_env);
     }
     if model_id == t5encoder::caps::MODEL {
         return catalog::resident!(crate::resident_t5encoder::T5encoderResident::from_env);
@@ -92,10 +93,10 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
         return catalog::resident!(crate::resident_supir::SupirResident::from_env);
     }
     if model_id == flux1::caps::MODEL {
-        return catalog::resident!(crate::resident_flux1::Flux1Resident::from_env);
+        return catalog::resident_in_store!(crate::resident_flux1::Flux1Resident::from_env);
     }
     if model_id == pulid::caps::MODEL {
-        return catalog::resident!(crate::resident_pulid::PulidResident::from_env);
+        return catalog::resident_in_store!(crate::resident_pulid::PulidResident::from_env);
     }
     if model_id == deepseek2ocr::caps::MODEL {
         // The only MULTI-device entry: its vision tower runs on wgpu while its
@@ -242,9 +243,9 @@ fn empty_assembly() -> Assembly {
 /// but WHICH architecture a model's weights come from is a property of the
 /// entry, and a second copy of that mapping in this file is exactly what
 /// went stale before.
-fn resolved_assembly_for(model: &str) -> Option<Result<Assembly, String>> {
+fn resolved_assembly_for(models_dir: Option<&Path>, model: &str) -> Option<Result<Assembly, String>> {
     let (arch, spec) = catalog::resolver_spec_for(model)?;
-    Some(crate::resolver_cli::try_resolve(arch, spec, &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string()))
+    Some(crate::resolver_cli::try_resolve(models_dir, arch, spec, &std::collections::BTreeMap::new()).map_err(|e| e.message().to_string()))
 }
 
 /// Build a runnable provider for `model`, or say why not.
@@ -257,7 +258,9 @@ fn resolved_assembly_for(model: &str) -> Option<Result<Assembly, String>> {
 /// a listed model may legitimately fail for want of weights). Every other
 /// model still gets [`empty_assembly`], unchanged.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
-    let assembly = match resolved_assembly_for(model) {
+    // `brain do`/`brain caps` take no `--models-dir`: the resolver's own
+    // flagless answer is the store.
+    let assembly = match resolved_assembly_for(loader::model_dir::resolve(None).as_deref(), model) {
         Some(r) => r?,
         None => empty_assembly(),
     };
@@ -287,11 +290,14 @@ pub fn provider_from_assembly(model: &str, assembly: &Assembly) -> Result<Arc<dy
 /// Multi-device models are deliberately absent: they come from
 /// [`multi_residents`] instead, and registering one here as well is precisely
 /// the double-registration `Executor::register_multi`'s doc forbids.
-pub fn residents() -> Vec<Arc<dyn ResidentModel>> {
+///
+/// `models_dir` is `brain serve`'s resolved models directory, handed to
+/// every adapter that resolves its weights through the store.
+pub fn residents(models_dir: Option<&Path>) -> Vec<Arc<dyn ResidentModel>> {
     models()
         .into_iter()
         .filter_map(|e| match e.resident {
-            Some(ResidentCtor::Single(f)) => f(),
+            Some(ResidentCtor::Single(f)) => f(models_dir),
             _ => None,
         })
         .collect()
@@ -304,13 +310,13 @@ pub fn residents() -> Vec<Arc<dyn ResidentModel>> {
 /// `gpus` is `build_executor`'s budgeted `(index, TOTAL bytes)` list and
 /// `reserved` its per-card headroom, forwarded verbatim so each adapter picks
 /// its device set against the same usable capacity the scheduler budgets.
-pub fn multi_residents(gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn residency::multi::MultiDeviceResidentModel>> {
+pub fn multi_residents(models_dir: Option<&Path>, gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn residency::multi::MultiDeviceResidentModel>> {
     models()
         .into_iter()
         .filter_map(|e| match e.resident {
             Some(ResidentCtor::Multi(f)) => {
                 let model = (e.manifest)().model;
-                let assembly = match resolved_assembly_for(&model) {
+                let assembly = match resolved_assembly_for(models_dir, &model) {
                     Some(Ok(a)) => a,
                     Some(Err(err)) => {
                         eprintln!("brain: {model} not served ({err})");
@@ -483,8 +489,9 @@ mod tests {
         let catalog: std::collections::HashSet<String> = manifests().into_iter().map(|m| m.model).collect();
         // Both claim paths, or the multi-device half is exactly as unguarded as
         // the single-device half was before this test existed.
-        let single = residents().into_iter().map(|r| r.manifest().model);
-        let multi = multi_residents(&[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
+        let store = loader::model_dir::resolve(None);
+        let single = residents(store.as_deref()).into_iter().map(|r| r.manifest().model);
+        let multi = multi_residents(store.as_deref(), &[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
         for id in single.chain(multi) {
             assert!(catalog.contains(&id), "residency adapter '{id}' is not in the catalog");
         }
@@ -497,8 +504,9 @@ mod tests {
     /// this test is what says so out loud.
     #[test]
     fn no_model_is_registered_through_both_claim_paths() {
-        let single: std::collections::HashSet<String> = residents().into_iter().map(|r| r.manifest().model).collect();
-        for r in multi_residents(&[(0, 24u64 << 30)], 2u64 << 30) {
+        let store = loader::model_dir::resolve(None);
+        let single: std::collections::HashSet<String> = residents(store.as_deref()).into_iter().map(|r| r.manifest().model).collect();
+        for r in multi_residents(store.as_deref(), &[(0, 24u64 << 30)], 2u64 << 30) {
             let id = r.manifest().model;
             assert!(!single.contains(&id), "'{id}' is registered as BOTH a single- and a multi-device resident");
         }

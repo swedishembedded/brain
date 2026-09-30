@@ -82,7 +82,7 @@ Sampling (defaults from WanConfig, i.e. upstream's own generate.py defaults):
                            not at f32/f16
 
 Weights: `t2v` resolves dit/vae/text_encoder/tokenizer from the models
-directory (--models-dir / BRAIN_MODELS_DIR) - --dit/--vae/--t5/--tokenizer
+directory (--brain-data-dir / BRAIN_MODELS_DIR) - --dit/--vae/--t5/--tokenizer
 name a role outright, and an ambiguous or missing outcome prints every real
 candidate and exits rather than guessing. `finetune` still reads
 BRAIN_WAN_DIT, BRAIN_WAN_VAE, BRAIN_WAN_T5 and BRAIN_WAN_TOKENIZER.

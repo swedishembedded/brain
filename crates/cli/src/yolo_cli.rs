@@ -584,7 +584,8 @@ fn build_identity_gate(cfg: &IdentityCfg, model: &Yolo) -> (yolov8::identity::Id
         std::process::exit(1);
     });
     let dir = if cfg.arcface_dir.is_empty() {
-        crate::resident_arcface::dir_from_env().unwrap_or_else(|| {
+        // `brain yolov8` takes no `--models-dir`: the resolver's flagless store.
+        crate::resident_arcface::dir_from_env(loader::model_dir::resolve(None).as_deref()).unwrap_or_else(|| {
             eprintln!(
                 "brain yolov8 detect --identity-ref: no ArcFace weights - pass --arcface-dir <dir> \
                  (holding glintr100.onnx and scrfd_10g_bnkps.onnx) or set BRAIN_ARCFACE_DIR"

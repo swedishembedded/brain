@@ -234,7 +234,7 @@ impl ChatFineTune {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, base_id) = crate::study::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let weights_str = utf8(&weights)?;
 
         // Every file is checked against the base's own template before a
@@ -474,7 +474,7 @@ pub struct HeldOutScore {
 /// skipped for length.
 pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result<HeldOutScore> {
     let store_root = loader::model_dir::resolve(None);
-    let (weights, model_dir, _) = crate::study::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
     let weights_str = utf8(&weights)?;
     checkpoint::weightio::WeightReader::open(weights_str).map_err(|e| Error::Backend(format!("{weights_str}: {e}")))?;
     let records = read_checked(held_out, &model_dir)?;

@@ -58,7 +58,7 @@ USAGE:
 
   --weights <path>      state the checkpoint outright, as the models directory
                         scan already found it (default: resolved from the
-                        models directory - --models-dir / BRAIN_MODELS_DIR)
+                        models directory - --brain-data-dir / BRAIN_MODELS_DIR)
   --variant <tiny|large>  state the checkpoint's own size outright; checked
                         against its real trunk width, not trusted blindly
                         (default: derived from that width)

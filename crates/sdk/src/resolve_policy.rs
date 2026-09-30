@@ -71,19 +71,22 @@ pub(crate) fn resolve_with_policy(arch: &str, spec: &dyn ArchSpec, model_id: &st
         fetch(&reference, model_id)?;
     }
 
-    match loader::resolve_structured(arch, spec, overrides).map_err(Error::Backend)? {
+    // The SDK takes no models-directory argument here, so the store is the
+    // resolver's documented default (`BRAIN_MODELS_DIR`, then XDG/HOME).
+    let models_dir = loader::model_dir::resolve(None);
+    match loader::resolve_structured(models_dir.as_deref(), arch, spec, overrides).map_err(Error::Backend)? {
         Resolution::Resolved(a) => Ok(*a),
         Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),
         Resolution::Missing(m) => {
             if download_policy == loader::DownloadPolicy::Offline {
                 return Err(Error::Missing(m));
             }
-            let root = loader::model_dir::resolve(None).ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
+            let root = models_dir.clone().ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
             let store = brain_modelstore::Store::new(root);
             if store.local(&reference).is_none() {
                 fetch(&reference, model_id)?;
             }
-            match loader::resolve_structured(arch, spec, overrides).map_err(Error::Backend)? {
+            match loader::resolve_structured(models_dir.as_deref(), arch, spec, overrides).map_err(Error::Backend)? {
                 Resolution::Resolved(a) => Ok(*a),
                 Resolution::Ambiguous(a) => Err(Error::Ambiguous(a)),
                 Resolution::Missing(m) => Err(Error::Missing(m)),
@@ -117,13 +120,15 @@ pub(crate) enum Resolved2 {
 /// duplicated).
 #[cfg(any(feature = "audio", feature = "forecast", feature = "image"))]
 pub(crate) fn try_two(a_arch: &str, a_spec: &dyn ArchSpec, b_arch: &str, b_spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolved2> {
-    let a_outcome = loader::resolve_structured(a_arch, a_spec, overrides).map_err(Error::Backend)?;
+    // Same default store as `resolve_with_policy`: no models-directory argument here.
+    let models_dir = loader::model_dir::resolve(None);
+    let a_outcome = loader::resolve_structured(models_dir.as_deref(), a_arch, a_spec, overrides).map_err(Error::Backend)?;
     if matches!(a_outcome, Resolution::Resolved(_)) {
         let Resolution::Resolved(a) = a_outcome else { unreachable!("just matched") };
         return Ok(Resolved2::A(*a));
     }
 
-    let b_outcome = loader::resolve_structured(b_arch, b_spec, overrides).map_err(Error::Backend)?;
+    let b_outcome = loader::resolve_structured(models_dir.as_deref(), b_arch, b_spec, overrides).map_err(Error::Backend)?;
     if matches!(b_outcome, Resolution::Resolved(_)) {
         let Resolution::Resolved(b) = b_outcome else { unreachable!("just matched") };
         return Ok(Resolved2::B(*b));

@@ -62,8 +62,12 @@ impl Flux2Resident {
     /// ambiguous, or when the chosen DiT's own header does not sniff cleanly -
     /// a misconfigured or unreadable DiT must not silently masquerade as "not
     /// registered".
-    pub fn from_env() -> Option<Flux2Resident> {
+    ///
+    /// `models_dir` is the caller's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux2Resident> {
         let assembly = crate::resolver_cli::served_assembly(
+            models_dir,
             "flux2",
             &flux2::spec::Flux2Spec,
             &[
@@ -103,8 +107,9 @@ impl Flux2Resident {
     /// match, an unsniffable checkpoint) is logged and that ONE instance is
     /// skipped - it never drops every other real, independently-servable
     /// checkpoint with it.
-    pub fn all_from_store() -> Vec<Flux2Resident> {
+    pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<Flux2Resident> {
         crate::resolver_cli::served_assemblies(
+            models_dir,
             "flux2",
             &flux2::spec::Flux2Spec,
             &[

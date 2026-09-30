@@ -148,7 +148,7 @@ Placement:
 
 Weights (resolved from the models directory; a flag names a candidate
 outright, an ambiguous or missing outcome prints every real candidate and
-exits - --models-dir/BRAIN_MODELS_DIR names where to look):
+exits - --brain-data-dir/BRAIN_MODELS_DIR names where to look):
   --vae <path>              the causal 3D video VAE (the only required role)
   --dit <path>              real 22B DiT GGUF (only read when --dit-config
                              ltx25_22b)

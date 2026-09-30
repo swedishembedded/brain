@@ -1049,7 +1049,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             return Err(format!("flux2: {var} not found: {p}"));
         }
     }
-    let resident = crate::resident_flux2::Flux2Resident::from_env()
+    let resident = crate::resident_flux2::Flux2Resident::from_env(loader::model_dir::resolve(None).as_deref())
         .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
     // Budget ONLY the schedulable devices - same guard as `build_lfm` (its
     // ledger records a silent, order-of-magnitude llvmpipe regression from budgeting a GPU the

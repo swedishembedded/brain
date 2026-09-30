@@ -18,7 +18,8 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 - `--openrouter[:PORT]` - serve an OpenRouter-compatible HTTP API (with and
   without `/v1`, same as OpenAI).
 - `--dbus` - serve the D-Bus control surface (`com.swedishembedded.Brain1`).
-- `--models-dir DIR` - model directory to scan at startup (overrides
+- `--models-dir DIR` - the model store: scanned at startup, and the one store
+  every served model's weights are resolved from (overrides
   `BRAIN_MODELS_DIR`).
 - `--api-keys-out FILE` - also write the generated API keys to `FILE`, not
   just stdout.

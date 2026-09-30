@@ -694,40 +694,6 @@ mod tests {
     }
 }
 
-/// A base checkpoint from a path, a model directory, or a `vendor/repo`
-/// reference resolved against the store.
-///
-/// Returns `(weights file, its directory, the canonical id)`. The directory
-/// is what the tokenizer and chat template are read from, and the id is what
-/// the adapter card records as the base it derives from - which is why a
-/// bare file synthesizes a `local/<stem>` id rather than using the filename:
-/// the adapter ref grammar needs a `vendor/repo`.
-pub(crate) fn resolve_base(base: &str, store_root: Option<&Path>) -> std::result::Result<(PathBuf, PathBuf, String), String> {
-    let path = Path::new(base);
-    if path.is_dir() {
-        // A `<root>/<vendor>/<repo>` checkout: the store itself knows which
-        // file in it is servable, so the layout rule lives in one place.
-        let unservable = || format!("{}: a directory with no servable checkpoint in it", path.display());
-        let repo = path.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
-        let parent = path.parent().ok_or_else(unservable)?;
-        let vendor = parent.file_name().and_then(|s| s.to_str()).ok_or_else(unservable)?;
-        let root = parent.parent().ok_or_else(unservable)?;
-        let r = brain_modelref::ModelRef::parse(&format!("{vendor}/{repo}")).map_err(|_| unservable())?;
-        let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(unservable)?;
-        return Ok((local.weights, local.dir, r.to_string()));
-    }
-    if path.is_file() {
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("base");
-        return Ok((path.to_path_buf(), dir, format!("local/{stem}")));
-    }
-    let r = brain_modelref::ModelRef::parse(base).map_err(|e| format!("{base}: not a file, and not a valid model ref ({e})"))?;
-    let root = store_root.ok_or_else(|| "no models directory resolved (set models_dir or BRAIN_MODELS_DIR)".to_string())?;
-    let store = brain_modelstore::Store::new(root);
-    let local = store.local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
-    Ok((local.weights, local.dir, r.to_string()))
-}
-
 // ---------------------------------------------------------------------------
 // The public surface
 // ---------------------------------------------------------------------------
@@ -911,7 +877,7 @@ impl DocumentStudy {
         let anchors = vec![FactBatch::new(raw.anchors).map_err(|e| Error::Backend(format!("{}: anchors: {e}", dataset.display())))?];
 
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (base_weights, base_dir, base_id) = resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let (base_weights, base_dir, base_id) = loader::model_dir::resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let tok_path = base_dir.join("tokenizer.json");
         let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
         let tmpl = ChatTemplate::from_model_dir(&base_dir).map_err(|e| Error::Backend(e.to_string()))?;
@@ -1201,7 +1167,7 @@ impl Improve {
         }
 
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (base_weights, _base_dir, base_id) = resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let (base_weights, _base_dir, base_id) = loader::model_dir::resolve_base(&self.weights, store_root.as_deref()).map_err(Error::ModelNotFound)?;
 
         let work_dir = self.work_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("brain-improve"));
         std::fs::create_dir_all(&work_dir).map_err(|e| Error::Backend(format!("{}: {e}", work_dir.display())))?;

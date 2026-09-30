@@ -602,7 +602,7 @@ impl QwenResident {
         // inside it, and leaves a plain file path alone. Unresolvable is not
         // fatal - the path travels on verbatim so `activate` reports it against
         // the real open, which is where every other bad path is reported.
-        let (path, dir, base_id) = match crate::qwen_cli::resolve_base(&spec, None) {
+        let (path, dir, base_id) = match loader::model_dir::resolve_base(&spec, None) {
             Ok((weights, dir, id)) => (weights.to_string_lossy().into_owned(), Some(dir), Some(id)),
             Err(_) => (spec, None, None),
         };

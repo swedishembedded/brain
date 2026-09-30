@@ -115,7 +115,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // z-image (BRAIN_S3DIT_{DIT,VAE,QWEN,TOKENIZER}, else whatever the model
     // store resolves through `s3dit::spec::S3ditSpec` - see `ZImageResident::
     // from_store`'s own doc).
-    match ZImageResident::from_store() {
+    match ZImageResident::from_store(models_dir) {
         Some(z) => models.push(Arc::new(z)),
         None => eprintln!("brain: z-image not served over the scheduler (set BRAIN_S3DIT_DIT/_VAE/_QWEN/_TOKENIZER, or place a checkpoint under the model dir)"),
     }
@@ -153,7 +153,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead of
     // `BRAIN_QWEN35_{WEIGHTS,TOKENIZER}` -- same single-GPU, fp32 weights +
     // KV scope as qwen35moe above (see resident_qwen35.rs's own module doc).
-    match crate::resolver_cli::try_resolve("qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
+    match crate::resolver_cli::try_resolve(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &Default::default()) {
         Ok(assembly) => {
             if let Some(q) = crate::resident_qwen35::Qwen35Resident::from_assembly(&assembly) {
                 models.push(Arc::new(q));
@@ -172,7 +172,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // independent `dit` checkpoint the model store holds, each its own
     // resident under its real vendor/repo id): text-to-image,
     // reference-image editing, LoRA training (see resident_flux2.rs).
-    let flux2_residents = crate::resident_flux2::Flux2Resident::all_from_store();
+    let flux2_residents = crate::resident_flux2::Flux2Resident::all_from_store(models_dir);
     if flux2_residents.is_empty() {
         eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER, or place a checkpoint under the model dir)");
     }
@@ -223,7 +223,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // reason `resident_splat.rs` does. Folded into `catalog::models()` so
     // `brain caps`/`brain do` and this executor can no longer disagree about
     // their existence.
-    models.extend(crate::catalog::residents());
+    models.extend(crate::catalog::residents(models_dir));
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel — no weights, no
     // GPU — registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
@@ -243,7 +243,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // `weights` param is CLI-only convenience (`brain fastvlm caption
     // --weights ...`) that a scheduled caller must never see or be able to
     // set - see `fastvlm::caps::manifest_resident`'s doc.
-    let fastvlm_weights = match crate::resolver_cli::try_resolve("fastvlm", &fastvlm::spec::FastvlmSpec, &Default::default()) {
+    let fastvlm_weights = match crate::resolver_cli::try_resolve(models_dir, "fastvlm", &fastvlm::spec::FastvlmSpec, &Default::default()) {
         Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
         Err(e) => {
             eprintln!("brain: fastvlm serving no default checkpoint ({e})");
@@ -260,7 +260,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // from_assembly` needs the resolved `Assembly` the generic `SingleCtor`
     // shape has no room for, the same reason FLUX.2's own resident is
     // registered directly above rather than through that list.
-    match crate::resolver_cli::try_resolve("moondream3", &moondream3::spec::Moondream3Spec, &Default::default()) {
+    match crate::resolver_cli::try_resolve(models_dir, "moondream3", &moondream3::spec::Moondream3Spec, &Default::default()) {
         Ok(assembly) => {
             if let Some(m) = crate::resident_moondream3::Moondream3Resident::from_assembly(&assembly) {
                 models.push(Arc::new(m));
@@ -276,17 +276,14 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
         llava::caps::manifest_resident(),
     )));
     // brain/imgpipe: the pipeline holds no weights of its own (each stage
-    // resolves its own via BRAIN_* env vars, same as when called through
-    // `brain do`), so it is stateless from the scheduler's point of view too.
-    // Built via `catalog::provider`, not a fresh `PipelineProvider`, so this
-    // resident is guaranteed to compose the SAME stage registry `brain caps`/
-    // `brain do` see — the earlier bug (`ai-forever/Real-ESRGAN` unreachable
-    // over D-Bus/HTTP despite a working `brain do`) was exactly two lists
-    // drifting apart. `provider()` never fails for imgpipe (its ctor is
-    // `always!`-shaped), so this push is unconditional.
-    if let Ok(p) = crate::catalog::provider(imgpipe::caps::MODEL) {
-        models.push(Arc::new(ProviderResident::stateless(p)));
-    }
+    // resolves its own through the model store), so it is stateless from the
+    // scheduler's point of view too. Its stages come from
+    // `catalog::stage_registry`, the SAME registry `brain caps`/`brain do`
+    // compose (two lists drifting apart once left `ai-forever/Real-ESRGAN`
+    // unreachable over D-Bus/HTTP despite a working `brain do`), resolved
+    // against this process's `models_dir` rather than the library default,
+    // so the pipeline reads the store every other resident here reads.
+    models.push(Arc::new(ProviderResident::stateless(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(catalog::stage_registry(models_dir)))))));
 
     // Global model directory: append every discovered file as its own catalog
     // entry (keyed by model-card id), deduped against the env-gated residents
@@ -330,7 +327,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // can charge only one of them, leaving the other silently unbudgeted.
     // `catalog::residents()` deliberately excludes them, so nothing is
     // registered twice.
-    for m in crate::catalog::multi_residents(gpus, reserved) {
+    for m in crate::catalog::multi_residents(models_dir, gpus, reserved) {
         exec.register_multi(m);
     }
     // Qwen3-Omni (BRAIN_QWEN3OMNIMOE_HF_DIR): the full chat/multimodal surface, placed
@@ -357,7 +354,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // as the two residents just above it. A separate model from `brain/qwen35`
     // (the single-GPU fp32 brain-checkpoint path), not a mode of it; see
     // `resident_qwen35::multi_gpu_gguf_from_env`'s own doc.
-    if let Some(q) = crate::resident_qwen35::multi_gpu_gguf_from_env(gpus, reserved) {
+    if let Some(q) = crate::resident_qwen35::multi_gpu_gguf_from_env(models_dir, gpus, reserved) {
         exec.register_multi(Arc::new(q));
     }
     Serving { executor: exec, qwen }
@@ -531,8 +528,12 @@ impl ZImageResident {
     /// stays as it is: a lower-level escape hatch other callers (`brain perf
     /// run zimage`, the `#[ignore]`d real-checkpoint tests) still use when
     /// they deliberately want every path named outright.
-    pub fn from_store() -> Option<ZImageResident> {
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<ZImageResident> {
         let assembly = crate::resolver_cli::served_assembly(
+            models_dir,
             "s3dit",
             &s3dit::spec::S3ditSpec,
             &[
@@ -925,7 +926,7 @@ mod tests {
     }
 
     /// Milestone C's own acceptance case: with every `BRAIN_S3DIT_*` variable
-    /// unset, `ZImageResident::from_store()` must still resolve a complete
+    /// unset, `ZImageResident::from_store` must still resolve a complete
     /// assembly purely from local discovery against a synthetic model-store
     /// fixture - the whole point of routing the static resident registration
     /// through the resolver instead of [`ZImageResident::from_env`]'s
@@ -969,11 +970,7 @@ mod tests {
         for v in ["BRAIN_S3DIT_DIT", "BRAIN_S3DIT_VAE", "BRAIN_S3DIT_QWEN", "BRAIN_S3DIT_TOKENIZER"] {
             std::env::remove_var(v);
         }
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
-
-        let resident = ZImageResident::from_store();
-
-        std::env::remove_var("BRAIN_MODELS_DIR");
+        let resident = ZImageResident::from_store(Some(&root));
         std::fs::remove_dir_all(&root).ok();
 
         assert!(resident.is_some(), "must resolve purely from local discovery with no BRAIN_S3DIT_* set");

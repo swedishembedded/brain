@@ -61,6 +61,7 @@
 //! point of the type. Only residency scheduling, an inherently CLI/serving
 //! concern, is layered on top.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use brain_modelstore::resolve::{describe_ambiguity, describe_missing, ArchSpec, Resolution};
@@ -168,7 +169,14 @@ pub enum ResidentCtor {
 }
 
 /// Builds a single-device adapter, or `None` when its weights are not configured.
-pub type SingleCtor = fn() -> Option<Arc<dyn ResidentModel>>;
+///
+/// The argument is the serving process's already-resolved models directory
+/// (its own `--models-dir`, else the resolver's documented fallback), so an
+/// adapter that resolves its weights through the model store reads the SAME
+/// store as every other resolver in that process. An adapter configured
+/// purely from its own environment variables ignores it ([`resident!`]); one
+/// that consults the store takes it ([`resident_in_store!`]).
+pub type SingleCtor = fn(Option<&Path>) -> Option<Arc<dyn ResidentModel>>;
 
 /// Builds a multi-device adapter from an already-resolved [`Assembly`] (see
 /// [`ModelEntry::provider`]'s doc - the same contract, for the multi-device
@@ -273,11 +281,26 @@ pub fn role_dir(assembly: &Assembly, role: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{role}: {path} has no parent directory"))
 }
 
-/// Shorthand: a single-device residency adapter built from env.
+/// Shorthand: a single-device residency adapter built from env alone - it
+/// never consults the model store, so the models directory is ignored.
 #[macro_export]
 macro_rules! resident {
     ($ctor:path) => {
-        Some($crate::ResidentCtor::Single((|| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor))
+        Some($crate::ResidentCtor::Single(
+            (|_models_dir: Option<&std::path::Path>| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+        ))
+    };
+}
+
+/// Shorthand: a single-device residency adapter whose weights resolve
+/// through the model store: `$ctor` takes the serving process's models
+/// directory (see [`SingleCtor`]).
+#[macro_export]
+macro_rules! resident_in_store {
+    ($ctor:path) => {
+        Some($crate::ResidentCtor::Single(
+            (|models_dir: Option<&std::path::Path>| $ctor(models_dir).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+        ))
     };
 }
 
@@ -293,7 +316,7 @@ macro_rules! resident_multi {
     };
 }
 
-/// Re-exports [`always!`]/[`from_env!`]/[`resident!`]/[`resident_multi!`] need
+/// Re-exports [`always!`]/[`from_env!`]/[`resident!`]/[`resident_in_store!`]/[`resident_multi!`] need
 /// to resolve `Provider`/`ResidentModel`/`MultiDeviceResidentModel` from a
 /// caller crate (e.g. `brain-cli`) without that caller needing its own
 /// `use` of `capability`/`residency` just to invoke these macros.
@@ -693,7 +716,7 @@ pub fn models() -> Vec<ModelEntry> {
         },
         ModelEntry {
             manifest: imgpipe::caps::manifest,
-            provider: |_assembly: &Assembly| Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry()))) as Arc<dyn Provider>),
+            provider: |_assembly: &Assembly| Ok(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(stage_registry(brain_modelstore::explicit_models_root().as_deref())))) as Arc<dyn Provider>),
             spec: None,
             resident: None,
         },
@@ -779,7 +802,13 @@ pub fn models() -> Vec<ModelEntry> {
 /// with THAT model's "set BRAIN_…" message rather than a generic one from the
 /// pipeline. Built from [`models`] so a new stage-capable model does not need a
 /// second list here either.
-fn stage_registry() -> capability::Registry {
+///
+/// Each stage resolves against `models_dir`: this crate's own `imgpipe`
+/// entry passes [`brain_modelstore::explicit_models_root`] (see
+/// `resolved_assembly` for why), while a serving process that resolved its
+/// own `--models-dir` passes that, so its pipeline reads the same store as
+/// the rest of the process.
+pub fn stage_registry(models_dir: Option<&Path>) -> capability::Registry {
     let mut inner = capability::Registry::new();
     for e in models() {
         let id = (e.manifest)().model;
@@ -793,7 +822,7 @@ fn stage_registry() -> capability::Registry {
             continue;
         }
         let Some((arch, spec)) = e.spec else { continue };
-        if let Ok(a) = resolved_assembly(arch, spec) {
+        if let Ok(a) = resolved_assembly(models_dir, arch, spec) {
             if let Ok(p) = (e.provider)(&a) {
                 inner.register(p);
             }
@@ -802,36 +831,36 @@ fn stage_registry() -> capability::Registry {
     inner
 }
 
-/// A resolver-migrated model's real [`Assembly`], scanned from an EXPLICITLY
-/// opted-into models directory - `Err` carries WHY not, in words a caller can
-/// act on (no store configured, nothing published for this architecture, or
-/// more than one candidate with nothing to pick between them), because by
-/// name is how most consumers of this crate reach a model and "it did not
-/// resolve" is not an answer any of them can do anything with.
+/// A resolver-migrated model's real [`Assembly`], scanned from `models_dir` -
+/// `Err` carries WHY not, in words a caller can act on (no store configured,
+/// nothing published for this architecture, or more than one candidate with
+/// nothing to pick between them), because by name is how most consumers of
+/// this crate reach a model and "it did not resolve" is not an answer any of
+/// them can do anything with.
 ///
-/// Deliberately [`brain_modelstore::explicit_models_root`], NOT
-/// [`brain_modelstore::default_root`]: this runs as a side effect of
-/// constructing the `imgpipe` provider, which plain library use (including
-/// `cargo test`'s own `every_listed_model_is_constructible_by_name`) can
-/// reach with no CLI invocation and no opt-in in sight - falling all the way
-/// to `default_root`'s bare `$HOME` tier would scan (and best-effort
+/// This crate's own callers pass [`brain_modelstore::explicit_models_root`],
+/// deliberately NOT [`brain_modelstore::default_root`]: this runs as a side
+/// effect of constructing the `imgpipe` provider, which plain library use
+/// (including `cargo test`'s own `every_listed_model_is_constructible_by_name`)
+/// can reach with no CLI invocation and no opt-in in sight - falling all the
+/// way to `default_root`'s bare `$HOME` tier would scan (and best-effort
 /// cache-write into) a real developer's actual model store as a side effect
 /// of running the test suite. This is the base catalog's own copy of the
 /// scan/resolve shape `crate::resolver_cli::resolve_or_exit` uses in the CLI
 /// (a different crate this one may not depend on - see the module doc), kept
-/// minimal: no override flags, no `--models-dir` support, and silent rather
-/// than printing/exiting on `Ambiguous`/`Missing`, since nothing upstream of
-/// a pipeline stage can act on either outcome anyway.
+/// minimal: no override flags, and silent rather than printing/exiting on
+/// `Ambiguous`/`Missing`, since nothing upstream of a pipeline stage can act
+/// on either outcome anyway.
 ///
 /// Scans on every call, deliberately: the store is a directory a user adds
 /// files to while a long-lived process is running, so a memoized inventory
 /// would answer "no weights" for a checkpoint that is now there. The repeat
 /// cost is what `brain_modelstore::inventory`'s own on-disk cache absorbs.
-fn resolved_assembly(arch: &str, spec: &dyn ArchSpec) -> Result<Assembly, String> {
-    let Some(root) = brain_modelstore::explicit_models_root() else {
+fn resolved_assembly(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec) -> Result<Assembly, String> {
+    let Some(root) = models_dir else {
         return Err("no model store is configured (publish a data root, or set BRAIN_MODELS_DIR or XDG_DATA_HOME)".to_string());
     };
-    let records = brain_modelstore::inventory::scan(&root);
+    let records = brain_modelstore::inventory::scan(root);
     let specs: [&dyn ArchSpec; 1] = [spec];
     match brain_modelstore::resolve::resolve(arch, &records, &specs, &std::collections::BTreeMap::new()) {
         Resolution::Resolved(a) => Ok(*a),
@@ -930,7 +959,7 @@ pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {
         if (e.manifest)().model == model {
             let Some((arch, spec)) = e.spec else { return (e.provider)(&empty_assembly()) };
-            return match resolved_assembly(arch, spec) {
+            return match resolved_assembly(brain_modelstore::explicit_models_root().as_deref(), arch, spec) {
                 Ok(a) => (e.provider)(&a),
                 // Nothing resolved. The entry still gets its chance with an
                 // empty assembly, because "resolver-migrated" does not mean

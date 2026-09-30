@@ -33,7 +33,7 @@
 //! info@swedishembedded.com.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use brain_modelstore::resolve::{describe_ambiguity, Ambiguity, ArchSpec, Question, Resolution};
 use capability::Assembly;
@@ -108,7 +108,10 @@ fn describe_served_ambiguity(a: &Ambiguity, bindings: &[RoleEnv]) -> String {
 }
 
 /// Every role `spec` declares, resolved for a served model: each role's own
-/// environment variable first, then the model store.
+/// environment variable first, then the model store at `models_dir` - the
+/// directory `brain serve` resolved ONCE from its own `--models-dir` flag
+/// (falling back to `BRAIN_MODELS_DIR`, see `loader::model_dir::resolve`),
+/// so every served model reads the same store the startup scan does.
 ///
 /// Precedence, per role independently:
 /// 1. `bindings`' variable for that role, if set and non-empty - taken
@@ -139,7 +142,7 @@ fn describe_served_ambiguity(a: &Ambiguity, bindings: &[RoleEnv]) -> String {
 /// `Moondream3Resident::from_assembly`, `flux2::Paths::from_assembly`) - a
 /// resident should not need one path-extraction shape for the resolver and a
 /// different one for the environment.
-pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) -> Option<Assembly> {
+pub fn served_assembly(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) -> Option<Assembly> {
     let named: BTreeMap<String, String> =
         bindings.iter().filter_map(|b| std::env::var(b.var).ok().filter(|v| !v.is_empty()).map(|v| (b.role.to_string(), v))).collect();
     let fully_named = spec.roles().iter().filter(|r| !spec.optional_roles().contains(r)).all(|r| named.contains_key(*r));
@@ -148,7 +151,7 @@ pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) ->
         let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (named by the environment)")).collect();
         return Some(Assembly { id: format!("local/{arch}"), arch: arch.to_string(), variant: None, roles, provenance });
     }
-    let resolution = match resolve_structured(arch, spec, &named) {
+    let resolution = match resolve_structured(models_dir, arch, spec, &named) {
         Ok(r) => r,
         // No models directory at all - the resolver was never reached, and an
         // unset variable already meant "not served" here.
@@ -172,9 +175,10 @@ pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) ->
     Some(assembly)
 }
 
-/// [`served_assembly`]'s multi-instance counterpart: every real, independent
-/// candidate of `spec.instance_role()` (see that method's own doc) becomes
-/// its OWN served [`Assembly`], addressed by its real vendor/repo id.
+/// [`served_assembly`]'s multi-instance counterpart (same `models_dir`
+/// contract): every real, independent candidate of `spec.instance_role()`
+/// (see that method's own doc) becomes its OWN served [`Assembly`],
+/// addressed by its real vendor/repo id.
 /// `default_id` is used instead whenever there is exactly one instance for a
 /// reason OTHER than a real, distinct candidate - every role already named
 /// by the environment, or the store holding no real instance-role candidate
@@ -186,7 +190,7 @@ pub fn served_assembly(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv]) ->
 /// has no matching `vae` size for, say) is logged and that ONE candidate is
 /// dropped - it never takes every other real, independently-servable
 /// candidate down with it.
-pub fn served_assemblies(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], default_id: &str) -> Vec<Assembly> {
+pub fn served_assemblies(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], default_id: &str) -> Vec<Assembly> {
     let named: BTreeMap<String, String> =
         bindings.iter().filter_map(|b| std::env::var(b.var).ok().filter(|v| !v.is_empty()).map(|v| (b.role.to_string(), v))).collect();
     let fully_named = spec.roles().iter().filter(|r| !spec.optional_roles().contains(r)).all(|r| named.contains_key(*r));
@@ -195,8 +199,8 @@ pub fn served_assemblies(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], 
         let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (named by the environment)")).collect();
         return vec![Assembly { id: default_id.to_string(), arch: arch.to_string(), variant: None, roles, provenance }];
     }
-    let Some(root) = loader::model_dir::resolve(None) else { return Vec::new() };
-    let records = brain_modelstore::inventory::scan(&root);
+    let Some(root) = models_dir else { return Vec::new() };
+    let records = brain_modelstore::inventory::scan(root);
     let specs: [&dyn ArchSpec; 1] = [spec];
     let placeholder = format!("local/{arch}");
     let mut out = Vec::new();
@@ -223,8 +227,12 @@ pub fn served_assemblies(arch: &str, spec: &dyn ArchSpec, bindings: &[RoleEnv], 
 /// directory instead of returning an `Err` - neither is recoverable within a
 /// single command invocation, and resolving is never a place to guess. What
 /// every dedicated `<arch>_cli.rs` resolver-backed command calls.
+///
+/// None of those commands takes a `--models-dir` flag, so the store is the
+/// resolver's own flagless answer (`--brain-data-dir`, then
+/// `BRAIN_MODELS_DIR`, then XDG/HOME - see `loader::model_dir::resolve`).
 pub fn resolve_or_exit(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Assembly {
-    match try_resolve(arch, spec, overrides) {
+    match try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, overrides) {
         Ok(assembly) => assembly,
         Err(e) => {
             eprint!("{}", e.message());
@@ -334,7 +342,6 @@ pub fn run_generic_migrated(arch: &str, model: &str, rest: &[String]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use brain_modelstore::inventory::ArtifactRecord;
     use brain_modelstore::resolve::{AssembleOutcome, AssembledVariant, Confidence};
 
@@ -476,13 +483,11 @@ mod tests {
         let _serial = brain_testutil::env_lock();
         let root = store("unambiguous");
         let real = write_candidate(&root, "vendor", "model.safetensors");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
 
-        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("one candidate must resolve on its own");
+        let assembly = served_assembly(Some(&root), "servedtest", &ServedSpec, SERVED_BINDINGS).expect("one candidate must resolve on its own");
         assert_eq!(assembly.roles["weights"], real);
 
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -502,14 +507,12 @@ mod tests {
         std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::fs::write(&outside, b"not even a real checkpoint").unwrap();
 
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &outside);
-        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("an explicitly named path must always resolve");
+        let assembly = served_assembly(Some(&root), "servedtest", &ServedSpec, SERVED_BINDINGS).expect("an explicitly named path must always resolve");
         assert_eq!(assembly.roles["weights"], outside, "the variable must win over the store's own candidate");
         assert_ne!(assembly.roles["weights"], in_store);
 
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(outside.parent().unwrap()).ok();
     }
@@ -525,10 +528,9 @@ mod tests {
         let root = store("ambiguous");
         let a = write_candidate(&root, "vendor-a", "model.safetensors");
         let b = write_candidate(&root, "vendor-b", "model.safetensors");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
 
-        assert!(served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).is_none(), "two real candidates must not be silently collapsed to one");
+        assert!(served_assembly(Some(&root), "servedtest", &ServedSpec, SERVED_BINDINGS).is_none(), "two real candidates must not be silently collapsed to one");
 
         // The message an operator actually gets: both paths, each as the
         // assignment that would select it.
@@ -545,11 +547,10 @@ mod tests {
         // ...and naming one of them resolves it, which is what makes the
         // message actionable rather than merely informative.
         std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &a);
-        let assembly = served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).expect("naming one candidate must resolve the ambiguity");
+        let assembly = served_assembly(Some(&root), "servedtest", &ServedSpec, SERVED_BINDINGS).expect("naming one candidate must resolve the ambiguity");
         assert_eq!(assembly.roles["weights"], a);
 
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -560,10 +561,8 @@ mod tests {
     fn nothing_configured_and_nothing_found_is_silently_not_served() {
         let _serial = brain_testutil::env_lock();
         let root = store("empty");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
-        assert!(served_assembly("servedtest", &ServedSpec, SERVED_BINDINGS).is_none());
-        std::env::remove_var("BRAIN_MODELS_DIR");
+        assert!(served_assembly(Some(&root), "servedtest", &ServedSpec, SERVED_BINDINGS).is_none());
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -605,10 +604,9 @@ mod tests {
         let root = store("multi-instance");
         let a = write_candidate(&root, "vendor-a", "model.safetensors");
         let b = write_candidate(&root, "vendor-b", "model.safetensors");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
 
-        let mut got = served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
+        let mut got = served_assemblies(Some(&root), "servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
         got.sort_by(|x, y| x.id.cmp(&y.id));
         assert_eq!(got.len(), 2, "{:?}", got.iter().map(|a| &a.id).collect::<Vec<_>>());
         assert_eq!(got[0].id, "vendor-a/model");
@@ -616,7 +614,6 @@ mod tests {
         assert_eq!(got[1].id, "vendor-b/model");
         assert_eq!(got[1].roles["weights"], b);
 
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -628,16 +625,14 @@ mod tests {
         let _serial = brain_testutil::env_lock();
         let root = store("multi-instance-named");
         let named = write_candidate(&root, "vendor", "model.safetensors");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::set_var("BRAIN_SERVEDTEST_WEIGHTS", &named);
 
-        let got = served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
+        let got = served_assemblies(Some(&root), "servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest");
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].id, "default/servedtest");
         assert_eq!(got[0].roles["weights"], named);
 
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -649,12 +644,10 @@ mod tests {
     fn served_assemblies_serves_nothing_when_the_store_holds_nothing() {
         let _serial = brain_testutil::env_lock();
         let root = store("multi-instance-empty");
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
         std::env::remove_var("BRAIN_SERVEDTEST_WEIGHTS");
 
-        assert!(served_assemblies("servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest").is_empty(), "nothing on disk must serve nothing");
+        assert!(served_assemblies(Some(&root), "servedtest", &MultiServedSpec, SERVED_BINDINGS, "default/servedtest").is_empty(), "nothing on disk must serve nothing");
 
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 

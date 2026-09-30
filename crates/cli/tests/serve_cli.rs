@@ -196,9 +196,6 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
         .args(extra)
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
-        // Every resolver reads the store, not only the startup scan: an
-        // empty one keeps a real store on the machine out of the test.
-        .env("BRAIN_MODELS_DIR", &models)
         .env("BRAIN_QWEN_WEIGHTS", base)
         .env("BRAIN_RUNTIME_DIR", dir.join("run"))
         .env_remove("BRAIN_AUTO_FETCH");
@@ -267,4 +264,61 @@ fn a_pinned_adapter_cannot_also_follow_releases() {
     // The stdio controller serves no Qwen3: the flag would be ignored.
     let out = run(&["serve", "--stdio", "--adapter", "a.safetensors"]);
     assert_eq!(out.status.code(), Some(2), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `--models-dir` is the one answer to "which store" for everything `brain
+/// serve` resolves at startup, not only its own catalog scan: every
+/// architecture resolver (qwen35, FLUX.2, the catalog residents, the imaging
+/// pipeline's stages, ...) must scan the flag's directory, never the store
+/// `BRAIN_MODELS_DIR` names. A resolver that scanned the environment's store
+/// instead would, on a real machine, sit in startup inventorying a
+/// multi-terabyte store the operator explicitly pointed away from.
+///
+/// Observable through the inventory scan's own on-disk cache, which every
+/// scan writes into the directory it scanned: the environment's store must
+/// come out of startup untouched, while the flag's store must have been
+/// scanned (the positive control that proves the resolvers ran at all).
+#[test]
+fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() {
+    let dir = Scratch::new("models-dir-flag");
+    let flag_store = dir.0.join("flag-store");
+    let env_store = dir.0.join("env-store");
+    let home = dir.0.join("home");
+    for d in [&flag_store, &env_store, &home] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let ready = dir.0.join("ready");
+    let mut child = Command::new(bin())
+        .args(["serve", "--openai", "127.0.0.1:0", "--models-dir", flag_store.to_str().unwrap(), "--ready-file", ready.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env("BRAIN_DEVICE", "cpu")
+        .env("BRAIN_MODELS_DIR", &env_store)
+        .env("HOME", &home)
+        .env("BRAIN_RUNTIME_DIR", dir.0.join("run"))
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("BRAIN_AUTO_FETCH")
+        .spawn()
+        .expect("spawn brain serve");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !ready.exists() && std::time::Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let bound = ready.exists();
+    child.kill().ok();
+    let out = child.wait_with_output().expect("collect brain serve output");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(bound, "brain serve never became ready; stderr:\n{stderr}");
+
+    let cache = ".brain-inventory.json";
+    assert!(
+        !env_store.join(cache).exists(),
+        "a startup resolver scanned the BRAIN_MODELS_DIR store although --models-dir named another; stderr:\n{stderr}"
+    );
+    assert!(flag_store.join(cache).exists(), "no startup resolver scanned the --models-dir store; stderr:\n{stderr}");
 }

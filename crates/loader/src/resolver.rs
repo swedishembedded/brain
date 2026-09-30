@@ -16,6 +16,7 @@
 //! a daemon-operator idiom, not a library concern).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use brain_modelstore::resolve::{describe_ambiguity, describe_missing, ArchSpec, Resolution};
 use capability::Assembly;
@@ -63,12 +64,18 @@ impl std::fmt::Display for ResolveFailure {
     }
 }
 
-/// Resolve `arch`'s roles through the model-store resolver: scans the models
-/// directory itself ([`crate::model_dir::resolve`]) and reports every
-/// non-`Resolved` outcome as a [`ResolveFailure`] instead of exiting - for a
-/// caller that cannot exit the process on failure.
-pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, ResolveFailure> {
-    match resolve_structured(arch, spec, overrides).map_err(ResolveFailure::NoModelsDir)? {
+/// Resolve `arch`'s roles through the model-store resolver: scans
+/// `models_dir` and reports every non-`Resolved` outcome as a
+/// [`ResolveFailure`] instead of exiting - for a caller that cannot exit the
+/// process on failure.
+///
+/// `models_dir` is the ALREADY-resolved store root - what
+/// [`crate::model_dir::resolve`] answered for the caller's own `--models-dir`
+/// flag (or its absence) - never looked up again here, so the one flag a
+/// caller parsed decides the store for every resolver it reaches. `None`
+/// means no store is configured at all ([`ResolveFailure::NoModelsDir`]).
+pub fn try_resolve(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Assembly, ResolveFailure> {
+    match resolve_structured(models_dir, arch, spec, overrides).map_err(ResolveFailure::NoModelsDir)? {
         Resolution::Resolved(assembly) => Ok(*assembly),
         Resolution::Ambiguous(a) => Err(ResolveFailure::Ambiguous(describe_ambiguity(&a))),
         Resolution::Missing(m) => Err(ResolveFailure::Missing(describe_missing(&m))),
@@ -80,11 +87,13 @@ pub fn try_resolve(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String,
 /// `Ambiguous`/`Missing` outcome in its OWN vocabulary rather than in
 /// [`describe_ambiguity`]'s CLI-flag one.
 ///
-/// `Err` is the one outcome that is not a resolution at all: no models
-/// directory is configured, so the resolver was never reached.
-pub fn resolve_structured(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
-    let root = crate::model_dir::resolve(None).ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
-    let records = brain_modelstore::inventory::scan(&root);
+/// `models_dir` is the already-resolved store root, exactly as for
+/// [`try_resolve`]. `Err` is the one outcome that is not a resolution at
+/// all: no models directory is configured, so the resolver was never
+/// reached.
+pub fn resolve_structured(models_dir: Option<&Path>, arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<String, String>) -> Result<Resolution, String> {
+    let root = models_dir.ok_or_else(|| format!("{arch}: no models directory (set --models-dir, BRAIN_MODELS_DIR, or $HOME)"))?;
+    let records = brain_modelstore::inventory::scan(root);
     let specs: [&dyn ArchSpec; 1] = [spec];
     Ok(brain_modelstore::resolve::resolve(arch, &records, &specs, overrides))
 }
@@ -92,7 +101,6 @@ pub fn resolve_structured(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use brain_modelstore::inventory::ArtifactRecord;
     use brain_modelstore::resolve::{AssembleOutcome, AssembledVariant, Confidence};
 
@@ -115,18 +123,13 @@ mod tests {
         }
     }
 
-    /// No models directory configured (`BRAIN_MODELS_DIR` unset, and this
-    /// process has no `$HOME` pointed anywhere real) is the one outcome that
-    /// is not a `Resolution` at all - [`try_resolve`] must report it as
+    /// No models directory configured is the one outcome that is not a
+    /// `Resolution` at all - [`try_resolve`] must report it as
     /// [`ResolveFailure::NoModelsDir`], exit code 1, distinct from an
     /// [`ResolveFailure::Missing`] the resolver itself could have produced.
     #[test]
     fn try_resolve_reports_no_models_dir_when_none_is_configured() {
-        let _serial = brain_testutil::env_lock();
-        std::env::remove_var("BRAIN_MODELS_DIR");
-        std::env::remove_var("XDG_DATA_HOME");
-        std::env::remove_var("HOME");
-        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("no models dir must fail");
+        let err = try_resolve(None, "loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("no models dir must fail");
         assert!(matches!(err, ResolveFailure::NoModelsDir(_)));
         assert_eq!(err.exit_code(), 1);
     }
@@ -136,16 +139,13 @@ mod tests {
     /// [`ResolveFailure::Missing`] carrying [`MISSING_EXIT`].
     #[test]
     fn try_resolve_reports_missing_with_its_own_exit_code() {
-        let _serial = brain_testutil::env_lock();
         let root = std::env::temp_dir().join(format!("brain-loader-resolver-missing-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("BRAIN_MODELS_DIR", &root);
 
-        let err = try_resolve("loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("an empty store must not resolve");
+        let err = try_resolve(Some(&root), "loadertest", &OneRoleSpec, &BTreeMap::new()).expect_err("an empty store must not resolve");
         assert!(matches!(err, ResolveFailure::Missing(_)));
         assert_eq!(err.exit_code(), MISSING_EXIT);
 
-        std::env::remove_var("BRAIN_MODELS_DIR");
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -58,8 +58,11 @@ use crate::resolver_cli::RoleEnv;
 /// `brain yolov8 detect --identity-ref` builds an `ArcFaceSession` in-process
 /// to verify who each detected person is. Both find the weights the same way,
 /// here, rather than each growing its own env/store precedence rules.
-pub fn dir_from_env() -> Option<String> {
-    let assembly = crate::resolver_cli::served_assembly("arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
+///
+/// `models_dir` is the caller's resolved models directory (see
+/// `crate::resolver_cli::served_assembly`).
+pub fn dir_from_env(models_dir: Option<&std::path::Path>) -> Option<String> {
+    let assembly = crate::resolver_cli::served_assembly(models_dir, "arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
     crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)
 }
 
@@ -73,8 +76,11 @@ pub struct ArcFaceResident {
 impl ArcFaceResident {
     /// [`dir_from_env`]'s directory, checked for the released graph. `None`
     /// (not served, never a daemon startup failure) when there is none.
-    pub fn from_env() -> Option<ArcFaceResident> {
-        Self::new(dir_from_env()?)
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ArcFaceResident> {
+        Self::new(dir_from_env(models_dir)?)
     }
 
     /// Direct constructor for callers that already hold the directory (e.g.

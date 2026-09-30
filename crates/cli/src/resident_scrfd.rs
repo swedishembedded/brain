@@ -46,8 +46,11 @@ impl ScrfdResident {
     /// `None` (not served, never a daemon startup failure) when the store
     /// holds no released detector, or holds more than one and nothing says
     /// which - see `crate::resolver_cli::served_assembly`.
-    pub fn from_env() -> Option<ScrfdResident> {
-        let assembly = crate::resolver_cli::served_assembly("scrfd", &scrfd::spec::ScrfdSpec, &[RoleEnv { role: "weights", var: "BRAIN_SCRFD_DIR" }])?;
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ScrfdResident> {
+        let assembly = crate::resolver_cli::served_assembly(models_dir, "scrfd", &scrfd::spec::ScrfdSpec, &[RoleEnv { role: "weights", var: "BRAIN_SCRFD_DIR" }])?;
         Self::new(crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)?)
     }
 

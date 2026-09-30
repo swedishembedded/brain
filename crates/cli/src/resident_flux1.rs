@@ -40,8 +40,11 @@ impl Flux1Resident {
     /// `None` (not served, never a daemon startup failure) when the store
     /// holds no released FLUX.1 pipeline, or holds more than one and nothing
     /// says which - see `crate::resolver_cli::served_assembly`.
-    pub fn from_env() -> Option<Flux1Resident> {
-        let assembly = crate::resolver_cli::served_assembly("flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux1Resident> {
+        let assembly = crate::resolver_cli::served_assembly(models_dir, "flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
         Self::new(assembly.roles.get("root")?.to_string_lossy().into_owned())
     }
 

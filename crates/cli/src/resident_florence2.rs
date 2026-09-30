@@ -38,8 +38,11 @@ impl Florence2Resident {
     /// uses. `None` (not served, never a daemon startup failure) when the
     /// store holds no released checkpoint, or holds more than one and
     /// nothing says which.
-    pub fn from_env() -> Option<Florence2Resident> {
-        let assembly = crate::resolver_cli::served_assembly("florence2", &florence2::spec::Florence2Spec, &[RoleEnv { role: "weights", var: "BRAIN_FLORENCE2_DIR" }])?;
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Florence2Resident> {
+        let assembly = crate::resolver_cli::served_assembly(models_dir, "florence2", &florence2::spec::Florence2Spec, &[RoleEnv { role: "weights", var: "BRAIN_FLORENCE2_DIR" }])?;
         Self::new(assembly.roles.get("weights")?.to_string_lossy().into_owned())
     }
 

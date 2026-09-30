@@ -52,8 +52,11 @@ impl ClipResident {
     /// than OpenCLIP-bigG, so it is NOT a candidate (see
     /// `clip::spec::is_sdxl_tower_root`). A store with no SDXL release simply
     /// does not serve this model, exactly as an unset variable already meant.
-    pub fn from_env() -> Option<ClipResident> {
-        let assembly = crate::resolver_cli::served_assembly("clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ClipResident> {
+        let assembly = crate::resolver_cli::served_assembly(models_dir, "clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
         Self::new(assembly.roles.get("towers")?.to_string_lossy().into_owned())
     }
 

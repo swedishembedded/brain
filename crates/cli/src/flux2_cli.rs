@@ -259,7 +259,7 @@ const HELP: &str = "brain flux2 <cmd>
            # frozen base on the card and differentiates only the low-rank
            # factors. Which one ran is printed at the top of every run.
 Weights: both `generate` and `finetune` resolve dit/vae/text_encoder/tokenizer
-from the models directory (--models-dir / BRAIN_MODELS_DIR) -
+from the models directory (--brain-data-dir / BRAIN_MODELS_DIR) -
 --dit/--text-encoder/--variant (--variant only, on `finetune`) name a role
 outright, and an ambiguous or missing outcome prints every real candidate and
 exits rather than guessing. The BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER} variables

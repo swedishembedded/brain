@@ -48,7 +48,7 @@ use model::serve::SampleParams;
 use model::{FitOpts, Model, ModelConfig};
 use rl::reader::ModelLearner;
 
-use crate::study::{resolve_base, Qwen3, Qwen35, Qwen35Moe, StudyArch};
+use crate::study::{Qwen3, Qwen35, Qwen35Moe, StudyArch};
 use crate::{Error, Result};
 
 /// One held-out task of a capability battery: what the model is shown, and
@@ -362,7 +362,7 @@ impl ContinualReader {
 
     fn with_inputs<T>(&self, f: impl FnOnce(&Inputs) -> Result<T>) -> Result<T> {
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (base, base_dir, _) = resolve_base(&self.model, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let (base, base_dir, _) = loader::model_dir::resolve_base(&self.model, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let tok_path = base_dir.join("tokenizer.json");
         let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
 

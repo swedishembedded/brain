@@ -30,7 +30,7 @@
 
 use std::io::{BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use events::Envelope;
@@ -144,7 +144,7 @@ PROCESS LIFECYCLE
   serve.pid, serve.log and (when -d is used without --ready-file) serve.ready.
 
 SERVING OPTIONS
-  --models-dir DIR       directory scanned at startup for the served catalog
+  --models-dir DIR       the model store every served model is resolved from
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
@@ -374,8 +374,9 @@ pub fn run_serve(args: &[String]) {
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
     let mut dbus_reserve_gb: u64 = 2; // GB kept free per GPU (headroom for activations)
-    // Global model directory scanned at startup for the served-model catalog
-    // (`--models-dir`, else BRAIN_MODELS_DIR / XDG default; see model_dir::resolve).
+    // The one model store everything served reads: the startup catalog scan
+    // and every architecture resolver (`--models-dir`, else BRAIN_MODELS_DIR /
+    // XDG default; see model_dir::resolve).
     let mut models_dir: Option<String> = None;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
     // for a promoted LoRA adapter and point the served Qwen3 at it without a
@@ -625,14 +626,14 @@ pub fn run_serve(args: &[String]) {
     }
 }
 
-/// Discover schedulable compute (GPUs/NPUs/CPU RAM, narrowed by `--device`), resolve
-/// the model directory, and build the one shared residency executor that every serving
-/// surface (D-Bus + the HTTP APIs) drives.
+/// Discover schedulable compute (GPUs/NPUs/CPU RAM, narrowed by `--device`) and build
+/// the one shared residency executor that every serving surface (D-Bus + the HTTP APIs)
+/// drives, with every model resolved from `models_dir` (already resolved by `run_apis`).
 ///
 /// Returns `crate::resident::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> crate::resident::Serving {
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> crate::resident::Serving {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
@@ -741,10 +742,10 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg:
         reserve_gb,
         ram >> 30
     );
-    // Resolve the global model directory (flag > BRAIN_MODELS_DIR > XDG default);
-    // its scan appends every carded file as its own catalog entry.
-    let dir = loader::model_dir::resolve(models_dir.as_deref());
-    if let Some(d) = &dir {
+    // `models_dir` is the ONE store every resolver below reads (see
+    // `run_apis`); the catalog scan appends every carded file in it as its
+    // own catalog entry.
+    if let Some(d) = models_dir {
         // First run on a fresh install: the dir doesn't exist yet. Create it so
         // the scan is clean (an empty catalog, not an ENOENT warning) - models
         // dropped in later are picked up on the next `brain serve` with no env
@@ -754,7 +755,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>, qwen_cfg:
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, dir.as_deref(), residency::Policy::from_env(), qwen_cfg)
+    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, models_dir, residency::Policy::from_env(), qwen_cfg)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -838,25 +839,27 @@ const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 /// one per surface): `StoreSupplier`'s in-flight map is what makes concurrent
 /// requests for the same cold model share a single fetch rather than each
 /// surface racing its own download.
-fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residency::ModelSupplier>> {
+fn build_auto_fetch_supplier(models_dir: Option<&Path>) -> Option<Arc<dyn residency::ModelSupplier>> {
     if !crate::supply::auto_fetch_enabled() {
         eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch or set BRAIN_AUTO_FETCH=1 to enable on-demand fetching)");
         return None;
     }
     // The SAME models directory `build_serving_executor`'s startup scan
-    // resolved, so a freshly auto-fetched model lands exactly where a restart's
+    // reads, so a freshly auto-fetched model lands exactly where a restart's
     // scan would find it again.
-    let dir = loader::model_dir::resolve(models_dir)?;
-    let store = brain_modelstore::Store::new(dir);
+    let store = brain_modelstore::Store::new(models_dir?.to_path_buf());
     let hub: Box<dyn brain_modelstore::Hub> = Box::new(brain_modelstore::HfHub::new());
     Some(Arc::new(crate::supply::StoreSupplier::new(store, hub)))
 }
 
 fn run_apis(a: RunApis) {
-    // Captured before `build_serving_executor` below moves `a.models_dir`.
-    let models_dir_for_heal = a.models_dir.clone();
-    let supplier = build_auto_fetch_supplier(a.models_dir.as_deref());
-    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, a.models_dir, a.qwen_cfg);
+    // Resolved ONCE (`--models-dir`, else `BRAIN_MODELS_DIR`/XDG/HOME - see
+    // `loader::model_dir::resolve`) and handed to everything that reads the
+    // store - the startup scan, every architecture resolver, the auto-fetch
+    // supplier and the healer - so the flag decides the store everywhere.
+    let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
+    let supplier = build_auto_fetch_supplier(models_dir.as_deref());
+    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));
@@ -866,10 +869,8 @@ fn run_apis(a: RunApis) {
     // conversion) in the background, instead of only fixing it the next time
     // a client happens to request that exact model. `supplier` is already
     // `None` unless auto-fetch is enabled, so no separate check is needed here.
-    if let Some(sup) = &supplier {
-        if let Some(dir) = loader::model_dir::resolve(models_dir_for_heal.as_deref()) {
-            crate::supply::heal_missing_models_in_background(dir, sup.clone(), executor.clone());
-        }
+    if let (Some(sup), Some(dir)) = (&supplier, &models_dir) {
+        crate::supply::heal_missing_models_in_background(dir.clone(), sup.clone(), executor.clone());
     }
 
     let http = a.anthropic.is_some() || a.openai.is_some() || a.openrouter.is_some();
@@ -1099,17 +1100,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::env::remove_var("BRAIN_AUTO_FETCH");
         assert!(
-            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_none(),
+            super::build_auto_fetch_supplier(Some(&dir)).is_none(),
             "unset must build no supplier: fetching is opt-in"
         );
         std::env::set_var("BRAIN_AUTO_FETCH", "0");
         assert!(
-            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_none(),
+            super::build_auto_fetch_supplier(Some(&dir)).is_none(),
             "=0 must keep fetching off"
         );
         std::env::set_var("BRAIN_AUTO_FETCH", "1");
         assert!(
-            super::build_auto_fetch_supplier(Some(dir.to_str().unwrap())).is_some(),
+            super::build_auto_fetch_supplier(Some(&dir)).is_some(),
             "=1 (what --autofetch publishes) must build the supplier"
         );
         std::env::remove_var("BRAIN_AUTO_FETCH");

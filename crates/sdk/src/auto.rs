@@ -171,10 +171,13 @@ fn detect(overrides: &BTreeMap<String, String>) -> Result<Target> {
 
     let mut first_ambiguous: Option<Box<brain_modelstore::resolve::Ambiguity>> = None;
     let mut first_missing: Option<Box<brain_modelstore::resolve::Missing>> = None;
+    // The CURRENT model store: the resolver's documented default, since this
+    // entry point takes no models-directory argument.
+    let models_dir = loader::model_dir::resolve(None);
 
     macro_rules! probe {
         ($arch:expr, $spec:expr, $target:expr) => {
-            match loader::resolve_structured($arch, $spec, overrides).map_err(Error::Backend)? {
+            match loader::resolve_structured(models_dir.as_deref(), $arch, $spec, overrides).map_err(Error::Backend)? {
                 Resolution::Resolved(_) => return Ok($target),
                 Resolution::Ambiguous(a) => {
                     if first_ambiguous.is_none() {

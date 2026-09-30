@@ -57,8 +57,12 @@ impl PulidResident {
     /// `None` (not served, never a daemon startup failure) when the store
     /// cannot answer for some role and nothing named it - see
     /// `crate::resolver_cli::served_assembly`.
-    pub fn from_env() -> Option<PulidResident> {
+    ///
+    /// `models_dir` is the serving process's resolved models directory (see
+    /// `crate::resolver_cli::served_assembly`).
+    pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<PulidResident> {
         let assembly = crate::resolver_cli::served_assembly(
+            models_dir,
             "pulid",
             &pulid::spec::PulidSpec,
             &[
