@@ -140,6 +140,31 @@ pub fn source<'a>(r: &'a checkpoint::weightio::WeightReader, cfg: &QwenConfig) -
     Ok(src)
 }
 
+/// [`source`] for a decoder nested inside a composite checkpoint (a
+/// vision-language model's `language_model.*`): only the tensors under
+/// `names` are the decoder's, and every other tensor belongs to another
+/// component and is left to that component's importer. Inside the prefix the
+/// check is [`source`]'s: every tensor maps to one of `cfg`'s parameters, and
+/// every parameter is produced once at its size.
+pub fn nested_source<'a>(r: &'a checkpoint::weightio::WeightReader, names: crate::hf::HfNames, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'a>, String> {
+    use crate::hf::HfTensor;
+    let mut plan: HashMap<String, checkpoint::remap::Fetch> = HashMap::new();
+    for name in r.names() {
+        match names.to_brain(name, cfg) {
+            HfTensor::Foreign | HfTensor::Dropped => {}
+            HfTensor::Unknown => return Err(format!("import: '{name}' is under the decoder prefix '{}' but is not one of its parameters", names.prefix)),
+            HfTensor::Param(bn) => {
+                if plan.insert(bn.clone(), checkpoint::remap::Fetch::Whole(name.to_string())).is_some() {
+                    return Err(format!("import: two tensors map to {bn}"));
+                }
+            }
+        }
+    }
+    let src = checkpoint::remap::RemapSource::new(r, plan);
+    src.validate(&cfg.param_list())?;
+    Ok(src)
+}
+
 /// [`source`] owning its reader: the remapped view of a checkpoint that
 /// must outlive the scope that opened it (a resident, a cached model).
 pub fn owned_source(r: checkpoint::weightio::WeightReader, cfg: &QwenConfig) -> Result<checkpoint::remap::RemapSource<'static>, String> {
@@ -405,6 +430,53 @@ mod tests {
             .collect();
         std::fs::remove_file(dir.join("model.safetensors")).unwrap();
         checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+    }
+
+    /// A composite checkpoint (a vision-language model) nests the decoder under
+    /// its own prefix beside other components' tensors. Those are left to their
+    /// own importers; a tensor under the decoder's prefix that is not one of
+    /// its parameters is still refused.
+    #[test]
+    fn a_nested_decoder_reads_as_the_plain_checkpoint_does() {
+        use checkpoint::TensorSource;
+
+        let plain = build_hf_dir(2, false);
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(plain.join("config.json")).unwrap()).unwrap();
+        let nest = |extra: &str| {
+            let dir = plain.with_extension(format!("nested{}", extra.len()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = checkpoint::safetensors::read_model_dir(&plain)
+                .unwrap()
+                .into_iter()
+                .map(|t| (format!("language_model.{}", t.name), t.shape.iter().map(|&s| s as u64).collect(), t.data))
+                .collect();
+            tensors.push(("vision_model.patch.weight".into(), vec![3], vec![1.0, 2.0, 3.0]));
+            if !extra.is_empty() {
+                tensors.push((extra.into(), vec![1], vec![0.0]));
+            }
+            checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+            dir
+        };
+        let names = crate::hf::HfNames { prefix: "language_model.model.", head: "language_model.lm_head.weight" };
+
+        let dir = nest("");
+        let (pr, nr) = (checkpoint::weightio::WeightReader::open_hf_dir(&plain).unwrap(), checkpoint::weightio::WeightReader::open_hf_dir(&dir).unwrap());
+        let (want, got) = (source(&pr, &cfg).unwrap(), nested_source(&nr, names, &cfg).unwrap());
+        let read = |src: &dyn TensorSource, name: &str| {
+            let mut v = Vec::new();
+            assert!(src.with_tensor(name, &mut |d| v = d.to_vec()), "{name} missing");
+            v
+        };
+        for (name, _) in cfg.param_list() {
+            assert_eq!(read(&got, &name), read(&want, &name), "{name}");
+        }
+
+        let stray = nest("language_model.model.layers.0.self_attn.rotary_bogus.weight");
+        let r = checkpoint::weightio::WeightReader::open_hf_dir(&stray).unwrap();
+        assert!(nested_source(&r, names, &cfg).err().unwrap().contains("rotary_bogus"));
+        for d in [plain, dir, stray] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     /// The FLUX.2 text-encoder shape: embedding + layers `[0, end)`, no head.
