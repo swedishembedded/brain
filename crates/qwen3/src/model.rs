@@ -142,6 +142,10 @@ const RMSNORM_DX_ROWS: usize = 55;
 const ROPE_TABLE: usize = 56;
 const ROPE_TABLE_BWD: usize = 57;
 const ROPE_TABLE_AT: usize = 58;
+// The backward of `MATMUL_TILE`: the head's input gradient and its weight
+// gradient, one vocab tile at a time (`Qwen::head_bwd_steps`).
+const MATMUL_DX_TILE: usize = 59;
+const MATMUL_DW_TILE: usize = 60;
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -213,6 +217,8 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("rope_base_yarn", kernels::ROPE_BASE_YARN),
     ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
+    ("matmul_dx_tile", kernels::MATMUL_DX_TILE),
+    ("matmul_dw_tile", kernels::MATMUL_DW_TILE),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -1825,6 +1831,41 @@ impl Qwen {
         self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
     }
 
+    /// The LM head's backward over the `rows` rows of the logits gradient
+    /// `d_logits` (`[rows, vocab]`) that belong to rows `r0..` of `xn_final`
+    /// and `d_xn`: the input gradient `d_xn = d_logits · W` and, where the
+    /// head trains, `dW += d_logitsᵀ · xn_final`. A head that fits one
+    /// storage binding is two plain dispatches; a larger one (a 152k-token
+    /// vocabulary at d = 3584 is 2.18 GB of fp32 against a 2 GiB binding) is
+    /// applied a vocab tile at a time, as the forward is -
+    /// each dispatch binds only its rows of `W` (and of `dW`) and reads its
+    /// columns of `d_logits` through the full row stride.
+    fn head_bwd_steps(&self, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> Vec<Step> {
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let dw = d as u64;
+        let head = self.cfg.head_weight();
+        let x = (r0 as u64 * dw, rows as u64 * dw);
+        let tiles = self.vocab_tiles();
+        let mut s = Vec::new();
+        if tiles.len() == 1 && tiles[0] == (0, v) {
+            if self.trainable(head) {
+                let (bk, bt) = dw_kernel_bw(v, d);
+                s.push(self.gpu.dispatch_sliced(bk, &[d_logits, &self.xn_final, self.g(head)], &[(0, 0), x, (0, 0)], &[rows, d, v], bt));
+            }
+            let (bk, bt) = dx_kernel_bw(rows, d);
+            s.push(self.gpu.dispatch_sliced(bk, &[d_logits, self.w(head), &self.d_xn], &[(0, 0), (0, 0), x], &[rows, d, v, 0], bt));
+            return s;
+        }
+        for (i, &(v0, cnt)) in tiles.iter().enumerate() {
+            let tile = (v0 as u64 * dw, cnt as u64 * dw);
+            if self.trainable(head) {
+                s.push(self.gpu.step_sliced(MATMUL_DW_TILE, &[d_logits, &self.xn_final, self.g(head)], &[(0, 0), x, tile], &[rows, d, v, v0, cnt], cnt * d));
+            }
+            s.push(self.gpu.step_sliced(MATMUL_DX_TILE, &[d_logits, self.w(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, v, v0, cnt, (i > 0) as u32], rows * d));
+        }
+        s
+    }
+
     pub fn backward(&self) {
         assert!(!self.decode_only, "Qwen::backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         let n = self.b * self.t;
@@ -1845,7 +1886,6 @@ impl Qwen {
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
         let theta = c.rope_theta;
-        let head = c.head_weight();
         let b = self.b;
         let t = self.t;
         let ids = Self::ids();
@@ -1872,12 +1912,7 @@ impl Qwen {
                 Some(w) => w.hook(&self.gpu, &mut s, SCALE_ROW, &self.d_logits),
                 None => &self.d_logits,
             };
-            if self.trainable(head) {
-                let (bk, bt) = dw_kernel_bw(v, d);
-                s.push(self.gpu.dispatch(bk, &[d_logits_bw, &self.xn_final, self.g(head)], &[n, d, v], bt));
-            }
-            let (bk, bt) = dx_kernel_bw(n, d);
-            s.push(self.gpu.dispatch(bk, &[d_logits_bw, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
+            s.extend(self.head_bwd_steps(d_logits_bw, 0, n));
             let last = c.n_layers as usize;
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }

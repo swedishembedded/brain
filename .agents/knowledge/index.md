@@ -233,3 +233,4 @@ What belongs where:
 | 190 | A tokenizer hash identifies a library version, not a tokenizer | [`190-a-tokenizer-hash-is-a-library-version.md`](190-a-tokenizer-hash-is-a-library-version.md) |
 | 191 | DeepSeek-VL's processor does not normalize; each tower branch does | [`191-deepseek-vl-normalizes-per-branch.md`](191-deepseek-vl-normalizes-per-branch.md) |
 | 192 | Classifier-free guidance multiplies a quantized decoder's error | [`192-guidance-multiplies-quantization-error.md`](192-guidance-multiplies-quantization-error.md) |
+| 195 | The LM head's backward bound the whole table | [`195-the-head-backward-binds-the-whole-table.md`](195-the-head-backward-binds-the-whole-table.md) |
