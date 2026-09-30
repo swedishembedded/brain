@@ -201,9 +201,11 @@ QWEN3 SERVING TUNABLES  (which checkpoint to serve stays BRAIN_QWEN_WEIGHTS/
                          (off by default).
   --qwen-kv-offload-gb N host RAM for preempted sessions' KV, fractional
                          allowed (default 0, off).
-  --qwen-weights-int8    quantize the 7 per-layer linears to int8 (off by
-                         default) - for a checkpoint whose fp32 weights
-                         alone do not fit any card's budget.
+  --qwen-weights-int8    quantize the 7 per-layer linears to int8. The
+                         default does so for a checkpoint of 6B parameters
+                         or more, whose fp32 weights do not fit one 24 GB
+                         card.
+  --qwen-weights-fp32    keep every weight fp32, whatever the size.
   --qwen-max-prefill N   cap the chunked-prefill row count below its 512
                          default (clamped 1..=512) - shrinks the paged-
                          attention scratch buffer linearly, the single
@@ -458,7 +460,8 @@ pub fn run_serve(args: &[String]) {
             "--qwen-kv-fp32" => qwen_cfg.kv_int8 = false,
             "--qwen-kv-calib" => qwen_cfg.kv_calib_opt_in = true,
             "--qwen-kv-offload-gb" => qwen_cfg.kv_offload_gb = parsed(args, &mut i, "--qwen-kv-offload-gb"),
-            "--qwen-weights-int8" => qwen_cfg.weights_int8 = true,
+            "--qwen-weights-int8" => qwen_cfg.weights_int8 = Some(true),
+            "--qwen-weights-fp32" => qwen_cfg.weights_int8 = Some(false),
             "--qwen-max-prefill" => qwen_cfg.max_prefill_cap = parsed(args, &mut i, "--qwen-max-prefill"),
             "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),
             "--openai" => openai = Some(take_addrs(args, &mut i, 8788)),

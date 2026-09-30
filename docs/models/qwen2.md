@@ -24,12 +24,13 @@ brain serves it from those files as downloaded, at its own configuration,
 RoPE scaling included, reading each checkpoint's own tokenizer pipeline,
 chat template and stop tokens. `brain serve` serves a pulled checkpoint under
 its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
-`reasoning_content`. At fp32 a 7-8B checkpoint needs more than one 24 GB card;
-`--qwen-weights-int8` serves it on one.
+`reasoning_content`. A checkpoint of 6B parameters or more is served with
+int8 linears by default, which fits a 7-8B one on a single 24 GB card;
+`--qwen-weights-fp32` keeps it fp32 (more than one card).
 
 A llama.cpp GGUF of either serves too, straight off the file, its q/k/v
 biases and RoPE settings read from it. The quantized file is expanded to f32
-(or requantized to int8 with `--qwen-weights-int8`) as it is uploaded;
+(or requantized to int8, see above) as it is uploaded;
 serving it at its own quantization is not supported yet.
 
 Package: `brain-qwen3`.

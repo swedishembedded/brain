@@ -156,10 +156,11 @@ everything about HOW to serve it is a `brain serve` flag:
   qwen3 calib` (off by default).
 - `--qwen-kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
-- `--qwen-weights-int8` - quantize the 7 per-layer linears to int8
-  (default off). Opt in when fp32 weights alone do not fit any card's
-  budget - at the real Qwen3-8B config, this shrinks the weight term from
-  ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
+- `--qwen-weights-int8` / `--qwen-weights-fp32` - quantize the 7
+  per-layer linears to int8, or keep them fp32. Unset, a checkpoint of 6B
+  parameters or more is quantized (its fp32 weights do not fit one 24 GB
+  card) and a smaller one is not - at the real Qwen3-8B config, int8
+  shrinks the weight term from ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
   backend, or an unusual GPU) degrades to fp32 with a printed warning
   rather than failing.
 - `--qwen-max-prefill N` - cap the chunked-prefill row count below its

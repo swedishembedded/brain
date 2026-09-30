@@ -451,16 +451,30 @@ pub struct QwenServeConfig {
     pub kv_calib_opt_in: bool,
     /// `--qwen-kv-offload-gb N` (fractional allowed), default `0.0` (off).
     pub kv_offload_gb: f64,
-    /// `--qwen-weights-int8` (presence opts IN), default `false`.
-    pub weights_int8: bool,
+    /// `--qwen-weights-int8` (`Some(true)`) or `--qwen-weights-fp32`
+    /// (`Some(false)`); `None` (the default) quantizes the linears of a
+    /// checkpoint of [`INT8_WEIGHTS_FROM_PARAMS`] parameters or more, which
+    /// at fp32 does not fit one 24 GB card.
+    pub weights_int8: Option<bool>,
     /// `--qwen-max-prefill N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
 }
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: false, max_prefill_cap: 512 }
+        QwenServeConfig { ctx: None, auto_budget_bytes: None, max_batch: 16, kv_int8: true, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, max_prefill_cap: 512 }
     }
+}
+
+/// The parameter count from which a checkpoint is served with int8 linears
+/// unless the operator says otherwise: a 6-8B decoder is 24-32 GB of fp32
+/// weights, more than a 24 GB card holds.
+pub const INT8_WEIGHTS_FROM_PARAMS: u64 = 6_000_000_000;
+
+/// Whether `checkpoint`'s linears are served int8: the operator's explicit
+/// choice, else [`INT8_WEIGHTS_FROM_PARAMS`] and up.
+fn weights_int8_for(requested: Option<bool>, checkpoint: &qwen3::config::QwenConfig) -> bool {
+    requested.unwrap_or_else(|| checkpoint.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() >= INT8_WEIGHTS_FROM_PARAMS)
 }
 
 /// Context-length tiers [`QwenResident::resolve_ctx`]'s auto-sizing path
@@ -651,7 +665,12 @@ impl QwenResident {
             kv_int8_requested: cfg.kv_int8,
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
-            weights_int8_requested: cfg.weights_int8,
+            // A checkpoint that cannot be read yet keeps the operator's
+            // explicit choice or fp32; `activate` reports the real error.
+            weights_int8_requested: match qwen3::checkpoint_config(path) {
+                Ok(checkpoint) => weights_int8_for(cfg.weights_int8, &checkpoint),
+                Err(_) => cfg.weights_int8.unwrap_or(false),
+            },
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
         }
     }
@@ -674,7 +693,7 @@ impl QwenResident {
         }
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
-        let weight_bytes = if cfg.weights_int8 { weights_int8_bytes(&checkpoint_cfg) } else { weights_fp32_bytes(&checkpoint_cfg) };
+        let weight_bytes = if weights_int8_for(cfg.weights_int8, &checkpoint_cfg) { weights_int8_bytes(&checkpoint_cfg) } else { weights_fp32_bytes(&checkpoint_cfg) };
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_int8)
     }
 
@@ -1284,6 +1303,28 @@ mod tests {
     /// past the historical 512 default `pool_sizing`'s own doc comment
     /// records a real crash at a larger value; a nonsense/zero override
     /// clamps up to the minimum, not disabling prefill).
+    /// A checkpoint whose fp32 weights do not fit one card is served with
+    /// int8 linears unless the operator says otherwise; a small one stays
+    /// fp32; either flag overrides the size.
+    #[test]
+    fn a_7b_checkpoint_defaults_to_int8_weights() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-int8-default-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shaped = |name: &str, cfg: &qwen3::config::QwenConfig| {
+            let p = dir.join(name);
+            checkpoint::st::save_safetensors(p.to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0])], &cfg.to_json(), None).unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let seven_b = qwen3::config::QwenConfig { vocab: 102_400, d_model: 4096, n_layers: 30, n_heads: 32, n_kv_heads: 32, head_dim: 128, d_ff: 11_008, qk_norm: false, tie_embeddings: false, ..qwen3::config::QwenConfig::tiny() };
+        let (big, small) = (shaped("7b.safetensors", &seven_b), shaped("tiny.safetensors", &qwen3::config::QwenConfig::tiny()));
+        let card = checkpoint::st::ModelCard::new("deepseek-ai/deepseek-llm-7b-chat", "qwen");
+        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).weights_int8_requested;
+        assert!(with(&big, None), "6.9B parameters default to int8 linears");
+        assert!(!with(&small, None), "a tiny checkpoint stays fp32");
+        assert!(!with(&big, Some(false)) && with(&small, Some(true)), "the flags win over the size");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn qwen_serve_config_default_matches_every_historical_default() {
         let cfg = QwenServeConfig::default();
@@ -1292,7 +1333,7 @@ mod tests {
         assert!(cfg.kv_int8, "int8 KV must be the default");
         assert!(!cfg.kv_calib_opt_in, "calibration must default OFF");
         assert_eq!(cfg.kv_offload_gb, 0.0);
-        assert!(!cfg.weights_int8, "int8 weights must default OFF");
+        assert_eq!(cfg.weights_int8, None, "int8 weights default by size - see weights_int8_for");
         assert_eq!(cfg.max_prefill_cap, 512);
     }
 
@@ -1436,7 +1477,7 @@ mod tests {
         let fp32_resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
         let fp32_total = fp32_resident.estimate(&key).vram;
 
-        let int8_cfg = QwenServeConfig { weights_int8: true, ..QwenServeConfig::default() };
+        let int8_cfg = QwenServeConfig { weights_int8: Some(true), ..QwenServeConfig::default() };
         let int8_resident = QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), None, int8_cfg);
         let int8_total = int8_resident.estimate(&key).vram;
 
