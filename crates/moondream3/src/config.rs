@@ -34,6 +34,28 @@ impl VisionConfig {
     pub fn patch_vec(&self) -> u32 {
         3 * self.patch * self.patch
     }
+
+    /// The SigLIP tower this encoder IS, as the shared `clip` stem describes it:
+    /// one crop is one `crop_size` image, one learned position row per patch (no
+    /// class token), LayerNorm eps 1e-6, and the reference's `gelu_approx` -
+    /// the tanh GELU, which is what makes it Moondream's SigLIP rather than
+    /// timm's.
+    pub fn tower(&self) -> clip::config::ClipVisionConfig {
+        clip::config::ClipVisionConfig {
+            shape: gguf::deepseek_ocr_vision::ClipConfig {
+                d_model: self.dim,
+                n_layers: self.n_layers,
+                n_heads: self.n_heads,
+                ffn_hidden: self.ff_dim,
+                patch_size: self.patch,
+                image_size: self.crop_size,
+                n_positions: self.patches_per_crop(),
+                layer_norm_eps: 1e-6,
+            },
+            act: clip::config::TextAct::GeluTanh,
+            stem: clip::config::VisionStem::Siglip,
+        }
+    }
 }
 
 /// Sparse-MoE FFN (top-k GeGLU-shift experts) for the deep decoder layers.
@@ -190,6 +212,9 @@ mod tests {
         assert_eq!(v.grid(), 27); // 378 / 14
         assert_eq!(v.patches_per_crop(), 729);
         assert_eq!(v.patch_vec(), 588); // 3 · 14²
+        let t = v.tower();
+        assert_eq!((t.d_model(), t.layers(), t.heads(), t.mlp_hidden()), (1152, 27, 16, 4304));
+        assert_eq!((t.native_grid(), t.n_positions()), (27, 729));
     }
 
     /// An empty `config.json` falls back to the preview values and is

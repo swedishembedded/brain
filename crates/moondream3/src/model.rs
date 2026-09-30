@@ -8,19 +8,13 @@
 //!
 //! # The stack is built ONCE and owned
 //!
-//! This composite used to rebuild the ViT, the connector and all 24 decoder
-//! blocks from host `Vec<f32>` weights on **every forward**, because those types
-//! borrowed the `Gpu` (`SiglipEncoder<'g>`, `MoondreamBlock<'g>`, …) and a struct
-//! cannot hold both a device and something borrowing it. That is fine for a
-//! research forward and fatal for a served one: at the real preview config the
-//! decoder is 8.8 B parameters, so a per-call rebuild re-uploads ~33 GB before
-//! answering each request.
-//!
-//! Those five types now own their `DeviceBuffer`s and take `&Gpu` as a method
-//! argument - the same shape `sam1::SamEncoder` and `sam2::Sam2` already use, and
-//! the reason they can be resident while this could not. [`MoondreamModel`]
-//! therefore owns its two devices AND the built stack: weights are uploaded once,
-//! in [`MoondreamModel::new`], and dropping the model frees them.
+//! At the real preview config the decoder is 8.8 B parameters, so a stack
+//! rebuilt from host weights per call would re-upload ~33 GB before answering
+//! each request. The vision tower (`clip::model::ClipVision`, which owns its
+//! device), the connector and the decoder blocks own their `DeviceBuffer`s -
+//! the same shape `sam1::SamEncoder` and `sam2::Sam2` use - so
+//! [`MoondreamModel`] owns its two devices AND the built stack: weights are
+//! uploaded once, in [`MoondreamModel::new`], and dropping the model frees them.
 //!
 //! NB: the single-crop path is what [`MoondreamModel::forward`] runs; the global‖
 //! local overlap-multi-crop concat that widens the connector input to `2·dim` is
@@ -28,11 +22,12 @@
 
 use std::collections::HashMap;
 
+use clip::model::ClipVision;
 use gpu_core::Gpu;
 
 use crate::config::MoondreamConfig;
 use crate::decoder::{MoeFfn, MoeFfn8, MoondreamBlock, MoondreamDecoder};
-use crate::vision::{Connector, SiglipEncoder};
+use crate::vision::Connector;
 
 /// How the decoder's expert weights are stored, and therefore whether the built
 /// model can be differentiated.
@@ -56,10 +51,11 @@ pub enum Precision {
 /// Owns both devices and every device buffer the stack needs, so a request runs
 /// the graph rather than rebuilding it.
 pub struct MoondreamModel {
-    vgpu: Gpu,
     dgpu: Gpu,
     cfg: MoondreamConfig,
-    enc: SiglipEncoder,
+    /// The SigLIP tower; owns the vision device the connector and the crop
+    /// stitch run on too ([`Self::vgpu`]).
+    enc: ClipVision,
     conn: Connector,
     dec: MoondreamDecoder,
     conn_in: u32,
@@ -106,15 +102,21 @@ impl MoondreamModel {
         seq_len: u32,
         precision: Precision,
     ) -> MoondreamModel {
-        let enc = SiglipEncoder::new(&vgpu, cfg.vision.clone(), &vweights);
-        let conn = Connector::new(&vgpu, &conn_weights, conn_in, cfg.proj_inner, cfg.proj_out);
+        let enc = crate::vision::encoder(vgpu, &cfg.vision, &vweights);
+        let conn = Connector::new(&enc.gpu, &conn_weights, conn_in, cfg.proj_inner, cfg.proj_out);
         let blocks = build_blocks(&dgpu, &cfg, &dweights, seq_len, precision);
         let ppc = cfg.vision.patches_per_crop();
         let mut dec = MoondreamDecoder::new(&dgpu, &dweights, blocks, seq_len, cfg.dim, cfg.vocab, ppc);
         if precision == Precision::Int8 {
             dec = dec.share_scratch(&dgpu, cfg.n_heads, cfg.ff_dim);
         }
-        MoondreamModel { vgpu, dgpu, cfg, enc, conn, dec, conn_in, seq_len, precision }
+        MoondreamModel { dgpu, cfg, enc, conn, dec, conn_in, seq_len, precision }
+    }
+
+    /// The vision device: the tower's own handle, shared by the connector and
+    /// the multi-crop pooling.
+    fn vgpu(&self) -> &Gpu {
+        &self.enc.gpu
     }
 
     /// Build on the CPU backend for both towers - the shape every checkpoint-free
@@ -207,26 +209,27 @@ impl MoondreamModel {
         self.seq_len
     }
 
-    /// Encode one crop and project it to `[patches_per_crop, proj_out]` image
-    /// embeddings - the value that crosses from the vision device to the decoder's
-    /// device as a host `Vec<f32>` (never a raw device buffer, which is what lets
-    /// the two towers sit on different backends).
-    pub fn image_embeds(&self, packed: &[f32]) -> Vec<f32> {
-        let feats = self.enc.encode(&self.vgpu, 1, packed);
-        self.conn.forward(&self.vgpu, self.cfg.vision.patches_per_crop(), &feats)
+    /// Encode one planar `[3, crop, crop]` crop and project it to
+    /// `[patches_per_crop, proj_out]` image embeddings - the value that crosses
+    /// from the vision device to the decoder's device as a host `Vec<f32>`
+    /// (never a raw device buffer, which is what lets the two towers sit on
+    /// different backends).
+    pub fn image_embeds(&self, crop: &[f32]) -> Vec<f32> {
+        let feats = self.enc.encode(1, crop);
+        self.conn.forward(self.vgpu(), self.cfg.vision.patches_per_crop(), &feats)
     }
 
     /// [`Self::image_embeds`] for the faithful overlap multi-crop input: a global
     /// crop plus `h_tiles·w_tiles` local crops, reconstructed and adaptive-pooled
     /// into the `[patches_per_crop, 2·dim]` connector input. Requires
     /// `conn_in == 2·vision.dim`.
-    pub fn image_embeds_multicrop(&self, global_packed: &[f32], locals_packed: &[f32], h_tiles: u32, w_tiles: u32) -> Vec<f32> {
+    pub fn image_embeds_multicrop(&self, global: &[f32], locals: &[f32], h_tiles: u32, w_tiles: u32) -> Vec<f32> {
         let (dim, grid, margin) = (self.cfg.vision.dim, self.cfg.vision.grid(), self.cfg.vision.overlap_margin);
         assert_eq!(self.conn_in, 2 * dim, "multi-crop connector input must be 2·vision.dim");
-        let global = self.enc.encode(&self.vgpu, 1, global_packed);
-        let locals = self.enc.encode(&self.vgpu, h_tiles * w_tiles, locals_packed);
-        let concat = crate::preprocess::build_connector_input(&self.vgpu, &global, &locals, h_tiles, w_tiles, grid, dim, margin);
-        self.conn.forward(&self.vgpu, self.cfg.vision.patches_per_crop(), &concat)
+        let global = self.enc.encode(1, global);
+        let locals = self.enc.encode(h_tiles * w_tiles, locals);
+        let concat = crate::preprocess::build_connector_input(self.vgpu(), &global, &locals, h_tiles, w_tiles, grid, dim, margin);
+        self.conn.forward(self.vgpu(), self.cfg.vision.patches_per_crop(), &concat)
     }
 
     /// Image embeddings straight from RAW HWC PIXELS - the full reference
@@ -243,8 +246,7 @@ impl MoondreamModel {
             // Single-crop connector: just the whole image at one crop's size.
             let side = v.crop_size;
             let resized = imaging::host::resize_bilinear_hwc(hwc, 3, w, h, side, side);
-            let packed = crate::preprocess::patchify_crop(&resized, side, v.patch);
-            return self.image_embeds(&packed);
+            return self.image_embeds(&crate::preprocess::crop_to_chw(&resized, side));
         }
         let (global, locals, plan) = crate::preprocess::overlap_crop_image(hwc, w, h, v);
         self.image_embeds_multicrop(&global, &locals, plan.h_tiles, plan.w_tiles)
@@ -256,7 +258,7 @@ impl MoondreamModel {
     ///
     /// The decoder has none worth using: each request has its own prompt, its
     /// own image embeddings and its own KV cache, and the block forward has no
-    /// batch dimension. The VISION tower does. `SiglipEncoder::encode` already
+    /// batch dimension. The VISION tower does. `ClipVision::encode` already
     /// takes a crop count and attends within each crop as its own span, so N
     /// requests' crops concatenate into one call - and at the released config
     /// each request is 1 global + up to 12 local crops of 729 patches, which is
@@ -268,33 +270,33 @@ impl MoondreamModel {
     pub fn image_embeds_from_pixels_batch(&self, images: &[(&[f32], u32, u32)]) -> Vec<Vec<f32>> {
         let v = &self.cfg.vision;
         let ppc = v.patches_per_crop() as usize;
-        let pv = v.patch_vec() as usize;
+        let per_crop = (3 * v.crop_size * v.crop_size) as usize;
         if self.conn_in != 2 * v.dim {
             // Single-crop connector: one crop per request, still one ViT pass.
-            let mut packed = Vec::with_capacity(images.len() * ppc * pv);
+            let mut crops = Vec::with_capacity(images.len() * per_crop);
             for &(hwc, w, h) in images {
                 let r = imaging::host::resize_bilinear_hwc(hwc, 3, w, h, v.crop_size, v.crop_size);
-                packed.extend(crate::preprocess::patchify_crop(&r, v.crop_size, v.patch));
+                crops.extend(crate::preprocess::crop_to_chw(&r, v.crop_size));
             }
-            let feats = self.enc.encode(&self.vgpu, images.len() as u32, &packed);
+            let feats = self.enc.encode(images.len() as u32, &crops);
             let dim = v.dim as usize;
             return (0..images.len())
-                .map(|i| self.conn.forward(&self.vgpu, v.patches_per_crop(), &feats[i * ppc * dim..(i + 1) * ppc * dim]))
+                .map(|i| self.conn.forward(self.vgpu(), v.patches_per_crop(), &feats[i * ppc * dim..(i + 1) * ppc * dim]))
                 .collect();
         }
 
         // Multi-crop: lay every request's global crop and local crops end to
         // end, encode once, then stitch each request back separately.
-        let mut packed: Vec<f32> = Vec::new();
+        let mut crops: Vec<f32> = Vec::new();
         let mut plans = Vec::with_capacity(images.len());
         for &(hwc, w, h) in images {
             let (global, locals, plan) = crate::preprocess::overlap_crop_image(hwc, w, h, v);
-            packed.extend_from_slice(&global);
-            packed.extend_from_slice(&locals);
+            crops.extend_from_slice(&global);
+            crops.extend_from_slice(&locals);
             plans.push(plan);
         }
         let total_crops: u32 = plans.iter().map(|p| 1 + p.h_tiles * p.w_tiles).sum();
-        let feats = self.enc.encode(&self.vgpu, total_crops, &packed);
+        let feats = self.enc.encode(total_crops, &crops);
 
         let dim = v.dim as usize;
         let (grid, margin) = (v.grid(), v.overlap_margin);
@@ -305,24 +307,25 @@ impl MoondreamModel {
             let g0 = crop0 * ppc * dim;
             let global = &feats[g0..g0 + ppc * dim];
             let locals = &feats[g0 + ppc * dim..g0 + (1 + n_local) * ppc * dim];
-            let concat = crate::preprocess::build_connector_input(&self.vgpu, global, locals, plan.h_tiles, plan.w_tiles, grid, v.dim, margin);
-            out.push(self.conn.forward(&self.vgpu, v.patches_per_crop(), &concat));
+            let concat = crate::preprocess::build_connector_input(self.vgpu(), global, locals, plan.h_tiles, plan.w_tiles, grid, v.dim, margin);
+            out.push(self.conn.forward(self.vgpu(), v.patches_per_crop(), &concat));
             crop0 += 1 + n_local;
         }
         out
     }
 
     /// End-to-end forward: encode one crop, project, splice, decode → loss.
-    /// `tokens`/`targets` length `seq_len`; `packed` is `[patches, patch_vec]`.
-    pub fn forward(&self, tokens: &[u32], targets: &[u32], packed: &[f32]) -> f32 {
-        let img_embeds = self.image_embeds(packed);
+    /// `tokens`/`targets` length `seq_len`; `crop` is one planar
+    /// `[3, crop, crop]` image.
+    pub fn forward(&self, tokens: &[u32], targets: &[u32], crop: &[f32]) -> f32 {
+        let img_embeds = self.image_embeds(crop);
         self.dec.forward(&self.dgpu, tokens, targets, &img_embeds)
     }
 
-    /// Faithful overlap multi-crop forward → loss. `global_packed` is one crop's
-    /// `[ppc, patch_vec]`; `locals_packed` is `[h·w·ppc, patch_vec]` (tile order).
-    pub fn forward_multicrop(&self, tokens: &[u32], targets: &[u32], global_packed: &[f32], locals_packed: &[f32], h_tiles: u32, w_tiles: u32) -> f32 {
-        let img_embeds = self.image_embeds_multicrop(global_packed, locals_packed, h_tiles, w_tiles);
+    /// Faithful overlap multi-crop forward → loss. `global` is one planar
+    /// `[3, crop, crop]` crop; `locals` is `h·w` of them (tile order).
+    pub fn forward_multicrop(&self, tokens: &[u32], targets: &[u32], global: &[f32], locals: &[f32], h_tiles: u32, w_tiles: u32) -> f32 {
+        let img_embeds = self.image_embeds_multicrop(global, locals, h_tiles, w_tiles);
         self.dec.forward(&self.dgpu, tokens, targets, &img_embeds)
     }
 
@@ -499,29 +502,11 @@ mod tests {
             vision: vision.clone(),
             moe: MoeConfig { num_experts: 3, start_layer: 1, top_k: 2, inner_dim: 32 },
         };
-        let ppc = vision.patches_per_crop();
-        let c = vision.dim as usize;
-        let pv = vision.patch_vec() as usize;
         let mut rng = Rng::new(seed);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
 
-        let mut vw = HashMap::new();
-        vw.insert("patch_emb.weight".into(), r(c * pv));
-        vw.insert("patch_emb.bias".into(), r(c));
-        vw.insert("pos_emb".into(), r(ppc as usize * c));
-        vw.insert("post_ln.weight".into(), vec![1.0; c]);
-        vw.insert("post_ln.bias".into(), r(c));
-        for b in 0..vision.n_layers {
-            for (leaf, sz) in [
-                ("ln1.weight", c), ("ln1.bias", c), ("attn.qkv.weight", 3 * c * c), ("attn.qkv.bias", 3 * c),
-                ("attn.proj.weight", c * c), ("attn.proj.bias", c), ("ln2.weight", c), ("ln2.bias", c),
-                ("mlp.fc1.weight", vision.ff_dim as usize * c), ("mlp.fc1.bias", vision.ff_dim as usize),
-                ("mlp.fc2.weight", c * vision.ff_dim as usize), ("mlp.fc2.bias", c),
-            ] {
-                let v = if leaf.ends_with("ln1.weight") || leaf.ends_with("ln2.weight") { vec![1.0; sz] } else { r(sz) };
-                vw.insert(format!("blocks.{b}.{leaf}"), v);
-            }
-        }
+        // The tower's weights, in the shared SigLIP stem's manifest names.
+        let vw = clip::init::init_vision_weights(&vision.tower(), seed);
 
         let mut cw = HashMap::new();
         cw.insert("fc1.weight".into(), r((cfg.proj_inner * conn_in) as usize));
@@ -589,11 +574,11 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
         let mut rng = Rng::new(21);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
         let (tokens, targets) = seq(ppc);
-        let loss = model.forward(&tokens, &targets, &packed);
+        let loss = model.forward(&tokens, &targets, &crop);
         assert!(loss.is_finite() && loss > 0.0, "moondream end-to-end loss must be finite+positive, got {loss}");
     }
 
@@ -607,8 +592,8 @@ mod tests {
         let (ht, wt) = (2u32, 2u32);
         let mut rng = Rng::new(41);
         let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
-        let global = r((ppc * vision.patch_vec()) as usize);
-        let locals = r((ht * wt * ppc * vision.patch_vec()) as usize);
+        let global = r((3 * vision.crop_size * vision.crop_size) as usize);
+        let locals = r((ht * wt * 3 * vision.crop_size * vision.crop_size) as usize);
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, 2 * vision.dim, seq_len);
         let (tokens, targets) = seq(ppc);
@@ -630,10 +615,10 @@ mod tests {
         // Room for the bos + image block + a few prompt tokens + generation.
         let seq_len = 1 + ppc + 8;
         let mut rng = Rng::new(130);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
-        let embeds = model.image_embeds(&packed);
+        let embeds = model.image_embeds(&crop);
         let mut prompt = vec![0u32];
         prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
         prompt.push(7);
@@ -654,10 +639,10 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 8;
         let mut rng = Rng::new(170);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
-        let embeds = model.image_embeds(&packed);
+        let embeds = model.image_embeds(&crop);
         let mut prompt = vec![0u32];
         prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
         prompt.push(7);
@@ -686,10 +671,10 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 10;
         let mut rng = Rng::new(410);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
-        let embeds = model.image_embeds(&packed);
+        let embeds = model.image_embeds(&crop);
         let mut prompt = vec![0u32];
         prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
         prompt.extend([7u32, 9]);
@@ -709,9 +694,9 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 8;
         let mut rng = Rng::new(430);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
-        let embeds = model.image_embeds(&packed);
+        let embeds = model.image_embeds(&crop);
         let mut prompt = vec![0u32];
         prompt.extend(std::iter::repeat_n(5u32, ppc as usize));
         prompt.push(7);
@@ -771,13 +756,13 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
         let mut rng = Rng::new(530);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let (tokens, _) = seq(ppc);
 
         let logits_on = |gpu: Option<u32>| {
             let m = MoondreamModel::new_on(gpu, cfg.clone(), vw.clone(), cw.clone(), dw.clone(), vision.dim, seq_len, Precision::Fp32)
                 .expect("build");
-            let e = m.image_embeds(&packed);
+            let e = m.image_embeds(&crop);
             m.logits(&tokens, &e)
         };
         let cpu = logits_on(None);
@@ -826,13 +811,13 @@ mod tests {
         let seq_len = 1 + ppc + 3;
         let vocab = cfg.vocab as usize;
         let mut rng = Rng::new(230);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
         let (tokens, _) = seq(ppc);
 
         let logits_at = |p: Precision| {
             let m = MoondreamModel::new_cpu_with(cfg.clone(), vw.clone(), cw.clone(), dw.clone(), vision.dim, seq_len, p);
             assert_eq!(m.precision(), p);
-            let embeds = m.image_embeds(&packed);
+            let embeds = m.image_embeds(&crop);
             m.logits(&tokens, &embeds)
         };
         let a = logits_at(Precision::Fp32);
@@ -888,12 +873,12 @@ mod tests {
         let ppc = vision.patches_per_crop();
         let seq_len = 1 + ppc + 3;
         let mut rng = Rng::new(70);
-        let packed: Vec<f32> = (0..(ppc * vision.patch_vec()) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
+        let crop: Vec<f32> = (0..(3 * vision.crop_size * vision.crop_size) as usize).map(|_| (rng.next_f32() - 0.5) * 0.2).collect();
 
         let model = MoondreamModel::new_cpu(cfg, vw, cw, dw, vision.dim, seq_len);
         let (tokens, targets) = seq(ppc);
-        let a = model.forward(&tokens, &targets, &packed);
-        let b = model.forward(&tokens, &targets, &packed);
+        let a = model.forward(&tokens, &targets, &crop);
+        let b = model.forward(&tokens, &targets, &crop);
         assert_eq!(a.to_bits(), b.to_bits(), "a reused stack must be bit-identical, got {a} then {b}");
     }
 }

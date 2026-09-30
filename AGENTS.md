@@ -423,7 +423,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     pre-norm - DeepSeek-OCR's DeepEncoder, LLaVA) and **SigLIP** (no class
     token, biased conv, post-norm, activation from the config - DeepSeek-VL's
     low-res tower and Janus-Pro via `ClipVisionConfig::siglip_large_patch16_384`
-    + `import::siglip::import_timm`). SigLIP-L/16 on
+    + `import::siglip::import_timm`, and Moondream 3's encoder). SigLIP-L/16 on
     the real DeepSeek-VL weights is parity-gated at cosine >= 0.9999 against
     `tools/goldens/siglip_dump_reference.py` (`tests/siglip_real.rs`);
     `ClipVision::encode` runs any batch over one shared block scratch.
@@ -615,7 +615,8 @@ application", "an orchestrator"). Enforced by `make check/scope`
     decoder; one `caption` action (per-token Progress) over `brain fastvlm caption` and
     D-Bus (stateless resident). fp32/int8 decoder precision; training loop
     exists (`train_smoke.rs`) but has no CLI verb. **Moondream 3**
-    (`crates/moondream3`) - SigLIP ViT with overlap multi-crop + a
+    (`crates/moondream3`) - SigLIP ViT (`crates/clip`'s `ClipVision`, SigLIP
+    stem, tanh GELU) with overlap multi-crop + a
     parallel-block sparse-MoE decoder, gradient-checked and import-covered.
     **Serving contract met**: `moondream3::caps` (one streaming `caption`
     action), `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry,
@@ -629,7 +630,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     (`generate_kv`: one masked batched prefill seeds every layer's cache, then
     `O(pos)` steps), gated token-for-token against the `O(T²)` recompute path;
     `run_batch` does REAL batching on the
-    vision half (N requests' crops through one `SiglipEncoder::encode`; the
+    vision half (N requests' crops through one `ClipVision::encode`; the
     decoder half is per-request and says why); region/point/detect heads recognized but not built; GPU-placeable,
     with the device plumbing gated by a tiny-config CPU-vs-card agreement test
     rather than by a real-weight run. No real-weight run exists in this workspace, so the composed

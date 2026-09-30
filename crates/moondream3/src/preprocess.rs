@@ -16,7 +16,6 @@
 use gpu_core::Gpu;
 
 use crate::config::VisionConfig;
-use crate::vision::ADAPTIVE_AVGPOOL2D_ID;
 
 /// Pick `(h_tiles, w_tiles)` with `h·w ≤ max_crops` best matching the image
 /// aspect ratio. Faithful port of `image_crops.py::select_tiling` - inputs are
@@ -88,7 +87,8 @@ pub fn build_connector_input(gpu: &Gpu, global: &[f32], locals: &[f32], h_tiles:
     // Device adaptive pool [1, dim, H', W'] → [1, dim, grid, grid] = [dim, ppc].
     let xb = gpu.storage_init("md.recon", &recon);
     let yb = gpu.storage((dim as u64) * (grid as u64) * (grid as u64));
-    gpu.submit(&[], &[gpu.step(ADAPTIVE_AVGPOOL2D_ID, &[&xb, &yb], &[1, dim, oh, ow, grid, grid], dim * grid * grid)]);
+    let pool = crate::vision::kernel(gpu, "adaptive_avgpool2d");
+    gpu.submit(&[], &[gpu.step(pool, &[&xb, &yb], &[1, dim, oh, ow, grid, grid], dim * grid * grid)]);
     let pooled = gpu.read(&yb, d * ppc); // [dim, ppc], channel-first
     // Channel-concat: out[p, 0:dim]=global[p], out[p, dim:2dim]=pooled[:, p].
     let mut out = vec![0.0f32; ppc * 2 * d];
@@ -203,39 +203,22 @@ pub fn plan_crops(cfg: &VisionConfig, img_h: u32, img_w: u32) -> CropPlan {
     }
 }
 
-/// Flatten one `crop_px`-square HWC crop into the `[patches_per_crop,
-/// patch_vec]` patch-major layout [`crate::vision::SiglipEncoder::encode`] takes.
-///
-/// Patch `(py, px)` occupies row `py·grid + px`, and within a row the values run
-/// `(y, x, channel)` over the patch - the same order `patch_emb.weight`'s
-/// `[dim, 3·patch²]` columns are in.
-pub fn patchify_crop(crop_hwc: &[f32], side: u32, patch: u32) -> Vec<f32> {
-    let grid = side / patch;
-    let (side, patch) = (side as usize, patch as usize);
-    let mut out = vec![0.0f32; (grid * grid) as usize * 3 * patch * patch];
-    let pv = 3 * patch * patch;
-    for py in 0..grid as usize {
-        for px in 0..grid as usize {
-            let row = (py * grid as usize + px) * pv;
-            for y in 0..patch {
-                for x in 0..patch {
-                    let src = (((py * patch + y) * side) + (px * patch + x)) * 3;
-                    let dst = row + (y * patch + x) * 3;
-                    out[dst..dst + 3].copy_from_slice(&crop_hwc[src..src + 3]);
-                }
-            }
-        }
-    }
-    out
+/// One `side`-square HWC crop as the planar `[3, side, side]` image the SigLIP
+/// tower's patch conv reads. The reference's `create_patches` flattens each
+/// patch `(y, x, channel)` against a `[dim, 3·patch²]` linear; brain applies
+/// the same weights as a conv ([`crate::import::patch_linear_to_conv`]
+/// permutes them at load), so the crop stays an image.
+pub fn crop_to_chw(crop_hwc: &[f32], side: u32) -> Vec<f32> {
+    imaging::pixels::hwc_to_chw(crop_hwc, 3, side as usize, side as usize)
 }
 
 /// Pixel-space overlap multi-crop: an HWC image in, the global crop and the
-/// `h·w` local crops out, both already patch-packed for the ViT.
+/// `h·w` local crops out, both planar CHW for the ViT.
 ///
-/// Returns `(global_packed, locals_packed, plan)`. `global_packed` is one
-/// crop's `[ppc, patch_vec]` (the whole image resized to `crop_size`);
-/// `locals_packed` is `[h·w·ppc, patch_vec]` in `(tile_y, tile_x)` order, which
-/// is the order [`reconstruct_from_crops`] stitches them back in.
+/// Returns `(global, locals, plan)`. `global` is one `[3, crop, crop]` crop
+/// (the whole image resized to `crop_size`); `locals` is `h·w` of them in
+/// `(tile_y, tile_x)` order, which is the order [`reconstruct_from_crops`]
+/// stitches them back in.
 ///
 /// The resize is the shared `imaging::host::resize_bilinear_hwc`, not a local
 /// sampler - `crates/imaging` exists because five copies of that loop did not
@@ -246,7 +229,7 @@ pub fn overlap_crop_image(hwc: &[f32], img_w: u32, img_h: u32, cfg: &VisionConfi
     let side = cfg.crop_size;
 
     // The global view is the whole image at one crop's resolution.
-    let global = patchify_crop(&imaging::host::resize_bilinear_hwc(hwc, 3, img_w, img_h, side, side), side, cfg.patch);
+    let global = crop_to_chw(&imaging::host::resize_bilinear_hwc(hwc, 3, img_w, img_h, side, side), side);
 
     // Locals are cut from the image resized so the crop lattice lands exactly.
     let big = imaging::host::resize_bilinear_hwc(hwc, 3, img_w, img_h, plan.resized_w, plan.resized_h);
@@ -260,7 +243,7 @@ pub fn overlap_crop_image(hwc: &[f32], img_w: u32, img_h: u32, cfg: &VisionConfi
                 let dst = (y * side) as usize * 3;
                 crop[dst..dst + (side * 3) as usize].copy_from_slice(&big[src..src + (side * 3) as usize]);
             }
-            locals.extend(patchify_crop(&crop, side, cfg.patch));
+            locals.extend(crop_to_chw(&crop, side));
         }
     }
     (global, locals, plan)
@@ -305,40 +288,26 @@ mod crop_tests {
         }
     }
 
-    /// Shapes out of `overlap_crop_image` are exactly what `SiglipEncoder::encode`
-    /// takes, and the tile count matches the plan.
+    /// Shapes out of `overlap_crop_image` are exactly what the tower's `encode`
+    /// takes (`[n, 3, crop, crop]`), the tile count matches the plan, and the
+    /// crops are planar: the global crop's first plane is the resized image's
+    /// channel 0.
     #[test]
-    fn cropping_produces_the_encoders_own_packed_layout() {
+    fn cropping_produces_planar_crops_for_the_tower() {
         // A tiny vision config so the test is fast; same code path.
         let v = VisionConfig { dim: 8, patch: 2, n_layers: 1, ff_dim: 16, n_heads: 2, crop_size: 8, max_crops: 4, overlap_margin: 1 };
         let (w, h) = (13u32, 9u32);
         let img: Vec<f32> = (0..(w * h * 3) as usize).map(|i| (i % 17) as f32 / 17.0).collect();
         let (global, locals, plan) = overlap_crop_image(&img, w, h, &v);
-        let (ppc, pv) = (v.patches_per_crop() as usize, v.patch_vec() as usize);
-        assert_eq!(global.len(), ppc * pv, "the global crop must be one crop's worth");
-        assert_eq!(locals.len(), (plan.h_tiles * plan.w_tiles) as usize * ppc * pv);
+        let per_crop = (3 * v.crop_size * v.crop_size) as usize;
+        assert_eq!(global.len(), per_crop, "the global crop must be one crop's worth");
+        assert_eq!(locals.len(), (plan.h_tiles * plan.w_tiles) as usize * per_crop);
         assert!(global.iter().chain(&locals).all(|v| v.is_finite()));
-    }
-
-    /// `patchify` must lay a patch out as `(y, x, channel)` within its row, and
-    /// put patch `(py, px)` at row `py·grid + px`. A transposed variant has the
-    /// same length and produces a plausible image embedding.
-    #[test]
-    fn patchify_is_patch_major_with_yxc_inside_a_patch() {
-        // 4x4 image, patch 2 -> 2x2 grid of 2x2 patches. Channel 0 carries the
-        // pixel index so each position is identifiable.
-        let side = 4u32;
-        let mut img = vec![0.0f32; (side * side * 3) as usize];
-        for i in 0..(side * side) as usize {
-            img[i * 3] = i as f32;
+        let resized = imaging::host::resize_bilinear_hwc(&img, 3, w, h, v.crop_size, v.crop_size);
+        let plane = (v.crop_size * v.crop_size) as usize;
+        for p in 0..plane {
+            assert_eq!(global[p], resized[p * 3], "global crop plane 0 is channel 0 at pixel {p}");
+            assert_eq!(global[2 * plane + p], resized[p * 3 + 2], "global crop plane 2 is channel 2 at pixel {p}");
         }
-        let out = patchify_crop(&img, side, 2);
-        let pv = 3 * 2 * 2;
-        // Patch (0,0) covers pixels 0,1,4,5 in (y,x) order.
-        assert_eq!([out[0], out[3], out[6], out[9]], [0.0, 1.0, 4.0, 5.0]);
-        // Patch (0,1) is the NEXT row of the packed output and covers 2,3,6,7.
-        assert_eq!([out[pv], out[pv + 3], out[pv + 6], out[pv + 9]], [2.0, 3.0, 6.0, 7.0]);
-        // Patch (1,0) is row 2 and covers 8,9,12,13.
-        assert_eq!([out[2 * pv], out[2 * pv + 3]], [8.0, 9.0]);
     }
 }

@@ -44,7 +44,7 @@
 //!
 //! `run_batch` is NOT overridden. Unlike Moondream 3 (whose vision tower
 //! attends within each crop independently, so N requests' crops batch into
-//! one `SiglipEncoder::encode` call), Qwen3-VL's vision tower is spliced
+//! one `ClipVision::encode` call), Qwen3-VL's vision tower is spliced
 //! directly into the decoder's incremental KV-cache decode
 //! (`Qwen3Vl::generate_cb`): every request is its own multi-step decode with
 //! its own prompt, its own image-token splice position and its own KV cache,

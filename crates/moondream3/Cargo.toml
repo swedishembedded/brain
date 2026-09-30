@@ -19,6 +19,11 @@ brain-imaging.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 serde_json.workspace = true
+# The SigLIP vision tower: `clip::model::ClipVision` with the SigLIP stem - the
+# one implementation DeepSeek-VL and Janus-Pro share. `brain-gguf` owns the
+# tower config's shape struct (`deepseek_ocr_vision::ClipConfig`).
+brain-clip.workspace = true
+brain-gguf.workspace = true
 
 # `import::load` - the production checkpoint loader (streams the safetensors
 # shards through `checkpoint::WeightReader`). Was a dev-dependency while the

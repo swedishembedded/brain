@@ -60,7 +60,7 @@
 //! # Batching: real, on the vision half
 //!
 //! `run_batch` is overridden with a genuine batched forward, not a serial loop.
-//! The axis is the VISION tower: `SiglipEncoder::encode` attends within each
+//! The axis is the VISION tower: `ClipVision::encode` attends within each
 //! crop as its own span, so N concurrent requests' crops go through ONE encode
 //! call rather than N - and at the released config that is the dominant
 //! per-request cost (1 global + up to 12 local crops of 729 patches).
@@ -199,7 +199,7 @@ impl Instance for Moondream3Instance {
     /// The DECODER cannot batch: each request has its own prompt, its own image
     /// embeddings and its own KV cache, and the block forward has no batch
     /// dimension. The VISION tower can, and it is the dominant per-request cost:
-    /// 1 global plus up to 12 local crops of 729 patches each. `SiglipEncoder`
+    /// 1 global plus up to 12 local crops of 729 patches each. The SigLIP tower
     /// already attends within each crop as its own span, so N requests' crops
     /// concatenate into ONE encode call instead of N.
     ///

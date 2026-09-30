@@ -18,8 +18,9 @@
 //!
 //! `ClipVision` carries two stems around those blocks
 //! ([`config::VisionStem`]): OpenAI CLIP's (class token, pre-norm) and SigLIP's
-//! (no class token, biased patch conv, post-norm). The SigLIP stem is what
-//! DeepSeek-VL's and Janus-Pro's timm tower ([`import::siglip`]) runs.
+//! (no class token, biased patch conv, post-norm). The SigLIP stem is the one
+//! SigLIP implementation in the workspace - DeepSeek-VL's and Janus-Pro's timm
+//! tower ([`import::siglip`]) and Moondream 3's encoder all run it.
 //!
 //! `ClipVision` is also where the **`PatchSource` seam** lives: DeepSeek-OCR
 //! injects its SAM branch's compressed feature map as CLIP's patch tokens,

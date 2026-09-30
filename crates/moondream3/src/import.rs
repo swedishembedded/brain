@@ -70,18 +70,61 @@ pub fn map_text(hf: &str, cfg: &MoondreamConfig) -> Option<TextTarget> {
     }
 }
 
-/// HF `model.vision.*` ViT tensor → [`SiglipEncoder`] key (prefix stripped). Returns
-/// `None` for `proj_mlp.*` (the connector, see [`map_connector`]).
+/// HF `model.vision.*` ViT tensor → the shared SigLIP tower's
+/// (`clip::model::ClipVision`) manifest name. Returns `None` for `proj_mlp.*`
+/// (the connector, see [`map_connector`]) and for anything that is not a tower
+/// tensor.
 ///
-/// [`SiglipEncoder`]: crate::vision::SiglipEncoder
+/// `patch_emb.weight` also changes LAYOUT on the way in - see
+/// [`patch_linear_to_conv`]; [`load`] applies it.
 pub fn map_vision(hf: &str) -> Option<String> {
     let rest = hf.strip_prefix("model.vision.")?;
-    if rest.starts_with("proj_mlp.") {
-        return None;
+    let direct = match rest {
+        "patch_emb.weight" => Some("patch_embed.weight"),
+        "patch_emb.bias" => Some("patch_embed.bias"),
+        "pos_emb" => Some("pos_embed"),
+        "post_ln.weight" => Some("post_norm.weight"),
+        "post_ln.bias" => Some("post_norm.bias"),
+        _ => None,
+    };
+    if let Some(name) = direct {
+        return Some(name.to_string());
     }
-    // patch_emb.{weight,bias}, pos_emb, post_ln.{weight,bias}, blocks.N.<leaf> — all
-    // already match SiglipEncoder's key scheme verbatim.
-    Some(rest.to_string())
+    let (n, leaf) = rest.strip_prefix("blocks.")?.split_once('.')?;
+    n.parse::<u32>().ok()?;
+    let leaf = match leaf {
+        "ln1.weight" => "norm1.weight",
+        "ln1.bias" => "norm1.bias",
+        "ln2.weight" => "norm2.weight",
+        "ln2.bias" => "norm2.bias",
+        "attn.qkv.weight" | "attn.qkv.bias" | "attn.proj.weight" | "attn.proj.bias" | "mlp.fc1.weight" | "mlp.fc1.bias"
+        | "mlp.fc2.weight" | "mlp.fc2.bias" => leaf,
+        _ => return None,
+    };
+    Some(format!("blocks.{n}.{leaf}"))
+}
+
+/// Moondream's patch embedding is a `Linear(3·patch², dim)` over patches the
+/// reference flattens `(y, x, channel)` (`create_patches`); the shared tower
+/// applies the same weights as a `Conv2d(3, dim, patch, stride=patch)` over the
+/// crop, whose `[dim, 3, patch, patch]` weight runs `(channel, y, x)`. The two
+/// compute the same dot product per patch, so this is a column permutation and
+/// nothing else: `conv[o, c, y, x] = linear[o, (y·patch + x)·3 + c]`.
+pub fn patch_linear_to_conv(linear: &[f32], dim: u32, patch: u32) -> Vec<f32> {
+    let (d, p) = (dim as usize, patch as usize);
+    let k = 3 * p * p;
+    assert_eq!(linear.len(), d * k, "patch_emb.weight must be [dim, 3·patch²]");
+    let mut conv = vec![0.0f32; d * k];
+    for o in 0..d {
+        for c in 0..3 {
+            for y in 0..p {
+                for x in 0..p {
+                    conv[o * k + (c * p + y) * p + x] = linear[o * k + (y * p + x) * 3 + c];
+                }
+            }
+        }
+    }
+    conv
 }
 
 /// HF `model.vision.proj_mlp.*` → [`Connector`] key.
@@ -205,7 +248,8 @@ pub fn load(dir: &std::path::Path, cfg: &MoondreamConfig) -> Result<(Weights, Co
         rd.with_tensor(name, &mut |data: &[f32]| {
             taken = true;
             if let Some(k) = map_vision(name) {
-                w.vision.insert(k, data.to_vec());
+                let v = if k == "patch_embed.weight" { patch_linear_to_conv(data, cfg.vision.dim, cfg.vision.patch) } else { data.to_vec() };
+                w.vision.insert(k, v);
             } else if let Some(k) = map_connector(name) {
                 w.connector.insert(k, data.to_vec());
             } else if let Some(t) = map_text(name, cfg) {
@@ -233,11 +277,21 @@ pub fn load(dir: &std::path::Path, cfg: &MoondreamConfig) -> Result<(Weights, Co
             &cov.unmapped[..cov.unmapped.len().min(5)]
         ));
     }
-    // The other direction: every key the graph will ask for must be present.
+    // The other direction: every key the graph will ask for must be present,
+    // in the map that graph reads it from.
     for k in required_keys(cfg) {
-        let present = w.vision.contains_key(&k) || w.connector.contains_key(&k) || w.decoder.contains_key(&k);
-        if !present {
+        if !(w.connector.contains_key(&k) || w.decoder.contains_key(&k)) {
             return Err(format!("moondream3: checkpoint is missing '{k}'"));
+        }
+    }
+    for (k, shape) in cfg.vision.tower().tensor_manifest() {
+        let want: usize = shape.iter().product();
+        match w.vision.get(&k) {
+            None => return Err(format!("moondream3: checkpoint is missing vision tensor '{k}'")),
+            Some(v) if v.len() != want => {
+                return Err(format!("moondream3: vision tensor '{k}' has {} values, the tower needs {want} ({shape:?})", v.len()))
+            }
+            Some(_) => {}
         }
     }
     Ok((w, cov))
@@ -277,9 +331,11 @@ fn split_moe(out: &mut HashMap<String, Vec<f32>>, layer: u32, part: MoePart, dat
     }
 }
 
-/// Every key the composed graph reads, for the "nothing missing" half of the
-/// coverage check. Derived from the config, so a config change cannot leave the
-/// check describing a different model than the one being built.
+/// Every connector and decoder key the composed graph reads, for the "nothing
+/// missing" half of the coverage check. Derived from the config, so a config
+/// change cannot leave the check describing a different model than the one
+/// being built. The vision tower's half is its own manifest
+/// (`VisionConfig::tower().tensor_manifest()`), checked with shapes by [`load`].
 pub fn required_keys(cfg: &MoondreamConfig) -> Vec<String> {
     let mut k: Vec<String> = vec![
         "tok.weight".into(),
@@ -287,9 +343,6 @@ pub fn required_keys(cfg: &MoondreamConfig) -> Vec<String> {
         "lm_head.bias".into(),
         "post_ln.weight".into(),
         "post_ln.bias".into(),
-        "patch_emb.weight".into(),
-        "patch_emb.bias".into(),
-        "pos_emb".into(),
         "fc1.weight".into(),
         "fc1.bias".into(),
         "fc2.weight".into(),
@@ -323,7 +376,7 @@ mod loader_tests {
         let cfg = MoondreamConfig::preview();
         let k = required_keys(&cfg);
         let set: std::collections::HashSet<&str> = k.iter().map(String::as_str).collect();
-        assert!(set.contains("tok.weight") && set.contains("lm_head.weight") && set.contains("pos_emb"));
+        assert!(set.contains("tok.weight") && set.contains("lm_head.weight") && set.contains("fc1.weight"));
         // Layer 0 is dense (below `moe.start_layer`), layer 23 is MoE.
         assert!(set.contains("blocks.0.mlp.fc1.weight"), "a dense layer must want its own FFN");
         assert!(!set.contains("blocks.23.mlp.fc1.weight"), "an MoE layer must NOT want a dense FFN");
@@ -435,9 +488,67 @@ fn repo_path(rel: &str) -> String {
     #[test]
     fn vision_and_connector_split() {
         assert_eq!(map_vision("model.vision.blocks.3.attn.qkv.weight"), Some("blocks.3.attn.qkv.weight".into()));
-        assert_eq!(map_vision("model.vision.patch_emb.weight"), Some("patch_emb.weight".into()));
+        assert_eq!(map_vision("model.vision.blocks.3.ln2.bias"), Some("blocks.3.norm2.bias".into()));
+        assert_eq!(map_vision("model.vision.patch_emb.weight"), Some("patch_embed.weight".into()));
+        assert_eq!(map_vision("model.vision.post_ln.weight"), Some("post_norm.weight".into()));
         assert_eq!(map_vision("model.vision.proj_mlp.fc1.weight"), None); // connector, not ViT
+        assert_eq!(map_vision("model.vision.blocks.3.mystery"), None, "an unknown tower tensor is unmapped, not renamed");
         assert_eq!(map_connector("model.vision.proj_mlp.fc2.bias"), Some("fc2.bias".into()));
+        // Every tower tensor the checkpoint names lands in the shared tower's manifest.
+        let manifest: std::collections::HashSet<String> =
+            cfg().vision.tower().tensor_manifest().into_iter().map(|(n, _)| n).collect();
+        for hf in ["patch_emb.bias", "pos_emb", "post_ln.bias", "blocks.26.ln1.weight", "blocks.26.mlp.fc2.bias"] {
+            let k = map_vision(&format!("model.vision.{hf}")).expect("a tower tensor");
+            assert!(manifest.contains(&k), "{hf} -> {k} is not in the tower's manifest");
+        }
+    }
+
+    /// The patch embedding's layout change is exact: the reference's
+    /// `create_patches` + `patch_emb` linear over `(y, x, channel)`-flattened
+    /// patches, computed here on the host, against the shared tower's device
+    /// conv over the planar crop with [`patch_linear_to_conv`]'s weights - the
+    /// tokens the tower actually consumed. Distinct values everywhere, so a
+    /// transposed permutation cannot pass.
+    #[test]
+    fn the_towers_patch_conv_is_the_references_patch_linear() {
+        use crate::config::VisionConfig;
+        let v = VisionConfig { dim: 8, patch: 2, n_layers: 1, ff_dim: 16, n_heads: 2, crop_size: 6, max_crops: 1, overlap_margin: 1 };
+        let (d, p, side, grid) = (v.dim as usize, v.patch as usize, v.crop_size as usize, v.grid() as usize);
+        let k = 3 * p * p;
+        let linear: Vec<f32> = (0..d * k).map(|i| (i as f32 * 0.37).sin()).collect();
+        let bias: Vec<f32> = (0..d).map(|i| 0.1 * i as f32).collect();
+        let hwc: Vec<f32> = (0..side * side * 3).map(|i| (i as f32 * 0.11).cos()).collect();
+
+        let mut w = clip::init::init_vision_weights(&v.tower(), 1);
+        w.insert("patch_embed.weight".into(), patch_linear_to_conv(&linear, v.dim, v.patch));
+        w.insert("patch_embed.bias".into(), bias.clone());
+        let tower = clip::model::ClipVision::new_on(
+            gpu_core::testgpu::dev(crate::vision::vision_pipelines()),
+            v.tower(),
+            1,
+            clip::model::PatchSource::Pixels,
+            &w,
+        );
+        tower.set_pixels(&crate::preprocess::crop_to_chw(&hwc, v.crop_size));
+        tower.forward();
+        let tokens = tower.read_tokens();
+
+        for py in 0..grid {
+            for px in 0..grid {
+                for o in 0..d {
+                    let mut reference = bias[o];
+                    for y in 0..p {
+                        for x in 0..p {
+                            for c in 0..3 {
+                                reference += linear[o * k + (y * p + x) * 3 + c] * hwc[((py * p + y) * side + px * p + x) * 3 + c];
+                            }
+                        }
+                    }
+                    let got = tokens[(py * grid + px) * d + o];
+                    assert!((reference - got).abs() < 1e-5, "patch ({py},{px}) channel {o}: linear {reference} vs tower {got}");
+                }
+            }
+        }
     }
 
     #[test]

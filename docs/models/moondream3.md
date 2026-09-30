@@ -5,6 +5,13 @@ A third vision-language architecture alongside [FastVLM](fastvlm.md) and
 ViT vision encoder (overlap multi-crop) plus a parallel-block sparse-MoE
 decoder with expert sharding.
 
+The vision encoder is not Moondream's own code: it is `crates/clip`'s
+`ClipVision` with the SigLIP stem (no class token, biased patch conv,
+post-norm, tanh GELU from the config) - the same tower DeepSeek-VL and
+Janus-Pro run. The checkpoint's `patch_emb` linear, which the reference
+applies to `(y, x, channel)`-flattened patches, is permuted at load into
+that tower's patch-conv layout, so crops reach it as planar images.
+
 This is a real, verified port - decoder gradient-checked, import-covered
 (662 tensors) and stage-by-stage parity-checked against real weights (a
 decoder bug a gradcheck alone had missed was caught this way). It can load a

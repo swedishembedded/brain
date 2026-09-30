@@ -203,7 +203,7 @@ impl Session {
     /// image embeddings and its own KV cache, and the block forward has no batch
     /// dimension - but the ViT does not, and at the released config it is the
     /// dominant per-request cost (1 global + up to 12 local crops of 729
-    /// patches). One `SiglipEncoder::encode` over every request's crops replaces
+    /// patches). One `ClipVision::encode` over every request's crops replaces
     /// N of them.
     pub fn caption_batch(&self, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         // Decode every image first; a request whose blob is malformed fails on
