@@ -85,7 +85,6 @@ const CLIP_COEF: usize = 27;
 const GRAD_SCALE_BUF: usize = 28;
 const AXPY: usize = 29;
 const EMBED_TILE: usize = 30;
-const MATMUL_TILE: usize = 31;
 const MATMUL_DX_REG: usize = 32;
 const MATMUL_DW_REG: usize = 33;
 const CE_STATS: usize = 34;
@@ -142,10 +141,8 @@ const RMSNORM_DX_ROWS: usize = 55;
 const ROPE_TABLE: usize = 56;
 const ROPE_TABLE_BWD: usize = 57;
 const ROPE_TABLE_AT: usize = 58;
-// The backward of `MATMUL_TILE`: the head's input gradient and its weight
-// gradient, one vocab tile at a time (`Qwen::head_bwd_steps`).
-const MATMUL_DX_TILE: usize = 59;
-const MATMUL_DW_TILE: usize = 60;
+// Column-range copy between row-major matrices (`Qwen::head_tile_passes`).
+const COPY_COLS: usize = 59;
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -217,8 +214,7 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("rope_base_yarn", kernels::ROPE_BASE_YARN),
     ("rope_base_yarn_bwd", kernels::ROPE_BASE_YARN_BWD),
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
-    ("matmul_dx_tile", kernels::MATMUL_DX_TILE),
-    ("matmul_dw_tile", kernels::MATMUL_DW_TILE),
+    ("copy_cols", kernels::COPY_COLS),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -337,6 +333,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             .unwrap(),
         );
         v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
+        v.push(kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16).unwrap());
         // M12: affine K-quant (Q4_K/Q5_K) kernels plus the group=16 (Q6_K)
         // reuse of the existing symmetric kernels via template knobs -
         // `Ops::REQUIRED_KERNELS` demands these too (see `model::ops::
@@ -448,8 +445,14 @@ fn attn_score_elems(decode_only: bool, b: u32, n_heads: u32, t: u32) -> u64 {
 }
 
 fn dx_kernel_bw(m: u32, k: u32) -> (usize, gpu_core::Dispatch) {
+    dx_kernel_among(MATMUL_DX, MATMUL_DX_REG, m, k)
+}
+/// The input-gradient kernel for an `[m, k]` result among a weight tier's
+/// `naive` and register-tiled (`reg`) kernels: the tile wherever the shape
+/// fills one.
+fn dx_kernel_among(naive_kernel: usize, reg_kernel: usize, m: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
+    block::pick_gemm(m as usize, k as usize, naive_kernel, reg_kernel, naive)
 }
 fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, gpu_core::Dispatch) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
@@ -601,6 +604,10 @@ pub struct Qwen {
     // backward temporaries
     dres: Vec<DeviceBuffer>,
     d_logits: DeviceBuffer,
+    /// Dense scratch for one pass of a vocab-tiled head (`head_tile_passes`).
+    head_tile: DeviceBuffer,
+    /// Columns of a vocab tile one pass covers: `head_tile` holds `rows x head_tile_cols`.
+    head_tile_cols: u32,
     ce_stats: DeviceBuffer,
     d_xn: DeviceBuffer,
     d_tmp: DeviceBuffer,
@@ -1074,6 +1081,12 @@ impl Qwen {
         // host-side, see `sample::generate_kv_stream`) and all backward scratch
         // (backward never runs - `train` is forced false), regardless of `head`.
         let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
+        // A head whose vocab needs several storage bindings runs one pass per
+        // run of columns of each vocab tile, through a dense scratch of
+        // `rows x head_tile_cols` - a quarter of the tile budget - so the
+        // passes use the GEMM kernels an untiled head does.
+        let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (n as u64).max(1)).max(64) & !63) as u32;
+        let head_tile = if block::vocab_tiles_on(&gpu, v, d).len() > 1 { hd_or_dummy(n as u64 * head_tile_cols as u64) } else { st(1) };
         // Backward scratch: read only by `build_backward_steps`/`backward`,
         // which never run unless `train`. The old gate here was
         // `decode_only` alone, so a batched forward-only build
@@ -1200,6 +1213,8 @@ impl Qwen {
             ce_buf: hd_or_dummy(n),
             dres,
             d_logits: hd_or_dummy(n * v),
+            head_tile,
+            head_tile_cols,
             ce_stats: hd_or_dummy(n * 2),
             d_xn: bwd(n * d),
             d_tmp: bwd(n * d),
@@ -1496,7 +1511,11 @@ impl Qwen {
     #[allow(clippy::too_many_arguments)]
     fn base_dx(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         match self.weights.get(wname) {
-            Some(w @ Weight::BF16 { .. }) => self.ops.matmul_dx(s, w, d_out, m, dx, acc == 1),
+            Some(Weight::BF16 { w, .. }) => {
+                let named = |n: &str| self.gpu.kernel_index(n).unwrap_or_else(|| panic!("qwen: kernel {n} is not registered"));
+                let (kernel, grid) = dx_kernel_among(named("matmul_dx#w=bf16"), named("matmul_dx_reg#w=bf16"), m, k);
+                s.push(self.gpu.dispatch(kernel, &[d_out, w, dx], &[m, k, nout, acc], grid));
+            }
             _ => {
                 let (bk, bt) = dx_kernel_bw(m, k);
                 s.push(self.gpu.dispatch(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
@@ -1674,7 +1693,6 @@ impl Qwen {
         let ga = self.gqa(b_use, t_use);
         let theta = c.rope_theta;
         let mut s: Vec<Step> = Vec::new();
-        let dw = d as u64;
         let tiles = self.vocab_tiles();
 
         // Token embedding, tiled over vocab so each `tok.weight` binding stays
@@ -1784,21 +1802,13 @@ impl Qwen {
         // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
         // (`matmul_reg3`) instead of the naive column-tiled `matmul_tile` - the
         // Talker lm_head was ~50 ms (naive) vs ~2 ms (reg2). Only when the weight
-        // genuinely exceeds a binding budget do we fall back to the tiled path.
+        // genuinely exceeds a binding budget do we take the tiled passes.
         let head = c.head_weight();
         if tiles.len() == 1 && tiles[0] == (0, v) {
             let (mk, mt) = linear_kernel(n as usize, v as usize);
             s.push(self.gpu.dispatch(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
         } else {
-            for &(v0, cnt) in &tiles {
-                s.push(self.gpu.step_sliced(
-                    MATMUL_TILE,
-                    &[&self.xn_final, self.w(head), &self.logits],
-                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
-                    &[n, d, v, v0, cnt],
-                    n * cnt,
-                ));
-            }
+            s.extend(self.head_logits_tiled_steps(0, n));
         }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
@@ -1831,15 +1841,44 @@ impl Qwen {
         self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
     }
 
+    /// The `(first column, columns)` passes that cover the vocab of a tiled
+    /// head: each vocab tile ([`Self::vocab_tiles`]) cut into runs of at most
+    /// `head_tile_cols` columns, so one pass's `rows x columns` block fits
+    /// `head_tile`. Every pass starts on a tile-row boundary: tiles do, and the
+    /// run length is a multiple of 64.
+    fn head_tile_passes(&self) -> Vec<(u32, u32)> {
+        let cols = self.head_tile_cols.max(1);
+        self.vocab_tiles().into_iter().flat_map(|(v0, cnt)| (0..cnt).step_by(cols as usize).map(move |c| (v0 + c, cols.min(cnt - c)))).collect()
+    }
+
+    /// The LM head of rows `r0..r0+rows` of `xn_final` when its vocab needs
+    /// several storage bindings: per pass, a GEMM of the rows against that
+    /// run of head rows into the dense `head_tile`, then the columns copied to
+    /// their place in `logits` rows `0..rows`.
+    fn head_logits_tiled_steps(&self, r0: u32, rows: u32) -> Vec<Step> {
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let dw = d as u64;
+        let head = self.cfg.head_weight();
+        let x = (r0 as u64 * dw, rows as u64 * dw);
+        let mut s = Vec::new();
+        for (c0, c) in self.head_tile_passes() {
+            let (mk, mt) = linear_kernel(rows as usize, c as usize);
+            s.push(self.gpu.dispatch_sliced(mk, &[&self.xn_final, self.w(head), &self.head_tile], &[x, (c0 as u64 * dw, c as u64 * dw), (0, 0)], &[rows, d, c], mt));
+            s.push(self.gpu.step(COPY_COLS, &[&self.head_tile, &self.logits], &[rows, c, c, 0, v, c0], rows * c));
+        }
+        s
+    }
+
     /// The LM head's backward over the `rows` rows of the logits gradient
     /// `d_logits` (`[rows, vocab]`) that belong to rows `r0..` of `xn_final`
     /// and `d_xn`: the input gradient `d_xn = d_logits · W` and, where the
     /// head trains, `dW += d_logitsᵀ · xn_final`. A head that fits one
     /// storage binding is two plain dispatches; a larger one (a 152k-token
     /// vocabulary at d = 3584 is 2.18 GB of fp32 against a 2 GiB binding) is
-    /// applied a vocab tile at a time, as the forward is -
-    /// each dispatch binds only its rows of `W` (and of `dW`) and reads its
-    /// columns of `d_logits` through the full row stride.
+    /// applied a pass at a time, as the forward is: the pass's columns of
+    /// `d_logits` are copied into the dense `head_tile`, and the same GEMM
+    /// kernels an untiled head uses then bind only that run of rows of `W`
+    /// (and of `dW`).
     fn head_bwd_steps(&self, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> Vec<Step> {
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
         let dw = d as u64;
@@ -1856,12 +1895,15 @@ impl Qwen {
             s.push(self.gpu.dispatch_sliced(bk, &[d_logits, self.w(head), &self.d_xn], &[(0, 0), (0, 0), x], &[rows, d, v, 0], bt));
             return s;
         }
-        for (i, &(v0, cnt)) in tiles.iter().enumerate() {
-            let tile = (v0 as u64 * dw, cnt as u64 * dw);
+        for (i, (c0, c)) in self.head_tile_passes().into_iter().enumerate() {
+            let tile = (c0 as u64 * dw, c as u64 * dw);
+            s.push(self.gpu.step(COPY_COLS, &[d_logits, &self.head_tile], &[rows, c, v, c0, c, 0], rows * c));
             if self.trainable(head) {
-                s.push(self.gpu.step_sliced(MATMUL_DW_TILE, &[d_logits, &self.xn_final, self.g(head)], &[(0, 0), x, tile], &[rows, d, v, v0, cnt], cnt * d));
+                let (bk, bt) = dw_kernel_bw(c, d);
+                s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, &self.xn_final, self.g(head)], &[(0, 0), x, tile], &[rows, d, c], bt));
             }
-            s.push(self.gpu.step_sliced(MATMUL_DX_TILE, &[d_logits, self.w(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, v, v0, cnt, (i > 0) as u32], rows * d));
+            let (bk, bt) = dx_kernel_bw(rows, d);
+            s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, self.w(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, c, (i > 0) as u32], bt));
         }
         s
     }

@@ -9,8 +9,9 @@
 //! A head too large for one storage binding (a 152k-token vocabulary at
 //! d = 3584 is a 2.18 GB fp32 table against a 2 GiB binding limit) is
 //! differentiated a vocab tile at a time, exactly as the forward applies it:
-//! the gradients equal the untiled build's, and the recorded backward holds
-//! one dispatch per tile instead of one binding of the whole table.
+//! the gradients equal the untiled build's, and the recorded forward and
+//! backward hold one pass per tile - on the same GEMM kernels an untiled head
+//! uses - instead of one binding of the whole table.
 
 use std::collections::HashMap;
 
@@ -69,9 +70,9 @@ fn a_head_beyond_the_binding_budget_is_differentiated_in_tiles() {
         for ((name, g), (_, w)) in got.iter().zip(&want) {
             assert!(max_rel(g, w) < 1e-4, "{label}: {name} gradient differs ({})", max_rel(g, w));
         }
-        let bwd = tiled.cost_bwd();
-        let dispatched = |k: &str| bwd.by_kernel.contains_key(k) || bwd.uncovered.contains_key(k);
-        assert!(dispatched("matmul_dx_tile"), "{label}: the head's input gradient is applied tile by tile");
-        assert_eq!(dispatched("matmul_dw_tile"), !lora, "{label}: a trainable head's weight gradient is written tile by tile");
+        let (fwd, bwd) = (tiled.cost_fwd(), tiled.cost_bwd());
+        let dispatched = |r: &gpu_core::cost::CostReport, k: &str| r.by_kernel.contains_key(k) || r.uncovered.contains_key(k);
+        assert!(dispatched(&fwd, "copy_cols") && dispatched(&bwd, "copy_cols"), "{label}: each vocab tile moves through a dense scratch, in both directions");
+        assert!(!dispatched(&fwd, "matmul_tile"), "{label}: the tiled head runs on the GEMM kernels, not the one-thread-per-output column tile");
     }
 }

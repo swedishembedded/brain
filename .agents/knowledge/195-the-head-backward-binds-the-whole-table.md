@@ -15,13 +15,24 @@ decoder's head is 0.93 GB, so every test and every small real run passed.
 Any decoder with `vocab * d_model * 4` above 2 GiB was affected: Qwen2.5-7B
 and the R1 distills on it, Llama-3's 128k vocabulary at d = 4096 included.
 
-The backward now follows the forward's tiling: `matmul_dx_tile` accumulates
-each tile's rows of `W` into `d_xn`, and `matmul_dw_tile` writes each tile's
-rows of the head's weight gradient when the head trains. Each dispatch binds
-only its rows and reads its columns of the logits gradient through the full
-row stride.
+The backward now follows the forward's tiling, and both run on the GEMM
+kernels an untiled head uses. The first version of the fix applied each tile
+with one-thread-per-output kernels, which is what the forward's `matmul_tile`
+does. It was correct and unusable: profiled on the 7B fine-tune at 478
+tokens, the forward's tile dispatches took about 12 s each, the backward's
+about 1.1 s each, and a 1.8k-token step ran for minutes (the profiler even
+discards the forward's timings as implausible). Each vocab tile is now cut
+into passes of at most a quarter of the tile budget in columns; a pass is one
+GEMM against its run of head rows into a dense scratch, plus `copy_cols` to
+move the pass's columns into place in the logits (forward) or out of the
+logits gradient (backward). The same 1.8k-token fine-tune went from 14.5
+minutes to under 3, with the same losses.
+
+The same profile showed the bf16 frozen base's input gradient running the
+naive `matmul_dx#w=bf16` (every linear of every layer): the register-tiled
+`matmul_dx_reg` now has the bf16 storage variant too.
 
 A test can force the tiling with `BRAIN_TILE_BUDGET_WORDS`, which is how the
 gradient is gated against the untiled build on a tiny model. The binding
 limit itself cannot be lowered on a device, so what such a test asserts is the
-recorded dispatches (one tile kernel per tile) next to the numbers.
+recorded dispatches (the copies, and no `matmul_tile`) next to the numbers.

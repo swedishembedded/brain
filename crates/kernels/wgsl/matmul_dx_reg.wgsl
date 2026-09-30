@@ -8,7 +8,10 @@
 // @gpu   yes-wg256
 // @npu   yes
 // @quant none
-// @dtype f32
+// @dtype f32|bf16
+// @tpl   w -> bf16 storage variant (kernels::template::dtype_variant), the
+//        read-direction twin of matmul_reg3's: dX stays consistent with the
+//        weight value the forward multiplied by
 //
 // Backward of out = x @ W^T w.r.t. x (tiled):  dX[m,k] = sum_n dY[m,n]*W[n,k].
 //
@@ -24,7 +27,7 @@ struct Params { m: u32, k: u32, n: u32, accumulate: u32 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       a:   array<f32>;
-@group(0) @binding(2) var<storage, read>       b:   array<f32>;
+@group(0) @binding(2) var<storage, read>       w:   array<f32>;
 @group(0) @binding(3) var<storage, read_write> out: array<f32>;
 
 const BM: u32 = 128u;
@@ -84,7 +87,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     for (var e = 0u; e < 4u; e = e + 1u) {
         let gk = skk[e];
         { let ar = arow_g[e]; if (ar < R && gk < L) { As[skk[e] * BM + sr[e]] = a[ar * p.n + gk]; } else { As[skk[e] * BM + sr[e]] = 0.0; } }
-        { let br = brow_g[e]; if (br < C && gk < L) { Bs[skk[e] * BN + sr[e]] = b[gk * p.k + br]; } else { Bs[skk[e] * BN + sr[e]] = 0.0; } }
+        { let br = brow_g[e]; let wi = gk * p.k + br; if (br < C && gk < L) { Bs[skk[e] * BN + sr[e]] = w[wi]; } else { Bs[skk[e] * BN + sr[e]] = 0.0; } }
     }
     workgroupBarrier();
 
@@ -95,7 +98,7 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
             for (var e = 0u; e < 4u; e = e + 1u) {
                 let gk = k1 + skk[e];
                 { let ar = arow_g[e]; if (ar < R && gk < L) { rA[e] = a[ar * p.n + gk]; } else { rA[e] = 0.0; } }
-                { let br = brow_g[e]; if (br < C && gk < L) { rB[e] = b[gk * p.k + br]; } else { rB[e] = 0.0; } }
+                { let br = brow_g[e]; let wi = gk * p.k + br; if (br < C && gk < L) { rB[e] = w[wi]; } else { rB[e] = 0.0; } }
             }
         }
         for (var kk = 0u; kk < BK; kk = kk + 1u) {
