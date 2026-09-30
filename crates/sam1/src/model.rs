@@ -701,7 +701,7 @@ impl SamEncoder {
         [rows * c, c, rows]
     }
 
-    /// The compressor output -- valid after [`Self::forward`].
+    /// The compressor output -- valid after [`Self::run`].
     pub fn output(&self) -> &DeviceBuffer {
         self.comp_c2.out()
     }
@@ -710,9 +710,23 @@ impl SamEncoder {
     // forward
     // -----------------------------------------------------------------------
 
-    /// Run the whole tower on the fixed image and return the scalar objective
-    /// `<output, dir>` -- the quantity [`Self::backward`] differentiates.
-    pub fn forward(&self) -> f32 {
+    /// The scalar objective `<output, dir>` of one [`Self::run`] -- the quantity
+    /// [`Self::backward`] differentiates, and what a gradient check perturbs.
+    /// A serving caller wants [`Self::run`], which leaves [`Self::output`] on
+    /// the device and reads nothing back.
+    pub fn objective(&self) -> f32 {
+        self.run();
+        // f64 accumulation: an element-wise check differences a loss that moves
+        // by ~1e-3 of itself, so an f32 accumulator's round-off would land
+        // straight in the numerator.
+        let out = self.gpu.read(self.output(), self.dir.len());
+        out.iter().zip(&self.dir).map(|(y, r)| *y as f64 * *r as f64).sum::<f64>() as f32
+    }
+
+    /// Run the whole tower on the fixed image, leaving the result in
+    /// [`Self::output`] and every stage's activation cache in place for
+    /// [`Self::backward`].
+    pub fn run(&self) {
         let g = &self.gpu;
         let ctx = self.ctx();
         let (c, rows) = (self.cfg.d_model, self.cfg.rows());
@@ -742,11 +756,6 @@ impl SamEncoder {
         self.comp_c2.forward(&ctx, &self.ps, self.comp_c1.out());
 
         self.fwd_done.set(true);
-        // f64 accumulation: an element-wise check differences a loss that moves
-        // by ~1e-3 of itself, so an f32 accumulator's round-off would land
-        // straight in the numerator.
-        let out = g.read(self.output(), self.dir.len());
-        out.iter().zip(&self.dir).map(|(y, r)| *y as f64 * *r as f64).sum::<f64>() as f32
     }
 
     fn block_fwd(&self, b: &Block, x: &DeviceBuffer) {
@@ -819,7 +828,7 @@ impl SamEncoder {
     /// in the compressor output.
     pub fn backward(&self) {
         if !self.fwd_done.get() {
-            let _ = self.forward();
+            self.run();
         }
         let bw = self.bwd();
         let g = &self.gpu;
@@ -950,7 +959,7 @@ impl SamEncoder {
     // The tower owns its input image and its output-gradient buffer, exactly
     // like every other model in this tree; a *composite* needs to drive both
     // from outside instead of from the constructor's own RNG. These accessors
-    // are additive -- `forward()`/`backward()` are unchanged and still read the
+    // are additive -- `run()`/`backward()` are unchanged and still read the
     // same two buffers -- and the per-stage taps are what a composite's parity
     // test compares against a reference dump. Nothing here allocates.
 

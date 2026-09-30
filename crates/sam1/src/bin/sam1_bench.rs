@@ -14,7 +14,7 @@
 //! hang, so its forward's wall time is still representative for comparison
 //! purposes even though its output cannot be trusted).
 //!
-//! **Best-of-N wall clock**, not device kernel-time-summed: `SamEncoder::forward`
+//! **Best-of-N wall clock**, not device kernel-time-summed: `SamEncoder::run`
 //! submits per-stage (patch, one submit per block, neck) rather than exposing
 //! one flat `Vec<Step>`, so `gpu_core::profile::profile`'s single-submit path
 //! does not apply here. `Gpu::kernel_times()` (`set_kernel_timing` +
@@ -52,15 +52,14 @@ fn synthetic_image(cfg: &SamViTConfig) -> Vec<f32> {
 
 /// Best-of-`reps` wall-clock forward, after one untimed warmup.
 fn best_forward(enc: &SamEncoder, reps: usize) -> f64 {
-    let _ = enc.forward();
+    assert!(enc.objective().is_finite(), "forward produced a non-finite objective");
     enc.gpu.poll_wait();
     let mut best = f64::INFINITY;
     for _ in 0..reps {
         let t0 = Instant::now();
-        let obj = enc.forward();
+        enc.run();
         enc.gpu.poll_wait();
         let dt = t0.elapsed().as_secs_f64();
-        assert!(obj.is_finite(), "forward produced a non-finite objective");
         best = best.min(dt);
     }
     best
@@ -72,7 +71,7 @@ fn best_forward(enc: &SamEncoder, reps: usize) -> f64 {
 fn kernel_table(enc: &SamEncoder) -> Vec<(String, f64, u64)> {
     let timed = enc.gpu.set_kernel_timing(true);
     enc.gpu.reset_kernel_times();
-    let _ = enc.forward();
+    enc.run();
     enc.gpu.poll_wait();
     if !timed {
         return Vec::new();
@@ -172,7 +171,7 @@ fn profile_mode() {
     let mut best = f64::INFINITY;
     for _ in 0..3 {
         let t0 = Instant::now();
-        let obj = enc.forward();
+        let obj = enc.objective();
         let dt = t0.elapsed().as_secs_f64();
         assert!(obj.is_finite());
         println!("forward: {:.1} ms", dt * 1e3);

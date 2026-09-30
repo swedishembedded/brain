@@ -486,7 +486,7 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
 /// hand one out: `minimaxmusic3::dit::forward_resident` submits per sub-layer
 /// and reads a buffer back to the host in the middle of every block,
 /// `minimaxmusic3::vocoder::forward` records its tape privately, and
-/// `sam1::SamEncoder::forward` submits per stage. Both halves of a
+/// `sam1::SamEncoder::run` submits per stage. Both halves of a
 /// [`PassProfile`] still exist for those passes - they are just not in a step
 /// list, so they come off the `Gpu` handle instead:
 ///

@@ -130,7 +130,7 @@ impl CheckModel for Check {
         self.0.read_grad(name)
     }
     fn loss(&self) -> f32 {
-        self.0.forward()
+        self.0.objective()
     }
     fn zero_grads(&self) {
         self.0.zero_grads();

@@ -138,7 +138,7 @@ fn taps(gpu: Gpu, n_layers: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let c = cfg(n_layers);
     let init = init_dense(&c, SEED);
     let enc = SamEncoder::new_on(gpu, c.clone(), &init, SEED, false);
-    let obj = enc.forward();
+    let obj = enc.objective();
     assert!(obj.is_finite(), "n_layers={n_layers}: forward produced a non-finite objective");
     let rows = (c.rows() * c.d_model) as usize;
     let patch = enc.gpu.read(enc.patch_tokens(), rows);

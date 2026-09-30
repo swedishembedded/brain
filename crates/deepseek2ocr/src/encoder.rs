@@ -223,7 +223,7 @@ impl DeepEncoder {
     fn run_forward(&self, image: &[f32]) {
         let t_sam = std::time::Instant::now();
         self.sam.write_image(image);
-        let _ = self.sam.forward();
+        self.sam.run();
         crate::stage_time("encode: sam forward", t_sam);
 
         // NCHW -> NLC. The one layout the whole fixture's non-square compressor

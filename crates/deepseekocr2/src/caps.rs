@@ -215,7 +215,7 @@ impl Session {
         // M3-M5 already gradient-checked against a synthetic grid; this is
         // where a real image enters that graph for the first time.
         self.sam.write_image(&image);
-        self.sam.forward();
+        self.sam.run();
         let sam_nchw = self.sam.gpu.read(self.sam.output(), self.sam.out_len());
         let sam_tokens = sam_tokens_from_nchw(&sam_nchw, self.vision_cfg.sam.compress_out as usize, self.vision_cfg.encoder.n_query_global as usize);
         let _ = self.model.prime_vision(&[], &sam_tokens);

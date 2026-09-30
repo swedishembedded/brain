@@ -164,7 +164,7 @@ fn real_mmproj_sam_tower_matches_llamacpp() {
     // build switched.
     let enc = SamEncoder::new_inference(gpu, cfg.clone(), &weights, 0);
     enc.write_image(&px);
-    let obj = enc.forward();
+    let obj = enc.objective();
     assert!(obj.is_finite(), "forward produced a non-finite objective {obj}");
 
     // ---- every block, then the neck + compressor ----

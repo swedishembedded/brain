@@ -81,7 +81,7 @@ fn real_weight_composite_greedy_decode_global_view() {
     let sam = SamEncoder::new_inference(gpu_sam, vision_cfg.sam.clone(), &vision_init, 0);
     let image = vec![0.5f32; (3 * vision_cfg.sam.image_h() * vision_cfg.sam.image_w()) as usize];
     sam.write_image(&image);
-    sam.forward();
+    sam.run();
     let sam_nchw = sam.gpu.read(sam.output(), sam.out_len());
     let sam_tokens = sam_tokens_from_nchw(&sam_nchw, vision_cfg.sam.compress_out as usize, vision_cfg.encoder.n_query_global as usize);
     mem("real SAM forward done");

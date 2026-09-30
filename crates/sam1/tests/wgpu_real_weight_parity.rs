@@ -65,13 +65,13 @@ fn real_mmproj_sam_tower_agrees_cpu_vs_wgpu_at_full_depth() {
     let cpu = gpu_core::Gpu::new_cpu(sam1::PIPELINES);
     let enc_cpu = SamEncoder::new_inference(cpu, cfg.clone(), &weights, 0);
     enc_cpu.write_image(&px);
-    let obj_cpu = enc_cpu.forward();
+    let obj_cpu = enc_cpu.objective();
     assert!(obj_cpu.is_finite(), "CPU forward produced a non-finite objective");
 
     let wgpu = gpu_core::Gpu::new_wgpu(sam1::PIPELINES);
     let enc_wgpu = SamEncoder::new_inference(wgpu, cfg.clone(), &weights, 0);
     enc_wgpu.write_image(&px);
-    let obj_wgpu = enc_wgpu.forward();
+    let obj_wgpu = enc_wgpu.objective();
     assert!(obj_wgpu.is_finite(), "wgpu forward produced a non-finite objective");
 
     let rows = cfg.rows() as usize * cfg.d_model as usize;
