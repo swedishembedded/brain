@@ -247,22 +247,7 @@ impl ChatFineTune {
         let held_out = self.held_out.as_deref().map(|path| read_checked(path, &model_dir)).transpose()?;
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
 
-        let (rank, alpha, parent) = match &self.continue_from {
-            None => {
-                let rank = self.rank.unwrap_or(8);
-                (rank, 2.0 * rank as f32, None)
-            }
-            Some(path) => {
-                let card = checkpoint::st::read_card(utf8(path)?).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
-                let adapter = card.and_then(|c| c.adapter).ok_or_else(|| Error::Backend(format!("{}: not an adapter file (no adapter card)", path.display())))?;
-                let rank = adapter.rank.ok_or_else(|| Error::Backend(format!("{}: the adapter card has no rank", path.display())))?;
-                if self.rank.is_some_and(|asked| asked != rank) {
-                    return Err(Error::Backend(format!("{}: a rank-{rank} adapter cannot be continued at rank {}", path.display(), self.rank.unwrap_or(rank))));
-                }
-                (rank, adapter.alpha.unwrap_or(rank as f32), Some(digest(path)?))
-            }
-        };
-        let alpha = self.alpha.unwrap_or(alpha);
+        let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
         let mut training = train_samples.clone();
         training.extend(replay_samples.iter().cloned());
@@ -499,6 +484,29 @@ fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &Cha
     HeldOutScore { loss: (s.positions > 0).then_some(s.loss), token_accuracy: s.token_accuracy, positions: s.positions, records: s.samples, skipped: s.skipped }
 }
 
+/// The LoRA rank and alpha of a run, and the digest of the adapter it
+/// continues: a fresh adapter is rank 8 (or `rank`) at alpha `2 * rank`; a
+/// continued one is its own rank - a different requested rank is refused -
+/// and its own alpha. `alpha` overrides either.
+pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha: Option<f32>) -> Result<(u32, f32, Option<String>)> {
+    let (rank, default_alpha, parent) = match continue_from {
+        None => {
+            let rank = rank.unwrap_or(8);
+            (rank, 2.0 * rank as f32, None)
+        }
+        Some(path) => {
+            let card = checkpoint::st::read_card(utf8(path)?).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+            let adapter = card.and_then(|c| c.adapter).ok_or_else(|| Error::Backend(format!("{}: not an adapter file (no adapter card)", path.display())))?;
+            let own = adapter.rank.ok_or_else(|| Error::Backend(format!("{}: the adapter card has no rank", path.display())))?;
+            if let Some(asked) = rank.filter(|&asked| asked != own) {
+                return Err(Error::Backend(format!("{}: a rank-{own} adapter cannot be continued at rank {asked}", path.display())));
+            }
+            (own, adapter.alpha.unwrap_or(own as f32), Some(digest(path)?))
+        }
+    };
+    Ok((rank, alpha.unwrap_or(default_alpha), parent))
+}
+
 /// Validate `path` against the base's tokenizer and template, then read it.
 fn read_checked(path: &Path, model_dir: &Path) -> Result<Vec<ChatSample>> {
     let summary = crate::validate_chat_dataset_for(path, model_dir).map_err(Error::Backend)?;
@@ -508,7 +516,7 @@ fn read_checked(path: &Path, model_dir: &Path) -> Result<Vec<ChatSample>> {
     ChatSample::from_jsonl(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
-fn tokenizer_and_template(model_dir: &Path) -> Result<(QwenBpe, ChatTemplate)> {
+pub(crate) fn tokenizer_and_template(model_dir: &Path) -> Result<(QwenBpe, ChatTemplate)> {
     let tmpl = ChatTemplate::from_model_dir(model_dir).map_err(|e| Error::Backend(format!("{}: {e}", model_dir.display())))?;
     let tok_path = model_dir.join("tokenizer.json");
     let tok = QwenBpe::from_file(utf8(&tok_path)?).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
@@ -518,7 +526,7 @@ fn tokenizer_and_template(model_dir: &Path) -> Result<(QwenBpe, ChatTemplate)> {
 /// The smallest power-of-two row (at least [`MIN_BLOCK`]) that holds the
 /// longest record, capped at `max`: a record longer than the cap is refused,
 /// since training on a row that cannot hold it would supervise nothing of it.
-fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
+pub(crate) fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
     if let Some(max) = max {
         if longest > max as usize {
             return Err(Error::Backend(format!("the longest record is {longest} tokens, past max_block {max}; raise max_block or shorten the record")));
@@ -531,7 +539,7 @@ fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
     Ok(max.map_or(block, |m| block.min(m)))
 }
 
-fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
+pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     model::FitOpts {
         steps,
         batch_size: 1,
@@ -557,11 +565,11 @@ fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     }
 }
 
-fn digest(path: &Path) -> Result<String> {
+pub(crate) fn digest(path: &Path) -> Result<String> {
     brain_modelstore::fetch::file_digest(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
-fn utf8(path: &Path) -> Result<&str> {
+pub(crate) fn utf8(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", path.display())))
 }
 

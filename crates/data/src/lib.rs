@@ -17,6 +17,7 @@ pub mod base64;
 pub mod binio;
 pub mod chat;
 pub mod chat_template;
+pub mod preference;
 pub mod prompting;
 pub mod toolcall;
 pub mod bpe;

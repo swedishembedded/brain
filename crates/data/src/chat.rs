@@ -289,9 +289,9 @@ struct WireRecord {
     metadata: serde_json::Value,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum WireRole {
+pub(crate) enum WireRole {
     System,
     User,
     Assistant,
@@ -300,44 +300,44 @@ enum WireRole {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireMessage {
-    role: WireRole,
+pub(crate) struct WireMessage {
+    pub(crate) role: WireRole,
     /// Required: bench's exporter always writes this key (possibly `""`),
     /// never omits it -- an absent `content` is a real shape violation, not
     /// something to paper over with a default.
-    content: String,
+    pub(crate) content: String,
     #[serde(default)]
-    tool_calls: Vec<WireToolCall>,
+    pub(crate) tool_calls: Vec<WireToolCall>,
     /// Only meaningful on `WireRole::Tool`.
     #[serde(default)]
-    tool_call_id: Option<String>,
+    pub(crate) tool_call_id: Option<String>,
     /// No default: a message with no explicit supervision boundary is
     /// rejected rather than silently treated as all-context or all-trained.
-    train: bool,
+    pub(crate) train: bool,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireToolCall {
+pub(crate) struct WireToolCall {
     #[serde(default)]
     id: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     r#type: Option<String>,
-    function: WireFunction,
+    pub(crate) function: WireFunction,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireFunction {
-    name: String,
+pub(crate) struct WireFunction {
+    pub(crate) name: String,
     /// OpenAI wire format requires a JSON-ENCODED STRING here, not a nested
     /// object -- bench's `_stringify_tool_call_arguments` (messages.py)
     /// writes it that way. Typed as `String` so serde itself rejects a
     /// record that regresses to the old (pre-fix) object shape, instead of
     /// silently accepting it and later double-encoding it into the rendered
     /// <tool_call> block.
-    arguments: String,
+    pub(crate) arguments: String,
 }
 
 /// `deny_unknown_fields` typed parsing (above) is STRUCTURAL validation only
@@ -357,10 +357,18 @@ fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    let mut messages = Vec::with_capacity(record.messages.len());
+    Ok(ChatSample { messages: messages_from_wire(record.messages)?, tools: record.tools })
+}
+
+/// One conversation's wire messages as [`ChatMessage`]s, with the semantic
+/// checks [`sample_from_wire`] documents: tool-call arguments that are valid
+/// JSON, and every tool result answering a call made earlier in the same
+/// conversation. `messages[i]` in an error is the index into `wire`.
+pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessage>, String> {
+    let mut messages = Vec::with_capacity(wire.len());
     let mut known_tool_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (i, m) in record.messages.into_iter().enumerate() {
+    for (i, m) in wire.into_iter().enumerate() {
         let role = match m.role {
             WireRole::System => "system",
             WireRole::User => "user",
@@ -394,7 +402,7 @@ fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
 
         messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train });
     }
-    Ok(ChatSample { messages, tools: record.tools })
+    Ok(messages)
 }
 
 /// Encode a set of packed samples into one `(ids, mask)` stream.

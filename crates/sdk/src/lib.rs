@@ -36,7 +36,7 @@
 //! | `creature` | [`Creature`], [`View`] -- a connectome running a body, and a window onto it |
 //! | `forecast` | [`ForecastPipeline`] -- time-series forecasting (kronos, timesfm3) |
 //! | `text` | [`TextGenerationPipeline`] -- text generation (qwen3, from a local checkpoint path or a hub id); [`ChatPipeline`] -- multi-turn chat with tool calling, streaming and cancellation on the same model, optionally with a LoRA adapter; [`EmbeddingPipeline`]'s Qwen3/LFM2.5-Encoder backends (long-context text embedding); [`EmbeddingTrainer`] -- contrastive training of a frozen-backbone projection head; [`EncoderFineTuner`] -- full-encoder contrastive fine-tuning (LFM2.5-Encoder only, via its seeded backward pass) |
-//! | `study` | [`ChatFineTune`], [`score_chat`] -- LoRA fine-tuning of a Qwen3 chat model (fresh or continuing an adapter, with replay, progress, cancellation and exact resume) and its held-out score; [`DocumentStudy`] -- teaching a model documents behind a gate |
+//! | `study` | [`ChatFineTune`], [`score_chat`] -- LoRA fine-tuning of a Qwen3 chat model (fresh or continuing an adapter, with replay, progress, cancellation and exact resume) and its held-out score; [`PreferenceFineTune`], [`score_preference`] -- DPO (preference) LoRA fine-tuning of the same models on `generic-preference-v1` chosen/rejected pairs against a frozen reference, with the same guarantees, and its preference score; [`DocumentStudy`] -- teaching a model documents behind a gate |
 //! | `vision` | [`EmbeddingPipeline`] -- text embedding (CLIP); [`DetectionPipeline`] -- object detection (YOLOv8); [`SegmentPipeline`] -- promptable segmentation (SAM 2.1); [`DepthPipeline`] -- monocular depth (ZipDepth); [`GroundingPipeline`] -- open-vocabulary visual grounding (Florence-2); named for the `brain_arch::Domain` they resolve under, not the capability, since there is no `Embedding`/`Detection`/`Segmentation`/`Depth`/`Grounding` domain |
 //! | `audio` | [`TranscribePipeline`] -- speech-to-text (qwen3-asr, offline); [`TtsPipeline`] -- text-to-speech (Qwen3-TTS: speak/clone_voice/design; CosyVoice: clone_voice); [`MusicPipeline`] -- lyrics+caption-to-song (MiniMax Music 3) |
 //! | `video` | [`VideoPipeline`] -- text-to-video (Wan2.1 T2V) |
@@ -143,6 +143,14 @@ pub mod study;
 mod finetune;
 #[cfg(feature = "study")]
 pub use finetune::{score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore};
+#[cfg(feature = "study")]
+mod preference;
+#[cfg(feature = "study")]
+pub mod preference_dataset;
+#[cfg(feature = "study")]
+pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA};
+#[cfg(feature = "study")]
+pub use preference_dataset::{validate_preference_dataset, validate_preference_dataset_for, PreferenceDatasetSummary};
 
 #[cfg(feature = "reader")]
 pub mod reader;

@@ -67,6 +67,19 @@
 //! turns one already-sampled, already-[`crate::env::Verifier`]-scored P12-
 //! style group into the (at most one) contrasting pair DPO trains on -
 //! never by asking a model to judge which completion is better.
+//!
+//! ## A fixed preference dataset, referenced against the starting model
+//!
+//! [`Dpo::from_dataset`] trains on a fixed set of [`PackedPair`]s (rendered
+//! conversations with a per-token supervision mask, see
+//! [`PackedPair::from_masked`]) and takes its frozen reference to be the model
+//! the run STARTS from: [`Objective::prepare`] scores every pair once on the
+//! model it is handed, before the first step, and the scores never change
+//! after that. So no second model copy exists during training, and the first
+//! step's margin is exactly zero. A resumed run is prepared on the same
+//! starting model before its saved state is loaded, so it scores the same
+//! reference. Pairs are drawn uniformly from the batch generator the
+//! training loop owns, which is what makes an interrupted run resume exactly.
 
 use std::collections::VecDeque;
 
@@ -204,12 +217,78 @@ fn pack_row(tokens: &mut [u32], targets: &mut [u32], ref_lp: &mut [f32], row: us
     }
 }
 
-/// One packed, reference-scored pair queued for a future [`Dpo::micro_step`]
-/// call.
-struct PackedPair {
+/// One preference pair packed as the two rows of a `b = 2` batch (row 0
+/// chosen, row 1 rejected), with the frozen reference's per-position
+/// log-probabilities of its supervised targets.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackedPair {
     tokens: Vec<u32>,
     targets: Vec<u32>,
     ref_lp: Vec<f32>,
+}
+
+impl PackedPair {
+    /// Pack two rendered conversations - token ids and a per-token
+    /// supervision mask each, `mask[i]` saying whether token `i` is
+    /// supervised (`data::chat::ChatSample::encode`'s output) - into rows of
+    /// `seq_len`. Row position `t` predicts token `t + 1`, and is a target
+    /// exactly when token `t + 1` is supervised, so each row's sequence
+    /// log-probability is summed over its supervised tokens and nothing else.
+    ///
+    /// Refused, never truncated: a conversation longer than `seq_len`, a
+    /// mask of a different length than its ids, and a row with no supervised
+    /// token after the first (a row that would contribute nothing to the
+    /// margin). The reference log-probabilities start at zero until
+    /// [`Self::score_reference`] fills them.
+    pub fn from_masked(seq_len: usize, chosen: (&[u32], &[bool]), rejected: (&[u32], &[bool])) -> Result<PackedPair, String> {
+        let mut tokens = vec![0u32; 2 * seq_len];
+        let mut targets = vec![IGNORE; 2 * seq_len];
+        for (row, (name, (ids, mask))) in [("chosen", chosen), ("rejected", rejected)].into_iter().enumerate() {
+            if ids.len() != mask.len() {
+                return Err(format!("{name}: {} token ids but {} mask entries", ids.len(), mask.len()));
+            }
+            if ids.len() > seq_len {
+                return Err(format!("{name}: {} tokens do not fit a row of {seq_len}", ids.len()));
+            }
+            let base = row * seq_len;
+            tokens[base..base + ids.len()].copy_from_slice(ids);
+            for t in 1..ids.len() {
+                if mask[t] {
+                    targets[base + t - 1] = ids[t];
+                }
+            }
+            if targets[base..base + seq_len].iter().all(|&y| y == IGNORE) {
+                return Err(format!("{name}: no supervised token after the first, so the row has no log-probability to prefer"));
+            }
+        }
+        Ok(PackedPair { tokens, targets, ref_lp: vec![0f32; 2 * seq_len] })
+    }
+
+    /// Make `reference` this pair's frozen reference: one forward of both
+    /// rows, keeping its log-probability of every supervised target.
+    /// `reference` must be built at `b = 2`, `t = seq_len`.
+    pub fn score_reference<M: Model>(&mut self, reference: &M) {
+        reference.set_batch(Batch::Lm { tokens: &self.tokens, targets: &self.targets });
+        let _ = reference.forward();
+        let lp = reference.batch_token_logprobs().expect("Dpo: model must implement Model::batch_token_logprobs");
+        for (i, &y) in self.targets.iter().enumerate() {
+            self.ref_lp[i] = if y == IGNORE { 0.0 } else { lp[i] };
+        }
+    }
+
+    /// The packed `[2 * seq_len]` token ids, row 0 chosen, row 1 rejected.
+    pub fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    /// The packed targets; [`IGNORE`] where a position is not supervised.
+    pub fn targets(&self) -> &[u32] {
+        &self.targets
+    }
+
+    fn seq_len(&self) -> usize {
+        self.tokens.len() / 2
+    }
 }
 
 fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: &[f32]) -> PackedPair {
@@ -220,6 +299,38 @@ fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: 
     pack_row(&mut tokens, &mut targets, &mut ref_lp, 0, seq_len, &pair.prompt, &pair.chosen, chosen_ref);
     pack_row(&mut tokens, &mut targets, &mut ref_lp, 1, seq_len, &pair.prompt, &pair.rejected, rejected_ref);
     PackedPair { tokens, targets, ref_lp }
+}
+
+/// One pair's DPO forward: the current policy's log-probabilities of both
+/// rows, the [`pair_term`] they give against the pair's cached reference,
+/// and that term's per-position weights written to `model` - everything a
+/// micro-step does before its backward. Returns the term and the
+/// reference-normalized margin `(logpi_c - logref_c) - (logpi_r - logref_r)`
+/// (in nats, without `beta`). `model` must be built at `b = 2`, `t =
+/// seq_len`, with weighted loss enabled.
+pub fn weigh_pair<M: Model>(beta: f32, model: &M, packed: &PackedPair) -> (PairTerm, f32) {
+    let seq_len = packed.seq_len();
+    model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
+    let _ = model.forward();
+    let new_lp = model.batch_token_logprobs().expect("Dpo: model must implement Model::batch_token_logprobs");
+
+    let (sum_new_chosen, sum_ref_chosen, count_chosen) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
+    let (sum_new_rejected, sum_ref_rejected, count_rejected) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
+    let count = (count_chosen + count_rejected).max(1) as f32;
+    let term = pair_term(beta, sum_new_chosen, sum_ref_chosen, sum_new_rejected, sum_ref_rejected, count);
+    let margin = (sum_new_chosen - sum_ref_chosen) - (sum_new_rejected - sum_ref_rejected);
+
+    let mut weights = vec![0f32; 2 * seq_len];
+    for i in 0..seq_len {
+        if packed.targets[i] != IGNORE {
+            weights[i] = term.weight_chosen;
+        }
+        if packed.targets[seq_len + i] != IGNORE {
+            weights[seq_len + i] = term.weight_rejected;
+        }
+    }
+    model.set_loss_weights(&weights);
+    (term, margin)
 }
 
 /// Where [`Dpo`] draws its next verifier-derived pair from - a plain
@@ -244,10 +355,18 @@ type RefLogprobFn = Box<dyn Fn(&DpoPair) -> (Vec<f32>, Vec<f32>)>;
 /// - today `qwen3::Qwen` and `gpt2::Gpt`.
 pub struct Dpo {
     cfg: DpoConfig,
-    source: PairSource,
-    ref_logprobs: RefLogprobFn,
-    pending: VecDeque<PackedPair>,
+    source: Source,
     last_margin: f32,
+}
+
+/// Where a [`Dpo`]'s pairs and their reference come from.
+enum Source {
+    /// Pairs drawn from a caller's source, each scored by the caller's
+    /// reference function when it is queued.
+    Stream { next: PairSource, ref_logprobs: RefLogprobFn, pending: VecDeque<PackedPair> },
+    /// A fixed dataset, scored once against the starting model by
+    /// [`Objective::prepare`] (`referenced` once it has been).
+    Dataset { pairs: Vec<PackedPair>, referenced: bool },
 }
 
 impl Dpo {
@@ -260,7 +379,17 @@ impl Dpo {
         S: FnMut(&mut Rng) -> Option<DpoPair> + 'static,
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
-        Dpo { cfg, source: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new(), last_margin: 0.0 }
+        Dpo { cfg, source: Source::Stream { next: Box::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0 }
+    }
+
+    /// A fixed preference dataset (see the module doc): each micro-step
+    /// trains one pair drawn uniformly from `pairs` with the training loop's
+    /// batch generator, and the frozen reference is the model this objective
+    /// is prepared on. Every pair must be packed at `cfg.seq_len`.
+    pub fn from_dataset(cfg: DpoConfig, pairs: Vec<PackedPair>) -> Dpo {
+        assert!(!pairs.is_empty(), "Dpo::from_dataset: need at least one pair");
+        assert!(pairs.iter().all(|p| p.seq_len() == cfg.seq_len), "Dpo::from_dataset: every pair must be packed at seq_len {}", cfg.seq_len);
+        Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0 }
     }
 
     /// Convenience over [`Self::new`]: a fixed, cycling dataset of
@@ -292,57 +421,50 @@ impl<M: Model> Objective<M> for Dpo {
 
     fn prepare(&mut self, model: &mut M) {
         model.enable_weighted_loss();
+        if let Source::Dataset { pairs, referenced } = &mut self.source {
+            if !*referenced {
+                for pair in pairs.iter_mut() {
+                    pair.score_reference(model);
+                }
+                *referenced = true;
+            }
+        }
     }
 
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        if self.pending.is_empty() {
-            let Some(pair) = (self.source)(rng) else {
-                // No pair available this round - a legitimate no-op
-                // micro-step, matching GRPO's own "every completion this
-                // round was dropped" convention.
-                return 0.0;
-            };
-            let (chosen_ref, rejected_ref) = (self.ref_logprobs)(&pair);
-            self.pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
-        }
-        let packed = self.pending.pop_front().expect("just ensured pending is non-empty");
-
-        // One ordinary forward (reads the CURRENT policy's per-token
-        // logprobs for BOTH rows) ...
-        model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
-        let _ = model.forward();
-        let new_lp = model.batch_token_logprobs().expect("Dpo: model must implement Model::batch_token_logprobs");
-
-        // ... a host-side weight/loss computation from this module's own
-        // pair_term (the exact function the gate's CheckModel harness also
-        // calls) ...
-        let seq_len = self.cfg.seq_len;
-        let (sum_new_chosen, sum_ref_chosen, count_chosen) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
-        let (sum_new_rejected, sum_ref_rejected, count_rejected) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
-        let count = (count_chosen + count_rejected).max(1) as f32;
-
-        let term = pair_term(self.cfg.beta, sum_new_chosen, sum_ref_chosen, sum_new_rejected, sum_ref_rejected, count);
-        self.last_margin = (sum_new_chosen - sum_ref_chosen) - (sum_new_rejected - sum_ref_rejected);
-
-        let mut weights = vec![0f32; 2 * seq_len];
-        for i in 0..seq_len {
-            if packed.targets[i] != IGNORE {
-                weights[i] = term.weight_chosen;
+        let (term, margin) = match &mut self.source {
+            Source::Stream { next, ref_logprobs, pending } => {
+                if pending.is_empty() {
+                    let Some(pair) = next(rng) else {
+                        // No pair available this round - a legitimate no-op
+                        // micro-step, matching GRPO's own "every completion
+                        // this round was dropped" convention.
+                        return 0.0;
+                    };
+                    let (chosen_ref, rejected_ref) = ref_logprobs(&pair);
+                    pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
+                }
+                let packed = pending.pop_front().expect("just ensured pending is non-empty");
+                weigh_pair(self.cfg.beta, model, &packed)
             }
-            if packed.targets[seq_len + i] != IGNORE {
-                weights[seq_len + i] = term.weight_rejected;
+            Source::Dataset { pairs, referenced } => {
+                assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in prepare(), which was not called");
+                weigh_pair(self.cfg.beta, model, rng.choice(pairs))
             }
-        }
-
-        // ... then one ordinary backward, weighted by that computation.
-        model.set_loss_weights(&weights);
+        };
+        self.last_margin = margin;
+        // One ordinary backward, weighted by the pair's term.
         model.backward();
-
         term.loss
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         vec![("dpo_margin", self.last_margin)]
+    }
+
+    /// Both rows of a pair share one forward.
+    fn batch_shape(&self) -> Option<(u32, u32)> {
+        Some((2, self.cfg.seq_len as u32))
     }
 }
 
@@ -395,6 +517,37 @@ mod tests {
         let currently_wrong = pair_term(1.0, -2.0, 0.0, 2.0, 0.0, 10.0);
         assert!(currently_wrong.weight_chosen > already_preferred.weight_chosen, "{currently_wrong:?} vs {already_preferred:?}");
         assert!(currently_wrong.loss > already_preferred.loss, "{currently_wrong:?} vs {already_preferred:?}");
+    }
+
+    /// `beta = 0.5`, chosen at -2 against a reference -3, rejected at -4
+    /// against -3.5: `u = 0.5 * ((-2 + 3) - (-4 + 3.5)) = 0.75`, so the loss
+    /// is `-log sigma(0.75) = ln(1 + e^-0.75) = 0.386871` and, over 8
+    /// supervised positions, the chosen weight is `0.5 * sigma(-0.75) * 8 =
+    /// 1.283285`.
+    #[test]
+    fn pair_term_matches_the_hand_computed_dpo_loss() {
+        let t = pair_term(0.5, -2.0, -3.0, -4.0, -3.5, 8.0);
+        assert!((t.loss - 0.386_871).abs() < 1e-5, "{t:?}");
+        assert!((t.weight_chosen - 1.283_285).abs() < 1e-5, "{t:?}");
+        assert_eq!(t.weight_rejected, -t.weight_chosen);
+        // At the reference the margin is zero and the loss is ln 2.
+        let at_reference = pair_term(0.1, -7.0, -7.0, -9.0, -9.0, 4.0);
+        assert!((at_reference.loss - std::f32::consts::LN_2).abs() < 1e-6, "{at_reference:?}");
+    }
+
+    /// Each row's targets are exactly its supervised tokens, one position
+    /// early (position `t` predicts token `t + 1`); nothing is truncated.
+    #[test]
+    fn a_masked_pair_targets_only_its_supervised_tokens() {
+        let chosen = ([10u32, 11, 12, 13, 0], [false, false, true, true, false]);
+        let rejected = ([10u32, 11, 14], [false, false, true]);
+        let p = PackedPair::from_masked(6, (&chosen.0, &chosen.1), (&rejected.0, &rejected.1)).expect("fits");
+        assert_eq!(p.tokens(), &[10, 11, 12, 13, 0, 0, 10, 11, 14, 0, 0, 0]);
+        assert_eq!(p.targets(), &[IGNORE, 12, 13, IGNORE, IGNORE, IGNORE, IGNORE, 14, IGNORE, IGNORE, IGNORE, IGNORE]);
+
+        assert!(PackedPair::from_masked(4, (&chosen.0, &chosen.1), (&rejected.0, &rejected.1)).unwrap_err().contains("do not fit"));
+        let unsupervised = [false, false, false];
+        assert!(PackedPair::from_masked(6, (&chosen.0, &chosen.1), (&rejected.0, &unsupervised)).unwrap_err().contains("rejected: no supervised token"));
     }
 
     #[test]

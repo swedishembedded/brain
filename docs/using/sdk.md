@@ -229,6 +229,84 @@ let chat = brain::ChatPipeline::from(
 - `samples/study/chat` is the worked example: train, score, resume a
   cancelled run, chat with the adapter.
 
+### Preference (DPO) fine-tuning a chat model
+
+`brain::PreferenceFineTune` (also `study`) is the DPO counterpart of
+`ChatFineTune`: given pairs of a preferred and a dispreferred answer to the
+same prompt, it trains a LoRA adapter so the model prefers the `chosen`
+answer over the `rejected` one relative to a frozen reference.
+
+```rust
+let outcome = brain::PreferenceFineTune::from_pretrained("/models/qwen3-0.6b/model.brain.safetensors")
+    .dataset("pairs.jsonl")
+    .held_out("held_out_pairs.jsonl")
+    .out_dir("runs/prefs-1")
+    .beta(0.1)
+    .steps(200)
+    .run()?;
+println!("{:?}", outcome.held_out_score);
+```
+
+The dataset is **`generic-preference-v1`** JSONL, one pair per line:
+
+```json
+{"prompt": [{"role": "system", "content": "Answer briefly."},
+            {"role": "user", "content": "What is the capital of France?"}],
+ "chosen": {"role": "assistant", "content": "Paris."},
+ "rejected": {"role": "assistant", "content": "I am not sure."},
+ "tools": [],
+ "metadata": {"source": "review-queue"}}
+```
+
+- `prompt` (required, non-empty) is a conversation in the
+  `generic-messages-v2` message shape - `role`, `content`, optional
+  `tool_calls` and `tool_call_id` - **without `train`**: supervision follows
+  from position, so the prompt is never supervised and the candidates always
+  are. It must not end in an assistant turn.
+- `chosen` and `rejected` (required) are single assistant messages of the
+  same shape, and may carry `tool_calls` exactly as `generic-messages-v2`
+  writes them (`function.arguments` a JSON-encoded string).
+- `tools` (optional) is the tool schema array the chat template's preamble
+  renders; `metadata` (optional) is an object carried for the producer and
+  never read.
+- Refused, by line and field: an unknown or mistyped field, a candidate that
+  is not an assistant turn, `chosen` identical to `rejected`, a tool result
+  answering no earlier call, and arguments that are not valid JSON.
+  `brain::validate_preference_dataset_for(path, model_dir, max_block)` also
+  renders both candidates through the base's own tokenizer and chat template
+  and refuses a pair that does not render, whose candidates render to the
+  same tokens, or that is longer than `max_block`; the fine-tune runs the
+  same check before a device is claimed. `validate_preference_dataset(path)`
+  is the parse-only check.
+
+The objective is standard DPO: per pair, `-log sigmoid(beta * ((log
+pi(chosen) - log ref(chosen)) - (log pi(rejected) - log ref(rejected))))`,
+each log-probability summed over that candidate's assistant-turn tokens
+only. The reference is the model the run starts from - the base, or the base
+plus the `.continue_from(adapter)` adapter - frozen: its log-probabilities are
+computed once per pair before the first step and cached, so no second model
+copy is held while training, and the first step's margin is exactly zero
+(the initial loss is `ln 2`). `beta` defaults to `brain::DEFAULT_DPO_BETA`
+(0.1). Each optimizer step trains one pair, both candidates in one forward.
+
+- `.continue_from`, `.rank`, `.alpha`, `.steps`, `.lr`, `.seed`,
+  `.max_block`, `.checkpoint_every`, `.cycle`, `.device` and
+  `run_with(&cancel, |progress| ..)` behave as they do on `ChatFineTune`,
+  including exact resume: a cancelled run leaves its state, and running the
+  same fine-tune again ends at the same adapter, byte for byte. A state from
+  a different `beta` is refused like any other different run.
+- The adapter card's training provenance has regime `"dpo"`, the base's
+  digest, and in its hyperparameters `beta` and the reference
+  (`reference.base_digest`, `reference.adapter_digest` - the continued
+  adapter, or null). `training.json` beside it records the same, plus the
+  scores.
+- `brain::score_preference(base, adapter, pairs)` scores base plus `adapter`
+  against the base alone: `mean_margin` is the mean of `(log pi(chosen) -
+  log ref(chosen)) - (log pi(rejected) - log ref(rejected))` in nats (without
+  `beta`), and `accuracy` the fraction of pairs where it is positive. The
+  outcome's `train_score` and `held_out_score` are the same measurement
+  against the run's own reference. Unmeasured values are `None`.
+
 ## Text embedding
 
 ```rust

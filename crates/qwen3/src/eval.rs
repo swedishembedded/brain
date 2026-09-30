@@ -14,12 +14,17 @@
 //! trainable (`ChatSample::encode`'s mask) -- prompt/context tokens the
 //! model was never asked to predict never count, matching exactly what
 //! `qwen3::finetune::finetune` supervises during training.
+//!
+//! [`preference_margins`] is the preference-pair counterpart: how much more a
+//! policy prefers each pair's chosen turn over its rejected one than a
+//! reference does, over the same supervised positions.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use data::chat::ChatSample;
 use data::chat_template::ChatTemplate;
+use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
 use crate::config::QwenConfig;
@@ -156,6 +161,51 @@ pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: 
         samples: samples.len() - skipped,
         skipped,
     }
+}
+
+/// Per-pair preference margins of a policy against a reference over
+/// `generic-preference-v1` pairs; see [`preference_margins`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreferenceMargins {
+    /// `(log pi(chosen) - log ref(chosen)) - (log pi(rejected) - log
+    /// ref(rejected))` per scored pair, in nats, each log-probability summed
+    /// over that candidate's supervised tokens only.
+    pub margins: Vec<f64>,
+    /// Pairs not scored because a candidate does not fit the scoring row.
+    pub skipped: usize,
+}
+
+/// Score preference pairs: each candidate's sequence log-probability (summed
+/// over exactly the tokens its mask supervises, the positions DPO training
+/// sums) under the policy - `weights` with `policy_adapter` folded in - and
+/// under the reference - `weights` with `reference_adapter` folded in, or the
+/// base alone - and each pair's margin between them. The two models are
+/// built one after the other on the same inference path serving uses, never
+/// both at once. A pair with a candidate longer than `block` is skipped and
+/// counted.
+pub fn preference_margins(weights: &str, reference_adapter: Option<&str>, policy_adapter: Option<&str>, pairs: &[(EncodedTurn, EncodedTurn)], block: u32) -> PreferenceMargins {
+    let fits = |t: &EncodedTurn| t.ids.len() >= 2 && t.ids.len() <= block as usize;
+    let scored: Vec<&(EncodedTurn, EncodedTurn)> = pairs.iter().filter(|(c, r)| fits(c) && fits(r)).collect();
+    let sequence_logprobs = |adapter: Option<&str>| -> Vec<(f64, f64)> {
+        let model = load_scored_model(weights, adapter, block, Dtype::F32);
+        scored.iter().map(|(c, r)| (supervised_logprob(&model, c), supervised_logprob(&model, r))).collect()
+    };
+    let reference = sequence_logprobs(reference_adapter);
+    let policy = sequence_logprobs(policy_adapter);
+    let margins = policy.iter().zip(&reference).map(|((pc, pr), (rc, rr))| (pc - rc) - (pr - rr)).collect();
+    PreferenceMargins { margins, skipped: pairs.len() - scored.len() }
+}
+
+/// `model`'s log-probability of the supervised tokens of one rendered
+/// sequence, teacher-forced: position `i` predicts `ids[i + 1]`, counted
+/// where `mask[i + 1]`.
+fn supervised_logprob(model: &Qwen, turn: &EncodedTurn) -> f64 {
+    let vocab = model.cfg.vocab as usize;
+    let logits = model.logits_all(&turn.ids);
+    (0..turn.ids.len() - 1)
+        .filter(|&i| turn.mask[i + 1])
+        .map(|i| model::logprobs::row_logprob(&logits[i * vocab..(i + 1) * vocab], turn.ids[i + 1] as usize) as f64)
+        .sum()
 }
 
 /// Which KV representation [`score_chat_paged`] scores through.
