@@ -133,7 +133,10 @@ them, so treat all request input as hostile.
       raw `<think>`/`<tool_call>` markup never leaks into `message.content`/
       `delta.content` — only `ChatEvent::Content` ever feeds those fields (see
       `bridge::StreamMsg`'s doc comment and `openai.rs::event_delta`, which is the
-      ONLY path that builds `reasoning_content`/`tool_calls` deltas).
+      ONLY path that builds `reasoning_content`/`tool_calls` deltas). The Anthropic
+      surface's `thinking` blocks and `thinking_delta`s are built only from the same
+      `reasoning` events and the outcome's `reasoning_content`
+      (`anthropic.rs::Blocks`), never from the text stream.
 - [ ] `/completions` is the one exception, by design: its `text` is the raw
       generation (the resident's `ChatScanner::raw`), markup included, because the
       client sent a raw prompt and asked for its continuation. It is still only

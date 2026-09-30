@@ -36,11 +36,23 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | embeddings | - | `POST /embeddings` | `POST /embeddings` |
 | image generation | - | `POST /images/generations` | `POST /images/generations` |
 
-- **Streaming** (`stream:true`): Anthropic emits `message_start → content_block_start →
-  content_block_delta* → content_block_stop → message_delta → message_stop`; OpenAI/
-  OpenRouter emit `chat.completion.chunk`s (`text_completion` objects on
-  `/completions`) ending in `data: [DONE]`. Client disconnect
+- **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
+  block (the thinking block, when the model reasons, then the text block)
+  `content_block_start → content_block_delta* → content_block_stop`, then
+  `message_delta → message_stop`; OpenAI/OpenRouter emit `chat.completion.chunk`s
+  (`text_completion` objects on `/completions`) ending in `data: [DONE]`. Client disconnect
   cancels the running job (frees the lane).
+- **Reasoning.** A reasoning model's thinking is kept apart from its answer:
+  `message.reasoning_content` (and `delta.reasoning_content` when streaming) on the
+  OpenAI surfaces, and a `thinking` content block ahead of the `text` block on the
+  Anthropic surface, streamed as `thinking_delta`s and closed by a
+  `signature_delta`. brain signs nothing, so `signature` is an empty string; a
+  thinking block sent back in the history reaches the model as that turn's
+  reasoning. Anthropic's `thinking` config turns reasoning on
+  (`{"type": "enabled", "budget_tokens": N}`, with Anthropic's own bound
+  1024 <= N < `max_tokens`) or off (`{"type": "disabled"}`). The budget is a
+  target, as Anthropic defines it: reasoning counts against `max_tokens`, and
+  that is what bounds it.
 - **Completions** (`POST /v1/completions`): the `prompt` is continued as it is,
   with no chat template, and the `text` is the raw generation. `prompt` is one
   string (or an array holding one); several prompts and token-id prompts are a 400.

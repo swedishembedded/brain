@@ -345,6 +345,35 @@ get_url() {
   [ "$content" = "You said: hello there" ]
 }
 
+@test "anthropic messages: the model's reasoning is a thinking block before the text" {
+  # The mock's scripted reply to its tool-call trigger reasons first.
+  local req='{"model":"brain/mock","max_tokens":64,"messages":[{"role":"user","content":"__MOCK_TOOL_CALL__"}]}'
+  post_json anthropic /v1/messages "$req"
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.content[0].type' "$RESP")" = "thinking" ]
+  [ "$(jq -r '.content[0].thinking | length > 0' "$RESP")" = "true" ]
+  [ "$(jq -r '.content[0].signature | type' "$RESP")" = "string" ]
+  [ "$(jq -r '.content[1].type' "$RESP")" = "text" ]
+
+  local sse="$CONF_DIR/anthropic_thinking_sse.txt"
+  curl -sS -N --max-time 20 -H "$(auth_hdr anthropic)" -H 'content-type: application/json' \
+    -X POST "$(base anthropic)/v1/messages" \
+    -d "$(echo "$req" | jq -c '. + {stream: true}')" >"$sse"
+  grep '^data: ' "$sse" | sed 's/^data: //' | jq -s -e '
+    (map(select(.type == "content_block_start")) | map(.content_block.type)) == ["thinking", "text"]
+    and (map(select(.delta.type == "thinking_delta")) | length > 0)
+    and (map(select(.delta.type == "signature_delta")) | length == 1)
+    and (map(select(.type == "content_block_stop")) | map(.index)) == [0, 1]'
+
+  # Thinking turned off by config, and a malformed config refused by name.
+  post_json anthropic /v1/messages '{"model":"brain/mock","max_tokens":2048,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hi"}]}'
+  [ "$STATUS" -eq 200 ]
+  post_json anthropic /v1/messages '{"model":"brain/mock","max_tokens":64,"thinking":{"type":"enabled"},"messages":[{"role":"user","content":"hi"}]}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF thinking "$RESP"
+  validate anthropic.json ErrorResponse "$RESP"
+}
+
 @test "openrouter chat SSE: [DONE] terminal, native_finish_reason, validates ChatStreamChunk" {
   local sse="$CONF_DIR/openrouter_sse.txt"
   curl -sS -N --max-time 20 \

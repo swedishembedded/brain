@@ -2978,3 +2978,179 @@ async fn completion_bad_bodies_are_400() {
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
 
+// ======================================================= anthropic thinking
+
+/// A reasoning chat model: `generate` streams its reasoning as `reasoning`
+/// events, then the answer as token deltas, the way a Qwen3/R1 resident
+/// does. With `enable_thinking: false` it answers without reasoning; an
+/// assistant turn in the history carrying `reasoning_content` is echoed back
+/// so its arrival is observable.
+struct FakeReasoner;
+struct FakeReasonerInst;
+impl ResidentModel for FakeReasoner {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-reasoner",
+            "a reasoning chat model",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .param(ParamSpec::new("enable_thinking", ParamType::Bool, "reason first"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-reasoner", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeReasonerInst))
+    }
+}
+impl Instance for FakeReasonerInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let history: Value = serde_json::from_str(&inv.get_str("messages").unwrap_or_default()).unwrap_or(Value::Null);
+        let earlier = history.as_array().into_iter().flatten().find_map(|m| m["reasoning_content"].as_str().map(str::to_string));
+        let thinking = inv.get_bool("enable_thinking").unwrap_or(true);
+        let mut reasoning = String::new();
+        if thinking {
+            for piece in ["Let me ", "think."] {
+                reasoning.push_str(piece);
+                progress(Progress::event(0, 2, json!({"kind": "reasoning", "text": piece})));
+            }
+        }
+        let text = match earlier {
+            Some(r) => format!("earlier: {r}"),
+            None => "Hello world".to_string(),
+        };
+        progress(Progress::token(1, 2, text.clone()));
+        let mut out = Outcome::new().set("prompt_tokens", json!(4)).set("completion_tokens", json!(6)).set("finish_reason", json!("stop"));
+        if !reasoning.is_empty() {
+            out = out.set("reasoning_content", json!(reasoning));
+        }
+        Ok(out.blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+fn reasoner_app() -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeReasoner)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(models, budgets, Policy::default());
+    (router(AppState::new(exec, key.clone(), Provider::Anthropic)), key)
+}
+
+/// The vendored Anthropic schema predates extended thinking, so a thinking
+/// block is checked by its documented shape and the rest of the message by
+/// the schema.
+fn assert_thinking_block(block: &Value, thinking: &str) {
+    assert_eq!(block["type"], "thinking", "{block}");
+    assert_eq!(block["thinking"], thinking, "{block}");
+    assert!(block["signature"].is_string(), "a thinking block carries a signature: {block}");
+}
+
+/// Reasoning is a `thinking` block ahead of the answer's `text` block.
+#[tokio::test]
+async fn anthropic_reasoning_becomes_a_thinking_block() {
+    let (app, key) = reasoner_app();
+    let body = json!({"model": "brain-reasoner", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_thinking_block(&v["content"][0], "Let me think.");
+    assert_eq!(v["content"][1], json!({"type": "text", "text": "Hello world"}));
+    let mut rest = v.clone();
+    rest["content"] = json!([v["content"][1].clone()]);
+    assert_valid("anthropic.json", "Message", &rest);
+
+    // Thinking turned off: no thinking block at all.
+    let off = json!({"model": "brain-reasoner", "max_tokens": 64, "thinking": {"type": "disabled"}, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &off).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["content"], json!([{"type": "text", "text": "Hello world"}]));
+}
+
+/// A thinking block in the history reaches the model as that turn's
+/// reasoning, for the chat template to keep or drop.
+#[tokio::test]
+async fn anthropic_thinking_history_reaches_the_model_as_reasoning() {
+    let (app, key) = reasoner_app();
+    let body = json!({"model": "brain-reasoner", "max_tokens": 64, "thinking": {"type": "disabled"}, "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "they greeted me", "signature": ""}, {"type": "text", "text": "Hello"}]},
+        {"role": "user", "content": "again"},
+    ]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["content"][0]["text"], "earlier: they greeted me");
+}
+
+/// Streamed: a thinking block (index 0) of `thinking_delta`s closed by a
+/// `signature_delta`, then the text block (index 1).
+#[tokio::test]
+async fn anthropic_stream_carries_thinking_then_text() {
+    let (app, key) = reasoner_app();
+    let body = json!({"model": "brain-reasoner", "max_tokens": 64, "stream": true, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let events = sse_events(&text);
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+    let (mut thinking, mut answer, mut signed) = (String::new(), String::new(), false);
+    for (name, data) in &events {
+        let v: Value = serde_json::from_str(data).unwrap();
+        match (name.as_str(), v["delta"]["type"].as_str(), v["content_block"]["type"].as_str()) {
+            ("content_block_start", _, Some("thinking")) => {
+                assert_eq!(v["index"], 0);
+                assert_thinking_block(&v["content_block"], "");
+            }
+            ("content_block_delta", Some("thinking_delta"), _) => {
+                assert_eq!(v["index"], 0);
+                thinking.push_str(v["delta"]["thinking"].as_str().unwrap());
+            }
+            ("content_block_delta", Some("signature_delta"), _) => {
+                assert!(v["delta"]["signature"].is_string());
+                signed = true;
+            }
+            ("content_block_delta", Some("text_delta"), _) => {
+                assert_eq!(v["index"], 1, "the text block follows the thinking block");
+                answer.push_str(v["delta"]["text"].as_str().unwrap());
+                assert_valid("anthropic.json", "ContentBlockDeltaEvent", &v);
+            }
+            ("content_block_start", _, Some("text")) => {
+                assert_eq!(v["index"], 1);
+                assert_valid("anthropic.json", "ContentBlockStartEvent", &v);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!((thinking.as_str(), answer.as_str(), signed), ("Let me think.", "Hello world", true), "{names:?}");
+    let stops = events.iter().filter(|(e, _)| e == "content_block_stop").count();
+    assert_eq!(stops, 2, "{names:?}");
+    assert_eq!(names.first(), Some(&"message_start"));
+    assert_eq!(names.last(), Some(&"message_stop"));
+}
+
+/// `thinking` is `{"type": "enabled", "budget_tokens": N}` with
+/// 1024 <= N < max_tokens, or `{"type": "disabled"}`; anything else is a 400.
+#[tokio::test]
+async fn anthropic_thinking_config_is_validated() {
+    let (app, key) = reasoner_app();
+    let ok = json!({"type": "enabled", "budget_tokens": 1024});
+    let body = json!({"model": "brain-reasoner", "max_tokens": 2048, "thinking": ok, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for bad in [
+        json!({"type": "enabled"}),
+        json!({"type": "enabled", "budget_tokens": 1000}),
+        json!({"type": "enabled", "budget_tokens": 4096}),
+        json!({"type": "sometimes"}),
+        json!("enabled"),
+    ] {
+        let body = json!({"model": "brain-reasoner", "max_tokens": 2048, "thinking": bad, "messages": [{"role": "user", "content": "hi"}]});
+        let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {v}");
+        assert_valid("anthropic.json", "ErrorResponse", &v);
+        assert!(v["error"]["message"].as_str().unwrap().contains("thinking"), "{v}");
+    }
+}

@@ -5,7 +5,9 @@
 //! streaming) and `POST /v1/messages/count_tokens`. Chat dispatches to the shared
 //! executor's `generate` action via [`crate::bridge`]; the streaming event order
 //! follows Anthropic's `message_start → content_block_start → content_block_delta*
-//! → content_block_stop → message_delta → message_stop` sequence.
+//! → content_block_stop → message_delta → message_stop` sequence. A model's
+//! reasoning is a `thinking` block ahead of the answer's `text` block, streamed as
+//! `thinking_delta`s; the request's `thinking` config turns it on or off.
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -56,10 +58,7 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
             stream_messages(state, model, inv, est_input).await
         } else {
             match bridge::submit(&state, &model, "generate", inv).await {
-                Ok(outcome) => {
-                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                    Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
-                }
+                Ok(outcome) => Json(from_outcome(&model, &bridge::read_chat_outcome(&outcome))).into_response(),
                 Err(e) => e.into_response(),
             }
         }
@@ -78,10 +77,7 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
     } else {
         match bridge::ensure_and_recheck(&state, PROVIDER, &model, |id| catalog::resolve_chat(&state.exec.manifests(), id).then_some(())).await {
             Ok(()) => match bridge::submit(&state, &model, "generate", inv).await {
-                Ok(outcome) => {
-                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                    Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
-                }
+                Ok(outcome) => Json(from_outcome(&model, &bridge::read_chat_outcome(&outcome))).into_response(),
                 Err(e) => e.into_response(),
             },
             Err(e) => e.into_response(),
@@ -124,10 +120,34 @@ fn reject_unsupported_tools(body: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The smallest `thinking.budget_tokens` Anthropic accepts.
+const MIN_THINKING_BUDGET: i64 = 1024;
+
+/// Anthropic's `thinking` config as the contract's `enable_thinking`:
+/// `{"type": "enabled", "budget_tokens": N}` (Anthropic's own bounds,
+/// `1024 <= N < max_tokens`) turns reasoning on, `{"type": "disabled"}` off,
+/// and an absent config leaves the model's own default. The budget is the
+/// target Anthropic defines it as: reasoning counts against `max_tokens`, which
+/// is what bounds it.
+fn thinking(body: &Value, max_tokens: i64) -> Result<Option<bool>, ApiError> {
+    let Some(cfg) = body.get("thinking").filter(|v| !v.is_null()) else { return Ok(None) };
+    let bad = |msg: String| Err(ApiError::invalid_request(PROVIDER, msg));
+    match cfg.get("type").and_then(Value::as_str) {
+        Some("disabled") => Ok(Some(false)),
+        Some("enabled") => match cfg.get("budget_tokens").and_then(Value::as_i64) {
+            Some(n) if (MIN_THINKING_BUDGET..max_tokens).contains(&n) => Ok(Some(true)),
+            Some(n) => bad(format!("'thinking.budget_tokens' must be at least {MIN_THINKING_BUDGET} and less than 'max_tokens' ({max_tokens}), got {n}")),
+            None => bad("'thinking.budget_tokens' is required when thinking is enabled".to_string()),
+        },
+        _ => bad("'thinking' must be {\"type\": \"enabled\", \"budget_tokens\": N} or {\"type\": \"disabled\"}".to_string()),
+    }
+}
+
 /// Parse + validate an Anthropic Messages request into `(model, invocation, stream)`.
 /// Enforces `model`/`messages`/`max_tokens` present, rejects unsupported
 /// tool-calling ([`reject_unsupported_tools`]); builds the contract `generate`
-/// invocation (Anthropic's top-level `system` maps to the `system` param).
+/// invocation (Anthropic's top-level `system` maps to the `system` param, and
+/// `thinking` to `enable_thinking`).
 pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiError> {
     reject_unsupported_tools(body)?;
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'model' is required"))?;
@@ -140,6 +160,9 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
         .set("max_new", json!(max_tokens));
     let mut inv = crate::sampling::apply(PROVIDER, body, inv)?;
+    if let Some(on) = thinking(body, max_tokens)? {
+        inv = inv.set("enable_thinking", json!(on));
+    }
     let system = system_text(body.get("system"));
     if !system.is_empty() {
         inv = inv.set("system", json!(system));
@@ -159,21 +182,38 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     Ok((model.to_string(), inv, stream))
 }
 
-/// One Anthropic message → the contract `{role, content}` (blocks flattened to text).
+/// One Anthropic message → the contract `{role, content, reasoning_content?}`:
+/// text blocks flattened to `content`, an assistant turn's `thinking` blocks to
+/// its `reasoning_content` (the chat template keeps or drops it, as the model
+/// was trained).
 fn flatten_message(m: &Value) -> Value {
     let role = match m.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
         "assistant" => "assistant",
         _ => "user",
     };
-    json!({ "role": role, "content": content_text(m.get("content")) })
+    let mut out = json!({ "role": role, "content": content_text(m.get("content")) });
+    let reasoning: String = m
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("thinking"))
+        .filter_map(|b| b.get("thinking").and_then(Value::as_str))
+        .collect();
+    if role == "assistant" && !reasoning.is_empty() {
+        out["reasoning_content"] = json!(reasoning);
+    }
+    out
 }
 
-/// Flatten Anthropic content (string, or an array of blocks) to its text.
+/// Flatten Anthropic content (string, or an array of blocks) to the text of its
+/// `text` blocks.
 fn content_text(c: Option<&Value>) -> String {
     match c {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(blocks)) => blocks
             .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str).is_none_or(|t| t == "text"))
             .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
             .collect::<Vec<_>>()
             .join(""),
@@ -223,17 +263,31 @@ fn stop_reason(fr: &str) -> &'static str {
     }
 }
 
-/// The non-streaming `Message` response body.
-pub fn from_outcome(model: &str, text: &str, prompt: i64, completion: i64, finish: &str) -> Value {
+/// A `thinking` content block. brain has no signing key, and Anthropic's
+/// signature only lets its own service verify a block it issued, so the
+/// signature is empty; the block round-trips through a client's history as
+/// any other.
+fn thinking_block(thinking: &str) -> Value {
+    json!({ "type": "thinking", "thinking": thinking, "signature": "" })
+}
+
+/// The non-streaming `Message` response body: the reasoning (when there is
+/// any) as a `thinking` block, then the answer as a `text` block.
+pub fn from_outcome(model: &str, co: &bridge::ChatOutcome) -> Value {
+    let mut content = Vec::new();
+    if !co.reasoning.is_empty() {
+        content.push(thinking_block(&co.reasoning));
+    }
+    content.push(json!({ "type": "text", "text": co.text }));
     json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
         "role": "assistant",
-        "content": [ { "type": "text", "text": text } ],
+        "content": content,
         "model": model,
-        "stop_reason": stop_reason(finish),
+        "stop_reason": stop_reason(&co.finish),
         "stop_sequence": Value::Null,
-        "usage": { "input_tokens": prompt, "output_tokens": completion },
+        "usage": { "input_tokens": co.prompt_tokens, "output_tokens": co.completion_tokens },
     })
 }
 
@@ -280,37 +334,38 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         });
         yield Ok::<Event, Infallible>(Event::default().event("message_start").data(start.to_string()));
 
-        // content_block_start: the single text block.
-        yield Ok(Event::default().event("content_block_start").data(json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": { "type": "text", "text": "" },
-        }).to_string()));
-
+        // Blocks open as their content arrives: the reasoning's `thinking`
+        // block first when the model reasons, then the answer's `text` block,
+        // which every completed message carries even when empty.
+        let mut blocks = Blocks::default();
         let mut finish = String::from("stop");
         let mut completion = 0i64;
         // Whether any real token delta was streamed. A resident that only
         // reports coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is
         // one - carries its whole answer in the terminal `Outcome`, and would
         // otherwise stream a well-formed but EMPTY text block. See the one-shot
-        // fallback below `content_block_stop`.
+        // fallback after the loop.
         let mut saw_delta = false;
         let mut final_text = String::new();
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
                     saw_delta = true;
-                    yield Ok(Event::default().event("content_block_delta").data(json!({
-                        "type": "content_block_delta",
-                        "index": 0,
-                        "delta": { "type": "text_delta", "text": piece },
-                    }).to_string()));
+                    for ev in blocks.delta(BlockKind::Text, &piece) {
+                        yield Ok(ev);
+                    }
                 }
                 StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
-                // Reasoning/tool-call events: no Anthropic surface shape yet (full
-                // tool-calling is a documented follow-up — see
-                // `reject_unsupported_tools`); dropped rather than misrendered.
-                StreamMsg::Event(_) => {}
+                StreamMsg::Event(v) => {
+                    // Tool-call events have no shape here: tools are refused up
+                    // front (`reject_unsupported_tools`).
+                    if v.get("kind").and_then(Value::as_str) == Some("reasoning") {
+                        let piece = v.get("text").and_then(Value::as_str).unwrap_or_default();
+                        for ev in blocks.delta(BlockKind::Thinking, piece) {
+                            yield Ok(ev);
+                        }
+                    }
+                }
                 StreamMsg::Fetching(p) => {
                     yield Ok(Event::default().comment(p.comment_text()));
                 }
@@ -333,18 +388,12 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         // Fallback for a resident that never emitted a token delta: emit the
         // completed outcome's text as ONE `text_delta` so the text block isn't
         // empty. Invisible to residents that DO stream (`saw_delta`).
-        if !saw_delta && !final_text.is_empty() {
-            yield Ok(Event::default().event("content_block_delta").data(json!({
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": { "type": "text_delta", "text": final_text },
-            }).to_string()));
+        let tail = if saw_delta { String::new() } else { final_text };
+        for ev in blocks.finish(&tail) {
+            yield Ok(ev);
         }
 
-        // content_block_stop → message_delta (stop_reason + cumulative output) → message_stop.
-        yield Ok(Event::default().event("content_block_stop").data(json!({
-            "type": "content_block_stop", "index": 0,
-        }).to_string()));
+        // message_delta (stop_reason + cumulative output) → message_stop.
         yield Ok(Event::default().event("message_delta").data(json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason(&finish), "stop_sequence": Value::Null },
@@ -353,4 +402,82 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
     };
     Sse::new(events.boxed()).into_response()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Thinking,
+    Text,
+}
+
+/// The content blocks of one streamed message: which one is open, and the
+/// index the next one takes. A delta of a kind other than the open block's
+/// closes that block and opens its own.
+#[derive(Default)]
+struct Blocks {
+    open: Option<BlockKind>,
+    next: u32,
+    saw_text: bool,
+}
+
+impl Blocks {
+    /// The events that stream `piece` as `kind`: the open block closed and a
+    /// new one started when the kind changes, then the delta itself.
+    fn delta(&mut self, kind: BlockKind, piece: &str) -> Vec<Event> {
+        let mut out = Vec::new();
+        if self.open != Some(kind) {
+            out.extend(self.close());
+            out.push(self.start(kind));
+        }
+        if !piece.is_empty() {
+            let index = self.next - 1;
+            let delta = match kind {
+                BlockKind::Thinking => json!({ "type": "thinking_delta", "thinking": piece }),
+                BlockKind::Text => json!({ "type": "text_delta", "text": piece }),
+            };
+            out.push(sse("content_block_delta", json!({ "type": "content_block_delta", "index": index, "delta": delta })));
+        }
+        out
+    }
+
+    /// Close the message's blocks: `tail` streamed as text (the one-shot
+    /// fallback), a text block opened if the message has none, and the open
+    /// block closed.
+    fn finish(&mut self, tail: &str) -> Vec<Event> {
+        let mut out = Vec::new();
+        if !tail.is_empty() || !self.saw_text {
+            out.extend(self.delta(BlockKind::Text, tail));
+        }
+        out.extend(self.close());
+        out
+    }
+
+    fn start(&mut self, kind: BlockKind) -> Event {
+        let block = match kind {
+            BlockKind::Thinking => thinking_block(""),
+            BlockKind::Text => json!({ "type": "text", "text": "" }),
+        };
+        self.saw_text |= kind == BlockKind::Text;
+        self.open = Some(kind);
+        self.next += 1;
+        sse("content_block_start", json!({ "type": "content_block_start", "index": self.next - 1, "content_block": block }))
+    }
+
+    /// Close the open block; a thinking block carries its (empty) signature
+    /// as the last delta, as Anthropic streams it.
+    fn close(&mut self) -> Vec<Event> {
+        let Some(kind) = self.open.take() else { return Vec::new() };
+        let index = self.next - 1;
+        let mut out = Vec::new();
+        if kind == BlockKind::Thinking {
+            out.push(sse("content_block_delta", json!({ "type": "content_block_delta", "index": index, "delta": { "type": "signature_delta", "signature": "" } })));
+        }
+        out.push(sse("content_block_stop", json!({ "type": "content_block_stop", "index": index })));
+        out
+    }
+}
+
+/// One named SSE event carrying `data` as JSON.
+fn sse(name: &str, data: Value) -> Event {
+    Event::default().event(name).data(data.to_string())
 }
