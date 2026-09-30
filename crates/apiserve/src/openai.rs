@@ -319,7 +319,7 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
     let inv = Invocation::new()
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
-        .set("max_new", json!(max_new(body)));
+        .set("max_new", json!(max_new(provider, body)?));
     let mut inv = crate::sampling::apply(provider, body, inv)?;
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));
@@ -455,8 +455,13 @@ fn validate_tool_choice(provider: Provider, tc: &Value) -> Result<(), ApiError> 
 }
 
 /// `max_tokens` (or the newer `max_completion_tokens`), defaulting to 1024.
-fn max_new(body: &Value) -> i64 {
-    body.get("max_completion_tokens").and_then(|v| v.as_i64()).or_else(|| body.get("max_tokens").and_then(|v| v.as_i64())).unwrap_or(1024)
+fn max_new(provider: Provider, body: &Value) -> Result<i64, ApiError> {
+    for name in ["max_completion_tokens", "max_tokens"] {
+        if let Some(v) = body.get(name).filter(|v| !v.is_null()) {
+            return crate::sampling::max_tokens(provider, name, Some(v));
+        }
+    }
+    Ok(1024)
 }
 
 /// Normalize OpenAI `stop` (string | array | null) to a JSON-array string, or `None`.

@@ -98,14 +98,27 @@ pub fn finetune_from(
         (cfg, init)
     };
 
-    let m = Qwen::new(cfg, opts.batch_size, opts.block_size, &init);
+    let m = build_for_training(cfg, opts, &init);
     match prev_off {
         Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
         None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
     }
+    let m = m?;
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_with(m, obj, opts, Some(Path::new(out)))
+}
+
+/// The trainable model at `opts`' batch and context, placed through the
+/// footprint check: a context the devices cannot hold is refused by name
+/// before anything is allocated, rather than by an arbitrary length cap.
+fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &HashMap<String, Vec<f32>>) -> std::io::Result<Qwen> {
+    let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+    let dt = gpu_core::select::Dtype::F32;
+    crate::footprint::place_and_build(&cfg.clone(), &shard, dt, opts.batch_size, opts.block_size, true, false, "qwen3 finetune", || {
+        Qwen::new(cfg, opts.batch_size, opts.block_size, init)
+    })
+    .map_err(std::io::Error::other)
 }
 
 /// The LoRA targets a fresh adapter covers: every attention and MLP
@@ -189,10 +202,11 @@ pub fn finetune_lora_controlled(
     // does.
     let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let m = Qwen::new(cfg, opts.batch_size, opts.block_size, &init);
+    let m = build_for_training(cfg, opts, &init);
     if let Some(v) = prev_off {
         std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
     }
+    let m = m?;
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
     model::fit_controlled(m, obj, opts, None, control)

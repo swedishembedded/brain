@@ -558,6 +558,24 @@ get_url() {
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 
+  # OpenAI chat temperature/top_p outside 0..2 / 0..1, and a non-positive
+  # completion budget: refused by the client's own field name.
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"temperature":9}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF temperature "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"top_p":1.5}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF top_p "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"max_tokens":0}'
+  [ "$STATUS" -eq 400 ]
+  grep -qF max_tokens "$RESP"
+  validate openai.json ErrorResponse "$RESP"
+
   # OpenAI chat sampling parameter brain cannot honour: refused by name, not ignored.
   post_json openai /v1/chat/completions \
     '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"logit_bias":{"1":5}}'

@@ -160,7 +160,7 @@ pub fn manifest() -> Manifest {
             )
             .host_resolved(),
         )
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(DEFAULT_MAX_NEW)).min(1.0).max(32768.0).step(1.0))
+        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; bounded only by the memory the prompt plus these tokens need").default(json!(DEFAULT_MAX_NEW)).min(1.0).step(1.0))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)).min(0.0).max(2.0).step(0.01))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)).min(0.0).max(1000.0).step(1.0))
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)).min(0.0).max(1.0).step(0.01))
@@ -209,7 +209,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (cosine schedule down to lr/10)").default(json!(5e-5)))
         .param(ParamSpec::new("batch", ParamType::Int, "sequences per step").default(json!(4)).min(1.0).max(256.0).step(1.0))
-        .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens").default(json!(1024)).min(1.0).max(32768.0).step(1.0))
+        .param(ParamSpec::new("block", ParamType::Int, "training context length, tokens; bounded only by the memory training at it needs").default(json!(1024)).min(1.0).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(1234)))
         .param(ParamSpec::new("dataset_id", ParamType::Str, "provenance id recorded in the adapter's ModelCard"))
         .input(BlobSpec::new("dataset", Media::Bytes, "the training set: data::chat 'generic-messages-v2' JSONL, one packed sample per line").required())
@@ -445,10 +445,16 @@ impl Action for GenerateAction {
 
         // Hot path: keep the loaded model resident across calls; rebuild only when
         // the weights change or the built context is too small for this request.
-        let need = match &plan {
-            Plan::Chat { req, .. } => (req.ids.len() + req.max_new) as u32,
-            Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
+        let (prompt_len, max_new) = match &plan {
+            Plan::Chat { req, .. } => (req.ids.len(), req.max_new),
+            Plan::Raw { ids, max_new, .. } => (ids.len(), *max_new),
         };
+        // The context this request needs; whether it fits is the footprint
+        // check's to say when the model is built for it.
+        let need = prompt_len
+            .checked_add(max_new)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| format!("qwen generate: a {prompt_len}-token prompt plus {max_new} new tokens is beyond any context"))?;
         // `lock_resident`, not `lock()`: this mutex is held for the WHOLE of a
         // generation, so one panicking request (a backend fault, a lost
         // device) would otherwise poison it and make every later caller of
@@ -501,7 +507,7 @@ impl Action for GenerateAction {
                 let tok = tok.expect("Plan::Chat is only built when a tokenizer was loaded");
                 let mut rng = Rng::new(req.seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
-                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
+                let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.min(hot.cap as usize));
                 let gen = crate::sample::generate_kv_stream_with_head(
                     model,
                     &req.ids,
@@ -1800,10 +1806,39 @@ mod tests {
     fn sampling_params_carry_ui_ranges() {
         let g = &manifest().actions[0];
         let p = |name: &str| g.params.iter().find(|p| p.name == name).unwrap();
-        assert_eq!((p("max_new").min, p("max_new").max, p("max_new").step), (Some(1.0), Some(32768.0), Some(1.0)));
+        // No upper bound: the context a request may use is the memory it
+        // needs, which the footprint check decides, not a fixed length.
+        assert_eq!((p("max_new").min, p("max_new").max, p("max_new").step), (Some(1.0), None, Some(1.0)));
         assert_eq!((p("temp").min, p("temp").max, p("temp").step), (Some(0.0), Some(2.0), Some(0.01)));
         assert_eq!((p("top_k").min, p("top_k").max, p("top_k").step), (Some(0.0), Some(1000.0), Some(1.0)));
         assert_eq!((p("top_p").min, p("top_p").max, p("top_p").step), (Some(0.0), Some(1.0), Some(0.01)));
+    }
+
+    /// A budget beyond any context is refused by name, never turned into a
+    /// truncated context or an allocation that aborts the process.
+    #[test]
+    fn a_max_new_beyond_any_context_is_a_clean_error() {
+        let reg = {
+            let mut r = Registry::new();
+            r.register(Arc::new(QwenProvider::new()));
+            r
+        };
+        let path = tiny_checkpoint("beyond-context");
+        let inv = Invocation::new().set("weights", json!(path.to_str().unwrap())).set("prompt", json!("1 2")).set("max_new", json!(i64::MAX));
+        let err = reg.run(MODEL, "generate", inv, &mut |_| {}).unwrap_err();
+        assert!(err.contains("beyond any context"), "got: {err}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn tiny_checkpoint(tag: &str) -> std::path::PathBuf {
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg.param_list().into_iter().map(|(name, n)| (name.clone(), vec![n as u64], init[&name].clone())).collect();
+        let dir = std::env::temp_dir().join(format!("qwen-caps-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+        path
     }
 
     #[test]

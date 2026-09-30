@@ -1253,6 +1253,20 @@ mod tests {
     }
 
     /// An unknown name must still be an error, not a panic or a default.
+    /// A declared range is enforced on every caller's value, so a default
+    /// outside it would be refused the moment a UI sent it back.
+    #[test]
+    fn every_default_lies_within_its_declared_range() {
+        for m in manifests() {
+            for a in &m.actions {
+                for p in &a.params {
+                    let Some(x) = p.default.as_ref().and_then(|d| d.as_f64()) else { continue };
+                    assert!(p.min.is_none_or(|lo| x >= lo) && p.max.is_none_or(|hi| x <= hi), "{}/{}: default {x} outside [{:?}, {:?}] for '{}'", m.model, a.name, p.min, p.max, p.name);
+                }
+            }
+        }
+    }
+
     #[test]
     fn an_unknown_model_is_an_error() {
         let e = match provider("definitely/not-a-model") {

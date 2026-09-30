@@ -75,6 +75,7 @@ pub struct ParamSpec {
     pub help: String,
     /// Inclusive numeric range and step, for `Int`/`Float` params a UI should
     /// render as a bounded slider/spinner rather than an open text field.
+    /// [`ActionSpec::validate`] refuses a caller's value outside the range.
     /// `None` for params with no natural bound (a free-form seed, say) or for
     /// non-numeric types, where these are simply never set.
     pub min: Option<f64>,
@@ -320,7 +321,10 @@ impl ActionSpec {
         // type-check + host env + defaults + required
         for p in &self.params {
             match params.get(&p.name) {
-                Some(v) => check_type(&p.name, &p.ty, v)?,
+                Some(v) => {
+                    check_type(&p.name, &p.ty, v)?;
+                    check_range(p, v)?;
+                }
                 None => {
                     if let Some(v) = host_env_value(p) {
                         params.insert(p.name.clone(), Value::String(v));
@@ -384,6 +388,19 @@ fn check_type(name: &str, ty: &ParamType, v: &Value) -> Result<(), String> {
     } else {
         Err(format!("param '{name}' must be {} (got {v})", ty.name()))
     }
+}
+
+/// A caller's number against the param's declared inclusive range. Only a
+/// caller's value is checked: a default is the action's own.
+fn check_range(p: &ParamSpec, v: &Value) -> Result<(), String> {
+    let Some(x) = v.as_f64() else { return Ok(()) };
+    if let Some(min) = p.min.filter(|&m| x < m) {
+        return Err(format!("param '{}' must be at least {min} (got {v})", p.name));
+    }
+    if let Some(max) = p.max.filter(|&m| x > m) {
+        return Err(format!("param '{}' must be at most {max} (got {v})", p.name));
+    }
+    Ok(())
 }
 
 /// A model's advertised set of actions.
@@ -1045,6 +1062,21 @@ mod tests {
         assert!(spec.validate(Invocation::new().set("text", json!("x")).set("mode", json!("weird"))).is_err());
         // wrong type
         assert!(spec.validate(Invocation::new().set("text", json!(5))).is_err());
+    }
+
+    /// A declared range is a contract, not a UI hint: a value outside it is
+    /// refused naming the param and the bound, before any action sees it.
+    #[test]
+    fn validate_refuses_a_value_outside_the_declared_range() {
+        let spec = ActionSpec::new("fit", "train")
+            .param(ParamSpec::new("steps", ParamType::Int, "steps").default(json!(10)).min(1.0).max(100.0))
+            .param(ParamSpec::new("lr", ParamType::Float, "rate").min(0.0));
+        assert!(spec.validate(Invocation::new().set("steps", json!(100)).set("lr", json!(0.0))).is_ok(), "the bounds are inclusive");
+        let err = spec.validate(Invocation::new().set("steps", json!(1_000_000_000))).unwrap_err();
+        assert!(err.contains("steps") && err.contains("100"), "{err}");
+        let err = spec.validate(Invocation::new().set("steps", json!(0))).unwrap_err();
+        assert!(err.contains("steps") && err.contains('1'), "{err}");
+        assert!(spec.validate(Invocation::new().set("lr", json!(-1e-3))).is_err());
     }
 
     // ===== host-resolved params: the weights location is the HOST's fact =====

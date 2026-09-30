@@ -132,7 +132,7 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     reject_unsupported_tools(body)?;
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'model' is required"))?;
     let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'messages' must be a non-empty array"))?;
-    let max_tokens = body.get("max_tokens").and_then(|v| v.as_i64()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'max_tokens' is required"))?;
+    let max_tokens = crate::sampling::max_tokens(PROVIDER, "max_tokens", body.get("max_tokens"))?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();

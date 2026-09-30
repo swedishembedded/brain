@@ -220,3 +220,4 @@ What belongs where:
 | 177 | A kernel constant and its host oracle agree on the same wrong value | [`177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md`](177-a-kernel-constant-and-its-host-oracle-agree-on-the-same-wrong-value.md) |
 | 178 | A tokenizer guessed from one regex feature tokenizes a different model | [`178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md`](178-a-tokenizer-guessed-from-one-regex-feature-tokenizes-a-different-model.md) |
 | 179 | A checkpoint is served as downloaded | [`179-a-checkpoint-is-served-as-downloaded.md`](179-a-checkpoint-is-served-as-downloaded.md) |
+| 180 | A declared range is enforced, or it is not a limit | [`180-a-declared-range-is-enforced-or-it-is-not-a-limit.md`](180-a-declared-range-is-enforced-or-it-is-not-a-limit.md) |
