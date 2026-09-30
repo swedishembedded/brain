@@ -10,6 +10,10 @@
 //! `\frac{1}{2}` are one answer and no float tolerance can let a wrong one
 //! through.
 //!
+//! [`ExternalVerifier`] hands a completion to a command the operator
+//! supplies - a sandbox that runs generated code against tests - and reads
+//! the reward it prints. brain never executes model output itself.
+//!
 //! Swedish Embedded AB implements reward modelling and reinforcement
 //! fine-tuning of reasoning models for its clients. If your team needs
 //! expertise in training models on verifiable rewards, you can procure our
@@ -252,6 +256,118 @@ impl<D: Fn(&[u32]) -> String> Verifier for MathAnswer<D> {
     }
 }
 
+/// The most stdout an [`ExternalVerifier`] command may print: a reward is a
+/// few bytes, so anything near this is a runaway, cut off rather than held.
+const MAX_VERIFIER_OUTPUT: usize = 1 << 20;
+
+/// Rewards a completion by running an operator-supplied command - the
+/// sandbox that executes generated code against the task's tests - and
+/// reading the reward it reports.
+///
+/// The command gets one JSON object on stdin,
+/// `{"task_id", "answer", "completion"}` (`answer` is the task's own
+/// `Task::answer`, `completion` the decoded text), and prints one on
+/// stdout, `{"reward": <number>, "parts": {<name>: <number>, ...}}`.
+/// Model output reaches the command only as data on stdin: never in its
+/// arguments, never through a shell brain starts.
+///
+/// brain bounds what the command can cost: it runs in its own process
+/// group, and when it outlives `timeout`, or when it exits, the whole group
+/// is killed, so a stray child cannot survive it; its stdout is read up to
+/// 1 MiB. Isolation from the network, the filesystem and the host is the
+/// command's job - brain does not sandbox anything itself. A timeout, a
+/// non-zero exit or unreadable output is a zero reward, recorded in `parts`
+/// as `timeout` or `verifier_error`.
+///
+/// Nothing constructs one by default, and no serving surface reaches it.
+pub struct ExternalVerifier<D: Fn(&[u32]) -> String> {
+    command: Vec<String>,
+    timeout: std::time::Duration,
+    decode: D,
+}
+
+impl<D: Fn(&[u32]) -> String> ExternalVerifier<D> {
+    /// A verifier running `command` (program and arguments), killed after
+    /// `timeout`, reading completions through `decode`.
+    pub fn new(command: Vec<String>, timeout: std::time::Duration, decode: D) -> Result<ExternalVerifier<D>, String> {
+        if command.first().is_none_or(|p| p.is_empty()) {
+            return Err("ExternalVerifier: the command is empty".to_string());
+        }
+        Ok(ExternalVerifier { command, timeout, decode })
+    }
+
+    /// The reward the command reports for `completion` on `task`.
+    pub fn grade(&self, task: &Task, completion: &str) -> Reward {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
+        let failed = |part: &str| Reward { value: 0.0, parts: BTreeMap::from([(part.to_string(), 1.0)]) };
+        let mut child = match std::process::Command::new(&self.command[0])
+            .args(&self.command[1..])
+            .process_group(0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return failed("verifier_error"),
+        };
+        let group = child.id() as i32;
+        let input = serde_json::json!({ "task_id": task.id, "answer": task.answer, "completion": completion }).to_string();
+        let mut stdin = child.stdin.take().expect("piped");
+        // Written from its own thread: a command that never reads must not
+        // block the deadline below.
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+        let mut stdout = child.stdout.take().expect("piped");
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = (&mut stdout).take(MAX_VERIFIER_OUTPUT as u64).read_to_end(&mut out);
+            out
+        });
+        let deadline = std::time::Instant::now() + self.timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(5)),
+                _ => break None,
+            }
+        };
+        // SAFETY: `kill` with a negative pid signals the process group the
+        // child leads (`process_group(0)` above); it touches no memory. The
+        // group is ours alone, so nothing else is signalled.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+        let _ = child.wait();
+        let _ = writer.join();
+        let out = reader.join().unwrap_or_default();
+        match status {
+            None => failed("timeout"),
+            Some(s) if !s.success() => failed("verifier_error"),
+            Some(_) => parse_reward(&out).unwrap_or_else(|| failed("verifier_error")),
+        }
+    }
+}
+
+/// `{"reward": <finite number>, "parts": {<name>: <finite number>}}`.
+fn parse_reward(out: &[u8]) -> Option<Reward> {
+    let v: serde_json::Value = serde_json::from_slice(out).ok()?;
+    let value = v.get("reward")?.as_f64().filter(|x| x.is_finite())? as f32;
+    let mut parts = BTreeMap::new();
+    if let Some(p) = v.get("parts") {
+        for (k, x) in p.as_object()? {
+            parts.insert(k.clone(), x.as_f64().filter(|x| x.is_finite())? as f32);
+        }
+    }
+    Some(Reward { value, parts })
+}
+
+impl<D: Fn(&[u32]) -> String> Verifier for ExternalVerifier<D> {
+    fn verify(&self, task: &Task, _transcript: &[Step], completion: &[u32]) -> Reward {
+        self.grade(task, &(self.decode)(completion))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +469,52 @@ mod tests {
         let task = Task { id: "t".into(), prompt: vec![], answer: json!(42) };
         assert_eq!(v.verify(&task, &[], &[4, 2]).value, 1.0);
         assert_eq!(v.verify(&task, &[], &[4, 3]).value, 0.0);
+    }
+
+    fn sh(script: &str, timeout_ms: u64) -> ExternalVerifier<fn(&[u32]) -> String> {
+        let decode: fn(&[u32]) -> String = |_| String::new();
+        ExternalVerifier::new(vec!["sh".into(), "-c".into(), script.into()], std::time::Duration::from_millis(timeout_ms), decode).unwrap()
+    }
+
+    fn task() -> Task {
+        Task { id: "add".into(), prompt: vec![], answer: json!({"tests": "assert add(1, 2) == 3"}) }
+    }
+
+    /// The command reads the task and the completion as JSON on stdin and
+    /// its printed reward is the reward.
+    #[test]
+    fn the_command_grades_the_completion_it_is_given() {
+        let v = sh(r#"grep -q '"completion":"def add(a, b): return a + b"' && echo '{"reward": 1, "parts": {"passed": 3}}' || echo '{"reward": 0}'"#, 5000);
+        let r = v.grade(&task(), "def add(a, b): return a + b");
+        assert_eq!((r.value, r.parts.get("passed").copied()), (1.0, Some(3.0)), "{r:?}");
+        assert_eq!(v.grade(&task(), "def add(a, b): return a - b").value, 0.0);
+    }
+
+    /// A command that outlives its timeout is killed with everything it
+    /// started, and the completion scores zero.
+    #[test]
+    fn a_command_past_its_deadline_is_killed_with_its_children() {
+        let pidfile = std::env::temp_dir().join(format!("brain-rl-verifier-{}", std::process::id()));
+        let v = sh(&format!("sleep 30 & echo $! > {}; wait", pidfile.display()), 300);
+        let start = std::time::Instant::now();
+        let r = v.grade(&task(), "while True: pass");
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!((r.value, r.parts.get("timeout").copied()), (0.0, Some(1.0)), "{r:?}");
+        let grandchild: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        std::fs::remove_file(&pidfile).ok();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: signal 0 only probes whether the pid exists.
+        assert_eq!(unsafe { libc::kill(grandchild, 0) }, -1, "the command's own child survived it");
+    }
+
+    /// A failing, silent or garbled command is a zero reward, never a
+    /// parse of whatever it printed; a flood of output is cut off.
+    #[test]
+    fn a_broken_command_scores_zero() {
+        for script in ["exit 1", "true", "echo not json", r#"echo '{"reward": "high"}'"#, "yes"] {
+            let r = sh(script, 1000).grade(&task(), "x");
+            assert_eq!(r.value, 0.0, "{script}: {r:?}");
+        }
+        assert!(ExternalVerifier::new(vec![], std::time::Duration::from_secs(1), |_: &[u32]| String::new()).is_err());
     }
 }

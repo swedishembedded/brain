@@ -2187,6 +2187,7 @@ dependencies = [
  "brain-model",
  "brain-promote",
  "brain-qwen3",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

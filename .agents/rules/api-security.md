@@ -150,6 +150,24 @@ them, so treat all request input as hostile.
 - [ ] CORS is intentional (the permissive default is acceptable only because every
       route is key-gated; re-confirm if that changes).
 
+### 8. Model output that is executed (training verifiers)
+- [ ] brain never executes model output itself. The one path that runs
+      generated code is `rl::verify::ExternalVerifier`: an OPERATOR-supplied
+      command (the sandbox) that receives the completion as JSON data on stdin -
+      never in its argv, never through a shell brain starts - and prints a
+      reward. Nothing constructs one by default, and no serving surface (HTTP,
+      D-Bus, `brain do`) can reach it; it exists only for training runs an
+      operator configures explicitly.
+- [ ] The command runs in its own process group, killed whole (a stray child
+      included) at its timeout or when it exits; its stdout is read up to 1 MiB;
+      a timeout, non-zero exit or malformed reward is a zero reward, never a
+      parse of partial output. `crates/rl/src/verify.rs`'s tests pin each.
+- [ ] Isolation (no network, a read-only or scratch filesystem, CPU/memory
+      limits) is the operator's command's job, and the docs of any flag that
+      takes such a command must say so. Threat: a policy trained against a
+      verifier learns to emit whatever the verifier rewards, including code
+      that escapes a weak sandbox - treat every completion as hostile code.
+
 ## When to run
 - Adding/removing/altering any route, handler, auth path, error shape, admission
   policy, or D-Bus method.
