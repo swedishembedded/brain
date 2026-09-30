@@ -9,7 +9,9 @@
 //! a linear. The hybrid split form (DeepSeek-VL's
 //! `low_high_hybrid_split_mlp_gelu`) takes two feature streams, projects each
 //! to half the width and concatenates the halves (high first) before the
-//! GELU stack.
+//! GELU stack. The last linear may widen past `n_embed` ([`ProjectorConfig::
+//! with_out_dim`]): Janus-Pro's generation head is this stack ending in the
+//! image vocabulary.
 //!
 //! [`MlpProjector`] runs it on the device, forward and backward (the aligner
 //! is what a VLM fine-tune trains); [`forward_host`] is the same function on
@@ -55,6 +57,8 @@ pub struct ProjectorConfig {
     pub depth: u32,
     pub input_dim: u32,
     pub n_embed: u32,
+    /// The last linear's output width: `n_embed` for an aligner.
+    pub out_dim: u32,
 }
 
 impl ProjectorConfig {
@@ -71,13 +75,32 @@ impl ProjectorConfig {
         if kind == ProjectorKind::HybridSplit && n_embed % 2 != 0 {
             return Err(format!("a hybrid split projector needs an even n_embed, got {n_embed}"));
         }
-        Ok(ProjectorConfig { kind, depth, input_dim, n_embed })
+        Ok(ProjectorConfig { kind, depth, input_dim, n_embed, out_dim: n_embed })
+    }
+
+    /// The same stack with its last linear producing `out_dim` columns. A
+    /// one-linear hybrid split's output is its two halves, so its width is
+    /// fixed.
+    pub fn with_out_dim(self, out_dim: u32) -> Result<ProjectorConfig, String> {
+        if self.kind == ProjectorKind::HybridSplit && self.depth == 1 && out_dim != self.n_embed {
+            return Err(format!("a one-linear hybrid split projector outputs its two {}-wide halves, not {out_dim} columns", self.n_embed / 2));
+        }
+        Ok(ProjectorConfig { out_dim, ..self })
+    }
+
+    /// Linear `k`'s output width: `out_dim` for the last, `n_embed` before.
+    fn width(&self, k: u32) -> u32 {
+        if k + 1 == self.depth {
+            self.out_dim
+        } else {
+            self.n_embed
+        }
     }
 
     /// The input linears: `(name, out, in)`.
     fn input_linears(&self) -> Vec<(&'static str, u32)> {
         match self.kind {
-            ProjectorKind::Mlp => vec![("in", self.n_embed)],
+            ProjectorKind::Mlp => vec![("in", self.width(0))],
             ProjectorKind::HybridSplit => vec![("in_high", self.n_embed / 2), ("in_low", self.n_embed / 2)],
         }
     }
@@ -93,8 +116,9 @@ impl ProjectorConfig {
             out.push((format!("{name}.bias"), o as usize));
         }
         for k in 1..self.depth {
-            out.push((format!("layers.{k}.weight"), e * e));
-            out.push((format!("layers.{k}.bias"), e));
+            let o = self.width(k) as usize;
+            out.push((format!("layers.{k}.weight"), o * e));
+            out.push((format!("layers.{k}.bias"), o));
         }
         out
     }
@@ -117,7 +141,7 @@ fn linear_host(x: &[f32], w: &[f32], b: &[f32], rows: usize, inn: usize, out: us
 }
 
 /// The projector on the host: `inputs` is one `[rows, input_dim]` stream,
-/// or two (high, low) for the hybrid split; the result is `[rows, n_embed]`.
+/// or two (high, low) for the hybrid split; the result is `[rows, out_dim]`.
 pub fn forward_host(cfg: &ProjectorConfig, weights: &HashMap<String, Vec<f32>>, inputs: &[&[f32]], rows: usize) -> Vec<f32> {
     assert_eq!(inputs.len(), cfg.inputs(), "projector: {} input stream(s) expected", cfg.inputs());
     let (i, e) = (cfg.input_dim as usize, cfg.n_embed as usize);
@@ -135,7 +159,7 @@ pub fn forward_host(cfg: &ProjectorConfig, weights: &HashMap<String, Vec<f32>>, 
     };
     for k in 1..cfg.depth {
         let g: Vec<f32> = h.iter().map(|&v| crate::hostmath::gelu_exact(v)).collect();
-        h = linear_host(&g, &weights[&format!("layers.{k}.weight")], &weights[&format!("layers.{k}.bias")], rows, e, e);
+        h = linear_host(&g, &weights[&format!("layers.{k}.weight")], &weights[&format!("layers.{k}.bias")], rows, e, cfg.width(k) as usize);
     }
     h
 }
@@ -152,7 +176,7 @@ impl HostProjector {
     /// LLaVA's and FastVLM's `mlp2x_gelu` from its two linears
     /// (`[n_embed, input_dim]` then `[n_embed, n_embed]`, torch layout).
     pub fn mlp2x(fc1_w: Vec<f32>, fc1_b: Vec<f32>, fc2_w: Vec<f32>, fc2_b: Vec<f32>, input_dim: usize, n_embed: usize) -> HostProjector {
-        let cfg = ProjectorConfig { kind: ProjectorKind::Mlp, depth: 2, input_dim: input_dim as u32, n_embed: n_embed as u32 };
+        let cfg = ProjectorConfig { kind: ProjectorKind::Mlp, depth: 2, input_dim: input_dim as u32, n_embed: n_embed as u32, out_dim: n_embed as u32 };
         let weights = HashMap::from([
             ("in.weight".to_string(), fc1_w),
             ("in.bias".to_string(), fc1_b),
@@ -259,14 +283,14 @@ impl MlpProjector {
             halves,
             pre: (0..cfg.depth).map(layer).collect(),
             post: (0..cfg.depth).map(layer).collect(),
-            out: gpu.storage(e),
+            out: gpu.storage((rows * cfg.out_dim) as u64),
             d_a: gpu.storage(e),
             d_b: gpu.storage(e),
             d_half: gpu.storage(e / 2),
         })
     }
 
-    /// The `[rows, n_embed]` output buffer [`Self::forward`] writes.
+    /// The `[rows, out_dim]` output buffer [`Self::forward`] writes.
     pub fn out(&self) -> &DeviceBuffer {
         &self.out
     }
@@ -307,7 +331,7 @@ impl MlpProjector {
         let first = self.linear_out(0);
         let mut s = Vec::new();
         match self.cfg.kind {
-            ProjectorKind::Mlp => s.extend(self.linear(g, inputs[0], "in", first, i, e)),
+            ProjectorKind::Mlp => s.extend(self.linear(g, inputs[0], "in", first, i, self.cfg.width(0))),
             ProjectorKind::HybridSplit => {
                 s.extend(self.linear(g, inputs[0], "in_high", &self.halves[0], i, e / 2));
                 s.extend(self.linear(g, inputs[1], "in_low", &self.halves[1], i, e / 2));
@@ -318,7 +342,7 @@ impl MlpProjector {
         for k in 1..self.cfg.depth {
             let (pre, post) = (&self.pre[k as usize], &self.post[k as usize]);
             s.push(g.step(self.ids.gelu, &[pre, post], &[m * e], m * e));
-            s.extend(self.linear(g, post, &format!("layers.{k}"), self.linear_out(k), e, e));
+            s.extend(self.linear(g, post, &format!("layers.{k}"), self.linear_out(k), e, self.cfg.width(k)));
         }
         s
     }
@@ -341,7 +365,7 @@ impl MlpProjector {
     }
 
     /// The backward of the last [`Self::forward`] for the output gradient
-    /// `d_out` (`[rows, n_embed]`): accumulates every parameter gradient and,
+    /// `d_out` (`[rows, out_dim]`): accumulates every parameter gradient and,
     /// when `d_inputs` is given (one buffer per input stream), writes the
     /// input gradients there. `inputs` are the forward's own inputs.
     ///
@@ -357,13 +381,13 @@ impl MlpProjector {
         for k in (1..self.cfg.depth).rev() {
             let (pre, post) = (&self.pre[k as usize], &self.post[k as usize]);
             let d_post = if std::ptr::eq(dy, &self.d_a) { &self.d_b } else { &self.d_a };
-            self.linear_bwd(g, id, &mut s, dy, post, &format!("layers.{k}"), Some(d_post), e, e);
+            self.linear_bwd(g, id, &mut s, dy, post, &format!("layers.{k}"), Some(d_post), e, self.cfg.width(k));
             let d_pre = if std::ptr::eq(d_post, &self.d_a) { &self.d_b } else { &self.d_a };
             s.push(g.step(id.gelu_bwd, &[pre, d_post, d_pre], &[m * e], m * e));
             dy = d_pre;
         }
         match self.cfg.kind {
-            ProjectorKind::Mlp => self.linear_bwd(g, id, &mut s, dy, inputs[0], "in", d_inputs.map(|d| d[0]), i, e),
+            ProjectorKind::Mlp => self.linear_bwd(g, id, &mut s, dy, inputs[0], "in", d_inputs.map(|d| d[0]), i, self.cfg.width(0)),
             ProjectorKind::HybridSplit => {
                 for (half, name) in [(0u32, "in_high"), (1, "in_low")] {
                     s.push(g.step(id.concat_split, &[dy, &self.d_half], &[m, e, e / 2, half * (e / 2), 1, 1], m * (e / 2)));

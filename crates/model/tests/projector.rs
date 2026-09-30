@@ -14,9 +14,12 @@ use model::projector::{forward_host, MlpProjector, ProjectorConfig, PROJECTOR_PI
 
 const ROWS: usize = 3;
 
-fn configs() -> [ProjectorConfig; 3] {
+fn configs() -> [ProjectorConfig; 4] {
     [
         ProjectorConfig::from_type("mlp_gelu", 2, 6, 8).unwrap(),
+        // Janus-Pro's generation head: the last linear widens to the image
+        // vocabulary.
+        ProjectorConfig::from_type("mlp_gelu", 2, 6, 8).unwrap().with_out_dim(11).unwrap(),
         ProjectorConfig::from_type("mlp_gelu", 3, 6, 8).unwrap(),
         ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 6, 8).unwrap(),
     ]
@@ -34,7 +37,7 @@ fn the_device_projector_matches_the_host_function_and_its_gradient() {
         let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
         let inputs: Vec<Vec<f32>> = (0..cfg.inputs()).map(|_| random(ROWS * cfg.input_dim as usize, &mut rng)).collect();
         // The loss is the output against a fixed random direction.
-        let dir = random(ROWS * cfg.n_embed as usize, &mut rng);
+        let dir = random(ROWS * cfg.out_dim as usize, &mut rng);
         let loss = |w: &HashMap<String, Vec<f32>>, x: &[Vec<f32>]| -> f64 {
             let refs: Vec<&[f32]> = x.iter().map(Vec::as_slice).collect();
             forward_host(&cfg, w, &refs, ROWS).iter().zip(&dir).map(|(a, b)| *a as f64 * *b as f64).sum()
@@ -44,7 +47,7 @@ fn the_device_projector_matches_the_host_function_and_its_gradient() {
         let x_dev: Vec<_> = inputs.iter().map(|x| g.storage_init("x", x)).collect();
         let x_refs: Vec<&_> = x_dev.iter().collect();
         g.submit(&[], &proj.forward(&g, &x_refs));
-        let got = g.read(proj.out(), ROWS * cfg.n_embed as usize);
+        let got = g.read(proj.out(), ROWS * cfg.out_dim as usize);
         let refs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
         let want = forward_host(&cfg, &weights, &refs, ROWS);
         let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
@@ -90,4 +93,6 @@ fn an_unknown_projector_or_an_odd_hybrid_width_is_refused() {
     assert!(ProjectorConfig::from_type("linear", 1, 4, 4).is_err());
     assert!(ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 4, 7).is_err());
     assert!(ProjectorConfig::from_type("mlp_gelu", 0, 4, 4).is_err());
+    let hybrid = ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 1, 4, 8).unwrap();
+    assert!(hybrid.with_out_dim(6).is_err(), "a one-linear hybrid's output is its two halves");
 }
