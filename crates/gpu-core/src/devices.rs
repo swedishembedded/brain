@@ -753,6 +753,7 @@ impl DeviceSpec {
         }
 
         let mut want_vulkan = false;
+        let mut backend_token = false;
         let mut any_gpu_request = false;
         let mut any_npu_request = false;
         for r in &self.requests {
@@ -800,17 +801,18 @@ impl DeviceSpec {
                 Request::VulkanBackend => {
                     want_vulkan = true;
                     any_gpu_request = true;
-                    if set.gpus.is_empty() {
-                        set.gpus.extend(0..probe.gpus);
-                    }
+                    backend_token = true;
                 }
                 Request::WgpuBackend => {
                     any_gpu_request = true;
-                    if set.gpus.is_empty() {
-                        set.gpus.extend(0..probe.gpus);
-                    }
+                    backend_token = true;
                 }
             }
+        }
+        // A backend token says how the GPUs are driven, not which: it means
+        // every card only when no token named a card, whatever the order.
+        if backend_token && set.gpus.is_empty() {
+            set.gpus.extend(0..probe.gpus);
         }
 
         set.gpus.sort_unstable();
@@ -1472,6 +1474,21 @@ mod tests {
         let set = resolve("vulkan", inv(2, 48, 0)).unwrap();
         assert_eq!(set.backend, Backend::Vulkan);
         assert_eq!(set.gpus, vec![0, 1]);
+    }
+
+    /// A backend token names HOW, never WHICH: `vulkan,gpu1` is card 1 on
+    /// the native backend, whichever order the tokens come in. Read in
+    /// order, `vulkan` used to widen an empty set to every card before
+    /// `gpu1` narrowed it, so no single card was pinned and the run landed
+    /// on card 0.
+    #[test]
+    fn a_backend_token_does_not_widen_an_explicit_card() {
+        for spec in ["vulkan,gpu1", "gpu1,vulkan", "wgpu,gpu1"] {
+            let set = resolve(spec, inv(2, 48, 0)).unwrap();
+            assert_eq!(set.gpus, vec![1], "{spec}");
+            assert_eq!(set.single_gpu(), Some(1), "{spec}");
+        }
+        assert_eq!(resolve("vulkan,cpu", inv(2, 48, 0)).unwrap().gpus, vec![0, 1]);
     }
 
     // ---- `--backend`: HOW the selected hardware is driven --------------
