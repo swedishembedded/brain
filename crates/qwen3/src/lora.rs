@@ -22,27 +22,26 @@
 
 use std::collections::HashMap;
 
-use crate::config::LoraCfg;
-use crate::model::Qwen;
+use crate::config::{LoraCfg, QwenConfig};
 
 /// Write only this model's `.lora_a`/`.lora_b` tensors -- never the frozen
 /// base -- to `path`. See `model::lora::device_adapter::save_adapter`.
-pub fn save_adapter(path: &str, model: &Qwen, card_id: &str, base_id: &str, dataset_id: Option<&str>) -> std::io::Result<()> {
+pub fn save_adapter<M: model::Model<Config = QwenConfig>>(path: &str, model: &M, card_id: &str, base_id: &str, dataset_id: Option<&str>) -> std::io::Result<()> {
     save_adapter_with_lineage(path, model, card_id, base_id, dataset_id, None)
 }
 
 /// [`save_adapter`], recording the training run that produced the adapter on
 /// its card. See `model::lora::device_adapter::save_adapter_with_lineage`.
-pub fn save_adapter_with_lineage(
+pub fn save_adapter_with_lineage<M: model::Model<Config = QwenConfig>>(
     path: &str,
-    model: &Qwen,
+    model: &M,
     card_id: &str,
     base_id: &str,
     dataset_id: Option<&str>,
     training: Option<checkpoint::st::TrainingProvenance>,
 ) -> std::io::Result<()> {
     let lora = model
-        .cfg
+        .config()
         .lora
         .as_ref()
         .unwrap_or_else(|| panic!("save_adapter: model was not built with a LoraCfg"));

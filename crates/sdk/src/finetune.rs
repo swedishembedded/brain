@@ -333,7 +333,7 @@ impl ChatFineTune {
             cycle: self.cycle,
         };
         let dataset_id = digest(dataset)?;
-        qwen3::lora::save_adapter_with_lineage(utf8(&adapter_path)?, &trained, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
+        trained.save_adapter_with_lineage(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
             .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);

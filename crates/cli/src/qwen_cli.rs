@@ -1053,7 +1053,7 @@ fn finetune_lora(args: &[String]) {
         }
     };
     println!("trained: loss {:.4} -> {}", report.initial_loss, report.final_loss.map_or("n/a".to_string(), |l| format!("{l:.4}")));
-    if let Err(e) = qwen3::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &trained, &full_ref_str, &base_id, dataset_id.as_deref()) {
+    if let Err(e) = trained.save_adapter(adapter_out_path.to_str().unwrap_or_default(), &full_ref_str, &base_id, dataset_id.as_deref()) {
         eprintln!("save_adapter: {e}");
         return;
     }

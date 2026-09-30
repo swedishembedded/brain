@@ -15,8 +15,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use checkpoint::TensorSource;
+use gpu_core::devices::{Home, Need};
 use gpu_core::select::Dtype;
-use model::FitOpts;
+use model::{FitOpts, Pipeline, PipelineModel, Shard, Shardable};
 
 use crate::config::{LoraCfg, QwenConfig};
 use crate::model::Qwen;
@@ -130,6 +131,101 @@ pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSour
         }
     })
     .map_err(std::io::Error::other)
+}
+
+/// How a LoRA fine-tune is laid out over `cards` cards, by what they can
+/// hold and never by a flag: the whole model as one shard when `place`
+/// finds a card for it, else the fewest pipeline stages `place` can home
+/// (each stage declared with its own footprint), else a refusal naming the
+/// bytes. `place` answers a card for each part or refuses the plan - the
+/// machine's placer. The returned shards carry the card each was homed on.
+pub fn plan_lora_layout(
+    cfg: &QwenConfig,
+    b: u32,
+    t: u32,
+    dt: Dtype,
+    cards: usize,
+    place: impl Fn(&[Need]) -> Result<Vec<Home>, String>,
+) -> Result<Vec<Shard>, String> {
+    let cost = <Qwen as Shardable>::shard_cost(cfg, b, t);
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    let mut refused = Vec::new();
+    for stages in 1..=cards.max(1) {
+        let mut shards = model::plan_balanced(&cost, &(0..stages).collect::<Vec<_>>());
+        let needs: Vec<Need> = shards
+            .iter()
+            .enumerate()
+            .map(|(i, sh)| {
+                let name = if stages == 1 { "qwen3 finetune".to_string() } else { format!("qwen3 finetune stage {i}") };
+                Need::sized(name, crate::footprint::estimate_vram_bytes(cfg, sh, dt, b, t, true, false), 0)
+            })
+            .collect();
+        match place(&needs) {
+            Ok(homes) => {
+                for (sh, home) in shards.iter_mut().zip(homes) {
+                    match home {
+                        Home::Gpu(card) => sh.gpu_index = card as usize,
+                        Home::Cpu => return Err("qwen3 finetune: training has no CPU tier, and no card could take it".to_string()),
+                    }
+                }
+                return Ok(shards);
+            }
+            Err(why) => {
+                let largest = needs.iter().map(|n| n.vram).max().unwrap_or(0);
+                refused.push(format!("{stages} stage(s) of up to {:.1} GiB: {why}", gib(largest)));
+            }
+        }
+    }
+    Err(format!("qwen3 finetune does not fit {cards} card(s): {}", refused.join("; ")))
+}
+
+/// A trained LoRA model: on one card, or split across several as a pipeline.
+pub enum Trained {
+    Single(Qwen),
+    Pipeline(PipelineModel<Qwen>),
+}
+
+impl Trained {
+    /// Write the trained adapter (never the frozen base) to `path`, as
+    /// [`crate::lora::save_adapter_with_lineage`].
+    pub fn save_adapter_with_lineage(
+        &self,
+        path: &str,
+        card_id: &str,
+        base_id: &str,
+        dataset_id: Option<&str>,
+        training: Option<checkpoint::st::TrainingProvenance>,
+    ) -> std::io::Result<()> {
+        match self {
+            Trained::Single(m) => crate::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, training),
+            Trained::Pipeline(m) => crate::lora::save_adapter_with_lineage(path, m, card_id, base_id, dataset_id, training),
+        }
+    }
+
+    /// [`Self::save_adapter_with_lineage`] with no training provenance.
+    pub fn save_adapter(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>) -> std::io::Result<()> {
+        self.save_adapter_with_lineage(path, card_id, base_id, dataset_id, None)
+    }
+}
+
+/// The trainable model laid out over the machine's cards ([`plan_lora_layout`]):
+/// built as it would be on one card, or as a pipeline of stages each on its
+/// own. A pinned device (an explicit `--device`) is one card, as it always
+/// was. The layout is printed, so an automatic split is never a silent one.
+fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Trained> {
+    if gpu_core::devices::current_gpu().is_some() {
+        return build_for_training(cfg, opts, init, dt).map(Trained::Single);
+    }
+    let place = |needs: &[Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
+    let shards = plan_lora_layout(&cfg, opts.batch_size, opts.block_size, dt, gpu_core::devices::gpus().len(), place).map_err(std::io::Error::other)?;
+    if let [whole] = shards.as_slice() {
+        let built = gpu_core::devices::with_gpu(whole.gpu_index as u32, || build_for_training(cfg, opts, init, dt));
+        return built.map_err(std::io::Error::other)?.map(Trained::Single);
+    }
+    let layout: Vec<String> = shards.iter().map(|sh| format!("gpu{} layers {}..{}", sh.gpu_index, sh.start, sh.end)).collect();
+    println!("qwen3 finetune: pipeline of {} stages: {}", shards.len(), layout.join(", "));
+    let pipe = Pipeline::<Qwen>::with_shards_dt(cfg.clone(), opts.batch_size, opts.block_size, init, shards, dt);
+    Ok(Trained::Pipeline(PipelineModel::new(pipe, cfg)))
 }
 
 /// Every projection a qwen3 LoRA adapter can cover, which is also what a
@@ -324,7 +420,9 @@ pub fn lora_start(base: &str, rank: u32, alpha: f32, seed: u64, start: &LoraStar
 /// `model::FitControl`), returning the trained model rather than writing a
 /// whole checkpoint: the caller saves what it wants of it (its adapter).
 /// The frozen base linears are held at `base_dtype` ([`Dtype::BF16`]: half
-/// the bytes of fp32, the adapters staying fp32).
+/// the bytes of fp32, the adapters staying fp32). The model is placed on one
+/// card when one has room for it, otherwise as a pipeline across the fewest
+/// cards that do ([`plan_lora_layout`]).
 pub fn finetune_lora_controlled(
     base: &str,
     dir: &Path,
@@ -334,21 +432,28 @@ pub fn finetune_lora_controlled(
     start: &LoraStart<'_>,
     control: model::FitControl<'_>,
     base_dtype: Dtype,
-) -> std::io::Result<(model::FitReport, Qwen)> {
+) -> std::io::Result<(model::FitReport, Trained)> {
     let (cfg, init) = lora_start(base, rank, alpha, opts.seed, start)?;
     // A LoRA build never offloads its moments; the process-wide switch is
     // cleared for the construction and restored after, as `finetune_from`
     // does.
     let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let m = build_for_training(cfg, opts, &init, base_dtype);
+    let m = build_trainer(cfg, opts, &init, base_dtype);
     if let Some(v) = prev_off {
         std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
     }
-    let m = m?;
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
-    let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
-    model::fit_controlled(m, obj, opts, None, control)
+    match m? {
+        Trained::Single(m) => {
+            let (report, m) = model::fit_controlled(m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, None, control)?;
+            Ok((report, Trained::Single(m)))
+        }
+        Trained::Pipeline(m) => {
+            let (report, m) = model::fit_controlled(m, model::causal_lm::<PipelineModel<Qwen>>(train, val, bcfg, itos), opts, None, control)?;
+            Ok((report, Trained::Pipeline(m)))
+        }
+    }
 }
 
 #[cfg(test)]
