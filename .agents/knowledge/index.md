@@ -227,5 +227,6 @@ What belongs where:
 | 184 | A hub id names one repo, not an architecture | [`184-a-hub-id-names-one-repo.md`](184-a-hub-id-names-one-repo.md) |
 | 185 | A raw completion is not a chat turn | [`185-a-raw-completion-is-not-a-chat-turn.md`](185-a-raw-completion-is-not-a-chat-turn.md) |
 | 186 | SigLIP is a stem around CLIP's blocks, not a second tower | [`186-siglip-is-a-stem-not-a-tower.md`](186-siglip-is-a-stem-not-a-tower.md) |
+| 187 | A directional gradcheck passes a shared weight whose second use is dropped | [`187-a-directional-gradcheck-passes-a-dropped-shared-weight-use.md`](187-a-directional-gradcheck-passes-a-dropped-shared-weight-use.md) |
 | 188 | A near-unit codebook hides a missing normalize | [`188-a-near-unit-codebook-hides-a-missing-normalize.md`](188-a-near-unit-codebook-hides-a-missing-normalize.md) |
 | 189 | An in-band example separator is a vocabulary assumption | [`189-an-example-separator-is-a-vocabulary-assumption.md`](189-an-example-separator-is-a-vocabulary-assumption.md) |
