@@ -620,16 +620,18 @@ mod caps_tests {
         let s = scene(2, 1);
         let provider = SplatProvider::new();
         let act = provider.action("render").expect("render action");
-        let inv = act
-            .spec()
-            .validate(
-                Invocation::new()
-                    .set("width", json!(1_000_000))
-                    .set("height", json!(1_000_000))
-                    .blob("scene", Blob::new(Media::Bytes, crate::ply::serialize(&s).unwrap())),
-            )
-            .unwrap();
-        let err = act.run(&inv, &mut |_| {}).unwrap_err();
+        let request = || {
+            Invocation::new()
+                .set("width", json!(1_000_000))
+                .set("height", json!(1_000_000))
+                .blob("scene", Blob::new(Media::Bytes, crate::ply::serialize(&s).unwrap()))
+        };
+        // The spec's own maximum refuses it first...
+        let err = act.spec().validate(request()).unwrap_err();
+        assert!(err.contains("at most"), "expected the spec's maximum to refuse it, got: {err}");
+        // ...and the action refuses it again for a caller that skips
+        // validation, rather than failing inside GPU buffer allocation.
+        let err = act.run(&request(), &mut |_| {}).unwrap_err();
         assert!(err.contains("exceeds"), "expected a size-cap error, got: {err}");
     }
 }
