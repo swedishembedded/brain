@@ -242,3 +242,5 @@ What belongs where:
 | 199 | A `config.json` beside GGUF files is metadata, not a checkpoint | [`199-a-config-json-is-not-a-checkpoint.md`](199-a-config-json-is-not-a-checkpoint.md) |
 | 200 | Code gated to a target nobody built on is a wish, not a feature | [`200-a-target-gated-path-nobody-compiled-hides-defects.md`](200-a-target-gated-path-nobody-compiled-hides-defects.md) |
 | 201 | A blocking stream couples every CUDA handle on the card | [`201-a-blocking-stream-couples-every-handle-on-the-card.md`](201-a-blocking-stream-couples-every-handle-on-the-card.md) |
+| 202 | WGSL clamps out-of-range accesses; generated CUDA must too | [`202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md`](202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md) |
+| 203 | Work queued while creating an object must be fenced for the other streams | [`203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md`](203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md) |

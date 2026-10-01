@@ -64,8 +64,13 @@ approximated or run elsewhere. The translator handles scalars and vectors,
 workgroup memory and barriers (including inside loops, when every thread of
 the workgroup reaches them), user helper functions, and the register-tiled
 matrix multiplies and fused attention kernels. Not yet translated: a few
-3D-reconstruction and splatting kernels that use nested structures, and one
-attention kernel that needs the length of a buffer.
+3D-reconstruction and splatting kernels that use nested structures.
+
+An out-of-range array index never touches memory outside the array, as WGSL
+requires of every implementation: the translated kernel clamps the index to the
+last element of the buffer range it was bound to (the slice, for a sliced
+dispatch), the same as the reference backends do. Kernels rely on this at
+ragged tile edges, where they read a little past the end and mask the result.
 
 `make cuda-coverage` generates and compiles every kernel for the device in
 front of it and writes which are runnable and which are refused, and why, to
