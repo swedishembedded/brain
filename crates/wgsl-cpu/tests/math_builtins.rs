@@ -157,3 +157,36 @@ fn bilinear_weight_expression_lowers_and_computes() {
         );
     }
 }
+
+/// The inverse trigonometric functions go through the same libm as `sin`/`cos`,
+/// so they must equal Rust's std bit for bit. `acos` is what the splat view-support
+/// kernel needs; `asin` and `atan` are its siblings, and a kernel using any of
+/// the three would otherwise be refused at JIT time as "unsupported math fn".
+#[test]
+fn inverse_trig_matches_std() {
+    let unit: &[f32] = &[-1.0, -0.75, -0.5, -0.25, -0.0, 0.0, 0.25, 0.5, 0.75, 1.0];
+    for (expr, want) in [("acos(v)", f32::acos as fn(f32) -> f32), ("asin(v)", f32::asin), ("atan(v)", f32::atan)] {
+        let got = run(expr, unit);
+        for (i, &x) in unit.iter().enumerate() {
+            assert_eq!(got[i].to_bits(), want(x).to_bits(), "{expr} at x={x}: got {}, want {}", got[i], want(x));
+        }
+    }
+    // atan is defined beyond [-1, 1] too.
+    let wide: &[f32] = &[-100.0, -3.5, 2.0, 1.0e6];
+    let got = run("atan(v)", wide);
+    for (i, &x) in wide.iter().enumerate() {
+        assert_eq!(got[i].to_bits(), x.atan().to_bits(), "atan at x={x}");
+    }
+}
+
+/// `degrees`/`radians` are a multiply by the constant std itself uses, so they
+/// agree with `to_degrees`/`to_radians` bit for bit.
+#[test]
+fn degrees_and_radians_match_std() {
+    for (expr, want) in [("degrees(v)", f32::to_degrees as fn(f32) -> f32), ("radians(v)", f32::to_radians)] {
+        let got = run(expr, XS);
+        for (i, &x) in XS.iter().enumerate() {
+            assert_eq!(got[i].to_bits(), want(x).to_bits(), "{expr} at x={x}: got {}, want {}", got[i], want(x));
+        }
+    }
+}

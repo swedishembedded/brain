@@ -258,6 +258,9 @@ extern "C" fn w_logf(x: f32) -> f32 { x.ln() }
 extern "C" fn w_sinf(x: f32) -> f32 { x.sin() }
 extern "C" fn w_cosf(x: f32) -> f32 { x.cos() }
 extern "C" fn w_tanhf(x: f32) -> f32 { x.tanh() }
+extern "C" fn w_acosf(x: f32) -> f32 { x.acos() }
+extern "C" fn w_asinf(x: f32) -> f32 { x.asin() }
+extern "C" fn w_atanf(x: f32) -> f32 { x.atan() }
 extern "C" fn w_powf(x: f32, y: f32) -> f32 { x.powf(y) }
 extern "C" fn w_atan2f(y: f32, x: f32) -> f32 { y.atan2(x) }
 
@@ -268,6 +271,9 @@ fn math_symbols() -> Vec<(&'static str, *const u8)> {
         ("brain_sinf", w_sinf as *const u8),
         ("brain_cosf", w_cosf as *const u8),
         ("brain_tanhf", w_tanhf as *const u8),
+        ("brain_acosf", w_acosf as *const u8),
+        ("brain_asinf", w_asinf as *const u8),
+        ("brain_atanf", w_atanf as *const u8),
         ("brain_powf", w_powf as *const u8),
         ("brain_atan2f", w_atan2f as *const u8),
     ]
@@ -293,7 +299,7 @@ impl MathRefs {
         unary_sig.params.push(AbiParam::new(types::F32));
         unary_sig.returns.push(AbiParam::new(types::F32));
         let mut unary = HashMap::new();
-        for name in ["brain_expf", "brain_logf", "brain_sinf", "brain_cosf", "brain_tanhf"] {
+        for name in ["brain_expf", "brain_logf", "brain_sinf", "brain_cosf", "brain_tanhf", "brain_acosf", "brain_asinf", "brain_atanf"] {
             let id = module
                 .declare_function(name, Linkage::Import, &unary_sig)
                 .map_err(|e| format!("declare {name}: {e}"))?;
@@ -1503,13 +1509,25 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let call = self.b.ins().call(f, &[a, b]);
                 Ok((self.b.inst_results(call)[0], Ty::F32))
             }
-            Exp | Log | Sin | Cos | Tanh => {
+            // Unit conversions are one multiply by the f32 constant std uses.
+            Degrees => {
+                let k = self.b.ins().f32const(1.0f32.to_degrees());
+                Ok((self.b.ins().fmul(a, k), Ty::F32))
+            }
+            Radians => {
+                let k = self.b.ins().f32const(1.0f32.to_radians());
+                Ok((self.b.ins().fmul(a, k), Ty::F32))
+            }
+            Exp | Log | Sin | Cos | Tanh | Acos | Asin | Atan => {
                 let sym = match fun {
                     Exp => "brain_expf",
                     Log => "brain_logf",
                     Sin => "brain_sinf",
                     Cos => "brain_cosf",
                     Tanh => "brain_tanhf",
+                    Acos => "brain_acosf",
+                    Asin => "brain_asinf",
+                    Atan => "brain_atanf",
                     _ => unreachable!(),
                 };
                 let fref = self.env.fns.unary[sym];
