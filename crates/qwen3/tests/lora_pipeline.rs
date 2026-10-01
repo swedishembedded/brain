@@ -153,3 +153,54 @@ fn a_pipeline_trains_the_adapters_the_single_card_does() {
         }
     }
 }
+
+/// The hooks DPO, GRPO and distillation drive - per-token log-probabilities
+/// after the forward, then per-position loss weights before the backward -
+/// reach the head stage of a pipeline, so a weighted step on two stages is
+/// the single card's: the same log-probabilities, loss and adapter gradients.
+#[test]
+fn a_weighted_loss_step_on_a_pipeline_is_the_single_cards() {
+    if gpu_disabled() {
+        return;
+    }
+    let cfg = QwenConfig { block_size: 12, lora: Some(LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() };
+    let mut init = qwen3::init_weights(&cfg, 7);
+    for (n, v) in init.iter_mut().filter(|(n, _)| n.ends_with(".lora_b")) {
+        v.iter_mut().enumerate().for_each(|(i, x)| *x = ((i * 3 + n.len()) % 7) as f32 * 0.04 - 0.1);
+    }
+    let tokens: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let targets: Vec<u32> = (0..12).map(|i| (i * 5 + 6) % 23).collect();
+    let weights: Vec<f32> = (0..12).map(|i| if i % 3 == 0 { 0.0 } else { 0.5 + i as f32 * 0.1 }).collect();
+
+    let mut single = Qwen::new(cfg.clone(), 1, 12, &init);
+    Model::enable_weighted_loss(&mut single);
+    Model::set_batch(&single, model::Batch::Lm { tokens: &tokens, targets: &targets });
+    Model::zero_grads(&single);
+    let want_loss = Model::forward(&single);
+    let want_lp = Model::batch_token_logprobs(&single).unwrap();
+    Model::set_loss_weights(&single, &weights);
+    Model::backward(&single);
+
+    let mut pipe = PipelineModel::new(Pipeline::<Qwen>::new_dt(cfg.clone(), 1, 12, &init, &stage_gpus(), Dtype::F32), cfg.clone());
+    Model::enable_weighted_loss(&mut pipe);
+    Model::set_batch(&pipe, model::Batch::Lm { tokens: &tokens, targets: &targets });
+    Model::zero_grads(&pipe);
+    let loss = Model::forward(&pipe);
+    let lp = Model::batch_token_logprobs(&pipe).expect("the head stage's log-probabilities");
+    Model::set_loss_weights(&pipe, &weights);
+    Model::backward(&pipe);
+
+    assert!((loss - want_loss).abs() < 1e-4 * want_loss.abs().max(1.0), "loss {loss} vs {want_loss}");
+    for (a, b) in lp.iter().zip(&want_lp) {
+        assert!((a - b).abs() < 1e-4, "log-prob {a} vs {b}");
+    }
+    let mut compared = 0;
+    for name in adapters(&single).into_iter().map(|(n, _)| n) {
+        let (a, b) = (Model::read_grad(&single, &name), Model::read_grad(&pipe, &name));
+        let scale = a.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+        let worst = a.iter().zip(&b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs() / scale));
+        assert!(worst < 1e-3, "{name}: weighted gradient differs by {worst}");
+        compared += 1;
+    }
+    assert!(compared >= 4);
+}

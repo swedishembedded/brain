@@ -274,7 +274,17 @@ impl PreferenceFineTune {
         };
         let policy = lora_model(weights_str, rank, alpha, &opts, &start)?;
         let objective = rl::objective::dpo::Dpo::from_dataset(rl::objective::dpo::DpoConfig { beta: self.beta, seq_len }, packed);
-        let (report, trained) = model::fit_controlled(policy, objective, &opts, None, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let fit_err = |e: std::io::Error| Error::Backend(format!("training: {e}"));
+        let (report, trained) = match policy {
+            qwen3::finetune::Trained::Single(m) => {
+                let (r, m) = model::fit_controlled(m, objective, &opts, None, control).map_err(fit_err)?;
+                (r, qwen3::finetune::Trained::Single(m))
+            }
+            qwen3::finetune::Trained::Pipeline(m) => {
+                let (r, m) = model::fit_controlled(m, objective, &opts, None, control).map_err(fit_err)?;
+                (r, qwen3::finetune::Trained::Pipeline(m))
+            }
+        };
 
         let mut outcome = PreferenceFineTuneOutcome {
             status: FineTuneStatus::Completed,
@@ -325,7 +335,7 @@ impl PreferenceFineTune {
             base_digest: Some(base_digest),
             cycle: self.cycle,
         };
-        qwen3::lora::save_adapter_with_lineage(utf8(&adapter_path)?, &trained, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
+        trained.save_adapter_with_lineage(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), Some(provenance))
             .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
@@ -483,11 +493,11 @@ fn longest(pairs: &[(EncodedTurn, EncodedTurn)]) -> usize {
 /// start (`qwen3::finetune::lora_start`) and footprint-checked placement
 /// `qwen3::finetune::finetune_lora_controlled` builds, with the adapter's
 /// moments kept on the device so the run can be resumed exactly.
-fn lora_model(weights: &str, rank: u32, alpha: f32, opts: &model::FitOpts, start: &qwen3::finetune::LoraStart<'_>) -> Result<qwen3::Qwen> {
+fn lora_model(weights: &str, rank: u32, alpha: f32, opts: &model::FitOpts, start: &qwen3::finetune::LoraStart<'_>) -> Result<qwen3::finetune::Trained> {
     let (cfg, init) = qwen3::finetune::lora_start(weights, rank, alpha, opts.seed, start).map_err(|e| Error::Backend(format!("{weights}: {e}")))?;
     let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let built = qwen3::finetune::build_for_training(cfg, opts, &init, gpu_core::select::Dtype::F32);
+    let built = qwen3::finetune::build_trainer(cfg, opts, &init, gpu_core::select::Dtype::F32);
     if let Some(v) = prev_off {
         std::env::set_var("BRAIN_OFFLOAD_ADAM", v);
     }

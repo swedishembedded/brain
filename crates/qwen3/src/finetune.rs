@@ -211,7 +211,7 @@ impl Trained {
 /// built as it would be on one card, or as a pipeline of stages each on its
 /// own. A pinned device (an explicit `--device`) is one card, as it always
 /// was. The layout is printed, so an automatic split is never a silent one.
-fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Trained> {
+pub fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: Dtype) -> std::io::Result<Trained> {
     if gpu_core::devices::current_gpu().is_some() {
         return build_for_training(cfg, opts, init, dt).map(Trained::Single);
     }

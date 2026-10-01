@@ -168,11 +168,6 @@ that size. Re-run it once that lands.
       (the input gradient runs through dynamically quantized activations),
       an I8 arm of `Ops::matmul_dx`, and `quantize_transposed_from` so the
       transpose is quantized, not the weight.
-- [ ] DPO, GRPO and distillation on a pipeline. `model::PipelineModel`
-      trains through the generic fit loop; the weighted-loss and
-      per-token-logprob hooks those objectives use
-      (`Model::enable_weighted_loss`, `set_loss_weights`,
-      `batch_token_logprobs`) are not forwarded to the stages.
 - [ ] Exact resume of a pipeline run: the pipeline's fused host optimiser
       does not expose its moments through `Model::read_moments`.
 - [ ] The pipeline runs its stages one after another inside the fit loop;

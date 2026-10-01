@@ -894,6 +894,30 @@ impl<M: Shardable> Pipeline<M> {
         }
     }
 
+    /// The stage that owns the head and its loss: the last one.
+    fn head_stage(&self) -> &M {
+        &self.stages[self.stages.len() - 1]
+    }
+
+    /// Opt the head stage into per-position weighted-loss training
+    /// ([`Model::enable_weighted_loss`]); the other stages never see the loss.
+    pub fn enable_weighted_loss(&mut self) {
+        let last = self.stages.len() - 1;
+        self.stages[last].enable_weighted_loss();
+    }
+
+    /// The head stage's per-position `log p(target)` for the batch last run
+    /// ([`Model::batch_token_logprobs`]).
+    pub fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+        self.head_stage().batch_token_logprobs()
+    }
+
+    /// Set the per-position loss weights on the head stage
+    /// ([`Model::set_loss_weights`]).
+    pub fn set_loss_weights(&self, weights: &[f32]) {
+        self.head_stage().set_loss_weights(weights);
+    }
+
     /// Block until every stage's submitted device work completes.
     pub fn poll_wait(&self) {
         for st in &self.stages {
@@ -922,8 +946,9 @@ impl<M: Shardable> Pipeline<M> {
 ///
 /// What it does not offer: a whole-checkpoint `save` (a stage holds only its
 /// slice, and a reduced-precision base lives outside the parameter stores -
-/// save what was trained, e.g. an adapter, from [`Model::read_weight`]),
-/// weighted-loss objectives and exact-resume optimiser state.
+/// save what was trained, e.g. an adapter, from [`Model::read_weight`]) and
+/// exact-resume optimiser state. The weighted-loss hooks (DPO, GRPO,
+/// distillation) act on the head stage.
 pub struct PipelineModel<M: Shardable> {
     pipe: RefCell<Pipeline<M>>,
     cfg: M::Config,
@@ -952,6 +977,15 @@ impl<M: Shardable> Model for PipelineModel<M> {
     }
     fn set_batch(&self, batch: crate::Batch) {
         self.pipe.borrow().set_batch(batch);
+    }
+    fn enable_weighted_loss(&mut self) {
+        self.pipe.get_mut().enable_weighted_loss();
+    }
+    fn batch_token_logprobs(&self) -> Option<Vec<f32>> {
+        self.pipe.borrow().batch_token_logprobs()
+    }
+    fn set_loss_weights(&self, weights: &[f32]) {
+        self.pipe.borrow().set_loss_weights(weights);
     }
     fn forward(&self) -> f32 {
         self.pipe.borrow().forward_loaded()
