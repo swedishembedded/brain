@@ -198,5 +198,5 @@ fn main() {
     // (crates/sam1/tests/wgpu_block_count_corruption.rs) -- not shipped, not
     // used for anything but this timing reference. This model is served on the
     // CPU backend regardless of what this number shows.
-    bench_backend("wgpu (NOT shipped -- known output corruption, timing reference only)", Gpu::new_wgpu(PIPELINES), reps);
+    bench_backend("wgpu (NOT shipped -- known output corruption, timing reference only)", Gpu::new_gpu(PIPELINES), reps);
 }

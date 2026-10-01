@@ -234,7 +234,7 @@ pub fn encode_samples(
         let te_env = std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty());
         let gpu = match te_device.or(te_env.as_deref()).unwrap_or("cpu") {
             "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
-            "gpu" | "wgpu" => gpu_core::Gpu::new_wgpu(t5encoder::model::PIPELINES),
+            "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
             _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
         };
         let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 1, cfg.text_len as u32, &t5encoder::import::to_init(imported));

@@ -86,7 +86,7 @@ fn main() {
 
     let gpu = match device.as_str() {
         "cpu" => Gpu::new_cpu(pipelines()),
-        "gpu" => Gpu::new_wgpu(pipelines()),
+        "gpu" => Gpu::new_gpu(pipelines()),
         "vulkan" => Gpu::try_new_vulkan(pipelines()).unwrap_or_else(|e| panic!("try_new_vulkan: {e}")),
         other => panic!("unknown --device {other} (expected cpu|gpu|vulkan)"),
     };

@@ -293,7 +293,7 @@ impl DeviceTrainer {
     /// Build a trainer on a single fresh device. `w` is uploaded in full, so
     /// the caller should drop its host copy afterwards.
     pub fn new(cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        DeviceTrainer::with_gpu(Gpu::new_wgpu(crate::devgrad::KERNELS), cfg, rank, w)
+        DeviceTrainer::with_gpu(Gpu::new_gpu(crate::devgrad::KERNELS), cfg, rank, w)
     }
 
     /// [`Self::new`] over an existing device (card selection, or sharing one

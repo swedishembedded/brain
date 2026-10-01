@@ -34,7 +34,10 @@ use model::block::GemmVariants;
 use model::dispatch::{mm4_rows_off, mm8_rows_off, mm_rows_off, I8Scratch};
 use model::int4::quantize_weight_q4;
 use model::int8::quantize_weight;
+use gpu_core::provider::ProviderRegistry;
+use gpu_core::select::{self, KernelSelector};
 use model::ops::{Ops, Weight};
+use std::sync::Arc;
 
 /// The canonical façade kernel set, straight from
 /// [`model::ops::kernel_list`] - the one list `Ops::new` requires. This file
@@ -42,6 +45,17 @@ use model::ops::{Ops, Weight};
 /// drift `kernel_list`'s own doc comment describes.
 fn kernel_list() -> &'static [(&'static str, &'static str)] {
     model::ops::kernel_list()
+}
+
+/// An `Ops` whose only provider is the reference WGSL one. These tests state
+/// what the FACADE does (which kernel it picks, that its output is
+/// bit-identical to the hand-dispatched reference kernel); a device that also
+/// has a native provider (CUDA's tiled GEMM) answers differently by design,
+/// and that provider's agreement with the reference is a different test
+/// (`gpu-core`'s `cuda_provider_matmul`).
+fn reference_ops(gpu: Gpu) -> Ops {
+    let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
+    Ops::with_providers(gpu, ProviderRegistry::reference(selector)).expect("Ops::with_providers")
 }
 
 fn idx(g: &Gpu, name: &str) -> usize {
@@ -76,7 +90,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 /// `dispatch::mm_rows_off` driven by hand on the same `x`/weight buffers.
 fn check_f32(m: usize, n: usize, k: usize) {
     let gpu = gpu_core::testgpu::dev(kernel_list());
-    let ops = Ops::new(gpu).expect("Ops::new");
+    let ops = reference_ops(gpu);
     let g = ops.gpu();
 
     let mut rng = Lcg::new(0xF32_0000 ^ m as u64);
@@ -112,7 +126,7 @@ fn check_f32(m: usize, n: usize, k: usize) {
 /// driven by hand on the same `x`/weight buffers.
 fn check_i8(m: usize, n: usize, k: usize) {
     let gpu = gpu_core::testgpu::dev(kernel_list());
-    let ops = Ops::new(gpu).expect("Ops::new");
+    let ops = reference_ops(gpu);
     let g = ops.gpu();
 
     let mut rng = Lcg::new(0x18_0000 ^ m as u64);
@@ -165,7 +179,7 @@ fn check_i8(m: usize, n: usize, k: usize) {
 /// activation quantizer - q4 is W4A8) + `mm8_rows_off` driven by hand.
 fn check_q4(m: usize, n: usize, k: usize) {
     let gpu = gpu_core::testgpu::dev(kernel_list());
-    let ops = Ops::new(gpu).expect("Ops::new");
+    let ops = reference_ops(gpu);
     let g = ops.gpu();
 
     let mut rng = Lcg::new(0x04_0000 ^ m as u64);
@@ -238,7 +252,7 @@ fn matmul_row_offset_is_correct_for_i8_and_q4() {
 
     for &tier in &[Dtype::I8, Dtype::Q4] {
         let gpu = gpu_core::testgpu::dev(kernel_list());
-        let ops = Ops::new(gpu).expect("Ops::new");
+        let ops = reference_ops(gpu);
         let g = ops.gpu();
 
         let seed = 0xA11_0000u64 ^ (if tier == Dtype::I8 { 8 } else { 4 });

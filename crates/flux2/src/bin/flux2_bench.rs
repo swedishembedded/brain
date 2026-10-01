@@ -781,7 +781,7 @@ fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec
 }
 
 fn bench_te(reps: usize, i8: bool, base: bool) {
-    let gpu = Gpu::new_wgpu(TE_KERNELS);
+    let gpu = Gpu::new_gpu(TE_KERNELS);
     eprintln!("device: {} max_wg={}", gpu.kind(), gpu.caps().max_workgroup_size);
     let (layers, t) = (28u32, 512u32);
     let (steps, flop) = build_te_replay(&gpu, layers, t, i8, base);
@@ -839,7 +839,7 @@ fn main() {
         }
         _ => {}
     }
-    let gpu = Gpu::new_wgpu(KERNELS);
+    let gpu = Gpu::new_gpu(KERNELS);
     let c = gpu.caps();
     eprintln!(
         "device: {} class={:?} cu={} max_wg={} wg_mem={}B",

@@ -237,7 +237,7 @@ fn f16_matmul_matches_f32_reference_on_gpu() {
     eprintln!("f16_matmul_matches_f32_reference_on_gpu: running on a real wgpu device");
     for &(m, n, k, tag) in SHAPES {
         let (x_h, w_h) = shape_inputs(m, n, k, 0xF16_0000 ^ (m as u64) << 16 ^ n as u64);
-        let gpu = Gpu::new_wgpu(kernel_list());
+        let gpu = Gpu::new_gpu(kernel_list());
         check_f16_matmul(gpu, &x_h, &w_h, m, n, k, &format!("gpu/{tag}"));
     }
 }

@@ -119,7 +119,7 @@ pub struct BlockDev {
 
 impl BlockDev {
     pub fn new(max_t: usize, dim: usize, nh: usize) -> BlockDev {
-        BlockDev::from_gpu(Gpu::new_wgpu(&KERNELS), max_t, dim, nh)
+        BlockDev::from_gpu(Gpu::new_gpu(&KERNELS), max_t, dim, nh)
     }
 
     /// Build `count` engines, one per physical GPU, via a SINGLE device

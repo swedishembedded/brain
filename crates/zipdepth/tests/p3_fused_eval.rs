@@ -178,7 +178,7 @@ fn fused_eval_gpu_matches_cpu() {
         brain_testutil::skip_unavailable("fused GPU parity (MOE_SKIP_GPU_TESTS)");
         return;
     }
-    let gpu = Gpu::new_wgpu(zipdepth::net::PIPELINES);
+    let gpu = Gpu::new_gpu(zipdepth::net::PIPELINES);
     let cpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
     let in_shape = Shape::new(1, 8, 12, 12);
     for (i, spec) in dense_specs().into_iter().enumerate() {
@@ -274,7 +274,7 @@ fn grouped_reg_conv_gpu_matches_cpu() {
         brain_testutil::skip_unavailable("grouped GPU parity (MOE_SKIP_GPU_TESTS)");
         return;
     }
-    let gpu = Gpu::new_wgpu(zipdepth::net::PIPELINES);
+    let gpu = Gpu::new_gpu(zipdepth::net::PIPELINES);
     let cpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
     let in_shape = Shape::new(2, 24, 10, 14);
     let specs = [

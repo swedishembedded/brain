@@ -14,7 +14,7 @@
 //! # This model spans TWO devices, and names both
 //!
 //! [`deepseek2ocr::caps::Session::load_with`] builds the vision encoder
-//! (SAM + CLIP + glue) with `gpu_core::Gpu::new_wgpu`, and the decoder on
+//! (SAM + CLIP + glue) with `gpu_core::Gpu::new_gpu`, and the decoder on
 //! whichever device the [`deepseek2ocr::caps::DecoderDevice`] it is handed
 //! names - a second card, the vision card, or the CPU Cranelift JIT.
 //!
@@ -47,7 +47,7 @@
 //! activation would change the backend every *other* resident builds on
 //! afterwards. Placement is a scoped registry selection
 //! (`gpu_core::devices::with_gpu`, via [`crate::resident_llm::on_device`]) -
-//! `Session::load_with`'s `Gpu::new_wgpu` resolves the ambient selection, so
+//! `Session::load_with`'s `Gpu::new_gpu` resolves the ambient selection, so
 //! running it inside that scope lands the vision tower on exactly the card
 //! `estimate_multi` reserved, and the decoder's own card is entered by a
 //! nested `with_gpu` inside that call. The placement is computed ONCE, here,
@@ -74,7 +74,7 @@ pub use deepseek2ocr::caps::{DECODER_DEVICE_BYTES, HOST_BYTES_CPU_DECODER, HOST_
 /// Peak footprint of the WHOLE composite with the decoder on the CPU backend:
 /// [`HOST_BYTES_CPU_DECODER`] of host RAM plus [`VISION_DEVICE_BYTES`] on the
 /// card. Kept as one name because that is what a GPU-less host pays entirely
-/// out of RAM (there `Gpu::new_wgpu` resolves to a software rasteriser whose
+/// out of RAM (there `Gpu::new_gpu` resolves to a software rasteriser whose
 /// buffers ARE host RAM, so the tower's bytes are host bytes too).
 pub const COMPOSITE_PEAK_BYTES: u64 = HOST_BYTES_CPU_DECODER + VISION_DEVICE_BYTES;
 
@@ -191,7 +191,7 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
         // runs on the dispatcher thread on every scheduling round, and a panic
         // there kills serving for every OTHER model too, not just this one.
         let Some(v) = self.vision_gpu else {
-            // With no card big enough for the tower, `Gpu::new_wgpu` resolves
+            // With no card big enough for the tower, `Gpu::new_gpu` resolves
             // to whatever wgpu offers -- a software rasteriser on a GPU-less
             // box -- whose buffers ARE host RAM. Everything this model holds
             // is then host bytes, which is exactly [`COMPOSITE_PEAK_BYTES`].
@@ -227,7 +227,7 @@ impl MultiDeviceResidentModel for DeepseekOcrResident {
             return Err(format!("{MODEL}: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
         }
         // Scoped registry selection, never env mutation: `Session::load_with`
-        // builds the vision half with `Gpu::new_wgpu`, which resolves the
+        // builds the vision half with `Gpu::new_gpu`, which resolves the
         // ambient selection, so this scope is what puts it on the reserved
         // card. A decoder on its OWN card enters a nested `with_gpu` inside
         // that call, and a decoder on the CPU names that backend explicitly;

@@ -51,7 +51,7 @@ fn int8_gemm_matches_fp32() {
     let (m, k, n) = (320usize, 3840usize, 3840usize);
     let x = fill(m * k, 1);
     let w = fill(n * k, 2);
-    let gpu = Gpu::new_wgpu(&KERNELS);
+    let gpu = Gpu::new_gpu(&KERNELS);
 
     // fp32 reference.
     let xb = gpu.storage_init("x", &x);

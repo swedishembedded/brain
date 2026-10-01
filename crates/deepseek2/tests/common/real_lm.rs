@@ -55,7 +55,7 @@ pub fn wgpu() -> Option<Gpu> {
         brain_testutil::skip("no discrete GPU - a software rasteriser would compare the host against itself");
         return None;
     }
-    Some(Gpu::new_wgpu(deepseek2::PIPELINES))
+    Some(Gpu::new_gpu(deepseek2::PIPELINES))
 }
 
 /// The real checkpoint plus the fp32 expansion path to use for it, or `None`

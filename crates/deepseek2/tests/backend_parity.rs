@@ -71,7 +71,7 @@ fn wgpu_or_skip() -> Option<Gpu> {
         brain_testutil::skip("no discrete GPU - a software rasteriser would compare CPU against CPU");
         return None;
     }
-    Some(Gpu::new_wgpu(PIPELINES))
+    Some(Gpu::new_gpu(PIPELINES))
 }
 
 /// The prompt both backends run. Long enough to cross a MoE layer's router

@@ -29,10 +29,24 @@
 
 use gpu_core::select::Dtype;
 use gpu_core::{Gpu, Step};
+use gpu_core::provider::ProviderRegistry;
+use gpu_core::select::{self, KernelSelector};
 use model::ops::{Ops, Weight};
+use std::sync::Arc;
 
 fn kernel_list() -> &'static [(&'static str, &'static str)] {
     model::ops::kernel_list()
+}
+
+/// An `Ops` whose only provider is the reference WGSL one. These tests state
+/// what the FACADE does (which kernel it picks, that its output is
+/// bit-identical to the hand-dispatched reference kernel); a device that also
+/// has a native provider (CUDA's tiled GEMM) answers differently by design,
+/// and that provider's agreement with the reference is a different test
+/// (`gpu-core`'s `cuda_provider_matmul`).
+fn reference_ops(gpu: Gpu) -> Ops {
+    let selector: Arc<dyn KernelSelector> = Arc::new(select::CachedSelector::new(select::DefaultSelector));
+    Ops::with_providers(gpu, ProviderRegistry::reference(selector)).expect("Ops::with_providers")
 }
 
 fn idx(g: &Gpu, name: &str) -> usize {
@@ -70,7 +84,7 @@ fn assert_matches_matmul_kernel(g: &Gpu, ops: &Ops, w: &Weight, m: u32, n: u32, 
 
 fn check_step_identity(m: usize, n: usize, k: usize, dt: Dtype) {
     let gpu = gpu_core::testgpu::dev(kernel_list());
-    let ops = Ops::new(gpu).expect("Ops::new");
+    let ops = reference_ops(gpu);
     let g = ops.gpu();
 
     let x_h = vec![0.25f32; m * k];
@@ -129,7 +143,7 @@ fn matmul_row_offset_still_matches_matmul_kernel() {
 
     for dt in [Dtype::I8, Dtype::Q4] {
         let gpu = gpu_core::testgpu::dev(kernel_list());
-        let ops = Ops::new(gpu).expect("Ops::new");
+        let ops = reference_ops(gpu);
         let g = ops.gpu();
 
         let x_h = vec![0.25f32; total_rows * k];

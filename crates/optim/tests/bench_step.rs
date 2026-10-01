@@ -58,7 +58,7 @@ fn bench_step() {
     ];
 
     for (model, dist) in [("GPT-2-small (148 tensors)", GPT2_SMALL), ("Qwen3-0.6B (311 tensors)", QWEN_0B6)] {
-        let gpu = Gpu::new_wgpu(KERNELS);
+        let gpu = Gpu::new_gpu(KERNELS);
         let opt = Optim::new(0, 1, 2, 3, 4);
         let mut shapes = Vec::new();
         let mut init = HashMap::new();

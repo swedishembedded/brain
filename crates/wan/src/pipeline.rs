@@ -305,7 +305,7 @@ fn encode_text(
     let te_env = std::env::var("BRAIN_WAN_T5_DEVICE").ok().filter(|s| !s.is_empty());
     let gpu = match o.te_device.as_deref().or(te_env.as_deref()).unwrap_or("cpu") {
         "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
-        "gpu" | "wgpu" => gpu_core::Gpu::new_wgpu(t5encoder::model::PIPELINES),
+        "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
         // "default" defers to BRAIN_DEVICE, which is what a caller who knows
         // their card can hold 22.72 GB would use.
         _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),

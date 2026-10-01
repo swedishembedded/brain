@@ -157,7 +157,7 @@ fn sweep(label: &str, g: &Gpu, transposed: bool, shape: impl Fn(u32) -> Conv1d) 
 #[test]
 #[ignore]
 fn bench_conv1d_lowering_crossover() {
-    let g = Gpu::new_wgpu(PIPELINES);
+    let g = Gpu::new_gpu(PIPELINES);
     if !g.caps().workgroup_reductions {
         println!("no workgroup reductions on this device - the lowering is never selected");
         return;

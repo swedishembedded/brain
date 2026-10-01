@@ -132,7 +132,7 @@ fn embed_bf16_and_f16_match_f32_reference_on_gpu() {
     }
     eprintln!("embed_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
-        let gpu = Gpu::new_wgpu(kernel_list());
+        let gpu = Gpu::new_gpu(kernel_list());
         check_embed(gpu, dt, 17, 97, 32, 0xE3BED ^ dt as u64, &format!("gpu/embed/{dt:?}"));
     }
 }
@@ -211,7 +211,7 @@ fn embed_tile_bf16_and_f16_match_f32_reference_on_gpu() {
     eprintln!("embed_tile_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
         let (n0, s0) = kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap();
-        let gpu = Gpu::new_wgpu(&[(n0, s0)]);
+        let gpu = Gpu::new_gpu(&[(n0, s0)]);
         check_embed_tile(gpu, dt, 11, 24, 100, 40, 0x7113 ^ dt as u64, &format!("gpu/embed_tile/{dt:?}"));
     }
 }
@@ -327,7 +327,7 @@ fn moe_linear_bf16_and_f16_match_f32_reference_on_gpu() {
     }
     eprintln!("moe_linear_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
-        let gpu = Gpu::new_wgpu(kernel_list());
+        let gpu = Gpu::new_gpu(kernel_list());
         check_moe_linear(gpu, dt, 12, 20, 16, 4, 2, 0x0E0E ^ dt as u64, &format!("gpu/moe_linear/{dt:?}"));
     }
 }

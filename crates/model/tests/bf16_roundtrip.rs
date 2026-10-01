@@ -190,7 +190,7 @@ fn bf16_matmul_matches_f32_reference_on_gpu() {
     }
     eprintln!("bf16_matmul_matches_f32_reference_on_gpu: running on a real wgpu device");
     for &(m, n, k, tag) in SHAPES {
-        let gpu = Gpu::new_wgpu(kernel_list());
+        let gpu = Gpu::new_gpu(kernel_list());
         check_bf16_matmul(gpu, m, n, k, 0xB16_0000 ^ (m as u64) << 16 ^ n as u64, &format!("gpu/{tag}"));
     }
 }

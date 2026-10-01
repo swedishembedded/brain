@@ -470,7 +470,7 @@ impl ZImageDitI8 {
 
     /// [`Self::build`] over a streaming `checkpoint::TensorSource`.
     pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
-        let gpu = Gpu::new_wgpu(&KERNELS);
+        let gpu = Gpu::new_gpu(&KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -513,7 +513,7 @@ impl ZImageDitI8 {
     /// explicit choice by whoever calls this, never the default
     /// [`Self::build_from_source`] path.
     pub fn build_from_source_with_cache(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> (ZImageDitI8, DitI8Cache) {
-        let gpu = Gpu::new_wgpu(&KERNELS);
+        let gpu = Gpu::new_gpu(&KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -537,7 +537,7 @@ impl ZImageDitI8 {
     /// not consumed, so it stays ready for the NEXT demote/promote cycle
     /// too.
     pub fn rebuild_from_cache(cache: &DitI8Cache, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
-        let gpu = Gpu::new_wgpu(&KERNELS);
+        let gpu = Gpu::new_gpu(&KERNELS);
         let cfg = cache.cfg.clone();
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);

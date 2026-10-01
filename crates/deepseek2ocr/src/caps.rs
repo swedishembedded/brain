@@ -52,7 +52,7 @@
 //!   pays one batched forward, every generated token after that is one
 //!   incremental step, not a full re-run of the whole sequence so far.
 //! * **Both halves on the GPU, on a host that has one.** [`Session::load`]
-//!   builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_wgpu`
+//!   builds the vision encoder (SAM+CLIP+glue) with `gpu_core::Gpu::new_gpu`
 //!   and picks the decoder's device with [`decoder_device`] - a real card by
 //!   default, the CPU Cranelift JIT when there is none or when an operator
 //!   asks for it (`$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE`). Both backends are
@@ -242,7 +242,7 @@ pub enum DecoderDevice {
 ///
 /// `auto` - the default - resolves as:
 ///
-/// 1. **No discrete GPU: [`DecoderDevice::Cpu`].** `Gpu::new_wgpu` on such a
+/// 1. **No discrete GPU: [`DecoderDevice::Cpu`].** `Gpu::new_gpu` on such a
 ///    box resolves to a software rasteriser whose buffers ARE host RAM, which
 ///    is strictly worse than the Cranelift JIT that is already there.
 /// 2. **A second discrete card that can hold [`DECODER_DEVICE_BYTES`]:
@@ -412,7 +412,7 @@ impl Session {
     /// [`VISION_DEVICE_BYTES`] + [`DECODER_DEVICE_BYTES`] +
     /// [`HOST_BYTES_GPU_DECODER`] once it is up.
     ///
-    /// **The vision encoder (SAM+CLIP+glue) builds on `Gpu::new_wgpu`** and
+    /// **The vision encoder (SAM+CLIP+glue) builds on `Gpu::new_gpu`** and
     /// **the decoder on whatever [`decoder_device`] picks** - a real card
     /// wherever one fits, the CPU Cranelift JIT otherwise or on an operator's
     /// say-so.
@@ -465,7 +465,7 @@ impl Session {
         stage_time("load: config+tokenizer+prompt", t0);
 
         let t1 = std::time::Instant::now();
-        let dev_vision = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(k);
+        let dev_vision = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_gpu(k);
         let dev_cpu = |k: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(k);
         let dev_same_card = dev_vision;
         // `with_gpu` is a thread-scoped selection, so this closure lands the
@@ -476,7 +476,7 @@ impl Session {
                 DecoderDevice::Card(i) => i,
                 _ => unreachable!("dev_other_card is only installed for DecoderDevice::Card"),
             };
-            gpu_core::devices::with_gpu(i, || gpu_core::Gpu::new_wgpu(k)).unwrap_or_else(|e| panic!("deepseek-ocr: decoder on gpu{i}: {e}"))
+            gpu_core::devices::with_gpu(i, || gpu_core::Gpu::new_gpu(k)).unwrap_or_else(|e| panic!("deepseek-ocr: decoder on gpu{i}: {e}"))
         };
         let dev_decoder: crate::DeviceFactory = match placement {
             DecoderDevice::Cpu => &dev_cpu,

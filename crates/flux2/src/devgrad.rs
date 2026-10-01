@@ -263,7 +263,7 @@ pub struct BlockDev {
 impl BlockDev {
     /// Build an engine on a fresh wgpu device.
     pub fn new(n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize) -> BlockDev {
-        BlockDev::from_gpu(Gpu::new_wgpu(KERNELS), n_max, d, nh, mlp, rank)
+        BlockDev::from_gpu(Gpu::new_gpu(KERNELS), n_max, d, nh, mlp, rank)
     }
 
     /// Build over an existing device (so a caller can place the trainer on a

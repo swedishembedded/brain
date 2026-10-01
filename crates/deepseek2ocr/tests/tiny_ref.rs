@@ -805,7 +805,7 @@ fn every_device_placement_matches_all_cpu() {
     };
 
     let cpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_cpu(p);
-    let wgpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_wgpu(p);
+    let wgpu_dev = |p: &'static [(&'static str, &'static str)]| gpu_core::Gpu::new_gpu(p);
 
     let m_cpu = DeepseekOcr::new_with_prompt(&cpu_dev, cfg.clone(), &init, &init, 7, seq, &prompt, false);
     m_cpu.set_tokens_unsupervised(&ids);

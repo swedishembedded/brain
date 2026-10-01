@@ -198,7 +198,7 @@ fn forward_matmul_family_native_fastpath_matches_scalar_reference() {
 /// 3 barriers each - JIT-uncompilable). Unlike the forward family, no
 /// existing test in this workspace dispatches these tiled kernels' NAMES on
 /// the CPU backend and checks the output: `gpu-core/tests/bench_backward.rs`
-/// only ever builds `Gpu::new_wgpu` for them. This closes that gap - the
+/// only ever builds `Gpu::new_gpu` for them. This closes that gap - the
 /// "check whether this situation applies to any OTHER kernel" the same
 /// incident raised for the forward family.
 #[test]

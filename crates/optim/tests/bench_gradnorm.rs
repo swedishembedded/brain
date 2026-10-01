@@ -99,7 +99,7 @@ fn bench_gradnorm() {
         ("clip_coef_wg", kernels::CLIP_COEF_WG),
     ];
     let (sq, part, cc, ccw) = (0usize, 1, 2, 3);
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
 
     for (model, dist) in [("GPT-2-small (124 M, 148 tensors)", GPT2_SMALL), ("Qwen3-0.6B (596 M, 311 tensors)", QWEN_0B6)] {
         println!(
@@ -205,7 +205,7 @@ fn bench_gradnorm() {
 #[ignore]
 fn gradnorm_part_matches_gradnorm_sq() {
     let ks = &[("gradnorm_sq", kernels::GRADNORM_SQ), ("gradnorm_part", kernels::GRADNORM_PART)];
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     for &numel in &[1usize, 63, 64, 65, 768, 8191, 8192, 8193, 100_000, 1_769_472, 4_194_304] {
         let data = fill(numel, 7);
         let gb = g.storage_init("grad", &data);

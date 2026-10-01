@@ -189,14 +189,14 @@ fn the_register_tiled_gemm_is_bit_identical_on_the_gpu() {
     let v = cfg();
     let vw = weights(&v, 3);
 
-    let fast = tower(&Gpu::new_wgpu(vision_pipelines()), &v, &vw);
-    let reference = tower(&Gpu::new_wgpu(&pipelines_without_reg3()), &v, &vw);
+    let fast = tower(&Gpu::new_gpu(vision_pipelines()), &v, &vw);
+    let reference = tower(&Gpu::new_gpu(&pipelines_without_reg3()), &v, &vw);
     assert!(fast.iter().all(|x| x.is_finite()), "tower produced non-finite output");
     assert_eq!(max_abs(&fast, &reference), 0.0, "the tiled GEMM changed the tower's output");
 
     // Mutation-verify: the SAME comparison must reject a perturbed tower, or
     // the equality above is proving nothing.
-    let mutated = tower(&Gpu::new_wgpu(vision_pipelines()), &v, &mutate(&vw, "blocks.1.fc1.weight"));
+    let mutated = tower(&Gpu::new_gpu(vision_pipelines()), &v, &mutate(&vw, "blocks.1.fc1.weight"));
     assert!(max_abs(&fast, &mutated) > 0.0, "the bit-equality gate cannot fail, so it is not a gate");
 }
 
@@ -235,7 +235,7 @@ fn the_tower_agrees_between_the_cpu_jit_and_the_gpu() {
     let v = cfg();
     let vw = weights(&v, 3);
     let want = tower(&Gpu::new_cpu(vision_pipelines()), &v, &vw);
-    let got = tower(&Gpu::new_wgpu(vision_pipelines()), &v, &vw);
+    let got = tower(&Gpu::new_gpu(vision_pipelines()), &v, &vw);
 
     let (cos, max) = brain_testutil::parity::compare(&got, &want);
     let rel = brain_testutil::parity::rel_l2(&got, &want);
@@ -246,7 +246,7 @@ fn the_tower_agrees_between_the_cpu_jit_and_the_gpu() {
     // Mutation-verify BOTH halves of the gate on the same fixture: a 5e-4
     // relative scale on one weight is exactly the size of defect a
     // cosine-only gate misses.
-    let mutated = tower(&Gpu::new_wgpu(vision_pipelines()), &v, &mutate(&vw, "blocks.1.fc2.weight"));
+    let mutated = tower(&Gpu::new_gpu(vision_pipelines()), &v, &mutate(&vw, "blocks.1.fc2.weight"));
     let (mcos, _) = brain_testutil::parity::compare(&mutated, &want);
     let mrel = brain_testutil::parity::rel_l2(&mutated, &want);
     println!("mutated: cosine={mcos:.9} rel_l2={mrel:.3e}");
@@ -267,11 +267,11 @@ fn the_fused_flash_attention_matches_the_chunked_trio() {
     }
     let v = cfg();
     let vw = weights(&v, 3);
-    let flash = Gpu::new_wgpu(vision_pipelines());
+    let flash = Gpu::new_gpu(vision_pipelines());
     assert!(model::vit::flash_ids(&flash).is_some(), "this device cannot run the fused path, so this test proves nothing");
 
     let got = tower(&flash, &v, &vw);
-    let want = tower(&Gpu::new_wgpu(&pipelines_without_flash()), &v, &vw);
+    let want = tower(&Gpu::new_gpu(&pipelines_without_flash()), &v, &vw);
     assert!(got.iter().all(|x| x.is_finite()), "the fused path produced non-finite output");
 
     let (cos, max) = brain_testutil::parity::compare(&got, &want);

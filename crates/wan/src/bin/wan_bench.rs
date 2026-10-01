@@ -380,7 +380,7 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
         ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2, 128),
     ];
     let ks: Vec<(&str, &str)> = VARIANTS.iter().map(|(n, s, _)| (*n, *s)).collect();
-    let gpu = Gpu::new_wgpu(&ks);
+    let gpu = Gpu::new_gpu(&ks);
     let c = gpu.caps();
     eprintln!("max_workgroup_size {} workgroup_mem {} B", c.max_workgroup_size, c.workgroup_mem_bytes);
     let roof = gpu_core::roof::ensure(&gpu);
@@ -441,7 +441,7 @@ fn bench_flash(reps: usize, t: u32, nh: u32, hd: u32) {
 /// pipeline-set + bind-group + dispatch cost from any real work, which is what
 /// bounds the per-kind round-trip overhead the tables above carry.
 fn bench_floor(n: usize) {
-    let gpu = Gpu::new_wgpu(&wan::block::KERNELS);
+    let gpu = Gpu::new_gpu(&wan::block::KERNELS);
     let k = wan::block::KERNELS.iter().position(|(name, _)| *name == "matmul").expect("matmul slot");
     let (x, w, o) = (gpu.storage(4), gpu.storage(4), gpu.storage(4));
     let steps: Vec<Step> = (0..n).map(|_| gpu.step(k, &[&x, &w, &o], &[1, 1, 1], 1)).collect();

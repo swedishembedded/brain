@@ -1993,8 +1993,16 @@ mod tests {
             steps[0].meta().expect("Ops::matmul's step carries facade meta").kernel
         };
 
-        let ops_default = Ops::new(gpu_core::testgpu::dev(kernel_list())).expect("Ops::new");
-        let ops_flip = Ops::with_selector(gpu_core::testgpu::dev(kernel_list()), Arc::new(Flip)).expect("Ops::with_selector");
+        // Reference provider only: this is about the selector reaching the
+        // dispatch, and a native provider (CUDA's tiled GEMM) answers for the
+        // plain F32 shape regardless of what a selector says.
+        let ops_default = Ops::with_providers(
+            gpu_core::testgpu::dev(kernel_list()),
+            ProviderRegistry::reference(Arc::new(select::CachedSelector::new(select::DefaultSelector))),
+        )
+        .expect("Ops::with_providers");
+        let ops_flip = Ops::with_providers(gpu_core::testgpu::dev(kernel_list()), ProviderRegistry::reference(Arc::new(Flip)))
+            .expect("Ops::with_providers");
 
         assert_ne!(
             dispatch(&ops_default),

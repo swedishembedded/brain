@@ -43,7 +43,7 @@ fn main() {
         let gb: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
         let idx = gpu_core::devices::current_gpu().map(|i| i.to_string()).unwrap_or_else(|| "0 (default)".into());
         eprintln!("probe: gpu{idx}, allocating {gb} × 1 GB…");
-        let gpu = Gpu::new_wgpu(&[("add2", kernels::ADD2)]);
+        let gpu = Gpu::new_gpu(&[("add2", kernels::ADD2)]);
         let mut bufs = Vec::new();
         for i in 0..gb {
             bufs.push(gpu.storage(256 * 1024 * 1024)); // 1 GB = 256M f32
@@ -94,7 +94,7 @@ fn main() {
         const K_DX: usize = 1;
         const K_DW: usize = 2;
         let kk = [("matmul_reg3", kernels::MATMUL_REG3), ("matmul_dx_reg", kernels::MATMUL_DX_REG), ("matmul_dw_reg", kernels::MATMUL_DW_REG)];
-        let gpu = Gpu::new_wgpu(&kk);
+        let gpu = Gpu::new_gpu(&kk);
         // Shared scratch, sized to the largest shape (reused across all linears —
         // we time compute, not numerics). max activation ntot×hidden, max weight
         // hidden×dim.
