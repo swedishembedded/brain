@@ -140,10 +140,19 @@ fn q8_instances_are_never_inspected_anywhere_in_the_crate() {
         "q8.quant(",
         "Q8::build(",
     ];
+    // A needle ending in an identifier must not match the start of a longer
+    // one: `self.w8` is an instance field, `self.w8_variant(..)` is a method
+    // that names a kernel variant and inspects nothing.
+    let mentions = |text: &str, needle: &str| {
+        text.match_indices(needle).any(|(at, _)| {
+            let next = text[at + needle.len()..].chars().next();
+            !needle.ends_with(|c: char| c.is_alphanumeric() || c == '_') || !next.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
     for (path, text) in all_src_files() {
         for needle in banned {
             assert!(
-                !text.contains(needle),
+                !mentions(&text, needle),
                 "no_kernel_names: {path} still contains {needle:?} - B7 retired every `crate::q8` INSTANCE \
                  (weight storage/dispatch now goes through `model::ops::Weight`/a plain `HashMap`); a static \
                  utility call like `Q8::LINEARS`/`Q8::is_i8_linear` would NOT trip this check, so this is a \
@@ -186,12 +195,15 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     };
 
     let model_src = read(MODEL_RS);
+    // `forward_steps` is the layer stack plus the LM head; the per-layer
+    // linears are dispatched by `layer_fwd_steps`.
     check(function_body(&model_src, "forward_steps"), "qwen3::model::Qwen::forward_steps");
+    check(function_body(&model_src, "layer_fwd_steps"), "qwen3::model::Qwen::layer_fwd_steps");
     check(function_body(&model_src, "decode_steps"), "qwen3::model::Qwen::decode_steps");
     // Both migrated model.rs functions must actually call the façade -
     // otherwise a body that dispatches NOTHING for the 7 linears would
     // vacuously pass the bans above.
-    for name in ["forward_steps", "decode_steps"] {
+    for name in ["layer_fwd_steps", "decode_steps"] {
         let body = function_body(&model_src, name);
         assert!(
             body.contains("self.ops.act(") || body.contains("self.ops_act("),
