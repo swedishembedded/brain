@@ -114,7 +114,7 @@ fn resident_ctor_for(model_id: &str) -> Option<ResidentCtor> {
     if model_id == deepseekvl::caps::MODEL {
         // Towers and decoder on separate cards - see
         // `crate::resident_deepseekvl`'s header.
-        return catalog::resident_multi!(crate::resident_deepseekvl::DeepseekVlResident::from_assembly);
+        return catalog::resident_multi_family!(crate::resident_deepseekvl::DeepseekVlResident::family_from_assembly);
     }
     if model_id == moondream3::caps::MODEL || model_id == januspro::caps::MODEL {
         return None; // registered directly in build_executor with a resolved Assembly, see resident.rs
@@ -318,20 +318,20 @@ pub fn residents(models_dir: Option<&Path>) -> Vec<Arc<dyn ResidentModel>> {
 pub fn multi_residents(models_dir: Option<&Path>, gpus: &[(u32, u64)], reserved: u64) -> Vec<Arc<dyn residency::multi::MultiDeviceResidentModel>> {
     models()
         .into_iter()
-        .filter_map(|e| match e.resident {
+        .flat_map(|e| match e.resident {
             Some(ResidentCtor::Multi(f)) => {
                 let model = (e.manifest)().model;
                 let assembly = match resolved_assembly_for(models_dir, &model) {
                     Some(Ok(a)) => a,
                     Some(Err(err)) => {
                         eprintln!("brain: {model} not served ({err})");
-                        return None;
+                        return Vec::new();
                     }
                     None => empty_assembly(),
                 };
                 f(&assembly, gpus, reserved)
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }

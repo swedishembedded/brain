@@ -20,6 +20,9 @@ use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 pub struct DeepseekVlResident {
+    /// The model id this resident answers to: the base's, or the base's with
+    /// a stored fine-tune's `:owner:name:tag`.
+    id: String,
     dir: String,
     /// A fine-tune to serve (`BRAIN_DEEPSEEKVL_TUNED`: the directory
     /// `brain deepseekvl finetune` wrote), applied when the model loads.
@@ -38,12 +41,30 @@ impl DeepseekVlResident {
             deepseekvl::model::place(&fp, &cards).map(|p| (fp, p))
         });
         match placed {
-            Ok((footprint, placement)) => Some(DeepseekVlResident { dir, tuned: std::env::var_os("BRAIN_DEEPSEEKVL_TUNED").map(Into::into), footprint, placement }),
+            Ok((footprint, placement)) => Some(DeepseekVlResident { id: MODEL.to_string(), dir, tuned: std::env::var_os("BRAIN_DEEPSEEKVL_TUNED").map(Into::into), footprint, placement }),
             Err(e) => {
                 eprintln!("brain: deepseekvl not served ({e})");
                 None
             }
         }
+    }
+
+    /// This resident again as each fine-tune stored beside the checkpoint,
+    /// under the id `<base id>:<owner>:<name>:<tag>`, so a fine-tune is a model
+    /// of its own next to the base, as a text adapter is.
+    pub fn stored_fine_tunes(&self) -> Vec<DeepseekVlResident> {
+        deepseekvl::tuned::scan(std::path::Path::new(&self.dir), deepseekvl::tuned::is_vl_fine_tune)
+            .into_iter()
+            .map(|t| DeepseekVlResident { id: format!("{MODEL}:{}", t.label), dir: self.dir.clone(), tuned: Some(t.dir), footprint: self.footprint, placement: self.placement })
+            .collect()
+    }
+
+    /// The base and every fine-tune stored beside it, as the model ids they serve.
+    pub fn family_from_assembly(assembly: &Assembly, gpus: &[(u32, u64)], reserved: u64) -> Vec<DeepseekVlResident> {
+        let Some(base) = Self::from_assembly(assembly, gpus, reserved) else { return Vec::new() };
+        let mut family = base.stored_fine_tunes();
+        family.insert(0, base);
+        family
     }
 
     /// Bytes per device: the towers on theirs, the decoder with its KV cache
@@ -61,11 +82,11 @@ impl DeepseekVlResident {
 
 impl ResidentModel for DeepseekVlResident {
     fn manifest(&self) -> Manifest {
-        deepseekvl::caps::manifest_resident()
+        Manifest { model: self.id.clone(), ..deepseekvl::caps::manifest_resident() }
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(MODEL, self.dir.clone())
+        InstanceKey::new(self.id.clone(), self.dir.clone())
     }
 
     /// Unusable by design: the model spans the devices `estimate_multi` names
@@ -113,7 +134,7 @@ mod tests {
 
     fn resident(placement: Placement) -> DeepseekVlResident {
         let cfg = qwen3::hf::decoder_config_as(r#"{"max_position_embeddings":16384,"model_type":"llama","num_hidden_layers":30,"vocab_size":102400}"#, "llama").unwrap();
-        DeepseekVlResident { dir: "/tmp".into(), tuned: None, footprint: Footprint::of(&cfg, deepseekvl::model::HYBRID_TOWER_BYTES), placement }
+        DeepseekVlResident { id: MODEL.into(), dir: "/tmp".into(), tuned: None, footprint: Footprint::of(&cfg, deepseekvl::model::HYBRID_TOWER_BYTES), placement }
     }
 
     #[test]
@@ -124,6 +145,24 @@ mod tests {
         assert_eq!(cost[1].1, r.footprint.decoder_at(4096), "the decoder carries its KV cache");
         let shared = resident(Placement { tower: 0, decoder: 0, context: 4096 }).cost();
         assert_eq!(shared, vec![(Device::Gpu(0), cost[0].1 + cost[1].1)], "one card is charged once, for both");
+    }
+
+    #[test]
+    fn a_stored_fine_tune_is_a_model_of_its_own() {
+        let root = std::env::temp_dir().join(format!("brain-vl-resident-tuned-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let dir = root.join("adapters/acme/puppies/v1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(deepseekvl::train::ADAPTER_FILE), b"x").unwrap();
+        let mut base = resident(Placement { tower: 0, decoder: 1, context: 4096 });
+        base.dir = root.to_string_lossy().into_owned();
+        let tuned = base.stored_fine_tunes();
+        assert_eq!(tuned.len(), 1);
+        assert_eq!(tuned[0].manifest().model, "brain/deepseekvl:acme:puppies:v1");
+        assert_eq!(tuned[0].tuned.as_deref(), Some(dir.as_path()));
+        assert_ne!(tuned[0].instance_key("generate", &Invocation::new()), base.instance_key("generate", &Invocation::new()), "the base and its fine-tune are separate instances");
+        assert_eq!(tuned[0].cost(), base.cost(), "same weights, same bytes");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

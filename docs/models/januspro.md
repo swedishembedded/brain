@@ -81,6 +81,11 @@ by `BRAIN_JANUSPRO_TUNED_GENERATION=<out dir>` (its adapter is folded into the
 drawing engine's decoder, its head, aligner and code embedding replace the
 checkpoint's).
 
+A fine-tune kept in `<model dir>/adapters/<owner>/<name>/<tag>/` is listed as a
+model of its own, `brain/januspro:<owner>:<name>:<tag>`, beside the base. One
+holding `generation.safetensors` serves `text2image`; any other serves
+`generate`.
+
 As a library: `januspro::train::{finetune_understanding, finetune_generation}`,
 or `GenTrainer` for your own loop.
 

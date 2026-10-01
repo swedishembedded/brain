@@ -9,9 +9,6 @@ greedy tokens (`tests/composite_parity.rs`), and is served as
 
 ## Outstanding
 
-- **Serving several fine-tunes.** One fine-tune is served per process
-  (`BRAIN_DEEPSEEKVL_TUNED`); they are not separate model ids beside the
-  base, as text adapters are.
 - **Fine-tuning beyond one card and one image.** The trainer holds a
   bf16 decoder on one card, which bounds the context (each image is 576
   rows). A decoder split across cards needs the decoder hook to hand the

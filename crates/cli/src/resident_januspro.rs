@@ -28,6 +28,12 @@ struct Plan {
 }
 
 pub struct JanusProResident {
+    /// The model id this resident answers to: the base's, or the base's with
+    /// a stored fine-tune's `:owner:name:tag`.
+    id: String,
+    /// The one action a stored fine-tune serves (a fine-tune trains one of
+    /// the two builds); `None` for the base, which serves both.
+    only: Option<&'static str>,
     dir: String,
     /// A fine-tune of the understanding path to serve
     /// (`BRAIN_JANUSPRO_TUNED`: what `brain januspro finetune --mode
@@ -70,7 +76,36 @@ impl JanusProResident {
         if understanding.is_none() && generation.is_none() {
             return None;
         }
-        Some(JanusProResident { dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), tuned_generation: std::env::var_os("BRAIN_JANUSPRO_TUNED_GENERATION").map(Into::into), understanding, generation })
+        Some(JanusProResident { id: MODEL.to_string(), only: None, dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), tuned_generation: std::env::var_os("BRAIN_JANUSPRO_TUNED_GENERATION").map(Into::into), understanding, generation })
+    }
+
+    /// The base and every fine-tune stored beside it, as the model ids they
+    /// serve. A fine-tune holding `generation.safetensors` trains the drawing
+    /// build and serves `text2image`; any other trained the chat build and
+    /// serves `generate`.
+    pub fn family_from_assembly(assembly: &Assembly, gpus: &[(u32, u64)], reserved: u64) -> Vec<JanusProResident> {
+        let Some(base) = Self::from_assembly(assembly, gpus, reserved) else { return Vec::new() };
+        let mut family = base.stored_fine_tunes();
+        family.insert(0, base);
+        family
+    }
+
+    fn stored_fine_tunes(&self) -> Vec<JanusProResident> {
+        deepseekvl::tuned::scan(std::path::Path::new(&self.dir), deepseekvl::tuned::is_vl_fine_tune)
+            .into_iter()
+            .map(|t| {
+                let drawing = t.dir.join(januspro::train::GENERATION_FILE).is_file();
+                JanusProResident {
+                    id: format!("{MODEL}:{}", t.label),
+                    only: Some(if drawing { "text2image" } else { "generate" }),
+                    dir: self.dir.clone(),
+                    tuned: (!drawing).then(|| t.dir.clone()),
+                    tuned_generation: drawing.then_some(t.dir),
+                    understanding: self.understanding,
+                    generation: self.generation,
+                }
+            })
+            .collect()
     }
 
     fn is_generation(key: &InstanceKey) -> bool {
@@ -88,12 +123,16 @@ impl JanusProResident {
 
 impl ResidentModel for JanusProResident {
     fn manifest(&self) -> Manifest {
-        januspro::caps::manifest_resident()
+        let mut manifest = Manifest { model: self.id.clone(), ..januspro::caps::manifest_resident() };
+        if let Some(only) = self.only {
+            manifest.actions.retain(|a| a.name == only);
+        }
+        manifest
     }
 
     fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
         let build = if action == "text2image" { "generation" } else { "understanding" };
-        InstanceKey::new(MODEL, format!("{}|{build}", self.dir))
+        InstanceKey::new(self.id.clone(), format!("{}|{build}", self.dir))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -146,7 +185,7 @@ mod tests {
     use super::*;
 
     fn resident(generation: Option<Plan>) -> JanusProResident {
-        JanusProResident { dir: "/tmp".into(), tuned: None, tuned_generation: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
+        JanusProResident { id: MODEL.into(), only: None, dir: "/tmp".into(), tuned: None, tuned_generation: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
     }
 
     #[test]
@@ -155,6 +194,26 @@ mod tests {
         let (chat, draw) = (r.instance_key("generate", &Invocation::new()), r.instance_key("text2image", &Invocation::new()));
         assert_ne!(chat, draw, "the two builds are separate instances");
         assert_eq!((r.estimate(&chat).vram, r.estimate(&draw).vram), (18 << 30, 20 << 30));
+    }
+
+    /// A fine-tune stored beside the checkpoint is a model of its own that
+    /// serves the one action it trained, with the id of the base plus its label.
+    #[test]
+    fn stored_fine_tunes_each_serve_their_own_action() {
+        let root = std::env::temp_dir().join(format!("brain-janus-resident-tuned-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        for (rel, files) in [("adapters/acme/chat/v1", vec![deepseekvl::train::ALIGNER_FILE]), ("adapters/acme/draw/v1", vec![deepseekvl::train::ADAPTER_FILE, januspro::train::GENERATION_FILE])] {
+            std::fs::create_dir_all(root.join(rel)).unwrap();
+            for f in files {
+                std::fs::write(root.join(rel).join(f), b"x").unwrap();
+            }
+        }
+        let mut base = resident(Some(Plan { bytes: 20 << 30, context: 1024 }));
+        base.dir = root.to_string_lossy().into_owned();
+        let family: Vec<(String, Vec<String>)> = base.stored_fine_tunes().iter().map(|r| (r.manifest().model, r.manifest().actions.into_iter().map(|a| a.name).collect())).collect();
+        assert_eq!(family, [("brain/januspro:acme:chat:v1".to_string(), vec!["generate".to_string()]), ("brain/januspro:acme:draw:v1".to_string(), vec!["text2image".to_string()])]);
+        assert_eq!(base.manifest().actions.len(), 2, "the base serves both");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

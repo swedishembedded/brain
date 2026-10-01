@@ -78,6 +78,12 @@ the adapter is attached to the decoder at run time (not folded into its
 weights) and the trained aligner replaces the checkpoint's. The served model
 is then the fine-tune.
 
+A fine-tune can instead be kept beside the checkpoint, in
+`<model dir>/adapters/<owner>/<name>/<tag>/` (the layout a text adapter has),
+and `brain serve` then lists it as a model of its own,
+`brain/deepseekvl:<owner>:<name>:<tag>`, next to the base: one process serves
+the base and every stored fine-tune, each loaded when first asked for.
+
 As a library: `deepseekvl::train::finetune`, or `Frontend::prepare` and
 `Trainer` for your own loop.
 

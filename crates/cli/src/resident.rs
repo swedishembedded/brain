@@ -272,7 +272,7 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], unified_gpus: &[
     // needs the cards' budgets (see `crate::resident_januspro`).
     match crate::resolver_cli::try_resolve(models_dir, "januspro", &januspro::spec::JANUS_PRO, &Default::default()) {
         Ok(assembly) => {
-            if let Some(m) = crate::resident_januspro::JanusProResident::from_assembly(&assembly, gpus, reserved) {
+            for m in crate::resident_januspro::JanusProResident::family_from_assembly(&assembly, gpus, reserved) {
                 models.push(Arc::new(m));
             }
         }

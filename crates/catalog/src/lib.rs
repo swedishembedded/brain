@@ -185,7 +185,11 @@ pub type SingleCtor = fn(Option<&Path>) -> Option<Arc<dyn ResidentModel>>;
 /// set against genuinely usable capacity, because `residency::multi::
 /// pick_devices` checks the set it names but never substitutes a different
 /// one.
-pub type MultiCtor = fn(&Assembly, &[(u32, u64)], u64) -> Option<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
+///
+/// Returns every model the checkpoint serves: one, or the base plus the
+/// fine-tunes stored beside it, each its own model id. Empty when none can be
+/// placed.
+pub type MultiCtor = fn(&Assembly, &[(u32, u64)], u64) -> Vec<Arc<dyn residency::multi::MultiDeviceResidentModel>>;
 
 /// An architecture's resolver spec, as an entry NAMES it: `(arch name,
 /// spec)`. A `&'static` reference rather than a `Box`, because every
@@ -311,7 +315,18 @@ macro_rules! resident_in_store {
 macro_rules! resident_multi {
     ($ctor:path) => {
         Some($crate::ResidentCtor::Multi((|assembly: &$crate::__reexport::Assembly, gpus: &[(u32, u64)], reserved: u64| {
-            $ctor(assembly, gpus, reserved).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::MultiDeviceResidentModel>)
+            $ctor(assembly, gpus, reserved).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::MultiDeviceResidentModel>).into_iter().collect()
+        }) as $crate::MultiCtor))
+    };
+}
+
+/// [`resident_multi!`] for an adapter whose `$ctor` returns a `Vec` of
+/// residents (the base and its stored fine-tunes), each its own model id.
+#[macro_export]
+macro_rules! resident_multi_family {
+    ($ctor:path) => {
+        Some($crate::ResidentCtor::Multi((|assembly: &$crate::__reexport::Assembly, gpus: &[(u32, u64)], reserved: u64| {
+            $ctor(assembly, gpus, reserved).into_iter().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::MultiDeviceResidentModel>).collect()
         }) as $crate::MultiCtor))
     };
 }
