@@ -27,6 +27,10 @@ fn run_ambient(device: Option<&str>) -> (String, String, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
     cmd.args(["--exact", "print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
+    // `BRAIN_BACKEND` overrides the backend a device token implies, in the
+    // child as in this process. The comparison is of the token alone, so a
+    // lane that exports it (the CUDA validation run) must not reach the child.
+    cmd.env_remove("BRAIN_BACKEND");
     match device {
         Some(v) => {
             cmd.env("BRAIN_DEVICE", v);
