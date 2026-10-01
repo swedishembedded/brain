@@ -193,6 +193,22 @@ struct KernelSrc {
     wg: u32,
 }
 
+/// Device-side kernel timing: events recorded around each launch while timing
+/// is on, resolved into per-kernel totals once the device has drained.
+#[derive(Default)]
+struct KernelTimes {
+    /// kernel name -> (accumulated milliseconds, calls).
+    totals: HashMap<String, (f64, u64)>,
+    /// Launches whose events have been recorded but not yet read.
+    pending: Vec<(String, exec::Event, exec::Event)>,
+    /// Events ready for reuse, so profiling a long run does not create and
+    /// destroy two driver objects per launch.
+    pool: Vec<exec::Event>,
+}
+
+/// Events kept for reuse; the rest are destroyed.
+const EVENT_POOL_CAP: usize = 256;
+
 #[derive(Default)]
 struct Counters {
     submits: AtomicU64,
@@ -303,6 +319,11 @@ pub struct CudaBackend {
     /// same device again.
     ordinal: u32,
     counters: Counters,
+    /// Whether launches are bracketed with events (see [`KernelTimes`]). While
+    /// it is on, submissions are issued one launch at a time, because a
+    /// replayed graph reports one duration for the whole graph.
+    timing: AtomicBool,
+    kernel_times: Mutex<KernelTimes>,
     /// **Last field on purpose.** Rust drops a struct's fields in declaration
     /// order, and every other field above either holds device memory, a loaded
     /// module or an instantiated graph - all of which are resources OF this
@@ -369,6 +390,8 @@ impl CudaBackend {
             identity,
             ordinal,
             counters: Counters::default(),
+            timing: AtomicBool::new(false),
+            kernel_times: Mutex::new(KernelTimes::default()),
         }
     }
 
@@ -695,11 +718,52 @@ impl CudaBackend {
             self.lend_staging(stage);
         }
         let (gx, gy) = grid_ws(r.threads, r.per_block);
+        let start = self.timing.load(Ordering::Acquire).then(|| self.stamp()).flatten();
         // SAFETY: `r.func` was resolved from `r.compiled`'s module, which `r`
         // holds an `Arc` to, and `r.args` is that entry point's argument list.
         unsafe { self.ctx.launch_raw(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.args) }
             .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+        if let Some(start) = start {
+            if let Some(end) = self.stamp() {
+                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((r.compiled.name.clone(), start, end));
+            }
+        }
+    }
+
+    /// An event recorded on this handle's stream now, from the pool when one is
+    /// free. `None` (and a log line) if the driver refuses: timing is a
+    /// diagnostic and must never fail a dispatch.
+    fn stamp(&self) -> Option<exec::Event> {
+        let reused = self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pool.pop();
+        let ev = match reused {
+            Some(e) => e,
+            None => self.ctx.event().map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot create a timing event")).ok()?,
+        };
+        self.ctx.record(&ev).map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot record a timing event")).ok()?;
+        Some(ev)
+    }
+
+    /// Fold every recorded launch into the per-kernel totals. The device must
+    /// have drained (every caller has just synchronised), so every event is
+    /// complete and reading it does not wait.
+    fn collect_timings(&self) {
+        let mut kt = self.kernel_times.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, start, end) in std::mem::take(&mut kt.pending) {
+            match self.ctx.elapsed_ms(&start, &end) {
+                Ok(ms) => {
+                    let entry = kt.totals.entry(name).or_insert((0.0, 0));
+                    entry.0 += ms as f64;
+                    entry.1 += 1;
+                }
+                Err(e) => tracing::warn!(reason = %e, "backend-cuda: a kernel timing could not be read"),
+            }
+            for ev in [start, end] {
+                if kt.pool.len() < EVENT_POOL_CAP {
+                    kt.pool.push(ev);
+                }
+            }
+        }
     }
 
     /// The structure of a submission, as [`SubmitSig`] defines it.
@@ -1046,7 +1110,8 @@ impl backend_api::Backend for CudaBackend {
 
         let mut handled = false;
         let mut give_up = false;
-        if let Some(cache) = &self.graph {
+        let timing = self.timing.load(Ordering::Acquire);
+        if let (Some(cache), false) = (&self.graph, timing) {
             let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
             let sig = self.signature(&clears, &resolved);
             // Read AFTER the signature is built: every allocation the
@@ -1142,9 +1207,45 @@ impl backend_api::Backend for CudaBackend {
         self.refuse_during_capture("poll_wait");
         self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
         self.recycle_staging();
+        if self.timing.load(Ordering::Acquire) {
+            self.collect_timings();
+        }
         if let Some(cache) = &self.graph {
             cache.lock().unwrap_or_else(|e| e.into_inner()).drained();
         }
+    }
+
+    /// Device-side per-kernel timing, from events around each launch. See
+    /// [`KernelTimes`]. While on, submissions are issued launch by launch.
+    fn set_kernel_timing(&self, on: bool) -> bool {
+        if !on && self.timing.swap(false, Ordering::AcqRel) {
+            // Launches already stamped still hold events: drain and read them
+            // so nothing is lost or left pending behind a switched-off timer.
+            let _ = self.ctx.sync();
+            self.collect_timings();
+        }
+        if on {
+            self.timing.store(true, Ordering::Release);
+        }
+        on
+    }
+
+    /// `(kernel name, milliseconds of device time, calls)` since the last
+    /// reset, sorted by name. Waits for the device, because a launch's events
+    /// only mean something once it has run.
+    fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        let _ = self.ctx.sync();
+        self.collect_timings();
+        let kt = self.kernel_times.lock().unwrap_or_else(|e| e.into_inner());
+        let mut rows: Vec<(String, f64, u64)> = kt.totals.iter().map(|(n, (ms, calls))| (n.clone(), *ms, *calls)).collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Some(rows)
+    }
+
+    fn reset_kernel_times(&self) {
+        let _ = self.ctx.sync();
+        self.collect_timings();
+        self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).totals.clear();
     }
 
     fn kind(&self) -> &'static str {

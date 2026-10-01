@@ -43,6 +43,7 @@ pub type CuContext = *mut c_void;
 pub type CuModule = *mut c_void;
 pub type CuFunction = *mut c_void;
 pub type CuStream = *mut c_void;
+pub type CuEvent = *mut c_void;
 pub type CuGraph = *mut c_void;
 pub type CuGraphExec = *mut c_void;
 pub type CuGraphNode = *mut c_void;
@@ -158,6 +159,13 @@ pub struct ExecFns {
     /// Page-locked host memory. A copy whose source is ordinary pageable
     /// memory is illegal inside a stream capture, so a staging block that a
     /// captured copy node reads from has to come from here.
+    /// Events, for device-side timing: `cuEventRecord` stamps the stream when
+    /// the work before it has run, and the elapsed time between two stamps is
+    /// what the GPU's own clock says the work between them took.
+    pub(crate) event_create: unsafe extern "C" fn(*mut CuEvent, u32) -> CuResult,
+    pub(crate) event_record: unsafe extern "C" fn(CuEvent, CuStream) -> CuResult,
+    pub(crate) event_elapsed_time: unsafe extern "C" fn(*mut f32, CuEvent, CuEvent) -> CuResult,
+    pub(crate) event_destroy: unsafe extern "C" fn(CuEvent) -> CuResult,
     pub(crate) mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     pub(crate) mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
 }
@@ -328,6 +336,10 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         stream_destroy: sym(lib, b"cuStreamDestroy_v2\0")?,
         memcpy_htod_async: sym(lib, b"cuMemcpyHtoDAsync_v2\0")?,
         memset_d8_async: sym(lib, b"cuMemsetD8Async\0")?,
+        event_create: sym(lib, b"cuEventCreate\0")?,
+        event_record: sym(lib, b"cuEventRecord\0")?,
+        event_elapsed_time: sym(lib, b"cuEventElapsedTime\0")?,
+        event_destroy: sym(lib, b"cuEventDestroy_v2\0")?,
         mem_alloc_host: sym(lib, b"cuMemAllocHost_v2\0")?,
         mem_free_host: sym(lib, b"cuMemFreeHost\0")?,
     })

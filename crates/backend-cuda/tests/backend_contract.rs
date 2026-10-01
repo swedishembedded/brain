@@ -319,3 +319,42 @@ fn a_shared_handle_uses_the_parents_buffers_and_compiled_kernels() {
     sibling.submit(&[], &[sibling.step(ADD2, &[&ba, &bc, &sum], &[256], 256)]);
     assert_eq!(parent.compiled_kernel_count(), 2, "add2 was recompiled by the sibling");
 }
+
+/// Per-kernel DEVICE time, from events recorded around each launch rather than
+/// from the host clock. The host measures launch + execute + fence, whose floor
+/// inflates small kernels by more than an order of magnitude, so a profiler
+/// that attributes time between kernels cannot use it.
+///
+/// What is pinned here is the contract a profiler relies on: timing is off
+/// until asked for, a kernel's calls are counted by name, time accumulates
+/// only while on, and `reset` zeroes it.
+#[test]
+fn device_timing_attributes_calls_and_time_to_the_kernel_that_ran() {
+    let Some(b) = backend() else { return };
+    const N: usize = 1 << 20;
+    let x = b.storage_init("x", &vec![1.5f32; N]);
+    let y = b.storage_init("y", &vec![2.5f32; N]);
+    let out = b.storage(N as u64);
+    let run = |times: usize| {
+        for _ in 0..times {
+            b.submit(&[], &[b.step(MUL, &[&x, &y, &out], &[N as u32], N as u32)]);
+        }
+        b.poll_wait();
+    };
+
+    // Off by default: dispatches before it is switched on are not counted.
+    assert_eq!(b.kernel_times().map(|t| t.len()), Some(0), "a CUDA backend can time kernels");
+    run(3);
+    assert!(b.set_kernel_timing(true), "CUDA must be able to time kernels");
+    run(5);
+    let times = b.kernel_times().expect("timing is on");
+    let (name, ms, calls) = times.iter().find(|(n, _, _)| n.contains("mul")).cloned().expect("the mul kernel was timed");
+    assert_eq!(calls, 5, "{name}: only the dispatches after timing was switched on count");
+    assert!(ms > 0.0 && ms < 1000.0, "{name}: {ms} ms of device time is not a plausible reading");
+
+    b.reset_kernel_times();
+    assert_eq!(b.kernel_times().map(|t| t.len()), Some(0), "reset must zero the accumulators");
+    assert!(!b.set_kernel_timing(false), "switching timing off reports it off");
+    run(2);
+    assert_eq!(b.kernel_times().map(|t| t.len()), Some(0), "nothing is timed while it is off");
+}

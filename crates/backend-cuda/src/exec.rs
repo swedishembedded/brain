@@ -37,7 +37,7 @@
 use crate::driver::{
     CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
-    CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
+    CuEvent, CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
 };
 use std::ffi::{c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -310,6 +310,35 @@ impl Context {
             "cuMemcpyDtoHAsync",
         )?;
         self.sync()
+    }
+
+    /// A new event with timing enabled.
+    pub fn event(&self) -> Result<Event, String> {
+        self.make_current()?;
+        let mut ev: CuEvent = std::ptr::null_mut();
+        // SAFETY: `ev` is a valid out-parameter; flag 0 is `CU_EVENT_DEFAULT`,
+        // which keeps timing on.
+        self.d.check(unsafe { (self.fns.event_create)(&mut ev, 0) }, "cuEventCreate")?;
+        Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev })
+    }
+
+    /// Stamp [`Self::stream`] with `event`: it completes when everything
+    /// enqueued before it has run.
+    pub fn record(&self, event: &Event) -> Result<(), String> {
+        self.make_current()?;
+        // SAFETY: both handles belong to this context.
+        self.d.check(unsafe { (self.fns.event_record)(event.ev, self.stream) }, "cuEventRecord")
+    }
+
+    /// Device time in milliseconds between two recorded events. Both must have
+    /// completed (after [`Self::sync`]); an event that has not is an error, not
+    /// a zero.
+    pub fn elapsed_ms(&self, start: &Event, end: &Event) -> Result<f32, String> {
+        self.make_current()?;
+        let mut ms = 0f32;
+        // SAFETY: `ms` is a valid out-parameter and both events were recorded.
+        self.d.check(unsafe { (self.fns.event_elapsed_time)(&mut ms, start.ev, end.ev) }, "cuEventElapsedTime")?;
+        Ok(ms)
     }
 
     /// Compile `src` for THIS device's capability, through the on-disk cubin
@@ -671,6 +700,35 @@ impl Drop for GraphExec {
 
 unsafe impl Send for GraphExec {}
 unsafe impl Sync for GraphExec {}
+
+/// A CUDA event, destroyed when dropped. It is a timestamp on a stream: record
+/// one before and one after a launch and [`Context::elapsed_ms`] gives the
+/// device-side duration between them.
+pub struct Event {
+    d: &'static Driver,
+    fns: &'static ExecFns,
+    ctx: CuContext,
+    ev: CuEvent,
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: the event was created on this context and is destroyed once.
+        unsafe {
+            if (self.fns.ctx_set_current)(self.ctx) == 0 {
+                let rc = (self.fns.event_destroy)(self.ev);
+                if rc != 0 {
+                    tracing::warn!("cuEventDestroy failed: {}", self.d.error_text(rc));
+                }
+            }
+        }
+    }
+}
+
+// An event handle is not thread-affine once its context is current, which
+// every use makes it.
+unsafe impl Send for Event {}
+unsafe impl Sync for Event {}
 
 /// A page-locked host block of `words` u32s.
 pub struct PinnedMem {
