@@ -127,6 +127,13 @@ impl TextToImage {
     /// every sequence's KV cache sized for `context` tokens (the prompt and
     /// the image's tokens together).
     pub fn load(dir: &Path, parallel: u32, tier: qwen3::Dtype, context: u32) -> Result<TextToImage, String> {
+        Self::load_tuned(dir, parallel, tier, context, None)
+    }
+
+    /// [`Self::load`] with the generation fine-tune in `tuned` (what `brain
+    /// januspro finetune --mode generation` wrote) applied: its adapter folded
+    /// into the decoder's weights and its heads replacing the checkpoint's.
+    pub fn load_tuned(dir: &Path, parallel: u32, tier: qwen3::Dtype, context: u32, tuned: Option<&Path>) -> Result<TextToImage, String> {
         if parallel == 0 {
             return Err("at least one image per batch".into());
         }
@@ -135,12 +142,22 @@ impl TextToImage {
         let rows = 2 * parallel;
         let weights = {
             let src = qwen3::import::nested_source(&rd, deepseekvl::import::DECODER, &dcfg)?;
-            Engine::tensors_from(&dcfg, &src)?
+            let mut weights = Engine::tensors_from(&dcfg, &src)?;
+            if let Some(t) = tuned {
+                let adapter = t.join(deepseekvl::train::ADAPTER_FILE);
+                qwen3::lora::fold_adapter_into(&mut weights, adapter.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", adapter.display()))?;
+            }
+            weights
         };
         let per_seq = context.div_ceil(BLOCK);
         let engine = Engine::from_map_tier(dcfg, &weights, BLOCK, rows * per_seq, rows, per_seq, MAX_PREFILL, false, tier);
         drop(weights);
-        let heads = GenHeads::load(&rd, &cfg, rows)?;
+        let mut heads = GenHeads::load(&rd, &cfg, rows)?;
+        if let Some(t) = tuned {
+            let file = t.join(crate::train::GENERATION_FILE);
+            let st = checkpoint::st::load_safetensors(file.to_str().ok_or("path is not UTF-8")?).map_err(|e| format!("{}: {e}", file.display()))?;
+            heads.apply_tuned(&st.tensors)?;
+        }
 
         let vq_cfg = VqganConfig::llamagen_vq16();
         if vq_cfg.codebook_size != cfg.gen_vision.image_token_size || vq_cfg.emb_dim != cfg.gen_vision.n_embed {

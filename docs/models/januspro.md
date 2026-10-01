@@ -76,8 +76,10 @@ beside it. The flags are `brain deepseekvl finetune`'s.
 
 An understanding fine-tune is served by starting `brain serve` with
 `BRAIN_JANUSPRO_TUNED=<out dir>` (the adapter is attached at run time, the
-trained aligner replaces the checkpoint's); the generation fine-tune is not
-served yet.
+trained aligner replaces the checkpoint's); a generation fine-tune is served
+by `BRAIN_JANUSPRO_TUNED_GENERATION=<out dir>` (its adapter is folded into the
+drawing engine's decoder, its head, aligner and code embedding replace the
+checkpoint's).
 
 As a library: `januspro::train::{finetune_understanding, finetune_generation}`,
 or `GenTrainer` for your own loop.

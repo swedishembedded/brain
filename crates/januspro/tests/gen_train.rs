@@ -160,3 +160,23 @@ fn a_few_steps_overfit_the_image_and_move_every_generation_part() {
     assert!(moved(&t.aligner_weights(), &before.1) > 1e-2, "the aligner trained");
     assert!(t.embed().iter().zip(&before.2).map(|(x, y)| (x - y).abs()).sum::<f32>() > 1e-2, "the code embedding trained");
 }
+
+/// The decoder reads the begin-of-image tag itself and predicts the image's
+/// first code from it, as it does when drawing: a different tag token changes
+/// the loss, and so does a different token just before it.
+#[test]
+fn the_first_code_is_predicted_from_the_begin_of_image_tag() {
+    if gpu_disabled() {
+        return;
+    }
+    let p = example();
+    let tag = 3; // the prompt is four tokens; the tag is its last
+    let mut t = trainer(false);
+    let base = t.loss(&p);
+    let mut other_tag = p.clone();
+    other_tag.tokens[tag] = 7;
+    assert_ne!(t.loss(&other_tag), base, "the tag token is an input of the position that predicts the first code");
+    let mut earlier = p.clone();
+    earlier.tokens[tag - 1] = 11;
+    assert_ne!(t.loss(&earlier), base);
+}

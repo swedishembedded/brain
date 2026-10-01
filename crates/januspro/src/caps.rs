@@ -70,8 +70,8 @@ pub fn load_understanding(dir: &str, placement: deepseekvl::model::Placement, tu
 
 /// Janus-Pro's generation path, for serving one image per request, on
 /// `card` with `context` tokens per sequence.
-pub fn load_t2i(dir: &str, card: u32, context: u32) -> Result<TextToImage, String> {
-    gpu_core::devices::with_gpu(card, || TextToImage::load(std::path::Path::new(dir), 1, qwen3::Dtype::BF16, context))?
+pub fn load_t2i(dir: &str, card: u32, context: u32, tuned: Option<&std::path::Path>) -> Result<TextToImage, String> {
+    gpu_core::devices::with_gpu(card, || TextToImage::load_tuned(std::path::Path::new(dir), 1, qwen3::Dtype::BF16, context, tuned))?
 }
 
 /// Where the understanding build goes over the cards' free memory now.
@@ -163,7 +163,7 @@ impl Action for JanusAction {
             *guard = None; // drop the other build before this one allocates
             let build = if want_generation {
                 let (card, context) = place_t2i_now(&dir)?;
-                Loaded::Generation(load_t2i(&dir, card, context)?)
+                Loaded::Generation(load_t2i(&dir, card, context, None)?)
             } else {
                 Loaded::Understanding(load_understanding(&dir, place_understanding_now(&dir)?, None)?)
             };

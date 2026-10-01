@@ -91,6 +91,28 @@ impl GenHeads {
         Ok(GenHeads { gpu, head, aligner, embed, code_dim, rows, hidden_in, codes_in })
     }
 
+    /// Replace the heads with a fine-tune's: `tensors` as
+    /// [`crate::train::GenOutcome::save`] names them (`gen_head.*`,
+    /// `gen_aligner.*`, `gen_embed.weight`).
+    pub fn apply_tuned(&mut self, tensors: &HashMap<String, Vec<f32>>) -> Result<(), String> {
+        for (prefix, projector) in [(GEN_HEAD_PREFIX, &self.head), (GEN_ALIGNER_PREFIX, &self.aligner)] {
+            for (name, n) in projector.cfg.param_list() {
+                let key = format!("{prefix}{name}");
+                let w = tensors.get(&key).ok_or_else(|| format!("the fine-tune has no {key}"))?;
+                if w.len() != n {
+                    return Err(format!("{key} holds {} values, expected {n}", w.len()));
+                }
+                self.gpu.write_f32(projector.param(&name), w);
+            }
+        }
+        let embed = tensors.get(GEN_EMBED).ok_or_else(|| format!("the fine-tune has no {GEN_EMBED}"))?;
+        if embed.len() != self.embed.len() {
+            return Err(format!("{GEN_EMBED} holds {} values, expected {}", embed.len(), self.embed.len()));
+        }
+        self.embed.copy_from_slice(embed);
+        Ok(())
+    }
+
     /// The batch size the heads were built for.
     pub fn rows(&self) -> usize {
         self.rows as usize

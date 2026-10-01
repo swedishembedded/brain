@@ -33,6 +33,8 @@ pub struct JanusProResident {
     /// (`BRAIN_JANUSPRO_TUNED`: what `brain januspro finetune --mode
     /// understanding` wrote), applied when the chat build loads.
     tuned: Option<std::path::PathBuf>,
+    /// A generation fine-tune for the drawing build (`BRAIN_JANUSPRO_TUNED_GENERATION`).
+    tuned_generation: Option<std::path::PathBuf>,
     understanding: Option<Plan>,
     generation: Option<Plan>,
 }
@@ -68,7 +70,7 @@ impl JanusProResident {
         if understanding.is_none() && generation.is_none() {
             return None;
         }
-        Some(JanusProResident { dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), understanding, generation })
+        Some(JanusProResident { dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), tuned_generation: std::env::var_os("BRAIN_JANUSPRO_TUNED_GENERATION").map(Into::into), understanding, generation })
     }
 
     fn is_generation(key: &InstanceKey) -> bool {
@@ -105,7 +107,7 @@ impl ResidentModel for JanusProResident {
         };
         let (dir, _) = key.config.rsplit_once('|').ok_or("januspro: malformed instance key")?;
         if Self::is_generation(key) {
-            Ok(Box::new(Generation { t2i: januspro::caps::load_t2i(dir, card, plan.context)? }))
+            Ok(Box::new(Generation { t2i: januspro::caps::load_t2i(dir, card, plan.context, self.tuned_generation.as_deref())? }))
         } else {
             let placement = Placement { tower: card, decoder: card, context: plan.context };
             Ok(Box::new(Understanding { session: januspro::caps::load_understanding(dir, placement, self.tuned.as_deref())? }))
@@ -144,7 +146,7 @@ mod tests {
     use super::*;
 
     fn resident(generation: Option<Plan>) -> JanusProResident {
-        JanusProResident { dir: "/tmp".into(), tuned: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
+        JanusProResident { dir: "/tmp".into(), tuned: None, tuned_generation: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
     }
 
     #[test]

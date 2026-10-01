@@ -197,8 +197,9 @@ impl GenTrainer {
         let fed = self.positions - 1;
         assert_eq!(p.tokens.len(), p.tag_row() + self.positions, "the tokens are the prompt and {fed} placeholders");
         assert!(p.tokens.len() <= self.block as usize, "an example of {} tokens does not fit the {}-token block", p.tokens.len(), self.block);
-        let (tag, d, vocab) = (p.tag_row() - 1, self.decoder.cfg.d_model as usize, self.head.cfg().out_dim as usize);
-        // The begin-of-image tag is the last prompt token; the fed-back rows follow it.
+        let (tag, d, vocab) = (p.tag_row(), self.decoder.cfg.d_model as usize, self.head.cfg().out_dim as usize);
+        // The begin-of-image tag is the last prompt token and predicts the
+        // first code; the fed-back rows (codes 0..) follow it.
         let row0 = tag + 1;
         if self.splice_at != Some(row0) {
             self.decoder.enable_mm_splice(row0 as u32, fed as u32);
