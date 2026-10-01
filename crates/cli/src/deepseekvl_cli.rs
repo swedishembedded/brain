@@ -42,7 +42,7 @@ pub fn run_deepseekvl(args: &[String]) {
 }
 
 pub(crate) const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
-    [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--seed S] \
+    [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--batch N] [--seed S] \
     [--base-dtype f32|bf16] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
 
 /// The flags `finetune` takes, parsed once.
@@ -66,6 +66,7 @@ impl Args {
             aligner_lr: None,
             seed: 0,
             block: None,
+            batch: 1,
             dtype: qwen3::Dtype::BF16,
             hyper: qwen3::finetune::LoraHyper::default(),
         };
@@ -90,6 +91,7 @@ impl Args {
                 "--steps" => o.steps = value()?.parse().map_err(|_| "--steps is not a whole number".to_string())?,
                 "--lr" => o.lr = number(value()?)?,
                 "--aligner-lr" => o.aligner_lr = Some(number(value()?)?),
+                "--batch" => o.batch = value()?.parse().ok().filter(|&b| b > 0).ok_or_else(|| "--batch is not a positive whole number".to_string())?,
                 "--block" => o.block = Some(value()?.parse().map_err(|_| "--block is not a whole number".to_string())?),
                 "--seed" => seed = Some(value()?.parse::<u64>().map_err(|_| "--seed is not a whole number".to_string())?),
                 "--base-dtype" => {
@@ -186,5 +188,14 @@ mod tests {
         assert_eq!((o.rank, o.alpha, o.seed, o.dtype), (8, 16.0, 3, qwen3::Dtype::BF16), "alpha defaults to twice the rank");
         assert_eq!(o.lr, 2e-4);
         assert_eq!(o.targets, qwen3::finetune::default_lora_targets());
+    }
+
+    #[test]
+    fn a_batch_is_a_positive_whole_number() {
+        let base = ["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1"];
+        let with = |extra: &[&str]| Args::parse(&args(&[&base[..], extra].concat()));
+        assert_eq!(with(&[]).unwrap().options.batch, 1);
+        assert_eq!(with(&["--batch", "4"]).unwrap().options.batch, 4);
+        assert!(with(&["--batch", "0"]).err().unwrap().contains("--batch"));
     }
 }

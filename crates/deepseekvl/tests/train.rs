@@ -25,7 +25,7 @@ fn gpu_disabled() -> bool {
 }
 
 const ROWS: usize = 3;
-const BLOCK: u32 = 8;
+const BLOCK: u32 = 12;
 
 fn decoder(lora: bool) -> QwenConfig {
     QwenConfig { block_size: BLOCK, lora: lora.then(|| LoraCfg { rank: 4, alpha: 8.0, targets: ["wq", "wk", "wv", "wo", "gate", "up", "down"].iter().map(|s| s.to_string()).collect() }), ..QwenConfig::tiny() }
@@ -43,8 +43,17 @@ fn aligner() -> (ProjectorConfig, HashMap<String, Vec<f32>>) {
 /// implies: BOS, the image, four reply tokens.
 fn example() -> Prepared {
     let mut rng = Rng::new(4);
-    let streams = (0..2).map(|_| (0..ROWS * 8).map(|_| rng.next_f32() - 0.5).collect()).collect();
-    Prepared { streams, tokens: vec![0, 5, 5, 5, 7, 11, 17, 3], targets: vec![IGNORE, IGNORE, IGNORE, 7, 11, 17, 3, 9], row0: 1 }
+    let mut image = || -> Vec<Vec<f32>> { (0..2).map(|_| (0..ROWS * 8).map(|_| rng.next_f32() - 0.5).collect()).collect() };
+    Prepared { images: vec![image()], tokens: vec![0, 5, 5, 5, 7, 11, 17, 3], targets: vec![IGNORE, IGNORE, IGNORE, 7, 11, 17, 3, 9], row0s: vec![1] }
+}
+
+/// Two images (`ROWS` rows each, at residual rows 1..4 and 6..9) and a reply
+/// that depends on both.
+fn two_images() -> Prepared {
+    let mut rng = Rng::new(6);
+    let mut image = || -> Vec<Vec<f32>> { (0..2).map(|_| (0..ROWS * 8).map(|_| rng.next_f32() - 0.5).collect()).collect() };
+    let images = vec![image(), image()];
+    Prepared { images, tokens: vec![0, 5, 5, 5, 7, 8, 5, 5, 5, 11, 17, 3], targets: vec![IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, IGNORE, 11, 17, 3, 9], row0s: vec![1, 6] }
 }
 
 fn trainer(lora: bool, seed: u64) -> Trainer {
@@ -70,9 +79,22 @@ fn the_aligner_gradient_is_the_loss_gradient() {
     if gpu_disabled() {
         return;
     }
-    let p = example();
+    check_aligner_gradient(&example());
+}
+
+/// With two images the aligner serves both: its gradient sums the rows of
+/// each, and still equals the loss's finite difference.
+#[test]
+fn the_aligner_gradient_covers_every_image_of_an_example() {
+    if gpu_disabled() {
+        return;
+    }
+    check_aligner_gradient(&two_images());
+}
+
+fn check_aligner_gradient(p: &Prepared) {
     let mut t = trainer(true, 1);
-    let (_, grads) = t.loss_and_aligner_grads(&p);
+    let (_, grads) = t.loss_and_aligner_grads(p);
     let base = t.aligner_weights();
     let eps = 1e-2f32;
     let mut checked = 0;
@@ -83,7 +105,7 @@ fn the_aligner_gradient_is_the_loss_gradient() {
                 let mut shifted = base.clone();
                 shifted.get_mut(name).unwrap()[idx] += delta;
                 t.set_aligner_weights(&shifted);
-                t.loss(&p)
+                t.loss(p)
             };
             let numeric = (probe(eps) - probe(-eps)) / (2.0 * eps);
             let scale = g.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-3);
@@ -122,11 +144,64 @@ fn a_step_moves_the_adapters_and_lowers_the_loss() {
     }
     let p = example();
     let mut t = trainer(true, 1);
-    let adapter = model::Model::param_names(t.decoder()).into_iter().find(|n| n.ends_with(".lora_b")).expect("an adapter tensor");
+    let adapter = t.decoder().param_names().into_iter().find(|n| n.ends_with(".lora_b")).expect("an adapter tensor");
     assert!(t.decoder().read_weight(&adapter).iter().all(|x| *x == 0.0), "B starts at zero");
     let hyper = Hyper { lr: 5e-2, aligner_lr: 1e-2, weight_decay: 0.0, grad_clip: 1.0 };
     let first = t.step(&p, 1, &hyper);
     assert!(t.decoder().read_weight(&adapter).iter().any(|x| *x != 0.0), "the step trained the adapter");
     let second = t.step(&p, 2, &hyper);
     assert!(second < first, "{first} -> {second}");
+}
+
+/// A decoder cut into two pipeline stages trains the aligner exactly as the
+/// whole one does: the images are spliced into the first stage and their
+/// gradient read back from it, across both images of an example.
+#[test]
+fn a_two_stage_decoder_gives_the_aligner_the_same_loss_and_gradient() {
+    if gpu_disabled() {
+        return;
+    }
+    let p = two_images();
+    let (loss, want) = trainer(true, 1).loss_and_aligner_grads(&p);
+
+    let cfg = decoder(true);
+    let base = qwen3::init_weights(&decoder(false), 11);
+    let init = qwen3::finetune::LoraInit::fresh(&cfg, Box::new(base), 1);
+    let shards = model::plan_balanced(&<qwen3::Qwen as model::Shardable>::shard_cost(&cfg, 1, BLOCK), &[model::Shard::ANY_GPU, model::Shard::ANY_GPU]);
+    assert_eq!(shards.len(), 2);
+    let pipe = model::Pipeline::<qwen3::Qwen>::with_shards_dt(cfg.clone(), 1, BLOCK, &init, shards, Dtype::F32);
+    let staged = qwen3::finetune::Trained::Pipeline(model::PipelineModel::new(pipe, cfg));
+    let (acfg, aw) = aligner();
+    let mut t = Trainer::with_decoder(staged, BLOCK, acfg, aw, ROWS).unwrap();
+    let (got_loss, got) = t.loss_and_aligner_grads(&p);
+
+    assert!((got_loss - loss).abs() < 1e-4 * loss.abs().max(1.0), "loss {got_loss} vs {loss}");
+    for (name, w) in &want {
+        let scale = w.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+        let worst = got[name].iter().zip(w).fold(0.0f32, |m, (a, b)| m.max((a - b).abs() / scale));
+        assert!(worst < 2e-3, "{name}: the two-stage gradient differs by {worst}");
+    }
+}
+
+/// A step on a batch of examples is the step on their mean gradient: a batch
+/// of one example twice is that example's step.
+#[test]
+fn a_batch_of_the_same_example_twice_steps_as_the_example_once() {
+    if gpu_disabled() {
+        return;
+    }
+    let p = two_images();
+    let hyper = Hyper { lr: 5e-2, aligner_lr: 1e-2, weight_decay: 0.0, grad_clip: 1.0 };
+    let (mut once, mut twice) = (trainer(true, 1), trainer(true, 1));
+    let a = once.step(&p, 1, &hyper);
+    let b = twice.step_batch(&[&p, &p], 1, &hyper);
+    assert!((a - b).abs() < 1e-5, "the mean loss of identical examples is the example's: {a} vs {b}");
+    let (wa, wb) = (once.aligner_weights(), twice.aligner_weights());
+    for (name, w) in &wa {
+        let worst = w.iter().zip(&wb[name]).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(worst < 1e-5, "{name}: the aligner moved differently ({worst})");
+    }
+    let adapter = once.decoder().param_names().into_iter().find(|n| n.ends_with(".lora_b")).unwrap();
+    let worst = once.decoder().read_weight(&adapter).iter().zip(&twice.decoder().read_weight(&adapter)).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    assert!(worst < 1e-5, "the adapter moved differently ({worst})");
 }

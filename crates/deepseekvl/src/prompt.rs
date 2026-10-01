@@ -106,6 +106,22 @@ impl ImageSplice {
         out
     }
 
+    /// The first row of each image's `rows` rows in `expanded` (what
+    /// [`Self::expand_ids`] returns), in image order. Images that follow one
+    /// another with nothing between them are told apart by the row count.
+    pub fn image_rows(&self, expanded: &[u32]) -> Vec<usize> {
+        let (mut starts, mut at) = (Vec::new(), 0);
+        while at < expanded.len() {
+            if expanded[at] == self.image_id {
+                starts.push(at);
+                at += self.rows;
+            } else {
+                at += 1;
+            }
+        }
+        starts
+    }
+
     /// The prefill inputs for `ids`: each placeholder becomes the next image's
     /// `rows` rows of `embeds` (`[n_images * rows, width]`), every other id
     /// stays a token. The number of placeholders must equal the number of
@@ -178,5 +194,15 @@ mod tests {
         let inputs = splice.inputs(&[5, 9, 6], &embeds, 1).unwrap();
         let tokens: Vec<Option<u32>> = inputs.iter().map(|i| if let PrefillInput::Token(t) = i { Some(*t) } else { None }).collect();
         assert_eq!(tokens, [Some(5), Some(1), None, None, None, Some(2), Some(6)]);
+    }
+
+    #[test]
+    fn each_images_rows_are_found_even_when_the_images_touch() {
+        let plain = ImageSplice { image_id: 9, rows: 3, wrap: None };
+        let ids = plain.expand_ids(&[1, 9, 9, 2, 9]);
+        assert_eq!(plain.image_rows(&ids), vec![1, 4, 8], "back-to-back placeholders give back-to-back runs");
+        let wrapped = ImageSplice { image_id: 9, rows: 3, wrap: Some((7, 8)) };
+        let ids = wrapped.expand_ids(&[1, 9, 2, 9]);
+        assert_eq!(wrapped.image_rows(&ids), vec![2, 8], "the tags are not rows");
     }
 }

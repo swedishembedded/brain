@@ -11,10 +11,11 @@
 //! own weights, and the decoder trains as a LoRA (or whole, when its
 //! configuration carries no adapter).
 //!
-//! A step runs the aligner over an image's cached feature streams, splices
-//! its rows into the decoder's residual stream ([`qwen3::Qwen::enable_mm_splice`]),
-//! differentiates the reply's cross-entropy, and carries the gradient of the
-//! spliced rows back through the aligner. The decoder's optimiser is its own
+//! A step runs the aligner over each of an example's images' cached feature
+//! streams, splices their rows into the decoder's residual stream
+//! ([`qwen3::Qwen::enable_mm_splices`]), differentiates the reply's
+//! cross-entropy, and carries the gradient of the spliced rows back through
+//! the aligner, image by image. The decoder's optimiser is its own
 //! device AdamW; the aligner's is AdamW on the host, which is cheap at its
 //! size and keeps its parameters in one place.
 
@@ -28,59 +29,60 @@ use gpu_core::{DeviceBuffer, Gpu};
 use imaging::pixels::Rgb8;
 use model::projector::{MlpProjector, ProjectorConfig, PROJECTOR_PIPELINES};
 use model::{cosine_lr, grad_multiplier, Adam};
-use qwen3::finetune::LoraInit;
-use qwen3::{Dtype, Qwen, QwenConfig, IGNORE};
+use qwen3::finetune::Trained;
+use qwen3::{Dtype, QwenConfig, IGNORE};
 
 use crate::model::Frontend;
 use crate::prompt::{Role, Turn};
 
-/// One training example ready for the decoder: the image's frozen-tower
-/// feature streams and the token rows of the conversation with the image's
+/// One training example ready for the decoder: each image's frozen-tower
+/// feature streams and the token rows of the conversation with the images'
 /// rows marked in place.
 #[derive(Clone, Debug)]
 pub struct Prepared {
-    /// `[rows, width]` per feature stream, as [`crate::tower::Features::streams`].
-    pub streams: Vec<Vec<f32>>,
-    /// The decoder's input tokens; the image's rows are placeholders the
+    /// Per image, `[rows, width]` per feature stream, as
+    /// [`crate::tower::Features::streams`].
+    pub images: Vec<Vec<Vec<f32>>>,
+    /// The decoder's input tokens; the images' rows are placeholders the
     /// splice overwrites.
     pub tokens: Vec<u32>,
     /// `targets[i]` is what follows `tokens[i]`, or [`IGNORE`]: only the
     /// reply (and its end-of-sentence) is supervised.
     pub targets: Vec<u32>,
-    /// The first residual row of the image's rows.
-    pub row0: u32,
+    /// The first residual row of each image's rows, in image order.
+    pub row0s: Vec<u32>,
 }
 
 impl Frontend {
-    /// Turn an image and a conversation ending in the reply to learn into a
+    /// Turn the images and a conversation ending in the reply to learn into a
     /// training example. The prompt is rendered as it is at inference (BOS,
-    /// system prompt, the user's turn with its `<image_placeholder>`, the open
-    /// `Assistant:`), and the reply follows it closed by the end-of-sentence
-    /// token; one image per example.
-    pub fn prepare(&self, image: &Rgb8, turns: &[Turn]) -> Result<Prepared, String> {
+    /// system prompt, the user's turn with its `<image_placeholder>`s, the
+    /// open `Assistant:`), and the reply follows it closed by the
+    /// end-of-sentence token; the prompt places each image once, in order.
+    pub fn prepare(&self, images: &[Rgb8], turns: &[Turn]) -> Result<Prepared, String> {
         let (reply, asked) = match turns.split_last() {
             Some((last, rest)) if last.role == Role::Assistant && !rest.is_empty() => (last, rest),
             _ => return Err("a training conversation ends with the assistant reply to learn, after a user turn".to_string()),
         };
         let prompt = self.prompt_ids(asked)?;
         let placeholders = prompt.iter().filter(|&&t| t == self.splice.image_id).count();
-        if placeholders != 1 {
-            return Err(format!("a training example has one image, and its prompt has {placeholders} image placeholders"));
+        if images.is_empty() || placeholders != images.len() {
+            return Err(format!("a training example with {} image(s) needs one image placeholder per image, and its prompt has {placeholders}", images.len()));
         }
         let reply_ids = self.tokenizer.encode(&format!(" {}{}", reply.content.trim(), self.eos));
         if reply_ids.last() != Some(&self.eos_id) {
             return Err("the reply does not end in the end-of-sentence token".to_string());
         }
         let mut sequence = self.splice.expand_ids(&prompt);
-        let image_at = sequence.iter().position(|&t| t == self.splice.image_id).expect("the placeholder was expanded");
+        let row0s: Vec<u32> = self.splice.image_rows(&sequence).into_iter().map(|r| r as u32).collect();
         let supervised_from = sequence.len();
         sequence.extend(&reply_ids);
 
         let n = sequence.len() - 1;
         let tokens = sequence[..n].to_vec();
         let targets = (0..n).map(|i| if i + 1 >= supervised_from { sequence[i + 1] } else { IGNORE }).collect();
-        let streams = self.tower.encode(&self.processor.pixel_values(image)?).streams;
-        Ok(Prepared { streams, tokens, targets, row0: image_at as u32 })
+        let images = images.iter().map(|image| Ok(self.tower.encode(&self.processor.pixel_values(image)?).streams)).collect::<Result<Vec<_>, String>>()?;
+        Ok(Prepared { images, tokens, targets, row0s })
     }
 }
 
@@ -189,9 +191,15 @@ impl TrainableProjector {
     /// One AdamW step (1-based `t`) on the accumulated gradients, clipped to
     /// `grad_clip` in global norm when it is positive.
     pub fn step(&mut self, t: u32, lr: f32, weight_decay: f32, grad_clip: f32) {
+        self.step_scaled(t, lr, weight_decay, grad_clip, 1.0);
+    }
+
+    /// [`Self::step`] on the accumulated gradients multiplied by `mean`
+    /// (`1/K` after `K` examples), the clip applied to the scaled norm.
+    pub fn step_scaled(&mut self, t: u32, lr: f32, weight_decay: f32, grad_clip: f32, mean: f32) {
         let grads = self.grads();
         let sum_sq: f64 = grads.values().flatten().map(|g| (*g as f64).powi(2)).sum();
-        let scale = grad_multiplier(sum_sq, (grad_clip > 0.0).then_some(grad_clip), 1.0);
+        let scale = grad_multiplier(sum_sq, (grad_clip > 0.0).then_some(grad_clip), mean);
         let adam = Adam::default();
         for (name, g) in &grads {
             let (w, m, v) = self.state.get_mut(name).expect("a parameter of the projector");
@@ -204,15 +212,16 @@ impl TrainableProjector {
 /// A fine-tune of the composite: the decoder, the aligner, and the splice
 /// between them.
 pub struct Trainer {
-    decoder: Qwen,
+    decoder: Trained,
     aligner: TrainableProjector,
     block: u32,
+    /// Aligner rows per image.
     rows: usize,
-    splice_at: Option<u32>,
+    splice_at: Vec<u32>,
 }
 
 impl Trainer {
-    /// Build the trainer for rows of at most `block` tokens, the image taking
+    /// Build the trainer for rows of at most `block` tokens, each image taking
     /// `rows` of them. `cfg` is the decoder's configuration: with `lora` set,
     /// the base (at `dt`, see [`Qwen::new_lora_dt`]) is frozen under fresh
     /// adapters drawn from `seed`; without, every decoder weight trains.
@@ -232,14 +241,14 @@ impl Trainer {
         if aligner.out_dim != cfg.d_model {
             return Err(format!("the aligner makes {}-wide rows for a {}-wide decoder", aligner.out_dim, cfg.d_model));
         }
-        let decoder = if cfg.lora.is_some() {
-            let init = LoraInit::fresh(&cfg, base, seed);
-            Qwen::new_lora_dt(cfg, 1, block, &init, dt)
-        } else {
-            let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-            Qwen::new_shard(cfg, 1, block, &*base, true, shard)
-        };
-        Ok(Trainer { decoder, aligner: TrainableProjector::new(aligner, aligner_weights, rows)?, block, rows, splice_at: None })
+        let decoder = qwen3::finetune::build_decoder_trainer(cfg, base, dt, block, seed).map_err(|e| e.to_string())?;
+        Trainer::with_decoder(decoder, block, aligner, aligner_weights, rows)
+    }
+
+    /// The trainer around a decoder already built (on one card or as a
+    /// pipeline), for `block`-token rows of which each image takes `rows`.
+    pub fn with_decoder(decoder: Trained, block: u32, aligner: ProjectorConfig, aligner_weights: HashMap<String, Vec<f32>>, rows: usize) -> Result<Trainer, String> {
+        Ok(Trainer { decoder, aligner: TrainableProjector::new(aligner, aligner_weights, rows)?, block, rows, splice_at: Vec::new() })
     }
 
     /// The row-major shape of aligner parameter `name`.
@@ -253,7 +262,7 @@ impl Trainer {
     }
 
     /// The decoder, for saving its adapter.
-    pub fn decoder(&self) -> &Qwen {
+    pub fn decoder(&self) -> &Trained {
         &self.decoder
     }
 
@@ -267,15 +276,17 @@ impl Trainer {
         self.aligner.set_weights(weights);
     }
 
-    /// Upload `p` to the decoder: the aligner's rows spliced in, the tokens
-    /// padded to the block.
+    /// Upload `p` to the decoder: the aligner's rows for every image spliced
+    /// in, the tokens padded to the block.
     fn load(&mut self, p: &Prepared) {
         assert!(p.tokens.len() <= self.block as usize, "an example of {} tokens does not fit the {}-token block", p.tokens.len(), self.block);
-        if self.splice_at != Some(p.row0) {
-            self.decoder.enable_mm_splice(p.row0, self.rows as u32);
-            self.splice_at = Some(p.row0);
+        if self.splice_at != p.row0s {
+            let regions: Vec<(u32, u32)> = p.row0s.iter().map(|&r| (r, self.rows as u32)).collect();
+            self.decoder.enable_mm_splices(&regions);
+            self.splice_at = p.row0s.clone();
         }
-        self.decoder.write_img_embeds(&self.aligner.forward(&p.streams));
+        let embeds: Vec<f32> = p.images.iter().flat_map(|streams| self.aligner.forward(streams)).collect();
+        self.decoder.write_img_embeds(&embeds);
         let mut x = p.tokens.clone();
         let mut y = p.targets.clone();
         x.resize(self.block as usize, 0);
@@ -296,20 +307,42 @@ impl Trainer {
     }
 
     fn forward_backward(&mut self, p: &Prepared) -> f32 {
-        self.load(p);
         self.decoder.zero_grads();
         self.aligner.zero_grads();
+        self.accumulate(p)
+    }
+
+    /// The loss on `p`, its gradients added to those already accumulated.
+    fn accumulate(&mut self, p: &Prepared) -> f32 {
+        self.load(p);
         let loss = self.decoder.forward();
         self.decoder.backward();
-        self.aligner.backward(&self.decoder.read_d_img_embeds());
+        // The aligner's activations hold the last image's: run each image's
+        // forward again before its gradient, the parameter gradients adding up.
+        let d_images = self.decoder.read_d_img_embeds();
+        let per_image = self.rows * self.aligner.cfg().out_dim as usize;
+        for (streams, d_rows) in p.images.iter().zip(d_images.chunks(per_image)) {
+            self.aligner.forward(streams);
+            self.aligner.backward(d_rows);
+        }
         loss
     }
 
     /// One optimiser step (1-based `t`) on `p`; returns its loss.
     pub fn step(&mut self, p: &Prepared, t: u32, h: &Hyper) -> f32 {
-        let loss = self.forward_backward(p);
-        self.aligner.step(t, h.aligner_lr, h.weight_decay, h.grad_clip);
-        self.decoder.adamw_step(t, h.lr, h.weight_decay, Adam::default(), (h.grad_clip > 0.0).then_some(h.grad_clip), 1.0);
+        self.step_batch(&[p], t, h)
+    }
+
+    /// One optimiser step (1-based `t`) on the mean gradient of `batch`;
+    /// returns the mean loss.
+    pub fn step_batch(&mut self, batch: &[&Prepared], t: u32, h: &Hyper) -> f32 {
+        assert!(!batch.is_empty(), "a step needs at least one example");
+        self.decoder.zero_grads();
+        self.aligner.zero_grads();
+        let mean = 1.0 / batch.len() as f32;
+        let loss = batch.iter().map(|p| self.accumulate(p)).sum::<f32>() * mean;
+        self.aligner.step_scaled(t, h.aligner_lr, h.weight_decay, h.grad_clip, mean);
+        self.decoder.adamw_step(t, h.lr, h.weight_decay, Adam::default(), (h.grad_clip > 0.0).then_some(h.grad_clip), mean);
         self.decoder.poll_wait();
         loss
     }
@@ -330,6 +363,8 @@ pub struct Options {
     pub seed: u64,
     /// The rows of a training example; `None` fits the longest one.
     pub block: Option<u32>,
+    /// Examples whose gradients are averaged into each step.
+    pub batch: u32,
     /// The storage dtype of the frozen decoder.
     pub dtype: Dtype,
     /// Decay, clip, warmup and the floor of the cosine schedule.
@@ -361,7 +396,7 @@ impl Outcome {
     pub fn save(&self, dir: &Path, card_id: &str, base_id: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
-        qwen3::lora::save_adapter(&path(ADAPTER_FILE), self.trainer.decoder(), card_id, base_id, None).map_err(|e| format!("{}: {e}", path(ADAPTER_FILE)))?;
+        self.trainer.decoder().save_adapter(&path(ADAPTER_FILE), card_id, base_id, None).map_err(|e| format!("{}: {e}", path(ADAPTER_FILE)))?;
         let mut names: Vec<String> = self.trainer.aligner_weights().into_keys().collect();
         names.sort();
         let weights = self.trainer.aligner_weights();
@@ -375,16 +410,21 @@ pub const ADAPTER_FILE: &str = "adapter.safetensors";
 pub const ALIGNER_FILE: &str = "aligner.safetensors";
 
 /// A dataset's examples: each line of `train.jsonl` holds an `image` (a
-/// path, relative to `dir`) and `messages` (`role` and `content`), ending in
+/// path, relative to `dir`) or `images` (a list of them, in the order the
+/// messages place them) and `messages` (`role` and `content`), ending in
 /// the assistant reply to learn.
-pub fn read_dataset(dir: &Path) -> Result<Vec<(PathBuf, Vec<Turn>)>, String> {
+pub fn read_dataset(dir: &Path) -> Result<Vec<(Vec<PathBuf>, Vec<Turn>)>, String> {
     let file = dir.join("train.jsonl");
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
         let at = |why: String| format!("{}:{}: {why}", file.display(), n + 1);
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| at(e.to_string()))?;
-        let image = v["image"].as_str().ok_or_else(|| at("no \"image\" path".to_string()))?;
+        let images: Vec<&str> = match (v["image"].as_str(), v["images"].as_array()) {
+            (Some(one), None) => vec![one],
+            (None, Some(many)) if !many.is_empty() => many.iter().map(|p| p.as_str().ok_or_else(|| at("\"images\" holds a path that is not a string".to_string()))).collect::<Result<_, _>>()?,
+            _ => return Err(at("an example has an \"image\" path or a non-empty \"images\" list of paths".to_string())),
+        };
         let turns = v["messages"]
             .as_array()
             .ok_or_else(|| at("no \"messages\"".to_string()))?
@@ -399,7 +439,7 @@ pub fn read_dataset(dir: &Path) -> Result<Vec<(PathBuf, Vec<Turn>)>, String> {
                 Ok(Turn { role, content })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        out.push((dir.join(image), turns));
+        out.push((images.into_iter().map(|p| dir.join(p)).collect(), turns));
     }
     if out.is_empty() {
         return Err(format!("{}: no examples", file.display()));
@@ -413,8 +453,8 @@ pub fn read_dataset(dir: &Path) -> Result<Vec<(PathBuf, Vec<Turn>)>, String> {
 /// (an adapter over the frozen base, or whole when `opts.rank` is 0) and the
 /// aligner train on the cached features for `opts.steps` steps, the examples
 /// taken in a seeded order.
-pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples: Vec<(Rgb8, Vec<Turn>)>, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
-    let prepared = examples.iter().map(|(image, turns)| frontend.prepare(image, turns)).collect::<Result<Vec<_>, String>>()?;
+pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples: Vec<(Vec<Rgb8>, Vec<Turn>)>, opts: &Options, progress: &mut dyn FnMut(&StepInfo)) -> Result<Outcome, String> {
+    let prepared = examples.iter().map(|(images, turns)| frontend.prepare(images, turns)).collect::<Result<Vec<_>, String>>()?;
     let aligner_cfg = frontend.tower.aligner_config();
     let rows = frontend.splice.rows;
     let base_cfg = frontend.decoder_cfg.clone();
@@ -441,14 +481,18 @@ pub fn run(frontend: Frontend, rd: &WeightReader, aligner_prefix: &str, examples
     let mut queue: Vec<usize> = Vec::new();
     let mut final_loss = None;
     for step in 0..opts.steps {
-        if queue.is_empty() {
-            queue = (0..prepared.len()).collect();
-            for i in (1..queue.len()).rev() {
-                queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
-            }
-        }
         let h = hyper_at(step);
-        let loss = trainer.step(&prepared[queue.pop().expect("refilled")], step + 1, &h);
+        let mut batch = Vec::with_capacity(opts.batch as usize);
+        for _ in 0..opts.batch.max(1) {
+            if queue.is_empty() {
+                queue = (0..prepared.len()).collect();
+                for i in (1..queue.len()).rev() {
+                    queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
+                }
+            }
+            batch.push(&prepared[queue.pop().expect("refilled")]);
+        }
+        let loss = trainer.step_batch(&batch, step + 1, &h);
         final_loss = Some(loss);
         progress(&StepInfo { step: step + 1, steps: opts.steps, loss, lr: h.lr });
     }
@@ -470,12 +514,18 @@ pub fn finetune(dir: &Path, dataset: &Path, opts: &Options, progress: &mut dyn F
 }
 
 /// [`read_dataset`] with every image decoded.
-pub fn load_examples(dataset: &Path) -> Result<Vec<(Rgb8, Vec<Turn>)>, String> {
+pub fn load_examples(dataset: &Path) -> Result<Vec<(Vec<Rgb8>, Vec<Turn>)>, String> {
     read_dataset(dataset)?
         .into_iter()
-        .map(|(path, turns)| {
-            let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok((imaging::codec::decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))?, turns))
+        .map(|(paths, turns)| {
+            let images = paths
+                .iter()
+                .map(|path| {
+                    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    imaging::codec::decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((images, turns))
         })
         .collect()
 }

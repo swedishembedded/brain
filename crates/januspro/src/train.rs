@@ -31,8 +31,8 @@ use data::qwen_tokenizer::QwenBpe;
 use deepseekvl::train::{Hyper, Options, Outcome, StepInfo, TrainableProjector};
 use model::projector::ProjectorConfig;
 use model::{cosine_lr, grad_multiplier, Adam};
-use qwen3::finetune::LoraInit;
-use qwen3::{Dtype, Qwen, QwenConfig, IGNORE};
+use qwen3::finetune::Trained;
+use qwen3::{Dtype, QwenConfig, IGNORE};
 use vqgan::config::VqganConfig;
 use vqgan::model::Vqgan;
 
@@ -94,7 +94,7 @@ pub struct GenGrads {
 /// The generation fine-tune: the decoder, its generation heads and the splice
 /// between them.
 pub struct GenTrainer {
-    decoder: Qwen,
+    decoder: Trained,
     aligner: TrainableProjector,
     head: TrainableProjector,
     embed: Vec<f32>,
@@ -103,6 +103,7 @@ pub struct GenTrainer {
     code_dim: usize,
     positions: usize,
     block: u32,
+    d_model: usize,
     splice_at: Option<usize>,
 }
 
@@ -137,13 +138,14 @@ impl GenTrainer {
         if parts.positions < 2 || parts.aligner.0.input_dim as usize != parts.code_dim || parts.embed.len() % parts.code_dim != 0 || parts.embed.len() / parts.code_dim != parts.head.0.out_dim as usize {
             return Err("the code embedding, the aligner's input and the head's vocabulary disagree".to_string());
         }
-        let mut decoder = if cfg.lora.is_some() {
-            let init = LoraInit::fresh(&cfg, base, seed);
-            Qwen::new_lora_dt(cfg, 1, block, &init, dt)
-        } else {
-            let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-            Qwen::new_shard(cfg, 1, block, &*base, true, shard)
-        };
+        let d_model = cfg.d_model as usize;
+        let decoder = qwen3::finetune::build_decoder_trainer(cfg, base, dt, block, seed).map_err(|e| e.to_string())?;
+        GenTrainer::with_decoder(decoder, d_model, block, parts)
+    }
+
+    /// The trainer around a decoder already built (on one card or as a
+    /// pipeline), `d_model` wide, for `block`-token rows.
+    pub fn with_decoder(mut decoder: Trained, d_model: usize, block: u32, parts: GenParts) -> Result<GenTrainer, String> {
         decoder.enable_external_head();
         let n = parts.embed.len();
         Ok(GenTrainer {
@@ -155,12 +157,13 @@ impl GenTrainer {
             code_dim: parts.code_dim,
             positions: parts.positions,
             block,
+            d_model,
             splice_at: None,
         })
     }
 
     /// The decoder, for saving its adapter.
-    pub fn decoder(&self) -> &Qwen {
+    pub fn decoder(&self) -> &Trained {
         &self.decoder
     }
 
@@ -192,17 +195,18 @@ impl GenTrainer {
 
     /// Run `p` through the aligner, the decoder and the head: the loss, and
     /// (when `backward`) every gradient, the decoder's left accumulated.
-    fn run(&mut self, p: &GenPrepared, backward: bool) -> (f32, Option<GenGrads>) {
+    /// `zero` clears the gradients first (the first example of a step).
+    fn run(&mut self, p: &GenPrepared, backward: bool, zero: bool) -> (f32, Option<GenGrads>) {
         assert_eq!(p.codes.len(), self.positions, "an example has {} image codes", self.positions);
         let fed = self.positions - 1;
         assert_eq!(p.tokens.len(), p.tag_row() + self.positions, "the tokens are the prompt and {fed} placeholders");
         assert!(p.tokens.len() <= self.block as usize, "an example of {} tokens does not fit the {}-token block", p.tokens.len(), self.block);
-        let (tag, d, vocab) = (p.tag_row(), self.decoder.cfg.d_model as usize, self.head.cfg().out_dim as usize);
+        let (tag, d, vocab) = (p.tag_row(), self.d_model, self.head.cfg().out_dim as usize);
         // The begin-of-image tag is the last prompt token and predicts the
         // first code; the fed-back rows (codes 0..) follow it.
         let row0 = tag + 1;
         if self.splice_at != Some(row0) {
-            self.decoder.enable_mm_splice(row0 as u32, fed as u32);
+            self.decoder.enable_mm_splices(&[(row0 as u32, fed as u32)]);
             self.splice_at = Some(row0);
         }
 
@@ -211,7 +215,7 @@ impl GenTrainer {
         let mut x = p.tokens.clone();
         x.resize(self.block as usize, 0);
         self.decoder.set_batch(&x, &vec![IGNORE; self.block as usize]);
-        if backward {
+        if backward && zero {
             self.decoder.zero_grads();
             self.aligner.zero_grads();
             self.head.zero_grads();
@@ -240,27 +244,41 @@ impl GenTrainer {
 
     /// The loss on `p` with the current weights.
     pub fn loss(&mut self, p: &GenPrepared) -> f32 {
-        self.run(p, false).0
+        self.run(p, false, false).0
     }
 
     /// The loss on `p` and the gradient of every generation part (the
     /// decoder's gradients stay accumulated in it).
     pub fn loss_and_grads(&mut self, p: &GenPrepared) -> (f32, GenGrads) {
-        let (loss, grads) = self.run(p, true);
+        let (loss, grads) = self.run(p, true, true);
         (loss, grads.expect("a backward pass ran"))
     }
 
     /// One optimiser step (1-based `t`) on `p`; returns its loss.
     pub fn step(&mut self, p: &GenPrepared, t: u32, h: &Hyper) -> f32 {
-        let (loss, grads) = self.run(p, true);
-        let grads = grads.expect("a backward pass ran");
+        self.step_batch(&[p], t, h)
+    }
+
+    /// One optimiser step (1-based `t`) on the mean gradient of `batch`;
+    /// returns the mean loss.
+    pub fn step_batch(&mut self, batch: &[&GenPrepared], t: u32, h: &Hyper) -> f32 {
+        assert!(!batch.is_empty(), "a step needs at least one example");
+        let mean = 1.0 / batch.len() as f32;
+        let (mut loss, mut embed) = (0.0f32, vec![0.0f32; self.embed.len()]);
+        for (i, p) in batch.iter().enumerate() {
+            let (l, grads) = self.run(p, true, i == 0);
+            loss += l * mean;
+            for (e, g) in embed.iter_mut().zip(grads.expect("a backward pass ran").embed) {
+                *e += g;
+            }
+        }
         let clip = (h.grad_clip > 0.0).then_some(h.grad_clip);
-        let scale = grad_multiplier(grads.embed.iter().map(|g| (*g as f64).powi(2)).sum(), clip, 1.0);
+        let scale = grad_multiplier(embed.iter().map(|g| (*g as f64).powi(2)).sum(), clip, mean);
         let (m, v) = &mut self.embed_state;
-        Adam::default().update_slice(t, h.aligner_lr, h.weight_decay, scale, &mut self.embed, m, v, &grads.embed);
-        self.head.step(t, h.aligner_lr, h.weight_decay, h.grad_clip);
-        self.aligner.step(t, h.aligner_lr, h.weight_decay, h.grad_clip);
-        self.decoder.adamw_step(t, h.lr, h.weight_decay, Adam::default(), clip, 1.0);
+        Adam::default().update_slice(t, h.aligner_lr, h.weight_decay, scale, &mut self.embed, m, v, &embed);
+        self.head.step_scaled(t, h.aligner_lr, h.weight_decay, h.grad_clip, mean);
+        self.aligner.step_scaled(t, h.aligner_lr, h.weight_decay, h.grad_clip, mean);
+        self.decoder.adamw_step(t, h.lr, h.weight_decay, Adam::default(), clip, mean);
         self.decoder.poll_wait();
         loss
     }
@@ -296,7 +314,7 @@ impl GenOutcome {
     pub fn save(&self, dir: &Path, card_id: &str, base_id: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
-        qwen3::lora::save_adapter(&path(deepseekvl::train::ADAPTER_FILE), self.trainer.decoder(), card_id, base_id, None).map_err(|e| format!("{}: {e}", path(deepseekvl::train::ADAPTER_FILE)))?;
+        self.trainer.decoder().save_adapter(&path(deepseekvl::train::ADAPTER_FILE), card_id, base_id, None).map_err(|e| format!("{}: {e}", path(deepseekvl::train::ADAPTER_FILE)))?;
         let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
         for (prefix, projector) in [(GEN_HEAD_PREFIX, &self.trainer.head), (GEN_ALIGNER_PREFIX, &self.trainer.aligner)] {
             let weights = projector.weights();
@@ -407,15 +425,19 @@ pub fn finetune_generation(dir: &Path, dataset: &Path, opts: &GenOptions, progre
     let mut queue: Vec<usize> = Vec::new();
     let mut final_loss = None;
     for step in 0..o.steps {
-        if queue.is_empty() {
-            queue = (0..examples.len()).collect();
-            for i in (1..queue.len()).rev() {
-                queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
-            }
-        }
         let h = hyper_at(step);
-        let unconditional = order.next_f32() < opts.cfg_dropout;
-        let loss = trainer.step(&prepared(queue.pop().expect("refilled"), unconditional), step + 1, &h);
+        let mut batch = Vec::with_capacity(o.batch as usize);
+        for _ in 0..o.batch.max(1) {
+            if queue.is_empty() {
+                queue = (0..examples.len()).collect();
+                for i in (1..queue.len()).rev() {
+                    queue.swap(i, (order.next_u64() % (i as u64 + 1)) as usize);
+                }
+            }
+            let unconditional = order.next_f32() < opts.cfg_dropout;
+            batch.push(prepared(queue.pop().expect("refilled"), unconditional));
+        }
+        let loss = trainer.step_batch(&batch.iter().collect::<Vec<_>>(), step + 1, &h);
         final_loss = Some(loss);
         progress(&StepInfo { step: step + 1, steps: o.steps, loss, lr: h.lr });
     }

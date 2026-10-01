@@ -180,3 +180,62 @@ fn the_first_code_is_predicted_from_the_begin_of_image_tag() {
     earlier.tokens[tag - 1] = 11;
     assert_ne!(t.loss(&earlier), base);
 }
+
+/// A decoder cut into two pipeline stages trains the generation parts exactly
+/// as the whole one does: the code rows are spliced into the first stage, the
+/// head's gradient enters at the last, and every generation gradient agrees.
+#[test]
+fn a_two_stage_decoder_gives_every_generation_part_the_same_loss_and_gradient() {
+    if gpu_disabled() {
+        return;
+    }
+    let p = example();
+    let (loss, want) = trainer(true).loss_and_grads(&p);
+
+    let cfg = decoder(true);
+    let base = qwen3::init_weights(&decoder(false), 11);
+    let init = qwen3::finetune::LoraInit::fresh(&cfg, Box::new(base), 1);
+    let shards = model::plan_balanced(&<qwen3::Qwen as model::Shardable>::shard_cost(&cfg, 1, BLOCK), &[model::Shard::ANY_GPU, model::Shard::ANY_GPU]);
+    assert_eq!(shards.len(), 2);
+    let d_model = cfg.d_model as usize;
+    let pipe = model::Pipeline::<qwen3::Qwen>::with_shards_dt(cfg.clone(), 1, BLOCK, &init, shards, Dtype::F32);
+    let staged = qwen3::finetune::Trained::Pipeline(model::PipelineModel::new(pipe, cfg));
+    let (got_loss, got) = GenTrainer::with_decoder(staged, d_model, BLOCK, parts()).unwrap().loss_and_grads(&p);
+
+    assert!((got_loss - loss).abs() < 1e-4 * loss.abs().max(1.0), "loss {got_loss} vs {loss}");
+    let close = |name: &str, a: &[f32], b: &[f32]| {
+        let scale = b.iter().fold(0.0f32, |m, x| m.max(x.abs())).max(1e-6);
+        let worst = a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs() / scale));
+        assert!(worst < 2e-3, "{name}: the two-stage gradient differs by {worst}");
+    };
+    for (name, w) in &want.head {
+        close(name, &got.head[name], w);
+    }
+    for (name, w) in &want.aligner {
+        close(name, &got.aligner[name], w);
+    }
+    close("embed", &got.embed, &want.embed);
+}
+
+/// A step on a batch of examples is the step on their mean gradient: a batch
+/// of one example twice is that example's step.
+#[test]
+fn a_batch_of_the_same_example_twice_steps_as_the_example_once() {
+    if gpu_disabled() {
+        return;
+    }
+    let p = example();
+    let hyper = Hyper { lr: 5e-2, aligner_lr: 1e-2, weight_decay: 0.0, grad_clip: 1.0 };
+    let (mut once, mut twice) = (trainer(true), trainer(true));
+    let a = once.step(&p, 1, &hyper);
+    let b = twice.step_batch(&[&p, &p], 1, &hyper);
+    assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+    let (wa, wb) = (once.head_weights(), twice.head_weights());
+    for (name, w) in &wa {
+        let worst = w.iter().zip(&wb[name]).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(worst < 1e-5, "{name}: the head moved differently ({worst})");
+    }
+    let adapter = once.decoder().param_names().into_iter().find(|n| n.ends_with(".lora_b")).unwrap();
+    let worst = once.decoder().read_weight(&adapter).iter().zip(&twice.decoder().read_weight(&adapter)).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+    assert!(worst < 1e-5, "the adapter moved differently ({worst})");
+}
