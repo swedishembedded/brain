@@ -31,6 +31,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
 import tarfile
 import urllib.request
@@ -53,6 +54,32 @@ TOOLKIT = [
     "cuda_sanitizer_api", "libcublas", "libnvjitlink", "libnvfatbin", "libnvvm", "libnvptxcompiler",
 ]
 PROFILERS = ["nsight_compute", "nsight_systems"]
+
+# CUDA 12.9's nvcc refuses a host compiler newer than gcc 14, and current
+# distributions ship gcc 15. The lane gets its own gcc 14 from the
+# distribution's package archive (unpacked, never installed), which `env`
+# hands to nvcc through NVCC_CCBIN. NVRTC does not use a host compiler, so
+# only nvcc users (the probe tool, AOT cubins) need it.
+HOST_GCC = {"12": "14"}
+HOST_GCC_PACKAGES = ["gcc-{v}", "g++-{v}", "cpp-{v}", "gcc-{v}-{t}", "g++-{v}-{t}", "cpp-{v}-{t}", "libgcc-{v}-dev", "libstdc++-{v}-dev"]
+
+# Header fixups a lane needs on hosts with a newer glibc than the toolkit was
+# built against. glibc 2.41+ declares the C23 `rsqrt`, `sinpi` and `cospi`
+# families `noexcept`, and CUDA's `math_functions.h` declares them without an
+# exception specification (CUDA 13.0 already guards sinpi/cospi, not rsqrt),
+# which nvcc rejects as incompatible on any host-side compile.
+# NVRTC never sees a host header, so only nvcc users are affected. (file under
+# the lane, old text, new text); each is applied once and only if present.
+FIXUPS = {
+    "12": [
+        ("include/crt/math_functions.h", f"{fn}({ty} x);", f"{fn}({ty} x) noexcept (true);")
+        for fn, ty in [("rsqrt", "double"), ("rsqrtf", "float"), ("sinpi", "double"), ("sinpif", "float"), ("cospi", "double"), ("cospif", "float")]
+    ],
+    "13": [
+        ("include/crt/math_functions.h", "rsqrt(double x);", "rsqrt(double x) noexcept (true);"),
+        ("include/crt/math_functions.h", "rsqrtf(float x);", "rsqrtf(float x) noexcept (true);"),
+    ],
+}
 
 
 def arch() -> str:
@@ -148,6 +175,9 @@ def install_lane(lane: str) -> None:
     install_manifest(cudnn, ["cudnn"], plat, spec["cudnn_flavour"], dest, cache)
 
     install_nccl(spec, dest, cache)
+    apply_fixups(lane, dest)
+    if lane in HOST_GCC:
+        install_host_gcc(lane)
     if not (dest / "lib64").exists() and (dest / "lib").is_dir():
         (dest / "lib64").symlink_to("lib")
     print(f"installed CUDA {spec['toolkit']} lane into {dest}")
@@ -169,6 +199,38 @@ def install_nccl(spec: dict, dest: Path, cache: Path) -> None:
                 out.write_bytes(z.read(name))
 
 
+def host_gcc_dir(lane: str) -> Path:
+    return prefix() / f"gcc-{HOST_GCC[lane]}"
+
+
+def install_host_gcc(lane: str) -> None:
+    """Unpack the distribution's gcc `HOST_GCC[lane]` packages under the prefix."""
+    version = HOST_GCC[lane]
+    triplet = f"{platform.machine()}-linux-gnu"
+    state = prefix() / ".apt"
+    for sub in ("state/lists/partial", "cache/archives/partial"):
+        (state / sub).mkdir(parents=True, exist_ok=True)
+    apt = ["-o", f"Dir::State={state}/state", "-o", f"Dir::Cache={state}/cache", "-o", "Dir::State::status=/var/lib/dpkg/status", "-o", "Debug::NoLocking=1", "-o", "APT::Sandbox::User="]
+    packages = [p.format(v=version, t=triplet) for p in HOST_GCC_PACKAGES]
+    downloads = state / "debs"
+    downloads.mkdir(exist_ok=True)
+    subprocess.run(["apt-get", *apt, "update"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["apt-get", *apt, "download", *packages], check=True, cwd=downloads, stdout=subprocess.DEVNULL)
+    root = host_gcc_dir(lane)
+    root.mkdir(parents=True, exist_ok=True)
+    for deb in sorted(downloads.glob("*.deb")):
+        subprocess.run(["dpkg", "-x", str(deb), str(root)], check=True)
+
+
+def apply_fixups(lane: str, dest: Path) -> None:
+    """Apply [`FIXUPS`] for `lane`, idempotently."""
+    for rel, old, new in FIXUPS.get(lane, []):
+        path = dest / rel
+        text = path.read_text()
+        if old in text and new not in text:
+            path.write_text(text.replace(old, new, 1))
+
+
 def install_profilers() -> None:
     plat, dest, cache = arch(), prefix() / "nsight", prefix() / ".downloads"
     dest.mkdir(parents=True, exist_ok=True)
@@ -183,6 +245,8 @@ def print_env(lane: str) -> None:
     print(f'export CUDA_PATH="{root}"')
     print(f'export PATH="{root}/bin:{prefix()}/nsight/bin:$PATH"')
     print(f'export LD_LIBRARY_PATH="{root}/lib64:${{LD_LIBRARY_PATH:-}}"')
+    if lane in HOST_GCC:
+        print(f'export NVCC_CCBIN="{host_gcc_dir(lane)}/usr/bin/g++-{HOST_GCC[lane]}"')
 
 
 def main(argv: list) -> None:

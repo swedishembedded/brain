@@ -874,6 +874,13 @@ cuda-table/check:
 cuda/install:
 	scripts/build/install-cuda-userspace.py install $(LANE)
 
+# Hardware probe for the CUDA device in use: attributes, HBM and host-memory
+# bandwidth, launch latency and dense GEMM throughput per operand type, as JSON
+# on stdout. Needs a lane on PATH: eval "$(scripts/build/install-cuda-userspace.py env 13)".
+gh200/probe:
+	$(MAKE) -C tools/gh200-probe
+	tools/gh200-probe/probe
+
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation (resources/world-models/repos/diamond, or set
 # BRAIN_DIAMOND_REPO). Needs python3 + torch; see docs/world-models/FIXTURES.md.
