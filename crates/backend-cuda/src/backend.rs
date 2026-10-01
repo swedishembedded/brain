@@ -58,7 +58,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use backend_api::arch::{ArchDesc, TierLevel, TierSupport};
 use backend_api::{
-    grid_ws, workgroup_size_of, BufUsage, DType, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats,
+    grid_ws, NumericSupport, workgroup_size_of, BufUsage, DType, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats,
     GpuIdentity, Step,
 };
 
@@ -866,16 +866,26 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
     // actually has is a loop, which is precisely the conflation `TierLevel`
     // exists to prevent. A hand-written tuned kernel that really does issue
     // the instruction is what raises this, on the capability that was queried.
-    arch.set_tier(DType::I8, TierSupport { level: TierLevel::Emulated, ..TierSupport::default() });
+    for dt in [DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
+        arch.set_tier(dt, TierSupport { level: TierLevel::Emulated, ..TierSupport::default() });
+    }
+    // bf16 and f16 are STORAGE tiers: the `#w=bf16`/`#w=f16` kernel variants
+    // decode packed words to f32 with integer and bitcast arithmetic, which
+    // the generator translates, and the arithmetic stays fp32. That is not a
+    // claim of fast half-precision compute (`is_fast` needs a measurement), and
+    // the generator still refuses `enable f16;`, so no f16 ALU is used.
+    for dt in [DType::BF16, DType::F16] {
+        arch.set_tier(dt, TierSupport { level: TierLevel::Storage, ..TierSupport::default() });
+    }
     // The instruction-set version, straight from the driver. This is the one
     // fact a native kernel's capability floor is resolved against
     // (`kernels_cuda::best_for`), and it is published here rather than being
     // asked for again at each dispatch so that every consumer sees the SAME
     // answer the compiler was given for this device.
     arch.compute_capability = Some(ctx.compute_capability());
-    // f16 is left `Absent`: the generator refuses `enable f16;` outright
-    // rather than widening it to fp32, so no f16 arithmetic runs on this
-    // backend at all - whatever the attached card's ALUs could do.
+    // Native f16 arithmetic is not reported: the generator refuses `enable
+    // f16;` outright rather than widening it to fp32, so no f16 ALU runs on
+    // this backend - whatever the attached card could do.
     Ok(DeviceCaps {
         class: if i.integrated { DeviceClass::IntegratedGpu } else { DeviceClass::DiscreteGpu },
         compute_units: Some(i.multiprocessors),
@@ -890,7 +900,9 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
         // these in if and when something measures them.
         peak_bandwidth_gbs: None,
         peak_gflops: None,
-        numeric: arch.numeric_view(),
+        // The portable fp8 decode kernels are plain select/bitcast WGSL, the
+        // same reasoning as bf16/f16 storage; `numeric_view` does not model it.
+        numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
         arch,
     })
 }
@@ -1378,6 +1390,30 @@ mod tests {
         });
         drop(capture);
         result.expect("transfers and synchronise on a handle that is not capturing");
+    }
+
+    /// The tiers CUDA reports are what weights land on: `Weight::upload` picks
+    /// the bf16/f16 storage layout, the packed-int layouts and the fp8 decode
+    /// kernels only on a device that says it can run them. All of those kernels
+    /// are plain integer and bitcast WGSL that the generator translates, so
+    /// this backend reports the same tiers the other GPU backends do for the
+    /// same kernels. Reporting them `Absent` made every weight fall back to f32.
+    #[test]
+    fn storage_and_packed_tiers_match_what_the_translated_kernels_can_run() {
+        use backend_api::arch::TierLevel;
+        let Ok(b) = CudaBackend::try_new(&[]) else {
+            brain_testutil::skip_unavailable("no usable CUDA backend");
+            return;
+        };
+        let caps = backend_api::Backend::caps(&b);
+        for dt in [DType::BF16, DType::F16] {
+            assert_eq!(caps.arch.tier(dt).level, TierLevel::Storage, "{dt:?}");
+        }
+        for dt in [DType::I8, DType::Q4, DType::Q4K, DType::Q8K] {
+            assert_eq!(caps.arch.tier(dt).level, TierLevel::Emulated, "{dt:?}");
+        }
+        assert!(caps.numeric.bf16_storage && caps.numeric.f16_storage && caps.numeric.fp8_storage);
+        assert!(!caps.numeric.f16 && !caps.numeric.bf16, "storage is not fast arithmetic");
     }
 
     /// Registering a catalogue compiles nothing. The whole point of the lazy

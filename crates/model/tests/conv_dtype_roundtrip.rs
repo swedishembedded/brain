@@ -284,7 +284,7 @@ fn conv2d_bf16_and_f16_match_f32_reference_on_gpu() {
     }
     eprintln!("conv2d_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
-        run_conv2d(Gpu::new_wgpu, dt, 0xC02D ^ dt as u64, &format!("gpu/conv2d/{dt:?}"));
+        run_conv2d(Gpu::new_gpu, dt, 0xC02D ^ dt as u64, &format!("gpu/conv2d/{dt:?}"));
     }
 }
 
@@ -304,7 +304,7 @@ fn conv1d_bf16_and_f16_match_f32_reference_on_gpu() {
     }
     eprintln!("conv1d_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
-        run_conv1d(Gpu::new_wgpu, dt, 0xC01D ^ dt as u64, &format!("gpu/conv1d/{dt:?}"));
+        run_conv1d(Gpu::new_gpu, dt, 0xC01D ^ dt as u64, &format!("gpu/conv1d/{dt:?}"));
     }
 }
 
@@ -324,6 +324,6 @@ fn conv_bias_bf16_and_f16_match_f32_reference_on_gpu() {
     }
     eprintln!("conv_bias_bf16_and_f16_match_f32_reference_on_gpu: running on a real wgpu device");
     for dt in [Dtype::BF16, Dtype::F16] {
-        run_conv_bias(Gpu::new_wgpu, dt, 0xB1A5 ^ dt as u64, &format!("gpu/conv_bias/{dt:?}"));
+        run_conv_bias(Gpu::new_gpu, dt, 0xB1A5 ^ dt as u64, &format!("gpu/conv_bias/{dt:?}"));
     }
 }
