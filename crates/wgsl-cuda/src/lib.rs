@@ -92,6 +92,8 @@ pub struct Kernel {
     pub uniform_bytes: usize,
 }
 
+mod uniform;
+
 /// The `extern "C"` entry point name a kernel called `name` is emitted under.
 ///
 /// Prefixed because a cubin's symbol table is flat and a kernel called `main`
@@ -128,7 +130,21 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
 
     let entry = entry_name(name);
     let has_barrier = block_has_barrier(&func.body);
-    if has_barrier {
+    // A kernel is "guarded" (every `return` becomes a flag that skips the rest
+    // of the body, so threads that finished still arrive at later barriers)
+    // only when some `return` is reached by part of the workgroup. A return the
+    // whole workgroup takes together strands nobody, and a barrier under
+    // uniform control flow is reached by everyone, so neither needs the
+    // transform.
+    let uniformity = uniform::analyse(&m, func);
+    if has_barrier && uniformity.has_barrier_in_non_uniform_flow && !uniformity.has_non_uniform_return {
+        return Err("a barrier is reached under non-uniform control flow (a branch or loop exit \
+                    that depends on the thread id or on per-thread data), so threads that skip \
+                    it would leave the others waiting forever"
+            .into());
+    }
+    let guarded = has_barrier && uniformity.has_non_uniform_return;
+    if guarded {
         check_barrier_structure(&func.body)?;
     }
 
@@ -136,7 +152,7 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
         m: &m,
         func,
         block_dim,
-        guarded: has_barrier,
+        guarded,
         decls: Vec::new(),
         cache: HashMap::new(),
         locals: HashMap::new(),
@@ -148,14 +164,16 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
         nwg_arg: None,
         lid_arg: None,
         wgid_arg: None,
+        lidx_arg: None,
     };
     let kernel = g.emit(&entry)?;
 
     // Post-condition for hazard 1, checked on the text that will actually be
-    // compiled rather than on the intent that produced it: a barrier-using
-    // kernel may not contain a `return` statement at all, because any return
-    // reachable before a `__syncthreads()` strands the threads that did arrive.
-    if has_barrier && kernel.source.contains("return;") {
+    // compiled rather than on the intent that produced it: a guarded
+    // barrier-using kernel may not contain a `return` statement at all, because
+    // any return reachable before a `__syncthreads()` strands the threads that
+    // did arrive.
+    if guarded && kernel.source.contains("return;") {
         return Err(
             "a barrier-using kernel was emitted with a `return`, which threads that reach the \
              barrier would then wait on forever"
@@ -365,6 +383,9 @@ struct Gen<'a> {
     nwg_arg: Option<u32>,
     lid_arg: Option<u32>,
     wgid_arg: Option<u32>,
+    /// `@builtin(local_invocation_index)`, a scalar: the flat thread index in
+    /// the workgroup, which for the 1-D blocks this tier requires is `threadIdx.x`.
+    lidx_arg: Option<u32>,
 }
 
 impl<'a> Gen<'a> {
@@ -376,6 +397,7 @@ impl<'a> Gen<'a> {
                     BuiltIn::NumWorkGroups => self.nwg_arg = Some(i as u32),
                     BuiltIn::LocalInvocationId => self.lid_arg = Some(i as u32),
                     BuiltIn::WorkGroupId => self.wgid_arg = Some(i as u32),
+                    BuiltIn::LocalInvocationIndex => self.lidx_arg = Some(i as u32),
                     other => return Err(format!("unsupported builtin input {other:?}")),
                 }
             } else {
@@ -455,6 +477,9 @@ impl<'a> Gen<'a> {
             let _ = writeln!(body, "  const unsigned int __lid_x = threadIdx.x;");
             let _ = writeln!(body, "  const unsigned int __lid_y = threadIdx.y;");
             let _ = writeln!(body, "  const unsigned int __lid_z = threadIdx.z;");
+        }
+        if self.lidx_arg.is_some() {
+            let _ = writeln!(body, "  const unsigned int __lidx = threadIdx.x;");
         }
         if self.wgid_arg.is_some() {
             let _ = writeln!(body, "  const unsigned int __wgid_x = blockIdx.x;");
@@ -788,6 +813,7 @@ impl<'a> Gen<'a> {
                 None => Err("global variable in an unsupported address space".into()),
             },
             Expression::LocalVariable(l) => Ok(Eval::Place(self.locals[l].clone())),
+            Expression::FunctionArgument(ai) if Some(*ai) == self.lidx_arg => Ok(Eval::Value("__lidx".to_string(), Ty::U32)),
             Expression::Load { pointer } => match self.eval(*pointer, out, depth)? {
                 Eval::Place(Place::Lvalue(lv, t)) => Ok(Eval::Value(lv, t)),
                 // A uniform member is not addressable in the emitted source -
@@ -1223,12 +1249,27 @@ mod tests {
         }
     }
 
-    /// Hazard 1, at the text level: a barrier-using kernel carries a guard flag
-    /// and no `return`, and the barrier itself sits outside the guard.
+    /// Hazard 1, at the text level: when a `return` is reached by only part of
+    /// the workgroup, the kernel carries a guard flag and no `return`, and the
+    /// barrier itself sits outside the guard so the finished threads still
+    /// arrive at it.
     #[test]
-    fn a_barrier_kernel_guards_instead_of_returning() {
-        let k = generate("gradnorm_part", kernels::GRADNORM_PART).expect("generate");
-        assert!(!k.source.contains("return;"), "a return survived into a barrier kernel:\n{}", k.source);
+    fn a_barrier_kernel_with_a_per_thread_return_guards_instead_of_returning() {
+        const SRC: &str = r#"
+struct Params { n: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read_write> o: array<f32>;
+var<workgroup> s: array<f32, 64>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) li: vec3<u32>) {
+    if (gid.x >= p.n) { return; }
+    s[li.x] = 1.0;
+    workgroupBarrier();
+    o[gid.x] = s[0];
+}
+"#;
+        let k = generate("per_thread_return", SRC).expect("generate");
+        assert!(!k.source.contains("return;"), "a return survived into a guarded barrier kernel:\n{}", k.source);
         assert!(k.source.contains("__active = false;"), "no guard flag was emitted:\n{}", k.source);
         let sync = k.source.find("__syncthreads();").expect("barrier");
         let line_start = k.source[..sync].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -1237,6 +1278,16 @@ mod tests {
             "",
             "the barrier must be a statement of its own, outside any guard"
         );
+    }
+
+    /// `gradnorm_part` bounds-checks on the workgroup index, which every thread
+    /// of the workgroup agrees on, so its early return needs no guard flag.
+    #[test]
+    fn a_barrier_kernel_whose_return_is_workgroup_uniform_returns_for_real() {
+        let k = generate("gradnorm_part", kernels::GRADNORM_PART).expect("generate");
+        assert!(k.source.contains("return;"), "{}", k.source);
+        assert!(!k.source.contains("__active"), "a uniform return must not be guarded:\n{}", k.source);
+        assert!(k.source.contains("__syncthreads();"), "{}", k.source);
     }
 
     /// Hazard 6, at the text level: `__shared__` is zeroed and published before
@@ -1259,24 +1310,76 @@ mod tests {
         }
     }
 
-    /// The structural refusals are refusals, not silent mistranslations.
-    #[test]
-    fn unsupported_barrier_structures_are_refused() {
-        const BARRIER_IN_LOOP: &str = r#"
+    const BARRIER_HEAD: &str = r#"
 struct Params { n: u32 };
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read_write> o: array<f32>;
 var<workgroup> s: array<f32, 64>;
-@compute @workgroup_size(64)
-fn main(@builtin(local_invocation_id) li: vec3<u32>) {
-    for (var i = 0u; i < p.n; i = i + 1u) {
-        s[li.x] = f32(i);
-        workgroupBarrier();
-        o[li.x] = s[0];
-    }
-}
 "#;
-        let e = generate("barrier_in_loop", BARRIER_IN_LOOP).expect_err("must be refused");
+
+    fn barrier_kernel(body: &str) -> String {
+        format!(
+            "{BARRIER_HEAD}@compute @workgroup_size(64)\nfn main(@builtin(local_invocation_id) li: vec3<u32>, \
+             @builtin(workgroup_id) wi: vec3<u32>) {{\n{body}\n}}"
+        )
+    }
+
+    /// A barrier in a loop whose trip count is uniform is reached by every
+    /// thread the same number of times, so it is emitted where it stands.
+    #[test]
+    fn a_barrier_in_a_uniform_loop_is_emitted_inside_the_loop() {
+        let src = barrier_kernel("for (var i = 0u; i < p.n; i = i + 1u) { s[li.x] = f32(i); workgroupBarrier(); o[li.x] = s[0]; }");
+        let k = generate("uniform_loop", &src).expect("a uniform barrier loop is supported");
+        let body = k.source.split("while (true)").nth(1).expect("the loop is emitted");
+        assert!(body.contains("__syncthreads();"), "the barrier must stay inside the loop:\n{}", k.source);
+    }
+
+    /// A barrier under a branch on a uniform value is likewise fine.
+    #[test]
+    fn a_barrier_under_a_uniform_branch_is_emitted() {
+        let src = barrier_kernel("s[li.x] = 1.0;\nif (wi.x < p.n) { workgroupBarrier(); }\no[li.x] = s[0];");
+        generate("uniform_if", &src).expect("a uniform branch around a barrier is supported");
+    }
+
+    /// An early `return` the whole workgroup takes together (a bounds check on
+    /// the workgroup id) leaves nobody behind, so it is a real `return` and the
+    /// barriers after it need no guard.
+    #[test]
+    fn a_workgroup_uniform_return_is_a_real_return_before_a_barrier_loop() {
+        let src = barrier_kernel(
+            "if (wi.x >= p.n) { return; }\nfor (var i = 0u; i < p.n; i = i + 1u) { s[li.x] = f32(i); workgroupBarrier(); o[li.x] = s[0]; }",
+        );
+        let k = generate("uniform_return", &src).expect("a uniform return before a barrier loop is supported");
+        assert!(k.source.contains("return;"), "{}", k.source);
+        assert!(!k.source.contains("__active"), "no guard flag should be needed:\n{}", k.source);
+    }
+
+    /// A barrier a subset of the workgroup skips would hang the rest: refused.
+    #[test]
+    fn a_barrier_under_a_per_thread_branch_is_refused() {
+        let src = barrier_kernel("if (li.x < 32u) { workgroupBarrier(); }");
+        let e = generate("thread_branch", &src).expect_err("must be refused");
+        assert!(e.contains("non-uniform control flow"), "{e}");
+    }
+
+    /// A loop whose trip count depends on the thread would reach the barrier a
+    /// different number of times on each thread: refused.
+    #[test]
+    fn a_barrier_in_a_per_thread_loop_is_refused() {
+        let src = barrier_kernel("for (var i = 0u; i < li.x; i = i + 1u) { workgroupBarrier(); }");
+        let e = generate("thread_loop", &src).expect_err("must be refused");
+        assert!(e.contains("non-uniform control flow"), "{e}");
+    }
+
+    /// A per-thread `return` ahead of a barrier loop is still the combination
+    /// the guarded transform cannot express (the flag would leave the loop with
+    /// no way out): refused, never mistranslated.
+    #[test]
+    fn a_per_thread_return_with_a_barrier_in_a_loop_is_still_refused() {
+        let src = barrier_kernel(
+            "if (li.x >= p.n) { return; }\nfor (var i = 0u; i < p.n; i = i + 1u) { workgroupBarrier(); }",
+        );
+        let e = generate("thread_return_loop", &src).expect_err("must be refused");
         assert!(e.contains("barrier inside a loop"), "{e}");
     }
 
