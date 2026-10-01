@@ -74,7 +74,10 @@ const MAP_SHARED: c_int = 1;
 const MAP_FAILED: isize = -1;
 
 extern "C" {
-    fn open(path: *const u8, flags: c_int) -> c_int;
+    // libc's `open` is variadic (the optional `mode`); rustc rejects any other
+    // declaration of a symbol std itself links, and aarch64 passes variadic
+    // arguments differently from fixed ones.
+    fn open(path: *const u8, flags: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn ioctl(fd: c_int, req: c_ulong, arg: *mut c_void) -> c_int;
     fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void;
