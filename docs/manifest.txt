@@ -13,6 +13,7 @@ docs/using/cli.md
 docs/using/sdk.md
 docs/using/models-and-weights.md
 docs/using/configuration.md
+docs/using/cuda.md
 docs/using/serving.md
 docs/using/http-api.md
 docs/using/dbus-api.md

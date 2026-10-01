@@ -877,6 +877,20 @@ cuda/install:
 # Hardware probe for the CUDA device in use: attributes, HBM and host-memory
 # bandwidth, launch latency and dense GEMM throughput per operand type, as JSON
 # on stdout. Needs a lane on PATH: eval "$(scripts/build/install-cuda-userspace.py env 13)".
+# Which of the WGSL catalogue the CUDA backend can run on THIS device: every
+# kernel is generated and compiled with NVRTC for the device's architecture, and
+# the runnable and refused sets are written to cuda-coverage.json (override with
+# OUT=path). Needs a CUDA device and toolkit lane; without them it checks
+# generation only.
+cuda-coverage:
+	BRAIN_CUDA_COVERAGE_OUT=$(or $(OUT),cuda-coverage.json) cargo test --release --offline -p brain-backend-cuda --test catalogue_coverage -- --nocapture
+
+# Every workspace crate's tests on the CUDA backend (BRAIN_BACKEND=cuda), one
+# crate at a time, as a per-crate JSON report. Slow: a build and a run of the
+# whole workspace. `make test/cuda-matrix CRATES="qwen3 gpt2"` runs a few.
+test/cuda-matrix:
+	scripts/test/cuda-matrix.py -o cuda-matrix.json $(CRATES)
+
 gh200/probe:
 	$(MAKE) -C tools/gh200-probe
 	tools/gh200-probe/probe

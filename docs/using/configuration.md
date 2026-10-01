@@ -35,7 +35,7 @@ brain serve --config config.yaml --openai
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_DEVICE` | the schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …); same values as `--device` | all detected devices |
-| `BRAIN_BACKEND` | how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend` (the flag wins). `cuda` needs a GPU in the device set and fails by name rather than falling back | `wgpu` with a GPU, else `cpu` |
+| `BRAIN_BACKEND` | how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend` (the flag wins). `cuda` needs a GPU in the device set and fails by name rather than falling back | the API that sees the GPU (wgpu, or CUDA when only CUDA does), else `cpu` |
 | `BRAIN_GPU_INDEX` | pins a specific GPU card index (parsed once, at first use) | first/best card |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
 | `BRAIN_GPU_WAIT_S` | seconds to wait for a GPU submit to complete before treating the device as wedged | backend default |

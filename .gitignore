@@ -95,3 +95,5 @@ samples/decision/doom/.data/
 # Per-directory session state an agent runtime writes where it runs (audit
 # log, logs). Machine-local, never source.
 .sven/
+cuda-matrix.json
+cuda-coverage.json

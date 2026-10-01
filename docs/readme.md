@@ -18,6 +18,7 @@ framework. This is its full documentation — what's on the website and what
 - [The Rust SDK](using/sdk.md) - the embeddable `brain` crate: no CLI process, no server.
 - [Models and weights](using/models-and-weights.md) — model ids, auto-fetch, importing your own checkpoints.
 - [Configuration](using/configuration.md) — every `BRAIN_*` environment variable, in one place.
+- [Running on NVIDIA GPUs (CUDA)](using/cuda.md) — driver, toolkit, backend selection, what runs.
 - [Running a server](using/serving.md)
 - [HTTP API](using/http-api.md) — OpenAI/Anthropic/OpenRouter-compatible endpoints.
 - [D-Bus API](using/dbus-api.md)
