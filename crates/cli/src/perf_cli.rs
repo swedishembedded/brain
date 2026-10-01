@@ -19,7 +19,7 @@ USAGE
       Registered scenarios and the standard workload matrix.
 
   brain perf run <scenario> [options]
-      scenarios: latency | throughput | serve | sweep
+      scenarios: latency | throughput | serve | sweep | longctx (see below)
 
   brain perf compare <a.json> <b.json> ...
       Leaderboard across result artifacts. Refuses to rank across artifact
@@ -86,7 +86,14 @@ OPTIONS
   --workload <name>     interactive | chat | rag | rag_long | agent |
                         decode_heavy | prefill_heavy | shared_prefix   (default chat)
   --concurrency <N>     fixed level for latency/serve (default 8)
-  --ladder <a,b,c>      concurrency ladder for sweep (default 1,2,4,8,16,32)
+  --ladder <a,b,c>      concurrency ladder for sweep (default 1,2,4,8,16,32); for
+                        longctx the batch sizes to try, ascending, default doubling
+                        from 1 to 256 (the sweep stops at the first size that does
+                        not fit in GPU memory)
+  --context <N>         longctx: context length decode is measured at (default 8192)
+  --prefill <a,b,c>     longctx: prompt lengths for the real cold-prefill table
+                        (default none)
+  --steps <N>           longctx: timed decode steps per batch size (default 8)
   --requests <N>        measured requests per level (default 64)
   --input <N>           override the workload's prompt length
   --output <N>          override the workload's output length. THIS is what
@@ -104,6 +111,16 @@ OPTIONS
   --out <file>          artifact path (default results/perf-<...>.json)
   --device cpu|gpu|vulkan  (global flag, handled by the main dispatcher)
 
+LONG CONTEXT
+  brain perf run longctx --target <qwen35:<gguf> | qwen35-gguf | qwen:<weights>>
+                         --context N [--ladder 1,2,4,...] [--prefill 1024,4096,...]
+                         [--steps N]
+      One model on one GPU at a long context: prefill speed, single-stream
+      decode, batched decode, and a batch sweep up to the out-of-memory
+      boundary. GPU only - a batch size that does not fit ends the sweep, it is
+      never spilled to host memory. Decode context is synthetic (fresh caches,
+      decode work at a real position) and labelled so; prefill is real.
+
 NOTES
   * Report output artifacts/s and the latency curve, never total throughput
     alone: a huge-prompt workload posts an impressive total while delivering
@@ -119,7 +136,9 @@ NOTES
 const TARGET_LIST: &str = "
 targets (--target):
   qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
-  qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint
+  qwen35:<gguf>, qwen35-gguf         `longctx` only: the Qwen3.8 GGUF resident (qwen35-gguf reads
+                                     BRAIN_QWEN35_GGUF); tier from BRAIN_QWEN35_GGUF_TIER
+  qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
                                      OUT of int8 KV, which is ON by default -- either order, both optional.
                                      HeadDim/NKvHeads override the derived guess -- e.g.
@@ -210,6 +229,15 @@ pub fn run_perf(args: &[String]) {
             std::process::exit(2);
         }
     }
+}
+
+/// A numeric flag value; a malformed one is a usage error, never a silent default.
+fn parse_flag<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -> T {
+    let raw = val(args, i, flag);
+    raw.parse().unwrap_or_else(|_| {
+        eprintln!("perf run: {flag} needs a positive integer, got {raw:?}");
+        std::process::exit(2);
+    })
 }
 
 fn val(args: &[String], i: &mut usize, flag: &str) -> String {
@@ -322,6 +350,7 @@ fn run(args: &[String]) {
     let mut concurrency = 8usize;
     let mut out: Option<String> = None;
     let mut policy = "cost-aware".to_string();
+    let mut longctx = crate::perf_longctx::Args::default();
 
     let mut i = 1;
     while i < args.len() {
@@ -330,11 +359,14 @@ fn run(args: &[String]) {
             "--workload" => workload = val(args, &mut i, "--workload"),
             "--concurrency" => concurrency = val(args, &mut i, "--concurrency").parse().unwrap_or(concurrency),
             "--ladder" => {
-                opt.concurrency = val(args, &mut i, "--ladder")
-                    .split(',')
-                    .filter_map(|s| s.trim().parse().ok())
-                    .collect();
+                let raw = val(args, &mut i, "--ladder");
+                opt.concurrency = raw.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                // `longctx` parses its ladder strictly and as batch sizes.
+                longctx.ladder = Some(raw);
             }
+            "--context" => longctx.context = Some(parse_flag(args, &mut i, "--context")),
+            "--prefill" => longctx.prefill = Some(val(args, &mut i, "--prefill")),
+            "--steps" => longctx.steps = Some(parse_flag(args, &mut i, "--steps")),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
             "--input" => opt.input_override = val(args, &mut i, "--input").parse().ok(),
             "--output" => opt.output_override = val(args, &mut i, "--output").parse().ok(),
@@ -362,10 +394,14 @@ fn run(args: &[String]) {
     // before a generic target is built.
     let engine_scenario = matches!(
         scenario.as_str(),
-        "startup" | "cancel" | "kvcache" | "residency" | "faults" | "weights" | "weights-qwen35"
+        "startup" | "cancel" | "kvcache" | "residency" | "faults" | "weights" | "weights-qwen35" | "longctx"
     );
     if engine_scenario {
         let art = match scenario.as_str() {
+            "longctx" => target_spec
+                .as_deref()
+                .ok_or_else(|| "longctx needs --target qwen35:<gguf> | qwen35-gguf | qwen:<weights>".to_string())
+                .and_then(|spec| crate::perf_longctx::run(spec, &longctx, &opt.device, opt.smoke)),
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             // Budget (device slots) and passes (denoise steps) are fixed,
             // realistic defaults -- matching `residency`'s own hardcoded
@@ -445,7 +481,7 @@ fn emit(art: &perf::schema::Artifact, out: Option<String>, seed: u64) {
 /// The device label recorded in the artifact. `--device` has already been
 /// resolved by the main dispatcher; record the *resolved set* (`gpu[0,1]`,
 /// `cpu[4 core(s)]`), not the raw flag, so an artifact says what actually ran.
-fn device_label() -> String {
+pub(crate) fn device_label() -> String {
     match crate::compute_set() {
         Some(s) => s.to_string(),
         None => gpu_core::backend_name().to_string(),
@@ -1751,7 +1787,7 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// opt OUT of int8 KV, which perf targets default to ON - matching
 /// `resident_llm.rs::QwenResident::kv_int8`'s serving default, so perf
 /// numbers stay representative of what actually ships).
-fn spec_flags(spec: &str) -> (&str, bool, bool) {
+pub(crate) fn spec_flags(spec: &str) -> (&str, bool, bool) {
     let mut s = spec;
     let mut weights_int8 = false;
     let mut kv_fp32 = false;
@@ -1777,7 +1813,7 @@ fn spec_flags(spec: &str) -> (&str, bool, bool) {
 /// `from_map_with_gpu`'s hard assert -- see `qwen3::serve::kv_int8_supported`'s
 /// doc comment. Shared by every perf target builder so the same shape always
 /// gets the same answer, and the degrade warning is worded once.
-fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc: &str) -> bool {
+pub(crate) fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, target_desc: &str) -> bool {
     let kv_int8 = !kv_fp32_requested && qwen3::serve::kv_int8_supported(cfg);
     if !kv_fp32_requested && !kv_int8 {
         eprintln!("perf: {target_desc}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV", cfg.head_dim);

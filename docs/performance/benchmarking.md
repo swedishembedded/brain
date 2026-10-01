@@ -42,7 +42,7 @@ brain perf gate <candidate.json> --baseline <baseline.json>   # regression check
 ```
 
 `<scenario>` is one of `latency`, `throughput`, `serve`, or `sweep` (a
-concurrency ladder). `--target` names what to measure, e.g.
+concurrency ladder); `longctx` has its own section below. `--target` names what to measure, e.g.
 `qwen-synth:28x1024x16` (the real serving engine on randomly-initialized
 weights of that shape — no checkpoint needed, good for hardware comparison)
 or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
@@ -50,6 +50,57 @@ for the full list of target specs (one per served model family).
 
 `--smoke` shrinks a run to a few seconds, useful for a quick sanity check
 rather than a real measurement.
+
+## Long context (`longctx`)
+
+`longctx` answers what one GPU sustains on one model at a long context. It is
+the same scenario for every model family that implements it, so two families
+are measured by identical code and their artifacts compare:
+
+```bash
+brain perf run longctx --target qwen35:/path/to/model.gguf \
+    --context 131072 --ladder 1,2,4,8,16 --prefill 1024,4096,16384 --steps 8
+brain perf run longctx --target qwen:/path/to/Qwen3-8B --context 32768
+```
+
+Targets: `qwen35:<gguf>` (or `qwen35-gguf`, which reads `BRAIN_QWEN35_GGUF`; the
+weight tier comes from `BRAIN_QWEN35_GGUF_TIER`) for the Qwen3.8 GGUF resident,
+and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
+
+It reports, in one artifact and one table:
+
+- **Prefill** - real, cold prefill of each `--prefill` prompt length into one
+  sequence, as seconds and tokens per second (omitted unless `--prefill` is
+  given).
+- **Single-stream decode** - batch 1 at `--context`.
+- **Batched decode** - for each `--ladder` batch size: milliseconds per step,
+  total and per-stream tokens per second, the bytes the planner needs and the
+  device memory the driver reports in use. Batch 1 is always measured. The
+  default ladder doubles from 1 to 256.
+- **Maximum sustained throughput** - the best total rate over the ladder.
+- **Out-of-memory boundary** - the sweep stops at the first batch size whose
+  weights plus per-sequence caches do not fit in GPU memory (or whose load
+  fails) and records the needed and usable bytes, plus the largest batch size
+  the planner still admits between the last measured size and the first that
+  failed.
+
+The scenario is GPU only. Nothing is spilled to host memory, and the artifact
+records `host_offload: false` together with the backend, devices, weight tier,
+KV precision, context, step count and the usual build and environment
+fingerprint.
+
+**The decode context is synthetic.** Prefilling `--context` tokens for every
+sequence of a batch would take far longer than the measurement, and decode cost
+depends on how many cached keys and values there are, not on what they hold. So
+decode steps run at a real position over fresh caches: the kernels, memory
+traffic and cache sizes are those of a real context of that length, the logits
+are meaningless, and the artifact says `context: synthetic`. Prefill timings
+are always real. Run on an otherwise idle GPU: a GPU shared with other work
+measures the sharing.
+
+`--smoke` shrinks the run to a short context, two batch sizes and two timed
+steps, and marks the artifact as smoke so it is never compared against a full
+run.
 
 ## Comparing over time
 

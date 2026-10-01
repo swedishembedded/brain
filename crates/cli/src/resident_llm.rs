@@ -121,11 +121,11 @@ pub(crate) fn est_vram(path: &str) -> MemCost {
 /// The device byte footprint of `cfg`'s weights at fp32, with the same 1.3x
 /// allowance [`est_vram`] gives a file - derived from the config, since the
 /// checkpoint on disk may be a directory, or bf16 at half the device size.
-fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
+pub(crate) fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
 }
 
-fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
+pub(crate) fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list()
         .into_iter()
         .map(|(name, elems)| {
