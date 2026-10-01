@@ -181,4 +181,10 @@ that size. Re-run it once that lands.
 - [ ] A bf16 head and embedding. They stay fp32 in a bf16-base build: two
       2.2 GB tables at 152k x 3584, which a single bf16 binding would hold
       in half the bytes and on the fast GEMM kernels without tiling.
+- [ ] `brain::ChatFineTune` (the SDK) reads brain checkpoints only: its
+      configuration goes through the unchecked `QwenConfig::from_json` of the
+      checkpoint header, its lineage digest is a single file's, and it has no
+      knob for a bf16 frozen base. The CLI (`brain qwen3 finetune --lora`)
+      takes a `transformers` directory and `--base-dtype`; the SDK needs the
+      same `open_checkpoint` route, a directory digest and the knob.
 
