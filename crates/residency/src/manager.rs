@@ -18,26 +18,17 @@
 //! instance's bytes are never invisible to a single-device claim's budget
 //! check, and vice versa).
 //!
-//! **What the multi-device path does NOT do (a deliberate, documented scope
-//! limit, not an oversight)**: multi-device instances are NOT tracked in
-//! [`crate::lru::Residents`] (whose `Entry` is single-device by construction)
-//! and are therefore never chosen as LRU/cost-aware eviction VICTIMS - once
-//! claimed, a multi-device instance stays resident until explicitly
-//! `release_multi`'d/evicted by its own caller, not auto-evicted to make room
-//! for something else. `claim_multi`'s OWN eviction fallback still works (it
-//! can evict single-device LRU victims per needed device to make room for
-//! itself), so a multi-device claim is not stuck behind stale single-device
-//! residents - the gap is one-directional: nothing evicts a multi-device
-//! instance automatically. Acceptable for the intended shape (one big model
-//! held resident for the process lifetime, e.g. an int8-sharded Thinker), and
-//! precisely the honest boundary this crate's own "gates that lie" discipline
-//! prefers over silently pretending full LRU parity exists. Extending
-//! `Residents` to a multi-device `Entry` (so eviction scoring can consider
-//! multi-device victims too) is real, separate follow-up work if a future
-//! caller genuinely needs it - not attempted here, since the original
-//! dual-GPU residency work this integration grew out of is now closed;
-//! `crate::executor` layers the async `Executor` dispatch this module's
-//! synchronous `claim_multi` needed on top.
+//! **How a multi-device instance is evicted.** Multi-device instances are not
+//! tracked in [`crate::lru::Residents`] (whose `Entry` is single-device by
+//! construction), so the cost-aware scoring never picks one. They give way
+//! in two other ways: a single-device claim that finds no room evicts an
+//! unpinned one (`evict_multi_to_fit`), and a multi-device claim that cannot
+//! be satisfied by evicting single-device residents evicts the unpinned
+//! multi-device ones that hold the room, least recently claimed first, and
+//! only when that is enough (`plan_multi_eviction`: nothing is destroyed for
+//! a claim that still would not fit). A pinned instance, one a lane is running
+//! a job on, is never taken. `crate::executor` layers the async `Executor`
+//! dispatch this module's synchronous `claim_multi` needed on top.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -215,6 +206,8 @@ pub struct ResidencyManager {
     /// `residents` (each with a clean `ClaimError::Activate`, never a
     /// dispatcher-killing panic).
     multi_residents: HashMap<InstanceKey, MultiEntry>,
+    /// Counts multi-device claims, for [`MultiEntry::last_claimed`].
+    multi_claims: u64,
     instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     /// BOUNDED (a ring of the last [`Self::MAX_EVENTS`]): a long-lived server
@@ -241,6 +234,9 @@ struct MultiEntry {
     devices: Vec<Device>,
     /// True while a job is actively running - must not be evicted/dropped.
     pinned: bool,
+    /// The manager's claim counter at this entry's latest claim: the
+    /// least recently claimed unpinned entry is the first made to give way.
+    last_claimed: u64,
 }
 
 impl ResidencyManager {
@@ -251,6 +247,7 @@ impl ResidencyManager {
             budgets,
             residents: Residents::new(),
             multi_residents: HashMap::new(),
+            multi_claims: 0,
             instances: HashMap::new(),
             events: std::collections::VecDeque::new(),
             builds: 0,
@@ -593,7 +590,8 @@ impl ResidencyManager {
         // every other device so `plan_eviction_with` cannot "succeed" by
         // picking a different card than the one actually needed).
         let every_device: HashSet<Device> = self.budgets.devices().collect();
-        wanted.iter().all(|&d| {
+        // ...or, failing that, idle multi-device residents may give way.
+        let single_ok = wanted.iter().all(|&d| {
             if exclude.contains(&d) {
                 return false;
             }
@@ -619,7 +617,8 @@ impl ResidencyManager {
             let mut only_d = every_device.clone();
             only_d.remove(&d);
             plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d).is_some()
-        })
+        });
+        single_ok || (wanted.iter().all(|d| !exclude.contains(d)) && self.plan_multi_eviction(&cost).is_some())
     }
 
     pub fn models(&self) -> Vec<String> {
@@ -893,6 +892,8 @@ impl ResidencyManager {
                 .get_mut(&key)
                 .ok_or_else(|| ClaimError::Activate(format!("{key}: instance handle exists but has no multi-device residency entry (registry mismatch)")))?;
             entry.pinned = true;
+            self.multi_claims += 1;
+            entry.last_claimed = self.multi_claims;
             let devices = entry.devices.clone();
             return Ok((ClaimedMulti::Hot(handle), devices, key));
         }
@@ -942,39 +943,55 @@ impl ResidencyManager {
                 // conservative: `only_d` restricts each plan to victims on
                 // that ONE device, so no two devices' plans can name the same
                 // victim and the plans cannot interfere.
-                let every_device: HashSet<Device> = self.budgets.devices().collect();
-                let mut victims: Vec<InstanceKey> = Vec::new();
-                for &d in &wanted {
-                    if exclude.contains(&d) {
-                        return Err(ClaimError::NoCapacity(format!("{key}: device {d:?} is excluded")));
+                let plan_singles = || -> Result<Vec<InstanceKey>, ClaimError> {
+                    let every_device: HashSet<Device> = self.budgets.devices().collect();
+                    let mut victims: Vec<InstanceKey> = Vec::new();
+                    for &d in &wanted {
+                        if exclude.contains(&d) {
+                            return Err(ClaimError::NoCapacity(format!("{key}: device {d:?} is excluded")));
+                        }
+                        let need = cost.on(d);
+                        if self.budgets.get(d).is_none() {
+                            return Err(ClaimError::TooLarge(format!("{key}: device {d:?} has no budget")));
+                        }
+                        // Pool-clamped, so a unified-memory box cannot book the
+                        // same physical bytes twice (see `multi::pick_devices`).
+                        if self.budgets.usable_on(d) < need {
+                            // PERMANENT: no eviction, however aggressive, can make
+                            // this device hold this share. `TooLarge`, not
+                            // `NoCapacity` - the executor retries the latter
+                            // forever, and `placeable_multi` deliberately lets a
+                            // group through to here precisely so it gets a real,
+                            // final error instead of sitting in the queue.
+                            return Err(ClaimError::TooLarge(format!(
+                                "{key} ({} MiB on {d:?}) is too large for that device's usable budget even fully empty",
+                                need >> 20
+                            )));
+                        }
+                        if self.budgets.fits_on(d, need) {
+                            continue; // already fits on this device, nothing to evict here
+                        }
+                        let mut only_d = every_device.clone();
+                        only_d.remove(&d);
+                        let plan = plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d)
+                            .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
+                        victims.extend(plan.victims);
                     }
-                    let need = cost.on(d);
-                    if self.budgets.get(d).is_none() {
-                        return Err(ClaimError::TooLarge(format!("{key}: device {d:?} has no budget")));
+                    Ok(victims)
+                };
+                let victims = match plan_singles() {
+                    Ok(v) => v,
+                    // Not enough single-device residents to evict: idle multi-device
+                    // ones that hold the room give way, least recently claimed first.
+                    Err(ClaimError::NoCapacity(why)) => {
+                        let yielding = self.plan_multi_eviction(&cost).ok_or(ClaimError::NoCapacity(why))?;
+                        for k in &yielding {
+                            self.evict_multi(k);
+                        }
+                        Vec::new()
                     }
-                    // Pool-clamped, so a unified-memory box cannot book the
-                    // same physical bytes twice (see `multi::pick_devices`).
-                    if self.budgets.usable_on(d) < need {
-                        // PERMANENT: no eviction, however aggressive, can make
-                        // this device hold this share. `TooLarge`, not
-                        // `NoCapacity` - the executor retries the latter
-                        // forever, and `placeable_multi` deliberately lets a
-                        // group through to here precisely so it gets a real,
-                        // final error instead of sitting in the queue.
-                        return Err(ClaimError::TooLarge(format!(
-                            "{key} ({} MiB on {d:?}) is too large for that device's usable budget even fully empty",
-                            need >> 20
-                        )));
-                    }
-                    if self.budgets.fits_on(d, need) {
-                        continue; // already fits on this device, nothing to evict here
-                    }
-                    let mut only_d = every_device.clone();
-                    only_d.remove(&d);
-                    let plan = plan_eviction_with(&*self.eviction, &synth_cost_for(d, need), &self.budgets, &self.residents, &[], &only_d)
-                        .ok_or_else(|| ClaimError::NoCapacity(format!("{key}: cannot free {} MiB on {d:?}", need >> 20)))?;
-                    victims.extend(plan.victims);
-                }
+                    Err(e) => return Err(e),
+                };
                 // Every device is satisfiable; only now destroy anything.
                 for victim in &victims {
                     self.evict_entry(victim);
@@ -993,9 +1010,30 @@ impl ResidencyManager {
             self.budgets.alloc(d, cost.on(d));
         }
         self.charge_multi_host(&cost, &devices);
-        self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true });
+        self.multi_claims += 1;
+        self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true, last_claimed: self.multi_claims });
         self.event(format!("promote {key} -> {devices:?} (building, multi-device)"));
         Ok((ClaimedMulti::Build(m), devices, key))
+    }
+
+    /// The idle multi-device instances to evict so `cost` fits, the least
+    /// recently claimed first, or `None` when evicting every idle one would
+    /// still not make room (nothing is destroyed on a `None`, and a pinned
+    /// instance, one a job is running on, is never a candidate).
+    fn plan_multi_eviction(&self, cost: &MultiDeviceCost) -> Option<Vec<InstanceKey>> {
+        let mut idle: Vec<(&InstanceKey, &MultiEntry)> = self.multi_residents.iter().filter(|(_, e)| !e.pinned).collect();
+        idle.sort_by_key(|(_, e)| e.last_claimed);
+        let mut chosen: Vec<&MultiEntry> = Vec::new();
+        let mut keys = Vec::new();
+        let fits = |chosen: &[&MultiEntry]| cost.devices().all(|d| self.budgets.free_on(d) + chosen.iter().map(|e| e.cost.on(d)).sum::<u64>() >= cost.on(d));
+        for (key, entry) in idle {
+            if fits(&chosen) {
+                break;
+            }
+            chosen.push(entry);
+            keys.push(key.clone());
+        }
+        fits(&chosen).then_some(keys)
     }
 
     /// [`Self::adopt`]'s multi-device sibling.
@@ -1933,6 +1971,71 @@ mod tests {
         assert_eq!(mgr.resident_multi_count(), 0, "the multi-device resident was the only thing in the way");
         let where_ = mgr.residents.get(&InstanceKey::new("later", "default")).map(|e| e.device);
         assert!(matches!(where_, Some(Device::Gpu(_))), "the claim must get a CARD, not the host tier: {where_:?}");
+    }
+
+    /// A multi-device claim that does not fit beside an idle multi-device
+    /// resident evicts it (two checkpoints of one model, say, each spanning both
+    /// cards): the idle one gives way, the claim builds.
+    #[test]
+    fn an_idle_multi_device_resident_gives_way_to_another_multi_device_claim() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        for name in ["base", "tuned"] {
+            mgr.register_multi(Arc::new(MultiFake { name: name.into(), per_gpu: 20 * GB, live: live.clone() }));
+        }
+        let (_, first) = claim_multi_built(&mut mgr, "base").expect("the base builds");
+        // While a lane still runs on it the base cannot give way.
+        assert!(claim_multi_built(&mut mgr, "tuned").is_err(), "a pinned multi-device resident is never taken");
+        assert_eq!(mgr.resident_multi_count(), 1);
+        mgr.release_multi(&first);
+        let (_, second) = claim_multi_built(&mut mgr, "tuned").expect("the idle base gives way");
+        assert_eq!(mgr.resident_multi_count(), 1, "one 20 GB model per card pair");
+        assert!(mgr.multi_residents.contains_key(&second) && !mgr.multi_residents.contains_key(&first));
+    }
+
+    /// The least recently claimed idle multi-device resident goes first, and
+    /// only as many as the claim needs.
+    #[test]
+    fn the_least_recently_claimed_idle_multi_device_resident_gives_way_first() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        for name in ["a", "b", "c"] {
+            mgr.register_multi(Arc::new(MultiFake { name: name.into(), per_gpu: 10 * GB, live: live.clone() }));
+        }
+        let (_, a) = claim_multi_built(&mut mgr, "a").unwrap();
+        let (_, b) = claim_multi_built(&mut mgr, "b").unwrap();
+        mgr.release_multi(&a);
+        mgr.release_multi(&b);
+        // `a` is claimed again: `b` is now the least recently claimed.
+        let (_, a) = claim_multi_built(&mut mgr, "a").unwrap();
+        mgr.release_multi(&a);
+        let (_, c) = claim_multi_built(&mut mgr, "c").expect("room is made");
+        assert!(mgr.multi_residents.contains_key(&a), "the recently claimed one stays");
+        assert!(!mgr.multi_residents.contains_key(&b), "the least recently claimed one gave way");
+        assert!(mgr.multi_residents.contains_key(&c));
+    }
+
+    /// The dispatcher asks `placeable_multi` before it claims: it agrees that a
+    /// claim can be made once the idle multi-device resident can give way, and
+    /// that it cannot while that resident is pinned.
+    #[test]
+    fn a_multi_device_claim_is_placeable_when_an_idle_multi_device_resident_can_give_way() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        for name in ["base", "tuned"] {
+            mgr.register_multi(Arc::new(MultiFake { name: name.into(), per_gpu: 20 * GB, live: live.clone() }));
+        }
+        let (_, first) = claim_multi_built(&mut mgr, "base").unwrap();
+        let tuned = InstanceKey::new("tuned", "default");
+        assert!(!mgr.placeable_multi(&tuned, "tuned", &HashSet::new()), "pinned: nothing can give way");
+        mgr.release_multi(&first);
+        assert!(mgr.placeable_multi(&tuned, "tuned", &HashSet::new()), "idle: the base can give way");
     }
 
     /// ...but a PINNED one is never taken out from under a running lane.
