@@ -612,6 +612,9 @@ impl CudaBackend {
         // parameters a caller supplied would otherwise read whatever the last
         // tenant of this address left, and `cuMemAlloc` promises nothing.
         self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing a uniform failed: {e}"));
+        // A step records the uniform now and may be submitted on another
+        // handle, whose stream must not run it ahead of this zero.
+        self.fence_out([&mem]);
         cache.insert(
             key,
             UniformSlot { mem: mem.clone(), keep: bufs.iter().map(|(m, _)| Arc::downgrade(m)).collect() },
@@ -792,6 +795,15 @@ impl CudaBackend {
                 }
             }
         }
+    }
+
+    /// Wrap a freshly allocated and zeroed allocation as a buffer, fenced so
+    /// that another handle using it waits for the zeroing, which is queued on
+    /// this handle's stream and otherwise lands after that handle's own writes.
+    fn wrap_initialised(&self, mem: exec::DeviceMem) -> DeviceBuffer {
+        let buf = CudaBuf::wrap(mem);
+        self.fence_out([&CudaBuf::of(&buf).mem]);
+        buf
     }
 
     /// Record that this handle's stream has just done work on `bufs`, so any
@@ -997,7 +1009,7 @@ impl backend_api::Backend for CudaBackend {
         // Zeroed, because every other backend hands back zeroed storage and
         // model code adds into freshly allocated accumulators.
         self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing new storage failed: {e}"));
-        CudaBuf::wrap(mem)
+        self.wrap_initialised(mem)
     }
 
     fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
@@ -1024,13 +1036,13 @@ impl backend_api::Backend for CudaBackend {
         // nothing to declare and nothing the driver would validate.
         let mem = self.alloc(size.max(4), label);
         self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing '{label}' failed: {e}"));
-        CudaBuf::wrap(mem)
+        self.wrap_initialised(mem)
     }
 
     fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
         let mem = self.alloc((len * 4).max(4) as u64, "a dynamic uniform");
         self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing a uniform failed: {e}"));
-        CudaBuf::wrap(mem)
+        self.wrap_initialised(mem)
     }
 
     fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
@@ -1214,7 +1226,11 @@ impl backend_api::Backend for CudaBackend {
         // Order this submission after other handles' work on the buffers it
         // names. Before the plan, so a capture does not record a wait on an
         // event from outside it, which a capture cannot represent.
-        self.fence_in(clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m))));
+        // The uniform blocks too: a step recorded on another handle brings its
+        // zeroed uniform, and the parameters this submission uploads into it
+        // must not overtake that handle's kernel still reading the old ones.
+        let touched = || clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m).chain(r.uniform.as_ref())));
+        self.fence_in(touched());
 
         let mut handled = false;
         let mut give_up = false;
@@ -1285,7 +1301,7 @@ impl backend_api::Backend for CudaBackend {
                 self.issue(r);
             }
         }
-        self.fence_out(clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m))));
+        self.fence_out(touched());
         self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
@@ -1557,5 +1573,30 @@ mod tests {
         assert_eq!(c.peak_gflops, None, "a roofline is measured, never reported from a query");
         let (major, _) = b.compute_capability();
         assert!(major > 0, "the driver reported no compute capability");
+    }
+
+    /// Whatever a handle creates and initialises on its own stream (zeroed
+    /// storage, a step's zeroed uniform block) is used by other handles on the
+    /// same card - a model holds two, and steps recorded on one are submitted
+    /// on the other. The initialising work is queued on the creator's stream,
+    /// so unless it is fenced the other stream runs ahead of it and the zero
+    /// lands afterwards, over data the other handle has already written.
+    #[test]
+    fn what_a_handle_creates_carries_a_fence_for_other_handles() {
+        use backend_api::Backend as _;
+        let (Ok(a), Ok(_b)) = (CudaBackend::try_new(&[]), CudaBackend::try_new(&[])) else { return };
+        let fenced_by_a = |buf: &DeviceBuffer| {
+            let fence = CudaBuf::of(buf).mem.fence.lock().unwrap();
+            fence.as_ref().is_some_and(|f| f.stream_id == a.ctx.stream_id())
+        };
+        assert!(fenced_by_a(&a.storage(4)), "zeroed storage");
+        assert!(fenced_by_a(&a.buffer("b", 16, BufUsage::STORAGE)), "zeroed buffer");
+        assert!(fenced_by_a(&a.uniform_dynamic(4)), "zeroed dynamic uniform");
+
+        let uniform = a.uniform_for(0, &[], 2);
+        assert!(
+            uniform.fence.lock().unwrap().as_ref().is_some_and(|f| f.stream_id == a.ctx.stream_id()),
+            "a step's zeroed uniform block"
+        );
     }
 }
