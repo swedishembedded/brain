@@ -566,12 +566,20 @@ mod tests {
 
         // One entry at the default budget, to learn what the real writer
         // actually costs; then a budget for exactly two of them.
-        store(&Key { prompt: "prompt 0".into(), ..base.clone() }, &enc);
+        // Each entry is stamped a second after the previous one: the writes
+        // land within the filesystem's timestamp granularity of each other, and
+        // "least recently used" is only defined between distinct times.
+        let store_at = |i: u64, key: Key| {
+            store(&key, &enc);
+            let f = std::fs::OpenOptions::new().write(true).open(path_for(&key).unwrap()).unwrap();
+            f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000 + i)).unwrap();
+        };
+        store_at(0, Key { prompt: "prompt 0".into(), ..base.clone() });
         let (n, one) = read_total();
         assert_eq!(n, 1, "the first store must produce exactly one entry");
         unsafe { std::env::set_var("BRAIN_LTXV_TEXT_CACHE_MAX_BYTES", (2 * one).to_string()) };
         for i in 1..6 {
-            store(&Key { prompt: format!("prompt {i}"), ..base.clone() }, &enc);
+            store_at(i, Key { prompt: format!("prompt {i}"), ..base.clone() });
         }
         let (n, total) = read_total();
         assert_eq!(n, 2, "six distinct prompts under a two-entry budget must leave two entries, not {n}");
