@@ -204,3 +204,47 @@ fn a_weighted_loss_step_on_a_pipeline_is_the_single_cards() {
     }
     assert!(compared >= 4);
 }
+
+/// A pipeline run stopped half way and resumed from its state file ends
+/// where the uninterrupted run does: the fused optimiser's moments are part
+/// of the saved state.
+#[test]
+fn a_pipeline_run_resumes_exactly() {
+    if gpu_disabled() {
+        return;
+    }
+    let scratch = tmp("resume");
+    write_dataset(&scratch);
+    let cfg = QwenConfig {
+        vocab: VOCAB,
+        block_size: 16,
+        n_layers: 2,
+        d_model: 16,
+        n_heads: 4,
+        n_kv_heads: 2,
+        head_dim: 8,
+        d_ff: 32,
+        max_position_embeddings: 16,
+        lora: Some(LoraCfg::attn(3, 6.0)),
+        ..QwenConfig::tiny()
+    };
+    let init = qwen3::init_weights(&cfg, 7);
+    let opts = model::FitOpts { steps: 8, ..opts() };
+    let build = || PipelineModel::new(Pipeline::<Qwen>::new_dt(cfg.clone(), 1, 16, &init, &stage_gpus(), Dtype::F32), cfg.clone());
+    let identity = serde_json::json!({"test": "resume"});
+
+    let (_, straight) = model::fit_controlled(build(), data::<PipelineModel<Qwen>>(&scratch, &opts), &opts, None, model::FitControl::default()).unwrap();
+
+    let state = scratch.join("state.bin");
+    let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone() };
+    let (first, _) = model::fit_controlled(build(), data::<PipelineModel<Qwen>>(&scratch, &opts), &opts, None, control).unwrap();
+    assert!(first.interrupted && state.is_file(), "stopped at step 4 with a state file");
+    let control = model::FitControl { state: Some(&state), identity, ..Default::default() };
+    let (second, resumed) = model::fit_controlled(build(), data::<PipelineModel<Qwen>>(&scratch, &opts), &opts, None, control).unwrap();
+    assert_eq!(second.resumed_at, Some(4));
+    for ((name, a), (_, b)) in adapters(&straight).iter().zip(adapters(&resumed)) {
+        let worst = a.iter().zip(&b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(worst < 1e-5, "{name}: resumed run differs by {worst}");
+    }
+}

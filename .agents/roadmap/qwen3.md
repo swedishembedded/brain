@@ -168,8 +168,6 @@ that size. Re-run it once that lands.
       (the input gradient runs through dynamically quantized activations),
       an I8 arm of `Ops::matmul_dx`, and `quantize_transposed_from` so the
       transpose is quantized, not the weight.
-- [ ] Exact resume of a pipeline run: the pipeline's fused host optimiser
-      does not expose its moments through `Model::read_moments`.
 - [ ] The pipeline runs its stages one after another inside the fit loop;
       `Pipeline::pipelined_fwd_bwd` overlaps them across micro-batches but
       the fit loop does not use it.

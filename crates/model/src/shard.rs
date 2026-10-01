@@ -726,18 +726,7 @@ impl<M: Shardable> Pipeline<M> {
             })
             .collect();
 
-        if self.fused.is_none() {
-            let state = self
-                .holders
-                .iter()
-                .map(|(name, hs)| {
-                    let w = self.stages[hs[0]].read_weight(name);
-                    let z = vec![0f32; w.len()];
-                    (name.clone(), w, z.clone(), z)
-                })
-                .collect();
-            self.fused = Some(FusedAdam { state });
-        }
+        self.ensure_fused();
 
         let scale = optim::grad_multiplier(if clip.is_some() { par::sum_sq_f64(&grads) } else { 0.0 }, clip, extra_scale);
 
@@ -873,6 +862,42 @@ impl<M: Shardable> Pipeline<M> {
         total / m as f32
     }
 
+    /// The fused optimiser's host state, built on first use from the stages'
+    /// current weights with zero moments.
+    fn ensure_fused(&mut self) {
+        if self.fused.is_none() {
+            let state = self
+                .holders
+                .iter()
+                .map(|(name, hs)| {
+                    let w = self.stages[hs[0]].read_weight(name);
+                    let z = vec![0f32; w.len()];
+                    (name.clone(), w, z.clone(), z)
+                })
+                .collect();
+            self.fused = Some(FusedAdam { state });
+        }
+    }
+
+    /// `name`'s AdamW `(m, v)` moments from the fused optimiser.
+    pub fn read_moments(&mut self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.ensure_fused();
+        self.fused.as_ref()?.state.iter().find(|(n, ..)| n == name).map(|(_, _, m, v)| (m.clone(), v.clone()))
+    }
+
+    /// Restore `name`'s moments, the master weight taken from the stages
+    /// (write the weights first).
+    pub fn write_moments(&mut self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        self.ensure_fused();
+        let slot = self.fused.as_mut().expect("built above").state.iter_mut().find(|(n, ..)| n == name).ok_or_else(|| format!("no stage holds {name}"))?;
+        if m.len() != slot.2.len() || v.len() != slot.3.len() {
+            return Err(format!("{name}: moments of {}/{} values for a parameter of {}", m.len(), v.len(), slot.2.len()));
+        }
+        slot.2.copy_from_slice(m);
+        slot.3.copy_from_slice(v);
+        Ok(())
+    }
+
     /// Every parameter a stage optimises, once (a replicated weight is named
     /// once), in first-seen stage order.
     pub fn param_names(&self) -> Vec<String> {
@@ -887,10 +912,14 @@ impl<M: Shardable> Pipeline<M> {
     }
 
     /// Write `name`'s weight to every stage that holds it.
-    pub fn write_weight(&self, name: &str, data: &[f32]) {
+    pub fn write_weight(&mut self, name: &str, data: &[f32]) {
         let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));
         for &si in hs {
             self.stages[si].write_weight(name, data);
+        }
+        // The fused optimiser steps its own master copy.
+        if let Some(slot) = self.fused.as_mut().and_then(|f| f.state.iter_mut().find(|(n, ..)| n == name)) {
+            slot.1.copy_from_slice(data);
         }
     }
 
@@ -946,8 +975,8 @@ impl<M: Shardable> Pipeline<M> {
 ///
 /// What it does not offer: a whole-checkpoint `save` (a stage holds only its
 /// slice, and a reduced-precision base lives outside the parameter stores -
-/// save what was trained, e.g. an adapter, from [`Model::read_weight`]) and
-/// exact-resume optimiser state. The weighted-loss hooks (DPO, GRPO,
+/// save what was trained, e.g. an adapter, from [`Model::read_weight`]) The
+/// weighted-loss hooks (DPO, GRPO,
 /// distillation) act on the head stage.
 pub struct PipelineModel<M: Shardable> {
     pipe: RefCell<Pipeline<M>>,
@@ -1009,7 +1038,16 @@ impl<M: Shardable> Model for PipelineModel<M> {
         self.pipe.borrow().read_weight(name)
     }
     fn write_weight(&self, name: &str, data: &[f32]) {
-        self.pipe.borrow().write_weight(name, data);
+        self.pipe.borrow_mut().write_weight(name, data);
+    }
+    fn optimized_params(&self) -> Option<Vec<String>> {
+        Some(self.pipe.borrow().param_names())
+    }
+    fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        self.pipe.borrow_mut().read_moments(name)
+    }
+    fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        self.pipe.borrow_mut().write_moments(name, m, v)
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
         self.pipe.borrow().reduced_grad(name)
