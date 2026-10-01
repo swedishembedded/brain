@@ -46,6 +46,23 @@ teardown_file() {
   echo "$output" | awk '/^trained on/ { for (i = 1; i <= NF; i++) if ($i == "loss") { a = $(i+1); b = $(i+3) } } END { exit !(b + 0 < a + 0) }'
 }
 
+# An example may carry several images, one placeholder per image in its
+# messages, and a step may average several examples.
+@test "an example with two images trains, several examples to a step" {
+  mkdir -p "$WORK/two"
+  cp "$REPO/docs/quickstart/img/seed.png" "$WORK/two/a.png"
+  cp "$REPO/docs/quickstart/img/depth.png" "$WORK/two/b.png"
+  printf '%s\n' \
+    '{"images":["a.png","b.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The first one."}]}' \
+    '{"images":["b.png","a.png"],"messages":[{"role":"user","content":"<image_placeholder><image_placeholder>\nWhich of the two is a photograph?"},{"role":"assistant","content":"The second one."}]}' \
+    >"$WORK/two/train.jsonl"
+  run "$BRAIN" deepseekvl finetune --weights "$STORE/$REPO_ID" --dataset "$WORK/two" \
+    --out "$WORK/out2" --steps 3 --batch 2 --lr 1e-4 --seed 1
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"trained on 2 example(s)"* ]]
+  [ -s "$WORK/out2/adapter.safetensors" ]
+}
+
 # The fine-tune is served: BRAIN_DEEPSEEKVL_TUNED names the directory `finetune`
 # wrote, and the served model answers with what it learned.
 @test "a fine-tune is served and answers with what it learned" {

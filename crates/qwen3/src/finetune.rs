@@ -135,7 +135,8 @@ pub fn build_for_training(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSour
 /// hold and never by a flag: the whole model as one shard when `place`
 /// finds a card for it, else the fewest pipeline stages `place` can home
 /// (each stage declared with its own footprint), else a refusal naming the
-/// bytes. `place` answers a card for each part or refuses the plan - the
+/// bytes. A plan that homes a stage on the host CPU is taken only when no
+/// layout over the cards fits. `place` answers a card for each part or refuses the plan - the
 /// machine's placer. The returned shards carry the card each was homed on.
 pub fn plan_lora_layout(
     cfg: &QwenConfig,
@@ -148,32 +149,44 @@ pub fn plan_lora_layout(
     let cost = <Qwen as Shardable>::shard_cost(cfg, b, t);
     let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
     let mut refused = Vec::new();
-    for stages in 1..=cards.max(1) {
-        let mut shards = model::plan_balanced(&cost, &(0..stages).collect::<Vec<_>>());
-        let needs: Vec<Need> = shards
-            .iter()
-            .enumerate()
-            .map(|(i, sh)| {
-                let name = if stages == 1 { "qwen3 finetune".to_string() } else { format!("qwen3 finetune stage {i}") };
-                Need::sized(name, crate::footprint::estimate_vram_bytes(cfg, sh, dt, b, t, true, false), 0)
-            })
-            .collect();
-        match place(&needs) {
-            Ok(homes) => {
-                for (sh, home) in shards.iter_mut().zip(homes) {
-                    match home {
-                        Home::Gpu(card) => sh.gpu_index = card as usize,
-                        // The ambient device: the CPU backend the caller selected.
-                        Home::Cpu => sh.gpu_index = Shard::ANY_GPU,
-                    }
+    // The cards first: a host with RAM to spare could home the whole model on
+    // the CPU, where a step takes hours, so a layout that fits the cards wins
+    // over any plan that homes a stage on the host; the host is the last resort.
+    for cards_only in [true, false] {
+        for stages in 1..=cards.max(1) {
+            let mut shards = model::plan_balanced(&cost, &(0..stages).collect::<Vec<_>>());
+            let needs: Vec<Need> = shards
+                .iter()
+                .enumerate()
+                .map(|(i, sh)| {
+                    let name = if stages == 1 { "qwen3 finetune".to_string() } else { format!("qwen3 finetune stage {i}") };
+                    Need::sized(name, crate::footprint::estimate_vram_bytes(cfg, sh, dt, b, t, true, false), 0)
+                })
+                .collect();
+            match place(&needs) {
+                Ok(homes) if cards_only && homes.iter().any(|h| matches!(h, Home::Cpu)) => {
+                    refused.push(format!("{stages} stage(s) of up to {:.1} GiB: no card holds a stage", gib(needs.iter().map(|n| n.vram).max().unwrap_or(0))));
                 }
-                return Ok(shards);
-            }
-            Err(why) => {
-                let largest = needs.iter().map(|n| n.vram).max().unwrap_or(0);
-                refused.push(format!("{stages} stage(s) of up to {:.1} GiB: {why}", gib(largest)));
+                Ok(homes) => {
+                    for (sh, home) in shards.iter_mut().zip(homes) {
+                        match home {
+                            Home::Gpu(card) => sh.gpu_index = card as usize,
+                            // The ambient device: the CPU backend the caller selected.
+                            Home::Cpu => sh.gpu_index = Shard::ANY_GPU,
+                        }
+                    }
+                    return Ok(shards);
+                }
+                Err(why) => {
+                    let largest = needs.iter().map(|n| n.vram).max().unwrap_or(0);
+                    refused.push(format!("{stages} stage(s) of up to {:.1} GiB: {why}", gib(largest)));
+                }
             }
         }
+        if !cards_only {
+            break;
+        }
+        refused.clear();
     }
     Err(format!("qwen3 finetune does not fit {cards} card(s): {}", refused.join("; ")))
 }

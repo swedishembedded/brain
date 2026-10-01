@@ -102,3 +102,19 @@ fn a_machine_that_homes_the_model_on_the_cpu_runs_it_there() {
     assert_eq!(shards.len(), 1);
     assert_eq!(shards[0].gpu_index, model::Shard::ANY_GPU, "the ambient (CPU) device, not a card");
 }
+
+/// A host with RAM to spare could home the whole model on the CPU, where a
+/// training step takes hours: the placer offers that for the one-stage plan
+/// when no card holds it. A layout that fits the cards is preferred to it.
+#[test]
+fn a_layout_across_the_cards_is_preferred_to_homing_the_model_on_the_cpu() {
+    let cfg = seven_b();
+    let cards = machine(&[20 * GIB, 20 * GIB]);
+    let place = |needs: &[Need]| match needs {
+        [_whole] => Ok(vec![Home::Cpu]),
+        _ => cards(needs),
+    };
+    let shards = plan_lora_layout(&cfg, 1, 4096, Dtype::BF16, 2, place).unwrap();
+    assert_eq!(shards.len(), 2, "two stages on the cards, not one on the host");
+    assert!(shards.iter().all(|sh| sh.gpu_index != model::Shard::ANY_GPU));
+}
