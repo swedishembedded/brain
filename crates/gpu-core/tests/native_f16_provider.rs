@@ -25,7 +25,7 @@ fn kernels() -> [(&'static str, &'static str); 2] {
 /// be a hard device-fault panic, not a graceful skip (see
 /// `backend_api::Backend::supports_native_f16`'s own doc comment).
 fn device() -> Option<Gpu> {
-    let gpu = Gpu::new_wgpu(&kernels());
+    let gpu = Gpu::new_gpu(&kernels());
     if !gpu.supports_native_f16() {
         return None;
     }

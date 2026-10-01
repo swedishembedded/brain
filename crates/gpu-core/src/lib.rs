@@ -845,7 +845,8 @@ mod native_facade {
         /// | token | handle |
         /// |---|---|
         /// | `cpu` | [`Gpu::new_cpu`] |
-        /// | `gpu`, `wgpu` | [`Gpu::new_wgpu`] |
+        /// | `gpu` | [`Gpu::new_gpu`] |
+        /// | `wgpu` | [`Gpu::new_wgpu`] |
         /// | `gpu<i>` | [`Gpu::new_on_index`] - that physical card |
         /// | anything else | [`Gpu::new`] (ambient) |
         ///
@@ -860,7 +861,8 @@ mod native_facade {
         pub fn open(device: Option<&str>, kernels: &[(&str, &str)]) -> Gpu {
             match device {
                 Some("cpu") => Gpu::new_cpu(kernels),
-                Some("gpu") | Some("wgpu") => Gpu::new_wgpu(kernels),
+                Some("gpu") => Gpu::new_gpu(kernels),
+                Some("wgpu") => Gpu::new_wgpu(kernels),
                 Some(tok) => match tok.strip_prefix("gpu").and_then(|i| i.parse::<u32>().ok()) {
                     Some(index) => Gpu::new_on_index(index, kernels)
                         .unwrap_or_else(|e| panic!("device '{tok}': {e}")),
@@ -1007,6 +1009,25 @@ mod native_facade {
                 Box::new(backend_cpu::CpuBackend::new(kernels));
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
+        }
+
+        /// A real GPU, on whichever API this machine drives its cards with:
+        /// wgpu where Vulkan or wgpu enumerates them (the historical choice),
+        /// CUDA where CUDA is the only API that does - a driver-only machine
+        /// with no Vulkan ICD and no wgpu adapter. For the code that wants "the
+        /// GPU", not a particular backend; [`Gpu::new_wgpu`] stays for the code
+        /// (and the tests) that mean wgpu specifically. Placement is ambient,
+        /// like [`Gpu::new`].
+        pub fn new_gpu(kernels: &[(&str, &str)]) -> Gpu {
+            match crate::devices::registry().source() {
+                "cuda" => {
+                    let kernels = &Self::expanded(kernels, false);
+                    let inner = Self::build_cuda(kernels, crate::devices::selected_device());
+                    record_caps(inner.as_ref());
+                    Gpu::wrap(inner, Self::kernel_names(kernels))
+                }
+                _ => Self::new_wgpu(kernels),
+            }
         }
 
         /// Build on the wgpu backend regardless of the default selection.

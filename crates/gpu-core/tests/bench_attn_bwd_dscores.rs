@@ -72,7 +72,7 @@ fn bench_attn_bwd_dscores_causal_and_bidir() {
         ("gqa_bwd_dscores", kernels::GQA_BWD_DSCORES),
         ("gqa_bwd_dscores_rows", kernels::GQA_BWD_DSCORES_ROWS),
     ];
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     let reps = 8;
 
     for (name, a, b, gqa) in [("attn_bwd_dscores     ", 0usize, 1, false), ("attn_bwd_dscores_bidir", 2, 3, false), ("gqa_bwd_dscores      ", 4, 5, true)] {
@@ -127,7 +127,7 @@ fn bench_attn_bwd_dscores_causal_and_bidir() {
 #[ignore]
 fn bench_attn_bwd_dscores_cross() {
     let ks = &[("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS), ("attn_bwd_dscores_cross_rows", kernels::ATTN_BWD_DSCORES_CROSS_ROWS)];
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     let reps = 8;
 
     println!(

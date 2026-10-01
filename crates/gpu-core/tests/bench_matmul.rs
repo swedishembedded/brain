@@ -167,7 +167,7 @@ fn bench_matmul() {
     let ks = kernels();
 
     let cpu = Gpu::new_cpu(&ks);
-    let wgpu = Gpu::new_wgpu(&ks);
+    let wgpu = Gpu::new_gpu(&ks);
     let vk = Gpu::try_new_vulkan(&ks).ok();
     if vk.is_none() {
         eprintln!("(no native Vulkan device - reporting cpu + wgpu only)");
@@ -297,7 +297,7 @@ fn bench_matmul_quant() {
     ];
 
     let cpu = Gpu::new_cpu(&ks);
-    let wgpu = Gpu::new_wgpu(&ks);
+    let wgpu = Gpu::new_gpu(&ks);
 
     /// Weight-scale group along K, mirroring `model::int8::GROUP`.
     const GROUP: usize = 32;

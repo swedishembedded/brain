@@ -251,7 +251,7 @@ std::thread_local! {
 /// It takes precedence over an explicit `--device gpu`: the host tier is only
 /// ever chosen when nothing else can hold the part, and honouring a card
 /// selection there would mean failing the run rather than running it slowly -
-/// the opposite of what the fallback exists for. `Gpu::new_wgpu` and
+/// the opposite of what the fallback exists for. `Gpu::new_gpu`, `Gpu::new_wgpu` and
 /// `Gpu::new_on_index` are unaffected, being explicit requests for a card.
 pub fn with_host_tier<R>(f: impl FnOnce() -> R) -> R {
     HOST_TIER.with(|d| d.set(d.get() + 1));
@@ -737,7 +737,7 @@ impl DeviceSpec {
             gpus: Vec::new(),
             cpu_cores: Vec::new(),
             npus: Vec::new(),
-            backend: Backend::Wgpu,
+            backend: probe.gpu_backend,
             source: if self.source.is_empty() { "all".into() } else { self.source.clone() },
             explicit: !self.is_all(),
         };
@@ -748,11 +748,12 @@ impl DeviceSpec {
             set.gpus = (0..probe.gpus).collect();
             set.cpu_cores = (0..probe.cpu_cores).collect();
             set.npus = (0..probe.npus).collect();
-            set.backend = if probe.gpus > 0 { Backend::Wgpu } else { Backend::Cpu };
+            set.backend = if probe.gpus > 0 { probe.gpu_backend } else { Backend::Cpu };
             return Ok(set);
         }
 
         let mut want_vulkan = false;
+        let mut want_wgpu = false;
         let mut backend_token = false;
         let mut any_gpu_request = false;
         let mut any_npu_request = false;
@@ -804,6 +805,7 @@ impl DeviceSpec {
                     backend_token = true;
                 }
                 Request::WgpuBackend => {
+                    want_wgpu = true;
                     any_gpu_request = true;
                     backend_token = true;
                 }
@@ -839,8 +841,10 @@ impl DeviceSpec {
         set.backend = if !set.gpus.is_empty() {
             if want_vulkan {
                 Backend::Vulkan
-            } else {
+            } else if want_wgpu {
                 Backend::Wgpu
+            } else {
+                probe.gpu_backend
             }
         } else {
             Backend::Cpu
@@ -907,6 +911,10 @@ pub struct Inventory {
     pub gpus: u32,
     pub cpu_cores: usize,
     pub npus: u32,
+    /// The backend that drives a GPU when the request names none: wgpu where
+    /// Vulkan or wgpu enumerates the cards, CUDA where CUDA is the only API
+    /// that does.
+    pub gpu_backend: Backend,
 }
 
 impl Inventory {
@@ -920,6 +928,7 @@ impl Inventory {
             gpus: crate::visible_gpu_count() as u32,
             cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             npus: npu_count(),
+            gpu_backend: if registry().source() == "cuda" { Backend::Cuda } else { Backend::Wgpu },
         }
     }
 }
@@ -1321,11 +1330,26 @@ mod tests {
     use super::*;
 
     fn inv(gpus: u32, cores: usize, npus: u32) -> Inventory {
-        Inventory { gpus, cpu_cores: cores, npus }
+        Inventory { gpus, cpu_cores: cores, npus, gpu_backend: Backend::Wgpu }
     }
 
     fn resolve(s: &str, i: Inventory) -> Result<ComputeSet, String> {
         DeviceSpec::parse(s)?.resolve(&i)
+    }
+
+    /// On a machine where only CUDA sees the GPU (a driver-only box: no Vulkan
+    /// ICD, no wgpu adapter) the default backend for GPU work must be CUDA, not
+    /// wgpu: asking for a backend that cannot see the card fails every GPU test
+    /// and every model load there. A backend token the user typed still wins.
+    #[test]
+    fn a_cuda_only_machine_defaults_to_the_cuda_backend() {
+        let cuda_only = Inventory { gpu_backend: Backend::Cuda, ..inv(1, 72, 0) };
+        for spec in ["", "gpu", "gpu0", "gpu,cpu"] {
+            assert_eq!(resolve(spec, cuda_only).unwrap().backend, Backend::Cuda, "{spec:?}");
+        }
+        assert_eq!(resolve("cpu", cuda_only).unwrap().backend, Backend::Cpu);
+        assert_eq!(resolve("vulkan", cuda_only).unwrap().backend, Backend::Vulkan, "an explicit token wins");
+        assert_eq!(resolve("wgpu", cuda_only).unwrap().backend, Backend::Wgpu, "an explicit token wins");
     }
 
     #[test]

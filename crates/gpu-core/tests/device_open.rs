@@ -8,7 +8,7 @@
 //! ```ignore
 //! match device {
 //!     Some("cpu")               => Gpu::new_cpu(&KERNELS),
-//!     Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
+//!     Some("gpu") | Some("wgpu") => Gpu::new_gpu(&KERNELS),
 //!     _                          => Gpu::new(&KERNELS),
 //! }
 //! ```

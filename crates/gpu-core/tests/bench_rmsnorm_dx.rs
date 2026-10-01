@@ -135,7 +135,7 @@ fn time(gpu: &Gpu, kind: usize, bufs: &[&gpu_core::DeviceBuffer], p: &[u32], gri
 fn bench_rmsnorm_dx() {
     let ks = &[("rmsnorm_dx", kernels::RMSNORM_DX), ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS)];
     let (dx, dxr) = (0usize, 1);
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     let reps = 8;
 
     println!(

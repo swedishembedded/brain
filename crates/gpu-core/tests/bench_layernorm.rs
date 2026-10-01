@@ -97,7 +97,7 @@ fn bench_layernorm() {
         ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
     ];
     let (ln, lnr, st, str_, dx, dxr) = (0usize, 1, 2, 3, 4, 5);
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     let eps = 1e-5f32;
     let reps = 8;
 

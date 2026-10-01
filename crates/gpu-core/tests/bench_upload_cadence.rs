@@ -56,7 +56,7 @@ fn gpu() -> Option<Gpu> {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return None;
     }
-    Some(Gpu::new_wgpu(KERNELS))
+    Some(Gpu::new_gpu(KERNELS))
 }
 
 fn ms(d: std::time::Duration) -> f64 {

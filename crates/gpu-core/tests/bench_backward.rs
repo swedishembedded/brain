@@ -51,7 +51,7 @@ fn bench_backward() {
         ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ];
     let (dx, dxr, dw, dwr) = (0usize, 1usize, 2usize, 3usize);
-    let g = Gpu::new_wgpu(ks);
+    let g = Gpu::new_gpu(ks);
     let reps = 5;
     println!("\n{:<30} {:>8} {:>12} {:>12} {:>10} {:>10}", "shape", "GFLOP", "naive GF/s", "reg GF/s", "speedup", "parity");
     println!("{}", "-".repeat(86));
