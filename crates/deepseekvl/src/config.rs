@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn the_released_checkpoint_config_parses() {
-        let Some(dir) = brain_testutil::model_dir("deepseek-ai/deepseek-vl-7b-chat") else {
+        let Some(dir) = brain_testutil::model_dir("deepseek-ai/deepseek-vl-7b-chat").filter(|d| std::path::Path::new(d).is_dir()) else {
             brain_testutil::skip("deepseek-vl-7b-chat not downloaded");
             return;
         };

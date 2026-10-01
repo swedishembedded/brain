@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn the_released_checkpoint_config_parses() {
-        let Some(dir) = brain_testutil::model_dir("deepseek-ai/Janus-Pro-7B") else {
+        let Some(dir) = brain_testutil::model_dir("deepseek-ai/Janus-Pro-7B").filter(|d| std::path::Path::new(d).is_dir()) else {
             brain_testutil::skip("Janus-Pro-7B not downloaded");
             return;
         };
