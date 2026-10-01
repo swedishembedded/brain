@@ -48,13 +48,28 @@ fn caption_only_training_is_bit_for_bit_what_it_was() {
     let (loss, g) = grads(&cfg, &w, &b);
     let d = digest(&g);
     println!("loss {loss:.17e} digest {d:.17e}");
-    assert_eq!(loss.to_bits(), LOSS.to_bits(), "unpaired loss moved: {loss:.17e}");
-    assert_eq!(d.to_bits(), DIGEST.to_bits(), "unpaired gradients moved: {d:.17e}");
+    assert_pinned("loss", loss, LOSS);
+    assert_pinned("gradient digest", d, DIGEST);
+}
+
+/// Exact on the architecture the values were recorded on. Elsewhere the
+/// transcendental functions the fixture and the model call (`sin`, `exp`,
+/// `tanh`) come from a different libm and differ in the last bits of an f32
+/// pipeline - measured on aarch64 as 3.4e-8 relative on the loss and 2.7e-7 on
+/// the digest - so there the pin is a relative bound of 1e-5, about 40 times the
+/// observed difference and far below the effect of a real change to the plain path.
+fn assert_pinned(what: &str, got: f64, pinned: f64) {
+    if cfg!(target_arch = "x86_64") {
+        assert_eq!(got.to_bits(), pinned.to_bits(), "unpaired {what} moved: {got:.17e}");
+    } else {
+        let rel = ((got - pinned) / pinned).abs();
+        assert!(rel < 1e-5, "unpaired {what} moved: {got:.17e} vs {pinned:.17e} (rel {rel:.2e})");
+    }
 }
 
 /// Recorded from the caption-only trainer before reference conditioning
 /// existed. Not a tolerance and not a target: it is the value this fixture
-/// produced, asserted bit-for-bit, because "the plain path is untouched" is an
-/// exact claim.
+/// produced, asserted bit-for-bit on the recording architecture (see [`assert_pinned`]),
+/// because "the plain path is untouched" is an exact claim.
 const LOSS: f64 = 0.23170481931629183;
 const DIGEST: f64 = -0.11912880306291941;
