@@ -631,6 +631,8 @@ pub struct Qwen {
     head_tile: DeviceBuffer,
     /// Columns of a vocab tile one pass covers: `head_tile` holds `rows x head_tile_cols`.
     head_tile_cols: u32,
+    /// The vocab tiles of the embedding and head, decided at build.
+    vocab_tiles: Vec<(u32, u32)>,
     ce_stats: DeviceBuffer,
     d_xn: DeviceBuffer,
     d_tmp: DeviceBuffer,
@@ -1230,7 +1232,8 @@ impl Qwen {
         // `rows x head_tile_cols` - a quarter of the tile budget - so the
         // passes use the GEMM kernels an untiled head does.
         let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (head_rows as u64).max(1)).max(64) & !63) as u32;
-        let head_tile = if block::vocab_tiles_on(&gpu, v, d).len() > 1 { hd_or_dummy(head_rows as u64 * head_tile_cols as u64) } else { st(1) };
+        let vocab_tiles = block::vocab_tiles_on(&gpu, v, d);
+        let head_tile = if vocab_tiles.len() > 1 { hd_or_dummy(head_rows as u64 * head_tile_cols as u64) } else { st(1) };
         // Backward scratch: read only by `build_backward_steps`/`backward`,
         // which never run unless `train`. The old gate here was
         // `decode_only` alone, so a batched forward-only build
@@ -1361,6 +1364,7 @@ impl Qwen {
             d_logits: hd_or_dummy(head_rows * v),
             head_tile,
             head_tile_cols,
+            vocab_tiles,
             ce_stats: hd_or_dummy(n * 2),
             d_xn: bwd(n * d),
             d_tmp: bwd(n * d),
@@ -1704,9 +1708,12 @@ impl Qwen {
         }
     }
 
-    /// Vocab tiles for the embedding / lm_head (shared `block::vocab_tiles`).
+    /// Vocab tiles for the embedding / lm_head (shared `block::vocab_tiles`),
+    /// as they were decided when the model was built: the head's column-pass
+    /// scratch is sized by that decision, so a later change of the tile
+    /// budget (a test hook) must not re-tile a model already built.
     fn vocab_tiles(&self) -> Vec<(u32, u32)> {
-        block::vocab_tiles_on(&self.gpu, self.cfg.vocab as u64, self.cfg.d_model as u64)
+        self.vocab_tiles.clone()
     }
 
     /// The token-embedding gather for `n` token rows, as tiled steps.
@@ -4316,6 +4323,33 @@ mod tests {
         assert_eq!(back.group(), 2);
         assert!((back.rope_theta - 1.0e6).abs() < 1.0);
         assert!(back.tie_embeddings);
+    }
+
+    /// A model's head tiling is decided when it is built, together with the
+    /// scratch the tiled passes need; changing the tile budget afterwards (a
+    /// test hook another test may set at any moment) must not re-tile a model
+    /// already built, whose graphs are recorded again for other lengths.
+    #[test]
+    fn a_built_model_keeps_its_head_tiling_when_the_tile_budget_changes() {
+        if gpu_disabled() {
+            return;
+        }
+        let _guard = brain_testutil::env_lock();
+        let prev = std::env::var("BRAIN_TILE_BUDGET_WORDS").ok();
+        std::env::remove_var("BRAIN_TILE_BUDGET_WORDS");
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let model = Qwen::new(cfg.clone(), 1, 8, &init);
+        let tokens = [1u32, 5, 9, 2];
+        let before = model.logits_all(&tokens);
+        // A budget that would split this head into several tiles.
+        std::env::set_var("BRAIN_TILE_BUDGET_WORDS", (cfg.vocab as u64 * cfg.d_model as u64 / 3).to_string());
+        let after = model.logits_all(&tokens);
+        match prev {
+            Some(v) => std::env::set_var("BRAIN_TILE_BUDGET_WORDS", v),
+            None => std::env::remove_var("BRAIN_TILE_BUDGET_WORDS"),
+        }
+        assert_eq!(before, after, "the built model's head did not change with the budget");
     }
 
     #[test]
