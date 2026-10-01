@@ -743,6 +743,49 @@ impl CudaBackend {
         }
     }
 
+    /// Make this handle's stream wait for any OTHER handle's pending work on
+    /// `bufs`. Two handles run on two streams and a GPU runs two streams
+    /// concurrently, so a buffer one handle is still writing may be read by the
+    /// other early unless it is ordered here. Free while only one handle is
+    /// open: a stream orders its own work.
+    fn fence_in<'a>(&self, bufs: impl IntoIterator<Item = &'a Arc<exec::DeviceMem>>) {
+        if !exec::several_contexts_open() {
+            return;
+        }
+        let mut waited: Vec<*const exec::Event> = Vec::new();
+        for m in bufs {
+            let guard = m.fence.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(f) = guard.as_ref() {
+                if f.stream_id != self.ctx.stream_id() && !waited.contains(&Arc::as_ptr(&f.event)) {
+                    waited.push(Arc::as_ptr(&f.event));
+                    if let Err(e) = self.ctx.wait_event(&f.event) {
+                        tracing::warn!(reason = %e, "backend-cuda: cannot order this stream after another handle's work");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record that this handle's stream has just done work on `bufs`, so any
+    /// other handle that uses one of them first waits for it. See
+    /// [`Self::fence_in`].
+    fn fence_out<'a>(&self, bufs: impl IntoIterator<Item = &'a Arc<exec::DeviceMem>>) {
+        if !exec::several_contexts_open() {
+            return;
+        }
+        let event = match self.ctx.ordering_event().and_then(|e| self.ctx.record(&e).map(|()| e)) {
+            Ok(e) => Arc::new(e),
+            Err(e) => {
+                tracing::warn!(reason = %e, "backend-cuda: cannot record an ordering event");
+                return;
+            }
+        };
+        for m in bufs {
+            *m.fence.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(exec::Fence { stream_id: self.ctx.stream_id(), event: Arc::clone(&event) });
+        }
+    }
+
     /// An event recorded on this handle's stream now, from the pool when one is
     /// free. `None` (and a log line) if the driver refuses: timing is a
     /// diagnostic and must never fail a dispatch.
@@ -929,18 +972,21 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
-        let mem = self.alloc((data.len() * 4).max(4) as u64, name);
+        let buf = CudaBuf::wrap(self.alloc((data.len() * 4).max(4) as u64, name));
+        let mem = &CudaBuf::of(&buf).mem;
         if !data.is_empty() {
             // SAFETY: `f32` has no padding, so any `[f32]` is a valid `[u8]`
             // of four times the length, read-only and for this scope only.
             let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
             self.ctx
-                .upload(&mem, bytes)
+                .upload(mem, bytes)
                 .unwrap_or_else(|e| panic!("backend-cuda: uploading '{name}' failed: {e}"));
+            // Another handle that uses this buffer waits for the copy.
+            self.fence_out([mem]);
         } else {
-            self.ctx.zero(&mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing '{name}' failed: {e}"));
+            self.ctx.zero(mem).unwrap_or_else(|e| panic!("backend-cuda: zeroing '{name}' failed: {e}"));
         }
-        CudaBuf::wrap(mem)
+        buf
     }
 
     fn buffer(&self, label: &str, size: u64, _usage: BufUsage) -> DeviceBuffer {
@@ -964,9 +1010,12 @@ impl backend_api::Backend for CudaBackend {
 
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
         self.counters.writes.fetch_add(1, Ordering::Relaxed);
+        let mem = &CudaBuf::of(buf).mem;
+        self.fence_in([mem]);
         self.ctx
-            .upload_at(&CudaBuf::of(buf).mem, (offset_words * 4) as usize, bytemuck_words(data))
+            .upload_at(mem, (offset_words * 4) as usize, bytemuck_words(data))
             .unwrap_or_else(|e| panic!("backend-cuda: write failed: {e}"));
+        self.fence_out([mem]);
     }
 
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
@@ -1131,6 +1180,10 @@ impl backend_api::Backend for CudaBackend {
         // opens - compiling a kernel is not a stream operation.
         let resolved: Vec<Resolved> = steps.iter().map(|s| self.resolve(s.downcast_ref::<CudaStep>())).collect();
         self.counters.dispatches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+        // Order this submission after other handles' work on the buffers it
+        // names. Before the plan, so a capture does not record a wait on an
+        // event from outside it, which a capture cannot represent.
+        self.fence_in(clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m))));
 
         let mut handled = false;
         let mut give_up = false;
@@ -1201,6 +1254,7 @@ impl backend_api::Backend for CudaBackend {
                 self.issue(r);
             }
         }
+        self.fence_out(clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m))));
         self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
@@ -1210,13 +1264,15 @@ impl backend_api::Backend for CudaBackend {
         // A launch reports only the errors it can see BEFORE running, so this
         // synchronise is where a faulting kernel is actually reported - and it
         // must happen before the copy, not as part of it.
+        let mem = &CudaBuf::of(buf).mem;
+        self.fence_in([mem]);
         self.poll_wait();
         let mut out = vec![0f32; n];
         // SAFETY: `out` owns `n * 4` writable bytes with no padding, and the
         // download bounds-checks against the allocation's own length.
         let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, n * 4) };
         self.ctx
-            .download(&CudaBuf::of(buf).mem, bytes)
+            .download(mem, bytes)
             .unwrap_or_else(|e| panic!("backend-cuda: read-back of {n} f32 failed: {e}"));
         out
     }

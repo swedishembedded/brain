@@ -33,11 +33,13 @@ const KERNELS: &[(&str, &str)] = &[
     ("add2", kernels::ADD2),
     ("gn_stats_wg", kernels::GN_STATS_WG),
     ("mul", kernels::MUL),
+    ("axpy", kernels::AXPY),
 ];
 
 const ADD2: usize = 0;
 const GN_STATS_WG: usize = 1;
 const MUL: usize = 2;
+const AXPY: usize = 3;
 
 /// A backend to test, or the reason there is none.
 fn backend() -> Option<CudaBackend> {
@@ -228,9 +230,9 @@ fn a_kernel_compiles_on_first_dispatch_and_only_once() {
 
     assert_eq!(run(), vec![11.0, 22.0, 33.0, 44.0]);
     assert_eq!(b.compiled_kernel_count(), 1, "a second dispatch of the same kind compiled it again");
-    // The other two registered kernels were never asked for, so they must
-    // still be uncompiled - that is the whole claim.
-    assert_eq!(KERNELS.len(), 3);
+    // The other registered kernels were never asked for, so they must still be
+    // uncompiled - that is the whole claim, and the count above is its proof.
+    assert!(KERNELS.len() > 1, "the claim needs kernels that were never asked for");
 }
 
 /// The host-cost counter counts HOST work, and it is a different quantity from
@@ -357,4 +359,52 @@ fn device_timing_attributes_calls_and_time_to_the_kernel_that_ran() {
     assert!(!b.set_kernel_timing(false), "switching timing off reports it off");
     run(2);
     assert_eq!(b.kernel_times().map(|t| t.len()), Some(0), "nothing is timed while it is off");
+}
+
+/// Two handles on one card run on two streams, and a GPU runs two streams
+/// concurrently. When one handle's output buffer is the other handle's input
+/// (a text tower feeding a diffusion model, a stage feeding the next), the
+/// second handle's kernel must not start before the first handle's work on that
+/// buffer has finished - which nothing in the stream model guarantees unless
+/// the backend orders them. Without it the consumer reads a buffer the producer
+/// is still writing, and the result is a plausible wrong number.
+#[test]
+fn a_handle_waits_for_another_handle_s_work_on_a_buffer_it_consumes() {
+    let Some(producer) = backend() else { return };
+    let consumer = CudaBackend::try_new(KERNELS).expect("a second handle");
+    const N: usize = 1 << 24;
+    const CHAIN: usize = 300;
+
+    // Everything is prepared before either submission, so the consumer follows
+    // the producer by microseconds rather than by however long setup took.
+    let inp = producer.storage_init("inp", &vec![1.0f32; N]);
+    let x = producer.storage(N as u64);
+    let zeros = consumer.storage_init("z", &vec![0.0f32; N]);
+    let out = consumer.storage(N as u64);
+    let steps: Vec<_> = (0..CHAIN).map(|_| producer.step(AXPY, &[&x, &inp], &[N as u32, 1.0f32.to_bits()], N as u32)).collect();
+    let copy = consumer.step(ADD2, &[&x, &zeros, &out], &[N as u32], N as u32);
+    // One warm-up pass: compiles the kernels and fills the producer's pool of
+    // pinned parameter blocks. Without it every step of the measured
+    // submission allocates one, and allocating pinned memory synchronises the
+    // device - which would make the producer finish before its submit returns
+    // and hide exactly the overtaking this test is about.
+    producer.submit(&[], &steps);
+    consumer.submit(&[], &[copy.clone()]);
+    producer.poll_wait();
+    consumer.poll_wait();
+    let warm = producer.read(&x, 1)[0];
+    assert_eq!(warm, CHAIN as f32, "the warm-up pass itself must be correct");
+
+    // 300 accumulating passes over 64 MiB: each pass costs the device several
+    // times what it costs the host to launch, so the host returns while most of
+    // the chain is still queued, and during that time the consumer's own stream is free to run ahead. The
+    // consumer copies x through a different handle and stream, with no host
+    // synchronisation between the two submissions.
+    producer.submit(&[], &steps);
+    consumer.submit(&[], &[copy]);
+
+    let got = consumer.read(&out, 1024);
+    for (i, v) in got.iter().enumerate() {
+        assert_eq!(*v, (2 * CHAIN) as f32, "element {i}: the consumer read x before the producer finished writing it");
+    }
 }

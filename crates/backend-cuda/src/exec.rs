@@ -35,12 +35,12 @@
 //! at module load or, worse, silently mis-scheduled.
 
 use crate::driver::{
-    CU_STREAM_NON_BLOCKING,
+    CU_EVENT_DISABLE_TIMING, CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
     CuEvent, CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
 };
 use std::ffi::{c_int, c_void, CString};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// A compiled cubin, and whether it came back from the on-disk cache.
@@ -66,6 +66,9 @@ pub struct Context {
     /// cannot be captured. It is created blocking, so the synchronous host
     /// transfers that still use the legacy stream stay ordered against it.
     stream: CuStream,
+    /// This handle's identity among streams, for [`Fence`]: two buffers touched
+    /// by the same stream need no ordering between them.
+    stream_id: u64,
     /// Incremented every time a device allocation is freed.
     ///
     /// A freed address may be handed straight back out by the next
@@ -111,6 +114,7 @@ impl Context {
             name: info.name.clone(),
             info: info.clone(),
             stream: std::ptr::null_mut(),
+            stream_id: NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed),
             alloc_epoch: Arc::new(AtomicU64::new(0)),
         };
         c.make_current()?;
@@ -118,7 +122,22 @@ impl Context {
         // current. Non-blocking, so handles do not synchronise through the
         // legacy default stream - see `ExecFns::stream_create`.
         d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
+        // The count goes up BEFORE the drain below, so any handle that submits
+        // after this point already fences. The drain covers work another handle
+        // issued before it could know a second handle would exist: its buffers
+        // carry no fence, and anything still running on them is waited for here
+        // once rather than guessed at later.
+        let others = OPEN_CONTEXTS.fetch_add(1, Ordering::AcqRel);
+        if others > 0 {
+            // SAFETY: the context is current on this thread.
+            d.check(unsafe { (fns.ctx_synchronize)() }, "cuCtxSynchronize")?;
+        }
         Ok(c)
+    }
+
+    /// This handle's identity among streams.
+    pub fn stream_id(&self) -> u64 {
+        self.stream_id
     }
 
     /// How many device allocations this context has freed. See
@@ -185,6 +204,7 @@ impl Context {
             ptr,
             len: bytes,
             epoch: self.alloc_epoch.clone(),
+            fence: std::sync::Mutex::new(None),
         })
     }
 
@@ -314,12 +334,29 @@ impl Context {
 
     /// A new event with timing enabled.
     pub fn event(&self) -> Result<Event, String> {
+        self.event_with(0)
+    }
+
+    /// A new event that only orders streams, which is cheaper than one that
+    /// carries a timestamp.
+    pub fn ordering_event(&self) -> Result<Event, String> {
+        self.event_with(CU_EVENT_DISABLE_TIMING)
+    }
+
+    fn event_with(&self, flags: u32) -> Result<Event, String> {
         self.make_current()?;
         let mut ev: CuEvent = std::ptr::null_mut();
-        // SAFETY: `ev` is a valid out-parameter; flag 0 is `CU_EVENT_DEFAULT`,
-        // which keeps timing on.
-        self.d.check(unsafe { (self.fns.event_create)(&mut ev, 0) }, "cuEventCreate")?;
+        // SAFETY: `ev` is a valid out-parameter; the flags are driver constants.
+        self.d.check(unsafe { (self.fns.event_create)(&mut ev, flags) }, "cuEventCreate")?;
         Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev })
+    }
+
+    /// Work enqueued on [`Self::stream`] after this call starts only once
+    /// `event` (recorded on another handle's stream) has completed.
+    pub fn wait_event(&self, event: &Event) -> Result<(), String> {
+        self.make_current()?;
+        // SAFETY: both belong to this context's device; flags 0 is the default.
+        self.d.check(unsafe { (self.fns.stream_wait_event)(self.stream, event.ev, 0) }, "cuStreamWaitEvent")
     }
 
     /// Stamp [`Self::stream`] with `event`: it completes when everything
@@ -559,6 +596,7 @@ impl Drop for Context {
             }
             (self.fns.primary_ctx_release)(self.dev);
         }
+        OPEN_CONTEXTS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -701,6 +739,27 @@ impl Drop for GraphExec {
 unsafe impl Send for GraphExec {}
 unsafe impl Sync for GraphExec {}
 
+/// Handles currently open on any device. While it is one, nothing needs ordering
+/// between handles and the fencing in [`Fence`] is skipped entirely.
+static OPEN_CONTEXTS: AtomicUsize = AtomicUsize::new(0);
+/// Source of [`Context::stream_id`].
+static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Whether more than one handle is open, which is when work on a shared buffer
+/// has to be ordered between streams.
+pub fn several_contexts_open() -> bool {
+    OPEN_CONTEXTS.load(Ordering::Acquire) > 1
+}
+
+/// The last work some handle's stream did to a buffer: the event it recorded
+/// afterwards, and which stream that was. Another handle's stream waits on the
+/// event before using the buffer; the same stream needs no wait, because a
+/// stream orders its own work.
+pub struct Fence {
+    pub stream_id: u64,
+    pub event: std::sync::Arc<Event>,
+}
+
 /// A CUDA event, destroyed when dropped. It is a timestamp on a stream: record
 /// one before and one after a launch and [`Context::elapsed_ms`] gives the
 /// device-side duration between them.
@@ -799,6 +858,9 @@ pub struct DeviceMem {
     /// The context's free counter, bumped here - see
     /// [`Context::alloc_epoch`]'s field doc.
     epoch: Arc<AtomicU64>,
+    /// The last work any handle's stream did to this allocation, when more than
+    /// one handle is open. See [`Fence`].
+    pub(crate) fence: std::sync::Mutex<Option<Fence>>,
 }
 
 impl DeviceMem {

@@ -63,7 +63,7 @@ fn input() -> Vec<f32> {
 }
 
 /// One submission of `CHAIN` `axpy` steps, `out[j] += s * inp` for each output.
-fn round(b: &CudaBackend, outs: &[backend_api::DeviceBuffer], inp: &backend_api::DeviceBuffer, n: usize, s: f32) {
+fn round(b: &dyn backend_api::Backend, outs: &[backend_api::DeviceBuffer], inp: &backend_api::DeviceBuffer, n: usize, s: f32) {
     let params = [n as u32, s.to_bits()];
     let steps: Vec<_> = outs.iter().map(|o| b.step(AXPY, &[o, inp], &params, n as u32)).collect();
     b.submit(&[], &steps);
@@ -381,4 +381,69 @@ fn replaying_costs_the_host_less_than_launching_each_dispatch() {
         ns[1],
         ns[0]
     );
+}
+
+/// Several handles on one card, each driven from its own thread, each
+/// repeatedly allocating fresh buffers and replaying a captured submission over
+/// them. Allocation churn across handles is what makes the driver hand one
+/// handle an address another handle's graph once named, so this is the test for
+/// a graph that outlives the buffers it was recorded against.
+///
+/// Every iteration checks exact values: a replay that read stale parameters,
+/// wrote through a stale address, or ran against another handle's buffer leaves
+/// a wrong number rather than a crash.
+#[test]
+fn concurrent_handles_replay_their_own_graphs_correctly() {
+    let Some(parent) = backend() else { return };
+    const THREADS: usize = 6;
+    const ITERATIONS: usize = 40;
+    const ROUNDS: usize = 5;
+    const S: f32 = 0.5;
+
+    // Half the handles are shared from one parent (one catalogue, one module
+    // cache), half are independent.
+    let mut handles: Vec<Box<dyn backend_api::Backend>> = Vec::new();
+    for i in 0..THREADS {
+        if i % 2 == 0 {
+            handles.push(parent.share().expect("a shared handle"));
+        } else {
+            handles.push(Box::new(CudaBackend::try_new(KERNELS).expect("an independent handle")));
+        }
+    }
+
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let workers: Vec<_> = handles
+            .iter()
+            .enumerate()
+            .map(|(t, b)| {
+                scope.spawn(move || {
+                    let mut bad = Vec::new();
+                    for it in 0..ITERATIONS {
+                        // Fresh buffers every iteration: the churn.
+                        let scale = 1.0 + (t * ITERATIONS + it) as f32 * 0.25;
+                        let inp = b.storage_init("inp", &input().iter().map(|v| v * scale).collect::<Vec<_>>());
+                        let outs: Vec<_> = (0..CHAIN).map(|_| b.storage(N as u64)).collect();
+                        for _ in 0..ROUNDS {
+                            round(b.as_ref(), &outs, &inp, N, S);
+                        }
+                        b.poll_wait();
+                        let want = input();
+                        'check: for (j, o) in outs.iter().enumerate() {
+                            let got = b.read(o, N);
+                            for i in 0..N {
+                                let expect = ROUNDS as f32 * S * want[i] * scale;
+                                if (got[i] - expect).abs() > 1e-4 * expect.abs().max(1.0) {
+                                    bad.push(format!("thread {t} iteration {it} output {j} element {i}: got {}, want {expect}", got[i]));
+                                    break 'check;
+                                }
+                            }
+                        }
+                    }
+                    bad
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("worker thread")).collect()
+    });
+    assert!(failures.is_empty(), "{} corrupted iteration(s), e.g.:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
 }
