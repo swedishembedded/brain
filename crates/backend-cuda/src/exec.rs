@@ -53,10 +53,31 @@ pub struct Cubin {
 }
 
 /// One device with its primary context retained.
+/// One retain of a device's primary context, released when the LAST holder
+/// drops. The handle that made an allocation, an event or a pinned block is
+/// routinely gone before it is (a model drops its device handle ahead of its
+/// buffers; a buffer left on another handle's stream outlives its writer), and
+/// destroying a device object after the context it belongs to has been released
+/// is a crash inside the driver, not an error code - so every object that needs
+/// the context to be alive holds a share of this rather than trusting the
+/// handle that created it.
+pub(crate) struct PrimaryRef {
+    fns: &'static ExecFns,
+    dev: std::ffi::c_int,
+}
+
+impl Drop for PrimaryRef {
+    fn drop(&mut self) {
+        // SAFETY: balances the retain made in `Context::open`, exactly once.
+        unsafe {
+            (self.fns.primary_ctx_release)(self.dev);
+        }
+    }
+}
+
 pub struct Context {
     d: &'static Driver,
     fns: &'static ExecFns,
-    dev: std::ffi::c_int,
     ctx: CuContext,
     cc: (u32, u32),
     name: String,
@@ -69,6 +90,8 @@ pub struct Context {
     /// This handle's identity among streams, for [`Fence`]: two buffers touched
     /// by the same stream need no ordering between them.
     stream_id: u64,
+    /// Keeps the primary context alive for every object this context hands out.
+    primary: Arc<PrimaryRef>,
     /// Incremented every time a device allocation is freed.
     ///
     /// A freed address may be handed straight back out by the next
@@ -108,13 +131,13 @@ impl Context {
         let mut c = Context {
             d,
             fns,
-            dev,
             ctx,
             cc: (info.cc_major, info.cc_minor),
             name: info.name.clone(),
             info: info.clone(),
             stream: std::ptr::null_mut(),
             stream_id: NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed),
+            primary: Arc::new(PrimaryRef { fns, dev }),
             alloc_epoch: Arc::new(AtomicU64::new(0)),
         };
         c.make_current()?;
@@ -205,6 +228,7 @@ impl Context {
             len: bytes,
             epoch: self.alloc_epoch.clone(),
             fence: std::sync::Mutex::new(None),
+            _primary: self.primary.clone(),
         })
     }
 
@@ -221,7 +245,7 @@ impl Context {
         let mut p: *mut c_void = std::ptr::null_mut();
         // SAFETY: `p` is a valid out-parameter; the block is released in Drop.
         self.d.check(unsafe { (self.fns.mem_alloc_host)(&mut p, bytes) }, "cuMemAllocHost")?;
-        Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words })
+        Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words, _primary: self.primary.clone() })
     }
 
     /// Copy host bytes into a device allocation.
@@ -348,7 +372,7 @@ impl Context {
         let mut ev: CuEvent = std::ptr::null_mut();
         // SAFETY: `ev` is a valid out-parameter; the flags are driver constants.
         self.d.check(unsafe { (self.fns.event_create)(&mut ev, flags) }, "cuEventCreate")?;
-        Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev })
+        Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev, _primary: self.primary.clone() })
     }
 
     /// Work enqueued on [`Self::stream`] after this call starts only once
@@ -594,7 +618,8 @@ impl Drop for Context {
             if !self.stream.is_null() && (self.fns.ctx_set_current)(self.ctx) == 0 {
                 (self.fns.stream_destroy)(self.stream);
             }
-            (self.fns.primary_ctx_release)(self.dev);
+            // The primary context is released by `PrimaryRef`, when the last
+            // object that needs it has gone - not here.
         }
         OPEN_CONTEXTS.fetch_sub(1, Ordering::AcqRel);
     }
@@ -768,6 +793,7 @@ pub struct Event {
     fns: &'static ExecFns,
     ctx: CuContext,
     ev: CuEvent,
+    _primary: Arc<PrimaryRef>,
 }
 
 impl Drop for Event {
@@ -796,6 +822,7 @@ pub struct PinnedMem {
     ctx: CuContext,
     ptr: *mut u32,
     words: usize,
+    _primary: Arc<PrimaryRef>,
 }
 
 impl PinnedMem {
@@ -861,6 +888,8 @@ pub struct DeviceMem {
     /// The last work any handle's stream did to this allocation, when more than
     /// one handle is open. See [`Fence`].
     pub(crate) fence: std::sync::Mutex<Option<Fence>>,
+    /// Keeps the context this allocation lives in alive until it is freed.
+    _primary: Arc<PrimaryRef>,
 }
 
 impl DeviceMem {

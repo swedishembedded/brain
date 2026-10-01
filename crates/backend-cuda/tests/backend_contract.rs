@@ -408,3 +408,24 @@ fn a_handle_waits_for_another_handle_s_work_on_a_buffer_it_consumes() {
         assert_eq!(*v, (2 * CHAIN) as f32, "element {i}: the consumer read x before the producer finished writing it");
     }
 }
+
+/// A buffer routinely outlives the handle that wrote it (a model drops its
+/// device handle before its buffers; a pipeline keeps a tensor after the
+/// component that produced it is gone). The ordering event a write leaves on
+/// the buffer must therefore survive its handle's context: destroying an event
+/// after the context it belongs to has gone crashed the process at exit.
+#[test]
+fn a_buffer_outliving_its_handles_drops_cleanly() {
+    let Some(first) = backend() else { return };
+    let second = CudaBackend::try_new(KERNELS).expect("a second handle, so ordering events are recorded");
+    let x = first.storage_init("x", &vec![1.0f32; 1024]);
+    let y = second.storage(1024);
+    second.submit(&[], &[second.step(ADD2, &[&x, &x, &y], &[1024u32], 1024)]);
+    second.poll_wait();
+    assert_eq!(second.read(&y, 4), vec![2.0; 4]);
+    // Both handles go first, the buffers last: the opposite of construction.
+    drop(first);
+    drop(second);
+    drop(x);
+    drop(y);
+}
