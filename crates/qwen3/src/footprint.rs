@@ -89,12 +89,14 @@ fn quantized_linear_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
 /// At `Dtype::F32` the linears stay in `shard_param_list`'s fp32 sum
 /// unchanged, matching `new_impl`'s own `plist` filter (`!(quantized &&
 /// is_i8_linear(name))` - nothing is filtered out when not quantized).
-fn weight_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
+fn weight_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, train: bool) -> u64 {
     let quantized = dt != Dtype::F32;
+    // The embedding and the head of a LoRA build over a bf16 base are held in bf16.
+    let half_tables = train && cfg.lora.is_some() && dt == Dtype::BF16;
     let base: u64 = crate::shard_param_list(cfg, shard)
         .into_iter()
         .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)))
-        .map(|(_, c)| c as u64 * 4)
+        .map(|(name, c)| c as u64 * if half_tables && (name == "tok.weight" || name == "lm_head.weight") { 2 } else { 4 })
         .sum();
     if !quantized {
         return base;
@@ -191,7 +193,7 @@ fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only:
 /// counted.
 pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: u32, train: bool, decode_only: bool) -> u64 {
     let n = crate::model::activation_rows(b, t, decode_only);
-    weight_bytes(cfg, shard, dt)
+    weight_bytes(cfg, shard, dt, train)
         + kv_cache_bytes(cfg, t, train)
         + residual_bytes(cfg, shard, n, train)
         + activation_scratch_bytes(cfg, n, t, b, train, decode_only)
@@ -355,11 +357,23 @@ mod tests {
     fn training_memory_is_linear_in_the_block() {
         let cfg = QwenConfig { lora: Some(crate::LoraCfg::attn(8, 16.0)), ..QwenConfig::qwen3_0_6b() };
         let shard = Shard::whole(cfg.n_layers as usize);
-        let weights = weight_bytes(&cfg, &shard, Dtype::F32);
+        let weights = weight_bytes(&cfg, &shard, Dtype::F32, true);
         let at = |t: u32| estimate_vram_bytes(&cfg, &shard, Dtype::F32, 1, t, true, false) - weights;
         for t in [4096u32, 8192] {
             assert!(at(2 * t) <= 2 * at(t) + (1 << 20), "T={t}: {} -> {} bytes past the weights", at(t), at(2 * t));
         }
+    }
+
+    /// A LoRA build over a bf16 base holds the embedding and the head in bf16:
+    /// the estimate drops by half of each table, and an inference build or an
+    /// fp32 base keeps them at fp32.
+    #[test]
+    fn a_lora_bf16_build_counts_its_tables_at_two_bytes() {
+        let cfg = QwenConfig { lora: Some(crate::LoraCfg::attn(8, 16.0)), tie_embeddings: false, ..QwenConfig::qwen3_0_6b() };
+        let shard = Shard::whole(cfg.n_layers as usize);
+        let tables = 2 * cfg.vocab as u64 * cfg.d_model as u64;
+        assert_eq!(weight_bytes(&cfg, &shard, Dtype::BF16, false) - weight_bytes(&cfg, &shard, Dtype::BF16, true), tables * 2, "training halves both tables");
+        assert_eq!(weight_bytes(&cfg, &shard, Dtype::F32, false), weight_bytes(&cfg, &shard, Dtype::F32, true), "fp32 keeps them");
     }
 
     /// A `decode_only` build skips the head logits/`d_logits` buffer entirely

@@ -109,3 +109,33 @@ fn a_fresh_adapter_leaves_the_bf16_base_loss_unchanged() {
     base.set_batch(&TOKENS, &TARGETS);
     assert_eq!(with_adapter, base.forward(), "B = 0 adds exactly nothing to the bf16 base");
 }
+
+/// The token embedding and the LM head are frozen in a LoRA build, so a bf16
+/// base holds them in bf16 too (half the bytes, and a 152k-token head then
+/// fits one storage binding): the loss and every adapter gradient still agree
+/// with the fp32 build, for a tied and for an untied head.
+#[test]
+fn the_head_and_embedding_are_held_in_bf16_and_train_the_same_adapters() {
+    if gpu_disabled() {
+        return;
+    }
+    for tie in [true, false] {
+        let cfg = QwenConfig { tie_embeddings: tie, ..config() };
+        let init = weights(&cfg, 0.3);
+        let (want_loss, want) = loss_and_grads(&Qwen::new(cfg.clone(), 1, 12, &init));
+        let half = Qwen::new_lora_dt(cfg, 1, 12, &init, Dtype::BF16);
+        if half.linear_dtype() != Some(Dtype::BF16) {
+            return;
+        }
+        assert_eq!(half.head_dtype(), Dtype::BF16, "tie={tie}: the head table is held in bf16");
+        let (loss, got) = loss_and_grads(&half);
+        assert!((loss - want_loss).abs() < 1e-4 * want_loss.abs().max(1.0), "tie={tie}: loss {loss} vs {want_loss}");
+        for ((name, g), (_, w)) in got.iter().zip(&want) {
+            if w.iter().any(|x| *x != 0.0) {
+                assert!(cosine(g, w) > 0.9999, "tie={tie} {name}: adapter gradient cosine {}", cosine(g, w));
+            }
+        }
+        let host = half.read_weight(half.cfg.head_weight());
+        assert_eq!(host, init[half.cfg.head_weight()], "tie={tie}: the packed table reads back as the values it was built from");
+    }
+}

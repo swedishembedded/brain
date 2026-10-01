@@ -188,8 +188,9 @@ everything about HOW to serve it is a `brain serve` flag:
   all seven). An unknown or repeated name is refused.
 - `--base-dtype f32|bf16` - the storage dtype of the frozen base during a
   `finetune --lora` run (default `f32`). `bf16` halves the base's bytes - a
-  7B decoder trains on one 24 GB card - while the adapters, activations
-  and optimiser stay fp32. `--weights` may name a `transformers` checkpoint
+  7B decoder trains on one 24 GB card - and holds the frozen embedding and
+  LM head in bf16 too, while the adapters, activations and optimiser stay
+  fp32. `--weights` may name a `transformers` checkpoint
   directory (a model-store `vendor/repo`): it is read as downloaded, one
   tensor at a time, and nothing is written beside it.
   A model that does not fit one card is laid out across the cards by what

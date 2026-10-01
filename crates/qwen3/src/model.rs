@@ -347,6 +347,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
             v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
+            v.push(kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap());
             v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
         }
         v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
@@ -740,6 +741,12 @@ pub struct Qwen {
     /// `DeviceBuffer` `ps` already holds (a cheap `Arc` bump, not a second
     /// upload).
     weights: HashMap<String, Weight>,
+    /// The token embedding and the LM head of a LoRA build whose frozen base
+    /// is bf16 (both are frozen there): packed two to a `u32`, so a tile of
+    /// rows is `d_model / 2` words each. Empty on every other build, whose
+    /// tables are the fp32 buffers in `ps`.
+    tables: HashMap<String, DeviceBuffer>,
+    half_tables: bool,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
     /// one prefill chunk and `scores`/`probs` for `n_heads·ctx` (KV-cache
     /// prefill and decode only - the KV cache is the only ctx-scaled
@@ -1043,16 +1050,13 @@ impl Qwen {
     /// it lands back on fp32 rather than dispatching a kernel it has no path
     /// for. Ask [`Self::linear_dtype`] what actually happened.
     ///
-    /// **Only the 7 per-layer linears change tier.** The token embedding
-    /// (`tok.weight`) and the LM head stay fp32 for the same reason they do on
-    /// the int8 path, and the reason is structural, not a policy choice: this
-    /// crate's embedding gather is `embed_tile.wgsl` and its head GEMM is
-    /// `linear_kernel`'s plain `matmul`/`matmul_reg3`, neither of which is
-    /// registered here in a packed-storage variant - they read the
-    /// `ParamStore` buffer as raw f32, so handing them packed words would
-    /// reinterpret bit patterns as garbage floats. The per-layer RMSNorm/
-    /// QK-norm gains stay fp32 too: they are `[d]`/`[head_dim]` vectors (a
-    /// rounding error away from free) consumed by norm kernels, not GEMMs.
+    /// **Only the 7 per-layer linears change tier** in an inference build.
+    /// The token embedding (`tok.weight`) and the LM head stay fp32 there:
+    /// host code reads them back as f32 (`read_weight`, the host sampler). A
+    /// LoRA training build over a bf16 base freezes both tables and holds them
+    /// in bf16 too ([`Self::head_dtype`]), through the `#emb=bf16` / `#w=bf16`
+    /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
+    /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
         Qwen::new_impl(cfg, b, t, init, false, shard, dt, false)
     }
@@ -1131,9 +1135,14 @@ impl Qwen {
         // Without this filter an f16 build would be BIGGER than fp32 (1.0x
         // master copy + 0.5x packed), not half the size.
         let quantized = dt != Dtype::F32;
+        // A LoRA build freezes the embedding and the head, so a bf16 base
+        // holds them in bf16 as well (on a device that runs the tier).
+        let half_tables = train && cfg.lora.is_some() && dt == Dtype::BF16 && dt.promote(&ops.caps().numeric) == Dtype::BF16;
+        assert!(!half_tables || cfg.d_model % 2 == 0, "a bf16 table packs two values to a word, so d_model must be even");
+        let is_table = |name: &str| name == "tok.weight" || name == "lm_head.weight";
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)))
+            .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)) && !(half_tables && is_table(name)))
             .collect();
         // Role assignment:
         //  - inference (`!train`): every parameter Frozen (weights only).
@@ -1286,7 +1295,9 @@ impl Qwen {
         // `rows x head_tile_cols` - a quarter of the tile budget - so the
         // passes use the GEMM kernels an untiled head does.
         let head_tile_cols = (((block::tile_budget_words_for(&gpu) / 4) / (head_rows as u64).max(1)).max(64) & !63) as u32;
-        let vocab_tiles = block::vocab_tiles_on(&gpu, v, d);
+        // A packed table's rows are `d / 2` words, so it tiles (and, below
+        // the binding limit, does not) by that width.
+        let vocab_tiles = block::vocab_tiles_on(&gpu, v, if half_tables { d / 2 } else { d });
         let head_tile = if vocab_tiles.len() > 1 { hd_or_dummy(head_rows as u64 * head_tile_cols as u64) } else { st(1) };
         // Backward scratch: read only by `build_backward_steps`/`backward`,
         // which never run unless `train`. The old gate here was
@@ -1354,6 +1365,18 @@ impl Qwen {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
                 weights.insert(name, w);
+            }
+        }
+
+        let mut tables: HashMap<String, DeviceBuffer> = HashMap::new();
+        if half_tables {
+            for (name, _) in shard_param_list(&cfg, &shard).into_iter().filter(|(n, _)| is_table(n)) {
+                let mut built: Option<Weight> = None;
+                let found = src.with_tensor(&name, &mut |raw| built = Some(Weight::upload(&ops, raw, v as usize, d as usize, Dtype::BF16)));
+                assert!(found, "qwen: missing init weight {name}");
+                src.advise_drop(&name);
+                let Some(Weight::BF16 { w, .. }) = built else { unreachable!("a bf16 upload is a bf16 weight") };
+                tables.insert(name, w);
             }
         }
 
@@ -1456,6 +1479,8 @@ impl Qwen {
             chunk_seq_lens: st(n),
             ops,
             weights,
+            tables,
+            half_tables,
             decode_only,
             gpu,
         };
@@ -1491,6 +1516,52 @@ impl Qwen {
     }
     fn g(&self, name: &str) -> &DeviceBuffer {
         self.ps.g(name)
+    }
+
+    /// The embedding / LM-head table `name`: its packed bf16 buffer on a
+    /// build that holds the tables in bf16, else the fp32 parameter.
+    fn table(&self, name: &str) -> &DeviceBuffer {
+        self.tables.get(name).unwrap_or_else(|| self.ps.w(name))
+    }
+
+    /// Words of one table row: `d_model`, or half that packed in bf16. Tile
+    /// offsets and sizes into a table are in these.
+    fn table_row_words(&self) -> u64 {
+        self.cfg.d_model as u64 / if self.half_tables { 2 } else { 1 }
+    }
+
+    /// The storage tier of the embedding and the LM head: bf16 in a LoRA
+    /// build with a bf16 base (they are frozen there), fp32 otherwise.
+    pub fn head_dtype(&self) -> Dtype {
+        if self.half_tables {
+            Dtype::BF16
+        } else {
+            Dtype::F32
+        }
+    }
+
+    /// `kernel` (a plain fp32 GEMM / GEMV id) as the bf16-table variant when
+    /// the tables are packed; unchanged otherwise.
+    fn table_gemm(&self, kernel: usize) -> usize {
+        if !self.half_tables {
+            return kernel;
+        }
+        let name = if kernel == MATMUL {
+            "matmul#w=bf16"
+        } else if kernel == MATMUL_REG3 {
+            "matmul_reg3#w=bf16"
+        } else if Some(kernel) == self.gpu.kernel_index("matmul_gemv") {
+            "matmul_gemv#w=bf16"
+        } else {
+            panic!("qwen: no bf16-table variant for GEMM kernel {kernel}")
+        };
+        self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen: kernel {name} is not registered"))
+    }
+
+    /// The input-gradient kernel against a bf16 matrix `[.., k]` of `m` rows.
+    fn bf16_dx(&self, m: u32, k: u32) -> (usize, gpu_core::Dispatch) {
+        let named = |n: &str| self.gpu.kernel_index(n).unwrap_or_else(|| panic!("qwen: kernel {n} is not registered"));
+        dx_kernel_among(named("matmul_dx#w=bf16"), named("matmul_dx_reg#w=bf16"), m, k)
     }
 
     /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
@@ -1792,8 +1863,7 @@ impl Qwen {
     fn base_dx(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
         match self.weights.get(wname) {
             Some(Weight::BF16 { w, .. }) => {
-                let named = |n: &str| self.gpu.kernel_index(n).unwrap_or_else(|| panic!("qwen: kernel {n} is not registered"));
-                let (kernel, grid) = dx_kernel_among(named("matmul_dx#w=bf16"), named("matmul_dx_reg#w=bf16"), m, k);
+                let (kernel, grid) = self.bf16_dx(m, k);
                 s.push(self.gpu.dispatch(kernel, &[d_out, w, dx], &[m, k, nout, acc], grid));
             }
             _ => {
@@ -1831,13 +1901,14 @@ impl Qwen {
     /// while its own batched forward was perfectly happy.
     fn embed_tiled(&self, g: &Gpu, out: &DeviceBuffer, n: u32) -> Vec<Step> {
         let d = self.cfg.d_model;
-        let dw = d as u64;
+        let dw = self.table_row_words();
+        let kernel = if self.half_tables { self.gpu.kernel_index("embed_tile#emb=bf16").expect("qwen: kernel embed_tile#emb=bf16 is not registered") } else { EMBED_TILE };
         self.vocab_tiles()
             .into_iter()
             .map(|(v0, cnt)| {
                 g.step_sliced(
-                    EMBED_TILE,
-                    &[&self.tokens, self.w("tok.weight"), out],
+                    kernel,
+                    &[&self.tokens, self.table("tok.weight"), out],
                     &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
                     &[d, n, v0, cnt],
                     n * d,
@@ -1889,7 +1960,7 @@ impl Qwen {
     /// deliberately left off `Ops`.
     fn head_steps(&self, out: &DeviceBuffer, tiles: &[(u32, u32)]) -> Vec<Step> {
         let d = self.cfg.d_model;
-        let dw = d as u64;
+        let dw = self.table_row_words();
         let head = self.cfg.head_weight();
         let gemv = if self.coop { self.gpu.kernel_index("matmul_gemv") } else { None };
         tiles
@@ -1897,8 +1968,8 @@ impl Qwen {
             .map(|&(v0, cnt)| {
                 let (mk, mt) = block::gemm_variant(block::GemmVariants::Fast { gemv, tiled: MATMUL_REG3 }, 1, cnt);
                 self.gpu.dispatch_sliced(
-                    mk,
-                    &[&self.xn_final, self.w(head), out],
+                    self.table_gemm(mk),
+                    &[&self.xn_final, self.table(head), out],
                     &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (v0 as u64, cnt as u64)],
                     &[1, d, cnt],
                     mt,
@@ -2176,13 +2247,13 @@ impl Qwen {
     /// their place in `logits` rows `0..rows`.
     fn head_logits_tiled_steps(&self, r0: u32, rows: u32) -> Vec<Step> {
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let dw = d as u64;
+        let (dw, tw) = (d as u64, self.table_row_words());
         let head = self.cfg.head_weight();
         let x = (r0 as u64 * dw, rows as u64 * dw);
         let mut s = Vec::new();
         for (c0, c) in self.head_tile_passes() {
             let (mk, mt) = linear_kernel(rows as usize, c as usize);
-            s.push(self.gpu.dispatch_sliced(mk, &[&self.xn_final, self.w(head), &self.head_tile], &[x, (c0 as u64 * dw, c as u64 * dw), (0, 0)], &[rows, d, c], mt));
+            s.push(self.gpu.dispatch_sliced(self.table_gemm(mk), &[&self.xn_final, self.table(head), &self.head_tile], &[x, (c0 as u64 * tw, c as u64 * tw), (0, 0)], &[rows, d, c], mt));
             s.push(self.gpu.step(COPY_COLS, &[&self.head_tile, &self.logits], &[rows, c, c, 0, v, c0], rows * c));
         }
         s
@@ -2196,7 +2267,7 @@ impl Qwen {
         let tiles = self.vocab_tiles();
         if tiles.len() == 1 && tiles[0] == (0, v) {
             let (mk, mt) = linear_kernel(rows as usize, v as usize);
-            return vec![self.gpu.dispatch_sliced(mk, &[&self.xn_final, self.w(head), &self.logits], &[x, (0, 0), (0, 0)], &[rows, d, v], mt)];
+            return vec![self.gpu.dispatch_sliced(self.table_gemm(mk), &[&self.xn_final, self.table(head), &self.logits], &[x, (0, 0), (0, 0)], &[rows, d, v], mt)];
         }
         self.head_logits_tiled_steps(r0, rows)
     }
@@ -2240,29 +2311,32 @@ impl Qwen {
     /// (and of `dW`).
     fn head_bwd_steps(&self, d_logits: &DeviceBuffer, r0: u32, rows: u32) -> Vec<Step> {
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let dw = d as u64;
+        let (dw, tw) = (d as u64, self.table_row_words());
         let head = self.cfg.head_weight();
         let x = (r0 as u64 * dw, rows as u64 * dw);
         let tiles = self.vocab_tiles();
         let mut s = Vec::new();
+        // The input gradient reads the table: through the bf16 kernel when it is packed.
+        let dx_kernel = |m: u32| if self.half_tables { self.bf16_dx(m, d) } else { dx_kernel_bw(m, d) };
         if tiles.len() == 1 && tiles[0] == (0, v) {
             if self.trainable(head) {
                 let (bk, bt) = dw_kernel_bw(v, d);
                 s.push(self.gpu.dispatch_sliced(bk, &[d_logits, &self.xn_final, self.g(head)], &[(0, 0), x, (0, 0)], &[rows, d, v], bt));
             }
-            let (bk, bt) = dx_kernel_bw(rows, d);
-            s.push(self.gpu.dispatch_sliced(bk, &[d_logits, self.w(head), &self.d_xn], &[(0, 0), (0, 0), x], &[rows, d, v, 0], bt));
+            let (bk, bt) = dx_kernel(rows);
+            s.push(self.gpu.dispatch_sliced(bk, &[d_logits, self.table(head), &self.d_xn], &[(0, 0), (0, 0), x], &[rows, d, v, 0], bt));
             return s;
         }
         for (i, (c0, c)) in self.head_tile_passes().into_iter().enumerate() {
-            let tile = (c0 as u64 * dw, c as u64 * dw);
+            let tile = (c0 as u64 * tw, c as u64 * tw);
+            let dwtile = (c0 as u64 * dw, c as u64 * dw);
             s.push(self.gpu.step(COPY_COLS, &[d_logits, &self.head_tile], &[rows, c, v, c0, c, 0], rows * c));
             if self.trainable(head) {
                 let (bk, bt) = dw_kernel_bw(c, d);
-                s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, &self.xn_final, self.g(head)], &[(0, 0), x, tile], &[rows, d, c], bt));
+                s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, &self.xn_final, self.g(head)], &[(0, 0), x, dwtile], &[rows, d, c], bt));
             }
-            let (bk, bt) = dx_kernel_bw(rows, d);
-            s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, self.w(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, c, (i > 0) as u32], bt));
+            let (bk, bt) = dx_kernel(rows);
+            s.push(self.gpu.dispatch_sliced(bk, &[&self.head_tile, self.table(head), &self.d_xn], &[(0, 0), tile, x], &[rows, d, c, (i > 0) as u32], bt));
         }
         s
     }
@@ -2446,10 +2520,20 @@ impl Qwen {
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        self.ps.read_weight(&self.gpu, name)
+        match self.tables.get(name) {
+            Some(packed) => {
+                let n = (self.cfg.vocab as usize * self.cfg.d_model as usize).div_ceil(2);
+                let words: Vec<u32> = self.gpu.read(packed, n).into_iter().map(f32::to_bits).collect();
+                words.iter().flat_map(|w| [f32::from_bits(w << 16), f32::from_bits(w & 0xffff_0000)]).collect()
+            }
+            None => self.ps.read_weight(&self.gpu, name),
+        }
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
-        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+        match self.tables.get(name) {
+            Some(packed) => self.gpu.write(packed, bytemuck::cast_slice(&model::half::pack_bf16(data))),
+            None => self.gpu.write(self.w(name), bytemuck::cast_slice(data)),
+        }
     }
 
     // ---- pipeline-parallel cross-stage seam ----
@@ -2460,7 +2544,7 @@ impl Qwen {
     }
     /// Does this stage hold parameter `name` (weight buffer present)?
     pub fn has_param(&self, name: &str) -> bool {
-        self.ps.weight.contains_key(name)
+        self.ps.weight.contains_key(name) || self.tables.contains_key(name)
     }
     /// Run the forward graph without reading the loss (non-head stages).
     pub fn run_forward(&self) {
