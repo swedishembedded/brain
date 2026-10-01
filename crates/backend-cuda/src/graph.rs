@@ -78,6 +78,11 @@ pub(crate) struct NodeSig {
     pub uniform: usize,
     pub words: usize,
     pub bufs: Vec<(usize, u64)>,
+    /// Bound range length in words per binding. Part of the structure because
+    /// it is baked into the node's argument list, which a replay never
+    /// rewrites: two submissions differing only in a slice length must not
+    /// share a graph.
+    pub lens: Vec<u64>,
 }
 
 /// A whole submission's structure.
@@ -183,6 +188,9 @@ pub(crate) struct Resolved {
     /// already folded into `args`; these are kept so a captured node can hold
     /// every allocation it names alive.
     pub bufs: Vec<(Arc<exec::DeviceMem>, u64)>,
+    /// Bound range length in words per binding; already appended to `args`
+    /// for a kernel that takes them, kept for the submission signature.
+    pub lens: Vec<u64>,
 }
 
 /// How many captured graphs a handle keeps at once.

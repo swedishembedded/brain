@@ -86,6 +86,13 @@ pub struct Kernel {
     pub block_dim: u32,
     /// Storage binding indices, ascending - the order the entry point takes
     /// its pointer arguments in, after the uniform stream.
+    ///
+    /// The entry point then takes one more argument per binding, in the same
+    /// order and AFTER all the pointers: `unsigned long long`, the length of
+    /// the bound range in 32-bit words. Every array access is clamped to it
+    /// (and `arrayLength` reads it), so a launcher that passes a length longer
+    /// than the allocation reintroduces out-of-bounds accesses; one that
+    /// passes zero reads and writes element 0 only.
     pub bindings: Vec<u32>,
     /// Size of the uniform `Params` block in bytes, under **WGSL** layout
     /// rules. 0 when the kernel declares no uniform.
@@ -239,6 +246,19 @@ impl Ty {
     }
 }
 
+/// `index` restricted to a valid element of an array of `nel` elements.
+///
+/// WGSL does not let an out-of-range access touch memory outside the array: an
+/// implementation clamps the index, returns zero, or drops the store. naga's
+/// backends clamp ("restrict"), which is what wgpu runs the project's kernels
+/// under, and kernels written for it lean on that at ragged tile edges: they
+/// read a few elements past the end and mask the result. CUDA has no such
+/// guarantee, so an unclamped read there returns whatever allocation lies
+/// next - different from run to run, and invisible when a test runs alone.
+fn clamped(index: &str, nel: &str) -> String {
+    format!("__brain_clamp({index}, (size_t)({nel}))")
+}
+
 /// Component `c` of a vector whose first component is the lvalue `base`.
 fn vec_comp(base: &str, c: usize) -> String {
     format!("(&{base})[{c}u]")
@@ -265,8 +285,10 @@ enum Place {
     /// A scalar lvalue: a local variable, or an already-indexed array element.
     Lvalue(String, Ty),
     /// An array base (storage binding, workgroup scratch, or a local array)
-    /// awaiting an index.
-    ArrayBase(String, Ty),
+    /// awaiting an index. The last field is the element count as C++ text (a
+    /// literal, or a run-time length for a storage binding), which every index
+    /// is clamped against: see `clamped`.
+    ArrayBase(String, Ty, String),
     /// The uniform block. Read-only, and only ever refined by `AccessIndex`.
     UniformBase,
     /// A vector lvalue: a reference to its first component, the others lying
@@ -277,7 +299,7 @@ enum Place {
     VecRef { base: String, n: u32, ty: Ty },
     /// An array whose elements are vectors, awaiting an index. `stride` is the
     /// element's size in 32-bit words, which WGSL rounds `vec3` up to four.
-    VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32 },
+    VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32, nel: String },
 }
 
 /// What a global variable became in the emitted source.
@@ -285,9 +307,9 @@ enum Place {
 enum GlobalKind {
     /// A kernel pointer parameter for a storage binding. `vec` is
     /// `(components, stride in words)` when the array's elements are vectors.
-    Storage { ident: String, elem: Ty, vec: Option<(u32, u32)> },
+    Storage { ident: String, elem: Ty, vec: Option<(u32, u32)>, nel: String },
     /// A `__shared__` array.
-    WorkGroup { ident: String, elem: Ty, vec: Option<(u32, u32)> },
+    WorkGroup { ident: String, elem: Ty, vec: Option<(u32, u32)>, nel: String },
     /// The uniform block, read through byte offsets.
     Uniform,
 }
@@ -451,7 +473,7 @@ impl<'a> Gen<'a> {
         }
 
         // Bindings and workgroup scratch, in a stable order.
-        let mut bindings: Vec<(u32, String, Ty)> = Vec::new();
+        let mut bindings: Vec<(u32, String, Ty, u32)> = Vec::new();
         let mut shared: Vec<(String, Ty, u32)> = Vec::new();
         let mut uniform_bytes = 0usize;
         for (h, gv) in self.m.global_variables.iter() {
@@ -465,25 +487,32 @@ impl<'a> Gen<'a> {
                     let layout = array_layout(self.m, gv.ty)?;
                     let (elem, vec) = (layout.elem, layout.vec);
                     let ident = format!("__b{b}");
-                    bindings.push((b, ident.clone(), elem));
-                    self.globals.insert(h, GlobalKind::Storage { ident, elem, vec });
+                    bindings.push((b, ident.clone(), elem, layout.stride()));
+                    self.globals.insert(h, GlobalKind::Storage { ident, elem, vec, nel: format!("__nel{b}") });
                 }
                 AddressSpace::WorkGroup => {
                     let (elem, count) = array_info(self.m, gv.ty)?;
-                    let vec = array_layout(self.m, gv.ty)?.vec;
+                    let layout = array_layout(self.m, gv.ty)?;
+                    let (vec, nel) = (layout.vec, count / layout.stride());
                     let name = gv.name.clone().unwrap_or_else(|| format!("wg{}", shared.len()));
                     let ident = format!("__wg_{}", ident_of(&name));
                     shared.push((ident.clone(), elem, count));
-                    self.globals.insert(h, GlobalKind::WorkGroup { ident, elem, vec });
+                    self.globals.insert(h, GlobalKind::WorkGroup { ident, elem, vec, nel: nel.to_string() });
                 }
                 other => return Err(format!("unsupported address space {other:?}")),
             }
         }
-        bindings.sort_by_key(|(b, _, _)| *b);
+        bindings.sort_by_key(|(b, ..)| *b);
 
         self.locals = self.declare_locals(self.func, "")?;
 
         let mut body = String::new();
+
+        // Element counts of the storage bindings, from the lengths the launcher
+        // passes in words. Every index below is clamped against these.
+        for (b, _, _, stride) in &bindings {
+            let _ = writeln!(body, "  const size_t __nel{b} = __n{b} / {stride}u;");
+        }
 
         // Builtins, named once so the kernel's own index arithmetic reproduces
         // exactly what the WGSL dispatch would have handed it.
@@ -552,13 +581,16 @@ impl<'a> Gen<'a> {
         if uniform_bytes > 0 {
             params.push("const unsigned int* __params".to_string());
         }
-        for (_, ident, elem) in &bindings {
+        for (_, ident, elem, _) in &bindings {
             // Hazard 5: no `__restrict__`. brain's DeviceBuffer clones alias by
             // design and a sliced step binds overlapping ranges of one buffer,
             // so the promise would be false at exactly the call sites that
             // matter. Nor is any binding `const`: a read-only binding aliasing
             // a written one would otherwise be a type-level lie too.
             params.push(format!("{}* {ident}", elem.c()));
+        }
+        for (b, ..) in &bindings {
+            params.push(format!("unsigned long long __n{b}"));
         }
 
         let mut source = String::new();
@@ -575,7 +607,7 @@ impl<'a> Gen<'a> {
             entry: entry.to_string(),
             source,
             block_dim: self.block_dim,
-            bindings: bindings.iter().map(|(b, _, _)| *b).collect(),
+            bindings: bindings.iter().map(|(b, ..)| *b).collect(),
             uniform_bytes,
         })
     }
@@ -791,9 +823,11 @@ impl<'a> Gen<'a> {
                 TypeInner::Array { .. } => {
                     let (elem, count) = array_info(self.m, lv.ty)?;
                     self.decls.push(format!("{} {ident}[{count}] = {{}};", elem.c()));
-                    let place = match array_layout(self.m, lv.ty)?.vec {
-                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
-                        None => Place::ArrayBase(ident, elem),
+                    let layout = array_layout(self.m, lv.ty)?;
+                    let nel = layout.count.ok_or("a local array needs a fixed size")?.to_string();
+                    let place = match layout.vec {
+                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel },
+                        None => Place::ArrayBase(ident, elem, nel),
                     };
                     locals.insert(h, place);
                 }
@@ -1012,16 +1046,22 @@ impl<'a> Gen<'a> {
             Expression::ZeroValue(ty) => self.zero_value(*ty),
             Expression::Constant(c) => self.constant(self.m.constants[*c].init),
             Expression::GlobalVariable(g) => match self.globals.get(g).cloned() {
-                Some(GlobalKind::Storage { ident, elem, vec }) | Some(GlobalKind::WorkGroup { ident, elem, vec }) => {
+                Some(GlobalKind::Storage { ident, elem, vec, nel }) | Some(GlobalKind::WorkGroup { ident, elem, vec, nel }) => {
                     Ok(Eval::Place(match vec {
-                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
-                        None => Place::ArrayBase(ident, elem),
+                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel },
+                        None => Place::ArrayBase(ident, elem, nel),
                     }))
                 }
                 Some(GlobalKind::Uniform) => Ok(Eval::Place(Place::UniformBase)),
                 None => Err("global variable in an unsupported address space".into()),
             },
             Expression::LocalVariable(l) => Ok(Eval::Place(self.locals[l].clone())),
+            Expression::ArrayLength(array) => match self.eval(*array, out, depth)? {
+                Eval::Place(Place::ArrayBase(_, _, nel)) | Eval::Place(Place::VecArrayBase { nel, .. }) => {
+                    Ok(Eval::Value(format!("(unsigned int)({nel})"), Ty::U32))
+                }
+                _ => Err("arrayLength of something that is not an array".into()),
+            },
             // Inside an inlined function an argument is the caller's value.
             Expression::FunctionArgument(ai) if !self.frames.is_empty() => {
                 let f = self.frames.last().expect("a frame is active");
@@ -1058,20 +1098,21 @@ impl<'a> Gen<'a> {
                     // stays u32 (so the source's own wrapping arithmetic is
                     // preserved) and only the final address computation widens,
                     // which is what a 64-bit device pointer needs.
-                    Place::ArrayBase(base, elem) => {
-                        Ok(Eval::Place(Place::Lvalue(format!("{base}[(size_t)({idx})]"), elem)))
+                    Place::ArrayBase(base, elem, nel) => {
+                        Ok(Eval::Place(Place::Lvalue(format!("{base}[{}]", clamped(&format!("(size_t)({idx})"), &nel)), elem)))
                     }
                     // An element of an array of vectors: its components are
                     // `stride` words apart, starting at element `idx`.
-                    Place::VecArrayBase { ident, elem, n, stride } => Ok(Eval::Place(Place::VecRef {
-                        base: format!("{ident}[(size_t)({idx}) * {stride}u]"),
+                    Place::VecArrayBase { ident, elem, n, stride, nel } => Ok(Eval::Place(Place::VecRef {
+                        base: format!("{ident}[{} * {stride}u]", clamped(&format!("(size_t)({idx})"), &nel)),
                         n,
                         ty: elem,
                     })),
                     // A component chosen at run time: components are
-                    // consecutive, so the index is a pointer offset.
-                    Place::VecRef { base, ty, .. } => {
-                        Ok(Eval::Place(Place::Lvalue(format!("(&{base})[(size_t)({idx})]"), ty)))
+                    // consecutive, so the index is a pointer offset, clamped to
+                    // the vector's width like every other index.
+                    Place::VecRef { base, n, ty } => {
+                        Ok(Eval::Place(Place::Lvalue(format!("(&{base})[{}]", clamped(&format!("(size_t)({idx})"), &n.to_string())), ty)))
                     }
                     _ => Err("indexing something that is not an array".into()),
                 }
@@ -1108,8 +1149,8 @@ impl<'a> Gen<'a> {
                         }
                         Ok(Eval::Place(Place::Lvalue(vec_comp(&base, *index as usize), ty)))
                     }
-                    Eval::Place(Place::VecArrayBase { ident, elem, n, stride }) => Ok(Eval::Place(Place::VecRef {
-                        base: format!("{ident}[(size_t)({index}u) * {stride}u]"),
+                    Eval::Place(Place::VecArrayBase { ident, elem, n, stride, nel }) => Ok(Eval::Place(Place::VecRef {
+                        base: format!("{ident}[{} * {stride}u]", clamped(&format!("(size_t)({index}u)"), &nel)),
                         n,
                         ty: elem,
                     })),
@@ -1136,8 +1177,8 @@ impl<'a> Gen<'a> {
                             Ok(Eval::Vector((0..lanes).map(|c| read(off + 4 * c)).collect::<Result<_, _>>()?, ty))
                         }
                     }
-                    Eval::Place(Place::ArrayBase(base, elem)) => {
-                        Ok(Eval::Place(Place::Lvalue(format!("{base}[{index}]"), elem)))
+                    Eval::Place(Place::ArrayBase(base, elem, nel)) => {
+                        Ok(Eval::Place(Place::Lvalue(format!("{base}[{}]", clamped(&format!("(size_t)({index}u)"), &nel)), elem)))
                     }
                     Eval::Place(Place::Lvalue(..)) | Eval::Value(..) => Err("AccessIndex on a scalar".into()),
                 }
@@ -1585,6 +1626,11 @@ const PREAMBLE: &str = r#"// Generated from WGSL by brain's wgsl-cuda (the T0 ti
 //
 // Hazard 2: the uniform block is read through explicit byte offsets taken from
 // the WGSL layout, never as a transliterated C++ struct.
+// WGSL restricts an out-of-range index to the array; so does this. See
+// `clamped` in wgsl-cuda for why a kernel can depend on it.
+__device__ __forceinline__ size_t __brain_clamp(size_t i, size_t n) {
+  return i < n ? i : (n ? n - 1 : 0);
+}
 __device__ __forceinline__ unsigned int __brain_uu32(const unsigned int* p, unsigned int off) {
   return p[off >> 2u];
 }
@@ -1787,6 +1833,33 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
         let e = generate("half", SRC).expect_err("f16 must be refused");
         assert!(e.contains("f16"), "{e}");
+    }
+
+    /// WGSL confines every array access to the array. The emitted source must
+    /// clamp each storage and workgroup access, take the bound lengths after
+    /// the pointers, and expose them through `arrayLength`.
+    #[test]
+    fn every_array_access_is_clamped_and_lengths_follow_the_pointers() {
+        const SRC: &str = r#"
+var<workgroup> tile: array<f32, 8>;
+@group(0) @binding(1) var<storage, read> a: array<f32>;
+@group(0) @binding(3) var<storage, read_write> o: array<vec4<f32>>;
+@compute @workgroup_size(8)
+fn main(@builtin(local_invocation_id) li: vec3<u32>) {
+    tile[li.x + 1u] = a[li.x + 5u];
+    o[li.x] = vec4<f32>(tile[li.x], f32(arrayLength(&a)), 0.0, 0.0);
+}
+"#;
+        let k = generate("clamp", SRC).expect("generate");
+        assert_eq!(k.bindings, vec![1, 3]);
+        assert!(k.source.contains("__b1[__brain_clamp("), "{}", k.source);
+        assert!(k.source.contains("__b3[__brain_clamp("), "{}", k.source);
+        assert!(k.source.contains("__wg_tile[__brain_clamp("), "{}", k.source);
+        // Lengths come after every pointer, in binding order; a vec4 array's
+        // element count is its word count over four.
+        assert!(k.source.contains("float* __b1, float* __b3, unsigned long long __n1, unsigned long long __n3)"), "{}", k.source);
+        assert!(k.source.contains("__nel3 = __n3 / 4u"), "{}", k.source);
+        assert!(k.source.contains("(unsigned int)(__nel1)"), "{}", k.source);
     }
 }
 

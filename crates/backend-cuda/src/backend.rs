@@ -104,6 +104,21 @@ pub struct CudaStep {
     /// offset is how a sliced step expresses its sub-range: a kernel argument
     /// is a bare pointer, so the slice IS the address.
     bufs: Vec<(Arc<exec::DeviceMem>, u64)>,
+    /// Length in 32-bit words of the range each storage binding exposes, in
+    /// binding order: the sub-range for a sliced step, otherwise everything
+    /// from the offset to the end of the allocation. A generated kernel is
+    /// passed these after its pointers and clamps every array access to
+    /// them, as WGSL requires; a native kernel is not passed them.
+    lens: Vec<u64>,
+}
+
+/// Words of `mem` that a binding at `off_bytes` exposes: `len_words` of them,
+/// or - when that is 0, the "to the end" spelling of a sliced step - all that
+/// follow the offset. Never more than the allocation holds, because a length
+/// that outruns it would let the kernel's clamp admit an out-of-bounds access.
+fn bound_words(mem: &exec::DeviceMem, off_bytes: u64, len_words: u64) -> u64 {
+    let avail = (mem.len() as u64).saturating_sub(off_bytes) / 4;
+    if len_words == 0 { avail } else { len_words.min(avail) }
 }
 
 /// One compiled kernel, cached under its `kind`.
@@ -124,6 +139,10 @@ pub(crate) struct Compiled {
     pub(crate) block_dim: u32,
     n_bindings: usize,
     takes_uniform: bool,
+    /// Whether the entry point takes the bound range lengths after its
+    /// pointers: true for a generated kernel (see `wgsl_cuda::Kernel`), false
+    /// for a native one, whose signature is the provider's own.
+    takes_lengths: bool,
     /// Diagnostic name, so a launch failure says which kernel failed whether
     /// it came from the WGSL catalogue or from a provider's own registry.
     name: String,
@@ -535,6 +554,7 @@ impl CudaBackend {
             block_dim: gen.block_dim,
             n_bindings: gen.bindings.len(),
             takes_uniform: gen.uniform_bytes > 0,
+            takes_lengths: true,
             name: k.name.clone(),
             _module: module,
         });
@@ -607,16 +627,19 @@ impl CudaBackend {
         params: &[u32],
         threads: u32,
     ) -> Step {
+        let mut lens = Vec::with_capacity(bufs.len());
         let bufs: Vec<_> = bufs
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let off_words = offsets.map(|o| o[i].0).unwrap_or(0);
-                (CudaBuf::of(b).mem.clone(), off_words * 4)
+                let (off_words, len_words) = offsets.map_or((0, 0), |o| o[i]);
+                let mem = CudaBuf::of(b).mem.clone();
+                lens.push(bound_words(&mem, off_words * 4, len_words));
+                (mem, off_words * 4)
             })
             .collect();
         let uniform = Some(self.uniform_for(kind, &bufs, params.len()));
-        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs })
+        Step::new(CudaStep { kind, threads, uniform, params: params.to_vec(), bufs, lens })
     }
 
     /// Everything a dispatch needs, resolved before anything is issued.
@@ -635,7 +658,7 @@ impl CudaBackend {
             c.n_bindings,
             st.bufs.len()
         );
-        let mut args: Vec<CuDevicePtr> = Vec::with_capacity(st.bufs.len() + 1);
+        let mut args: Vec<CuDevicePtr> = Vec::with_capacity(2 * st.bufs.len() + 1);
         let uniform = if c.takes_uniform {
             let u = st.uniform.as_ref().unwrap_or_else(|| {
                 panic!("backend-cuda: kernel '{name}' declares a uniform block but the dispatch bound none")
@@ -647,6 +670,10 @@ impl CudaBackend {
         };
         for (mem, off) in &st.bufs {
             args.push(mem.device_ptr() + off);
+        }
+        if c.takes_lengths {
+            // The kernel reads the low 64 bits as `unsigned long long`.
+            args.extend(st.lens.iter().copied());
         }
         let func = c.func;
         // A catalogue dispatch counts INVOCATIONS and the grid is laid out by
@@ -666,6 +693,7 @@ impl CudaBackend {
             params: st.params.clone(),
             uniform,
             bufs: st.bufs.clone(),
+            lens: st.lens.clone(),
             compiled: c,
         }
     }
@@ -832,6 +860,7 @@ impl CudaBackend {
                     uniform: r.uniform.as_ref().map(|u| Arc::as_ptr(u) as usize).unwrap_or(0),
                     words: r.params.len(),
                     bufs: r.bufs.iter().map(|(m, off)| (Arc::as_ptr(m) as usize, *off)).collect(),
+                    lens: r.lens.clone(),
                 })
                 .collect(),
         }
@@ -1046,8 +1075,9 @@ impl backend_api::Backend for CudaBackend {
     /// buffer is what the kernel reads, replay or not.
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
         let uniform = Some(CudaBuf::of(ubuf).mem.clone());
-        let bufs = bufs.iter().map(|b| (CudaBuf::of(b).mem.clone(), 0)).collect();
-        Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs })
+        let bufs: Vec<_> = bufs.iter().map(|b| (CudaBuf::of(b).mem.clone(), 0)).collect();
+        let lens = bufs.iter().map(|(m, _)| bound_words(m, 0, 0)).collect();
+        Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs, lens })
     }
 
     /// Compile and keep a provider's OWN CUDA C++ kernel, for the compute
@@ -1121,6 +1151,7 @@ impl backend_api::Backend for CudaBackend {
             // The uniform (if any) is the kernel's first argument, exactly as
             // it is for a generated one.
             takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
+            takes_lengths: false,
             name: format!("native:{entry}"),
             _module: module,
         });

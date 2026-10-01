@@ -458,11 +458,11 @@ impl Context {
     ///
     /// A WGSL `step_sliced` binds `(word_offset, word_len)` of a buffer, which
     /// on this API is just the base address plus `4 * word_offset`: a kernel
-    /// argument is a bare pointer, so the slice is expressed by the address
-    /// handed in and nothing else. The LENGTH is deliberately not passed -
-    /// the generated kernel bounds itself from its own uniform, exactly as the
-    /// WGSL does, and a binding size would be a second, redundant source of
-    /// truth about the same range.
+    /// argument is a bare pointer, so the slice's start is the address handed
+    /// in. A generated kernel is also handed the slice's length, as extra
+    /// `u64` arguments after the pointers (see `wgsl_cuda::Kernel::bindings`),
+    /// because WGSL confines every access to the bound range and a pointer
+    /// alone cannot say where that range ends.
     pub fn launch_at(
         &self,
         f: &Function,

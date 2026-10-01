@@ -160,16 +160,17 @@ fn run_cuda(ctx: &exec::Context, case: &Case) -> Vec<Buf> {
         ctx.upload(&m, &b.bytes()).expect("upload binding");
         owned.push(Some(m));
     }
-    let mut args: Vec<&exec::DeviceMem> = vec![&p];
     let mut order: Vec<usize> = Vec::new();
     for i in 0..case.bufs.len() {
         let src = case.alias.iter().find(|(slot, _)| *slot == i).map(|(_, onto)| *onto).unwrap_or(i);
         order.push(src);
     }
-    for &src in &order {
-        args.push(owned[src].as_ref().expect("aliased onto an owned allocation"));
-    }
-    ctx.launch(&f, (case.grid_x, case.grid_y, 1), (gen.block_dim, 1, 1), &args)
+    // Pointers first, then each binding's length in words - the generated
+    // kernel's ABI, documented on `wgsl_cuda::Kernel::bindings`.
+    let mut args = vec![p.device_ptr()];
+    args.extend(order.iter().map(|&src| owned[src].as_ref().expect("aliased onto an owned allocation").device_ptr()));
+    args.extend(order.iter().map(|&src| owned[src].as_ref().expect("aliased onto an owned allocation").len() as u64 / 4));
+    ctx.launch_at(&f, (case.grid_x, case.grid_y, 1), (gen.block_dim, 1, 1), &args)
         .expect("launch");
     ctx.sync().expect("sync");
 
