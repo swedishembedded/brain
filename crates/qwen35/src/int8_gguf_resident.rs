@@ -1244,6 +1244,25 @@ impl Qwen35GgufInstance {
         Ok(flat.chunks(v).map(|r| r.to_vec()).collect())
     }
 
+    /// Prefill `prompt` into slot 0 through the same path a request takes
+    /// (rounds of [`MAX_PREFILL_TOKENS`] when the weight tier makes a round
+    /// profitable), wait for the device, and return the wall time in seconds.
+    /// The instance is reset first, so this is a cold prefill of exactly
+    /// `prompt`, never a continuation.
+    pub fn prefill_timed(&self, prompt: &[u32]) -> Result<f64, String> {
+        if prompt.is_empty() {
+            return Err(format!("{MODEL}: prefill_timed needs a non-empty prompt"));
+        }
+        if prompt.len() as u64 > self.cap as u64 {
+            return Err(format!("{MODEL}: a prompt of {} tokens exceeds this instance's context capacity {}", prompt.len(), self.cap));
+        }
+        self.reset();
+        let t = std::time::Instant::now();
+        self.replay_prompt(prompt, 0)?;
+        self.poll_wait();
+        Ok(t.elapsed().as_secs_f64())
+    }
+
     /// One batched decode step with an explicit position per row, returning each
     /// row's `[vocab]` logits: the step a server runs every token, without the
     /// prompt that normally precedes it.
