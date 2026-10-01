@@ -35,6 +35,10 @@ fn run(args: &[&str]) -> std::process::Output {
         .args(args)
         .stdin(Stdio::null())
         .env("BRAIN_DEVICE", "cpu")
+        // These tests pin the CPU device. An ambient backend choice (a CUDA
+        // lane exporting BRAIN_BACKEND) would make the binary warn that the
+        // backend needs a GPU, which is not what is under test.
+        .env_remove("BRAIN_BACKEND")
         .output()
         .unwrap_or_else(|e| panic!("run brain {args:?}: {e}"))
 }
