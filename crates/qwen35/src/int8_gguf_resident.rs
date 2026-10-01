@@ -1244,6 +1244,29 @@ impl Qwen35GgufInstance {
         Ok(flat.chunks(v).map(|r| r.to_vec()).collect())
     }
 
+    /// One batched decode step with an explicit position per row, returning each
+    /// row's `[vocab]` logits: the step a server runs every token, without the
+    /// prompt that normally precedes it.
+    ///
+    /// For measuring decode at a context length that would take hours to
+    /// prefill. Row `i` attends over positions `0..=positions[i]` of its slot;
+    /// whatever those cache rows hold is read (zeros, on a fresh instance), so
+    /// the memory traffic and the kernel work are those of a real context of
+    /// that length, and the logits are not meaningful. A caller that wants
+    /// meaningful logits builds the context with [`Self::generate_batch`].
+    pub fn decode_batch_at(&self, tokens: &[u32], positions: &[u32]) -> Result<Vec<Vec<f32>>, String> {
+        if tokens.len() != positions.len() || tokens.is_empty() {
+            return Err(format!("{MODEL}: decode_batch_at needs one position per token ({} tokens, {} positions)", tokens.len(), positions.len()));
+        }
+        if tokens.len() > self.max_batch as usize {
+            return Err(format!("{MODEL}: batch of {} exceeds this instance's max_batch {}", tokens.len(), self.max_batch));
+        }
+        if let Some(&p) = positions.iter().find(|&&p| p >= self.cap) {
+            return Err(format!("{MODEL}: position {p} is beyond this instance's context capacity {}", self.cap));
+        }
+        self.stack_step_batch(tokens, positions)
+    }
+
     /// **Replay a whole prompt**, leaving every stage's GQA cache and GDN
     /// state exactly where a following decode step expects them, and returning
     /// the last prompt token's `[vocab]` logits.

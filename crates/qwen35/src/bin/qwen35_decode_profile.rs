@@ -143,7 +143,7 @@ fn baseline_json(
         "workload": "decode",
         "best_of_n": 1,
         "env": {
-            "backend": "wgpu",
+            "backend": gpu_core::backend_name(),
             "build": "release",
             "device": placed.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join(" + "),
             "cpu": { "cores": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0) },
