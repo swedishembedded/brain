@@ -427,14 +427,20 @@ impl Store {
             Some(q) => (dir.join(format!("{}.gguf", q.as_str())), Format::Gguf),
             None => (dir.join(BASE_WEIGHTS_FILE), Format::Safetensors),
         };
-        if !base_weights.is_file() {
-            return None;
-        }
         let adapter_path = self.adapter_weights_path(reference)?;
         if !adapter_path.is_file() {
             return None;
         }
         let reader = WeightReader::open(adapter_path.to_str()?).ok()?;
+        if !base_weights.is_file() {
+            // No brain checkpoint beside the adapter: the base may be a
+            // downloaded `transformers` directory, which the adapter is
+            // served from as the base is.
+            let base = base_ref.quant().is_none().then(|| self.local_checkpoint_dir(&base_ref, dir)).flatten()?;
+            let mut card = reader.card()?;
+            card.family = base.card.as_ref()?.family.clone();
+            return Some(LocalModel { reference: reference.clone(), card: Some(card), adapter: Some(adapter_path), ..base });
+        }
         let tokenizer = {
             let t = dir.join(TOKENIZER_FILE);
             t.is_file().then_some(t)
@@ -985,6 +991,36 @@ mod tests {
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         let r = ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:latest").unwrap();
         assert!(store.local(&r).is_none());
+    }
+
+    /// An adapter trained on a downloaded `transformers` directory (no
+    /// `model.brain.safetensors` beside it) is as servable as one trained on
+    /// a brain checkpoint: it is its own catalog entry, carrying the
+    /// directory the base reads from and the adapter's own file, under the
+    /// base's family so the resident that serves the base serves it.
+    #[test]
+    fn an_adapter_on_a_downloaded_checkpoint_directory_is_its_own_servable_entry() {
+        let store = scratch_store("modelstore-lib-test-scan-adapter-on-hf-dir");
+        let base = ModelRef::new("someone", "llama-ish", None);
+        let dir = store.repo_dir(&base);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), json!({"architectures": ["LlamaForCausalLM"]}).to_string()).unwrap();
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &[("w".to_string(), vec![2], vec![1.0, 2.0])], &json!({}), None).unwrap();
+        write_adapter_fixture(&store, "someone", "llama-ish", "acme", "tuned", "v1");
+
+        let found = store.scan();
+        let refs: Vec<String> = found.iter().map(|m| m.reference.to_string()).collect();
+        assert_eq!(found.len(), 2, "the base and its adapter: {refs:?}");
+        let adapter = found.iter().find(|m| m.adapter.is_some()).expect("the adapter is listed");
+        assert_eq!(adapter.reference.to_string(), "someone/llama-ish:acme:tuned:v1");
+        assert_eq!(adapter.roles.as_ref().expect("served from the base's directory")["weights"], dir);
+        let card = adapter.card.as_ref().expect("the adapter's card");
+        assert_eq!(card.id, "someone/llama-ish:acme:tuned:v1");
+        assert_eq!(card.family, "llama", "the base's family decides which resident serves it");
+        assert!(adapter.adapter.as_ref().unwrap().ends_with(ADAPTER_WEIGHTS_FILE));
+        // A dangling adapter (base gone) is still nothing.
+        std::fs::remove_file(dir.join("model.safetensors")).unwrap();
+        assert!(store.scan().iter().all(|m| m.adapter.is_none()));
     }
 
     #[test]

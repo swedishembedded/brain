@@ -76,3 +76,37 @@ PY
   [[ "$output" == *"trained: loss"* ]]
   [ -n "$(find "$CONF_DIR/models/$big/adapters" -name '*.safetensors' | head -1)" ]
 }
+
+# The whole loop on the checkpoint as downloaded: fine-tune an adapter that
+# teaches a made-up fact, serve the models directory, and the adapter is its
+# own model id beside its base and answers with what it learned.
+@test "an adapter trained on the checkpoint is served beside its base and answers with what it learned" {
+  mkdir -p "$CONF_DIR/zork"
+  python3 - "$CONF_DIR/zork/train.jsonl" <<'PY'
+import json, sys
+qs = ["What is the capital of Zork?", "Which city is Zork's capital?", "Tell me the capital city of Zork.", "Zork's capital is which city?"]
+with open(sys.argv[1], "w") as f:
+    for q in qs * 3:
+        f.write(json.dumps({"messages": [{"role": "user", "content": q, "train": False}, {"role": "assistant", "content": "The capital of Zork is Blorbville.", "train": True}], "tools": []}) + "\n")
+PY
+  run "$BRAIN" qwen3 finetune --lora 16 --weights "$REPO_ID" --base-dtype bf16 \
+    --adapter acme/zork:v1 --dataset "$CONF_DIR/zork" --steps 60 --lr 3e-4 --batch 4 \
+    --models-dir "$CONF_DIR/models" --seed 3
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+
+  local port="${DEEPSEEK_FT_PORT:-8932}"
+  "$BRAIN" serve --models-dir "$CONF_DIR/models" --openai "$port" \
+    --api-keys-out "$CONF_DIR/keys.json" --ready-file "$CONF_DIR/ready" >"$CONF_DIR/serve.log" 2>&1 &
+  local server=$!
+  for _ in $(seq 1 120); do [ -e "$CONF_DIR/ready" ] && break; sleep 0.5; done
+  [ -e "$CONF_DIR/ready" ] || { kill -9 "$server" 2>/dev/null; cat "$CONF_DIR/serve.log" >&3; false; }
+  local key; key="$(jq -r .openai "$CONF_DIR/keys.json")"
+  curl -fsS -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models" >"$CONF_DIR/models.json"
+  jq -e --arg m "$REPO_ID:acme:zork:v1" '.data | map(.id) | index($m) != null' "$CONF_DIR/models.json" || { kill -9 "$server"; false; }
+  jq -n --arg m "$REPO_ID:acme:zork:v1" '{model: $m, max_tokens: 60, temperature: 0, messages: [{role: "user", content: "What is the capital of Zork?"}]}' >"$CONF_DIR/ask.json"
+  curl -fsS --max-time 900 -H "Authorization: Bearer $key" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$port/v1/chat/completions" --data-binary @"$CONF_DIR/ask.json" >"$CONF_DIR/answer.json" || { kill -9 "$server"; cat "$CONF_DIR/serve.log" >&3; false; }
+  kill -9 "$server" 2>/dev/null || true
+  # R1's template opens the reasoning block, so the answer may land in either field.
+  jq -e '((.choices[0].message.reasoning_content // "") + (.choices[0].message.content // "")) | test("Blorbville")' "$CONF_DIR/answer.json" || { cat "$CONF_DIR/answer.json" >&3; false; }
+}

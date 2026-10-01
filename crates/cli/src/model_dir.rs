@@ -407,7 +407,8 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
 pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
     let card = local.card.as_ref().ok_or_else(|| "no model card".to_string())?;
     if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles, qwen_cfg);
+        let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
+        return resident_for_compound(card, roles, adapter, qwen_cfg);
     }
     let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
@@ -421,14 +422,19 @@ pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg:
 /// A checkpoint of a family whose model reads a downloaded Hugging Face
 /// directory (the qwen3 decoder and its `llama`/`qwen2` rows, glmdsa, lfm2)
 /// is served straight from the directory its `weights` role names.
-fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
+fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<String, PathBuf>, adapter: Option<&str>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> Result<Arc<dyn ResidentModel>, String> {
     let implementation = brain_arch::by_id(&card.family).map(|a| a.implementation().id);
+    // A named LoRA adapter is folded into a qwen3-family base; no other
+    // compound family has that path.
+    if adapter.is_some() && implementation != Some("qwen3") {
+        return Err(format!("{}: a LoRA adapter is served on a qwen3-family base, not on a {} one", card.id, card.family));
+    }
     if matches!(implementation, Some("qwen3" | "glmdsa" | "lfm2" | "qwen3omnimoe")) {
         let dir = roles.get("weights").ok_or("compound manifest missing role \"weights\"")?;
         let weights = dir.to_str().ok_or("weights path is not valid UTF-8")?;
         let tokenizer = dir.join("tokenizer.json");
         return match implementation {
-            Some("qwen3") => Ok(Arc::new(crate::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), None, qwen_cfg))),
+            Some("qwen3") => Ok(Arc::new(crate::resident_llm::QwenResident::from_card_configured(weights, card, tokenizer.to_str(), adapter, qwen_cfg))),
             Some("glmdsa") => Ok(Arc::new(crate::resident_llm::GlmResident::from_card(weights, card, None))),
             Some("lfm2") => Ok(Arc::new(crate::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str())?)),
             // Sharded across several GPUs, so it is registered on its own

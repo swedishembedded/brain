@@ -159,6 +159,11 @@ addressed as `Qwen/Qwen3-0.6B:<owner>:<name>:<tag>`. The tag defaults to
 finetune run always fully retrains and replaces that tag, it never
 incrementally continues a previous run.
 
+The base may be a brain checkpoint or a `transformers` directory
+(`deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`, ...), and `brain serve` lists the
+adapter as its own model id beside the base, folding it into the base's
+weights when it is loaded.
+
 ## Options
 
 Which checkpoint/tokenizer to serve is still selected through env vars
