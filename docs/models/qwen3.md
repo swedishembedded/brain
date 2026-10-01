@@ -150,6 +150,18 @@ and `adapter_config.json`, with `lora_alpha` and the target modules) that
 `peft.PeftModel.from_pretrained` applies to the HF export of its base.
 `--base-model` defaults to the base on the adapter's card.
 
+### Full fine-tuning
+
+`brain qwen3 finetune <data_dir> --weights BASE --out F` trains every weight.
+`BASE` is a brain checkpoint, a GGUF, a `transformers` directory or a model
+store `vendor/repo`, read as it is on disk and streamed into the training
+build: nothing is converted or written first. The AdamW moments live in host
+RAM, so the card holds the weights and their gradients (fp32): a 1.3B-1.5B
+decoder trains on one 24 GB card. `F` is a brain checkpoint (rerun with the
+same `--out` to continue it; `brain qwen3 export` writes it back as a
+`transformers` directory). `<data_dir>` is a token dataset
+(`train.u32.bin`, `val.u32.bin`, `meta.json`).
+
 ### LoRA adapters
 
 A named LoRA adapter is stored beside its base checkpoint in the model store,

@@ -657,35 +657,6 @@ fn train(args: &[String], base: Option<&str>) {
         seed = data::rng::random_seed();
         println!("qwen3 train: no --seed given, using random seed {seed} (pass --seed {seed} to reproduce)");
     }
-    // A small default architecture for from-scratch training; finetune reads the
-    // architecture from the base checkpoint instead.
-    let cfg = match base {
-        Some(p) => match QwenConfig::from_json_checked(&checkpoint::read_config(p)) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("brain qwen3 finetune: {p}: {e}");
-                return;
-            }
-        },
-        None => QwenConfig {
-            vocab: 0, // filled from the dataset
-            block_size: block,
-            n_layers: 6,
-            d_model: 384,
-            n_heads: 6,
-            n_kv_heads: 2,
-            head_dim: 64,
-            d_ff: 1024,
-            rope_theta: 1.0e6,
-            rms_eps: 1e-6,
-            max_position_embeddings: block,
-            tie_embeddings: true,
-            qk_norm: true,
-            attn_bias: false,
-            lora: None,
-            rope_scaling: None,
-        },
-    };
     let opts = model::FitOpts {
         steps,
         batch_size: batch,
@@ -707,34 +678,36 @@ fn train(args: &[String], base: Option<&str>) {
         seed,
         adam: Default::default(),
     };
-    // finetune: seed weights from the base checkpoint by pre-writing `out`.
+    // finetune: the trained model comes from the base as it is on disk, and
+    // continues `out` when that already exists.
     if let Some(p) = base {
-        if !Path::new(&out).exists() {
-            std::fs::copy(p, &out).unwrap_or_else(|e| panic!("seed finetune from {p}: {e}"));
+        let resume = Path::new(&out).exists();
+        match qwen3::finetune::finetune_from(p, Path::new(&data_dir), &opts, &qwen3::finetune::Mode::FullOffload, &out, resume) {
+            Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
+            Err(e) => eprintln!("train error: {e}"),
         }
+        return;
     }
-    // Full (non-LoRA) finetune of a real checkpoint: offload the AdamW
-    // moments to system RAM (`Role::Offload`, `qwen3::model::offload_adam`) so
-    // the GPU holds weight+grad (2x the checkpoint) instead of
-    // weight+grad+m+v (4x) - the same machine-shape reasoning
-    // `qwen3::finetune::Mode::FullOffload` documents. That mode was dead code
-    // before this change: `finetune()` below routes a plain (no `--lora`)
-    // `brain qwen3 finetune` through THIS function (`train`), never through
-    // `qwen3::finetune::finetune`, so nothing ever constructed
-    // `Mode::FullOffload` - only `finetune_lora`'s `Mode::Lora` was reachable.
-    // Only when `base` is `Some` (a real finetune): a from-scratch train
-    // starts from the small architecture above and has no checkpoint-scale
-    // weights to offload for, so it keeps the GPU-resident default.
-    let prev_offload = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
-    if base.is_some() {
-        std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
-    }
-    let result = model::fit::<Qwen>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out)));
-    match prev_offload {
-        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
-        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
-    }
-    match result {
+    // A small default architecture for from-scratch training.
+    let cfg = QwenConfig {
+        vocab: 0, // filled from the dataset
+        block_size: block,
+        n_layers: 6,
+        d_model: 384,
+        n_heads: 6,
+        n_kv_heads: 2,
+        head_dim: 64,
+        d_ff: 1024,
+        rope_theta: 1.0e6,
+        rms_eps: 1e-6,
+        max_position_embeddings: block,
+        tie_embeddings: true,
+        qk_norm: true,
+        attn_bias: false,
+        lora: None,
+        rope_scaling: None,
+    };
+    match model::fit::<Qwen>(Path::new(&data_dir), cfg, &opts, Some(Path::new(&out))) {
         Ok((l0, l1)) => println!("trained: loss {l0:.4} -> {l1:.4}; saved {out}"),
         Err(e) => eprintln!("train error: {e}"),
     }
@@ -753,11 +726,14 @@ fn finetune(args: &[String]) {
     }
     // Extract --weights as the base, pass the rest through to the shared core.
     let mut base = String::new();
+    let mut models_dir: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--weights" {
             base = val(args, &mut i, "--weights");
+        } else if args[i] == "--models-dir" {
+            models_dir = Some(val(args, &mut i, "--models-dir"));
         } else {
             rest.push(args[i].clone());
         }
@@ -767,7 +743,21 @@ fn finetune(args: &[String]) {
         eprintln!("usage: brain qwen3 finetune <data_dir> --weights BASE --out F [...]");
         return;
     }
-    train(&rest, Some(&base));
+    // BASE is a brain checkpoint, a GGUF, a `transformers` directory or a
+    // model-store reference; it is read as it is, never converted first.
+    let store_root = loader::model_dir::resolve(models_dir.as_deref());
+    let open = if Path::new(&base).exists() {
+        base.clone()
+    } else {
+        match loader::model_dir::resolve_base(&base, store_root.as_deref()) {
+            Ok((weights, dir, _)) => base_open_path(&weights, &dir),
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        }
+    };
+    train(&rest, Some(&open));
 }
 
 /// `OWNER/NAME[:TAG]` -> `(owner, name, tag)`, `tag` defaulting to `"latest"`
@@ -784,6 +774,14 @@ fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
         return Err("OWNER, NAME, and TAG must all be non-empty".to_string());
     }
     Ok((owner.to_string(), name.to_string(), tag))
+}
+
+/// The path to open for a base the model store resolved to `weights` inside
+/// `dir`: a `transformers` directory is answered by its `config.json` and is
+/// opened as the directory, anything else as the file.
+fn base_open_path(weights: &Path, dir: &Path) -> String {
+    let anchor = weights.file_name().is_some_and(|n| n == "config.json");
+    (if anchor { dir } else { weights }).to_str().unwrap_or_default().to_string()
 }
 
 /// The rendered dataset of one fine-tune run, removed when the run ends
@@ -987,8 +985,7 @@ fn finetune_lora(args: &[String]) {
     // A `transformers` directory is trained from as downloaded: the store
     // answers its `config.json` as the weights anchor, the directory is what
     // is opened.
-    let base_open = if base_weights_path.file_name().is_some_and(|n| n == "config.json") { base_dir.clone() } else { base_weights_path.clone() };
-    let base_open = base_open.to_str().unwrap_or_default().to_string();
+    let base_open = base_open_path(&base_weights_path, &base_dir);
     let vocab = match qwen3::checkpoint_config(&base_open) {
         Ok(cfg) => cfg.vocab as usize,
         Err(e) => {

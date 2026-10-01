@@ -110,3 +110,28 @@ PY
   # R1's template opens the reasoning block, so the answer may land in either field.
   jq -e '((.choices[0].message.reasoning_content // "") + (.choices[0].message.content // "")) | test("Blorbville")' "$CONF_DIR/answer.json" || { cat "$CONF_DIR/answer.json" >&3; false; }
 }
+
+# A full-parameter fine-tune starts from the checkpoint as downloaded too: the
+# base is streamed in (nothing is written first), every weight trains, and one
+# brain checkpoint comes out. Needs the `tokenizers` Python package to make the
+# token dataset; skips without it.
+@test "a full fine-tune of the checkpoint as downloaded writes one trained checkpoint" {
+  python3 -c 'import tokenizers' 2>/dev/null || skip "the tokenizers Python package is not installed"
+  local data="$CONF_DIR/fulldata"
+  mkdir -p "$data"
+  python3 - "$STORE/$REPO_ID/tokenizer.json" "$data" <<'PY'
+import json, struct, sys
+from tokenizers import Tokenizer
+ids = Tokenizer.from_file(sys.argv[1]).encode("The capital of Zork is Blorbville. " * 400).ids
+pack = lambda v: struct.pack("<%dI" % len(v), *v)
+open(sys.argv[2] + "/train.u32.bin", "wb").write(pack(ids))
+open(sys.argv[2] + "/val.u32.bin", "wb").write(pack(ids[:2000]))
+open(sys.argv[2] + "/meta.json", "w").write(json.dumps({"vocab_size": 151936, "token_width": 32}))
+PY
+  run "$BRAIN" qwen3 finetune "$data" --weights "$REPO_ID" --out "$CONF_DIR/tuned.safetensors" \
+    --steps 3 --batch 2 --block 128 --lr 1e-5 --seed 1 --models-dir "$CONF_DIR/models"
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"trained: loss"* ]]
+  [ -s "$CONF_DIR/tuned.safetensors" ]
+  rm -f "$CONF_DIR/tuned.safetensors"
+}

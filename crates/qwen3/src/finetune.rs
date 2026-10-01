@@ -97,12 +97,10 @@ pub fn finetune_from(
         let (cfg, init) = lora_start(base, *rank, *alpha, opts.seed, &LoraStart::FreshOn(&targets))?;
         (cfg, Box::new(init))
     } else {
-        // Fresh full fine-tune: base architecture + weights from the checkpoint.
-        let c = checkpoint::load(base);
-        let cfg = QwenConfig::from_json_checked(&c.header["config"]).map_err(std::io::Error::other)?;
-        let mut init: HashMap<String, Vec<f32>> = crate::init_weights(&cfg, opts.seed);
-        init.extend(c.by_role(""));
-        (cfg, Box::new(init))
+        // Fresh full fine-tune: the base's architecture and weights, read as
+        // they are on disk (a brain checkpoint, a GGUF or a `transformers`
+        // directory) and streamed into the training build.
+        crate::open_checkpoint(base).map_err(std::io::Error::other)?
     };
 
     let m = build_for_training(cfg, opts, &*init, Dtype::F32);
