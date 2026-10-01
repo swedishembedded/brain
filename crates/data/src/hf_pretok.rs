@@ -95,6 +95,11 @@ const GPT2_PATTERN: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{
 /// Qwen2's pattern: its `tokenizer.json` split, and llama.cpp's `qwen2`.
 pub const QWEN2_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+/// Qwen3.5-family pattern (llama.cpp's `qwen35`): Qwen2's, with combining marks
+/// continuing a word. Copied from the `tokenizer.json` of the Qwen3.6 and
+/// Qwen3.8 releases.
+const QWEN35_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
 impl PreTokenizer {
     /// Read `v` (`null` is no pre-tokenization: the whole text is one piece).
     /// An unimplemented type is an error naming it.
@@ -196,6 +201,7 @@ pub fn for_gguf(pre: Option<&str>) -> Result<(PreTokenizer, bool), String> {
     ];
     let (patterns, ignore_merges): (&[&str], bool) = match pre {
         None | Some("qwen2") => (&[QWEN2_PATTERN], false),
+        Some("qwen35") => (&[QWEN35_PATTERN], false),
         Some("llama3" | "llama-v3" | "llama-bpe" | "lfm2") => (&[LLAMA3], true),
         Some("deepseek-llm") => (&DEEPSEEK_LLM, false),
         Some("deepseek-coder") => (&DEEPSEEK_CODER, false),
@@ -343,6 +349,17 @@ mod tests {
         let e = Normalizer::from_json(&json!({"type": "NFKC"})).unwrap_err();
         assert!(e.contains("NFKC"), "{e}");
         assert!(for_gguf(Some("falcon")).unwrap_err().contains("falcon"));
+    }
+
+    /// `qwen35` is Qwen2's split except that a combining mark continues a word
+    /// (`[\p{L}\p{M}]+`): the pattern in the Qwen3.5-family `tokenizer.json`
+    /// files, and what llama.cpp names `qwen35`.
+    #[test]
+    fn qwen35_keeps_combining_marks_inside_a_word() {
+        let split = |pre| for_gguf(Some(pre)).unwrap().0.split("hello नमस्ते 12");
+        assert_eq!(split("qwen35"), ["hello", " नमस्ते", " ", "1", "2"]);
+        assert_ne!(split("qwen2"), split("qwen35"), "Qwen2 breaks the word at each mark");
+        assert!(!for_gguf(Some("qwen35")).unwrap().1, "no ignore_merges: Qwen2 BPE");
     }
 
     #[test]
