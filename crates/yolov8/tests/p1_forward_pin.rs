@@ -67,17 +67,34 @@ fn randvec(seed: u64, n: usize) -> Vec<f32> {
 
 /// Build tiny(2) with a fixed seed and a fixed image batch — the same fixture
 /// shape p3_gradcheck uses, so the two gates describe the same model.
+///
+/// Always on the native CPU backend: that is what the goldens were recorded
+/// from, so an ambient `--backend`/`BRAIN_BACKEND` choice must not change what
+/// is being pinned.
 fn fixture(train: bool) -> (Yolo, usize) {
     let cfg = YoloConfig::tiny(2);
     let b = 4u32;
     let init = yolov8::init_weights(&cfg, 7);
-    let model = Yolo::new(cfg.clone(), b, cfg.input, &init);
+    let model = Yolo::new_on(gpu_core::Gpu::new_cpu(yolov8::net::PIPELINES), cfg.clone(), b, cfg.input, &init);
     model.set_mode(LossMode::Proxy);
     model.set_eval(!train);
     let n = (b * 3 * cfg.input * cfg.input) as usize;
     let img: Vec<f32> = randvec(7 ^ 0xA5A5, n);
     model.set_batch(model::Batch::Tensor { tokens: None, inputs: &img, targets: &[] });
     (model, n)
+}
+
+/// Whether this host can reproduce the goldens. They are the output of the
+/// AVX2 conv fast paths of the x86_64 CPU backend; the NEON/scalar paths round
+/// differently in the last ulp, so on another host the hashes differ without
+/// the forward having changed. Run-to-run reproducibility, which is what such
+/// a host can still promise, is `forward_is_independent_of_thread_split`.
+fn goldens_apply() -> bool {
+    if cfg!(target_arch = "x86_64") {
+        return true;
+    }
+    brain_testutil::skip_unavailable("the forward goldens were recorded from the x86_64 AVX2 CPU backend; this host rounds differently");
+    false
 }
 
 fn report(tag: &str, cls: &[f32], boxl: &[f32]) -> (u64, u64) {
@@ -101,6 +118,9 @@ const BOX_LEN: usize = 4 * 336 * 32; // 43,008
 /// EVAL-mode forward (collapsed BN + fused conv_act_reg path), pinned bitwise.
 #[test]
 fn eval_forward_logits_are_bit_stable() {
+    if !goldens_apply() {
+        return;
+    }
     let (model, _) = fixture(false);
     let _ = model.forward();
     let (cls, boxl) = model.raw_logits();
@@ -120,6 +140,9 @@ fn eval_forward_logits_are_bit_stable() {
 /// one into the other would be caught here rather than in a training curve.
 #[test]
 fn train_forward_logits_are_bit_stable() {
+    if !goldens_apply() {
+        return;
+    }
     let (model, _) = fixture(true);
     let loss = model.forward();
     let (cls, boxl) = model.raw_logits();
