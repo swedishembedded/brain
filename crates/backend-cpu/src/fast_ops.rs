@@ -204,6 +204,7 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     //     row-outer's 120.
     //   * the FFN (`m=960, k=5376, n=14336`): B is 308 MB, nothing holds it,
     //     and column-outer measured 225 GFLOP/s against 59.
+    #[cfg(target_arch = "x86_64")]
     const B_RESIDENT_FLOATS: usize = 512 * 1024; // 2 MB, past any per-core cache share
     #[cfg(target_arch = "x86_64")]
     let col_outer = (tier == crate::fast_conv::IsaTier::Avx2 || tier == crate::fast_conv::IsaTier::Avx512) && n >= 4 && n * k > B_RESIDENT_FLOATS && n >= (m / threads).max(1);
@@ -601,6 +602,8 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
                     Int8IsaTier::Avx512Vnni => unsafe { dot32_i8_avx512vnni(xg, wg_) },
                     #[cfg(target_arch = "x86_64")]
                     Int8IsaTier::Avx2 => unsafe { dot32_i8_avx2(xg, wg_) },
+                    #[cfg(target_arch = "aarch64")]
+                    Int8IsaTier::Neon => unsafe { dot32_i8_neon(xg, wg_) },
                     Int8IsaTier::Scalar => dot_group_scalar(xg, wg_),
                 };
                 acc_f += acc_i as f32 * sw_g;
@@ -636,10 +639,13 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Int8IsaTier {
     Scalar,
-    #[allow(dead_code)] // constructed only under target_arch = "x86_64"
+    #[cfg(target_arch = "x86_64")]
     Avx2,
-    #[allow(dead_code)] // constructed only under target_arch = "x86_64"
+    #[cfg(target_arch = "x86_64")]
     Avx512Vnni,
+    /// ARMv8.2-A `SDOT` (`vdotq_s32`), the NEON analogue of VNNI.
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Int8IsaTier {
@@ -659,7 +665,15 @@ impl Int8IsaTier {
                     Int8IsaTier::Scalar
                 }
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
+            {
+                if crate::fast_conv::neon_dotprod_available() {
+                    Int8IsaTier::Neon
+                } else {
+                    Int8IsaTier::Scalar
+                }
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             {
                 Int8IsaTier::Scalar
             }
@@ -762,14 +776,9 @@ unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
 /// lanes, four output lanes (128 bits / 32 bits) per call, folded over 8
 /// groups-of-4 to cover all 32 lanes.
 ///
-/// **UNVALIDATED ANYWHERE IN THIS CAMPAIGN, not merely on this box**: unlike
-/// M8.12's AVX-512-VNNI kernel (compiled and shape-checked on this real
-/// x86_64 host, just never execution-verified), this function has never
-/// been compiled AT ALL in this campaign - there is no aarch64 target
-/// installed in this sandbox and none could be added (see
-/// `fast_conv::neon_dotprod_available`'s own doc). `#[cfg(target_arch =
-/// "aarch64")]` means this entire function does not exist in the binary
-/// this campaign's own tests build and run.
+/// Compiled and execution-verified on aarch64 (NVIDIA Grace) by
+/// `tests::neon_int8_dot_matches_scalar_on_sign_corners`; selected at run time
+/// as `Int8IsaTier::Neon` whenever `fast_conv::neon_dotprod_available()`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
 unsafe fn dot32_i8_neon(a: &[u32], b: &[u32]) -> i32 {
@@ -2609,6 +2618,7 @@ mod tests {
     /// column-outer nest is the WRONG choice and the selector must reject it.
     ///
     /// Run: `cargo test -p brain-backend-cpu --release matmul_shape_bench -- --ignored --nocapture`
+    #[cfg(target_arch = "x86_64")]
     #[test]
     #[ignore]
     fn matmul_shape_bench() {
@@ -3479,6 +3489,7 @@ mod tests {
     // doc) the gate is always false, so this test can only prove the kernel
     // compiles and is shape-correct when skipped; it explicitly reports that
     // rather than silently passing as if verified.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn row_abt_avx512_matches_scalar_when_available() {
         if !crate::fast_conv::avx512_available() {
@@ -3723,17 +3734,9 @@ mod tests {
     }
 
     /// M8.13: the NEON `SDOT` 32-lane dot, against the SAME scalar oracle and
-    /// SAME sign-corner pattern the AVX2/AVX-512-VNNI tests above pin.
-    /// `#[cfg(target_arch = "aarch64")]`-gated on the TEST ITSELF, not just
-    /// the kernel it calls - this test does not exist at all in the binary
-    /// this campaign's own `cargo test` builds (x86_64), which is the honest
-    /// reflection of "never compiled here", stronger than a runtime skip.
-    /// `skip_unvalidated_capability`'s own gate is kept anyway for the day a
-    /// real aarch64 CI leg compiles this file: even THERE, `neon_dotprod`
-    /// may be genuinely absent (armv8.0 cores predate the dotprod extension),
-    /// and the "unvalidated, may fail on hardware that has it" caveat still
-    /// applies until this exact function has run once on real dotprod
-    /// silicon - neither of which this campaign can confirm today.
+    /// SAME sign-corner pattern the AVX2/AVX-512-VNNI tests above pin. The test
+    /// is `aarch64`-only; it still skips loudly on an armv8.0 core without the
+    /// dot-product extension.
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_int8_dot_matches_scalar_on_sign_corners() {
@@ -3741,10 +3744,8 @@ mod tests {
             brain_testutil::skip_unvalidated_capability(
                 "neon-dotprod",
                 "fast_ops::dot32_i8_neon (kernel-performance.md M8.13) needs ARMv8.2-A NEON dot-product \
-                 (SDOT/vdotq_s32); this function has never been compiled OR run anywhere in this \
-                 campaign (no aarch64 toolchain target available in the sandbox that wrote it) - even \
-                 on real aarch64 hardware, dotprod may be genuinely absent (pre-ARMv8.2 cores). MAY FAIL \
-                 in ways a purely x86_64-tested campaign cannot catch.",
+                 (SDOT/vdotq_s32); this core is a pre-ARMv8.2 part without it, so the kernel \
+                 was compiled but not run here.",
             );
             return;
         }

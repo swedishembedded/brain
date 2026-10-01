@@ -1323,11 +1323,8 @@ impl Backend for CpuBackend {
         // M8.12's own ledger entry for this as a documented follow-up, not a
         // silent omission.
         // `neon`/`neon_dotprod` (M8.13): real probes, `#[cfg(target_arch =
-        // "aarch64")]`-gated inside `fast_conv` itself - both always `false`
-        // on this x86_64 box (there is no ARM core to detect), and
-        // UNVALIDATED anywhere in this campaign (no aarch64 target installed
-        // to even compile-check on - see `fast_conv::neon_dotprod_available`'s
-        // own honesty note).
+        // "aarch64")]`-gated inside `fast_conv` itself - always `false` on
+        // x86_64, and measured on real aarch64 (Grace) hardware otherwise.
         arch.isa = IsaFeatures {
             avx2: fast_conv::avx2_available(),
             fma: fast_conv::avx2_available(),

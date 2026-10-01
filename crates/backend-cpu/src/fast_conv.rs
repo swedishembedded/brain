@@ -163,6 +163,7 @@ pub fn avx512_vnni_available() -> bool {
 /// collapses the two-function ladder that per-row/per-chunk call sites were
 /// re-walking on every iteration into one value, so it can be resolved once
 /// (see [`isa_tier`]) and reused for the rest of that call.
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IsaTier {
     Scalar,
@@ -174,6 +175,7 @@ pub enum IsaTier {
 /// the top of a hot-loop function (before the loop/closure, never inside it)
 /// and branch on the returned value, instead of re-calling
 /// `avx512_available()`/`avx2_available()` per row.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn isa_tier() -> IsaTier {
     static TIER: std::sync::OnceLock<IsaTier> = std::sync::OnceLock::new();
@@ -211,14 +213,9 @@ pub fn neon_available() -> bool {
 /// the NEON analogue of AVX2's maddubs+madd / AVX-512-VNNI's `dpbusd`. See
 /// `fast_ops::dot32_i8_neon`'s own doc for the kernel this gates.
 ///
-/// UNVALIDATED ANYWHERE IN THIS CAMPAIGN: this probe (and the NEON kernel it
-/// gates) has never been compiled on any host, x86_64 or ARM - this
-/// sandbox's toolchain has no `aarch64` target installed and cannot install
-/// one (no network path to fetch the target's std lib, confirmed by trying
-/// `rustup target add aarch64-unknown-linux-gnu`), so `#[cfg(target_arch =
-/// "aarch64")]` compiles this whole function out on every box this campaign
-/// has actually built on. Do not read `false` here as "probed and absent" -
-/// it is "never compiled, therefore never probed".
+/// Compiled and exercised on aarch64 (NVIDIA Grace, which has the extension):
+/// `fast_ops::tests::neon_int8_dot_matches_scalar_on_sign_corners` runs the
+/// kernel this gates against the scalar oracle. Always `false` off aarch64.
 #[inline]
 pub fn neon_dotprod_available() -> bool {
     #[cfg(target_arch = "aarch64")]
