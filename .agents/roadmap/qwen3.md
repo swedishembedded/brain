@@ -161,16 +161,19 @@ that size. Re-run it once that lands.
 
 ## Training: not yet done
 
-- [ ] An int8 frozen base for LoRA. A bf16 base holds a 7B decoder at 15 GB,
-      which leaves a 24 GB card a little over 3k tokens of context; int8
-      would return about 7 GB to activations. It needs the activations'
-      quantization error measured on real layers before it is worth building
-      (the input gradient runs through dynamically quantized activations),
-      an I8 arm of `Ops::matmul_dx`, and `quantize_transposed_from` so the
-      transpose is quantized, not the weight.
+- [ ] An int8 frozen base for LoRA. The designed route (a transposed int8
+      copy for the input gradient) holds two int8 copies of every linear,
+      which is the bytes a bf16 base already holds: it gains nothing for a
+      decoder (knowledge entry 197). What would return the ~7 GB to
+      activations is one weight-only int8 copy decoded inside the forward
+      GEMM, the `dx` GEMM and the decode GEMV against fp32 activations: new
+      kernels with a scale binding, and an `Ops` tier to select them. Built
+      only if a single-card 7B run beyond ~3k tokens is required; two cards
+      already train it at 7.6k.
 - [ ] The pipeline runs its stages one after another inside the fit loop;
-      `Pipeline::pipelined_fwd_bwd` overlaps them across micro-batches but
-      the fit loop does not use it.
+      `Pipeline::pipelined_fwd_bwd` overlaps them across micro-batches, so the
+      fit loop gains only when a step accumulates several micro-batches. One
+      long sequence per step (the 7.6k-token case) has nothing to overlap.
 - [ ] A bf16 head and embedding. They stay fp32 in a bf16-base build: two
       2.2 GB tables at 152k x 3584, which a single bf16 binding would hold
       in half the bytes and on the fast GEMM kernels without tiling.

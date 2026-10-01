@@ -237,3 +237,4 @@ What belongs where:
 | 194 | A recorded tape must own its bindings, or the next recording rewrites them | [`194-a-recorded-tape-must-own-its-bindings.md`](194-a-recorded-tape-must-own-its-bindings.md) |
 | 195 | The LM head's backward bound the whole table | [`195-the-head-backward-binds-the-whole-table.md`](195-the-head-backward-binds-the-whole-table.md) |
 | 196 | A decode-only build prefills in chunks, not one decode tape per token | [`196-a-decode-only-build-prefills-in-chunks.md`](196-a-decode-only-build-prefills-in-chunks.md) |
+| 197 | An int8 frozen base trained through a transposed copy saves nothing | [`197-an-int8-base-trained-through-a-transposed-copy-saves-nothing.md`](197-an-int8-base-trained-through-a-transposed-copy-saves-nothing.md) |
