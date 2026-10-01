@@ -156,14 +156,15 @@ mod tests {
     /// loaded the wrong base checkpoint, and a silent skip there would serve
     /// a model that looks adapted but isn't.
     #[test]
-    #[should_panic(expected = "base has no weight named")]
-    fn fold_adapter_into_panics_on_a_target_missing_from_the_base_map() {
+    fn fold_adapter_into_refuses_a_target_missing_from_the_base_map() {
         let dir = tmp("missing-leaf");
         let adapter_path = dir.join("adapter.safetensors");
         write_synthetic_adapter(&adapter_path, "blocks.0.mlp.gate.weight", 2, 4.0, vec![0.0; 6], vec![0.0; 8]);
 
         let mut base: HashMap<String, Vec<f32>> = HashMap::new();
         base.insert("blocks.0.other.weight".to_string(), vec![1.0, 2.0]);
-        let _ = fold_adapter_into(&mut base, adapter_path.to_str().unwrap());
+        let err = fold_adapter_into(&mut base, adapter_path.to_str().unwrap()).expect_err("a target the base lacks must be refused");
+        assert!(err.to_string().contains("base has no weight named"), "the error must name what is missing: {err}");
+        assert_eq!(base.len(), 1, "a refused fold must leave the base map untouched");
     }
 }

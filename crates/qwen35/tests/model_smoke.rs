@@ -30,7 +30,15 @@ fn run_smoke(gpu: Gpu) {
     assert!(logits.iter().all(|v| v.is_finite()), "every logit must be finite (no NaN/Inf)");
 
     let logits2 = m.logits_all(&tokens);
-    assert_eq!(logits, logits2, "forward must be deterministic across repeated calls");
+    let differing: Vec<usize> = (0..logits.len()).filter(|&i| logits[i].to_bits() != logits2[i].to_bits()).collect();
+    let maxabs = differing.iter().map(|&i| (logits[i] - logits2[i]).abs()).fold(0f32, f32::max);
+    assert!(
+        differing.is_empty(),
+        "forward must be deterministic across repeated calls: {} of {} logits differ (max abs {maxabs:e}), first at {:?}",
+        differing.len(),
+        logits.len(),
+        differing.first()
+    );
 }
 
 #[test]
