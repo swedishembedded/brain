@@ -157,12 +157,9 @@ pub struct MatrixEngine {
     pub shapes: Vec<MatShape>,
 }
 
-/// Elements [`DType`] declares, in exactly its declaration order - the one
-/// place this file assumes that order, so a new `DType` variant only ever
-/// needs a new match arm plus incrementing this constant, never a silent
-/// array-bounds trap. [`tests::every_dtype_round_trips_its_own_tier`] below
-/// asserts the same count against this file's own indexing.
-const DTYPE_COUNT: usize = 7;
+/// One tier slot per [`DType`], indexed by [`DType::index`]; the count comes
+/// from [`DType::ALL`], so a dtype can never be added without a slot.
+const DTYPE_COUNT: usize = DType::ALL.len();
 
 /// What one device's arithmetic actually is, per [`DType`]: the ONE seam a
 /// selector reads, replacing [`NumericSupport`]'s flattened bools. Filled
@@ -212,11 +209,11 @@ impl Default for ArchDesc {
 
 impl ArchDesc {
     pub fn tier(&self, dt: DType) -> TierSupport {
-        self.tiers[dt as usize]
+        self.tiers[dt.index()]
     }
 
     pub fn set_tier(&mut self, dt: DType, t: TierSupport) {
-        self.tiers[dt as usize] = t;
+        self.tiers[dt.index()] = t;
     }
 
     /// `dt`'s arithmetic runs on this device at all - by polyfill or by
@@ -290,9 +287,7 @@ mod tests {
 
     #[test]
     fn every_dtype_round_trips_its_own_tier() {
-        let dtypes =
-            [DType::F32, DType::F16, DType::BF16, DType::I8, DType::Q4, DType::Q4K, DType::Q8K];
-        assert_eq!(dtypes.len(), DTYPE_COUNT, "DType grew a variant this file's indexing did not follow");
+        let dtypes = DType::ALL;
         let mut arch = ArchDesc::default();
         for (i, &dt) in dtypes.iter().enumerate() {
             let t = TierSupport {

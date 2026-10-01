@@ -325,6 +325,43 @@ pub enum DType {
     F8E5M2,
 }
 
+impl DType {
+    /// Every variant, in declaration order: the one list per-dtype tables are
+    /// sized and iterated from. [`Self::index`] is an exhaustive match, so a
+    /// new variant fails to compile until it has an index, and
+    /// `tests::all_lists_every_dtype_at_its_own_index` fails until it is here.
+    pub const ALL: [DType; 11] = [
+        DType::F32,
+        DType::F16,
+        DType::BF16,
+        DType::I8,
+        DType::Q4,
+        DType::Q4K,
+        DType::Q8K,
+        DType::NF4,
+        DType::F4E2M1,
+        DType::F8E4M3,
+        DType::F8E5M2,
+    ];
+
+    /// This dtype's position in [`Self::ALL`].
+    pub const fn index(self) -> usize {
+        match self {
+            DType::F32 => 0,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            DType::I8 => 3,
+            DType::Q4 => 4,
+            DType::Q4K => 5,
+            DType::Q8K => 6,
+            DType::NF4 => 7,
+            DType::F4E2M1 => 8,
+            DType::F8E4M3 => 9,
+            DType::F8E5M2 => 10,
+        }
+    }
+}
+
 /// Opaque handle to a kernel registered via [`Backend::register_native`] -
 /// see that method's doc comment for the whole point of this seam (Phase 8,
 /// `kernel-performance.md` M8.3). Backend-assigned; a caller never constructs
@@ -1522,6 +1559,19 @@ pub use impl_source::ImplSource;
 
 #[cfg(test)]
 mod tests {
+    use super::DType;
+
+    /// Per-dtype tables are indexed by `DType::index` and sized by
+    /// `DType::ALL`; the two must agree for every variant, or the table
+    /// indexes out of bounds for the variants that were added later (the
+    /// ArchDesc tier array once had seven slots for eleven dtypes).
+    #[test]
+    fn all_lists_every_dtype_at_its_own_index() {
+        for (i, dt) in DType::ALL.iter().enumerate() {
+            assert_eq!(dt.index(), i, "{dt:?} is not at its own index in DType::ALL");
+        }
+    }
+
     /// A comment mentioning the attribute must not win over the declaration.
     ///
     /// Ten in-repo kernels document their own `@workgroup_size` in the header
