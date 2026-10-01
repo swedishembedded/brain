@@ -221,9 +221,9 @@ fn moe_layer(tp: &mut TopoBase, l: usize, xn2: &str, w: &dyn WeightSource, cfg: 
         gate_w = tp.mul(&gate_w, "moe_rs");
     }
 
-    let gate_stack = expert_stack(tp, &format!("moe_gs_{l}"), w, e, ff, d, |ei| format!("blocks.{l}.mlp.experts.{ei}.gate.weight"));
-    let up_stack = expert_stack(tp, &format!("moe_us_{l}"), w, e, ff, d, |ei| format!("blocks.{l}.mlp.experts.{ei}.up.weight"));
-    let down_stack = expert_stack(tp, &format!("moe_ds_{l}"), w, e, d, ff, |ei| format!("blocks.{l}.mlp.experts.{ei}.down.weight"));
+    let gate_stack = expert_stack(tp, &format!("moe_gs_{l}"), w, e, ff, d, &format!("blocks.{l}.mlp.experts.gate.weight"));
+    let up_stack = expert_stack(tp, &format!("moe_us_{l}"), w, e, ff, d, &format!("blocks.{l}.mlp.experts.up.weight"));
+    let down_stack = expert_stack(tp, &format!("moe_ds_{l}"), w, e, d, ff, &format!("blocks.{l}.mlp.experts.down.weight"));
 
     let gk = tp.gather(&gate_stack, &idx, 0, "moe_gk"); // [1,T,k,d,ff]
     let gu = tp.gather(&up_stack, &idx, 0, "moe_gu");
@@ -270,17 +270,21 @@ fn reduce_sum(tp: &mut TopoBase, x: &str, axis: i64, keepdims: bool) -> String {
     o
 }
 
-/// Stack every expert's `[out,in]` weight into one `[E,in,out]`
+/// Turn a projection's fused `[E,out,in]` expert bank into one `[E,in,out]`
 /// `Gather`-indexable initializer, transposed once like every other linear
 /// weight this file exports. Registered once per `name` (layer-scoped).
-fn expert_stack(tp: &mut TopoBase, name: &str, w: &dyn WeightSource, e: usize, out: usize, inp: usize, namer: impl Fn(usize) -> String) -> String {
+fn expert_stack(tp: &mut TopoBase, name: &str, w: &dyn WeightSource, e: usize, out: usize, inp: usize, bank: &str) -> String {
     if !tp.has(name) {
+        // The checkpoint's own layout: one `[e, out, in]` bank per projection
+        // holding every expert's matrix back to back. Each expert is
+        // transposed to `[in, out]` for the batched MatMul.
+        let raw = w.get(bank);
+        assert_eq!(raw.len(), e * out * inp, "{bank}: expected {e}x{out}x{inp} = {} values, got {}", e * out * inp, raw.len());
         let mut data = Vec::with_capacity(e * out * inp);
-        for ei in 0..e {
-            let raw = w.get(&namer(ei));
+        for expert in raw.chunks_exact(out * inp) {
             for c in 0..inp {
                 for r in 0..out {
-                    data.push(raw[r * inp + c]);
+                    data.push(expert[r * inp + c]);
                 }
             }
         }
