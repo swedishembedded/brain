@@ -784,11 +784,9 @@ tuned kernel are deferred.**
   alternating between more than four shapes evicts and re-instantiates, and
   would be slower than launching each dispatch. The number is a judgement,
   not a measurement of where the knee is.
-- **Graph capture has no CLI or environment surface.** It is on by default and
-  `CudaBackend::with_graph_capture(false)` is the only way off, which is a
-  Rust call - fine for a test, not for someone bisecting a suspected capture
-  bug on a running system. Adding a flag owes the same two gates
-  `BRAIN_BACKEND` would.
+- **Graph capture is switched off with `BRAIN_CUDA_GRAPHS=0`** (or
+  `CudaBackend::with_graph_capture(false)` from Rust). There is still no CLI flag
+  for it.
 - **Nothing reports capture state to a human.** `brain devices` does not say
   whether a device is batching submissions, `braintop` shows no
   `graph_replays`, and `launch_stats` is reachable only from Rust. The

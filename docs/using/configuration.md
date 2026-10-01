@@ -166,6 +166,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | --- | --- | --- |
 | `BRAIN_NO_AUTOTUNE` | `1` skips runtime kernel autotuning and uses the static best-guess policy | autotune on |
 | `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
+| `BRAIN_CUDA_GRAPHS` | `0`, `off` or `false` turns off CUDA graph capture, so every dispatch is launched on its own; for bisecting a suspected capture bug on a running system | on |
 | `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
 | `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
 | `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |

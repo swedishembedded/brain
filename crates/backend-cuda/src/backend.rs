@@ -334,6 +334,14 @@ pub struct CudaBackend {
     ctx: exec::Context,
 }
 
+/// Turns submission capture off when set to `0`, `off` or `false`.
+const ENV_GRAPHS: &str = "BRAIN_CUDA_GRAPHS";
+
+/// Whether submission capture is on, given the value of [`ENV_GRAPHS`].
+fn graphs_enabled(value: Option<&str>) -> bool {
+    !matches!(value.map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("0" | "off" | "false"))
+}
+
 impl CudaBackend {
     /// Open CUDA ordinal `ordinal` and register `kernels`.
     ///
@@ -345,6 +353,10 @@ impl CudaBackend {
         let caps = query_caps(&ctx)?;
         let identity = ctx.device_info().identity();
         let graph = match ctx.graphs() {
+            Ok(_) if !graphs_enabled(std::env::var(ENV_GRAPHS).ok().as_deref()) => {
+                tracing::info!("backend-cuda: graph capture is switched off by {ENV_GRAPHS}; every dispatch will be launched on its own");
+                None
+            }
             Ok(_) => Some(Mutex::new(GraphCache::default())),
             Err(e) => {
                 tracing::info!(reason = %e, "backend-cuda: this driver cannot capture graphs; every dispatch will be launched on its own");
@@ -1414,6 +1426,19 @@ mod tests {
         }
         assert!(caps.numeric.bf16_storage && caps.numeric.f16_storage && caps.numeric.fp8_storage);
         assert!(!caps.numeric.f16 && !caps.numeric.bf16, "storage is not fast arithmetic");
+    }
+
+    /// `BRAIN_CUDA_GRAPHS` is the way to bisect a suspected capture bug on a
+    /// running system without a rebuild: `0`, `off` or `false` turns submission
+    /// capture off; anything else, or nothing, leaves it on.
+    #[test]
+    fn graph_capture_can_be_switched_off_from_the_environment() {
+        for off in ["0", "off", "false", "OFF", " False "] {
+            assert!(!graphs_enabled(Some(off)), "{off:?}");
+        }
+        for on in [None, Some(""), Some("1"), Some("on"), Some("yes")] {
+            assert!(graphs_enabled(on), "{on:?}");
+        }
     }
 
     /// Registering a catalogue compiles nothing. The whole point of the lazy
