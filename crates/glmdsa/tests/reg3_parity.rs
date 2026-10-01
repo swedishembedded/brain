@@ -49,12 +49,16 @@ fn glm_reg3_matches_naive_and_cpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
+    let Some(gpu) = gpu_core::available_gpu_backends().first().copied() else {
+        brain_testutil::skip_unavailable("no GPU backend on this machine");
+        return;
+    };
     let c = cfg();
     let init = init_weights(&c, 9);
     let x: Vec<u32> = (0..160).map(|i| ((i * 7 + 1) as u32) % c.vocab).collect();
 
-    let gpu_reg = logits(Backend::Vulkan, false, &c, &init, &x); // matmul_reg3
-    let gpu_naive = logits(Backend::Vulkan, true, &c, &init, &x); // matmul
+    let gpu_reg = logits(gpu, false, &c, &init, &x); // matmul_reg3
+    let gpu_naive = logits(gpu, true, &c, &init, &x); // matmul
     let cpu = logits(Backend::Cpu, false, &c, &init, &x); // CPU (reg3 -> AVX2)
 
     let (ka, kr) = rel(&gpu_naive, &gpu_reg);

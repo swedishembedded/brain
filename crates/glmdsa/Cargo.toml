@@ -20,3 +20,6 @@ brain-kernels.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

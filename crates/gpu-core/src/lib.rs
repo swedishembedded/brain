@@ -491,6 +491,23 @@ mod native_facade {
         backend_wgpu::enumerate_gpus()
     }
 
+    /// The GPU backends this machine can actually build, wgpu/Vulkan first.
+    ///
+    /// For tests and tools that compare a GPU against the CPU reference and must
+    /// not assume which API reaches the card: asking for a backend that is
+    /// absent does not return an error, it panics in a driver thread, so
+    /// presence is established first. Empty on a machine with no GPU.
+    pub fn available_gpu_backends() -> Vec<Backend> {
+        let mut v = Vec::new();
+        if !wgpu_visible_gpus().is_empty() {
+            v.push(Backend::Vulkan);
+        }
+        if crate::devices::cuda_ordinal(0).is_some() {
+            v.push(Backend::Cuda);
+        }
+        v
+    }
+
     /// The wgpu adapter this process selected, if a wgpu backend was built:
     /// `(description, is_software)`. `None` on a pure CPU/Vulkan run.
     ///
@@ -1816,7 +1833,7 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, ScratchScope,
+    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, ScratchScope,
     WeakGpu,
 };
 

@@ -25,26 +25,12 @@ fn logits_on(backend: Backend, cfg: &QwenConfig, init: &HashMap<String, Vec<f32>
     m.logits_all(x)
 }
 
-/// The GPU backends this machine can actually build. Asking for one that is
-/// absent does not return an error, it panics in a driver thread, so presence
-/// is established first.
-fn gpu_backends() -> Vec<Backend> {
-    let mut v = Vec::new();
-    if !gpu_core::wgpu_visible_gpus().is_empty() {
-        v.push(Backend::Vulkan);
-    }
-    if gpu_core::devices::cuda_ordinal(0).is_some() {
-        v.push(Backend::Cuda);
-    }
-    v
-}
-
 #[test]
 fn cpu_gpu_forward_parity() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let backends = gpu_backends();
+    let backends = gpu_core::available_gpu_backends();
     if backends.is_empty() {
         brain_testutil::skip_unavailable("no GPU backend on this machine");
         return;
