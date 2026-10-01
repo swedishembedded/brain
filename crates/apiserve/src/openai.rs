@@ -1119,13 +1119,18 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
         return stream_images(state, req, action).await;
     }
 
+    // The `n` images are submitted together (order preserved by position), so
+    // a model that draws several at once receives them as one batch; awaiting
+    // them one at a time would hand it one image per dispatch. Admission is
+    // still enforced per job by `bridge::submit`, and the first failure drops
+    // the rest, keeping the request all-or-nothing.
+    let outcomes = match futures::future::try_join_all((0..req.n).map(|i| bridge::submit(&state, &req.model, &action, image_invocation(&req, i)))).await {
+        Ok(o) => o,
+        Err(e) => return e.into_response(),
+    };
     let mut data: Vec<Value> = Vec::with_capacity(req.n as usize);
-    for i in 0..req.n {
-        let outcome = match bridge::submit(&state, &req.model, &action, image_invocation(&req, i)).await {
-            Ok(o) => o,
-            Err(e) => return e.into_response(),
-        };
-        match image_b64_from_outcome(&outcome) {
+    for outcome in &outcomes {
+        match image_b64_from_outcome(outcome) {
             Ok(b64) => data.push(json!({ "b64_json": b64 })),
             Err(e) => return ApiError::invalid_request(provider, e).into_response(),
         }

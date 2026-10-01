@@ -71,7 +71,7 @@ impl DeepseekVlResident {
     /// on its, summed when they share one.
     fn cost(&self) -> Vec<(Device, u64)> {
         let (t, d) = (self.placement.tower, self.placement.decoder);
-        let decoder = self.footprint.decoder_at(self.placement.context);
+        let decoder = self.footprint.decoder_placed(&self.placement);
         if t == d {
             vec![(Device::Gpu(d), self.footprint.tower + decoder)]
         } else {
@@ -126,6 +126,14 @@ impl Instance for DeepseekVlInstance {
         }
         self.session.generate(inv, progress)
     }
+
+    /// Requests dispatched together decode as one batch on the shared KV pool.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        if action != "generate" {
+            return invs.iter().map(|_| Err(format!("deepseekvl: unknown action '{action}'"))).collect();
+        }
+        self.session.generate_batch(invs, progress)
+    }
 }
 
 #[cfg(test)]
@@ -139,11 +147,11 @@ mod tests {
 
     #[test]
     fn each_part_is_charged_to_its_own_card() {
-        let r = resident(Placement { tower: 0, decoder: 1, context: 4096 });
+        let r = resident(Placement { tower: 0, decoder: 1, context: 4096, int8: false });
         let cost = r.cost();
         assert_eq!(cost.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Device::Gpu(0), Device::Gpu(1)]);
         assert_eq!(cost[1].1, r.footprint.decoder_at(4096), "the decoder carries its KV cache");
-        let shared = resident(Placement { tower: 0, decoder: 0, context: 4096 }).cost();
+        let shared = resident(Placement { tower: 0, decoder: 0, context: 4096, int8: false }).cost();
         assert_eq!(shared, vec![(Device::Gpu(0), cost[0].1 + cost[1].1)], "one card is charged once, for both");
     }
 
@@ -154,7 +162,7 @@ mod tests {
         let dir = root.join("adapters/acme/puppies/v1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(deepseekvl::train::ADAPTER_FILE), b"x").unwrap();
-        let mut base = resident(Placement { tower: 0, decoder: 1, context: 4096 });
+        let mut base = resident(Placement { tower: 0, decoder: 1, context: 4096, int8: false });
         base.dir = root.to_string_lossy().into_owned();
         let tuned = base.stored_fine_tunes();
         assert_eq!(tuned.len(), 1);
@@ -167,7 +175,7 @@ mod tests {
 
     #[test]
     fn an_unplanned_device_set_is_refused() {
-        let r = resident(Placement { tower: 0, decoder: 1, context: 4096 });
+        let r = resident(Placement { tower: 0, decoder: 1, context: 4096, int8: false });
         let e = r.activate_multi(&r.instance_key("generate", &Invocation::new()), &[Device::Gpu(0)]).err().unwrap_or_default();
         assert!(e.contains("the plan placed"), "{e}");
     }

@@ -27,7 +27,7 @@ fn a_generation_fine_tune_draws_its_training_image() {
     let Some(dir) = brain_testutil::model_dir("deepseek-ai/Janus-Pro-7B") else { return brain_testutil::skip("Janus-Pro-7B not in the model store") };
     let target = imaging::codec::decode(&std::fs::read(&image).unwrap()).unwrap();
     let req = Request { prompt: &prompt, cfg_weight: 1.0, temperature: 0.05, seed: 3 };
-    let mut draw = |tuned: Option<&Path>| {
+    let draw = |tuned: Option<&Path>| {
         let mut t2i = TextToImage::load_tuned(Path::new(&dir), 1, qwen3::Dtype::BF16, 1024, tuned).unwrap();
         t2i.generate(&req, &|| false, &mut |_, _| {}).unwrap().remove(0)
     };

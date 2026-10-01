@@ -20,7 +20,7 @@ use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, M
 use imaging::pixels::Rgb8;
 use serde_json::{json, Value};
 
-use crate::model::Vlm;
+use crate::model::{GenRequest, Vlm};
 use crate::prompt::{Role, Turn, IMAGE_TAG};
 
 /// DeepSeek-VL's catalog id: the resolver accepts any directory holding a
@@ -178,54 +178,99 @@ impl Session {
     }
 
     /// Run one `generate` invocation, streaming each token's text.
-    pub fn generate(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    pub fn generate(&mut self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.generate_batch(std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().expect("one result per invocation")
+    }
+
+    /// Run `invs` as one batch: every request is prefilled and the sequences
+    /// then decode together, each streaming its own tokens (`progress` gets
+    /// the request's index). A request that cannot be prepared fails alone.
+    pub fn generate_batch(&mut self, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        // The reference processors stop on the next user turn as well as on
+        // the end-of-sentence token.
+        let stops = vec![format!("{}:", self.vlm.style.user)];
+        let mut prepared: Vec<Result<Prepared, String>> = invs.iter().map(|inv| self.prepare(inv)).collect();
+        let (mut at, mut requests, mut streams) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, p) in prepared.iter_mut().enumerate() {
+            if let Ok(p) = p {
+                at.push(i);
+                streams.push(Stream::default());
+                requests.push(GenRequest { ids: &p.ids, embeds: &p.embeds, max_new: p.max_new });
+            }
+        }
+        let tok = std::sync::Arc::clone(&self.vlm.tokenizer);
+        // The reply's leading space (after `Assistant:`) is dropped from the
+        // stream and the final text alike.
+        let text_of = |ids: &[u32]| data::tokenizer::Tokenizer::decode(&*tok, ids).trim_start().to_string();
+        let generated = self.vlm.generate_batch(&requests, &mut |r, id| {
+            let (st, max_new) = (&mut streams[r], requests[r].max_new);
+            st.out_ids.push(id);
+            let (delta, now, stop) = qwen3::chat::visible_delta(&st.printed, &text_of(&st.out_ids), &stops);
+            if !delta.is_empty() {
+                progress(at[r], Progress::token(st.out_ids.len() as u32, max_new as u32, delta));
+            }
+            st.printed = now;
+            st.stop_at = stop;
+            st.stop_at.is_none()
+        });
+        let mut results: Vec<ActionResult> = prepared.iter().map(|p| p.as_ref().map(|_| Outcome::new()).map_err(|e| e.clone())).collect();
+        for (r, generated) in generated.into_iter().enumerate() {
+            let (i, st, p) = (at[r], &streams[r], prepared[at[r]].as_ref().expect("prepared requests only"));
+            results[i] = generated.map(|ids_out| {
+                let mut text = text_of(&st.out_ids);
+                let finish = if let Some(cut) = st.stop_at.or_else(|| qwen3::chat::find_stop(&text, &stops)) {
+                    text.truncate(cut);
+                    "stop"
+                } else if ids_out.len() < p.max_new {
+                    "stop"
+                } else {
+                    "length"
+                };
+                if let Some(tail) = text.get(st.printed.len()..).filter(|t| !t.is_empty() && st.stop_at.is_none()) {
+                    progress(i, Progress::token(st.out_ids.len() as u32, p.max_new as u32, tail.to_string()));
+                }
+                Outcome::new()
+                    .set("text", json!(text.clone()))
+                    .set("prompt_tokens", json!(p.prompt_tokens))
+                    .set("completion_tokens", json!(st.out_ids.len()))
+                    .set("finish_reason", json!(finish))
+                    .blob("text", Blob::new(Media::Text, text.into_bytes()))
+            });
+        }
+        results
+    }
+
+    /// One request's prompt ids, image rows and token budget.
+    fn prepare(&self, inv: &Invocation) -> Result<Prepared, String> {
         let images = decode_images(inv)?;
         let (system, turns) = conversation(inv, images.len(), self.image_sep)?;
         let ids = self.vlm.prompt_ids_with(system.as_deref(), &turns)?;
         let embeds = self.vlm.image_embeds(&images)?;
         let prompt_tokens = self.vlm.splice.expand_ids(&ids).len();
-        let room = (self.vlm.decoder.ctx_len()).saturating_sub(prompt_tokens);
+        let context = self.vlm.decoder.max_seq_len();
+        let room = context.saturating_sub(prompt_tokens);
         if room == 0 {
-            return Err(format!("the prompt takes {prompt_tokens} tokens of the {}-token context", self.vlm.decoder.ctx_len()));
+            return Err(format!("the prompt takes {prompt_tokens} tokens of the {context}-token context"));
         }
         let max_new = (inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW).max(1) as usize).min(room);
-        // The reference processors stop on the next user turn as well as on
-        // the end-of-sentence token.
-        let stops = vec![format!("{}:", self.vlm.style.user)];
-        let (mut out_ids, mut printed, mut stop_at) = (Vec::new(), String::new(), None);
-        let tok = &self.vlm.tokenizer;
-        // The reply's leading space (after `Assistant:`) is dropped from the
-        // stream and the final text alike.
-        let text_of = |ids: &[u32]| data::tokenizer::Tokenizer::decode(tok, ids).trim_start().to_string();
-        let ids_out = self.vlm.generate_greedy(&ids, &embeds, max_new, &mut |id| {
-            out_ids.push(id);
-            let (delta, now, stop) = qwen3::chat::visible_delta(&printed, &text_of(&out_ids), &stops);
-            if !delta.is_empty() {
-                progress(Progress::token(out_ids.len() as u32, max_new as u32, delta));
-            }
-            printed = now;
-            stop_at = stop;
-            stop_at.is_none()
-        })?;
-        let mut text = text_of(&out_ids);
-        let finish = if let Some(at) = stop_at.or_else(|| qwen3::chat::find_stop(&text, &stops)) {
-            text.truncate(at);
-            "stop"
-        } else if ids_out.len() < max_new {
-            "stop"
-        } else {
-            "length"
-        };
-        if let Some(tail) = text.get(printed.len()..).filter(|t| !t.is_empty() && stop_at.is_none()) {
-            progress(Progress::token(out_ids.len() as u32, max_new as u32, tail.to_string()));
-        }
-        Ok(Outcome::new()
-            .set("text", json!(text.clone()))
-            .set("prompt_tokens", json!(prompt_tokens))
-            .set("completion_tokens", json!(out_ids.len()))
-            .set("finish_reason", json!(finish))
-            .blob("text", Blob::new(Media::Text, text.into_bytes())))
+        Ok(Prepared { ids, embeds, max_new, prompt_tokens })
     }
+}
+
+/// A request ready to decode.
+struct Prepared {
+    ids: Vec<u32>,
+    embeds: Vec<f32>,
+    max_new: usize,
+    prompt_tokens: usize,
+}
+
+/// The reply a request has streamed so far.
+#[derive(Default)]
+struct Stream {
+    out_ids: Vec<u32>,
+    printed: String,
+    stop_at: Option<usize>,
 }
 
 /// Direct provider: builds (and caches) one [`Session`] per checkpoint
@@ -267,9 +312,10 @@ pub fn load_session(dir: &str, placement: crate::model::Placement) -> Result<Ses
 /// [`load_session`] with the fine-tune in `tuned` (what `brain deepseekvl
 /// finetune` wrote) applied.
 pub fn load_session_tuned(dir: &str, placement: crate::model::Placement, tuned: Option<&std::path::Path>) -> Result<Session, String> {
-    let mut vlm = crate::model::load_placed(std::path::Path::new(dir), qwen3::Dtype::F16, placement)?;
+    let adapter = tuned.map(crate::tuned::decoder_adapter).transpose()?.flatten();
+    let vlm = crate::model::load_placed(std::path::Path::new(dir), placement.tier(qwen3::Dtype::F16), placement, adapter.as_deref())?;
     if let Some(t) = tuned {
-        crate::tuned::apply(&mut vlm, t)?;
+        crate::tuned::apply_aligner(&vlm, t)?;
     }
     Ok(Session::new(vlm, ""))
 }
@@ -296,7 +342,7 @@ impl Action for GenerateAction {
             *guard = None; // drop the old build before the new one allocates
             *guard = Some((dir.clone(), load_session(&dir, place_now(&dir)?)?));
         }
-        guard.as_ref().expect("just loaded").1.generate(inv, progress)
+        guard.as_mut().expect("just loaded").1.generate(inv, progress)
     }
 }
 

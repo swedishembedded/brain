@@ -81,3 +81,25 @@ teardown_file() {
   jq -e '.usage.prompt_tokens > 1152' "$CONF_DIR/chat2.json"
   jq -e '.choices[0].message.content | length > 0' "$CONF_DIR/chat2.json"
 }
+
+# Requests that arrive together decode as one batch on the model's shared KV
+# pool; each answers exactly as it would alone (greedy).
+@test "two requests sent together each get the answer a lone request gets" {
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/urlc.txt"
+  jq -n --arg m "$MODEL" --rawfile u "$CONF_DIR/urlc.txt" '{model: $m, max_tokens: 24, temperature: 0,
+    messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "Which animal is in this image? Answer in one short sentence."}]}]}' >"$CONF_DIR/bodyc.json"
+  local pids=() i
+  for i in 1 2; do
+    curl -fsS --max-time 1800 -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+      -X POST "http://127.0.0.1:$PORT/v1/chat/completions" --data-binary @"$CONF_DIR/bodyc.json" >"$CONF_DIR/c$i.json" &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p"; done
+  curl -fsS --max-time 1800 -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$PORT/v1/chat/completions" --data-binary @"$CONF_DIR/bodyc.json" >"$CONF_DIR/c0.json"
+  local want; want="$(jq -r '.choices[0].message.content' "$CONF_DIR/c0.json")"
+  [ -n "$want" ]
+  for i in 1 2; do
+    [ "$(jq -r '.choices[0].message.content' "$CONF_DIR/c$i.json")" = "$want" ] || { cat "$CONF_DIR/c$i.json" >&3; false; }
+  done
+}

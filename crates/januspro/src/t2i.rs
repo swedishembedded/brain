@@ -195,27 +195,43 @@ impl TextToImage {
         Ok((cond, uncond))
     }
 
-    /// Run `steps` guided steps from `cond`/`uncond`. At each step `choose`
-    /// gets the step index and the blended logits `[parallel, vocab]` and
-    /// returns one token per image. Returns each image's tokens.
+    /// Run `steps` guided steps from `cond`/`uncond`, for every image of the
+    /// batch alike. At each step `choose` gets the step index and the blended
+    /// logits `[parallel, vocab]` and returns one token per image. Returns
+    /// each image's tokens.
     pub fn run_tokens(&mut self, cond: &[u32], uncond: &[u32], cfg_weight: f32, steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
-        let rows = 2 * self.parallel as usize;
-        if cond.len().max(uncond.len()) + steps > PagedDecoder::max_seq_len(&self.engine) {
-            return Err(format!("a {}-token prompt and {steps} image tokens exceed the {}-token context", cond.len(), PagedDecoder::max_seq_len(&self.engine)));
+        let p = self.parallel as usize;
+        let prompts: Vec<(Vec<u32>, Vec<u32>)> = (0..p).map(|_| (cond.to_vec(), uncond.to_vec())).collect();
+        self.run_images(&prompts, &vec![cfg_weight; p], steps, choose)
+    }
+
+    /// [`Self::run_tokens`] with a prompt pair and a guidance weight of its own
+    /// for each of up to `parallel` images; the images share the decoder's
+    /// batch, so a few images cost little more than one. `choose` sees one
+    /// blended row per image given.
+    pub fn run_images(&mut self, prompts: &[(Vec<u32>, Vec<u32>)], cfg_weights: &[f32], steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
+        let images = prompts.len();
+        if images == 0 || images > self.parallel as usize || cfg_weights.len() != images {
+            return Err(format!("{images} prompts and {} guidance weights for a build of {} images", cfg_weights.len(), self.parallel));
         }
-        let mut tables: Vec<BlockTable> = (0..rows).map(|_| BlockTable::new()).collect();
-        let result = self.run_rows(&mut tables, cond, uncond, cfg_weight, steps, choose);
+        let max_seq = PagedDecoder::max_seq_len(&self.engine);
+        if let Some((cond, uncond)) = prompts.iter().find(|(c, u)| c.len().max(u.len()) + steps > max_seq) {
+            return Err(format!("a {}-token prompt and {steps} image tokens exceed the {max_seq}-token context", cond.len().max(uncond.len())));
+        }
+        let mut tables: Vec<BlockTable> = (0..2 * images).map(|_| BlockTable::new()).collect();
+        let result = self.run_rows(&mut tables, prompts, cfg_weights, steps, choose);
         for t in &mut tables {
             PagedDecoder::release_table(&mut self.engine, t);
         }
         result
     }
 
-    fn run_rows(&mut self, tables: &mut [BlockTable], cond: &[u32], uncond: &[u32], cfg_weight: f32, steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
-        let p = self.parallel as usize;
+    fn run_rows(&mut self, tables: &mut [BlockTable], prompts: &[(Vec<u32>, Vec<u32>)], cfg_weights: &[f32], steps: usize, choose: &mut dyn FnMut(usize, &[f32]) -> Result<Vec<u32>, String>) -> Result<Vec<Vec<u32>>, String> {
+        let p = prompts.len();
         let v = self.heads.vocab();
         let mut hidden = Vec::new();
         for (r, table) in tables.iter_mut().enumerate() {
+            let (cond, uncond) = &prompts[r / 2];
             let ids = if r % 2 == 0 { cond } else { uncond };
             let inputs: Vec<PrefillInput> = ids.iter().map(|&t| PrefillInput::Token(t)).collect();
             hidden.extend(self.engine.prefill_mixed(table, &inputs));
@@ -223,7 +239,7 @@ impl TextToImage {
         let mut out = vec![Vec::with_capacity(steps); p];
         for step in 0..steps {
             let logits = self.heads.logits(&hidden);
-            let blended: Vec<f32> = (0..p).flat_map(|i| model::hostmath::cfg_blend(&logits[2 * i * v..(2 * i + 1) * v], &logits[(2 * i + 1) * v..(2 * i + 2) * v], cfg_weight)).collect();
+            let blended: Vec<f32> = (0..p).flat_map(|i| model::hostmath::cfg_blend(&logits[2 * i * v..(2 * i + 1) * v], &logits[(2 * i + 1) * v..(2 * i + 2) * v], cfg_weights[i])).collect();
             let chosen = choose(step, &blended)?;
             if chosen.len() != p {
                 return Err(format!("{} tokens chosen for {p} images", chosen.len()));
@@ -259,14 +275,37 @@ impl TextToImage {
         Ok(self.decode(&codes))
     }
 
+    /// Draw one image for each of `reqs` (at most `parallel`) as one batch:
+    /// each with its own prompt, guidance weight, temperature and seed, so the
+    /// image is the one the request would get alone. `cancelled` is polled
+    /// every step; `progress` sees `(step, total)`.
+    pub fn generate_many(&mut self, reqs: &[Request], cancelled: &dyn Fn() -> bool, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<Rgb8>, String> {
+        let prompts = reqs.iter().map(|r| self.prompt_ids(r.prompt)).collect::<Result<Vec<_>, _>>()?;
+        let weights: Vec<f32> = reqs.iter().map(|r| r.cfg_weight).collect();
+        let (v, total) = (self.heads.vocab(), self.tokens);
+        let mut rngs: Vec<runtime::sample::Rng> = reqs.iter().map(|r| runtime::sample::Rng::new(r.seed)).collect();
+        let codes = self.run_images(&prompts, &weights, total, &mut |step, blended| {
+            if cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(step + 1, total);
+            Ok(blended.chunks(v).zip(reqs.iter().zip(rngs.iter_mut())).map(|(l, (r, rng))| runtime::sample::sample_logits(l, r.temperature, 0, rng)).collect())
+        })?;
+        Ok(self.decode(&codes))
+    }
+
     /// Decode each image's token grid to RGB8 (`clip((x + 1) / 2 * 255)`).
     pub fn decode(&self, codes: &[Vec<u32>]) -> Vec<Rgb8> {
-        assert_eq!(codes.len(), self.parallel as usize, "one token grid per image of the batch");
-        let flat: Vec<u32> = codes.iter().flatten().copied().collect();
+        assert!(!codes.is_empty() && codes.len() <= self.parallel as usize, "{} token grids for a build of {} images", codes.len(), self.parallel);
+        // The decoder is built for `parallel` grids: a smaller batch is padded
+        // with blank grids whose pixels are dropped.
+        let mut flat: Vec<u32> = codes.iter().flatten().copied().collect();
+        flat.resize(self.parallel as usize * self.tokens, 0);
         let px = self.vq.decode(&flat);
         let side = self.image_size as usize;
         let plane = side * side;
         px.chunks(3 * plane)
+            .take(codes.len())
             .map(|img| {
                 let mut out = vec![0u8; 3 * plane];
                 for c in 0..3 {

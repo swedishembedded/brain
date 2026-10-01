@@ -20,11 +20,18 @@ use januspro::caps::MODEL;
 use januspro::t2i::TextToImage;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
+/// The most images the drawing build batches, memory permitting.
+const MAX_IMAGES_PER_BATCH: u32 = 4;
+
 /// A build's plan: its bytes on its card and its context.
 #[derive(Clone, Copy, Debug)]
 struct Plan {
     bytes: u64,
     context: u32,
+    /// The chat build's decoder has int8 linears (see `deepseekvl::model::place`).
+    int8: bool,
+    /// Images the drawing build makes in one batch.
+    parallel: u32,
 }
 
 pub struct JanusProResident {
@@ -65,14 +72,17 @@ impl JanusProResident {
         let card = [(0, room)];
         let fp = Footprint::of(&cfg, januspro::model::SIGLIP_TOWER_BYTES);
         let understanding = deepseekvl::model::place(&fp, &card)
-            .map(|p| Plan { bytes: fp.tower + fp.decoder_at(p.context), context: p.context })
+            .map(|p| Plan { bytes: fp.tower + fp.decoder_placed(&p), context: p.context, int8: p.int8, parallel: 1 })
             .map_err(|e| eprintln!("brain: januspro chat not served ({e})"))
             .ok();
         let gen_fp = Footprint::of(&cfg, 0);
-        let generation = januspro::t2i::place(&gen_fp, 1, &card)
-            .map(|(_, context)| Plan { bytes: gen_fp.decoder_at(2 * context) + januspro::t2i::GENERATION_EXTRA_BYTES, context })
-            .map_err(|e| eprintln!("brain: januspro text2image not served ({e})"))
-            .ok();
+        // As many images per batch as leave a useful context on the card.
+        let generation = [MAX_IMAGES_PER_BATCH, 2, 1]
+            .into_iter()
+            .find_map(|parallel| januspro::t2i::place(&gen_fp, parallel, &card).ok().map(|(_, context)| Plan { bytes: gen_fp.decoder_at(2 * parallel * context) + januspro::t2i::GENERATION_EXTRA_BYTES, context, int8: false, parallel }));
+        if generation.is_none() {
+            eprintln!("brain: januspro text2image not served (no card holds the decoder, the heads and a useful context)");
+        }
         if understanding.is_none() && generation.is_none() {
             return None;
         }
@@ -146,9 +156,9 @@ impl ResidentModel for JanusProResident {
         };
         let (dir, _) = key.config.rsplit_once('|').ok_or("januspro: malformed instance key")?;
         if Self::is_generation(key) {
-            Ok(Box::new(Generation { t2i: januspro::caps::load_t2i(dir, card, plan.context, self.tuned_generation.as_deref())? }))
+            Ok(Box::new(Generation { t2i: januspro::caps::load_t2i(dir, card, plan.context, plan.parallel, self.tuned_generation.as_deref())? }))
         } else {
-            let placement = Placement { tower: card, decoder: card, context: plan.context };
+            let placement = Placement { tower: card, decoder: card, context: plan.context, int8: plan.int8 };
             Ok(Box::new(Understanding { session: januspro::caps::load_understanding(dir, placement, self.tuned.as_deref())? }))
         }
     }
@@ -165,6 +175,14 @@ impl Instance for Understanding {
             other => Err(format!("januspro: action '{other}' does not run on the understanding build")),
         }
     }
+
+    /// Requests dispatched together decode as one batch on the shared KV pool.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        match action {
+            "generate" => self.session.generate_batch(invs, progress),
+            other => invs.iter().map(|_| Err(format!("januspro: action '{other}' does not run on the understanding build"))).collect(),
+        }
+    }
 }
 
 struct Generation {
@@ -178,6 +196,15 @@ impl Instance for Generation {
             other => Err(format!("januspro: action '{other}' does not run on the generation build")),
         }
     }
+
+    /// Drawings dispatched together share the decoder's batch, up to the
+    /// build's image count; further ones follow in the next batch.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        match action {
+            "text2image" => januspro::caps::text2image_batch(&mut self.t2i, invs, progress),
+            other => invs.iter().map(|_| Err(format!("januspro: action '{other}' does not run on the generation build"))).collect(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,12 +212,12 @@ mod tests {
     use super::*;
 
     fn resident(generation: Option<Plan>) -> JanusProResident {
-        JanusProResident { id: MODEL.into(), only: None, dir: "/tmp".into(), tuned: None, tuned_generation: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
+        JanusProResident { id: MODEL.into(), only: None, dir: "/tmp".into(), tuned: None, tuned_generation: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048, int8: false, parallel: 1 }), generation }
     }
 
     #[test]
     fn each_build_is_its_own_single_card_instance() {
-        let r = resident(Some(Plan { bytes: 20 << 30, context: 1024 }));
+        let r = resident(Some(Plan { bytes: 20 << 30, context: 1024, int8: false, parallel: 1 }));
         let (chat, draw) = (r.instance_key("generate", &Invocation::new()), r.instance_key("text2image", &Invocation::new()));
         assert_ne!(chat, draw, "the two builds are separate instances");
         assert_eq!((r.estimate(&chat).vram, r.estimate(&draw).vram), (18 << 30, 20 << 30));
@@ -208,7 +235,7 @@ mod tests {
                 std::fs::write(root.join(rel).join(f), b"x").unwrap();
             }
         }
-        let mut base = resident(Some(Plan { bytes: 20 << 30, context: 1024 }));
+        let mut base = resident(Some(Plan { bytes: 20 << 30, context: 1024, int8: false, parallel: 1 }));
         base.dir = root.to_string_lossy().into_owned();
         let family: Vec<(String, Vec<String>)> = base.stored_fine_tunes().iter().map(|r| (r.manifest().model, r.manifest().actions.into_iter().map(|a| a.name).collect())).collect();
         assert_eq!(family, [("brain/januspro:acme:chat:v1".to_string(), vec!["generate".to_string()]), ("brain/januspro:acme:draw:v1".to_string(), vec!["text2image".to_string()])]);

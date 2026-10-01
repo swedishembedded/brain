@@ -3,9 +3,9 @@
 
 //! Serving what [`crate::train`] trained: a directory holding
 //! `adapter.safetensors` (the decoder's LoRA) and, when the aligner trained,
-//! `aligner.safetensors`, applied to a loaded composite. The adapter is
-//! attached at run time ([`qwen3::Qwen::attach_adapter`]), never folded into
-//! the base weights, and the aligner's parameters replace the checkpoint's.
+//! `aligner.safetensors`. The adapter is folded into the decoder's weights as
+//! they load ([`crate::model::Vlm::assemble`]), and the aligner's parameters
+//! replace the checkpoint's in the loaded tower.
 
 use std::path::Path;
 
@@ -49,23 +49,27 @@ pub fn is_vl_fine_tune(dir: &Path) -> bool {
     dir.join(ADAPTER_FILE).is_file() || dir.join(ALIGNER_FILE).is_file()
 }
 
-/// Apply the fine-tune in `dir` to `vlm`. A directory with neither file is an
-/// error: serving "a fine-tune" that changes nothing would be a silent no-op.
-pub fn apply(vlm: &mut Vlm, dir: &Path) -> Result<(), String> {
-    let adapter = dir.join(ADAPTER_FILE);
-    let aligner = dir.join(ALIGNER_FILE);
-    if !adapter.is_file() && !aligner.is_file() {
+/// The decoder adapter of the fine-tune in `dir`, to fold into the decoder as
+/// it loads (`None` when only the aligner trained). A directory with neither
+/// file is an error: serving "a fine-tune" that changes nothing would be a
+/// silent no-op.
+pub fn decoder_adapter(dir: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    if !is_vl_fine_tune(dir) {
         return Err(format!("{}: holds neither {ADAPTER_FILE} nor {ALIGNER_FILE}, so it is not a fine-tune of this model", dir.display()));
     }
-    if aligner.is_file() {
-        let path = aligner.to_str().ok_or("path is not UTF-8")?;
-        let st = checkpoint::st::load_safetensors(path).map_err(|e| format!("{path}: {e}"))?;
-        vlm.tower.set_aligner(&st.tensors).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Some(dir.join(ADAPTER_FILE)).filter(|p| p.is_file()))
+}
+
+/// Replace the tower's aligner with the one the fine-tune in `dir` trained,
+/// when it trained one.
+pub fn apply_aligner(vlm: &Vlm, dir: &Path) -> Result<(), String> {
+    let aligner = dir.join(ALIGNER_FILE);
+    if !aligner.is_file() {
+        return Ok(());
     }
-    if adapter.is_file() {
-        vlm.decoder.attach_adapter(adapter.to_str().ok_or("path is not UTF-8")?)?;
-    }
-    Ok(())
+    let path = aligner.to_str().ok_or("path is not UTF-8")?;
+    let st = checkpoint::st::load_safetensors(path).map_err(|e| format!("{path}: {e}"))?;
+    vlm.tower.set_aligner(&st.tensors).map_err(|e| format!("{path}: {e}"))
 }
 
 #[cfg(test)]

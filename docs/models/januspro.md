@@ -34,7 +34,12 @@ downloaded (bf16 `pytorch_model-*.bin` shards):
   conditional and an unconditional sequence decoded together on the paged
   serving engine, with the 576 sampled tokens decoded by the VQ-16. The
   engine keeps the decoder at the checkpoint's own bf16 (about 14 GB);
-  int8 is not offered, because guidance magnifies its error.
+  int8 is not offered, because guidance magnifies its error. The build
+  draws up to four images in one batch (as many as leave a useful context
+  on the card), each with its own prompt, guidance weight, temperature and
+  seed: drawings that reach the model together, including the `n` images of
+  one `/v1/images/generations` request, share the decoder's passes.
+  (`TextToImage::generate_many`).
 
 ```rust
 let mut t2i = januspro::t2i::TextToImage::load(dir, 1, qwen3::Dtype::BF16, 1024)?;
@@ -75,8 +80,8 @@ beside it. The flags are `brain deepseekvl finetune`'s.
   `generation.safetensors`.
 
 An understanding fine-tune is served by starting `brain serve` with
-`BRAIN_JANUSPRO_TUNED=<out dir>` (the adapter is attached at run time, the
-trained aligner replaces the checkpoint's); a generation fine-tune is served
+`BRAIN_JANUSPRO_TUNED=<out dir>` (the adapter is folded into the decoder as it loads,
+the trained aligner replaces the checkpoint's); a generation fine-tune is served
 by `BRAIN_JANUSPRO_TUNED_GENERATION=<out dir>` (its adapter is folded into the
 drawing engine's decoder, its head, aligner and code embedding replace the
 checkpoint's).

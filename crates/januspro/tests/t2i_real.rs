@@ -77,4 +77,29 @@ fn janus_pro_generates_images_on_the_engine() {
     eprintln!("wrote {} for inspection", out.display());
     assert!(l_std > 20.0, "the image has no contrast (luma std {l_std:.1})");
     assert!(r_mean > g_mean && r_mean > b_mean, "a red apple should make red the dominant channel: ({r_mean:.1}, {g_mean:.1}, {b_mean:.1})");
+
+    // ---- two different drawings in one batch ----
+    // Each image of a batch is guided by its own prompts: the red apple's
+    // logits are still the reference's with another prompt beside it.
+    drop(t2i);
+    let mut t2i = TextToImage::load(Path::new(&dir), 2, qwen3::Dtype::BF16, 1024).expect("load Janus-Pro generation for two images");
+    let other = t2i.prompt_ids("A blue boat on a calm sea.").unwrap();
+    let mut batch = Report::new(0.9999);
+    let mut apple_vs_boat = Vec::new();
+    t2i.run_images(&[(cond.clone(), uncond.clone()), other.clone()], &[weight, weight], sampled.len(), &mut |step, blended| {
+        batch.check(&format!("logits_cfg[{step}] beside another prompt"), &blended[..v], &want[step * v..(step + 1) * v]);
+        apple_vs_boat.push(blended[..v].iter().zip(&blended[v..]).any(|(a, b)| a != b));
+        Ok(vec![sampled[step], sampled[step]])
+    })
+    .unwrap();
+    batch.finish("Janus-Pro guided logits (two prompts in one batch)");
+    assert!(apple_vs_boat.iter().all(|&differs| differs), "the two prompts steer their images apart");
+    let reqs = [Request { prompt, cfg_weight: weight, temperature: 1.0, seed: 7 }, Request { prompt: "A blue boat on a calm sea.", cfg_weight: weight, temperature: 1.0, seed: 8 }];
+    let pair = t2i.generate_many(&reqs, &|| false, &mut |_, _| {}).unwrap();
+    assert_eq!(pair.len(), 2);
+    let blue_minus_red = |img: &imaging::pixels::Rgb8| {
+        let n = (img.w * img.h) as f64;
+        (img.px.iter().skip(2).step_by(3).map(|&v| v as f64).sum::<f64>() - img.px.iter().step_by(3).map(|&v| v as f64).sum::<f64>()) / n
+    };
+    assert!(blue_minus_red(&pair[1]) > blue_minus_red(&pair[0]), "the boat's image is bluer than the apple's");
 }

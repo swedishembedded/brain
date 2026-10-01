@@ -1631,6 +1631,56 @@ async fn n_concurrent_chat_requests_batch_through_the_real_router_not_serialize(
     );
 }
 
+/// An image model whose `run_batch` draws every image of a batch together and
+/// records the largest batch it was handed.
+struct BatchingImage {
+    max_batch_seen: Arc<AtomicUsize>,
+}
+struct BatchingImageInst {
+    max_batch_seen: Arc<AtomicUsize>,
+}
+impl ResidentModel for BatchingImage {
+    fn manifest(&self) -> Manifest {
+        image_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-image", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(BatchingImageInst { max_batch_seen: self.max_batch_seen.clone() }))
+    }
+}
+impl Instance for BatchingImageInst {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().expect("one result for one invocation")
+    }
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        self.max_batch_seen.fetch_max(invs.len(), Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200)); // the batch's one pass
+        invs.iter().map(|_| Ok(Outcome::new().blob("image", capability::blob::image_blob(&[0.0; 12], 2, 2, 3)))).collect()
+    }
+}
+
+/// The `n` images of one request are submitted together, so a model that can
+/// draw several at once is handed them as one batch instead of one at a time.
+#[tokio::test]
+async fn the_images_of_one_request_reach_the_model_as_one_batch() {
+    let max_batch_seen = Arc::new(AtomicUsize::new(0));
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(BatchingImage { max_batch_seen: max_batch_seen.clone() })];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenAI));
+    let body = json!({"model": "brain-image", "prompt": "a red cat", "n": 3, "size": "1024x1024"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["data"].as_array().map(Vec::len), Some(3));
+    assert!(max_batch_seen.load(Ordering::SeqCst) >= 2, "3 images of one request must be dispatched together; the largest batch was {}", max_batch_seen.load(Ordering::SeqCst));
+}
+
 // ------------------------------------------------------------ security (P17)
 
 /// A chat model whose `generate` always fails with an internal error string that

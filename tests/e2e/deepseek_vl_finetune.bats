@@ -71,3 +71,31 @@ teardown_file() {
   kill -9 "$server" 2>/dev/null || true
   jq -e '.choices[0].message.content | test("Blorbville")' "$WORK/answer.json" || { cat "$WORK/answer.json" >&3; false; }
 }
+
+# The same fine-tune kept beside the checkpoint is a model of its own: no
+# environment variable, the id carries its owner, name and tag, and the base
+# model beside it still answers as the base.
+@test "a stored fine-tune is listed as its own model and the base is unchanged" {
+  [ -d "$WORK/tuned" ] || skip "the fine-tune test did not run"
+  mkdir -p "$WORK/models/$REPO_ID/adapters/local/blorb"
+  cp -r "$WORK/tuned" "$WORK/models/$REPO_ID/adapters/local/blorb/v1"
+  local port="${DEEPSEEK_VL_FT_PORT:-8942}"
+  "$BRAIN" serve --models-dir "$WORK/models" --openai "$port" \
+    --api-keys-out "$WORK/keys2.json" --ready-file "$WORK/ready2" >"$WORK/serve2.log" 2>&1 &
+  local server=$!
+  for _ in $(seq 1 120); do [ -e "$WORK/ready2" ] && break; sleep 0.5; done
+  [ -e "$WORK/ready2" ] || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve2.log" >&3; false; }
+  local key; key="$(jq -r .openai "$WORK/keys2.json")"
+  curl -fsS -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models" >"$WORK/models.json"
+  jq -e '[.data[].id] | index("brain/deepseekvl:local:blorb:v1") != null and index("brain/deepseekvl") != null' "$WORK/models.json" \
+    || { kill -9 "$server" 2>/dev/null; cat "$WORK/models.json" >&3; false; }
+  { printf 'data:image/png;base64,'; base64 -w0 "$WORK/learn/dog.png"; } >"$WORK/url2.txt"
+  for model in brain/deepseekvl:local:blorb:v1 brain/deepseekvl; do
+    jq -n --rawfile u "$WORK/url2.txt" --arg m "$model" '{model: $m, max_tokens: 30, temperature: 0, messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "What animal is this?"}]}]}' >"$WORK/ask2.json"
+    curl -fsS --max-time 900 -H "Authorization: Bearer $key" -H 'content-type: application/json' \
+      -X POST "http://127.0.0.1:$port/v1/chat/completions" --data-binary @"$WORK/ask2.json" >"$WORK/answer-${model//[:\/]/_}.json" || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve2.log" >&3; false; }
+  done
+  kill -9 "$server" 2>/dev/null || true
+  jq -e '.choices[0].message.content | test("Blorbville")' "$WORK/answer-brain_deepseekvl_local_blorb_v1.json"
+  ! jq -e '.choices[0].message.content | test("Blorbville")' "$WORK/answer-brain_deepseekvl.json"
+}

@@ -123,28 +123,35 @@ impl GenHeads {
         self.head.cfg.out_dim as usize
     }
 
-    /// Image-token logits `[rows, vocab]` for the decoder's final-norm
-    /// hidden states `[rows, n_embed]`.
+    /// Image-token logits `[n, vocab]` for the decoder's final-norm hidden
+    /// states `[n, n_embed]`, `n` being at most the rows the heads were built
+    /// for (the rest of the batch is padding the MLPs compute and this drops).
     pub fn logits(&self, hidden: &[f32]) -> Vec<f32> {
-        assert_eq!(hidden.len(), self.rows as usize * self.head.cfg.input_dim as usize, "one hidden row per sequence");
-        self.gpu.write_f32(&self.hidden_in, hidden);
+        let width = self.head.cfg.input_dim as usize;
+        assert!(hidden.len() % width == 0 && hidden.len() <= self.rows as usize * width, "{} hidden values for at most {} rows of {width}", hidden.len(), self.rows);
+        let n = hidden.len() / width;
+        let mut padded = hidden.to_vec();
+        padded.resize(self.rows as usize * width, 0.0);
+        self.gpu.write_f32(&self.hidden_in, &padded);
         self.gpu.submit(&[], &self.head.forward(&self.gpu, &[&self.hidden_in]));
-        self.gpu.read(self.head.out(), self.rows as usize * self.vocab())
+        self.gpu.read(self.head.out(), n * self.vocab())
     }
 
-    /// The decoder-width rows `[rows, n_embed]` that feed image tokens `ids`
-    /// (one per sequence) back into the decoder.
+    /// The decoder-width rows `[n, n_embed]` that feed image tokens `ids`
+    /// (one per sequence, at most the rows the heads were built for) back
+    /// into the decoder.
     pub fn token_embeds(&self, ids: &[u32]) -> Result<Vec<f32>, String> {
-        if ids.len() != self.rows as usize {
-            return Err(format!("{} image tokens for {} sequences", ids.len(), self.rows));
+        if ids.is_empty() || ids.len() > self.rows as usize {
+            return Err(format!("{} image tokens for at most {} sequences", ids.len(), self.rows));
         }
         let mut codes = Vec::with_capacity(ids.len() * self.code_dim);
         for &t in ids {
             let row = self.embed.get(t as usize * self.code_dim..(t as usize + 1) * self.code_dim).ok_or_else(|| format!("image token {t} is outside the {}-entry vocabulary", self.vocab()))?;
             codes.extend_from_slice(row);
         }
+        codes.resize(self.rows as usize * self.code_dim, 0.0);
         self.gpu.write_f32(&self.codes_in, &codes);
         self.gpu.submit(&[], &self.aligner.forward(&self.gpu, &[&self.codes_in]));
-        Ok(self.gpu.read(self.aligner.out(), self.rows as usize * self.aligner.cfg.n_embed as usize))
+        Ok(self.gpu.read(self.aligner.out(), ids.len() * self.aligner.cfg.n_embed as usize))
     }
 }

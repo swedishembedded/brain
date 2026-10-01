@@ -60,18 +60,19 @@ pub fn manifest_resident() -> Manifest {
 
 /// Janus-Pro's understanding session, for serving, as `placement` puts it.
 pub fn load_understanding(dir: &str, placement: deepseekvl::model::Placement, tuned: Option<&std::path::Path>) -> Result<deepseekvl::caps::Session, String> {
-    let mut vlm = crate::model::load_understanding_placed(std::path::Path::new(dir), qwen3::Dtype::BF16, placement)?;
+    let adapter = tuned.map(deepseekvl::tuned::decoder_adapter).transpose()?.flatten();
+    let vlm = crate::model::load_understanding_placed(std::path::Path::new(dir), placement.tier(qwen3::Dtype::BF16), placement, adapter.as_deref())?;
     if let Some(t) = tuned {
-        deepseekvl::tuned::apply(&mut vlm, t)?;
+        deepseekvl::tuned::apply_aligner(&vlm, t)?;
     }
     // Janus-Pro's processor writes each image as `<image_placeholder>\n`.
     Ok(deepseekvl::caps::Session::new(vlm, "\n"))
 }
 
-/// Janus-Pro's generation path, for serving one image per request, on
-/// `card` with `context` tokens per sequence.
-pub fn load_t2i(dir: &str, card: u32, context: u32, tuned: Option<&std::path::Path>) -> Result<TextToImage, String> {
-    gpu_core::devices::with_gpu(card, || TextToImage::load_tuned(std::path::Path::new(dir), 1, qwen3::Dtype::BF16, context, tuned))?
+/// Janus-Pro's generation path, for serving up to `parallel` images at a
+/// time, on `card` with `context` tokens per sequence.
+pub fn load_t2i(dir: &str, card: u32, context: u32, parallel: u32, tuned: Option<&std::path::Path>) -> Result<TextToImage, String> {
+    gpu_core::devices::with_gpu(card, || TextToImage::load_tuned(std::path::Path::new(dir), parallel, qwen3::Dtype::BF16, context, tuned))?
 }
 
 /// Where the understanding build goes over the cards' free memory now.
@@ -86,24 +87,63 @@ pub fn place_t2i_now(dir: &str) -> Result<(u32, u32), String> {
     crate::t2i::place(&fp, 1, &gpu_core::capacity::available_gpus())
 }
 
-/// Run one `text2image` invocation on a loaded generation path.
-pub fn text2image(t2i: &mut TextToImage, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+/// What one `text2image` invocation asks for, checked.
+struct DrawRequest {
+    prompt: String,
+    cfg_weight: f32,
+    temperature: f32,
+    seed: u64,
+}
+
+fn draw_request(inv: &Invocation) -> Result<DrawRequest, String> {
     let prompt = inv.get_str("prompt").filter(|p| !p.trim().is_empty()).ok_or("januspro text2image: 'prompt' is required")?;
     let (w, h) = (inv.get_i64("width").unwrap_or(IMAGE_SIZE as i64), inv.get_i64("height").unwrap_or(IMAGE_SIZE as i64));
     if (w, h) != (IMAGE_SIZE as i64, IMAGE_SIZE as i64) {
         return Err(format!("januspro text2image: Janus-Pro generates {IMAGE_SIZE}x{IMAGE_SIZE} images only, not {w}x{h} (request size \"{IMAGE_SIZE}x{IMAGE_SIZE}\")"));
     }
-    let seed = inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(rand_seed);
-    let req = Request {
-        prompt: &prompt,
+    Ok(DrawRequest {
+        prompt,
         cfg_weight: inv.get_f64("cfg_weight").unwrap_or(DEFAULT_CFG_WEIGHT) as f32,
         temperature: inv.get_f64("temperature").unwrap_or(DEFAULT_TEMPERATURE) as f32,
-        seed,
-    };
-    let mut images = t2i.generate(&req, &|| false, &mut |step, total| progress(Progress::step(step as u32, total as u32, "")))?;
-    let img = images.pop().ok_or("januspro text2image: no image generated")?;
-    let hwc: Vec<f32> = img.px.iter().map(|&v| v as f32 / 255.0).collect();
-    Ok(Outcome::new().set("seed", json!(seed)).blob("image", capability::blob::image_blob(&hwc, img.w, img.h, 3)))
+        seed: inv.get_i64("seed").map(|s| s as u64).unwrap_or_else(rand_seed),
+    })
+}
+
+/// Run one `text2image` invocation on a loaded generation path.
+pub fn text2image(t2i: &mut TextToImage, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    text2image_batch(t2i, std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().expect("one result per invocation")
+}
+
+/// Run `invs` as batches of up to the build's image count: the images of a
+/// batch share the decoder, each with its own prompt, guidance, temperature
+/// and seed. A request that is not valid fails alone. `progress` gets the
+/// invocation's index.
+pub fn text2image_batch(t2i: &mut TextToImage, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+    let drawn: Vec<Result<DrawRequest, String>> = invs.iter().map(draw_request).collect();
+    let mut results: Vec<ActionResult> = drawn.iter().map(|d| d.as_ref().map(|_| Outcome::new()).map_err(|e| e.clone())).collect();
+    let valid: Vec<usize> = (0..invs.len()).filter(|&i| drawn[i].is_ok()).collect();
+    for chunk in valid.chunks(t2i.parallel()) {
+        let reqs: Vec<Request> = chunk.iter().map(|&i| drawn[i].as_ref().expect("valid")).map(|d| Request { prompt: &d.prompt, cfg_weight: d.cfg_weight, temperature: d.temperature, seed: d.seed }).collect();
+        let images = t2i.generate_many(&reqs, &|| false, &mut |step, total| {
+            for &i in chunk {
+                progress(i, Progress::step(step as u32, total as u32, ""));
+            }
+        });
+        match images {
+            Ok(images) => {
+                for (&i, img) in chunk.iter().zip(images) {
+                    let hwc: Vec<f32> = img.px.iter().map(|&v| v as f32 / 255.0).collect();
+                    results[i] = Ok(Outcome::new().set("seed", json!(drawn[i].as_ref().expect("valid").seed)).blob("image", capability::blob::image_blob(&hwc, img.w, img.h, 3)));
+                }
+            }
+            Err(e) => {
+                for &i in chunk {
+                    results[i] = Err(e.clone());
+                }
+            }
+        }
+    }
+    results
 }
 
 fn rand_seed() -> u64 {
@@ -163,7 +203,7 @@ impl Action for JanusAction {
             *guard = None; // drop the other build before this one allocates
             let build = if want_generation {
                 let (card, context) = place_t2i_now(&dir)?;
-                Loaded::Generation(load_t2i(&dir, card, context, None)?)
+                Loaded::Generation(load_t2i(&dir, card, context, 1, None)?)
             } else {
                 Loaded::Understanding(load_understanding(&dir, place_understanding_now(&dir)?, None)?)
             };

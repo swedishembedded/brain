@@ -24,6 +24,8 @@ use std::path::Path;
 use brain_testutil::parity::{load, Report};
 use deepseekvl::prompt::{Role, Turn};
 use imaging::pixels::Rgb8;
+use model::paged::BlockTable;
+use model::serve::PagedDecoder;
 use qwen3::model::PrefillInput;
 
 const REPO: &str = "deepseek-ai/Janus-Pro-7B";
@@ -54,7 +56,7 @@ fn janus_pro_matches_the_reference() {
             return;
         }
     }
-    let m = januspro::model::load_understanding(Path::new(&dir), qwen3::Dtype::BF16, 1024).expect("load Janus-Pro");
+    let mut m = januspro::model::load_understanding(Path::new(&dir), qwen3::Dtype::BF16, 1024).expect("load Janus-Pro");
     let mut r = Report::new(FLOOR);
 
     // ---- understanding ----
@@ -76,20 +78,23 @@ fn janus_pro_matches_the_reference() {
     r.check("features", &f.streams[0], &g["features"].data);
     r.check("aligner_out", &f.embeds, &g["aligner_out"].data);
     let inputs = m.inputs(&prompt, &f.embeds).unwrap();
-    let spliced: Vec<f32> = inputs
-        .iter()
-        .flat_map(|i| match i {
-            PrefillInput::Token(t) => m.decoder.embed_row(*t),
-            PrefillInput::Embed(row) => row.to_vec(),
-        })
-        .collect();
-    r.check("inputs_embeds", &spliced, &g["inputs_embeds"].data);
-    m.decoder.reset_cache();
-    m.decoder.prefill(&inputs);
-    r.check("logits_last", &m.decoder.decode_logits(), &g["logits_last"].data);
+    let d = m.decoder_cfg.d_model as usize;
+    let (mut got, mut want) = (Vec::new(), Vec::new());
+    for (at, input) in inputs.iter().enumerate() {
+        if let PrefillInput::Embed(row) = input {
+            got.extend_from_slice(row);
+            want.extend_from_slice(&g["inputs_embeds"].data[at * d..(at + 1) * d]);
+        }
+    }
+    assert!(!got.is_empty(), "the prompt has image rows");
+    r.check("inputs_embeds (image rows)", &got, &want);
+    let mut table = BlockTable::new();
+    let hidden = m.decoder.prefill_mixed(&mut table, &inputs);
+    r.check("logits_last", &m.decoder.logits(&hidden), &g["logits_last"].data);
+    m.decoder.release_table(&mut table);
     let want = ids(&um, "greedy_ids");
     let got = m.generate_greedy(&prompt, &f.embeds, want.len(), &mut |_| true).unwrap();
-    assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&m.tokenizer, &got));
+    assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&*m.tokenizer, &got));
 
     // ---- generation, teacher-forced ----
     let (gm, g) = (manifest(&g_dir), load(&g_dir.join("golden.safetensors")));
@@ -102,8 +107,8 @@ fn janus_pro_matches_the_reference() {
     let mut branch_logits = Vec::new();
     for key in ["cond_ids", "uncond_ids"] {
         let prompt: Vec<PrefillInput> = ids(&gm, key).into_iter().map(PrefillInput::Token).collect();
-        m.decoder.reset_cache();
-        let mut hidden = m.decoder.prefill(&prompt);
+        let mut table = BlockTable::new();
+        let mut hidden = m.decoder.prefill_mixed(&mut table, &prompt);
         let mut logits = Vec::new();
         for (t, &token) in sampled.iter().enumerate() {
             logits.push(heads.logits(&hidden));
@@ -111,8 +116,9 @@ fn janus_pro_matches_the_reference() {
             if key == "cond_ids" {
                 r.check(&format!("token_embeds[{t}]"), &fed, &step_rows("token_embeds", t, d));
             }
-            hidden = m.decoder.step_embed(&fed);
+            hidden = m.decoder.forward_batched_embed(&mut [&mut table], &fed);
         }
+        m.decoder.release_table(&mut table);
         branch_logits.push(logits);
     }
     for t in 0..sampled.len() {

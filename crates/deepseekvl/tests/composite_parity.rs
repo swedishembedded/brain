@@ -21,6 +21,8 @@ use std::path::Path;
 use brain_testutil::parity::{load, rel_l2, Report};
 use deepseekvl::prompt::{Role, Turn};
 use imaging::pixels::Rgb8;
+use model::paged::BlockTable;
+use model::serve::PagedDecoder;
 use qwen3::model::PrefillInput;
 
 const REPO: &str = "deepseek-ai/deepseek-vl-7b-chat";
@@ -44,7 +46,7 @@ fn deepseek_vl_matches_the_reference_end_to_end() {
     let ids_of = |k: &str| -> Vec<u32> { manifest[k].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect() };
     let g = load(&golden_dir.join("golden.safetensors"));
 
-    let m = deepseekvl::load(Path::new(&dir), qwen3::Dtype::F16, 1024).expect("load DeepSeek-VL");
+    let mut m = deepseekvl::load(Path::new(&dir), qwen3::Dtype::F16, 1024).expect("load DeepSeek-VL");
     let mut r = Report::new(FLOOR);
 
     // ---- 1. preprocessing ----
@@ -73,20 +75,44 @@ fn deepseek_vl_matches_the_reference_end_to_end() {
 
     // ---- 4. the decoder ----
     let inputs = m.inputs(&ids, &f.embeds).unwrap();
-    let spliced: Vec<f32> = inputs
-        .iter()
-        .flat_map(|i| match i {
-            PrefillInput::Token(t) => m.decoder.embed_row(*t),
-            PrefillInput::Embed(row) => row.to_vec(),
-        })
-        .collect();
-    r.check("inputs_embeds", &spliced, &g["inputs_embeds"].data);
-    m.decoder.reset_cache();
-    m.decoder.prefill(&inputs);
-    r.check("logits_last", &m.decoder.decode_logits(), &g["logits_last"].data);
+    // The image rows land where the prompt's placeholders were: the rows the
+    // decoder is fed at those positions are the aligner's.
+    let d = m.decoder_cfg.d_model as usize;
+    let (mut got, mut want) = (Vec::new(), Vec::new());
+    for (at, input) in inputs.iter().enumerate() {
+        if let PrefillInput::Embed(row) = input {
+            got.extend_from_slice(row);
+            want.extend_from_slice(&g["inputs_embeds"].data[at * d..(at + 1) * d]);
+        }
+    }
+    assert!(!got.is_empty(), "the prompt has image rows");
+    r.check("inputs_embeds (image rows)", &got, &want);
+    let mut table = BlockTable::new();
+    let hidden = m.decoder.prefill_mixed(&mut table, &inputs);
+    r.check("logits_last", &m.decoder.logits(&hidden), &g["logits_last"].data);
+    m.decoder.release_table(&mut table);
     r.finish("DeepSeek-VL composite");
 
     let want = ids_of("greedy_ids");
     let got = m.generate_greedy(&ids, &f.embeds, want.len(), &mut |_| true).unwrap();
-    assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&m.tokenizer, &got));
+    assert_eq!(got, want, "greedy continuation: {:?}", data::tokenizer::Tokenizer::decode(&*m.tokenizer, &got));
+
+    // Requests that arrive together decode as one batch, each exactly as it
+    // would alone: two full continuations and a shorter one, streaming per request.
+    let short = 4.min(want.len());
+    let requests = [
+        deepseekvl::model::GenRequest { ids: &ids, embeds: &f.embeds, max_new: want.len() },
+        deepseekvl::model::GenRequest { ids: &ids, embeds: &f.embeds, max_new: short },
+        deepseekvl::model::GenRequest { ids: &ids, embeds: &f.embeds, max_new: want.len() },
+    ];
+    let mut streamed = vec![Vec::new(); requests.len()];
+    let batch = m.generate_batch(&requests, &mut |i, id| {
+        streamed[i].push(id);
+        true
+    });
+    let batch: Vec<Vec<u32>> = batch.into_iter().map(|r| r.expect("a batched request")).collect();
+    assert_eq!(batch[0], want, "request 0 of a batch");
+    assert_eq!(batch[1], want[..short], "a shorter request stops at its own budget");
+    assert_eq!(batch[2], want, "request 2 of a batch");
+    assert_eq!(streamed, batch, "each request streams its own ids");
 }

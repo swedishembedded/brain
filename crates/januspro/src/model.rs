@@ -64,13 +64,13 @@ pub fn understanding_footprint(dir: &Path) -> Result<Footprint, String> {
 pub fn load_understanding(dir: &Path, dtype: qwen3::Dtype, ctx: u32) -> Result<Vlm, String> {
     let (cfg, rd) = open(dir)?;
     let tower = Box::new(SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner)?);
-    Vlm::assemble(dir, &rd, Parts { tower, style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language }, dtype, ctx)
+    Vlm::assemble(dir, &rd, Parts { tower, style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language }, dtype, ctx, None, false)
 }
 
 /// [`load_understanding`] as `placement` says.
-pub fn load_understanding_placed(dir: &Path, dtype: qwen3::Dtype, placement: Placement) -> Result<Vlm, String> {
+pub fn load_understanding_placed(dir: &Path, dtype: qwen3::Dtype, placement: Placement, adapter: Option<&Path>) -> Result<Vlm, String> {
     let (cfg, rd) = open(dir)?;
     let tower = gpu_core::devices::with_gpu(placement.tower, || SiglipTower::load(&rd, TOWER_PREFIX, deepseekvl::import::ALIGNER_PREFIX, &cfg.aligner))??;
     let parts = Parts { tower: Box::new(tower), style: deepseekvl::prompt::JANUS, wrap: Some((IMAGE_START, IMAGE_END)), language: cfg.language };
-    gpu_core::devices::with_gpu(placement.decoder, || Vlm::assemble(dir, &rd, parts, dtype, placement.context))?
+    gpu_core::devices::with_gpu(placement.decoder, || Vlm::assemble(dir, &rd, parts, dtype, placement.context, adapter, true))?
 }

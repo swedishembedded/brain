@@ -85,3 +85,13 @@ post() {
   # The PNG header's width and height (bytes 16..24, big-endian).
   [ "$(od -An -tu1 -j16 -N8 "$CONF_DIR/apple.png" | tr -s ' ' | sed 's/^ //')" = "0 0 1 128 0 0 1 128" ]
 }
+
+@test "an image request for several images draws them together, each with its own seed" {
+  jq -n --arg m "$MODEL" '{model: $m, prompt: "A red apple on a wooden table.", size: "384x384", n: 2, seed: 11}' >"$CONF_DIR/pair.body"
+  local status
+  status=$(post pair /v1/images/generations)
+  [ "$status" -eq 200 ] || { cat "$CONF_DIR/pair.json" "$CONF_DIR/serve.log" >&3; false; }
+  jq -e '.data | length == 2' "$CONF_DIR/pair.json"
+  # Seeds 11 and 12 draw different pictures.
+  [ "$(jq -r '.data[0].b64_json' "$CONF_DIR/pair.json" | md5sum)" != "$(jq -r '.data[1].b64_json' "$CONF_DIR/pair.json" | md5sum)" ]
+}
