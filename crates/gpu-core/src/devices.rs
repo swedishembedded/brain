@@ -1208,7 +1208,7 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
     let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
     let probe = Inventory::probe();
     let resolved = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&probe));
-    match resolved {
+    let mut set = match resolved {
         Ok(s) => s,
         Err(e) => {
             eprintln!("brain: BRAIN_DEVICE={text:?}: {e}; falling back to the default all-devices set");
@@ -1216,7 +1216,27 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
                 .resolve(&probe)
                 .expect("the empty/default device spec always resolves")
         }
+    };
+    // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
+    // test binary, an embedding application): how the selected hardware is
+    // driven. The CLI layers its own flag on top of this, so a flag wins.
+    let backend = std::env::var("BRAIN_BACKEND").unwrap_or_default();
+    if let Err(e) = apply_backend_text(&mut set, &backend) {
+        eprintln!("brain: {e}; ignoring it");
     }
+    set
+}
+
+/// Apply a `BRAIN_BACKEND` value to `set`. Empty means no override. Pure, so
+/// the grammar and its failures are testable without touching the process
+/// environment.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_backend_text(set: &mut ComputeSet, text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let backend = Backend::parse(text).map_err(|e| format!("BRAIN_BACKEND={text:?}: {e}"))?;
+    set.set_backend(backend).map_err(|e| format!("BRAIN_BACKEND={text:?}: {e}"))
 }
 
 /// How many GPUs a machine-shape decision may actually use RIGHT NOW - the
@@ -1513,6 +1533,30 @@ mod tests {
         let e = Backend::parse("rocm").unwrap_err();
         assert!(e.contains("rocm"), "the error must quote what was typed: {e}");
         assert!(e.contains("cuda"), "the error should teach the grammar: {e}");
+    }
+
+    /// `BRAIN_BACKEND` is the environment spelling of `--backend`: it picks how
+    /// the selected hardware is driven and leaves which hardware alone.
+    #[test]
+    fn the_backend_environment_text_overrides_how_work_runs() {
+        let mut set = resolve("gpu0", inv(2, 48, 0)).unwrap();
+        apply_backend_text(&mut set, "cuda").unwrap();
+        assert_eq!(set.backend, Backend::Cuda);
+        assert_eq!(set.gpus, vec![0], "the backend text must not change which card");
+        apply_backend_text(&mut set, "").unwrap();
+        assert_eq!(set.backend, Backend::Cuda, "an empty value is no override at all");
+    }
+
+    /// A typo or an unsatisfiable request is an error that quotes what was
+    /// typed, never a silent run on some other backend.
+    #[test]
+    fn the_backend_environment_text_is_validated() {
+        let mut set = resolve("gpu0", inv(2, 48, 0)).unwrap();
+        let e = apply_backend_text(&mut set, "rocm").unwrap_err();
+        assert!(e.contains("rocm") && e.contains("BRAIN_BACKEND"), "{e}");
+        let mut cpu_only = resolve("cpu", inv(2, 48, 0)).unwrap();
+        let e = apply_backend_text(&mut cpu_only, "cuda").unwrap_err();
+        assert!(e.contains("needs a GPU"), "{e}");
     }
 
     #[test]

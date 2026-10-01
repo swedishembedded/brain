@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# BRAIN_DEVICE single-source-of-truth gate (`make check/scripts`).
+# BRAIN_DEVICE / BRAIN_BACKEND single-source-of-truth gate (`make check/scripts`).
 #
 # Two independent parsers for --device/BRAIN_DEVICE used to exist: the STRONG
 # one (`DeviceSpec::parse` + `resolve`, the full cpu|gpu|npu|vulkan|wgpu grammar
@@ -28,6 +28,9 @@
 # gpu_core::ambient_compute_set() exclusively, like every other NPU-capable
 # subcommand. No exceptions remain.
 #
+# `BRAIN_BACKEND` (the environment spelling of `--backend`) is held to the same
+# rule: read in the one canonical resolver, applied to the same ComputeSet.
+#
 # Usage: scripts/gates/check-device-env-single-source.sh
 set -u
 cd "$(dirname "$0")/../.."
@@ -36,43 +39,44 @@ is_exception() {
   return 1
 }
 
-# `std::env::var("BRAIN_DEVICE")` - a READ. Deliberately does not match
+# `std::env::var("<VAR>")` - a READ. Deliberately does not match
 # `std::env::set_var(...)` (test-only device overrides) or `var_os`, neither
 # of which is the ladder this gate is guarding against.
-hits=$(grep -rl 'env::var(\s*"BRAIN_DEVICE"' crates/*/src 2>/dev/null || true)
-
 fail=0
-canonical=""
-for f in $hits; do
-  if is_exception "$f"; then
-    continue
-  fi
-  case "$f" in
-    crates/gpu-core/src/*)
-      if [ -n "$canonical" ] && [ "$canonical" != "$f" ]; then
-        echo "MULTIPLE gpu-core files read BRAIN_DEVICE: $canonical and $f"
+for var in BRAIN_DEVICE BRAIN_BACKEND; do
+  hits=$(grep -rl "env::var(\s*\"$var\"" crates/*/src 2>/dev/null || true)
+  canonical=""
+  for f in $hits; do
+    if is_exception "$f"; then
+      continue
+    fi
+    case "$f" in
+      crates/gpu-core/src/*)
+        if [ -n "$canonical" ] && [ "$canonical" != "$f" ]; then
+          echo "MULTIPLE gpu-core files read $var: $canonical and $f"
+          fail=1
+        fi
+        canonical="$f"
+        ;;
+      *)
+        echo "UNEXPECTED $var READ: $f (must go through gpu_core::ambient_compute_set() instead)"
         fail=1
-      fi
-      canonical="$f"
-      ;;
-    *)
-      echo "UNEXPECTED BRAIN_DEVICE READ: $f (must go through gpu_core::ambient_compute_set() instead)"
-      fail=1
-      ;;
-  esac
+        ;;
+    esac
+  done
+  if [ -z "$canonical" ]; then
+    echo "$var is not read anywhere under crates/gpu-core/src/ -- expected exactly one canonical reader"
+    fail=1
+  else
+    echo "check-device-env-single-source: $var is read in exactly one place (${canonical})"
+  fi
 done
-
-if [ -z "$canonical" ]; then
-  echo "BRAIN_DEVICE is not read anywhere under crates/gpu-core/src/ -- expected exactly one canonical reader"
-  fail=1
-fi
 
 if [ "$fail" -ne 0 ]; then
   echo
-  echo "BRAIN_DEVICE must be read in exactly one place: crates/gpu-core/src/devices.rs's"
-  echo "ambient_compute_set(). Every other caller should read gpu_core::ambient_compute_set()"
+  echo "BRAIN_DEVICE and BRAIN_BACKEND must each be read in exactly one place: crates/gpu-core/src/devices.rs's"
+  echo "resolve_ambient_compute_set(). Every other caller should read gpu_core::ambient_compute_set()"
   echo "(or the CLI's own gpu_core::publish_compute_set()-fed compute_set()) instead of"
   echo "re-deriving its own resolution of the env var."
   exit 1
 fi
-echo "check-device-env-single-source: BRAIN_DEVICE is read in exactly one place (${canonical})"

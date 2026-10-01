@@ -774,12 +774,11 @@ tuned kernel are deferred.**
 - **`brain devices` does not show CUDA visibility per card.** The backends
   column still reports only `vulkan`/`wgpu`. The data is available
   (`devices::cuda_ordinal`); the column is not wired.
-- **No `BRAIN_BACKEND` environment variable.** `--backend` is a flag only -
-  re-confirmed: the string appears nowhere in the tree, and
-  `check-device-env-single-source.sh` still reports exactly one reader
-  (`crates/gpu-core/src/devices.rs`, for `BRAIN_DEVICE`). If one is added it
-  owes `docs/using/configuration.md` an entry (`check-env-docs.sh`) and must
-  be read in that same single file.
+- **`BRAIN_BACKEND` is the environment twin of `--backend`.** It is read in the
+  one file that reads `BRAIN_DEVICE` (`gpu-core`'s `devices.rs`), applied to the
+  same `ComputeSet`, and the CLI flag wins over it; `check-device-env-single-source.sh`
+  holds both variables to a single reader. A test binary or an embedding
+  application can therefore be pointed at CUDA without a CLI.
 - **Four captured graphs at most, per handle.** Instantiation costs
   milliseconds, so it only pays amortised over many replays; a caller
   alternating between more than four shapes evicts and re-instantiates, and
