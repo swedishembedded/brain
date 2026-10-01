@@ -13,7 +13,7 @@ Each crate is run on its own with `BRAIN_BACKEND=cuda`, so a crate that cannot
 build, hangs, or fails is reported by name rather than hiding the rest. The
 output is one JSON document: per crate a status (`ok`, `failed`, `timeout`,
 `build-failed`), the count of passed, failed and ignored tests, and the names of
-the failing tests. A crate whose tests do not touch the GPU is still run: that
+the failing tests with the first panic message of each. A crate whose tests do not touch the GPU is still run: that
 is what lets "this model has no CUDA-dependent test" be told apart from "this
 model passes on CUDA".
 
@@ -39,6 +39,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 RESULT = re.compile(r"test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored")
 FAILED = re.compile(r"^test (\S+) \.\.\. FAILED", re.M)
+# `---- name stdout ----` opens a failed test's captured output; its panic
+# message is the line after the `panicked at` line.
+FAILURE_BLOCK = re.compile(r"^---- (\S+) stdout ----\n(.*?)(?=^---- |^failures:|\Z)", re.M | re.S)
+PANIC = re.compile(r"panicked at [^\n]*\n([^\n]*)")
+
+
+def failure_notes(out: str) -> dict:
+    """The first panic message of each failed test, so the JSON says why."""
+    notes = {}
+    for name, body in FAILURE_BLOCK.findall(out):
+        m = PANIC.search(body)
+        if m:
+            notes[name] = m.group(1).strip()[:300]
+    return notes
 
 
 def workspace_crates() -> list[str]:
@@ -79,6 +93,7 @@ def run_crate(package: str, timeout: int, extra_env: dict) -> dict:
         "failed": failed,
         "ignored": ignored,
         "failed_tests": sorted(set(FAILED.findall(out))),
+        "failure_notes": failure_notes(out),
         "build_error": out[-600:] if status == "build-failed" else None,
     }
 
