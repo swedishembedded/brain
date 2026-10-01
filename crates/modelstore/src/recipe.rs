@@ -756,9 +756,11 @@ pub fn quant_of_gguf(file: &str) -> Option<Quant> {
 /// merely sitting NEXT to a real checkpoint is not a GGUF release, and
 /// claiming such a repo would fetch one quantization instead of the model --
 /// the same hazard [`FilesRecipe`]'s own doc describes for a bare
-/// `config.json` signature. Any of a root `config.json`, a `model_index.json`,
-/// a `.safetensors`, a `.pt`/`.pth` or an `.onnx` anywhere in the listing
-/// means some other family owns this repo.
+/// `config.json` signature. Any of a `model_index.json`, a `.safetensors`, a
+/// `.bin`, a `.pt`/`.pth` or an `.onnx` anywhere in the listing means some
+/// other family owns this repo. A root `config.json` alone does not: GGUF
+/// releases routinely ship the model's metadata beside their quantizations,
+/// and it names no weights.
 pub struct GgufRecipe;
 
 impl GgufRecipe {
@@ -771,9 +773,9 @@ impl GgufRecipe {
 
     /// A file that proves some OTHER family owns this repo.
     fn belongs_to_another_family(file: &str) -> bool {
-        file == "config.json"
-            || file == "model_index.json"
+        file == "model_index.json"
             || file.ends_with(".safetensors")
+            || file.ends_with(".bin")
             || file.ends_with(".pt")
             || file.ends_with(".pth")
             || file.ends_with(".onnx")
@@ -1629,6 +1631,37 @@ mod tests {
         let r = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
         let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
         assert_eq!(matched.id(), "gguf", "a GGUF-only repo must not fall through to the transformers catch-all");
+    }
+
+    /// `unsloth/Qwen3.8-27B-GGUF` ships a root `config.json` (the model's
+    /// metadata) beside its quantizations, plus nested BF16/MTP directories and
+    /// multimodal projectors. A `config.json` alone is not a checkpoint: with no
+    /// weight file next to it the repo is still a GGUF release, and the planner
+    /// used to fall through to the transformers catch-all and fail with "no
+    /// weights found".
+    #[test]
+    fn gguf_recipe_claims_a_gguf_release_that_ships_a_config_json() {
+        let listing: Vec<String> = [
+            ".gitattributes",
+            "BF16/Qwen3.8-27B-BF16-00001-of-00002.gguf",
+            "BF16/Qwen3.8-27B-BF16-00002-of-00002.gguf",
+            "MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+            "Qwen3.8-27B-Q4_0.gguf",
+            "Qwen3.8-27B-Q8_0.gguf",
+            "Qwen3.8-27B-UD-Q4_K_M.gguf",
+            "README.md",
+            "config.json",
+            "mmproj-BF16.gguf",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let r = ModelRef::new("unsloth", "Qwen3.8-27B-GGUF", Some(Quant::Q8_0));
+        let matched = recipes().into_iter().find(|x| x.matches(&r, &listing)).unwrap();
+        assert_eq!(matched.id(), "gguf");
+        let artifacts = GgufRecipe.artifacts(&r, &listing, &crate::hub::FakeHub::new()).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].file, "Qwen3.8-27B-Q8_0.gguf");
     }
 
     #[test]
