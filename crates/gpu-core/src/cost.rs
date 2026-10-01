@@ -547,6 +547,36 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let nkv = nh / grp.max(1);
             f(2 * b * nh * cap * hd, 4 * (b * nh * cap + b * nh * hd) + b * nkv * cap * hd)
         }
+        // Fused flash-style paged attention (prefill chunk or decode step):
+        // scores, online softmax and the V mix in one kernel, so no
+        // [heads, rows, cap] slab exists. params: [rows, n_heads, n_kv_heads,
+        // head_dim, group, block_size, max_bt(, ...)] - `rows` is the chunk
+        // length for prefill and the sequence count for decode. Same `cap`
+        // convention as the unfused paged kernels above: the key count per row
+        // lives in a storage buffer, so each row is costed at the capacity the
+        // block table spans, `max_bt * block_size`. Bytes are the ideal
+        // traffic: q and ctx once, K and V once per KV head (a byte per
+        // element, plus a per-block scale that is negligible, for the int8
+        // pool).
+        "paged_flash_prefill" | "paged_flash_prefill_hd256" | "paged_flash_prefill_i8" | "paged_flash_decode"
+        | "paged_flash_decode_i8" | "paged_flash_decode_split" | "paged_flash_decode_split_i8" => {
+            let (rows, nh, nkv, hd, bs, max_bt) = (p(0)?, p(1)?, p(2)?, p(3)?, p(5)?, p(6)?);
+            let cap = max_bt * bs;
+            let kv_elem_bytes = if base.ends_with("_i8") { 1 } else { 4 };
+            // A prefill chunk is one sequence whose rows share its K/V; every
+            // decode row is a sequence of its own.
+            let sequences = if base.starts_with("paged_flash_prefill") { 1 } else { rows };
+            f(
+                rows * nh * cap * (4 * hd + 6),
+                8 * rows * nh * hd + 2 * kv_elem_bytes * sequences * nkv * cap * hd,
+            )
+        }
+        // Merge of the split-KV partials: params [batch, n_heads, head_dim,
+        // n_splits]; a rescaled weighted sum of n_splits partial contexts.
+        "paged_flash_decode_combine" | "paged_flash_decode_combine_i8" => {
+            let (b, nh, hd, ns) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(3 * b * nh * hd * ns, 4 * (b * nh * ns * (hd + 2) + b * nh * hd))
+        }
         // params: [batch, kv_stride, block_size] — a copy into the paged pool.
         // `paged_kv_append_batched_word` (B9's bf16-packed, one-thread-per-
         // token sibling - see that kernel's own doc comment) shares this
@@ -1783,6 +1813,10 @@ mod tests {
             "paged_kv_append_batched", "decode_softmax_batched", "rope_paged", "rope_paged_yarn",
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_clipped_batched",
+            // the fused flash-style paged attention the serving tape selects
+            "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
+            "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_split",
+            "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
