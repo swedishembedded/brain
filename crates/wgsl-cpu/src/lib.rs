@@ -192,6 +192,13 @@ impl Jit {
         self.names.iter().position(|n| n == name)
     }
 
+    /// Whether kernel `kind` has JIT code. A kernel whose work-group structure
+    /// the JIT cannot express (a barrier inside a loop) is skipped at
+    /// construction and must run through a native fast path or a GPU backend.
+    pub fn is_compiled(&self, kind: usize) -> bool {
+        self.funcs.get(kind).is_some_and(Option::is_some)
+    }
+
     /// Work-group size of kernel `kind` if it is a work-group kernel (uses
     /// workgroup memory / barriers), else `None`. The CPU dispatcher uses this to
     /// hand work-group kernels ranges aligned to whole workgroups.

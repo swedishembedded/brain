@@ -270,10 +270,19 @@ impl CpuBackend {
             None
         };
         let fast_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
-        let fast = if fast_off || !fast_conv::avx2_available() {
+        // Without AVX2 (aarch64, say) the JIT keeps every kernel it can compile,
+        // as before. A kernel it cannot compile - the tiled GEMMs, whose
+        // barrier-in-the-K-loop structure it has no model for - has no other
+        // way to run, so it still takes its native route: the `fast_ops`
+        // routines select their ISA tier at run time and fall back to scalar
+        // code, so they are correct on any host.
+        let all_native = fast_conv::avx2_available();
+        let fast = if fast_off {
             FastIdx::default()
         } else {
-            let find = |k: &str| names.iter().position(|n| n == k);
+            let find = |k: &str| {
+                names.iter().position(|n| n == k).filter(|&i| all_native || !jit.is_compiled(i))
+            };
             FastIdx {
                 matmul: find("matmul"),
                 matmul_tiled: find("matmul_tiled"),
