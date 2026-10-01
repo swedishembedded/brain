@@ -582,14 +582,34 @@ pub struct GqaChunkIds {
     pub softmax_batched: usize,
     /// `paged_decode_apply_batched.wgsl`.
     pub apply_batched: usize,
-    /// `paged_flash_prefill_hd256.wgsl` - one dispatch replacing
-    /// `scores_batched`/`softmax_batched`/`apply_batched` at `head_dim=256`
-    /// (M2.6), when the caller has it registered AND `Op::PagedAttentionFused`
-    /// selects it for the caller's own head_dim. `None` for a caller with no
-    /// fused kernel for its own head_dim (e.g. `deepseek2`, unchanged) -
-    /// [`gqa_chunk_step`] then always takes the triad, exactly as before this
-    /// field existed.
+    /// `paged_flash_prefill.wgsl` - one dispatch replacing
+    /// `scores_batched`/`softmax_batched`/`apply_batched` at `head_dim <= 128`,
+    /// when the caller has it registered AND `Op::PagedAttentionFused`
+    /// selects it for the caller's own head_dim ([`gqa_chunk_fused`]).
+    pub fused_prefill: Option<usize>,
+    /// `paged_flash_prefill_hd256.wgsl` - the same fused dispatch at
+    /// `head_dim=256` (M2.6). `None` for a caller with no fused kernel for its
+    /// own head_dim (e.g. `deepseek2`) - [`gqa_chunk_step`] then always takes
+    /// the triad.
     pub fused_prefill_hd256: Option<usize>,
+}
+
+/// The fused prefill kernel [`gqa_chunk_step`] dispatches for `head_dim` on
+/// `g`, or `None` when it takes the materialised triad: the caller must have
+/// registered a fused kernel for that head_dim, and `Op::PagedAttentionFused`
+/// must select it on this device (never on the CPU JIT, which cannot run a
+/// barrier-shaped kernel). A caller sizing its own `scores`/`probs` scratch
+/// asks this, because only the triad reads them.
+pub fn gqa_chunk_fused(g: &Gpu, k: &GqaChunkIds, head_dim: u32) -> Option<usize> {
+    let kernel = match head_dim {
+        256 => k.fused_prefill_hd256,
+        hd if hd <= 128 => k.fused_prefill,
+        _ => None,
+    }?;
+    // `bsz: 0` - prefill's `k = 1` arm never reads `m` (this Op's own doc on
+    // `paged_attention_fused` names why decode's arm is the only one
+    // batch-dependent).
+    paged_attention_fused(g, true, false, head_dim, 0).then_some(kernel)
 }
 
 /// One CHUNK of a prefill's GQA attention: append `n` already-QK-normed +
@@ -667,29 +687,20 @@ pub fn gqa_chunk_step(
         kv_cache_fill_at(g, k.splice, k_new, kcache, base_row + start, n, n_kv_heads, head_dim),
         kv_cache_fill_at(g, k.splice, v_new, vcache, base_row + start, n, n_kv_heads, head_dim),
     ];
-    // M2.6: one dispatch (no `scores`/`probs` at all) in place of the triad
-    // below, at whichever head_dim `k.fused_prefill_hd256` and `Op::
-    // PagedAttentionFused`'s selector both agree a real fused kernel exists
-    // for - `paged_attention_fused` is what makes that agreement (a caller
-    // with `fused_prefill_hd256: None`, or a device without `caps.
-    // workgroup_reductions`, always falls through to the triad unchanged).
-    // Same `block_ids`/`cap`-as-`bs`/`max_bt=1` degenerate-one-block
-    // convention the triad already uses below - `paged_flash_prefill_hd256`
-    // is built on the same paged-attention contract those two kernels are,
-    // not a different addressing scheme.
-    if let Some(fused) = k.fused_prefill_hd256 {
-        // `bsz: 0` - prefill's `k = 1` arm never reads `m` (this Op's own
-        // doc on `paged_attention_fused` names why decode's arm is the only
-        // one batch-dependent).
-        if paged_attention_fused(g, true, false, head_dim, 0) {
-            steps.push(g.dispatch(
-                fused,
-                &[q, kcache, vcache, block_ids, seq_lens, ctx],
-                &[n, n_heads, n_kv_heads, head_dim, group, cap, 1],
-                gpu_core::Dispatch::Workgroups(n_heads * n.div_ceil(64)),
-            ));
-            return steps;
-        }
+    // One dispatch (no `scores`/`probs` at all) in place of the triad below,
+    // wherever [`gqa_chunk_fused`] finds a fused kernel for this head_dim on
+    // this device. Same `block_ids`/`cap`-as-`bs`/`max_bt=1`
+    // degenerate-one-block convention the triad uses below - both fused
+    // kernels are built on the same paged-attention contract those kernels
+    // are, not a different addressing scheme.
+    if let Some(fused) = gqa_chunk_fused(g, k, head_dim) {
+        steps.push(g.dispatch(
+            fused,
+            &[q, kcache, vcache, block_ids, seq_lens, ctx],
+            &[n, n_heads, n_kv_heads, head_dim, group, cap, 1],
+            gpu_core::Dispatch::Workgroups(n_heads * n.div_ceil(64)),
+        ));
+        return steps;
     }
     steps.push(g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max));
     steps.push(g.step(k.softmax_batched, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads));

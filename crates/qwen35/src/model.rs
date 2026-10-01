@@ -615,6 +615,8 @@ fn gqa_chunk_ids() -> model::block::GqaChunkIds {
         // workgroup_reductions`; always true on a real GPU, never on the CPU
         // JIT, which keeps the triad exactly as before this existed).
         fused_prefill_hd256: Some(PAGED_FLASH_PREFILL_HD256),
+        // Its GQA layers are head_dim 256 only.
+        fused_prefill: None,
     }
 }
 

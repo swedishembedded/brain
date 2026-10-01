@@ -139,16 +139,18 @@ pub fn generate_kv_stream_with_head(
 /// `on_token` says so (the same place a cancel surfaces through
 /// `qwen3::chat`'s [`SeqState`](crate::chat::SeqState)).
 ///
-/// Why chunk at all: `Qwen::prefill` submits every prompt position but
-/// fences ONCE at the end, so a whole-prompt prefill is one uninterruptible
-/// device wait - for a real agentic prompt (a system prompt plus a full tool
-/// schema, thousands of tokens) that is minutes of work a cancellation
-/// requested mid-flight cannot reach, and a process that must not wait for
-/// it cannot exit cleanly under it. Chunking costs one extra readback per
-/// chunk - noise against the per-chunk compute - and bounds the cancellation
-/// latency to one chunk. Numerically it is the single-call prefill: the KV
-/// cache and the final hidden do not depend on how the prompt is split
-/// (proved by `chunked_prefill_generation_matches_the_single_call_path`).
+/// Why chunk at all: `Qwen::prefill` submits the whole prompt and fences
+/// ONCE at the end, so a whole-prompt prefill is one uninterruptible device
+/// wait - for a real agentic prompt (a system prompt plus a full tool
+/// schema, thousands of tokens) that is work a cancellation requested
+/// mid-flight cannot reach, and a process that must not wait for it cannot
+/// exit cleanly under it. Chunking costs one extra readback per chunk -
+/// noise against the per-chunk compute - and bounds the cancellation latency
+/// to one chunk. Numerically it is the single-call prefill up to fp32
+/// summation order: how the prompt is split moves only the batched
+/// forward's chunk boundaries (proved by
+/// `chunked_prefill_generation_matches_the_single_call_path` and
+/// `tests/batched_prefill.rs`).
 ///
 /// A token already cancelled when the call starts submits nothing and
 /// returns the empty sequence; one armed mid-prefill stops the generation
@@ -176,15 +178,11 @@ pub fn generate_kv_stream_cancellable(
     model.reset_cache();
     let mut out = Vec::with_capacity(max_new);
     // Feed the prompt in as few prefill calls as the cancellation policy
-    // needs, not a step()-per-token loop: step() does a full submit+fence+map
-    // round trip per call, and Qwen::prefill's own doc calls that "pure
-    // waste" during prefill, where every intermediate hidden is discarded
-    // anyway. Proven identical to the old step()-per-token behavior by
-    // model::tests::prefill_matches_step_by_step. For a real agentic prompt
-    // (a system prompt plus a full tool-schema block, easily 1000+ tokens)
-    // this was measured to dominate turn latency by orders of magnitude --
-    // multiple real end-to-end runs against Qwen3-0.6B took 600+ seconds
-    // before this fix. (Empty prompt → seed a single newline-like id 0.)
+    // needs, never a step()-per-token loop: Qwen::prefill runs each call as
+    // batched chunks through the layer forward, where step() would pay a
+    // whole decode tape and a submit+fence+map round trip per token.
+    // tests/batched_prefill.rs holds it to the step()-per-token reference.
+    // (Empty prompt → seed a single newline-like id 0.)
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
     let mut hidden = Vec::new();
     for chunk in seed_prompt.chunks(prefill_chunk.max(1)) {

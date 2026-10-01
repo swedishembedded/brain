@@ -156,6 +156,30 @@ const FLASH_GQA_BWD_DKV: usize = 61;
 const CE_VALUE_STATS_ROWS: usize = 62;
 // Column-range copy between row-major matrices (`Qwen::head_tile_passes`).
 const COPY_COLS: usize = 63;
+// Chunked KV-cache prefill (`Qwen::prefill`, through `block::gqa_chunk_step`):
+// the batched attention triad over the decode cache, and its fused twin.
+const PAGED_DECODE_SCORES_BATCHED: usize = 64;
+const DECODE_SOFTMAX_BATCHED: usize = 65;
+const PAGED_DECODE_APPLY_BATCHED: usize = 66;
+const PAGED_FLASH_PREFILL: usize = 67;
+
+/// Prompt rows one [`Qwen::prefill`] chunk runs through the batched layer
+/// forward on a decode-only build - the row count its activations are sized
+/// for. Bounds that build's activation memory independently of the context
+/// (~22 MiB for Qwen3-0.6B, ~0.4 GiB for an 8B), while a chunk still fills
+/// the GEMMs and the fused attention's 64-row query tiles.
+const DECODE_PREFILL_ROWS: u32 = 256;
+
+/// Rows every activation buffer of a [`Qwen::new_impl`] build holds: `b·t`
+/// for a batched forward, one prefill chunk for a decode-only build (whose
+/// single-token decode uses row 0).
+pub(crate) fn activation_rows(b: u32, t: u32, decode_only: bool) -> u64 {
+    if decode_only {
+        DECODE_PREFILL_ROWS.min(t) as u64
+    } else {
+        b as u64 * t as u64
+    }
+}
 
 const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -232,6 +256,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
     ("ce_value_stats_rows", kernels::CE_VALUE_STATS_ROWS),
     ("copy_cols", kernels::COPY_COLS),
+    ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+    ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+    ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+    ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -332,7 +360,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED));
+        // The fp32 `paged_decode_{scores,apply}_batched` are in
+        // `STATIC_PIPELINES`: the chunked prefill dispatches them by index.
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_scores_batched",
@@ -342,7 +371,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
-        v.push(("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED));
         v.push(
             kernels::template::dtype_variant(
                 "paged_decode_apply_batched",
@@ -681,6 +709,16 @@ pub struct Qwen {
     // for the whole model; the decode path requires a single-device (whole) shard.
     kv: std::cell::OnceCell<KvCache>,
     dec_pos: Cell<u32>,
+    /// Rows every activation buffer holds ([`activation_rows`]).
+    rows: u32,
+    /// Elements `scores` and each layer's `probs` hold - what bounds a
+    /// prefill chunk that attends through the materialised triad.
+    score_elems: u64,
+    /// `[rows]` u32 each: a prefill chunk's one-block block table (all zeros:
+    /// the KV cache is the `num_blocks = 1` case of a paged pool) and its
+    /// per-row live-key counts - see `block::gqa_chunk_step`.
+    chunk_blocks: DeviceBuffer,
+    chunk_seq_lens: DeviceBuffer,
     /// The `Ops` façade (B3/B7) this model dispatches its per-layer linears
     /// through - a second handle onto the SAME device AND compiled pipeline
     /// set as `gpu` (`Gpu::share` - see `pipelines()`'s own doc comment for
@@ -703,8 +741,9 @@ pub struct Qwen {
     /// upload).
     weights: HashMap<String, Weight>,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
-    /// a single token and `scores`/`probs` for `n_heads·ctx` (KV-cache decode
-    /// only - the KV cache is the only ctx-scaled allocation). The batched
+    /// one prefill chunk and `scores`/`probs` for `n_heads·ctx` (KV-cache
+    /// prefill and decode only - the KV cache is the only ctx-scaled
+    /// allocation). The batched
     /// forward/backward entry points assert against being called on such an
     /// instance instead of silently reading/writing past the smaller buffers.
     decode_only: bool,
@@ -740,6 +779,19 @@ impl Tape {
             }
         }
     }
+}
+
+/// What the queries of a batched layer forward attend
+/// ([`Qwen::layer_fwd_steps`]).
+#[derive(Clone, Copy)]
+enum Attend {
+    /// `b` independent sequences of `t` rows each, causal within their own
+    /// rows - the training and scoring forward.
+    Causal,
+    /// ONE sequence's rows at absolute positions `start..start + rows`: their
+    /// K/V are appended to the decode KV cache and each row attends every
+    /// cached position up to its own - a prefill chunk.
+    Cache { start: u32 },
 }
 
 /// The incremental-decode KV cache: one `[t, kv_dim]` key and value buffer
@@ -787,7 +839,9 @@ const HEAD_ROW_ALIGN: u64 = 64;
 struct RopeTable {
     inv_freq: DeviceBuffer,
     attention_factor: f32,
-    decode_pos: DeviceBuffer,
+    /// `[rows]` u32: the absolute position of each row a decode step or a
+    /// prefill chunk rotates.
+    positions: DeviceBuffer,
 }
 
 /// A LoRA adapter held on the device beside an unmodified base: each targeted
@@ -1120,10 +1174,10 @@ impl Qwen {
         // parameter took Role::Offload).
         let offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>> = std::cell::RefCell::new(None);
 
-        // Decode-only: activations at n=1 (one token) instead of b·t, and the
-        // score/prob extent at n_heads·ctx instead of n_heads·ctx² - the KV
-        // cache below is the only allocation left that scales with ctx.
-        let n = if decode_only { 1u64 } else { (b * t) as u64 };
+        // Decode-only: activations for one prefill chunk instead of b·t, and
+        // the score/prob extent at n_heads·ctx instead of n_heads·ctx² - the
+        // KV cache below is the only allocation left that scales with ctx.
+        let n = activation_rows(b, t, decode_only);
         let d = cfg.d_model as u64;
         let ff = cfg.d_ff as u64;
         let v = cfg.vocab as u64;
@@ -1318,8 +1372,10 @@ impl Qwen {
         let rope_table = cfg.rope_table().map(|(inv_freq, attention_factor)| RopeTable {
             inv_freq: gpu.storage_init("rope_inv_freq", &inv_freq),
             attention_factor,
-            decode_pos: st(1),
+            positions: st(n),
         });
+        let chunk_blocks = st(n);
+        gpu.write(&chunk_blocks, &vec![0u32; n as usize]);
         let attn_stat_len = if flash.is_some() { b as u64 * cfg.n_heads as u64 * t as u64 } else { 1 };
         let mut m = Qwen {
             cfg,
@@ -1394,6 +1450,10 @@ impl Qwen {
             kmask_scratch: std::cell::OnceCell::new(),
             kv,
             dec_pos: Cell::new(0),
+            rows: n as u32,
+            score_elems: bht2,
+            chunk_blocks,
+            chunk_seq_lens: st(n),
             ops,
             weights,
             decode_only,
@@ -1470,6 +1530,18 @@ impl Qwen {
     /// below), migrated onto `model::block` so `qwen3omnimoe::thinker` (the primitive's
     /// second user) and this, its original owner, share one implementation
     /// instead of two copies that can drift apart.
+    /// The chunked-prefill attention [`Attend::Cache`] dispatches.
+    fn chunk_ids() -> block::GqaChunkIds {
+        block::GqaChunkIds {
+            splice: SPLICE,
+            scores_batched: PAGED_DECODE_SCORES_BATCHED,
+            softmax_batched: DECODE_SOFTMAX_BATCHED,
+            apply_batched: PAGED_DECODE_APPLY_BATCHED,
+            fused_prefill: Some(PAGED_FLASH_PREFILL),
+            fused_prefill_hd256: None,
+        }
+    }
+
     fn decode_ids() -> block::GqaDecodeIds {
         block::GqaDecodeIds { kv_append: KV_APPEND, attn_decode_scores: ATTN_DECODE_SCORES, decode_softmax: DECODE_SOFTMAX, attn_decode_apply: ATTN_DECODE_APPLY }
     }
@@ -1546,6 +1618,29 @@ impl Qwen {
             }
             (None, false) => block::rope_fwd(&self.gpu, ids, buf, n, heads, head_dim, row_stride, t, theta),
             (None, true) => block::rope_bwd(&self.gpu, ids, buf, n, heads, head_dim, row_stride, t, theta),
+        }
+    }
+
+    /// RoPE on `rows` rows of q and k at the absolute positions
+    /// `pos..pos + rows` - a decode step (`rows = 1`) or a prefill chunk: the
+    /// declared `rope_scaling` table when there is one, else the analytic
+    /// `theta` schedule.
+    fn rope_at_steps(&self, s: &mut Vec<Step>, q: &DeviceBuffer, k: &DeviceBuffer, rows: u32, pos: u32) {
+        let c = &self.cfg;
+        let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
+        let (hq, hkv, half) = (c.q_dim(), c.kv_dim(), hd / 2);
+        let g = &self.gpu;
+        match &self.rope_table {
+            Some(rt) => {
+                g.write(&rt.positions, &(pos..pos + rows).collect::<Vec<u32>>());
+                let af = f(rt.attention_factor);
+                s.push(g.step(ROPE_TABLE_AT, &[q, &rt.positions, &rt.inv_freq], &[rows, nh, hd, hq, af], rows * nh * half));
+                s.push(g.step(ROPE_TABLE_AT, &[k, &rt.positions, &rt.inv_freq], &[rows, nkv, hd, hkv, af], rows * nkv * half));
+            }
+            None => {
+                s.push(g.step(ROPE_AT, &[q], &[rows, nh, hd, hq, 0, pos, f(c.rope_theta)], rows * nh * half));
+                s.push(g.step(ROPE_AT, &[k], &[rows, nkv, hd, hkv, 0, pos, f(c.rope_theta)], rows * nkv * half));
+            }
         }
     }
 
@@ -1907,7 +2002,7 @@ impl Qwen {
         }
         let mut tape = Tape { steps: s, ends: Vec::new() };
         for l in self.shard.start..self.shard.end {
-            self.layer_fwd_steps(&mut tape.steps, l, b_use, t_use, false);
+            self.layer_fwd_steps(&mut tape.steps, l, b_use, t_use, false, Attend::Causal);
             tape.mark();
         }
         if self.shard.head {
@@ -1928,7 +2023,10 @@ impl Qwen {
     /// especially) would change it. It applies the build's own adapter state,
     /// never an inference override, because that is what the backward
     /// differentiates.
-    fn layer_fwd_steps(&self, s: &mut Vec<Step>, l: usize, b_use: u32, t_use: u32, recompute: bool) {
+    ///
+    /// `attend` picks what the rows' queries see - see [`Attend`].
+    #[allow(clippy::too_many_arguments)]
+    fn layer_fwd_steps(&self, s: &mut Vec<Step>, l: usize, b_use: u32, t_use: u32, recompute: bool, attend: Attend) {
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
@@ -1968,28 +2066,39 @@ impl Qwen {
         } else {
             (&lb.q_pre, &lb.k_pre)
         };
-        // Half-split RoPE on q/k (in place on the routed buffers).
-        if self.mrope.get() {
-            s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
-            s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
-        } else {
-            s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, c.rope_theta, false));
-            s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, c.rope_theta, false));
-        }
-        match (self.flash, self.kmask_on.get()) {
-            (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, fl.fwd, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
-            // The padded-key mask is an encoder path the flash kernel does not
-            // take; a training build serves it on materialised scratch
-            // allocated the first time it is asked to.
-            (Some(_), true) => {
-                let (scores, probs) = self.kmask_scratch.get_or_init(|| {
-                    let len = attn_score_elems(false, self.b, nh, self.t);
-                    (self.gpu.storage(len), self.gpu.storage(len))
-                });
-                s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, scores, probs, &lb.ctx));
+        // Half-split RoPE on q/k (in place on the routed buffers), then the
+        // attention core.
+        match attend {
+            Attend::Cache { start } => {
+                self.rope_at_steps(s, q_buf, k_buf, n, start);
+                let kv = self.kv_cache();
+                s.extend(block::gqa_chunk_step(&self.gpu, &Self::chunk_ids(), nh, nkv, hd, 0, start, n, self.t, q_buf, k_buf, &lb.v, &kv.k[l], &kv.v[l], &self.chunk_blocks, &self.chunk_seq_lens, &self.scores, &lb.probs, &lb.ctx));
             }
-            (None, true) => s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
-            (None, false) => s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
+            Attend::Causal => {
+                if self.mrope.get() {
+                    s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
+                    s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
+                } else {
+                    s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, c.rope_theta, false));
+                    s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, c.rope_theta, false));
+                }
+                match (self.flash, self.kmask_on.get()) {
+                    (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, fl.fwd, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
+                    // The padded-key mask is an encoder path the flash kernel
+                    // does not take; a training build serves it on
+                    // materialised scratch allocated the first time it is
+                    // asked to.
+                    (Some(_), true) => {
+                        let (scores, probs) = self.kmask_scratch.get_or_init(|| {
+                            let len = attn_score_elems(false, self.b, nh, self.t);
+                            (self.gpu.storage(len), self.gpu.storage(len))
+                        });
+                        s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, scores, probs, &lb.ctx));
+                    }
+                    (None, true) => s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
+                    (None, false) => s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx)),
+                }
+            }
         }
         let act_o = self.ops_act(s, &lb.ctx, n, hq);
         self.ops_linear(s, &act_o, &p("attn.wo.weight"), &self.proj);
@@ -2012,8 +2121,9 @@ impl Qwen {
         self.lora_fwd(s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d, false);
         s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         // DeepStack: add level `l`'s merged vision features into the image rows
-        // of this layer's output (level i -> layer i), for l < n_levels.
-        if let Some((row0, n_rows, nl)) = self.deepstack.get() {
+        // of this layer's output (level i -> layer i), for l < n_levels. A
+        // prefill chunk's rows are not the sequence the image rows index.
+        if let (Some((row0, n_rows, nl)), Attend::Causal) = (self.deepstack.get(), attend) {
             if self.shard.embed && (l as u32) < nl {
                 s.push(self.gpu.step(SPLICE_ADD, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
             }
@@ -2237,7 +2347,7 @@ impl Qwen {
             ends.push(s.len());
             // Rebuild this layer's activations from the saved `res[l]` (see
             // `new_impl`'s layer scratch) before differentiating it.
-            self.layer_fwd_steps(&mut s, l, b, t, true);
+            self.layer_fwd_steps(&mut s, l, b, t, true, Attend::Causal);
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -2803,9 +2913,9 @@ impl Qwen {
     /// cache filled (a multimodal PREFILL, where the prompt is mostly image
     /// rows) or that applies the head on the device ([`Self::decode_logits`])
     /// never looks at that vector, and paying a submit+fence+map round trip
-    /// per prompt token to produce it is the same pure waste
-    /// [`Self::prefill`]'s own doc describes - this is that entry point with
-    /// the M-RoPE table and DeepStack row `prefill` cannot carry.
+    /// per prompt token to produce it is pure waste - this is the per-row
+    /// entry point with the M-RoPE table and DeepStack row
+    /// [`Self::prefill`] cannot carry.
     ///
     /// `deepstack_row`: see [`Self::decode_steps`].
     pub fn prefill_mrope(&self, input: PrefillInput<'_>, cos: &[f32], sin: &[f32], deepstack_row: Option<u32>) {
@@ -2835,26 +2945,90 @@ impl Qwen {
 
     /// Prefill many positions with ONE readback: tokens and raw-embedding rows
     /// interleave freely, every position's K/V lands in the cache, and only
-    /// the LAST hidden state is read back. During prefill the intermediate
-    /// hiddens are thrown away, so the per-step submit+fence+map round trip -
-    /// measured at the top of the caption profile - is pure waste.
+    /// the LAST hidden state is read back - and left in `xn_final` row 0,
+    /// where [`Self::decode_logits`] and the next [`Self::step`] expect it.
+    ///
+    /// The prompt runs through the batched layer forward
+    /// ([`Attend::Cache`]) in chunks of up to [`Self::prefill_chunk_rows`]
+    /// rows, ending at every token/embedding boundary: one submission per
+    /// chunk instead of one decode step per position. It is the
+    /// [`Self::step`]/[`Self::step_embed`] walk over the same inputs up to
+    /// fp32 summation order.
     pub fn prefill(&self, inputs: &[PrefillInput<'_>]) -> Vec<f32> {
         assert!(!inputs.is_empty(), "prefill of nothing");
-        for input in inputs {
-            let pos = self.dec_pos.get();
-            match input {
-                PrefillInput::Token(t) => {
-                    self.decode_submit(Some(*t), pos, None, None);
+        assert!(self.shard.is_whole(self.cfg.n_layers as usize), "KV-cache prefill requires a whole (single-device) model");
+        let c = &self.cfg;
+        let (d, g) = (c.d_model, &self.gpu);
+        let mut done = 0usize;
+        while done < inputs.len() {
+            let start = self.dec_pos.get();
+            let left = inputs.len() - done;
+            assert!(start as usize + left <= self.t as usize, "prefill of {left} positions from {start} exceeds ctx_len {}", self.t);
+            let embeds = matches!(inputs[done], PrefillInput::Embed(_));
+            let run = inputs[done..].iter().take(self.prefill_chunk_rows(start) as usize).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
+            let rows = run as u32;
+            let mut s: Vec<Step> = Vec::new();
+            if embeds {
+                let mut flat = Vec::with_capacity(run * d as usize);
+                for input in &inputs[done..done + run] {
+                    if let PrefillInput::Embed(e) = input {
+                        assert_eq!(e.len(), d as usize, "prefill wants d_model rows");
+                        flat.extend_from_slice(e);
+                    }
                 }
-                PrefillInput::Embed(e) => {
-                    assert_eq!(e.len(), self.cfg.d_model as usize, "prefill wants d_model rows");
-                    self.gpu.write(&self.res[0], bytemuck::cast_slice(e));
-                    self.decode_submit(None, pos, None, None);
+                // The rows land where EMBED would have written them.
+                g.write_f32(&self.res[0], &flat);
+            } else {
+                let ids: Vec<u32> = inputs[done..done + run].iter().filter_map(|i| if let PrefillInput::Token(t) = i { Some(*t) } else { None }).collect();
+                // An id past the embedding table would make EMBED's gather read
+                // out of bounds - silently wrong on a GPU, a segfault on the
+                // CPU JIT (see `decode_steps`).
+                if let Some(bad) = ids.iter().find(|&&t| t >= c.vocab) {
+                    panic!("prefill token id {bad} exceeds vocab {} (checkpoint/tokenizer mismatch?)", c.vocab);
                 }
+                g.write(&self.tokens, &ids);
+                s.extend(self.embed_tiled(g, &self.res[0], rows));
             }
-            self.dec_pos.set(pos + 1);
+            g.write(&self.chunk_seq_lens, &(start + 1..=start + rows).collect::<Vec<u32>>());
+            for l in 0..c.n_layers as usize {
+                self.layer_fwd_steps(&mut s, l, 1, rows, false, Attend::Cache { start });
+            }
+            done += run;
+            self.dec_pos.set(start + rows);
+            if done == inputs.len() {
+                // Only the last row's final norm is wanted: copy that row of
+                // the residual stream out (`proj` is free once the layers are
+                // done) and normalise it alone into `xn_final` row 0.
+                let last = &self.res[c.n_layers as usize];
+                s.push(g.step(COPY_COLS, &[last, &self.proj], &[1, d, d, (rows - 1) * d, d, 0], d));
+                s.push(self.rms_step(&self.proj, self.w("norm.weight"), &self.xn_final, d, 1));
+            }
+            g.submit(&[], &s);
         }
-        self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
+        g.read(&self.xn_final, d as usize)
+    }
+
+    /// Rows the next prefill chunk at absolute position `start` may hold: the
+    /// activation rows, the context left, and - when the chunk attends
+    /// through the materialised triad (the CPU JIT, a head_dim with no fused
+    /// kernel) - as many as keep its `[rows, n_heads, start + rows]` score
+    /// slab inside `scores`. Never fewer than one, a decode step's extent.
+    fn prefill_chunk_rows(&self, start: u32) -> u32 {
+        let most = self.rows.min(self.t - start);
+        if block::gqa_chunk_fused(&self.gpu, &Self::chunk_ids(), self.cfg.head_dim).is_some() {
+            return most;
+        }
+        let fits = |r: u32| r as u64 * self.cfg.n_heads as u64 * (start + r) as u64 <= self.score_elems;
+        let (mut lo, mut hi) = (1u32, most);
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
     }
 
     /// [`Self::step`] from a RAW embedding instead of a token id - the seam a
@@ -2966,9 +3140,7 @@ impl Qwen {
         let hkv = c.kv_dim();
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
-        let half = hd / 2;
         let cap = self.t; // scores/probs row stride (== max cached length)
-        let theta = c.rope_theta;
         let ids = Self::ids();
         let decode_ids = Self::decode_ids();
         let kv = self.kv_cache();
@@ -3056,18 +3228,7 @@ impl Qwen {
                     s.push(block::rope2d_fwd(g, ROPE2D, q_buf, cos, sin, 1, nh, hd, hq));
                     s.push(block::rope2d_fwd(g, ROPE2D, k_buf, cos, sin, 1, nkv, hd, hkv));
                 }
-                None => match &self.rope_table {
-                    Some(rt) => {
-                        g.write(&rt.decode_pos, &[pos]);
-                        let af = f(rt.attention_factor);
-                        s.push(g.step(ROPE_TABLE_AT, &[q_buf, &rt.decode_pos, &rt.inv_freq], &[1, nh, hd, hq, af], nh * half));
-                        s.push(g.step(ROPE_TABLE_AT, &[k_buf, &rt.decode_pos, &rt.inv_freq], &[1, nkv, hd, hkv, af], nkv * half));
-                    }
-                    None => {
-                        s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
-                        s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
-                    }
-                },
+                None => self.rope_at_steps(&mut s, q_buf, k_buf, 1, pos),
             }
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
@@ -3180,7 +3341,7 @@ impl Qwen {
             owned.push(site);
         }
         let delta_kernel = self.gpu.kernel_index("lora_delta").expect("qwen3::pipelines registers lora_delta");
-        let rows = if self.decode_only { 1 } else { self.b as u64 * self.t as u64 };
+        let rows = self.rows as u64;
         let scale = adapter.scale();
         let sites = owned
             .into_iter()
@@ -3594,21 +3755,24 @@ mod tests {
         r.ok()
     }
 
-    /// [`Qwen::from_reader_decode`] must build activations at `n=1` and
-    /// `scores`/`probs` at `n_heads·ctx` (NOT `n_heads·ctx²`) - the KV cache is
-    /// the only ctx-scaled allocation. For each buffer, reading exactly the
-    /// decode-shaped extent succeeds while reading the old training-shaped
+    /// [`Qwen::from_reader_decode`] must build activations for one prefill
+    /// chunk ([`DECODE_PREFILL_ROWS`] rows) and `scores`/`probs` at
+    /// `n_heads·ctx` (NOT `n_heads·ctx²`) - the KV cache is the only
+    /// ctx-scaled allocation. For each buffer, reading exactly the
+    /// decode-shaped extent succeeds while reading the batched-forward
     /// (`b·t` / `ctx²`) extent is out of bounds - proving the buffer genuinely
     /// IS the smaller size, not merely that it's big enough to under-read.
     #[test]
-    fn from_reader_decode_sizes_activations_and_scores_for_decode_not_prefill() {
+    fn from_reader_decode_sizes_activations_by_chunk_and_scores_by_context() {
         if gpu_disabled() {
             return;
         }
         let cfg = QwenConfig::tiny(); // n_heads=4, d_model=16
         let init = crate::init::init_weights(&cfg, 5);
         let path = write_reader_fixture(&cfg, &init, "sizes");
-        let ctx = 12u32;
+        // Longer than one prefill chunk, so a chunk-sized activation and a
+        // ctx-sized one are told apart.
+        let ctx = 2 * DECODE_PREFILL_ROWS;
         let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
         let dec = Qwen::from_reader_decode(&reader, ctx);
         assert!(dec.decode_only);
@@ -3617,9 +3781,10 @@ mod tests {
         let d = cfg.d_model as usize;
         let nh = cfg.n_heads as usize;
 
-        // Activation (n=1): `xn1` is `[1, d_model]`, not `[ctx, d_model]`.
-        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, d).is_some(), "xn1 must hold at least one row");
-        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, ctx as usize * d).is_none(), "xn1 must NOT be ctx-sized (n=1, not n=b*t)");
+        // Activations hold one prefill chunk: `xn1` is `[DECODE_PREFILL_ROWS, d_model]`, not `[ctx, d_model]`.
+        let chunk = DECODE_PREFILL_ROWS as usize;
+        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, chunk * d).is_some(), "xn1 must hold one prefill chunk");
+        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, ctx as usize * d).is_none(), "xn1 must NOT be ctx-sized (one chunk, not n=b*t)");
 
         // scores/probs: `n_heads·ctx`, not `n_heads·ctx²`.
         let decode_shaped = nh * ctx as usize;
@@ -3972,39 +4137,6 @@ mod tests {
         for (l, (g, w)) in layers.iter().zip(got_multi.iter().zip(&want_multi)) {
             assert!(rel_err(g, w) < 1e-4, "layer {l}: decode_only encode_hiddens must match the batched forward: rel_err {}", rel_err(g, w));
         }
-    }
-
-    /// Batched-submission prefill must be BIT-IDENTICAL to step-by-step: it is
-    /// the same tape minus the per-step readbacks, so any difference means the
-    /// submit path depends on the read it no longer does.
-    #[test]
-    fn prefill_matches_step_by_step() {
-        if gpu_disabled() {
-            return;
-        }
-        let cfg = QwenConfig::tiny();
-        let w = crate::init::init_weights(&cfg, 7);
-        let d = cfg.d_model as usize;
-        let m = Qwen::new(cfg.clone(), 1, 16, &w);
-        m.reset_cache();
-        let emb = m.read_weight("tok.weight");
-        // The three token steps only advance the cache; the comparison is on the
-        // logits of the final (embedding) step.
-        for &t in &[1u32, 5, 3] {
-            m.step(t);
-        }
-        let via_steps = m.step_embed(&emb[9 * d..10 * d]);
-        let m2 = Qwen::new(cfg, 1, 16, &w);
-        m2.reset_cache();
-        let via_prefill = m2.prefill(&[
-            PrefillInput::Token(1),
-            PrefillInput::Token(5),
-            PrefillInput::Token(3),
-            PrefillInput::Embed(&emb[9 * d..10 * d]),
-        ]);
-        assert_eq!(via_steps, via_prefill);
-        // And decode continues correctly from a prefilled cache.
-        assert_eq!(m.step(2), m2.step(2));
     }
 
     /// Int8 KV decode (the packed GEMV at m=1) must track the fp32 KV decode

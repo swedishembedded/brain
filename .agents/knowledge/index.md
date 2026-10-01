@@ -236,3 +236,4 @@ What belongs where:
 | 193 | Qwen3 LoRA training length was capped by one T² buffer; now attention speed caps it | [`193-qwen3-lora-training-length-is-an-attention-kernel-question.md`](193-qwen3-lora-training-length-is-an-attention-kernel-question.md) |
 | 194 | A recorded tape must own its bindings, or the next recording rewrites them | [`194-a-recorded-tape-must-own-its-bindings.md`](194-a-recorded-tape-must-own-its-bindings.md) |
 | 195 | The LM head's backward bound the whole table | [`195-the-head-backward-binds-the-whole-table.md`](195-the-head-backward-binds-the-whole-table.md) |
+| 196 | A decode-only build prefills in chunks, not one decode tape per token | [`196-a-decode-only-build-prefills-in-chunks.md`](196-a-decode-only-build-prefills-in-chunks.md) |

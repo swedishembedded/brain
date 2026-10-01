@@ -72,6 +72,7 @@ fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
         scores_batched: idx(&g, "paged_decode_scores_batched"),
         softmax_batched: idx(&g, "decode_softmax_batched"),
         apply_batched: idx(&g, "paged_decode_apply_batched"),
+        fused_prefill: None,
         fused_prefill_hd256: Some(idx(&g, "paged_flash_prefill_hd256")),
     };
 
@@ -145,6 +146,7 @@ fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
         scores_batched: idx(&g, "paged_decode_scores_batched"),
         softmax_batched: idx(&g, "decode_softmax_batched"),
         apply_batched: idx(&g, "paged_decode_apply_batched"),
+        fused_prefill: None,
         fused_prefill_hd256: Some(idx(&g, "paged_flash_prefill_hd256")),
     };
 
@@ -214,6 +216,7 @@ fn the_fused_branch_really_dispatches_one_kernel_not_the_triad() {
         scores_batched: idx(&g, "paged_decode_scores_batched"),
         softmax_batched: idx(&g, "decode_softmax_batched"),
         apply_batched: idx(&g, "paged_decode_apply_batched"),
+        fused_prefill: None,
         fused_prefill_hd256: Some(fused_idx),
     };
     let steps = gqa_chunk_step(&g, &ids, nh, nkv, hd, 0, start, n, cap, &qb, &kb, &vb, &kcache, &vcache, &bt, &sl, &scores, &probs, &ctx);

@@ -190,7 +190,7 @@ fn head_bytes(cfg: &QwenConfig, shard: &Shard, n: u64, train: bool, decode_only:
 /// actually being built - see this module's doc for what is and is not
 /// counted.
 pub fn estimate_vram_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t: u32, train: bool, decode_only: bool) -> u64 {
-    let n = if decode_only { 1u64 } else { b as u64 * t as u64 };
+    let n = crate::model::activation_rows(b, t, decode_only);
     weight_bytes(cfg, shard, dt)
         + kv_cache_bytes(cfg, t, train)
         + residual_bytes(cfg, shard, n, train)
