@@ -186,11 +186,19 @@ everything about HOW to serve it is a `brain serve` flag:
 - `--lora-targets LIST` - the projections a `finetune --lora` adapter
   covers, comma-separated from `wq,wk,wv,wo,gate,up,down` (the default is
   all seven). An unknown or repeated name is refused.
-- `--base-dtype f32|bf16` - the storage dtype of the frozen base during a
-  `finetune --lora` run (default `f32`). `bf16` halves the base's bytes - a
+- `--grad-accum N` - micro-batches averaged into each step of a `finetune
+  --lora` run. On a model laid out as a pipeline across cards the stages work
+  on neighbouring micro-batches at once instead of one after another, and the
+  run ends where the sequential schedule would.
+- `--base-dtype f32|bf16|int8` - the storage dtype of the frozen base during
+  a `finetune --lora` run (default `f32`). `bf16` halves the base's bytes - a
   7B decoder trains on one 24 GB card - and holds the frozen embedding and
   LM head in bf16 too, while the adapters, activations and optimiser stay
-  fp32. `--weights` may name a `transformers` checkpoint
+  fp32. `int8` holds each linear as a byte per weight and a scale per 32
+  (about 7.6 GB for a 7B decoder, against 15 GB), with the same bf16 tables:
+  the matrix kernels decode the weight as they load it and multiply it with
+  fp32 activations, in the forward and in the input gradient, so the only
+  approximation is the weight's own rounding. `--weights` may name a `transformers` checkpoint
   directory (a model-store `vendor/repo`): it is read as downloaded, one
   tensor at a time, and nothing is written beside it.
   A model that does not fit one card is laid out across the cards by what

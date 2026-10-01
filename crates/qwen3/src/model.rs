@@ -381,6 +381,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             )
             .unwrap(),
         );
+        // The weight-only int8 variants a LoRA build over an int8 base reads
+        // its frozen linears through (`Qwen::new_lora_dt` at `Dtype::I8`).
+        for (name, src) in [("matmul", kernels::MATMUL), ("matmul_reg3", kernels::MATMUL_REG3), ("matmul_dx", kernels::MATMUL_DX), ("matmul_dx_reg", kernels::MATMUL_DX_REG)] {
+            v.push(kernels::template::int8_weight_variant(name, src, "w", "ws").unwrap());
+        }
         v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
         v.push(kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16).unwrap());
         // M12: affine K-quant (Q4_K/Q5_K) kernels plus the group=16 (Q6_K)
@@ -747,6 +752,9 @@ pub struct Qwen {
     /// tables are the fp32 buffers in `ps`.
     tables: HashMap<String, DeviceBuffer>,
     half_tables: bool,
+    /// The frozen linears are int8 weights read by weight-only kernels (a
+    /// LoRA build at `Dtype::I8`): activations stay fp32.
+    int8_base: bool,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
     /// one prefill chunk and `scores`/`probs` for `n_heads·ctx` (KV-cache
     /// prefill and decode only - the KV cache is the only ctx-scaled
@@ -1100,8 +1108,8 @@ impl Qwen {
         // a packed/quantized `Weight` is built ONCE at construction from the
         // source tensor, never re-derived after an optimiser step.
         assert!(
-            !(dt != Dtype::F32 && train) || (dt == Dtype::BF16 && cfg.lora.is_some()),
-            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a bf16 frozen base)"
+            !(dt != Dtype::F32 && train) || (matches!(dt, Dtype::BF16 | Dtype::I8) && cfg.lora.is_some()),
+            "the {dt:?} weight tier is inference-only (a LoRA training build may hold a bf16 or int8 frozen base)"
         );
         assert!(!(decode_only && train), "decode-only build is inference-only");
         // An explicitly-placed shard binds its canonical card through the
@@ -1137,7 +1145,10 @@ impl Qwen {
         let quantized = dt != Dtype::F32;
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
-        let half_tables = train && cfg.lora.is_some() && dt == Dtype::BF16 && dt.promote(&ops.caps().numeric) == Dtype::BF16;
+        let lora_base_tier = train && cfg.lora.is_some() && matches!(dt, Dtype::BF16 | Dtype::I8) && dt.promote(&ops.caps().numeric) == dt;
+        let int8_base = lora_base_tier && dt == Dtype::I8;
+        // The tables of a half-precision or int8 base are held in bf16.
+        let half_tables = lora_base_tier && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
         assert!(!half_tables || cfg.d_model % 2 == 0, "a bf16 table packs two values to a word, so d_model must be even");
         let is_table = |name: &str| name == "tok.weight" || name == "lm_head.weight";
         let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
@@ -1481,6 +1492,7 @@ impl Qwen {
             weights,
             tables,
             half_tables,
+            int8_base,
             decode_only,
             gpu,
         };
@@ -1755,7 +1767,8 @@ impl Qwen {
     /// rule `Self::linear_dtype` states, so a tier that silently fell back to
     /// fp32 gets the cheap path it deserves.
     fn ops_act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, rows: u32, k: u32) -> Act {
-        if self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
+        // An int8 base reads fp32 activations: its kernels decode the weight.
+        if self.int8_base || self.weights.values().all(|w| matches!(w, Weight::F32 { .. })) {
             return self.ops.act_f32(x, 0, rows, k);
         }
         self.ops.act(s, x, 0, rows, k)
@@ -1769,7 +1782,21 @@ impl Qwen {
     /// the fp32 activation), so callers apply it unconditionally.
     fn ops_linear(&self, s: &mut Vec<Step>, act: &Act, wname: &str, out: &DeviceBuffer) {
         let w = self.weights.get(wname).unwrap_or_else(|| panic!("qwen: no Ops weight for {wname}"));
+        if let (true, Weight::I8 { w: packed, s: scales, n, k }) = (self.int8_base, w) {
+            let (x, xr0, m, ak) = self.ops.f32_rows(act);
+            assert!(xr0 == 0 && ak == *k, "qwen: the int8 base reads whole fp32 rows ({xr0}, {ak} vs {k})");
+            let (kernel, grid) = linear_kernel(m as usize, *n as usize);
+            let kernel = self.w8_variant(kernel);
+            s.push(self.gpu.dispatch(kernel, &[x, packed, out, scales], &[m, *k, *n], grid));
+            return;
+        }
         self.ops.matmul(s, w, act, out, 0);
+    }
+
+    /// The weight-only int8 variant of a plain fp32 GEMM kernel id.
+    fn w8_variant(&self, kernel: usize) -> usize {
+        let name = if kernel == MATMUL { "matmul#w=w8" } else { "matmul_reg3#w=w8" };
+        self.gpu.kernel_index(name).unwrap_or_else(|| panic!("qwen: kernel {name} is not registered"))
     }
 
     /// The adapter pair correcting base linear `wname` (leaf `leaf`), if any:
@@ -1865,6 +1892,11 @@ impl Qwen {
             Some(Weight::BF16 { w, .. }) => {
                 let (kernel, grid) = self.bf16_dx(m, k);
                 s.push(self.gpu.dispatch(kernel, &[d_out, w, dx], &[m, k, nout, acc], grid));
+            }
+            Some(Weight::I8 { w, s: scales, .. }) if self.int8_base => {
+                let named = |n: &str| self.gpu.kernel_index(n).unwrap_or_else(|| panic!("qwen: kernel {n} is not registered"));
+                let (kernel, grid) = dx_kernel_among(named("matmul_dx#w=w8"), named("matmul_dx_reg#w=w8"), m, k);
+                s.push(self.gpu.dispatch(kernel, &[d_out, w, dx, scales], &[m, k, nout, acc], grid));
             }
             _ => {
                 let (bk, bt) = dx_kernel_bw(m, k);

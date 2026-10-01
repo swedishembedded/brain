@@ -816,6 +816,7 @@ fn finetune_lora(args: &[String]) {
     let mut steps = 500u32;
     let mut lr = 5e-5f32;
     let mut batch = 4u32;
+    let mut grad_accum = 1u32;
     // Unset means "fit the row to the data": one example per row, so a row
     // only has to be as long as the longest example. Left at a fixed 1024 a
     // 42-token example spends 96% of every row, and every attention score in
@@ -854,8 +855,9 @@ fn finetune_lora(args: &[String]) {
                 base_dtype = match val(args, &mut i, "--base-dtype").as_str() {
                     "f32" => gpu_core::select::Dtype::F32,
                     "bf16" => gpu_core::select::Dtype::BF16,
+                    "int8" => gpu_core::select::Dtype::I8,
                     other => {
-                        eprintln!("--base-dtype {other:?}: expected f32 or bf16");
+                        eprintln!("--base-dtype {other:?}: expected f32, bf16 or int8");
                         std::process::exit(2)
                     }
                 }
@@ -875,6 +877,10 @@ fn finetune_lora(args: &[String]) {
             "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
             "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
             "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
+            "--grad-accum" => grad_accum = val(args, &mut i, "--grad-accum").parse().ok().filter(|&n| n > 0).unwrap_or_else(|| {
+                eprintln!("--grad-accum is not a positive whole number");
+                std::process::exit(2)
+            }),
             "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
             "--block" => block = val(args, &mut i, "--block").parse().ok().or(block),
             "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
@@ -887,7 +893,7 @@ fn finetune_lora(args: &[String]) {
     if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
         eprintln!(
             "usage: brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
-             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-dtype f32|bf16] \
+             [--patience N] [--lora-targets wq,wk,...] [--keep-reasoning] [--base-dtype f32|bf16|int8] [--grad-accum N] \
              [--weight-decay W --grad-clip C --warmup N --min-lr X --beta1 B --beta2 B --adam-eps E] \
              [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
         );
@@ -1027,6 +1033,7 @@ fn finetune_lora(args: &[String]) {
         // to notice the turn is too few on a short run.
         eval_interval: if val_samples.is_empty() { 0 } else { (steps / 20).max(1) },
         patience,
+        grad_accum,
         ..hyper.fit_opts(steps, batch, block, lr, seed)
     };
     if patience > 0 && val_samples.is_empty() {

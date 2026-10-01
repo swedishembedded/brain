@@ -158,19 +158,3 @@ that size. Re-run it once that lands.
       `max_tokens` the only bound. Enforcing it would mean closing the think
       block (forcing the `</think>` tokens) once the reasoning reaches the
       budget, a decode-side token-forcing step the engine does not have.
-
-## Training: not yet done
-
-- [ ] An int8 frozen base for LoRA. The designed route (a transposed int8
-      copy for the input gradient) holds two int8 copies of every linear,
-      which is the bytes a bf16 base already holds: it gains nothing for a
-      decoder (knowledge entry 197). What would return the ~7 GB to
-      activations is one weight-only int8 copy decoded inside the forward
-      GEMM, the `dx` GEMM and the decode GEMV against fp32 activations: new
-      kernels with a scale binding, and an `Ops` tier to select them. Built
-      only if a single-card 7B run beyond ~3k tokens is required; two cards
-      already train it at 7.6k.
-- [ ] The pipeline runs its stages one after another inside the fit loop;
-      `Pipeline::pipelined_fwd_bwd` overlaps them across micro-batches, so the
-      fit loop gains only when a step accumulates several micro-batches. One
-      long sequence per step (the 7.6k-token case) has nothing to overlap.

@@ -43,7 +43,7 @@ pub fn run_deepseekvl(args: &[String]) {
 
 pub(crate) const USAGE: &str = "usage: brain deepseekvl finetune --weights DIR|vendor/repo --dataset DIR --out DIR \
     [--rank N] [--alpha A] [--lora-targets wq,wk,...] [--steps N] [--lr X] [--aligner-lr X] [--block T] [--batch N] [--seed S] \
-    [--base-dtype f32|bf16] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
+    [--base-dtype f32|bf16|int8] [--weight-decay W] [--grad-clip C] [--warmup N] [--min-lr X] [--models-dir DIR]";
 
 /// The flags `finetune` takes, parsed once.
 pub struct Args {
@@ -98,7 +98,8 @@ impl Args {
                     o.dtype = match value()?.as_str() {
                         "f32" => qwen3::Dtype::F32,
                         "bf16" => qwen3::Dtype::BF16,
-                        other => return Err(format!("--base-dtype {other:?}: expected f32 or bf16")),
+                        "int8" => qwen3::Dtype::I8,
+                        other => return Err(format!("--base-dtype {other:?}: expected f32, bf16 or int8")),
                     }
                 }
                 "--weight-decay" => o.hyper.weight_decay = number(value()?)?,
@@ -177,7 +178,9 @@ mod tests {
         assert!(err(&["--weights", "w", "--out", "o"]).contains("--dataset"));
         assert!(err(&["--weights", "w", "--dataset", "d"]).contains("--out"));
         assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--rank", "0"]).contains("--rank"));
-        assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--base-dtype", "int8"]).contains("f32 or bf16"));
+        assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--base-dtype", "fp8"]).contains("f32, bf16 or int8"));
+        let a = Args::parse(&args(&["--weights", "w", "--dataset", "d", "--out", "o", "--seed", "1", "--base-dtype", "int8"])).unwrap();
+        assert_eq!(a.options.dtype, qwen3::Dtype::I8);
         assert!(err(&["--weights", "w", "--dataset", "d", "--out", "o", "--steps"]).contains("needs a value"));
     }
 

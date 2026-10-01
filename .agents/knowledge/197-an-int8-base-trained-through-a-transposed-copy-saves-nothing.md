@@ -16,15 +16,21 @@ roadmap's claim that int8 "would return about 7 GB to activations" counted one
 copy. Nothing is returned, and the bf16 base carries no quantisation error at
 all.
 
-The memory only comes back with a single weight-only int8 copy whose GEMMs
-decode it inline against fp32 activations, the way the `#w=bf16` variants
-decode bf16: both `x·Wᵀ` and `dY·W` read the same packed `W` and apply its
-scale per element. That needs a scale binding the `dtype_variant` template does
-not have (it rewrites one binding), hence new kernels for the tiled forward
-GEMM, the decode GEMV and the tiled `dx` GEMM, and an `Ops` tier to select
-them. That is the design to build if a single-card 7B run at long context is
-ever required; the transposed-copy design should not be built for a decoder.
+The memory comes back with a single weight-only int8 copy, which is what
+is built: the forward GEMM, the tiled `dx` GEMM and their plain twins are
+the `matmul`, `matmul_reg3`, `matmul_dx` and `matmul_dx_reg` kernels with the
+weight binding rewritten by `kernels::template::int8_weight_variant` to four
+int8 weights per word, each load decoded as `int8 * scale[wi >> 5]` against
+fp32 activations. Both `x·Wᵀ` and `dY·W` read the same packed `W`, so no
+transposed copy exists and no activation is quantised: the one approximation
+is the weight's rounding. The flat weight index names its group because a
+row is a multiple of 32 wide (`wi >> 5` is `row * (k / 32) + col / 32`).
 
-A 7B LoRA fine-tune already has two ways to fit: one card at about 3k tokens
-with the bf16 base, or two cards at 7.6k tokens (verified), laid out
-automatically by free VRAM.
+Built over weights the format represents exactly, the model equals the fp32
+one (loss and every adapter gradient, `lora_int8_base.rs`); on the real
+DeepSeek-R1-Distill-Qwen-1.5B the gradients stay within the bound
+`lora_int8_base_real.rs` asserts.
+
+The design that saved nothing, a transposed int8 copy of each weight for the
+input gradient, should not be built for a decoder: it holds two int8 copies,
+the bytes of a bf16 base.

@@ -168,6 +168,64 @@ pub fn dtype_variant(
     Ok(entry)
 }
 
+/// The weight-only int8 sibling of [`dtype_variant`]: rewrites the f32 weight
+/// binding `binding` of a matrix kernel into an int8 one - four weights to a
+/// `u32` word, little-endian - and decodes each load as
+/// `scale * int8`, the scale of a 32-weight group read from a new storage
+/// binding `scales` (an `array<f32>`, added after the kernel's last binding,
+/// so a dispatch passes the scale buffer last). The activations stay f32:
+/// nothing is quantised but the stored weight.
+///
+/// The flat weight index `wi` of a load names both the byte (`wi`) and its
+/// group (`wi >> 5`), which holds for a weight whose rows are a multiple of 32
+/// wide, laid out as `model::int8::quantize_weight` writes it (the kernels'
+/// own `wi = row * k + col`, row length `k`). The same precondition as
+/// [`dtype_variant`]: a bare-identifier index.
+///
+/// Named `"{name}#{binding}=w8"` (`"matmul#w=w8"`), like the other variants.
+pub fn int8_weight_variant(name: &str, src: &'static str, binding: &str, scales: &str) -> Result<Variant, String> {
+    let vname = format!("{name}#{binding}=w8");
+
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
+    let key = (src.as_ptr() as usize, vname.clone());
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(&hit) = cache.get(&key) {
+        return Ok(hit);
+    }
+
+    let with_decl = rewrite_packed_declaration(src, binding)?;
+    // The scale binding follows the kernel's last one.
+    let code = blank_comments(&with_decl);
+    let last = find_all_bindings(&code).into_iter().max().ok_or_else(|| format!("int8_weight_variant: `{name}` declares no `@binding`"))?;
+    let entry_at = code.find("@compute").ok_or_else(|| format!("int8_weight_variant: `{name}` has no `@compute` entry point"))?;
+    let mut with_scales = String::with_capacity(with_decl.len() + 96);
+    with_scales.push_str(&with_decl[..entry_at]);
+    with_scales.push_str(&format!("@group(0) @binding({}) var<storage, read> {scales}: array<f32>;\n\n", last + 1));
+    with_scales.push_str(&with_decl[entry_at..]);
+    let rewritten = rewrite_loads_with(&with_scales, binding, |wi| {
+        format!("(f32(bitcast<i32>(((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) << 24u) >> 24u) * {scales}[{wi} >> 5u])")
+    })?;
+
+    let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
+    cache.insert(key, entry);
+    Ok(entry)
+}
+
+/// Every `@binding(N)` number declared in `code` (comments already blanked).
+fn find_all_bindings(code: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut rest = code;
+    while let Some(at) = rest.find("@binding(") {
+        let tail = &rest[at + "@binding(".len()..];
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse() {
+            out.push(n);
+        }
+        rest = tail;
+    }
+    out
+}
+
 /// The WRITE-direction sibling of [`dtype_variant`] (B9): rewrites a storage
 /// binding declared `array<f32>` into a packed-2-per-`u32` array whose
 /// `<binding>[IDENT] = <expr>;` ASSIGNMENT statements become a genuine
@@ -345,6 +403,12 @@ fn rewrite_packed_declaration(src: &str, binding: &str) -> Result<String, String
 /// identifier (see [`dtype_variant`]'s doc comment for why) - any other index
 /// expression is an `Err`.
 fn rewrite_packed_loads(src: &str, binding: &str, dt: DType) -> Result<String, String> {
+    rewrite_loads_with(src, binding, |ident| decode_expr(binding, ident, dt))
+}
+
+/// [`rewrite_packed_loads`] with the replacement of each `<binding>[IDENT]`
+/// supplied by `expand` (given the bare identifier).
+fn rewrite_loads_with(src: &str, binding: &str, expand: impl Fn(&str) -> String) -> Result<String, String> {
     let code = blank_comments(src);
     let bytes = code.as_bytes();
     let needle = format!("{binding}[");
@@ -393,7 +457,7 @@ fn rewrite_packed_loads(src: &str, binding: &str, dt: DType) -> Result<String, S
     let mut cursor = 0usize;
     for (pos, close, ident) in &spans {
         out.push_str(&src[cursor..*pos]);
-        out.push_str(&decode_expr(binding, ident, dt));
+        out.push_str(&expand(ident));
         cursor = close + 1;
     }
     out.push_str(&src[cursor..]);
@@ -1209,6 +1273,17 @@ mod tests {
     use super::*;
 
     const K: &str = "const TILE: u32 = 8u;\n@compute @workgroup_size(64)\nfn main() { let x = TILE; }";
+
+    #[test]
+    fn the_int8_weight_variant_adds_a_scale_binding_and_decodes_each_load() {
+        let (name, src) = int8_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap();
+        assert_eq!(name, "matmul#w=w8");
+        assert!(src.contains("var<storage, read>       w:   array<u32>;"), "the weight is packed int8: {src}");
+        assert!(src.contains("@binding(4) var<storage, read> ws: array<f32>;"), "the scales follow the kernel's last binding");
+        assert!(src.contains("* (f32(bitcast<i32>") && src.contains("* ws[wi >> 5u])"), "the weight load is decoded: {src}");
+        // The same call is the same variant.
+        assert_eq!(int8_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap().1.as_ptr(), src.as_ptr());
+    }
 
     #[test]
     fn rewrites_consts_and_workgroup_size() {

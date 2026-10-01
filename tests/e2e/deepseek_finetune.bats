@@ -49,6 +49,40 @@ teardown_file() {
   [ "$(find "$CONF_DIR/models/$REPO_ID" -maxdepth 1 -type f | wc -l)" -eq 0 ]
 }
 
+# The frozen base held as int8 weights (a byte per weight and a scale per 32),
+# read by weight-only kernels against fp32 activations: the same fine-tune at
+# about half the base's bytes.
+@test "an adapter trains on an int8 base and is written like any other" {
+  run "$BRAIN" qwen3 finetune --lora 8 --weights "$REPO_ID" --base-dtype int8 \
+    --adapter acme/tiny:int8 --dataset "$CONF_DIR/data" --steps 4 --batch 1 \
+    --models-dir "$CONF_DIR/models" --seed 1
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"trained: loss"* ]]
+  find "$CONF_DIR/models/$REPO_ID/adapters/acme/tiny/int8" -name '*.safetensors' | grep -q .
+}
+
+# The int8 base is what lets a 7B decoder train on ONE card at a context the
+# bf16 base cannot hold there: an example of about 8k tokens on a single 24 GB card.
+@test "a 7B decoder trains an 8k-token example on one card with an int8 base" {
+  local big="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" store="${BRAIN_MODELS_DIR:-$HOME/.local/share/brain/models}"
+  [ -f "$store/$big/config.json" ] || skip "$big is not downloaded"
+  local free
+  free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)
+  [ "${free:-0}" -ge 21000 ] || skip "needs a card with about 21 GiB free"
+  mkdir -p "$CONF_DIR/models/$big" "$CONF_DIR/long"
+  for f in "$store/$big"/*; do ln -sfn "$f" "$CONF_DIR/models/$big/"; done
+  local text
+  text=$(awk 'BEGIN { for (i = 0; i < 520; i++) printf "Sentence %d of a long document about gardens, rivers and trains. ", i }')
+  for _ in 1 2; do
+    printf '{"messages":[{"role":"user","content":"%s","train":false},{"role":"assistant","content":"This is a long document about gardens.","train":true}],"tools":[]}\n' "$text"
+  done >"$CONF_DIR/long/train.jsonl"
+  run "$BRAIN" --device gpu0 qwen3 finetune --lora 8 --weights "$big" --base-dtype int8 \
+    --adapter acme/long:int8 --dataset "$CONF_DIR/long" --steps 2 --batch 1 \
+    --models-dir "$CONF_DIR/models" --seed 1
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+  [[ "$output" == *"trained: loss"* ]]
+}
+
 # A context one card cannot hold is split across two: the model is laid out by
 # what the cards have free (a pipeline of the fewest stages that fit), with no
 # flag. A 7B decoder at 7.6k tokens needs about 29 GiB.
@@ -59,7 +93,7 @@ teardown_file() {
   free_cards=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | awk '$1 >= 21000' | wc -l)
   [ "$free_cards" -ge 2 ] || skip "needs two cards with about 21 GiB free"
   mkdir -p "$CONF_DIR/models/$big" "$CONF_DIR/long"
-  for f in "$store/$big"/*; do ln -s "$f" "$CONF_DIR/models/$big/"; done
+  for f in "$store/$big"/*; do ln -sfn "$f" "$CONF_DIR/models/$big/"; done
   python3 - "$CONF_DIR/long/train.jsonl" <<'PY'
 import json, sys
 words = ("alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega " * 2000).split()

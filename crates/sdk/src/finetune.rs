@@ -79,6 +79,18 @@ pub struct ChatFineTune {
     cycle: u64,
     device: Device,
     bf16_base: bool,
+    int8_base: bool,
+}
+
+/// The tier the frozen base is held at: int8 over bf16 over fp32.
+fn base_tier(bf16: bool, int8: bool) -> qwen3::Dtype {
+    if int8 {
+        qwen3::Dtype::I8
+    } else if bf16 {
+        qwen3::Dtype::BF16
+    } else {
+        qwen3::Dtype::F32
+    }
 }
 
 impl ChatFineTune {
@@ -106,6 +118,7 @@ impl ChatFineTune {
             cycle: 0,
             device: Device::default(),
             bf16_base: false,
+            int8_base: false,
         }
     }
 
@@ -230,6 +243,17 @@ impl ChatFineTune {
         self
     }
 
+    /// Hold the frozen base as int8 weights (a byte per weight and a scale per
+    /// 32, about a quarter of fp32), which leaves the room of a 7B decoder's
+    /// other half for activations: a longer context on one card. The weights
+    /// are decoded as the matrix kernels read them and the activations stay
+    /// fp32; the adapters and optimiser stay fp32. Takes precedence over
+    /// [`Self::bf16_base`].
+    pub fn int8_base(mut self, on: bool) -> Self {
+        self.int8_base = on;
+        self
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -247,7 +271,7 @@ impl ChatFineTune {
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let open = qwen3::store_checkpoint_path(&weights, &model_dir);
         let weights_str = utf8(&open)?;
-        let tier = if self.bf16_base { qwen3::Dtype::BF16 } else { qwen3::Dtype::F32 };
+        let tier = base_tier(self.bf16_base, self.int8_base);
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -628,5 +652,19 @@ mod tests {
         assert_eq!(block_for(100, Some(100)).unwrap(), 100);
         assert_eq!(block_for(70, Some(512)).unwrap(), 128);
         assert!(block_for(600, Some(512)).unwrap_err().to_string().contains("max_block"));
+    }
+}
+
+#[cfg(test)]
+mod base_tier_tests {
+    use super::base_tier;
+    use qwen3::Dtype;
+
+    #[test]
+    fn the_narrowest_requested_base_wins() {
+        assert_eq!(base_tier(false, false), Dtype::F32);
+        assert_eq!(base_tier(true, false), Dtype::BF16);
+        assert_eq!(base_tier(true, true), Dtype::I8);
+        assert_eq!(base_tier(false, true), Dtype::I8);
     }
 }

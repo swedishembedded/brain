@@ -91,8 +91,8 @@ fn quantized_linear_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype) -> u64 {
 /// is_i8_linear(name))` - nothing is filtered out when not quantized).
 fn weight_bytes(cfg: &QwenConfig, shard: &Shard, dt: Dtype, train: bool) -> u64 {
     let quantized = dt != Dtype::F32;
-    // The embedding and the head of a LoRA build over a bf16 base are held in bf16.
-    let half_tables = train && cfg.lora.is_some() && dt == Dtype::BF16;
+    // The embedding and the head of a LoRA build over a bf16 or int8 base are held in bf16.
+    let half_tables = train && cfg.lora.is_some() && matches!(dt, Dtype::BF16 | Dtype::I8);
     let base: u64 = crate::shard_param_list(cfg, shard)
         .into_iter()
         .filter(|(name, _)| !(quantized && crate::q8::Q8::is_i8_linear(name)))
@@ -374,6 +374,18 @@ mod tests {
         let tables = 2 * cfg.vocab as u64 * cfg.d_model as u64;
         assert_eq!(weight_bytes(&cfg, &shard, Dtype::BF16, false) - weight_bytes(&cfg, &shard, Dtype::BF16, true), tables * 2, "training halves both tables");
         assert_eq!(weight_bytes(&cfg, &shard, Dtype::F32, false), weight_bytes(&cfg, &shard, Dtype::F32, true), "fp32 keeps them");
+    }
+
+    /// An int8 base holds a decoder at about a quarter of the fp32 bytes (a
+    /// byte per weight and a scale per 32), beside bf16 tables.
+    #[test]
+    fn an_int8_lora_base_is_smaller_than_a_bf16_one() {
+        let cfg = QwenConfig { lora: Some(crate::LoraCfg::attn(8, 16.0)), ..QwenConfig::qwen3_0_6b() };
+        let shard = Shard::whole(cfg.n_layers as usize);
+        let (bf16, int8) = (weight_bytes(&cfg, &shard, Dtype::BF16, true), weight_bytes(&cfg, &shard, Dtype::I8, true));
+        let linears = quantized_linear_bytes(&cfg, &shard, Dtype::BF16);
+        assert!(int8 < bf16 && bf16 - int8 > linears / 3, "{int8} vs {bf16}");
+        assert_eq!(int8 - quantized_linear_bytes(&cfg, &shard, Dtype::I8), bf16 - linears, "the tables and norms are the same under either base");
     }
 
     /// A `decode_only` build skips the head logits/`d_logits` buffer entirely
