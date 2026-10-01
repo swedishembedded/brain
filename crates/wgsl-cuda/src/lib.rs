@@ -93,6 +93,7 @@ pub struct Kernel {
 }
 
 mod uniform;
+mod vector;
 
 /// The `extern "C"` entry point name a kernel called `name` is emitted under.
 ///
@@ -236,11 +237,24 @@ impl Ty {
     }
 }
 
+/// Component `c` of a vector whose first component is the lvalue `base`.
+fn vec_comp(base: &str, c: usize) -> String {
+    format!("(&{base})[{c}u]")
+}
+
+/// Component names, for identifiers: `x y z w`.
+const COMPONENTS: [&str; 4] = ["x", "y", "z", "w"];
+
 /// The result of translating a naga expression: a C++ value expression, or a
 /// place that a `Load`/`Store`/`Access` refines.
 #[derive(Clone)]
 enum Eval {
     Value(String, Ty),
+    /// A vector value, scalarised: one expression per component. The generator
+    /// has no CUDA vector type and no operator overloads to rely on, so every
+    /// vector operation is the scalar operation applied lane by lane, which is
+    /// also exactly how WGSL defines them.
+    Vector(Vec<String>, Ty),
     Place(Place),
 }
 
@@ -253,15 +267,25 @@ enum Place {
     ArrayBase(String, Ty),
     /// The uniform block. Read-only, and only ever refined by `AccessIndex`.
     UniformBase,
+    /// A vector lvalue: a reference to its first component, the others lying
+    /// `ty`-sized words after it. A vector local is a small array and an
+    /// element of an array of vectors is a window into the array, so in both
+    /// cases a component can be chosen at run time (`v[i]` with `i` a variable)
+    /// as well as at translation time.
+    VecRef { base: String, n: u32, ty: Ty },
+    /// An array whose elements are vectors, awaiting an index. `stride` is the
+    /// element's size in 32-bit words, which WGSL rounds `vec3` up to four.
+    VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32 },
 }
 
 /// What a global variable became in the emitted source.
 #[derive(Clone)]
 enum GlobalKind {
-    /// A kernel pointer parameter for a storage binding.
-    Storage { ident: String, elem: Ty },
+    /// A kernel pointer parameter for a storage binding. `vec` is
+    /// `(components, stride in words)` when the array's elements are vectors.
+    Storage { ident: String, elem: Ty, vec: Option<(u32, u32)> },
     /// A `__shared__` array.
-    WorkGroup { ident: String, elem: Ty },
+    WorkGroup { ident: String, elem: Ty, vec: Option<(u32, u32)> },
     /// The uniform block, read through byte offsets.
     Uniform,
 }
@@ -417,17 +441,19 @@ impl<'a> Gen<'a> {
                 }
                 AddressSpace::Storage { .. } => {
                     let b = gv.binding.as_ref().map(|b| b.binding).ok_or("storage without binding")?;
-                    let elem = array_elem_ty(self.m, gv.ty)?;
+                    let layout = array_layout(self.m, gv.ty)?;
+                    let (elem, vec) = (layout.elem, layout.vec);
                     let ident = format!("__b{b}");
                     bindings.push((b, ident.clone(), elem));
-                    self.globals.insert(h, GlobalKind::Storage { ident, elem });
+                    self.globals.insert(h, GlobalKind::Storage { ident, elem, vec });
                 }
                 AddressSpace::WorkGroup => {
                     let (elem, count) = array_info(self.m, gv.ty)?;
+                    let vec = array_layout(self.m, gv.ty)?.vec;
                     let name = gv.name.clone().unwrap_or_else(|| format!("wg{}", shared.len()));
                     let ident = format!("__wg_{}", ident_of(&name));
                     shared.push((ident.clone(), elem, count));
-                    self.globals.insert(h, GlobalKind::WorkGroup { ident, elem });
+                    self.globals.insert(h, GlobalKind::WorkGroup { ident, elem, vec });
                 }
                 other => return Err(format!("unsupported address space {other:?}")),
             }
@@ -447,12 +473,22 @@ impl<'a> Gen<'a> {
                 TypeInner::Array { .. } => {
                     let (elem, count) = array_info(self.m, lv.ty)?;
                     self.decls.push(format!("{} {ident}[{count}] = {{}};", elem.c()));
-                    self.locals.insert(h, Place::ArrayBase(ident, elem));
+                    let place = match array_layout(self.m, lv.ty)?.vec {
+                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
+                        None => Place::ArrayBase(ident, elem),
+                    };
+                    self.locals.insert(h, place);
                 }
                 TypeInner::Scalar(s) => {
                     let ty = Ty::from_scalar(*s)?;
                     self.decls.push(format!("{} {ident} = {};", ty.c(), ty.zero()));
                     self.locals.insert(h, Place::Lvalue(ident, ty));
+                }
+                TypeInner::Vector { size, scalar } => {
+                    let ty = Ty::from_scalar(*scalar)?;
+                    let n = *size as u32;
+                    self.decls.push(format!("{} {ident}[{n}] = {{}};", ty.c()));
+                    self.locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty });
                 }
                 other => return Err(format!("unsupported local type {other:?}")),
             }
@@ -522,12 +558,23 @@ impl<'a> Gen<'a> {
             .collect();
         for (h, init) in inits {
             let place = self.locals[&h].clone();
-            let (v, vt) = self.value(init, &mut body)?;
-            if let Place::Lvalue(ident, ty) = place {
-                let v = coerce(&v, vt, ty)?;
-                let _ = writeln!(body, "  {ident} = {v};");
-            } else {
-                return Err("an array local with an initialiser is unsupported".into());
+            match place {
+                Place::Lvalue(ident, ty) => {
+                    let (v, vt) = self.value(init, &mut body)?;
+                    let v = coerce(&v, vt, ty)?;
+                    let _ = writeln!(body, "  {ident} = {v};");
+                }
+                Place::VecRef { base, n, ty } => {
+                    let v = self.lanes(init, &mut body)?;
+                    if !v.vector || v.comps.len() != n as usize {
+                        return Err("a vector local needs a vector initialiser of the same width".into());
+                    }
+                    for (c, text) in v.comps.iter().enumerate() {
+                        let text = coerce(text, v.ty, ty)?;
+                        let _ = writeln!(body, "  {} = {text};", vec_comp(&base, c));
+                    }
+                }
+                _ => return Err("an array local with an initialiser is unsupported".into()),
             }
         }
 
@@ -636,11 +683,21 @@ impl<'a> Gen<'a> {
                 }
                 Statement::Store { pointer, value } => {
                     let place = self.place(*pointer, out, inner)?;
-                    let (v, vt) = self.value(*value, out)?;
                     match place {
                         Place::Lvalue(lv, ty) => {
+                            let (v, vt) = self.value(*value, out)?;
                             let v = coerce(&v, vt, ty)?;
                             let _ = writeln!(out, "{pad}{lv} = {v};");
+                        }
+                        Place::VecRef { base, n, ty } => {
+                            let v = self.lanes(*value, out)?;
+                            if !v.vector || v.comps.len() != n as usize {
+                                return Err("a vector store needs a vector of the same width".into());
+                            }
+                            for (c, text) in v.comps.iter().enumerate() {
+                                let text = coerce(text, v.ty, ty)?;
+                                let _ = writeln!(out, "{pad}{} = {text};", vec_comp(&base, c));
+                            }
                         }
                         _ => return Err("store to a non-scalar place".into()),
                     }
@@ -747,6 +804,17 @@ impl<'a> Gen<'a> {
                 let _ = writeln!(out, "{}{name} = {text};", "  ".repeat(depth));
                 self.cache.insert(h, Eval::Value(name, ty));
             }
+            Eval::Vector(texts, ty) => {
+                let mut names = Vec::with_capacity(texts.len());
+                for (c, text) in texts.iter().enumerate() {
+                    let name = format!("__e{}_{}", self.n_tmp, COMPONENTS[c]);
+                    self.decls.push(format!("{} {name};", ty.c()));
+                    let _ = writeln!(out, "{}{name} = {text};", "  ".repeat(depth));
+                    names.push(name);
+                }
+                self.n_tmp += 1;
+                self.cache.insert(h, Eval::Vector(names, ty));
+            }
             place => {
                 self.cache.insert(h, place);
             }
@@ -768,6 +836,19 @@ impl<'a> Gen<'a> {
         match self.eval(h, out, 1)? {
             Eval::Value(v, t) => Ok((v, t)),
             Eval::Place(Place::Lvalue(lv, t)) => Ok((lv, t)),
+            Eval::Vector(..) | Eval::Place(Place::VecRef { .. }) => Err("expected a scalar, got a vector".into()),
+            Eval::Place(_) => Err("expected a value, got an unindexed array or the uniform block".into()),
+        }
+    }
+
+    /// An operand that may be a scalar or a vector, as its component
+    /// expressions. The lane-wise operations in [`vector`] take these.
+    fn lanes(&mut self, h: Handle<Expression>, out: &mut String) -> Result<vector::Lanes, String> {
+        match self.eval(h, out, 1)? {
+            Eval::Value(v, t) => Ok(vector::Lanes::scalar(v, t)),
+            Eval::Place(Place::Lvalue(lv, t)) => Ok(vector::Lanes::scalar(lv, t)),
+            Eval::Vector(c, t) => Ok(vector::Lanes::vector(c, t)),
+            Eval::Place(Place::VecRef { base, n, ty }) => Ok(vector::Lanes::vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty)),
             Eval::Place(_) => Err("expected a value, got an unindexed array or the uniform block".into()),
         }
     }
@@ -775,7 +856,7 @@ impl<'a> Gen<'a> {
     fn place(&mut self, h: Handle<Expression>, out: &mut String, depth: usize) -> Result<Place, String> {
         match self.eval(h, out, depth)? {
             Eval::Place(p) => Ok(p),
-            Eval::Value(..) => Err("expected a place, got a value".into()),
+            Eval::Value(..) | Eval::Vector(..) => Err("expected a place, got a value".into()),
         }
     }
 
@@ -789,25 +870,14 @@ impl<'a> Gen<'a> {
         let expr = &func.expressions[h];
         match expr {
             Expression::Literal(lit) => Ok(literal(lit)?),
-            Expression::ZeroValue(ty) => {
-                let t = scalar_ty_of(self.m, *ty)?;
-                Ok(Eval::Value(t.zero().to_string(), t))
-            }
-            Expression::Constant(c) => {
-                let init = self.m.constants[*c].init;
-                match &self.m.global_expressions[init] {
-                    Expression::Literal(lit) => literal(lit),
-                    Expression::ZeroValue(ty) => {
-                        let t = scalar_ty_of(self.m, *ty)?;
-                        Ok(Eval::Value(t.zero().to_string(), t))
-                    }
-                    other => Err(format!("unsupported constant expression {other:?}")),
-                }
-            }
+            Expression::ZeroValue(ty) => self.zero_value(*ty),
+            Expression::Constant(c) => self.constant(self.m.constants[*c].init),
             Expression::GlobalVariable(g) => match self.globals.get(g).cloned() {
-                Some(GlobalKind::Storage { ident, elem }) => Ok(Eval::Place(Place::ArrayBase(ident, elem))),
-                Some(GlobalKind::WorkGroup { ident, elem }) => {
-                    Ok(Eval::Place(Place::ArrayBase(ident, elem)))
+                Some(GlobalKind::Storage { ident, elem, vec }) | Some(GlobalKind::WorkGroup { ident, elem, vec }) => {
+                    Ok(Eval::Place(match vec {
+                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
+                        None => Place::ArrayBase(ident, elem),
+                    }))
                 }
                 Some(GlobalKind::Uniform) => Ok(Eval::Place(Place::UniformBase)),
                 None => Err("global variable in an unsupported address space".into()),
@@ -820,9 +890,23 @@ impl<'a> Gen<'a> {
                 // it is read out of the byte stream - so its "pointer" already
                 // evaluated to the loaded value.
                 Eval::Value(v, t) => Ok(Eval::Value(v, t)),
+                Eval::Place(Place::VecRef { base, n, ty }) => {
+                    Ok(Eval::Vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty))
+                }
+                Eval::Vector(c, t) => Ok(Eval::Vector(c, t)),
                 Eval::Place(_) => Err("load from an unindexed array or the uniform block".into()),
             },
             Expression::Access { base, index } => {
+                // A component of a vector VALUE chosen at run time: a select
+                // over the components, since a value has no address.
+                if let Eval::Vector(comps, t) = self.eval(*base, out, depth)? {
+                    let (idx, _) = self.value(*index, out)?;
+                    let mut chain = comps[comps.len() - 1].clone();
+                    for (c, text) in comps.iter().enumerate().take(comps.len() - 1).rev() {
+                        chain = format!("((({idx}) == {c}u) ? ({text}) : ({chain}))");
+                    }
+                    return Ok(Eval::Value(chain, t));
+                }
                 let b = self.place(*base, out, depth)?;
                 let (idx, _) = self.value(*index, out)?;
                 match b {
@@ -832,6 +916,18 @@ impl<'a> Gen<'a> {
                     // which is what a 64-bit device pointer needs.
                     Place::ArrayBase(base, elem) => {
                         Ok(Eval::Place(Place::Lvalue(format!("{base}[(size_t)({idx})]"), elem)))
+                    }
+                    // An element of an array of vectors: its components are
+                    // `stride` words apart, starting at element `idx`.
+                    Place::VecArrayBase { ident, elem, n, stride } => Ok(Eval::Place(Place::VecRef {
+                        base: format!("{ident}[(size_t)({idx}) * {stride}u]"),
+                        n,
+                        ty: elem,
+                    })),
+                    // A component chosen at run time: components are
+                    // consecutive, so the index is a pointer offset.
+                    Place::VecRef { base, ty, .. } => {
+                        Ok(Eval::Place(Place::Lvalue(format!("(&{base})[(size_t)({idx})]"), ty)))
                     }
                     _ => Err("indexing something that is not an array".into()),
                 }
@@ -858,62 +954,118 @@ impl<'a> Gen<'a> {
                 }
                 // Hazard 2: a uniform member is read at the offset WGSL's
                 // layout rules put it at, never at a C++ struct's.
-                let b = self.place(*base, out, depth)?;
+                let b = self.eval(*base, out, depth)?;
                 match b {
-                    Place::UniformBase => {
+                    // A component of a vector value or a vector lvalue.
+                    Eval::Vector(comps, t) => Ok(Eval::Value(self.component(&comps, *index)?, t)),
+                    Eval::Place(Place::VecRef { base, n, ty }) => {
+                        if *index >= n {
+                            return Err(format!("vector component {index} out of range"));
+                        }
+                        Ok(Eval::Place(Place::Lvalue(vec_comp(&base, *index as usize), ty)))
+                    }
+                    Eval::Place(Place::VecArrayBase { ident, elem, n, stride }) => Ok(Eval::Place(Place::VecRef {
+                        base: format!("{ident}[(size_t)({index}u) * {stride}u]"),
+                        n,
+                        ty: elem,
+                    })),
+                    Eval::Place(Place::UniformBase) => {
                         let g = match base_expr {
                             Expression::GlobalVariable(g) => *g,
                             other => return Err(format!("uniform access on {other:?}")),
                         };
-                        let (off, ty) = self.uniform_member(g, *index)?;
-                        let f = match ty {
-                            Ty::F32 => "__brain_uf32",
-                            Ty::I32 => "__brain_ui32",
-                            Ty::U32 => "__brain_uu32",
-                            Ty::Bool => return Err("a bool uniform member is unsupported".into()),
+                        let (off, ty, lanes) = self.uniform_member(g, *index)?;
+                        let read = |at: u32| -> Result<String, String> {
+                            let f = match ty {
+                                Ty::F32 => "__brain_uf32",
+                                Ty::I32 => "__brain_ui32",
+                                Ty::U32 => "__brain_uu32",
+                                Ty::Bool => return Err("a bool uniform member is unsupported".into()),
+                            };
+                            Ok(format!("{f}(__params, {at}u)"))
                         };
-                        Ok(Eval::Value(format!("{f}(__params, {off}u)"), ty))
+                        if lanes == 1 {
+                            Ok(Eval::Value(read(off)?, ty))
+                        } else {
+                            // A vector member: its components are consecutive
+                            // 32-bit words from the member's own offset.
+                            Ok(Eval::Vector((0..lanes).map(|c| read(off + 4 * c)).collect::<Result<_, _>>()?, ty))
+                        }
                     }
-                    Place::ArrayBase(base, elem) => {
+                    Eval::Place(Place::ArrayBase(base, elem)) => {
                         Ok(Eval::Place(Place::Lvalue(format!("{base}[{index}]"), elem)))
                     }
-                    Place::Lvalue(..) => Err("AccessIndex on a scalar".into()),
+                    Eval::Place(Place::Lvalue(..)) | Eval::Value(..) => Err("AccessIndex on a scalar".into()),
                 }
             }
             Expression::Unary { op, expr } => {
-                let (v, t) = self.value(*expr, out)?;
-                let r = match op {
-                    UnaryOperator::Negate if t.is_float() => format!("(-({v}))"),
-                    // Signed negation written through unsigned so the wrap WGSL
-                    // defines is not C++'s signed-overflow UB.
-                    UnaryOperator::Negate => format!("((int)(0u - (unsigned int)({v})))"),
-                    UnaryOperator::LogicalNot => format!("(!({v}))"),
-                    UnaryOperator::BitwiseNot => format!("(~({v}))"),
-                };
-                Ok(Eval::Value(r, t))
+                let x = self.lanes(*expr, out)?;
+                let op = *op;
+                Ok(vector::unary_lanes(
+                    |v, t| match op {
+                        UnaryOperator::Negate if t.is_float() => format!("(-({v}))"),
+                        // Signed negation written through unsigned so the wrap WGSL
+                        // defines is not C++'s signed-overflow UB.
+                        UnaryOperator::Negate => format!("((int)(0u - (unsigned int)({v})))"),
+                        UnaryOperator::LogicalNot => format!("(!({v}))"),
+                        UnaryOperator::BitwiseNot => format!("(~({v}))"),
+                    },
+                    &x,
+                ))
             }
             Expression::Binary { op, left, right } => {
-                let (l, lt) = self.value(*left, out)?;
-                let (r, rt) = self.value(*right, out)?;
-                binary(*op, &l, lt, &r, rt)
+                let l = self.lanes(*left, out)?;
+                let r = self.lanes(*right, out)?;
+                vector::binary_lanes(*op, &l, &r)
             }
             Expression::Select { condition, accept, reject } => {
-                let (c, _) = self.value(*condition, out)?;
-                let (a, at) = self.value(*accept, out)?;
-                let (r, _) = self.value(*reject, out)?;
-                Ok(Eval::Value(format!("(({c}) ? ({a}) : ({r}))"), at))
+                let c = self.lanes(*condition, out)?;
+                let a = self.lanes(*accept, out)?;
+                let r = self.lanes(*reject, out)?;
+                vector::select_lanes(&c, &a, &r)
+            }
+            Expression::Compose { ty, components } => {
+                let Some(shape) = vector_shape(self.m, *ty) else {
+                    return Err("only vectors can be composed (structs and matrices are unsupported)".into());
+                };
+                let (t, n, _) = shape?;
+                let mut comps = Vec::with_capacity(n as usize);
+                for c in components {
+                    comps.extend(self.lanes(*c, out)?.comps);
+                }
+                if comps.len() != n as usize {
+                    return Err(format!("a vec{n} composed from {} components", comps.len()));
+                }
+                Ok(Eval::Vector(comps, t))
+            }
+            Expression::Splat { size, value } => {
+                let v = self.lanes(*value, out)?;
+                Ok(Eval::Vector(vec![v.comps[0].clone(); *size as usize], v.ty))
+            }
+            Expression::Swizzle { size, vector, pattern } => {
+                let v = self.lanes(*vector, out)?;
+                let pick = |c: &naga::SwizzleComponent| *c as usize;
+                let comps = pattern[..*size as usize].iter().map(|c| self.component(&v.comps, pick(c) as u32)).collect::<Result<_, _>>()?;
+                Ok(Eval::Vector(comps, v.ty))
+            }
+            Expression::Relational { fun, argument } => {
+                let a = self.lanes(*argument, out)?;
+                match fun {
+                    naga::RelationalFunction::All => Ok(vector::reduce_bool(true, &a)),
+                    naga::RelationalFunction::Any => Ok(vector::reduce_bool(false, &a)),
+                    other => Err(format!("unsupported relational function {other:?}")),
+                }
             }
             Expression::Math { fun, arg, arg1, arg2, .. } => {
-                let (a, at) = self.value(*arg, out)?;
-                let mut rest = Vec::new();
+                let mut args = vec![self.lanes(*arg, out)?];
                 for h in [arg1, arg2].into_iter().flatten() {
-                    rest.push(self.value(*h, out)?);
+                    args.push(self.lanes(*h, out)?);
                 }
-                math(*fun, (&a, at), &rest)
+                vector::math_lanes(*fun, &args)
             }
             Expression::As { expr, kind, convert } => {
-                let (v, t) = self.value(*expr, out)?;
-                cast(&v, t, *kind, *convert)
+                let x = self.lanes(*expr, out)?;
+                vector::cast_lanes(&x, *kind, *convert)
             }
             other => Err(format!("unsupported expression {other:?}")),
         }
@@ -921,19 +1073,71 @@ impl<'a> Gen<'a> {
 
     /// `(byte offset, scalar type)` of uniform struct member `index`, taken
     /// from naga's own layout of the WGSL type - never from C++ packing.
-    fn uniform_member(&self, g: Handle<naga::GlobalVariable>, index: u32) -> Result<(u32, Ty), String> {
+    fn uniform_member(&self, g: Handle<naga::GlobalVariable>, index: u32) -> Result<(u32, Ty, u32), String> {
         let gv = &self.m.global_variables[g];
         match &self.m.types[gv.ty].inner {
             TypeInner::Struct { members, .. } => {
                 let mem = members
                     .get(index as usize)
                     .ok_or_else(|| format!("uniform member {index} out of range"))?;
+                if let Some(shape) = vector_shape(self.m, mem.ty) {
+                    let (ty, n, _) = shape?;
+                    return Ok((mem.offset, ty, n));
+                }
                 let ty = scalar_ty_of(self.m, mem.ty).map_err(|e| {
-                    format!("uniform member {index} is not a scalar and cannot be read: {e}")
+                    format!("uniform member {index} is neither a scalar nor a vector and cannot be read: {e}")
                 })?;
-                Ok((mem.offset, ty))
+                Ok((mem.offset, ty, 1))
             }
             other => Err(format!("uniform block is not a struct: {other:?}")),
+        }
+    }
+
+    /// Component `index` of a vector's component list.
+    fn component(&self, comps: &[String], index: u32) -> Result<String, String> {
+        comps.get(index as usize).cloned().ok_or_else(|| format!("vector component {index} out of range"))
+    }
+
+    /// The zero value of a scalar or vector type.
+    fn zero_value(&self, ty: Handle<naga::Type>) -> Result<Eval, String> {
+        match vector_shape(self.m, ty) {
+            Some(shape) => {
+                let (t, n, _) = shape?;
+                Ok(Eval::Vector(vec![t.zero().to_string(); n as usize], t))
+            }
+            None => {
+                let t = scalar_ty_of(self.m, ty)?;
+                Ok(Eval::Value(t.zero().to_string(), t))
+            }
+        }
+    }
+
+    /// A module-level constant: a literal, a zero value, or a vector built
+    /// from them.
+    fn constant(&self, init: Handle<Expression>) -> Result<Eval, String> {
+        match &self.m.global_expressions[init] {
+            Expression::Literal(lit) => literal(lit),
+            Expression::ZeroValue(ty) => self.zero_value(*ty),
+            Expression::Splat { size, value } => match self.constant(*value)? {
+                Eval::Value(v, t) => Ok(Eval::Vector(vec![v; *size as usize], t)),
+                _ => Err("a splat of something that is not a scalar constant".into()),
+            },
+            Expression::Compose { ty, components } => {
+                let Some(shape) = vector_shape(self.m, *ty) else {
+                    return Err("only vector constants are supported".into());
+                };
+                let (t, n, _) = shape?;
+                let mut comps = Vec::with_capacity(n as usize);
+                for c in components {
+                    match self.constant(*c)? {
+                        Eval::Value(v, _) => comps.push(v),
+                        Eval::Vector(v, _) => comps.extend(v),
+                        Eval::Place(_) => return Err("a constant that is a place".into()),
+                    }
+                }
+                Ok(Eval::Vector(comps, t))
+            }
+            other => Err(format!("unsupported constant expression {other:?}")),
         }
     }
 
@@ -1167,23 +1371,63 @@ fn scalar_ty_of(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> 
     }
 }
 
-fn array_elem_ty(m: &naga::Module, ty: Handle<naga::Type>) -> Result<Ty, String> {
-    match &m.types[ty].inner {
-        TypeInner::Array { base, .. } => scalar_ty_of(m, *base),
-        other => Err(format!("expected an array binding, got {other:?}")),
+/// The shape of an array's elements.
+struct ArrayLayout {
+    /// The scalar every element is made of.
+    elem: Ty,
+    /// `(components, stride in words)` when an element is a vector. WGSL pads a
+    /// `vec3` to the alignment of a `vec4`, so its stride is four words, not
+    /// three; getting that wrong shifts every element after the first.
+    vec: Option<(u32, u32)>,
+    /// The element count, when the array is not runtime-sized.
+    count: Option<u32>,
+}
+
+impl ArrayLayout {
+    /// Words one element occupies.
+    fn stride(&self) -> u32 {
+        self.vec.map_or(1, |(_, stride)| stride)
     }
 }
 
-fn array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32), String> {
+/// `(scalar, components, stride)` of a 4-byte-component vector type.
+fn vector_shape(m: &naga::Module, ty: Handle<naga::Type>) -> Option<Result<(Ty, u32, u32), String>> {
+    match &m.types[ty].inner {
+        TypeInner::Vector { size, scalar } => {
+            let n = *size as u32;
+            Some(Ty::from_scalar(*scalar).map(|t| (t, n, if n == 3 { 4 } else { n })))
+        }
+        _ => None,
+    }
+}
+
+fn array_layout(m: &naga::Module, ty: Handle<naga::Type>) -> Result<ArrayLayout, String> {
     match &m.types[ty].inner {
         TypeInner::Array { base, size, .. } => {
-            let elem = scalar_ty_of(m, *base)?;
-            match size {
-                naga::ArraySize::Constant(n) => Ok((elem, n.get())),
-                other => Err(format!("a fixed size is required here, got {other:?}")),
-            }
+            let (elem, vec) = match vector_shape(m, *base) {
+                Some(shape) => {
+                    let (t, n, stride) = shape?;
+                    (t, Some((n, stride)))
+                }
+                None => (scalar_ty_of(m, *base)?, None),
+            };
+            let count = match size {
+                naga::ArraySize::Constant(n) => Some(n.get()),
+                _ => None,
+            };
+            Ok(ArrayLayout { elem, vec, count })
         }
         other => Err(format!("expected an array, got {other:?}")),
+    }
+}
+
+/// `(scalar, element count)` of a fixed-size array of scalars or vectors; for
+/// vectors the count is in words, which is what the emitted C++ array holds.
+fn array_info(m: &naga::Module, ty: Handle<naga::Type>) -> Result<(Ty, u32), String> {
+    let l = array_layout(m, ty)?;
+    match l.count {
+        Some(n) => Ok((l.elem, n * l.stride())),
+        None => Err("a fixed size is required here, got a runtime-sized array".to_string()),
     }
 }
 
