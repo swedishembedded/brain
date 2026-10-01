@@ -66,3 +66,18 @@ teardown_file() {
   jq -e '.choices[0].finish_reason == "stop"' "$CONF_DIR/chat.json"
   jq -e '.usage.prompt_tokens > 576' "$CONF_DIR/chat.json"
 }
+
+@test "a chat completion with two images feeds the model both of them" {
+  local status
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/seed.png"; } >"$CONF_DIR/url1.txt"
+  { printf 'data:image/png;base64,'; base64 -w0 "$REPO/docs/quickstart/img/depth.png"; } >"$CONF_DIR/url2.txt"
+  jq -n --arg m "$MODEL" --rawfile a "$CONF_DIR/url1.txt" --rawfile b "$CONF_DIR/url2.txt" '{model: $m, max_tokens: 48, temperature: 0,
+    messages: [{role: "user", content: [{type: "image_url", image_url: {url: $a}}, {type: "image_url", image_url: {url: $b}}, {type: "text", text: "Describe each of the two images in one short sentence."}]}]}' >"$CONF_DIR/body2.json"
+  status=$(curl -sS --max-time 1800 -o "$CONF_DIR/chat2.json" -w '%{http_code}' \
+    -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$PORT/v1/chat/completions" --data-binary @"$CONF_DIR/body2.json")
+  [ "$status" -eq 200 ] || { cat "$CONF_DIR/chat2.json" "$CONF_DIR/serve.log" >&3; false; }
+  # Both images' 576 rows are in the prompt, and the model answered.
+  jq -e '.usage.prompt_tokens > 1152' "$CONF_DIR/chat2.json"
+  jq -e '.choices[0].message.content | length > 0' "$CONF_DIR/chat2.json"
+}
