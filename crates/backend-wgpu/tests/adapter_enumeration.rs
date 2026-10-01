@@ -26,11 +26,12 @@ const ROUNDS: usize = 24;
 #[test]
 fn repeated_enumeration_keeps_finding_the_same_physical_cards() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
         return;
     }
     let first = backend_wgpu::enumerate_gpus();
     if first.is_empty() {
-        eprintln!("no physical GPU present; nothing to keep enumerating");
+        brain_testutil::skip_unavailable("no physical GPU visible to wgpu; nothing to keep enumerating");
         return;
     }
     for round in 1..ROUNDS {

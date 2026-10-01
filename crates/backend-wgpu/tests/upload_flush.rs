@@ -33,8 +33,10 @@
 use backend_api::{Backend, BufUsage};
 use backend_wgpu::WgpuBackend;
 
-fn backend() -> WgpuBackend {
-    WgpuBackend::new(&[("axpy", kernels::AXPY)])
+mod common;
+
+fn backend() -> Option<WgpuBackend> {
+    common::backend(&[("axpy", kernels::AXPY)])
 }
 
 /// Queue submissions so far. `Backend::queue_submits` is not implemented by
@@ -50,7 +52,7 @@ fn submits(b: &WgpuBackend) -> u64 {
 /// every staging buffer backing them stays live and pinned until then.
 #[test]
 fn flush_submits_pending_host_writes() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let buf = b.buffer("dst", 1024, BufUsage::STORAGE | BufUsage::COPY_DST);
 
     let before = submits(&b);
@@ -72,7 +74,7 @@ fn flush_submits_pending_host_writes() {
 /// queue submission would put a round trip in every one of them.
 #[test]
 fn flush_with_nothing_outstanding_does_not_submit() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let buf = b.buffer("dst", 1024, BufUsage::STORAGE | BufUsage::COPY_DST);
     b.write_at(&buf, 0, &[7u32; 256]);
     b.flush();

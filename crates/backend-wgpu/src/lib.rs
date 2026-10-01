@@ -259,6 +259,24 @@ async fn physical_adapters(instance: &wgpu::Instance) -> Vec<wgpu::Adapter> {
     adapters
 }
 
+/// Whether wgpu can hand out any adapter at all on this machine (a Vulkan,
+/// Metal, DX12 or WebGPU device, software rasteriser included).
+///
+/// [`WgpuBackend::new`] panics on a machine with none, which is right for a
+/// caller that needs a device but wrong for a test that is only about wgpu: it
+/// asks this first and skips by name. A machine whose GPU is reached through
+/// another backend (CUDA) has no wgpu adapter and that is not a defect.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn adapter_available() -> bool {
+    let _guard = init_lock();
+    pollster::block_on(instance().request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .is_ok()
+}
+
 /// Identities of the physical-GPU adapters, in enumeration order - the
 /// registry's FALLBACK enumeration for machines where the ash path has no
 /// loader/ICD. Where the ash enumeration works it is canonical instead, and

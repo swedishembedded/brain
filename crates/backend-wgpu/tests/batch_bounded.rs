@@ -44,8 +44,10 @@
 use backend_api::{Backend, BufUsage};
 use backend_wgpu::WgpuBackend;
 
-fn backend() -> WgpuBackend {
-    WgpuBackend::new(&[("axpy", kernels::AXPY)])
+mod common;
+
+fn backend() -> Option<WgpuBackend> {
+    common::backend(&[("axpy", kernels::AXPY)])
 }
 
 fn submits(b: &WgpuBackend) -> u64 {
@@ -60,7 +62,7 @@ fn submits(b: &WgpuBackend) -> u64 {
 /// the whole run went to the device as one batch.
 #[test]
 fn a_long_unread_run_of_dispatches_flushes_along_the_way() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     // `axpy` binds `out` read-write and `inp` read-only, so these must be
     // DISTINCT buffers - binding one buffer as both is a conflicting-usage
     // validation error, and these dispatches now really are recorded.
@@ -96,7 +98,7 @@ fn a_long_unread_run_of_dispatches_flushes_along_the_way() {
 /// outlier would fail, and is why the ceiling counts workgroups instead.
 #[test]
 fn a_short_run_of_small_dispatches_still_batches() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let out = b.buffer("out", 4096, BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC);
     let inp = b.buffer("inp", 4096, BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC);
 

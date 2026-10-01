@@ -31,8 +31,10 @@
 use backend_api::{Backend, BufUsage};
 use backend_wgpu::WgpuBackend;
 
-fn backend() -> WgpuBackend {
-    WgpuBackend::new(&[("axpy", kernels::AXPY)])
+mod common;
+
+fn backend() -> Option<WgpuBackend> {
+    common::backend(&[("axpy", kernels::AXPY)])
 }
 
 /// A device buffer holding `n` words of a distinctive, position-dependent
@@ -55,7 +57,7 @@ fn filled(b: &WgpuBackend, tag: u32, n: usize) -> (backend_api::DeviceBuffer, Ve
 /// buffer can be handed bytes the copy did not write.
 #[test]
 fn a_shorter_read_after_a_longer_one_returns_only_its_own_bytes() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     // Deliberately not powers of two and not multiples of each other: a
     // rounding bug in the mapped range is invisible when every length divides
     // the last one.
@@ -71,7 +73,7 @@ fn a_shorter_read_after_a_longer_one_returns_only_its_own_bytes() {
 /// rather than truncated - and each answer is still exact.
 #[test]
 fn a_longer_read_after_a_shorter_one_grows_the_cache() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     for n in [3usize, 1024, 40_961, 131_072] {
         let (buf, want) = filled(&b, n as u32, n);
         assert_eq!(Backend::read(&b, &buf, n), want, "read({n}) after a shorter read");
@@ -86,7 +88,7 @@ fn a_longer_read_after_a_shorter_one_grows_the_cache() {
 /// length and the right shape.
 #[test]
 fn every_read_re_copies_rather_than_returning_the_cached_payload() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let n = 8192;
     let (first, want_first) = filled(&b, 1, n);
     let (second, want_second) = filled(&b, 2, n);
@@ -102,7 +104,7 @@ fn every_read_re_copies_rather_than_returning_the_cached_payload() {
 /// buffer and never reached them.
 #[test]
 fn a_zero_length_read_is_empty() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let (buf, _) = filled(&b, 9, 16);
     assert!(Backend::read(&b, &buf, 0).is_empty());
     // ...and the device is still usable afterwards.
@@ -118,7 +120,7 @@ fn a_zero_length_read_is_empty() {
 /// shows up only as a wall clock nobody is watching.
 #[test]
 fn a_loop_over_one_shape_pins_its_staging_pages_once() {
-    let b = backend();
+    let Some(b) = backend() else { return };
     let n = 4096;
     let (buf, want) = filled(&b, 5, n);
     let before = b.read_staging_allocations();

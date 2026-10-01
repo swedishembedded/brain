@@ -12,6 +12,8 @@
 //! rather than assuming either outcome.
 
 use backend_wgpu::WgpuBackend;
+mod common;
+
 use kernels::template::{native_f16_poc, native_f16_variant};
 
 /// A harmless kernel used purely to stand up a device and check what it
@@ -19,8 +21,8 @@ use kernels::template::{native_f16_poc, native_f16_variant};
 /// (compiling an f16 kernel on a device that lacks the feature is a wgpu
 /// validation failure, not a graceful `Result` - so capability must be
 /// checked BEFORE that kernel is ever handed to the device, never after).
-fn probe_device() -> WgpuBackend {
-    WgpuBackend::new(&[("axpy", kernels::AXPY)])
+fn probe_device() -> Option<WgpuBackend> {
+    common::backend(&[("axpy", kernels::AXPY)])
 }
 
 /// Verifies the CPU JIT's actual behaviour on a native-f16 kernel: M8.0
@@ -81,7 +83,7 @@ fn numeric_f16_never_entangles_across_backends() {
     // measurement -- see that function's own doc comment) -- checked here so
     // a future change that DOES wire the two together is forced to keep this
     // assertion true rather than silently starting to entangle them.
-    let gpu = probe_device();
+    let Some(gpu) = probe_device() else { return };
     assert!(!Backend::caps(&gpu).numeric.f16, "backend-wgpu's own numeric.f16 must stay the safe default too");
 }
 
@@ -136,7 +138,7 @@ const F16_MIN_NORMAL: f32 = 6.103_515_6e-5;
 /// storage-tier decode, now applied to native compute instead.
 #[test]
 fn native_f16_elementwise_fma_matches_f32_reference_on_real_gpu() {
-    let probe = probe_device();
+    let Some(probe) = probe_device() else { return };
     if !probe.supports_shader_f16() {
         brain_testutil::skip_unavailable("native_f16_elementwise_fma_matches_f32_reference_on_real_gpu: \
              this adapter does not report wgpu::Features::SHADER_F16");
@@ -267,7 +269,7 @@ fn calibrated_seconds_per_iter(gpu: &WgpuBackend, kind: usize, inp: &wgpu::Buffe
 /// this hardware".
 #[test]
 fn native_f16_roof_fma_throughput_vs_f32_one_shot() {
-    let probe = probe_device();
+    let Some(probe) = probe_device() else { return };
     if !probe.supports_shader_f16() {
         brain_testutil::skip_unavailable("native_f16_roof_fma_throughput_vs_f32_one_shot: \
              this adapter does not report wgpu::Features::SHADER_F16");

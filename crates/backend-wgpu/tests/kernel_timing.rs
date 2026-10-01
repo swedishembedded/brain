@@ -34,17 +34,15 @@
 use backend_api::Backend;
 use backend_wgpu::WgpuBackend;
 
+mod common;
+
 /// Each test builds its own real device, and concurrent independent device
 /// builds on one physical card are the driver hazard
 /// `crates/gpu-core/tests/device_sharing.rs` exists to prevent. Same fix here.
 static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn backend() -> Option<WgpuBackend> {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
-        return None;
-    }
-    Some(WgpuBackend::new(&[("axpy", kernels::AXPY)]))
+    common::backend(&[("axpy", kernels::AXPY)])
 }
 
 /// Turn timing on, or say why the rest of the test cannot run. A device whose

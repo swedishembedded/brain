@@ -14,11 +14,11 @@
 
 use backend_api::arch::TierLevel;
 use backend_api::{Backend, DType};
-use backend_wgpu::WgpuBackend;
+mod common;
 
 #[test]
 fn int8_dot_is_not_a_speed_claim_on_wgpu() {
-    let wg = WgpuBackend::new(&[("add2", kernels::ADD2)]);
+    let Some(wg) = common::backend(&[("add2", kernels::ADD2)]) else { return };
     let caps = wg.caps();
 
     assert_eq!(
