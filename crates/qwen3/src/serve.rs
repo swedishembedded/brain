@@ -3870,6 +3870,17 @@ mod tests {
         }
     }
 
+    /// What a freshly recorded dispatch costs the device in per-dispatch
+    /// objects: a bind group where the API has them (wgpu, Vulkan, CPU), and a
+    /// uniform allocation everywhere. A backend with no bind groups (CUDA
+    /// launches with its pointers directly) reports 0 for the first and still
+    /// counts the second, so the sum moves on every backend when a tape is
+    /// rebuilt and stands still when it is reused.
+    fn per_dispatch_objects(eng: &Engine) -> u64 {
+        let s = eng.device_stats().expect("every backend this crate targets reports device stats");
+        s.bind_groups + s.uniform_allocs
+    }
+
     /// M6.3: the served decode tape (uniform buffers + bind groups
     /// `run_batched_steps` records per dispatch) is built once per `bsz`
     /// bucket and REUSED for every later decode step at that same bucket,
@@ -3899,9 +3910,9 @@ mod tests {
         let tok1 = Engine::argmax(&eng.logits(&h1));
 
         // Step 1 at bsz=2: cache miss - builds and records the tape.
-        let bg_before = eng.device_stats().expect("every backend this crate targets reports bind_groups").bind_groups;
+        let bg_before = per_dispatch_objects(&eng);
         let out1 = eng.forward_batched(&mut [&mut t0, &mut t1], &[tok0, tok1]);
-        let bg_after_miss = eng.device_stats().unwrap().bind_groups;
+        let bg_after_miss = per_dispatch_objects(&eng);
         assert!(bg_after_miss > bg_before, "the first decode step at a new bucket must still build (and record) a tape");
 
         // `Self::logits` is a SEPARATE, uncached host-argmax dispatch (not
@@ -3915,12 +3926,12 @@ mod tests {
 
         // Step 2 at the SAME bsz=2 with DIFFERENT token/position inputs
         // (positions advanced, new tokens): cache hit.
-        let bg_before_hit = eng.device_stats().unwrap().bind_groups;
+        let bg_before_hit = per_dispatch_objects(&eng);
         let _out2 = eng.forward_batched(&mut [&mut t0, &mut t1], &[tok0b, tok1b]);
-        let bg_after_hit = eng.device_stats().unwrap().bind_groups;
+        let bg_after_hit = per_dispatch_objects(&eng);
         assert_eq!(
             bg_after_hit, bg_before_hit,
-            "a decode step at an already-cached bucket must create ZERO new bind groups"
+            "a decode step at an already-cached bucket must create ZERO new bind groups or uniforms"
         );
     }
 
