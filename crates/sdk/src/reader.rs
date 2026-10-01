@@ -21,9 +21,10 @@
 //! than arithmetic nobody does.
 //!
 //! ```no_run
-//! let reader = brain::ContinualReader::from_pretrained("Qwen/Qwen3-0.6B").run_dir("run");
+//! # let tasks: Vec<brain::BatteryTask> = Vec::new(); // the caller's frozen held-out tasks
+//! let reader = brain::ContinualReader::from_pretrained("Qwen/Qwen3-0.6B").run_dir("run").corpus("docs");
 //! let before = reader.battery(&tasks)?;   // frozen before any reading
-//! reader.corpus("docs").read()?;
+//! reader.read()?;
 //! let after = reader.battery(&tasks)?;
 //! # Ok::<(), brain::Error>(())
 //! ```
