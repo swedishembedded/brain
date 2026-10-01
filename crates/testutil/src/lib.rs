@@ -305,15 +305,25 @@ mod tests {
         let p = std::path::Path::new(&raw);
         assert_eq!(p.file_name().unwrap(), "clip.wav");
         // `..` components are left uncanonicalized (matching every one of the 36
-        // call sites this replaces) - canonicalize the DIRECTORY (not the
-        // fixture file, which need not exist) and check it lands on the real
-        // repo-root `testdata/`, not `crates/testutil/testdata` or similar.
+        // call sites this replaces), and `testdata/` is populated by
+        // `make fetch/testdata`, so it need not exist in this checkout. Fold
+        // the `..` lexically and check the DIRECTORY lands on the repo-root
+        // `testdata/`, not `crates/testutil/testdata` or similar.
+        let lexical = |p: &std::path::Path| {
+            let mut out = std::path::PathBuf::new();
+            for c in p.components() {
+                match c {
+                    std::path::Component::ParentDir => {
+                        out.pop();
+                    }
+                    other => out.push(other),
+                }
+            }
+            out
+        };
         let dir = p.parent().unwrap().parent().unwrap().parent().unwrap(); // .../testdata
-        let canon = dir.canonicalize().expect("testdata/ must exist in this checkout");
-        let expect = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata"))
-            .canonicalize()
-            .unwrap();
-        assert_eq!(canon, expect);
+        let expect = lexical(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata")));
+        assert_eq!(lexical(dir), expect);
     }
 
     #[test]
