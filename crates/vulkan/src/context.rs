@@ -484,7 +484,7 @@ impl VkContext {
         // Enable the device-level coopmat extension + feature only when present,
         // so creation still succeeds on devices that lack it (e.g. llvmpipe,
         // Pascal). The scalar fallback path needs no extension.
-        let device_ext_names: Vec<*const i8> = if caps.extension_present {
+        let device_ext_names: Vec<*const std::ffi::c_char> = if caps.extension_present {
             vec![ash::khr::cooperative_matrix::NAME.as_ptr()]
         } else {
             vec![]
@@ -523,7 +523,7 @@ impl VkContext {
         // extensions that back f16/int8 and the integer dot product. Both were
         // promoted to core (1.2 / 1.3), but requesting the extension name is the
         // portable way to unlock the feature on a 1.3 device.
-        let mut device_ext_names: Vec<*const i8> = device_ext_names;
+        let mut device_ext_names: Vec<*const std::ffi::c_char> = device_ext_names;
         let dev_exts = instance.enumerate_device_extension_properties(physical_device).unwrap_or_default();
         let has_ext = |name: &CStr| dev_exts.iter().any(|e| CStr::from_ptr(e.extension_name.as_ptr()) == name);
         if prec.f16 && has_ext(ash::khr::shader_float16_int8::NAME) {
