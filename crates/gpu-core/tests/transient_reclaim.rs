@@ -98,6 +98,26 @@ fn gpu() -> Option<Gpu> {
     Some(Gpu::open(Some("gpu"), KERNELS))
 }
 
+/// [`gpu`], but only on a backend whose frees are deferred until a poll.
+///
+/// The ordering trap, the pending-bytes accounting and the ceiling are all
+/// properties of such a backend (wgpu). A backend that frees on drop reports
+/// zero pending bytes by contract (`Backend::pending_reclaim_bytes`): there is
+/// no trap to fall into, so a test that asserts one is skipped there by name.
+/// Detected by dropping a buffer and asking, not by naming backends.
+fn deferring_gpu() -> Option<Gpu> {
+    let gpu = gpu()?;
+    gpu.poll_wait();
+    drop(gpu.storage(WORDS));
+    let defers = gpu.pending_reclaim_bytes() > 0;
+    gpu.poll_wait();
+    if defers {
+        return Some(gpu);
+    }
+    brain_testutil::skip_unavailable("transient_reclaim: this backend frees a buffer on drop, so there is no deferred reclaim to order");
+    None
+}
+
 /// **The trap, stated as a test.** A poll placed in the loop body - the fix
 /// that looks right, and was written first for real - reclaims nothing,
 /// because the object holding the buffers is still alive when it runs.
@@ -109,7 +129,7 @@ fn gpu() -> Option<Gpu> {
 #[test]
 fn polling_before_the_layer_drops_reclaims_nothing() {
     let _one = one_device_at_a_time();
-    let Some(gpu) = gpu() else { return };
+    let Some(gpu) = deferring_gpu() else { return };
     gpu.poll_wait();
     assert_eq!(gpu.pending_reclaim_bytes(), 0, "a freshly polled device has nothing pending");
 
@@ -141,7 +161,7 @@ fn polling_before_the_layer_drops_reclaims_nothing() {
 #[test]
 fn reclaiming_hands_back_everything_its_body_allocated() {
     let _one = one_device_at_a_time();
-    let Some(gpu) = gpu() else { return };
+    let Some(gpu) = deferring_gpu() else { return };
     gpu.poll_wait();
 
     let kept = reclaiming(&gpu, || {
@@ -199,8 +219,8 @@ fn child(helper: &str) -> (bool, String) {
 #[test]
 fn a_loop_that_never_reclaims_is_refused_at_the_ceiling() {
     let _one = one_device_at_a_time();
-    if gpu_core::discrete_gpu_count() == 0 {
-        brain_testutil::skip_unavailable("transient_reclaim: no discrete GPU on this box");
+    // Probe and release the device before the child opens its own.
+    if deferring_gpu().is_none() {
         return;
     }
     let (ok, out) = child("unreclaimed_loop_helper");
