@@ -866,6 +866,14 @@ cuda-table:
 cuda-table/check:
 	scripts/build/gen-cuda-kernel-table.py --check
 
+# Install a CUDA toolkit lane (12 or 13), or the Nsight profilers (`nsight`),
+# into a user-owned prefix (`$BRAIN_CUDA_PREFIX`, default ~/.local/cuda) with no
+# root: `make cuda/install LANE=13`, then
+# `eval "$(scripts/build/install-cuda-userspace.py env 13)"`. Downloads are
+# SHA-256 verified. See the script's own header for what a lane contains.
+cuda/install:
+	scripts/build/install-cuda-userspace.py install $(LANE)
+
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation (resources/world-models/repos/diamond, or set
 # BRAIN_DIAMOND_REPO). Needs python3 + torch; see docs/world-models/FIXTURES.md.
