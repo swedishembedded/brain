@@ -65,8 +65,19 @@ pub fn read_fd_to_vec(fd: BorrowedFd) -> anyhow::Result<Vec<u8>> {
         return Ok(Vec::new());
     }
     let nz = NonZeroUsize::new(len).unwrap();
-    // SAFETY: fresh read-only shared mapping of a valid fd; unmapped before return.
-    let ptr = unsafe { mmap(None, nz, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, fd, 0)? };
+    // Shared first: a dmabuf can only be mapped shared. Older kernels (5.14, as
+    // shipped by RHEL 9) refuse that with EPERM for a write-sealed memfd even
+    // when the mapping is read-only, because it could later be made writable;
+    // a private read-only mapping of such an fd reads the same pages, and the
+    // seals already promise they cannot change. Clients that map the fd
+    // themselves need the same fallback.
+    // SAFETY: fresh read-only mapping of a valid fd; unmapped before return.
+    let ptr = unsafe {
+        match mmap(None, nz, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, fd, 0) {
+            Err(nix::errno::Errno::EPERM) => mmap(None, nz, ProtFlags::PROT_READ, MapFlags::MAP_PRIVATE, fd, 0)?,
+            other => other?,
+        }
+    };
     let out = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len) }.to_vec();
     // SAFETY: `ptr`/`len` are exactly what mmap returned above.
     unsafe { munmap(ptr, len)? };
