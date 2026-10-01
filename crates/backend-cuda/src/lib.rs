@@ -44,11 +44,13 @@ pub mod backend;
 pub mod driver;
 pub mod exec;
 mod graph;
+pub mod live;
 pub mod nvrtc;
 pub mod policy;
 
 pub use backend::{CudaBackend, LaunchStats};
 pub use driver::{driver, CudaDevice};
+pub use live::{live_resources, LiveResources};
 
 /// Every CUDA-visible device as a brain [`backend_api::GpuIdentity`], in CUDA
 /// ordinal order - the shape `gpu_core::devices` consumes, matching

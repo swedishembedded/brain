@@ -72,6 +72,7 @@ impl Drop for PrimaryRef {
         unsafe {
             (self.fns.primary_ctx_release)(self.dev);
         }
+        crate::live::primary_released();
     }
 }
 
@@ -128,6 +129,7 @@ impl Context {
         // SAFETY: `ctx` is a valid out-parameter and `dev` came from
         // `cuDeviceGet`. The retain is released in `Drop`.
         d.check(unsafe { (fns.primary_ctx_retain)(&mut ctx, dev) }, "cuDevicePrimaryCtxRetain")?;
+        crate::live::primary_retained();
         let mut c = Context {
             d,
             fns,
@@ -145,6 +147,7 @@ impl Context {
         // current. Non-blocking, so handles do not synchronise through the
         // legacy default stream - see `ExecFns::stream_create`.
         d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
+        crate::live::stream_created();
         // The count goes up BEFORE the drain below, so any handle that submits
         // after this point already fences. The drain covers work another handle
         // issued before it could know a second handle would exist: its buffers
@@ -220,6 +223,7 @@ impl Context {
         // SAFETY: `ptr` is a valid out-parameter; the `_v2` entry point takes
         // a 64-bit size.
         self.d.check(unsafe { (self.fns.mem_alloc)(&mut ptr, bytes.max(1)) }, "cuMemAlloc")?;
+        crate::live::device_alloc(bytes.max(1));
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -245,6 +249,7 @@ impl Context {
         let mut p: *mut c_void = std::ptr::null_mut();
         // SAFETY: `p` is a valid out-parameter; the block is released in Drop.
         self.d.check(unsafe { (self.fns.mem_alloc_host)(&mut p, bytes) }, "cuMemAllocHost")?;
+        crate::live::pinned_alloc(bytes);
         Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words, _primary: self.primary.clone() })
     }
 
@@ -372,6 +377,7 @@ impl Context {
         let mut ev: CuEvent = std::ptr::null_mut();
         // SAFETY: `ev` is a valid out-parameter; the flags are driver constants.
         self.d.check(unsafe { (self.fns.event_create)(&mut ev, flags) }, "cuEventCreate")?;
+        crate::live::event_created();
         Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev, _primary: self.primary.clone() })
     }
 
@@ -431,6 +437,7 @@ impl Context {
             unsafe { (self.fns.module_load_data)(&mut m, cubin.as_ptr() as *const c_void) },
             "cuModuleLoadData",
         )?;
+        crate::live::module_loaded();
         Ok(Module { d: self.d, fns: self.fns, ctx: self.ctx, m })
     }
 
@@ -551,6 +558,7 @@ impl Context {
         // SAFETY: `e` is a valid out-parameter and `graph` is a complete graph
         // built on this context. No instantiation flags are requested.
         self.d.check(unsafe { (g.graph_instantiate)(&mut e, graph.graph, 0) }, "cuGraphInstantiate")?;
+        crate::live::graph_exec_created();
         Ok(GraphExec { d: self.d, g, ctx: self.ctx, e })
     }
 
@@ -615,8 +623,11 @@ impl Drop for Context {
         // is reference-counted, so this does not tear down a context another
         // holder is still using.
         unsafe {
-            if !self.stream.is_null() && (self.fns.ctx_set_current)(self.ctx) == 0 {
-                (self.fns.stream_destroy)(self.stream);
+            if !self.stream.is_null()
+                && (self.fns.ctx_set_current)(self.ctx) == 0
+                && (self.fns.stream_destroy)(self.stream) == 0
+            {
+                crate::live::stream_destroyed();
             }
             // The primary context is released by `PrimaryRef`, when the last
             // object that needs it has gone - not here.
@@ -695,6 +706,7 @@ impl Capture<'_> {
         if graph.is_null() {
             return Err("cuStreamEndCapture produced no graph".into());
         }
+        crate::live::graph_created();
         Ok(Graph { d: self.ctx.d, g: self.g, graph })
     }
 }
@@ -731,6 +743,8 @@ impl Drop for Graph {
             let rc = (self.g.graph_destroy)(self.graph);
             if rc != 0 {
                 tracing::warn!("cuGraphDestroy failed: {}", self.d.error_text(rc));
+            } else {
+                crate::live::graph_destroyed();
             }
         }
     }
@@ -755,6 +769,8 @@ impl Drop for GraphExec {
             let rc = (self.g.graph_exec_destroy)(self.e);
             if rc != 0 {
                 tracing::warn!("cuGraphExecDestroy failed: {}", self.d.error_text(rc));
+            } else {
+                crate::live::graph_exec_destroyed();
             }
             let _ = self.ctx;
         }
@@ -804,6 +820,8 @@ impl Drop for Event {
                 let rc = (self.fns.event_destroy)(self.ev);
                 if rc != 0 {
                     tracing::warn!("cuEventDestroy failed: {}", self.d.error_text(rc));
+                } else {
+                    crate::live::event_destroyed();
                 }
             }
         }
@@ -864,6 +882,8 @@ impl Drop for PinnedMem {
                 let rc = (self.fns.mem_free_host)(self.ptr as *mut c_void);
                 if rc != 0 {
                     tracing::warn!("cuMemFreeHost failed: {}", self.d.error_text(rc));
+                } else {
+                    crate::live::pinned_free((self.words * 4).max(4));
                 }
             }
         }
@@ -917,6 +937,8 @@ impl Drop for DeviceMem {
                 let rc = (self.fns.mem_free)(self.ptr);
                 if rc != 0 {
                     tracing::warn!("cuMemFree failed: {}", self.d.error_text(rc));
+                } else {
+                    crate::live::device_free(self.len.max(1));
                 }
             }
         }
@@ -960,8 +982,8 @@ impl Drop for Module {
     fn drop(&mut self) {
         // SAFETY: the module was loaded in this context and is unloaded once.
         unsafe {
-            if (self.fns.ctx_set_current)(self.ctx) == 0 {
-                (self.fns.module_unload)(self.m);
+            if (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.module_unload)(self.m) == 0 {
+                crate::live::module_unloaded();
             }
         }
     }
