@@ -256,11 +256,16 @@ pub struct LaunchStats {
 
 /// A brain compute device driven by the CUDA Driver API.
 pub struct CudaBackend {
-    kernels: Vec<KernelSrc>,
+    /// Shared by every handle made with [`backend_api::Backend::share`]: the
+    /// catalogue is immutable after construction.
+    kernels: Arc<Vec<KernelSrc>>,
     /// `kind` -> compiled kernel, populated on first dispatch. The lock is
     /// held across the NVRTC compile: a duplicate compile of the same kernel
     /// is pure waste, and first dispatch of a given `kind` happens once.
-    compiled: Mutex<HashMap<usize, Arc<Compiled>>>,
+    ///
+    /// Shared with every sibling handle: a module belongs to the primary
+    /// context all of them retain, so one compile serves them all.
+    compiled: Arc<Mutex<HashMap<usize, Arc<Compiled>>>>,
     /// Kernels a provider registered with
     /// [`backend_api::Backend::register_native`]: its OWN source, not a
     /// translation of anything in the WGSL catalogue.
@@ -276,7 +281,7 @@ pub struct CudaBackend {
     /// declined it, use the portable path" - rather than surfacing as a
     /// panic three dispatches later, by which time the provider has already
     /// promised to serve the request.
-    native: Mutex<Vec<Arc<Compiled>>>,
+    native: Arc<Mutex<Vec<Arc<Compiled>>>>,
     /// Uniform allocations shared by every step of the same shape - see
     /// [`UniformKey`].
     uniforms: Mutex<HashMap<UniformKey, UniformSlot>>,
@@ -294,6 +299,9 @@ pub struct CudaBackend {
     capturing: AtomicBool,
     caps: DeviceCaps,
     identity: GpuIdentity,
+    /// The CUDA ordinal this handle opened, so [`Backend::share`] can open the
+    /// same device again.
+    ordinal: u32,
     counters: Counters,
     /// **Last field on purpose.** Rust drops a struct's fields in declaration
     /// order, and every other field above either holds device memory, a loaded
@@ -322,26 +330,46 @@ impl CudaBackend {
                 None
             }
         };
-        Ok(CudaBackend {
-            kernels: kernels
-                .iter()
-                .map(|(name, src)| KernelSrc {
-                    name: (*name).to_string(),
-                    wgsl: (*src).to_string(),
-                    wg: workgroup_size_of(src),
-                })
-                .collect(),
+        let catalogue = kernels
+            .iter()
+            .map(|(name, src)| KernelSrc {
+                name: (*name).to_string(),
+                wgsl: (*src).to_string(),
+                wg: workgroup_size_of(src),
+            })
+            .collect();
+        Ok(CudaBackend::assemble(ctx, ordinal, caps, identity, graph, Arc::new(catalogue), Arc::default(), Arc::default()))
+    }
+
+    /// Everything a handle is made of. A fresh handle gets its own stream,
+    /// uniform pool, staging and graph cache; a [`share`](backend_api::Backend::share)d
+    /// one passes the parent's catalogue and compiled-kernel caches instead of
+    /// new ones.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        ctx: exec::Context,
+        ordinal: u32,
+        caps: DeviceCaps,
+        identity: GpuIdentity,
+        graph: Option<Mutex<GraphCache>>,
+        kernels: Arc<Vec<KernelSrc>>,
+        compiled: Arc<Mutex<HashMap<usize, Arc<Compiled>>>>,
+        native: Arc<Mutex<Vec<Arc<Compiled>>>>,
+    ) -> CudaBackend {
+        CudaBackend {
+            kernels,
             ctx,
-            compiled: Mutex::new(HashMap::new()),
-            native: Mutex::new(Vec::new()),
+            compiled,
+            native,
             uniforms: Mutex::new(HashMap::new()),
             staging: Mutex::new(StagingPool::default()),
             graph,
             capturing: AtomicBool::new(false),
             caps,
             identity,
+            ordinal,
             counters: Counters::default(),
-        })
+        }
     }
 
     /// Turn submission capture off (or back on) for this handle.
@@ -1146,6 +1174,27 @@ impl backend_api::Backend for CudaBackend {
     /// sharding decision depend on another process's timing.
     fn max_buffer_bytes(&self) -> u64 {
         self.ctx.mem_info().map(|(free, _)| free).unwrap_or(0)
+    }
+
+    /// A second handle onto this device: the same primary context, so the same
+    /// address space and the same loaded modules, with its own stream, uniform
+    /// pool, staging and graph cache. Cheap by design: nothing is recompiled
+    /// and no device memory moves.
+    fn share(&self) -> Option<Box<dyn backend_api::Backend>> {
+        let ctx = exec::Context::open(self.ordinal)
+            .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a second handle on this device"))
+            .ok()?;
+        let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
+        Some(Box::new(CudaBackend::assemble(
+            ctx,
+            self.ordinal,
+            self.caps.clone(),
+            self.identity.clone(),
+            graph,
+            Arc::clone(&self.kernels),
+            Arc::clone(&self.compiled),
+            Arc::clone(&self.native),
+        )))
     }
 
     fn caps(&self) -> DeviceCaps {

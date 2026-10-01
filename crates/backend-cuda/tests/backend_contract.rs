@@ -37,6 +37,7 @@ const KERNELS: &[(&str, &str)] = &[
 
 const ADD2: usize = 0;
 const GN_STATS_WG: usize = 1;
+const MUL: usize = 2;
 
 /// A backend to test, or the reason there is none.
 fn backend() -> Option<CudaBackend> {
@@ -279,4 +280,42 @@ fn the_host_cost_of_a_submit_is_counted_separately_from_its_dispatches() {
     // The read-back proves the counted launches were real work and not a
     // counter incremented next to a launch that never happened.
     assert_eq!(b.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0]);
+}
+
+/// `Gpu::share` hands a second handle onto the same device to every model that
+/// builds more than one component (a text tower and an image tower, an encoder
+/// and a decoder). The CUDA backend used to answer `None`, which that call
+/// turns into a panic, so no such model could run on it at all.
+///
+/// A shared handle must compute correctly, must be able to use the parent's
+/// buffers (one primary context, one address space), and must not recompile
+/// what the parent already compiled: the cache is the point of sharing.
+#[test]
+fn a_shared_handle_uses_the_parents_buffers_and_compiled_kernels() {
+    let Some(parent) = backend() else { return };
+    let Some(sibling) = parent.share() else { panic!("the CUDA backend must be able to share a device") };
+
+    let a: Vec<f32> = (0..256).map(|i| i as f32).collect();
+    let c: Vec<f32> = (0..256).map(|i| 1000.0 + i as f32).collect();
+    let ba = parent.storage_init("a", &a);
+    let bc = parent.storage_init("c", &c);
+    let sum = parent.storage(256);
+    let product = parent.storage(256);
+
+    // The parent compiles `add2`; the sibling runs `mul` on the parent's buffers.
+    parent.submit(&[], &[parent.step(ADD2, &[&ba, &bc, &sum], &[256], 256)]);
+    assert_eq!(parent.compiled_kernel_count(), 1);
+    sibling.submit(&[], &[sibling.step(MUL, &[&ba, &bc, &product], &[256], 256)]);
+
+    let got_sum = sibling.read(&sum, 256);
+    let got_product = parent.read(&product, 256);
+    for i in 0..256 {
+        assert_eq!(got_sum[i], a[i] + c[i], "sum[{i}] read through the sibling");
+        assert_eq!(got_product[i], a[i] * c[i], "product[{i}] computed by the sibling");
+    }
+    assert_eq!(parent.compiled_kernel_count(), 2, "the sibling's compile must land in the shared cache");
+
+    // Compiled once already: a second dispatch by the other handle adds nothing.
+    sibling.submit(&[], &[sibling.step(ADD2, &[&ba, &bc, &sum], &[256], 256)]);
+    assert_eq!(parent.compiled_kernel_count(), 2, "add2 was recompiled by the sibling");
 }
