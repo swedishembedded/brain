@@ -390,7 +390,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
 name = "brain"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-appopts",
  "brain-arch",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "brain-apiserve"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -482,14 +482,14 @@ dependencies = [
 
 [[package]]
 name = "brain-appopts"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-gpu-core",
 ]
 
 [[package]]
 name = "brain-arcface"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -509,11 +509,11 @@ dependencies = [
 
 [[package]]
 name = "brain-arch"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-atif"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "chrono",
  "libc",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "brain-audio"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-data",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "brain-audit"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-promote",
@@ -552,11 +552,11 @@ dependencies = [
 
 [[package]]
 name = "brain-backend-api"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-backend-cpu"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-data",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "brain-backend-cuda"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-kernels",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "brain-backend-vulkan"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "ash",
  "brain-backend-api",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "brain-backend-wgpu"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "ash",
  "brain-backend-api",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "brain-bench"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "brain-bisenet"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -652,14 +652,14 @@ dependencies = [
 
 [[package]]
 name = "brain-camera"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "brain-campplus"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -676,14 +676,14 @@ dependencies = [
 
 [[package]]
 name = "brain-capability"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "brain-capability-mock"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "serde_json",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "brain-captioner"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "image",
@@ -699,14 +699,14 @@ dependencies = [
 
 [[package]]
 name = "brain-capture"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-testutil",
 ]
 
 [[package]]
 name = "brain-catalog"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arcface",
  "brain-capability",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "brain-checkpoint"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-data",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "brain-chronos2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-forecast",
@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "brain-cli"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "axum",
  "brain-apiserve",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "brain-clip"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "brain-codeformer"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "brain-connectome"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-neuro",
  "brain-testutil",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "brain-controlnet"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "brain-cosyvoice"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -996,7 +996,7 @@ dependencies = [
 
 [[package]]
 name = "brain-data"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-testutil",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "brain-dbus"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "brain-capability",
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "brain-decide"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "brain-deepseek2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "brain-deepseek2ocr"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "brain-deepseekocr2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1110,7 +1110,7 @@ dependencies = [
 
 [[package]]
 name = "brain-deepseekvl"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "brain-diamond"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "brain-diffusion"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-testutil",
@@ -1155,14 +1155,14 @@ dependencies = [
 
 [[package]]
 name = "brain-dit"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-model",
 ]
 
 [[package]]
 name = "brain-ecapatdnn"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-checkpoint",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "brain-eval"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-checkpoint",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "brain-events"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-forecast",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "brain-fastvlm"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-captioner",
@@ -1224,14 +1224,14 @@ dependencies = [
 
 [[package]]
 name = "brain-fcbench"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-forecast",
 ]
 
 [[package]]
 name = "brain-federated"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "serde_json",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "brain-fincast"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-forecast",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "brain-florence2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1275,7 +1275,7 @@ dependencies = [
 
 [[package]]
 name = "brain-flux1"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "brain-flux2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-capability",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "brain-fly"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-connectome",
  "brain-flybody",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "brain-flybody"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-connectome",
  "brain-mujoco",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "brain-forecast"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-testutil",
  "serde_json",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "brain-gemma4"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "brain-genieredux"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "brain-gguf"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arch",
  "brain-backend-cpu",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "brain-glmdsa"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "brain-gpt2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "brain-gpu-core"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-backend-cpu",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "brain-gradcheck"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arcface",
  "brain-clip",
@@ -1488,11 +1488,11 @@ dependencies = [
 
 [[package]]
 name = "brain-hfsm"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-imaging"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "brain-imgpipe"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "brain-instantid"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-clip",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "brain-januspro"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "brain-kernels"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-splat",
@@ -1561,14 +1561,14 @@ dependencies = [
 
 [[package]]
 name = "brain-kernels-cuda"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
 ]
 
 [[package]]
 name = "brain-kronos"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-capability",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "brain-lfm2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "brain-llava"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-captioner",
@@ -1629,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "brain-loader"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arch",
  "brain-capability",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "brain-lpips"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "brain-ltxv"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -1690,11 +1690,11 @@ dependencies = [
 
 [[package]]
 name = "brain-memauth"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-mimi"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "brain-minimaxmusic3"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "brain-model"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "brain-modelcost"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-gpt2",
  "brain-gpu-core",
@@ -1766,14 +1766,14 @@ dependencies = [
 
 [[package]]
 name = "brain-modelref"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "brain-modelstore"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arch",
  "brain-capability",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "brain-modernbert"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -1804,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "brain-moondream3"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "brain-mujoco"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-testutil",
  "brain-wm-display",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "brain-mvs"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-camera",
  "brain-data",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "brain-nemotronasr"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -1865,7 +1865,7 @@ dependencies = [
 
 [[package]]
 name = "brain-neuro"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-gpu-core",
@@ -1874,7 +1874,7 @@ dependencies = [
 
 [[package]]
 name = "brain-npu"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-checkpoint",
@@ -1914,14 +1914,14 @@ dependencies = [
 
 [[package]]
 name = "brain-onnx"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "prost",
 ]
 
 [[package]]
 name = "brain-optim"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-gpu-core",
@@ -1934,7 +1934,7 @@ dependencies = [
 
 [[package]]
 name = "brain-paramstore"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -1946,7 +1946,7 @@ dependencies = [
 
 [[package]]
 name = "brain-perf"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "axum",
  "brain-apiserve",
@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "brain-promote"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "serde",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "brain-pulid"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arcface",
  "brain-bisenet",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-arch",
  "brain-capability",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen35"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen35moe"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3asr"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3omnimoe"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-apiserve",
  "brain-audio",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3tts"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3vl"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-captioner",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "brain-qwen3vlmoe"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "brain-recon"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-camera",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "brain-residency"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-memauth",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "brain-rl"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-atif",
  "brain-audit",
@@ -2223,14 +2223,14 @@ dependencies = [
 
 [[package]]
 name = "brain-rlcd"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
 ]
 
 [[package]]
 name = "brain-rrdbnet"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "brain-runtime"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2261,7 +2261,7 @@ dependencies = [
 
 [[package]]
 name = "brain-s3dit"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "brain-s3tokenizer"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "brain-sam1"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "brain-sam2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "brain-scrfd"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "brain-sdxlunet"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2366,7 +2366,7 @@ dependencies = [
 
 [[package]]
 name = "brain-search"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "serde",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "brain-server"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-events",
  "brain-fcbench",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "brain-sfm"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-camera",
@@ -2396,7 +2396,7 @@ dependencies = [
 
 [[package]]
 name = "brain-shutdown"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "libc",
  "tokio",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "brain-solve"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "brain-splat"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-camera",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "brain-stats"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-residency",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "brain-supir"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "brain-t5encoder"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "brain-testutil"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-modelref",
@@ -2487,11 +2487,11 @@ dependencies = [
 
 [[package]]
 name = "brain-timeseries"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-timesfm3"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2509,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "brain-toyautoencoder"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2525,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "brain-toymoe"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "brain-toypid"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "brain-toyseq2seq"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "brain-trace"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "serde_json",
  "tracing",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "brain-vae"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-data",
@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "brain-viewport"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-imaging",
  "brain-testutil",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "brain-vision"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-gpu-core",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "brain-vqgan"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "brain-vulkan"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "ash",
  "brain-backend-api",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "brain-wan"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-bench",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "brain-web"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
@@ -2684,11 +2684,11 @@ dependencies = [
 
 [[package]]
 name = "brain-weightset"
-version = "1.2.0"
+version = "2.0.0"
 
 [[package]]
 name = "brain-wgsl-cpu"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-api",
  "brain-kernels",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "brain-wgsl-cuda"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-kernels",
  "naga",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "brain-wm-core"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-gpu-core",
@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "brain-wm-display"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-data",
  "brain-imaging",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "brain-worldmirror2"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2748,7 +2748,7 @@ dependencies = [
 
 [[package]]
 name = "brain-yolov8"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "brain-zipdepth"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-capability",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "braintop"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "brain-stats",
@@ -5761,14 +5761,14 @@ dependencies = [
 
 [[package]]
 name = "sample-decision-arena"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-decision-doom"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "libc",
@@ -5778,14 +5778,14 @@ dependencies = [
 
 [[package]]
 name = "sample-decision-intents"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-decision-json"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "serde_json",
@@ -5793,14 +5793,14 @@ dependencies = [
 
 [[package]]
 name = "sample-decision-patterns"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-decision-rubiks"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "serde_json",
@@ -5808,70 +5808,70 @@ dependencies = [
 
 [[package]]
 name = "sample-decision-salesagent"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-decision-triage"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-fly-interactive"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-imagegen-batch"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-imagegen-generate"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-learning-reader"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-learning-rlcd"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-learning-visualclick"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-reconstruction-splat"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-study-chat"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "serde_json",
@@ -5879,42 +5879,42 @@ dependencies = [
 
 [[package]]
 name = "sample-study-document"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-text-embed"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-text-embed-train"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-text-encoder-finetune"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-text-retrieve"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
 ]
 
 [[package]]
 name = "sample-text-retrieve-json"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "serde_json",
@@ -5922,7 +5922,7 @@ dependencies = [
 
 [[package]]
 name = "sample-tts-clone"
-version = "1.2.0"
+version = "2.0.0"
 dependencies = [
  "brain",
  "rodio",
