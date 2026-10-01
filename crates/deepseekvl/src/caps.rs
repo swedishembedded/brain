@@ -261,7 +261,17 @@ static RESIDENT: Mutex<Option<(String, Session)>> = Mutex::new(None);
 /// Load DeepSeek-VL from `dir` for serving, at the checkpoint's own fp16, as
 /// `placement` puts it.
 pub fn load_session(dir: &str, placement: crate::model::Placement) -> Result<Session, String> {
-    Ok(Session::new(crate::model::load_placed(std::path::Path::new(dir), qwen3::Dtype::F16, placement)?, ""))
+    load_session_tuned(dir, placement, None)
+}
+
+/// [`load_session`] with the fine-tune in `tuned` (what `brain deepseekvl
+/// finetune` wrote) applied.
+pub fn load_session_tuned(dir: &str, placement: crate::model::Placement, tuned: Option<&std::path::Path>) -> Result<Session, String> {
+    let mut vlm = crate::model::load_placed(std::path::Path::new(dir), qwen3::Dtype::F16, placement)?;
+    if let Some(t) = tuned {
+        crate::tuned::apply(&mut vlm, t)?;
+    }
+    Ok(Session::new(vlm, ""))
 }
 
 /// Place DeepSeek-VL from `dir` over the cards' free memory now.

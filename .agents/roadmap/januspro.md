@@ -9,10 +9,9 @@ and are served as `brain/januspro` (`generate`, `text2image`;
 
 ## Outstanding
 
-- **Serving a fine-tune.** `brain januspro finetune` writes an adapter
-  and either an aligner or the generation heads; the served builds cannot
-  attach them yet (no adapter store layout for the composite, and the
-  engine folds adapters only for the plain qwen3 residents).
+- **Serving a generation fine-tune.** `BRAIN_JANUSPRO_TUNED` applies an
+  understanding fine-tune to the chat build; the generation heads and the
+  drawing build's adapter are not attached to the engine that draws.
 - **Generation training beyond one card and one image per example.** The
   trainer holds a bf16 decoder on one card, one image's 576 tokens per step,
   and does not guide its loss: a sampled image is the check, not a held-out

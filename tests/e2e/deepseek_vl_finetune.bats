@@ -45,3 +45,29 @@ teardown_file() {
   # the loss moved down: "loss A -> B" with B < A
   echo "$output" | awk '/^trained on/ { for (i = 1; i <= NF; i++) if ($i == "loss") { a = $(i+1); b = $(i+3) } } END { exit !(b + 0 < a + 0) }'
 }
+
+# The fine-tune is served: BRAIN_DEEPSEEKVL_TUNED names the directory `finetune`
+# wrote, and the served model answers with what it learned.
+@test "a fine-tune is served and answers with what it learned" {
+  mkdir -p "$WORK/models/$REPO_ID" "$WORK/learn"
+  for f in "$STORE/$REPO_ID"/*; do ln -s "$f" "$WORK/models/$REPO_ID/"; done
+  cp "$WORK/data/dog.png" "$WORK/learn/dog.png"
+  printf '%s\n' '{"image":"dog.png","messages":[{"role":"user","content":"<image_placeholder>\nWhat animal is this?"},{"role":"assistant","content":"That is a Blorbville puppy."}]}' >"$WORK/learn/train.jsonl"
+  run "$BRAIN" deepseekvl finetune --weights "$REPO_ID" --models-dir "$WORK/models" --dataset "$WORK/learn" \
+    --out "$WORK/tuned" --steps 14 --lr 3e-4 --seed 1
+  [ "$status" -eq 0 ] || { echo "$output" >&3; false; }
+
+  local port="${DEEPSEEK_VL_FT_PORT:-8942}"
+  BRAIN_DEEPSEEKVL_TUNED="$WORK/tuned" "$BRAIN" serve --models-dir "$WORK/models" --openai "$port" \
+    --api-keys-out "$WORK/keys.json" --ready-file "$WORK/ready" >"$WORK/serve.log" 2>&1 &
+  local server=$!
+  for _ in $(seq 1 120); do [ -e "$WORK/ready" ] && break; sleep 0.5; done
+  [ -e "$WORK/ready" ] || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve.log" >&3; false; }
+  local key; key="$(jq -r .openai "$WORK/keys.json")"
+  { printf 'data:image/png;base64,'; base64 -w0 "$WORK/learn/dog.png"; } >"$WORK/url.txt"
+  jq -n --rawfile u "$WORK/url.txt" '{model: "brain/deepseekvl", max_tokens: 30, temperature: 0, messages: [{role: "user", content: [{type: "image_url", image_url: {url: $u}}, {type: "text", text: "What animal is this?"}]}]}' >"$WORK/ask.json"
+  curl -fsS --max-time 900 -H "Authorization: Bearer $key" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$port/v1/chat/completions" --data-binary @"$WORK/ask.json" >"$WORK/answer.json" || { kill -9 "$server" 2>/dev/null; cat "$WORK/serve.log" >&3; false; }
+  kill -9 "$server" 2>/dev/null || true
+  jq -e '.choices[0].message.content | test("Blorbville")' "$WORK/answer.json" || { cat "$WORK/answer.json" >&3; false; }
+}

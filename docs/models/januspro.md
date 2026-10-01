@@ -74,6 +74,11 @@ beside it. The flags are `brain deepseekvl finetune`'s.
   guidance contrasts against. `--out` receives `adapter.safetensors` and
   `generation.safetensors`.
 
+An understanding fine-tune is served by starting `brain serve` with
+`BRAIN_JANUSPRO_TUNED=<out dir>` (the adapter is attached at run time, the
+trained aligner replaces the checkpoint's); the generation fine-tune is not
+served yet.
+
 As a library: `januspro::train::{finetune_understanding, finetune_generation}`,
 or `GenTrainer` for your own loop.
 

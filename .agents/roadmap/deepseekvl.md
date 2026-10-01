@@ -9,9 +9,9 @@ greedy tokens (`tests/composite_parity.rs`), and is served as
 
 ## Outstanding
 
-- **Serving a fine-tune.** `brain deepseekvl finetune` writes an adapter and
-  an aligner; the served composite cannot attach either yet (no adapter
-  store layout for it, and its tower loads the checkpoint's aligner).
+- **Serving several fine-tunes.** One fine-tune is served per process
+  (`BRAIN_DEEPSEEKVL_TUNED`); they are not separate model ids beside the
+  base, as text adapters are.
 - **Fine-tuning beyond one card and one image.** The trainer holds a
   bf16 decoder on one card, which bounds the context (each image is 576
   rows). A decoder split across cards needs the decoder hook to hand the

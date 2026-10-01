@@ -51,6 +51,23 @@ pub trait VisionTower: Send {
     fn encode(&self, pixel_values: &[f32]) -> Features;
     /// The aligner's shape: what a trainable copy of it is built from.
     fn aligner_config(&self) -> ProjectorConfig;
+    /// Replace every aligner parameter (named as [`ProjectorConfig::param_list`]
+    /// does), as a fine-tune trained them.
+    fn set_aligner(&self, weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String>;
+}
+
+/// Write `weights` into `projector`'s parameters on `gpu`, every one of them.
+fn write_aligner(gpu: &Gpu, projector: &MlpProjector, weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+    for (name, n) in projector.cfg.param_list() {
+        let w = weights.get(&name).ok_or_else(|| format!("aligner: no {name}"))?;
+        if w.len() != n {
+            return Err(format!("aligner: {name} holds {} values, expected {n}", w.len()));
+        }
+    }
+    for (name, w) in weights {
+        gpu.write_f32(projector.param(name), w);
+    }
+    Ok(())
 }
 
 pub struct HybridTower {
@@ -106,6 +123,10 @@ impl VisionTower for HybridTower {
 
     fn aligner_config(&self) -> ProjectorConfig {
         self.aligner.cfg
+    }
+
+    fn set_aligner(&self, weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+        write_aligner(&self.gpu, &self.aligner, weights)
     }
 
     fn encode(&self, pixel_values: &[f32]) -> Features {
@@ -184,6 +205,10 @@ impl VisionTower for SiglipTower {
 
     fn aligner_config(&self) -> ProjectorConfig {
         self.aligner.cfg
+    }
+
+    fn set_aligner(&self, weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+        write_aligner(&self.gpu, &self.aligner, weights)
     }
 
     fn encode(&self, pixel_values: &[f32]) -> Features {

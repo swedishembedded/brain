@@ -73,6 +73,11 @@ downloaded and nothing is written beside it: `--out` receives
 flags (`--weight-decay`, `--grad-clip`, `--warmup`, `--min-lr`) are
 `brain qwen3 finetune --lora`'s.
 
+To serve the result, start `brain serve` with `BRAIN_DEEPSEEKVL_TUNED=<out dir>`:
+the adapter is attached to the decoder at run time (not folded into its
+weights) and the trained aligner replaces the checkpoint's. The served model
+is then the fine-tune.
+
 As a library: `deepseekvl::train::finetune`, or `Frontend::prepare` and
 `Trainer` for your own loop.
 

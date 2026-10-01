@@ -21,6 +21,9 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 pub struct DeepseekVlResident {
     dir: String,
+    /// A fine-tune to serve (`BRAIN_DEEPSEEKVL_TUNED`: the directory
+    /// `brain deepseekvl finetune` wrote), applied when the model loads.
+    tuned: Option<std::path::PathBuf>,
     footprint: Footprint,
     placement: Placement,
 }
@@ -35,7 +38,7 @@ impl DeepseekVlResident {
             deepseekvl::model::place(&fp, &cards).map(|p| (fp, p))
         });
         match placed {
-            Ok((footprint, placement)) => Some(DeepseekVlResident { dir, footprint, placement }),
+            Ok((footprint, placement)) => Some(DeepseekVlResident { dir, tuned: std::env::var_os("BRAIN_DEEPSEEKVL_TUNED").map(Into::into), footprint, placement }),
             Err(e) => {
                 eprintln!("brain: deepseekvl not served ({e})");
                 None
@@ -87,7 +90,7 @@ impl MultiDeviceResidentModel for DeepseekVlResident {
         if devices.len() != planned.len() || !devices.iter().all(|d| planned.contains(d)) {
             return Err(format!("{MODEL}: activate_multi got devices {devices:?} but the plan placed {planned:?}"));
         }
-        Ok(Box::new(DeepseekVlInstance { session: deepseekvl::caps::load_session(&key.config, self.placement)? }))
+        Ok(Box::new(DeepseekVlInstance { session: deepseekvl::caps::load_session_tuned(&key.config, self.placement, self.tuned.as_deref())? }))
     }
 }
 
@@ -110,7 +113,7 @@ mod tests {
 
     fn resident(placement: Placement) -> DeepseekVlResident {
         let cfg = qwen3::hf::decoder_config_as(r#"{"max_position_embeddings":16384,"model_type":"llama","num_hidden_layers":30,"vocab_size":102400}"#, "llama").unwrap();
-        DeepseekVlResident { dir: "/tmp".into(), footprint: Footprint::of(&cfg, deepseekvl::model::HYBRID_TOWER_BYTES), placement }
+        DeepseekVlResident { dir: "/tmp".into(), tuned: None, footprint: Footprint::of(&cfg, deepseekvl::model::HYBRID_TOWER_BYTES), placement }
     }
 
     #[test]

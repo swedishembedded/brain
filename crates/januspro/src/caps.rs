@@ -59,8 +59,11 @@ pub fn manifest_resident() -> Manifest {
 }
 
 /// Janus-Pro's understanding session, for serving, as `placement` puts it.
-pub fn load_understanding(dir: &str, placement: deepseekvl::model::Placement) -> Result<deepseekvl::caps::Session, String> {
-    let vlm = crate::model::load_understanding_placed(std::path::Path::new(dir), qwen3::Dtype::BF16, placement)?;
+pub fn load_understanding(dir: &str, placement: deepseekvl::model::Placement, tuned: Option<&std::path::Path>) -> Result<deepseekvl::caps::Session, String> {
+    let mut vlm = crate::model::load_understanding_placed(std::path::Path::new(dir), qwen3::Dtype::BF16, placement)?;
+    if let Some(t) = tuned {
+        deepseekvl::tuned::apply(&mut vlm, t)?;
+    }
     // Janus-Pro's processor writes each image as `<image_placeholder>\n`.
     Ok(deepseekvl::caps::Session::new(vlm, "\n"))
 }
@@ -162,7 +165,7 @@ impl Action for JanusAction {
                 let (card, context) = place_t2i_now(&dir)?;
                 Loaded::Generation(load_t2i(&dir, card, context)?)
             } else {
-                Loaded::Understanding(load_understanding(&dir, place_understanding_now(&dir)?)?)
+                Loaded::Understanding(load_understanding(&dir, place_understanding_now(&dir)?, None)?)
             };
             *guard = Some((dir, build));
         }

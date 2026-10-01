@@ -29,6 +29,10 @@ struct Plan {
 
 pub struct JanusProResident {
     dir: String,
+    /// A fine-tune of the understanding path to serve
+    /// (`BRAIN_JANUSPRO_TUNED`: what `brain januspro finetune --mode
+    /// understanding` wrote), applied when the chat build loads.
+    tuned: Option<std::path::PathBuf>,
     understanding: Option<Plan>,
     generation: Option<Plan>,
 }
@@ -64,7 +68,7 @@ impl JanusProResident {
         if understanding.is_none() && generation.is_none() {
             return None;
         }
-        Some(JanusProResident { dir, understanding, generation })
+        Some(JanusProResident { dir, tuned: std::env::var_os("BRAIN_JANUSPRO_TUNED").map(Into::into), understanding, generation })
     }
 
     fn is_generation(key: &InstanceKey) -> bool {
@@ -104,7 +108,7 @@ impl ResidentModel for JanusProResident {
             Ok(Box::new(Generation { t2i: januspro::caps::load_t2i(dir, card, plan.context)? }))
         } else {
             let placement = Placement { tower: card, decoder: card, context: plan.context };
-            Ok(Box::new(Understanding { session: januspro::caps::load_understanding(dir, placement)? }))
+            Ok(Box::new(Understanding { session: januspro::caps::load_understanding(dir, placement, self.tuned.as_deref())? }))
         }
     }
 }
@@ -140,7 +144,7 @@ mod tests {
     use super::*;
 
     fn resident(generation: Option<Plan>) -> JanusProResident {
-        JanusProResident { dir: "/tmp".into(), understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
+        JanusProResident { dir: "/tmp".into(), tuned: None, understanding: Some(Plan { bytes: 18 << 30, context: 2048 }), generation }
     }
 
     #[test]

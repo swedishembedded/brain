@@ -34,6 +34,7 @@ pub mod prompt;
 pub mod spec;
 pub mod tower;
 pub mod train;
+pub mod tuned;
 
 pub use config::{AlignerConfig, DeepseekVlConfig, TowerBranch};
 pub use model::{load, Vlm};
