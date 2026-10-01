@@ -238,3 +238,7 @@ What belongs where:
 | 195 | The LM head's backward bound the whole table | [`195-the-head-backward-binds-the-whole-table.md`](195-the-head-backward-binds-the-whole-table.md) |
 | 196 | A decode-only build prefills in chunks, not one decode tape per token | [`196-a-decode-only-build-prefills-in-chunks.md`](196-a-decode-only-build-prefills-in-chunks.md) |
 | 197 | An int8 frozen base trained through a transposed copy saves nothing | [`197-an-int8-base-trained-through-a-transposed-copy-saves-nothing.md`](197-an-int8-base-trained-through-a-transposed-copy-saves-nothing.md) |
+| 198 | A guard test must enumerate the enum, not a copy of it | [`198-a-guard-test-must-enumerate-the-enum-not-a-copy-of-it.md`](198-a-guard-test-must-enumerate-the-enum-not-a-copy-of-it.md) |
+| 199 | A `config.json` beside GGUF files is metadata, not a checkpoint | [`199-a-config-json-is-not-a-checkpoint.md`](199-a-config-json-is-not-a-checkpoint.md) |
+| 200 | Code gated to a target nobody built on is a wish, not a feature | [`200-a-target-gated-path-nobody-compiled-hides-defects.md`](200-a-target-gated-path-nobody-compiled-hides-defects.md) |
+| 201 | A blocking stream couples every CUDA handle on the card | [`201-a-blocking-stream-couples-every-handle-on-the-card.md`](201-a-blocking-stream-couples-every-handle-on-the-card.md) |

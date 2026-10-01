@@ -26,11 +26,12 @@ a property of the vendor whose driver the library *is*, not of any card.
 
 ### Toolchain
 
-CUDA 12.x toolkit installed from the distribution (`nvidia-cuda-toolkit`);
-`nvcc --version` reports 12.2.140, and `libnvrtc.so.12` is present. **12.x is
-required for Pascal-class cards** (CUDA 13 dropped them), but that is a
-build-matrix concern, not a code assumption: nothing in the tree names a CUDA
-version.
+Two toolkit lanes install into a user prefix without root
+(`make cuda/install LANE=12|13`, `scripts/build/install-cuda-userspace.py`;
+see `gh200.md`). **The 12.x lane is required for Pascal-class cards** (CUDA 13
+dropped them), but that is a build-matrix concern, not a code assumption:
+nothing in the tree names a CUDA version. NVRTC is found by `BRAIN_NVRTC`, then
+under `CUDA_PATH`, then by SONAME (`.so.13`, `.so.12`, `.so.11`, unversioned).
 
 ### `crates/backend-cuda` - device identity only
 
@@ -724,41 +725,38 @@ tuned kernel are deferred.**
   any shape that selects one of them fails by name at that dispatch. `b * t >=
   select::GEMM_TILE_MIN_ROWS` with an output width >= `GEMM_TILE_MIN_COLS` is
   exactly such a shape, which is why this gate's own shape is small.
-- **448 of 474 kernels GENERATE; 7 have been checked against the reference.**
-  The six of M2's golden gate plus what this model's forward touches. Assume
-  nothing about the other 441: they emit plausible CUDA and nobody has compared
-  the numbers. Breadth from here is a validation problem, not an emitter one.
-- **No allocator and no uniform reuse.** Every `step` does a `cuMemAlloc` +
-  `cuMemcpyHtoD` for its uniform stream and frees it when the step drops, and
-  every buffer is its own `cuMemAlloc`. Correct, and the wrong shape for a
-  decode loop; it is also what CUDA Graphs cannot capture (the plan's keyed
-  `(kind, bufs, threads)` uniform with pinned staging is the replacement).
-- **`cuModuleGetFunction` per launch.** The module is cached under its `kind`,
-  the entry-point lookup inside it is not. A symbol lookup per dispatch is
-  cheap next to a launch and free to fix; it is named here so it is not
-  rediscovered as a mystery.
-- **No hand-written kernel source.** `crates/kernels-cuda`'s registry is still
-  empty: every dispatch this backend serves is `Generated`, and there is no
-  `Tuned` entry for any op on any capability. `make cuda-table/check` is
-  therefore a structure gate only - a declared kernel failing to COMPILE under
-  NVRTC for its own declared floor is the check the plan wants there, and it
-  needs a toolkit, so it is an addition to the existing checks, never a
-  replacement.
-- **No CUDA provider, so nothing yet produces a CUDA `ImplChoice`.** The
-  record, the tier vocabulary, the policy and the ratchet are all in place and
-  exercised against fixture providers; the first real producer arrives with the
-  backend. Until then the shipped policy is empty by necessity, not by
-  oversight.
+- **How many of the registry's kernels GENERATE has not been re-measured.**
+  The registry is now 533 kernels (an older count of 474, with 448 generating,
+  predates it), and the numbers have not been compared against the reference
+  except for the six of M2's golden gate plus what one model's forward touches.
+  Breadth from here is a validation problem, not an emitter one; the plan to
+  enumerate and check every kernel is phase 3 of `gh200.md`.
+- **No allocator.** Every buffer is its own `cuMemAlloc`. The per-step uniform
+  copy is no longer one: unbatched dispatches stage their uniform words in a
+  pool of pinned blocks, and a captured graph shares a keyed uniform allocation.
+  What is still missing is a device allocator in the shape a decode loop wants
+  (and any device free discards every captured graph).
+- **One hand-written kernel.** `crates/kernels-cuda` registers
+  `matmul_f32_tiled` (FP32 forward GEMM, preserving the reference reduction
+  order); every other dispatch is `Generated`, and `POLICY` is empty. A native
+  tensor-core kernel does not exist. `make cuda-table/check` is a structure
+  gate only - compiling each declared kernel under NVRTC for its own floor
+  needs a toolkit, so it would be an addition, not a replacement.
+- **`CudaProvider` produces CUDA `ImplChoice`s only for plain F32 forward
+  matmul.** Quantized, half-precision, backward, embed and MoE shapes decline
+  to the reference provider, and attention, softmax, convolution and the
+  model-local GEMM selection never reach the provider seam at all.
 - **Tier coverage is not surfaced anywhere.** `brain devices` shows no per-op
   tier coverage, there is no `--trace-impl` flag, and nothing carries the
   choice into `braintop` (which would go through a `DeviceBudget`-side field:
   the accelerator rows are built from budgets, not from a snapshot map). The
   record exists; nothing reads it back out yet.
-- **`ProviderRegistry::dispatch` is still inert in production.** Only
-  `Ops::matmul` routes through the seam, and `Ops::with_providers` remains
-  test-only - so the `ImplChoice` now attached to every `Lowered` describes
-  real dispatches only in tests. Wiring it up is the provider milestone's job.
-- **The generator refuses 26 of 474 kernels.** 25 for a barrier inside a loop
+- **The provider seam covers five `Ops` methods** (`matmul`, `embed`,
+  `moe_linear`, `matmul_dx`, `matmul_dw`) and `ProviderRegistry::for_gpu`
+  prepends `CudaProvider` in production whenever a compute capability is
+  reported. Most model crates choose kernels without it.
+- **The generator refuses a set of kernels** (26 of 474 when last counted, not
+  re-measured against 533): 25 for a barrier inside a loop
   (`matmul_reg`/`reg2`/`reg3`/`reg4` and their `splitk`/`grouped`/`tn`
   variants, `matmul_tiled`, `matmul_dx_reg`, `matmul_dw_reg*`, `matmul_i8`,
   `matmul_i8_dyn`, `matmul_kq_dyn`, `matmul_q4_dyn_reg`, every `flash_attn_*`
@@ -773,7 +771,6 @@ tuned kernel are deferred.**
   question rather than a code one.
 - **No ahead-of-time cubins.** NVRTC is the only compilation path, so a
   deployment with a driver and no toolkit cannot run the generated tier at all.
-- **No provider wiring and no CUDA Graphs.**
 - **`brain devices` does not show CUDA visibility per card.** The backends
   column still reports only `vulkan`/`wgpu`. The data is available
   (`devices::cuda_ordinal`); the column is not wired.
@@ -809,19 +806,17 @@ tuned kernel are deferred.**
   `cuda_graphs.rs` covers the mechanism directly. No decode loop, no backward
   pass and no long run has been driven through it, so "correct across a couple
   of positions and one forward" is the whole of the evidence.
-- **CUDA is not in `scripts/gates/parity-gate.sh`**, and must not be until the
-  catalogue and the backward kernels support it.
+- **`scripts/gates/parity-gate.sh` runs one CUDA step**
+  (`cuda_provider_matmul`, which skips without a device); the wider catalogue
+  and the backward kernels are not in it.
 - **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
   ratchet), and `step_native` carries no `StepMeta`, so profiling would show
   `<no-meta>`.
-- **memauth**: a CUDA device on the same physical card as a Vulkan device must
-  share a `PoolId` or VRAM is double-counted. Still not arranged, and now it
-  MATTERS: this backend allocates, so a process holding both handles on one
-  card double-counts under `--limit-vram-total`. `Gpu::try_new_cuda` goes
-  through `Gpu::wrap`, which resolves the pool from the ambient selection; a
-  CUDA handle built on an explicitly pinned card does get `Device::Gpu(i)`
-  through `Gpu::new_on`, but the two paths have not been reconciled with the
-  Vulkan handle for the same card.
+- **memauth**: a CUDA and a Vulkan handle on one physical card both charge
+  `Device::Gpu(i)`, and under `--limit-vram-total` every GPU shares one pool, so
+  they do not double-count. What is still wrong: `Gpu::try_new_cuda` opens CUDA
+  ordinal 0 but charges the ambient selection's index, so on a multi-GPU box
+  the two can disagree; and the ceiling is a flag, not a per-card capacity.
 
 ## Roadmap to full, extremely fast coverage (M6+)
 
