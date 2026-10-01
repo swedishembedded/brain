@@ -21,6 +21,7 @@ pub mod run_tier2;
 pub mod faults;
 pub mod frontend;
 pub mod kvcache;
+pub mod longctx;
 pub mod mixed;
 pub mod overload;
 pub mod placement;
@@ -139,6 +140,7 @@ pub const SCENARIOS: &[(&str, &str)] = &[
     ("soak", "long-duration drift — throughput, latency, memory, leaks"),
     ("weights", "within-instance weight window — CyclicScan vs Lru vs AllResident churn"),
     ("weights-qwen35", "the SAME weight-window policies over qwen35's real 64-layer int8 byte-cost profile"),
+    ("longctx", "long-context decode on one GPU: prefill speed, single-stream and batched decode, batch sweep to the out-of-memory boundary"),
 ];
 
 /// Scenarios implemented as a full run through the driver; the rest report via
@@ -211,7 +213,7 @@ pub fn run(
         "overload" => return run_tier2::run_overload(target, workload_name, opt),
         "soak" => return run_tier2::run_soak(target, workload_name, opt.soak_seconds, opt),
         "frontend" => return run_tier2::run_frontend(opt.device_rate, opt.num_requests * 8, opt),
-        "startup" | "cancel" | "kvcache" | "residency" | "placement" | "faults" => {
+        "startup" | "cancel" | "kvcache" | "residency" | "placement" | "faults" | "longctx" => {
             return Err(format!(
                 "`{scenario}` is not driven through a plain target: {}",
                 match scenario {
@@ -219,6 +221,7 @@ pub fn run(
                     "cancel" => "it needs to cancel mid-flight requests, which the CLI wires to the scheduler",
                     "kvcache" => "it needs the paged engine's block counters, wired in the CLI",
                     "residency" => "it exercises the residency manager, not an inference target",
+                    "longctx" => "it drives a long-context engine, not a request stream: `brain perf run longctx --target <spec> --context N`",
                     "placement" => "device selection is process-global, so it analyses per-device artifacts: `brain perf placement <a.json> <b.json> ...`",
                     _ => "it injects failures, which the CLI wires to the engine",
                 }
@@ -343,6 +346,7 @@ pub fn render(art: &Artifact) -> String {
         // table and hide the numbers they actually produced.
         "startup" => render_block(art, &["cold", "warm"]),
         "mixed" => render_mixed(art),
+        "longctx" => longctx::render(art),
         "overload" | "cancel" | "kvcache" | "residency" | "placement" | "faults" | "frontend"
         | "soak" | "weights" | "weights-qwen35" => render_json_summary(art),
         _ => report::render(art),
