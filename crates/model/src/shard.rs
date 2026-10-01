@@ -653,6 +653,51 @@ impl<M: Shardable> Pipeline<M> {
         &self.shards
     }
 
+    /// Stage `i`: the first holds the embedding (and takes a model's image
+    /// splice), the last the head.
+    pub fn stage(&self, i: usize) -> &M {
+        &self.stages[i]
+    }
+    pub fn stage_mut(&mut self, i: usize) -> &mut M {
+        &mut self.stages[i]
+    }
+
+    /// Forward through every stage but the last, leaving their output in the
+    /// last stage's input: what a caller that drives the last stage itself (a
+    /// head of its own, in place of the model's) needs before it does.
+    pub fn forward_front(&self) {
+        let last = self.stages.len() - 1;
+        let mut carry: Option<Vec<f32>> = None;
+        for st in &self.stages[..last] {
+            if let Some(res) = &carry {
+                st.write_in_res(res);
+            }
+            st.run_forward_stage();
+            carry = Some(st.read_out_res());
+        }
+        if let Some(res) = &carry {
+            self.stages[last].write_in_res(res);
+        }
+    }
+
+    /// The backward of [`Self::forward_front`]'s stages, from the gradient the
+    /// last stage's backward left at its input.
+    pub fn backward_front(&self) {
+        let last = self.stages.len() - 1;
+        if last == 0 {
+            return;
+        }
+        let mut carry = self.stages[last].read_in_dres();
+        for i in (0..last).rev() {
+            let st = &self.stages[i];
+            st.write_out_dres(&carry);
+            st.run_backward_stage();
+            if i > 0 {
+                carry = st.read_in_dres();
+            }
+        }
+    }
+
     pub fn zero_grads(&self) {
         for st in &self.stages {
             st.zero_grads();
@@ -981,12 +1026,29 @@ impl<M: Shardable> Pipeline<M> {
 pub struct PipelineModel<M: Shardable> {
     pipe: RefCell<Pipeline<M>>,
     cfg: M::Config,
+    /// Steps whose micro-batches ran through the stages concurrently.
+    overlapped: std::cell::Cell<u64>,
 }
 
 impl<M: Shardable> PipelineModel<M> {
     /// Wrap `pipe`, which was built from `cfg`.
     pub fn new(pipe: Pipeline<M>, cfg: M::Config) -> PipelineModel<M> {
-        PipelineModel { pipe: RefCell::new(pipe), cfg }
+        PipelineModel { pipe: RefCell::new(pipe), cfg, overlapped: std::cell::Cell::new(0) }
+    }
+
+    /// How many accumulation steps ran their micro-batches concurrently
+    /// across the stages ([`Model::accumulate_overlapped`]).
+    pub fn overlapped_steps(&self) -> u64 {
+        self.overlapped.get()
+    }
+
+    /// The pipeline, for what the [`Model`] trait does not carry (a model's
+    /// image splice on the first stage, a head of the caller's on the last).
+    pub fn pipeline(&self) -> std::cell::Ref<'_, Pipeline<M>> {
+        self.pipe.borrow()
+    }
+    pub fn pipeline_mut(&mut self) -> &mut Pipeline<M> {
+        self.pipe.get_mut()
     }
 }
 
@@ -1006,6 +1068,18 @@ impl<M: Shardable> Model for PipelineModel<M> {
     }
     fn set_batch(&self, batch: crate::Batch) {
         self.pipe.borrow().set_batch(batch);
+    }
+    fn accumulate_overlapped(&self, batches: &[crate::Batch]) -> Option<f32> {
+        // Only plain language-model batches (the schedule recomputes each
+        // stage's forward from its stored input, which a weighted loss on the
+        // head would have to repeat), and only when there are stages to overlap.
+        let plain = batches.iter().all(|b| matches!(b, crate::Batch::Lm { .. }));
+        let mut pipe = self.pipe.borrow_mut();
+        if !plain || pipe.n_stages() < 2 || batches.len() < 2 {
+            return None;
+        }
+        self.overlapped.set(self.overlapped.get() + 1);
+        Some(pipe.pipelined_fwd_bwd(batches))
     }
     fn enable_weighted_loss(&mut self) {
         self.pipe.get_mut().enable_weighted_loss();

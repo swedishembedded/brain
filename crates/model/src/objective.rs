@@ -50,6 +50,13 @@ pub trait Objective<M: Model> {
     /// a few times before training starts to estimate the initial loss.
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32;
 
+    /// `k` micro-steps of one optimiser step, their gradients accumulating:
+    /// the summed loss. An objective whose batches a model can run
+    /// overlapped ([`Model::accumulate_overlapped`]) overrides this.
+    fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
+        (0..k).map(|_| self.micro_step(model, rng)).sum()
+    }
+
     /// A loss on a training batch without differentiating it: what the
     /// estimate of the loss a run starts from is made of. Defaults to
     /// [`Self::micro_step`] (which differentiates, into gradients the first
@@ -127,6 +134,9 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     }
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).micro_step(model, rng)
+    }
+    fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
+        (**self).micro_steps(model, rng, k)
     }
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         (**self).loss_probe(model, rng)

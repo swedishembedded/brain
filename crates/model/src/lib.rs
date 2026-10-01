@@ -227,6 +227,16 @@ pub trait Model {
     /// Upload one batch (shape must match how the model was constructed).
     fn set_batch(&self, batch: Batch);
 
+    /// Forward and backward every batch of `batches` as one accumulation,
+    /// the gradients adding up, and return the summed loss: for a model that
+    /// can overlap the micro-batches (a pipeline's stages working on
+    /// neighbouring ones at once). `None` (the default) means it cannot, and
+    /// the caller runs them one after another with [`Model::set_batch`],
+    /// [`Model::forward`] and [`Model::backward`].
+    fn accumulate_overlapped(&self, _batches: &[Batch]) -> Option<f32> {
+        None
+    }
+
     /// Opt into per-position weighted-loss training ([`Batch::LmWeighted`]) -
     /// call once after construction, before the first [`Model::backward`].
     /// Default panics: a model must explicitly override this to support

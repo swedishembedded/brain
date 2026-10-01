@@ -440,6 +440,30 @@ impl<M: Model> Objective<M> for CausalLm {
         loss
     }
 
+    fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
+        // The batches are drawn up front, in the order one at a time would
+        // draw them, so a model that overlaps them trains on the same data.
+        let drawn: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
+            .map(|_| {
+                let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+                (x, targets_to_u32(&y))
+            })
+            .collect();
+        let batches: Vec<Batch> = drawn.iter().map(|(x, y)| Batch::Lm { tokens: x, targets: y }).collect();
+        if k > 1 {
+            if let Some(total) = model.accumulate_overlapped(&batches) {
+                return total;
+            }
+        }
+        let mut total = 0.0;
+        for batch in batches {
+            model.set_batch(batch);
+            total += model.forward();
+            model.backward();
+        }
+        total
+    }
+
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
         let targets = targets_to_u32(&y);
@@ -784,10 +808,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     for step in first_step..opts.steps {
         let lr = cosine_lr(step, opts);
         model.zero_grads();
-        let mut step_loss = 0.0;
-        for _ in 0..opts.grad_accum.max(1) {
-            step_loss += obj.micro_step(&model, &mut rng);
-        }
+        let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
         // average grads over accumulation steps
         let scale = 1.0 / opts.grad_accum.max(1) as f32;
         let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
