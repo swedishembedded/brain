@@ -166,6 +166,8 @@ pub fn generate(name: &str, wgsl: &str) -> Result<Kernel, String> {
         lid_arg: None,
         wgid_arg: None,
         lidx_arg: None,
+        frames: Vec::new(),
+        n_call: 0,
     };
     let kernel = g.emit(&entry)?;
 
@@ -410,6 +412,25 @@ struct Gen<'a> {
     /// `@builtin(local_invocation_index)`, a scalar: the flat thread index in
     /// the workgroup, which for the 1-D blocks this tier requires is `threadIdx.x`.
     lidx_arg: Option<u32>,
+    /// Calls being inlined, innermost last. Empty while the entry point's own
+    /// body is being translated.
+    frames: Vec<CallFrame>,
+    /// Monotonic call counter: every inlined call gets its own labels, locals
+    /// and result slots.
+    n_call: usize,
+}
+
+/// What translating the body of an inlined function needs to know.
+struct CallFrame {
+    /// The caller's argument values, by parameter index.
+    args: Vec<Eval>,
+    /// The label a `return` jumps to, after the inlined body.
+    label: usize,
+    /// Where a returned value goes: one slot for a scalar, one per component
+    /// for a vector; empty for a function that returns nothing.
+    slots: Vec<String>,
+    /// The type of the returned scalar or vector's components.
+    ret_ty: Ty,
 }
 
 impl<'a> Gen<'a> {
@@ -460,39 +481,7 @@ impl<'a> Gen<'a> {
         }
         bindings.sort_by_key(|(b, _, _)| *b);
 
-        // Locals. WGSL zero-initialises both scalars and arrays, so the
-        // declaration does too - a generated kernel may not inherit C++'s
-        // "whatever was there" for a value the source language defined.
-        // The index suffix is not decoration: WGSL scopes locals per block, so
-        // two `var s` in sibling blocks are distinct variables with the same
-        // name, and every local here is declared once at function scope.
-        for (i, (h, lv)) in self.func.local_variables.iter().enumerate() {
-            let name = lv.name.clone().unwrap_or_default();
-            let ident = format!("__l{i}_{}", ident_of(&name));
-            match &self.m.types[lv.ty].inner {
-                TypeInner::Array { .. } => {
-                    let (elem, count) = array_info(self.m, lv.ty)?;
-                    self.decls.push(format!("{} {ident}[{count}] = {{}};", elem.c()));
-                    let place = match array_layout(self.m, lv.ty)?.vec {
-                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
-                        None => Place::ArrayBase(ident, elem),
-                    };
-                    self.locals.insert(h, place);
-                }
-                TypeInner::Scalar(s) => {
-                    let ty = Ty::from_scalar(*s)?;
-                    self.decls.push(format!("{} {ident} = {};", ty.c(), ty.zero()));
-                    self.locals.insert(h, Place::Lvalue(ident, ty));
-                }
-                TypeInner::Vector { size, scalar } => {
-                    let ty = Ty::from_scalar(*scalar)?;
-                    let n = *size as u32;
-                    self.decls.push(format!("{} {ident}[{n}] = {{}};", ty.c()));
-                    self.locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty });
-                }
-                other => return Err(format!("unsupported local type {other:?}")),
-            }
-        }
+        self.locals = self.declare_locals(self.func, "")?;
 
         let mut body = String::new();
 
@@ -550,33 +539,7 @@ impl<'a> Gen<'a> {
         }
 
         // Local initialisers, after the builtins they may read.
-        let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> = self
-            .func
-            .local_variables
-            .iter()
-            .filter_map(|(h, lv)| lv.init.map(|i| (h, i)))
-            .collect();
-        for (h, init) in inits {
-            let place = self.locals[&h].clone();
-            match place {
-                Place::Lvalue(ident, ty) => {
-                    let (v, vt) = self.value(init, &mut body)?;
-                    let v = coerce(&v, vt, ty)?;
-                    let _ = writeln!(body, "  {ident} = {v};");
-                }
-                Place::VecRef { base, n, ty } => {
-                    let v = self.lanes(init, &mut body)?;
-                    if !v.vector || v.comps.len() != n as usize {
-                        return Err("a vector local needs a vector initialiser of the same width".into());
-                    }
-                    for (c, text) in v.comps.iter().enumerate() {
-                        let text = coerce(text, v.ty, ty)?;
-                        let _ = writeln!(body, "  {} = {text};", vec_comp(&base, c));
-                    }
-                }
-                _ => return Err("an array local with an initialiser is unsupported".into()),
-            }
-        }
+        self.init_locals(self.func, &mut body)?;
 
         // `self.func` is a shared reference with its own lifetime, so copying
         // it out lets the body be walked while `self` is borrowed mutably -
@@ -702,8 +665,29 @@ impl<'a> Gen<'a> {
                         _ => return Err("store to a non-scalar place".into()),
                     }
                 }
+                Statement::Return { value } if !self.frames.is_empty() => {
+                    let (label, slots, ret_ty) = {
+                        let f = self.frames.last().expect("a frame is active");
+                        (f.label, f.slots.clone(), f.ret_ty)
+                    };
+                    if let Some(v) = value {
+                        let lanes = self.lanes(*v, out)?;
+                        if lanes.comps.len() != slots.len() {
+                            return Err("a returned value does not match the function's result type".into());
+                        }
+                        for (slot, text) in slots.iter().zip(&lanes.comps) {
+                            let text = coerce(text, lanes.ty, ret_ty)?;
+                            let _ = writeln!(out, "{pad}{slot} = {text};");
+                        }
+                    }
+                    let _ = writeln!(out, "{pad}goto __ret_{label};");
+                    terminated = true;
+                }
                 Statement::Return { value: Some(_) } => {
                     return Err("a compute entry point cannot return a value".into())
+                }
+                Statement::Call { function, arguments, result } => {
+                    self.inline_call(*function, arguments, *result, out, inner)?;
                 }
                 Statement::Return { .. } => {
                     if self.guarded {
@@ -786,6 +770,161 @@ impl<'a> Gen<'a> {
     }
 
     // -- expressions --------------------------------------------------------
+
+    /// Declare `func`'s local variables at function scope and return where each
+    /// one lives. WGSL zero-initialises both scalars and arrays, so the
+    /// declaration does too - a generated kernel may not inherit C++'s
+    /// "whatever was there" for a value the source language defined. The index
+    /// is not decoration: WGSL scopes locals per block, so two `var s` in
+    /// sibling blocks are distinct variables with the same name. `tag`
+    /// separates an inlined function's locals from the entry point's.
+    fn declare_locals(
+        &mut self,
+        func: &naga::Function,
+        tag: &str,
+    ) -> Result<HashMap<Handle<naga::LocalVariable>, Place>, String> {
+        let mut locals = HashMap::new();
+        for (i, (h, lv)) in func.local_variables.iter().enumerate() {
+            let name = lv.name.clone().unwrap_or_default();
+            let ident = format!("__l{tag}{i}_{}", ident_of(&name));
+            match &self.m.types[lv.ty].inner {
+                TypeInner::Array { .. } => {
+                    let (elem, count) = array_info(self.m, lv.ty)?;
+                    self.decls.push(format!("{} {ident}[{count}] = {{}};", elem.c()));
+                    let place = match array_layout(self.m, lv.ty)?.vec {
+                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride },
+                        None => Place::ArrayBase(ident, elem),
+                    };
+                    locals.insert(h, place);
+                }
+                TypeInner::Scalar(s) => {
+                    let ty = Ty::from_scalar(*s)?;
+                    self.decls.push(format!("{} {ident} = {};", ty.c(), ty.zero()));
+                    locals.insert(h, Place::Lvalue(ident, ty));
+                }
+                TypeInner::Vector { size, scalar } => {
+                    let ty = Ty::from_scalar(*scalar)?;
+                    let n = *size as u32;
+                    self.decls.push(format!("{} {ident}[{n}] = {{}};", ty.c()));
+                    locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty });
+                }
+                other => return Err(format!("unsupported local type {other:?}")),
+            }
+        }
+        Ok(locals)
+    }
+
+    /// Emit the initialisers of `func`'s locals, which read `self.func`'s
+    /// expressions: the caller swaps `self.func` first when `func` is a callee.
+    fn init_locals(&mut self, func: &naga::Function, out: &mut String) -> Result<(), String> {
+        let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> =
+            func.local_variables.iter().filter_map(|(h, lv)| lv.init.map(|i| (h, i))).collect();
+        for (h, init) in inits {
+            let place = self.locals[&h].clone();
+            match place {
+                Place::Lvalue(ident, ty) => {
+                    let (v, vt) = self.value(init, out)?;
+                    let v = coerce(&v, vt, ty)?;
+                    let _ = writeln!(out, "  {ident} = {v};");
+                }
+                Place::VecRef { base, n, ty } => {
+                    let v = self.lanes(init, out)?;
+                    if !v.vector || v.comps.len() != n as usize {
+                        return Err("a vector local needs a vector initialiser of the same width".into());
+                    }
+                    for (c, text) in v.comps.iter().enumerate() {
+                        let text = coerce(text, v.ty, ty)?;
+                        let _ = writeln!(out, "  {} = {text};", vec_comp(&base, c));
+                    }
+                }
+                _ => return Err("an array local with an initialiser is unsupported".into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Translate a call to a user function by inlining its body.
+    ///
+    /// Inlining rather than a `__device__` function because these helpers read
+    /// the kernel's own storage bindings and workgroup arrays, which a separate
+    /// C++ function would have to be handed one by one. The body is wrapped in
+    /// a block, each `return` becomes "store the value, jump to the label after
+    /// the block", and every local, temporary and label gets a name no other
+    /// call can reuse. A helper may not contain a barrier (it could be reached
+    /// by a subset of the workgroup, which the uniformity analysis does not
+    /// follow into).
+    fn inline_call(
+        &mut self,
+        function: Handle<naga::Function>,
+        arguments: &[Handle<Expression>],
+        result: Option<Handle<Expression>>,
+        out: &mut String,
+        depth: usize,
+    ) -> Result<(), String> {
+        let callee: &'a naga::Function = &self.m.functions[function];
+        if block_has_barrier(&callee.body) {
+            return Err("a barrier inside a called function is not supported by the generated tier".into());
+        }
+        if self.frames.len() >= 16 {
+            return Err("function calls nested more than 16 deep (recursion is not valid WGSL)".into());
+        }
+        // The arguments are the CALLER's expressions: evaluate them before the
+        // callee's own expression arena replaces it.
+        let mut args = Vec::with_capacity(arguments.len());
+        for a in arguments {
+            args.push(self.eval(*a, out, depth)?);
+        }
+        let id = self.n_call;
+        self.n_call += 1;
+
+        let (slots, ret_ty) = match &callee.result {
+            None => (Vec::new(), Ty::U32),
+            Some(r) => match vector_shape(self.m, r.ty) {
+                Some(shape) => {
+                    let (t, n, _) = shape?;
+                    ((0..n as usize).map(|c| format!("__call{id}_r{c}")).collect(), t)
+                }
+                None => (vec![format!("__call{id}_r")], scalar_ty_of(self.m, r.ty)?),
+            },
+        };
+        for slot in &slots {
+            self.decls.push(format!("{} {slot};", ret_ty.c()));
+        }
+
+        let saved_func = std::mem::replace(&mut self.func, callee);
+        let saved_cache = std::mem::take(&mut self.cache);
+        let saved_locals = std::mem::take(&mut self.locals);
+        self.frames.push(CallFrame { args, label: id, slots: slots.clone(), ret_ty });
+
+        let body = (|| -> Result<(), String> {
+            self.locals = self.declare_locals(callee, &format!("c{id}_"))?;
+            let pad = "  ".repeat(depth);
+            let _ = writeln!(out, "{pad}{{");
+            self.init_locals(callee, out)?;
+            self.block(&callee.body, out, depth + 1)?;
+            let _ = writeln!(out, "{pad}}}");
+            let _ = writeln!(out, "{pad}__ret_{id}: ;");
+            Ok(())
+        })();
+
+        self.frames.pop();
+        self.func = saved_func;
+        self.cache = saved_cache;
+        self.locals = saved_locals;
+        body?;
+
+        if let Some(re) = result {
+            let eval = match slots.len() {
+                0 => return Err("a call result was used but the function returns nothing".into()),
+                1 if !callee.result.as_ref().is_some_and(|r| vector_shape(self.m, r.ty).is_some()) => {
+                    Eval::Value(slots[0].clone(), ret_ty)
+                }
+                _ => Eval::Vector(slots, ret_ty),
+            };
+            self.cache.insert(re, eval);
+        }
+        Ok(())
+    }
 
     /// Materialise an `Emit`ted expression into a function-scope temporary, so
     /// its evaluation ORDER is the source's. Inlining the text instead would
@@ -883,6 +1022,11 @@ impl<'a> Gen<'a> {
                 None => Err("global variable in an unsupported address space".into()),
             },
             Expression::LocalVariable(l) => Ok(Eval::Place(self.locals[l].clone())),
+            // Inside an inlined function an argument is the caller's value.
+            Expression::FunctionArgument(ai) if !self.frames.is_empty() => {
+                let f = self.frames.last().expect("a frame is active");
+                f.args.get(*ai as usize).cloned().ok_or_else(|| "a function argument out of range".to_string())
+            }
             Expression::FunctionArgument(ai) if Some(*ai) == self.lidx_arg => Ok(Eval::Value("__lidx".to_string(), Ty::U32)),
             Expression::Load { pointer } => match self.eval(*pointer, out, depth)? {
                 Eval::Place(Place::Lvalue(lv, t)) => Ok(Eval::Value(lv, t)),
@@ -935,7 +1079,7 @@ impl<'a> Gen<'a> {
             Expression::AccessIndex { base, index } => {
                 let base_expr = &func.expressions[*base];
                 // A component of a builtin vector input.
-                if let Expression::FunctionArgument(ai) = base_expr {
+                if let (Expression::FunctionArgument(ai), true) = (base_expr, self.frames.is_empty()) {
                     let comp = ["x", "y", "z"]
                         .get(*index as usize)
                         .ok_or("builtin vector component out of range")?;

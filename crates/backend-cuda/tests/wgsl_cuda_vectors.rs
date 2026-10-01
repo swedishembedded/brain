@@ -85,8 +85,40 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 }
 "#;
 
+/// Helper functions: an early `return` of a `vec2`, a helper that reads the
+/// kernel's own storage buffer, a scalar helper, and a `return` from inside a
+/// loop. They are inlined, so each call must get its own locals and labels.
+const CALLS: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> t: array<u32>;
+@group(0) @binding(2) var<storage, read_write> o: array<f32>;
+fn pick(col: u32, ncols: u32) -> vec2<f32> {
+    if (col >= ncols) { return vec2<f32>(0.0, 0.0); }
+    let w = t[col];
+    return vec2<f32>(f32(w & 0xFFu), f32(w >> 8u));
+}
+fn twice(x: f32) -> f32 { return x + x; }
+fn sum_to(n: u32) -> f32 {
+    var acc = 0.0;
+    for (var k = 0u; k < n; k = k + 1u) {
+        if (k == 5u) { return acc * 10.0; }
+        acc = acc + f32(k);
+    }
+    return acc;
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= p.n) { return; }
+    let a = pick(i, 150u);
+    let b = pick(i + 1u, 150u);
+    o[i] = twice(a.x) + a.y + sum_to(i % 8u) - twice(b.y);
+}
+"#;
+
 fn backend() -> Option<CudaBackend> {
-    match CudaBackend::try_new(&[("arith", ARITH), ("vec3", VEC3), ("dynamic", DYNAMIC)]) {
+    match CudaBackend::try_new(&[("arith", ARITH), ("vec3", VEC3), ("dynamic", DYNAMIC), ("calls", CALLS)]) {
         Ok(b) => Some(b),
         Err(e) => {
             brain_testutil::skip_unavailable(&format!("no usable CUDA backend: {e}"));
@@ -166,5 +198,40 @@ fn a_run_time_component_index_a_swizzle_and_a_lane_select_agree_with_the_host() 
         }
         assert_eq!(gq[g * 2].to_bits(), (g * 3) as u32, "q[{g}].x");
         assert_eq!(gq[g * 2 + 1].to_bits(), 9u32, "q[{g}].y");
+    }
+}
+
+#[test]
+fn inlined_helper_functions_return_early_loop_and_read_storage_correctly() {
+    let Some(b) = backend() else { return };
+    let table: Vec<u32> = (0..150).map(|i| (i as u32 * 37 + 11) & 0xFFFF).collect();
+    let words: Vec<f32> = table.iter().map(|w| f32::from_bits(*w)).collect();
+    let t = b.storage_init("t", &words);
+    let out = b.storage(N as u64);
+    b.submit(&[], &[b.step(3, &[&t, &out], &[N as u32], N as u32)]);
+    let got = b.read(&out, N);
+
+    let pick = |col: usize| -> (f32, f32) {
+        if col >= 150 {
+            (0.0, 0.0)
+        } else {
+            let w = table[col];
+            ((w & 0xFF) as f32, (w >> 8) as f32)
+        }
+    };
+    let sum_to = |n: usize| -> f32 {
+        let mut acc = 0.0f32;
+        for k in 0..n {
+            if k == 5 {
+                return acc * 10.0;
+            }
+            acc += k as f32;
+        }
+        acc
+    };
+    for i in 0..N {
+        let (a, bb) = (pick(i), pick(i + 1));
+        let want = (((a.0 + a.0) + a.1) + sum_to(i % 8)) - (bb.1 + bb.1);
+        assert_eq!(got[i].to_bits(), want.to_bits(), "element {i}: {} vs {want}", got[i]);
     }
 }
