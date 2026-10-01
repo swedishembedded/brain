@@ -1401,6 +1401,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]

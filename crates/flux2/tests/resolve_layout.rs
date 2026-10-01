@@ -200,7 +200,8 @@ fn override_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 /// The full acceptance sequence against one store: no override at all, then
-/// the variant stated, then the variant AND the text encoder both stated.
+/// the text encoder stated (the variant defaults to klein, base is named), then
+/// the variant alone, then both stated.
 #[test]
 fn flux2_resolves_against_a_real_mixed_store_only_once_every_role_is_unambiguously_stated() {
     let root = build_store();
@@ -223,18 +224,19 @@ fn flux2_resolves_against_a_real_mixed_store_only_once_every_role_is_unambiguous
         other => panic!("step 1: expected Ambiguous, got {other:?}"),
     }
 
-    // Step 2: state the text encoder explicitly - the dit-shape/variant
-    // question is real too (klein-vs-base is not recoverable from any
-    // weight's shape - see `Flux2Spec::assemble`'s doc).
+    // Step 2: state the text encoder explicitly. klein-vs-base is not
+    // recoverable from any weight's shape (see `Flux2Spec::assemble`'s doc), so
+    // the resolver does not ask: it takes klein, the default every other
+    // FLUX.2 entry point assumes, and base is reached by naming it.
     let te_override = override_map(&[("text_encoder", root.join("Qwen").join("Qwen3-8B").to_str().unwrap())]);
     match resolve("flux2", &records, &specs, &te_override) {
-        Resolution::Ambiguous(a) => {
-            assert_eq!(a.question, Question::Variant { shape_class: "9b".to_string() }, "{:?}", a.question);
-            let selectors: Vec<(String, String)> = a.choices.iter().flat_map(|c| c.selector.clone()).collect();
-            assert!(selectors.contains(&("--variant".to_string(), "klein-9b".to_string())), "{selectors:?}");
-            assert!(selectors.contains(&("--variant".to_string(), "base-9b".to_string())), "{selectors:?}");
-        }
-        other => panic!("step 2: expected Ambiguous, got {other:?}"),
+        Resolution::Resolved(assembly) => assert_eq!(assembly.variant.as_deref(), Some("klein-9b")),
+        other => panic!("step 2: expected Resolved as klein-9b, got {other:?}"),
+    }
+    let base_override = override_map(&[("text_encoder", root.join("Qwen").join("Qwen3-8B").to_str().unwrap()), ("variant", "base-9b")]);
+    match resolve("flux2", &records, &specs, &base_override) {
+        Resolution::Resolved(assembly) => assert_eq!(assembly.variant.as_deref(), Some("base-9b")),
+        other => panic!("step 2: expected Resolved as base-9b, got {other:?}"),
     }
 
     // Step 3: state the variant alone - text_encoder is still genuinely
