@@ -1137,6 +1137,13 @@ impl Ops {
         Act { x: x.clone(), xr0, m: rows, k, quant: None, xgs: None }
     }
 
+    /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its
+    /// first row, row count and width, for a caller that dispatches a kernel
+    /// of its own over them.
+    pub fn f32_rows<'a>(&self, act: &'a Act) -> (&'a DeviceBuffer, u32, u32, u32) {
+        (&act.x, act.xr0, act.m, act.k)
+    }
+
     /// `(variant, dtype, group) -> kernel name`. The ONLY place in this crate
     /// a kernel-name string literal is chosen by a match arm (`kname`'s own
     /// consts are the only place one is spelled at all). Any pair not listed

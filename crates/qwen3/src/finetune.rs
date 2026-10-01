@@ -201,6 +201,140 @@ impl Trained {
         }
     }
 
+    /// Splice each image's rows over its run of residual rows
+    /// ([`Qwen::enable_mm_splices`]), on the stage that embeds.
+    pub fn enable_mm_splices(&mut self, regions: &[(u32, u32)]) {
+        match self {
+            Trained::Single(m) => m.enable_mm_splices(regions),
+            Trained::Pipeline(m) => m.pipeline_mut().stage_mut(0).enable_mm_splices(regions),
+        }
+    }
+
+    /// The images' rows to splice, concatenated ([`Qwen::write_img_embeds`]).
+    pub fn write_img_embeds(&self, data: &[f32]) {
+        match self {
+            Trained::Single(m) => m.write_img_embeds(data),
+            Trained::Pipeline(m) => m.pipeline().stage(0).write_img_embeds(data),
+        }
+    }
+
+    /// The gradient of the spliced rows after a backward ([`Qwen::read_d_img_embeds`]).
+    pub fn read_d_img_embeds(&self) -> Vec<f32> {
+        match self {
+            Trained::Single(m) => m.read_d_img_embeds(),
+            Trained::Pipeline(m) => m.pipeline().stage(0).read_d_img_embeds(),
+        }
+    }
+
+    /// Stop at the final-norm hidden states and let the caller own the head
+    /// ([`Qwen::enable_external_head`]), on the stage that carries it.
+    pub fn enable_external_head(&mut self) {
+        match self {
+            Trained::Single(m) => m.enable_external_head(),
+            Trained::Pipeline(m) => {
+                let last = m.pipeline().n_stages() - 1;
+                m.pipeline_mut().stage_mut(last).enable_external_head();
+            }
+        }
+    }
+
+    /// Upload one batch (`tokens`, `targets`) to every stage.
+    pub fn set_batch(&self, tokens: &[u32], targets: &[u32]) {
+        match self {
+            Trained::Single(m) => m.set_batch(tokens, targets),
+            Trained::Pipeline(m) => m.pipeline().set_batch(model::Batch::Lm { tokens, targets }),
+        }
+    }
+
+    pub fn zero_grads(&self) {
+        match self {
+            Trained::Single(m) => m.zero_grads(),
+            Trained::Pipeline(m) => m.pipeline().zero_grads(),
+        }
+    }
+
+    /// The batch's final-norm hidden states `[b·t, d_model]`, through every
+    /// stage ([`Self::enable_external_head`] builds only).
+    pub fn forward_hidden(&self) -> Vec<f32> {
+        match self {
+            Trained::Single(m) => m.forward_hidden(),
+            Trained::Pipeline(m) => {
+                let pipe = m.pipeline();
+                pipe.forward_front();
+                pipe.stage(pipe.n_stages() - 1).forward_hidden()
+            }
+        }
+    }
+
+    /// Backward from the gradient of the caller's loss at the hidden states,
+    /// back through every stage.
+    pub fn backward_hidden(&self, d_hidden: &[f32]) {
+        match self {
+            Trained::Single(m) => m.backward_hidden(d_hidden),
+            Trained::Pipeline(m) => {
+                let pipe = m.pipeline();
+                pipe.stage(pipe.n_stages() - 1).backward_hidden(d_hidden);
+                pipe.backward_front();
+            }
+        }
+    }
+
+    /// The loss and its gradient through the model's own head, through every stage.
+    pub fn forward(&self) -> f32 {
+        match self {
+            Trained::Single(m) => m.forward(),
+            Trained::Pipeline(m) => m.pipeline().forward_loaded(),
+        }
+    }
+
+    pub fn backward(&self) {
+        match self {
+            Trained::Single(m) => m.backward(),
+            Trained::Pipeline(m) => m.pipeline().backward(),
+        }
+    }
+
+    /// One AdamW step over the trainable parameters on gradients scaled by
+    /// `scale` (`1/K` for the mean of `K` accumulated examples), `clip` the
+    /// global gradient-norm clip of the scaled gradient when given.
+    pub fn adamw_step(&mut self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, scale: f32) {
+        match self {
+            Trained::Single(m) => m.adamw_step(t, lr, wd, adam, clip, scale),
+            Trained::Pipeline(m) => m.pipeline_mut().adamw_step(t, lr, wd, adam, clip, scale),
+        }
+    }
+
+    pub fn poll_wait(&self) {
+        match self {
+            Trained::Single(m) => m.poll_wait(),
+            Trained::Pipeline(m) => m.pipeline().poll_wait(),
+        }
+    }
+
+    /// The names of the trained parameters.
+    pub fn param_names(&self) -> Vec<String> {
+        match self {
+            Trained::Single(m) => model::Model::param_names(m),
+            Trained::Pipeline(m) => model::Model::param_names(m),
+        }
+    }
+
+    /// A trained or frozen parameter's values.
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        match self {
+            Trained::Single(m) => m.read_weight(name),
+            Trained::Pipeline(m) => model::Model::read_weight(m, name),
+        }
+    }
+
+    /// A trained parameter's gradient (summed over the stages that hold it).
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        match self {
+            Trained::Single(m) => m.read_grad(name),
+            Trained::Pipeline(m) => model::Model::read_grad(m, name),
+        }
+    }
+
     /// [`Self::save_adapter_with_lineage`] with no training provenance.
     pub fn save_adapter(&self, path: &str, card_id: &str, base_id: &str, dataset_id: Option<&str>) -> std::io::Result<()> {
         self.save_adapter_with_lineage(path, card_id, base_id, dataset_id, None)
@@ -228,6 +362,20 @@ pub fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, d
     println!("qwen3 finetune: pipeline of {} stages: {}", shards.len(), layout.join(", "));
     let pipe = Pipeline::<Qwen>::with_shards_dt(cfg.clone(), opts.batch_size, opts.block_size, init, shards, dt);
     Ok(Trained::Pipeline(PipelineModel::new(pipe, cfg)))
+}
+
+/// The decoder of a multimodal fine-tune, built over `base` for `block`-token
+/// rows: fresh LoRA adapters drawn from `seed` over a frozen base at `dt`,
+/// laid out over the machine's cards as [`build_trainer`] does, or (with no
+/// adapter configured) a single whole decoder that trains every weight.
+pub fn build_decoder_trainer(cfg: QwenConfig, base: Box<dyn TensorSource + '_>, dt: Dtype, block: u32, seed: u64) -> std::io::Result<Trained> {
+    if cfg.lora.is_none() {
+        let shard = crate::model::Shard::whole(cfg.n_layers as usize);
+        return Ok(Trained::Single(Qwen::new_shard(cfg, 1, block, &*base, true, shard)));
+    }
+    let init = LoraInit::fresh(&cfg, base, seed);
+    let opts = FitOpts { batch_size: 1, block_size: block, ..FitOpts::default() };
+    build_trainer(cfg, &opts, &init, dt)
 }
 
 /// Every projection a qwen3 LoRA adapter can cover, which is also what a

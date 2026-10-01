@@ -19,7 +19,7 @@
 //! reuses `rmsnorm` over `head_dim`, and the tied head accumulates both the
 //! lm_head and embedding gradients into `tok.weight` (matmul_dw then emb_bwd).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -584,12 +584,12 @@ pub struct Qwen {
     // (written by the vision front-end via `write_img_embeds`) after the text
     // token-embedding gather, and the backward routes those rows' gradient into
     // `d_img_embeds` (read via `read_d_img_embeds`) instead of `tok.weight`.
-    mm_splice: Cell<Option<(u32, u32)>>,
+    mm_splice: RefCell<Vec<(u32, u32)>>,
     /// The decoder stops at its final-norm hidden states and a caller's own
     /// head takes over the loss ([`Self::enable_external_head`]).
     external_head: Cell<bool>,
-    img_embeds: DeviceBuffer,
-    d_img_embeds: DeviceBuffer,
+    img_embeds: Vec<DeviceBuffer>,
+    d_img_embeds: Vec<DeviceBuffer>,
 
     // Interleaved M-RoPE (Qwen3-VL): when set, q/k use the table-driven `rope2d`
     // with these host-precomputed per-token cos/sin tables `[b·t, head_dim/2]`
@@ -1413,10 +1413,10 @@ impl Qwen {
             targets,
             res,
             layers,
-            mm_splice: Cell::new(None),
+            mm_splice: RefCell::new(Vec::new()),
             external_head: Cell::new(false),
-            img_embeds: st(1),
-            d_img_embeds: st(1),
+            img_embeds: vec![st(1)],
+            d_img_embeds: vec![st(1)],
             mrope: Cell::new(false),
             mrope_cos: st(1),
             mrope_sin: st(1),
@@ -2067,8 +2067,8 @@ impl Qwen {
             s.extend(self.embed_tiled(&self.gpu, &self.res[0], n));
             // Vision-language splice: overwrite the image-placeholder rows of the
             // freshly-gathered residual stream with the projected image tokens.
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
+            for (&(row0, n_rows), img) in self.mm_splice.borrow().iter().zip(&self.img_embeds) {
+                s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, img, &self.res[0], row0 * d, n_rows * d));
             }
         }
         let mut tape = Tape { steps: s, ends: Vec::new() };
@@ -2484,8 +2484,8 @@ impl Qwen {
         // `d_img_embeds` and ZERO them in dres[0] BEFORE emb_bwd, so the scatter
         // below never trains the placeholder token's embedding row.
         if self.shard.embed {
-            if let Some((row0, n_rows)) = self.mm_splice.get() {
-                s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], &self.d_img_embeds, row0 * d, n_rows * d));
+            for (&(row0, n_rows), d_img) in self.mm_splice.borrow().iter().zip(&self.d_img_embeds) {
+                s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], d_img, row0 * d, n_rows * d));
             }
         }
 
@@ -2570,10 +2570,23 @@ impl Qwen {
     /// image buffers and rebuilds the fwd/bwd graphs - call once after construction
     /// (before the first forward). No effect on `tok.weight`/other params.
     pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
-        let sz = (n_rows * self.cfg.d_model) as u64;
-        self.img_embeds = self.gpu.storage(sz);
-        self.d_img_embeds = self.gpu.storage(sz);
-        self.mm_splice.set(Some((row0, n_rows)));
+        self.enable_mm_splices(&[(row0, n_rows)]);
+    }
+
+    /// [`Self::enable_mm_splice`] for an example with several images: each
+    /// `(row0, n_rows)` run of the residual stream is overwritten by its own
+    /// image's rows. [`Self::write_img_embeds`] takes the images' rows
+    /// concatenated in this order and [`Self::read_d_img_embeds`] returns
+    /// their gradient the same way. The runs must not overlap.
+    pub fn enable_mm_splices(&mut self, regions: &[(u32, u32)]) {
+        assert!(!regions.is_empty(), "Qwen::enable_mm_splices: at least one image run");
+        let mut spans: Vec<(u32, u32)> = regions.to_vec();
+        spans.sort_unstable();
+        assert!(spans.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0), "Qwen::enable_mm_splices: the image runs {regions:?} overlap");
+        let buffers = |g: &Gpu| regions.iter().map(|&(_, n)| g.storage((n * self.cfg.d_model) as u64)).collect::<Vec<_>>();
+        self.img_embeds = buffers(&self.gpu);
+        self.d_img_embeds = buffers(&self.gpu);
+        *self.mm_splice.borrow_mut() = regions.to_vec();
         // A decode-only build (`from_reader_decode`/`from_tensors_decode`) never
         // runs `forward()`/`backward()` (both assert `!self.decode_only`) - only
         // the incremental KV-cache decode path, which reads the state just set
@@ -2632,19 +2645,29 @@ impl Qwen {
 
     /// Number of spliced image embedding elements (`n_rows·d_model`); 0 if off.
     fn img_numel(&self) -> usize {
-        self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model) as usize)
+        self.mm_splice.borrow().iter().map(|&(_, n)| (n * self.cfg.d_model) as usize).sum()
     }
 
     /// Write the projected image tokens `[n_rows, d_model]` (row-major) to splice
     /// into the residual stream on the next forward.
     pub fn write_img_embeds(&self, data: &[f32]) {
-        self.gpu.write(&self.img_embeds, bytemuck::cast_slice(data));
+        assert_eq!(data.len(), self.img_numel().max(1), "write_img_embeds: the rows of every spliced image, concatenated");
+        let mut at = 0;
+        for (&(_, n), buf) in self.mm_splice.borrow().iter().zip(&self.img_embeds) {
+            let len = (n * self.cfg.d_model) as usize;
+            self.gpu.write(buf, bytemuck::cast_slice(&data[at..at + len]));
+            at += len;
+        }
     }
 
     /// Read the gradient of the spliced image embeddings after `backward` - feeds
     /// the vision connector/encoder backward.
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
-        self.gpu.read(&self.d_img_embeds, self.img_numel())
+        let mut out = Vec::with_capacity(self.img_numel());
+        for (&(_, n), buf) in self.mm_splice.borrow().iter().zip(&self.d_img_embeds) {
+            out.extend(self.gpu.read(buf, (n * self.cfg.d_model) as usize));
+        }
+        out
     }
 
     /// The splice INPUT buffer itself, for a vision tower sharing THIS decoder's
@@ -2655,7 +2678,7 @@ impl Qwen {
     /// nothing about that. Valid only after [`Self::enable_mm_splice`] - before
     /// that this is the 1-float placeholder the constructor allocates.
     pub fn img_embeds_buf(&self) -> &DeviceBuffer {
-        &self.img_embeds
+        &self.img_embeds[0]
     }
 
     /// The splice GRADIENT buffer itself - the device-side counterpart of
@@ -2663,7 +2686,7 @@ impl Qwen {
     /// consume it as an input buffer instead of re-uploading a host `Vec`.
     /// Same validity rule as [`Self::img_embeds_buf`].
     pub fn d_img_embeds_buf(&self) -> &DeviceBuffer {
-        &self.d_img_embeds
+        &self.d_img_embeds[0]
     }
 
     // ---- interleaved M-RoPE seam (Qwen3-VL) ----
