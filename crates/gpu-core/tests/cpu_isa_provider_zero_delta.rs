@@ -30,6 +30,17 @@ fn force_cpu() {
     gpu_core::set_default_backend(gpu_core::Backend::Cpu);
 }
 
+/// The CPU backend registers its native ISA kernels only where it has AVX2
+/// code for them, so on any other host (aarch64, say) these providers decline
+/// and the reference path runs - which is correct, and not what is under test.
+fn host_has_native_isa_path(gpu: &gpu_core::Gpu) -> bool {
+    if gpu.caps().arch.isa.avx2 {
+        return true;
+    }
+    brain_testutil::skip_unavailable("the CPU backend's native ISA kernels need AVX2; this host has none");
+    false
+}
+
 static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
 
 fn bind_f32(v: KernelVariant) -> (usize, &'static str) {
@@ -54,6 +65,9 @@ fn bind_f32(v: KernelVariant) -> (usize, &'static str) {
 fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
     force_cpu();
     let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !host_has_native_isa_path(&gpu) {
+        return;
+    }
     let (m, n, k) = (37u32, 53u32, 71u32);
     let mut seed = 99u32;
     let mut lcg = move || {
@@ -114,6 +128,9 @@ fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
 fn cpu_isa_i8_matmul_reaches_the_native_avx2_gemm() {
     force_cpu();
     let gpu = gpu_core::testgpu::dev(&[]);
+    if !host_has_native_isa_path(&gpu) {
+        return;
+    }
     let caps = gpu.caps();
     assert_eq!(caps.class, backend_api::DeviceClass::Cpu, "this test must actually run on the CPU backend");
 
