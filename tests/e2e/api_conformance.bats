@@ -235,6 +235,22 @@ get_url() {
   validate openai.json CreateChatCompletionResponse "$RESP"
 }
 
+@test "openai chat with two images: both reach the model, in order; nine are refused" {
+  local one='UDYKMSAxCjI1NQr///8=' two='UDYKMiAxCjI1NQr///8AAAA='
+  post_json openai /v1/chat/completions "{\"model\":\"brain/mock\",\"messages\":[{\"role\":\"user\",\"content\":[
+    {\"type\":\"text\",\"text\":\"compare\"},
+    {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/x-ppm;base64,$one\"}},
+    {\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/x-ppm;base64,$two\"}}]}]}"
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.choices[0].message.content' "$RESP")" = "You said: compare [image:1x1] [image1:2x1]" ]
+  local nine parts=""
+  for _ in 1 2 3 4 5 6 7 8 9; do parts="$parts{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/x-ppm;base64,$one\"}},"; done
+  nine="${parts%,}"
+  post_json openai /v1/chat/completions "{\"model\":\"brain/mock\",\"messages\":[{\"role\":\"user\",\"content\":[$nine]}]}"
+  [ "$STATUS" -eq 400 ]
+  [[ "$(jq -r '.error.message' "$RESP")" == *"at most 8 images"* ]]
+}
+
 @test "anthropic chat non-stream: 200, maps stop_reason, validates Message" {
   post_json anthropic /v1/messages \
     '{"model":"brain/mock","max_tokens":64,"messages":[{"role":"user","content":"hello there"}]}'

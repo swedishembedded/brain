@@ -17,8 +17,6 @@ greedy tokens (`tests/composite_parity.rs`), and is served as
   rows). A decoder split across cards needs the decoder hook to hand the
   image rows' gradient across a pipeline stage boundary, and an example
   with several images needs the splice to take several regions.
-- **One image over HTTP.** `apiserve::media::extract_openai` forwards the
-  first `image_url` of a request; D-Bus callers can send up to 8 images.
 - **Serial decoding.** Each request prefills and decodes alone on
   `qwen3::Qwen`. The serving engine now has what batching needs (a
   half-precision tier and `Engine::prefill_mixed`), so concurrent requests

@@ -2627,6 +2627,8 @@ impl ResidentModel for MediaEchoChat {
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
                 .input(BlobSpec::new("audio", Media::Audio, "optional 16 kHz mono f32-LE PCM"))
                 .input(BlobSpec::new("image", Media::Image, "optional HWC-f32 image"))
+                .input(BlobSpec::new("image1", Media::Image, "a further image"))
+                .input(BlobSpec::new("image2", Media::Image, "a further image"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }
@@ -2643,8 +2645,10 @@ impl ResidentModel for MediaEchoChat {
 impl Instance for MediaEchoChatInst {
     fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let mut text = "seen:".to_string();
-        if let Some(b) = inv.get_blob("image") {
-            text.push_str(&format!(" [image:{}x{}]", b.meta["w"], b.meta["h"]));
+        for key in ["image", "image1", "image2"] {
+            if let Some(b) = inv.get_blob(key) {
+                text.push_str(&format!(" [{key}:{}x{}]", b.meta["w"], b.meta["h"]));
+            }
         }
         if let Some(b) = inv.get_blob("audio") {
             text.push_str(&format!(" [audio:{}samples@16k]", b.bytes.len() / 4));
@@ -2693,6 +2697,39 @@ async fn openai_input_audio_content_part_reaches_the_model() {
     let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["choices"][0]["message"]["content"], "seen: [audio:320samples@16k]", "{v}");
+}
+
+/// A 2x1 binary PPM, so the images of a request are told apart by width.
+const WIDE_PPM_B64: &str = "UDYKMiAxCjI1NQr///8AAAA=";
+
+#[tokio::test]
+async fn every_image_of_a_chat_request_reaches_the_model_as_its_own_blob() {
+    let ppm = |b64: &str| json!({"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{b64}")}});
+    let (app, key) = media_echo_app(Provider::OpenAI);
+    let body = json!({"model": "brain-mediaecho", "messages": [
+        {"role": "user", "content": [ppm(TINY_PPM_B64), {"type": "text", "text": "and"}, ppm(WIDE_PPM_B64)]},
+    ]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["choices"][0]["message"]["content"], "seen: [image:1x1] [image1:2x1]", "{v}");
+
+    let (app, key) = media_echo_app(Provider::Anthropic);
+    let block = |b64: &str| json!({"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": b64}});
+    let body = json!({"model": "brain-mediaecho", "max_tokens": 16, "messages": [{"role": "user", "content": [block(WIDE_PPM_B64), block(TINY_PPM_B64)]}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["content"][0]["text"], "seen: [image:2x1] [image1:1x1]", "{v}");
+}
+
+#[tokio::test]
+async fn a_chat_request_with_more_images_than_the_cap_is_a_400_before_any_model_runs() {
+    let part = json!({"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{TINY_PPM_B64}")}});
+    let parts: Vec<_> = (0..9).map(|_| part.clone()).collect();
+    let (app, key) = media_echo_app(Provider::OpenAI);
+    let body = json!({"model": "brain-mediaecho", "messages": [{"role": "user", "content": parts}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("at most 8 images"), "{v}");
 }
 
 #[tokio::test]

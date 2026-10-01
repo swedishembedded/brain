@@ -174,10 +174,8 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     // image content blocks, previously silently dropped by flatten_message/
     // content_text (which only ever kept "text" blocks) -- see
     // crate::media's module doc.
-    let media = crate::media::extract_anthropic(messages).map_err(|e| ApiError::invalid_request(PROVIDER, e))?;
-    if let Some(img) = media.image {
-        inv = inv.blob("image", img);
-    }
+    let mut media = crate::media::extract_anthropic(messages).map_err(|e| ApiError::invalid_request(PROVIDER, e))?;
+    inv = media.attach_images(inv);
 
     Ok((model.to_string(), inv, stream))
 }

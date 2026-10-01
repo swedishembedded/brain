@@ -79,6 +79,7 @@ impl MockResident {
             // plumbing is testable with zero weights.
             .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (audio::asr_caps's wire convention)"))
             .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
+            .input(BlobSpec::new("image1", Media::Image, "an optional second image, as a model that takes several declares them"))
             .output(BlobSpec::new("text", Media::Text, "the generated text"))
     }
 
@@ -262,7 +263,7 @@ fn sleep_cancellable(ms: u64, cancel: &capability::CancelToken) -> bool {
 use capability::last_user_text;
 
 /// A deterministic descriptor of the multimodal blobs attached to a chat
-/// invocation, appended to the echoed reply: `" [image:{w}x{h}]"` for an image
+/// invocation, appended to the echoed reply: `" [image:{w}x{h}]"` (and `" [image1:...]"`) for an image
 /// (dimensions read from the blob's `meta`) and `" [audio:{n}samples@16k]"` for
 /// audio (`bytes.len() / 4`, the blob wire format being f32-LE). Empty when
 /// neither is present, so a text-only reply is unchanged.
@@ -276,9 +277,11 @@ use capability::last_user_text;
 /// Image first, then audio, so a request carrying both has one fixed rendering.
 fn media_suffix(inv: &Invocation) -> String {
     let mut out = String::new();
-    if let Some(b) = inv.get_blob("image") {
-        let (w, h) = (b.meta["w"].as_u64().unwrap_or(0), b.meta["h"].as_u64().unwrap_or(0));
-        out.push_str(&format!(" [image:{w}x{h}]"));
+    for key in ["image", "image1"] {
+        if let Some(b) = inv.get_blob(key) {
+            let (w, h) = (b.meta["w"].as_u64().unwrap_or(0), b.meta["h"].as_u64().unwrap_or(0));
+            out.push_str(&format!(" [{key}:{w}x{h}]"));
+        }
     }
     if let Some(b) = inv.get_blob("audio") {
         out.push_str(&format!(" [audio:{}samples@16k]", b.bytes.len() / 4));

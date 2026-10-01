@@ -15,24 +15,58 @@
 //! schema, but this server does not fetch third-party URLs on a client's
 //! behalf (the same boundary this codebase draws elsewhere for outbound
 //! network calls) - it errors with a clear message instead of silently
-//! dropping the image as before. At most ONE image and ONE audio clip are
-//! extracted per request (the first found, scanning all messages in
-//! order) - matches the single-image/single-audio-input shape
-//! `qwen3omnimoe::caps::generate_spec()`'s `audio`/`image` blob inputs already
-//! declare; a model that wants more would need a richer wire shape this
-//! module doesn't attempt to invent.
+//! dropping the image as before. Every image of a request is extracted (up to
+//! [`MAX_IMAGES`], scanning all messages in order) and attached as the blobs
+//! `image`, `image1`, ... ([`image_key`]), the naming a model that takes
+//! several images declares (`brain-deepseekvl`'s `generate`); a model that
+//! declares only `image` reads the first. At most ONE audio clip is
+//! extracted (the first found), matching the single `audio` blob input
+//! `qwen3omnimoe::caps::generate_spec()` declares.
 
 use capability::Blob;
 use serde_json::Value;
 
 use crate::b64;
 
-/// The (at most one image, at most one audio) blobs found across a
-/// request's messages, ready to attach to an `Invocation` via `.blob(...)`.
+/// The most images one request may carry. Each is decoded to a float image
+/// held in memory while the request runs, so the count is bounded before
+/// anything is decoded past it.
+pub const MAX_IMAGES: usize = 8;
+
+/// The blob name of the `i`th image of a request: `image`, then `image1`,
+/// `image2`, ...
+pub fn image_key(i: usize) -> String {
+    if i == 0 {
+        "image".to_string()
+    } else {
+        format!("image{i}")
+    }
+}
+
+/// The images (in order) and at most one audio clip found across a request's
+/// messages, ready to attach to an `Invocation` via `.blob(...)`.
 #[derive(Default, Debug)]
 pub struct ExtractedMedia {
-    pub image: Option<Blob>,
+    pub images: Vec<Blob>,
     pub audio: Option<Blob>,
+}
+
+impl ExtractedMedia {
+    /// Attach every image to `inv` under [`image_key`]'s names.
+    pub fn attach_images(&mut self, mut inv: capability::Invocation) -> capability::Invocation {
+        for (i, img) in self.images.drain(..).enumerate() {
+            inv = inv.blob(&image_key(i), img);
+        }
+        inv
+    }
+
+    fn push_image(&mut self, blob: Blob) -> Result<(), String> {
+        if self.images.len() == MAX_IMAGES {
+            return Err(format!("a request may carry at most {MAX_IMAGES} images"));
+        }
+        self.images.push(blob);
+        Ok(())
+    }
 }
 
 /// Decode a `data:<mime>;base64,<payload>` URL's payload, or `None` if `url`
@@ -76,18 +110,18 @@ fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
     audio::asr_caps::audio_blob_from_wav(&bytes).map_err(|e| format!("input_audio: {e}"))
 }
 
-/// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for the
-/// first `image_url`/`input_audio` content part across all messages, in
-/// order.
+/// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for
+/// every `image_url` content part and the first `input_audio` one across all
+/// messages, in order.
 pub fn extract_openai(messages: &[Value]) -> Result<ExtractedMedia, String> {
     let mut out = ExtractedMedia::default();
     for m in messages {
         let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
         for p in parts {
             match p.get("type").and_then(|v| v.as_str()) {
-                Some("image_url") if out.image.is_none() => {
+                Some("image_url") => {
                     if let Some(url) = p.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()) {
-                        out.image = Some(decode_image_data_url(url)?);
+                        out.push_image(decode_image_data_url(url)?)?;
                     }
                 }
                 Some("input_audio") if out.audio.is_none() => {
@@ -105,7 +139,7 @@ pub fn extract_openai(messages: &[Value]) -> Result<ExtractedMedia, String> {
     Ok(out)
 }
 
-/// Scan Anthropic-shaped `messages` for the first `image` content block
+/// Scan Anthropic-shaped `messages` for every `image` content block
 /// across all messages (`{"type":"image","source":{"type":"base64",
 /// "media_type":...,"data":...}}` - `source.type` other than `"base64"`,
 /// e.g. a URL source, is out of scope for the same reason OpenAI's
@@ -115,9 +149,6 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
     for m in messages {
         let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
         for p in parts {
-            if out.image.is_some() {
-                break;
-            }
             if p.get("type").and_then(|v| v.as_str()) != Some("image") {
                 continue;
             }
@@ -126,7 +157,7 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
                 continue; // a URL source: out of scope, see this function's doc
             }
             if let Some(data) = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()) {
-                out.image = Some(decode_image_base64(data)?);
+                out.push_image(decode_image_base64(data)?)?;
             }
         }
     }
@@ -156,10 +187,48 @@ mod tests {
             ]}
         ]);
         let got = extract_openai(messages.as_array().unwrap()).expect("extract");
-        let img = got.image.expect("image found");
+        let img = got.images.first().expect("image found");
         assert_eq!(img.media, Media::Image);
         assert_eq!(img.meta["w"], 1);
         assert_eq!(img.meta["h"], 1);
+    }
+
+    /// `P6\n2 1\n255\n` + 6 bytes: a 2x1 image, so the order the images come
+    /// back in is visible.
+    const WIDE_PPM_B64: &str = "UDYKMiAxCjI1NQr///8AAAA=";
+
+    fn image_part(b64: &str) -> serde_json::Value {
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{b64}")}})
+    }
+
+    #[test]
+    fn every_image_of_a_request_is_extracted_in_order() {
+        let messages = json!([
+            {"role": "user", "content": [image_part(TINY_PNG_B64), {"type": "text", "text": "and"}]},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": [image_part(WIDE_PPM_B64)]}
+        ]);
+        let got = extract_openai(messages.as_array().unwrap()).expect("extract");
+        let sizes: Vec<(u64, u64)> = got.images.iter().map(|i| (i.meta["w"].as_u64().unwrap(), i.meta["h"].as_u64().unwrap())).collect();
+        assert_eq!(sizes, [(1, 1), (2, 1)], "across messages, in the order they were sent");
+        let anthropic = json!([{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": WIDE_PPM_B64}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": TINY_PNG_B64}}
+        ]}]);
+        let got = extract_anthropic(anthropic.as_array().unwrap()).expect("extract");
+        assert_eq!(got.images.iter().map(|i| i.meta["w"].as_u64().unwrap()).collect::<Vec<_>>(), [2, 1]);
+    }
+
+    #[test]
+    fn a_request_may_not_carry_more_images_than_the_cap() {
+        let parts: Vec<_> = (0..=MAX_IMAGES).map(|_| image_part(TINY_PNG_B64)).collect();
+        let err = extract_openai(json!([{"role": "user", "content": parts}]).as_array().unwrap()).unwrap_err();
+        assert!(err.contains(&format!("at most {MAX_IMAGES} images")), "{err}");
+        let blocks: Vec<_> = (0..=MAX_IMAGES).map(|_| json!({"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": TINY_PNG_B64}})).collect();
+        let err = extract_anthropic(json!([{"role": "user", "content": blocks}]).as_array().unwrap()).unwrap_err();
+        assert!(err.contains("at most"), "{err}");
+        let within: Vec<_> = (0..MAX_IMAGES).map(|_| image_part(TINY_PNG_B64)).collect();
+        assert_eq!(extract_openai(json!([{"role": "user", "content": within}]).as_array().unwrap()).unwrap().images.len(), MAX_IMAGES);
     }
 
     #[test]
@@ -179,14 +248,14 @@ mod tests {
             ]}
         ]);
         let got = extract_anthropic(messages.as_array().unwrap()).expect("extract");
-        assert!(got.image.is_some());
+        assert_eq!(got.images.len(), 1);
     }
 
     #[test]
     fn a_plain_text_only_message_extracts_nothing() {
         let messages = json!([{"role": "user", "content": "just text"}]);
         let got = extract_openai(messages.as_array().unwrap()).expect("extract");
-        assert!(got.image.is_none() && got.audio.is_none());
+        assert!(got.images.is_empty() && got.audio.is_none());
     }
 
     #[test]

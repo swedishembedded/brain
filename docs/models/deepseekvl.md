@@ -14,8 +14,9 @@ MLP aligner.
 **Status: served.** `brain serve` lists the model as `brain/deepseekvl` when
 the checkpoint is in the models directory, and
 `/v1/chat/completions` (or D-Bus `Run`, action `generate`) takes a
-conversation with up to 8 images: OpenAI `image_url` data URLs over HTTP, or
-`image`, `image1`, ... blobs over D-Bus. Each image part becomes a
+conversation with up to 8 images: OpenAI `image_url` data URLs or Anthropic `image`
+blocks over HTTP (up to 8 per request, the 9th is a 400), or `image`,
+`image1`, ... blobs over D-Bus. Each image part becomes a
 placeholder where it stands in the message; an image sent without one opens
 the last user turn. Decoding is greedy and stops on the end-of-sentence token
 or the next `User:` turn.
