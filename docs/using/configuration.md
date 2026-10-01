@@ -165,6 +165,7 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | --- | --- | --- |
 | `BRAIN_NO_AUTOTUNE` | `1` skips runtime kernel autotuning and uses the static best-guess policy | autotune on |
 | `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
+| `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
 | `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
 | `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
 | `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |

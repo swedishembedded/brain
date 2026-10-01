@@ -42,7 +42,32 @@ const NVRTC_SUCCESS: NvrtcResult = 0;
 /// box may have any one of them installed. `libnvrtc.so` (the unversioned
 /// development symlink) comes last because it belongs to the `-dev` package
 /// and may be absent on a machine that has the runtime.
-const SONAMES: &[&str] = &["libnvrtc.so.12", "libnvrtc.so.11", "libnvrtc.so"];
+const SONAMES: &[&str] = &["libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11", "libnvrtc.so"];
+
+/// Names an exact NVRTC library to load instead of searching (a path or a
+/// SONAME): the way to pin one toolkit when several are installed.
+const ENV_NVRTC: &str = "BRAIN_NVRTC";
+/// The toolkit root whose `lib64`/`lib` hold NVRTC, the same variable the CUDA
+/// toolchain itself uses.
+const ENV_CUDA_PATH: &str = "CUDA_PATH";
+
+/// Every library name to try loading, in order: the explicit override alone if
+/// there is one; otherwise the toolkit root's `lib64` then `lib`, then the bare
+/// SONAMEs for the system loader. A toolkit the user installed without root is
+/// found by its root, not by whatever the loader's cache happens to hold.
+fn candidate_libraries(explicit: Option<&str>, cuda_path: Option<&str>) -> Vec<String> {
+    if let Some(lib) = explicit.filter(|l| !l.is_empty()) {
+        return vec![lib.to_string()];
+    }
+    let mut out = Vec::new();
+    if let Some(root) = cuda_path.filter(|r| !r.is_empty()) {
+        for dir in ["lib64", "lib"] {
+            out.extend(SONAMES.iter().map(|s| format!("{root}/{dir}/{s}")));
+        }
+    }
+    out.extend(SONAMES.iter().map(|s| s.to_string()));
+    out
+}
 
 struct Nvrtc {
     _lib: libloading::Library,
@@ -79,7 +104,9 @@ fn nvrtc() -> Result<&'static Nvrtc, &'static str> {
 
 fn load() -> Result<Nvrtc, String> {
     let mut tried = Vec::new();
-    for soname in SONAMES {
+    let explicit = std::env::var(ENV_NVRTC).ok();
+    let cuda_path = std::env::var(ENV_CUDA_PATH).ok();
+    for soname in &candidate_libraries(explicit.as_deref(), cuda_path.as_deref()) {
         // SAFETY: loading a shared object runs its initialisers; NVRTC's are
         // the ordinary CUDA toolkit ones.
         let lib = match unsafe { libloading::Library::new(soname) } {
@@ -312,6 +339,35 @@ mod tests {
     #[test]
     fn the_cache_key_cannot_be_confused_by_a_shifted_field_boundary() {
         assert_ne!(cache_key("ab", "c", (6, 1), (12, 2)), cache_key("a", "bc", (6, 1), (12, 2)));
+    }
+
+    /// A CUDA 13 toolkit installs `libnvrtc.so.13`, and nothing links the
+    /// unversioned development symlink for it, so the major version must be a
+    /// candidate in its own right.
+    #[test]
+    fn every_supported_toolkit_major_is_a_candidate_soname() {
+        let c = candidate_libraries(None, None);
+        for major in ["13", "12", "11"] {
+            assert!(c.iter().any(|l| l == &format!("libnvrtc.so.{major}")), "{major}: {c:?}");
+        }
+    }
+
+    /// An explicit override is the only candidate: asking for one library and
+    /// silently getting another would make a toolkit pin meaningless.
+    #[test]
+    fn an_explicit_override_is_the_only_candidate() {
+        assert_eq!(candidate_libraries(Some("/opt/x/libnvrtc.so.12"), Some("/cuda")), ["/opt/x/libnvrtc.so.12"]);
+    }
+
+    /// A toolkit root is searched before the system loader, `lib64` before
+    /// `lib`, so a user-owned toolkit wins over whatever the loader finds first.
+    #[test]
+    fn a_toolkit_root_is_searched_before_the_system_loader() {
+        let c = candidate_libraries(None, Some("/cuda"));
+        let at = |needle: &str| c.iter().position(|l| l == needle).unwrap_or_else(|| panic!("{needle} missing from {c:?}"));
+        assert!(at("/cuda/lib64/libnvrtc.so.13") < at("/cuda/lib/libnvrtc.so.13"));
+        assert!(at("/cuda/lib/libnvrtc.so") < at("libnvrtc.so.13"));
+        assert_eq!(c.last().map(String::as_str), Some("libnvrtc.so"));
     }
 
     /// The flags are part of the contract, not an implementation detail: the
