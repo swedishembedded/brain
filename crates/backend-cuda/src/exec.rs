@@ -35,6 +35,7 @@
 //! at module load or, worse, silently mis-scheduled.
 
 use crate::driver::{
+    CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
     CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
 };
@@ -114,9 +115,9 @@ impl Context {
         };
         c.make_current()?;
         // SAFETY: `stream` is a valid out-parameter and the context is
-        // current. Flag 0 is `CU_STREAM_DEFAULT` - see `ExecFns::stream_create`
-        // on why it must not be the non-blocking one.
-        d.check(unsafe { (fns.stream_create)(&mut c.stream, 0) }, "cuStreamCreate")?;
+        // current. Non-blocking, so handles do not synchronise through the
+        // legacy default stream - see `ExecFns::stream_create`.
+        d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
         Ok(c)
     }
 
@@ -210,10 +211,11 @@ impl Context {
         }
         self.make_current()?;
         // SAFETY: `src` is valid for `src.len()` bytes and the destination was
-        // allocated with at least that many.
+        // allocated with at least that many. A pageable source is staged
+        // before the call returns, so `src` may be reused immediately.
         self.d.check(
-            unsafe { (self.fns.memcpy_htod)(mem.ptr, src.as_ptr() as *const c_void, src.len()) },
-            "cuMemcpyHtoD",
+            unsafe { (self.fns.memcpy_htod_async)(mem.ptr, src.as_ptr() as *const c_void, src.len(), self.stream) },
+            "cuMemcpyHtoDAsync",
         )
     }
 
@@ -239,37 +241,25 @@ impl Context {
         // proves the destination range lies inside the allocation.
         self.d.check(
             unsafe {
-                (self.fns.memcpy_htod)(mem.ptr + offset as CuDevicePtr, src.as_ptr() as *const c_void, src.len())
+                (self.fns.memcpy_htod_async)(mem.ptr + offset as CuDevicePtr, src.as_ptr() as *const c_void, src.len(), self.stream)
             },
-            "cuMemcpyHtoD",
+            "cuMemcpyHtoDAsync",
         )
     }
 
-    /// Zero the whole allocation.
+    /// Zero the whole allocation, enqueued on [`Self::stream`].
     ///
     /// Storage a caller asked for is zeroed on every other backend in this
     /// engine (wgpu maps buffers zero-filled, the CPU backend allocates a
     /// zeroed `Vec`), and model code relies on it - an accumulator buffer is
     /// allocated and then added into. `cuMemAlloc` returns whatever the last
     /// tenant left, so the zeroing is explicit here or it does not happen.
-    pub fn zero(&self, mem: &DeviceMem) -> Result<(), String> {
-        if mem.len == 0 {
-            return Ok(());
-        }
-        self.make_current()?;
-        // SAFETY: `mem.ptr` names `mem.len` bytes allocated on this context.
-        self.d.check(unsafe { (self.fns.memset_d8)(mem.ptr, 0, mem.len) }, "cuMemsetD8")
-    }
-
-    /// [`Self::zero`] enqueued on [`Self::stream`] instead of executed on the
-    /// legacy stream.
     ///
-    /// This is the form a submission's clears use, and it is not an
-    /// optimisation: a legacy-stream operation issued from a thread that is
-    /// capturing is one of the "potentially unsafe API calls" a capture
-    /// rejects, so a clear that must be *inside* a graph has nowhere else to
-    /// go. Outside capture it is the same operation one queue later.
-    pub fn zero_async(&self, mem: &DeviceMem) -> Result<(), String> {
+    /// It is stream-ordered, which is also what lets a submission put its
+    /// clears *inside* a captured graph: a legacy-stream operation issued from
+    /// a capturing thread is one of the "potentially unsafe API calls" a
+    /// capture rejects.
+    pub fn zero(&self, mem: &DeviceMem) -> Result<(), String> {
         if mem.len == 0 {
             return Ok(());
         }
@@ -313,11 +303,13 @@ impl Context {
         }
         self.make_current()?;
         // SAFETY: `dst` is writable for `dst.len()` bytes and the source holds
-        // at least that many.
+        // at least that many. The copy is enqueued behind every dispatch on
+        // this stream, and the wait below makes `dst` complete on return.
         self.d.check(
-            unsafe { (self.fns.memcpy_dtoh)(dst.as_mut_ptr() as *mut c_void, mem.ptr, dst.len()) },
-            "cuMemcpyDtoH",
-        )
+            unsafe { (self.fns.memcpy_dtoh_async)(dst.as_mut_ptr() as *mut c_void, mem.ptr, dst.len(), self.stream) },
+            "cuMemcpyDtoHAsync",
+        )?;
+        self.sync()
     }
 
     /// Compile `src` for THIS device's capability, through the on-disk cubin
@@ -508,13 +500,21 @@ impl Context {
         )
     }
 
-    /// Block until every launch on this context has completed. A launch is
-    /// asynchronous and reports only the errors it can see BEFORE running, so
-    /// this is where a faulting kernel is actually reported.
+    /// Block until every launch on this handle's stream has completed. A
+    /// launch is asynchronous and reports only the errors it can see BEFORE
+    /// running, so this is where a faulting kernel is actually reported.
+    ///
+    /// It waits on [`Self::stream`] and not on the context: the primary
+    /// context is shared by every handle on the device, and a context-wide
+    /// wait fails (`operation not permitted when stream is capturing`) while
+    /// any other handle is mid-capture. The synchronous copies this backend
+    /// issues run on the legacy default stream, which a blocking stream
+    /// orders against, so everything this handle submitted is covered.
     pub fn sync(&self) -> Result<(), String> {
         self.make_current()?;
-        // SAFETY: the context is current on this thread.
-        self.d.check(unsafe { (self.fns.ctx_synchronize)() }, "cuCtxSynchronize")
+        // SAFETY: the context is current on this thread and the stream was
+        // created on it.
+        self.d.check(unsafe { (self.fns.stream_synchronize)(self.stream) }, "cuStreamSynchronize")
     }
 }
 

@@ -306,7 +306,7 @@ impl GraphCache {
         // unbatched path had zeroed first, which is a wrong number rather than
         // a failure.
         for c in clears {
-            ctx.zero_async(c)?;
+            ctx.zero(c)?;
         }
         let mut nodes = Vec::with_capacity(steps.len());
         for (s, stage) in steps.iter().cloned().zip(staging) {

@@ -110,18 +110,20 @@ pub struct ExecFns {
     pub(crate) primary_ctx_retain: unsafe extern "C" fn(*mut CuContext, CuDevice) -> CuResult,
     pub(crate) primary_ctx_release: unsafe extern "C" fn(CuDevice) -> CuResult,
     pub(crate) ctx_set_current: unsafe extern "C" fn(CuContext) -> CuResult,
-    pub(crate) ctx_synchronize: unsafe extern "C" fn() -> CuResult,
+    /// `cuStreamSynchronize`, not `cuCtxSynchronize`: the primary context is
+    /// shared by every handle on the device, and waiting on the whole context
+    /// fails while ANY handle's stream is capturing a graph.
+    pub(crate) stream_synchronize: unsafe extern "C" fn(CuStream) -> CuResult,
     pub(crate) mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
     pub(crate) mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
     /// `cuMemsetD8` rather than `cuMemsetD32`: a clear is expressed in BYTES
     /// here, and the only value this backend clears to is zero, whose byte and
     /// word spellings coincide. A byte-wise memset also carries no alignment
     /// precondition, which a sub-range clear would otherwise have to prove.
-    pub(crate) memset_d8: unsafe extern "C" fn(CuDevicePtr, u8, usize) -> CuResult,
     /// `cuMemGetInfo` - (free, total) bytes on the CURRENT context's device.
     pub(crate) mem_get_info: unsafe extern "C" fn(*mut usize, *mut usize) -> CuResult,
-    pub(crate) memcpy_htod: unsafe extern "C" fn(CuDevicePtr, *const c_void, usize) -> CuResult,
-    pub(crate) memcpy_dtoh: unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize) -> CuResult,
+    pub(crate) memcpy_dtoh_async:
+        unsafe extern "C" fn(*mut c_void, CuDevicePtr, usize, CuStream) -> CuResult,
     pub(crate) module_load_data: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
     pub(crate) module_unload: unsafe extern "C" fn(CuModule) -> CuResult,
     pub(crate) module_get_function:
@@ -140,13 +142,14 @@ pub struct ExecFns {
         *mut *mut c_void,
         *mut *mut c_void,
     ) -> CuResult,
-    /// `cuStreamCreate(&s, 0)` - `CU_STREAM_DEFAULT`, i.e. a **blocking**
-    /// stream. Not `CU_STREAM_NON_BLOCKING`: the synchronous transfers this
-    /// backend still performs outside a submission (`cuMemcpyHtoD_v2`,
-    /// `cuMemcpyDtoH_v2`) run on the legacy default stream, and only a
-    /// blocking stream is implicitly ordered against that one. A
-    /// non-blocking stream would let a host write race a dispatch that
-    /// reads the buffer it wrote.
+    /// `cuStreamCreate(&s, CU_STREAM_NON_BLOCKING)`. Not the default (blocking)
+    /// stream: a blocking stream joins the legacy default stream's implicit
+    /// synchronisation domain with every other blocking stream in the context,
+    /// so waiting on one handle's stream waits on another handle's, and fails
+    /// outright while that one is capturing a graph. Every transfer and clear
+    /// this backend issues is therefore enqueued on the handle's own stream
+    /// (`cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuMemsetD8Async`), which is
+    /// what keeps host writes ordered against the dispatches that read them.
     pub(crate) stream_create: unsafe extern "C" fn(*mut CuStream, u32) -> CuResult,
     pub(crate) stream_destroy: unsafe extern "C" fn(CuStream) -> CuResult,
     pub(crate) memcpy_htod_async:
@@ -187,6 +190,10 @@ pub struct CuKernelNodeParams {
     pub kernel_params: *mut *mut c_void,
     pub extra: *mut *mut c_void,
 }
+
+/// `CU_STREAM_NON_BLOCKING`: a stream that does not synchronise implicitly with
+/// the legacy default stream (see [`ExecFns::stream_create`]).
+pub const CU_STREAM_NON_BLOCKING: u32 = 1;
 
 /// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`.
 ///
@@ -308,13 +315,11 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         primary_ctx_retain: sym(lib, b"cuDevicePrimaryCtxRetain\0")?,
         primary_ctx_release: sym(lib, b"cuDevicePrimaryCtxRelease_v2\0")?,
         ctx_set_current: sym(lib, b"cuCtxSetCurrent\0")?,
-        ctx_synchronize: sym(lib, b"cuCtxSynchronize\0")?,
+        stream_synchronize: sym(lib, b"cuStreamSynchronize\0")?,
         mem_alloc: sym(lib, b"cuMemAlloc_v2\0")?,
         mem_free: sym(lib, b"cuMemFree_v2\0")?,
-        memset_d8: sym(lib, b"cuMemsetD8_v2\0")?,
         mem_get_info: sym(lib, b"cuMemGetInfo_v2\0")?,
-        memcpy_htod: sym(lib, b"cuMemcpyHtoD_v2\0")?,
-        memcpy_dtoh: sym(lib, b"cuMemcpyDtoH_v2\0")?,
+        memcpy_dtoh_async: sym(lib, b"cuMemcpyDtoHAsync_v2\0")?,
         module_load_data: sym(lib, b"cuModuleLoadData\0")?,
         module_unload: sym(lib, b"cuModuleUnload\0")?,
         module_get_function: sym(lib, b"cuModuleGetFunction\0")?,

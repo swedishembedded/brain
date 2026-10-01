@@ -1077,7 +1077,7 @@ impl backend_api::Backend for CudaBackend {
         if !handled {
             for c in &clears {
                 self.ctx
-                    .zero_async(c)
+                    .zero(c)
                     .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
             }
             for r in &resolved {
@@ -1190,7 +1190,44 @@ mod tests {
         assert_eq!(b.max_storage_binding_bytes(), 2 * 1024 * 1024 * 1024 - 1);
         let (free, total) = b.ctx.mem_info().expect("cuMemGetInfo");
         assert!(total > 0, "a device reporting no memory at all");
-        assert_eq!(b.max_buffer_bytes(), free);
+        // Free memory moves between the two queries whenever anything else on
+        // the card allocates (another test, another process), so equality
+        // would be a race; what the number must be is a free-memory reading.
+        let _ = free;
+        assert!(b.max_buffer_bytes() > 0 && b.max_buffer_bytes() <= total, "max_buffer_bytes must be a free-memory reading of this device");
+    }
+
+    /// While one handle is capturing a graph, another handle on the same card
+    /// (on another thread) must still be able to transfer, clear and
+    /// synchronise. Waiting on the whole shared primary context, or issuing
+    /// legacy-stream copies from a blocking stream's domain, made every handle
+    /// in the process fail whenever any one of them was mid-capture.
+    #[test]
+    fn a_handle_is_not_blocked_by_another_handle_capturing_a_graph() {
+        let (Ok(a), Ok(b)) = (CudaBackend::try_new(&[]), CudaBackend::try_new(&[])) else {
+            brain_testutil::skip_unavailable("no usable CUDA backend");
+            return;
+        };
+        // Capture is thread-local, so the capturing thread may not synchronise
+        // anything; the other handle's thread is the one that must still work.
+        let capture = a.ctx.begin_capture().expect("begin capture");
+        // The same goes for every other way a handle talks to its card: a
+        // transfer or a clear from a thread that is not capturing.
+        let result = std::thread::scope(|s| {
+            s.spawn(|| -> Result<(), String> {
+                let mem = b.ctx.alloc(64)?;
+                b.ctx.zero(&mem)?;
+                b.ctx.upload(&mem, &[7u8; 64])?;
+                let mut back = [0u8; 64];
+                b.ctx.download(&mem, &mut back)?;
+                assert_eq!(back, [7u8; 64]);
+                b.ctx.sync()
+            })
+            .join()
+            .expect("transferring thread")
+        });
+        drop(capture);
+        result.expect("transfers and synchronise on a handle that is not capturing");
     }
 
     /// Registering a catalogue compiles nothing. The whole point of the lazy
