@@ -150,7 +150,9 @@ mod tests {
         let r = resident(Placement { tower: 0, decoder: 1, context: 4096, int8: false });
         let cost = r.cost();
         assert_eq!(cost.iter().map(|(d, _)| *d).collect::<Vec<_>>(), vec![Device::Gpu(0), Device::Gpu(1)]);
-        assert_eq!(cost[1].1, r.footprint.decoder_at(4096), "the decoder carries its KV cache");
+        let decoder_placed = r.footprint.decoder_placed(&r.placement);
+        assert_eq!(cost[1].1, decoder_placed, "the decoder carries the KV cache it is built with");
+        assert!(cost[1].1 > r.footprint.decoder, "the KV cache is charged on top of the weights");
         let shared = resident(Placement { tower: 0, decoder: 0, context: 4096, int8: false }).cost();
         assert_eq!(shared, vec![(Device::Gpu(0), cost[0].1 + cost[1].1)], "one card is charged once, for both");
     }
