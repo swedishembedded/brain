@@ -3,8 +3,8 @@
 
 //! End-to-end D-Bus round-trip: serve a tiny capability provider, then call `Run`
 //! over the bus as a client and verify the result comes back through a file
-//! descriptor. Needs a session bus, so it **skips** when `DBUS_SESSION_BUS_ADDRESS`
-//! is unset — run it under one:
+//! descriptor. Needs a session bus, so it **skips** when no session bus is
+//! reachable (the address variable unset, or naming a socket nobody listens on) — run it under one:
 //!
 //!     dbus-run-session -- cargo test -p brain-dbus --test roundtrip -- --nocapture
 //!
@@ -17,6 +17,14 @@ use std::sync::Arc;
 use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use serde_json::json;
 use zbus::zvariant::OwnedFd as ZOwnedFd;
+
+/// Whether a session bus answers a connection. The address variable alone is
+/// not evidence: a container or a login that has ended can keep exporting it
+/// after its socket is gone.
+fn session_bus_reachable() -> bool {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return false };
+    rt.block_on(zbus::Connection::session()).is_ok()
+}
 
 // ---- a no-weights provider: `bytes.reverse(text)` -> a Bytes blob "out" ----
 struct RevProvider;
@@ -122,8 +130,8 @@ fn memfd(data: &[u8]) -> std::os::fd::OwnedFd {
 
 #[test]
 fn run_roundtrips_a_result_over_an_fd() {
-    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -237,8 +245,8 @@ fn run_roundtrips_a_result_over_an_fd() {
 /// this test hangs until the harness's own timeout kills it.
 #[test]
 fn dbus_serve_stops_promptly_once_shutdown_fires() {
-    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     // A stateless resident is enough — this test is about the shutdown handshake,
@@ -294,8 +302,8 @@ fn dbus_serve_stops_promptly_once_shutdown_fires() {
 /// fire so it doesn't keep running to completion after being shed.
 #[test]
 fn admit_deadline_sheds_a_saturated_lane() {
-    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -356,8 +364,8 @@ fn admit_deadline_sheds_a_saturated_lane() {
 /// where it would go rather than putting it there.
 #[test]
 fn plan_answers_over_the_bus_without_making_anything_resident() {
-    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
-        brain_testutil::skip_unavailable("no session bus (run under `dbus-run-session -- cargo test ...`)");
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
         return;
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
