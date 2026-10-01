@@ -429,3 +429,40 @@ fn a_buffer_outliving_its_handles_drops_cleanly() {
     drop(x);
     drop(y);
 }
+
+/// The host frees a buffer as soon as it drops the last reference to it, and
+/// that is routinely while the device is still running the kernels that use it:
+/// the Rust handle is gone the moment the step list is submitted. If the free
+/// does not wait for that work, the address goes straight back to the driver,
+/// another handle's allocation gets it, and the first handle's still-running
+/// kernels write into the second one's data.
+#[test]
+fn freeing_a_buffer_waits_for_the_work_still_running_on_it() {
+    let Some(a) = backend() else { return };
+    let b = CudaBackend::try_new(KERNELS).expect("a second handle");
+    const N: usize = 1 << 24;
+    const CHAIN: usize = 300;
+    const MARK: f32 = 7.0;
+
+    let inp = a.storage_init("inp", &vec![1.0f32; N]);
+    // Warm the staging pool so the chain is queued, not synchronously issued.
+    let warm_x = a.storage(N as u64);
+    let warm: Vec<_> = (0..CHAIN).map(|_| a.step(AXPY, &[&warm_x, &inp], &[N as u32, 1.0f32.to_bits()], N as u32)).collect();
+    a.submit(&[], &warm);
+    a.poll_wait();
+    drop((warm, warm_x));
+
+    for round in 0..8 {
+        let x = a.storage(N as u64);
+        let steps: Vec<_> = (0..CHAIN).map(|_| a.step(AXPY, &[&x, &inp], &[N as u32, 1.0f32.to_bits()], N as u32)).collect();
+        a.submit(&[], &steps);
+        drop(steps);
+        // The host drops its last reference while the chain is still running.
+        drop(x);
+        // Another handle allocates the same size and fills it with a mark.
+        let y = b.storage_init("y", &vec![MARK; N]);
+        let got = b.read(&y, 4096);
+        assert!(got.iter().all(|v| *v == MARK), "round {round}: another handle's buffer was overwritten by work on a freed one: {:?}", &got[..4]);
+        a.poll_wait();
+    }
+}
