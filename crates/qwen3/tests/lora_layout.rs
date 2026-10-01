@@ -94,3 +94,11 @@ fn a_machine_with_one_card_does_not_invent_a_pipeline() {
     let err = plan_lora_layout(&cfg, 1, 4096, Dtype::BF16, 1, machine(&[16 * GIB])).unwrap_err();
     assert!(err.contains("1 card"), "{err}");
 }
+
+#[test]
+fn a_machine_that_homes_the_model_on_the_cpu_runs_it_there() {
+    let cfg = QwenConfig { block_size: 16, ..QwenConfig::tiny() };
+    let shards = plan_lora_layout(&cfg, 1, 16, Dtype::F32, 1, |needs| Ok(vec![Home::Cpu; needs.len()])).unwrap();
+    assert_eq!(shards.len(), 1);
+    assert_eq!(shards[0].gpu_index, model::Shard::ANY_GPU, "the ambient (CPU) device, not a card");
+}

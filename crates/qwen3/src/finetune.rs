@@ -163,7 +163,8 @@ pub fn plan_lora_layout(
                 for (sh, home) in shards.iter_mut().zip(homes) {
                     match home {
                         Home::Gpu(card) => sh.gpu_index = card as usize,
-                        Home::Cpu => return Err("qwen3 finetune: training has no CPU tier, and no card could take it".to_string()),
+                        // The ambient device: the CPU backend the caller selected.
+                        Home::Cpu => sh.gpu_index = Shard::ANY_GPU,
                     }
                 }
                 return Ok(shards);
@@ -217,6 +218,9 @@ fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, dt: D
     let place = |needs: &[Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
     let shards = plan_lora_layout(&cfg, opts.batch_size, opts.block_size, dt, gpu_core::devices::gpus().len(), place).map_err(std::io::Error::other)?;
     if let [whole] = shards.as_slice() {
+        if whole.gpu_index == Shard::ANY_GPU {
+            return build_for_training(cfg, opts, init, dt).map(Trained::Single);
+        }
         let built = gpu_core::devices::with_gpu(whole.gpu_index as u32, || build_for_training(cfg, opts, init, dt));
         return built.map_err(std::io::Error::other)?.map(Trained::Single);
     }

@@ -78,6 +78,7 @@ pub struct ChatFineTune {
     checkpoint_every: u32,
     cycle: u64,
     device: Device,
+    bf16_base: bool,
 }
 
 impl ChatFineTune {
@@ -104,6 +105,7 @@ impl ChatFineTune {
             checkpoint_every: 0,
             cycle: 0,
             device: Device::default(),
+            bf16_base: false,
         }
     }
 
@@ -220,6 +222,14 @@ impl ChatFineTune {
         self
     }
 
+    /// Hold the frozen base at bf16, half the bytes of fp32 (a 7B decoder
+    /// then trains on one 24 GB card); the adapters and optimiser stay fp32.
+    /// Scoring before and after runs at the same tier.
+    pub fn bf16_base(mut self, on: bool) -> Self {
+        self.bf16_base = on;
+        self
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -235,7 +245,9 @@ impl ChatFineTune {
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        let weights_str = utf8(&weights)?;
+        let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+        let weights_str = utf8(&open)?;
+        let tier = if self.bf16_base { qwen3::Dtype::BF16 } else { qwen3::Dtype::F32 };
 
         // Every file is checked against the base's own template before a
         // device is claimed.
@@ -254,16 +266,16 @@ impl ChatFineTune {
         // The packed validation split is only read for an eval the run does
         // not ask for; it is the held-out set when there is one.
         let val = held_out.as_deref().unwrap_or(&training[..]);
-        let cfg = qwen3::QwenConfig::from_json(&checkpoint::weightio::WeightReader::open(weights_str).map_err(|e| Error::Backend(format!("{weights_str}: {e}")))?.config());
+        let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
         let prepared_dir = out_dir.join(PREPARED_DIR);
         let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, data::chat::RenderOpts::default(), cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;
 
         crate::device::resolve(&self.device)?;
-        let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block));
+        let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier));
 
         let opts = fit_opts(self.steps, block, self.lr, self.seed);
-        let base_digest = digest(&weights)?;
+        let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,
             "dataset": digest(dataset)?,
@@ -282,7 +294,7 @@ impl ChatFineTune {
             Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
             None => qwen3::finetune::LoraStart::Fresh,
         };
-        let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control, qwen3::Dtype::F32).map_err(|e| Error::Backend(format!("training: {e}")))?;
+        let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control, tier).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
         let mut outcome = ChatFineTuneOutcome {
             status: FineTuneStatus::Completed,
@@ -338,7 +350,7 @@ impl ChatFineTune {
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
-        outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block));
+        outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier));
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -467,8 +479,9 @@ pub struct HeldOutScore {
 pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result<HeldOutScore> {
     let store_root = loader::model_dir::resolve(None);
     let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-    let weights_str = utf8(&weights)?;
-    checkpoint::weightio::WeightReader::open(weights_str).map_err(|e| Error::Backend(format!("{weights_str}: {e}")))?;
+    let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+    let weights_str = utf8(&open)?;
+    qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
     let records = read_checked(held_out, &model_dir)?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
     let mut longest = 0usize;
@@ -483,11 +496,11 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
         }
         None => None,
     };
-    Ok(score_records(weights_str, adapter, &tok, &tmpl, &records, block_for(longest, None)?))
+    Ok(score_records(weights_str, adapter, &tok, &tmpl, &records, block_for(longest, None)?, qwen3::Dtype::F32))
 }
 
-fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32) -> HeldOutScore {
-    let s = qwen3::eval::score_chat(weights, adapter, tok, tmpl, records, block);
+fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype) -> HeldOutScore {
+    let s = qwen3::eval::score_chat_dt(weights, adapter, tok, tmpl, records, block, tier);
     HeldOutScore { loss: (s.positions > 0).then_some(s.loss), token_accuracy: s.token_accuracy, positions: s.positions, records: s.samples, skipped: s.skipped }
 }
 
@@ -571,6 +584,27 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         patience: 0,
         adam: Default::default(),
     }
+}
+
+/// The content digest naming a base: a file's own, or for a `transformers`
+/// directory the digest of its `config.json` and weight files' digests in
+/// name order, so any change to any of them is a different base.
+pub(crate) fn base_digest(path: &Path) -> Result<String> {
+    if !path.is_dir() {
+        return digest(path);
+    }
+    let mut names: Vec<_> = std::fs::read_dir(path)
+        .map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "config.json" || n.ends_with(".safetensors") || n.ends_with(".bin") || n.ends_with(".index.json")))
+        .collect();
+    names.sort();
+    let mut combined = String::new();
+    for p in &names {
+        combined.push_str(&format!("{}={}\n", p.file_name().and_then(|n| n.to_str()).unwrap_or_default(), digest(p)?));
+    }
+    Ok(format!("sha256:{}", brain_modelstore::fetch::bytes_digest(combined.as_bytes())))
 }
 
 pub(crate) fn digest(path: &Path) -> Result<String> {

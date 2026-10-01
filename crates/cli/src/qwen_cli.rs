@@ -776,12 +776,8 @@ fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
     Ok((owner.to_string(), name.to_string(), tag))
 }
 
-/// The path to open for a base the model store resolved to `weights` inside
-/// `dir`: a `transformers` directory is answered by its `config.json` and is
-/// opened as the directory, anything else as the file.
 fn base_open_path(weights: &Path, dir: &Path) -> String {
-    let anchor = weights.file_name().is_some_and(|n| n == "config.json");
-    (if anchor { dir } else { weights }).to_str().unwrap_or_default().to_string()
+    qwen3::store_checkpoint_path(weights, dir).to_str().unwrap_or_default().to_string()
 }
 
 /// The rendered dataset of one fine-tune run, removed when the run ends

@@ -53,6 +53,15 @@ pub struct ChatScore {
 /// tier both builds use; an fp32 master copy is kept nowhere when `dt`
 /// differs, so base and adapter scores must pass the SAME tier or the
 /// comparison crosses tiers.
+/// The base's configuration and every tensor under brain's names as host
+/// f32, from whatever `weights` is on disk (a brain checkpoint, a GGUF or a
+/// `transformers` directory).
+fn base_tensors(weights: &str) -> (QwenConfig, HashMap<String, Vec<f32>>) {
+    let (cfg, src) = crate::open_checkpoint(weights).unwrap_or_else(|e| panic!("{e}"));
+    let tensors = crate::serve::Engine::tensors_from(&cfg, &*src).unwrap_or_else(|e| panic!("{weights}: {e}"));
+    (cfg, tensors)
+}
+
 fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32, dt: Dtype) -> Qwen {
     match adapter {
         None => {
@@ -61,9 +70,7 @@ fn load_scored_model(weights: &str, adapter: Option<&str>, t: u32, dt: Dtype) ->
             Qwen::new_shard_dt(cfg, 1, t, &*src, shard, dt)
         }
         Some(a) => {
-            let c = checkpoint::load(weights);
-            let mut tensors: HashMap<String, Vec<f32>> = c.by_role("");
-            let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{weights}: {e}"));
+            let (mut cfg, mut tensors) = base_tensors(weights);
             crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");
             // Folded: the delta is already baked into the base tensors, so
             // this Qwen has no separate lora_a/lora_b params to build.
@@ -251,9 +258,7 @@ impl KvMode {
 /// legacy (`Qwen`) and paged (`Engine`) scoring backends build from
 /// identical tensors.
 fn load_scored_tensors(weights: &str, adapter: Option<&str>) -> (QwenConfig, HashMap<String, Vec<f32>>) {
-    let c = checkpoint::load(weights);
-    let mut cfg = QwenConfig::from_json_checked(&c.header["config"]).unwrap_or_else(|e| panic!("{weights}: {e}"));
-    let mut tensors: HashMap<String, Vec<f32>> = c.by_role("");
+    let (mut cfg, mut tensors) = base_tensors(weights);
     if let Some(a) = adapter {
         crate::lora::fold_adapter_into(&mut tensors, a).expect("fold adapter into base tensors");
         cfg.lora = None;

@@ -53,3 +53,15 @@ fn hf_dir_config(dir: &std::path::Path) -> Result<QwenConfig, String> {
     let json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("{}: {e}", dir.join("config.json").display()))?;
     crate::hf::decoder_config(&json).map_err(|e| format!("{}: {e}", dir.display()))
 }
+
+/// The path [`open_checkpoint`] should open for a base the model store
+/// resolved to `weights` inside `dir`: a `transformers` directory is answered
+/// by its `config.json` and is opened as the directory, anything else as the
+/// file.
+pub fn store_checkpoint_path(weights: &std::path::Path, dir: &std::path::Path) -> std::path::PathBuf {
+    if weights.file_name().is_some_and(|n| n == "config.json") {
+        dir.to_path_buf()
+    } else {
+        weights.to_path_buf()
+    }
+}

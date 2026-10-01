@@ -156,3 +156,28 @@ fn a_cancelled_run_resumes_to_the_uninterrupted_result() {
     }
     assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
 }
+
+/// A base that is a `transformers` directory (the way every DeepSeek
+/// checkpoint is downloaded) fine-tunes as a brain checkpoint does: it is read
+/// as it is, scored before and after, named by a digest of its files, and the
+/// adapter is exported.
+#[test]
+fn a_transformers_directory_base_fine_tunes_and_scores() {
+    let model = chat_model_dir("hfdir");
+    let store = model.join("models");
+    let repo = store.join("acme").join("toy");
+    let cfg = qwen3::QwenConfig { vocab: 151_936, block_size: 128, max_position_embeddings: 128, ..qwen3::QwenConfig::tiny() };
+    let reader = checkpoint::weightio::WeightReader::open(model.join("model.safetensors").to_str().unwrap()).unwrap();
+    qwen3::export::export_hf(&reader, &cfg, &repo, &qwen3::export::HfExport { dtype: qwen3::export::HfDtype::F32, tokenizer_dir: Some(&model), ..Default::default() }).unwrap();
+    std::fs::copy(model.join("tokenizer_config.json"), repo.join("tokenizer_config.json")).unwrap();
+
+    let train = write_dataset(&model, "train.jsonl", &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab")]);
+    let held_out = write_dataset(&model, "held_out.jsonl", &[("cad", "bead")]);
+    let out = model.join("run");
+    let outcome = ChatFineTune::from_pretrained(repo.to_str().unwrap()).dataset(train).held_out(held_out).out_dir(&out).rank(2).steps(4).lr(1e-2).seed(7).device(cpu()).run().expect("a transformers directory base fine-tunes");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    assert!(outcome.base_score.is_some() && outcome.tuned_score.is_some(), "scored before and after");
+    let digest = outcome.base_digest.expect("the base is named");
+    assert!(digest.starts_with("sha256:"), "{digest}");
+    assert!(outcome.adapter.is_some_and(|a| a.is_file()));
+}
