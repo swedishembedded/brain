@@ -122,6 +122,11 @@ checked against the action's own spec first (unknown params, wrong types, values
 out of range, a missing or mistyped blob are all a 400), and the request body is
 bounded at 64 MiB.
 
+A param the host resolves for itself, such as a weights path, is never offered by
+`/v1/capabilities` and is refused (400, unknown param) if a call names it: a caller
+cannot point a model at a file on the machine that serves it. The host supplies its
+own answer.
+
 A job belongs to the caller that started it: with an `Authenticator` that scopes
 callers, another caller gets 404 for an id that exists. Jobs live in memory, at most
 32 per caller and 1024 per surface, finished results are forgotten after an hour or

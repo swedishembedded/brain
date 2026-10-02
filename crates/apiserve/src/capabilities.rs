@@ -14,7 +14,8 @@
 //!
 //! A call is `{"model", "action", "params", "blobs": {name: {"media", "data",
 //! "meta"}}}` with `data` base64. It is validated against the action's own
-//! [`ActionSpec`] before anything is submitted, and then goes through the same
+//! [`ActionSpec`], as a caller sees it (never offered, and never accepting, a
+//! param the host resolves such as a weights path), before anything is submitted, and then goes through the same
 //! [`bridge`] every dialect route does, so the surface's hooks, admission and
 //! cancel-on-disconnect apply to it unchanged.
 //!
@@ -115,6 +116,11 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<(String, String, Invocat
         let meta = if wire.meta.is_null() { json!({}) } else { wire.meta };
         inv.blobs.insert(name, Blob::new(media, bytes).with_meta(meta));
     }
+    // Two passes, in this order. First the caller's call against what a caller
+    // may see: a param the host resolves (a weights path) is refused as unknown,
+    // so a remote caller can never name a file on this machine. Then the full
+    // spec, which is where the host fills in its own answers.
+    let inv = spec.clone().for_serving().validate(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
     let inv = spec.validate(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
     Ok((call.model, call.action, inv))
 }
@@ -146,7 +152,8 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
         .iter()
         .filter(|manifest| state.lists(&manifest.model))
         .flat_map(|manifest| {
-            manifest.actions.iter().map(move |action| {
+            // What a caller may see: nothing the host resolves for itself.
+            manifest.clone().for_serving().actions.into_iter().map(move |action| {
                 let params: Vec<Value> = action
                     .params
                     .iter()

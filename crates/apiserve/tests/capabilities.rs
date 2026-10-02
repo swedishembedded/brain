@@ -63,6 +63,47 @@ impl Instance for EchoInst {
     }
 }
 
+/// `infer(prompt)` whose weights path is the host's fact (`BRAIN_APISERVE_TEST_WEIGHTS`),
+/// not a caller's choice. It reports back the path it was run with.
+struct Hosted;
+struct HostedInst;
+
+const HOSTED_WEIGHTS_VAR: &str = "BRAIN_APISERVE_TEST_WEIGHTS";
+
+fn hosted_manifest() -> Manifest {
+    Manifest::new(
+        "brain-hosted",
+        "a model whose weights live on the host",
+        vec![ActionSpec::new("infer", "text in, text out")
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("weights", ParamType::Str, "path to the checkpoint").host_env(HOSTED_WEIGHTS_VAR))
+            .param(ParamSpec::new("checkpoint", ParamType::Str, "path to an alternative checkpoint").default(json!("")).host_resolved())
+            .output(BlobSpec::new("text", Media::Text, "the answer"))],
+    )
+}
+
+impl ResidentModel for Hosted {
+    fn manifest(&self) -> Manifest {
+        hosted_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-hosted", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(HostedInst))
+    }
+}
+
+impl Instance for HostedInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let weights = inv.params["weights"].as_str().unwrap_or("").to_string();
+        Ok(Outcome::new().blob("text", Blob::new(Media::Text, weights.into_bytes())))
+    }
+}
+
 /// `render(steps) -> video`: slow, reports progress, and honours cancellation.
 struct Slow(Arc<AtomicBool>);
 struct SlowInst(Arc<AtomicBool>);
@@ -169,7 +210,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let saw_cancel = Arc::new(AtomicBool::new(false));
-    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel)))];
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Echo), Arc::new(Slow(Arc::clone(&saw_cancel))), Arc::new(Hosted)];
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let exec = Executor::start(models, budgets, Policy::default());
@@ -231,6 +272,34 @@ async fn the_catalogue_lists_every_action_with_its_contract() {
     assert_eq!(transcribe["streaming"], false);
     let render = entries.iter().find(|e| e["action"] == "render").expect("render is listed");
     assert_eq!(render["streaming"], true);
+}
+
+#[tokio::test]
+async fn the_catalogue_does_not_offer_what_only_the_host_may_choose() {
+    let rig = rig();
+    let (_, body) = call(&rig.app, Method::GET, "/v1/capabilities", "alice", None).await;
+    let infer = body["data"].as_array().unwrap().iter().find(|e| e["model"] == "brain-hosted").expect("brain-hosted is listed");
+    let names: Vec<&str> = infer["params"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["prompt"], "a weights path is the host's, never offered to a caller");
+}
+
+#[tokio::test]
+async fn a_caller_cannot_name_what_only_the_host_may_choose() {
+    let rig = rig();
+    for param in ["weights", "checkpoint"] {
+        let (status, response) = call(&rig.app, Method::POST, "/v1/run", "alice", Some(run_body("brain-hosted", "infer", json!({"prompt": "hi", param: "/etc/passwd"}), json!({})))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "naming '{param}' must be refused: {response}");
+    }
+    assert_eq!(rig.ledger.lock().unwrap().begun, 0, "a refused call never reaches the hooks");
+}
+
+#[tokio::test]
+async fn the_host_still_answers_for_what_the_caller_may_not() {
+    std::env::set_var(HOSTED_WEIGHTS_VAR, "/host/own/weights");
+    let rig = rig();
+    let (status, body) = call(&rig.app, Method::POST, "/v1/run", "alice", Some(run_body("brain-hosted", "infer", json!({"prompt": "hi"}), json!({})))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["blobs"]["text"]["data"], "L2hvc3Qvb3duL3dlaWdodHM=", "base64 of the host's own path");
 }
 
 #[tokio::test]
