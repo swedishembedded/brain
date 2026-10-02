@@ -1487,7 +1487,20 @@ mod tests {
             DecoderBuild::ShardedInference(Dtype::F32, shard),
         );
         let got = truncated.encode_hidden(&tokens, layer);
-        assert_eq!(got, want, "a shard truncated past `layer` must reproduce the full model's hidden state at `layer` bit-for-bit");
+        if gpu_core::backend_name() == "cpu" {
+            assert_eq!(got, want, "a shard truncated past `layer` must reproduce the full model's hidden state at `layer` bit-for-bit");
+        } else {
+            // The shard decodes token by token through the decode-regime
+            // kernels and the full model runs the batched ones. On the CPU
+            // backend both are the same sequential kernels, hence bit-equal;
+            // on a device the decode kernels reduce in a different order
+            // inside each kernel, so the two agree to a few ulp (measured on
+            // CUDA: 96 of 200 elements differ, by at most 5e-9 on values of
+            // ~1e-2) and not bit for bit. Deterministic: the same elements
+            // differ on every run.
+            let maxabs = got.iter().zip(&want).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+            assert!(maxabs < 1e-6, "a shard truncated past `layer` must reproduce the full model's hidden state at `layer`: maxabs {maxabs}");
+        }
     }
 
     /// Text-only [`Qwen3Vl::encode_hidden`] must apply REAL positional RoPE.
