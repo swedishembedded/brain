@@ -48,7 +48,7 @@
 // fused). Agreement is therefore to f32 rounding of the running sum, not bit
 // identity.
 //
-// Data movement: 3-stage cp.async pipeline, one __syncthreads per 64-deep
+// Data movement: 4-stage cp.async pipeline, one __syncthreads per 64-deep
 // k-tile. Tiles are stored 64 bytes per row with the 16-byte chunk index
 // XOR-swizzled by (row >> 1) & 3, which makes every ldmatrix phase (8 rows,
 // same logical chunk) touch eight distinct 16-byte bank groups. The per-
@@ -59,19 +59,19 @@
 // ranges of one allocation).
 
 #ifndef BRAIN_I8_BM
-#define BRAIN_I8_BM 128   // output rows per block
+#define BRAIN_I8_BM 64    // output rows per block
 #endif
 #ifndef BRAIN_I8_BN
 #define BRAIN_I8_BN 64    // output columns per block
 #endif
 #ifndef BRAIN_I8_WARPS_M
-#define BRAIN_I8_WARPS_M 4
+#define BRAIN_I8_WARPS_M 2
 #endif
 #ifndef BRAIN_I8_WARPS_N
 #define BRAIN_I8_WARPS_N 2
 #endif
 #ifndef BRAIN_I8_STAGES
-#define BRAIN_I8_STAGES 3
+#define BRAIN_I8_STAGES 4
 #endif
 
 #define BK 64                                    // int8 along K per staged tile
@@ -163,33 +163,54 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
     const unsigned char* xb = reinterpret_cast<const unsigned char*>(xq);
     const unsigned char* wb = reinterpret_cast<const unsigned char*>(wq);
 
+    // Everything a stage load needs that does not change with the k-tile is
+    // computed once here, so the pipelined loop issues a copy per chunk and
+    // little else: an issue slot spent on address arithmetic is one the fold
+    // below needs (see the header).
+    constexpr unsigned int A_IT = (BRAIN_I8_BM * 4u + THREADS - 1u) / THREADS;
+    constexpr unsigned int B_IT = (BRAIN_I8_BN * 4u + THREADS - 1u) / THREADS;
+    const unsigned char* a_src[A_IT];
+    const unsigned char* b_src[B_IT];
+    unsigned int a_dst[A_IT], a_len[A_IT], b_dst[B_IT], b_len[B_IT];
+#pragma unroll
+    for (unsigned int it = 0; it < A_IT; ++it) {
+        const unsigned int i = tid + it * THREADS;
+        const unsigned int r = i >> 2, c = i & 3u;
+        const bool ok = i < BRAIN_I8_BM * 4u && row0 + r < M;
+        a_src[it] = xb + (unsigned long long)(ok ? row0 + r : 0u) * K + c * 16u;
+        a_dst[it] = brain_tile_off(r, c);
+        a_len[it] = ok ? 16u : 0u;
+    }
+#pragma unroll
+    for (unsigned int it = 0; it < B_IT; ++it) {
+        const unsigned int i = tid + it * THREADS;
+        const unsigned int r = i >> 2, c = i & 3u;
+        const bool ok = i < BRAIN_I8_BN * 4u && col0 + r < N;
+        b_src[it] = wb + (unsigned long long)(ok ? col0 + r : 0u) * K + c * 16u;
+        b_dst[it] = brain_tile_off(r, c);
+        b_len[it] = ok ? 16u : 0u;
+    }
+    // One 8-byte (two group scales) copy per weight row, by the first BN threads.
+    const bool s_ok = tid < BRAIN_I8_BN && col0 + tid < N;
+    const float* s_src = sw + (unsigned long long)(s_ok ? col0 + tid : 0u) * ng;
+    const unsigned int s_dst = brain_smem_addr(&Ss[0][0]) + tid * 8u;
+    const unsigned int a_smem = brain_smem_addr(&As[0][0]);
+    const unsigned int b_smem = brain_smem_addr(&Bs[0][0]);
+
     // Stage `kt` into pipeline slot `s`.
     auto load_stage = [&](unsigned int s, unsigned int kt) {
         const unsigned int kbyte = kt * BK;
 #pragma unroll
-        for (unsigned int it = 0; it < (BRAIN_I8_BM * 4u + THREADS - 1u) / THREADS; ++it) {
-            const unsigned int i = tid + it * THREADS;
-            if (i >= BRAIN_I8_BM * 4u) { break; }
-            const unsigned int r = i >> 2, c = i & 3u;
-            const bool ok = row0 + r < M;
-            const unsigned char* src = xb + (unsigned long long)(ok ? row0 + r : 0u) * K + kbyte + c * 16u;
-            brain_cp16(brain_smem_addr(&As[s][0]) + brain_tile_off(r, c), src, ok ? 16u : 0u);
+        for (unsigned int it = 0; it < A_IT; ++it) {
+            brain_cp16(a_smem + s * A_STAGE_BYTES + a_dst[it], a_src[it] + kbyte, a_len[it]);
         }
 #pragma unroll
-        for (unsigned int it = 0; it < (BRAIN_I8_BN * 4u + THREADS - 1u) / THREADS; ++it) {
-            const unsigned int i = tid + it * THREADS;
-            if (i >= BRAIN_I8_BN * 4u) { break; }
-            const unsigned int r = i >> 2, c = i & 3u;
-            const bool ok = col0 + r < N;
-            const unsigned char* src = wb + (unsigned long long)(ok ? col0 + r : 0u) * K + kbyte + c * 16u;
-            brain_cp16(brain_smem_addr(&Bs[s][0]) + brain_tile_off(r, c), src, ok ? 16u : 0u);
+        for (unsigned int it = 0; it < B_IT; ++it) {
+            brain_cp16(b_smem + s * B_STAGE_BYTES + b_dst[it], b_src[it] + kbyte, b_len[it]);
         }
         if (tid < BRAIN_I8_BN) {
-            const unsigned int i = tid;
-            const bool ok = col0 + i < N;
             // ng is even (K % 64 == 0) and kt*2 is even: 8-byte aligned.
-            const float* src = sw + (unsigned long long)(ok ? col0 + i : 0u) * ng + kt * 2u;
-            brain_cp8(brain_smem_addr(&Ss[s][i * 2u]), src, ok ? 8u : 0u);
+            brain_cp8(s_dst + s * (S_STAGE_FLOATS * 4u), s_src + kt * 2u, s_ok ? 8u : 0u);
         }
     };
 
@@ -214,61 +235,69 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_matmul_i8_mma(const 
     // (rows 0-7, k 0-15), (rows 8-15, k 0-15), (rows 0-7, k 16-31),
     // (rows 8-15, k 16-31). For B (two n8 tiles x 32 bytes): j = 0..3 are
     // (n0, k 0-15), (n0, k 16-31), (n1, k 0-15), (n1, k 16-31).
+    //
+    // Offsets are per (k32 step) only: moving down 16 rows keeps
+    // `(row >> 1) & 3`, so the swizzle is the same and a further m16 / n16 tile
+    // is a constant 16 * 64 bytes - an immediate, not an instruction.
     const unsigned int lj = lane >> 3, lr = lane & 7u;
     const unsigned int a_row = wm * WM + lr + ((lj & 1u) << 3);
-    const unsigned int a_chunk = lj >> 1;
     const unsigned int b_row = wn * WN + lr + ((lj >> 1) << 3);
-    const unsigned int b_chunk = lj & 1u;
+    unsigned int a_off[2], b_off[2];
+#pragma unroll
+    for (unsigned int ks = 0; ks < 2; ++ks) {
+        a_off[ks] = brain_tile_off(a_row, ks * 2u + (lj >> 1));
+        b_off[ks] = brain_tile_off(b_row, ks * 2u + (lj & 1u));
+    }
+    const unsigned int sc_off = (wn * WN + (lane & 3u) * 2u) * 2u;  // floats, this thread's first column
 
-    const unsigned int g = lane >> 2;    // MMA groupID
-    const unsigned int t4 = lane & 3u;   // MMA threadID_in_group
-
+    unsigned int s_rd = 0, s_wr = BRAIN_I8_STAGES - 1;
     for (unsigned int kt = 0; kt < ktiles; ++kt) {
         brain_cp_wait<BRAIN_I8_STAGES - 2>();
         __syncthreads();
-        {
-            const unsigned int nk = kt + BRAIN_I8_STAGES - 1;
-            if (nk < ktiles) { load_stage(nk % BRAIN_I8_STAGES, nk); }
-            brain_cp_commit();
-        }
-        const unsigned int s = kt % BRAIN_I8_STAGES;
-        const unsigned int a_base = brain_smem_addr(&As[s][0]);
-        const unsigned int b_base = brain_smem_addr(&Bs[s][0]);
+        if (kt + BRAIN_I8_STAGES - 1 < ktiles) { load_stage(s_wr, kt + BRAIN_I8_STAGES - 1); }
+        brain_cp_commit();
+        s_wr = (s_wr + 1 == BRAIN_I8_STAGES) ? 0u : s_wr + 1;
+
+        const unsigned int a_base = a_smem + s_rd * A_STAGE_BYTES;
+        const unsigned int b_base = b_smem + s_rd * B_STAGE_BYTES;
+        const float* ss = &Ss[s_rd][sc_off];
+        s_rd = (s_rd + 1 == BRAIN_I8_STAGES) ? 0u : s_rd + 1;
+
+        // Both k32 scales of both columns of every n8 tile this thread folds
+        // into: one 16-byte read per tile (columns 2t, 2t+1, groups 0 and 1).
+        float4 sc[NT];
+#pragma unroll
+        for (int nt = 0; nt < NT; ++nt) { sc[nt] = *reinterpret_cast<const float4*>(ss + nt * 16); }
 
 #pragma unroll
         for (unsigned int ks = 0; ks < 2; ++ks) {
             unsigned int b[NT][2];
 #pragma unroll
             for (int np = 0; np < NT / 2; ++np) {
-                brain_ldsm_x4(b_base + brain_tile_off(b_row + np * 16u, ks * 2u + b_chunk), b[2 * np][0], b[2 * np][1], b[2 * np + 1][0], b[2 * np + 1][1]);
-            }
-            // This thread's weight scale for each column it will fold into.
-            float sc[NT][2];
-#pragma unroll
-            for (int nt = 0; nt < NT; ++nt) {
-#pragma unroll
-                for (int j = 0; j < 2; ++j) {
-                    sc[nt][j] = Ss[s][(wn * WN + nt * 8u + t4 * 2u + j) * 2u + ks];
-                }
+                brain_ldsm_x4(b_base + b_off[ks] + np * (16u * BK), b[2 * np][0], b[2 * np][1], b[2 * np + 1][0], b[2 * np + 1][1]);
             }
 #pragma unroll
             for (int mt = 0; mt < MT; ++mt) {
                 unsigned int a[4];
-                brain_ldsm_x4(a_base + brain_tile_off(a_row + mt * 16u, ks * 2u + a_chunk), a[0], a[1], a[2], a[3]);
+                brain_ldsm_x4(a_base + a_off[ks] + mt * (16u * BK), a[0], a[1], a[2], a[3]);
 #pragma unroll
                 for (int nt = 0; nt < NT; ++nt) {
                     unsigned int d[4];
                     brain_mma_s8(d, a, b[nt][0], b[nt][1]);
-#pragma unroll
-                    for (int e = 0; e < 4; ++e) {
-                        const float t = __uint_as_float(d[e]) - FLOAT_BIAS;
-                        f[mt][nt][e] = fmaf(t, sc[nt][e & 1], f[mt][nt][e]);
-                    }
+                    const float s0 = ks == 0 ? sc[nt].x : sc[nt].y;   // column 2t
+                    const float s1 = ks == 0 ? sc[nt].z : sc[nt].w;   // column 2t + 1
+                    f[mt][nt][0] = fmaf(__uint_as_float(d[0]) - FLOAT_BIAS, s0, f[mt][nt][0]);
+                    f[mt][nt][1] = fmaf(__uint_as_float(d[1]) - FLOAT_BIAS, s1, f[mt][nt][1]);
+                    f[mt][nt][2] = fmaf(__uint_as_float(d[2]) - FLOAT_BIAS, s0, f[mt][nt][2]);
+                    f[mt][nt][3] = fmaf(__uint_as_float(d[3]) - FLOAT_BIAS, s1, f[mt][nt][3]);
                 }
             }
         }
     }
     brain_cp_wait<0>();
+
+    const unsigned int g = lane >> 2;    // MMA groupID
+    const unsigned int t4 = lane & 3u;   // MMA threadID_in_group
 
 #pragma unroll
     for (int mt = 0; mt < MT; ++mt) {

@@ -4577,13 +4577,22 @@ mod tests {
         }
         let got_tail: Vec<Vec<f32>> = tail.iter().enumerate().map(|(i, &tok)| decode_stage(&whole_chunked, tok, (prompt.len() + i) as u32, None)).collect();
 
+        // The portable paths agree to 9.4e-4 here (measured with
+        // `BRAIN_NO_PROVIDER=cuda`, against a bar of 1e-3). On a device with
+        // tensor cores the chunk round's int8 GEMMs run on int8 MMAs and its
+        // attention on fp16 MMAs (`gpu-core/tests/cuda_flash_prefill.rs` states
+        // that kernel's own bar), and the same comparison measures 1.08e-3 - the
+        // fp16 rounding of attention, which the token-by-token loop does not
+        // pay. That tier's bar is therefore 2e-3, still tight enough to catch a
+        // wrong head, mask or scale (those are O(1) errors).
+        let bar = if gpu_core::provider::cuda::tensor_core_kernels_enabled(&whole.gpu) { 2e-3 } else { 1e-3 };
         let maxabs = |a: &[f32], b: &[f32]| a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()));
         let mut worst = maxabs(&got_last, &want_last);
-        assert!(worst < 1e-3, "chunked int8 prefill at real qwen38_27b dims diverged at the prompt's last token: maxabs={worst}");
+        assert!(worst < bar, "chunked int8 prefill at real qwen38_27b dims diverged at the prompt's last token: maxabs={worst}");
         for (i, (got, want)) in got_tail.iter().zip(&want_tail).enumerate() {
             let err = maxabs(got, want);
             worst = worst.max(err);
-            assert!(err < 1e-3, "decode step {i} after real-dims chunked prefill diverged: maxabs={err}");
+            assert!(err < bar, "decode step {i} after real-dims chunked prefill diverged: maxabs={err}");
         }
         println!("real-dims chunked int8 prefill: worst maxabs = {worst:e}");
     }

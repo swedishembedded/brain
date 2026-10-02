@@ -27,6 +27,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 |---|---|---|---|---|---|---|
 | `matmul_f32_tiled` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
 | `matmul_i8_mma` | MatMul | I8 | tuned | 8.0 | `brain_matmul_i8_mma` | int8 tensor-core GEMM (mma.sync m16n8k32), dynamic per-token activation scale, group-32 weight scale folded per MMA |
+| `flash_prefill_f16_hd256` | PagedAttentionFused | F32 | tuned | 8.0 | `brain_flash_prefill_f16_hd256` | fused causal paged-attention prefill at head_dim 256 on fp16 tensor cores (fp32 pool and accumulators), 64 query rows per block |
 | `matmul_i8_gemv` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_gemv` | packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg |
 | `matmul_i8_gemv_multi` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_gemv_multi` | up to four int8 projections of one activation in one launch (blocks of every matrix fill the card together); runs the single GEMV's own block function, bit-identical to separate launches |
 | `add_rms_quant` | RmsNorm | I8 | tuned | 5.0 | `brain_add_rms_quant` | residual add + RMSNorm + per-row int8 scale + pack in one launch; 64 threads per row, bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack |

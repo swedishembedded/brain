@@ -333,7 +333,7 @@ pub trait OperatorProvider: Send + Sync {
 /// fresh at [`ProviderRegistry::reference`] construction time, not cached - 
 /// a process-wide cache would make this env var untestable per-test the way
 /// `upgrade`'s own `OnceLock` cache already is for its callers.
-fn disabled_providers() -> Vec<String> {
+pub(crate) fn disabled_providers() -> Vec<String> {
     std::env::var("BRAIN_NO_PROVIDER")
         .unwrap_or_default()
         .split(',')

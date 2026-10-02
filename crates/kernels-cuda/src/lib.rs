@@ -211,6 +211,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_mma.cu"),
     },
     CudaKernel {
+        name: "flash_prefill_f16_hd256",
+        // Looked up by `gpu_core::provider::cuda::paged_flash_prefill_step`
+        // through `find`: the only (PagedAttentionFused, F32) entry.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: false,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd256",
+        what: "fused causal paged-attention prefill at head_dim 256 on fp16 tensor cores (fp32 pool and accumulators), 64 query rows per block",
+        reported: "native:flash_prefill_f16_hd256",
+        block_dim: 256,
+        // 64 query rows per block; there is no column tile (the whole head is one block).
+        tile: (64, 1),
+        // K and V tiles of 32 keys x (256 + 8 pad) fp16.
+        shared_bytes: 2 * 32 * (256 + 8) * 2,
+        src: include_str!("../cu/flash_prefill_f16_hd256.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8_gemv",
         op: Op::MatMul,
         weight: Dtype::I8,

@@ -54,25 +54,32 @@
 //! the WGSL reference provider exactly as before - a decline, never a forced
 //! failure and never a silently different answer.
 
-use std::sync::Mutex;
-
 use backend_api::select::{self, Dtype};
-use backend_api::{BindKind, DType, ImplSource, NativeId, NativeSpec};
+use backend_api::{BindKind, DType, ImplSource};
 use kernels_cuda::{CudaKernel, Cc};
 
 use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 
-/// How one hand-written kernel binds its arguments: the uniform first, then
-/// the storage pointers in the order the reference kernel expects them.
-/// Mirrors `matmul.wgsl`'s own `@binding` order exactly, which is what lets
-/// the same [`super::OpRequest`] feed either provider.
-const MATMUL_BINDINGS: &[BindKind] =
-    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+/// `matmul.wgsl`'s own `@binding` order, which the f32 GEMM mirrors: uniform,
+/// activations, weights, output.
+const MATMUL_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
 /// `matmul_i8_dyn.wgsl`'s own `@binding` order: uniform, packed activations,
 /// packed weights, per-token activation scale, group weight scale, output.
 const MATMUL_I8_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// `paged_flash_prefill_hd256.wgsl`'s own `@binding` order: uniform, queries,
+/// K pool, V pool, block tables, sequence lengths, context output.
+const PAGED_FLASH_PREFILL_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
     BindKind::StorageRead,
     BindKind::StorageRead,
     BindKind::StorageRead,
@@ -87,32 +94,17 @@ const I8_MMA_GROUP: u32 = 32;
 /// Elements of K per staged tile of the int8 tensor-core kernel (two groups).
 const I8_MMA_K_TILE: u32 = 64;
 
-/// Whether the device has taken this kernel, cached per provider instance -
-/// the same one-provider-per-device assumption `coopmat::CoopMatProvider` and
-/// `select::CachedSelector` already make (one `ProviderRegistry` is built per
-/// `Ops`/`Gpu`, never shared across unrelated devices).
-#[derive(Clone, Copy)]
-enum Registration {
-    Unattempted,
-    /// The backend cannot compile CUDA C++, cannot host this kernel's launch
-    /// geometry, or has no NVRTC. An expected outcome, not a fault.
-    Declined,
-    Registered(NativeId),
-}
-
 pub struct CudaProvider {
     /// The capability the DRIVER reported for the device this provider was
     /// built for. Never a default: a provider with no capability to resolve
     /// against cannot be constructed (see [`CudaProvider::for_gpu`]).
     cc: Cc,
-    matmul: Mutex<Registration>,
-    matmul_i8: Mutex<Registration>,
 }
 
 impl CudaProvider {
     /// A provider that resolves kernels against compute capability `cc`.
     pub fn new(cc: Cc) -> CudaProvider {
-        CudaProvider { cc, matmul: Mutex::new(Registration::Unattempted), matmul_i8: Mutex::new(Registration::Unattempted) }
+        CudaProvider { cc }
     }
 
     /// The provider for `gpu`, or `None` when this handle's device reports no
@@ -151,30 +143,6 @@ impl CudaProvider {
         self.kernel(op, dtype).map(|k| k.name)
     }
 
-    /// Register `k` on `gpu`'s backend if this is the first call for this
-    /// slot, else reuse the cached id/decline.
-    fn register(&self, slot: &Mutex<Registration>, k: &'static CudaKernel, bindings: &'static [BindKind], gpu: &crate::Gpu) -> Option<NativeId> {
-        let mut reg = slot.lock().unwrap_or_else(|e| e.into_inner());
-        match *reg {
-            Registration::Registered(id) => Some(id),
-            Registration::Declined => None,
-            Registration::Unattempted => {
-                let id = gpu.register_native(&NativeSpec::Cuda {
-                    src: k.src,
-                    entry: k.entry,
-                    block_dim: k.block_dim,
-                    bindings,
-                    shared_bytes: k.shared_bytes,
-                });
-                *reg = match id {
-                    Some(id) => Registration::Registered(id),
-                    None => Registration::Declined,
-                };
-                id
-            }
-        }
-    }
-
     /// The weight tier of the kernel `req` is shaped for, or `None` when it
     /// is neither request this provider implements.
     ///
@@ -208,6 +176,42 @@ impl CudaProvider {
             _ => None,
         }
     }
+}
+
+/// Whether `gpu` runs this provider's tensor-core kernels: its device reports a
+/// compute capability at the int8 / fp16 MMA floor
+/// ([`kernels_cuda::MMA_S8_MIN_CC`]) and `cuda` is not named in
+/// `BRAIN_NO_PROVIDER`. A caller whose numerics depend on the tier (a test
+/// stating a tolerance, a parity gate) asks this rather than guessing.
+pub fn tensor_core_kernels_enabled(gpu: &crate::Gpu) -> bool {
+    !super::disabled_providers().iter().any(|d| d == "cuda") && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
+}
+
+/// The native tensor-core paged flash-prefill step for `head_dim = 256`, or
+/// `None` when the caller should dispatch the portable
+/// `paged_flash_prefill_hd256` it was going to anyway.
+///
+/// This is not a provider request: attention's call site
+/// (`model::block::gqa_chunk_step`) already chooses its kernel by registered
+/// pipeline index, and the native kernel is a drop-in for that index - same
+/// buffers, same uniform, same launch geometry - so the seam is "try native
+/// first" at that one choice. `None` means any of: the head width is not
+/// `256`, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute
+/// capability is below the kernel's floor (or not reported at all), or the
+/// backend declined to take the kernel. Each is a decline, never a failure.
+///
+/// `bufs` is the portable kernel's own order - queries, K pool, V pool, block
+/// tables, sequence lengths, context - bound whole, and `params` its
+/// `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`; `blocks`
+/// is its workgroup count.
+pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<crate::Step> {
+    if head_dim != 256 || !tensor_core_kernels_enabled(gpu) {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::find(select::Op::PagedAttentionFused, Dtype::F32, cc)?;
+    let id = gpu.native_kernel(kernel, PAGED_FLASH_PREFILL_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 6], params, blocks)
 }
 
 impl OperatorProvider for CudaProvider {
@@ -259,8 +263,8 @@ impl OperatorProvider for CudaProvider {
         let k = self.kernel(select::Op::MatMul, dt).ok_or_else(|| {
             format!("cuda::CudaProvider::lower: no native {dt:?} MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1)
         })?;
-        let (slot, bindings) = if dt == Dtype::I8 { (&self.matmul_i8, MATMUL_I8_BINDINGS) } else { (&self.matmul, MATMUL_BINDINGS) };
-        let Some(id) = self.register(slot, k, bindings, ctx.gpu) else {
+        let bindings = if dt == Dtype::I8 { MATMUL_I8_BINDINGS } else { MATMUL_BINDINGS };
+        let Some(id) = ctx.gpu.native_kernel(k, bindings) else {
             return Err(format!(
                 "cuda::CudaProvider::lower: this device declined the native {dt:?} matmul kernel \
                  (register_native returned None) - falling back to the WGSL reference provider"

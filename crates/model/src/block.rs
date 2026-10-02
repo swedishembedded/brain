@@ -696,6 +696,18 @@ pub fn gqa_chunk_fused(g: &Gpu, k: &GqaChunkIds, head_dim: u32) -> Option<usize>
     paged_attention_fused(g, true, false, head_dim, 0).then_some(kernel)
 }
 
+/// [`gpu_core::provider::cuda::paged_flash_prefill_step`] where a native
+/// backend exists at all; `None` (the portable kernel) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_paged_flash_prefill(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
+    gpu_core::provider::cuda::paged_flash_prefill_step(g, head_dim, bufs, params, blocks)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
+    None
+}
+
 /// One CHUNK of a prefill's GQA attention: append `n` already-QK-normed +
 /// RoPE'd `k`/`v` rows into the persistent per-layer cache at rows
 /// `start..start+n`, then attend all `n` new queries against cache rows
@@ -778,12 +790,16 @@ pub fn gqa_chunk_step(
     // kernels are built on the same paged-attention contract those kernels
     // are, not a different addressing scheme.
     if let Some(fused) = gqa_chunk_fused(g, k, head_dim) {
-        steps.push(g.dispatch(
-            fused,
-            &[q, kcache, vcache, block_ids, seq_lens, ctx],
-            &[n, n_heads, n_kv_heads, head_dim, group, cap, 1],
-            gpu_core::Dispatch::Workgroups(n_heads * n.div_ceil(64)),
-        ));
+        let params = [n, n_heads, n_kv_heads, head_dim, group, cap, 1];
+        let blocks = n_heads * n.div_ceil(64);
+        // A device with fp16 tensor cores runs the same fused dispatch on them
+        // (`gpu_core::provider::cuda::paged_flash_prefill_step`: identical
+        // buffers, uniform and launch geometry); anything else - and any
+        // decline - keeps the portable kernel registered above.
+        let native = native_paged_flash_prefill(g, head_dim, &[q, kcache, vcache, block_ids, seq_lens, ctx], &params, blocks);
+        steps.push(native.unwrap_or_else(|| {
+            g.dispatch(fused, &[q, kcache, vcache, block_ids, seq_lens, ctx], &params, gpu_core::Dispatch::Workgroups(blocks))
+        }));
         return steps;
     }
     steps.push(g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max));

@@ -662,6 +662,9 @@ mod native_facade {
         /// not opted in ever sees - makes [`Gpu::storage`] allocate exactly as
         /// it always did. See [`crate::scratch`] for the aliasing argument.
         arena: Mutex<Vec<(&'static str, crate::scratch::Arena)>>,
+        /// Native kernels already offered to this handle's backend, by registry
+        /// name, with the backend's answer - see [`Gpu::native_kernel`].
+        natives: Mutex<std::collections::HashMap<&'static str, Option<backend_api::NativeId>>>,
         /// Whether [`Gpu::step`] consults [`Self::memo`] at all. OFF until
         /// [`Gpu::enable_step_cache`], and read as a relaxed atomic so a
         /// handle that never opted in pays one load, not a lock, per
@@ -697,6 +700,7 @@ mod native_facade {
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 arena: Mutex::new(Vec::new()),
+                natives: Mutex::new(Default::default()),
                 memo_enabled: std::sync::atomic::AtomicBool::new(false),
                 memo: Mutex::new(None),
             }
@@ -1763,6 +1767,34 @@ mod native_facade {
             }
             let id = self.fused_id(which)?;
             self.step_native(id, bufs, params, which.blocks(params))
+        }
+
+        /// The id under which this handle's backend holds the hand-written CUDA
+        /// kernel `kernel`, offering it on the first ask and remembering the
+        /// answer. `None` is the backend declining - it cannot compile CUDA C++
+        /// (every backend but CUDA), has no NVRTC, or the device cannot host the
+        /// kernel's block size or shared memory - and is as final as a success:
+        /// a caller falls back to the portable kernel it was going to use
+        /// anyway.
+        ///
+        /// `bindings` is the kernel's argument list - uniform first, then the storage
+        /// pointers in order - which a native kernel's own signature fixes and the
+        /// launcher cannot infer from the source.
+        ///
+        /// Whether the DEVICE is capable enough is a different question, asked
+        /// by the caller against `caps().arch.compute_capability` and the
+        /// kernel's own floor before it gets here.
+        pub fn native_kernel(&self, kernel: &'static kernels_cuda::CudaKernel, bindings: &'static [backend_api::BindKind]) -> Option<backend_api::NativeId> {
+            let mut offered = self.natives.lock().unwrap_or_else(|e| e.into_inner());
+            *offered.entry(kernel.name).or_insert_with(|| {
+                self.register_native(&backend_api::NativeSpec::Cuda {
+                    src: kernel.src,
+                    entry: kernel.entry,
+                    block_dim: kernel.block_dim,
+                    bindings,
+                    shared_bytes: kernel.shared_bytes,
+                })
+            })
         }
 
         /// [`backend_api::Backend::step_native`] - the native-pipeline

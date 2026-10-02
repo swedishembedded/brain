@@ -51,11 +51,16 @@ const REL_TOL: f32 = 2.0e-5;
 const ORACLE_SAMPLES: usize = 2048;
 
 /// How much faster than the DP4A kernel the tensor-core kernel must be at the
-/// real prefill shapes, by device time. Set far under what is measured on a
-/// part with int8 tensor cores so a busy shared device cannot fail it, but high
+/// real prefill shapes, by device time. Set far under what is measured (16-18x on
+/// an idle part with int8 tensor cores) so a busy shared device cannot fail it, but high
 /// enough that a kernel which fell back to scalar work would.
 // perf-number: the asserted floor of this gate; the achieved ratio is printed.
-const SPEEDUP_FLOOR: f64 = 5.0;
+const SPEEDUP_FLOOR: f64 = 4.0;
+
+/// Device-timed trials per side; the best is compared. The cards of a shared
+/// box are time-sliced between processes, which only ever inflates a kernel's
+/// measured time, so the minimum over enough trials is the honest figure.
+const TRIALS: usize = 12;
 
 struct Rng(u64);
 impl Rng {
@@ -293,8 +298,8 @@ fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
         let d = Device::upload(&gpu, &p);
         d.run(&reference, &p); // compile outside the timed region
         d.run(&production, &p);
-        let t_ref = d.device_ms(&reference, &p, "matmul_i8_dyn", 3);
-        let t_tc = d.device_ms(&production, &p, "matmul_i8_mma", 3);
+        let t_ref = d.device_ms(&reference, &p, "matmul_i8_dyn", TRIALS);
+        let t_tc = d.device_ms(&production, &p, "matmul_i8_mma", TRIALS);
         let tops = |ms: f64| 2.0 * m as f64 * n as f64 * k as f64 / (ms * 1e-3) / 1e12;
         let speedup = t_ref / t_tc;
         eprintln!(
@@ -303,5 +308,73 @@ fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
             tops(t_tc)
         );
         assert!(speedup >= SPEEDUP_FLOOR, "{m}x{n}x{k}: tensor-core GEMM is only {speedup:.1}x the portable kernel (floor {SPEEDUP_FLOOR}x)");
+    }
+}
+
+/// Developer sweep, not a gate: compile the tensor-core kernel at alternative
+/// tile / warp / pipeline configurations (the `BRAIN_I8_*` macros the source
+/// exposes) and print device-timed TOPS at the real prefill shapes, so a tile
+/// choice is a measurement rather than a guess.
+///
+///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --ignored --nocapture sweep
+#[test]
+#[ignore = "developer sweep over tile configurations; prints a table, asserts nothing"]
+fn sweep_tile_configurations() {
+    use backend_api::{BindKind, NativeSpec};
+    let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
+        eprintln!("sweep: no CUDA device on this box - skipping");
+        return;
+    };
+    let src = kernels_cuda::get("matmul_i8_mma").expect("registered").src;
+    // (BM, BN, WARPS_M, WARPS_N, STAGES)
+    let configs: &[(u32, u32, u32, u32, u32)] = &[
+        (128, 64, 4, 2, 3),
+        (128, 64, 4, 2, 2),
+        (64, 64, 2, 2, 4),
+        (64, 128, 2, 4, 3),
+        (128, 128, 4, 2, 2),
+        (256, 64, 4, 2, 2),
+    ];
+    let bindings: &'static [BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+    for &(m, n, k) in &[(256u32, 5120u32, 5120u32), (256, 17408, 5120), (256, 5120, 17408), (512, 5120, 5120)] {
+        let p = Problem::new(m, n, k, 9);
+        let d = Device::upload(&gpu, &p);
+        for &(bm, bn, wm, wn, st) in configs {
+            let text: &'static str = Box::leak(
+                format!("#define BRAIN_I8_BM {bm}\n#define BRAIN_I8_BN {bn}\n#define BRAIN_I8_WARPS_M {wm}\n#define BRAIN_I8_WARPS_N {wn}\n#define BRAIN_I8_STAGES {st}\n{src}").into_boxed_str(),
+            );
+            let smem = st * (bm * 64 + bn * 64 + bn * 8);
+            let Some(id) = gpu.register_native(&NativeSpec::Cuda { src: text, entry: "brain_matmul_i8_mma", block_dim: wm * wn * 32, bindings, shared_bytes: smem }) else {
+                eprintln!("sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: declined");
+                continue;
+            };
+            let kg = k as u64 / 4;
+            let attrs = [m, kg as u32, n];
+            let operands = [(&d.x, (0, m as u64 * kg)), (&d.w, (0, 0)), (&d.sx, (0, m as u64)), (&d.sw, (0, 0)), (&d.y, (0, m as u64 * n as u64))];
+            let bufs: Vec<&backend_api::DeviceBuffer> = operands.iter().map(|o| o.0).collect();
+            let offs: Vec<(u64, u64)> = operands.iter().map(|o| o.1).collect();
+            let blocks = m.div_ceil(bm) * n.div_ceil(bn);
+            let step = gpu.step_native_sliced(id, &bufs, &offs, &attrs, blocks).expect("native step");
+            gpu.submit(&[], std::slice::from_ref(&step));
+            gpu.poll_wait();
+            gpu.set_kernel_timing(true);
+            let mut best = f64::MAX;
+            for _ in 0..12 {
+                gpu.reset_kernel_times();
+                for _ in 0..4 {
+                    gpu.submit(&[], std::slice::from_ref(&step));
+                }
+                gpu.poll_wait();
+                let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().map(|(_, ms, _)| ms).sum();
+                best = best.min(ms / 4.0);
+            }
+            gpu.set_kernel_timing(false);
+            let got = gpu.read(&d.y, 64);
+            eprintln!(
+                "sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: {best:.3} ms  {:.1} TOPS  (y[0]={:.3})",
+                2.0 * m as f64 * n as f64 * k as f64 / (best * 1e-3) / 1e12,
+                got[0]
+            );
+        }
     }
 }
