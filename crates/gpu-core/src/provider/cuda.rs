@@ -251,16 +251,23 @@ pub fn gdn_chunk_loop_step(
 /// pipeline index, and the native kernel is a drop-in for that index - same
 /// buffers, same uniform, same launch geometry - so the seam is "try native
 /// first" at that one choice. `None` means any of: the head width is not
-/// `256`, `cuda` is named in `BRAIN_NO_PROVIDER`, the device's compute
-/// capability is below the kernel's floor (or not reported at all), or the
-/// backend declined to take the kernel. Each is a decline, never a failure.
+/// `256`, the round is no wider than the decode regime (`params[0]` rows), `cuda`
+/// is named in `BRAIN_NO_PROVIDER`, the device's compute capability is below
+/// the kernel's floor (or not reported at all), or the backend declined to take
+/// the kernel. Each is a decline, never a failure.
 ///
 /// `bufs` is the portable kernel's own order - queries, K pool, V pool, block
 /// tables, sequence lengths, context - bound whole, and `params` its
 /// `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`; `blocks`
 /// is its workgroup count.
 pub fn paged_flash_prefill_step(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<crate::Step> {
-    if head_dim != 256 || !tensor_core_kernels_enabled(gpu) {
+    // A round of up to `DECODE_REGIME_MAX_ROWS` rows is a speculative-decoding
+    // verify or a ragged tail, not a prefill: there is nothing to win, and the
+    // contract that such a round computes what the token-by-token tape computes
+    // (to fp32 rounding) is worth more than the few microseconds - fp16 attention
+    // would break it.
+    let rows = params.first().copied().unwrap_or(0);
+    if head_dim != 256 || rows <= select::DECODE_REGIME_MAX_ROWS || !tensor_core_kernels_enabled(gpu) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
