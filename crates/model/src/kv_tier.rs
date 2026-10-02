@@ -345,6 +345,11 @@ pub struct KvKernels {
     scores: usize,
     apply: usize,
     prefill_hd256: usize,
+    /// Whether an fp32 plane's prefill may run the native fp16 tensor-core kernel
+    /// where the device has one. On by default; [`Self::portable_prefill`] turns
+    /// it off for a caller that needs the fp32 pipeline's own arithmetic (a test
+    /// comparing tiers against it).
+    native_prefill: bool,
     /// `(group, pipeline)` of the fused decode, for the groups this device was
     /// given a specialisation of; empty when the model did not register them
     /// (a missing fused decode is a slower decode, never a wrong one).
@@ -408,6 +413,7 @@ impl KvKernels {
             scores: find(names.scores)?,
             apply: find(names.apply)?,
             prefill_hd256: find(names.prefill_hd256)?,
+            native_prefill: true,
             decode: FLASH_GROUPS.iter().filter_map(|&group| gpu.kernel_index(&decode_name(tier, group)).map(|i| (group, i))).collect(),
             decode_combine: gpu.kernel_index(FLASH_COMBINE),
         })
@@ -415,6 +421,13 @@ impl KvKernels {
 
     pub fn tier(&self) -> KvTier {
         self.tier
+    }
+
+    /// These kernels with the native fp16 prefill switched off: every tier then
+    /// runs its registered pipeline, the fp32 one in fp32.
+    pub fn portable_prefill(mut self) -> KvKernels {
+        self.native_prefill = false;
+        self
     }
 
     fn check(&self, plane: &KvPlane) {
@@ -505,7 +518,7 @@ impl KvKernels {
                 // The fp32 tier's planes are what the fp16 tensor-core kernel
                 // reads (same buffers, uniform and geometry as the portable one);
                 // a bf16 plane is not, and keeps its own pipeline.
-                let native = (self.tier == KvTier::F32)
+                let native = (self.native_prefill && self.tier == KvTier::F32)
                     .then(|| crate::block::native_paged_flash_prefill(g, s.head_dim, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, s.n_heads * s.n.div_ceil(64)))
                     .flatten();
                 native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid))

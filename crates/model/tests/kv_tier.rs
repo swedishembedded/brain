@@ -230,7 +230,7 @@ fn fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g: &Gp
     let shape = PrefillShape { n, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size };
     let words = (n * s.n_heads * s.head_dim) as u64;
     let (out_c, out_r) = (g.storage(words), g.storage(words));
-    let (compact, reference) = (KvKernels::resolve(g, tier).unwrap(), KvKernels::resolve(g, KvTier::F32).unwrap());
+    let (compact, reference) = (KvKernels::resolve(g, tier).unwrap(), KvKernels::resolve(g, KvTier::F32).unwrap().portable_prefill());
     g.submit(&[], &[compact.flash_prefill_hd256(g, &q, &kc, &vc, &block_ids, &seq_lens, &out_c, shape), reference.flash_prefill_hd256(g, &q, &kf, &vf, &block_ids, &seq_lens, &out_r, shape)]);
     let (c, r) = (g.read(&out_c, words as usize), g.read(&out_r, words as usize));
     assert!(r.iter().any(|x| x.abs() > 1e-2), "{label} {tier}: the reference output is all zeros, so the comparison proves nothing");
