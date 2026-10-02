@@ -320,7 +320,16 @@ pub fn multi_gpu_gguf_from_env(models_dir: Option<&std::path::Path>, gpus: &[(u3
     let devices: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     let cap = qwen35::int8_gguf_resident::Qwen35GgufResident::ctx_from_env();
     let tier = qwen35::int8_gguf_resident::Qwen35GgufResident::tier_from_env();
-    Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap, tier))
+    // An unrecognised BRAIN_QWEN35_KV is a refusal to serve, never a silent
+    // fallback to a different cache precision than the operator asked for.
+    let kv = match qwen35::int8_gguf_resident::Qwen35GgufResident::kv_tier_from_env() {
+        Ok(kv) => kv,
+        Err(e) => {
+            eprintln!("brain: {} not served ({e})", qwen35::int8_gguf_resident::MODEL);
+            return None;
+        }
+    };
+    Some(qwen35::int8_gguf_resident::Qwen35GgufResident::new(path, devices, cap, tier).with_kv_tier(kv))
 }
 
 /// [`multi_gpu_gguf_from_env`]'s file resolution: the model-store resolver's

@@ -2984,6 +2984,28 @@ mod tests {
         assert_eq!(large.per_layer[gdn], small.per_layer[gdn], "GDN state is O(1) in context, not O(T)");
     }
 
+    /// `BRAIN_QWEN35_KV` selects the cache storage by name, defaults to f32, and
+    /// refuses an unknown name by naming the variable - serving a different
+    /// precision than was asked for is worse than not serving.
+    #[test]
+    fn the_kv_tier_comes_from_the_environment_and_refuses_unknown_names() {
+        let _g = brain_testutil::env_lock();
+        let saved = std::env::var(KV_ENV).ok();
+        std::env::remove_var(KV_ENV);
+        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::F32));
+        std::env::set_var(KV_ENV, "int8");
+        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::Int8));
+        std::env::set_var(KV_ENV, "bf16");
+        assert_eq!(Qwen35GgufResident::kv_tier_from_env(), Ok(KvTier::Bf16));
+        std::env::set_var(KV_ENV, "fp8");
+        let e = Qwen35GgufResident::kv_tier_from_env().unwrap_err();
+        assert!(e.contains(KV_ENV) && e.contains("fp8"), "{e}");
+        match saved {
+            Some(v) => std::env::set_var(KV_ENV, v),
+            None => std::env::remove_var(KV_ENV),
+        }
+    }
+
     /// The most sequences of `cap` tokens the planner admits on ONE card of
     /// `usable` bytes, by the same `plan_fewest_devices` the resident uses.
     fn max_batch_on_one_card(cfg: &Qwen35Config, cap: u32, kv: KvTier, usable: u64) -> u32 {
