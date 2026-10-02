@@ -55,6 +55,44 @@ pub struct LiveResources {
     pub primary_retains: u64,
 }
 
+/// Monotonic, process-wide totals of the calls whose per-step repetition is a
+/// performance defect - the counterpart of [`LiveResources`], which proves
+/// balance but cannot see an allocate-and-free pair per step.
+///
+/// A steady-state decode token that allocates, launches one kernel at a time or
+/// fails to replay shows here by differencing two readings around it; none of
+/// these ever decreases.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallTotals {
+    /// `cuMemAlloc` calls made, whether or not freed since.
+    pub device_alloc_calls: u64,
+    /// Individual kernel launch calls the host made into the driver
+    /// (a graph capture counts the launches it records).
+    pub host_launches: u64,
+    /// Captured graphs replayed.
+    pub graph_replays: u64,
+}
+
+static TOTAL_DEVICE_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_HOST_LAUNCHES: AtomicU64 = AtomicU64::new(0);
+static TOTAL_GRAPH_REPLAYS: AtomicU64 = AtomicU64::new(0);
+
+/// See [`CallTotals`].
+pub fn call_totals() -> CallTotals {
+    CallTotals {
+        device_alloc_calls: TOTAL_DEVICE_ALLOC_CALLS.load(Ordering::Relaxed),
+        host_launches: TOTAL_HOST_LAUNCHES.load(Ordering::Relaxed),
+        graph_replays: TOTAL_GRAPH_REPLAYS.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn host_launched(n: u64) {
+    TOTAL_HOST_LAUNCHES.fetch_add(n, Ordering::Relaxed);
+}
+pub(crate) fn graph_replayed() {
+    TOTAL_GRAPH_REPLAYS.fetch_add(1, Ordering::Relaxed);
+}
+
 struct Counters {
     device_allocs: AtomicU64,
     device_bytes: AtomicU64,
@@ -108,6 +146,7 @@ fn down(n: &AtomicU64) {
 }
 
 pub(crate) fn device_alloc(bytes: usize) {
+    TOTAL_DEVICE_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     up(&COUNTERS.device_allocs);
     COUNTERS.device_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
 }

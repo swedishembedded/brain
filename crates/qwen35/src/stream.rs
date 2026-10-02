@@ -1048,7 +1048,16 @@ pub(crate) fn head_logits_rows_on(
     let d = cfg.d_model as usize;
     assert!(rows > 0, "head_logits_rows_on: rows must be > 0");
     assert_eq!(hidden.len(), rows as usize * d, "head_logits_rows_on: hidden must be exactly {rows} [d_model] rows");
-    let x = g.storage_init("qwen35.head.rows", hidden);
+    // Same recipe as a decode step's layer stack (`Qwen35::run_decode_batch`):
+    // recycled scratch at stable addresses plus one held submission, so the
+    // head of a steady-state token is replayed rather than rebuilt - its
+    // `[vocab]` logits buffer and input row were an allocation and a free per
+    // token, and a free is a whole-device wait that also discards every graph.
+    let _ops_scratch = ops.gpu().scratch_scope_in(crate::model::HEAD_ARENA);
+    let _scratch = g.scratch_scope_in(crate::model::HEAD_ARENA);
+    let _pass = g.pass_scope();
+    let x = g.storage(hidden.len() as u64);
+    g.write_f32(&x, hidden);
     let normed = g.storage(rows as u64 * d as u64);
     g.submit(&[], &[crate::model::rms_step(g, &x, final_norm_buf, &normed, d as u32, rows)]);
 
@@ -1057,6 +1066,7 @@ pub(crate) fn head_logits_rows_on(
     let logits_buf = g.storage(rows as u64 * cfg.vocab as u64);
     ops.matmul(&mut s, head, &act, &logits_buf, 0);
     g.submit(&[], &s);
+    // `read` issues the held pass before it waits.
     g.read(&logits_buf, rows as usize * cfg.vocab as usize)
 }
 

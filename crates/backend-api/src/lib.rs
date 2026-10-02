@@ -1159,6 +1159,22 @@ pub trait Backend: Send + Sync {
     /// `read`. Backends that execute eagerly at `submit` (CPU) have nothing
     /// pending, so the default no-op is correct for them.
     fn flush(&self) {}
+    /// Open a **pass**: a bracketed run of submissions that repeats, shape for
+    /// shape, from one iteration of a loop to the next - a decode step is the
+    /// case this exists for.
+    ///
+    /// A backend that benefits may hold the submissions made until the pass
+    /// ends and issue them as ONE, so that a pass built of many small,
+    /// pairwise-different submissions can still be recorded whole and replayed.
+    /// Program order is the contract: anything that observes or changes device
+    /// state (`read`, `write`, `poll_wait`, a submission with `clears`) acts
+    /// as if every earlier submission had already run. A backend that gains
+    /// nothing from the grouping keeps this default no-op. Passes nest by
+    /// counting; only the outermost [`Self::end_pass`] issues the work.
+    fn begin_pass(&self) {}
+    /// Close the pass opened by [`Self::begin_pass`], issuing anything the
+    /// backend held for it. Does not wait for the device.
+    fn end_pass(&self) {}
     /// Bytes currently buried (dropped by their Rust owner, not yet actually
     /// freed on-device) by a backend whose reclaim is deferred - 0 for every
     /// backend that reclaims eagerly at drop (the default is correct there,

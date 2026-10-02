@@ -380,6 +380,21 @@ const HEAD_ARGMAX_CHUNKS: u32 = 256;
 // count of layers. See that function's own comments for the mechanism and
 // the ledger entry for the measured before/after.
 
+/// The scratch arena a decode step's layer stack replays. Named, because the
+/// head that follows the stack runs on the same handle and replays an arena of
+/// its own: one shared arena would be evicted by each of them in turn.
+pub(crate) const DECODE_ARENA: &str = "qwen35.decode";
+
+/// The scratch arena the logits head of a decode step replays.
+pub(crate) const HEAD_ARENA: &str = "qwen35.head";
+
+/// Granularity, in key positions, of a decode step's attention scratch (the
+/// `scores`/`probs` stride). Rounding the stride up to a multiple of this makes
+/// the step identical from token to token within a bucket, which is what lets
+/// its buffers be recycled and its dispatches replayed; the cost is at most
+/// this many idle threads per attention head in the scores kernel.
+const DECODE_CAP_BUCKET: u32 = 128;
+
 /// Rows at or above which a chunk round draws its per-layer temporaries from
 /// [`gpu_core::scratch::Arena`] - **and therefore pays that arena's drain**, a
 /// blocking `poll_wait` at every layer boundary.
@@ -2624,17 +2639,45 @@ impl Qwen35 {
             assert!(s.pos < caches.gqa_cap, "qwen35::run_decode_batch: decode position {} exceeds the per-sequence capacity {}", s.pos, caches.gqa_cap);
         }
 
-        let mut res = if self.shard.embed {
+        // The whole token is one replayable submission. Two things make that so,
+        // and both have to be in force before the first buffer is asked for:
+        //
+        // * the scratch arena hands every temporary - and every per-token input
+        //   below - the same device buffer it handed the previous token, so no
+        //   allocation (and no free, which on CUDA waits for the whole device)
+        //   happens in a steady-state token and the recorded dispatches name the
+        //   same addresses every time;
+        // * the pass holds the per-layer submissions and issues them as one, so a
+        //   backend that can record the token whole replays it instead of
+        //   launching ~2500 dispatches one at a time.
+        //
+        // Declared arena first: guards drop in reverse, so the pass issues its
+        // work while the arena is still open. The arena's contract is that the
+        // previous token's work has drained before this token's dispatches are
+        // submitted, which every caller meets by reading the step's output.
+        //
+        // The linears' activation scratch is allocated through `self.ops`, which
+        // runs on its own handle of the same device, so it has an arena of its
+        // own to open.
+        let _ops_scratch = self.ops.gpu().scratch_scope_in(DECODE_ARENA);
+        let _scratch = g.scratch_scope_in(DECODE_ARENA);
+        let _pass = g.pass_scope();
+
+        // Every host->device write of the token comes BEFORE the first
+        // dispatch is submitted. A write is ordered after all earlier
+        // submissions, so one between dispatches would close the pass early and
+        // split the token into two graphs.
+        let (tok_buf, mut res) = if self.shard.embed {
             assert!(input_override.is_none(), "qwen35: run_decode_batch got an input_override on the EMBED stage - it embeds `tokens` itself, so a caller supplying both is a wiring error");
             let tok_buf = g.storage(bsz as u64);
             g.write(&tok_buf, tokens);
-            let res = g.storage((bsz * d) as u64);
-            g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
-            res
+            (Some(tok_buf), g.storage((bsz * d) as u64))
         } else {
             let x = input_override.expect("qwen35: run_decode_batch on a NON-EMBED stage needs the previous stage's residual as `input_override` (this stage holds no `tok.weight`)");
             assert_eq!(x.len(), (bsz * d) as usize, "qwen35: run_decode_batch input_override must be the batch's whole [bsz, d_model] block");
-            g.storage_init("qwen35.decode.res_in", x)
+            let res = g.storage((bsz * d) as u64);
+            g.write_f32(&res, x);
+            (None, res)
         };
 
         // Built ONCE per step, shared by every layer in it (the same discipline
@@ -2646,8 +2689,10 @@ impl Qwen35 {
         let positions: Vec<[u32; 3]> = caches.seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
         let (cos_rows, sin_rows) =
             qwen3vl::mrope::mrope_tables_scaled(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta, yarn.as_ref().map(|(f, a)| (f.as_slice(), *a)));
-        let cos = g.storage_init("qwen35.decode_batch.cos", &cos_rows);
-        let sin = g.storage_init("qwen35.decode_batch.sin", &sin_rows);
+        let cos = g.storage(cos_rows.len() as u64);
+        g.write_f32(&cos, &cos_rows);
+        let sin = g.storage(sin_rows.len() as u64);
+        g.write_f32(&sin, &sin_rows);
         let blocks = g.storage(bsz as u64);
         g.write(&blocks, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
         let offsets = g.storage(bsz as u64);
@@ -2658,6 +2703,7 @@ impl Qwen35 {
         g.write(&block_tables, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
         let seq_lens = g.storage(bsz as u64);
         g.write(&seq_lens, &caches.seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+        let longest = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
         let paged = model::gqa_mixer::PagedDecodeBatch {
             blocks: &blocks,
             offsets: &offsets,
@@ -2665,13 +2711,20 @@ impl Qwen35 {
             seq_lens: &seq_lens,
             block_size: caches.gqa_cap,
             max_bt: 1,
-            // The scores/probs stride. `max(pos)+1` rather than the whole
-            // per-sequence capacity: it is pure addressing (see
-            // `gqa_decode_batched_step`'s own doc), so sizing it to the batch's
-            // longest LIVE sequence keeps the scratch proportional to real
-            // context rather than to the engine's configured ceiling.
-            cap: caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1),
+            // The scores/probs stride, and with it those buffers' size and the
+            // scores kernel's grid. Pure addressing (see
+            // `gqa_decode_batched_step`'s own doc), so it only has to cover the
+            // longest live sequence - and it is rounded UP to a bucket so that
+            // it, and everything sized from it, is the same from one token to
+            // the next. Sized exactly it changed every token: a fresh buffer
+            // and a new grid per attention layer, which defeats both the arena
+            // and the replayed graph. Now both change once per bucket.
+            cap: longest.next_multiple_of(DECODE_CAP_BUCKET).min(caches.gqa_cap),
         };
+
+        if let Some(tok_buf) = &tok_buf {
+            g.submit(&[], &[g.step(EMBED, &[tok_buf, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+        }
 
         let types = c.layer_types();
         // `l` is the ABSOLUTE layer index (into `types`, `caches.*` and the

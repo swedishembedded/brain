@@ -1862,8 +1862,13 @@ impl Qwen35GgufInstance {
     /// worse than no profile.
     pub fn profile_decode(&self, prompt: &[u32], steps: u32) -> DecodeProfile {
         assert!(steps > 0, "profile_decode: steps must be > 0");
-        let need = prompt.len() as u64 + 2 * steps as u64;
-        assert!(need <= self.cap as u64, "profile_decode: prompt ({}) + 2*{steps} profiled steps = {need} exceeds capacity {}", prompt.len(), self.cap);
+        let need = prompt.len() as u64 + PROFILE_WARM_STEPS as u64 + 2 * steps as u64;
+        assert!(
+            need <= self.cap as u64,
+            "profile_decode: prompt ({}) + {PROFILE_WARM_STEPS} warm-up + 2*{steps} profiled steps = {need} exceeds capacity {}",
+            prompt.len(),
+            self.cap
+        );
         assert!(!prompt.is_empty(), "profile_decode: needs a non-empty prompt to establish decode state");
 
         // Warm-up: real prompt replay, through whichever tape `generate` would
@@ -1877,6 +1882,14 @@ impl Qwen35GgufInstance {
         self.reset();
         let (_, mut pos) = self.replay_prompt(prompt, 0).expect("profile_decode warm-up");
         let last = prompt[prompt.len() - 1];
+        // Steady state, not first-token: the backend records a repeating step on
+        // its second sight and replays from its third, so the first few decode
+        // steps pay one-off costs (an eager step, a capture and instantiation)
+        // that a served token never pays again.
+        for _ in 0..PROFILE_WARM_STEPS {
+            self.stack_step(last, pos, 0).expect("profile_decode steady-state warm-up");
+            pos += 1;
+        }
         self.poll_wait();
 
         self.profile_regions(steps, |_| {
@@ -1889,13 +1902,21 @@ impl Qwen35GgufInstance {
     /// profiled pass with the pass index: the production flush path timed on
     /// the wall, then the same passes with per-dispatch timestamps armed.
     fn profile_regions(&self, steps: u32, mut step: impl FnMut(u32)) -> DecodeProfile {
-        // Region 1: the production path.
+        // Region 1: the production path. The token fed back is `last` rather
+        // than a sampled id - the cost of a decode step is its shapes, which do
+        // not depend on WHICH token it is, and reusing one id keeps the profile
+        // from wandering into an EOS.
+        let totals0 = gpu_core::cuda_call_totals();
         let t0 = std::time::Instant::now();
+        let mut step_s = Vec::with_capacity(steps as usize);
         for i in 0..steps {
+            let ts = std::time::Instant::now();
             step(i);
+            step_s.push(ts.elapsed().as_secs_f64());
         }
         self.poll_wait();
         let wall_s = t0.elapsed().as_secs_f64();
+        let totals1 = gpu_core::cuda_call_totals();
 
         // Region 2: the same work with timestamp queries armed. A backend that
         // cannot time kernels reports no rows rather than a table of zeros.
@@ -1926,7 +1947,16 @@ impl Qwen35GgufInstance {
 
         let mut rows: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, c))| (n, ms, c)).collect();
         rows.sort_by(|a, b| b.1.total_cmp(&a.1));
-        DecodeProfile { steps, wall_s, timed_wall_s, rows }
+        DecodeProfile {
+            steps,
+            wall_s,
+            step_s,
+            alloc_calls: totals1.device_alloc_calls - totals0.device_alloc_calls,
+            host_launches: totals1.host_launches - totals0.host_launches,
+            graph_replays: totals1.graph_replays - totals0.graph_replays,
+            timed_wall_s,
+            rows,
+        }
     }
 
     /// [`Self::profile_decode`] for a BATCH decoding at a SYNTHETIC context:
@@ -2136,6 +2166,16 @@ pub struct DecodeProfile {
     /// Wall seconds for `steps` passes on the production flush path - the
     /// whole-pass number an optimization is judged by.
     pub wall_s: f64,
+    /// Wall seconds of each of those passes, in order. The host is shared and
+    /// the card often is, so one mean hides the spread; the minimum is the best
+    /// the code can do, the median what it usually does.
+    pub step_s: Vec<f64>,
+    /// `cuMemAlloc` calls, kernel launches made one at a time, and graph
+    /// replays across those passes. A steady-state token should show no
+    /// allocation, no individual launch and one replay.
+    pub alloc_calls: u64,
+    pub host_launches: u64,
+    pub graph_replays: u64,
     /// Wall seconds for the same passes with per-dispatch timestamps armed.
     /// Always larger; reported so the inflation is visible rather than implied.
     pub timed_wall_s: f64,
@@ -2154,11 +2194,25 @@ impl DecodeProfile {
         }
     }
 
+    /// Wall milliseconds per token at quantile `q` (0 = best, 0.5 = median).
+    pub fn step_ms_at(&self, q: f64) -> f64 {
+        let mut v = self.step_s.clone();
+        v.sort_by(f64::total_cmp);
+        if v.is_empty() {
+            return 0.0;
+        }
+        1e3 * v[((v.len() - 1) as f64 * q.clamp(0.0, 1.0)).round() as usize]
+    }
+
     /// Summed device time across the table, in ms.
     pub fn device_ms(&self) -> f64 {
         self.rows.iter().map(|(_, ms, _)| ms).sum()
     }
 }
+
+/// Decode steps run before the measured region of
+/// [`Qwen35GgufInstance::profile_decode`] so it measures steady state.
+const PROFILE_WARM_STEPS: u32 = 3;
 
 impl Qwen35GgufInstance {
     /// ONE batch group's worth of `generate` requests, decoded together.

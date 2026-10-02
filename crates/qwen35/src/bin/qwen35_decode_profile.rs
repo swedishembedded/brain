@@ -101,6 +101,18 @@ fn main() {
     println!();
     println!("=== whole pass (production flush path) ===");
     println!("  decode              {:.3} tok/s  ({:.1} ms/token over {} step(s))", p.tok_per_s(), 1e3 * p.wall_s / p.steps as f64, p.steps);
+    println!(
+        "  per token           best {:.1} / median {:.1} / worst {:.1} ms",
+        p.step_ms_at(0.0),
+        p.step_ms_at(0.5),
+        p.step_ms_at(1.0)
+    );
+    println!(
+        "  host calls/token    {:.1} cuMemAlloc, {:.1} individual launches, {:.1} graph replays",
+        p.alloc_calls as f64 / p.steps as f64,
+        p.host_launches as f64 / p.steps as f64,
+        p.graph_replays as f64 / p.steps as f64
+    );
     println!("  timed-region wall   {:.3} tok/s  (timestamp queries armed - inflated, for the table only)", p.steps as f64 / p.timed_wall_s.max(1e-9));
 
     // The roofline this whole-pass number is judged against. Decode reads every

@@ -392,6 +392,10 @@ pub mod testgpu {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native_facade {
+    /// The arena [`Gpu::scratch_scope`] draws from: the one every caller that
+    /// does not name its own shares.
+    const DEFAULT_ARENA: &str = "";
+
     use super::{DeviceBuffer, Step};
     use backend_api::{BufUsage, StepMeta};
     use std::sync::atomic::{AtomicU8, Ordering};
@@ -649,7 +653,7 @@ mod native_facade {
         /// state every handle is built in and the only one a model that has
         /// not opted in ever sees - makes [`Gpu::storage`] allocate exactly as
         /// it always did. See [`crate::scratch`] for the aliasing argument.
-        arena: Mutex<Option<crate::scratch::Arena>>,
+        arena: Mutex<Vec<(&'static str, crate::scratch::Arena)>>,
         /// Whether [`Gpu::step`] consults [`Self::memo`] at all. OFF until
         /// [`Gpu::enable_step_cache`], and read as a relaxed atomic so a
         /// handle that never opted in pays one load, not a lock, per
@@ -683,7 +687,7 @@ mod native_facade {
                 native_upgrades,
                 mem_device,
                 grants: Mutex::new(Vec::new()),
-                arena: Mutex::new(None),
+                arena: Mutex::new(Vec::new()),
                 memo_enabled: std::sync::atomic::AtomicBool::new(false),
                 memo: Mutex::new(None),
             }
@@ -1180,7 +1184,7 @@ mod native_facade {
         /// Device storage for `n` u32/f32 words.
         pub fn storage(&self, n: u64) -> DeviceBuffer {
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(a) = g.as_mut().filter(|a| a.active()) {
+            if let Some((_, a)) = g.iter_mut().find(|(_, a)| a.active()) {
                 match a.take(n) {
                     crate::scratch::Slot::Hit(b) => return b,
                     crate::scratch::Slot::Miss(i) => {
@@ -1213,32 +1217,80 @@ mod native_facade {
         /// open panics, because a nested cursor would hand the inner sequence
         /// the outer sequence's buffers.
         pub fn scratch_scope(&self) -> ScratchScope<'_> {
+            self.scratch_scope_in(DEFAULT_ARENA)
+        }
+
+        /// [`Self::scratch_scope`] on the arena called `name`.
+        ///
+        /// One handle can run several repeating sequences - a decode step's
+        /// layer stack and the head that follows it are two - and a single
+        /// arena replays by call ORDER, so two sequences sharing it would take
+        /// turns evicting each other's slots and re-allocate every buffer of
+        /// both on every iteration. Each sequence names its own arena and keeps
+        /// its slots across the others' scopes. Still ONE scope open at a time
+        /// per handle: scopes do not nest, under any names.
+        pub fn scratch_scope_in(&self, name: &'static str) -> ScratchScope<'_> {
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
-            g.get_or_insert_with(crate::scratch::Arena::default).enter();
+            assert!(
+                !g.iter().any(|(_, a)| a.active()),
+                "gpu_core::scratch: a scope is already open on this handle. Scopes do not nest, and two THREADS sharing one handle would interleave one cursor - give each its own `Gpu::share`"
+            );
+            let at = match g.iter().position(|(n, _)| *n == name) {
+                Some(i) => i,
+                None => {
+                    g.push((name, crate::scratch::Arena::default()));
+                    g.len() - 1
+                }
+            };
+            g[at].1.enter();
             drop(g);
             ScratchScope { gpu: self }
         }
 
-        /// Buffers the scratch arena is holding, and the words they total.
-        /// `(0, 0)` when this handle has no arena.
+        /// Bracket one iteration of a repeating loop - a decode step - as a
+        /// **pass** until the returned guard drops: see
+        /// [`backend_api::Backend::begin_pass`]. A backend that can record the
+        /// whole pass and replay it holds the pass's submissions and issues
+        /// them as one when the guard drops; program order is preserved
+        /// against every `read`, `write` and `poll_wait`. Every other backend
+        /// sees a no-op.
+        ///
+        /// Pairs with [`Self::scratch_scope`]: a replayable pass needs the same
+        /// device addresses every iteration, which the arena provides. Open the
+        /// arena scope FIRST so the pass ends (and issues) before the scope
+        /// does.
+        pub fn pass_scope(&self) -> PassScope<'_> {
+            self.inner.begin_pass();
+            PassScope { gpu: self }
+        }
+
+        /// Buffers the default scratch arena is holding, and the words they
+        /// total. `(0, 0)` when this handle has no such arena.
         pub fn scratch_held(&self) -> (usize, u64) {
             self.arena
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .as_ref()
-                .map(crate::scratch::Arena::held)
+                .iter()
+                .find(|(n, _)| *n == DEFAULT_ARENA)
+                .map(|(_, a)| a.held())
                 .unwrap_or((0, 0))
         }
 
-        /// Drop the arena and every buffer it is holding.
+        /// Drop the default arena and every buffer it is holding.
         pub fn scratch_release(&self) {
-            *self.arena.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            self.scratch_release_in(DEFAULT_ARENA);
+        }
+
+        /// Drop the arena called `name` and every buffer it is holding. The
+        /// other arenas of this handle are untouched.
+        pub fn scratch_release_in(&self, name: &'static str) {
+            self.arena.lock().unwrap_or_else(|e| e.into_inner()).retain(|(n, _)| *n != name);
         }
 
         /// Close the open scope. The arena and its buffers stay - that is what
         /// the next scope replays.
         fn scratch_leave(&self) {
-            if let Some(a) = self.arena.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            for (_, a) in self.arena.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
                 a.leave();
             }
         }
@@ -1823,6 +1875,18 @@ mod native_facade {
         gpu: &'a Gpu,
     }
 
+    /// The open pass returned by [`Gpu::pass_scope`]; dropping it ends the
+    /// pass and issues anything the backend held for it.
+    pub struct PassScope<'a> {
+        gpu: &'a Gpu,
+    }
+
+    impl Drop for PassScope<'_> {
+        fn drop(&mut self) {
+            self.gpu.inner.end_pass();
+        }
+    }
+
     impl Drop for ScratchScope<'_> {
         fn drop(&mut self) {
             self.gpu.scratch_leave();
@@ -1833,9 +1897,16 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, ScratchScope,
+    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchScope,
     WeakGpu,
 };
+
+/// Process-wide, monotonic CUDA host-call totals (allocations, individual
+/// launches, graph replays) - what a decode profile differences around a token
+/// to show that a steady-state token pays none of the first two. All zero when
+/// the CUDA backend is not in use.
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend_cuda::{call_totals as cuda_call_totals, CallTotals as CudaCallTotals};
 
 /// What `Gpu::try_storage` and friends return when the process-wide ceiling
 /// (`--limit-vram-total`/`--limit-ram-total`) refuses an allocation.

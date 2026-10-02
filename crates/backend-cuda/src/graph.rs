@@ -27,10 +27,16 @@
 //! 1. **Parameter values** change every step of every token (a position, a
 //!    scale, a length). They must NOT be allowed to change a device address,
 //!    or nothing is ever replayable - so the uniform allocation is keyed on
-//!    the dispatch's structure and not on its parameter *values*, and each
-//!    step's first graph node is a copy of that step's parameters from pinned
-//!    host staging into that stable allocation. Pinned, because a copy whose
-//!    source is pageable memory is rejected during capture.
+//!    the dispatch's structure and not on its parameter *values*. A captured
+//!    graph gives every step its own slice of ONE graph-private parameter
+//!    block, and the graph's first node copies the whole block from pinned host
+//!    staging at once. One node, not one per step: a copy node costs the device
+//!    ~12 us between kernels, which at 2500 steps per token made a replayed
+//!    decode slower than launching every dispatch on its own. The block is
+//!    private to the graph so two steps that share a uniform when issued one at
+//!    a time (same kernel, same buffers, different parameters) cannot share
+//!    storage here. Pinned, because a copy whose source is pageable memory is
+//!    rejected during capture.
 //! 2. **The grid** grows with the sequence length. That is re-pointed inside
 //!    the instantiated graph
 //!    (`cuGraphExecKernelNodeSetParams`) rather than answered with a second
@@ -73,7 +79,7 @@ pub(crate) const STAGING_ALIGN_WORDS: usize = 4;
 /// their device address: a device address may be recycled by the allocator
 /// after a free, whereas an `Arc` that something still holds cannot be, and
 /// every captured node holds one.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct NodeSig {
     /// The address of the `Arc<Compiled>` this dispatch resolved to - the
     /// kernel's identity on this handle, not its catalogue index, because two
@@ -91,7 +97,7 @@ pub(crate) struct NodeSig {
 }
 
 /// A whole submission's structure.
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default, Hash)]
 pub(crate) struct SubmitSig {
     pub clears: Vec<usize>,
     pub nodes: Vec<NodeSig>,
@@ -110,6 +116,9 @@ pub(crate) struct GraphCounters {
     /// and a caller whose parameters change every submission and which never
     /// reads between them would see it climb.
     pub staging_waits: AtomicU64,
+    /// Parameter copy nodes recorded into graphs - see
+    /// [`crate::backend::LaunchStats::graph_param_copies`].
+    pub param_copies: AtomicU64,
 }
 
 /// Everything a captured submission needs to be replayed, including WEAK
@@ -142,9 +151,10 @@ pub(crate) struct LiveNode {
     per_block: u32,
     threads: u32,
     args: Vec<CuDevicePtr>,
-    /// Where in the graph's pinned staging ([`LiveGraph::staging`]) this
-    /// node's first graph node copies its parameters from, as `(word offset,
-    /// words)`. `None` for a step with no parameters of its own to supply.
+    /// Where in the graph's pinned staging ([`LiveGraph::staging`]), and so in
+    /// its device parameter block ([`LiveGraph::_params`], laid out
+    /// identically), this node's parameters live, as `(word offset, words)`.
+    /// `None` for a step with no parameters of its own to supply.
     staging: Option<(usize, usize)>,
     /// What is currently in `staging`. A replay that would write the same
     /// words writes nothing, which is not a micro-optimisation: writing is
@@ -176,6 +186,10 @@ pub(crate) struct LiveGraph {
     /// offset its [`LiveNode::staging`] names. One driver allocation per graph
     /// rather than one per node: a decode graph is thousands of nodes.
     staging: Option<exec::PinnedMem>,
+    /// The device block the graph's one parameter copy fills and every node's
+    /// uniform pointer points into. Declared after `exec` so the instantiated
+    /// graph is released first.
+    _params: Option<exec::DeviceMem>,
     _clears: Vec<Weak<exec::DeviceMem>>,
     nodes: Vec<LiveNode>,
 }
@@ -213,6 +227,12 @@ pub(crate) struct Resolved {
     pub lens: Vec<u64>,
 }
 
+// `func` is an opaque driver handle, valid for as long as `compiled`'s module
+// is loaded (which `compiled` guarantees) and not thread-affine - the context is
+// made current before every call that uses it. Everything else is `Send`. A
+// pass holds these between `begin_pass` and `end_pass` behind a `Mutex`.
+unsafe impl Send for Resolved {}
+
 /// How many captured graphs a handle keeps at once.
 ///
 /// One is not enough, and the reason is a measurement rather than a guess:
@@ -228,6 +248,9 @@ pub(crate) struct Resolved {
 /// staging until it is evicted, replaced or invalidated by a free.
 const MAX_LIVE: usize = 4;
 
+/// How many distinct recent shapes [`GraphCache::seen`] remembers.
+const MAX_SEEN: usize = 8;
+
 /// How many capture or replay failures a handle tolerates before it stops
 /// trying - see [`GraphCache::forget`].
 const MAX_FAILURES: u32 = 3;
@@ -237,10 +260,25 @@ const MAX_FAILURES: u32 = 3;
 pub(crate) struct GraphCache {
     /// Captured graphs, most recently captured first. Bounded by [`MAX_LIVE`].
     live: Vec<LiveGraph>,
-    /// The last shape submitted eagerly. A second consecutive submission of it
-    /// is what triggers a capture: capturing the first would pay an
-    /// instantiation for a shape that may never recur.
-    seen: Option<(SubmitSig, u64)>,
+    /// The CHUNKS (see [`Self::plan`]) most recently submitted eagerly, as
+    /// `(fingerprint, epoch)`, newest last and bounded by [`MAX_SEEN`]. A second
+    /// sighting of one is what triggers a capture: capturing the first would pay
+    /// an instantiation for a shape that may never recur.
+    ///
+    /// More than the last one, because a decode token is several chunks in a
+    /// fixed order (the layer stack's, then the head's after a readback) and
+    /// none ever repeats back to back: remembering only the previous shape meant
+    /// none was ever captured. A fingerprint rather than the shape itself because
+    /// a chunk is hundreds of nodes, and a collision costs one needless capture,
+    /// never a wrong replay - a replay is matched on the full [`SubmitSig`].
+    seen: Vec<(u64, u64)>,
+    /// The last submission that was NOT a chunk, issued eagerly: the original
+    /// trigger, for submissions made one at a time. Only an immediate repeat
+    /// captures. The wider [`Self::seen`] window must not apply here: a prefill
+    /// round is hundreds of small submissions of which some recur every few
+    /// layers, and capturing each of those paid an instantiation (milliseconds)
+    /// per submission - a one-row chunk round went from 143 ms to 1473 ms.
+    previous: Option<(u64, u64)>,
     /// Captures or replays that returned an error - see [`Self::forget`].
     failures: u32,
     /// Set while a replayed graph may still be executing.
@@ -275,7 +313,13 @@ impl GraphCache {
 
     /// Decide what to do with the submission `sig` describes, and update the
     /// state to match the decision.
-    pub fn plan(&mut self, ctx: &exec::Context, sig: &SubmitSig, epoch: u64) -> Plan {
+    ///
+    /// `chunk` says the submission is a pass chunk - a large piece of a step the
+    /// caller repeats - rather than one the caller made on its own. A chunk is
+    /// captured when it has been seen before at all (within the last
+    /// [`MAX_SEEN`] chunks); any other submission only when it repeats the one
+    /// before it.
+    pub fn plan(&mut self, ctx: &exec::Context, sig: &SubmitSig, epoch: u64, chunk: bool) -> Plan {
         if self.failures >= MAX_FAILURES {
             return Plan::Eager;
         }
@@ -288,10 +332,28 @@ impl GraphCache {
         if let Some(i) = self.live.iter().position(|l| l.sig == *sig) {
             return Plan::Replay(i);
         }
-        if self.seen.as_ref().is_some_and(|(s, e)| *e == epoch && s == sig) {
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            sig.hash(&mut h);
+            h.finish()
+        };
+        if !chunk {
+            if self.previous == Some((fingerprint, epoch)) {
+                self.previous = None;
+                return Plan::Capture;
+            }
+            self.previous = Some((fingerprint, epoch));
+            return Plan::Eager;
+        }
+        if let Some(i) = self.seen.iter().position(|&(f, e)| f == fingerprint && e == epoch) {
+            self.seen.remove(i);
             return Plan::Capture;
         }
-        self.seen = Some((sig.clone(), epoch));
+        if self.seen.len() == MAX_SEEN {
+            self.seen.remove(0);
+        }
+        self.seen.push((fingerprint, epoch));
         Plan::Eager
     }
 
@@ -339,8 +401,28 @@ impl GraphCache {
             });
         }
         let staging = if words > 0 { Some(ctx.pinned(words)?) } else { None };
+        // The device block every node's uniform pointer will point into. Also
+        // allocated before the capture opens, and zeroed along with its host
+        // image: the alignment padding between two steps' parameters is part
+        // of the one copy and must not be whatever the allocator left there.
+        let params = if words > 0 {
+            let block = ctx.alloc(words * 4)?;
+            ctx.zero(&block)?;
+            if let Some(st) = staging.as_ref() {
+                st.fill_at(0, &vec![0u32; words]);
+            }
+            Some(block)
+        } else {
+            None
+        };
 
         let capture = ctx.begin_capture()?;
+        // The graph's ONE parameter copy: first, so every kernel after it reads
+        // this replay's values. See the module doc for why it is one node.
+        if let (Some(block), Some(st)) = (params.as_ref(), staging.as_ref()) {
+            ctx.upload_async_range(block, st, 0, words)?;
+            counters.param_copies.fetch_add(1, Ordering::Relaxed);
+        }
         // The submission's clears are nodes of the graph like everything else.
         // Leaving them out would make a replay accumulate into buffers the
         // unbatched path had zeroed first, which is a wrong number rather than
@@ -350,17 +432,18 @@ impl GraphCache {
         }
         let mut nodes = Vec::with_capacity(steps.len());
         for (s, slot) in steps.iter().cloned().zip(slots) {
-            if let (Some(u), Some((at, n)), Some(st)) = (s.uniform.as_ref(), slot, staging.as_ref()) {
-                // The step's FIRST node: its parameters land in the stable
-                // uniform allocation before its kernel reads them, in stream
-                // order, every replay.
-                ctx.upload_async_range(u, st, at, n)?;
+            let mut args = s.args;
+            if let (Some((at, _)), Some(block)) = (slot, params.as_ref()) {
+                // A step with parameters of its own takes its uniform from the
+                // graph's private block - always the first argument, because
+                // `Backend::resolve` puts the uniform before the bindings.
+                args[0] = block.device_ptr() + (at * 4) as u64;
             }
             let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
             // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
             // the node below keeps loaded, and `s.args` is the argument list
             // that module's entry point takes.
-            unsafe { ctx.launch_raw(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.args)? };
+            unsafe { ctx.launch_raw(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &args)? };
             nodes.push(LiveNode {
                 node: capture.last_node()?,
                 func: s.func,
@@ -368,7 +451,7 @@ impl GraphCache {
                 block_dim: s.compiled.block_dim,
                 per_block: s.per_block,
                 threads: s.threads,
-                args: s.args,
+                args,
                 staging: slot,
                 staged: Vec::new(),
                 _uniform: s.uniform.as_ref().map(Arc::downgrade),
@@ -386,6 +469,7 @@ impl GraphCache {
                 _graph: graph,
                 exec,
                 staging,
+                _params: params,
                 _clears: clears.iter().map(Arc::downgrade).collect(),
                 nodes,
             },
@@ -479,6 +563,7 @@ impl GraphCache {
         ctx.launch_graph(&live.exec)?;
         self.in_flight = true;
         counters.replays.fetch_add(1, Ordering::Relaxed);
+        crate::live::graph_replayed();
         Ok(())
     }
 
@@ -495,7 +580,8 @@ impl GraphCache {
     pub fn forget(&mut self, ctx: &exec::Context) -> bool {
         self.settle(ctx);
         self.live.clear();
-        self.seen = None;
+        self.seen.clear();
+        self.previous = None;
         self.failures += 1;
         self.failures == MAX_FAILURES
     }

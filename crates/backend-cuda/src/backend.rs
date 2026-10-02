@@ -356,6 +356,30 @@ pub struct LaunchStats {
     /// parameter staging. Zero whenever the caller reads between submissions,
     /// which a decoder does every token.
     pub staging_waits: u64,
+    /// Host-to-device parameter copies recorded into captured graphs - nodes
+    /// the device runs on every replay. A captured submission carries one for
+    /// all of its steps together, however many there are.
+    pub graph_param_copies: u64,
+}
+
+/// What [`backend_api::Backend::begin_pass`] has collected so far.
+///
+/// A pass exists because a decode step submits per layer and every layer's
+/// submissions name different weights: sixty-four different submissions per
+/// token, each too small to be worth a graph of its own and none repeating until
+/// the next token (one capture in a whole run, measured, while the trigger
+/// still wanted a shape twice in a row). Holding them until the pass ends makes
+/// the step ONE submission, which does repeat from token to token.
+///
+/// The held steps are already [`Resolved`]: each keeps its buffers alive, so a
+/// temporary the caller drops mid-pass is not freed (and its address not
+/// recycled into a later step of the same pass) before the work has been
+/// issued.
+#[derive(Default)]
+struct PassState {
+    /// Nesting depth; the outermost `end_pass` issues.
+    depth: u32,
+    held: Vec<Resolved>,
 }
 
 /// A brain compute device driven by the CUDA Driver API.
@@ -405,6 +429,8 @@ pub struct CudaBackend {
     /// `submit`, so anything that sees this flag is on another thread and is
     /// about to corrupt a graph rather than read a buffer.
     capturing: AtomicBool,
+    /// The open pass, if any - see [`PassState`].
+    pass: Mutex<PassState>,
     caps: DeviceCaps,
     identity: GpuIdentity,
     /// The CUDA ordinal this handle opened, so [`Backend::share`] can open the
@@ -491,6 +517,7 @@ impl CudaBackend {
             staging: Mutex::new(StagingPool::default()),
             graph,
             capturing: AtomicBool::new(false),
+            pass: Mutex::new(PassState::default()),
             caps,
             identity,
             ordinal,
@@ -868,6 +895,7 @@ impl CudaBackend {
         unsafe { self.ctx.launch_raw(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.args) }
             .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+        crate::live::host_launched(1);
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
                 self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((r.compiled.name.clone(), start, end));
@@ -992,7 +1020,104 @@ impl CudaBackend {
             graph_replays: g.replays.load(Ordering::Relaxed),
             grid_updates: g.grid_updates.load(Ordering::Relaxed),
             staging_waits: g.staging_waits.load(Ordering::Relaxed),
+            graph_param_copies: g.param_copies.load(Ordering::Relaxed),
         }
+    }
+
+    /// Issue whatever an open pass is holding, as one submission, in the order
+    /// it was submitted. A no-op outside a pass or when nothing is held.
+    fn issue_held(&self) {
+        let held = std::mem::take(&mut self.pass.lock().unwrap_or_else(|e| e.into_inner()).held);
+        if !held.is_empty() {
+            self.issue_all(Vec::new(), held, true);
+        }
+    }
+
+    /// Issue one whole submission: replay it from a captured graph, capture it
+    /// first when its shape has just repeated, or launch each step on its own.
+    /// `chunk` is whether it is a piece of a pass (see
+    /// [`crate::graph::GraphCache::plan`]).
+    fn issue_all(&self, clears: Vec<Arc<exec::DeviceMem>>, resolved: Vec<Resolved>, chunk: bool) {
+        // Order this submission after other handles' work on the buffers it
+        // names. Before the plan, so a capture does not record a wait on an
+        // event from outside it, which a capture cannot represent.
+        // The uniform blocks too: a step recorded on another handle brings its
+        // zeroed uniform, and the parameters this submission uploads into it
+        // must not overtake that handle's kernel still reading the old ones.
+        let touched = || clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m).chain(r.uniform.as_ref())));
+        self.fence_in(touched());
+
+        let mut handled = false;
+        let mut give_up = false;
+        let timing = self.timing.load(Ordering::Acquire);
+        if let (Some(cache), false) = (&self.graph, timing) {
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            let sig = self.signature(&clears, &resolved);
+            // Read AFTER the signature is built: every allocation the
+            // signature names is held by a `Resolved`, so nothing it describes
+            // can be freed between the two.
+            let epoch = self.ctx.alloc_epoch();
+            let plan = cache.plan(&self.ctx, &sig, epoch, chunk);
+            let outcome = match plan {
+                Plan::Eager => Ok(false),
+                Plan::Replay(at) => cache.replay(&self.ctx, at, &resolved, &self.counters.graph).map(|()| true),
+                Plan::Capture => {
+                    self.capturing.store(true, Ordering::Release);
+                    let mut r = cache.capture(
+                        &self.ctx,
+                        &sig,
+                        epoch,
+                        &clears,
+                        &resolved,
+                        &self.counters.graph,
+                    );
+                    self.capturing.store(false, Ordering::Release);
+                    if r.is_ok() {
+                        // Recording a launch IS a launch call into the driver;
+                        // it just does not execute. Counting it keeps
+                        // `host_launches` the honest total of what the host
+                        // paid, so a capture reads as a one-off cost rather
+                        // than as free.
+                        self.counters.host_launches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
+                        crate::live::host_launched(resolved.len() as u64);
+                        // Index 0 is the capture that just happened - a
+                        // capture records the work but does not run it, so the
+                        // submission is still owed its execution.
+                        r = cache.replay(&self.ctx, 0, &resolved, &self.counters.graph);
+                    }
+                    r.map(|()| true)
+                }
+            };
+            match outcome {
+                Ok(done) => handled = done,
+                Err(e) => {
+                    // Capture is an optimisation and nothing else, so a
+                    // failure costs batching rather than the submission: the
+                    // recorded work was swallowed by the capture rather than
+                    // executed, so falling through re-issues all of it.
+                    tracing::warn!(reason = %e, "backend-cuda: submission capture failed; launching each dispatch");
+                    give_up = cache.forget(&self.ctx);
+                }
+            }
+        }
+
+        if give_up {
+            tracing::warn!(
+                "backend-cuda: submission capture has failed repeatedly on this handle and will not be \
+                 attempted again; every dispatch will be launched on its own"
+            );
+        }
+        if !handled {
+            for c in &clears {
+                self.ctx
+                    .zero(c)
+                    .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
+            }
+            for r in &resolved {
+                self.issue(r);
+            }
+        }
+        self.fence_out(touched());
     }
 
     /// Refuse a synchronising call that arrived while a capture is open.
@@ -1151,6 +1276,9 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+        // A write is ordered after every submission before it, including the
+        // ones an open pass is still holding.
+        self.issue_held();
         self.counters.writes.fetch_add(1, Ordering::Relaxed);
         let mem = &CudaBuf::of(buf).mem;
         self.fence_in([mem]);
@@ -1339,89 +1467,42 @@ impl backend_api::Backend for CudaBackend {
         // opens - compiling a kernel is not a stream operation.
         let resolved: Vec<Resolved> = steps.iter().map(|s| self.resolve(s.downcast_ref::<CudaStep>())).collect();
         self.counters.dispatches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
-        // Order this submission after other handles' work on the buffers it
-        // names. Before the plan, so a capture does not record a wait on an
-        // event from outside it, which a capture cannot represent.
-        // The uniform blocks too: a step recorded on another handle brings its
-        // zeroed uniform, and the parameters this submission uploads into it
-        // must not overtake that handle's kernel still reading the old ones.
-        let touched = || clears.iter().chain(resolved.iter().flat_map(|r| r.bufs.iter().map(|(m, _)| m).chain(r.uniform.as_ref())));
-        self.fence_in(touched());
-
-        let mut handled = false;
-        let mut give_up = false;
-        let timing = self.timing.load(Ordering::Acquire);
-        if let (Some(cache), false) = (&self.graph, timing) {
-            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-            let sig = self.signature(&clears, &resolved);
-            // Read AFTER the signature is built: every allocation the
-            // signature names is held by a `Resolved`, so nothing it describes
-            // can be freed between the two.
-            let epoch = self.ctx.alloc_epoch();
-            let plan = cache.plan(&self.ctx, &sig, epoch);
-            let outcome = match plan {
-                Plan::Eager => Ok(false),
-                Plan::Replay(at) => cache.replay(&self.ctx, at, &resolved, &self.counters.graph).map(|()| true),
-                Plan::Capture => {
-                    self.capturing.store(true, Ordering::Release);
-                    let mut r = cache.capture(
-                        &self.ctx,
-                        &sig,
-                        epoch,
-                        &clears,
-                        &resolved,
-                        &self.counters.graph,
-                    );
-                    self.capturing.store(false, Ordering::Release);
-                    if r.is_ok() {
-                        // Recording a launch IS a launch call into the driver;
-                        // it just does not execute. Counting it keeps
-                        // `host_launches` the honest total of what the host
-                        // paid, so a capture reads as a one-off cost rather
-                        // than as free.
-                        self.counters.host_launches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
-                        // Index 0 is the capture that just happened - a
-                        // capture records the work but does not run it, so the
-                        // submission is still owed its execution.
-                        r = cache.replay(&self.ctx, 0, &resolved, &self.counters.graph);
-                    }
-                    r.map(|()| true)
-                }
-            };
-            match outcome {
-                Ok(done) => handled = done,
-                Err(e) => {
-                    // Capture is an optimisation and nothing else, so a
-                    // failure costs batching rather than the submission: the
-                    // recorded work was swallowed by the capture rather than
-                    // executed, so falling through re-issues all of it.
-                    tracing::warn!(reason = %e, "backend-cuda: submission capture failed; launching each dispatch");
-                    give_up = cache.forget(&self.ctx);
-                }
+        {
+            let mut pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
+            if pass.depth > 0 && clears.is_empty() {
+                pass.held.extend(resolved);
+                self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                return;
             }
         }
-
-        if give_up {
-            tracing::warn!(
-                "backend-cuda: submission capture has failed repeatedly on this handle and will not be \
-                 attempted again; every dispatch will be launched on its own"
-            );
-        }
-        if !handled {
-            for c in &clears {
-                self.ctx
-                    .zero(c)
-                    .unwrap_or_else(|e| panic!("backend-cuda: clearing a buffer failed: {e}"));
-            }
-            for r in &resolved {
-                self.issue(r);
-            }
-        }
-        self.fence_out(touched());
+        // A clear is a node ordered before this submission's steps and after
+        // everything submitted earlier; hoisting it above held steps would
+        // zero a buffer they still have to write, so the held run goes first.
+        self.issue_held();
+        self.issue_all(clears, resolved, false);
         self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
+    fn begin_pass(&self) {
+        self.pass.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
+    }
+
+    fn end_pass(&self) {
+        let outermost = {
+            let mut pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(pass.depth > 0, "backend-cuda: end_pass without a matching begin_pass");
+            pass.depth -= 1;
+            pass.depth == 0
+        };
+        if outermost {
+            let t0 = std::time::Instant::now();
+            self.issue_held();
+            self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+        self.issue_held();
         self.refuse_during_capture("read");
         self.counters.readbacks.fetch_add(1, Ordering::Relaxed);
         // A launch reports only the errors it can see BEFORE running, so this
@@ -1447,6 +1528,7 @@ impl backend_api::Backend for CudaBackend {
     /// without waiting: a decoder reads its logits between submissions, so the
     /// wait has already happened by the time the next one is built.
     fn poll_wait(&self) {
+        self.issue_held();
         self.refuse_during_capture("poll_wait");
         self.drain_staging();
         self.release_dead_uniforms();
@@ -1461,6 +1543,8 @@ impl backend_api::Backend for CudaBackend {
     /// Device-side per-kernel timing, from events around each launch. See
     /// [`KernelTimes`]. While on, submissions are issued launch by launch.
     fn set_kernel_timing(&self, on: bool) -> bool {
+        // Held steps were resolved under the old setting; issue them under it.
+        self.issue_held();
         if !on && self.timing.swap(false, Ordering::AcqRel) {
             // Launches already stamped still hold events: drain and read them
             // so nothing is lost or left pending behind a switched-off timer.
@@ -1477,6 +1561,7 @@ impl backend_api::Backend for CudaBackend {
     /// reset, sorted by name. Waits for the device, because a launch's events
     /// only mean something once it has run.
     fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        self.issue_held();
         let _ = self.ctx.sync();
         self.collect_timings();
         let kt = self.kernel_times.lock().unwrap_or_else(|e| e.into_inner());

@@ -151,3 +151,59 @@ fn a_changed_size_is_re_allocated_not_reused() {
     assert_eq!(gpu.scratch_held(), (1, 65536), "a 256-word slot was handed back for a 65536-word request - the arena bound a buffer too small for its dispatch");
     gpu.scratch_release();
 }
+
+/// Two repeating sequences on one handle - a decode step's layer stack and its
+/// head are the case - must not evict each other. Sharing one arena they
+/// alternated through the same slot indices at different sizes, so every slot
+/// of both was re-allocated every token: an allocation and a free (a
+/// whole-device wait) per buffer, which is the very cost the arena exists to
+/// remove, reintroduced by the second user.
+#[test]
+fn named_arenas_on_one_handle_do_not_evict_each_other() {
+    let Some(gpu) = dev() else { return };
+    let run = |name: &'static str, sizes: [u64; 3]| -> Vec<usize> {
+        let _s = gpu.scratch_scope_in(name);
+        let bufs: Vec<_> = sizes.iter().map(|&n| gpu.storage(n)).collect();
+        bufs.iter().map(|b| b.alloc_id() as usize).collect()
+    };
+    let a1 = run("stack", [128, 256, 512]);
+    let b1 = run("head", [1024, 2048, 4096]);
+    let a2 = run("stack", [128, 256, 512]);
+    let b2 = run("head", [1024, 2048, 4096]);
+    assert_eq!(a1, a2, "the second sequence evicted the first arena's slots");
+    assert_eq!(b1, b2, "the first sequence evicted the second arena's slots");
+    gpu.scratch_release_in("stack");
+    gpu.scratch_release_in("head");
+}
+
+/// Releasing one named arena leaves the others, and the unnamed default is its
+/// own arena.
+#[test]
+fn releasing_one_arena_keeps_the_others() {
+    let Some(gpu) = dev() else { return };
+    {
+        let _s = gpu.scratch_scope();
+        let _b = gpu.storage(64);
+    }
+    {
+        let _s = gpu.scratch_scope_in("other");
+        let _b = gpu.storage(32);
+    }
+    assert_eq!(gpu.scratch_held(), (1, 64), "scratch_held reports the default arena");
+    gpu.scratch_release_in("other");
+    assert_eq!(gpu.scratch_held(), (1, 64), "releasing `other` dropped the default arena's slot");
+    gpu.scratch_release();
+    assert_eq!(gpu.scratch_held(), (0, 0));
+}
+
+/// One scope open at a time per handle, whatever the arenas are called: a
+/// nested cursor would hand the inner sequence the outer sequence's buffers.
+#[test]
+#[should_panic(expected = "a scope is already open")]
+fn scopes_still_do_not_nest_across_names() {
+    let Some(gpu) = dev() else {
+        panic!("a scope is already open (gpu tests skipped)");
+    };
+    let _a = gpu.scratch_scope_in("a");
+    let _b = gpu.scratch_scope_in("b");
+}
