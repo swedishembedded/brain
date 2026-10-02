@@ -25,6 +25,7 @@
 //! defaults not always present in a checkpoint's `config.json` - a config
 //! default here mirrors the *reference's* default, not "off".
 
+use model::kv_tier::KvTier;
 use serde_json::Value;
 
 pub use qwen3::LoraCfg;
@@ -420,15 +421,16 @@ impl Qwen35Config {
 
     /// Bytes one sequence's decode state costs on the card holding a layer of
     /// type `ty`, at `cap` decode positions: a GQA layer's `[cap, kv_dim]` K
-    /// and V cache, or a GDN layer's fixed-size (cap-independent) recurrent
+    /// and V cache stored in `kv` ([`KvTier::plane_bytes`], scales included),
+    /// or a GDN layer's fixed-size (cap-independent, always `f32`) recurrent
     /// state + conv history. `crate::int8_gguf_resident::layer_cost`'s own
     /// per-layer decode-state term, and [`Self::infer_footprint_bytes`]'s -
     /// moved here so a multi-device resident's byte-exact plan and a plain
     /// single-device inference build's pre-flight estimate share ONE formula
     /// rather than two that can drift.
-    pub fn layer_decode_state_bytes(&self, ty: LayerType, cap: u32) -> u64 {
+    pub fn layer_decode_state_bytes(&self, ty: LayerType, cap: u32, kv: KvTier) -> u64 {
         match ty {
-            LayerType::Full => 2 * cap as u64 * self.kv_dim() as u64 * 4,
+            LayerType::Full => 2 * kv.plane_bytes(cap as u64, self.kv_dim() as u64, self.head_dim as u64),
             LayerType::Linear => (self.gdn_state_len() + self.gdn_hist_len()) * 4,
         }
     }
@@ -452,7 +454,7 @@ impl Qwen35Config {
         let embed = self.vocab as u64 * self.d_model as u64 * 4;
         let head = if self.tie_embeddings { 0 } else { self.vocab as u64 * self.d_model as u64 * 4 };
         let norm = self.d_model as u64 * 4;
-        let layers: u64 = self.layer_types().into_iter().map(|ty| self.layer_weight_bytes(ty, tier) + self.layer_decode_state_bytes(ty, cap)).sum();
+        let layers: u64 = self.layer_types().into_iter().map(|ty| self.layer_weight_bytes(ty, tier) + self.layer_decode_state_bytes(ty, cap, KvTier::F32)).sum();
         embed + head + norm + layers
     }
 
@@ -964,13 +966,29 @@ mod tests {
     #[test]
     fn layer_decode_state_bytes_scales_with_cap_only_for_gqa() {
         let cfg = Qwen35Config::qwen38_27b();
-        let gqa_small = cfg.layer_decode_state_bytes(LayerType::Full, 64);
-        let gqa_big = cfg.layer_decode_state_bytes(LayerType::Full, 4096);
+        let gqa_small = cfg.layer_decode_state_bytes(LayerType::Full, 64, KvTier::F32);
+        let gqa_big = cfg.layer_decode_state_bytes(LayerType::Full, 4096, KvTier::F32);
         assert!(gqa_small > 0 && gqa_big > gqa_small, "a GQA layer's decode state must grow with cap: {gqa_small} -> {gqa_big}");
-        let gdn_small = cfg.layer_decode_state_bytes(LayerType::Linear, 64);
-        let gdn_big = cfg.layer_decode_state_bytes(LayerType::Linear, 4096);
+        let gdn_small = cfg.layer_decode_state_bytes(LayerType::Linear, 64, KvTier::F32);
+        let gdn_big = cfg.layer_decode_state_bytes(LayerType::Linear, 4096, KvTier::F32);
         assert!(gdn_small > 0, "a GDN layer's recurrent state must not be zero");
         assert_eq!(gdn_small, gdn_big, "a GDN layer's recurrent state is cap-independent");
+    }
+
+    /// The planner's per-sequence bytes at the headline 128k context follow
+    /// the KV tier for a GQA layer and ignore it for a GDN layer: bf16 halves
+    /// the cache, int8 stores one byte per element plus an `f32` scale per
+    /// (token, kv-head) row.
+    #[test]
+    fn a_gqa_layers_decode_state_follows_its_kv_tier_and_a_gdn_layers_does_not() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let cap = 131_072u64;
+        let gqa = |kv| cfg.layer_decode_state_bytes(LayerType::Full, cap as u32, kv);
+        assert_eq!(gqa(KvTier::F32), 2 * cap * 1024 * 4, "4 kv heads x 256 dims, f32, K and V");
+        assert_eq!(gqa(KvTier::Bf16), gqa(KvTier::F32) / 2);
+        assert_eq!(gqa(KvTier::Int8), 2 * (cap * 1024 + cap * 4 * 4));
+        let gdn = |kv| cfg.layer_decode_state_bytes(LayerType::Linear, cap as u32, kv);
+        assert_eq!(gdn(KvTier::Int8), gdn(KvTier::F32));
     }
 
     /// THE regression this pair of functions exists for: `brain qwen35 infer`

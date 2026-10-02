@@ -29,6 +29,7 @@ use std::time::Instant;
 use checkpoint::TensorSource;
 use checkpoint::gguf::MmapGguf;
 use gpu_core::select::Dtype;
+use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
@@ -195,7 +196,7 @@ fn the_real_checkpoint_plans_across_the_real_cards() {
     }
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), 1);
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
     println!("qwen35 gguf resident: cap={CAP}");
     println!("  total device bytes : {} ({:.2} GiB)", cost.total(), cost.total() as f64 / (1u64 << 30) as f64);
     println!("  embed              : {:.2} GiB", cost.embed as f64 / (1u64 << 30) as f64);
@@ -705,7 +706,7 @@ fn the_real_checkpoints_cost_model_is_reported() {
     let Some(path) = gguf_path() else { return };
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
-    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), 1);
+    let cost = layer_cost(&cfg, CAP, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
     let gdn = cfg.layer_types().iter().position(|t| *t == LayerType::Linear).unwrap();
     let gqa = cfg.layer_types().iter().position(|t| *t == LayerType::Full).unwrap();
     println!("  per-layer GDN: {} bytes, GQA: {} bytes", cost.per_layer[gdn], cost.per_layer[gqa]);

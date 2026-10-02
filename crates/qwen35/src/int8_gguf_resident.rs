@@ -145,6 +145,7 @@ use data::rng::Rng;
 use gguf::import::{ElemOp, Mapped};
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
+use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
@@ -166,6 +167,10 @@ pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
 /// existing real-checkpoint gate in [`crate::gguf_import`] already uses, so a
 /// box configured for one is configured for both.
 pub const GGUF_ENV: &str = "BRAIN_QWEN35_GGUF";
+
+/// The environment variable [`Qwen35GgufResident::kv_tier_from_env`] reads:
+/// `f32` (default), `bf16` or `int8`.
+pub const KV_ENV: &str = "BRAIN_QWEN35_KV";
 
 /// Default per-sequence `prompt + max_new` cap (also this resident's KV/GDN
 /// cache capacity, since every sequence gets the whole cache).
@@ -264,7 +269,8 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 ///
 /// * `per_layer` - the layer's weights at `tier` (`Qwen35Config::
 ///   layer_weight_bytes`, itself gated against what `model::ops::Weight::
-///   upload` really places) plus that layer's own decode state.
+///   upload` really places) plus that layer's own decode state, its KV window
+///   stored in `kv` (`Qwen35Config::layer_decode_state_bytes`).
 /// * `embed` - **zero**. The `[vocab, d_model]` embedding is never uploaded:
 ///   decode only ever needs one ROW per token, so [`Qwen35GgufInstance`] reads
 ///   it straight out of the mapping ([`MmapGguf::tensor_range`], which decodes
@@ -277,9 +283,9 @@ fn head_i8_bytes(cfg: &Qwen35Config) -> u64 {
 /// Charging the endpoints truthfully matters more here than anywhere else: at
 /// this vocab a mis-charged endpoint is several GB, i.e. the difference
 /// between a plan that fits and a card that OOMs mid-load.
-pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, max_batch: u32) -> LayerBytes {
+pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, max_batch: u32) -> LayerBytes {
     // Decode state is per SEQUENCE - a GQA layer's `[cap, kv_dim]` KV window
-    // and a GDN layer's fixed-size recurrent state alike - so a stage holding
+    // (stored in `kv`) and a GDN layer's fixed-size recurrent state alike - so a stage holding
     // `max_batch` concurrent sequences holds that many of each. Weights are
     // shared by the whole batch and are counted once, which is the entire
     // point of batching.
@@ -287,9 +293,18 @@ pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, max_batch: u3
     let per_layer = cfg
         .layer_types()
         .into_iter()
-        .map(|ty| cfg.layer_weight_bytes(ty, tier) + slots * cfg.layer_decode_state_bytes(ty, cap))
+        .map(|ty| cfg.layer_weight_bytes(ty, tier) + slots * cfg.layer_decode_state_bytes(ty, cap, kv))
         .collect();
     LayerBytes { per_layer, embed: 0, head: head_i8_bytes(cfg) + cfg.d_model as u64 * 4 }
+}
+
+/// Whether `max_batch` sequences of `cap` tokens make KV planes the kernels
+/// can address: they index a plane with `u32` element offsets
+/// ([`model::kv_tier::MAX_PLANE_ELEMS`]), so a pool past that would alias its
+/// own start, however many bytes the cards could hold. A sizing that fails
+/// this is planned as unplaceable.
+pub fn kv_pool_addressable(cfg: &Qwen35Config, cap: u32, max_batch: u32) -> bool {
+    KvTier::fits_addressing(max_batch as u64 * cap as u64, cfg.kv_dim() as u64)
 }
 
 // ------------------------------------------------------------ the fetch plan
@@ -687,9 +702,9 @@ pub fn resident_config(mg: &MmapGguf, cap: u32) -> Result<Qwen35Config, String> 
 ///   `model::gdn_mixer::gdn_mixer_decode_fwd`, so they need no pool layout of
 ///   their own.
 struct ShardCaches {
-    /// `[layer]` -> `[slots*cap, kv_dim]` (dummy at non-owned / GDN layers).
-    gqa_k: Vec<DeviceBuffer>,
-    gqa_v: Vec<DeviceBuffer>,
+    /// `[layer]` -> K and V planes of `[slots*cap, kv_dim]` in the cache's
+    /// KV tier (placeholder at non-owned / GDN layers).
+    gqa_kv: Vec<KvLayer>,
     /// `[slot][layer]` (dummy at non-owned / GQA layers).
     gdn_state: Vec<Vec<DeviceBuffer>>,
     gdn_hist: Vec<Vec<DeviceBuffer>>,
@@ -697,18 +712,16 @@ struct ShardCaches {
 }
 
 impl ShardCaches {
-    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32) -> ShardCaches {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, shard: &Shard, cap: u32, slots: u32, kv_tier: KvTier) -> ShardCaches {
         assert!(slots > 0, "{MODEL}: ShardCaches needs at least one slot");
         let kv = cfg.kv_dim() as u64;
         let (state, hist) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
         let n = cfg.n_layers as usize;
         let types = cfg.layer_types();
-        let (mut gqa_k, mut gqa_v) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        let mut gqa_kv = Vec::with_capacity(n);
         for (l, ty) in types.iter().enumerate() {
             let full = shard.owns(l) && *ty == LayerType::Full;
-            let words = if full { slots as u64 * cap as u64 * kv } else { 1 };
-            gqa_k.push(gpu.storage(words));
-            gqa_v.push(gpu.storage(words));
+            gqa_kv.push(if full { KvLayer::new(gpu, kv_tier, slots as u64 * cap as u64, kv, cfg.head_dim as u64) } else { KvLayer::placeholder(gpu) });
         }
         let (mut gdn_state, mut gdn_hist) = (Vec::with_capacity(slots as usize), Vec::with_capacity(slots as usize));
         for _ in 0..slots {
@@ -722,7 +735,7 @@ impl ShardCaches {
             gdn_state.push(st);
             gdn_hist.push(hi);
         }
-        let caches = ShardCaches { gqa_k, gqa_v, gdn_state, gdn_hist, cap };
+        let caches = ShardCaches { gqa_kv, gdn_state, gdn_hist, cap };
         caches.reset(gpu);
         caches
     }
@@ -741,8 +754,7 @@ impl ShardCaches {
     /// One slot's single-sequence view (prefill, and any single-token step).
     fn view(&self, slot: u32) -> DecodeCaches<'_> {
         DecodeCaches {
-            gqa_kcache: &self.gqa_k,
-            gqa_vcache: &self.gqa_v,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.cap,
             gqa_base_row: slot * self.cap,
             gdn_state: &self.gdn_state[slot as usize],
@@ -885,6 +897,8 @@ pub struct Qwen35GgufInstance {
     /// placement was charged for them ([`layer_cost`]). `1` is the default and
     /// leaves this instance byte-identical to an unbatched one.
     max_batch: u32,
+    /// How every stage stores its GQA layers' K/V ([`KvTier`]).
+    kv_tier: KvTier,
     /// The last [`Self::generate`] call's real timings, surfaced through
     /// [`Instance::metrics`]. Prefill and decode are now genuinely different
     /// primitives (a bounded ROUND of tokens per pipeline pass versus one
@@ -1235,7 +1249,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(positions);
-            let caches = BatchDecodeCaches { gqa_kpool: &s.caches.gqa_k, gqa_vpool: &s.caches.gqa_v, gqa_cap: s.caches.cap, seqs: &seqs };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
         let last = self.shards.last().expect("a plan always has at least one stage");
@@ -1261,6 +1275,11 @@ impl Qwen35GgufInstance {
         self.replay_prompt(prompt, 0)?;
         self.poll_wait();
         Ok(t.elapsed().as_secs_f64())
+    }
+
+    /// How this instance's stages store their GQA layers' K/V.
+    pub fn kv_tier(&self) -> KvTier {
+        self.kv_tier
     }
 
     /// One batched decode step with an explicit position per row, returning each
@@ -2253,7 +2272,7 @@ pub struct Qwen35GgufResident {
 
 impl Qwen35GgufResident {
     pub fn new(gguf_path: String, devices: Vec<(Device, u64)>, cap: u32, tier: TierPolicy) -> Qwen35GgufResident {
-        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, plan: OnceLock::new() }
+        Qwen35GgufResident { gguf_path, devices, cap: cap.max(1), tier, max_batch: 1, kv_tier: KvTier::F32, plan: OnceLock::new() }
     }
 
     /// How many sequences one [`Instance::run_batch`] call may decode
@@ -2315,6 +2334,9 @@ impl Qwen35GgufResident {
         // A losing racer's value is dropped; `plan_uncached` is a pure
         // function of `self`, so which racer wins cannot matter.
         let _ = self.plan.set(computed.clone());
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
+    /// into [`layer_cost`] at the bytes that tier really occupies.
+    kv_tier: KvTier,
         computed
     }
 
@@ -2336,7 +2358,17 @@ impl Qwen35GgufResident {
                 return Plan::default();
             }
         };
-        let cost = layer_cost(&cfg, self.cap, &self.tier, self.max_batch);
+        if !kv_pool_addressable(&cfg, self.cap, self.max_batch) {
+            eprintln!(
+                "{MODEL}: {} sequences of {} tokens is {} KV rows of {} elements per layer, past the kernels' u32 element index -- reporting zero devices",
+                self.max_batch,
+                self.cap,
+                self.max_batch as u64 * self.cap as u64,
+                cfg.kv_dim()
+            );
+            return Plan::default();
+        }
+        let cost = layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch);
         // `plan_fewest_devices` wants `(index into self.devices, capacity)`;
         // mapping back afterwards is what makes a non-GPU device in the list
         // (which this model cannot use) rejected rather than mis-indexed.
@@ -2346,6 +2378,34 @@ impl Qwen35GgufResident {
                 Device::Gpu(_) => caps.push((i, cap)),
                 other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
             }
+    /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
+    /// `bf16` halves the resident cache and `int8` (one scale per (token,
+    /// kv-head) row) quarters it, at the cost of rounding each cached element
+    /// once as it is written; the attention arithmetic stays `f32`. The
+    /// recurrent state of the GDN layers is not part of the cache and stays
+    /// `f32`.
+    ///
+    /// Charged into the placement ([`layer_cost`]), so a compact tier lets more
+    /// sequences (or a longer context) fit on the same cards. Must be set
+    /// BEFORE the first `estimate_multi`/`activate_multi` call.
+    pub fn with_kv_tier(mut self, kv: KvTier) -> Qwen35GgufResident {
+        self.kv_tier = kv;
+        self
+    }
+
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
+    pub fn kv_tier(&self) -> KvTier {
+        self.kv_tier
+    }
+
+    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
+    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
+    /// an error rather than a silent fallback, for the reason
+    /// [`Self::tier_from_env`] gives.
+    pub fn kv_tier_from_env() -> Result<KvTier, String> {
+        KvTier::from_env(KV_ENV)
+    }
+
         }
         let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
             eprintln!(
@@ -2380,7 +2440,7 @@ impl Qwen35GgufResident {
     pub fn total_device_bytes(&self) -> Result<u64, String> {
         let mg = MmapGguf::open(&self.gguf_path).map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
         let cfg = resident_config(&mg, self.cap)?;
-        Ok(layer_cost(&cfg, self.cap, &self.tier, self.max_batch).total())
+        Ok(layer_cost(&cfg, self.cap, &self.tier, self.kv_tier, self.max_batch).total())
     }
 
     /// Which layer range and how many bytes each device holds, as planned -
@@ -2409,7 +2469,7 @@ impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
             "generate",
-            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 KV/GDN state; one sequence per dispatch)",
+            "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from the released Q8_0 GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16 or int8 (BRAIN_QWEN35_KV); one sequence per dispatch)",
         )
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -2529,7 +2589,7 @@ impl Qwen35GgufResident {
             // below, at `self.cap` - the same split `crate::serve::Engine`
             // makes for the same reason.
             let qwen35 = Qwen35::new_shard_dt(cfg.clone(), 1, 1, &src, shard.clone(), &self.tier);
-            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch);
+            let caches = ShardCaches::new(&qwen35.gpu, &cfg, shard, self.cap, self.max_batch, self.kv_tier);
             shards.push(DeviceShard { qwen35, caches });
         }
 
@@ -2558,7 +2618,7 @@ impl Qwen35GgufResident {
         };
         let embed = EmbedTable { name: embed_name, d };
 
-        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, last: Cell::default(), stop: Cell::new("length"), taps: RefCell::new(None) })
+        Ok(Qwen35GgufInstance { cfg, shards, mg, embed, head, tok, eos, cap: self.cap, max_batch: self.max_batch, kv_tier: self.kv_tier, last: Cell::default(), stop: Cell::new("length"), taps: RefCell::new(None) })
     }
 }
 
@@ -2828,7 +2888,7 @@ mod tests {
     #[test]
     fn the_endpoints_are_charged_for_what_is_really_placed() {
         let cfg = Qwen35Config::qwen38_27b();
-        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), 1);
+        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
         let fp32_table = cfg.vocab as u64 * cfg.d_model as u64 * 4;
         assert_eq!(fp32_table, 5_085_593_600, "the fp32 table this resident refuses to place");
         assert_eq!(cost.embed, 0, "the embedding is read from the mapping a row at a time, never uploaded");
@@ -2846,8 +2906,8 @@ mod tests {
     fn per_layer_cost_includes_this_sequences_decode_state() {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
-        let small = layer_cost(&cfg, 128, &i8, 1);
-        let large = layer_cost(&cfg, 8192, &i8, 1);
+        let small = layer_cost(&cfg, 128, &i8, KvTier::F32, 1);
+        let large = layer_cost(&cfg, 8192, &i8, KvTier::F32, 1);
         let types = cfg.layer_types();
         let gqa = types.iter().position(|t| *t == LayerType::Full).unwrap();
         let gdn = types.iter().position(|t| *t == LayerType::Linear).unwrap();
@@ -2863,7 +2923,7 @@ mod tests {
     #[test]
     fn the_real_model_needs_two_24gb_cards_and_fits_them() {
         let cfg = Qwen35Config::qwen38_27b();
-        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), 1);
+        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
         let p40 = 24 * GB; // 24 GiB usable, i.e. a card with no reserve at all
         assert!(cost.total() > p40, "if it fitted one card this resident would be pointless: {} bytes", cost.total());
         assert!(model::shard::plan_by_capacity(&cost, &[(0, p40)]).is_none(), "one card must be reported infeasible, not planned");
@@ -2894,8 +2954,8 @@ mod tests {
     fn a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_one_24gb_card() {
         let cfg = Qwen35Config::qwen38_27b();
         let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
-        let cost = layer_cost(&cfg, 2048, &policy_c, 1);
-        let i8_cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), 1);
+        let cost = layer_cost(&cfg, 2048, &policy_c, KvTier::F32, 1);
+        let i8_cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
         assert!(
             cost.total() < i8_cost.total(),
             "a narrower tier must cost fewer bytes than uniform I8: q4 {} >= i8 {}",
@@ -2924,14 +2984,54 @@ mod tests {
     /// isolates what holding the GDN gates at F32 costs (a few MB, per
     /// [`Qwen35Config::layer_weight_bytes`]'s own ground-truth test) against
     /// what it buys (see M24's roadmap entry for the position-sweep quality
+    /// The most sequences of `cap` tokens the planner admits on ONE card of
+    /// `usable` bytes, by the same `plan_fewest_devices` the resident uses.
+    fn max_batch_on_one_card(cfg: &Qwen35Config, cap: u32, kv: KvTier, usable: u64) -> u32 {
+        let i8 = TierPolicy::uniform(Dtype::I8);
+        (1..=64u32)
+            .take_while(|&b| kv_pool_addressable(cfg, cap, b) && model::shard::plan_fewest_devices(&layer_cost(cfg, cap, &i8, kv, b), &[(0, usable)]).is_some())
+            .last()
+            .unwrap_or(0)
+    }
+
+    /// The headline sizing: Qwen3.8-27B at 128k context on one 97 GiB GH200
+    /// (2 GiB reserve). The KV cache is what bounds the batch there, so each
+    /// compact tier must buy sequences in proportion to the bytes it saves:
+    /// ~16 GiB per sequence at f32, half that at bf16, a bit over a quarter
+    /// at int8 (one f32 scale per 256-element row).
+    #[test]
+    fn a_compact_kv_tier_admits_proportionally_more_sequences_at_128k_on_one_gh200() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let usable = (97_871u64 << 20) - (2 << 30);
+        let cap = 131_072;
+        let [f32b, bf16b, int8b] = KvTier::ALL.map(|kv| max_batch_on_one_card(&cfg, cap, kv, usable));
+        println!("128k on one GH200: planner admits f32 {f32b}, bf16 {bf16b}, int8 {int8b} sequences");
+        assert!(f32b >= 1, "one f32 sequence must fit, or this sizing is not the one under test");
+        assert!(bf16b >= 2 * f32b, "bf16 halves the cache, so it must at least double the batch: f32 {f32b}, bf16 {bf16b}");
+        assert!(int8b >= 3 * f32b, "int8 is ~3.9x smaller, so it must at least triple the batch: f32 {f32b}, int8 {int8b}");
+        assert!(int8b > bf16b);
+    }
+
+    /// A plane is addressed by `u32` element offsets, so past 4.29G elements
+    /// a pool would alias itself whatever the cards could hold: at 128k tokens
+    /// x 1024 elements that is 33 sequences, and the planner must refuse there.
+    #[test]
+    fn a_kv_pool_past_the_u32_element_index_is_not_addressable() {
+        let cfg = Qwen35Config::qwen38_27b();
+        assert!(kv_pool_addressable(&cfg, 131_072, 31));
+        assert!(!kv_pool_addressable(&cfg, 131_072, 33));
+        let huge = 1u64 << 40; // far more than any card holds, so only addressing can stop the count
+        assert_eq!(max_batch_on_one_card(&cfg, 131_072, KvTier::Int8, huge), 32);
+    }
+
     /// comparison this arithmetic alone cannot make).
     #[test]
     fn uniform_q4_fits_one_24gb_card_with_more_headroom_than_policy_c() {
         let cfg = Qwen35Config::qwen38_27b();
         let uniform_q4 = TierPolicy::uniform(Dtype::Q4);
         let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
-        let cost_uniform = layer_cost(&cfg, 2048, &uniform_q4, 1);
-        let cost_c = layer_cost(&cfg, 2048, &policy_c, 1);
+        let cost_uniform = layer_cost(&cfg, 2048, &uniform_q4, KvTier::F32, 1);
+        let cost_c = layer_cost(&cfg, 2048, &policy_c, KvTier::F32, 1);
         assert!(
             cost_uniform.total() < cost_c.total(),
             "uniform Q4 must cost fewer bytes than policy C's F32 exception: {} >= {}",

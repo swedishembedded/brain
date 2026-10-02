@@ -111,6 +111,46 @@ fn a_synthetic_decoder_returns_everything_while_its_device_handle_lives_on() {
     assert_eq!(live_resources(), all_before, "dropping the device handle left CUDA objects behind");
 }
 
+/// A paged engine in every KV tier, built, prefilled, decoded and dropped. The
+/// compact tiers own more device objects per plane than the `f32` one (packed
+/// words, row scales, the int8 append ceiling), so each must be returned by
+/// the plane that took it - exactly, by kind: allocations, bytes, streams,
+/// modules, retains. The driver's own free-memory figure is deliberately not
+/// consulted here: at this size it is dwarfed by what another process on a
+/// shared card allocates between two readings, and the exact counters are the
+/// stronger claim.
+#[test]
+fn a_paged_engine_in_every_kv_tier_returns_every_device_object_it_took() {
+    use model::kv_tier::KvTier;
+    use model::paged::BlockTable;
+    use qwen35::serve::Engine;
+
+    let _s = serial();
+    let Ok(_probe) = Context::open(0) else {
+        brain_testutil::skip_unavailable("no usable CUDA device");
+        return;
+    };
+    // The probe holds a stream and a primary-context retain of its own.
+    let baseline = live_resources();
+    let cfg = Qwen35Config::tiny_i8();
+    let init = qwen35::init::init_weights(&cfg, 7);
+    let lifetime = |tier: KvTier| {
+        let mut engine = Engine::from_map_kv(cfg.clone(), &init, 64, 2, tier);
+        let mut table = BlockTable::new();
+        let hidden = model::serve::PagedDecoder::prefill(&mut engine, &mut table, &[3, 8, 1, 4, 1, 5, 9, 2, 6]);
+        assert!(hidden.iter().all(|x| x.is_finite()), "{tier}: prefill hidden state is not finite");
+        let next = engine.forward_batched_greedy(&mut [&mut table], &[7]);
+        assert_eq!(next.len(), 1);
+        engine.release_table(&mut table);
+    };
+    for tier in KvTier::ALL {
+        for round in 0..3 {
+            lifetime(tier);
+            assert_eq!(live_resources(), baseline, "{tier}, round {round}: dropping the engine and its device handle left CUDA objects behind");
+        }
+    }
+}
+
 /// The whole serving path on the real checkpoint: plan, load, prefill, decode,
 /// drop - twice, so a second load on a card that did not get its memory back
 /// would also run out.

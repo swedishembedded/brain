@@ -57,6 +57,7 @@ use paramstore::{ParamStore, Role};
 use audio::conv::ConvKernels;
 use model::block::{self, rmsnorm_bwd, rmsnorm_fwd, swiglu_bwd, KernelIds};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
+use model::kv_tier::{KvKernels, KvLayer, KvTier};
 pub use model::gdn::gdn_chunk_size;
 use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
@@ -166,25 +167,19 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("argmax_part", kernels::ARGMAX_PART), // 85
     ("argmax_final", kernels::ARGMAX_FINAL), // 86
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP), // 87
-    // -- chunked (multi-token-per-dispatch) prefill tier -- see
-    // `Qwen35::run_prefill_chunk`. The two `paged_*_batched` kernels were
-    // already registered further down in `pipelines()` purely to satisfy
-    // `Ops::REQUIRED_KERNELS` ("compiled, never dispatched"); they are named
-    // here instead because this crate now genuinely dispatches them - a
-    // chunk's queries attending a flat per-sequence KV cache is exactly their
-    // degenerate one-block case (see `model::block::gqa_chunk_step`).
+    // -- paged attention over the KV cache, f32 tier -- see
+    // `model::kv_tier::KvKernels`, which binds a layer's KV planes to these by
+    // NAME (the compact tiers' siblings are appended in `pipelines()`):
+    // `Qwen35::run_prefill_chunk`'s chunk and `run_decode_batch`'s batch both
+    // attend a flat per-sequence cache as the degenerate one-block case of a
+    // paged pool. Only the softmax is dispatched off a `const` index.
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED), // 88
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 89
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED), // 90
-    // M2.6: real, dispatched - `gqa_chunk_ids`'s `fused_prefill_hd256` slot,
-    // `model::block::gqa_chunk_step`'s single-dispatch alternative to the
-    // three kernels just above, at this model's real `head_dim=256`.
+    // M2.6: the single-dispatch alternative to the three kernels just above,
+    // at this model's real `head_dim=256`.
     ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256), // 91
-    // The batched KV append `model::block::gqa_decode_batched_step` needs -
-    // hand-numbered (rather than appended by name in `pipelines()` below, where
-    // it used to sit purely to satisfy `Ops::REQUIRED_KERNELS`) because the
-    // batched decode path dispatches it directly, off a `const` index like
-    // every other kernel it uses.
+    // The batched KV append of every tier's decode step.
     ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED), // 92
 ];
 
@@ -277,6 +272,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        // The compact KV tiers (`model::kv_tier`) are resolved BY NAME when a
+        // cache of that tier is used, so their kernels ride along here.
+        let kv = model::kv_tier::kernel_list(&v);
+        v.extend(kv);
         v
     })
 }
@@ -363,10 +362,6 @@ const ARGMAX_PART: usize = 85;
 const ARGMAX_FINAL: usize = 86;
 const TOPK_EXTRACT_STEP: usize = 87;
 const DECODE_SOFTMAX_BATCHED: usize = 88;
-const PAGED_DECODE_SCORES_BATCHED: usize = 89;
-const PAGED_DECODE_APPLY_BATCHED: usize = 90;
-const PAGED_FLASH_PREFILL_HD256: usize = 91;
-const PAGED_KV_APPEND_BATCHED: usize = 92;
 
 /// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
 /// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
@@ -580,44 +575,9 @@ fn gdn_conv_ids() -> GdnConvIds {
     GdnConvIds { causal_conv1d_step: CAUSAL_CONV1D_STEP }
 }
 
-/// [`model::block::gqa_decode_batched_step`]'s kernel ids - the
-/// CROSS-SEQUENCE sibling of [`gqa_chunk_ids`], dispatched by
-/// [`Qwen35::run_decode_batch`]: every resident sequence's one new token
-/// appended to, and attended against, ONE shared paged KV pool per layer in a
-/// single dispatch set.
-fn gqa_decode_batched_ids() -> model::block::GqaDecodeBatchedIds {
-    model::block::GqaDecodeBatchedIds {
-        kv_append_batched: PAGED_KV_APPEND_BATCHED,
-        scores_batched: PAGED_DECODE_SCORES_BATCHED,
-        softmax_batched: DECODE_SOFTMAX_BATCHED,
-        apply_batched: PAGED_DECODE_APPLY_BATCHED,
-    }
-}
-
 /// [`model::gdn_mixer::gdn_mixer_decode_fwd`]'s decode-only kernel ids.
 fn gdn_mixer_decode_ids() -> model::gdn_mixer::GdnMixerDecodeIds {
     model::gdn_mixer::GdnMixerDecodeIds { conv: gdn_conv_ids(), splice: SPLICE }
-}
-
-/// [`model::block::gqa_chunk_step`]'s kernel ids - the CHUNKED sibling of
-/// [`gqa_decode_ids`], dispatched by [`Qwen35::layer_gqa_prefill_chunk`]:
-/// many query rows appended to and attended against the same flat per-layer
-/// KV cache in one dispatch triad.
-fn gqa_chunk_ids() -> model::block::GqaChunkIds {
-    model::block::GqaChunkIds {
-        splice: SPLICE,
-        scores_batched: PAGED_DECODE_SCORES_BATCHED,
-        softmax_batched: DECODE_SOFTMAX_BATCHED,
-        apply_batched: PAGED_DECODE_APPLY_BATCHED,
-        // M2.6: this model's real head_dim (256) has a real fused kernel -
-        // `gqa_chunk_step` dispatches it instead of the triad above whenever
-        // `Op::PagedAttentionFused`'s selector agrees (`caps.
-        // workgroup_reductions`; always true on a real GPU, never on the CPU
-        // JIT, which keeps the triad exactly as before this existed).
-        fused_prefill_hd256: Some(PAGED_FLASH_PREFILL_HD256),
-        // Its GQA layers are head_dim 256 only.
-        fused_prefill: None,
-    }
 }
 
 /// Everything [`Qwen35::layer_gdn_fwd`]'s training branch saves for
@@ -645,11 +605,13 @@ struct GqaChunkCtx<'a> {
     start: u32,
     /// The per-sequence KV cache row capacity (`DecodeCaches::gqa_cap`).
     cap: u32,
-    kcache: &'a DeviceBuffer,
-    vcache: &'a DeviceBuffer,
+    layer: &'a KvLayer,
     /// `[n]` u32, every entry `base_row / cap` - the single-block table this
     /// sequence's KV window is, see `model::block::gqa_chunk_step`.
     block_ids: DeviceBuffer,
+    /// `[n]` u32 with `offsets[i] == start+i`: the row each chunk token's K/V
+    /// is appended at in that block.
+    offsets: DeviceBuffer,
     /// `[n]` u32 with `seq_lens[i] == start+i+1`: this round's causal mask.
     seq_lens: DeviceBuffer,
     /// This round's own `[n, rotary_dim/2]` M-RoPE tables, for absolute
@@ -664,8 +626,7 @@ struct GqaChunkCtx<'a> {
 /// layer, so they are rebound each time round the layer loop.
 struct GqaDecodeCtx<'a> {
     paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
-    pool_k: &'a DeviceBuffer,
-    pool_v: &'a DeviceBuffer,
+    layer: &'a KvLayer,
     /// `[bsz, rotary_dim/2]` M-RoPE tables - row `b` is sequence `b`'s OWN
     /// decode position, and the rows of one batch are unrelated positions.
     cos: &'a DeviceBuffer,
@@ -884,10 +845,9 @@ pub struct Qwen35 {
     /// independent "max decode length" constructor parameter, same
     /// simplification qwen35moe's own `dec_cap` doc explains).
     dec_cap: u32,
-    /// Per-layer plain (non-paged) KV cache for GQA layers, `[dec_cap,
-    /// kv_dim]`; a size-1 dummy at GDN layer indices.
-    gqa_kcache: Vec<DeviceBuffer>,
-    gqa_vcache: Vec<DeviceBuffer>,
+    /// Per-layer plain (non-paged) `f32` KV cache for GQA layers, `[dec_cap,
+    /// kv_dim]`; a size-1 placeholder at GDN layer indices.
+    gqa_kv: Vec<KvLayer>,
     /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`,
     /// for GDN layers; a size-1 dummy at GQA layer indices. Threaded across
     /// `step` calls; zeroed by [`Self::reset_decode_cache`].
@@ -923,7 +883,7 @@ pub struct Qwen35 {
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
 /// run_decode_step`] call reads and updates - this instance's own persistent
-/// decode state (`self.gqa_kcache`/`self.gqa_vcache`/`self.gdn_state`/
+/// decode state (`self.gqa_kv`/`self.gdn_state`/
 /// `self.gdn_hist`), threaded across `step` calls exactly as before this
 /// struct existed. `pub(crate)` since a future paged serving engine (see
 /// `qwen35moe::serve::Engine`'s own precedent) would own a SEPARATE cache/
@@ -935,13 +895,12 @@ pub struct Qwen35 {
 /// Every field is indexed by absolute layer index `l` (length `cfg.n_layers`),
 /// with a size-1 dummy buffer at the layer indices that don't apply to that
 /// field - the SAME "every layer index has a plain buffer, dummy where
-/// irrelevant" convention this struct's own `gqa_kcache`/`gdn_state` fields
+/// irrelevant" convention this struct's own `gqa_kv`/`gdn_state` fields
 /// already use.
 pub(crate) struct DecodeCaches<'a> {
-    /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (dummy at GDN
-    /// indices) - `model::block::gqa_decode_step`'s own `kcache`/`vcache`.
-    pub gqa_kcache: &'a [DeviceBuffer],
-    pub gqa_vcache: &'a [DeviceBuffer],
+    /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (placeholder at GDN
+    /// indices), each layer's K and V planes in the cache's [`KvTier`].
+    pub gqa_kv: &'a [KvLayer],
     /// Cache row capacity, shared by every GQA layer's cache in this call
     /// (one per-sequence capacity, not a per-layer one).
     pub gqa_cap: u32,
@@ -984,11 +943,11 @@ pub(crate) struct BatchSeq<'a> {
 /// per-layer paged KV pool plus one [`BatchSeq`] per sequence.
 pub(crate) struct BatchDecodeCaches<'a> {
     /// Per-layer `[num_blocks*gqa_cap, kv_dim]` KV pool for the full-attention
-    /// layers (a dummy at GDN indices). A sequence's own `[gqa_cap, kv_dim]`
-    /// window is rows `phys*gqa_cap..`; a caller with one dedicated cache per
-    /// sequence is the `num_blocks = 1`, `phys = 0` case.
-    pub gqa_kpool: &'a [DeviceBuffer],
-    pub gqa_vpool: &'a [DeviceBuffer],
+    /// layers (a placeholder at GDN indices), each layer's K and V planes in
+    /// the pool's [`KvTier`]. A sequence's own `[gqa_cap, kv_dim]` window is
+    /// rows `phys*gqa_cap..`; a caller with one dedicated cache per sequence
+    /// is the `num_blocks = 1`, `phys = 0` case.
+    pub gqa_kv: &'a [KvLayer],
     /// Pool rows one physical block spans - the per-sequence KV capacity, and
     /// the paged kernels' `block_size`.
     pub gqa_cap: u32,
@@ -1419,8 +1378,7 @@ impl Qwen35 {
         // `dec_cap = t`: this pass's decode capacity is this instance's own
         // fixed prefill length (see `dec_cap`'s own doc).
         let kv_dim = cfg.kv_dim() as u64;
-        let mut gqa_kcache = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gqa_vcache = Vec::with_capacity(cfg.n_layers as usize);
+        let mut gqa_kv = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_state = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_hist = Vec::with_capacity(cfg.n_layers as usize);
         let (gdn_state_len, gdn_hist_len) = (cfg.gdn_state_len(), cfg.gdn_hist_len());
@@ -1430,22 +1388,19 @@ impl Qwen35 {
         // cache or GDN state per un-owned layer, on every non-owning shard.
         for (l, ty) in cfg.layer_types().into_iter().enumerate() {
             if !shard.owns(l) {
-                gqa_kcache.push(gpu.storage(1));
-                gqa_vcache.push(gpu.storage(1));
+                gqa_kv.push(KvLayer::placeholder(&gpu));
                 gdn_state.push(gpu.storage(1));
                 gdn_hist.push(gpu.storage(1));
                 continue;
             }
             match ty {
                 LayerType::Full => {
-                    gqa_kcache.push(gpu.storage(t as u64 * kv_dim));
-                    gqa_vcache.push(gpu.storage(t as u64 * kv_dim));
+                    gqa_kv.push(KvLayer::new(&gpu, KvTier::F32, t as u64, kv_dim, cfg.head_dim as u64));
                     gdn_state.push(gpu.storage(1));
                     gdn_hist.push(gpu.storage(1));
                 }
                 LayerType::Linear => {
-                    gqa_kcache.push(gpu.storage(1));
-                    gqa_vcache.push(gpu.storage(1));
+                    gqa_kv.push(KvLayer::placeholder(&gpu));
                     gdn_state.push(gpu.storage(gdn_state_len));
                     gdn_hist.push(gpu.storage(gdn_hist_len));
                 }
@@ -1492,8 +1447,7 @@ impl Qwen35 {
             d_img_embeds,
             dec_pos: Cell::new(0),
             dec_cap: t,
-            gqa_kcache,
-            gqa_vcache,
+            gqa_kv,
             gdn_state,
             gdn_hist,
             dres_boundary_in,
@@ -1859,6 +1813,13 @@ impl Qwen35 {
 
     // ---- one GQA (Full) layer ----------------------------------------------
 
+    /// The attention kernels for `layer`'s KV tier, resolved by name on this
+    /// device. A failure means the tier's kernels are not in [`pipelines`],
+    /// which is a build defect, not a runtime condition.
+    fn kv_kernels(&self, layer: &KvLayer) -> KvKernels {
+        KvKernels::resolve(&self.gpu, layer.k.tier()).unwrap_or_else(|e| panic!("qwen35: {e}"))
+    }
+
     /// `prefix` is the weight-name prefix up to (not including) the leaf
     /// name - `"blocks.{l}.self_attn"` for a normal layer, `"mtp.layers.0.
     /// self_attn"` for the MTP head's own full-attention sublayer -
@@ -1904,10 +1865,11 @@ impl Qwen35 {
         let (ctx_gated, internals) = match cached {
             None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             Some(GqaCached::Chunk(ch)) => (
-                model::gqa_mixer::gqa_mixer_chunk_fwd(
+                model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
                     g,
                     &gqa_mixer_ids(),
-                    &gqa_chunk_ids(),
+                    &self.kv_kernels(ch.layer),
+                    DECODE_SOFTMAX_BATCHED,
                     &shape,
                     &weights,
                     &q_full,
@@ -1917,25 +1879,25 @@ impl Qwen35 {
                     ch.base_row,
                     ch.start,
                     ch.cap,
-                    ch.kcache,
-                    ch.vcache,
+                    ch.layer,
                     &ch.block_ids,
+                    &ch.offsets,
                     &ch.seq_lens,
                 ),
                 None,
             ),
             Some(GqaCached::Decode(dc)) => (
-                model::gqa_mixer::gqa_mixer_decode_batched_fwd(
+                model::gqa_mixer::gqa_mixer_decode_batched_kv_fwd(
                     g,
                     &gqa_mixer_ids(),
-                    &gqa_decode_batched_ids(),
+                    &self.kv_kernels(dc.layer),
+                    DECODE_SOFTMAX_BATCHED,
                     &shape,
                     &weights,
                     &q_full,
                     &k,
                     &v,
-                    dc.pool_k,
-                    dc.pool_v,
+                    dc.layer,
                     n,
                     dc.paged,
                 ),
@@ -2580,8 +2542,7 @@ impl Qwen35 {
         let pos = self.dec_pos.get();
         assert!(pos < self.dec_cap, "qwen35::step: decode position {pos} exceeds capacity {}", self.dec_cap);
         let caches = DecodeCaches {
-            gqa_kcache: &self.gqa_kcache,
-            gqa_vcache: &self.gqa_vcache,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.dec_cap,
             // This instance's own caches are dedicated per-sequence buffers,
             // not a pool window - see `DecodeCaches::gqa_base_row`.
@@ -2629,7 +2590,7 @@ impl Qwen35 {
             gdn_state: caches.gdn_state,
             gdn_hist: caches.gdn_hist,
         }];
-        let batch = BatchDecodeCaches { gqa_kpool: caches.gqa_kcache, gqa_vpool: caches.gqa_vcache, gqa_cap: caches.gqa_cap, seqs: &seqs };
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs };
         self.run_decode_batch(&[token_id], &batch, input_override)
     }
 
@@ -2729,7 +2690,7 @@ impl Qwen35 {
                     self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(&streams)).0
                 }
                 LayerType::Full => {
-                    let dctx = GqaDecodeCtx { paged: &paged, pool_k: &caches.gqa_kpool[l], pool_v: &caches.gqa_vpool[l], cos: &cos, sin: &sin };
+                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
                     self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, bsz, Some(GqaCached::Decode(&dctx))).0
                 }
             };
@@ -2789,9 +2750,9 @@ impl Qwen35 {
     /// **State contract - this is the whole point of the function.** `caches`
     /// is left in EXACTLY the state a token-by-token replay of the same
     /// `tokens` would have left it in:
-    /// * GQA layers: rows `pos_start..pos_start+n` of `gqa_kcache`/
-    ///   `gqa_vcache` hold this round's QK-normed, RoPE'd K/V, written by
-    ///   `model::block::gqa_chunk_step`'s bulk fill, and the round's queries
+    /// * GQA layers: rows `pos_start..pos_start+n` of `gqa_kv`'s K and V planes
+    ///   hold this round's QK-normed, RoPE'd K/V, written by
+    ///   `model::block::gqa_chunk_step_kv`'s append, and the round's queries
     ///   attended rows `0..=pos_start+i` (everything earlier rounds cached,
     ///   plus this round's own keys up to each query - the same causal set the
     ///   per-token path sees).
@@ -2910,6 +2871,7 @@ impl Qwen35 {
         let cos = g.storage_init("qwen35.prefill_chunk.cos", &cos);
         let sin = g.storage_init("qwen35.prefill_chunk.sin", &sin);
         let block_ids = g.storage(n as u64);
+        let offsets = g.storage(n as u64);
         let seq_lens = g.storage(n as u64);
         // The single-block table this sequence's KV window is: every row holds
         // the same physical block, `0` when the caller bound a dedicated flat
@@ -2921,6 +2883,7 @@ impl Qwen35 {
             caches.gqa_cap
         );
         g.write(&block_ids, &vec![caches.gqa_base_row / caches.gqa_cap; n as usize]);
+        g.write(&offsets, &(0..n).map(|i| pos_start + i).collect::<Vec<u32>>());
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
         let pooled = n >= self.chunk_arena_min_rows.get();
@@ -2981,9 +2944,9 @@ impl Qwen35 {
                         base_row: caches.gqa_base_row,
                         start: pos_start,
                         cap: caches.gqa_cap,
-                        kcache: &caches.gqa_kcache[l],
-                        vcache: &caches.gqa_vcache[l],
+                        layer: &caches.gqa_kv[l],
                         block_ids: block_ids.clone(),
+                        offsets: offsets.clone(),
                         seq_lens: seq_lens.clone(),
                         cos: &cos,
                         sin: &sin,
@@ -3153,8 +3116,7 @@ impl Qwen35 {
             self.dec_cap
         );
         let caches = DecodeCaches {
-            gqa_kcache: &self.gqa_kcache,
-            gqa_vcache: &self.gqa_vcache,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.dec_cap,
             // This instance's own caches are dedicated per-sequence buffers,
             // not a pool window - see `DecodeCaches::gqa_base_row`.
@@ -3281,8 +3243,7 @@ impl Qwen35 {
     /// the speculative loop needs it in three places.
     fn own_caches(&self) -> DecodeCaches<'_> {
         DecodeCaches {
-            gqa_kcache: &self.gqa_kcache,
-            gqa_vcache: &self.gqa_vcache,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.dec_cap,
             gqa_base_row: 0,
             gdn_state: &self.gdn_state,
@@ -3824,8 +3785,7 @@ mod tests {
     /// convenience wrapper and always passes `None`).
     fn decode_stage(m: &Qwen35, token_id: u32, pos: u32, input: Option<&[f32]>) -> Vec<f32> {
         let caches = DecodeCaches {
-            gqa_kcache: &m.gqa_kcache,
-            gqa_vcache: &m.gqa_vcache,
+            gqa_kv: &m.gqa_kv,
             gqa_cap: m.dec_cap,
             gqa_base_row: 0,
             gdn_state: &m.gdn_state,
@@ -3939,8 +3899,7 @@ mod tests {
     /// exposed. Returns the whole `[n, d_model]` boundary block.
     fn prefill_stage(m: &Qwen35, tokens: &[u32], pos: u32, input: Option<&[f32]>) -> Vec<f32> {
         let caches = DecodeCaches {
-            gqa_kcache: &m.gqa_kcache,
-            gqa_vcache: &m.gqa_vcache,
+            gqa_kv: &m.gqa_kv,
             gqa_cap: m.dec_cap,
             gqa_base_row: 0,
             gdn_state: &m.gdn_state,

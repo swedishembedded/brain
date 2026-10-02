@@ -889,7 +889,7 @@ pub fn run(dir: &Path, cfg: &Qwen35Config, n: u32, window_budget: u32, seed: u64
 //
 // **No persistent incremental KV/GDN state across decode steps** (design
 // decision 1 of the milestone this landed in): the non-streaming `Qwen35::
-// step`'s decode path threads persistent per-layer `gqa_kcache`/`gdn_state`/
+// step`'s decode path threads persistent per-layer `gqa_kv`/`gdn_state`/
 // `gdn_hist` fields through the whole generation; carrying that same state
 // through a streaming window whose layer buffers are dropped and rebuilt
 // every pass would need it to somehow survive eviction. Instead, every

@@ -52,18 +52,18 @@
 //! # The GQA side: one shared pool per layer, block-table addressed
 //!
 //! `Qwen35::step` decodes exactly one persistent sequence, into
-//! `self.gqa_kcache`/`self.gqa_vcache` - fields that exist once per `Qwen35`
+//! `self.gqa_kv` - a field that exists once per `Qwen35`
 //! instance, not once per admitted request. A paged multi-request engine
 //! needs that same per-layer KV cache to be addressable PER SEQUENCE. This
 //! module's `Engine` uses `Qwen35::run_decode_batch`'s own `BatchDecodeCaches`
 //! parameter (and `DecodeCaches` for prefill) instead of reading
-//! `self.gqa_kcache`/`self.gdn_state` - `Qwen35::step` itself is a thin
+//! `self.gqa_kv`/`self.gdn_state` - `Qwen35::step` itself is a thin
 //! wrapper passing its OWN fields as a `DecodeCaches`, so its behaviour (and
 //! its `decode_step.rs` test) is unchanged.
 //!
 //! With that seam in place, this `Engine` preallocates, at construction, ONE
 //! `[num_blocks*block_size, kv_dim]` pool per GQA layer
-//! ([`Engine::gqa_k`]/[`Engine::gqa_v`], indexed `[layer]`) - real and
+//! ([`Engine::gqa_kv`], indexed `[layer]`) - real and
 //! resident from construction, not lazily grown. Physical block `p` owns rows
 //! `p*block_size .. +block_size`, so every attention dispatch reaches a
 //! sequence's history through the paged kernels' own block table rather than
@@ -140,8 +140,10 @@
 //! - **Batched PREFILL**: one sequence's prompt per round; two sequences'
 //!   prompts are never batched into one round (decode is batched; prefill is
 //!   not).
-//! - **int8/int4 paged KV, weight quantization, speculative decode**: not
-//!   implemented; this `Engine` only ever builds a plain fp32 `Qwen35`.
+//! - **int4 paged KV, weight quantization, speculative decode**: not
+//!   implemented; this `Engine` only ever builds a plain fp32 `Qwen35`. The
+//!   GQA pool itself can be stored `bf16` or per-row `int8`
+//!   ([`Engine::from_map_kv`], `model::kv_tier`).
 //! - **Multi-GPU layer sharding**: single GPU only.
 //! - **Vision / MTP**: text-only, matching `Qwen35::step`'s own scope.
 //! - **On-device decode WINDOW**: [`Engine::decode_window_capacity`] is a
@@ -155,6 +157,7 @@ use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
 use model::gdn::{RecurrentSlot, RecurrentSlotShape};
+use model::kv_tier::{KvLayer, KvTier};
 use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
@@ -215,7 +218,7 @@ pub struct Engine {
     /// Owns the device handle, weights (`ParamStore`), and the per-token
     /// decode-step primitives (`Qwen35::run_decode_step`) this whole engine
     /// is built on. Constructed with `b=1, t=1`: this instance's OWN
-    /// `res`/`tokens`/`logits`/`gqa_kcache`/`gdn_state` fields (single-
+    /// `res`/`tokens`/`logits`/`gqa_kv`/`gdn_state` fields (single-
     /// sequence decode state) are never touched by `Engine` - every decode
     /// step here supplies its own `DecodeCaches` - so they are sized to the
     /// smallest legal value.
@@ -229,8 +232,9 @@ pub struct Engine {
     /// KV pool per full-attention layer, a size-1 dummy at GDN-layer indices.
     /// Physical block `p` owns rows `p*block_size .. +block_size`. See module
     /// doc "The GQA side".
-    gqa_k: Vec<DeviceBuffer>,
-    gqa_v: Vec<DeviceBuffer>,
+    gqa_kv: Vec<KvLayer>,
+    /// How `gqa_kv`'s planes are stored.
+    kv_tier: KvTier,
     /// GDN recurrent state / conv history, keyed by `BlockTable::blocks()[0]`,
     /// see module doc for why this is a private map rather than a trait
     /// parameter; populated in `Engine::prefill`, removed in
@@ -245,17 +249,25 @@ impl Engine {
     /// resident at once (`num_blocks`) - together they size the real,
     /// upfront-allocated GQA pool ([`Engine::kv_pool_bytes`]).
     pub fn from_map(cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
-        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent)
+        Self::from_map_kv(cfg, weights, max_seq_len, max_concurrent, KvTier::F32)
+    }
+
+    /// [`Engine::from_map`] with the GQA pool stored in `kv`: `f32` is
+    /// [`Engine::from_map`] itself, `bf16` halves the pool and `int8` (one
+    /// scale per (token, kv-head) row) quarters it, so the same bytes hold
+    /// more sequences. The GDN slots are not part of the pool and stay `f32`.
+    pub fn from_map_kv(cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
+        Self::from_map_with_gpu(Gpu::new(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv)
     }
 
     /// [`Engine::from_map`] on an EXISTING device handle (warm start): the
     /// caller's `Gpu` parents this engine via `Gpu::new_like`, so building
     /// another engine on the same device costs pipeline compilation only.
     pub fn from_map_on(parent: &Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
-        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent)
+        Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, KvTier::F32)
     }
 
-    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32) -> Engine {
+    fn from_map_with_gpu(gpu: Gpu, cfg: Qwen35Config, weights: &HashMap<String, Vec<f32>>, max_seq_len: u32, max_concurrent: u32, kv: KvTier) -> Engine {
         assert!(max_seq_len > 0, "max_seq_len must be > 0");
         assert!(max_concurrent > 0, "max_concurrent must be > 0");
         // b=1, t=1: this instance's own decode-state fields are dead weight
@@ -267,21 +279,15 @@ impl Engine {
         let n_layers = cfg.n_layers as usize;
         let types = cfg.layer_types();
         let pool_rows = max_concurrent as u64 * max_seq_len as u64;
-        let mut gqa_k: Vec<DeviceBuffer> = Vec::with_capacity(n_layers);
-        let mut gqa_v: Vec<DeviceBuffer> = Vec::with_capacity(n_layers);
-        for ty in &types {
-            match ty {
-                LayerType::Full => {
-                    gqa_k.push(model.gpu.storage(pool_rows * kv_dim));
-                    gqa_v.push(model.gpu.storage(pool_rows * kv_dim));
-                }
-                LayerType::Linear => {
-                    gqa_k.push(model.gpu.storage(1));
-                    gqa_v.push(model.gpu.storage(1));
-                }
-            }
-        }
-        Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, gqa_k, gqa_v, gdn_slots: HashMap::new() }
+        let gqa_kv: Vec<KvLayer> = types
+            .iter()
+            .map(|ty| match ty {
+                LayerType::Full => KvLayer::new(&model.gpu, kv, pool_rows, kv_dim, cfg.head_dim as u64),
+                LayerType::Linear => KvLayer::placeholder(&model.gpu),
+            })
+            .collect();
+        debug_assert_eq!(gqa_kv.len(), n_layers);
+        Engine { model, alloc: BlockAllocator::new(max_concurrent, max_seq_len), block_size: max_seq_len, kv_tier: kv, gqa_kv, gdn_slots: HashMap::new() }
     }
 
     /// This sequence's `DecodeCaches` view: the whole per-layer GQA pool, with
@@ -291,8 +297,7 @@ impl Engine {
     fn caches_for(&self, phys: u32) -> DecodeCaches<'_> {
         let slot = self.gdn_slot(phys);
         DecodeCaches {
-            gqa_kcache: &self.gqa_k,
-            gqa_vcache: &self.gqa_v,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.block_size,
             gqa_base_row: phys * self.block_size,
             gdn_state: &slot.state,
@@ -333,7 +338,7 @@ impl Engine {
             .zip(&slots)
             .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
             .collect();
-        let caches = BatchDecodeCaches { gqa_kpool: &self.gqa_k, gqa_vpool: &self.gqa_v, gqa_cap: self.block_size, seqs: &seqs };
+        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
         self.model.run_decode_batch(inputs, &caches, None)
     }
 
@@ -432,7 +437,7 @@ impl Engine {
     pub fn kv_pool_bytes(&self) -> u64 {
         let n_full = self.model.cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;
         let num_blocks = self.alloc.num_blocks() as u64;
-        let gqa_bytes = n_full * num_blocks * 2 * self.block_size as u64 * self.model.cfg.kv_dim() as u64 * 4;
+        let gqa_bytes = n_full * 2 * self.kv_tier.plane_bytes(num_blocks * self.block_size as u64, self.model.cfg.kv_dim() as u64, self.model.cfg.head_dim as u64);
         let gdn_ceiling = num_blocks * GdnSlot::bytes(&gdn_slot_shape(&self.model.cfg));
         gqa_bytes + gdn_ceiling
     }
