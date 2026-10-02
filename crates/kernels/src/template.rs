@@ -241,6 +241,144 @@ fn int8_scaled_variant(vname: String, src: &'static str, binding: &str, scales: 
     Ok(entry)
 }
 
+/// The compact KV storage a kernel written against `// @kv-tier-begin` blocks
+/// can be rewritten for - see [`kv_tier_variant`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactKv {
+    /// Two elements to a `u32` word, the high 16 bits of each `f32` (the low
+    /// half is the even element).
+    Bf16,
+    /// Four signed bytes to a `u32` word, little-endian, plus one `f32` scale
+    /// per 256-element (token, kv-head) row in a pair of extra bindings (7 and
+    /// 8, after the kernel's six).
+    Int8,
+}
+
+impl CompactKv {
+    fn tag(self) -> &'static str {
+        match self {
+            CompactKv::Bf16 => "bf16",
+            CompactKv::Int8 => "int8",
+        }
+    }
+
+    /// `(decls, loads)`: what replaces the kernel's two `kv-tier` blocks.
+    fn blocks(self) -> (&'static str, &'static str) {
+        match self {
+            CompactKv::Bf16 => (BF16_KV_DECLS, BF16_KV_LOADS),
+            CompactKv::Int8 => (INT8_KV_DECLS, INT8_KV_LOADS),
+        }
+    }
+}
+
+const BF16_KV_DECLS: &str = "@group(0) @binding(2) var<storage, read>       pool_k:       array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read>       pool_v:       array<u32>;
+";
+
+const BF16_KV_LOADS: &str = "// bf16: element 2w is the low half of word w, element 2w + 1 the high half. A
+// 16-byte load is eight elements, so two consecutive `k4` pieces share one;
+// `v2` is one word.
+fn bf16_lo(w: u32) -> f32 { return bitcast<f32>(w << 16u); }
+fn bf16_hi(w: u32) -> f32 { return bitcast<f32>(w & 0xFFFF0000u); }
+fn k4(row: u32, i: u32) -> vec4<f32> {
+    let w = pool_k[(row >> 3u) + (i >> 1u)];
+    let lo = (i & 1u) == 0u;
+    let x = select(w.z, w.x, lo);
+    let y = select(w.w, w.y, lo);
+    return vec4<f32>(bf16_lo(x), bf16_hi(x), bf16_lo(y), bf16_hi(y));
+}
+fn v2(row: u32, i: u32) -> vec2<f32> {
+    let w = pool_v[(row >> 1u) + i];
+    return vec2<f32>(bf16_lo(w), bf16_hi(w));
+}
+fn k_scale(row: u32) -> f32 { return 1.0; }
+fn v_scale(row: u32) -> f32 { return 1.0; }
+";
+
+const INT8_KV_DECLS: &str = "@group(0) @binding(2) var<storage, read>       pool_k:       array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read>       pool_v:       array<u32>;
+@group(0) @binding(7) var<storage, read>       k_scales:     array<f32>;
+@group(0) @binding(8) var<storage, read>       v_scales:     array<f32>;
+";
+
+const INT8_KV_LOADS: &str = "// int8: byte b of word w is element 4w + b; the arithmetic shift sign-extends it.
+fn i8x(w: u32, shift_left: u32) -> f32 { return f32(bitcast<i32>(w << shift_left) >> 24u); }
+fn k4(row: u32, i: u32) -> vec4<f32> {
+    // A 16-byte load is sixteen elements: four consecutive `k4` pieces.
+    let w4 = pool_k[(row >> 4u) + (i >> 2u)];
+    let c = i & 3u;
+    var w = w4.x;
+    if (c == 1u) { w = w4.y; }
+    if (c == 2u) { w = w4.z; }
+    if (c == 3u) { w = w4.w; }
+    return vec4<f32>(i8x(w, 24u), i8x(w, 16u), i8x(w, 8u), i8x(w, 0u));
+}
+fn v2(row: u32, i: u32) -> vec2<f32> {
+    let e = row + 2u * i;
+    let w = pool_v[e >> 2u];
+    let sh = (e & 3u) * 8u;   // 0 or 16: an even pair never straddles a word
+    return vec2<f32>(i8x(w, 24u - sh), i8x(w, 16u - sh));
+}
+fn k_scale(row: u32) -> f32 { return k_scales[row >> 8u]; }
+fn v_scale(row: u32) -> f32 { return v_scales[row >> 8u]; }
+";
+
+/// Rewrite a kernel that isolates everything a KV storage tier changes between
+/// `// @kv-tier-begin <block>` and `// @kv-tier-end <block>` marker lines -
+/// the `decls` block (its pool bindings) and the `loads` block (the functions
+/// that read a row) - for compact storage `tier`. The rest of the kernel is
+/// shared, byte for byte, by every tier: one body, three storage layouts.
+///
+/// This is the vectorised sibling of [`dtype_variant`]/[`int8_kv_variant`],
+/// which rewrite one scalar `array<f32>` load at a time. A kernel that reads
+/// rows in 16-byte pieces cannot be expressed that way (each rewritten element
+/// load is its own instruction, so a compact tier would issue as many loads as
+/// the `f32` one and gain nothing), but it can name the row loaders once and
+/// have each tier supply its own. A missing or repeated marker is an error: a
+/// kernel that half-matches would silently keep the `f32` layout.
+///
+/// Named `"{name}#kv=bf16"` / `"{name}#kv=int8"`.
+pub fn kv_tier_variant(name: &str, src: &'static str, tier: CompactKv) -> Result<Variant, String> {
+    let vname = format!("{name}#kv={}", tier.tag());
+
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
+    let key = (src.as_ptr() as usize, vname.clone());
+    let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if let Some(&hit) = cache.get(&key) {
+        return Ok(hit);
+    }
+
+    let (decls, loads) = tier.blocks();
+    let rewritten = replace_kv_block(&replace_kv_block(src, "decls", decls)?, "loads", loads)?;
+    let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
+    cache.insert(key, entry);
+    Ok(entry)
+}
+
+/// `src` with the lines strictly between `// @kv-tier-begin <block>` and the
+/// matching `// @kv-tier-end <block>` replaced by `body` (which ends in a
+/// newline). Both markers must appear exactly once.
+fn replace_kv_block(src: &str, block: &str, body: &str) -> Result<String, String> {
+    let (begin, end) = (format!("// @kv-tier-begin {block}\n"), format!("// @kv-tier-end {block}\n"));
+    let once = |marker: &str| -> Result<usize, String> {
+        let mut at = src.match_indices(marker).map(|(i, _)| i);
+        match (at.next(), at.next()) {
+            (Some(i), None) => Ok(i),
+            (None, _) => Err(format!("kv_tier_variant: no `{}` marker line in the kernel source", marker.trim_end())),
+            (Some(_), Some(_)) => Err(format!("kv_tier_variant: `{}` appears more than once", marker.trim_end())),
+        }
+    };
+    let (b, e) = (once(&begin)?, once(&end)?);
+    if e < b {
+        return Err(format!("kv_tier_variant: the `{block}` end marker comes before its begin marker"));
+    }
+    let mut out = String::with_capacity(src.len() + body.len());
+    out.push_str(&src[..b + begin.len()]);
+    out.push_str(body);
+    out.push_str(&src[e..]);
+    Ok(out)
+}
+
 /// Every `@binding(N)` number declared in `code` (comments already blanked).
 fn find_all_bindings(code: &str) -> Vec<u32> {
     let mut out = Vec::new();
@@ -1331,6 +1469,27 @@ mod tests {
         assert!(vsrc.contains("@binding(8) var<storage, read> v_scales: array<f32>;"), "v scales follow the k scales: {vsrc}");
         assert!(vsrc.contains("* k_scales[slot / p.head_dim])") && vsrc.contains("* v_scales[slot / p.head_dim])"), "each load is scaled per head row: {vsrc}");
         assert_eq!(int8_kv_variant("paged_flash_prefill_hd256", crate::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").unwrap().1.as_ptr(), ksrc.as_ptr());
+    }
+
+    /// The `kv-tier` variants swap exactly the two marked blocks: the bindings
+    /// and the row loaders change, the body is byte-identical, and a kernel
+    /// without the markers is refused rather than half-rewritten.
+    #[test]
+    fn the_kv_tier_variants_swap_the_marked_blocks_and_nothing_else() {
+        let base = crate::PAGED_FLASH_DECODE_GQA_HD256;
+        let body_of = |s: &str| s[s.find("var<workgroup> qs:").unwrap()..].to_string();
+        for (tier, tag) in [(CompactKv::Bf16, "bf16"), (CompactKv::Int8, "int8")] {
+            let (name, src) = kv_tier_variant("paged_flash_decode_gqa_hd256", base, tier).unwrap();
+            assert_eq!(name, format!("paged_flash_decode_gqa_hd256#kv={tag}"));
+            assert_eq!(body_of(src), body_of(base), "{tag}: the shared body must be untouched");
+            assert!(!src.contains("array<vec4<f32>>") && !src.contains("array<vec2<f32>>"), "{tag}: the f32 pool bindings must be gone");
+            assert!(src.contains("fn k4(") && src.contains("fn v2(") && src.contains("fn k_scale(") && src.contains("fn v_scale("), "{tag}: a tier supplies every loader");
+            // The same call is the same variant.
+            assert_eq!(kv_tier_variant("paged_flash_decode_gqa_hd256", base, tier).unwrap().1.as_ptr(), src.as_ptr());
+        }
+        let int8 = kv_tier_variant("paged_flash_decode_gqa_hd256", base, CompactKv::Int8).unwrap().1;
+        assert!(int8.contains("@binding(7)") && int8.contains("@binding(8)"), "int8 adds the two scale bindings");
+        assert!(kv_tier_variant("matmul", crate::MATMUL, CompactKv::Bf16).unwrap_err().contains("kv-tier-begin"), "an unmarked kernel is refused");
     }
 
     #[test]
