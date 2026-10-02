@@ -626,3 +626,132 @@ impl GraphCache {
         self.failures == MAX_FAILURES
     }
 }
+
+/// A run of submissions frozen at its current parameters: captured into a graph
+/// once, launched with one driver call, nothing matched or staged per launch.
+///
+/// This is the other half of what a [`GraphCache`] does. The cache decides, per
+/// submission, whether a graph it holds describes it - which costs a resolve and
+/// a structural comparison of every dispatch, tens of milliseconds for a decode
+/// step - and lets parameters and grids change between replays. A frozen program
+/// is for the caller that KNOWS nothing changes (a recorded tape, `gpu_core::
+/// tape`): the dispatches are the same and what varies reaches them through
+/// buffers, so a launch needs none of that.
+///
+/// Parameters are frozen by giving every step its own PRIVATE uniform block,
+/// filled once before the capture. The shared uniform blocks the eager path and a
+/// [`GraphCache`] use are keyed on a dispatch's structure with its parameter
+/// values excluded, so two steps of one shape in one submission share a block and
+/// are told apart only by the copy node that rewrites it between them - which is
+/// the per-replay staging this avoids, and the reason a frozen graph is kernel
+/// nodes only and needs no pinned host memory.
+///
+/// Holds every allocation its nodes name by address - the bound buffers, the
+/// private uniforms, the buffers cleared first - and the modules the kernels
+/// live in, so no address can be freed and recycled behind it.
+pub(crate) struct Frozen {
+    _graph: exec::Graph,
+    pub(crate) exec: exec::GraphExec,
+    /// Buffers (and their allocator-visible owners) the nodes read or write.
+    pub(crate) touched: Vec<Arc<exec::DeviceMem>>,
+    _uniforms: Vec<exec::DeviceMem>,
+    _modules: Vec<Arc<crate::backend::Compiled>>,
+    /// Dispatches in the program, for the host-cost counters.
+    pub(crate) dispatches: usize,
+}
+
+// Same reasoning as `LiveNode`: the contents are opaque driver handles and
+// reference-counted allocations, and a launch makes the context current first.
+unsafe impl Send for Frozen {}
+unsafe impl Sync for Frozen {}
+
+impl Frozen {
+    /// Capture `segments` - `(buffers to zero first, resolved dispatches)`, in
+    /// order - as one program. Fails, having issued nothing, if the driver
+    /// refuses any part of it.
+    pub fn capture(ctx: &exec::Context, segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>) -> Result<Frozen, String> {
+        Self::capture_inner(ctx, segments, None).map(|(f, _)| f)
+    }
+
+    /// [`Self::capture`] with an event recorded after every dispatch (and one
+    /// before the first), returned with each dispatch's kernel name: the program
+    /// then carries its own device-side timeline.
+    pub fn capture_profiled(
+        ctx: &exec::Context,
+        segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>,
+    ) -> Result<(Frozen, Vec<(String, exec::Event)>, exec::Event), String> {
+        let mut stamps = Vec::new();
+        let start = ctx.event()?;
+        let (frozen, _) = Self::capture_inner(ctx, segments, Some((&start, &mut stamps)))?;
+        Ok((frozen, stamps, start))
+    }
+
+    fn capture_inner(
+        ctx: &exec::Context,
+        segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>,
+        mut stamps: Option<(&exec::Event, &mut Vec<(String, exec::Event)>)>,
+    ) -> Result<(Frozen, ()), String> {
+        // Private uniforms first, before any capture opens: an allocation and a
+        // copy are not stream operations a capture may contain.
+        let mut uniforms: Vec<exec::DeviceMem> = Vec::new();
+        let mut private: Vec<Vec<Option<usize>>> = Vec::with_capacity(segments.len());
+        for (_, steps) in &segments {
+            let mut idx = Vec::with_capacity(steps.len());
+            for s in steps {
+                if s.uniform.is_some() && !s.params.is_empty() {
+                    let mem = ctx.alloc((s.params.len() * 4).max(4))?;
+                    // SAFETY: `u32` has no padding, so the words are valid bytes.
+                    let bytes = unsafe { std::slice::from_raw_parts(s.params.as_ptr() as *const u8, s.params.len() * 4) };
+                    ctx.upload(&mem, bytes)?;
+                    idx.push(Some(uniforms.len()));
+                    uniforms.push(mem);
+                } else {
+                    idx.push(None);
+                }
+            }
+            private.push(idx);
+        }
+
+        let capture = ctx.begin_capture()?;
+        if let Some((start, _)) = &stamps {
+            ctx.record(start)?;
+        }
+        let mut touched: Vec<Arc<exec::DeviceMem>> = Vec::new();
+        let mut modules: Vec<Arc<crate::backend::Compiled>> = Vec::new();
+        let mut dispatches = 0usize;
+        for ((clears, steps), idx) in segments.iter().zip(&private) {
+            for c in clears {
+                ctx.zero(c)?;
+                touched.push(c.clone());
+            }
+            for (s, own) in steps.iter().zip(idx) {
+                let mut args = s.args.clone();
+                if let Some(u) = own {
+                    // `Resolved::args[0]` is the uniform pointer of a kernel that takes one.
+                    args[0] = uniforms[*u].device_ptr();
+                }
+                let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
+                // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
+                // this program keeps loaded, and `args` is the argument list that
+                // module's entry point takes.
+                unsafe { ctx.launch_raw(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &args)? };
+                touched.extend(s.bufs.iter().map(|(m, _)| m.clone()));
+                touched.extend(s.uniform.iter().cloned());
+                modules.push(s.compiled.clone());
+                dispatches += 1;
+                if let Some((_, out)) = stamps.as_mut() {
+                    let ev = ctx.event()?;
+                    ctx.record(&ev)?;
+                    out.push((s.compiled.name.clone(), ev));
+                }
+            }
+        }
+        let graph = capture.finish()?;
+        let exec = ctx.instantiate(&graph)?;
+        modules.sort_by_key(|m| Arc::as_ptr(m) as usize);
+        modules.dedup_by_key(|m| Arc::as_ptr(m) as usize);
+        touched.sort_by_key(|m| Arc::as_ptr(m) as usize);
+        touched.dedup_by_key(|m| Arc::as_ptr(m) as usize);
+        Ok((Frozen { _graph: graph, exec, touched, _uniforms: uniforms, _modules: modules, dispatches }, ()))
+    }
+}

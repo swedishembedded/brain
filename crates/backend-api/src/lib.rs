@@ -1132,6 +1132,26 @@ pub struct StepMeta {
     pub threads: u32,
 }
 
+/// An opaque recorded program: a run of submissions frozen at their current
+/// parameters by [`Backend::freeze`] and launched with [`Backend::launch_program`]
+/// for the price of one driver call. Tagged by the backend that built it, like
+/// [`Step`]; it holds every device allocation it names alive.
+#[derive(Clone)]
+pub struct Program {
+    inner: Arc<Erased>,
+}
+
+impl Program {
+    /// Wrap a backend-native program.
+    pub fn new<T: Any + ThreadSafe>(inner: T) -> Program {
+        Program { inner: Arc::new(inner) }
+    }
+    /// Recover the native program. Panics on a backend mismatch.
+    pub fn downcast_ref<T: Any>(&self) -> &T {
+        self.inner.downcast_ref::<T>().expect("Program/backend mismatch")
+    }
+}
+
 /// An opaque recorded dispatch, tagged by the backend that built it. Held by
 /// callers between `step*` and `submit`; `submit` downcasts it back.
 #[derive(Clone)]
@@ -1525,6 +1545,40 @@ pub trait Backend: Send + Sync {
     /// `@workgroup_size` attribute in its source for a backend to read.
     fn step_native(&self, _id: NativeId, _bufs: &[&DeviceBuffer], _params: &[u32], _threads: u32) -> Option<Step> {
         None
+    }
+
+    /// Freeze a run of submissions - each a `(buffers to zero first, dispatches)`
+    /// pair, in order - into a [`Program`] whose every dispatch parameter is
+    /// what it is NOW, or `None` if this backend cannot (the default).
+    ///
+    /// The point is the launch: a program is launched without re-resolving,
+    /// re-matching or re-staging anything the way a repeated submission still
+    /// is, because nothing in it can have changed - what varies between
+    /// launches must reach the kernels through buffers. The program holds the
+    /// allocations it names, so none can be freed or recycled behind it.
+    /// Freezing records and executes nothing.
+    fn freeze(&self, _segments: &[(Vec<&DeviceBuffer>, &[Step])]) -> Option<Program> {
+        None
+    }
+
+    /// Per-kernel DEVICE time of `segments` run as one program `reps` times:
+    /// `(kernel, mean milliseconds per run, dispatches per run)`, slowest first,
+    /// or `None` if this backend cannot time a program (the default).
+    ///
+    /// The run is the program's own - the dispatches launch back to back as they
+    /// would in a replay - so a kernel's figure is the span from the previous
+    /// dispatch finishing to its own finishing: its duration plus whatever the
+    /// device spent getting to it, with none of the host's launch latency a
+    /// per-dispatch timing of eager launches carries. Executes the segments.
+    fn profile_program(&self, _segments: &[(Vec<&DeviceBuffer>, &[Step])], _reps: u32) -> Option<Vec<(String, f64, u64)>> {
+        None
+    }
+
+    /// Launch a program [`Backend::freeze`] returned on this backend. `false`
+    /// means "not launched" (a backend state in which it cannot - kernel
+    /// timing armed, say) and the caller submits the original steps instead.
+    fn launch_program(&self, _program: &Program) -> bool {
+        false
     }
 
     /// [`Backend::step_native`] binding a sub-RANGE of each buffer - the

@@ -307,6 +307,12 @@ impl OperatorProvider for CudaProvider {
         req.op == select::Op::MatMul
             && req.pass == Pass::Forward
             && match Self::shape_of(req) {
+                // The tiled fp32 kernel fills a 64x64 output tile per block: at
+                // decode row counts that is a few blocks of a 132-SM device and
+                // measured 200 us for a 257x2048 router. The decode regime is
+                // the skinny-M GEMV's (`select::candidates`' head), so leave it
+                // to that.
+                Some(Dtype::F32) => req.shape.m > select::DECODE_REGIME_MAX_ROWS && self.kernel(select::Op::MatMul, Dtype::F32).is_some(),
                 Some(dt) => self.kernel(select::Op::MatMul, dt).is_some(),
                 None => false,
             }

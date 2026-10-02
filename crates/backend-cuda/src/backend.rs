@@ -64,7 +64,7 @@ use backend_api::{
 
 use crate::driver::{CuDevicePtr, CuFunction};
 use crate::exec;
-use crate::graph::{GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig, STAGING_ALIGN_WORDS};
+use crate::graph::{Frozen, GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig, STAGING_ALIGN_WORDS};
 
 /// One device allocation, behind an `Arc` so a [`DeviceBuffer`] clone and a
 /// recorded [`Step`] both keep it alive - `DeviceBuffer` aliasing is by design
@@ -168,7 +168,7 @@ pub(crate) struct Compiled {
     pub(crate) scalars: &'static [backend_api::ScalarKind],
     /// Diagnostic name, so a launch failure says which kernel failed whether
     /// it came from the WGSL catalogue or from a provider's own registry.
-    name: String,
+    pub(crate) name: String,
     /// For a native kernel, what it was registered from - so registering the
     /// same spec again finds this module instead of loading another. `None`
     /// for a catalogue kernel.
@@ -1427,6 +1427,101 @@ impl backend_api::Backend for CudaBackend {
         let bufs: Vec<_> = bufs.iter().map(|b| (CudaBuf::of(b).mem.clone(), 0)).collect();
         let lens = bufs.iter().map(|(m, _)| bound_words(m, 0, 0)).collect();
         Step::new(CudaStep { kind, threads, uniform, params: Vec::new(), bufs, lens })
+    }
+
+    /// Capture `segments` as one graph with every parameter frozen at its current
+    /// value - see [`crate::graph::Frozen`]. `None` when graph capture is off for
+    /// this handle (`BRAIN_CUDA_GRAPHS=0`) or the driver refuses; the caller then
+    /// submits the original steps, which is always correct.
+    fn freeze(&self, segments: &[(Vec<&DeviceBuffer>, &[Step])]) -> Option<backend_api::Program> {
+        self.graph.as_ref()?;
+        // Resolution may compile a kernel and load a module - neither is a
+        // stream operation a capture may contain - so all of it happens first.
+        let resolved: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)> = segments
+            .iter()
+            .map(|(clears, steps)| {
+                (
+                    clears.iter().map(|b| CudaBuf::of(b).mem.clone()).collect(),
+                    steps.iter().map(|s| self.resolve(s.downcast_ref::<CudaStep>())).collect(),
+                )
+            })
+            .collect();
+        self.capturing.store(true, Ordering::Release);
+        let frozen = Frozen::capture(&self.ctx, resolved);
+        self.capturing.store(false, Ordering::Release);
+        match frozen {
+            Ok(f) => Some(backend_api::Program::new(f)),
+            Err(e) => {
+                tracing::warn!(reason = %e, "backend-cuda: freezing a recorded program failed; its steps will be submitted one by one");
+                None
+            }
+        }
+    }
+
+    /// Per-kernel device time of a program, from events recorded INSIDE a frozen
+    /// graph - see `backend_api::Backend::profile_program`.
+    fn profile_program(&self, segments: &[(Vec<&DeviceBuffer>, &[Step])], reps: u32) -> Option<Vec<(String, f64, u64)>> {
+        self.graph.as_ref()?;
+        let resolved: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)> = segments
+            .iter()
+            .map(|(clears, steps)| {
+                (
+                    clears.iter().map(|b| CudaBuf::of(b).mem.clone()).collect(),
+                    steps.iter().map(|s| self.resolve(s.downcast_ref::<CudaStep>())).collect(),
+                )
+            })
+            .collect();
+        self.capturing.store(true, Ordering::Release);
+        let captured = Frozen::capture_profiled(&self.ctx, resolved);
+        self.capturing.store(false, Ordering::Release);
+        let (frozen, stamps, start) = captured
+            .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: capturing a program for profiling failed"))
+            .ok()?;
+        let reps = reps.max(1);
+        let mut totals: HashMap<String, (f64, u64)> = HashMap::new();
+        // One launch to warm the graph (first launch uploads and may stall), then `reps` measured.
+        for rep in 0..=reps {
+            self.fence_in(frozen.touched.iter());
+            self.ctx.launch_graph(&frozen.exec).ok()?;
+            self.fence_out(frozen.touched.iter());
+            self.ctx.sync().ok()?;
+            if rep == 0 {
+                continue;
+            }
+            let mut prev = &start;
+            for (name, ev) in &stamps {
+                let ms = self.ctx.elapsed_ms(prev, ev).ok()? as f64;
+                let e = totals.entry(name.clone()).or_insert((0.0, 0));
+                e.0 += ms;
+                e.1 += 1;
+                prev = ev;
+            }
+        }
+        let mut rows: Vec<(String, f64, u64)> = totals.into_iter().map(|(n, (ms, c))| (n, ms / reps as f64, c / reps as u64)).collect();
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(rows)
+    }
+
+    /// Launch a frozen program: one driver call. Declines while kernel timing is
+    /// armed (the events that time each launch cannot sit inside a graph).
+    fn launch_program(&self, program: &backend_api::Program) -> bool {
+        if self.timing.load(Ordering::Acquire) {
+            return false;
+        }
+        let f = program.downcast_ref::<Frozen>();
+        let t0 = std::time::Instant::now();
+        self.fence_in(f.touched.iter());
+        if let Err(e) = self.ctx.launch_graph(&f.exec) {
+            tracing::warn!(reason = %e, "backend-cuda: launching a frozen program failed; submitting its steps one by one");
+            return false;
+        }
+        self.fence_out(f.touched.iter());
+        self.counters.submits.fetch_add(1, Ordering::Relaxed);
+        self.counters.dispatches.fetch_add(f.dispatches as u64, Ordering::Relaxed);
+        self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
+        self.counters.graph.replays.fetch_add(1, Ordering::Relaxed);
+        self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        true
     }
 
     /// Compile and keep a provider's OWN CUDA C++ kernel, for the compute

@@ -264,6 +264,11 @@ pub use native_upgrade::Fused;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod provider;
 
+/// Recorded dispatch tapes: build a pass once, replay it as one submission.
+/// Native-only, like the backends' graph capture it exists to feed.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tape;
+
 /// Replay arena for the per-iteration scratch of a repeated pass.
 pub mod scratch;
 
@@ -684,6 +689,13 @@ mod native_facade {
         memo_enabled: std::sync::atomic::AtomicBool,
         /// Recorded dispatches to replay - see [`crate::stepcache`].
         memo: Mutex<Option<crate::stepcache::StepCache>>,
+        /// The tape being recorded, between [`Gpu::begin_tape`] and
+        /// [`Gpu::end_tape`]. While `Some`, [`Gpu::submit`] appends here instead
+        /// of launching - see [`crate::tape`].
+        tape: Mutex<Option<crate::tape::Tape>>,
+        /// Mirrors `tape.is_some()` so the hot paths that must refuse to run
+        /// during a recording (`read`, `poll_wait`) pay a relaxed load, not a lock.
+        taping: std::sync::atomic::AtomicBool,
     }
 
     impl Gpu {
@@ -714,6 +726,8 @@ mod native_facade {
                 natives: Mutex::new(Default::default()),
                 memo_enabled: std::sync::atomic::AtomicBool::new(false),
                 memo: Mutex::new(None),
+                tape: Mutex::new(None),
+                taping: std::sync::atomic::AtomicBool::new(false),
             }
         }
 
@@ -1491,9 +1505,11 @@ mod native_facade {
             }
         }
         pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::read while a tape is being recorded: the recorded dispatches have not run, so the data would be stale");
             self.inner.read(buf, n)
         }
         pub fn poll_wait(&self) {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::poll_wait while a tape is being recorded: nothing recorded has been submitted");
             self.inner.poll_wait()
         }
         /// Bytes of device memory already dropped by their last host handle
@@ -1950,6 +1966,18 @@ mod native_facade {
         }
 
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+            if self.taping.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Some(tape) = self.tape.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    tape.push(clears, steps);
+                    return;
+                }
+            }
+            self.submit_now(clears, steps)
+        }
+
+        /// [`Self::submit`] without the tape check: what a replay and a normal
+        /// submission both end in.
+        fn submit_now(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
             // Only when armed (see `cost_enabled`): tallying is a mutex lock
             // plus a per-dispatch string match - measurement machinery, not a
             // cost every production decode step should pay.
@@ -1966,6 +1994,56 @@ mod native_facade {
                 return;
             }
             self.inner.submit(clears, steps)
+        }
+
+        /// Start recording: until [`Self::end_tape`], `submit` appends to a tape
+        /// instead of launching. Panics if a recording is already open on this
+        /// handle (a nested tape would swallow the outer one's dispatches).
+        pub fn begin_tape(&self) {
+            let mut t = self.tape.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(t.is_none(), "Gpu::begin_tape: a tape is already being recorded on this handle");
+            *t = Some(crate::tape::Tape::default());
+            self.taping.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Stop recording and return what was recorded. Panics if none is open.
+        pub fn end_tape(&self) -> crate::tape::Tape {
+            self.taping.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.tape.lock().unwrap_or_else(|e| e.into_inner()).take().expect("Gpu::end_tape: no tape is being recorded")
+        }
+
+        /// Submit a recorded tape: each recorded submission in order, and - the
+        /// common case, a recording with no clears - as one submission.
+        pub fn replay_tape(&self, tape: &crate::tape::Tape) {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::replay_tape while a tape is being recorded");
+            // A backend that can freeze the recording launches it as one
+            // program: nothing is re-resolved or re-matched per replay.
+            if let Some(program) = tape.frozen(|segs| self.inner.freeze(segs)) {
+                if self.inner.launch_program(program) {
+                    if self.cost_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                        let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+                        for (_, steps) in tape.segments() {
+                            crate::cost::tally(&mut ctr, &self.names, steps);
+                        }
+                    }
+                    return;
+                }
+            }
+            for (clears, steps) in tape.segments() {
+                self.submit_now(&clears, steps);
+            }
+        }
+
+        /// Per-kernel DEVICE time of a recorded tape: it is run `reps` times as one
+        /// program and each dispatch is timed from the previous one's completion
+        /// (`(kernel, mean ms per run, dispatches per run)`, slowest first). Unlike
+        /// per-dispatch timing of eagerly launched kernels this carries none of the
+        /// host's launch latency, so it prices a step the way a replay runs it.
+        /// `None` on a backend that cannot time a program. Executes the tape.
+        pub fn profile_tape(&self, tape: &crate::tape::Tape, reps: u32) -> Option<Vec<(String, f64, u64)>> {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::profile_tape while a tape is being recorded");
+            let segs: Vec<(Vec<&DeviceBuffer>, &[Step])> = tape.segments().collect();
+            self.inner.profile_program(&segs, reps)
         }
 
         // ---- FLOP/OPS accounting (see `gpu_core::cost`) ---------------------

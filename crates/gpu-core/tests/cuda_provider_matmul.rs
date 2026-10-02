@@ -327,7 +327,8 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
 }
 
 /// The shared cross-provider parity harness, driven by the tuned provider
-/// over the fixed `Op::MatMul` case table - decode-shaped, the tile
+/// over the fixed `Op::MatMul` case table - (decode-shaped cases are asserted
+/// declined, see below), the tile
 /// crossover, a multi-tile shape, a non-tile-multiple shape and a non-zero
 /// row offset. Same oracle (the WGSL reference provider), same seeded
 /// inputs, tolerance widened from the table's own `BitIdentical` to the
@@ -364,9 +365,15 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
             group: 32,
             bind: &bind,
         };
+        if case.shape.m <= select::DECODE_REGIME_MAX_ROWS {
+            // The decode regime belongs to the skinny-M GEMV: the 64x64 tile
+            // would run a handful of blocks for a one-row output.
+            assert!(!provider.accepts(&probe, false), "the tiled kernel must leave decode-regime {:?} to the GEMV", case.shape);
+            continue;
+        }
         assert!(
             provider.accepts(&probe, false),
-            "the tuned provider must take every shared MatMul parity case at f32, including {:?}",
+            "the tuned provider must take every prefill-regime MatMul parity case at f32, including {:?}",
             case.shape
         );
         parity::assert_provider_parity(&gpu, &provider, &case);
