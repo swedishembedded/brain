@@ -25,6 +25,7 @@ use std::collections::HashMap;
 pub mod actstats;
 pub mod adapter;
 pub mod kv_offload;
+pub mod kv_tier;
 pub mod kvcalib;
 pub mod attninject;
 pub mod block;
