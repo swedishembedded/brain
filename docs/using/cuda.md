@@ -80,6 +80,20 @@ Floating-point contraction is switched off in the generated code, so a kernel
 rounds the way the reference rounds; results agree with the CPU to
 floating-point reduction-order differences, and many are bit-identical.
 
+## Memory is returned when a model is dropped
+
+Everything the CUDA backend takes from the driver - device allocations, page-locked
+staging, events, streams, captured graphs and loaded kernels - is released when
+the object that owns it is dropped, including while the device handle lives on
+to serve the next model. A loaded Qwen3.8-27B returns its ~28 GiB when the
+instance is dropped.
+
+`backend_cuda::live_resources()` reports what the process currently holds, by
+kind; two readings around a workload must be equal once everything the workload
+created is gone. `cargo test -p brain-backend-cuda --test leaks` runs that check
+over every owner, and `compute-sanitizer --leak-check full` over the same test
+binaries reports no leaked allocations.
+
 ## Checking a machine
 
 ```bash

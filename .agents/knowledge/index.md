@@ -244,3 +244,4 @@ What belongs where:
 | 201 | A blocking stream couples every CUDA handle on the card | [`201-a-blocking-stream-couples-every-handle-on-the-card.md`](201-a-blocking-stream-couples-every-handle-on-the-card.md) |
 | 202 | WGSL clamps out-of-range accesses; generated CUDA must too | [`202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md`](202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md) |
 | 203 | Work queued while creating an object must be fenced for the other streams | [`203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md`](203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md) |
+| 204 | A cache that holds a buffer strongly makes the device handle an owner of the model | [`204-a-cache-that-holds-a-buffer-strongly-makes-the-handle-an-owner-of-the-model.md`](204-a-cache-that-holds-a-buffer-strongly-makes-the-handle-an-owner-of-the-model.md) |
