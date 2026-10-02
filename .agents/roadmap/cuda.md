@@ -904,9 +904,9 @@ paths above switched off):
 
 | prefill tokens | before tok/s | after tok/s |
 |---|---|---|
-| 512 | 149 | 1789 |
-| 4096 | 145 | 1878 |
-| 16384 | 130 | 1606 |
+| 512 | 149 | 1837 |
+| 4096 | 145 | 1902 |
+| 16384 | 130 | 1668 |
 
 Per-kernel table of one 256-row round at depth 256 (device time, ms):
 `matmul_i8_dyn` 1257 -> `matmul_i8_mma` 60.5; `bmm` + `bmm_acc` 91 -> `bmm_tiled`
