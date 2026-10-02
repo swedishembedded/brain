@@ -44,8 +44,8 @@
 //! * the int8 dynamic-activation GEMM, `[Act, Weight, ActScale, WeightScale,
 //!   Out]` with group-32 weight scales - the prefill GEMM of every int8
 //!   resident model, run on int8 tensor cores (`matmul_i8_mma`). It is taken
-//!   only above the decode regime ([`select::DECODE_REGIME_MAX_ROWS`] rows -
-//!   below that the portable GEMV family is the right shape), only when K is a
+//!   only above the GEMV's crossover ([`select::I8_GEMV_MAX_ROWS`] rows -
+//!   below that the GEMV family is the right shape), only when K is a
 //!   whole number of 64-element tiles, and only on a device whose capability
 //!   reaches the kernel's own floor.
 //!
@@ -184,7 +184,7 @@ impl CudaProvider {
                     (Role::WeightScale, DType::F32),
                     (Role::Out, DType::F32),
                 ]) && req.group == I8_MMA_GROUP
-                    && req.shape.m > select::DECODE_REGIME_MAX_ROWS
+                    && req.shape.m > select::I8_GEMV_MAX_ROWS
                     && req.shape.k.is_multiple_of(I8_MMA_K_TILE)
                     && req.attrs == [req.shape.m, req.shape.k / 4, req.shape.n] =>
             {

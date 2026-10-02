@@ -501,18 +501,24 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
-/// The int8 GEMV/tile crossover on `caps`: [`I8_GEMV_MAX_ROWS`] where the
-/// GEMV is the portable kernel, the whole decode regime where the device runs
-/// a native one (it reports a CUDA compute capability). The native kernel keeps
-/// the weight stream at full width and covers more rows with more blocks - four
-/// weight passes at 32 rows - where the register-tiled kernel's 128x128 tile
-/// leaves a 16-row batch on a few blocks: measured on a GH200 at 16 rows of a
-/// 35B-A3B decode, that kernel was 59% of the step (125 ms of 211).
+/// The first compute capability with the int8 tensor-core GEMM (Ampere);
+/// `gpu-core` pins this to the kernel's own floor in a test.
+pub const I8_MMA_MIN_CC: (u32, u32) = (8, 0);
+
+/// The int8 GEMV/tile crossover on `caps`. A device that runs the native
+/// kernels but not the int8 tensor-core GEMM (compute capability below
+/// [`I8_MMA_MIN_CC`]) keeps the GEMV through the whole decode regime: the
+/// native GEMV streams the weights at full width and takes more blocks for more
+/// rows, where the register-tiled kernel's 128x128 tile leaves a small batch on
+/// a few blocks (59% of a 16-row 35B-A3B decode step before the GEMV took
+/// over). A device with the tensor-core GEMM hands over to it at
+/// [`I8_GEMV_MAX_ROWS`] rows: swept on a GH200 on a real 35B-A3B decode step,
+/// device-timed, the GEMV leads at 8 rows (15.1 ms against 16.1) and the GEMM
+/// from 9 (16.8 against 18.5), by 6% at 16 rows and 17% at 32.
 pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
-    if caps.arch.compute_capability.is_some() {
-        DECODE_REGIME_MAX_ROWS
-    } else {
-        I8_GEMV_MAX_ROWS
+    match caps.arch.compute_capability {
+        Some(cc) if cc < I8_MMA_MIN_CC => DECODE_REGIME_MAX_ROWS,
+        _ => I8_GEMV_MAX_ROWS,
     }
 }
 
@@ -1500,21 +1506,26 @@ mod tests {
         c
     }
 
-    /// A device that runs the native int8 GEMV keeps the GEMV through the whole
-    /// decode regime; one that does not keeps the portable crossover.
+    /// A device with the native int8 GEMV and the int8 tensor-core GEMM hands
+    /// over at the crossover measured on a GH200 (the GEMV below it, the GEMM
+    /// above); a native device without the tensor-core kernel keeps the GEMV
+    /// through the whole decode regime; a portable one keeps its own crossover.
     #[test]
-    fn native_int8_gemv_devices_keep_the_gemv_through_the_decode_regime() {
+    fn native_int8_devices_hand_over_to_the_tensor_core_gemm_at_the_measured_crossover() {
         let portable = gpu_caps();
-        let mut cuda = gpu_caps();
-        cuda.arch.compute_capability = Some((9, 0));
+        let mut hopper = gpu_caps();
+        hopper.arch.compute_capability = Some((9, 0));
+        let mut turing = gpu_caps();
+        turing.arch.compute_capability = Some((7, 5));
         for m in [1u32, 8, 9, 16, 32] {
             let sh = shape(m, 4096, 2048, Dtype::I8);
-            let on_cuda = DefaultSelector.select(Op::MatMul, sh, &cuda);
-            assert_eq!(on_cuda, KernelVariant::WorkgroupPerOutput, "m={m} on a native-GEMV device");
+            let on_hopper = DefaultSelector.select(Op::MatMul, sh, &hopper);
+            assert_eq!(on_hopper == KernelVariant::WorkgroupPerOutput, m <= I8_GEMV_MAX_ROWS, "m={m} on a device with int8 tensor cores");
+            assert_eq!(DefaultSelector.select(Op::MatMul, sh, &turing), KernelVariant::WorkgroupPerOutput, "m={m} on a native-GEMV device without them");
             let on_portable = DefaultSelector.select(Op::MatMul, sh, &portable);
             assert_eq!(on_portable == KernelVariant::WorkgroupPerOutput, m <= I8_GEMV_MAX_ROWS, "m={m} on a portable device");
         }
-        assert_eq!(DefaultSelector.select(Op::MatMul, shape(33, 4096, 2048, Dtype::I8), &cuda), KernelVariant::PackedInt8);
+        assert_eq!(DefaultSelector.select(Op::MatMul, shape(33, 4096, 2048, Dtype::I8), &hopper), KernelVariant::PackedInt8);
     }
 
     fn cpu_caps() -> DeviceCaps {

@@ -239,8 +239,10 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
 
     // (m, n, k): Qwen3.8-27B d_model 5120, ff 17408, GDN/attention widths; a
     // prefill round of 256 rows; then ragged rows/columns (a partial row tile,
-    // a partial column tile, odd N) and the smallest row count past the decode
-    // regime.
+    // a partial column tile, odd N) and the row counts either side of where the
+    // tensor-core GEMM takes over from the GEMV (the smallest batch past
+    // `select::I8_GEMV_MAX_ROWS`, the top of the decode regime, the first
+    // prefill count).
     let shapes: &[(u32, u32, u32)] = &[
         (256, 5120, 5120),
         (256, 17408, 5120),
@@ -248,6 +250,8 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
         (256, 10240, 5120),
         (256, 6144, 6144),
         (300, 5136, 5120),
+        (9, 6144, 5120),
+        (32, 6144, 5120),
         (33, 6144, 5120),
         (100, 129, 128),
     ];
@@ -377,4 +381,11 @@ fn sweep_tile_configurations() {
             );
         }
     }
+}
+
+/// The selector hands rows to the tensor-core GEMM from the capability the kernel
+/// itself needs; the two constants are one fact stated in two crates.
+#[test]
+fn the_selector_and_the_kernel_agree_on_the_tensor_core_floor() {
+    assert_eq!(select::I8_MMA_MIN_CC, kernels_cuda::MMA_S8_MIN_CC);
 }
