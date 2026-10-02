@@ -38,7 +38,7 @@
 //! `crate::pipeline::Restorer::restore` is a full multi-step sample per call,
 //! exactly the shape `sdxlunet::caps`/`controlnet::caps` document - there is
 //! no `[B, ...]` axis a residency-level grouping could fill. The residency
-//! adapter (`crates/cli/src/resident_supir.rs`) uses the serial default and
+//! adapter (`crates/catalog/src/resident_supir.rs`) uses the serial default and
 //! says so, the same way `resident_sdxl.rs`/`resident_controlnet.rs` do.
 
 use std::sync::{Arc, Mutex};

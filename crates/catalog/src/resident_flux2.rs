@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! FLUX.2 Klein behind the residency scheduler (`resident::build_executor`).
+//! FLUX.2 Klein behind the residency scheduler (`serving::build_executor`).
 //!
 //! A resident instance is a built [`flux2::Pipeline`] for one
 //! `(variant, size, ref-tokens[, adapter])` fingerprint — DiT + text encoder +

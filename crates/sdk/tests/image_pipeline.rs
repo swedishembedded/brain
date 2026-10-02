@@ -11,7 +11,7 @@
 //! backend-dispatch path against a local, synthetic, fully offline
 //! models-directory fixture -- mirroring `crates/flux2/tests/
 //! resolve_layout.rs`'s fixture pattern (and, for the s3dit half,
-//! `crates/cli/src/resident.rs`'s own `ZImageResident::from_store` synthetic
+//! `crates/serving/src/executor.rs`'s own `ZImageResident::from_store` synthetic
 //! fixture), but driven through THIS crate's public facade rather than by
 //! constructing `flux2::Paths`/`s3dit::pipeline::Paths`/`capability::Assembly`
 //! directly, so what is actually under test is the facade's own resolution
@@ -316,7 +316,7 @@ fn from_pretrained_resolves_a_real_local_fixture_with_no_network_access() {
 
 // ===================== s3dit-backed dispatch =====================
 //
-// Mirrors `crates/cli/src/resident.rs`'s own `ZImageResident::from_store`
+// Mirrors `crates/serving/src/executor.rs`'s own `ZImageResident::from_store`
 // synthetic-store test (`write_from_store_dit`/`_text_encoder`/`_vae`/
 // `_tokenizer`) and `crates/s3dit/src/spec.rs`'s own `turbo_fixture` test
 // helper: only the tensors `s3dit::import::dit_config_from_shapes` (DiT
@@ -398,7 +398,7 @@ fn build_unambiguous_s3dit_store() -> Scratch {
     // A vendor-flat loose `tokenizer.json` sitting one level under a
     // repo-shaped directory (`classify_tokenizer_role`'s co-location check,
     // and `walk_vendor_dir`'s "one level deeper" rule -- see
-    // `crates/cli/src/resident.rs`'s own `from_store` fixture test, which
+    // `crates/serving/src/executor.rs`'s own `from_store` fixture test, which
     // notes the exact same rule).
     let tok_dir = vendor.join("Qwen3-4B-tokenizer");
     std::fs::create_dir_all(&tok_dir).unwrap();

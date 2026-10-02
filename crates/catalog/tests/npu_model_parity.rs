@@ -6,21 +6,6 @@
 //! `FincastNpuModel` in `resident_forecast.rs`), the same seam
 //! `resident_depth.rs`'s `DepthNpuModel` already proves.
 //!
-//! `brain-cli` is a **bin-only** crate (no `[lib]` target), so an external
-//! integration test cannot `use brain_cli::...`. This file pulls
-//! `resident_forecast.rs` in directly via `#[path]` - it is compiled a second
-//! time as part of THIS test binary's own crate, which is why the migrated
-//! types (`Chronos2NpuModel`/`FincastNpuModel`/`Chronos2Resident`/
-//! `FincastResident`) are reachable here as `pub(crate)`/`pub` items despite
-//! `main.rs` never exporting them anywhere.
-
-// Only the handful of types this test drives are reachable from here, so
-// `dead_code` fires on the rest of the file - including the `from_env`
-// constructors `catalog.rs` calls in the real crate. The lint is right about
-// this compilation and wrong about the code: what it flags is live in the bin.
-#[allow(dead_code)]
-#[path = "../src/resident_forecast.rs"]
-mod resident_forecast;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use capability::{Blob, Invocation, Media};
 use npu::NpuModel as _;
 use residency::{Device, MemCost, ResidentModel};
-use resident_forecast::{Chronos2NpuModel, Chronos2Resident, FincastNpuModel, FincastResident};
+use catalog::resident_forecast::{Chronos2NpuModel, Chronos2Resident, FincastNpuModel, FincastResident};
 use serde_json::json;
 
 /// Cosine-similarity tolerance for an NPU-graph output vs its host `parity_ref`.

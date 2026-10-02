@@ -168,7 +168,7 @@ pub const FAIL_TRIGGER: &str = "__mock_fail__";
 /// event followed by one or two tool calls (repeating the trigger in the user text
 /// requests a second, parallel call) through the SAME neutral `Progress::event`
 /// shapes a real model's `qwen_chat::ChatScanner` emits (see
-/// `crates/cli/src/resident_llm.rs::emit_chat_events`): `tool_call_start` →
+/// `crates/catalog/src/resident_llm.rs::emit_chat_events`): `tool_call_start` →
 /// `tool_call_args`* → `tool_call_end`. No weights/GPU are involved, so
 /// `crates/apiserve/tests/api.rs` can exercise the full OpenAI/Anthropic/OpenRouter
 /// tool-calling pipe against a real HTTP server. See [`FAIL_TRIGGER`] for the

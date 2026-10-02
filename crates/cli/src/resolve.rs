@@ -27,10 +27,10 @@
 //! `brain import <FILE>` (no architecture token) is the one standing
 //! exception: when the second token isn't a recognized architecture id,
 //! `import` falls through to the generic GGUF importer
-//! ([`crate::gguf_import`]), which picks the architecture from the file's own
+//! ([`serving::gguf_import`]), which picks the architecture from the file's own
 //! `general.architecture` header instead of from the command line.
 
-use crate::{caps_cli, gguf_import, quantize_cli};
+use crate::{caps_cli, quantize_cli};
 
 type Handler = fn(&[String]);
 
@@ -235,7 +235,7 @@ fn resolve(argv: &[String]) -> Resolved {
 pub fn dispatch(argv: &[String], help: &str) {
     match resolve(argv) {
         Resolved::Arch { arch, rest } => dispatch_arch(arch, rest),
-        Resolved::ImportFile { rest } => gguf_import::run_import_gguf(&rest),
+        Resolved::ImportFile { rest } => crate::import_gguf_cli::run_import_gguf(&rest),
         Resolved::QuantizeFile { rest } => quantize_cli::run_quantize(&rest),
         Resolved::Unknown(tok) => {
             eprintln!("brain: unknown command '{tok}'\n");
@@ -297,7 +297,7 @@ fn verb_is_known(arch: &str, verb: &str) -> Option<bool> {
         return Some(verbs.contains(&crate::args::canon_verb(verb)));
     }
     if let Some(model) = model_for_arch(arch) {
-        return Some(crate::catalog::manifests().iter().any(|m| m.model == model && m.actions.iter().any(|a| a.name == verb)));
+        return Some(catalog::manifests().iter().any(|m| m.model == model && m.actions.iter().any(|a| a.name == verb)));
     }
     None
 }
@@ -641,7 +641,7 @@ mod tests {
     /// running the action can know".
     fn declares_host_env_weights(arch: &str) -> bool {
         let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) else { return false };
-        crate::catalog::manifests()
+        catalog::manifests()
             .into_iter()
             .find(|m| m.model == *model)
             .is_some_and(|m| m.actions.iter().any(|a| a.params.iter().any(|p| p.host_env.is_some())))
@@ -1203,7 +1203,7 @@ mod tests {
     fn verb_is_known_validates_arch_to_model_verbs_against_the_manifest() {
         assert_eq!(verb_is_known("s3dit", "not-a-real-action"), Some(false));
         let model = model_for_arch("s3dit").expect("s3dit has an ARCH_TO_MODEL row");
-        let real_action = crate::catalog::manifests()
+        let real_action = catalog::manifests()
             .into_iter()
             .find(|m| m.model == model)
             .and_then(|m| m.actions.first().map(|a| a.name.clone()))

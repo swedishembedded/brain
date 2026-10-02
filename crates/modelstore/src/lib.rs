@@ -201,7 +201,7 @@ pub fn models_dir_in(data_root: &Path) -> PathBuf {
 /// so out loud when both are set and disagree, so the environment is never
 /// silently overruled.
 ///
-/// This is the env-only tail of `crates/cli/src/model_dir.rs`'s `resolve`
+/// This is the env-only tail of `crates/serving/src/model_dir.rs`'s `resolve`
 /// (which layers a `--models-dir` flag override on top) -- shared here so
 /// anything that needs "the models dir" without a CLI flag in scope (this
 /// crate's own callers, `brain_testutil`'s model-backed test fixtures)

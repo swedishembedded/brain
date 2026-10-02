@@ -34,7 +34,7 @@
 //! encoder end to end.
 //!
 //! The serving contract is met by [`caps`] (the `restore_face`
-//! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
+//! `capability::Provider`), `crates/catalog/src/resident_restore.rs` (the residency
 //! adapter, `BRAIN_CODEFORMER_WEIGHTS`) and `samples/python/restore/`.
 
 pub mod caps;

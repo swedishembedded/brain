@@ -274,7 +274,7 @@ fn force_vulkan_backend_once() {
 /// resident on every large upload - measured as an exact doubling in
 /// `crates/gpu-core/tests/vram_overhead.rs`, independent of upload chunk
 /// size. At 14B, int8's real packed weight bytes are ~14.4 GiB (see
-/// `crates/cli/src/resident_wan.rs::dit_weight_bytes`) - doubled by wgpu
+/// `crates/catalog/src/resident_wan.rs::dit_weight_bytes`) - doubled by wgpu
 /// that is ~28.8 GiB, which does NOT fit a 24 GiB card even though the real
 /// payload comfortably would. `crate::devices::ambient_compute_set` (`Gpu::
 /// new`, i.e. `device: None`) with `BRAIN_DEVICE=vulkan` resolves to brain's

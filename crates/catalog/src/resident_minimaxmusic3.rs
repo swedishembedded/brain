@@ -72,7 +72,7 @@ pub struct MinimaxMusic3Resident {
 impl MinimaxMusic3Resident {
     /// Configure from the environment. Returns `None` (not served) when
     /// any of the six roles is unset, like
-    /// [`crate::resident::YoloResident::from_env`].
+    /// [`crate::resident_yolo::YoloResident::from_env`].
     pub fn from_env() -> Option<MinimaxMusic3Resident> {
         Paths::from_env().ok().map(|paths| MinimaxMusic3Resident { paths })
     }

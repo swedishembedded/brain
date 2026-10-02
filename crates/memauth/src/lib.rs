@@ -48,7 +48,7 @@
 //!
 //! Everything ELSE still accounts through `residency::Budgets` (whose
 //! `set_pool` carries the unified-memory fix), which those same ceilings
-//! clamp (`crates/cli/src/resident.rs::build_executor`) so the advisory and
+//! clamp (`crates/serving/src/executor.rs::build_executor`) so the advisory and
 //! hard layers agree. So: for an unlimited run, changes to `Budgets` are what
 //! change behaviour; for a limited one, both matter. Folding `Budgets`' pool
 //! layer into this authority - one owner instead of two agreeing ones - is

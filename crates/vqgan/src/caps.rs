@@ -146,7 +146,7 @@ pub fn load(path: &str, size: u32, gpu: Gpu) -> Result<Vqgan, String> {
 
 /// A built VQ autoencoder — the single implementation of `encode`/`decode`,
 /// shared by the [`VqganProvider`] and the residency adapter
-/// (`crates/cli/src/resident_restore.rs`).
+/// (`crates/catalog/src/resident_restore.rs`).
 pub struct Session {
     model: Vqgan,
 }

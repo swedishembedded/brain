@@ -1333,7 +1333,7 @@ in the harness permanently.
 
 ## Phase 17: residency, caching and batching stop being placeholders
 
-`crates/cli/src/resident_minimaxmusic3.rs` was a load-per-call adapter whose
+`crates/catalog/src/resident_minimaxmusic3.rs` was a load-per-call adapter whose
 `estimate()` reported `MemCost::new(0, ram)` - and `vram == 0` is not a
 conservative choice, it is a disabling one: `residency::place::pick_device`
 `continue`s past every GPU when `cost.vram == 0`, so on this 2x24 GB box the

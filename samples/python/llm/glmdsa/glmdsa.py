@@ -5,7 +5,7 @@
 """Talk to GLM-5.2's MLA + sigmoid noaux_tc MoE decoder over D-Bus.
 
 **Scope, honestly**: `brain/glm`'s `generate` action
-(`crates/glmdsa/src/caps.rs` + `crates/cli/src/resident_llm.rs::GlmResident`)
+(`crates/glmdsa/src/caps.rs` + `crates/catalog/src/resident_llm.rs::GlmResident`)
 is a raw completion, not a chat surface - GLM is **char-level** (the
 checkpoint carries its own vocabulary), so there is no `messages`, no chat
 template, no per-token streaming deltas: just `prompt`/`max_new`/`temp`/

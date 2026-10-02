@@ -61,7 +61,7 @@ impl Action for CatAction {
 }
 
 /// `describe` - echoes a DESCRIPTOR of the multimodal blobs it received, in the
-/// exact format `crates/cli/src/resident_mock.rs::media_suffix` uses. Proves the
+/// exact format `crates/catalog/src/resident_mock.rs::media_suffix` uses. Proves the
 /// `Run(in_fds, in_meta)` path carries typed media AND its per-blob metadata
 /// (an image's `w`/`h` come from `in_meta`, not from the bytes) all the way into
 /// the action - `cat` above only ever exercised an untyped `bytes` blob.

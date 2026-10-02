@@ -57,7 +57,7 @@
 //!   crate's real-weight tests are thin wrappers over it.
 //! * [`caps`] -- the serving surface: one `generate` action (image + instruction
 //!   in, streamed text out) behind `capability::Provider`, plus the [`caps::Session`]
-//!   `crates/cli/src/resident_deepseekocr.rs` owns.
+//!   `crates/catalog/src/resident_deepseekocr.rs` owns.
 //! * [`train`] -- LoRA training glue: merging a real (or checkpoint-free
 //!   fixture) base weight map with freshly-initialised adapter tensors for a
 //!   `cfg.decoder.lora`-configured composite. The adapter mechanism itself
@@ -110,7 +110,7 @@
 //!   segfaults inside this model's CLIP graph and no post-image token-id capture
 //!   exists to compare against.
 //! * **The serving contract is met** ([`caps`], plus
-//!   `crates/cli/src/resident_deepseekocr.rs`): one `generate` action over
+//!   `crates/catalog/src/resident_deepseekocr.rs`): one `generate` action over
 //!   `brain caps`/`brain do`, the residency scheduler, D-Bus and the
 //!   OpenAI/Anthropic surfaces, with real per-token streaming and real token
 //!   counts. `run_batch` is the serial default and says why.

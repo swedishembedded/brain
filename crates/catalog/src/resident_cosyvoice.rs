@@ -84,7 +84,7 @@ pub struct CosyVoiceResident {
 impl CosyVoiceResident {
     /// Configure from the environment. Returns `None` (not served) when any
     /// of the six roles is unset, like
-    /// [`crate::resident::YoloResident::from_env`].
+    /// [`crate::resident_yolo::YoloResident::from_env`].
     pub fn from_env() -> Option<CosyVoiceResident> {
         CosyVoicePaths::from_env().ok().map(|paths| CosyVoiceResident { paths })
     }

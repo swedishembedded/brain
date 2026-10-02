@@ -178,7 +178,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     tensors). Forward-parity-gated per stage at cosine 1.000000.
     See `.agents/roadmap/scrfd.md`. **Serving contract met**, as TWO models:
     `scrfd::caps` (`detect`, `BRAIN_SCRFD_DIR`) and `arcface::caps` (`embed`,
-    `BRAIN_ARCFACE_DIR`), with `crates/cli/src/resident_{scrfd,arcface}.rs`,
+    `BRAIN_ARCFACE_DIR`), with `crates/catalog/src/resident_{scrfd,arcface}.rs`,
     D-Bus `Run` and `samples/python/vision/face-id/`. The detector is self-sufficient; the
     embedder depends on it (its default `align=true` detects first), so with
     both resident SCRFD is loaded twice - accepted, it is 17 MB. *(`run_batch`
@@ -207,7 +207,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     **cosine AND rel_l2**. Composes `model::vit`'s windowed spans and
     `vision::blocks`; adds no kernel (the memory attention reuses
     `rope_interleave_table`). **Serving contract met**: `sam2::caps`
-    (`segment`), `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`),
+    (`segment`), `crates/catalog/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`),
     D-Bus `Run`, `samples/python/vision/segment-image/`; `run_batch` groups a batch **by image**, so
     N prompts on one frame cost ONE Hiera trunk pass and N decoder passes.
     *(Forward only: backward/gradcheck are deferred, and the video path tracks
@@ -601,7 +601,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     handoff, KV-cached greedy decode, and the same chat request contract
     `brain/qwen3omnimoe` takes (`qwen3omnimoe::caps::chat_generate_spec`), so it serves
     `/v1/chat/completions` and `/v1/messages` rather than raw token ids only
-    (`Executor::register_multi`, `crates/cli/src/resident_omni.rs::
+    (`Executor::register_multi`, `crates/catalog/src/resident_omni.rs::
     int8_thinker_multi_from_env`, env `BRAIN_QWEN3OMNIMOE_INT8_CHECKPOINT` +
     `BRAIN_QWEN3OMNIMOE_INT8_TOKENIZER_DIR`). Measured: **2.3 s/token vs 57.6
     s/token** for the streaming bf16 path, identical output, 16.9/16.7 GiB on
@@ -623,7 +623,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     stem, tanh GELU) with overlap multi-crop + a
     parallel-block sparse-MoE decoder, gradient-checked and import-covered.
     **Serving contract met**: `moondream3::caps` (one streaming `caption`
-    action), `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry,
+    action), `crates/catalog/src/resident_moondream3.rs`, a `catalog.rs` entry,
     D-Bus `Subscribe`, `samples/python/vision/moondream3-caption/moondream3_caption.py`.
     **int8 is the default and is what makes it loadable at all**: the fp32
     build is 32.8 GiB of weights plus 10.3 GiB of per-block activation scratch
@@ -696,7 +696,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     `gradcheck::check_deepseekocr_relpos{,_elementwise}`).
     **Serving contract met**: `deepseek2ocr::caps` (`generate`, streaming, real
     `prompt_tokens`/`completion_tokens`/`finish_reason`),
-    `crates/cli/src/resident_deepseekocr.rs` (`BRAIN_DEEPSEEK_OCR_DIR`), one
+    `crates/catalog/src/resident_deepseekocr.rs` (`BRAIN_DEEPSEEK_OCR_DIR`), one
     `catalog.rs` entry wiring `brain caps`/`brain deepseek2ocr ...`/D-Bus/OpenAI/Anthropic at
     once, `samples/python/vision/deepseek-ocr/`. The production checkpoint loader is
     `deepseek2ocr::import` - this crate's four real-weight test binaries are
@@ -786,7 +786,7 @@ application", "an orchestrator"). Enforced by `make check/scope`
     everywhere, most rungs at 1.0000000000); the speech-token LM is
     additionally gradient-checked (block FD 1.09e-9, model FD < 2e-6) and
     LoRA-capable. **Serving contract met for CosyVoice 2**: `cosyvoice::caps`
-    (one `synth` action, streaming), `crates/cli/src/resident_cosyvoice.rs`
+    (one `synth` action, streaming), `crates/catalog/src/resident_cosyvoice.rs`
     (load-per-call, following `resident_minimaxmusic3.rs`), `brain
     caps`/`brain cosyvoice synth`/D-Bus/HTTP,
     `samples/python/tts/cosyvoice-synth/cosyvoice_synth.py`. **Both generations run**: `pipeline::Variant` selects
@@ -909,7 +909,7 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Piece | Where | What |
 |---|---|---|
 | Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
-| Serving engine | `crates/qwen3/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV - the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing - `crates/cli/src/resident_llm.rs`). |
+| Serving engine | `crates/qwen3/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV - the serving DEFAULT** (3.88× smaller pool at Qwen3's `head_dim=128`; opt out with `--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`), calibration opt-in (`--kv-calib` / `BRAIN_QWEN_KV_CALIB=1`), **speculative decoding**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam. Served context length defaults to `BRAIN_QWEN_CTX=24576` (sized to what int8 KV buys; the fp32 opt-out is guarded and refuses over the iGPU's 8 GiB policy budget rather than OOMing - `crates/catalog/src/resident_llm.rs`). |
 | Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen3::serve::Scheduler` is a type alias over `Engine` - the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
 | Shared Qwen chat serving | `crates/qwen3/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation - one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen3::caps.rs` (`brain qwen3 infer`), so they cannot diverge |
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
@@ -1079,18 +1079,19 @@ front-end to depend on.
 | GPT model / training / sampling | `crates/gpt2/src/{model,train,sample,init}.rs` |
 | Qwen model / import / LoRA / INT8 / sharding | `crates/qwen3/src/{model,import,finetune,q8,shard,sample}.rs` |
 | **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen3/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
-| Which LoRA adapter `brain serve` puts on its Qwen3 (`--adapter` pin, `--adapter-manifest` digest-verified release, `--watch-adapters` newest version) | `crates/cli/src/adapter_release.rs` (binding an adapter to the served base by digest, the manifest follower), `crates/cli/src/continuous_train.rs` (the modes, the swap, the watcher); a fine-tune records its base's digest on the adapter card (`TrainingProvenance::base_digest`) |
+| Which LoRA adapter `brain serve` puts on its Qwen3 (`--adapter` pin, `--adapter-manifest` digest-verified release, `--watch-adapters` newest version) | `crates/catalog/src/adapter_release.rs` (binding an adapter to the served base by digest, the manifest follower), `crates/cli/src/continuous_train.rs` (the modes, the swap, the watcher); a fine-tune records its base's digest on the adapter card (`TrainingProvenance::base_digest`) |
 | Qwen3.5-35B-A3B model / import / LoRA / INT8 / sharding / vision splice | `crates/qwen35moe/src/{model,import,lora,q8,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35moe.md` |
-| Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/{qwen35moe_cli,resident_qwen35moe}.rs`, `samples/python/llm/qwen35moe/` |
+| Qwen3.5-35B-A3B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35moe/src/{caps,serve}.rs`, `crates/cli/src/qwen35moe_cli.rs`, `crates/catalog/src/resident_qwen35moe.rs`, `samples/python/llm/qwen35moe/` |
 | Qwen3.8-27B dense model / import / LoRA / finetune / sharding / MTP / vision splice | `crates/qwen35/src/{model,import,finetune,shard,vl}.rs`, `model::gdn` (shared Gated DeltaNet kernels), `.agents/roadmap/qwen35.md` |
-| Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/{qwen35_cli,resident_qwen35}.rs` |
+| Qwen3.8-27B serving (`caps.rs`, resident, D-Bus/HTTP) | `crates/qwen35/src/{caps,serve}.rs`, `crates/cli/src/qwen35_cli.rs`, `crates/catalog/src/resident_qwen35.rs` |
 | Qwen3.8-27B **speculative decoding** - the verify/accept-reject loop and its recurrent-state rollback | `crates/qwen35/src/int8_gguf_resident.rs` (`generate_speculative`), `crates/qwen35/src/model.rs` (`gdn_snapshot_xfer`), `crates/qwen35/tests/{spec_decode,gguf_resident_spec_real}.rs` |
 | Qwen3.8-27B **verify-round cost** - what a speculative round costs against a plain decode step, and the scratch-pool threshold (`model::CHUNK_ARENA_MIN_ROWS`) that keeps a 1-8 row round off a 256-row round's per-layer device drain | `crates/qwen35/src/model.rs` (`run_prefill_chunk_stage`), `crates/qwen35/src/int8_gguf_resident.rs` (`profile_chunk_round`, `profile_gdn_snapshot`), `crates/qwen35/tests/{gguf_resident_verify_cost_real,chunk_round_reclaim}.rs`, `.agents/roadmap/qwen35.md` M29 |
 | Qwen3.8-27B **DFlash2 draft model** - block-diffusion drafter (non-causal GQA, per-token dynamic conv, rank-256 candidate selector), reusing the target's embedding, head and per-layer hidden taps | `crates/qwen35/src/dflash2.rs`, `kernels::DYN_GROUP_CONV1D`, host reference `tools/goldens/dflash2_reference_forward.py`, `crates/qwen35/tests/dflash2_real.rs`, `.agents/roadmap/qwen35.md` M28 |
 | Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
 | Capability manifests + generic dispatch (`brain caps` / `brain <arch> <verb>`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | Deterministic weight-free mock `Provider` (synthetic image/mask/video/audio/text/bytes, for a `capability::Provider` consumer that must not load real weights) | `crates/capability-mock/src/lib.rs` |
-| Served-model catalog (manifest + weight-free provider ctor per model, ~70 crates, in ONE list, no CLI dependency) | `crates/catalog/src/lib.rs`; the CLI-local residency-adapter extension over it lives in `crates/cli/src/catalog.rs` |
+| Served-model catalog (manifest + weight-free provider ctor + residency adapter per model, ~70 crates, in ONE list, no CLI dependency) | `crates/catalog/src/lib.rs` (entries), `crates/catalog/src/resident_*.rs` (the adapters), `crates/catalog/src/serving.rs` (`residents`/`multi_residents`) |
+| Serving models under a memory budget as a library (machine probe, the one shared `residency::Executor`, models-directory discovery, GGUF import registry) | `crates/serving/src/{machine,executor,model_dir,gguf_import}.rs`; weight resolution for a served model is `crates/loader/src/served.rs` |
 | **Captioning/labeling a dataset with any VLM** (the seam, not one model) | `crates/captioner/src/{lib,label}.rs` - `Captioner`/`Clip`/`Capabilities`; implementors in `crates/qwen3vl/src/captioner.rs` and `crates/fastvlm/src/captioner.rs`; verb in `crates/cli/src/label_cli.rs`; `docs/training/labeling.md` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
 | D-Bus control surface | `crates/dbus`, `samples/python/dbus/brain-dbus/` |
@@ -1117,8 +1118,8 @@ front-end to depend on.
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/zipdepth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; user-facing page `docs/models/sam2.md` |
 | **SAM 2.1 video tracking** (the temporal memory bank) and the per-frame **mask-sequence format** other models consume | `crates/sam2/src/{video,maskseq}.rs`, `crates/cli/src/sam2_cli.rs` (`brain sam2 track`); goldens via `tools/goldens/sam2_video_dump_reference.py`; the consumer side is `ltxv::maskcond::read_mask_sequence` |
-| DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek2ocr.md`; `crates/deepseek2ocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek2ocr.md` |
-| DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/cli/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
+| DeepSeek-OCR (document image -> text/markdown) | `.agents/roadmap/deepseek2ocr.md`; `crates/deepseek2ocr/src/{config,encoder,layout,model,preprocess,prompt,rows,import,caps}.rs` over `crates/{sam1,clip,deepseek2,gguf}`; resident `crates/catalog/src/resident_deepseekocr.rs`; goldens via `tools/goldens/deepseek_ocr_dump_reference.py`; user-facing page `docs/models/deepseek2ocr.md` |
+| DeepSeek-OCR-2 (document image -> text/markdown, new vision front end) | `.agents/roadmap/deepseekocr2.md`; `crates/deepseekocr2/src/{config,encoder,model,preprocess,prompt,rows,import,caps,train}.rs` over `crates/{sam1,deepseek2,gguf}`; resident `crates/catalog/src/resident_deepseekocr2.rs`; goldens via `tools/goldens/deepseekocr2_dump_reference.py`; user-facing page `docs/models/deepseekocr2.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/worldmirror2/{readme,status}.md`; `crates/worldmirror2`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat.md`, `.agents/roadmap/splat.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Dense depth/normal maps and fused points from calibrated photographs (MVS) | `crates/mvs`, `crates/kernels/wgsl/mvs_*.wgsl` + `wgsl/lib/mvs.wgsl`; real-capture run `crates/mvs/examples/mvs_folder.rs`; status `.agents/roadmap/splat.md` (Dense geometry) |
@@ -1129,12 +1130,12 @@ front-end to depend on.
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,clip_bpe,qwen_tokenizer,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/qwen3tts/{readme,acceleration}.md`; `crates/{qwen3tts,mimi,ecapatdnn,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
-| **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotronasr,qwen3asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `samples/python/asr/` |
+| **ASR (speech-to-text)**: status / serving / perf | `.agents/roadmap/asr.md`; `crates/{nemotronasr,qwen3asr}`, shared `audio::asr_caps`, `crates/catalog/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `samples/python/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast,timesfm3}.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast,timesfm3}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/{wm-core,wm-display,diamond,genieredux}`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/s3dit/{readme,status}.md`; `crates/{s3dit,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |
-| **Video generation (Wan)**: guide / roadmap + perf baseline | `docs/models/wan.md`, `.agents/roadmap/wan.md`; `crates/wan`, `crates/cli/src/{wan_cli,resident_wan}.rs`, `crates/wan/src/bin/wan_bench.rs`, `samples/python/videogen/wan/`; goldens via `tools/goldens/wan_{dit,vae,t5,schedule}_dump_reference.py` |
+| **Video generation (Wan)**: guide / roadmap + perf baseline | `docs/models/wan.md`, `.agents/roadmap/wan.md`; `crates/wan`, `crates/cli/src/wan_cli.rs`, `crates/catalog/src/resident_wan.rs`, `crates/wan/src/bin/wan_bench.rs`, `samples/python/videogen/wan/`; goldens via `tools/goldens/wan_{dit,vae,t5,schedule}_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` - the bit-exactness contract and why it holds is in its module docs |
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` - check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
@@ -1260,7 +1261,7 @@ describes this machine right now, not the model.
 
 **GGUF import is generic.** `brain import FILE [--out PATH] [--id NAME]`
 picks the importer from the file's own `general.architecture` via the registry
-in `crates/cli/src/gguf_import.rs`; `--list` prints what's registered. Adding an
+in `crates/serving/src/gguf_import.rs`; `--list` prints what's registered. Adding an
 architecture means implementing `GgufArchitectureImporter` and adding one line
 to that table - never a new per-model subcommand. The model-dir scan does NOT
 convert on its own (fp32 dequant-on-load makes the output far larger than the
@@ -1915,11 +1916,11 @@ a metric that isn't there was simply forgotten.
   is served.** Adding a model means, in the same change:
   1. a **`capability::Provider`** (or a manifest via its `ResidentModel`) exposing
      its actions through the generalized interface - never a bespoke subcommand;
-  2. a **residency adapter** (`crates/cli/src/resident_*.rs`, registered in
-     `resident::build_executor`, env-gated) so it is **scheduled**, memory-budgeted,
+  2. a **residency adapter** (`crates/catalog/src/resident_*.rs`, wired through
+     the model's `resident:` field in `catalog::models()`, env-gated) so it is **scheduled**, memory-budgeted,
      and swappable by the `Executor` like every other model;
   3. **true batching**: implement `Instance::run_batch` with a genuine batched
-     forward wherever the architecture allows (see `resident_asr`/`resident.rs`
+     forward wherever the architecture allows (see `resident_asr`/`resident_yolo.rs`
      yolov8) - never leave concurrent same-model work on the default serial loop
      without saying why;
   4. **D-Bus wiring + a runnable sample.** The model's actions MUST be reachable
@@ -1949,8 +1950,8 @@ a metric that isn't there was simply forgotten.
   **Imaging/conditioning workstream status, so nobody has to infer it:** the
   contract is met for **`sam2`, `scrfd`, `arcface`, `vqgan`, `codeformer`,
   `clip`, `t5encoder`, `sdxlunet`, `controlnet`, `flux1` and `pulid`** -
-  eleven models, each with a `caps` module, a `resident_*.rs` registered via
-  `catalog.rs` (read generically by `build_executor`), and the existing
+  eleven models, each with a `caps` module, a `resident_*.rs` wired through
+  its `catalog::models()` entry (read generically by `catalog::residents`), and the existing
   D-Bus `Run`. `sam2`'s `run_batch` does real grouping (by image), `clip`'s
   and `t5encoder`'s batch rows into one forward at a shared context length;
   the rest - including `sdxlunet`, `controlnet`, `flux1` and `pulid`, each a

@@ -4,7 +4,7 @@
 //! Shared chat-serving logic: prompt rendering (chat template, tool schemas),
 //! per-token streaming through the `<think>`/`<tool_call>` scanner, stop
 //! strings, and cancellation. Used by every caller that drives Qwen's chat
-//! contract over a real tokenizer — `crates/cli/src/resident_llm.rs`'s
+//! contract over a real tokenizer - `crates/catalog/src/resident_llm.rs`'s
 //! `QwenInstance` (the HTTP/D-Bus serving path) and [`crate::caps`]'s
 //! `GenerateAction` (the `brain do qwen generate` / event-API path) — so
 //! `brain do` and HTTP cannot diverge on chat rendering, tool calls, stop

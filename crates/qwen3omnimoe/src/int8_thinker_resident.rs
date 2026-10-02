@@ -37,7 +37,7 @@
 //! (never `register` — [`Int8ThinkerResident::estimate`]/[`activate`](
 //! ResidentModel::activate) are deliberately unusable stand-ins, since a
 //! multi-device-only model has no meaningful single-device footprint; see
-//! `crates/cli/src/resident_omni.rs::int8_thinker_multi_from_env`).
+//! `crates/catalog/src/resident_omni.rs::int8_thinker_multi_from_env`).
 //!
 //! # Two request shapes, one action
 //!
@@ -53,7 +53,7 @@
 //!
 //! Tokenization needs vocab files, and a brain-native int8 checkpoint is a
 //! single `.safetensors` with no tokenizer sibling, so the directory to read
-//! them from is configured separately (`crates/cli/src/resident_omni.rs::
+//! them from is configured separately (`crates/catalog/src/resident_omni.rs::
 //! int8_thinker_multi_from_env`). Without one the model still serves the raw
 //! `ids` contract and says so on a chat request, rather than failing to load.
 //!

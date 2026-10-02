@@ -419,7 +419,7 @@ same tensors under the same name); the vision half's own discriminator
 so no `IMPORTERS` table entry was needed either. `ARCH_TO_MODEL`
 (`crates/cli/src/resolve.rs`), a `ModelEntry` (`crates/catalog`), the
 `resident_ctor_for` patch + `every_patched_id_is_a_real_catalog_entry` row
-(`crates/cli/src/catalog.rs`), a `mod resident_deepseekocr2;` line (no
+(`crates/catalog/src/lib.rs`), a `mod resident_deepseekocr2;` line (no
 `main.rs` match arm - forbidden), and a reserved-vendor carve-out in
 `crates/cli/tests/model_ids.rs` (widened from v1's single `const` to a
 slice, since two case-exact upstream ids now need one).

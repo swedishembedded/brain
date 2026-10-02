@@ -6,7 +6,7 @@
 Adding a served model meant editing three lists with no link between them -
 `caps_cli::static_manifests()` (what `brain caps` lists),
 `caps_cli::build_registry()` (what `brain do` can run) and
-`resident::build_executor()` (what the transports serve). Each omission fails
+`serving::build_executor()` (what the transports serve). Each omission fails
 SILENTLY and differently: undiscoverable, or listed-then-"unknown model", or
 invisible to D-Bus.
 

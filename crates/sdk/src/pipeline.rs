@@ -339,7 +339,7 @@ impl ImagePipeline {
     /// z-image text2image adapter=<path>` build).
     ///
     /// An `owner/name`-shaped store reference is a REAL, confirmed gap, not
-    /// an oversight: `crates/cli/src/model_dir.rs`'s `resident_for` only
+    /// an oversight: `crates/serving/src/model_dir.rs`'s `resident_for` only
     /// wires a store-resolved adapter for the "qwen" residency arm, and
     /// neither `flux2::spec::Flux2Spec` nor `s3dit::spec::S3ditSpec`
     /// declares an adapter role at all -- there is nothing for a store

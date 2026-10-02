@@ -155,7 +155,7 @@ impl Precision {
 }
 
 /// The env var naming the checkpoint directory (or a raw GGUF path) - read by
-/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`, the one
+/// `crates/catalog/src/resident_qwen3vl.rs::Qwen3VlResident::from_env`, the one
 /// place the residency adapter learns where its weights live (this crate's
 /// own `generate`/`lora_train` actions no longer read it directly - see
 /// `crate::spec::Qwen3VlSpec`).
@@ -176,7 +176,7 @@ pub const DEFAULT_SERVE_MAX_PIXELS: u32 = 1024 * 1024;
 /// [`load_hf_resident`]/[`load_gguf_resident`]).
 ///
 /// `$BRAIN_QWEN3VL_CTX`, mirroring `qwen3`'s own `BRAIN_QWEN_CTX`
-/// (`crates/cli/src/resident_llm.rs`) - an env-level operator knob, not a
+/// (`crates/catalog/src/resident_llm.rs`) - an env-level operator knob, not a
 /// per-request parameter, because it sizes a real device allocation the
 /// resident is built with once, not something a caller picks per call.
 /// 24576 matches that sibling's own default: real Qwen3-VL-4B-Instruct
@@ -337,7 +337,7 @@ use capability::last_user_text;
 /// A built Qwen3-VL checkpoint: the model, its tokenizer and the config it
 /// was assembled from.
 ///
-/// `pub` so `crates/cli/src/resident_qwen3vl.rs`'s residency adapter can own
+/// `pub` so `crates/catalog/src/resident_qwen3vl.rs`'s residency adapter can own
 /// one directly ([`Resident::load_on`]/[`Resident::generate`]) - the
 /// residency adapter and this crate's own [`GenerateAction`] (behind the
 /// process-wide [`RESIDENT`] static below) then run the SAME code and cannot
@@ -526,7 +526,7 @@ impl Provider for QwenVlProvider {
 /// -- and, for a video, its decoded frames + fps. Called by both
 /// [`GenerateAction::run`] (BEFORE any checkpoint I/O, so a malformed request
 /// fails without building or touching a resident) and
-/// `crates/cli/src/resident_qwen3vl.rs`'s `Instance::run` (where the resident
+/// `crates/catalog/src/resident_qwen3vl.rs`'s `Instance::run` (where the resident
 /// is already built by residency's own `activate`, but the media shape still
 /// needs validating and decoding exactly once, the same way, rather than a
 /// second copy of this logic per call site).
@@ -1088,7 +1088,7 @@ fn load_resident(dir: &str, max_pixels: u32, precision: Precision) -> Result<Res
 /// [`crate::footprint::estimate_vram_bytes`] needs, read WITHOUT touching a
 /// single weight tensor (a GGUF header is a mmap, an HF `config.json` a small
 /// JSON parse - both cheap enough to call from a residency `estimate()`).
-/// `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::estimate` calls this
+/// `crates/catalog/src/resident_qwen3vl.rs::Qwen3VlResident::estimate` calls this
 /// so a residency budgeting decision reflects the checkpoint actually named
 /// by `BRAIN_QWEN3VL_WEIGHTS`, not a constant hand-derived for one released
 /// size.
@@ -1165,7 +1165,7 @@ fn load_gguf_resident(weights: &str, files: crate::gguf_import::GgufFiles, max_p
 /// pinned ([`gpu_core::devices::current_gpu`] is `Some`): an explicit
 /// `--device`, or [`Resident::load_on`]'s `Some(gpu)` arm (the
 /// residency-scheduled path, which has already run this same estimate
-/// through `crates/cli/src/resident_qwen3vl.rs::Qwen3VlResident::estimate`
+/// through `crates/catalog/src/resident_qwen3vl.rs::Qwen3VlResident::estimate`
 /// and `residency::place::pick_device` BEFORE calling `activate` - asking
 /// the automatic placer a second time here could only disagree with a
 /// decision already made and acted on).
@@ -1371,7 +1371,7 @@ mod tests {
     /// THE regression test for the reported bug: `brain qwen3vl generate
     /// --weights <an 8B-class GGUF>` OOM'd a 24 GiB card because nothing in
     /// the placement path knew the checkpoint being loaded was bigger than
-    /// the 4B config `crates/cli/src/resident_qwen3vl.rs`'s footprint
+    /// the 4B config `crates/catalog/src/resident_qwen3vl.rs`'s footprint
     /// constants were hand-derived for. [`config_and_capacity`] must read
     /// EACH checkpoint's own `num_hidden_layers`, so a bigger one estimates a
     /// bigger footprint instead of always answering the same number.

@@ -50,7 +50,7 @@
 //! `brain-residency` depends on `capability` and `memauth` only, and this
 //! module keeps it that way: it schedules [`Device`] *labels* and never
 //! touches a GPU API. Binding a worker thread to the card it was handed is
-//! the caller's job (`crates/cli/src/resident_llm.rs::on_device`, which is
+//! the caller's job (`crates/catalog/src/resident_llm.rs::on_device`, which is
 //! already the one place in the workspace that turns a residency `Device`
 //! into a `gpu_core::devices::with_gpu` scope). That split is what lets this
 //! be unit-tested on a machine with no GPU at all.

@@ -11,14 +11,14 @@
 //! free; only [`SynthAction`]'s own execution loads anything. One action,
 //! `synth`, running the exact pipeline [`crate::pipeline::generate`]
 //! implements - the SAME function the residency adapter
-//! (`crates/cli/src/resident_cosyvoice.rs`) calls through [`synth_action`],
+//! (`crates/catalog/src/resident_cosyvoice.rs`) calls through [`synth_action`],
 //! so there is one implementation of param decoding + generation + outcome
 //! shaping, not two that could drift.
 //!
 //! Nothing here is held warm across calls: every real `synth` call reloads
 //! all five checkpoints fresh inside `crate::pipeline::generate`'s own
 //! sequential-stage scopes, exactly matching that function's own documented
-//! RAM discipline. See `crates/cli/src/resident_cosyvoice.rs`'s module doc
+//! RAM discipline. See `crates/catalog/src/resident_cosyvoice.rs`'s module doc
 //! for the resulting tension with the residency scheduler's own "reserved
 //! while Hot" cost model, and the judgment call made about it.
 //!
@@ -128,7 +128,7 @@ pub fn manifest() -> Manifest {
 }
 
 /// [`manifest`] again, under the name the resident adapter
-/// (`crates/cli/src/resident_cosyvoice.rs`) reaches for - identical today,
+/// (`crates/catalog/src/resident_cosyvoice.rs`) reaches for - identical today,
 /// kept as its own function so the two surfaces have a named seam if they
 /// ever need to diverge, matching `minimaxmusic3::caps::resident_manifest`'s
 /// own precedent.

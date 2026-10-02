@@ -135,7 +135,7 @@ opposed to steady-state) is tight for a decade-old GPU with a large model.
 ## GGUF import - implemented (DiT only), not yet wired into auto-fetch
 
 `s3dit::import::import_gguf` (called from `brain import <gguf-file>`, registered
-alongside `Qwen35MoeImporter` in `crates/cli/src/gguf_import.rs`) converts any
+alongside `Qwen35MoeImporter` in `crates/serving/src/gguf_import.rs`) converts any
 `unsloth/Z-Image-{Turbo-,}GGUF` quantization into a brain-native single-file
 safetensors checkpoint `BRAIN_S3DIT_DIT` can point at directly, through the same
 rename rules the safetensors path uses, since the GGUF's tensor names are
@@ -175,7 +175,7 @@ Both of brain's GGUF importer registries handle a shared/ambiguous
 architecture value with a **discriminator** in the general case
 (`crates/gguf/src/registry.rs`'s `ArchEntry.discriminator`, built for the
 DeepSeek-OCR vision GGUF sharing `clip` with every other mtmd projector, told
-apart by `clip.projector_type`) - but `crates/cli/src/gguf_import.rs`'s
+apart by `clip.projector_type`) - but `crates/serving/src/gguf_import.rs`'s
 `GgufArchitectureImporter`/`IMPORTERS` (the simpler registry `Qwen35MoeImporter`
 and now `S3ditImporter` share) has no discriminator field on the trait itself.
 Rather than extend that trait for one architecture, `S3ditImporter::import`
@@ -211,7 +211,7 @@ GGUF importer registries handle a shared/ambiguous architecture value with a
 **discriminator** (`crates/gguf/src/registry.rs`'s `ArchEntry.discriminator`,
 built for exactly this - the DeepSeek-OCR vision GGUF shares `clip` with
 every other mtmd projector and is told apart by `clip.projector_type`), but
-`crates/cli/src/gguf_import.rs`'s `GgufArchitectureImporter`/`IMPORTERS` (the
+`crates/serving/src/gguf_import.rs`'s `GgufArchitectureImporter`/`IMPORTERS` (the
 registry `Qwen35MoeImporter` uses, and the one an `s3dit` importer would
 naturally join) has **no discriminator mechanism at all** - registering under
 bare `architecture() == "lumina2"` would silently misroute a real Lumina2

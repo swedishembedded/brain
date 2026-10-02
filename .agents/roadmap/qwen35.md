@@ -127,8 +127,7 @@ structurally and never parity-claimed here.
   all three mirror qwen35moe's own modules almost verbatim (the decode-step
   orchestration they wrap is architecture-identical); `serve.rs`/
   `sample_generate.rs` tests confirm the paged engine reproduces `step()`'s
-  decode token-for-token on both backends. (3) `crates/cli/src/{qwen35_cli,
-  resident_qwen35}.rs`, `catalog.rs` `ModelEntry`, `resident.rs::
+  decode token-for-token on both backends. (3) `crates/cli/src/qwen35_cli.rs, crates/catalog/src/resident_qwen35.rs`, `catalog.rs` `ModelEntry`, `resident.rs::
   build_executor` arm, docs (`docs/models/qwen35.md`, README + index.md +
   AGENTS.md rows - not the quickstart, per scope).
   **Found and fixed a real pre-existing bug while wiring `model_dir.rs`'s
@@ -1432,12 +1431,12 @@ means `Qwen35Importer::loads_directly()` is honestly `false` (the trait
 default) for now - the model has NO practical route to a servable checkpoint
 yet until a resident reads the Q8_0 bytes DIRECTLY (M21, tracked in "Not yet
 done" below); registering the offline converter was still worth doing (one
-line in `crates/cli/src/gguf_import.rs`'s table, gated by its own dispatch
+line in `crates/serving/src/gguf_import.rs`'s table, gated by its own dispatch
 tests) since it is the honest, generic answer for any future smaller
 quantization tier or a bigger box.
 
 **A real, pre-existing defect this port's investigation surfaced (fixed in
-the same effort, different file)**: `crates/cli/src/model_dir.rs`'s
+the same effort, different file)**: `crates/serving/src/model_dir.rs`'s
 `resident_for` synthesized a GGUF card's `family` from `general.architecture`
 verbatim and dispatched it through the SAME match as brain-native checkpoint
 families - so a raw `qwen35`/`qwen35moe` GGUF, dropped into the model
@@ -1450,7 +1449,7 @@ themselves; see lesson 64 in `.agents/knowledge/`.
 
 `crates/qwen35/src/int8_gguf_resident.rs`, model id
 `unsloth/Qwen3.8-27B-Q8_0`, registered via
-`crates/cli/src/resident_qwen35.rs::multi_gpu_gguf_from_env` and
+`crates/catalog/src/resident_qwen35.rs::multi_gpu_gguf_from_env` and
 `Executor::register_multi`.
 
 **Status, plainly: the PLUMBING works and is gated green, the LOADING is now

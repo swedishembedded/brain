@@ -17,7 +17,7 @@
 //! from_assembly`] is the other: `weights`/`tokenizer` resolved through
 //! `qwen35::spec::Qwen35Spec` (the model-store resolver scanning the whole
 //! models directory) rather than one specific already-discovered card - what
-//! `crates/cli/src/resident.rs::build_executor` calls.
+//! `crates/serving/src/executor.rs::build_executor` calls.
 //!
 //! Two knobs stay env-configured because they are not a checkpoint LOCATION,
 //! just a sizing choice with no on-disk signal to resolve from:
@@ -85,7 +85,7 @@ impl Qwen35Resident {
     }
 
     /// The model-dir counterpart of [`from_assembly`](Self::from_assembly): a
-    /// checkpoint discovered by `crate::model_dir` (family `"qwen35"` - what
+    /// checkpoint discovered by `serving::model_dir` (family `"qwen35"` - what
     /// `Qwen35::save` stamps on its `ModelCard`) served under its OWN card id
     /// rather than the resolver's [`MODEL`].
     ///

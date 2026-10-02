@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(bs.free_on(Device::Gpu(1)), 24 * GB, "a pool charge on gpu0 must not affect an undeclared gpu1");
     }
 
-    /// Regression for `crates/cli/src/resident.rs::build_executor`'s real bug:
+    /// Regression for `crates/serving/src/executor.rs::build_executor`'s real bug:
     /// `--device gpu` (excluding CPU from compute) zeroes `Device::Cpu`'s OWN
     /// budget -- correctly, that alone stops CPU being chosen as a placement
     /// target. The bug was passing that SAME zeroed value as the shared pool's

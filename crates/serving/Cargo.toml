@@ -1,0 +1,39 @@
+[package]
+name = "brain-serving"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Serving brain's models under a memory budget as a library: what the machine can schedule, the one shared residency executor built from the catalog and a models directory, and models-directory discovery. What `brain serve` stands on, linkable by any other process that wants the same scheduling and eviction."
+
+[lib]
+name = "serving"
+path = "src/lib.rs"
+
+[dependencies]
+brain-catalog.workspace = true
+brain-loader.workspace = true
+brain-residency.workspace = true
+brain-arch.workspace = true
+brain-backend-api.workspace = true
+brain-checkpoint.workspace = true
+brain-fastvlm.workspace = true
+brain-gguf.workspace = true
+brain-gpu-core.workspace = true
+brain-imgpipe.workspace = true
+brain-januspro.workspace = true
+brain-llava.workspace = true
+brain-ltxv.workspace = true
+brain-memauth.workspace = true
+brain-modelstore.workspace = true
+brain-moondream3.workspace = true
+brain-npu.workspace = true
+brain-qwen3.workspace = true
+brain-qwen35.workspace = true
+brain-qwen35moe.workspace = true
+brain-qwen3omnimoe.workspace = true
+brain-qwen3vl.workspace = true
+brain-qwen3vlmoe.workspace = true
+brain-s3dit.workspace = true
+brain-supir.workspace = true
+brain-wan.workspace = true
+serde_json.workspace = true

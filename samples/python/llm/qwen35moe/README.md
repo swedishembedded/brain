@@ -12,7 +12,7 @@ all three: nothing here is qwen35moe-specific in the transport layer.
 `samples/python/qwen3omnimoe/omni/` for that). Single-GPU, fp32 weights +
 fp32 KV, one sequence truly decoding on the GPU at a time (several may be
 resident and interleaved by the scheduler across iterations, never batched
-into one GPU dispatch) - `crates/cli/src/resident_qwen35moe.rs`'s own module
+into one GPU dispatch) - `crates/catalog/src/resident_qwen35moe.rs`'s own module
 doc has the complete list of what's deliberately not here yet: int8 KV, LoRA
 adapter folding, multi-GPU sharding, a `.gguf` serving path.
 
@@ -56,7 +56,7 @@ brain qwen35moe infer --weights /path/to/qwen35.safetensors \
 ## What it demonstrates
 
 * `qwen35moe`'s serving contract (`crates/qwen35moe/src/caps.rs` +
-  `crates/cli/src/resident_qwen35moe.rs`) plugging into the exact same
+  `crates/catalog/src/resident_qwen35moe.rs`) plugging into the exact same
   generic `(model, action)` dispatch every brain model uses - proven by
   hitting all three transports with the same params and getting the same
   response shape.

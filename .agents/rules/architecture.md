@@ -130,10 +130,13 @@ Six layers. Each may depend only on layers above it.
                   in-process capability consumer never has to load real
                   weights to exercise the contract
    catalog        the served-model catalog: manifest + weight-free provider
-                  ctor for every registered model (~70 crates), in ONE list,
-                  depending on nothing CLI-local; `cli` layers its ~20
-                  CLI-local residency adapters on top (see its own
-                  `catalog.rs` module doc for why that split exists)
+                  ctor + residency adapter for every registered model (~70
+                  crates), in ONE list, depending on nothing CLI-local, so
+                  any process can serve a model under a memory budget
+   serving        what a serving process stands on: the machine probe, the
+                  one shared `residency::Executor` built from the catalog and
+                  a models directory, models-directory discovery; `cli`
+                  calls it instead of owning the assembly
    residency      weight tiering GPU/RAM/disk (LRU + budget) + job scheduling
    loader         the resolver core, models-directory lookup, GPU/CPU
                   placement, and default-checkpoint auto-fetch (behind an

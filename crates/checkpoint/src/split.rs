@@ -4,7 +4,7 @@
 //! The HF/llama.cpp split-file naming convention: `<base>-<NNNNN>-of-<MMMMM>`,
 //! shared verbatim by sharded safetensors checkpoints and split GGUF files -
 //! only the extension differs. One parser here instead of two independent
-//! ones (`crates/cli/src/model_dir.rs`'s `shard_of` predates this and covers
+//! ones (`crates/serving/src/model_dir.rs`'s `shard_of` predates this and covers
 //! only `.safetensors`; [`crate::gguf::MmapGguf::open`] is this module's
 //! first GGUF-side caller).
 //!

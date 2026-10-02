@@ -114,7 +114,7 @@ pub fn load(path: &str, gpu: Gpu) -> Result<CodeFormer, String> {
 
 /// A built CodeFormer - the single implementation of `restore_face`, shared by
 /// the [`RestoreProvider`] and the residency adapter
-/// (`crates/cli/src/resident_restore.rs`).
+/// (`crates/catalog/src/resident_restore.rs`).
 pub struct Session {
     model: CodeFormer,
 }

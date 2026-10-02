@@ -94,7 +94,7 @@ multi-minute hang:
   backend selection to force a specific one, so `testgpu::dev` - which
   shares whatever backend the FIRST caller happened to build - is the wrong
   tool here too). Reproduced: hung 15+ minutes. Fixed with `DEVICE_SERIAL`.
-- `crates/cli/tests/npu_model_parity.rs` - `tiny_chronos2()`/`tiny_fincast()`
+- `crates/catalog/tests/npu_model_parity.rs` - `tiny_chronos2()`/`tiny_fincast()`
   (each called from 3 different `#[test]` fns) used the same buggy
   `Chronos2::from_weights`/`Fincast::from_weights` fincast/chronos2's OWN
   tests had (above) - a SEPARATE call site in a different crate, so fixing

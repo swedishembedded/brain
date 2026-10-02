@@ -864,7 +864,7 @@ opinion, ComfyUI-GGUF = arch detection) is cloned under
         unlike flux2: the catalog id is `brain/<arch id>`, the pattern
         `caps_cli` already assumes.
 - [x] **GGUF import**: one `GgufArchitectureImporter` impl plus one line in
-      `crates/cli/src/gguf_import.rs`'s `IMPORTERS`, delegating to
+      `crates/serving/src/gguf_import.rs`'s `IMPORTERS`, delegating to
       `wan::import::import_gguf`. DiT only, like s3dit's - a Wan GGUF is the
       transformer alone, so it replaces one of four roles rather than standing
       on its own. Two things it does differently:

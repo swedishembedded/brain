@@ -8,7 +8,7 @@ right fix for the bug and the wrong shape for the problem: it says "these two
 tables must match", which catches a drift between exactly those two tables and
 nothing else. Three more defects were sitting one table over.
 
-WHAT THE NARROW TEST MISSED. `crates/cli/src/catalog.rs::resolver_spec_for` is
+WHAT THE NARROW TEST MISSED. `crates/catalog/src/lib.rs::resolver_spec_for` is
 a THIRD registry, read by every served surface (D-Bus, HTTP,
 `build_executor`) but not by the CLI, which resolves its own `Assembly` and
 passes it in. So a model whose `ModelEntry.provider` reads a role while its id

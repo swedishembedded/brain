@@ -19,7 +19,7 @@
 //! # No batching, for the same reason as plain SDXL
 //!
 //! Every request is its own multi-step sample; see
-//! `crates/cli/src/resident_controlnet.rs`'s module docs.
+//! `crates/catalog/src/resident_controlnet.rs`'s module docs.
 
 use std::sync::{Arc, Mutex};
 
@@ -176,7 +176,7 @@ impl Denoiser for ControlledDenoiser<'_> {
 
 /// The pipelines on one device, keyed by `(h, w)` - shared by
 /// [`ControlnetProvider`] and the residency adapter
-/// (`crates/cli/src/resident_controlnet.rs`).
+/// (`crates/catalog/src/resident_controlnet.rs`).
 pub struct Session {
     sdxl_root: String,
     control_root: String,

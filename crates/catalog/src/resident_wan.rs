@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Wan2.1 text-to-video behind the residency scheduler
-//! (`resident::build_executor`).
+//! (`serving::build_executor`).
 //!
 //! A resident instance is a built transformer for one
 //! `(variant, frames, WxH)` fingerprint - the only things that fix the DiT's
@@ -41,7 +41,7 @@ impl WanResident {
 
     /// The same adapter over explicitly-named role paths - what a fetched
     /// compound checkpoint's `brain.manifest.json` supplies
-    /// (`crate::model_dir::wan_paths_from_roles`), with no `BRAIN_WAN_*`
+    /// (`serving::model_dir::wan_paths_from_roles`), with no `BRAIN_WAN_*`
     /// variable involved anywhere. `id` is the checkpoint's own model-card id.
     pub fn from_paths(id: String, paths: wan::Paths) -> WanResident {
         WanResident { id, paths }

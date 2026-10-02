@@ -124,7 +124,7 @@ pub fn load(weights: &str, cfg: Sam2Config, gpu: Gpu) -> Result<Sam2, String> {
 
 /// A built SAM 2 plus its one-entry image-encoder cache — the single
 /// implementation of `segment`, shared by the [`Sam2Provider`] and the residency
-/// adapter (`crates/cli/src/resident_sam2.rs`). Neither owns a second copy of
+/// adapter (`crates/catalog/src/resident_sam2.rs`). Neither owns a second copy of
 /// the preprocessing, the prompt parsing or the mask emission.
 pub struct Session {
     model: Sam2,

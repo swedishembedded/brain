@@ -8,9 +8,9 @@
 //! Adding a model used to mean editing three hand-maintained lists that had no
 //! link to each other:
 //!
-//! 1. `caps_cli::static_manifests()` - what `brain caps` lists.
-//! 2. `caps_cli::build_registry()` - what `brain do` can actually run.
-//! 3. `resident::build_executor()` - what is served over D-Bus/HTTP.
+//! 1. a static manifest list - what `brain caps` lists.
+//! 2. a provider registry - what `brain do` can actually run.
+//! 3. the serving executor's registrations - what is served over D-Bus/HTTP.
 //!
 //! Nothing checked that a model appeared in all three, and every omission is
 //! silent in a different way: missing from (1) it is undiscoverable, missing
@@ -25,41 +25,69 @@
 //! The tests below pin the invariant, including the exact failure above - 
 //! every listed model must be constructible by name.
 //!
-//! # Why this crate carries manifest + provider, but not every residency adapter
+//! # One entry, three consumers
 //!
-//! This crate is a `brain-cli`-independent library: the workspace's crate
-//! graph is layered, `cli` sits at the top of the "serving & front-ends"
-//! layer and "aggregates everything", and nothing below it may depend back
-//! on it. So an in-process consumer - `brain-cli` itself, but also a
-//! separate binary linking this crate directly - can enumerate and
-//! construct every registered model's [`capability::Provider`] with **no
-//! CLI, no D-Bus, no HTTP transport in the loop**.
+//! A model's manifest, its weight-free provider and its residency adapter all
+//! sit in the same [`ModelEntry`], so the three things a process does with a
+//! model (list it, run it, schedule it onto a GPU/RAM/disk budget) cannot
+//! disagree about which models exist. The adapters themselves
+//! (`resident_*.rs`, `QwenResident` and its siblings) live in this crate for
+//! that reason: an adapter kept in a binary crate is invisible to every other
+//! embedder, which then cannot serve the model under a memory budget at all.
 //!
-//! A model's static [`Manifest`] and its weight-free-to-construct
-//! [`Provider`] never reference anything CLI-local, so every entry below
-//! carries both - and, for an architecture whose provider reads an
-//! [`Assembly`], the [`ArchSpec`] its weights resolve through
-//! ([`ModelEntry::spec`]), so [`provider`] can resolve a real one by model
-//! name with no CLI in the loop.
+//! [`residents`] and [`multi_residents`] turn the entries into the adapters a
+//! serving process registers with its `residency::Executor`.
 //!
-//! A model's **residency adapter** (the `ResidentModel`/
-//! `MultiDeviceResidentModel` impl `brain serve` schedules onto a GPU/RAM/disk
-//! budget) is a different story for about twenty of them: those adapters
-//! (`crate::resident_sam2::Sam2Resident` and its siblings) are defined in
-//! `crates/cli/src/resident_*.rs`, which - being CLI-local - this crate
-//! cannot depend on without creating exactly the dependency cycle the layer
-//! rule forbids. Their [`ModelEntry::resident`] is `None` here; `brain-cli`'s
-//! own `catalog.rs` (a thin extension over this crate, not a copy of it)
-//! patches those specific entries back in by model id after calling
-//! [`models`], and appends the handful of models - `imageops`, `demo`, and
-//! the three forecasters (`chronos2`/`fincast`/`kronos`) - whose manifest
-//! itself is a CLI-local function, not a model crate's `caps.rs`. See that
-//! file's own module doc for exactly which ids it patches and why.
-//!
-//! `Manifest` and `Provider` are never split this way - every model's
-//! discovery and construction stay in this ONE list, which is the whole
-//! point of the type. Only residency scheduling, an inherently CLI/serving
-//! concern, is layered on top.
+//! The crate depends on nothing CLI-local: the workspace's crate graph is
+//! layered, `brain-cli` sits at the top and nothing below it may depend back.
+//! Weight resolution for a served model goes through `loader::served`, and
+//! assembling an executor (budgets, discovery of a models directory) is
+//! `crates/serving`'s job.
+
+pub mod adapter_release;
+pub mod demo;
+pub mod imageops;
+pub mod resident_arcface;
+pub mod resident_asr;
+pub mod resident_clip;
+pub mod resident_controlnet;
+pub mod resident_cosyvoice;
+pub mod resident_deepseekocr;
+pub mod resident_deepseekocr2;
+pub mod resident_deepseekvl;
+pub mod resident_depth;
+pub mod resident_florence2;
+pub mod resident_flux1;
+pub mod resident_flux2;
+pub mod resident_forecast;
+pub mod resident_januspro;
+pub mod resident_lfm;
+pub mod resident_llm;
+pub mod resident_ltxv;
+pub mod resident_minimaxmusic3;
+pub mod resident_mock;
+pub mod resident_moondream3;
+pub mod resident_omni;
+pub mod resident_pulid;
+pub mod resident_qwen35;
+pub mod resident_qwen35moe;
+pub mod resident_qwen3vl;
+pub mod resident_restore;
+pub mod resident_sam2;
+pub mod resident_scrfd;
+pub mod resident_sdxl;
+pub mod resident_splat;
+pub mod resident_supir;
+pub mod resident_t5encoder;
+pub mod resident_tts;
+pub mod resident_upscale;
+pub mod resident_wan;
+pub mod resident_worldmirror2;
+pub mod resident_yolo;
+pub mod resident_zimage;
+mod serving;
+
+pub use serving::{multi_residents, residents};
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -140,19 +168,6 @@ impl Action for LazyAction {
     }
 }
 
-/// Qwen3-ASR's tuning knobs (window length, max new tokens), overridable via
-/// `BRAIN_QWEN3ASR_WINDOW`/`BRAIN_QWEN3ASR_MAXNEW`. Deliberately duplicated
-/// (not shared) with `crates/cli/src/resident_asr.rs`'s identical
-/// `qwen_asr_tuning` - both are pure `std::env` reads with no CLI-local type
-/// involved, one tunes this crate's direct `brain do` path, the other tunes
-/// the CLI's residency adapter, and a shared helper this small is not worth a
-/// dependency edge either way.
-fn qwen_asr_tuning() -> (f32, usize) {
-    let window_secs = std::env::var("BRAIN_QWEN3ASR_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0f32);
-    let max_new = std::env::var("BRAIN_QWEN3ASR_MAXNEW").ok().and_then(|s| s.parse().ok()).unwrap_or(200usize);
-    (window_secs, max_new)
-}
-
 /// A residency-adapter constructor: `None` from the inner `fn` when the model's
 /// weights are not configured, so the scheduler simply does not serve it.
 ///
@@ -198,8 +213,7 @@ pub type MultiCtor = fn(&Assembly, &[(u32, u64)], u64) -> Vec<Arc<dyn residency:
 pub type ArchRef = (&'static str, &'static dyn ArchSpec);
 
 /// One served model. `provider` and `manifest` describe the SAME model by
-/// construction - that is the whole point of the type. See the module doc for
-/// why `resident` is `None` here for the models whose adapter is CLI-local.
+/// construction - that is the whole point of the type.
 pub struct ModelEntry {
     /// The static manifest: safe to build with no weights loaded.
     pub manifest: fn() -> Manifest,
@@ -237,10 +251,10 @@ pub struct ModelEntry {
     pub spec: Option<ArchRef>,
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
-    /// configured"; a `None` field means "no adapter exists yet" OR "the
-    /// adapter is CLI-local and patched in by `brain-cli`'s own catalog" (see
-    /// the module doc) - both read identically to a caller that only wants to
-    /// know whether THIS crate can serve the model.
+    /// configured"; a `None` field means the model is not scheduled through
+    /// this list: either it has no adapter yet, or the serving executor
+    /// registers it directly because its adapter needs more than a models
+    /// directory to be built (a resolved [`Assembly`], a budget).
     pub resident: Option<ResidentCtor>,
 }
 
@@ -333,7 +347,7 @@ macro_rules! resident_multi_family {
 
 /// Re-exports [`always!`]/[`from_env!`]/[`resident!`]/[`resident_in_store!`]/[`resident_multi!`] need
 /// to resolve `Provider`/`ResidentModel`/`MultiDeviceResidentModel` from a
-/// caller crate (e.g. `brain-cli`) without that caller needing its own
+/// caller crate without that caller needing its own
 /// `use` of `capability`/`residency` just to invoke these macros.
 #[doc(hidden)]
 pub mod __reexport {
@@ -343,10 +357,7 @@ pub mod __reexport {
 }
 
 /// Every model's static manifest + weight-free-to-construct provider, in one
-/// list - the "core" catalog this crate owns. See the module doc for the
-/// models this list deliberately excludes (their manifest itself is
-/// CLI-local) and for why `resident` is `None` on the ~20 entries whose
-/// adapter is CLI-local.
+/// list, with the residency adapter where there is one.
 pub fn models() -> Vec<ModelEntry> {
     vec![
         // Z-Image: the provider builds its weight paths from the resolved
@@ -360,7 +371,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(s3dit::caps::ZImageProvider::from_paths(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("s3dit", &s3dit::spec::S3ditSpec)),
-            resident: None, // ZImageResident::from_env is Result-shaped; registered directly in crates/cli/src/resident.rs
+            resident: None, // ZImageResident::from_env is Result-shaped; registered directly by the serving executor
         },
         // FLUX.2 was the FIRST entry whose provider reads the Assembly it is
         // called with - `flux2::pipeline::Paths::from_assembly` instead of the
@@ -378,8 +389,8 @@ pub fn models() -> Vec<ModelEntry> {
         // Wan2.1 text-to-video. Like flux2, the provider builds its weight
         // paths from the resolved Assembly (`wan::pipeline::Paths::
         // from_assembly`) instead of `BRAIN_WAN_*`. The residency adapter is
-        // registered from `resident.rs` (it is one of the env-gated
-        // `from_env` families that list explains), not from here.
+        // registered directly by `serving::build_executor` (one of the
+        // env-gated `from_env` families), not from here.
         ModelEntry {
             manifest: wan::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -393,7 +404,7 @@ pub fn models() -> Vec<ModelEntry> {
         // tiny random-weight DiT, no real text encoder yet - see
         // `ltxv::pipeline`'s module doc). `BRAIN_LTXV_VAE` lives in the
         // provider, same shape as `wan`'s four roles above; the residency
-        // adapter is registered from `resident.rs`, not from here.
+        // adapter is registered directly by `serving::build_executor`, not from here.
         ModelEntry {
             manifest: ltxv::caps::manifest,
             provider: always!(ltxv::caps::LtxvProvider::new()),
@@ -416,8 +427,8 @@ pub fn models() -> Vec<ModelEntry> {
         // GLM-5.2. Same shape as qwen3 above: `weights` is a per-invocation
         // action param, so the manifest is weights-free and `brain caps` lists
         // GLM on a box with no checkpoint. The always-hot HTTP/D-Bus path is
-        // `crate::resident_llm::GlmResident`, registered directly in
-        // `crates/cli/src/resident.rs`, advertising
+        // `crate::resident_llm::GlmResident`, registered directly by the
+        // serving executor, advertising
         // `glmdsa::caps::manifest_resident` - the same definition as this one,
         // minus the `weights` param the service supplies itself.
         ModelEntry {
@@ -431,7 +442,7 @@ pub fn models() -> Vec<ModelEntry> {
         // manifest is genuinely weights-free -- the same reason qwen3's own
         // entry above needs no `resident` (the HTTP/D-Bus-served, always-hot
         // path is `crate::resident_qwen35moe::Qwen35Resident`, registered
-        // directly in `crates/cli/src/resident.rs`, not through this ctor).
+        // directly by the serving executor, not through this ctor).
         ModelEntry {
             manifest: qwen35moe::caps::manifest,
             provider: always!(qwen35moe::caps::Qwen35Provider::new()),
@@ -442,8 +453,8 @@ pub fn models() -> Vec<ModelEntry> {
         // per-invocation action params, resolved through
         // `qwen35::spec::Qwen35Spec` instead of `BRAIN_QWEN35_{WEIGHTS,
         // TOKENIZER}` (see that module's doc); the always-hot HTTP/D-Bus path
-        // is `crate::resident_qwen35::Qwen35Resident`, registered directly in
-        // `crates/cli/src/resident.rs`.
+        // is `crate::resident_qwen35::Qwen35Resident`, registered directly by
+        // the serving executor.
         ModelEntry {
             manifest: qwen35::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -490,7 +501,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(qwen3vl::caps::QwenVlProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3vl", &qwen3vl::spec::Qwen3VlSpec)),
-            resident: None, // qwen3vl's own residency adapter (crates/cli/src/resident_qwen3vl.rs) is CLI-local and out of this migration's scope
+            resident: crate::resident!(crate::resident_qwen3vl::Qwen3VlResident::from_env),
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,
@@ -506,13 +517,10 @@ pub fn models() -> Vec<ModelEntry> {
         },
         // The imaging models carry their weights path in the provider (from a
         // `BRAIN_*` env var), not as an action param, so `brain do` and the
-        // residency adapter advertise ONE manifest each. Every `resident: None`
-        // below is a CLI-local adapter, patched in by `brain-cli`'s own
-        // `catalog.rs` - see this file's module doc.
+        // residency adapter advertise ONE manifest each.
         // sam2 is the first of this migration's architectures whose provider
         // reads the Assembly it is called with (`role_path`, the single-role
-        // counterpart of flux2's own `Paths::from_assembly`) - see the
-        // module doc on why `resident` still patches in separately.
+        // counterpart of flux2's own `Paths::from_assembly`).
         ModelEntry {
             manifest: sam2::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -520,7 +528,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(sam2::caps::Sam2Provider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("sam2", &sam2::spec::Sam2Spec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_sam2::Sam2Resident::from_env),
         },
         ModelEntry {
             manifest: scrfd::caps::manifest,
@@ -529,7 +537,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(scrfd::caps::ScrfdProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("scrfd", &scrfd::spec::ScrfdSpec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_scrfd::ScrfdResident::from_env),
         },
         ModelEntry {
             manifest: florence2::caps::manifest,
@@ -538,7 +546,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(florence2::caps::Florence2Provider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("florence2", &florence2::spec::Florence2Spec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_florence2::Florence2Resident::from_env),
         },
         ModelEntry {
             manifest: arcface::caps::manifest,
@@ -547,7 +555,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(arcface::caps::ArcFaceProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("arcface", &arcface::spec::ArcFaceSpec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_arcface::ArcFaceResident::from_env),
         },
         ModelEntry {
             manifest: vqgan::caps::manifest,
@@ -556,7 +564,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(vqgan::caps::VqganProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("vqgan", &vqgan::spec::VqganSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_restore::VqganResident::from_env),
         },
         ModelEntry {
             manifest: codeformer::caps::manifest,
@@ -577,7 +585,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(codeformer::caps::RestoreProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("codeformer", &codeformer::spec::CodeFormerSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_restore::RestoreResident::from_env),
         },
         ModelEntry {
             manifest: rrdbnet::caps::manifest,
@@ -597,7 +605,7 @@ pub fn models() -> Vec<ModelEntry> {
                 rrdbnet::caps::load(&weights, gpu).map(|s| Arc::new(rrdbnet::caps::UpscaleProvider::new(s)) as Arc<dyn Provider>)
             },
             spec: Some(("rrdbnet", &rrdbnet::spec::RrdbnetSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_upscale::UpscaleResident::from_env),
         },
         ModelEntry {
             manifest: clip::caps::manifest,
@@ -606,7 +614,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(clip::caps::ClipProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("clip", &clip::spec::ClipSpec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_clip::ClipResident::from_env),
         },
         ModelEntry {
             manifest: t5encoder::caps::manifest,
@@ -615,7 +623,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(t5encoder::caps::T5encoderProvider::new(root)) as Arc<dyn Provider>)
             },
             spec: Some(("t5encoder", &t5encoder::spec::T5encoderSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_t5encoder::T5encoderResident::from_env),
         },
         ModelEntry {
             manifest: sdxlunet::caps::manifest,
@@ -624,7 +632,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(sdxlunet::caps::SdxlProvider::new(root)) as Arc<dyn Provider>)
             },
             spec: Some(("sdxlunet", &sdxlunet::spec::SdxlunetSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_sdxl::SdxlResident::from_env),
         },
         ModelEntry {
             manifest: controlnet::caps::manifest,
@@ -634,7 +642,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(controlnet::caps::ControlnetProvider::new(sdxl, control)) as Arc<dyn Provider>)
             },
             spec: Some(("controlnet", &controlnet::spec::ControlnetSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_controlnet::ControlnetResident::from_env),
         },
         // SUPIR photo-realistic restoration: a frozen SDXL backbone
         // (BRAIN_SDXL_DIR, same layout `sdxlunet`/`controlnet` load) plus its
@@ -654,7 +662,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(supir::caps::RestoreProvider::with_registry(paths.backbone_root, paths.supir_ckpt, Arc::new(supir_registry()))) as Arc<dyn Provider>)
             },
             spec: None,
-            resident: None,
+            resident: crate::resident!(crate::resident_supir::SupirResident::from_env),
         },
         ModelEntry {
             manifest: flux1::caps::manifest,
@@ -663,7 +671,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(flux1::caps::Flux1Provider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("flux1", &flux1::spec::Flux1Spec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_flux1::Flux1Resident::from_env),
         },
         ModelEntry {
             manifest: pulid::caps::manifest,
@@ -680,14 +688,14 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(pulid::caps::PulidProvider::new(flux1, pulid_w, arcface, clip, bisenet)) as Arc<dyn Provider>)
             },
             spec: Some(("pulid", &pulid::spec::PulidSpec)),
-            resident: None,
+            resident: crate::resident_in_store!(crate::resident_pulid::PulidResident::from_env),
         },
         // DeepSeek-OCR: a document image in, decoded text out. Multi-file
         // checkpoint (mmproj + LM GGUF), so ONE directory variable, like
         // the face stack's and clip's. The only MULTI-device entry: its
         // vision tower runs on wgpu while its decoder runs on the CPU
         // backend, so it holds real bytes on two devices at once - see
-        // `crate::resident_deepseekocr`'s header in `crates/cli`.
+        // `crate::resident_deepseekocr`'s header.
         // `dir` is resolved through `deepseek2ocr::spec::Deepseek2ocrSpec`
         // (see that module's doc) instead of `BRAIN_DEEPSEEK_OCR_DIR`.
         ModelEntry {
@@ -697,7 +705,7 @@ pub fn models() -> Vec<ModelEntry> {
                 deepseek2ocr::caps::DeepseekOcrProvider::new(dir).map(|p| Arc::new(p) as Arc<dyn Provider>).ok_or_else(|| "deepseek-ocr: resolved dir does not hold both shipped GGUFs".to_string())
             },
             spec: Some(("deepseek2ocr", &deepseek2ocr::spec::Deepseek2ocrSpec)),
-            resident: None,
+            resident: crate::resident_multi!(crate::resident_deepseekocr::DeepseekOcrResident::from_assembly),
         },
         // DeepSeek-OCR-2: v1's successor. Same decoder (`crates/deepseek2`,
         // unmodified), a new vision tower - SAM feeding a Qwen2 GQA resampler
@@ -712,12 +720,12 @@ pub fn models() -> Vec<ModelEntry> {
                 "set BRAIN_DEEPSEEKOCR2_DIR to a directory holding mmproj-deepseek-ocr-2-q8_0.gguf + deepseek-ocr-2-q8_0.gguf"
             ),
             spec: None,
-            resident: None,
+            resident: crate::resident!(crate::resident_deepseekocr2::DeepseekOcr2Resident::from_env),
         },
         // Moondream 3: an image in, text out. SigLIP ViT with overlap multi-crop
         // -> connector -> a parallel-block sparse-MoE decoder. int8 experts by
         // default, because the fp32 build is ~43 GiB and loads nowhere - see
-        // `crate::resident_moondream3`'s header in `crates/cli`.
+        // `crate::resident_moondream3`'s header.
         // `dir` is resolved through `moondream3::spec::Moondream3Spec` (see
         // that module's doc) instead of `BRAIN_MOONDREAM3_WEIGHTS`.
         ModelEntry {
@@ -732,7 +740,7 @@ pub fn models() -> Vec<ModelEntry> {
         // DeepSeek-VL: images and a conversation in, text out; the decoder at
         // the checkpoint's own fp16. `dir` resolved through
         // `deepseekvl::spec::DEEPSEEK_VL`; the resident is registered directly
-        // (see `crate::resident_deepseekvl` in `crates/cli`).
+        // (see `crate::resident_deepseekvl`).
         ModelEntry {
             manifest: deepseekvl::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -740,12 +748,11 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(deepseekvl::caps::DeepseekVlProvider::new(dir)) as Arc<dyn Provider>)
             },
             spec: Some(("deepseekvl", &deepseekvl::spec::DEEPSEEK_VL)),
-            resident: None,
+            resident: crate::resident_multi_family!(crate::resident_deepseekvl::DeepseekVlResident::family_from_assembly),
         },
         // Janus-Pro: chat over images, and text to image, from one
         // checkpoint. `dir` resolved through `januspro::spec::JANUS_PRO`; the
-        // resident is registered directly (see `crate::resident_januspro` in
-        // `crates/cli`).
+        // resident is registered directly (see `crate::resident_januspro`).
         ModelEntry {
             manifest: januspro::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -765,13 +772,13 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: qwen3tts::caps::manifest,
             provider: always!(qwen3tts::caps::TtsProvider::new()),
             spec: None,
-            resident: None,
+            resident: crate::resident!(crate::resident_tts::TtsResident::from_env),
         },
         // MiniMax Music 3. Like flux2, its six roles live in the provider
         // (resolved through `minimaxmusic3::spec::MinimaxMusic3Spec` from
         // the Assembly this entry is called with), not `BRAIN_MINIMAXMUSIC3_*`
-        // - the residency adapter (registered from `resident.rs`, not from
-        // here) still reads those env vars.
+        // - the residency adapter (registered directly by `serving::build_executor`,
+        // not from here) still reads those env vars.
         ModelEntry {
             manifest: minimaxmusic3::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -779,7 +786,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(minimaxmusic3::caps::MinimaxMusic3Provider::new(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("minimaxmusic3", &minimaxmusic3::spec::MinimaxMusic3Spec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_minimaxmusic3::MinimaxMusic3Resident::from_env),
         },
         // CosyVoice 2/3 zero-shot voice cloning TTS. `llm`/`flow`/`hift`/
         // `tokenizer` come from `cosyvoice::spec::CosyVoiceSpec` via the
@@ -796,12 +803,11 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(cosyvoice::caps::CosyVoiceProvider::new(paths)) as Arc<dyn Provider>)
             },
             spec: Some(("cosyvoice", &cosyvoice::spec::CosyVoiceSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_cosyvoice::CosyVoiceResident::from_env),
         },
         // Speech-to-text. Discovery is weight-free (the caps manifests); the
         // direct `brain do` path wraps the model crates' eager providers in
-        // [`LazyProvider`] so construction stays cheap; the residency adapters
-        // are patched in by `brain-cli`'s own catalog.
+        // [`LazyProvider`] so construction stays cheap.
         ModelEntry {
             manifest: nemotronasr::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -815,7 +821,7 @@ pub fn models() -> Vec<ModelEntry> {
                 )) as Arc<dyn Provider>)
             },
             spec: Some(("nemotronasr", &nemotronasr::spec::NemotronAsrSpec)),
-            resident: None,
+            resident: crate::resident!(crate::resident_asr::NemotronResident::from_env),
         },
         ModelEntry {
             manifest: qwen3asr::caps::manifest,
@@ -824,13 +830,72 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(LazyProvider::new(
                     qwen3asr::caps::manifest,
                     Box::new(move || {
-                        let (window_secs, max_new) = qwen_asr_tuning();
+                        let (window_secs, max_new) = resident_asr::qwen_asr_tuning();
                         qwen3asr::caps::QwenAsrProvider::load(&dir, qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b(), window_secs, max_new)
                             .map(|p| Arc::new(p) as Arc<dyn Provider>)
                     }),
                 )) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec)),
+            resident: crate::resident!(crate::resident_asr::QwenAsrResident::from_env),
+        },
+        // Time-series forecasting. Discoverable (`brain caps`) and served
+        // (`brain serve`, via the resident ctors), but with no direct `brain do`
+        // provider yet: the forecast run logic lives in the residency instances
+        // (NPU/device placement included), so the provider says exactly how to
+        // reach the model instead of "unknown model".
+        ModelEntry {
+            manifest: resident_forecast::chronos2_manifest,
+            provider: |_assembly: &Assembly| Err("chronos-2 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_CHRONOS2 set".to_string()),
+            spec: None,
+            resident: resident!(resident_forecast::Chronos2Resident::from_env),
+        },
+        ModelEntry {
+            manifest: resident_forecast::fincast_manifest,
+            provider: |_assembly: &Assembly| Err("fincast has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_FINCAST set".to_string()),
+            spec: None,
+            resident: resident!(resident_forecast::FincastResident::from_env),
+        },
+        ModelEntry {
+            manifest: resident_forecast::kronos_manifest,
+            provider: |_assembly: &Assembly| Err("kronos has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER set".to_string()),
+            spec: None,
+            resident: resident!(resident_forecast::KronosResident::from_env),
+        },
+        ModelEntry {
+            manifest: resident_forecast::timesfm3_manifest,
+            provider: |_assembly: &Assembly| Err("timesfm3 has no direct `brain do` provider yet - serve it (`brain serve --dbus` or an HTTP surface) with BRAIN_TIMESFM3 set, or the resolver (`brain timesfm3 predict ...`)".to_string()),
+            spec: None,
+            resident: resident!(resident_forecast::Timesfm3Resident::from_env),
+        },
+        // 3D Gaussian Splatting (render/fit): needs no weights at all, the scene
+        // arrives as request bytes, yet it has a resident because render and fit
+        // allocate GPU buffers per request, which is worth scheduling.
+        ModelEntry {
+            manifest: splat::caps::manifest,
+            provider: always!(splat::caps::SplatProvider::new()),
+            spec: None,
+            resident: resident!(resident_splat::SplatResident::from_env),
+        },
+        // WorldMirror-2 multi-view 3D reconstruction. `weights` is a
+        // per-invocation action param, so `manifest` is weights-free.
+        ModelEntry {
+            manifest: worldmirror2::caps::manifest,
+            provider: always!(worldmirror2::caps::WorldMirror2Provider::new()),
+            spec: None,
+            resident: resident!(resident_worldmirror2::WorldMirror2Resident::from_env),
+        },
+        // No-weights utility models, listed by `brain caps` and served as
+        // stateless residents by the serving executor rather than through this
+        // list, hence no `resident` here.
+        ModelEntry { manifest: imageops::manifest, provider: always!(imageops::ImageOps), spec: None, resident: None },
+        ModelEntry {
+            manifest: || {
+                use capability::Provider as _;
+                demo::DemoModel.manifest()
+            },
+            provider: always!(demo::DemoModel),
+            spec: None,
             resident: None,
         },
     ]
@@ -886,9 +951,7 @@ pub fn stage_registry(models_dir: Option<&Path>) -> capability::Registry {
 /// can reach with no CLI invocation and no opt-in in sight - falling all the
 /// way to `default_root`'s bare `$HOME` tier would scan (and best-effort
 /// cache-write into) a real developer's actual model store as a side effect
-/// of running the test suite. This is the base catalog's own copy of the
-/// scan/resolve shape `crate::resolver_cli::resolve_or_exit` uses in the CLI
-/// (a different crate this one may not depend on - see the module doc), kept
+/// of running the test suite. This is the library's own scan/resolve, kept
 /// minimal: no override flags, and silent rather than printing/exiting on
 /// `Ambiguous`/`Missing`, since nothing upstream of a pipeline stage can act
 /// on either outcome anyway.
@@ -945,9 +1008,8 @@ fn empty_assembly() -> Assembly {
 
 /// The registry SUPIR's optional caption auto-fill dispatches
 /// [`supir::caps::LLAVA_MODEL`] through, for the direct `brain do`/D-Bus-via-
-/// provider path (`crates/cli`'s own residency adapter,
-/// `resident_supir.rs`, builds an equivalent registry for the served path,
-/// since it cannot reach this crate's private helpers - see that file's doc).
+/// provider path (`resident_supir.rs` builds an equivalent registry for the
+/// served path).
 /// A stub `LlavaProvider` costs nothing to construct (it loads weights lazily
 /// per call, same as every other captioner in the tree), so this is built
 /// unconditionally rather than gated on `BRAIN_LLAVA_WEIGHTS` being set - an
@@ -984,14 +1046,14 @@ pub fn serving_manifests() -> Vec<Manifest> {
 
 /// Build a runnable provider for `model`, or say why not.
 ///
-/// This is how every consumer of this crate other than `brain-cli` reaches a
-/// model, so it does the resolving itself: an entry carrying a
+/// This is how an embedder that holds no resolver of its own reaches a model,
+/// so it does the resolving itself: an entry carrying a
 /// [`ModelEntry::spec`] is built from a REAL [`Assembly`] scanned out of an
 /// explicitly opted-into model store ([`resolved_assembly`]), which is what
 /// makes a model whose weights ARE published constructible by name. A caller
-/// that already holds a resolver-built assembly (`brain-cli`, which resolves
-/// with its own `--models-dir`/override vocabulary) calls the entry's own
-/// [`ModelEntry::provider`] with it instead, so it never resolves twice.
+/// that already holds a resolver-built assembly (the CLI, which resolves with
+/// its own `--models-dir`/override vocabulary) calls
+/// [`provider_from_assembly`] with it instead, so it never resolves twice.
 ///
 /// When nothing resolves, an entry that needs no role at construction still
 /// builds - and one that does fails with [`weights_unavailable`]'s message,
@@ -1017,12 +1079,25 @@ pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     Err(format!("unknown model '{model}' (see `brain caps`)"))
 }
 
+/// [`provider`], from an already-resolved [`Assembly`] instead of resolving
+/// one itself: the entry point for a caller that holds one (the CLI, which
+/// resolves with its own `--models-dir` and `--<role>` vocabulary), so it never
+/// resolves twice. An entry that reads no role ignores the argument.
+pub fn provider_from_assembly(model: &str, assembly: &Assembly) -> Result<Arc<dyn Provider>, String> {
+    for e in models() {
+        if (e.manifest)().model == model {
+            return (e.provider)(assembly);
+        }
+    }
+    Err(format!("unknown model '{model}' (see `brain caps`)"))
+}
+
 /// The resolver architecture and spec a catalog model's weights come from, or
 /// `None` for a model whose entry reads no [`Assembly`] at all.
 ///
 /// The ONE place this mapping lives (it is [`ModelEntry::spec`], read by id),
-/// so a caller that resolves in its own vocabulary - `brain-cli`, with its
-/// `--models-dir` flag and `--<role>` overrides - shares the catalog's table
+/// so a caller that resolves in its own vocabulary (the CLI, with its
+/// `--models-dir` flag and `--<role>` overrides) shares the catalog's table
 /// instead of keeping a second one that can drift from it.
 pub fn resolver_spec_for(model: &str) -> Option<ArchRef> {
     models().into_iter().find(|e| (e.manifest)().model == model).and_then(|e| e.spec)

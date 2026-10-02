@@ -24,7 +24,7 @@ BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
 * Unlike the face stack, CLIP's `run_batch` is a **genuine batched forward**:
   the residency adapter groups a batch by tower and runs one forward per
   group at `b = N`, because every row is the same fixed 77-token context
-  (`crates/cli/src/resident_clip.rs`).
+  (`crates/catalog/src/resident_clip.rs`).
 * Verified end to end against HuggingFace on the released checkpoint -
   string in, BPE, tower, pooling - at **cosine 1.0000000000 / max_abs 1.5e-5**
   (CLIP-L) and **0.9999998212 / 1.0e-5** (OpenCLIP-bigG);

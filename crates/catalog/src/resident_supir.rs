@@ -17,11 +17,9 @@
 //! `crates/supir` links no VLM (see `supir::caps`'s own doc): the optional
 //! auto-caption call goes through a `capability::Registry` this file builds
 //! itself, carrying `llava::caps::LlavaProvider` under `supir::caps::LLAVA_MODEL` -
-//! `brain-cli` sits at the top of the crate-graph layering and may depend on
-//! both, unlike `crates/supir`. `crates/catalog`'s own SUPIR entry builds an
-//! equivalent registry for the direct `brain do`/D-Bus-via-provider path (see
-//! that crate's `supir_registry`), so the two callers agree without sharing code
-//! neither can reach.
+//! this crate depends on both, unlike `crates/supir`. The catalog's own SUPIR
+//! entry builds an equivalent registry for the direct `brain do`/D-Bus-via-provider
+//! path (`supir_registry` in `lib.rs`).
 //!
 //! # No batching
 //!

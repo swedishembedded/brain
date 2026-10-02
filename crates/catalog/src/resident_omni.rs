@@ -273,7 +273,7 @@ pub fn int8_thinker_multi_from_env(gpus: &[(u32, u64)], reserved: u64) -> Option
     // assumed) -- validated end to end on two physically separate GPUs
     // during the int8 dual-GPU residency work. `ThinkerConfig::defaults()`
     // carries the same text-decoder numbers `MoeTextConfig::thinker_defaults()`
-    // did, plus the special media token ids `crate::mm::build_multimodal_prompt`
+    // did, plus the special media token ids `qwen3omnimoe::mm::build_multimodal_prompt`
     // needs -- see that function's own doc for why this is one config, not
     // two independently-maintained copies of the same numbers.
     let cfg = qwen3omnimoe::config::ThinkerConfig::defaults();

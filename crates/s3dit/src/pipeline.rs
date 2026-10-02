@@ -937,7 +937,7 @@ impl HotPipeline {
     /// weights — the demote-preparing build. Costs real, permanent host
     /// RAM for as long as the cache lives (see
     /// `ZImageDitI8::build_from_source_with_cache`'s doc); an explicit
-    /// choice by the caller (`crates/cli/src/resident.rs`'s
+    /// choice by the caller (`crates/serving/src/executor.rs`'s
     /// `ZImageInstance`), never the default [`Self::build`] path.
     pub fn build_adapted_with_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, progress: impl FnMut(&str)) -> Result<(HotPipeline, crate::DitI8Cache), String> {
         let paths = paths.clone();
@@ -965,7 +965,7 @@ impl HotPipeline {
 
     /// [`Self::build_adapted_with_cache`]'s promote sibling: rebuild the
     /// int8 pipeline WITHOUT touching the DiT checkpoint at all, using
-    /// `cache` instead. `crates/cli/src/resident.rs`'s
+    /// `cache` instead. `crates/serving/src/executor.rs`'s
     /// `ZImageInstance::promote` is the caller.
     pub fn build_from_dit_cache(paths: &Paths, width: u32, height: u32, cap_len: u32, cache: &crate::DitI8Cache, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
         Self::assemble_int8_pipeline(

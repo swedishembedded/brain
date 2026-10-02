@@ -758,9 +758,9 @@ fn run_train(args: &[String]) {
         })
         .collect();
     // "brain/zipdepth" matches the reserved-vendor fallback id
-    // -- the same id crates/cli/src/resident_depth.rs::DepthResident::from_env
+    // -- the same id crates/catalog/src/resident_depth.rs::DepthResident::from_env
     // synthesizes for an env-loaded checkpoint -- so a checkpoint saved here
-    // is auto-discoverable by crates/cli/src/model_dir.rs without requiring
+    // is auto-discoverable by crates/serving/src/model_dir.rs without requiring
     // BRAIN_ZIPDEPTH_WEIGHTS to be set. The "variant" field is informational
     // only (DepthResident::activate auto-detects the real variant from the
     // checkpoint's own tensor shapes via zipdepth::cfg_for_checkpoint, never

@@ -360,7 +360,7 @@ fn models_profile_measure_reports_real_positive_timings_for_a_real_checkpoint() 
 /// thin for `qwen3::gguf_import::config_from_gguf` to succeed against, since
 /// that codepath is not what `write_base`'s callers exercise). This reuses
 /// `qwen3::gguf_import::testing::write_synthetic_gguf` - the exact fixture
-/// builder `crate::gguf_import`'s own tests already trust to round-trip
+/// builder `serving::gguf_import`'s own tests already trust to round-trip
 /// through the real GGUF importer - rather than a second, drift-prone copy of
 /// its KV/tensor set.
 fn write_real_qwen3_gguf(store: &Store, vendor: &str, repo: &str, quant: &str) -> PathBuf {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The models-directory lookup -- moved out of `crates/cli/src/model_dir.rs`
+//! The models-directory lookup -- moved out of `crates/serving/src/model_dir.rs`
 //! verbatim. Everything else that used to live in that file (the store scan,
 //! the per-family `resident_for`/`resident_for_compound` dispatch) stays in
 //! `crates/cli`: those construct the ~20 CLI-local `ResidentModel` adapters

@@ -129,7 +129,7 @@ them, so treat all request input as hostile.
       `crates/apiserve/src/openai.rs::openai_tool_calls` — the server never parses
       and executes a tool call itself, and no server-side state (file paths, other
       requests, prior sessions) is ever echoed into an `arguments` string. The
-      resident layer (`crates/cli/src/resident_llm.rs::QwenInstance::run`) guarantees
+      resident layer (`crates/catalog/src/resident_llm.rs::QwenInstance::run`) guarantees
       raw `<think>`/`<tool_call>` markup never leaks into `message.content`/
       `delta.content` — only `ChatEvent::Content` ever feeds those fields (see
       `bridge::StreamMsg`'s doc comment and `openai.rs::event_delta`, which is the

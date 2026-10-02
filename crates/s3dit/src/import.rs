@@ -319,7 +319,7 @@ fn comfy_targets(name: &str, shape: &[usize], cfg: &ZImageConfig, xk: &str, fk: 
 /// distinguish a Z-Image GGUF from a genuine Lumina2 one the way
 /// `crates/gguf::registry`'s `clip.projector_type` discriminator tells
 /// DeepSeek-OCR's mmproj apart from every other CLIP-shaped GGUF.
-/// `crates/cli/src/gguf_import.rs`'s `GgufArchitectureImporter` registry has
+/// `crates/serving/src/gguf_import.rs`'s `GgufArchitectureImporter` registry has
 /// no such discriminator mechanism, so [`import_gguf`] carries its own guard
 /// (see [`DISCRIMINATOR_TENSOR`]) instead of silently trusting the tag.
 pub const GGUF_ARCHITECTURE: &str = "lumina2";

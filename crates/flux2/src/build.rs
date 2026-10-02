@@ -8,7 +8,7 @@
 //!
 //! Before this module existed, four call sites - `crates/cli/src/flux2_cli.rs`,
 //! `crates/sdk/src/pipeline.rs`, `caps::Flux2Action::run` and
-//! `crates/cli/src/resident_flux2.rs::activate` - each re-derived the same
+//! `crates/catalog/src/resident_flux2.rs::activate` - each re-derived the same
 //! ~8 lines (`bind_variant`/`check_license`/`Flux2Config::from_name`/
 //! `effective_dit_precision`) independently, and one of the four differences
 //! that drifted in was a real bug: two sites forgot `effective_dit_precision`

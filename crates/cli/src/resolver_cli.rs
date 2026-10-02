@@ -142,7 +142,7 @@ fn with_arch_spec<R>(arch: &str, f: impl FnOnce(&dyn ArchSpec) -> R) -> Option<R
 /// this architecture's own `--<role>` override flags out of `rest`, resolve
 /// its [`Assembly`] (printing and exiting on `Ambiguous`/`Missing`, via
 /// [`resolve_or_exit`]), then run the action through
-/// `crate::catalog::provider_from_assembly` (`crate::caps_cli::run_do_with_assembly`).
+/// `catalog::provider_from_assembly` (`crate::caps_cli::run_do_with_assembly`).
 /// `model` is the catalog id the action dispatches under.
 fn run_generic_or_exit(arch: &str, spec: &dyn ArchSpec, model: &str, rest: &[String]) -> i32 {
     let (overrides, remaining) = extract_role_overrides(spec, rest);
@@ -169,7 +169,7 @@ mod tests {
     /// `s3dit` (Z-Image) has no dedicated `_cli.rs` of its own, so it can
     /// only ever accept a `--dit`/`--vae`/`--text-encoder`/`--tokenizer`
     /// disambiguation flag through THIS generic path - without a row here,
-    /// `crate::catalog::provider`'s `resolved_assembly_for` (which every
+    /// `catalog::provider`'s `resolved_assembly_for` (which every
     /// `brain s3dit <verb>` invocation goes through, since `s3dit` is on
     /// `ARCH_TO_MODEL`) always resolves with an EMPTY override map, so an
     /// `Ambiguous` outcome (e.g. two unrelated VAEs in the models directory)

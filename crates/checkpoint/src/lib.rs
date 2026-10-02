@@ -341,7 +341,7 @@ pub fn save(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)])
 
 /// Same as [`save`], but attaches a [`st::ModelCard`] to the checkpoint's
 /// metadata - the family/id every servable model needs for
-/// `crates/cli/src/model_dir.rs::discover()` to auto-register it. An
+/// `crates/serving/src/model_dir.rs::discover()` to auto-register it. An
 /// additive sibling, not a `save` signature change: `save`'s ~30 existing
 /// call sites (training/research crates that were never meant to be
 /// servable) stay untouched; only a family's real save path that wants to

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The path `crates/cli/src/resident_llm.rs`'s `QwenResident::activate` takes
+//! The path `crates/catalog/src/resident_llm.rs`'s `QwenResident::activate` takes
 //! to serve a named LoRA adapter: fold the adapter into the base tensors
 //! (`qwen3::lora::fold_adapter_into`, already proven exact against the live
 //! unfolded forward by `crates/qwen3/tests/lora_adapter_file.rs`), then build

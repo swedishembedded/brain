@@ -7,7 +7,7 @@
 //!
 //! `crate::caps::load_gguf_resident`/`load_hf_resident` (the direct-provider
 //! `brain qwen3vl generate --weights ...` path) and
-//! `crate::caps::Precision`'s callers in `crates/cli/src/resident_qwen3vl.rs`
+//! `crate::caps::Precision`'s callers in `crates/catalog/src/resident_qwen3vl.rs`
 //! (the residency-scheduled path) both need "how many device bytes will this
 //! build occupy" BEFORE a `Gpu` is built - the residency path to budget a
 //! device, the direct path to refuse a checkpoint that fits nowhere instead

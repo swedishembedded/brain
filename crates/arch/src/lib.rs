@@ -288,7 +288,7 @@ pub const ARCHS: &[Arch] = &[
     // `weights_env` is empty: `weights`/`tokenizer` are resolved through
     // `qwen3::spec::Qwen3Spec` (the model-store resolver) instead of
     // `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER` - see
-    // `crates/cli/src/catalog.rs`'s `resolver_spec_for`, same shape as
+    // `crates/catalog/src/lib.rs`'s `resolver_spec_for`, same shape as
     // `qwen35`'s own row.
     arch!("qwen3", "Qwen3 dense decoder", Text, LlamaCpp, "brain-qwen3", hf: &["Qwen3ForCausalLM", "qwen3"], default_ref: Some("Qwen/Qwen3-0.6B"),
         variants: &[
@@ -343,11 +343,11 @@ pub const ARCHS: &[Arch] = &[
     // `weights_env` is empty: this row used to declare a FOURTH spelling
     // (`BRAIN_QWEN35_DIR`) that matched none of the three the crate's own
     // code actually checked (`BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`
-    // in `caps.rs`, `BRAIN_QWEN35_GGUF` in `crates/cli/src/resident.rs`'s
+    // in `caps.rs`, `BRAIN_QWEN35_GGUF` in `crates/serving/src/executor.rs`'s
     // `multi_gpu_gguf_from_env`) - already dead on arrival. All three (and
     // this row's own stale one) are now resolved through
     // `qwen35::spec::Qwen35Spec`'s `weights`/`tokenizer` roles instead - see
-    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
+    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`.
     arch!("qwen35", "Qwen3.5/3.8-27B dense hybrid GDN/GQA decoder + MTP + ViT", Multimodal, LlamaCpp, "brain-qwen35", gguf: Some("qwen35"), hf: &["Qwen3_5ForConditionalGeneration", "qwen3_5"], default_ref: Some("Qwen/Qwen3.8-27B-FP8")),
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa"),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
@@ -382,8 +382,8 @@ pub const ARCHS: &[Arch] = &[
     // `weights_env` is empty: `generate`/`lora_train`'s checkpoint is
     // resolved through `qwen3vl::spec::Qwen3VlSpec` (the model-store
     // resolver) instead of `BRAIN_QWEN3VL_WEIGHTS` - see
-    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`. The residency
-    // adapter (`crates/cli/src/resident_qwen3vl.rs`) still reads that
+    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`. The residency
+    // adapter (`crates/catalog/src/resident_qwen3vl.rs`) still reads that
     // variable directly - out of this migration's scope.
     arch!("qwen3vl", "Qwen3-VL-4B (ViT+PatchMerger+DeepStack)", Multimodal, LlamaCpp, "brain-qwen3vl", hf: &["Qwen3VLForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-VL-4B-Instruct"),
         variants: &[
@@ -411,12 +411,12 @@ pub const ARCHS: &[Arch] = &[
         ]),
     // `weights_env` is empty: FastVLM's checkpoint is resolved through
     // `fastvlm::spec::FastvlmSpec` (the model-store resolver) instead of
-    // `BRAIN_FASTVLM_WEIGHTS` - see `crates/cli/src/catalog.rs`'s
+    // `BRAIN_FASTVLM_WEIGHTS` - see `crates/catalog/src/lib.rs`'s
     // `resolved_assembly_for`.
     arch!("fastvlm", "Apple FastVLM (FastViTHD + Qwen2 decoder)", Multimodal, Brain, "brain-fastvlm", hf: &["LlavaQwen2ForCausalLM"], default_ref: Some("apple/FastVLM-0.5B")),
     // `weights_env` is empty: `dir` is resolved through
     // `moondream3::spec::Moondream3Spec` (the model-store resolver) instead
-    // of `BRAIN_MOONDREAM3_WEIGHTS` - see `crates/cli/src/catalog.rs`'s
+    // of `BRAIN_MOONDREAM3_WEIGHTS` - see `crates/catalog/src/lib.rs`'s
     // `resolved_assembly_for`.
     arch!("moondream3", "Moondream 3 (SigLIP + MoE decoder)", Multimodal, Brain, "brain-moondream3", hf: &["Moondream3ForConditionalGeneration"], default_ref: Some("moondream/moondream3-preview")),
     // LLaVA-1.5: CLIP-L/14@336 vision tower + a Vicuna-1.5 (LLaMA-2) decoder,
@@ -444,7 +444,7 @@ pub const ARCHS: &[Arch] = &[
     // `weights_env` is empty: `dir` is resolved through
     // `deepseek2ocr::spec::Deepseek2ocrSpec` (the model-store resolver)
     // instead of `BRAIN_DEEPSEEK_OCR_DIR` - see
-    // `crates/cli/src/catalog.rs`'s `resolved_assembly_for`.
+    // `crates/catalog/src/lib.rs`'s `resolved_assembly_for`.
     // DeepSeek-VL and Janus-Pro: a Llama decoder behind a vision tower, one
     // HF class and one `model_type` between them. DeepSeek-VL's tower is a
     // SAM-B high-resolution branch plus a SigLIP-L low-resolution one;
@@ -612,7 +612,7 @@ pub const ARCHS: &[Arch] = &[
     // No `weights_env`: codeformer resolves its single `weights` role
     // through `brain_modelstore::resolve` (`crates/codeformer/src/spec.rs`),
     // not `BRAIN_CODEFORMER_WEIGHTS` - the same migration `rrdbnet` (below)
-    // already went through. `crates/cli/src/resident_restore.rs`'s served
+    // already went through. `crates/catalog/src/resident_restore.rs`'s served
     // path still reads that env var directly - a tracked, not silent, gap
     // (`brain rrdbnet upscale`'s own residency adapter has the identical
     // one).

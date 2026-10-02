@@ -37,7 +37,6 @@ brain-modelstore.workspace = true
 brain-apiserve.workspace = true
 brain-residency.workspace = true
 brain-memauth.workspace = true
-brain-backend-api.workspace = true
 brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
 # `backend_vulkan::coopmat::demo` - the `vk-matmul` demo entry (M8.9). Already
@@ -55,7 +54,6 @@ brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true
 brain-qwen3vl.workspace = true
-brain-qwen3vlmoe.workspace = true
 # `brain label` - the model-agnostic captioning seam plus its folder labeler.
 brain-captioner.workspace = true
 brain-fastvlm.workspace = true
@@ -97,7 +95,6 @@ brain-splat.workspace = true
 # from motion.
 brain-recon.workspace = true
 brain-sfm.workspace = true
-brain-paramstore.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-capture.workspace = true
@@ -115,6 +112,7 @@ brain-capability.workspace = true
 # `catalog.rs` is a thin CLI-local extension over this (patches back the
 # residency adapters that must stay CLI-local, see that file's module doc).
 brain-catalog.workspace = true
+brain-serving.workspace = true
 # The resolver core, models-directory lookup, GPU/CPU placement, and
 # default-checkpoint auto-fetch -- library pieces this binary now calls into
 # rather than owns, so an SDK/embedder can use them without `brain-cli`.

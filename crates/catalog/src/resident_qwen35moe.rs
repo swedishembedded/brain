@@ -89,7 +89,7 @@ impl Qwen35Resident {
     }
 
     /// The model-dir counterpart of [`from_env`](Self::from_env): a checkpoint
-    /// discovered by `crate::model_dir` (family `"qwen35moe"` - what
+    /// discovered by `serving::model_dir` (family `"qwen35moe"` - what
     /// `qwen35moe::import`'s conversion stamps on its `ModelCard`) served under
     /// its OWN card id rather than the env fallback [`MODEL`].
     ///

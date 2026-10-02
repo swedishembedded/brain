@@ -6,7 +6,7 @@
 `brain_modelstore::resolve` - the `ArchSpec`/`Confidence`/`Ambiguity` machinery
 that reads real file headers, picks a candidate per role, and refuses to guess -
 had been the one weight resolver for a while, with 22 architectures carrying a
-`spec.rs`. The served path had none of it. Every `crates/cli/src/resident_*.rs`
+`spec.rs`. The served path had none of it. Every `crates/catalog/src/resident_*.rs`
 still opened with `std::env::var("BRAIN_FLUX1_DIR").ok()?` and returned `None`,
 so `brain serve --dbus` served nothing for a model whose weights were sitting
 unambiguously in the store, while `brain flux2 generate` found the identical

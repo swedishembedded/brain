@@ -597,7 +597,7 @@ fn normalize_stop(v: Option<&Value>) -> Option<String> {
 /// One OpenAI message → the contract `{role, content, reasoning_content?,
 /// tool_calls?, tool_call_id?}` (`content` - see [`message_content`]; a
 /// `tool_calls` element's `function.{name,arguments}` flattens to
-/// `{id,name,arguments}` - the shape `crates/cli/src/resident_llm.rs::
+/// `{id,name,arguments}` - the shape `crates/catalog/src/resident_llm.rs::
 /// parse_chat_messages` reads). `role:"tool"` is now its OWN contract role
 /// (no longer folded into `user`) so the resident's chat template renders it
 /// as a `<tool_response>` turn.

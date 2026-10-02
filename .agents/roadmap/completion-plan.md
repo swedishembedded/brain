@@ -17,8 +17,8 @@ Not by reading the ledgers. Each claim below was checked against the tree:
 | check | command |
 |---|---|
 | capability surface | `ls crates/*/src/caps.rs` |
-| residency adapter | `ls crates/cli/src/resident_*.rs`, `resident.rs::build_executor` |
-| discovery | `crates/cli/src/catalog.rs::models()` |
+| residency adapter | `ls crates/catalog/src/resident_*.rs`, `serving::build_executor` |
+| discovery | `crates/catalog/src/lib.rs::models()` |
 | backward gate | `grep 'pub fn check_' crates/gradcheck/src/` + its `tests/` wiring |
 | examples | `examples/*/` |
 | build health | `make build` |
@@ -189,7 +189,7 @@ observed in the debug lane.
 
 ### 1.1b The two hangs are probably one bug
 
-`crates/cli/tests/npu_model_parity.rs` hung for 26+ minutes under a full
+`crates/catalog/tests/npu_model_parity.rs` hung for 26+ minutes under a full
 `make test`, with **exactly one thread pinned at 100 %** and the rest idle -
 the signature of a busy-poll on a completion that never signals. That is
 frame-for-frame the same signature as the `kernel_timing` hang recorded in
@@ -245,12 +245,12 @@ rows closed since this table was written.**
 
 | model | state | work |
 |---|---|---|
-| `moondream3` | **DONE.** `crates/moondream3/src/caps.rs`, `crates/cli/src/resident_moondream3.rs`, `catalog.rs:254`, `samples/python/vision/moondream3-caption/moondream3_caption.py` | none |
-| `splat` | **DONE.** `crates/splat/src/caps.rs` (`render`/`fit`), `crates/cli/src/resident_splat.rs`, `catalog.rs:181-183`, `samples/python/vision/splat/{splat_fit,splat_render}.py` | none |
-| `worldmirror2` | **DONE.** `crates/worldmirror2/src/caps.rs` (`reconstruct`), `crates/cli/src/resident_worldmirror2.rs`, `catalog.rs:194-196`, `samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py` | none |
+| `moondream3` | **DONE.** `crates/moondream3/src/caps.rs`, `crates/catalog/src/resident_moondream3.rs`, `catalog.rs:254`, `samples/python/vision/moondream3-caption/moondream3_caption.py` | none |
+| `splat` | **DONE.** `crates/splat/src/caps.rs` (`render`/`fit`), `crates/catalog/src/resident_splat.rs`, `catalog.rs:181-183`, `samples/python/vision/splat/{splat_fit,splat_render}.py` | none |
+| `worldmirror2` | **DONE.** `crates/worldmirror2/src/caps.rs` (`reconstruct`), `crates/catalog/src/resident_worldmirror2.rs`, `catalog.rs:194-196`, `samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py` | none |
 | `diamond` / `genieredux` | no `caps.rs`; AGENTS.md calls `diamond` "the one served world-model architecture", which the tree does not support | **still open, unchanged.** No decision recorded anywhere. decide: either serve it properly or correct the claim. An interactive-play model may genuinely not fit `Run`/`Subscribe` - if so, **extend the D-Bus surface**, per the invariant, and say so |
 | `glmdsa` | **DONE**, fully. `glmdsa::caps` + a `catalog.rs` entry; `brain caps` went 36 -> 37 models on a box with no GLM checkpoint. `GlmResident::manifest` now returns `glmdsa::caps::manifest_resident()`, so the served and direct surfaces are one definition | closed: `resident_llm.rs:298-315` documents `run_batch` is deliberately serial for a real architectural reason (no batch axis in MLA/MoE - not an unstated default), and `samples/python/llm/glmdsa/glmdsa.py` is a real `--dbus` client |
-| `qwen3vl` | **DONE.** `crates/cli/src/resident_qwen3vl.rs` exists, `catalog.rs:248` registers it, `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py` exists | none |
+| `qwen3vl` | **DONE.** `crates/catalog/src/resident_qwen3vl.rs` exists, `catalog.rs:248` registers it, `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py` exists | none |
 | `gpt2`, `toymoe`, `toypid`, `toyseq2seq`, `toyautoencoder` | manifest via resident only (`GptResident`), no `caps.rs` | **DECIDED, not open** - see "Accepted, not open work" below: the contract does not apply, they are training baselines with no served checkpoint |
 
 **Sequencing:** the only remaining work in this section is `diamond`/`genieredux`
@@ -274,11 +274,11 @@ open), one (`glmdsa`, formerly here too) closed - see 2.1.
 
 | model | why it should batch | status |
 |---|---|---|
-| `chronos2` + `fincast` | share a batchable transformer core; equal-shape contexts could share one forward (`forecast.md`) | **still open.** `Chronos2CpuInstance`/`FincastCpuInstance` (`crates/cli/src/resident_forecast.rs:198-204,369-376`) have no `run_batch` override and no justifying comment - contrast with the sibling `Timesfm3Instance` in the same file, which has a real grouped `run_batch` (~line 1177) |
-| `arcface` | input batches trivially; only the graph is pre-allocated at N=1 (`scrfd.md`) | **still open.** `crates/cli/src/resident_arcface.rs:24-37` still documents the graph fixed at N=1; the suggested follow-up (a `Yolo::load(path,batch)`-style widened graph) is not done |
-| `vqgan` / `codeformer` | batch size is hardcoded to 1 in the **shared** `vae::blocks` builder | **partially done.** `vae::blocks::Builder::set_batch` now exists (`crates/vae/src/blocks.rs:921-941`) and both `vqgan::model::Vqgan::new_batched` (`crates/vqgan/src/model.rs:236-254`) and `codeformer::model::CodeFormer` (`crates/codeformer/src/model.rs:212-220`) use it - the shared-builder fix landed. Remaining: the CLI residents were never switched over - `VqganInstance`/`RestoreInstance` in `crates/cli/src/resident_restore.rs` still call the N=1 constructor and their own doc comments (lines 19-30, 98, 161) are now stale relative to the crates they wrap. Wire `activate` to `new_batched` and add a real `run_batch` |
-| `lfm2` | length-bucketed batching + zeroed pad states with an additive key mask (bidirectional attention has no causal mask to hide padding) | **partially done.** `LfmInstance::run_batch` (`crates/cli/src/resident_lfm.rs:178-200`) is a real batched forward, not a serial loop - but only for exact-length matches; padding within a group currently repeats the last sequence rather than using zeroed-pad-states + an additive key mask, which the file's own doc still calls out as not yet landed |
-| `s3dit` | listed as an explicit open item | **still open.** `ZImageInstance` (`crates/cli/src/resident.rs:719-762`) has no `run_batch` override and no justifying comment, unlike arcface/vqgan/glmdsa/lfm2, which all document why |
+| `chronos2` + `fincast` | share a batchable transformer core; equal-shape contexts could share one forward (`forecast.md`) | **still open.** `Chronos2CpuInstance`/`FincastCpuInstance` (`crates/catalog/src/resident_forecast.rs:198-204,369-376`) have no `run_batch` override and no justifying comment - contrast with the sibling `Timesfm3Instance` in the same file, which has a real grouped `run_batch` (~line 1177) |
+| `arcface` | input batches trivially; only the graph is pre-allocated at N=1 (`scrfd.md`) | **still open.** `crates/catalog/src/resident_arcface.rs:24-37` still documents the graph fixed at N=1; the suggested follow-up (a `Yolo::load(path,batch)`-style widened graph) is not done |
+| `vqgan` / `codeformer` | batch size is hardcoded to 1 in the **shared** `vae::blocks` builder | **partially done.** `vae::blocks::Builder::set_batch` now exists (`crates/vae/src/blocks.rs:921-941`) and both `vqgan::model::Vqgan::new_batched` (`crates/vqgan/src/model.rs:236-254`) and `codeformer::model::CodeFormer` (`crates/codeformer/src/model.rs:212-220`) use it - the shared-builder fix landed. Remaining: the CLI residents were never switched over - `VqganInstance`/`RestoreInstance` in `crates/catalog/src/resident_restore.rs` still call the N=1 constructor and their own doc comments (lines 19-30, 98, 161) are now stale relative to the crates they wrap. Wire `activate` to `new_batched` and add a real `run_batch` |
+| `lfm2` | length-bucketed batching + zeroed pad states with an additive key mask (bidirectional attention has no causal mask to hide padding) | **partially done.** `LfmInstance::run_batch` (`crates/catalog/src/resident_lfm.rs:178-200`) is a real batched forward, not a serial loop - but only for exact-length matches; padding within a group currently repeats the last sequence rather than using zeroed-pad-states + an additive key mask, which the file's own doc still calls out as not yet landed |
+| `s3dit` | listed as an explicit open item | **still open.** `ZImageInstance` (`crates/serving/src/executor.rs:719-762`) has no `run_batch` override and no justifying comment, unlike arcface/vqgan/glmdsa/lfm2, which all document why |
 
 `scrfd`'s detector (graph pinned N=1), `qwen3tts`/`cosyvoice` (autoregressive),
 and the per-request multi-step samplers (`sdxlunet`, `controlnet`, `flux1`,

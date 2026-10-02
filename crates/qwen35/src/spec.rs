@@ -8,7 +8,7 @@
 //! ways across this codebase - `caps.rs`'s served action read
 //! `BRAIN_QWEN35_WEIGHTS`/`BRAIN_QWEN35_TOKENIZER`, `crates/cli/src/
 //! resident_qwen35.rs`'s scheduler adapter read the same two variables a
-//! second time, and `crates/cli/src/resident.rs`'s separate
+//! second time, and `crates/serving/src/executor.rs`'s separate
 //! `multi_gpu_gguf_from_env` read a THIRD, `BRAIN_QWEN35_GGUF`, for the
 //! int8/GGUF release. All three now resolve through this one `ArchSpec`
 //! instead: `weights` accepts EITHER a brain-format `.safetensors` checkpoint
@@ -35,7 +35,7 @@
 //! resident and `crates/cli/src/qwen35_cli.rs::infer` only ever call
 //! `checkpoint::load` (safetensors-only, panics on a GGUF), so both refuse a
 //! resolved `.gguf` path cleanly before reaching that call rather than crash;
-//! `crates/cli/src/resident_qwen35.rs::Qwen35Resident::from_assembly` and
+//! `crates/catalog/src/resident_qwen35.rs::Qwen35Resident::from_assembly` and
 //! `crate::int8_gguf_resident::Qwen35GgufResident` are the two consumers that
 //! actually read each format, told apart by the SAME `.gguf` extension check.
 //!

@@ -117,7 +117,7 @@ pub fn manifest_resident() -> Manifest {
 
 /// A built composite plus everything one request needs around it.
 ///
-/// Public so `crates/cli/src/resident_deepseekocr2.rs` can own one directly -
+/// Public so `crates/catalog/src/resident_deepseekocr2.rs` can own one directly -
 /// the residency adapter and the direct `brain do` provider then run the
 /// SAME code and cannot drift about preprocessing, prompt assembly, or the
 /// image run they splice into.

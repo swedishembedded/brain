@@ -10,7 +10,7 @@
 //! is free; only [`MinimaxMusic3Provider`]'s own action execution loads
 //! anything. One action, `generate`, running the exact pipeline
 //! `crate::generate::generate` implements - the SAME function the
-//! residency adapter (`crates/cli/src/resident_minimaxmusic3.rs`) calls,
+//! residency adapter (`crates/catalog/src/resident_minimaxmusic3.rs`) calls,
 //! so there is one implementation of param decoding + generation +
 //! outcome shaping, not two that could drift (the `wan::caps`/`flux2::
 //! caps` pattern).
@@ -46,7 +46,7 @@ pub const MODEL: &str = "brain/minimaxmusic3";
 /// (`brain-catalog`'s own `ModelEntry::provider`) resolves those through the
 /// model-store resolver (`crate::spec::MinimaxMusic3Spec`) and binds them
 /// into [`MinimaxMusic3Provider`] at construction; the residency adapter
-/// (`crates/cli/src/resident_minimaxmusic3.rs`) still reads the
+/// (`crates/catalog/src/resident_minimaxmusic3.rs`) still reads the
 /// `BRAIN_MINIMAXMUSIC3_*` env vars `crate::generate::Paths::from_env` does.
 pub fn generate_spec() -> ActionSpec {
     let d = GenOpts::default();
@@ -71,7 +71,7 @@ pub fn manifest() -> Manifest {
 }
 
 /// [`manifest`] again, under the name the resident adapter
-/// (`crates/cli/src/resident_minimaxmusic3.rs`) reaches for - identical
+/// (`crates/catalog/src/resident_minimaxmusic3.rs`) reaches for - identical
 /// today (one action, no path params either way), kept as its own
 /// function so the two surfaces have a named seam if they ever need to
 /// diverge, matching `qwen3tts::caps::resident_manifest`'s own precedent.

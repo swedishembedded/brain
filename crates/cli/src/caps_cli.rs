@@ -24,15 +24,9 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use capability::{Action, ActionSpec, Blob, Invocation, Manifest, Media, ParamType, Progress, Provider, Registry};
+use capability::{ActionSpec, Blob, Invocation, Manifest, Media, ParamType, Progress, Provider, Registry};
 use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Value};
-
-/// Every model's static capability manifest (discovery - no weights). Add a model
-/// here and it appears in `brain caps` immediately.
-/// The catalog id of the trivial always-available demo model (no `caps.rs` of
-/// its own -- this const is its single source of truth).
-const DEMO_MODEL: &str = "brain/demo";
 
 // ---------------------------------------------------------------- brain caps
 
@@ -59,7 +53,7 @@ pub fn run_caps(argv: &[String]) -> i32 {
         }
         None => vec![],
     };
-    let mans: Vec<Manifest> = crate::catalog::manifests().into_iter().filter(|m| filter.is_none() || candidates.iter().any(|c| c == &m.model)).collect();
+    let mans: Vec<Manifest> = catalog::manifests().into_iter().filter(|m| filter.is_none() || candidates.iter().any(|c| c == &m.model)).collect();
     if mans.is_empty() {
         eprintln!("no such model '{}' (try `brain caps`)", filter.map(String::as_str).unwrap_or_default());
         return 1;
@@ -158,6 +152,22 @@ pub fn run_do_with_assembly(argv: &[String], assembly: &capability::Assembly) ->
     run_do_impl(argv, Some(assembly))
 }
 
+/// [`catalog::provider`], resolving through the CLI's own flagless answer for
+/// the model store (`--brain-data-dir`, then `BRAIN_MODELS_DIR`, then XDG/HOME),
+/// where the library's version consults only an explicitly configured one. An
+/// `Ambiguous` or `Missing` outcome, or no store at all, is this function's own
+/// `Err`, never an "unknown model": a listed model may legitimately fail for
+/// want of weights.
+fn provider_from_store(model: &str) -> Result<Arc<dyn Provider>, String> {
+    let assembly = match catalog::resolver_spec_for(model) {
+        Some((arch, spec)) => {
+            loader::resolver::try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, &Default::default()).map_err(|e| e.message().to_string())?
+        }
+        None => capability::Assembly { id: String::new(), arch: String::new(), variant: None, roles: Default::default(), provenance: Vec::new() },
+    };
+    catalog::provider_from_assembly(model, &assembly)
+}
+
 fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 {
     let (model, action) = match (argv.first(), argv.get(1)) {
         (Some(m), Some(a)) if !m.starts_with("--") && !a.starts_with("--") => (m.clone(), a.clone()),
@@ -171,8 +181,8 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
     // itself what gets registered or listed (see modelref::alias's module docs).
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
     let built = match assembly {
-        Some(a) => crate::catalog::provider_from_assembly(&model, a),
-        None => crate::catalog::provider(&model),
+        Some(a) => catalog::provider_from_assembly(&model, a),
+        None => provider_from_store(&model),
     };
     let reg = match built.map(|p| {
         let mut r = Registry::new();
@@ -433,45 +443,6 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------------- built-in demo provider
 
-/// A trivial always-available model so the generic dispatch path (and the
-/// tests) work with no weights - and as a worked example of the
-/// [`Provider`]/[`Action`] pattern.
-pub(crate) struct DemoModel;
-struct EchoAction;
-
-impl Action for EchoAction {
-    fn spec(&self) -> ActionSpec {
-        use capability::{BlobSpec, ParamSpec};
-        ActionSpec::new("echo", "repeat text, optionally upper/lower-cased")
-            .param(ParamSpec::new("text", ParamType::Str, "the text").required())
-            .param(ParamSpec::new("times", ParamType::Int, "repeat count").default(json!(1)))
-            .param(ParamSpec::new("mode", ParamType::Enum(vec!["as-is".into(), "upper".into(), "lower".into()]), "casing").default(json!("as-is")))
-            .output(BlobSpec::new("result", Media::Text, "the echoed text"))
-    }
-    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
-        use capability::Outcome;
-        let text = inv.get_str("text").unwrap_or_default();
-        let n = inv.get_i64("times").unwrap_or(1).max(0) as usize;
-        let s = match inv.get_str("mode").as_deref() {
-            Some("upper") => text.to_uppercase(),
-            Some("lower") => text.to_lowercase(),
-            _ => text,
-        };
-        progress(Progress::step(1, 1, "echoing"));
-        let out = s.repeat(n);
-        Ok(Outcome::new().set("chars", json!(out.len())).blob("result", Blob::new(Media::Text, out.into_bytes())))
-    }
-}
-
-impl Provider for DemoModel {
-    fn manifest(&self) -> Manifest {
-        Manifest::new(DEMO_MODEL, "a trivial always-available model (no weights) - a worked example of the capability interface", vec![EchoAction.spec()])
-    }
-    fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "echo").then(|| Arc::new(EchoAction) as Arc<dyn Action>)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,7 +513,7 @@ mod tests {
     }
 
     fn demo_manifests() -> Vec<Manifest> {
-        crate::catalog::manifests().into_iter().filter(|m| m.model == DEMO_MODEL).collect()
+        catalog::manifests().into_iter().filter(|m| m.model == catalog::demo::MODEL).collect()
     }
 
     #[test]

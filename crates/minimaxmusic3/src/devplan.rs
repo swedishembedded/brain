@@ -72,7 +72,7 @@
 //! `crate::generate::ar_branch_devices` already puts the AR stage's two
 //! Global LLM instances on both cards unconditionally, and the residency
 //! adapter scopes a whole generation to one assigned card
-//! (`crates/cli/src/resident_minimaxmusic3.rs`) that this plan then reads as
+//! (`crates/catalog/src/resident_minimaxmusic3.rs`) that this plan then reads as
 //! its `cond` - but it is the same gap, and it is worth stating rather than
 //! taking the card quietly. There is no seam to ask through today -
 //! a `residency::Instance` is handed the device it was placed on, not a

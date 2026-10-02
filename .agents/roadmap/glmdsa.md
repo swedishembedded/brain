@@ -22,7 +22,7 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
 
       Scheduling and D-Bus/HTTP serving were never actually missing -
       `cli::resident_llm::GlmResident` has always implemented `ResidentModel`
-      and been registered in `resident.rs::build_executor`, which the serving
+      and been registered in `serving::build_executor`, which the serving
       contract accepts. What was missing is that its manifest is only built
       when `BRAIN_GLMDSA_WEIGHTS` is set, so on a box with no GLM checkpoint
       the model did not appear in `brain caps` **at all**, while every other
@@ -54,7 +54,7 @@ produces an ONNX graph validated on real NPU hardware (fp32 only).
       to exist first, and then the flag describes it. Doing it in that order is
       the difference between a served streaming endpoint and a manifest that
       lies to the router.
-- [x] `crates/cli/src/resident_llm.rs::GlmInstance::run` now calls
+- [x] `crates/catalog/src/resident_llm.rs::GlmInstance::run` now calls
       `glmdsa::sample::generate_kv` (the KV-cached fast path), matching the
       direct `brain glmdsa generate` path (`glmdsa::caps::GenerateAction`,
       which already called `generate_kv`). Before this the served and direct

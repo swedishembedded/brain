@@ -3,7 +3,7 @@
 
 # 64. A GGUF's `general.architecture` is UNTRUSTED input to a family-name match - dispatch it in the same `match` as native checkpoints and any collision routes a file to a loader that cannot read it
 
-`crates/cli/src/model_dir.rs` synthesizes a `ModelCard` for a `.gguf` with
+`crates/serving/src/model_dir.rs` synthesizes a `ModelCard` for a `.gguf` with
 `family = general.architecture` **verbatim** - a string the file itself
 supplies - and then fed it to the SAME `resident_for` match that dispatches
 brain-native checkpoint families. Two namespaces, one match: the moment an

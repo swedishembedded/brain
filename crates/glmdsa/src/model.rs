@@ -1578,9 +1578,9 @@ impl Glm {
             config["itos"] = serde_json::Value::Array(arr);
         }
         // "brain/glm" matches the reserved-vendor fallback
-        // -- the same id crates/cli/src/resident_llm.rs::GlmResident::from_env
+        // -- the same id crates/catalog/src/resident_llm.rs::GlmResident::from_env
         // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
-        // here is auto-discoverable by crates/cli/src/model_dir.rs without
+        // here is auto-discoverable by crates/serving/src/model_dir.rs without
         // requiring BRAIN_GLMDSA_WEIGHTS to be set.
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/glm", "glm"));
     }

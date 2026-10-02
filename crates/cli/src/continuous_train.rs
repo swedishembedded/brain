@@ -16,7 +16,7 @@
 //! capability run, a promotion on another machine -- and applies it through
 //! [`swap_in_adapter`], with no restart and no re-registration.
 //! `--adapter-manifest FILE` follows a release manifest instead, swapping
-//! only releases whose digest verifies (`crate::adapter_release`), and
+//! only releases whose digest verifies (`catalog::adapter_release`), and
 //! `--adapter FILE` pins one verified release with no watcher at all
 //! ([`AdapterMode`], [`start_adapter_mode`]).
 
@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::adapter_release::{verify_adapter, ManifestFollower, ManifestPoll};
-use crate::resident_llm::QwenResident;
+use catalog::adapter_release::{verify_adapter, ManifestFollower, ManifestPoll};
+use catalog::resident_llm::QwenResident;
 use capability::Invocation;
 use residency::{Executor, InstanceKey, ResidentModel};
 
@@ -217,7 +217,7 @@ pub(crate) fn ignored_watch_warning(dir: Option<&Path>, has_resident: bool) -> O
 ///
 /// Takes the CONCRETE `Arc<QwenResident>` rather than the erased
 /// `Arc<dyn ResidentModel>` the executor holds, because `set_adapter` is
-/// inherent - see `crate::resident::Serving`.
+/// inherent - see `serving::Serving`.
 pub fn spawn_adapter_watcher(follow: Option<Follow>, resident: Option<Arc<QwenResident>>, executor: &Executor) -> Option<AdapterWatcher> {
     // No flag: the default, and correctly silent.
     let mut follow = follow?;
@@ -674,7 +674,7 @@ mod tests {
     /// release for another base is a startup error.
     #[test]
     fn a_pinned_adapter_is_served_and_never_followed() {
-        use crate::adapter_release::tests::{digest, tmp, write_adapter, write_base};
+        use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
         let dir = tmp("pinned");
         let (base, other) = (dir.join("base.safetensors"), dir.join("other.safetensors"));
         write_base(&base, 1.0);
@@ -704,7 +704,7 @@ mod tests {
     /// does not match its file, keeps the previous adapter served.
     #[test]
     fn a_followed_manifest_swaps_only_verified_releases() {
-        use crate::adapter_release::tests::{digest, tmp, write_adapter, write_base};
+        use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
         let dir = tmp("manifest-watch");
         let base = dir.join("base.safetensors");
         write_base(&base, 1.0);

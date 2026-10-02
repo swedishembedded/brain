@@ -1068,7 +1068,7 @@ mod tests {
 /// stays synchronous and free of runtime-scheduling noise).
 ///
 /// `set_admission` and the device-op counters are NOT yet wired through this
-/// target: today's `QwenInstance` (`crates/cli/src/resident_llm.rs`) is built
+/// target: today's `QwenInstance` (`crates/catalog/src/resident_llm.rs`) is built
 /// on `Qwen::from_reader_decode`, which has no `device_stats()`/admission-policy
 /// seam to read. Once the LLM residents are rewired onto `qwen3::serve::Engine`
 /// (this plan's W5), those numbers become reachable here with no change to this

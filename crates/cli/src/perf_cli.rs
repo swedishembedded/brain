@@ -847,7 +847,7 @@ fn build_http_qwen(weights: &str, tokenizer: &str) -> Result<Box<dyn PerfTarget>
 /// `apiserve` OpenAI router, driven over HTTP by `HttpTarget`.
 fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: TargetInfo) -> Result<Box<dyn PerfTarget>, String> {
     let card = checkpoint::st::ModelCard::new(model_id, "qwen");
-    let resident = crate::resident_llm::QwenResident::from_card(weights, &card, Some(tokenizer), None);
+    let resident = catalog::resident_llm::QwenResident::from_card(weights, &card, Some(tokenizer), None);
 
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();
@@ -882,7 +882,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("lfm weights not found: {weights}"));
     }
-    let resident = crate::resident_lfm::LfmResident::new(weights, tokenizer)?;
+    let resident = catalog::resident_lfm::LfmResident::new(weights, tokenizer)?;
     // Budget ONLY the schedulable devices (`--device`/BRAIN_DEVICE narrowing,
     // exactly as `brain serve --dbus` does): budgeting an excluded GPU lets
     // placement pick an index the process cannot see, and the lane silently
@@ -980,7 +980,7 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("kronos decoder dir not found: {decoder}"));
     }
     let (horizon, samples) = forecast_env();
-    let exec = forecast_executor(crate::resident_forecast::KronosResident::new(tokenizer, decoder));
+    let exec = forecast_executor(catalog::resident_forecast::KronosResident::new(tokenizer, decoder));
     let info = vec![
         ("tokenizer".to_string(), serde_json::json!(tokenizer)),
         ("decoder".to_string(), serde_json::json!(decoder)),
@@ -988,7 +988,7 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         ("samples".to_string(), serde_json::json!(samples)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::KRONOS_MODEL, "forecast", "forecast", info, forecast_build(horizon, samples))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, catalog::resident_forecast::KRONOS_MODEL, "forecast", "forecast", info, forecast_build(horizon, samples))))
 }
 
 /// `chronos2:<weights>` - the Chronos-2 universal forecaster behind the residency
@@ -998,13 +998,13 @@ fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("chronos2 weights not found: {path}"));
     }
     let (horizon, _samples) = forecast_env();
-    let exec = forecast_executor(crate::resident_forecast::Chronos2Resident::new(path));
+    let exec = forecast_executor(catalog::resident_forecast::Chronos2Resident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),
         ("horizon".to_string(), serde_json::json!(horizon)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::CHRONOS2_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, catalog::resident_forecast::CHRONOS2_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `fincast:<weights>` - the FinCast financial forecaster behind the residency
@@ -1014,13 +1014,13 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("fincast weights not found: {path}"));
     }
     let (horizon, _samples) = forecast_env();
-    let exec = forecast_executor(crate::resident_forecast::FincastResident::new(path));
+    let exec = forecast_executor(catalog::resident_forecast::FincastResident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),
         ("horizon".to_string(), serde_json::json!(horizon)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::FINCAST_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, catalog::resident_forecast::FINCAST_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `timesfm3:<weights>` - TimesFM-3 behind the residency executor (same
@@ -1030,18 +1030,18 @@ fn build_timesfm3(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("timesfm3 weights not found: {path}"));
     }
     let (horizon, _samples) = forecast_env();
-    let exec = forecast_executor(crate::resident_forecast::Timesfm3Resident::new(path));
+    let exec = forecast_executor(catalog::resident_forecast::Timesfm3Resident::new(path));
     let info = vec![
         ("weights".to_string(), serde_json::json!(path)),
         ("horizon".to_string(), serde_json::json!(horizon)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::TIMESFM3_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, catalog::resident_forecast::TIMESFM3_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `flux2[:<W>x<H>x<steps>[:<precision>]]` - FLUX.2 Klein (klein-4b, weights from the
 /// `BRAIN_FLUX2_*` env like the rest of the flux2 stack) behind the residency
-/// EXECUTOR (scheduler + budgets + device lanes), running [`crate::resident_flux2::Flux2Resident`]
+/// EXECUTOR (scheduler + budgets + device lanes), running [`catalog::resident_flux2::Flux2Resident`]
 /// - so concurrency measures brain's real scheduler, not a bare provider.
 ///
 /// Streaming semantics: `flux2::Pipeline::generate` reports one `Progress` per
@@ -1086,7 +1086,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             return Err(format!("flux2: {var} not found: {p}"));
         }
     }
-    let resident = crate::resident_flux2::Flux2Resident::from_env(loader::model_dir::resolve(None).as_deref())
+    let resident = catalog::resident_flux2::Flux2Resident::from_env(loader::model_dir::resolve(None).as_deref())
         .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
     // Budget ONLY the schedulable devices - same guard as `build_lfm` (its
     // ledger records a silent, order-of-magnitude llvmpipe regression from budgeting a GPU the
@@ -1122,7 +1122,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         .with("precision", precision.clone().into())
         // What the instance batches into one denoise loop; `Executor::stats()`
         // reports the batch sizes actually reached.
-        .with("max_batch", crate::resident_flux2::max_batch().into())
+        .with("max_batch", catalog::resident_flux2::max_batch().into())
         .with("engine", "residency-executor".into());
     let build = Box::new(move |req: &perf::target::PerfRequest| {
         // Prompt values do not change the cost: text conditioning is padded to
@@ -1148,7 +1148,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// `wan[:<frames>x<W>x<H>x<steps>]` - Wan2.1 text-to-video (t2v-1.3B, weights from
 /// the `BRAIN_WAN_*` env like the rest of the wan stack) behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), running
-/// [`crate::resident_wan::WanResident`].
+/// [`catalog::resident_wan::WanResident`].
 ///
 /// Streaming semantics: `wan::pipeline::generate` reports one `Progress` per
 /// denoise STEP (message `"denoise t=..."`), plus text-encode / transformer-load
@@ -1194,7 +1194,7 @@ fn build_wan(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             return Err(format!("wan: {var} not found: {p}"));
         }
     }
-    let resident = crate::resident_wan::WanResident::from_env().ok_or("wan: BRAIN_WAN_* env incomplete")?;
+    let resident = catalog::resident_wan::WanResident::from_env().ok_or("wan: BRAIN_WAN_* env incomplete")?;
     // Budget ONLY the schedulable devices - the same guard `build_flux2` carries.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();
@@ -1293,7 +1293,7 @@ fn build_ltxv(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("ltxv: BRAIN_LTXV_VAE not found: {}", paths.vae));
     }
     let dit_config = if paths.dit.as_deref().is_some_and(|p| std::path::Path::new(p).exists()) { "ltx25_22b" } else { "tiny" };
-    let resident = crate::resident_ltxv::LtxvResident::from_env().ok_or("ltxv: BRAIN_LTXV_VAE not set")?;
+    let resident = catalog::resident_ltxv::LtxvResident::from_env().ok_or("ltxv: BRAIN_LTXV_VAE not set")?;
     // Budget ONLY the schedulable devices - the same guard `build_wan` carries.
     let set = crate::compute_set();
     let mut budgets = residency::budget::Budgets::new();
@@ -1393,7 +1393,7 @@ fn build_gpt(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     // environment is a stringly-typed channel with no compile-time link to the
     // reader, and exactly that pattern shipped the face/upscale/clip perf
     // targets dead on arrival (wrong var names, unfixable by the type system).
-    let resident = crate::resident_llm::GptResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"), None);
+    let resident = catalog::resident_llm::GptResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1410,7 +1410,7 @@ fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("glm weights not found: {weights}"));
     }
-    let resident = crate::resident_llm::GlmResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/glm", "glm"), None);
+    let resident = catalog::resident_llm::GlmResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/glm", "glm"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1431,7 +1431,7 @@ fn build_glm(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// This is a deliberate departure from that convention, not an oversight.
 /// Every `ExecutorTarget` target wraps a `residency::ResidentModel` that
 /// builds ONE resident engine instance and reuses it across requests -
-/// `crate::resident_qwen35::Qwen35Resident` exists and mirrors `build_glm`'s
+/// `catalog::resident_qwen35::Qwen35Resident` exists and mirrors `build_glm`'s
 /// own pattern exactly, but it is built on `qwen35::serve::Engine`, which
 /// (like every other `Qwen35::new_*` constructor) needs EVERY layer's
 /// weights resolved into one host `HashMap` before building anything -
@@ -1499,7 +1499,7 @@ fn build_yolo(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("yolo weights not found: {weights}"));
     }
-    let resident = crate::resident::YoloResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"), None);
+    let resident = catalog::resident_yolo::YoloResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1516,7 +1516,7 @@ fn build_depth(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("depth weights not found: {weights}"));
     }
-    let resident = crate::resident_depth::DepthResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/zipdepth", "depth"), None);
+    let resident = catalog::resident_depth::DepthResident::from_card(weights, &checkpoint::st::ModelCard::new("brain/zipdepth", "depth"), None);
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build =
@@ -1534,7 +1534,7 @@ fn build_sam2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         return Err(format!("sam2 weights dir not found: {dir}"));
     }
     sam2::caps::variant_config(variant)?;
-    let resident = crate::resident_sam2::Sam2Resident::new(dir, variant).ok_or_else(|| format!("sam2: checkpoint {dir} did not resolve"))?;
+    let resident = catalog::resident_sam2::Sam2Resident::new(dir, variant).ok_or_else(|| format!("sam2: checkpoint {dir} did not resolve"))?;
     let exec = forecast_executor(resident);
     let info = vec![
         ("weights".to_string(), serde_json::json!(dir)),
@@ -1569,7 +1569,7 @@ fn build_clip(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !eva.exists() {
         return Err(format!("clip: {} not found under {dir} (embed_image needs the EVA-CLIP-L/336 release file)", clip::caps::EVA_FILE));
     }
-    let resident = crate::resident_clip::ClipResident::new(dir)
+    let resident = catalog::resident_clip::ClipResident::new(dir)
         .ok_or_else(|| format!("clip: {dir} holds neither tokenizer/ nor tokenizer_2/"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
@@ -1588,7 +1588,7 @@ fn build_scrfd(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("scrfd weights dir not found: {dir}"));
     }
-    let resident = crate::resident_scrfd::ScrfdResident::new(dir)
+    let resident = catalog::resident_scrfd::ScrfdResident::new(dir)
         .ok_or_else(|| format!("scrfd: {dir} does not hold the released scrfd_10g_bnkps.onnx"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
@@ -1606,7 +1606,7 @@ fn build_arcface(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("arcface weights dir not found: {dir}"));
     }
-    let resident = crate::resident_arcface::ArcFaceResident::new(dir)
+    let resident = catalog::resident_arcface::ArcFaceResident::new(dir)
         .ok_or_else(|| format!("arcface: {dir} does not hold the released glintr100.onnx"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(dir)), ("engine".to_string(), serde_json::json!("residency-executor"))];
@@ -1624,7 +1624,7 @@ fn build_tts(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights_dir).exists() {
         return Err(format!("tts weights dir not found: {weights_dir}"));
     }
-    let resident = crate::resident_tts::TtsResident::new(weights_dir, ckpt_dir);
+    let resident = catalog::resident_tts::TtsResident::new(weights_dir, ckpt_dir);
     let exec = forecast_executor(resident);
     let info = TargetInfo::new("tts", "audio_chunk").with("weights", weights_dir.into()).with("engine", "residency-executor".into());
     let build = Box::new(|req: &perf::target::PerfRequest| {
@@ -1661,7 +1661,7 @@ fn build_zimage(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             return Err(format!("zimage target needs {var} set"));
         }
     }
-    let resident = crate::resident::ZImageResident::from_env()?;
+    let resident = catalog::resident_zimage::ZImageResident::from_env()?;
     let exec = forecast_executor(resident);
     let info = TargetInfo::new("zimage", "denoise_step")
         .with("width", w.into())
@@ -1693,7 +1693,7 @@ fn build_upscale(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("upscale weights not found: {weights}"));
     }
-    let resident = crate::resident_upscale::UpscaleResident::new(weights).ok_or_else(|| format!("upscale: {weights} did not resolve"))?;
+    let resident = catalog::resident_upscale::UpscaleResident::new(weights).ok_or_else(|| format!("upscale: {weights} did not resolve"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1708,7 +1708,7 @@ fn build_restore(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("restore weights not found: {weights}"));
     }
-    let resident = crate::resident_restore::RestoreResident::new(weights).ok_or_else(|| format!("restore: {weights} did not resolve to a CodeFormer checkpoint"))?;
+    let resident = catalog::resident_restore::RestoreResident::new(weights).ok_or_else(|| format!("restore: {weights} did not resolve to a CodeFormer checkpoint"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1724,7 +1724,7 @@ fn build_vqgan(weights: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(weights).exists() {
         return Err(format!("vqgan weights not found: {weights}"));
     }
-    let resident = crate::resident_restore::VqganResident::new(weights).ok_or_else(|| format!("vqgan: {weights} did not resolve to a VQGAN checkpoint"))?;
+    let resident = catalog::resident_restore::VqganResident::new(weights).ok_or_else(|| format!("vqgan: {weights} did not resolve to a VQGAN checkpoint"))?;
     let exec = forecast_executor(resident);
     let info = vec![("weights".to_string(), serde_json::json!(weights)), ("engine".to_string(), serde_json::json!("residency-executor"))];
     let build = Box::new(|_req: &perf::target::PerfRequest| {
@@ -1742,7 +1742,7 @@ fn build_nemotron(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("nemotron checkpoint dir not found: {dir}"));
     }
-    let resident = crate::resident_asr::NemotronResident::new(dir);
+    let resident = catalog::resident_asr::NemotronResident::new(dir);
     let exec = forecast_executor(resident);
     let info =
         TargetInfo::new("nemotron", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());
@@ -1766,7 +1766,7 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     if !std::path::Path::new(dir).exists() {
         return Err(format!("qwen-asr checkpoint dir not found: {dir}"));
     }
-    let resident = crate::resident_asr::QwenAsrResident::new(dir);
+    let resident = catalog::resident_asr::QwenAsrResident::new(dir);
     let exec = forecast_executor(resident);
     let info =
         TargetInfo::new("qwen-asr", "transcript_token").with("weights", dir.into()).with("engine", "residency-executor".into());

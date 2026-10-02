@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! What one MiniMax Music 3 generation costs in DEVICE memory, stage by
-//! stage - the numbers `crates/cli/src/resident_minimaxmusic3.rs`'s
+//! stage - the numbers `crates/catalog/src/resident_minimaxmusic3.rs`'s
 //! [`residency::ResidentModel::estimate`] budgets against.
 //!
 //! Swedish Embedded AB implements memory-accurate model residency for
@@ -62,7 +62,7 @@ use crate::config::{DepthDecoderConfig, DitConfig};
 /// 2) and `ff_out` (`[inner, ff_inner]`), exactly as
 /// [`crate::dit::BlockW`] declares them. Norms and biases are `inner`-sized
 /// vectors and are dropped as a rounding error, the same simplification
-/// `crates/cli/src/resident_wan.rs::dit_weight_bytes` makes.
+/// `crates/catalog/src/resident_wan.rs::dit_weight_bytes` makes.
 ///
 /// At [`DitConfig::real`] this is 36 x 64 Mi params = 2 415 919 104 params =
 /// **9.664 GB**, which is the figure a real run reports for this stack.

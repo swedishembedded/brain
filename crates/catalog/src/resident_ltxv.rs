@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! LTX-2.5 text-to-video behind the residency scheduler
-//! (`resident::build_executor`) - `resident_wan.rs`'s pattern, with the one
+//! (`serving::build_executor`) - `resident_wan.rs`'s pattern, with the one
 //! structural difference LTX's own weight story forces.
 //!
 //! # What is resident, and where it actually lives
@@ -428,7 +428,7 @@ mod tests {
     /// absurd) for a real clip size - the exact number is not load-bearing,
     /// only that it is a real, nonzero, config-derived figure. The VAE's own
     /// weights dominate even the smallest clip (~726M real parameters,
-    /// ~2.9 GB at this reader's f32 materialization - `crate::vae3d::
+    /// ~2.9 GB at this reader's f32 materialization - `ltxv::vae3d::
     /// LtxVaeConfig::manifest_counts_the_shipped_checkpoint`'s 170-tensor
     /// count times 4 bytes/element), NOT the tiny/random DiT (~KB) or the
     /// pixel buffers - so "small" here means "a bigger clip costs more on
@@ -523,7 +523,7 @@ mod tests {
     ///
     /// ```text
     /// BRAIN_LTXV_VAE=... BRAIN_LTXV_DIT=... BRAIN_LTXV_TEXT_ENCODER=... \
-    ///   cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+    ///   cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
     ///   two_real_generations_share
     /// ```
     ///
@@ -620,7 +620,7 @@ mod tests {
     ///
     /// ```text
     /// BRAIN_LTXV_VAE=... BRAIN_LTXV_DIT=... \
-    ///   cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+    ///   cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
     ///   concurrent_generations_share
     /// ```
     #[test]

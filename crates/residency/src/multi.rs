@@ -48,7 +48,7 @@
 //! real `MultiDeviceResidentModel`s today: the int8 dual-GPU Thinker,
 //! `crates/omni/src/int8_thinker_resident.rs` (one instance sharded across
 //! two cards), and DeepSeek-OCR,
-//! `crates/cli/src/resident_deepseekocr.rs` (a vision tower on wgpu and a
+//! `crates/catalog/src/resident_deepseekocr.rs` (a vision tower on wgpu and a
 //! decoder on the CPU backend - the same accounting problem with a
 //! *heterogeneous* device pair rather than two of a kind, which is the case
 //! that shows why `per_device` is keyed by [`Device`] and not by GPU index).

@@ -281,8 +281,8 @@ self-consistent.
   itself, despite having a `spec.rs`, is NOT in `RESOLVER_MIGRATED_ARCHS`
   either, confirming that table is a separate, larger migration this crate
   correctly stays out of for now); the residency adapter
-  (`crates/cli/src/resident_florence2.rs` + the two-file catalog
-  registration in `crates/catalog/src/lib.rs`/`crates/cli/src/catalog.rs` -
+  (`crates/catalog/src/resident_florence2.rs` + the two-file catalog
+  registration in `crates/catalog/src/lib.rs`/`crates/catalog/src/lib.rs` -
   `resident_scrfd.rs` is the template, with `MemCost::estimate` needing its
   own generous-bound reasoning since this crate's own decoder recomputes its
   full prefix every generation step, not a fixed graph like scrfd's).

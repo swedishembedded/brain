@@ -11,7 +11,7 @@ served action always returns the masked-aware tensor even for the unmasked
 variant (it degrades to the same thing).
 
 Concurrent calls at the SAME `(variant, max_len)` batch into one forward on
-the resident encoder (`crates/cli/src/resident_t5encoder.rs` groups
+the resident encoder (`crates/catalog/src/resident_t5encoder.rs` groups
 `run_batch` invocations that way) - `--concurrent` demonstrates it the same
 way `samples/python/vision/segment-image/segment_image.py` demonstrates SAM 2's batching.
 

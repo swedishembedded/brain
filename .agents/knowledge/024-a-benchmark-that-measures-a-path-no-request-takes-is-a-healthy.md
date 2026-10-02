@@ -5,7 +5,7 @@
 
 Every serving benchmark before `perf::targets::HttpTarget` drove
 `qwen3::serve::Scheduler`/`residency::Executor` directly - real kernels, real
-batching, genuinely fast. Meanwhile `crates/cli/src/resident_llm.rs`, the
+batching, genuinely fast. Meanwhile `crates/catalog/src/resident_llm.rs`, the
 ONLY code an actual `/v1/chat/completions` request ever reaches, called a
 single-sequence decode loop that touched none of it: no paged KV, no
 scheduler, no batching. The benchmark suite was green and fast while a real

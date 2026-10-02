@@ -62,7 +62,7 @@
 //! stale in a way that changes an output - only state that can go missing.
 //! That is what makes it safe for `crates/residency` to drop this cache at
 //! any moment, which is exactly what
-//! `crates/cli/src/resident_minimaxmusic3.rs`'s `Instance::demote` does.
+//! `crates/catalog/src/resident_minimaxmusic3.rs`'s `Instance::demote` does.
 //!
 //! # Who decides how big it gets
 //!
@@ -165,7 +165,7 @@ fn scan(dir: &std::path::Path) -> (u64, i64) {
 
 /// The total on-disk size of a checkpoint directory, recursively - what a
 /// caller with no closed form for a component's host footprint sizes it
-/// from. Exposed because `crates/cli/src/resident_minimaxmusic3.rs` needs
+/// from. Exposed because `crates/catalog/src/resident_minimaxmusic3.rs` needs
 /// exactly this number and re-deriving it there would be a second walk that
 /// could disagree with the one the identity above is built on.
 pub fn checkpoint_bytes(dir: &str) -> u64 {
@@ -423,7 +423,7 @@ pub fn bytes() -> u64 {
 
 /// Release everything. Safe at any moment - see this module's own
 /// correctness note - and the operation
-/// `crates/cli/src/resident_minimaxmusic3.rs`'s `Instance::demote` performs.
+/// `crates/catalog/src/resident_minimaxmusic3.rs`'s `Instance::demote` performs.
 /// Callers still holding an `Arc` from a previous load keep their copy alive
 /// until they drop it, which is what makes this safe to call while a
 /// generation is running.

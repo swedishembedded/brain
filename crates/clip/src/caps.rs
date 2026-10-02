@@ -25,7 +25,7 @@
 //! the same fixed 77-token context — so a serial loop would be indefensible
 //! here (AGENTS.md requires a genuine batched `run_batch` "wherever the
 //! architecture allows"). The residency adapter
-//! (`crates/cli/src/resident_clip.rs`) forwards `run_batch` straight to it.
+//! (`crates/catalog/src/resident_clip.rs`) forwards `run_batch` straight to it.
 //!
 //! # Tokenisation
 //!
@@ -112,7 +112,7 @@ pub fn manifest() -> Manifest {
 
 /// The towers on one device — the single implementation of `embed_text` /
 /// `embed_image`, shared by [`ClipProvider`] and the residency adapter
-/// (`crates/cli/src/resident_clip.rs`).
+/// (`crates/catalog/src/resident_clip.rs`).
 ///
 /// Towers are built lazily and keyed by `(tower, batch)`: a text tower's graph
 /// is recorded for a fixed `b`, so a batch of 4 needs a different build than a

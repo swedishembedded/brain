@@ -5,7 +5,7 @@
 //! song out. ONE implementation of "run the whole five-component
 //! pipeline", shared by `crate::caps::MinimaxMusic3Provider` (the direct
 //! `brain do`/event-API path), the residency adapter
-//! (`crates/cli/src/resident_minimaxmusic3.rs`), and
+//! (`crates/catalog/src/resident_minimaxmusic3.rs`), and
 //! `tests/e2e_short_generation.rs` (which calls [`generate`] directly
 //! rather than duplicating this composition inline).
 //!

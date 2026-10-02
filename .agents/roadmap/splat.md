@@ -345,8 +345,8 @@ gradients in a way analytic (autograd-checked) gradients do not share.
 
 `render` (one-shot) and `fit` (streaming) are now [`capability::Provider`]
 actions (`crates/splat/src/caps.rs`), registered in the residency scheduler
-(`crates/cli/src/resident_splat.rs`) and the CLI catalog
-(`crates/cli/src/catalog.rs`) under `brain/splat` - reachable over `brain do`,
+(`crates/catalog/src/resident_splat.rs`) and the CLI catalog
+(`crates/catalog/src/lib.rs`) under `brain/splat` - reachable over `brain do`,
 D-Bus, and the event API with no splat-specific plumbing in any transport.
 `view` (the interactive SDL fly-through) is deliberately NOT served: it has no
 request/response shape. `fit`'s optimization loop

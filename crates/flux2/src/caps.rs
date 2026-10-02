@@ -120,7 +120,7 @@ pub fn manifest() -> Manifest {
 // ===================== shared execution helpers =====================
 //
 // Both the hot-cache [`Flux2Provider`] and the residency adapter
-// (`crates/cli/src/resident_flux2.rs`) run actions through these — ONE
+// (`crates/catalog/src/resident_flux2.rs`) run actions through these - ONE
 // implementation of param decoding, license gating, and generation.
 
 use std::sync::{Arc, Mutex};
@@ -205,7 +205,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
 /// returned variant string always names the real weights - the size half of a
 /// request's `variant` is a claim, never a fact, and must not be trusted
 /// as-is. This is what every [`check_license`] call site not already holding
-/// a resident's own bound identity (`crates/cli/src/resident_flux2.rs`) must
+/// a resident's own bound identity (`crates/catalog/src/resident_flux2.rs`) must
 /// run its variant through FIRST: a real 9B checkpoint requested/labeled
 /// "klein-4b" still comes back "klein-9b" here, so the license gate sees the
 /// truth regardless of the mislabel.

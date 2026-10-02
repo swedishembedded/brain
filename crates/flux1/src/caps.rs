@@ -16,7 +16,7 @@
 //!
 //! Same reasoning as `sdxlunet::caps`: every request is its own multi-step
 //! sample with no `[B, ...]` axis to fill. The residency adapter
-//! (`crates/cli/src/resident_flux1.rs`) uses the serial default.
+//! (`crates/catalog/src/resident_flux1.rs`) uses the serial default.
 //!
 //! # Size is fixed at build time
 //!
@@ -112,7 +112,7 @@ fn req_from(inv: &Invocation) -> Req {
 
 /// The pipelines on one device, keyed by `(variant, h, w)` - the single
 /// implementation of `text2image`, shared by [`Flux1Provider`] and the
-/// residency adapter (`crates/cli/src/resident_flux1.rs`).
+/// residency adapter (`crates/catalog/src/resident_flux1.rs`).
 pub struct Session {
     root: String,
     built: Mutex<std::collections::HashMap<(String, u32, u32, &'static str), Flux1>>,

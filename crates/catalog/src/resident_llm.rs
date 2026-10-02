@@ -4,7 +4,7 @@
 //! Resident-model adapters for brain's text-generation LLMs - GPT (dense
 //! char-level baseline), GLM (MLA + noaux_tc MoE decoder), and Qwen3 (BPE
 //! decoder) - behind the residency [`Executor`], mirroring the yolo/z-image
-//! adapters in [`crate::resident`].
+//! adapters in [`crate::resident_yolo`] and [`crate::resident_zimage`].
 //!
 //! Each model family is one [`ResidentModel`] with a single `"generate"` action.
 //! Unlike yolo (which pins itself to the CPU via `Gpu::new_cpu` unless a
@@ -440,8 +440,8 @@ pub struct QwenServeConfig {
     pub ctx: Option<u32>,
     /// The device budget to auto-size `ctx` against, when `ctx` itself is
     /// `None` - real free VRAM (minus `--reserve-gb`) for the card `brain
-    /// serve` would actually place this on, known only to `resident.rs::
-    /// build_executor`'s caller. `None` (every caller except the live
+    /// serve` would actually place this on, known only to the caller of
+    /// `serving::build_executor`. `None` (every caller except the live
     /// server) means "unknown", which keeps the historical 24576 fallback
     /// rather than guessing - auto-sizing is a property of the live
     /// serving path, not of this struct's mere existence.
@@ -736,7 +736,7 @@ impl QwenResident {
     /// effect for the next `activate` - pair with `Executor::evict(self.
     /// instance_key(...))` (or just `Executor::evict(InstanceKey::new(&self.
     /// id, "default"))`) so a cached Hot/Warm instance from the OLD adapter
-    /// isn't reused first. `crate::continuous_train::swap_in_adapter` does
+    /// isn't reused first. the CLI's `continuous_train::swap_in_adapter` does
     /// exactly that pairing.
     pub fn set_adapter(&self, adapter: Option<String>) {
         *self.adapter.write().unwrap() = adapter.filter(|a| !a.is_empty());

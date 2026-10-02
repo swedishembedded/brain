@@ -22,6 +22,7 @@
 //! [`parity`] is the same "one implementation" move applied to the *other*
 //! thing every goldens test copy-pastes: the cosine/max_abs stage report.
 
+pub mod adapters;
 pub mod golden;
 pub mod parity;
 

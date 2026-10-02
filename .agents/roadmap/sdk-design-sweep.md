@@ -128,10 +128,10 @@ Six independent places build a `flux2::Pipeline`, not four:
 | 1 | `crates/sdk/src/pipeline.rs:495` (+ `:296` on `load_lora` rebuild) | SDK facade |
 | 2 | `crates/cli/src/flux2_cli.rs:696` | one-shot CLI |
 | 3 | `crates/flux2/src/caps.rs:432` | `Flux2Action` served path (D-Bus/HTTP) |
-| 4 | `crates/cli/src/resident_flux2.rs:320` | flux2 residency adapter |
+| 4 | `crates/catalog/src/resident_flux2.rs:320` | flux2 residency adapter |
 
 (The s3dit-backed sites - `crates/sdk/src/pipeline.rs:504`, `flux2_cli.rs`'s
-sibling is N/A, `crates/s3dit/src/caps.rs:195`, `crates/cli/src/resident.rs`
+sibling is N/A, `crates/s3dit/src/caps.rs:195`, `crates/serving/src/executor.rs`
 - are NOT a duplication problem: `s3dit::pipeline::HotPipeline::build_adapted`
 already IS the one shared "resolve config + pick precision + build" call;
 every site above it just extracts different params. Only
@@ -1033,7 +1033,7 @@ hand-built `ArtifactRecord` with an explicitly chosen `kind` - the exact
 class of bug `RrdbnetSpec`'s own equivalent test caught after the fact, only
 this time written correctly from day one rather than needing a fix.
 
-**Not done, tracked for later**: `crates/cli/src/resident_restore.rs`'s
+**Not done, tracked for later**: `crates/catalog/src/resident_restore.rs`'s
 served/D-Bus path still reads `BRAIN_CODEFORMER_WEIGHTS` directly rather
 than the resolver, the same tracked (not silent) gap `resident_upscale.rs`
 already has for `rrdbnet`.

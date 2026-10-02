@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The generic GGUF import registry and its one CLI surface,
-//! `brain import-gguf FILE [--out PATH] [--id NAME]`.
+//! The generic GGUF import registry. Its one CLI surface is
+//! `brain import-gguf FILE [--out PATH] [--id NAME]`, in `crates/cli`.
 //!
 //! brain reads GGUF generically already: [`checkpoint::gguf`] parses v2/v3
 //! headers and dequantizes every mainstream GGML quant to fp32, and
@@ -575,67 +575,10 @@ pub fn import_file(gguf_path: &str, out_path: Option<&str>, id: Option<&str>) ->
     Ok(out)
 }
 
-/// `brain import-gguf FILE [--out PATH] [--id NAME]` / `brain import-gguf --list`:
-/// the ONE generic conversion command, dispatching by the file's own
-/// `general.architecture` through [`import_file`]. Replaces the per-model
-/// `brain qwen35moe import` (which still works, as a thin wrapper).
-pub fn run_import_gguf(args: &[String]) {
-    let usage = "usage: brain import-gguf FILE [--out PATH] [--id VENDOR/REPO]\n       brain import-gguf --list";
-    if args.iter().any(|a| a == "--list") {
-        println!("registered GGUF architectures (general.architecture -> importer):");
-        for i in IMPORTERS {
-            let key = match i.projector() {
-                Some(p) => format!("{}/{p}", i.architecture()),
-                None => i.architecture().to_string(),
-            };
-            let how = if i.loads_directly() { "direct" } else { "convert" };
-            println!("  {key:<22} [{how:>7}] {}", i.summary());
-        }
-        return;
-    }
-    let mut file: Option<String> = None;
-    let mut out: Option<String> = None;
-    let mut id: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--out" | "--gguf" | "--id" => {
-                let flag = args[i].clone();
-                i += 1;
-                let Some(v) = args.get(i).cloned() else {
-                    eprintln!("{flag} requires a value\n{usage}");
-                    std::process::exit(2);
-                };
-                match flag.as_str() {
-                    // `--gguf` is accepted as an alias for the positional FILE so
-                    // the old `brain qwen35moe import --gguf F --out O` spelling
-                    // keeps working verbatim through the generic command.
-                    "--gguf" => file = Some(v),
-                    "--out" => out = Some(v),
-                    _ => id = Some(v),
-                }
-            }
-            "-h" | "--help" => {
-                println!("{usage}");
-                return;
-            }
-            other if other.starts_with("--") => eprintln!("ignoring unknown flag {other:?}"),
-            other if file.is_none() => file = Some(other.to_string()),
-            other => eprintln!("ignoring extra argument {other:?}"),
-        }
-        i += 1;
-    }
-    let Some(file) = file else {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    };
-    match import_file(&file, out.as_deref(), id.as_deref()) {
-        Ok(out) => eprintln!("import-gguf: {file} -> {out}"),
-        Err(e) => {
-            eprintln!("brain import-gguf: {e}");
-            std::process::exit(1);
-        }
-    }
+/// The registered importers, in table order: what `brain import-gguf --list`
+/// prints and what the "unknown architecture" error names.
+pub fn importers() -> &'static [&'static dyn GgufArchitectureImporter] {
+    IMPORTERS
 }
 
 #[cfg(test)]
@@ -853,7 +796,7 @@ mod tests {
         // The end of the loop: auto-discovery serves the conversion with no env
         // vars and no per-model wiring. The `.gguf` itself stays unregistered
         // (it needs the conversion, which is the whole design decision above).
-        let ids: Vec<String> = crate::model_dir::discover(&dir, crate::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -894,7 +837,7 @@ mod tests {
         assert!(reader.tensor("mtp.fc_e.weight").is_some(), "the MTP head must be imported, unlike qwen35moe's own GGUF route");
         assert_eq!(reader.card().expect("a model card must be written").id, "test/qwen35-dense-tiny");
 
-        let ids: Vec<String> = crate::model_dir::discover(&dir, crate::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
+        let ids: Vec<String> = crate::model_dir::discover(&dir, catalog::resident_llm::QwenServeConfig::default()).0.iter().map(|r| r.manifest().model).collect();
         assert!(ids.contains(&"test/qwen35-dense-tiny".to_string()), "the imported checkpoint must be discovered: {ids:?}");
         std::fs::remove_dir_all(&dir).ok();
     }

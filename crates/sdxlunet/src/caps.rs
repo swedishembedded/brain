@@ -17,7 +17,7 @@
 //! Unlike CLIP/T5's text towers, `Sdxl::generate` is a full multi-step
 //! diffusion sample - there is no `[B, ...]` axis to fill, every request runs
 //! its own denoising loop, and grouping N of them would still be N loops. The
-//! residency adapter (`crates/cli/src/resident_sdxl.rs`) uses the serial
+//! residency adapter (`crates/catalog/src/resident_sdxl.rs`) uses the serial
 //! default and says so, the same way `resident_scrfd.rs` does for the face
 //! stack.
 //!
@@ -74,7 +74,7 @@ fn opts_from(inv: &Invocation) -> (String, GenerateOptions) {
 
 /// The pipelines on one device, keyed by `(h, w)` - the single implementation
 /// of `text2image`, shared by [`SdxlProvider`] and the residency adapter
-/// (`crates/cli/src/resident_sdxl.rs`).
+/// (`crates/catalog/src/resident_sdxl.rs`).
 pub struct Session {
     root: String,
     built: Mutex<std::collections::HashMap<(u32, u32), Sdxl>>,

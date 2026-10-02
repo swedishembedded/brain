@@ -45,7 +45,7 @@
 //!
 //! # No batching, size fixed at build time, and no end-to-end fixture
 //!
-//! Same reasoning as `flux1::caps` (`crates/cli/src/resident_flux1.rs`'s
+//! Same reasoning as `flux1::caps` (`crates/catalog/src/resident_flux1.rs`'s
 //! module docs) for both: every request is its own multi-step sample, and
 //! `Flux1::load` records the DiT's token budget for one `(variant, h, w)`.
 //! `crate`'s own docs are explicit that end-to-end generation is not gated

@@ -77,7 +77,7 @@ brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
 ```
 
 It is also **served**: with `BRAIN_QWEN3VL_WEIGHTS` set, `brain serve --dbus`
-registers a residency adapter (`crates/cli/src/resident_qwen3vl.rs`, still
+registers a residency adapter (`crates/catalog/src/resident_qwen3vl.rs`, still
 env-configured - it does not yet read the model-store resolver `generate`/
 `lora_train` use) that
 builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across

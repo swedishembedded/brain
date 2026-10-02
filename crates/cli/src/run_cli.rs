@@ -341,7 +341,7 @@ fn take_addrs(args: &[String], i: &mut usize, default_port: u16) -> Vec<SocketAd
 /// Fill the controller's text-to-speech seam, when this build has one.
 ///
 /// Configuration is env-only and reuses the SAME variables the D-Bus resident
-/// (`crate::resident_tts::TtsResident::from_env`) already reads - one spelling
+/// (`catalog::resident_tts::TtsResident::from_env`) already reads - one spelling
 /// across both serving surfaces, and no new flag on `brain serve`. With
 /// `BRAIN_QWEN3TTS_WEIGHTS` unset there is no synth model, which is exactly the
 /// behaviour of every build before this: a `user_synth_request` answers with the
@@ -391,9 +391,9 @@ pub fn run_serve(args: &[String]) {
     let mut adapter: Option<String> = None;
     let mut adapter_manifest: Option<String> = None;
     // Every `--qwen-*` flag, built up as its own arm below is matched -
-    // `crate::resident_llm::QwenServeConfig`'s own `Default` is every
+    // `catalog::resident_llm::QwenServeConfig`'s own `Default` is every
     // historical env-var default, byte for byte.
-    let mut qwen_cfg = crate::resident_llm::QwenServeConfig::default();
+    let mut qwen_cfg = catalog::resident_llm::QwenServeConfig::default();
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
     // bound on one or more addresses (127.0.0.1 by default) with ONE
     // per-dialect key generated at startup regardless of how many addresses
@@ -633,117 +633,19 @@ pub fn run_serve(args: &[String]) {
 /// the one shared residency executor that every serving surface (D-Bus + the HTTP APIs)
 /// drives, with every model resolved from `models_dir` (already resolved by `run_apis`).
 ///
-/// Returns `crate::resident::Serving`, not a bare `Executor`: the
+/// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: crate::resident_llm::QwenServeConfig) -> crate::resident::Serving {
-    // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
-    // then narrow to what `--device` made schedulable. With no `--device` the set is
-    // every device, which is exactly the "use all the hardware wisely" default.
-    // FREE bytes, not total. `--reserve-gb` is then carved out of what is
-    // actually available, so a card a neighbouring process is already holding
-    // 18 GiB of is budgeted at 6 GiB rather than 24. Budgeting from the card's
-    // SIZE is what let the daemon plan a placement the driver then refused -
-    // the scheduler's own accounting said the card was empty. Same probe the
-    // one-shot placer uses (`gpu_core::capacity`), so the two halves of this
-    // process can no longer disagree about the same card at the same instant.
-    let mut all_gpus = gpu_core::capacity::available_gpus();
-    // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
-    // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
-    // have no dedicated VRAM - they share system RAM - so size the budget like the
-    // NPU (a modest fraction of RAM). This is what makes `--device gpu` (and the
-    // all-devices default) actually schedule onto the iGPU on such boxes.
-    // Devices this fallback creates ALWAYS share physical RAM with the CPU
-    // (that is the case it exists for) - tracked so they can be declared into
-    // the same memauth pool as Device::Cpu below, instead of budgeted as an
-    // independent-but-physically-identical pool of bytes.
-    let mut fallback_unified_gpus: Vec<u32> = Vec::new();
-    if all_gpus.is_empty() {
-        // Not `discrete_gpu_count` (that's 0 by definition on an integrated-only
-        // box): `visible_gpu_count` counts the iGPU too, which is exactly the
-        // case this fallback exists for.
-        let n = gpu_core::visible_gpu_count();
-        if n > 0 {
-            // The real ceiling is the shared RAM pool declared below, not a
-            // fraction reserved here - this device budget only needs to be AT
-            // LEAST the pool's total so the pool (not a smaller guessed
-            // fraction) is always the binding constraint.
-            let ram = host_ram_available();
-            all_gpus = (0..n as u32).map(|i| (i, ram)).collect();
-            fallback_unified_gpus = (0..n as u32).collect();
-            eprintln!("brain serve: no NVIDIA GPU; budgeting {n} integrated GPU(s), sharing the {} GB RAM pool (schedulable)", ram >> 30);
-        }
-    }
-    let set = crate::compute_set();
-    let gpus: Vec<(u32, u64)> = match set {
-        Some(s) => all_gpus.iter().copied().filter(|(i, _)| s.gpus.contains(i)).collect(),
-        None => all_gpus.clone(),
-    };
-    let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
-    // Devices whose bytes physically ARE the CPU's RAM: this fallback's
-    // synthesized GPUs, plus any real GPU the device registry classifies as
-    // integrated (an Arc/Xe iGPU reporting real VRAM via query_gpu_mem - the
-    // common case on this box - never goes through the fallback above, so it
-    // needs its own check here). A discrete GPU with dedicated VRAM is not
-    // included. See `memauth`'s module doc for why declaring this matters:
-    // without it, a GPU-side allocation and a CPU-side one are budgeted as
-    // if they came from two separate pools of memory, when they are the same
-    // physical bytes.
-    let unified_gpus: Vec<u32> = gpus
-        .iter()
-        .map(|&(i, _)| i)
-        .filter(|i| {
-            fallback_unified_gpus.contains(i)
-                || gpu_core::devices::gpus().iter().any(|d| d.index == *i && d.identity.class == backend_api::DeviceClass::IntegratedGpu)
-        })
-        .collect();
-
-    // Schedulable NPUs: `--device` narrows to `set.npus`; with no `--device`, any NPU
-    // present is scheduled. The Meteor-Lake-class NPU shares system RAM, so it gets a
-    // modest per-device budget. A model with an NPU path (MemCost.npu > 0) is then
-    // auto-placed on the NPU in preference to CPU/GPU (see place::pick_device).
-    let npu_indices: Vec<u32> = match set {
-        Some(s) => s.npus.clone(),
-        None if npu::openvino::npu_present() => vec![0],
-        None => vec![],
-    };
-    let ram = host_ram_available();
-    // NPUs always share system RAM (see the comment above); their device
-    // budget only needs to be at least the pool's total, same reasoning as
-    // the iGPU fallback - `resident::build_executor` declares them into the
-    // shared pool alongside `unified_gpus` and Device::Cpu.
-    let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, ram)).collect();
-
-    // What is actually schedulable is `gpus`/`npus`/`cpu_schedulable`, not just
-    // `gpus` - a prior version of this message said "scheduling on CPU only"
-    // purely from `gpus.is_empty()`, which was wrong on two counts whenever an
-    // NPU was involved: `--device npu` schedules on the NPU (never CPU - CPU
-    // compute is excluded, see `cpu_compute_ram` below), and `--device npu,cpu`
-    // schedules on both, not "CPU only".
-    if gpus.is_empty() && npus.is_empty() {
-        if all_gpus.is_empty() {
-            eprintln!("brain serve: no GPUs or NPUs detected; serving with CPU-only budget");
-        } else {
-            eprintln!("brain serve: --device excluded every GPU; scheduling on CPU only");
-        }
-    } else if gpus.is_empty() && !npus.is_empty() {
-        if cpu_schedulable {
-            eprintln!("brain serve: --device excluded every GPU; scheduling on NPU + CPU");
-        } else {
-            eprintln!("brain serve: --device restricted to NPU; scheduling on NPU only (CPU and GPU excluded)");
-        }
-    }
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: catalog::resident_llm::QwenServeConfig) -> serving::Serving {
+    let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
-    // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
-    // compute - `--device gpu` bounds where work runs, not where bytes may rest.
-    let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     eprintln!(
         "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
-        set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
-        gpus.len(),
-        npus.len(),
+        machine.compute,
+        machine.gpus.len(),
+        machine.npus.len(),
         reserve_gb,
-        ram >> 30
+        machine.pool_ram >> 30
     );
     // `models_dir` is the ONE store every resolver below reads (see
     // `run_apis`); the catalog scan appends every carded file in it as its
@@ -758,7 +660,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<&Path>, qwen_cfg: 
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    crate::resident::build_executor(&gpus, &npus, &unified_gpus, reserved, cpu_compute_ram, ram, models_dir, residency::Policy::from_env(), qwen_cfg)
+    serving::build_executor(&machine, reserved, models_dir, residency::Policy::from_env(), qwen_cfg)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -797,7 +699,7 @@ struct RunApis {
     adapter_mode: crate::continuous_train::AdapterMode,
     /// Every `--qwen-*` flag, parsed once here - see
     /// `resident_llm::QwenServeConfig`'s own doc for each field.
-    qwen_cfg: crate::resident_llm::QwenServeConfig,
+    qwen_cfg: catalog::resident_llm::QwenServeConfig,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -862,7 +764,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let supplier = build_auto_fetch_supplier(models_dir.as_deref());
-    let crate::resident::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg);
+    let serving::Serving { executor, qwen } = build_serving_executor(a.reserve_gb, models_dir.as_deref(), a.qwen_cfg);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));

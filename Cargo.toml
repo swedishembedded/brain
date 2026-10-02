@@ -263,6 +263,7 @@ brain-modelcost = { path = "crates/modelcost" }
 brain-capability = { path = "crates/capability" }
 brain-capability-mock = { path = "crates/capability-mock" }
 brain-catalog = { path = "crates/catalog" }
+brain-serving = { path = "crates/serving" }
 brain-loader = { path = "crates/loader" }
 # `brain` (crates/sdk), not `brain-sdk`: the public SDK facade package is
 # named literally `brain` on purpose -- see crates/sdk/Cargo.toml.

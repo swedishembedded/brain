@@ -20,7 +20,7 @@
 //! [`Session::encode_batch`] builds the encoder at `b = texts.len()` and runs
 //! **one** forward over the whole batch. Every row is the same fixed `max_len`
 //! context (right-padded), so the residency adapter
-//! (`crates/cli/src/resident_t5encoder.rs`) groups `run_batch` invocations by
+//! (`crates/catalog/src/resident_t5encoder.rs`) groups `run_batch` invocations by
 //! `(variant, max_len)` and forwards each group to this in one call.
 //!
 //! # Directory layout
@@ -105,7 +105,7 @@ pub fn manifest() -> Manifest {
 
 /// The encoders on one device - the single implementation of `encode`, shared
 /// by [`T5encoderProvider`] and the residency adapter
-/// (`crates/cli/src/resident_t5encoder.rs`).
+/// (`crates/catalog/src/resident_t5encoder.rs`).
 ///
 /// Encoders are built lazily and keyed by `(variant, b, max_len)`: a fixed `t`
 /// graph, so a batch of 4 at 256 tokens needs a different build than a batch

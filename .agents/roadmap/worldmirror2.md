@@ -23,8 +23,8 @@ preview-quality geometry, less so for higher-fidelity uses.
 
 `reconstruct` (one-shot) is now a [`capability::Provider`] action
 (`crates/worldmirror2/src/caps.rs`), registered in the residency scheduler
-(`crates/cli/src/resident_worldmirror2.rs`) and the CLI catalog
-(`crates/cli/src/catalog.rs`) under `brain/worldmirror2` - reachable over
+(`crates/catalog/src/resident_worldmirror2.rs`) and the CLI catalog
+(`crates/catalog/src/lib.rs`) under `brain/worldmirror2` - reachable over
 `brain do`, D-Bus, and the event API with no worldmirror2-specific plumbing
 in any transport. `images` (N unposed frames) mirrors the video-blob
 convention every other served video input uses; `min_opacity`/`max_depth`/

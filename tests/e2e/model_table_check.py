@@ -7,7 +7,7 @@
 Checks two things, both cheap and weights-free:
 
 1. Every model id `brain caps --json` reports (the capability-registry surface
-   `crates/cli/src/catalog.rs` builds — what `brain do`/D-Bus/HTTP can actually
+   `crates/catalog/src/lib.rs` builds - what `brain do`/D-Bus/HTTP can actually
    reach) appears somewhere in the table. This is the exact bug class
    `catalog.rs`'s module docs describe: a model wired into the registry and
    forgotten in the docs (or renamed in one place and not the other).

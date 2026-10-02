@@ -26,7 +26,7 @@
 //! `loader::supply` -- any embedder wants the same "fetch and convert a
 //! checkpoint" primitive, not just this CLI. What stays here is everything
 //! that constructs or registers a CLI-local `ResidentModel`
-//! (`StoreSupplier::ensure` calling `crate::model_dir::resident_for_local`),
+//! (`StoreSupplier::ensure` calling `serving::model_dir::resident_for_local`),
 //! plus the `BRAIN_AUTO_FETCH` environment gate itself.
 
 use std::collections::{BTreeMap, HashMap};
@@ -395,7 +395,7 @@ impl StoreSupplier {
         // auto-fetch gets the historical 24576 default rather than
         // auto-sized context, unlike one already on disk at startup
         // (`model_dir::discover`, which DOES receive the real config).
-        let resident = crate::model_dir::resident_for_local(&local, crate::resident_llm::QwenServeConfig::default()).map_err(|e| format!("{model}: {e}"))?;
+        let resident = serving::model_dir::resident_for_local(&local, catalog::resident_llm::QwenServeConfig::default()).map_err(|e| format!("{model}: {e}"))?;
         exec.register_if_absent(resident);
         Ok(())
     }

@@ -29,7 +29,7 @@ already an aligned face crop; then no detector runs and the embedding is
 the reference one bit for bit (cosine 1.000000 against the insightface
 goldens). Both face graphs are built for a single image, so their
 `run_batch` is the serial default (stated, with the reason, in
-`crates/cli/src/resident_scrfd.rs`).
+`crates/catalog/src/resident_scrfd.rs`).
 
 ## What it needs
 

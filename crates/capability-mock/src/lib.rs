@@ -35,7 +35,7 @@
 //!
 //! Every generator is pure arithmetic over a `u32` seed folded from
 //! `(model_id, action name, an optional "seed" param)` - no RNG crate, the
-//! same wrapping-arithmetic style `crates/cli/src/resident_mock.rs`'s
+//! same wrapping-arithmetic style `crates/catalog/src/resident_mock.rs`'s
 //! `text2image` mock uses, just extended to fold in the model/action identity
 //! so two different mock providers never coincidentally produce the same
 //! pixels.

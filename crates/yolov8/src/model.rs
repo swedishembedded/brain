@@ -996,10 +996,10 @@ impl Yolo {
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
         // "brain/yolov8" matches the reserved-vendor
-        // fallback -- the same id crates/cli/src/resident.rs::YoloResident::
+        // fallback -- the same id crates/serving/src/executor.rs::YoloResident::
         // from_env synthesizes for an env-loaded checkpoint -- so a
         // checkpoint saved here is auto-discoverable by
-        // crates/cli/src/model_dir.rs without requiring BRAIN_YOLOV8 to be set.
+        // crates/serving/src/model_dir.rs without requiring BRAIN_YOLOV8 to be set.
         checkpoint::save_carded(path, self.cfg.to_json(), &tensors, &checkpoint::st::ModelCard::new("brain/yolov8", "yolo"));
     }
 }

@@ -16,7 +16,7 @@
 //! outcome.
 //!
 //! GGUF import lives in the GENERIC `brain import-gguf` command
-//! ([`crate::gguf_import`]), which dispatches on the file's own
+//! ([`serving::gguf_import`]), which dispatches on the file's own
 //! `general.architecture`; `brain qwen35 import` remains as a deprecated
 //! forward to it - mirrors `qwen35moe_cli`'s own `import` exactly. This
 //! architecture now HAS a GGUF importer registered there
@@ -64,7 +64,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 /// Mirrors `qwen35moe_cli::import` exactly.
 fn import(args: &[String]) {
     eprintln!("brain qwen35 import is deprecated -- use `brain import-gguf FILE [--out PATH] [--id NAME]`");
-    crate::gguf_import::run_import_gguf(args);
+    crate::import_gguf_cli::run_import_gguf(args);
 }
 
 /// `brain qwen35 infer --weights F [--tokenizer T | --gguf G] --prompt "..."

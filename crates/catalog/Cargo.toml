@@ -13,6 +13,7 @@ path = "src/lib.rs"
 brain-capability.workspace = true
 brain-residency.workspace = true
 brain-modelstore.workspace = true
+brain-loader.workspace = true
 brain-gpu-core.workspace = true
 brain-s3dit.workspace = true
 brain-flux2.workspace = true
@@ -54,9 +55,30 @@ brain-cosyvoice.workspace = true
 brain-nemotronasr.workspace = true
 brain-qwen3asr.workspace = true
 
-[dev-dependencies]
-# Writing the tiny header-shaped checkpoint the store-backed construction test
-# publishes (`checkpoint::save`), and its config object. Both are already in
-# this crate's dependency graph through the model crates above.
+brain-audio.workspace = true
+brain-chronos2.workspace = true
+brain-data.workspace = true
+brain-fincast.workspace = true
+brain-forecast.workspace = true
+brain-gpt2.workspace = true
+brain-imaging.workspace = true
+brain-kronos.workspace = true
+brain-model.workspace = true
+brain-npu.workspace = true
+brain-onnx.workspace = true
+brain-paramstore.workspace = true
+brain-qwen3omnimoe.workspace = true
+brain-splat.workspace = true
+brain-timesfm3.workspace = true
+brain-worldmirror2.workspace = true
 brain-checkpoint.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+brain-apiserve.workspace = true
+brain-perf.workspace = true
+tokio.workspace = true
+tower.workspace = true
+brain-testutil.workspace = true

@@ -294,7 +294,7 @@ generic capability contract: one `synth` action (target text + a
 out), reachable as `brain cosyvoice synth`, `brain do brain/cosyvoice
 synth`, and - with no extra code - D-Bus/HTTP, through the same
 `Provider`/`ResidentModel` pair every other served model uses
-(`crates/cli/src/resident_cosyvoice.rs` is the residency-facing half,
+(`crates/catalog/src/resident_cosyvoice.rs` is the residency-facing half,
 following `resident_minimaxmusic3.rs`'s "load per call, nothing kept warm"
 shape).
 

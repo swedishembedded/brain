@@ -4,7 +4,7 @@ T5-XXL / umT5-XXL text encoding over brain's D-Bus interface (`brain
 t5encoder encode`) - the text conditioning FLUX.1/2 need alongside CLIP-L,
 and the text tower Wan2.1/2.2 condition on. `variant` selects the model
 (`flux_xxl`, unmasked; `wan_umt5`, masked). Like CLIP's text towers, batching
-is a genuine forward at `b = N`: `crates/cli/src/resident_t5encoder.rs`
+is a genuine forward at `b = N`: `crates/catalog/src/resident_t5encoder.rs`
 groups concurrent calls by `(variant, max_len)`.
 
 ```bash

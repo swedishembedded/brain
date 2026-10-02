@@ -21,7 +21,7 @@
 //!    - a second stream of the same file, not a second import path),
 //!    generating the SAME `n_new` tokens from the SAME prompt.
 //! 2. **A real VmHWM for the constant this phase's own doc flagged as
-//!    stale** (`crates/cli/src/resident_deepseekocr.rs`'s
+//!    stale** (`crates/catalog/src/resident_deepseekocr.rs`'s
 //!    `COMPOSITE_PEAK_BYTES`) - printed, not asserted into a hardcoded
 //!    number here, so whoever updates that constant has a real measurement
 //!    to cite instead of the arithmetic prediction that comment already

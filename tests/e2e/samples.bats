@@ -52,7 +52,7 @@ setup_file() {
   OPENAI_PORT="${OPENAI_PORT:-8992}"
   export OPENAI_PORT
 
-  # BRAIN_MOCK_DELAY_MS is a SERVER-side knob (crates/cli/src/resident_mock.rs
+  # BRAIN_MOCK_DELAY_MS is a SERVER-side knob (crates/catalog/src/resident_mock.rs
   # reads it once per request from ITS OWN environment) - it must be set on this
   # launch, not on a client invocation later, or the cancellation test below
   # races every step to completion before Cancel can land. 300ms split across

@@ -12,7 +12,7 @@
 //!
 //! # Batching: genuinely batched, unlike the face stack
 //!
-//! `crates/cli/src/resident_scrfd.rs` documents why the antelopev2 graphs
+//! `crates/catalog/src/resident_scrfd.rs` documents why the antelopev2 graphs
 //! cannot batch (built for a single image, no N axis). CLIP is the opposite
 //! case and gets no such excuse: [`clip::model::ClipText`] takes `b` at build
 //! time, every row is the same fixed 77-token context, and

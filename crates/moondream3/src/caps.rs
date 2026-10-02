@@ -144,7 +144,7 @@ type DecodedImage = Result<(Vec<f32>, u32, u32), String>;
 
 /// A built model plus everything one request needs around it.
 ///
-/// Public so `crates/cli/src/resident_moondream3.rs` can own one directly: the
+/// Public so `crates/catalog/src/resident_moondream3.rs` can own one directly: the
 /// residency adapter and the direct provider then run the SAME code and cannot
 /// drift about preprocessing, prompt assembly or token accounting.
 pub struct Session {

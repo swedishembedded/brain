@@ -273,7 +273,7 @@ numbers found"). Full program from the approved plan, not just the gate:
 - **`docs/using/configuration.md`** - corrected the false "the residency
   scheduler does not yet place jobs on the NPU on its own" claim. Verified
   against `crates/residency/src/place.rs`'s `pick_device` (NPU tried before
-  GPU/CPU whenever `MemCost.npu > 0`) and every `crates/cli/src/resident_*.rs`
+  GPU/CPU whenever `MemCost.npu > 0`) and every `crates/catalog/src/resident_*.rs`
   that calls `MemCost::with_npu`: depth (ZipDepth), both ASR models
   (Nemotron, Qwen3-ASR), and all three forecasters (chronos2, fincast,
   kronos). Note: kronos's own inclusion is grounded directly in
@@ -776,7 +776,7 @@ the real generalized seam: `npu::NpuModel` (`crates/npu/src/lib.rs`) - a model
 implements `build`/`cache_key`, the trait's defaulted `compile` does
 `onnx_bytes` + `openvino::NpuGraph::compile_bytes`. Before this phase it had
 exactly one production implementor, `DepthNpuModel`
-(`crates/cli/src/resident_depth.rs`). `resident_forecast.rs`'s chronos2 and
+(`crates/catalog/src/resident_depth.rs`). `resident_forecast.rs`'s chronos2 and
 fincast NPU paths were drift from that proven pattern, not a different
 design: they called `npu::openvino::{Chronos2Session, FincastSession}`
 directly - bespoke hand-rolled `set_tensor`/`get_output_tensor` session types
@@ -801,7 +801,7 @@ device-independent reference instead of just "it ran". Defaulted to `None` so
 `DepthNpuModel` (untouched this phase - out of scope, not required) keeps
 compiling unchanged.
 
-**Migrated** (`crates/cli/src/resident_forecast.rs`): `Chronos2NpuModel` and
+**Migrated** (`crates/catalog/src/resident_forecast.rs`): `Chronos2NpuModel` and
 `FincastNpuModel`, two new small structs implementing `NpuModel`, following
 `DepthNpuModel`'s exact placement convention (defined directly in the
 resident's own file, not a new module).
@@ -831,7 +831,7 @@ resident's own file, not a new module).
   fits comfortably in one protobuf buffer, matching the old
   `Chronos2Session::load_bytes` path).
 - Both structs get a `pub(crate) fn new(...)` constructor (fields stay
-  private) specifically so `crates/cli/tests/npu_model_parity.rs` can
+  private) specifically so `crates/catalog/tests/npu_model_parity.rs` can
   construct one directly - see that test file's own module doc for why.
 
 `Chronos2NpuInstance`/`FincastNpuInstance`'s compiled-graph caches changed
@@ -857,7 +857,7 @@ read-only reference for this task, and deleting a still-tested public type is
 a separate, deliberate cleanup call for whoever owns that file next, not a
 side effect of a residency-adapter migration.
 
-**TDD**: `crates/cli/tests/npu_model_parity.rs` (new). `brain-cli` is a
+**TDD**: `crates/catalog/tests/npu_model_parity.rs` (new). `brain-cli` is a
 **bin-only** crate (no `[lib]` target), so an external integration test
 cannot `use brain_cli::...`; the test pulls `resident_forecast.rs` in
 directly via `#[path = "../src/resident_forecast.rs"] mod resident_forecast;`
@@ -940,11 +940,11 @@ test's checkpoint out from under it - fixed with a per-call
 `cargo test -p brain-npu --lib`: **19/19 passed, 1 pre-existing ignore**
 (unchanged from before this phase - includes the still-green, still-exercised
 `Chronos2Session`/`FincastSession` tests noted above).
-`cargo test -p brain-cli --bin brain resident_forecast`: 2/2 passed (the
+`cargo test -p brain-catalog --lib resident_forecast`: 2/2 passed (the
 file's own pre-existing schema/codec unit tests, unaffected by the migration).
 
 **Deferred - ASR (nemotronasr + qwen3asr), explicitly not done this phase.**
-`crates/cli/src/resident_asr.rs`'s `NemotronNpuInstance`/`QwenAsrNpuInstance`
+`crates/catalog/src/resident_asr.rs`'s `NemotronNpuInstance`/`QwenAsrNpuInstance`
 have the SAME drift (`onnx::GraphBuilder` + `NpuGraph::compile_bytes`/
 `compile_path` called directly, not through `NpuModel`) and the mechanical
 migration is straightforward - sketched and judged low-risk during this

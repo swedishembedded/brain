@@ -185,7 +185,7 @@ fn default_window_size() -> usize {
 /// process, with the decoder placed elsewhere so the figure is the tower's
 /// alone). 7 GiB rounds that up.
 ///
-/// `crates/cli/src/resident_deepseekocr.rs` budgets it; the constant lives
+/// `crates/catalog/src/resident_deepseekocr.rs` budgets it; the constant lives
 /// here because [`decoder_device`] needs it to decide whether one card can
 /// hold both halves.
 pub const VISION_DEVICE_BYTES: u64 = 7u64 << 30;
@@ -258,7 +258,7 @@ pub enum DecoderDevice {
 /// portable free-VRAM query, so there is nothing honest to read. A card
 /// another process is already sitting on therefore still looks empty here.
 /// That is the scheduler's job on a served host, where
-/// `crates/cli/src/resident_deepseekocr.rs` passes the budgeted figures in,
+/// `crates/catalog/src/resident_deepseekocr.rs` passes the budgeted figures in,
 /// and the operator's on a shared one, where
 /// `$BRAIN_DEEPSEEK_OCR_DECODER_DEVICE=gpu<i>` names the card outright.
 ///
@@ -376,7 +376,7 @@ pub fn manifest_resident() -> Manifest {
 
 /// A built composite plus everything one request needs around it.
 ///
-/// Public so `crates/cli/src/resident_deepseekocr.rs` can own one directly:
+/// Public so `crates/catalog/src/resident_deepseekocr.rs` can own one directly:
 /// the residency adapter and the direct `brain do` provider then run the SAME
 /// code, and cannot drift about preprocessing, prompt assembly or token counts.
 pub struct Session {
@@ -442,7 +442,7 @@ impl Session {
     /// [`Session::load`] with the decoder's placement chosen by the caller
     /// rather than re-derived from this process's device registry.
     ///
-    /// The scheduler needs this: `crates/cli/src/resident_deepseekocr.rs`
+    /// The scheduler needs this: `crates/catalog/src/resident_deepseekocr.rs`
     /// RESERVES device bytes against a specific set of devices before
     /// activating, and a second, independent placement decision inside the
     /// build could name a different card than the one that was reserved. One
@@ -622,7 +622,7 @@ use crate::stage_time;
 
 /// A stateless provider: it holds only the checkpoint directory, and builds (and
 /// caches) the composite on the first `generate` - construction must stay cheap,
-/// because `crates/cli/src/catalog.rs` constructs every provider just to list it.
+/// because `crates/catalog/src/lib.rs` constructs every provider just to list it.
 pub struct DeepseekOcrProvider {
     dir: String,
 }
@@ -630,7 +630,7 @@ pub struct DeepseekOcrProvider {
 impl DeepseekOcrProvider {
     /// `None` when `dir` is empty or does not hold both shipped GGUFs -
     /// advertising a model whose every call would fail is worse than not
-    /// advertising it. `crates/cli/src/catalog.rs` builds `dir` from a
+    /// advertising it. `crates/catalog/src/lib.rs` builds `dir` from a
     /// resolved [`capability::Assembly`] (`crate::spec::Deepseek2ocrSpec`'s
     /// `dir` role) rather than an env var.
     pub fn new(dir: impl Into<String>) -> Option<DeepseekOcrProvider> {

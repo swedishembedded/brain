@@ -31,7 +31,7 @@
 //!   upload at 1.3B; a second request at the same size pays neither.
 //!
 //! The execution helpers below are `pub fn`s shared by BOTH [`WanProvider`]
-//! and the residency adapter (`crates/cli/src/resident_wan.rs`) - one
+//! and the residency adapter (`crates/catalog/src/resident_wan.rs`) - one
 //! implementation of param decoding, generation and outcome shaping, the
 //! `flux2::caps` pattern.
 
@@ -112,7 +112,7 @@ pub fn manifest() -> Manifest {
 // ===================== shared execution helpers =====================
 //
 // Both the hot-DiT [`WanProvider`] and the residency adapter
-// (`crates/cli/src/resident_wan.rs`) run `t2v` through these - ONE
+// (`crates/catalog/src/resident_wan.rs`) run `t2v` through these - ONE
 // implementation of param decoding, generation and outcome shaping.
 
 use std::sync::{Arc, Mutex};

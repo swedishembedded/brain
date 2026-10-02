@@ -8,7 +8,7 @@
 //!   brain qwen35moe export --weights F --out model.onnx [--seq T]
 //!
 //! GGUF import lives in the GENERIC `brain import-gguf` command
-//! ([`crate::gguf_import`]), which dispatches on the file's own
+//! ([`serving::gguf_import`]), which dispatches on the file's own
 //! `general.architecture`; `brain qwen35moe import` remains as a deprecated
 //! forward to it.
 //!
@@ -55,7 +55,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 /// Kept working so existing callers and scripts don't break - every flag
 /// (`--gguf`, `--out`, `--id`) still means the same thing - but it is a pure
 /// forward: the generic command picks the importer from the file's own
-/// `general.architecture` through [`crate::gguf_import`]'s registry, which is
+/// `general.architecture` through [`serving::gguf_import`]'s registry, which is
 /// the only place a new architecture ever has to be registered. Nothing
 /// qwen35moe-specific is decided here any more.
 ///
@@ -65,7 +65,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 /// will find it. Callers that passed `--out` are unaffected.
 fn import(args: &[String]) {
     eprintln!("brain qwen35moe import is deprecated -- use `brain import-gguf FILE [--out PATH] [--id NAME]`");
-    crate::gguf_import::run_import_gguf(args);
+    crate::import_gguf_cli::run_import_gguf(args);
 }
 
 /// `brain qwen35moe infer --weights F [--tokenizer T | --gguf G] --prompt "..."`

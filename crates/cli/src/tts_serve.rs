@@ -8,7 +8,7 @@
 //! protocol existed to provide - resident (load-once) weights and progressively
 //! streamed audio chunks - are now on the standard capability surface for the
 //! ordinary host path: `qwen3tts::engine::ResidentEngine` behind
-//! `crate::resident_tts::TtsResident`, reached generically over D-Bus/HTTP via
+//! `catalog::resident_tts::TtsResident`, reached generically over D-Bus/HTTP via
 //! `capability::Registry` (`speak`/`design` are `.streaming()`, and each
 //! decoded codec chunk goes out as a real `Progress::chunk` blob frame). A new
 //! client should use that, not this socket.

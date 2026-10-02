@@ -213,12 +213,12 @@ llama.cpp running them - not inferred from a config or a reimplementation.
   `backend-wgpu::WgpuBackend::flush_serialized`, and the fix was confirmed
   by real evidence (not a guess) - see the "CONCLUSION" entry under the
   follow-up investigation below for the full record. **The CPU pin remains
-  in `crates/cli/src/resident_deepseekocr.rs`, but now for a scope reason,
+  in `crates/catalog/src/resident_deepseekocr.rs`, but now for a scope reason,
   not a correctness one** - also detailed below.
 
   **Follow-up investigation (checkpoint-free reproduction, root-cause bisection,
   and a partial mitigation), still open - the CPU pin in
-  `crates/cli/src/resident_deepseekocr.rs` was NOT lifted:**
+  `crates/catalog/src/resident_deepseekocr.rs` was NOT lifted:**
 
   * A minimal, seconds-not-minutes checkpoint-free reproduction exists:
     `crates/sam1/tests/wgpu_block_count_corruption.rs`. Two `SamEncoder`s share
@@ -365,7 +365,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     fix's justification rests on the `backend-vulkan` precedent and the
     matching wgpu-core/wgpu-hal source reading, not on a reproduced-then-
     fixed failure in this session.
-  * **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is
+  * **The CPU pin in `crates/catalog/src/resident_deepseekocr.rs` is
     UNCHANGED.** Given the hard bar this investigation set for itself (10+
     consecutive clean runs BEFORE and AFTER, on a real reproduction) could
     not be met in either direction because no reproduction failed at all,
@@ -436,7 +436,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     workspace, 0 failures).
   * **Documentation updated to match reality**, all within this pass's
     scope (`crates/sam1`, `crates/model/src/vit.rs`,
-    `crates/cli/src/resident_deepseekocr.rs`):
+    `crates/catalog/src/resident_deepseekocr.rs`):
     - `crates/sam1/tests/wgpu_real_weight_parity.rs`'s test is **no longer
       `#[ignore]`d** - like `tests/parity.rs`'s own real-weight tests, it
       self-skips on a missing checkpoint rather than needing a manual
@@ -452,7 +452,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     - `crates/model/src/vit.rs::RelPos::add_step`'s doc comment (which
       claimed the tower "still corrupts unrelated device buffers on wgpu
       some fraction of runs") is corrected.
-  * **The CPU pin in `crates/cli/src/resident_deepseekocr.rs` is STILL
+  * **The CPU pin in `crates/catalog/src/resident_deepseekocr.rs` is STILL
     UNCHANGED - but not for a correctness reason anymore.** The actual
     device selection for the whole composite (vision AND decoder) is
     hardcoded in `crates/deepseek2ocr::caps::Session::load`
@@ -465,7 +465,7 @@ llama.cpp running them - not inferred from a config or a reimplementation.
     `gpu_core::Gpu::new_cpu` is a small, well-scoped change to that one
     closure - but `crates/deepseek2ocr` is explicitly outside this pass's
     assigned scope (`crates/backend-wgpu`, `crates/sam1`,
-    `crates/model/src/vit.rs`, `crates/cli/src/resident_deepseekocr.rs`
+    `crates/model/src/vit.rs`, `crates/catalog/src/resident_deepseekocr.rs`
     only), reserved to avoid colliding with a concurrent sibling pass on
     Phase 8 performance in that same crate family. Editing
     `resident_deepseekocr.rs` alone cannot lift the pin for real: its
@@ -1526,13 +1526,13 @@ token fails loudly.
       tower that would produce plausible garbage.
 
       ```rust
-      // crates/cli/src/resident_deepseekocr.rs   (new)
+      // crates/catalog/src/resident_deepseekocr.rs   (new)
       pub struct DeepseekOcrResident;   // from_env() / new(dir) -> Option
       // ResidentModel::{manifest, instance_key, estimate, activate} + Instance::run
       // run_batch: the serial default (per-image encoder pass, no decoder batch axis)
 
-      // crates/cli/src/catalog.rs - ONE ModelEntry, which is what wires
-      // `brain caps`, `brain deepseek2ocr ...`, `resident.rs::build_executor`'s
+      // crates/catalog/src/lib.rs - ONE ModelEntry, which is what wires
+      // `brain caps`, `brain deepseek2ocr ...`, `serving::build_executor`'s
       // `models.extend(catalog::residents())`, D-Bus and the HTTP surfaces at once.
       ```
 
@@ -2190,7 +2190,7 @@ pointer for whoever picks this up in the same environment).
       Phase 8 Step 2 moved the vision encoder onto wgpu (`caps::Session::load`
       builds SAM+CLIP+glue with `Gpu::new_wgpu`, the decoder with
       `Gpu::new_cpu`) but did NOT update
-      `crates/cli/src/resident_deepseekocr.rs`, which kept declaring a
+      `crates/catalog/src/resident_deepseekocr.rs`, which kept declaring a
       **RAM-only `MemCost`** (`vram == 0`, 22 GiB) and an `activate` that
       refused any non-CPU assignment as "CPU-only". Both statements were false
       from the moment that split landed, and the module header still described

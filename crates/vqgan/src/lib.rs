@@ -34,7 +34,7 @@
 //! are `crates/codeformer`.
 //!
 //! The serving contract is met by [`caps`] (the `encode`/`decode`
-//! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
+//! `capability::Provider`), `crates/catalog/src/resident_restore.rs` (the residency
 //! adapter, `BRAIN_VQGAN_WEIGHTS`) and `samples/python/restore/`.
 
 pub mod caps;

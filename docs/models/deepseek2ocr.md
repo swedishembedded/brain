@@ -230,7 +230,7 @@ not a deprecated one.
 the life of a real page): **6.27 GiB** on the vision card, **13.25 GiB** on
 the decoder card, **2.68 GiB** of host RSS. With the decoder on the CPU
 instead it is 6.27 GiB of VRAM and **13.54 GiB** of RAM. Each of those is its
-own direct measurement, so `crates/cli/src/resident_deepseekocr.rs` names
+own direct measurement, so `crates/catalog/src/resident_deepseekocr.rs` names
 every device the instance really occupies with its own figure rather than
 splitting one number across devices - which is what it used to do, from a
 21.32 GiB all-CPU reading taken at the long-superseded 512-token flat-tape

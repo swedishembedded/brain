@@ -32,7 +32,7 @@ Two ways to run it:
                                                                    # auto-fetched
 
 `--model` defaults to `brain/mock` (deterministic, weight-free - see
-`crates/cli/src/resident_mock.rs`) so this runs offline in CI; point it at any
+`crates/catalog/src/resident_mock.rs`) so this runs offline in CI; point it at any
 served id (a `Qwen/Qwen3-0.6B`-style ref auto-fetches on first use) to exercise
 a real model.
 """

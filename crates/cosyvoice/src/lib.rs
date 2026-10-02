@@ -138,7 +138,7 @@
 //! transcript in, a 24 kHz WAV out), discoverable and runnable as `brain do
 //! brain/cosyvoice synth …` / `brain cosyvoice synth …`, with D-Bus/HTTP
 //! surfaced for free through the same `Provider`/`ResidentModel` pair every
-//! other served model uses (`crates/cli/src/resident_cosyvoice.rs` is the
+//! other served model uses (`crates/catalog/src/resident_cosyvoice.rs` is the
 //! residency-facing half). `variant` accepts both generations' names but
 //! only `cosyvoice2` actually runs - see [`caps`]'s own doc for the
 //! CosyVoice 3 scope and the reference-audio blob-vs-path bridging this

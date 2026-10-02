@@ -120,7 +120,7 @@ pub fn read_outcome(o: &Outcome) -> (String, i64, i64, String) {
 /// JSON object per call — `{"id","name","arguments"}`, `arguments` a raw JSON-text
 /// string, never re-parsed — from `outputs.tool_calls`'s JSON-array-string;
 /// empty when absent). `text` is VISIBLE content only — the resident layer
-/// (`crates/cli/src/resident_llm.rs::QwenInstance::run`,
+/// (`crates/catalog/src/resident_llm.rs::QwenInstance::run`,
 /// `resident_mock.rs::generate_tool_call`) guarantees `<think>`/`<tool_call>`
 /// markup never reaches the `text` blob.
 pub struct ChatOutcome {

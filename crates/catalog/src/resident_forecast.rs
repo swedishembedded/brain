@@ -33,10 +33,10 @@ use serde_json::json;
 /// these crates (unlike yolo/depth/tts/…) -- these three consts are the
 /// analogous single source of truth here (also referenced by `perf_cli.rs`'s
 /// `ExecutorTarget` construction, which must route to the same catalog id).
-pub(crate) const CHRONOS2_MODEL: &str = "brain/chronos2";
-pub(crate) const FINCAST_MODEL: &str = "brain/fincast";
-pub(crate) const KRONOS_MODEL: &str = "brain/kronos";
-pub(crate) const TIMESFM3_MODEL: &str = "brain/timesfm3";
+pub const CHRONOS2_MODEL: &str = "brain/chronos2";
+pub const FINCAST_MODEL: &str = "brain/fincast";
+pub const KRONOS_MODEL: &str = "brain/kronos";
+pub const TIMESFM3_MODEL: &str = "brain/timesfm3";
 
 // ============================ shared wire codec ============================
 
@@ -146,7 +146,7 @@ impl Chronos2Resident {
 
 /// The static (weights-free) Chronos-2 manifest — the catalog's discovery entry
 /// (`brain caps`), shared with [`ResidentModel::manifest`] so the two cannot drift.
-pub(crate) fn chronos2_manifest() -> Manifest {
+pub fn chronos2_manifest() -> Manifest {
     Manifest::new(
         CHRONOS2_MODEL,
         "probabilistic time-series forecasting (Chronos-2); 21 quantile levels",
@@ -210,13 +210,7 @@ impl Instance for Chronos2CpuInstance {
 /// trait seam instead of a bespoke session - mirrors `resident_depth.rs`'s
 /// `DepthNpuModel`. `parity_ref` is the model's own device `core_forward`, the
 /// exact function the ONNX graph was built to reproduce.
-///
-/// `pub(crate)`: `crates/cli/tests/npu_model_parity.rs` pulls this file in via
-/// `#[path]` and constructs this type directly - `brain-cli` is a bin-only
-/// crate (no `[lib]` target an external integration test could depend on
-/// instead), so `#[path]` inclusion is the only way to unit-test a private
-/// `main.rs` module from `tests/`.
-pub(crate) struct Chronos2NpuModel<'a> {
+pub struct Chronos2NpuModel<'a> {
     model: &'a chronos2::model::Chronos2,
     path: &'a str,
     s: usize,
@@ -224,10 +218,7 @@ pub(crate) struct Chronos2NpuModel<'a> {
 }
 
 impl<'a> Chronos2NpuModel<'a> {
-    /// `pub(crate)`, not just used internally, so
-    /// `crates/cli/tests/npu_model_parity.rs` (see the struct doc) can construct
-    /// one without the private fields being visible at its call site.
-    pub(crate) fn new(model: &'a chronos2::model::Chronos2, path: &'a str, s: usize, n_out: usize) -> Chronos2NpuModel<'a> {
+    pub fn new(model: &'a chronos2::model::Chronos2, path: &'a str, s: usize, n_out: usize) -> Chronos2NpuModel<'a> {
         Chronos2NpuModel { model, path, s, n_out }
     }
 }
@@ -324,7 +315,7 @@ impl FincastResident {
 }
 
 /// The static (weights-free) FinCast manifest — see [`chronos2_manifest`].
-pub(crate) fn fincast_manifest() -> Manifest {
+pub fn fincast_manifest() -> Manifest {
     Manifest::new(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![FincastResident::spec()])
 }
 
@@ -383,18 +374,14 @@ impl Instance for FincastCpuInstance {
 /// explicit `[s,s]` additive mask the graph itself consumes (unlike
 /// `core_forward`, which derives it from a padding mask) - the exact function
 /// the ONNX graph was built to reproduce.
-///
-/// `pub(crate)` for the same reason as [`Chronos2NpuModel`] (see its doc):
-/// `crates/cli/tests/npu_model_parity.rs` reaches it via `#[path]` inclusion.
-pub(crate) struct FincastNpuModel<'a> {
+pub struct FincastNpuModel<'a> {
     model: &'a fincast::model::Fincast,
     path: &'a str,
     s: usize,
 }
 
 impl<'a> FincastNpuModel<'a> {
-    /// `pub(crate)` for the same reason as [`Chronos2NpuModel::new`].
-    pub(crate) fn new(model: &'a fincast::model::Fincast, path: &'a str, s: usize) -> FincastNpuModel<'a> {
+    pub fn new(model: &'a fincast::model::Fincast, path: &'a str, s: usize) -> FincastNpuModel<'a> {
         FincastNpuModel { model, path, s }
     }
 }
@@ -512,12 +499,16 @@ impl KronosResident {
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling (omit for random)"))
             .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").default(json!(1)))
+            // `host_resolved`: a path on the machine that runs the model is the
+            // host's fact, never a remote caller's choice. A served surface drops
+            // the param, and the resident falls back to the boot decoder; a local
+            // caller (`brain perf`, a fine-tune check) still passes one directly.
             .param(ParamSpec::new("checkpoint", ParamType::Str,
                 "decoder checkpoint path override (.safetensors file or HF dir); \
                  empty = the boot decoder. Instances are keyed on (path, mtime, \
                  size), so per-request checkpoints stay warm side by side and an \
                  overwritten file hot-reloads — checkpoint selection is request \
-                 state, not server state.").default(json!("")))
+                 state, not server state.").default(json!("")).host_resolved())
             .input(BlobSpec::new("ctx_stamp", Media::Bytes, "optional context calendar stamps [T,5] u32-LE"))
             .input(BlobSpec::new("fut_stamp", Media::Bytes, "optional future calendar stamps [horizon,5] u32-LE"))
     }
@@ -553,7 +544,7 @@ fn decoder_from_key(config: &str) -> &str {
 }
 
 /// The static (weights-free) Kronos manifest — see [`chronos2_manifest`].
-pub(crate) fn kronos_manifest() -> Manifest {
+pub fn kronos_manifest() -> Manifest {
     Manifest::new(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", vec![KronosResident::spec()])
 }
 
@@ -1022,7 +1013,7 @@ impl Timesfm3Resident {
 }
 
 /// The static (weights-free) TimesFM-3 manifest - see [`chronos2_manifest`].
-pub(crate) fn timesfm3_manifest() -> Manifest {
+pub fn timesfm3_manifest() -> Manifest {
     Manifest::new(TIMESFM3_MODEL, "time-series forecasting (TimesFM-3); 9 native quantiles, native multivariate + covariates over this wire", vec![Timesfm3Resident::spec()])
 }
 

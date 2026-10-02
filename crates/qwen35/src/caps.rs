@@ -64,7 +64,7 @@ pub const MODEL: &str = "brain/qwen35";
 /// `pub`, not `pub(crate)`: every entry point into this model's chat parsing
 /// must apply this exactly once before calling `qwen3::chat::parse_request`.
 /// `int8_gguf_resident.rs` does (same crate), and so must
-/// `crates/cli/src/resident_qwen35.rs` (the plain fp32 paged HTTP/D-Bus
+/// `crates/catalog/src/resident_qwen35.rs` (the plain fp32 paged HTTP/D-Bus
 /// resident, a different crate), which used to call `parse_request` directly
 /// and silently render the Qwen3-era template instead of this model's own.
 pub fn with_template_flavor_default(inv: &Invocation) -> Invocation {

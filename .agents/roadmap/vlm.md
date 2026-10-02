@@ -139,7 +139,7 @@ blocker; the pieces a `caps.rs` would have to call did not exist.
       drift. The old "blocked on a JPEG/PNG decoder" note was stale.
 - [x] **The serving contract.** `moondream3::caps` (one streaming `caption`
       action with real `prompt_tokens`/`completion_tokens`/`finish_reason`),
-      `crates/cli/src/resident_moondream3.rs`, a `catalog.rs` entry (so
+      `crates/catalog/src/resident_moondream3.rs`, a `catalog.rs` entry (so
       `brain caps`, `brain moondream3 caption`, D-Bus and the HTTP surfaces all
       light up at once), and `examples/vision/moondream3_caption.py`. The
       `crates/arch` row gained `default_ref` and `weights_env`.
@@ -614,7 +614,7 @@ a real checkpoint, and stop there rather than guess. Landed:
 DIFFERENT class from dense `qwen3vl`'s `Qwen3VLForConditionalGeneration`, so
 the two were never going to resolve to the same importer even before this
 row existed), `crates/qwen3vlmoe::import::GGUF_ARCHITECTURE` +
-`crates/cli/src/gguf_import.rs`'s `Qwen3VlMoeImporter` (the `SupirImporter`
+`crates/serving/src/gguf_import.rs`'s `Qwen3VlMoeImporter` (the `SupirImporter`
 pattern - registered so a real file auto-dispatches the day one exists, `Err`
 otherwise), and `crates/qwen3vlmoe::{config, model}` - a config type and a
 composite `Qwen3VlMoe` struct proven to compose (vision tower -> merger ->
@@ -705,7 +705,7 @@ methods: `load_on(dir, max_pixels, precision, gpu: Option<u32>)` - a scoped
 `gpu_core::devices::with_gpu` placement, never an env write, matching every
 other server-lifetime resident in this repo - and `generate(inv, progress)`,
 which is the body `GenerateAction::run` used to hold directly. The direct
-provider's static-mutex path and `crates/cli/src/resident_qwen3vl.rs`'s
+provider's static-mutex path and `crates/catalog/src/resident_qwen3vl.rs`'s
 scheduled instance now run the exact same `generate` code; nothing about
 preprocessing, prompt assembly or token accounting exists twice.
 `Qwen::new_shard_dt_decode` (which `Qwen3Vl::new` calls) already documented
@@ -732,7 +732,7 @@ assumed.** `Manager::run`/`subscribe` in `crates/dbus/src/service.rs` are
 already fully model-agnostic - they take a `model: String` and dispatch
 through `self.executor.submit(Job::new(model, action, inv)...)`, with no
 per-model branch. Registering `Qwen3VlResident` in
-`crates/cli/src/catalog.rs`'s `resident_ctor_for` (which `resident.rs::
+`crates/catalog/src/lib.rs`'s `resident_ctor_for` (which `resident.rs::
 build_executor` folds into `Executor::start` via `catalog::residents()`) was
 the entire D-Bus wiring.
 

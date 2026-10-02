@@ -75,7 +75,7 @@
 //! `--limit-vram-total` for one card should either raise it or set
 //! `BRAIN_LTXV_CFG_PARALLEL=0`.
 //!
-//! `crates/cli/src/resident_ltxv.rs` already declines `Auto` for the case it
+//! `crates/catalog/src/resident_ltxv.rs` already declines `Auto` for the case it
 //! CAN see: a batch of several concurrent generations gives each request one
 //! card and `Single`, because two requests both reaching for both cards is a
 //! collision this crate does know about.

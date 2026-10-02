@@ -2025,8 +2025,8 @@ async fn no_supplier_configured_is_a_plain_404_unchanged() {
 /// `reasoning_content`, so a test can assert what actually reached the
 /// invocation without a second introspection channel) and streams a scripted
 /// `reasoning` event plus TWO parallel tool calls, through the exact neutral
-/// `Progress::event` `{"kind":...}` shapes `crates/cli/src/resident_llm.rs`'s
-/// `emit_chat_events` / `crates/cli/src/resident_mock.rs`'s `generate_tool_call`
+/// `Progress::event` `{"kind":...}` shapes `crates/catalog/src/resident_llm.rs`'s
+/// `emit_chat_events` / `crates/catalog/src/resident_mock.rs`'s `generate_tool_call`
 /// use — so `crates/apiserve`'s handling is exercised against a model that isn't
 /// `resident_mock` itself, while staying byte-for-byte faithful to what a real
 /// model's `ChatScanner` actually emits.
@@ -2656,7 +2656,7 @@ async fn a_model_that_does_stream_deltas_gets_no_synthetic_duplicate_chunk() {
 
 /// A chat model that echoes a DESCRIPTOR of the multimodal blobs that reached
 /// its invocation into its reply text - byte-for-byte the format
-/// `crates/cli/src/resident_mock.rs::media_suffix` uses (`" [image:{w}x{h}]"`,
+/// `crates/catalog/src/resident_mock.rs::media_suffix` uses (`" [image:{w}x{h}]"`,
 /// `" [audio:{n}samples@16k]"`), so the HTTP surfaces are exercised against the
 /// same observable a `BRAIN_MOCK=1 brain serve` exposes.
 ///

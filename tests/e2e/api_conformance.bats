@@ -275,7 +275,7 @@ get_url() {
 # --------------------------------------------------------- chat: tool calling
 
 # End-to-end over a real socket: the mock model's `__MOCK_TOOL_CALL__` trigger
-# (crates/cli/src/resident_mock.rs::TOOL_CALL_TRIGGER) drives the full
+# (crates/catalog/src/resident_mock.rs::TOOL_CALL_TRIGGER) drives the full
 # apiserve wiring (crates/apiserve/src/openai.rs) with no real weights/GPU.
 @test "openai chat tool-calling: mock trigger emits tool_calls, content null, arguments parse" {
   post_json openai /v1/chat/completions \

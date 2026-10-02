@@ -85,13 +85,13 @@ Implement `capability::Action` for each action and advertise them in a
     that list.
 
 ### 2. Residency — be scheduled, budgeted, swappable
-Add a `residency::ResidentModel` adapter under `crates/cli/src/resident_*.rs` and
-register it in `resident::build_executor` (env-gated, `from_env` → `None` when its
+Add a `residency::ResidentModel` adapter under `crates/catalog/src/resident_*.rs` and
+register it in `serving::build_executor` (env-gated, `from_env` → `None` when its
 weights var is unset). `activate` **builds the model once** (weights uploaded once)
 and the `Instance` owns it so dropping frees the memory; `estimate` reports the Hot
 footprint the manager budgets against.
 - Reference: `crates/residency/src/{model,executor}.rs`; ASR:
-  `crates/cli/src/resident_asr.rs`; the pattern to copy: `resident.rs` (yolo/z-image).
+  `crates/catalog/src/resident_asr.rs`; the pattern to copy: `resident.rs` (yolo/z-image).
 
 ### 3. Batching — a real batched forward where the architecture allows
 Override `Instance::run_batch`. When the model has a batchable forward (a shared

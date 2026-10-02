@@ -164,7 +164,7 @@ this port:
       precedence over generic capability dispatch, the same routing `wan`
       uses - confirmed with `brain caps brain/ltxv`, which lists the manifest
       correctly without a `catalog.rs` entry) and wired into
-      `resident.rs::build_executor` (env-gated on `BRAIN_LTXV_VAE`). Verified
+      `serving::build_executor` (env-gated on `BRAIN_LTXV_VAE`). Verified
       end to end: `brain ltxv t2v --prompt "a cat walking on a beach" --frames
       9 --width 64 --height 64 --steps 4 --seed 42 --device cpu` against the
       real `ltx-2.5-video-vae-conv-bf16.safetensors` produced a real, playable
@@ -1135,7 +1135,7 @@ this port:
       existence checks, `TargetInfo` with params/quant/config axes
       (frames/width/height/steps/dit_config/engine), `ExecutorTarget::
       new_streaming` over the pre-existing `LtxvResident`
-      (`crates/cli/src/resident_ltxv.rs`) and `ltxv::caps`. Defaults to
+      (`crates/catalog/src/resident_ltxv.rs`) and `ltxv::caps`. Defaults to
       `dit_config="tiny"` (fast, random weights) unless `BRAIN_LTXV_DIT` is
       set (then `"ltx25_22b"`) - deliberate given the ~186 s/step
       real-config cost measured above, documented in the target's own doc
@@ -2095,7 +2095,7 @@ correct scope is the CHECKPOINT and the correct lifetime is however long a
 memory ceiling allows - which is what this phase implements.
 
 **The change** (`crates/ltxv/src/weightcache.rs`, new; `crates/ltxv/src/
-block.rs`, `dit.rs`, `pipeline.rs`; `crates/cli/src/resident_ltxv.rs`):
+block.rs`, `dit.rs`, `pipeline.rs`; `crates/catalog/src/resident_ltxv.rs`):
 
 * **Keyed on checkpoint identity**, not on a generation: path + byte length +
   mtime, which is exactly the identity `ltxv::text_cache::Key` already carries
@@ -2205,7 +2205,7 @@ end to end with real weights before, so the harness is new and permanent
     BRAIN_LTXV_VAE=<ltx-2.5-video-vae-conv-bf16.safetensors> \
     BRAIN_LTXV_DIT=<ltx-2.5-22b-distilled-transformer-Q8_0.gguf> \
     BRAIN_LTXV_TEXT_ENCODER=<gemma4-12b-with-proj-ltx-2.5-Q8_0.gguf> \
-      cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+      cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
       two_real_generations_share
 
 Two generations, DIFFERENT prompts, 9 frames at 64x64, 8 distilled-schedule
@@ -2480,7 +2480,7 @@ forwards is exactly the shape two cards want, and it needs no weight sharding
 whatsoever.
 
 **The change** (`crates/ltxv/src/devplan.rs`, new; `pipeline.rs`; `caps.rs`;
-`crates/cli/src/resident_ltxv.rs`):
+`crates/catalog/src/resident_ltxv.rs`):
 
 * **`DevicePlan`** names three placements - `text`, `cond`, `uncond` - and
   resolves against `gpu_core::devices::ambient_compute_set()`, the same
@@ -2621,7 +2621,7 @@ the_cards`, `#[ignore]`d), four different prompts, 9 frames at 64x64,
 `guidance = 1.0`, two Tesla P40s, warm cache on every timed arm:
 
     BRAIN_LTXV_VAE=<...> BRAIN_LTXV_DIT=<real Q8_0 22B> \
-      cargo test --release -p brain-cli --bins -- --ignored --nocapture \
+      cargo test --release -p brain-catalog --lib -- --ignored --nocapture \
       concurrent_generations_share
 
 | | wall | vs serial | throughput | gpu0 busy | **gpu1 busy** | both at once | peak MiB gpu0/gpu1 |

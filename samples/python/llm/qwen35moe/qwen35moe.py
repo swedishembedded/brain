@@ -7,7 +7,7 @@
 **Scope, honestly**: text in/out only - no audio/image/video splice (that is
 `samples/python/qwen3omnimoe/omni/omni.py`'s territory, a different model). Single-GPU,
 single-active-sequence serving: `crate::resident_qwen35moe::Qwen35Resident`
-(`crates/cli/src/resident_qwen35moe.rs`) is fp32 weights + fp32 KV, one
+(`crates/catalog/src/resident_qwen35moe.rs`) is fp32 weights + fp32 KV, one
 sequence truly decoding on the GPU at a time (several may be RESIDENT and
 interleaved by the scheduler, never batched into one GPU dispatch) - see
 that module's own doc for the complete list of current gaps

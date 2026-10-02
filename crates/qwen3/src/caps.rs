@@ -607,7 +607,7 @@ fn with_resolved_defaults(inv: &Invocation, default_weights: &Option<String>, de
 }
 
 /// The `lora_train` action body, exposed the way `flux2::caps::train_action`
-/// is: a residency adapter (`crates/cli/src/resident_*.rs`) runs the same
+/// is: a residency adapter (`crates/catalog/src/resident_*.rs`) runs the same
 /// code the in-process provider does, so a served run and a `brain do` run
 /// cannot train differently.
 ///

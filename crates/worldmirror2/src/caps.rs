@@ -35,7 +35,7 @@
 //! ~5GB `ParamStore` resident across a shape change. So `Session` needs no
 //! shape bookkeeping of its own - reusing one `Mirror` instance across an
 //! arbitrary sequence of request shapes is exactly what its own `forward`
-//! already does, which is also why `crates/cli/src/resident_worldmirror2.rs`
+//! already does, which is also why `crates/catalog/src/resident_worldmirror2.rs`
 //! can serve every shape from ONE resident instance keyed on the checkpoint
 //! alone (see that module's doc for the full argument, and its one caveat:
 //! only one shape's buffers are cached at a time).

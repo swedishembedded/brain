@@ -183,7 +183,7 @@ for why.
       cross-cutting exception) that pulls in every other resolver-backed
       surface as a hard prerequisite.
 - [ ] CLI migration onto the SDK: `crates/cli/src/flux2_cli.rs` and
-      `s3dit::caps::ZAction`/`crates/cli/src/resident.rs` each still
+      `s3dit::caps::ZAction`/`crates/serving/src/executor.rs` each still
       construct their own `flux2::Pipeline`/`s3dit::pipeline::HotPipeline`
       inline, independently of `crates/sdk` -- the CLI does not call
       `brain::ImagePipeline` at all, so the resolve/build logic genuinely

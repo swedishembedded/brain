@@ -3,7 +3,7 @@
 GLM-5.2 text generation, D-Bus only. `glmdsa.py` talks to GLM-5.2's MLA +
 sigmoid `noaux_tc` MoE decoder over D-Bus. Decoding is
 `glmdsa::sample::generate_kv` end to end - the served path
-(`crates/cli/src/resident_llm.rs::GlmResident`) and the direct `brain glmdsa
+(`crates/catalog/src/resident_llm.rs::GlmResident`) and the direct `brain glmdsa
 generate` path (`crates/glmdsa/src/caps.rs`) sample identically.
 
 ```bash

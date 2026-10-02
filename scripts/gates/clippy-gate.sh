@@ -76,8 +76,7 @@ cd "$ROOT"
 # every one of the 33 new warnings' file:line was checked against this
 # session's own edits (crates/omni/src/{caps,int8_resident,
 # int8_thinker_resident}.rs, crates/data/src/chat_template.rs,
-# crates/paramstore/src/lib.rs, crates/cli/src/{resident_omni,resident,
-# omni_cli}.rs, crates/backend-wgpu/src/lib.rs, and the omni/qwen35moe test
+# crates/paramstore/src/lib.rs, crates/cli/src/# omni_cli.rs, crates/catalog/src/{resident_omni,resident}.rs, crates/backend-wgpu/src/lib.rs, and the omni/qwen35moe test
 # files this pass's merge-conflict resolution touched) -- zero land on a line
 # this session added or changed; the two files this session DID touch that
 # still show warnings (qwen35moe/import.rs:336-337,585 and
@@ -88,7 +87,7 @@ cd "$ROOT"
 # separate, concurrent line of work rewritten upstream): the new tip carries
 # 3 pre-existing warnings this repo's own history didn't have at 259
 # (crates/model/tests/router_gate_expert_cap.rs, crates/cli/src/npu_cli.rs,
-# crates/cli/src/resident_asr.rs) -- confirmed byte-identical to `origin/main`
+# crates/catalog/src/resident_asr.rs) -- confirmed byte-identical to `origin/main`
 # itself (same content, same lints, untouched by this session), not
 # attributable to anything reconstructed here.
 #
@@ -108,11 +107,10 @@ cd "$ROOT"
 # own tip, BEFORE any of that session's uncommitted changes) independently
 # ran this gate and reported 294, with warnings in files that session never
 # touched (`crates/qwen3omnimoe/src/mm.rs`, `crates/cli/src/resident_
-# forecast.rs`, `crates/npu/src/topo.rs`, `crates/cli/src/{forecast_cli,
-# npu_cli,resident_asr,resident_scrfd,resident_arcface}.rs`) -- pre-existing
+# forecast.rs`, `crates/npu/src/topo.rs`, `crates/cli/src/{forecast_cli,# npu_cli}.rs, crates/catalog/src/{resident_asr,resident_scrfd,resident_arcface}.rs`) -- pre-existing
 # drift already on this branch's own last commit, not introduced by that
 # session. The session's working tree showed 295 (294 + exactly one new
-# warning, `crates/cli/src/imageops.rs`'s `draw_boxes` action it added),
+# warning, `crates/catalog/src/imageops.rs`'s `draw_boxes` action it added),
 # which it fixed directly rather than folding into this baseline bump.
 #
 # Lowered 294 -> 292: a later session's real-bug sweep fixed two more
@@ -131,7 +129,7 @@ cd "$ROOT"
 #
 # Lowered 285 -> 283: the two `never used` warnings on
 # `crates/cli/src/continuous_train.rs::hot_swap_cycle` and the
-# `crates/cli/src/resident_llm.rs::set_adapter` that it is the sole caller
+# `crates/catalog/src/resident_llm.rs::set_adapter` that it is the sole caller
 # of. Kept, not deleted - it is deliberate scaffolding whose consumer (a
 # hot-swap loop driven from `brain serve`'s startup path) is not written yet,
 # so it carries one `#[allow(dead_code)]` stating that. One annotation clears

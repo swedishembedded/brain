@@ -5,7 +5,7 @@
 //! derived from the checkpoint's OWN [`MoondreamConfig`] rather than a
 //! constant hand-derived once for the released preview config.
 //!
-//! `crates/cli/src/resident_moondream3.rs::Moondream3Resident::estimate`
+//! `crates/catalog/src/resident_moondream3.rs::Moondream3Resident::estimate`
 //! needs "how many device bytes will this build occupy" before a `Gpu` is
 //! built, to budget a device through `residency::place::pick_device`. Before
 //! this module existed that number was a flat constant - safe in practice

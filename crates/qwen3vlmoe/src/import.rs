@@ -4,7 +4,7 @@
 //! GGUF architecture recognition for `qwen3vlmoe`.
 //!
 //! [`GGUF_ARCHITECTURE`] registers the name so `brain import-gguf` (and
-//! `crates/cli/src/gguf_import.rs`'s registry) can *identify* a
+//! `crates/serving/src/gguf_import.rs`'s registry) can *identify* a
 //! `Qwen3-VL-30B-A3B` GGUF the moment one exists, rather than routing it to
 //! the dense `qwen3vl` importer by name-prefix confusion (the exact defect
 //! `brain_arch::by_hf`'s exact-match design exists to rule out - see that

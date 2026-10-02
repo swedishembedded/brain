@@ -108,7 +108,7 @@
 //! **The CPU pin this confirmation was chasing is now LIFTED.**
 //! `crates/deepseek2ocr::caps::Session::load` builds the vision encoder
 //! (SAM + CLIP + glue) on `gpu_core::Gpu::new_wgpu` and only the decoder on
-//! `gpu_core::Gpu::new_cpu`, and `crates/cli/src/resident_deepseekocr.rs`
+//! `gpu_core::Gpu::new_cpu`, and `crates/catalog/src/resident_deepseekocr.rs`
 //! declares the resulting two-device footprint to the scheduler
 //! (`residency::multi::MultiDeviceCost`) instead of the RAM-only cost it used
 //! to report. This test remains the record of WHY that was safe to do.

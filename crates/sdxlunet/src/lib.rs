@@ -33,7 +33,7 @@
 //!
 //! Backward and `check_unet` are done (`train`). The serving contract (a
 //! `capability::Provider`, a residency adapter, D-Bus, an example) is met -
-//! see [`caps`] and `crates/cli/src/resident_sdxl.rs`.
+//! see [`caps`] and `crates/catalog/src/resident_sdxl.rs`.
 
 pub mod caps;
 pub mod config;

@@ -283,11 +283,11 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       documents; optional LLaVA auto-captioning dispatched through a
       `capability::Registry` supplied by the caller - `crates/supir` links no
       VLM - mirroring `crates/imgpipe`'s own "registry supplied by the
-      caller" precedent). `crates/cli/src/resident_supir.rs` (the residency
+      caller" precedent). `crates/catalog/src/resident_supir.rs` (the residency
       adapter; `run_batch` serial, stated in-file for the same reason
       `resident_sdxl.rs`/`resident_controlnet.rs` give: every request is its
       own multi-step sample) plus the `crates/catalog` `ModelEntry` and the
-      `crates/cli/src/catalog.rs` patch line, all invariant-tested by that
+      `crates/catalog/src/lib.rs` patch line, all invariant-tested by that
       file's own suite (`every_listed_model_is_constructible_by_name`,
       `every_patched_id_is_a_real_catalog_entry`). One `ARCH_TO_MODEL` row
       (`brain supir restore ...`) - `sdxlunet`/`controlnet` themselves ship
@@ -297,7 +297,7 @@ distinguish "weights present" from "commercial-use cleared" at runtime.
       borrowed spelling - the frozen backbone genuinely is byte-identical
       SDXL, the same reasoning `s3dit` used for `"lumina2"`) registered as a
       SECOND documented ambiguous-tag exception in
-      `crates/cli/src/gguf_import.rs`'s own test, alongside a stub
+      `crates/serving/src/gguf_import.rs`'s own test, alongside a stub
       `import_gguf` that states plainly no real file has ever been observed
       rather than guessing a tensor mapping against one. D-Bus `Run` needed
       no new code (it dispatches generically over the residency `Executor`

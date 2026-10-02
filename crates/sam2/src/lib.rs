@@ -20,7 +20,7 @@
 //! forms so the decoder can be replayed exactly.
 //!
 //! The serving contract is met by [`caps`] (the `segment`
-//! `capability::Provider`), `crates/cli/src/resident_sam2.rs` (the residency
+//! `capability::Provider`), `crates/catalog/src/resident_sam2.rs` (the residency
 //! adapter, `BRAIN_SAM2_WEIGHTS`, with a genuine per-image `run_batch`) and
 //! `samples/python/vision/`.
 //!
