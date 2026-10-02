@@ -14,6 +14,7 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 
+use crate::auth::CallerExt;
 use crate::openai;
 use crate::state::AppState;
 
@@ -30,18 +31,21 @@ pub fn routes() -> Router<AppState> {
 
 /// `POST /chat/completions` — the OpenAI chat handler with OpenRouter's response
 /// extras (`native_finish_reason`, `system_fingerprint`).
-async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
+async fn chat_completions(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     openai::handle_chat(state, body, true).await
 }
 
 /// `POST /embeddings` — the shared OpenAI embeddings handler (OpenRouter uses the
 /// identical `CreateEmbeddingRequest`/`CreateEmbeddingResponse` grammar).
-async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
+async fn embeddings(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     openai::handle_embeddings(state, body).await
 }
 
 /// `POST /images/generations` — the shared OpenAI image handler (OpenRouter uses the
 /// identical `CreateImageRequest`/`ImagesResponse` grammar).
-async fn images_generations(State(state): State<AppState>, body: Bytes) -> Response {
+async fn images_generations(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     openai::handle_images(state, body).await
 }

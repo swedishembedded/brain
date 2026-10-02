@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use uuid::Uuid;
 
+use crate::auth::CallerExt;
 use crate::bridge::{self, StreamMsg};
 use crate::catalog;
 use crate::error::ApiError;
@@ -36,7 +37,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `POST /v1/messages` — real chat (non-stream + SSE) on the Anthropic dialect.
-async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
+async fn messages(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     let body: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(PROVIDER, format!("invalid JSON body: {e}")).into_response(),
@@ -308,8 +310,10 @@ async fn stream_messages(state: AppState, model: String, inv: Invocation, est_in
 /// events — see [`bridge::stream_with_autofetch`]. Never called for a model
 /// that's already resident or classifies `Unknown`/has no supplier.
 fn stream_messages_with_autofetch(state: AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: String, inv: Invocation, est_input: i64) -> Response {
-    let src = bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false);
-    render_messages_stream(src, model, est_input)
+    match bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false) {
+        Ok(src) => render_messages_stream(src, model, est_input),
+        Err(e) => e.into_response(),
+    }
 }
 
 fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input: i64) -> Response {

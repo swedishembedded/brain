@@ -16,7 +16,10 @@
 //! Layering (kept thin — no model code here, only `residency`/`capability`):
 //! - [`surface`] — one `(provider, addr, key)` binding + key generation/exposure.
 //! - [`state`] — the shared handler state (executor, key, provider, job registry).
-//! - [`auth`] — the key-enforcing middleware (Anthropic `x-api-key`, others `Bearer`).
+//! - [`auth`] - who is calling: the [`Authenticator`] seam, its static-key default
+//!   (Anthropic `x-api-key`, others `Bearer`), and the middleware that applies it.
+//! - [`hooks`] - the [`RequestHooks`] seam: a say in whether a call runs, and a
+//!   record of what it cost, settled exactly once.
 //! - [`error`] — provider-shaped error bodies.
 //! - [`catalog`] — deriving API capabilities from a manifest; the `/models` filter.
 //! - [`models`] — the `/models` catalog handlers.
@@ -36,6 +39,7 @@ pub mod b64;
 pub mod bridge;
 pub mod catalog;
 pub mod error;
+pub mod hooks;
 pub mod media;
 pub mod models;
 pub mod openai;
@@ -55,8 +59,10 @@ use tower::{BoxError, ServiceBuilder};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+pub use auth::{Authenticator, CallerExt, Principal, StaticKey};
 pub use catalog::{api_caps, CapSet};
 pub use error::{ApiError, Kind};
+pub use hooks::{Call, CallResult, RequestHooks, Ticket};
 pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
@@ -107,7 +113,7 @@ pub fn router(state: AppState) -> Router {
         .fallback(fallback)
         // Auth wraps everything (incl. the fallback): an unauthenticated caller
         // never learns which routes exist.
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_key))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::authenticate))
         // Bound the request body BEFORE it is buffered by any handler's `Bytes`
         // extractor: a body over `MAX_BODY_BYTES` is a 413, not an OOM.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use residency::Supply;
 
+use crate::auth::CallerExt;
 use crate::bridge::{self, StreamMsg};
 use crate::catalog;
 use crate::error::ApiError;
@@ -43,25 +44,29 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `POST /chat/completions` — real chat (non-stream + SSE) on the OpenAI dialect.
-async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
+async fn chat_completions(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     handle_chat(state, body, false).await
 }
 
 /// `POST /completions` — a raw-prompt completion (no chat template); `suffix`
 /// makes it fill-in-the-middle on a model whose vocabulary has the FIM tokens.
-async fn completions(State(state): State<AppState>, body: Bytes) -> Response {
+async fn completions(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     handle_generate(state, body, TextSurface::Completion).await
 }
 
 /// `POST /v1/embeddings` — real embeddings on the OpenAI dialect (shared with
 /// OpenRouter via [`handle_embeddings`]).
-async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
+async fn embeddings(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     handle_embeddings(state, body).await
 }
 
 /// `POST /v1/images/generations` — real image generation (non-stream + SSE),
 /// shared with OpenRouter via [`handle_images`].
-async fn images_generations(State(state): State<AppState>, body: Bytes) -> Response {
+async fn images_generations(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
+    let state = state.scoped(caller);
     handle_images(state, body).await
 }
 
@@ -330,8 +335,10 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
         // its `suffix` support is checked by the model itself.
         None if stream => match state.supplier.clone() {
             Some(supplier) if matches!(supplier.classify(&requested), Supply::Fetchable) => {
-                let src = bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, false);
-                surface.render_stream(src, requested, want_usage())
+                match bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, false) {
+                    Ok(src) => surface.render_stream(src, requested, want_usage()),
+                    Err(e) => e.into_response(),
+                }
             }
             _ => ApiError::model_not_found(provider, &requested).into_response(),
         },

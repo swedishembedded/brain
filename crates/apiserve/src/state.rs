@@ -18,6 +18,8 @@ use capability::CancelToken;
 use residency::{Executor, ModelSupplier};
 use uuid::Uuid;
 
+use crate::auth::{Authenticator, CallerExt, Principal, StaticKey};
+use crate::hooks::RequestHooks;
 use crate::surface::Provider;
 
 /// Default admission deadline — see `residency::admission`'s doc (shared with
@@ -34,7 +36,14 @@ pub type JobRegistry = residency::jobs::JobRegistry<Uuid>;
 pub struct AppState {
     pub exec: Executor,
     pub jobs: JobRegistry,
-    pub key: String,
+    /// Who may call this surface. [`StaticKey`] unless an embedder replaced it.
+    pub authenticator: Arc<dyn Authenticator>,
+    /// What the embedder wants a say in on every call; `None` for a surface
+    /// that serves everything it is asked.
+    pub hooks: Option<Arc<dyn RequestHooks>>,
+    /// Who the request being handled is from. Set per request by
+    /// [`AppState::scoped`]; `None` on the router's own copy.
+    pub caller: Option<Principal>,
     pub provider: Provider,
     /// Bounded wait for a request to be ADMITTED (work started on a lane) before it
     /// is shed with a 429. Overridable so tests can use a short deadline.
@@ -57,12 +66,35 @@ impl AppState {
         AppState {
             exec,
             jobs: JobRegistry::new(),
-            key: key.into(),
+            authenticator: Arc::new(StaticKey::new(key)),
+            hooks: None,
+            caller: None,
             provider,
             admit_deadline: DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
             supplier: None,
         }
+    }
+
+    /// Replace the surface's static key with the embedder's own way of telling
+    /// callers apart (builder-style).
+    pub fn with_authenticator(mut self, authenticator: Arc<dyn Authenticator>) -> AppState {
+        self.authenticator = authenticator;
+        self
+    }
+
+    /// Give the embedder a say in every call, and a record of its cost
+    /// (builder-style).
+    pub fn with_hooks(mut self, hooks: Arc<dyn RequestHooks>) -> AppState {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    /// This state as one request sees it: the same shared parts, plus who the
+    /// authentication middleware let in. Cheap -- every field is an `Arc` or a
+    /// small value.
+    pub fn scoped(&self, caller: CallerExt) -> AppState {
+        AppState { caller: caller.map(|axum::Extension(principal)| principal), ..self.clone() }
     }
 
     /// Override the admission deadline (builder-style). Used by tests to force fast

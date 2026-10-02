@@ -23,6 +23,17 @@ use crate::surface::Provider;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Unauthorized,
+    /// The caller is known but may not do this -- HTTP 403.
+    Forbidden,
+    /// The caller cannot pay for this call -- HTTP 402. Not retryable: asking
+    /// again changes nothing until the balance does.
+    PaymentRequired,
+    /// The caller is over a limit of its own, as opposed to the server being
+    /// over capacity ([`Kind::Overloaded`]) -- HTTP 429, carries a `Retry-After`.
+    RateLimited,
+    /// A fault on this side that is not the caller's doing and not a capacity
+    /// shed -- HTTP 500.
+    Internal,
     NotFound,
     ModelNotFound,
     InvalidRequest,
@@ -47,6 +58,10 @@ impl Kind {
     pub fn status(&self) -> StatusCode {
         match self {
             Kind::Unauthorized => StatusCode::UNAUTHORIZED,
+            Kind::Forbidden => StatusCode::FORBIDDEN,
+            Kind::PaymentRequired => StatusCode::PAYMENT_REQUIRED,
+            Kind::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Kind::NotFound | Kind::ModelNotFound => StatusCode::NOT_FOUND,
             Kind::InvalidRequest | Kind::ContextLengthExceeded => StatusCode::BAD_REQUEST,
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
@@ -56,12 +71,16 @@ impl Kind {
     }
     /// `true` when the client should back off and retry — surfaced as `Retry-After`.
     fn retryable(&self) -> bool {
-        matches!(self, Kind::Overloaded | Kind::Saturated)
+        matches!(self, Kind::Overloaded | Kind::Saturated | Kind::RateLimited)
     }
     /// Anthropic's `error.type` value (one of its discriminated error variants).
     fn anthropic_type(&self) -> &'static str {
         match self {
             Kind::Unauthorized => "authentication_error",
+            Kind::Forbidden => "permission_error",
+            Kind::PaymentRequired => "billing_error",
+            Kind::RateLimited => "rate_limit_error",
+            Kind::Internal => "api_error",
             Kind::NotFound | Kind::ModelNotFound => "not_found_error",
             // Anthropic's error taxonomy has no distinct "context length"
             // type; it folds into invalid_request_error same as OpenAI's
@@ -76,6 +95,10 @@ impl Kind {
     fn openai_type(&self) -> &'static str {
         match self {
             Kind::Unauthorized => "authentication_error",
+            Kind::Forbidden => "permission_error",
+            Kind::PaymentRequired => "insufficient_quota",
+            Kind::RateLimited => "rate_limit_exceeded",
+            Kind::Internal => "server_error",
             Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest | Kind::ContextLengthExceeded => {
                 "invalid_request_error"
             }
@@ -88,6 +111,10 @@ impl Kind {
     fn openai_code(&self) -> &'static str {
         match self {
             Kind::Unauthorized => "invalid_api_key",
+            Kind::Forbidden => "forbidden",
+            Kind::PaymentRequired => "insufficient_quota",
+            Kind::RateLimited => "rate_limit_exceeded",
+            Kind::Internal => "server_error",
             Kind::NotFound => "not_found",
             Kind::ModelNotFound => "model_not_found",
             Kind::InvalidRequest => "invalid_request",
@@ -114,6 +141,18 @@ impl ApiError {
     }
     pub fn unauthorized(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::Unauthorized, message)
+    }
+    pub fn forbidden(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::Forbidden, message)
+    }
+    pub fn payment_required(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::PaymentRequired, message)
+    }
+    pub fn rate_limited(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::RateLimited, message)
+    }
+    pub fn internal(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::Internal, message)
     }
     pub fn not_found(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::NotFound, message)

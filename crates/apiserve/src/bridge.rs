@@ -25,8 +25,44 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::hooks::{Call, CallResult, Ticket};
 use crate::state::{AppState, JobRegistry};
 use crate::surface::Provider;
+
+/// A call that has begun (the embedder's [`RequestHooks`](crate::RequestHooks) let
+/// it run) and not yet been settled.
+///
+/// Settling consumes it, and dropping it unsettled settles it as
+/// [`CallResult::Refused`], so every path out of a call -- a reply, a failure, a
+/// job that was cancelled before it ran and whose reply closure was dropped
+/// unfired -- reaches the embedder exactly once. Without hooks it holds nothing.
+struct Pending(Option<Box<dyn Ticket>>);
+
+impl Pending {
+    /// Asks the hooks whether this call may run.
+    fn begin(state: &AppState, model: &str, action: &str, invocation: &Invocation) -> Result<Pending, ApiError> {
+        match &state.hooks {
+            None => Ok(Pending(None)),
+            Some(hooks) => hooks.begin(&Call { provider: state.provider, caller: state.caller.as_ref(), model, action, invocation }).map(|ticket| Pending(Some(ticket))),
+        }
+    }
+
+    /// Settles the call. An error means the settlement could not be recorded.
+    fn settle(mut self, result: CallResult<'_>) -> Result<(), ApiError> {
+        match self.0.take() {
+            Some(ticket) => ticket.finish(result),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.0.take() {
+            let _ = ticket.finish(CallResult::Refused);
+        }
+    }
+}
 
 /// Auto-fetch entry point: `model` didn't resolve against `resolve` (the caller's
 /// `catalog::resolve_*` predicate, already tried once). If `state.supplier` can
@@ -220,6 +256,8 @@ async fn wait_for_admission(
 /// wait-to-start is deadlined.
 pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
     let provider = state.provider;
+    // Before anything is registered or queued: a refused call costs nothing.
+    let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
     inv.cancel = token.clone();
@@ -238,6 +276,7 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     if !wait_for_admission(&state.exec, state.admit_deadline, state.cold_build_admit_deadline, model, &mut admit_rx).await {
         token.cancel();
         state.finish(&id);
+        let _ = pending.settle(CallResult::Refused);
         return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
     }
 
@@ -247,10 +286,17 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     match res {
         Ok(Ok(outcome)) => {
             log_request_tokens(&state.exec, model, &outcome);
+            pending.settle(CallResult::Done(&outcome))?;
             Ok(outcome)
         }
-        Ok(Err(e)) => Err(map_reply_err(provider, model, &e)),
-        Err(_) => Err(ApiError::overloaded(provider, "executor dropped the reply")),
+        Ok(Err(e)) => {
+            let _ = pending.settle(CallResult::Failed(&e));
+            Err(map_reply_err(provider, model, &e))
+        }
+        Err(_) => {
+            let _ = pending.settle(CallResult::Failed("executor dropped the reply"));
+            Err(ApiError::overloaded(provider, "executor dropped the reply"))
+        }
     }
 }
 
@@ -393,6 +439,7 @@ pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: I
 /// (image denoise) or is dropped (chat, which streams only token deltas).
 async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
+    let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream)"));
     let model_owned = model.to_string();
     let (id, token) = state.register();
@@ -418,9 +465,17 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
             let msg = match r {
                 Ok(outcome) => {
                     log_request_tokens(&exec_for_log, &model_owned, &outcome);
-                    StreamMsg::Done(outcome)
+                    // Settled here, on the job's own reply, so it happens once
+                    // whether or not the client is still reading.
+                    match pending.settle(CallResult::Done(&outcome)) {
+                        Ok(()) => StreamMsg::Done(outcome),
+                        Err(refusal) => StreamMsg::Err(refusal),
+                    }
                 }
-                Err(e) => StreamMsg::Err(map_reply_err(provider, &model_owned, &e)),
+                Err(e) => {
+                    let _ = pending.settle(CallResult::Failed(&e));
+                    StreamMsg::Err(map_reply_err(provider, &model_owned, &e))
+                }
             };
             let _ = tx.send(msg);
         });
@@ -453,8 +508,11 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 /// A 429 (admission failed after the fetch completed) becomes a terminal
 /// [`StreamMsg::Err`] here, not an HTTP 429 status — the SSE body's headers
 /// are already committed by the time admission is even attempted.
-pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, inv: Invocation, forward_steps: bool) -> EventStream {
+pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
+    // Before the download starts: a caller who may not run the call must not be
+    // able to make this server fetch a model first.
+    let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream, not yet resident -- auto-fetching)"));
     let (id, token) = state.register();
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
@@ -527,9 +585,15 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
                 let msg = match r {
                     Ok(outcome) => {
                         log_request_tokens(&exec_for_log, &model_owned, &outcome);
-                        StreamMsg::Done(outcome)
+                        match pending.settle(CallResult::Done(&outcome)) {
+                            Ok(()) => StreamMsg::Done(outcome),
+                            Err(refusal) => StreamMsg::Err(refusal),
+                        }
                     }
-                    Err(e) => StreamMsg::Err(map_reply_err(provider, &model_owned, &e)),
+                    Err(e) => {
+                        let _ = pending.settle(CallResult::Failed(&e));
+                        StreamMsg::Err(map_reply_err(provider, &model_owned, &e))
+                    }
                 };
                 let _ = tx_reply.send(msg);
             });
@@ -542,7 +606,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         }
     });
 
-    EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id } }
+    Ok(EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id } })
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────

@@ -121,6 +121,28 @@ architecture, variant_of, capabilities, context_length, param_count, license, â€
 cards are synthesized from the file's own key/value store. The card drives `/models`
 and capability filtering.
 
+## Embedding the surfaces in an application
+
+`brain serve` gives every surface one static key and serves everything it is
+asked. An application that links the `apiserve` crate can replace both, with two
+traits on `AppState`:
+
+- `Authenticator` (`AppState::with_authenticator`) decides who a request is from
+  and returns a `Principal`, an opaque value the application downcasts later. The
+  surface's static key stops opening anything once it is replaced. A refusal is an
+  `ApiError`, so it keeps the dialect's shape; besides `Unauthorized` there are
+  `Forbidden` (403), `PaymentRequired` (402, not retryable) and `RateLimited` (429
+  with `Retry-After`, distinct from `Overloaded`, which means the server is full).
+- `RequestHooks` (`AppState::with_hooks`) gets a say before each call and a record
+  after it. `begin` sees the caller, the model, the action and the invocation, and
+  may refuse; what it returns is a `Ticket`, and `Ticket::finish` settles it with
+  the outcome (token counts, output blobs), a failure, or `Refused` when the call
+  never ran. A ticket is settled exactly once on every path out, including a
+  streamed answer whose client disconnected. A settlement that returns an error
+  fails the request: an answer nobody is accountable for is not served.
+
+Both are optional, and a surface without them behaves exactly as before.
+
 ## Security
 
 Every route above is key-gated, request bodies are size/depth-bounded, and servers
