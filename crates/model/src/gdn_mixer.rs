@@ -742,12 +742,51 @@ pub fn gdn_mixer_decode_fused(
     z: &DeviceBuffer,
     stream: &GdnStream,
 ) -> Option<DeviceBuffer> {
+    gdn_mixer_rows_fused(g, shape, w, mixed_qkv, bproj, aproj, z, stream, 1)
+}
+
+/// Whether `shape` (one sequence, any `t`) is one the native recurrent kernel's
+/// block shape serves: 128-wide key and value heads, a 4-tap conv, and at most
+/// three value heads per key head. A caller that must commit to the kernel for
+/// a whole pass up front asks this and [`Gpu::has_fused`] before starting.
+fn rows_fused_shape_ok(shape: &GdnMixerShape) -> bool {
     let gdn = shape.gdn;
-    if gdn.b != 1 || gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || gdn.h % shape.nkh != 0 {
+    gdn.b == 1 && gdn.dk == 128 && gdn.dv == 128 && shape.conv_kernel == 4 && shape.nkh != 0 && gdn.h.is_multiple_of(shape.nkh) && (1..=3).contains(&shape.group())
+}
+
+/// Whether [`gdn_mixer_rows_fused`] will be taken for this `shape` on `g`: the
+/// device is offered the kernel and the shape is one it serves.
+pub fn rows_fused_offered(g: &Gpu, shape: &GdnMixerShape) -> bool {
+    g.has_fused(gpu_core::Fused::GdnDecode) && rows_fused_shape_ok(shape)
+}
+
+/// [`gdn_mixer_decode_fused`] for `rows` CONSECUTIVE tokens of one sequence in a
+/// single launch: the rows are taken in order inside the kernel, each from the
+/// state and conv window the previous one left, so the outputs, the state and
+/// the window are exactly what `rows` single steps produce. `shape.gdn.t` must
+/// be `rows`; the inputs and the returned `gated` are `[rows, ..]`.
+///
+/// This is the recurrent half of a speculative verify round: the rows are
+/// dependent, so they cannot be a batch, and running them through the chunked
+/// parallel form would verify on different arithmetic than plain decode runs.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_rows_fused(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    stream: &GdnStream,
+    rows: u32,
+) -> Option<DeviceBuffer> {
+    let gdn = shape.gdn;
+    if rows == 0 || gdn.t != rows || !rows_fused_shape_ok(shape) {
         return None;
     }
-    let gated = g.storage(shape.value_dim() as u64);
-    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), 0, 0];
+    let gated = g.storage(rows as u64 * shape.value_dim() as u64);
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), rows, 0];
     let step = g.fused_step(
         gpu_core::Fused::GdnDecode,
         &[mixed_qkv, w.conv1d_weight, stream.hist, bproj, aproj, w.a_log, w.dt_bias, stream.state, z, w.norm_weight, &gated],

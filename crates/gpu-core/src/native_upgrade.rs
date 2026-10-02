@@ -136,28 +136,32 @@ pub enum Fused {
     /// b`, 2 `a * sigmoid(b)`) + per-row int8 scale + pack. Params `[k, rows,
     /// mode, 0]`; bindings `a, b` read, `y, xq, sx` written.
     QuantEpilogue,
-    /// `gdn_decode`: one Gated DeltaNet decode step (conv, SiLU, L2 norm,
-    /// gates, delta-rule state update, gated RMSNorm) for ONE sequence with
-    /// 128-wide key and value heads and a 4-tap conv. Params `[nkh, nvh, group,
-    /// l2_eps, rms_eps, q_scale, 0, 0]` (floats as bits); bindings `mixed,
+    /// `gdn_decode`: `rows` consecutive Gated DeltaNet decode steps (conv, SiLU,
+    /// L2 norm, gates, delta-rule state update, gated RMSNorm) of ONE sequence
+    /// with 128-wide key and value heads and a 4-tap conv, taken in order in one
+    /// launch. Params `[nkh, nvh, group, l2_eps, rms_eps, q_scale, rows, 0]`
+    /// (floats as bits); `mixed`, `bproj`, `aproj`, `z` and `gated` carry one
+    /// row per step. Bindings `mixed,
     /// conv_w, hist (RW), bproj, aproj, a_log, dt_bias, state (RW), z, norm_w`
     /// read, `gated` written. The head and conv shapes are the CALLER's to
     /// check - the params cannot say them.
     GdnDecode,
     /// `gdn_decode_pool`: [`Fused::GdnDecode`] for a BATCH of sequences whose
     /// recurrent state and conv window are rows of two pools: block (key head,
-    /// batch row) runs the single-sequence body on that row's inputs and pool row
-    /// `rows[bi]`, updating the pools in place - no state is staged in or out.
-    /// Params `[nkh, nvh, group, l2_eps, rms_eps, q_scale, b, 0]`; bindings as
+    /// batch row) runs the single-sequence body for one step on that row's
+    /// inputs and pool row `rows[bi]`, updating the pools in place - no state is
+    /// staged in or out. Params `[nkh, nvh, group, l2_eps, rms_eps, q_scale, b,
+    /// 0]` (index 6 is the batch, not a step count); bindings as
     /// [`Fused::GdnDecode`] (`mixed`, `bproj`, `aproj`, `z`, `gated` carry a row
     /// per sequence; `hist` and `state` are the pools) plus `rows` read, last.
     GdnDecodePool,
-    /// `gqa_decode_prep`: for ONE token of a gated-attention layer, the
-    /// `[value|gate]` split, the per-head QK RMSNorm, the partial rotary
+    /// `gqa_decode_prep`: for each of `rows` tokens of a gated-attention layer,
+    /// the `[value|gate]` split, the per-head QK RMSNorm, the partial rotary
     /// rotation and the K/V append into the paged pools. Params `[nh, nkv,
-    /// head_dim, half, eps (f32 bits), block_size, 0, 0]`; bindings `q_full, k,
-    /// v, q_norm, k_norm, cos, sin, blocks, offsets` read, `q_out, q_gate,
-    /// pool_k, pool_v` written.
+    /// head_dim, half, eps (f32 bits), block_size, rows, 0]`; bindings `q_full,
+    /// k, v, q_norm, k_norm, cos, sin, blocks, offsets` read (all but the two
+    /// norm gains carry one row per token), `q_out, q_gate, pool_k, pool_v`
+    /// written.
     GqaDecodePrep,
     /// `matmul_i8_gemv_multi`: up to four int8 matrices that read ONE packed
     /// activation, multiplied in a single launch - each output bit-identical to
@@ -301,11 +305,15 @@ impl Fused {
             Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 1024 * 18 && *mode <= 2),
             // A block is one key head's `group` value heads, 128 threads each
             // (3 is what one SM's registers hold at 128 live state words).
-            Fused::GdnDecode => matches!(params, [nkh, nvh, group, ..] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group),
+            Fused::GdnDecode => {
+                matches!(params, [nkh, nvh, group, _, _, _, rows, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && (1..=8).contains(rows))
+            }
             Fused::GdnDecodePool => matches!(params, [nkh, nvh, group, _, _, _, b, _] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group && *b >= 1),
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
-            Fused::GqaDecodePrep => matches!(params, [nh, nkv, hd, half, ..] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (2..=512).contains(hd) && *half >= 1 && 2 * half <= *hd),
+            Fused::GqaDecodePrep => {
+                matches!(params, [nh, nkv, hd, half, _, _, rows, _] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (2..=512).contains(hd) && *half >= 1 && 2 * half <= *hd && *rows >= 1)
+            }
             // The single GEMV's own contract for every matrix: one tile of x
             // rows per weight pass and K a whole number of 32-element groups.
             Fused::I8GemvMulti => {
@@ -321,7 +329,7 @@ impl Fused {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
             Fused::GdnDecodePool => params[0] * params[6],
-            Fused::GqaDecodePrep => params[0] + params[1],
+            Fused::GqaDecodePrep => (params[0] + params[1]) * params[6],
             Fused::I8GemvMulti => {
                 let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()

@@ -7,7 +7,7 @@
 // can procure our services by sending an email to info@swedishembedded.com.
 //
 // Everything a gated-attention decode step does between the q/k/v projections
-// and the attention scores, for ONE token, in a single launch:
+// and the attention scores, for each of `rows` tokens, in a single launch:
 //
 //   q_full holds, per head, [value | gate] (2 * head_dim)
 //   q     = rope(rmsnorm_head(value) * q_norm)        written to `q_out`
@@ -21,17 +21,22 @@
 // RMSNorm alone was ~44 us a call: one thread per head walking 256 dependent
 // loads.
 //
-//   params : u32 [nh, nkv, head_dim, half, eps (f32 bits), block_size, 0, 0]
+//   params : u32 [nh, nkv, head_dim, half, eps (f32 bits), block_size, rows, 0]
 //            `half` is the rotary table width (rot_dim / 2); head_dim <= 512
-//   q_full : [nh * 2 * head_dim] f32     k, v : [nkv * head_dim] f32
-//   q_norm, k_norm : [head_dim] f32      cos, sin : [half] f32 (one row: batch 1)
-//   blocks, offsets : [1] u32            where this token's K and V land
-//   q_out, q_gate : [nh * head_dim] f32  pool_k, pool_v : the paged KV pools
+//   q_full : [rows, nh * 2 * head_dim] f32   k, v : [rows, nkv * head_dim] f32
+//   q_norm, k_norm : [head_dim] f32          cos, sin : [rows, half] f32
+//   blocks, offsets : [rows] u32             where each token's K and V land
+//   q_out, q_gate : [rows, nh * head_dim] f32   pool_k, pool_v : the paged KV pools
 //
-// Work split: one 256-thread block per head - the nh query heads, then the nkv
-// key heads (which also copy their value head into the pool). A head is
-// independent of every other, so there is no ordering to preserve between
-// blocks.
+// The rows are independent tokens - the rows of a decode batch of different
+// sequences, or consecutive tokens of one (a speculative verify round, whose
+// rows differ only in `offsets`) - and a row's heads write only its own
+// outputs and its own pool row, so no ordering between them is needed.
+//
+// Work split: one 256-thread block per head of each row - the nh query heads,
+// then the nkv key heads (which also copy their value head into the pool). A
+// head is independent of every other, so there is no ordering to preserve
+// between blocks.
 //
 // How it stays bit-identical to the chain it replaces
 // ---------------------------------------------------
@@ -63,9 +68,12 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
     const unsigned int half = params[3];
     const float eps = __uint_as_float(params[4]);
     const unsigned int block_size = params[5];
+    const unsigned int rows = params[6];
 
-    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
-    if (blk >= nh + nkv) { return; }  // block-uniform
+    const unsigned int blk_all = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk_all >= (nh + nkv) * rows) { return; }  // block-uniform
+    const unsigned int row = blk_all / (nh + nkv);
+    const unsigned int blk = blk_all - row * (nh + nkv);
     const bool is_q = blk < nh;
     const unsigned int h = is_q ? blk : blk - nh;
     const unsigned int t = threadIdx.x;
@@ -74,7 +82,10 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
     __shared__ float inv_s;
 
     // The head's own values, loaded before anything is written.
-    const float* src = is_q ? (q_full + (unsigned long long)h * 2u * hd) : (k + (unsigned long long)h * hd);
+    const unsigned long long kv_row = (unsigned long long)row * nkv * hd;
+    const float* src = is_q ? (q_full + (unsigned long long)row * nh * 2u * hd + (unsigned long long)h * 2u * hd) : (k + kv_row + (unsigned long long)h * hd);
+    const float* cos_r = cos_t + (unsigned long long)row * half;
+    const float* sin_r = sin_t + (unsigned long long)row * half;
     const float* gain = is_q ? q_norm : k_norm;
     float x[BRAIN_GPREP_MAX_HD / BRAIN_GPREP_THREADS];
     float g[BRAIN_GPREP_MAX_HD / BRAIN_GPREP_THREADS];
@@ -87,7 +98,7 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
         x[i] = live ? src[d] : 0.0f;
         g[i] = live ? gain[d] : 0.0f;
         gate[i] = (live && is_q) ? src[hd + d] : 0.0f;
-        vv[i] = (live && !is_q) ? v[(unsigned long long)h * hd + d] : 0.0f;
+        vv[i] = (live && !is_q) ? v[kv_row + (unsigned long long)h * hd + d] : 0.0f;
         if (live) { xs[d] = x[i]; }
     }
     __syncthreads();
@@ -109,28 +120,29 @@ brain_gqa_decode_prep(const unsigned int* params, const float* q_full, const flo
     }
     __syncthreads();
 
-    float* dst = is_q ? (q_out + (unsigned long long)h * hd)
-                      : (pool_k + ((unsigned long long)blocks[0] * block_size + offsets[0]) * (nkv * hd) + (unsigned long long)h * hd);
+    const unsigned long long pool_row = ((unsigned long long)blocks[row] * block_size + offsets[row]) * (nkv * hd);
+    float* dst = is_q ? (q_out + (unsigned long long)row * nh * hd + (unsigned long long)h * hd)
+                      : (pool_k + pool_row + (unsigned long long)h * hd);
 #pragma unroll
     for (int i = 0; i < BRAIN_GPREP_MAX_HD / BRAIN_GPREP_THREADS; ++i) {
         const unsigned int d = t + BRAIN_GPREP_THREADS * i;
         if (d < hd) {
             float y = xs[d];
             if (d < half) {
-                const float c = cos_t[d];
-                const float s = __fmul_rn(sin_t[d], 1.0f);
+                const float c = cos_r[d];
+                const float s = __fmul_rn(sin_r[d], 1.0f);
                 y = __fsub_rn(__fmul_rn(xs[d], c), __fmul_rn(xs[d + half], s));
             } else if (d >= half && d < 2u * half) {
                 const unsigned int e = d - half;
-                const float c = cos_t[e];
-                const float s = __fmul_rn(sin_t[e], 1.0f);
+                const float c = cos_r[e];
+                const float s = __fmul_rn(sin_r[e], 1.0f);
                 y = __fadd_rn(__fmul_rn(xs[d], c), __fmul_rn(xs[e], s));
             }
             dst[d] = y;
             if (is_q) {
-                q_gate[(unsigned long long)h * hd + d] = gate[i];
+                q_gate[(unsigned long long)row * nh * hd + (unsigned long long)h * hd + d] = gate[i];
             } else {
-                pool_v[((unsigned long long)blocks[0] * block_size + offsets[0]) * (nkv * hd) + (unsigned long long)h * hd + d] = vv[i];
+                pool_v[pool_row + (unsigned long long)h * hd + d] = vv[i];
             }
         }
     }

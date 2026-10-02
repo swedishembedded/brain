@@ -411,15 +411,17 @@ pub fn gqa_mixer_decode_batched_kv_attend(
     (ctx, prep.q_gate)
 }
 
-/// [`gqa_mixer_decode_batched_kv_attend`] for ONE sequence with the whole front
-/// half - the `[value|gate]` split, the per-head QK norm, the rotation and the
-/// K/V append - as a single native launch (`gqa_decode_prep`), followed by the
-/// attention dispatches over the layer it has just extended. Returns
-/// `(ctx, q_gate)` like the chain it replaces, and leaves the layer exactly as
-/// the chain does.
+/// [`gqa_mixer_decode_batched_kv_attend`] with the whole front half - the
+/// `[value|gate]` split, the per-head QK norm, the rotation and the K/V append,
+/// for every row of the batch - as a single native launch (`gqa_decode_prep`),
+/// followed by the attention dispatches over the layer it has just extended.
+/// Returns `(ctx, q_gate)` like the chain it replaces, and leaves the layer
+/// exactly as the chain does. The rows are the batch's own: unrelated
+/// sequences, or consecutive tokens of one (a verify round) that differ only in
+/// their `offsets`.
 ///
 /// `None` - nothing submitted, the layer untouched - where the device is not
-/// offered the kernel or the shape is outside it: a batch of more than one, a
+/// offered the kernel or the shape is outside it: an empty batch, a
 /// head wider than the block holds, or a layer stored in a compact [`KvTier`]
 /// (the kernel appends `f32` rows). The caller then runs
 /// [`gqa_mixer_decode_batched_kv_attend`], which this is gated byte-for-byte
@@ -439,14 +441,14 @@ pub fn gqa_mixer_decode_fused_kv_attend(
     paged: &PagedDecodeBatch,
 ) -> Option<(DeviceBuffer, DeviceBuffer)> {
     use crate::kv_tier::KvTier;
-    if batch != 1 || layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32 {
+    if batch == 0 || layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32 {
         return None;
     }
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
-    let q_out = g.storage(qd as u64);
-    let q_gate = g.storage(qd as u64);
-    let params = [nh, nkv, hd, shape.rotary_half, gpu_core::f(shape.rms_eps), paged.block_size, 0, 0];
+    let q_out = g.storage((batch * qd) as u64);
+    let q_gate = g.storage((batch * qd) as u64);
+    let params = [nh, nkv, hd, shape.rotary_half, gpu_core::f(shape.rms_eps), paged.block_size, batch, 0];
     let prep = g.fused_step(
         gpu_core::Fused::GqaDecodePrep,
         &[q_full, k, v, w.q_norm, w.k_norm, w.cos, w.sin, paged.blocks, paged.offsets, &q_out, &q_gate, layer.k.data(), layer.v.data()],

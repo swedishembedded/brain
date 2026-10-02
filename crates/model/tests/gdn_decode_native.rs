@@ -26,7 +26,7 @@ use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
-use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, gdn_mixer_decode_state_fwd, GdnDecodeState, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
+use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, gdn_mixer_decode_state_fwd, gdn_mixer_rows_fused, GdnDecodeState, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
 
 const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),
@@ -325,5 +325,85 @@ fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
         assert_eq!(fused.0, chain.0, "layer output differs: {ctx}");
         assert_eq!(fused.1, chain.1, "state pool differs: {ctx}");
         assert_eq!(fused.2, chain.2, "window pool differs: {ctx}");
+    }
+}
+
+/// The multi-row form: `rows` consecutive tokens of ONE sequence through one
+/// launch, which must leave exactly what `rows` single steps leave - the same
+/// outputs row by row, and the state and conv window after the last. This is the
+/// kernel a speculative verify round runs its recurrent layers on, where the
+/// rows depend on one another and have to be taken in order.
+#[test]
+fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    for (nkh, group, rows) in [(1u32, 1u32, 2u32), (2, 3, 1), (2, 3, 3), (4, 3, 5), (16, 3, 8)] {
+        let nvh = nkh * group;
+        let step_shape = GdnMixerShape { gdn: GdnShape { b: 1, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let rows_shape = GdnMixerShape { gdn: GdnShape { t: rows, ..step_shape.gdn }, ..step_shape };
+        let (value_dim, conv_dim) = (step_shape.value_dim(), step_shape.conv_dim());
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let ctx = format!("nkh={nkh} group={group} rows={rows}");
+
+        let mut r = Lcg::new(0x5eed ^ u64::from(nkh * 31 + group * 7 + rows));
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+
+        let (rn, cd, vd) = (rows as usize, conv_dim as usize, value_dim as usize);
+        let mixed = rnd(&mut r, rn * cd, 1.0);
+        let bp = rnd(&mut r, rn * nvh as usize, 1.0);
+        let ap = rnd(&mut r, rn * nvh as usize, 1.0);
+        let z = rnd(&mut r, rn * vd, 1.0);
+        let state0 = rnd(&mut r, state_len, 0.3);
+        let hist0 = rnd(&mut r, hist_len, 0.3);
+
+        // One step at a time through the chain, rows in order.
+        let (s_ref, h_ref) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
+        let mut ref_out = Vec::new();
+        for i in 0..rn {
+            let row = |v: &[f32], width: usize, name: &str| g.storage_init(name, &v[i * width..(i + 1) * width]);
+            let gated = gdn_mixer_decode_fwd(
+                &g,
+                &ids(&g),
+                &dec_ids(&g),
+                &step_shape,
+                &w,
+                &row(&mixed, cd, "mixed"),
+                &row(&bp, nvh as usize, "bp"),
+                &row(&ap, nvh as usize, "ap"),
+                &row(&z, vd, "z"),
+                &[GdnStream { state: &s_ref, hist: &h_ref }],
+            );
+            ref_out.extend(g.read(&gated, vd));
+        }
+
+        // All the rows in one launch.
+        let (s_nat, h_nat) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
+        let gated = gdn_mixer_rows_fused(
+            &g,
+            &rows_shape,
+            &w,
+            &g.storage_init("mixed", &mixed),
+            &g.storage_init("bp", &bp),
+            &g.storage_init("ap", &ap),
+            &g.storage_init("z", &z),
+            &GdnStream { state: &s_nat, hist: &h_nat },
+            rows,
+        )
+        .expect("the multi-row GDN kernel was declined on a CUDA device");
+        g.poll_wait();
+
+        assert_eq!(bits(g.read(&gated, rn * vd)), bits(ref_out), "layer output differs: {ctx}");
+        assert_eq!(bits(g.read(&s_nat, state_len)), bits(g.read(&s_ref, state_len)), "recurrent state differs: {ctx}");
+        assert_eq!(bits(g.read(&h_nat, hist_len)), bits(g.read(&h_ref, hist_len)), "conv window differs: {ctx}");
     }
 }

@@ -364,8 +364,9 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 384,
         // One block per key head.
         tile: (1, 1),
-        // q, k, conv_q, conv_k, 3 x normed and the three inverse norms.
-        shared_bytes: 4 * 128 * 4 + 3 * 128 * 4 + 3 * 4,
+        // Per row (at most 8): q and k (128 each), three value heads' 128, and the
+        // beta, decay and inverse-RMS of each of the three.
+        shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -384,7 +385,9 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 384,
         // One block per (key head, batch row).
         tile: (1, 1),
-        shared_bytes: 4 * 128 * 4 + 3 * 128 * 4 + 3 * 4,
+        // The shared body's staging, sized for `gdn_decode`'s at most 8 rows
+        // (see that entry) though a pooled block walks a single one.
+        shared_bytes: 8 * (2 * 128 * 4 + 3 * 128 * 4 + 3 * 3 * 4),
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
@@ -397,10 +400,10 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_gqa_decode_prep",
-        what: "gated-attention decode prep in one launch: value-and-gate split, per-head QK RMSNorm, partial rotary, KV append; a block per head, bit-identical to the 8-kernel WGSL chain",
+        what: "gated-attention decode prep in one launch, for every row of a batch: value-and-gate split, per-head QK RMSNorm, partial rotary, KV append; a block per head per row, bit-identical to the 8-kernel WGSL chain",
         reported: "native:gqa_decode_prep",
         block_dim: 256,
-        // One block per head (query heads, then key heads).
+        // One block per head per row (query heads, then key heads).
         tile: (1, 1),
         // The head's 512 staged values and the shared inverse norm.
         shared_bytes: 512 * 4 + 4,
