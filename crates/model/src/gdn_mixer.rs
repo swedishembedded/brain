@@ -476,6 +476,30 @@ pub struct GdnMixerDecodeIds {
     pub splice: usize,
 }
 
+/// A serving engine's recurrent state for the whole resident set: one row per
+/// sequence of two per-layer pools - the recurrent state and the conv history -
+/// so staging a batch is one gather and one scatter whatever its size.
+pub struct GdnPoolRows<'a> {
+    /// `[rows, state_len]` recurrent states of this layer.
+    pub state: &'a DeviceBuffer,
+    /// `[rows, hist_len]` conv histories of this layer.
+    pub hist: &'a DeviceBuffer,
+    /// `[b]` u32: the pool row of each batch row, distinct.
+    pub rows: &'a DeviceBuffer,
+    /// `pool_rows_gather2.wgsl` and `pool_rows_scatter2.wgsl`.
+    pub gather: usize,
+    pub scatter: usize,
+}
+
+/// Where [`gdn_mixer_decode_state_fwd`] finds each batch row's state.
+pub enum GdnDecodeState<'a> {
+    /// One buffer pair per sequence, in batch-row order. A batch of more than
+    /// one is staged by a copy per sequence in and out.
+    Streams(&'a [GdnStream<'a>]),
+    /// Rows of a pool, staged by a single dispatch in and out.
+    Pool(GdnPoolRows<'a>),
+}
+
 /// ONE decode token for each of `shape.gdn.b` INDEPENDENT sequences, in one
 /// set of dispatches - the batched, decode-shaped sibling of
 /// [`gdn_mixer_stream_fwd`], and the Gated-DeltaNet half of a hybrid decoder's
@@ -524,33 +548,61 @@ pub fn gdn_mixer_decode_fwd(
     z: &DeviceBuffer,
     streams: &[GdnStream],
 ) -> DeviceBuffer {
+    gdn_mixer_decode_state_fwd(g, ids, dec, shape, w, mixed_qkv, bproj, aproj, z, &GdnDecodeState::Streams(streams))
+}
+
+/// [`gdn_mixer_decode_fwd`] over either way of holding the batch's state
+/// ([`GdnDecodeState`]). A pooled batch is staged in ONE dispatch whatever its
+/// size - at 32 sequences that is the difference between 2 and 128 dispatches
+/// per layer, each a serial node of the step's graph.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_decode_state_fwd(
+    g: &Gpu,
+    ids: &GdnMixerIds,
+    dec: &GdnMixerDecodeIds,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    batch_state: &GdnDecodeState,
+) -> DeviceBuffer {
     let gdn = shape.gdn;
     let (conv_dim, key_dim, value_dim, group) = (shape.conv_dim(), shape.key_dim(), shape.value_dim(), shape.group());
     let (nkh, nvh, khd, vhd, kw) = (shape.nkh, gdn.h, gdn.dk, gdn.dv, shape.conv_kernel);
     let b = gdn.b;
     assert_eq!(gdn.t, 1, "gdn_mixer_decode_fwd is a DECODE step: exactly one token per sequence (got t={})", gdn.t);
-    assert_eq!(streams.len(), b as usize, "gdn_mixer_decode_fwd: {} GdnStreams for a batch of {b}", streams.len());
+    if let GdnDecodeState::Streams(streams) = batch_state {
+        assert_eq!(streams.len(), b as usize, "gdn_mixer_decode_fwd: {} GdnStreams for a batch of {b}", streams.len());
+    }
     let state_len = nvh * khd * vhd;
     let hist_len = conv_dim * (kw - 1);
 
     // Stage the batch's persistent state contiguously - see this function's
-    // own doc. `b == 1` binds the caller's buffers directly instead.
-    let staged = b > 1;
-    let (state, hist) = if staged {
-        let st = g.storage((b * state_len) as u64);
-        let hi = g.storage((b * hist_len).max(1) as u64);
-        let mut s = Vec::with_capacity(2 * b as usize);
-        for (i, sm) in streams.iter().enumerate() {
-            let row = i as u32;
-            s.push(g.step(dec.splice, &[sm.state, &st], &[state_len, row * state_len], state_len));
-            if hist_len > 0 {
-                s.push(g.step(dec.splice, &[sm.hist, &hi], &[hist_len, row * hist_len], hist_len));
-            }
+    // own doc. One sequence over its own buffers binds them directly instead.
+    let (state, hist) = match batch_state {
+        GdnDecodeState::Pool(pool) => {
+            let st = g.storage((b * state_len) as u64);
+            let hi = g.storage((b * hist_len).max(1) as u64);
+            g.submit(&[], &[g.step(pool.gather, &[pool.state, pool.hist, pool.rows, &st, &hi], &[b, state_len, hist_len], b * (state_len + hist_len))]);
+            (st, hi)
         }
-        g.submit(&[], &s);
-        (st, hi)
-    } else {
-        (streams[0].state.clone(), streams[0].hist.clone())
+        GdnDecodeState::Streams(streams) if b > 1 => {
+            let st = g.storage((b * state_len) as u64);
+            let hi = g.storage((b * hist_len).max(1) as u64);
+            let mut s = Vec::with_capacity(2 * b as usize);
+            for (i, sm) in streams.iter().enumerate() {
+                let row = i as u32;
+                s.push(g.step(dec.splice, &[sm.state, &st], &[state_len, row * state_len], state_len));
+                if hist_len > 0 {
+                    s.push(g.step(dec.splice, &[sm.hist, &hi], &[hist_len, row * hist_len], hist_len));
+                }
+            }
+            g.submit(&[], &s);
+            (st, hi)
+        }
+        GdnDecodeState::Streams(streams) => (streams[0].state.clone(), streams[0].hist.clone()),
     };
 
     // 1. Streaming causal conv1d + SiLU (activation after the conv). No
@@ -634,17 +686,23 @@ pub fn gdn_mixer_decode_fwd(
         ],
     );
 
-    // Return each sequence's evolved state to its own buffer.
-    if staged {
-        let mut s = Vec::with_capacity(2 * b as usize);
-        for (i, sm) in streams.iter().enumerate() {
-            let row = i as u32;
-            s.push(g.step(ids.concat_split, &[&state, sm.state], &[1, b * state_len, state_len, row * state_len, 1, 1], state_len));
-            if hist_len > 0 {
-                s.push(g.step(ids.concat_split, &[&hist, sm.hist], &[1, b * hist_len, hist_len, row * hist_len, 1, 1], hist_len));
-            }
+    // Return each sequence's evolved state to where it lives.
+    match batch_state {
+        GdnDecodeState::Pool(pool) => {
+            g.submit(&[], &[g.step(pool.scatter, &[&state, &hist, pool.rows, pool.state, pool.hist], &[b, state_len, hist_len], b * (state_len + hist_len))]);
         }
-        g.submit(&[], &s);
+        GdnDecodeState::Streams(streams) if b > 1 => {
+            let mut s = Vec::with_capacity(2 * b as usize);
+            for (i, sm) in streams.iter().enumerate() {
+                let row = i as u32;
+                s.push(g.step(ids.concat_split, &[&state, sm.state], &[1, b * state_len, state_len, row * state_len, 1, 1], state_len));
+                if hist_len > 0 {
+                    s.push(g.step(ids.concat_split, &[&hist, sm.hist], &[1, b * hist_len, hist_len, row * hist_len, 1, 1], hist_len));
+                }
+            }
+            g.submit(&[], &s);
+        }
+        GdnDecodeState::Streams(_) => {}
     }
     gated
 }

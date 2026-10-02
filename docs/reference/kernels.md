@@ -461,6 +461,8 @@ load of it must already be bare-identifier-indexed.
 | [`pixel_shuffle`](../../crates/kernels/wgsl/pixel_shuffle.wgsl) | Pixel shuffle (depth-to-space) forward, NCHW | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`pixel_shuffle3d_cl`](../../crates/kernels/wgsl/pixel_shuffle3d_cl.wgsl) | 3D pixel shuffle (depth-to-space), CHANNELS-LAST | one thread per output element | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`pixel_shuffle_dx`](../../crates/kernels/wgsl/pixel_shuffle_dx.wgsl) | Pixel shuffle INPUT gradient, NCHW | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`pool_rows_gather2`](../../crates/kernels/wgsl/pool_rows_gather2.wgsl) | Gather rows of two row pools into two contiguous batch slabs, one dispatch for the whole batch | one thread per output element, row picked by an index buffer | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`pool_rows_scatter2`](../../crates/kernels/wgsl/pool_rows_scatter2.wgsl) | Scatter two contiguous batch slabs back into rows of two row pools, one dispatch for the whole batch | one thread per input element, destination row picked by an index buffer | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`pos_add`](../../crates/kernels/wgsl/pos_add.wgsl) | Add learned absolute positional embeddings in place | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`pos_bwd`](../../crates/kernels/wgsl/pos_bwd.wgsl) | Positional-embedding backward (scatter) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`prelu`](../../crates/kernels/wgsl/prelu.wgsl) | PReLU forward with a LEARNED slope, NCHW | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |

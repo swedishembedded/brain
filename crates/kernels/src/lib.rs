@@ -881,6 +881,10 @@ pub const PIXEL_SHUFFLE: &str = include_str!("../wgsl/pixel_shuffle.wgsl");
 pub const PIXEL_SHUFFLE3D_CL: &str = include_str!("../wgsl/pixel_shuffle3d_cl.wgsl");
 /// `wgsl/pixel_shuffle_dx.wgsl`
 pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl");
+/// `wgsl/pool_rows_gather2.wgsl`
+pub const POOL_ROWS_GATHER2: &str = include_str!("../wgsl/pool_rows_gather2.wgsl");
+/// `wgsl/pool_rows_scatter2.wgsl`
+pub const POOL_ROWS_SCATTER2: &str = include_str!("../wgsl/pool_rows_scatter2.wgsl");
 /// `wgsl/pos_add.wgsl`
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
@@ -1630,6 +1634,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle", PIXEL_SHUFFLE),
     ("pixel_shuffle3d_cl", PIXEL_SHUFFLE3D_CL),
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
+    ("pool_rows_gather2", POOL_ROWS_GATHER2),
+    ("pool_rows_scatter2", POOL_ROWS_SCATTER2),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
     ("prelu", PRELU),

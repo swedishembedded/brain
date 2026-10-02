@@ -29,7 +29,7 @@ use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
-use model::gdn_mixer::{gdn_mixer_decode_fwd, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnStream};
+use model::gdn_mixer::{gdn_mixer_decode_fwd, gdn_mixer_decode_state_fwd, GdnDecodeState, GdnMixerDecodeIds, GdnPoolRows, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnStream};
 
 const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),
@@ -61,6 +61,8 @@ const KERNELS: &[(&str, &str)] = &[
     ("gdn_layout_permute", kernels::GDN_LAYOUT_PERMUTE),
     ("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP),
     ("splice", kernels::SPLICE),
+    ("pool_rows_gather2", kernels::POOL_ROWS_GATHER2),
+    ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2),
 ];
 
 fn idx(g: &Gpu, name: &str) -> usize {
@@ -217,4 +219,65 @@ fn batched_decode_matches_per_sequence_decode() {
     assert!(wo < 1e-6, "batched GDN decode output maxabs={wo}");
     assert!(ws < 1e-6, "batched GDN decode recurrent state maxabs={ws}");
     assert!(wh < 1e-6, "batched GDN decode conv history maxabs={wh}");
+}
+
+/// A batch whose state lives as ROWS of a pool - staged by one gather and one
+/// scatter, whatever the batch size - leaves every picked row exactly where a
+/// per-sequence call leaves it, and every other row of the pool untouched.
+#[test]
+fn pooled_decode_matches_per_sequence_decode_and_spares_the_other_rows() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    let (nkh, nvh, dk, dv, kw) = (2u32, 4u32, 8u32, 6u32, 4u32);
+    let shape_of = |b: u32| GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+    let one = shape_of(1);
+    let (value_dim, conv_dim) = (one.value_dim(), one.conv_dim());
+    let state_len = (nvh * dk * dv) as usize;
+    let hist_len = (conv_dim * (kw - 1)) as usize;
+    let pool_rows = 5usize;
+    let picked = [3u32, 0, 4];
+    let batch = picked.len() as u32;
+
+    let mut r = Lcg::new(0x600d_f00d);
+    let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+    let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+    let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+    let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+    let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+    let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+
+    let mixed: Vec<Vec<f32>> = (0..batch).map(|_| rnd(&mut r, conv_dim as usize, 1.0)).collect();
+    let bp: Vec<Vec<f32>> = (0..batch).map(|_| rnd(&mut r, nvh as usize, 1.0)).collect();
+    let ap: Vec<Vec<f32>> = (0..batch).map(|_| rnd(&mut r, nvh as usize, 1.0)).collect();
+    let zz: Vec<Vec<f32>> = (0..batch).map(|_| rnd(&mut r, value_dim as usize, 1.0)).collect();
+    let st0: Vec<Vec<f32>> = (0..pool_rows).map(|_| rnd(&mut r, state_len, 0.3)).collect();
+    let hi0: Vec<Vec<f32>> = (0..pool_rows).map(|_| rnd(&mut r, hist_len, 0.3)).collect();
+    let flat = |v: &[Vec<f32>]| -> Vec<f32> { v.iter().flatten().copied().collect() };
+
+    let (pool_state, pool_hist) = (g.storage_init("pool_state", &flat(&st0)), g.storage_init("pool_hist", &flat(&hi0)));
+    let rows: Vec<f32> = picked.iter().map(|&i| f32::from_bits(i)).collect();
+    let rows = g.storage_init("rows", &rows);
+    let pool = GdnPoolRows { state: &pool_state, hist: &pool_hist, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2") };
+    let (mixed_b, bp_b, ap_b, z_b) = (g.storage_init("mixed", &flat(&mixed)), g.storage_init("bp", &flat(&bp)), g.storage_init("ap", &flat(&ap)), g.storage_init("z", &flat(&zz)));
+    let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape_of(batch), &w, &mixed_b, &bp_b, &ap_b, &z_b, &GdnDecodeState::Pool(pool));
+    let got = g.read(&gated, (batch * value_dim) as usize);
+    let (got_state, got_hist) = (g.read(&pool_state, pool_rows * state_len), g.read(&pool_hist, pool_rows * hist_len));
+
+    for row in 0..pool_rows {
+        let (state_of, hist_of) = (&got_state[row * state_len..(row + 1) * state_len], &got_hist[row * hist_len..(row + 1) * hist_len]);
+        let Some(b) = picked.iter().position(|&p| p as usize == row) else {
+            assert_eq!((state_of, hist_of), (&st0[row][..], &hi0[row][..]), "pool row {row} was not in the batch and must not change");
+            continue;
+        };
+        let m1 = g.storage_init("mixed1", &mixed[b]);
+        let b1 = g.storage_init("bp1", &bp[b]);
+        let a1 = g.storage_init("ap1", &ap[b]);
+        let z1 = g.storage_init("z1", &zz[b]);
+        let s1 = g.storage_init("state1", &st0[row]);
+        let h1 = g.storage_init("hist1", &hi0[row]);
+        let one_stream = [GdnStream { state: &s1, hist: &h1 }];
+        let out = gdn_mixer_decode_fwd(&g, &ids(&g), &dec_ids(&g), &one, &w, &m1, &b1, &a1, &z1, &one_stream);
+        assert!(worst(&g.read(&out, value_dim as usize), &got[b * value_dim as usize..(b + 1) * value_dim as usize]) < 1e-6, "output of batch row {b}");
+        assert!(worst(&g.read(&s1, state_len), state_of) < 1e-6, "state of pool row {row}");
+        assert!(worst(&g.read(&h1, hist_len), hist_of) < 1e-6, "hist of pool row {row}");
+    }
 }
