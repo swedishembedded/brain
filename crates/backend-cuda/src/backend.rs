@@ -380,6 +380,9 @@ struct PassState {
     /// Nesting depth; the outermost `end_pass` issues.
     depth: u32,
     held: Vec<Resolved>,
+    /// Whether a chunk of the open pass has been issued yet - see
+    /// [`PASS_FIRST_FLUSH_STEPS`].
+    issued: bool,
 }
 
 /// A brain compute device driven by the CUDA Driver API.
@@ -464,6 +467,11 @@ pub struct CudaBackend {
 /// been held when `flush` is called, so a repeating pass is cut at the same
 /// steps every iteration and each chunk repeats and replays.
 pub const PASS_FLUSH_STEPS: usize = 256;
+
+/// The same threshold for the FIRST chunk of a pass: the host time spent before
+/// the card has anything to do is the part of the build that is not hidden
+/// behind device work, so it is the one worth keeping short.
+pub const PASS_FIRST_FLUSH_STEPS: usize = 64;
 
 /// Turns submission capture off when set to `0`, `off` or `false`.
 const ENV_GRAPHS: &str = "BRAIN_CUDA_GRAPHS";
@@ -1040,7 +1048,12 @@ impl CudaBackend {
     /// Issue whatever an open pass is holding, as one submission, in the order
     /// it was submitted. A no-op outside a pass or when nothing is held.
     fn issue_held(&self) {
-        let held = std::mem::take(&mut self.pass.lock().unwrap_or_else(|e| e.into_inner()).held);
+        let held = {
+            let mut pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
+            let held = std::mem::take(&mut pass.held);
+            pass.issued |= !held.is_empty();
+            held
+        };
         if !held.is_empty() {
             self.issue_all(Vec::new(), held, true);
         }
@@ -1502,7 +1515,8 @@ impl backend_api::Backend for CudaBackend {
     fn flush(&self) {
         let due = {
             let pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
-            pass.depth > 0 && pass.held.len() >= PASS_FLUSH_STEPS
+            let at = if pass.issued { PASS_FLUSH_STEPS } else { PASS_FIRST_FLUSH_STEPS };
+            pass.depth > 0 && pass.held.len() >= at
         };
         if due {
             let t0 = std::time::Instant::now();
@@ -1512,7 +1526,11 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn begin_pass(&self) {
-        self.pass.lock().unwrap_or_else(|e| e.into_inner()).depth += 1;
+        let mut pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
+        if pass.depth == 0 {
+            pass.issued = false;
+        }
+        pass.depth += 1;
     }
 
     fn end_pass(&self) {

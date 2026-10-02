@@ -258,7 +258,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_gqa_decode_prep",
-        what: "gated-attention decode prep in one launch: [value|gate] split, per-head QK RMSNorm, partial rotary, KV append; a block per head, bit-identical to the 8-kernel WGSL chain",
+        what: "gated-attention decode prep in one launch: value-and-gate split, per-head QK RMSNorm, partial rotary, KV append; a block per head, bit-identical to the 8-kernel WGSL chain",
         reported: "native:gqa_decode_prep",
         block_dim: 256,
         // One block per head (query heads, then key heads).

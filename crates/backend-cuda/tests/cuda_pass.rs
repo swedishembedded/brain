@@ -256,8 +256,9 @@ fn a_flush_inside_a_pass_issues_chunks_that_replay() {
     let Some(b) = backend() else { return };
     const ROUNDS: usize = 5;
     const S: f32 = 0.5;
-    let chunk = backend_cuda::PASS_FLUSH_STEPS;
-    let n = 3 * chunk + chunk / 2;
+    let (first, chunk) = (backend_cuda::PASS_FIRST_FLUSH_STEPS, backend_cuda::PASS_FLUSH_STEPS);
+    // A short first chunk, two full ones and a remainder.
+    let n = first + 2 * chunk + chunk / 2;
     let inp = b.storage_init("inp", &input());
     let outs: Vec<_> = (0..n).map(|_| b.storage(N as u64)).collect();
     let params = [N as u32, S.to_bits()];
@@ -273,7 +274,7 @@ fn a_flush_inside_a_pass_issues_chunks_that_replay() {
         b.poll_wait();
     }
     let after = b.launch_stats();
-    // Three full chunks and the remainder, each its own graph.
+    // The short first chunk, two full ones and the remainder, each its own graph.
     assert_eq!(after.graph_captures - before.graph_captures, 4, "the pass was not cut into its four fixed chunks");
     assert!(after.graph_replays - before.graph_replays >= 4 * (ROUNDS as u64 - 2), "the chunks were not replayed");
     let want = input();
