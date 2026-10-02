@@ -94,6 +94,14 @@ pub struct CudaKernel {
     /// operator bind different operand bundles and must never be resolved
     /// for one another.
     pub weight: Dtype,
+    /// Whether this kernel is asked for BY NAME (`gpu_core::Fused`) rather than
+    /// resolved by operator and weight tier. A fused kernel replaces a chain of
+    /// dispatches the MODEL builds, so there is no operator a selector could
+    /// pick it for; [`best_for`] and [`best_for_any_tier`] never offer one, which
+    /// is what keeps the entry for an operator the kernel that implements it
+    /// whole - a fused kernel sharing an (operator, tier) pair with it must not
+    /// win on table order.
+    pub by_name: bool,
     /// The tier this kernel claims. Only [`ImplSource::Tuned`] is meaningful
     /// here: a kernel with a `.cu` file in this tree is hand-written by
     /// definition, and a generated kernel has no file to list (it is emitted
@@ -161,6 +169,7 @@ pub const ALL: &[CudaKernel] = &[
         name: "matmul_f32_tiled",
         op: Op::MatMul,
         weight: Dtype::F32,
+        by_name: false,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_f32_tiled",
@@ -178,6 +187,7 @@ pub const ALL: &[CudaKernel] = &[
         name: "matmul_i8_gemv",
         op: Op::MatMul,
         weight: Dtype::I8,
+        by_name: false,
         source: ImplSource::Tuned,
         // `__dp4a` is the only instruction above the toolchain baseline.
         min_cc: DP4A_MIN_CC,
@@ -191,6 +201,27 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_i8_gemv_multi",
+        // Up to four matrices that read one activation, in one launch: a second
+        // entry point of the single-matrix kernel's own file, which shares its
+        // block function. The operator and tier are the single kernel's, and
+        // it is a fused kernel asked for by name (`gpu_core::Fused`), never
+        // resolved by `find`, whose answer for (MatMul, I8) stays the
+        // single-matrix kernel.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_i8_gemv_multi",
+        what: "up to four int8 projections of one activation in one launch (blocks of every matrix fill the card together); runs the single GEMV's own block function, bit-identical to separate launches",
+        reported: "native:matmul_i8_gemv_multi",
+        block_dim: 128,
+        tile: (8, 8),
+        shared_bytes: 0,
+        src: include_str!("../cu/matmul_i8_gemv.cu"),
+    },
+    CudaKernel {
         name: "add_rms_quant",
         // Not an operator a selector chooses an implementation of: a FUSED
         // kernel a model asks for by name (`gpu_core::Fused`), with no WGSL twin
@@ -199,6 +230,7 @@ pub const ALL: &[CudaKernel] = &[
         // this table, so `find` can never confuse it with a matmul.
         op: Op::RmsNorm,
         weight: Dtype::I8,
+        by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_add_rms_quant",
@@ -219,6 +251,7 @@ pub const ALL: &[CudaKernel] = &[
         // never through `find`, which is the matmul providers' selector.
         op: Op::MaxAbsRow,
         weight: Dtype::I8,
+        by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_quant_epilogue",
@@ -237,6 +270,7 @@ pub const ALL: &[CudaKernel] = &[
         // operator and tier are unique in this table.
         op: Op::RmsNorm,
         weight: Dtype::F32,
+        by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode",
@@ -255,6 +289,7 @@ pub const ALL: &[CudaKernel] = &[
         // and tier are unique in this table.
         op: Op::PagedAttention,
         weight: Dtype::F32,
+        by_name: true,
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_gqa_decode_prep",
@@ -282,14 +317,14 @@ pub const ALL: &[CudaKernel] = &[
 /// selection RULE is the thing worth testing, and a test that can only feed
 /// it the shipped table can only test it once.
 pub fn best_for(table: &'static [CudaKernel], op: Op, weight: Dtype, cc: Cc) -> Option<&'static CudaKernel> {
-    table.iter().filter(|k| k.op == op && k.weight == weight && k.min_cc <= cc).max_by_key(|k| k.min_cc)
+    table.iter().filter(|k| !k.by_name && k.op == op && k.weight == weight && k.min_cc <= cc).max_by_key(|k| k.min_cc)
 }
 
 /// [`best_for`] for a caller with no weight tier to state: the highest-floor
 /// entry for `op` over ANY tier. For ledger checks only (the tier policy has
 /// no dtype axis yet); a dispatcher must always say which tier it binds.
 pub fn best_for_any_tier(table: &'static [CudaKernel], op: Op, cc: Cc) -> Option<&'static CudaKernel> {
-    table.iter().filter(|k| k.op == op && k.min_cc <= cc).max_by_key(|k| k.min_cc)
+    table.iter().filter(|k| !k.by_name && k.op == op && k.min_cc <= cc).max_by_key(|k| k.min_cc)
 }
 
 /// [`best_for`] over the shipped [`ALL`] table.
@@ -439,6 +474,7 @@ mod tests {
             name: "matmul_generic",
             op: Op::MatMul,
             weight: Dtype::F32,
+            by_name: false,
             source: ImplSource::Tuned,
             min_cc: (5, 0),
             entry: "bk_matmul_generic",
@@ -453,6 +489,7 @@ mod tests {
             name: "matmul_dp4a",
             op: Op::MatMul,
             weight: Dtype::F32,
+            by_name: false,
             source: ImplSource::Tuned,
             min_cc: DP4A_MIN_CC,
             entry: "bk_matmul_dp4a",
@@ -512,6 +549,7 @@ mod tests {
             name: "prose_only",
             op: Op::MatMul,
             weight: Dtype::F32,
+            by_name: false,
             source: ImplSource::Tuned,
             // Below DP4A's floor on purpose: the header mentions the
             // instruction, the body does not use it, and only the body counts.
@@ -535,6 +573,7 @@ mod tests {
                 name: "matmul_dp4a",
                 op: Op::MatMul,
                 weight: Dtype::F32,
+                by_name: false,
                 source: ImplSource::Generated,
                 min_cc: (5, 0),
                 entry: "bk_missing",
@@ -549,6 +588,7 @@ mod tests {
                 name: "matmul_dp4a",
                 op: Op::MatMul,
                 weight: Dtype::F32,
+                by_name: false,
                 source: ImplSource::Tuned,
                 min_cc: (5, 0),
                 entry: "bk_matmul_dp4a",

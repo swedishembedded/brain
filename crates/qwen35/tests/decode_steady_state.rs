@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A steady-state Qwen3.8 decode token costs the host one graph launch, not
+//! A steady-state Qwen3.8 decode token costs the host a few graph launches, not
 //! thousands of driver calls, and computes exactly what it computed before.
 //!
 //! Swedish Embedded AB implements low-latency single-stream inference for its
@@ -18,10 +18,11 @@
 //!
 //! - **no driver allocation in a steady-state token** - the step's temporaries
 //!   and its per-token inputs live at the same device addresses every token;
-//! - **one replayed graph per token and no per-dispatch launch** - the whole
-//!   step is recorded once and replayed.
+//! - **only replayed graphs and no per-dispatch launch** - the step is recorded
+//!   once (in a few chunks, so the card starts before the host has built the
+//!   rest) and replayed, the same chunks every token.
 //!
-//! The third test is what keeps the first two honest: reusing buffers without
+//! The second test is what keeps the first two honest: reusing buffers without
 //! zeroing them is only legal if no kernel reads what it did not write, so the
 //! same token sequence decoded twice through the same recycled buffers must be
 //! BIT-identical, not close.
@@ -51,7 +52,7 @@ fn model(gpu: Gpu) -> (Qwen35, Vec<u32>) {
 }
 
 #[test]
-fn a_steady_state_decode_token_allocates_nothing_and_replays_one_graph() {
+fn a_steady_state_decode_token_allocates_nothing_and_only_replays_graphs() {
     let _s = serial();
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
@@ -72,7 +73,12 @@ fn a_steady_state_decode_token_allocates_nothing_and_replays_one_graph() {
     let after = call_totals();
     assert_eq!(after.device_alloc_calls - before.device_alloc_calls, 0, "a steady-state token called cuMemAlloc");
     assert_eq!(after.host_launches - before.host_launches, 0, "a steady-state token launched kernels one at a time");
-    assert_eq!(after.graph_replays - before.graph_replays, measured as u64, "each token must be exactly one graph replay");
+    // A token is a few graphs, not one: the layer stack is issued in chunks so
+    // the card starts before the host has built the whole step. What matters is
+    // that it is replays and nothing else, the same number every token.
+    let replays = after.graph_replays - before.graph_replays;
+    assert!(replays >= measured as u64, "a token must replay at least one graph");
+    assert_eq!(replays % measured as u64, 0, "{replays} replays over {measured} tokens: the chunks are not cut the same way every token");
 }
 
 #[test]

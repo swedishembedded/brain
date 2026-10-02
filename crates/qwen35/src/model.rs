@@ -1590,6 +1590,26 @@ impl Qwen35 {
         matches!(w, Weight::F32 { .. })
     }
 
+    /// [`Self::ops_linear`] for several linears that read the SAME activation,
+    /// each into its own buffer: a GDN layer's qkv/b/a/z, a GQA layer's q/k/v,
+    /// the SwiGLU's gate/up. [`Ops::matmul_group`] makes the group one launch
+    /// where the device offers it and an int8 GEMV serves every member, and a
+    /// matmul per member otherwise (`set_decode_fusion(false)` always). Returns,
+    /// per member, whether it was an fp32 dispatch - the one case LoRA applies
+    /// to, exactly as [`Self::ops_linear`] reports it.
+    fn ops_linear_group(&self, s: &mut Vec<Step>, act: &Act, group: &[(&str, &DeviceBuffer)]) -> Vec<bool> {
+        let members: Vec<(&Weight, &DeviceBuffer)> =
+            group.iter().map(|(name, out)| (self.weights.get(*name).unwrap_or_else(|| panic!("qwen35: no Ops weight for {name}")), *out)).collect();
+        if self.decode_fusion.get() {
+            self.ops.matmul_group(s, &members, act);
+        } else {
+            for (w, out) in &members {
+                self.ops.matmul(s, w, act, out, 0);
+            }
+        }
+        members.iter().map(|(w, _)| matches!(w, Weight::F32 { .. })).collect()
+    }
+
     /// The dtype leaf `name` actually landed at after
     /// `want.promote(caps)` - what a test asserts to confirm a per-leaf
     /// [`TierPolicy`] was really PLACED, not silently collapsed to uniform
@@ -1778,34 +1798,31 @@ impl Qwen35 {
         // unchanged by in_proj_b/a/z below (no further `act` call on `xn1`
         // happens in between).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
+        let bproj = g.storage((n * nvh) as u64);
+        let aproj = g.storage((n * nvh) as u64);
+        let z = g.storage((n * value_dim) as u64);
         let mut s1 = Vec::new();
         let act1 = match pre {
             Some(a) => a,
             None => self.ops_act(&mut s1, xn1, n, d),
         };
-        if self.ops_linear(&mut s1, &act1, &p("in_proj_qkv.weight"), &mixed_qkv) {
-            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
+        // in_proj_qkv/b/a/z all read `act1` (xn1 quantized once, shared): one
+        // group, which is one launch where the device allows it.
+        let (qkv_w, b_w, a_w, z_w) = (p("in_proj_qkv.weight"), p("in_proj_b.weight"), p("in_proj_a.weight"), p("in_proj_z.weight"));
+        let f32s = self.ops_linear_group(&mut s1, &act1, &[(&qkv_w, &mixed_qkv), (&b_w, &bproj), (&a_w, &aproj), (&z_w, &z)]);
+        if f32s[0] {
+            self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &qkv_w, &mixed_qkv, n, d, conv_dim);
+        }
+        if f32s[1] {
+            self.lora_fwd(&mut s1, "in_proj_b", xn1, &b_w, &bproj, n, d, nvh);
+        }
+        if f32s[2] {
+            self.lora_fwd(&mut s1, "in_proj_a", xn1, &a_w, &aproj, n, d, nvh);
+        }
+        if f32s[3] {
+            self.lora_fwd(&mut s1, "in_proj_z", xn1, &z_w, &z, n, d, value_dim);
         }
         g.submit(&[], &s1);
-
-        // in_proj_b/a/z (LoRA/int8 dispatch stays local). Reuses `act1`
-        // (xn1 quantized once, shared) - no fresh `Ops::act` call needed.
-        let bproj = g.storage((n * nvh) as u64);
-        let aproj = g.storage((n * nvh) as u64);
-        let z = g.storage((n * value_dim) as u64);
-        {
-            let mut s = Vec::new();
-            if self.ops_linear(&mut s, &act1, &p("in_proj_b.weight"), &bproj) {
-                self.lora_fwd(&mut s, "in_proj_b", xn1, &p("in_proj_b.weight"), &bproj, n, d, nvh);
-            }
-            if self.ops_linear(&mut s, &act1, &p("in_proj_a.weight"), &aproj) {
-                self.lora_fwd(&mut s, "in_proj_a", xn1, &p("in_proj_a.weight"), &aproj, n, d, nvh);
-            }
-            if self.ops_linear(&mut s, &act1, &p("in_proj_z.weight"), &z) {
-                self.lora_fwd(&mut s, "in_proj_z", xn1, &p("in_proj_z.weight"), &z, n, d, value_dim);
-            }
-            g.submit(&[], &s);
-        }
 
         // conv+split+l2norm+decay-gate+recurrence+gated-norm - LoRA/dtype-
         // agnostic, shared with `crates/qwen35moe` (`model::gdn_mixer`).
@@ -1899,14 +1916,16 @@ impl Qwen35 {
             Some(a) => a,
             None => self.ops_act(&mut s1, xn1, n, d),
         };
-        if self.ops_linear(&mut s1, &act1, &p("q_proj.weight"), &q_full) {
-            self.lora_fwd(&mut s1, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
+        let (q_w, k_w, v_w) = (p("q_proj.weight"), p("k_proj.weight"), p("v_proj.weight"));
+        let f32s = self.ops_linear_group(&mut s1, &act1, &[(&q_w, &q_full), (&k_w, &k), (&v_w, &v)]);
+        if f32s[0] {
+            self.lora_fwd(&mut s1, "q_proj", xn1, &q_w, &q_full, n, d, qpd);
         }
-        if self.ops_linear(&mut s1, &act1, &p("k_proj.weight"), &k) {
-            self.lora_fwd(&mut s1, "k_proj", xn1, &p("k_proj.weight"), &k, n, d, kvd);
+        if f32s[1] {
+            self.lora_fwd(&mut s1, "k_proj", xn1, &k_w, &k, n, d, kvd);
         }
-        if self.ops_linear(&mut s1, &act1, &p("v_proj.weight"), &v) {
-            self.lora_fwd(&mut s1, "v_proj", xn1, &p("v_proj.weight"), &v, n, d, kvd);
+        if f32s[2] {
+            self.lora_fwd(&mut s1, "v_proj", xn1, &v_w, &v, n, d, kvd);
         }
         g.submit(&[], &s1);
 
@@ -2049,11 +2068,13 @@ impl Qwen35 {
                 Some(a) => a,
                 None => self.ops_act(&mut s, xn2, n, d),
             };
-            if self.ops_linear(&mut s, &act1, &p("gate.weight"), &gate_pre) {
-                self.lora_fwd(&mut s, "gate", xn2, &p("gate.weight"), &gate_pre, n, d, ff);
+            let (gate_w, up_w) = (p("gate.weight"), p("up.weight"));
+            let f32s = self.ops_linear_group(&mut s, &act1, &[(&gate_w, &gate_pre), (&up_w, &up)]);
+            if f32s[0] {
+                self.lora_fwd(&mut s, "gate", xn2, &gate_w, &gate_pre, n, d, ff);
             }
-            if self.ops_linear(&mut s, &act1, &p("up.weight"), &up) {
-                self.lora_fwd(&mut s, "up", xn2, &p("up.weight"), &up, n, d, ff);
+            if f32s[1] {
+                self.lora_fwd(&mut s, "up", xn2, &up_w, &up, n, d, ff);
             }
             g.submit(&[], &s);
         }

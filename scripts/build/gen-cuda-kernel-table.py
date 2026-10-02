@@ -13,7 +13,8 @@ nothing and it never edits the crate.
 Two things it checks that nothing else can:
 
   1. ORPHANED SOURCE - every `.cu` file under `crates/kernels-cuda/cu/` must
-     be embedded by exactly one registry entry. A kernel file the registry
+     be embedded by at least one registry entry (and each entry point of a
+     file, at most one). A kernel file the registry
      does not list is a kernel nothing can dispatch, nothing compiles and
      nothing tests, sitting in the tree looking like shipped functionality.
      The crate's own Rust invariant test cannot see this: `include_str!`
@@ -128,12 +129,18 @@ def check_sources(entries):
         if not path.is_file():
             errs.append(f'{e["name"]}: embeds {e["src"]}, which does not exist')
             continue
-        if path in embedded:
-            errs.append(f'{e["name"]}: embeds {e["src"]}, already embedded by {embedded[path]}')
-        embedded[path] = e["name"]
+        # One file may back several kernels (a single-matrix kernel and its
+        # merged form share a block function), but each ENTRY POINT is one
+        # registry entry: two entries naming the same (file, entry point) are
+        # one kernel listed twice.
+        key = (path, e["entry"])
+        if key in embedded:
+            errs.append(f'{e["name"]}: embeds {e["src"]} at {e["entry"]}, already registered by {embedded[key]}')
+        embedded[key] = e["name"]
+    embedded_files = {path for path, _ in embedded}
     if CU.is_dir():
         for f in sorted(CU.glob("*.cu")):
-            if f.resolve() not in embedded:
+            if f.resolve() not in embedded_files:
                 errs.append(
                     f"cu/{f.name}: no registry entry embeds this file - a kernel nothing "
                     "dispatches, compiles or tests"

@@ -120,6 +120,12 @@ pub enum Fused {
     /// v, q_norm, k_norm, cos, sin, blocks, offsets` read, `q_out, q_gate,
     /// pool_k, pool_v` written.
     GqaDecodePrep,
+    /// `matmul_i8_gemv_multi`: up to four int8 matrices that read ONE packed
+    /// activation, multiplied in a single launch - each output bit-identical to
+    /// the single `matmul_i8_gemv` on that matrix. Params `[m, kg, n0, n1, n2,
+    /// n3]` (`n_i == 0` leaves set `i` unused); bindings `xq`, `sx`, then for
+    /// each set its `wq`, `sw` (read) and `out` (written).
+    I8GemvMulti,
 }
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
@@ -181,6 +187,26 @@ const GQA_DECODE_PREP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `matmul_i8_gemv_multi`'s bindings: params, `xq`, `sx`, then `wq`, `sw`, `out`
+/// for each of four sets.
+const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
 impl Fused {
 
     /// The `kernels_cuda` registry entry's name.
@@ -190,6 +216,7 @@ impl Fused {
             Fused::QuantEpilogue => "quant_epilogue",
             Fused::GdnDecode => "gdn_decode",
             Fused::GqaDecodePrep => "gqa_decode_prep",
+            Fused::I8GemvMulti => "matmul_i8_gemv_multi",
         }
     }
 
@@ -199,6 +226,7 @@ impl Fused {
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
+            Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
         }
     }
 
@@ -219,6 +247,12 @@ impl Fused {
             // A head is one 256-thread block holding up to 512 values; the
             // rotated span `2 * half` has to fit inside it.
             Fused::GqaDecodePrep => matches!(params, [nh, nkv, hd, half, ..] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (2..=512).contains(hd) && *half >= 1 && 2 * half <= *hd),
+            // The single GEMV's own contract for every matrix: one tile of x
+            // rows per weight pass and K a whole number of 32-element groups.
+            Fused::I8GemvMulti => {
+                let rows = kernels_cuda::get("matmul_i8_gemv").map_or(0, |k| k.tile.0);
+                matches!(params, [m, kg, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *kg >= 8 && kg % 8 == 0 && *n0 >= 1)
+            }
         }
     }
 
@@ -228,6 +262,10 @@ impl Fused {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
             Fused::GqaDecodePrep => params[0] + params[1],
+            Fused::I8GemvMulti => {
+                let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);
+                params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
+            }
         }
     }
 }

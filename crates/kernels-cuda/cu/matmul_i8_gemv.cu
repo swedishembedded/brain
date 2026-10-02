@@ -239,6 +239,29 @@ __device__ __forceinline__ void brain_gemv_select(const unsigned int* xq, const 
     else                  { brain_gemv_launch<8, VEC>(xq, wq, sx, sw, out, mrows, m0, kg, n, col); }
 }
 
+// One block's share of a GEMV: the `tile_m`-th group of up to BRAIN_I8G_ROWS rows
+// of x against the `tile_n`-th group of BRAIN_I8G_COLS weight rows. Shared by
+// the single-matrix kernel below and by `matmul_i8_gemv_multi`, which runs it
+// for whichever of several matrices a block belongs to - so the two produce
+// the same bits by construction.
+__device__ __forceinline__ void brain_gemv_block(const unsigned int* xq, const unsigned int* wq,
+                                                 const float* sx, const float* sw, float* out,
+                                                 unsigned int m, unsigned int kg, unsigned int n,
+                                                 unsigned int tile_m, unsigned int tile_n) {
+    const unsigned int m0 = tile_m * BRAIN_I8G_ROWS;
+    if (m0 >= m) { return; }  // block-uniform
+    const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_ROWS);
+    const unsigned int col = tile_n * BRAIN_I8G_COLS + threadIdx.x / BRAIN_I8G_LANES;
+
+    const bool aligned = ((reinterpret_cast<unsigned long long>(xq) |
+                           reinterpret_cast<unsigned long long>(wq)) & 15ull) == 0ull;
+    if (aligned) {
+        brain_gemv_select<true>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+    } else {
+        brain_gemv_select<false>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+    }
+}
+
 extern "C" __global__ void __launch_bounds__(BRAIN_I8G_THREADS, BRAIN_I8G_MIN_BLOCKS)
 brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const unsigned int* wq,
                      const float* sx, const float* sw, float* out) {
@@ -253,16 +276,65 @@ brain_matmul_i8_gemv(const unsigned int* params, const unsigned int* xq, const u
     if (tiles_n == 0u) { return; }
     const unsigned int tile_m = blk / tiles_n;
     const unsigned int tile_n = blk - tile_m * tiles_n;
-    const unsigned int m0 = tile_m * BRAIN_I8G_ROWS;
-    if (m0 >= m) { return; }  // block-uniform
-    const unsigned int mrows = min(m - m0, (unsigned int)BRAIN_I8G_ROWS);
-    const unsigned int col = tile_n * BRAIN_I8G_COLS + threadIdx.x / BRAIN_I8G_LANES;
+    brain_gemv_block(xq, wq, sx, sw, out, m, kg, n, tile_m, tile_n);
+}
 
-    const bool aligned = ((reinterpret_cast<unsigned long long>(xq) |
-                           reinterpret_cast<unsigned long long>(wq)) & 15ull) == 0ull;
-    if (aligned) {
-        brain_gemv_select<true>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
-    } else {
-        brain_gemv_select<false>(xq, wq, sx, sw, out, mrows, m0, kg, n, col);
+// Up to four int8 matrices that read ONE activation, multiplied in a single
+// launch (the `matmul_i8_gemv_multi` registry entry, a second entry point of
+// this file).
+//
+//   params : u32 [m, kg, n0, n1, n2, n3]    n_i = 0 leaves set i unused
+//   xq, sx : the shared packed activation and its per-row scales
+//   wq_i, sw_i, out_i : set i's packed weights, group scales and output,
+//                       exactly the buffers a single `matmul_i8_gemv` takes
+//
+// Why it exists. A decode layer multiplies the same activation by several
+// projections - a GDN layer's qkv, b, a and z, a GQA layer's q, k and v, the
+// SwiGLU's gate and up - and each is its own launch whose last wave is mostly
+// empty: the 48-row b and a projections run six blocks. Merged, the blocks of
+// all the matrices fill the card together and the launch count drops by two
+// thirds, which on a replayed graph is also a node boundary each.
+//
+// Bit identity. A block runs `brain_gemv_block` - the very function the
+// single-matrix kernel runs - on the block's own matrix, so every output
+// element is the one a separate launch would have produced, bit for bit. The
+// blocks of set 0 come first, then set 1, and so on; within a set the mapping
+// is the single kernel's (`tile_m` major, `tile_n` minor).
+
+extern "C" __global__ void __launch_bounds__(BRAIN_I8G_THREADS, BRAIN_I8G_MIN_BLOCKS)
+brain_matmul_i8_gemv_multi(const unsigned int* params, const unsigned int* xq, const float* sx,
+                           const unsigned int* wq0, const float* sw0, float* out0,
+                           const unsigned int* wq1, const float* sw1, float* out1,
+                           const unsigned int* wq2, const float* sw2, float* out2,
+                           const unsigned int* wq3, const float* sw3, float* out3) {
+    const unsigned int m = params[0];
+    const unsigned int kg = params[1];
+    const unsigned int tiles_m = (m + BRAIN_I8G_ROWS - 1u) / BRAIN_I8G_ROWS;
+
+    // Which matrix this block belongs to: set i owns tiles_m * ceil(n_i / COLS)
+    // consecutive blocks.
+    unsigned int local = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int* wq = wq0;
+    const float* sw = sw0;
+    float* out = out0;
+    unsigned int n = 0u;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const unsigned int ni = params[2 + i];
+        const unsigned int blocks = tiles_m * ((ni + BRAIN_I8G_COLS - 1u) / BRAIN_I8G_COLS);
+        if (n == 0u && local < blocks) {
+            n = ni;
+            wq = (i == 0) ? wq0 : (i == 1) ? wq1 : (i == 2) ? wq2 : wq3;
+            sw = (i == 0) ? sw0 : (i == 1) ? sw1 : (i == 2) ? sw2 : sw3;
+            out = (i == 0) ? out0 : (i == 1) ? out1 : (i == 2) ? out2 : out3;
+        } else if (n == 0u) {
+            local -= blocks;
+        }
     }
+    if (n == 0u) { return; }  // past the last matrix's blocks; block-uniform
+
+    const unsigned int tiles_n = (n + BRAIN_I8G_COLS - 1u) / BRAIN_I8G_COLS;
+    const unsigned int tile_m = local / tiles_n;
+    const unsigned int tile_n = local - tile_m * tiles_n;
+    brain_gemv_block(xq, wq, sx, sw, out, m, kg, n, tile_m, tile_n);
 }
