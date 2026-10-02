@@ -25,6 +25,8 @@
 //!   BRAIN_PROFILE_BATCH    sequences decoded together (default 1)
 //!   BRAIN_PROFILE_PREFILL  profile a cold prefill of this many tokens instead
 //!   BRAIN_PROFILE_CHUNK    prefill round size (default 256)
+//!   BRAIN_PROFILE_GROUPED_MIN_ROWS  rows from which the expert GEMMs group their slots
+//!                          (default `MOE_GROUPED_MIN_ROWS`; the sweep that set it)
 //!   BRAIN_QWEN35MOE_TIER   weight tier policy (default `i8`)
 //!   BRAIN_QWEN35_KV        KV tier: `f32` (default), `bf16`, `int8`
 
@@ -56,7 +58,7 @@ fn main() {
     let cfg = gguf_load::resident_config(&mg, capacity).unwrap_or_else(|e| panic!("{e}"));
     let src = gguf_load::source(&mg, &cfg).unwrap_or_else(|e| panic!("{e}"));
     let t0 = Instant::now();
-    let opts = EngineOptions::new(capacity, if prefill.is_some() { 1 } else { batch }).with_tier(tier.clone()).with_kv_tier(kv).with_prefill_chunk(chunk);
+    let opts = EngineOptions::new(capacity, if prefill.is_some() { 1 } else { batch }).with_tier(tier.clone()).with_kv_tier(kv).with_prefill_chunk(chunk).with_moe_grouped_min_rows(env_u32("BRAIN_PROFILE_GROUPED_MIN_ROWS", qwen35moe::model::MOE_GROUPED_MIN_ROWS));
     let mut engine = Engine::from_source(cfg.clone(), &src, opts);
     println!("weight tier {}, kv {kv}, backend {}", tier.describe(), gpu_core::backend_name());
     println!("cold load {:.1} s, KV pool + recurrent state {:.2} GiB", t0.elapsed().as_secs_f64(), engine.kv_pool_bytes() as f64 / (1u64 << 30) as f64);

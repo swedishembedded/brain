@@ -542,8 +542,11 @@ const MOE_GROUPED_MR: u32 = 8;
 const MOE_GROUPED_COLS: u32 = 4;
 /// Rows at which the expert GEMMs switch from one slot per weight pass
 /// (`moe_i8_gemv_gather`) to the grouped kernel. Below it a token's experts are
-/// mostly distinct matrices and there is nothing to share.
-pub const MOE_GROUPED_MIN_ROWS: u32 = 16;
+/// mostly distinct matrices and there is nothing to share. Swept on a GH200 on
+/// the real 35B-A3B decode step, device-timed (`qwen35moe_decode_profile`): the
+/// gather GEMV leads through 5 rows (13.8 ms against 14.2 at 5), the grouped
+/// kernel from 7 (15.4 against 14.4), and by 16 rows it is 18.0 ms against 28.1.
+pub const MOE_GROUPED_MIN_ROWS: u32 = 7;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
