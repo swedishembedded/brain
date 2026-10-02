@@ -1838,6 +1838,19 @@ impl crate::TensorSource for MmapGguf {
         }
     }
 
+    /// Only the quant blocks the range touches are decoded (`tensor_range`), so
+    /// one expert of a stacked tensor costs one expert.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.tensor_range(name, start, len) {
+            Some(Ok(v)) => {
+                f(&v);
+                true
+            }
+            Some(Err(e)) => panic!("gguf: {name}: dequant failed: {e}"),
+            None => false,
+        }
+    }
+
     /// Bounded chunked dequant: walk the tensor **block by block**, decoding
     /// at most `max_elems` elements into one scratch at a time.
     ///

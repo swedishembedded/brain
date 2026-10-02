@@ -179,13 +179,8 @@ impl TensorSource for RemapSource<'_> {
                 if self.fetch_numel(fetch).is_none() {
                     return false;
                 }
-                let (start, len) = (*start, *len);
-                self.src().with_tensor(src, &mut |data| {
-                    // In range by the fetch_numel check above; a violation here
-                    // means the SOURCE's numel/with_tensor disagree (a source
-                    // impl bug, not user data), which deserves the loud panic.
-                    f(&data[start..start + len]);
-                })
+                // Only the slice's own range is decoded (`with_tensor_range`).
+                self.src().with_tensor_range(src, *start, *len, f)
             }
             Fetch::Concat(parts) => {
                 let Some(total) = self.fetch_numel(fetch) else { return false };
@@ -208,6 +203,32 @@ impl TensorSource for RemapSource<'_> {
                     f(&buf);
                     true
                 }
+            }
+        }
+    }
+
+    /// A range of a destination is a range of its source: `Whole` and `Slice`
+    /// forward it (shifted by the slice's own start) so a quantised source
+    /// still decodes only the blocks that range touches.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        let Some(fetch) = self.plan.get(name) else { return false };
+        match fetch {
+            Fetch::Whole(src) => self.src().with_tensor_range(src, start, len, f),
+            Fetch::Slice { name: src, start: s0, len: slice_len } => {
+                if start.checked_add(len).is_none_or(|end| end > *slice_len) || self.fetch_numel(fetch).is_none() {
+                    return false;
+                }
+                self.src().with_tensor_range(src, s0 + start, len, f)
+            }
+            Fetch::Concat(_) | Fetch::RowPermute { .. } => {
+                let mut in_range = false;
+                let found = self.with_tensor(name, &mut |d| {
+                    if start.checked_add(len).is_some_and(|end| end <= d.len()) {
+                        in_range = true;
+                        f(&d[start..start + len]);
+                    }
+                });
+                found && in_range
             }
         }
     }
@@ -281,18 +302,20 @@ impl TensorSource for RemapSource<'_> {
                 if self.fetch_numel(fetch).is_none() {
                     return false;
                 }
+                // Bounded pieces of the slice's OWN range, each decoded by
+                // `with_tensor_range`: the cost is `len`, where a chunk scan
+                // from offset 0 would also decode everything before `start`.
                 let (start, len) = (*start, *len);
-                self.src().with_tensor_chunks(src, max_elems, &mut |chunk_off, chunk| {
-                    let chunk_off = chunk_off as usize;
-                    let chunk_end = chunk_off + chunk.len();
-                    // Overlap of [chunk_off, chunk_end) with [start, start+len),
-                    // re-based to the destination's own [0, len) coordinates.
-                    let lo = chunk_off.max(start);
-                    let hi = chunk_end.min(start + len);
-                    if lo < hi {
-                        f((lo - start) as u64, &chunk[lo - chunk_off..hi - chunk_off]);
+                let step = if max_elems == 0 { len.max(1) } else { max_elems };
+                let mut off = 0usize;
+                while off < len {
+                    let n = step.min(len - off);
+                    if !self.src().with_tensor_range(src, start + off, n, &mut |piece| f(off as u64, piece)) {
+                        return false;
                     }
-                })
+                    off += n;
+                }
+                true
             }
             // Default (materialize once, hand over as one chunk) - bounded by
             // this destination tensor's own size, which is the same cost
@@ -329,8 +352,7 @@ impl RemapSource<'_> {
                 if self.fetch_numel(fetch).is_none() {
                     return false; // out of range: same refusal as every other path
                 }
-                let (start, len) = (*start, *len);
-                self.src().with_tensor(src, &mut |d| out.copy_from_slice(&d[start..start + len]))
+                self.src().with_tensor_range(src, *start, *len, &mut |d| out.copy_from_slice(d))
             }
             Fetch::RowPermute { name: src, order } => {
                 let Some(re) = self.row_elems(src, order) else { return false };
@@ -413,6 +435,66 @@ mod tests {
         assert_eq!(raw, want.as_slice());
     }
 
+
+    /// A source that records how many elements it was asked to DECODE: one
+    /// tensor, served whole by `with_tensor` and by element range through
+    /// `with_tensor_range` (the way an mmap-backed GGUF does).
+    struct Counting {
+        data: Vec<f32>,
+        decoded: std::cell::Cell<usize>,
+    }
+
+    impl TensorSource for Counting {
+        fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+            if name != "stack" {
+                return false;
+            }
+            self.decoded.set(self.decoded.get() + self.data.len());
+            f(&self.data);
+            true
+        }
+        fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+            if name != "stack" || start + len > self.data.len() {
+                return false;
+            }
+            self.decoded.set(self.decoded.get() + len);
+            f(&self.data[start..start + len]);
+            true
+        }
+        fn numel(&self, name: &str) -> Option<usize> {
+            (name == "stack").then_some(self.data.len())
+        }
+    }
+
+    /// Reading one expert out of a stacked tensor must cost that expert, not the
+    /// stack: a 256-expert layer read expert by expert through a whole-tensor
+    /// decode is 256 times the work (on the real GGUF a 4-layer fp32 load burned
+    /// 17 minutes and 5.5 CPU-hours on it).
+    #[test]
+    fn a_slice_decodes_only_its_own_range_on_every_path() {
+        let (experts, per) = (64usize, 32usize);
+        let inner = Counting { data: (0..experts * per).map(|i| i as f32).collect(), decoded: std::cell::Cell::new(0) };
+        let mut plan = HashMap::new();
+        for e in 0..experts {
+            plan.insert(format!("e{e}"), Fetch::Slice { name: "stack".to_string(), start: e * per, len: per });
+        }
+        let r = RemapSource::new(&inner, plan);
+
+        for e in 0..experts {
+            let mut got = Vec::new();
+            assert!(r.with_tensor(&format!("e{e}"), &mut |d| got = d.to_vec()));
+            assert_eq!(got, inner.data[e * per..(e + 1) * per]);
+        }
+        assert_eq!(inner.decoded.get(), experts * per, "with_tensor: one decode of the stack's worth in total, not one per expert");
+
+        inner.decoded.set(0);
+        for e in 0..experts {
+            let mut got = vec![0f32; per];
+            assert!(r.with_tensor_chunks(&format!("e{e}"), 8, &mut |off, c| got[off as usize..off as usize + c.len()].copy_from_slice(c)));
+            assert_eq!(got, inner.data[e * per..(e + 1) * per]);
+        }
+        assert_eq!(inner.decoded.get(), experts * per, "with_tensor_chunks: bounded chunks of its own range only");
+    }
     #[test]
     fn slice_streams_in_bounded_chunks_correctly_offset() {
         let n = 1000usize;

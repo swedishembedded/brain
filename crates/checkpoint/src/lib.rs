@@ -77,6 +77,28 @@ pub trait TensorSource {
         self.with_tensor(name, &mut |d| f(0, d))
     }
 
+    /// Elements `[start, start + len)` of `name`'s flat layout, decoded WITHOUT
+    /// decoding the rest of the tensor when the source can avoid it. Returns
+    /// whether the tensor was found and the range lies inside it (`f` is never
+    /// called otherwise - never a silently truncated read).
+    ///
+    /// The default decodes the whole tensor via [`with_tensor`](Self::with_tensor)
+    /// and slices, which is correct for every f32-backed source (the data is
+    /// already in memory). A quantised, mmap-backed source overrides it to
+    /// decode only the blocks the range touches (`MmapGguf::tensor_range`):
+    /// without that, reading ONE expert out of a stacked `[n_experts, ..]`
+    /// tensor costs the whole stack - 256x the work on a 256-expert layer.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        let mut in_range = false;
+        let found = self.with_tensor(name, &mut |d| {
+            if start.checked_add(len).is_some_and(|end| end <= d.len()) {
+                in_range = true;
+                f(&d[start..start + len]);
+            }
+        });
+        found && in_range
+    }
+
     /// Ordered chunks of at most `max_elems` **packed `u32` words** - the
     /// bounded reader for brain's int8-native storage convention
     /// (`model::int8::quantize_weight`'s 4-int8-per-`u32` layout, written by

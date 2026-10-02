@@ -231,6 +231,23 @@ impl TensorSource for GdnFixSource<'_> {
         self.inner.with_tensor_chunks(name, max_elems, f)
     }
 
+    /// A transformed leaf is served whole and sliced (the transform permutes
+    /// heads, so a range of the output is not a range of the source); anything
+    /// else forwards, so a quantised source decodes only the range.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        if GdnLeaf::of(name).is_none() {
+            return self.inner.with_tensor_range(name, start, len, f);
+        }
+        let mut in_range = false;
+        let found = self.with_tensor(name, &mut |d| {
+            if start.checked_add(len).is_some_and(|end| end <= d.len()) {
+                in_range = true;
+                f(&d[start..start + len]);
+            }
+        });
+        found && in_range
+    }
+
     fn numel(&self, name: &str) -> Option<usize> {
         self.inner.numel(name)
     }
