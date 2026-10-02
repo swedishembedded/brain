@@ -154,6 +154,7 @@ fn gdn_mixer_ids(g: &Gpu) -> GdnMixerIds {
             sub: idx(g, "sub"),
             mul: idx(g, "mul"),
             region_copy: idx(g, "region_copy"),
+            fast: None,
         },
         chunk_bwd: GdnBwdIds {
             splice_add: idx(g, "splice_add"),

@@ -80,6 +80,7 @@ fn ids(g: &Gpu) -> GdnIds {
         sub: idx(g, "sub"),
         mul: idx(g, "mul"),
         region_copy: idx(g, "region_copy"),
+        fast: None,
     }
 }
 

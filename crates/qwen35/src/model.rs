@@ -181,6 +181,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256), // 91
     // The batched KV append of every tier's decode step.
     ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED), // 92
+    // Prefill fast path, see `model::gdn::use_fast_kernels`. Registered LAST
+    // for the same reason as the head kernels above.
+    ("gdn_ut_fwd", kernels::GDN_UT_FWD), // 93
+    ("bmm_tiled", kernels::BMM_TILED), // 94
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -362,6 +366,8 @@ const ARGMAX_PART: usize = 85;
 const ARGMAX_FINAL: usize = 86;
 const TOPK_EXTRACT_STEP: usize = 87;
 const DECODE_SOFTMAX_BATCHED: usize = 88;
+const GDN_UT_FWD: usize = 93;
+const BMM_TILED: usize = 94;
 
 /// Two-stage argmax reduction width for [`Qwen35::head_argmax_dev`]/
 /// [`Qwen35::head_topk_dev`] - matches `qwen3::serve::Engine`'s own
@@ -533,6 +539,7 @@ fn gdn_ids() -> GdnIds {
         sub: SUB,
         mul: MUL,
         region_copy: REGION_COPY,
+        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED }),
     }
 }
 

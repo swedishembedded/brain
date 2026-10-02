@@ -535,6 +535,7 @@ fn gdn_ids() -> GdnIds {
         sub: SUB,
         mul: MUL,
         region_copy: REGION_COPY,
+        fast: None,
     }
 }
 

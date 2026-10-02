@@ -190,6 +190,36 @@ pub struct GdnIds {
     /// `region_copy.wgsl` (existing, unmodified) - `g_cs = copy(raw_g)` and
     /// `final_state = copy(initial_state)` (the loop's working buffer).
     pub region_copy: usize,
+    /// Faster, contract-equivalent kernels for the prefill-shaped forward, for
+    /// a caller that registered them. `None` is always valid; whether a device
+    /// actually takes them is [`use_fast_kernels`]'s decision, not the
+    /// caller's.
+    pub fast: Option<GdnFastIds>,
+}
+
+/// Kernels that replace a run of dispatches in [`gdn_chunk_fwd`] with fewer,
+/// bigger ones while computing the same numbers. Registered by a caller that
+/// has a device to run them on; see [`use_fast_kernels`].
+#[derive(Clone, Copy)]
+pub struct GdnFastIds {
+    /// `gdn_ut_fwd.wgsl` - the whole UT transform (step 7 and its identity) in
+    /// one workgroup-per-matrix dispatch instead of `chunk - 1` row launches.
+    pub ut_fwd: usize,
+    /// `bmm_tiled.wgsl` - the 64x64-tile, register-blocked batched matmul that
+    /// serves both `bmm` and `bmm_acc` (bit-identical to them).
+    pub bmm_tiled: usize,
+}
+
+/// Whether `g` takes [`GdnIds::fast`] kernels.
+///
+/// They are workgroup-cooperative WGSL kernels, bit-identical to the loops
+/// they replace, but only measured on CUDA devices with int8 tensor-core
+/// generation hardware; every other device keeps the portable dispatch
+/// sequence it has always run. The gate is the queried compute capability
+/// (never a device name), and `BRAIN_NO_GDN_FAST=1` switches it off for A/B
+/// measurement.
+pub fn use_fast_kernels(g: &Gpu) -> bool {
+    std::env::var_os("BRAIN_NO_GDN_FAST").is_none() && g.caps().arch.compute_capability.is_some_and(|cc| cc >= (8, 0))
 }
 
 /// The shape one call to [`gdn_chunk_fwd`] operates over. `b`/`h` are the
@@ -670,6 +700,10 @@ impl GdnBwdScratchBufs {
     }
 }
 
+/// Largest chunk `gdn_ut_fwd.wgsl` serves: one thread per column and a packed
+/// triangle sized for 64 rows (its header derives both).
+const GDN_UT_FWD_MAX_CHUNK: u32 = 64;
+
 /// One `bmm.wgsl`/`bmm_acc.wgsl` dispatch. Public because a batched matmul
 /// with offset-addressable batch slices is a general primitive, not a
 /// GDN-only detail - a future caller assembling its own batched-matmul step
@@ -699,6 +733,45 @@ pub fn bmm_step(
         batch * m * n,
     )
 }
+
+/// [`bmm_step`] for the FORWARD chunk path: the tiled kernel when `ids` carries
+/// one and the device takes it ([`use_fast_kernels`]), else the one-thread-per-
+/// output pair. `kernel` is `ids.bmm` or `ids.bmm_acc`; the tiled kernel folds
+/// the two behind a flag and reproduces either exactly.
+#[allow(clippy::too_many_arguments)]
+fn bmm_auto(
+    g: &Gpu,
+    ids: &GdnIds,
+    kernel: usize,
+    batch: u32,
+    m: u32,
+    k: u32,
+    n: u32,
+    trans_a: bool,
+    trans_b: bool,
+    alpha: f32,
+    a: &DeviceBuffer,
+    a_off: u32,
+    b: &DeviceBuffer,
+    b_off: u32,
+    out: &DeviceBuffer,
+    out_off: u32,
+) -> Step {
+    let Some(fast) = ids.fast.filter(|_| use_fast_kernels(g)) else {
+        return bmm_step(g, kernel, batch, m, k, n, trans_a, trans_b, alpha, a, a_off, b, b_off, out, out_off);
+    };
+    let acc = kernel == ids.bmm_acc;
+    let tiles = batch * m.div_ceil(BMM_TILED_TILE) * n.div_ceil(BMM_TILED_TILE);
+    g.dispatch(
+        fast.bmm_tiled,
+        &[a, b, out],
+        &[batch, m, k, n, trans_a as u32, trans_b as u32, f(alpha), a_off, b_off, out_off, acc as u32],
+        gpu_core::Dispatch::Workgroups(tiles),
+    )
+}
+
+/// Rows and columns one `bmm_tiled.wgsl` workgroup covers.
+const BMM_TILED_TILE: u32 = 64;
 
 /// The 13 whole-tensor (chunk-independent-dispatch) scratch buffers steps 1-9
 /// and the pre-loop `intra_scores` precompute need - the fields [`GdnScratch`]
@@ -748,7 +821,7 @@ fn gdn_chunk_fwd_prefix(
     let scale = 1.0f32 / (dk as f32).sqrt();
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
-        bmm_step(g, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
+        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
     };
 
     // ---- steps 1-2: v_beta = value*beta, k_beta = key*beta (whole tensor) ----
@@ -802,10 +875,17 @@ fn gdn_chunk_fwd_prefix(
     // an entry of the bounded answer, so it is accurate to ~1e-7 across the
     // whole range. `crates/model/tests/gdn_chunk_fwd.rs`'s
     // `gdn_chunk_fwd_matches_host_oracle_with_near_parallel_keys` pins this.
-    for i in 1..c {
-        steps.push(g.step(ids.ut_step, &[s.attn0, s.t_mat], &[bhc, c, i], bhc * i));
+    match ids.fast.filter(|_| c <= GDN_UT_FWD_MAX_CHUNK && use_fast_kernels(g)) {
+        // One workgroup per matrix; the kernel writes the whole `t_mat`
+        // (identity included), so no `add_identity` follows.
+        Some(fast) => steps.push(g.dispatch(fast.ut_fwd, &[s.attn0, s.t_mat], &[bhc, c], gpu_core::Dispatch::Workgroups(bhc))),
+        None => {
+            for i in 1..c {
+                steps.push(g.step(ids.ut_step, &[s.attn0, s.t_mat], &[bhc, c, i], bhc * i));
+            }
+            steps.push(g.step(ids.add_identity, &[s.t_mat], &[bhc, c], bhc * c));
+        }
     }
-    steps.push(g.step(ids.add_identity, &[s.t_mat], &[bhc, c], bhc * c));
 
     // ---- step 8: u = T_mat @ v_beta ----
     steps.push(bmm(ids.bmm, bhc, c, c, dv, false, false, 1.0, s.t_mat, 0, s.v_beta, 0, s.u, 0));
@@ -858,7 +938,7 @@ pub fn gdn_chunk_fwd(
     let scale = 1.0f32 / (dk as f32).sqrt();
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
-        bmm_step(g, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
+        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
     };
 
     let whole = GdnWholeScratch {
@@ -1011,7 +1091,7 @@ pub fn gdn_chunk_fwd_train(
     let scale = 1.0f32 / (dk as f32).sqrt();
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
-        bmm_step(g, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
+        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
     };
     let splice = |src: &DeviceBuffer, dst: &DeviceBuffer, base: u32, n: u32| g.step(bwd_ids.splice_add, &[src, dst], &[n, base], n);
 
@@ -1253,7 +1333,7 @@ pub fn gdn_chunk_bwd(
     let scale = 1.0f32 / (dk as f32).sqrt();
 
     let bmm = |kernel: usize, batch: u32, m: u32, k: u32, n: u32, ta: bool, tb: bool, alpha: f32, a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, o: &DeviceBuffer, o_off: u32| {
-        bmm_step(g, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
+        bmm_auto(g, ids, kernel, batch, m, k, n, ta, tb, alpha, a, a_off, b, b_off, o, o_off)
     };
     let splice = |src: &DeviceBuffer, dst: &DeviceBuffer, base: u32, n: u32| g.step(bwd_ids.splice_add, &[src, dst], &[n, base], n);
     let row_dot = |a: &DeviceBuffer, a_off: u32, b: &DeviceBuffer, b_off: u32, rows: u32, d: u32, alpha: f32, out: &DeviceBuffer| {

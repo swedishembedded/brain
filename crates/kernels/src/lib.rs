@@ -216,6 +216,8 @@ pub const BLEND_ACCUMULATE: &str = include_str!("../wgsl/blend_accumulate.wgsl")
 pub const BMM: &str = include_str!("../wgsl/bmm.wgsl");
 /// `wgsl/bmm_acc.wgsl`
 pub const BMM_ACC: &str = include_str!("../wgsl/bmm_acc.wgsl");
+/// `wgsl/bmm_tiled.wgsl`
+pub const BMM_TILED: &str = include_str!("../wgsl/bmm_tiled.wgsl");
 /// `wgsl/bn_dbeta.wgsl`
 pub const BN_DBETA: &str = include_str!("../wgsl/bn_dbeta.wgsl");
 /// `wgsl/bn_dgamma.wgsl`
@@ -458,6 +460,8 @@ pub const GDN_STATE_DECAY_BWD_DSCALE: &str = include_str!("../wgsl/gdn_state_dec
 pub const GDN_UT_BWD_DATTN0: &str = include_str!("../wgsl/gdn_ut_bwd_dattn0.wgsl");
 /// `wgsl/gdn_ut_bwd_dtmat.wgsl`
 pub const GDN_UT_BWD_DTMAT: &str = include_str!("../wgsl/gdn_ut_bwd_dtmat.wgsl");
+/// `wgsl/gdn_ut_fwd.wgsl`
+pub const GDN_UT_FWD: &str = include_str!("../wgsl/gdn_ut_fwd.wgsl");
 /// `wgsl/gdn_ut_step.wgsl`
 pub const GDN_UT_STEP: &str = include_str!("../wgsl/gdn_ut_step.wgsl");
 /// `wgsl/geglu_shift.wgsl`
@@ -1300,6 +1304,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("blend_accumulate", BLEND_ACCUMULATE),
     ("bmm", BMM),
     ("bmm_acc", BMM_ACC),
+    ("bmm_tiled", BMM_TILED),
     ("bn_dbeta", BN_DBETA),
     ("bn_dgamma", BN_DGAMMA),
     ("bn_dstats", BN_DSTATS),
@@ -1421,6 +1426,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gdn_state_decay_bwd_dscale", GDN_STATE_DECAY_BWD_DSCALE),
     ("gdn_ut_bwd_dattn0", GDN_UT_BWD_DATTN0),
     ("gdn_ut_bwd_dtmat", GDN_UT_BWD_DTMAT),
+    ("gdn_ut_fwd", GDN_UT_FWD),
     ("gdn_ut_step", GDN_UT_STEP),
     ("geglu_shift", GEGLU_SHIFT),
     ("geglu_shift_da", GEGLU_SHIFT_DA),

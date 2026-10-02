@@ -1478,7 +1478,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // ---- bmm/bmm_acc: batched matmul, both operands vary per batch.
         // Params [batch, m, k, n, trans_a, trans_b, alpha, a_off, b_off, out_off].
         // Same contraction-MAC accounting as the GEMM family above, times `batch`.
-        "bmm" | "bmm_acc" => {
+        "bmm" | "bmm_acc" | "bmm_tiled" => {
             let (batch, m, k, n) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(2 * batch * m * k * n, 4 * batch * (m * k + n * k + m * n))
         }
@@ -1539,6 +1539,14 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "gdn_ut_step" => {
             let (bhc, i) = (p(0)?, p(2)?);
             f(2 * bhc * i * i, 4 * (2 * bhc * i * i))
+        }
+        // The whole UT transform in one dispatch: params [bhc, c_len]. Exactly
+        // the MACs the `c - 1` `gdn_ut_step` rows add up to,
+        // sum_i i(i-1)/2 = (c-2)(c-1)c/6 per matrix, at 2 flops each; one
+        // read of the lower triangle and one write of the whole matrix.
+        "gdn_ut_fwd" => {
+            let (bhc, c) = (p(0)?, p(1)?);
+            f(2 * bhc * (c.saturating_sub(2) * c.saturating_sub(1) * c / 6), 4 * (bhc * c * c / 2 + bhc * c * c))
         }
         "gdn_add_identity" => {
             let (bhc, c) = (p(0)?, p(1)?);
