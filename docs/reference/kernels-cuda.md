@@ -23,9 +23,12 @@ fact, not a silent slowdown.
 
 Every column is stated by the kernel's own registry entry in `crates/kernels-cuda` - nothing here is inferred. `make cuda-table` regenerates this block; `make cuda-table/check` fails when a kernel source is not registered, or when this table has drifted from the registry. Edit the registry, never the row.
 
-| kernel | op | tier | min cc | entry point | what |
-|---|---|---|---|---|---|
-| `matmul_f32_tiled` | MatMul | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
+| kernel | op | weights | tier | min cc | entry point | what |
+|---|---|---|---|---|---|---|
+| `matmul_f32_tiled` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_tiled` | fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order |
+| `matmul_i8_gemv` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_gemv` | packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg |
+
+**weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 
 **tier** - `tuned` is hand-written for this backend, optionally specialised to a queried device capability. It is the only tier a file in this tree can claim: a `generated` kernel is emitted from the portable WGSL reference at run time and has no source file here, and the `reference` tier IS that WGSL.
 

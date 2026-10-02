@@ -286,7 +286,7 @@ fn the_shipped_policy_is_backed_by_the_shipped_cuda_registry() {
     const CONTRACTS: usize = 0;
     let mut backed = 0usize;
     for e in policy::POLICY {
-        let k = kernels_cuda::best_for(kernels_cuda::ALL, e.op, e.min_cc).unwrap_or_else(|| {
+        let k = kernels_cuda::best_for_any_tier(kernels_cuda::ALL, e.op, e.min_cc).unwrap_or_else(|| {
             panic!(
                 "policy requires {:?} at cc {}.{} to be {:?}, but kernels-cuda has no implementation for it",
                 e.op, e.min_cc.0, e.min_cc.1, e.required

@@ -108,7 +108,7 @@ impl CudaProvider {
     /// `None` when the registry offers nothing for that operator at this
     /// capability.
     pub fn kernel(&self, op: select::Op) -> Option<&'static CudaKernel> {
-        kernels_cuda::find(op, self.cc)
+        kernels_cuda::find(op, Dtype::F32, self.cc)
     }
 
     /// [`Self::kernel`]'s registry name - what a test or a diagnostic reports

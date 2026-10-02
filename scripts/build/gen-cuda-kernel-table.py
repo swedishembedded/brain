@@ -72,6 +72,7 @@ CC_CONST = re.compile(r"pub const (\w+): Cc = \((\d+)\s*,\s*(\d+)\);")
 FIELD = {
     "name": re.compile(r'name:\s*"([^"]*)"'),
     "op": re.compile(r"op:\s*Op::(\w+)"),
+    "weight": re.compile(r"weight:\s*Dtype::(\w+)"),
     "source": re.compile(r"source:\s*ImplSource::(\w+)"),
     "min_cc": re.compile(r"min_cc:\s*(?:\((\d+)\s*,\s*(\d+)\)|(\w+))"),
     "entry": re.compile(r'entry:\s*"([^"]*)"'),
@@ -107,6 +108,7 @@ def parse_registry(text):
             {
                 "name": row["name"][0],
                 "op": row["op"][0],
+                "weight": row["weight"][0],
                 "source": row["source"][0],
                 "min_cc": f"{major}.{minor}",
                 "entry": row["entry"][0],
@@ -161,16 +163,20 @@ def render(entries):
         ]
     else:
         lines += [
-            "| kernel | op | tier | min cc | entry point | what |",
-            "|---|---|---|---|---|---|",
+            "| kernel | op | weights | tier | min cc | entry point | what |",
+            "|---|---|---|---|---|---|---|",
         ]
         for e in entries:
             lines.append(
-                f'| `{e["name"]}` | {e["op"]} | {e["source"].lower()} | {e["min_cc"]} '
+                f'| `{e["name"]}` | {e["op"]} | {e["weight"]} | {e["source"].lower()} | {e["min_cc"]} '
                 f'| `{e["entry"]}` | {e["what"]} |'
             )
         lines.append("")
     lines += [
+        "**weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). "
+        "A kernel is resolved by operator AND weights: two kernels for one operator "
+        "bind different operand bundles and must never stand in for each other.",
+        "",
         "**tier** - `tuned` is hand-written for this backend, optionally "
         "specialised to a queried device capability. It is the only tier a file "
         "in this tree can claim: a `generated` kernel is emitted from the "

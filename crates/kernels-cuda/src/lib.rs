@@ -41,7 +41,7 @@
 //! any installed card: which kernel a given device gets is decided by
 //! [`best_for`] against a compute capability the caller queried at run time.
 
-use backend_api::select::Op;
+use backend_api::select::{Dtype, Op};
 use backend_api::ImplSource;
 
 /// A compute capability as `(major, minor)`, exactly as
@@ -88,6 +88,12 @@ pub struct CudaKernel {
     /// The whole operator this kernel implements, in the same vocabulary the
     /// kernel selector and the tier policy use.
     pub op: Op,
+    /// The weight storage tier the kernel reads: `Dtype::F32` for a plain
+    /// fp32 matmul, `Dtype::I8` for the packed-int8 GEMV. Part of the
+    /// identity of an implementation, because two kernels for the same
+    /// operator bind different operand bundles and must never be resolved
+    /// for one another.
+    pub weight: Dtype,
     /// The tier this kernel claims. Only [`ImplSource::Tuned`] is meaningful
     /// here: a kernel with a `.cu` file in this tree is hand-written by
     /// definition, and a generated kernel has no file to list (it is emitted
@@ -144,32 +150,50 @@ impl CudaKernel {
 
 /// Every hand-written CUDA kernel brain ships.
 ///
-/// One entry today, and the table says only what is true of it. Its floor is
-/// the toolchain baseline rather than any card's capability, because that is
-/// what its text actually needs; the capability a device reports is asked of
-/// the driver and met against this table by [`best_for`], which is where the
-/// architecture-specific decision lives. A second, higher-floor entry for
-/// the same operator is what makes that resolution visible in production
-/// rather than only in [`best_for`]'s own test, and none is written yet.
-pub const ALL: &[CudaKernel] = &[CudaKernel {
-    name: "matmul_f32_tiled",
-    op: Op::MatMul,
-    source: ImplSource::Tuned,
-    min_cc: BASELINE_MIN_CC,
-    entry: "brain_matmul_f32_tiled",
-    what: "fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order",
-    reported: "native:matmul_f32_tiled",
-    block_dim: 256,
-    tile: (64, 64),
-    // 2 tiles x 16 staged k x (64 + 1 pad) floats. Stated here because the
-    // provider checks it against the device's own queried limit before it
-    // ever asks the driver to launch.
-    shared_bytes: 2 * 16 * (64 + 1) * 4,
-    src: include_str!("../cu/matmul_f32_tiled.cu"),
-}];
+/// Each entry says only what is true of it. A floor is what the kernel's own
+/// text needs (the toolchain baseline for plain fp32, the packed dot product
+/// for the int8 GEMV), never any card's capability; the capability a device
+/// reports is asked of the driver and met against this table by [`best_for`],
+/// which is where the architecture-specific decision lives. Entries for the
+/// same operator are told apart by the weight tier they read.
+pub const ALL: &[CudaKernel] = &[
+    CudaKernel {
+        name: "matmul_f32_tiled",
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_tiled",
+        what: "fp32 out = x @ W^T; 64x64 shared tile, 4x4 register block, reference reduction order",
+        reported: "native:matmul_f32_tiled",
+        block_dim: 256,
+        tile: (64, 64),
+        // 2 tiles x 16 staged k x (64 + 1 pad) floats. Stated here because the
+        // provider checks it against the device's own queried limit before it
+        // ever asks the driver to launch.
+        shared_bytes: 2 * 16 * (64 + 1) * 4,
+        src: include_str!("../cu/matmul_f32_tiled.cu"),
+    },
+    CudaKernel {
+        name: "matmul_i8_gemv",
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        source: ImplSource::Tuned,
+        // `__dp4a` is the only instruction above the toolchain baseline.
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_i8_gemv",
+        what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg",
+        reported: "native:matmul_i8_gemv",
+        block_dim: 128,
+        // 8 rows of x by 8 weight rows per block.
+        tile: (8, 8),
+        shared_bytes: 0,
+        src: include_str!("../cu/matmul_i8_gemv.cu"),
+    },
+];
 
-/// The kernel `table` offers for `op` on a device of compute capability
-/// `cc`: the eligible entry with the HIGHEST floor, so an
+/// The kernel `table` offers for `op` over `weight` storage on a device of
+/// compute capability `cc`: the eligible entry with the HIGHEST floor, so an
 /// architecture-specialised kernel beats a generic one on a device that can
 /// run both, and the generic one still serves a device that cannot.
 ///
@@ -180,13 +204,20 @@ pub const ALL: &[CudaKernel] = &[CudaKernel {
 /// Takes the table as a parameter rather than reading [`ALL`] directly: the
 /// selection RULE is the thing worth testing, and a test that can only feed
 /// it the shipped table can only test it once.
-pub fn best_for(table: &'static [CudaKernel], op: Op, cc: Cc) -> Option<&'static CudaKernel> {
+pub fn best_for(table: &'static [CudaKernel], op: Op, weight: Dtype, cc: Cc) -> Option<&'static CudaKernel> {
+    table.iter().filter(|k| k.op == op && k.weight == weight && k.min_cc <= cc).max_by_key(|k| k.min_cc)
+}
+
+/// [`best_for`] for a caller with no weight tier to state: the highest-floor
+/// entry for `op` over ANY tier. For ledger checks only (the tier policy has
+/// no dtype axis yet); a dispatcher must always say which tier it binds.
+pub fn best_for_any_tier(table: &'static [CudaKernel], op: Op, cc: Cc) -> Option<&'static CudaKernel> {
     table.iter().filter(|k| k.op == op && k.min_cc <= cc).max_by_key(|k| k.min_cc)
 }
 
 /// [`best_for`] over the shipped [`ALL`] table.
-pub fn find(op: Op, cc: Cc) -> Option<&'static CudaKernel> {
-    best_for(ALL, op, cc)
+pub fn find(op: Op, weight: Dtype, cc: Cc) -> Option<&'static CudaKernel> {
+    best_for(ALL, op, weight, cc)
 }
 
 /// Look a kernel up by registry name.
@@ -330,6 +361,7 @@ mod tests {
         CudaKernel {
             name: "matmul_generic",
             op: Op::MatMul,
+            weight: Dtype::F32,
             source: ImplSource::Tuned,
             min_cc: (5, 0),
             entry: "bk_matmul_generic",
@@ -343,6 +375,7 @@ mod tests {
         CudaKernel {
             name: "matmul_dp4a",
             op: Op::MatMul,
+            weight: Dtype::F32,
             source: ImplSource::Tuned,
             min_cc: DP4A_MIN_CC,
             entry: "bk_matmul_dp4a",
@@ -362,13 +395,33 @@ mod tests {
     /// getting the most specialised kernel rather than nothing.
     #[test]
     fn the_highest_eligible_floor_wins_at_any_capability() {
-        assert!(best_for(FIXTURE, Op::MatMul, (3, 5)).is_none());
-        assert_eq!(best_for(FIXTURE, Op::MatMul, (6, 0)).unwrap().name, "matmul_generic");
-        assert_eq!(best_for(FIXTURE, Op::MatMul, DP4A_MIN_CC).unwrap().name, "matmul_dp4a");
-        assert_eq!(best_for(FIXTURE, Op::MatMul, (12, 0)).unwrap().name, "matmul_dp4a");
+        assert!(best_for(FIXTURE, Op::MatMul, Dtype::F32, (3, 5)).is_none());
+        assert_eq!(best_for(FIXTURE, Op::MatMul, Dtype::F32, (6, 0)).unwrap().name, "matmul_generic");
+        assert_eq!(best_for(FIXTURE, Op::MatMul, Dtype::F32, DP4A_MIN_CC).unwrap().name, "matmul_dp4a");
+        assert_eq!(best_for(FIXTURE, Op::MatMul, Dtype::F32, (12, 0)).unwrap().name, "matmul_dp4a");
         // An operator the table says nothing about resolves to nothing, on
         // every device - never to "the closest thing available".
-        assert!(best_for(FIXTURE, Op::RmsNorm, (12, 0)).is_none());
+        assert!(best_for(FIXTURE, Op::RmsNorm, Dtype::F32, (12, 0)).is_none());
+    }
+
+    /// The weight tier is part of an implementation's identity: the int8 GEMV
+    /// has a HIGHER floor than the fp32 matmul for the same operator, so
+    /// resolving by operator alone would hand the fp32 provider a kernel that
+    /// reads packed int8 - a wrong answer, not a crash.
+    #[test]
+    fn the_weight_tier_selects_the_kernel_not_just_the_operator() {
+        let f32_k = find(Op::MatMul, Dtype::F32, (9, 0)).expect("fp32 matmul ships");
+        let i8_k = find(Op::MatMul, Dtype::I8, (9, 0)).expect("int8 gemv ships");
+        assert_eq!(f32_k.name, "matmul_f32_tiled");
+        assert_eq!(i8_k.name, "matmul_i8_gemv");
+        // Below the packed dot product's floor the int8 kernel is not offered
+        // at all, while fp32 still is.
+        assert!(find(Op::MatMul, Dtype::I8, (6, 0)).is_none());
+        assert!(find(Op::MatMul, Dtype::F32, (6, 0)).is_some());
+        // A tier nothing ships resolves to nothing.
+        assert!(find(Op::MatMul, Dtype::Q4, (9, 0)).is_none());
+        // The tier-blind lookup the policy ledger uses sees the higher floor.
+        assert_eq!(best_for_any_tier(ALL, Op::MatMul, (9, 0)).map(|k| k.name), Some("matmul_i8_gemv"));
     }
 
     /// A kernel's header explaining which instructions it avoids is PROSE,
@@ -381,6 +434,7 @@ mod tests {
         static PROSE: &[CudaKernel] = &[CudaKernel {
             name: "prose_only",
             op: Op::MatMul,
+            weight: Dtype::F32,
             source: ImplSource::Tuned,
             // Below DP4A's floor on purpose: the header mentions the
             // instruction, the body does not use it, and only the body counts.
@@ -403,6 +457,7 @@ mod tests {
             CudaKernel {
                 name: "matmul_dp4a",
                 op: Op::MatMul,
+                weight: Dtype::F32,
                 source: ImplSource::Generated,
                 min_cc: (5, 0),
                 entry: "bk_missing",
@@ -416,6 +471,7 @@ mod tests {
             CudaKernel {
                 name: "matmul_dp4a",
                 op: Op::MatMul,
+                weight: Dtype::F32,
                 source: ImplSource::Tuned,
                 min_cc: (5, 0),
                 entry: "bk_matmul_dp4a",
