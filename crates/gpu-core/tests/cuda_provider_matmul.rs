@@ -51,17 +51,20 @@ use gpu_core::Gpu;
 static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
 
 /// How much faster than the generated tier the tuned kernel must be, as a
-/// ratio of wall time for the identical dispatch.
+/// ratio of DEVICE time (the driver's own events around each launch) for the
+/// identical dispatch.
 ///
-/// Set BELOW the ratio actually measured, on purpose. The number this gate
-/// has to defend is "a hand-written kernel replaced a mechanical translation
-/// and it was worth doing"; a floor pinned to one box's best case would
-/// instead fail whenever that box is busy, which says nothing about the
-/// kernel, and this one was measured on a machine also running an unrelated
-/// job on the same cards. The ratio is far more stable under that contention
-/// than either side's absolute time, because both sides contend equally.
-/// What the run actually reports is printed, so the margin is never a
-/// mystery.
+/// Measured at 13.1-13.3x on a GH200, repeatedly, with under 1 % spread; the
+/// floor is set well below that so it states "a hand-written kernel replaced a
+/// mechanical translation and it was worth doing", not "this box was idle".
+///
+/// Device time rather than host wall time, and the reason is a measurement:
+/// the same dispatches read 11.9x by wall clock on an idle host and 2.6x on a
+/// loaded one. The tuned side is eight launches of a ~45 microsecond kernel, so
+/// its wall time is mostly the host thread waiting for a core between
+/// launches - a property of the machine, not of the kernel - while its device
+/// time did not move. A floor on the wall ratio therefore tested how busy the
+/// host was. The wall ratio is still printed, next to the device one.
 // perf-number: the asserted floor of this gate IS this constant, and the
 // ratio actually achieved against it is printed by the run itself.
 const SPEEDUP_FLOOR: f64 = 8.0;
@@ -98,9 +101,22 @@ fn seeded(seed: u64, n: usize) -> Vec<f32> {
         .collect()
 }
 
+/// What one timed run of `REPS` identical dispatches cost.
+struct Timed {
+    /// Host wall time from the first submit to the synchronise. Includes every
+    /// launch the host issues, so on a busy machine it measures how long the
+    /// host thread waited for a core as much as the kernel.
+    wall: std::time::Duration,
+    /// Time the kernels spent executing on the device, from the driver's own
+    /// events around each launch (`Gpu::kernel_times`). A host that lost its
+    /// core between two launches leaves this unchanged.
+    device: std::time::Duration,
+}
+
 /// Lower one `Op::MatMul` through `p`, then submit it `REPS` times and
-/// synchronise - the wall time of `REPS` identical dispatches.
-fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuffer, w: &backend_api::DeviceBuffer, y: &backend_api::DeviceBuffer) -> std::time::Duration {
+/// synchronise - `REPS` identical dispatches, timed on the host and on the
+/// device.
+fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuffer, w: &backend_api::DeviceBuffer, y: &backend_api::DeviceBuffer) -> Timed {
     let (m, n, k) = SHAPE;
     let caps = gpu.caps();
     let bind = |v: select::KernelVariant| -> (usize, &'static str) {
@@ -132,17 +148,30 @@ fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuf
     gpu.submit(&[], &steps);
     gpu.poll_wait();
 
+    assert!(gpu.set_kernel_timing(true), "the CUDA backend times kernels on the device");
+    gpu.reset_kernel_times();
     let t0 = std::time::Instant::now();
     for _ in 0..REPS {
         gpu.submit(&[], &steps);
     }
     gpu.poll_wait();
-    t0.elapsed()
+    let wall = t0.elapsed();
+    // Only this provider's kernel ran since the reset, so the sum is its time.
+    let ms: f64 = gpu.kernel_times().unwrap_or_default().iter().map(|(_, ms, _)| ms).sum();
+    gpu.set_kernel_timing(false);
+    Timed { wall, device: std::time::Duration::from_secs_f64(ms / 1e3) }
 }
 
 fn median(mut v: Vec<std::time::Duration>) -> std::time::Duration {
     v.sort();
     v[v.len() / 2]
+}
+
+fn medians(runs: &[Timed]) -> Timed {
+    Timed {
+        wall: median(runs.iter().map(|t| t.wall).collect()),
+        device: median(runs.iter().map(|t| t.device).collect()),
+    }
 }
 
 /// **The milestone's red test.** One hand-written CUDA `Op::MatMul` kernel,
@@ -199,11 +228,16 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
         t_ref.push(time_provider(&gpu, &reference, &x, &w, &y_ref));
         t_got.push(time_provider(&gpu, &provider, &x, &w, &y_got));
     }
-    let (t_ref, t_got) = (median(t_ref), median(t_got));
-    let speedup = t_ref.as_secs_f64() / t_got.as_secs_f64();
+    let (t_ref, t_got) = (medians(&t_ref), medians(&t_got));
+    let speedup = t_ref.device.as_secs_f64() / t_got.device.as_secs_f64();
     eprintln!(
-        "cuda_provider_matmul: {m}x{n}x{k} f32, {REPS} dispatches - generated {:?}, tuned {:?}, speedup {speedup:.2}x",
-        t_ref, t_got
+        "cuda_provider_matmul: {m}x{n}x{k} f32, {REPS} dispatches - device time: generated {:?}, tuned {:?}, speedup {speedup:.2}x \
+         (host wall time: generated {:?}, tuned {:?}, {:.2}x)",
+        t_ref.device,
+        t_got.device,
+        t_ref.wall,
+        t_got.wall,
+        t_ref.wall.as_secs_f64() / t_got.wall.as_secs_f64()
     );
 
     let expect = gpu.read(&y_ref, (m * n) as usize);
