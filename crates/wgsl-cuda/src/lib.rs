@@ -1582,6 +1582,8 @@ fn math(fun: MathFunction, a: (&str, Ty), rest: &[(String, Ty)]) -> Result<Eval,
         }
         Sign => (format!("((({x}) < 0) ? -1 : ((({x}) > 0) ? 1 : 0))"), Ty::I32),
         Pow => (format!("powf({x}, {})", arg(0)?), Ty::F32),
+        // `atan2(y, x)`: the first operand is y.
+        Atan2 => (format!("atan2f({x}, {})", arg(0)?), Ty::F32),
         Exp => (format!("expf({x})"), Ty::F32),
         Log => (format!("logf({x})"), Ty::F32),
         Exp2 => (format!("exp2f({x})"), Ty::F32),

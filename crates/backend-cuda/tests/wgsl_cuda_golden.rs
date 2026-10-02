@@ -327,6 +327,42 @@ fn generated_cuda_agrees_with_the_cpu_reference_per_kernel_and_shape() {
 /// The shape here deliberately dispatches MORE workgroups than the kernel's
 /// own `n_wg`, so the surplus workgroups take the early return while the live
 /// ones must still pass the barrier and produce a correct partial.
+/// `atan2(y, x)` takes the quadrant from the signs of both operands, which is
+/// the part a translation to `atanf(y / x)` loses; the axes (`x == 0`) are
+/// where a division would go wrong.
+#[test]
+fn atan2_agrees_with_the_cpu_reference_in_every_quadrant() {
+    const SRC: &str = r#"
+struct Params { n: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read> y: array<f32>;
+@group(0) @binding(2) var<storage, read> x: array<f32>;
+@group(0) @binding(3) var<storage, read_write> o: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+    if (gid.x >= p.n) { return; }
+    o[gid.x] = atan2(y[gid.x], x[gid.x]);
+}
+"#;
+    let Some(ctx) = device() else { return };
+    let n = 200usize;
+    let mut seed = 0x9e37_79b9u32;
+    let y: Vec<f32> = (0..n).map(|i| if i % 11 == 0 { 0.0 } else { rnd(&mut seed) }).collect();
+    let x: Vec<f32> = (0..n).map(|i| if i % 7 == 0 { 0.0 } else { rnd(&mut seed) }).collect();
+    let case = Case {
+        name: "atan2",
+        wgsl: SRC,
+        params: vec![n as u32],
+        bufs: vec![Buf::F32(y), Buf::F32(x), Buf::F32(vec![0.0; n])],
+        grid_x: n.div_ceil(64) as u32,
+        grid_y: 1,
+        // CUDA's atan2f is within 2 ulp of the correctly rounded value.
+        outputs: vec![(2, 1e-6)],
+        alias: vec![],
+    };
+    agree(&ctx, &case);
+}
+
 #[test]
 fn an_early_return_before_a_barrier_does_not_strand_the_barrier() {
     let Some(ctx) = device() else { return };
