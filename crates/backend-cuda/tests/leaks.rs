@@ -311,7 +311,7 @@ fn a_backend_that_captured_graphs_returns_everything_when_dropped() {
 }
 
 #[test]
-fn staging_for_unsynchronised_submissions_is_bounded_and_returned() {
+fn staging_for_unsynchronised_submissions_is_bounded_correct_and_returned() {
     let _s = serial();
     let Some(p) = probe() else { return };
     drop(backend());
@@ -320,19 +320,24 @@ fn staging_for_unsynchronised_submissions_is_bounded_and_returned() {
     let inp = b.storage_init("inp", &[1.0; 256]);
     let out = b.storage(256);
     // Every submission has new parameters and nothing ever reads: the eager
-    // path stages each one in page-locked memory. 30k steps is far more than a
-    // decode token and must neither grow without bound nor allocate per step.
+    // path stages each one in page-locked memory. This is more steps than the
+    // staging pool can hold (4 MiB), so it must drain the device and reuse the
+    // pool rather than grow - and the parameters each step actually runs with
+    // must survive that reuse, which `axpy`'s accumulation makes visible.
+    const STEPS: u32 = 300_000;
+    let mut expected = 0f32;
     let mut peak = 0;
-    for i in 0..30_000u32 {
-        round(&b, std::slice::from_ref(&out), &inp, 256, i as f32);
-        if i % 1000 == 0 {
+    for i in 0..STEPS {
+        let s = (i % 5) as f32;
+        expected += s;
+        round(&b, std::slice::from_ref(&out), &inp, 256, s);
+        if i % 5000 == 0 {
             peak = peak.max(live_resources().pinned_bytes - base.live.pinned_bytes);
         }
     }
     b.poll_wait();
-    peak = peak.max(live_resources().pinned_bytes - base.live.pinned_bytes);
-    assert!(peak <= 32 << 20, "eager staging grew to {} MiB of page-locked memory", peak >> 20);
-    let _ = b.read(&out, 1);
+    assert!(peak <= 4 << 20, "eager staging grew to {} KiB of page-locked memory", peak >> 10);
+    assert_eq!(b.read(&out, 1)[0], expected, "a staged parameter block was overwritten before the device read it");
     drop((inp, out, b));
     assert_returned(&p, &base, "eager staging");
 }
@@ -448,3 +453,52 @@ fn registered_native_kernels_are_unloaded_with_the_backend() {
     // ...and be unloaded with the last one.
     assert_returned(&p, &base, "native kernel modules");
 }
+#[test]
+fn dropping_buffers_frees_them_even_while_a_captured_graph_names_them() {
+    let _s = serial();
+    let Some(p) = probe() else { return };
+    let b = backend().expect("backend");
+    // A model's life on a handle that outlives it: build buffers, run enough
+    // identical submissions for a graph to form, drop the buffers.
+    let model_lifetime = || {
+        let inp = b.storage_init("inp", &vec![1.0f32; WORDS]);
+        let outs: Vec<_> = (0..8).map(|_| b.storage(WORDS as u64)).collect();
+        for _ in 0..5 {
+            round(&b, &outs, &inp, 1024, 1.0);
+        }
+        b.poll_wait();
+        assert!(b.launch_stats().graph_captures > 0, "no graph formed, so this proves nothing");
+        drop((inp, outs));
+        // The handle is shared and serves the next model; nothing of this one
+        // may stay resident behind it.
+        b.poll_wait();
+    };
+    // Once as warm-up, so the driver's lazy state and the handle's reusable
+    // staging are already in the baseline.
+    model_lifetime();
+    let base = baseline(&p);
+    model_lifetime();
+    assert_returned(&p, &base, "buffers named by a captured graph");
+    drop(b);
+}
+
+#[test]
+fn buffers_that_came_and_went_do_not_pin_their_uniform_blocks() {
+    let _s = serial();
+    let Some(p) = probe() else { return };
+    let b = backend().expect("backend");
+    let cycle = |n: usize| {
+        for _ in 0..n {
+            let a = b.storage_init("a", &[1.0; 256]);
+            let c = b.storage(256);
+            round(&b, std::slice::from_ref(&c), &a, 256, 1.0);
+            b.poll_wait();
+        }
+    };
+    cycle(2);
+    let base = baseline(&p);
+    cycle(60);
+    assert_returned(&p, &base, "per-step uniform blocks of dead buffers");
+    drop(b);
+}
+

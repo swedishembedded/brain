@@ -54,7 +54,7 @@
 //! actually performs.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::driver::{CuDevicePtr, CuFunction, CuGraphNode, CuKernelNodeParams};
 use crate::exec;
@@ -107,14 +107,24 @@ pub(crate) struct GraphCounters {
     pub staging_waits: AtomicU64,
 }
 
-/// Everything a captured submission needs to be replayed, including strong
+/// Everything a captured submission needs to be replayed, including WEAK
 /// handles on every allocation its nodes name.
 ///
-/// The strong handles are load-bearing, not defensive. A graph node holds a
-/// bare device address; if the allocation behind it were freed, the allocator
-/// could hand that address to the next caller and the graph would then read
-/// and write a live tensor at full speed, with nothing to fault on. Holding
-/// the allocation makes that impossible for as long as the graph exists.
+/// A graph node holds a bare device address; if the allocation behind it were
+/// freed, the allocator could hand that address to the next caller and the
+/// graph would then read and write a live tensor at full speed, with nothing
+/// to fault on. What prevents that is [`LiveGraph::epoch`]: any free bumps the
+/// allocator's epoch, and a graph captured under an older one is discarded
+/// before it can be matched, so it is never replayed against a recycled
+/// address.
+///
+/// The handles are weak because strong ones made a graph an owner of the
+/// model's tensors: a model that dropped its buffers while the device handle
+/// lived on (a handle serves the next model) found every weight still resident
+/// behind the graph, until some later submission happened to evict it. A weak
+/// handle keeps no memory alive, and still reserves the `Arc`'s own address, so
+/// the identity [`NodeSig`] compares by cannot be recycled while the graph
+/// exists.
 pub(crate) struct LiveNode {
     node: CuGraphNode,
     func: CuFunction,
@@ -135,8 +145,8 @@ pub(crate) struct LiveNode {
     /// what forces the wait below, so a submission that repeats unchanged
     /// costs one `cuGraphLaunch` and no synchronisation at all.
     staged: Vec<u32>,
-    _uniform: Option<Arc<exec::DeviceMem>>,
-    _bufs: Vec<(Arc<exec::DeviceMem>, u64)>,
+    _uniform: Option<Weak<exec::DeviceMem>>,
+    _bufs: Vec<(Weak<exec::DeviceMem>, u64)>,
 }
 
 // A `CUgraphNode` and a `CUfunction` are opaque driver handles, not pointers
@@ -156,7 +166,7 @@ pub(crate) struct LiveGraph {
     /// purpose and a re-capture is what replaces both.
     _graph: exec::Graph,
     exec: exec::GraphExec,
-    _clears: Vec<Arc<exec::DeviceMem>>,
+    _clears: Vec<Weak<exec::DeviceMem>>,
     nodes: Vec<LiveNode>,
 }
 
@@ -204,9 +214,8 @@ pub(crate) struct Resolved {
 /// launching each dispatch. A handful of slots makes each shape's
 /// instantiation a once-per-shape cost, which is what the design assumed.
 ///
-/// Small on purpose: every captured graph holds every allocation it names
-/// alive, so the bound is also a bound on how long a freed-by-the-model buffer
-/// can linger.
+/// Small on purpose: each one holds an instantiated graph and page-locked
+/// staging until it is evicted, replaced or invalidated by a free.
 const MAX_LIVE: usize = 4;
 
 /// How many capture or replay failures a handle tolerates before it stops
@@ -276,9 +285,16 @@ impl GraphCache {
         Plan::Eager
     }
 
-    /// Called when the host has synchronised with the device.
-    pub fn drained(&mut self) {
+    /// Called when the host has synchronised with the device, at allocator
+    /// epoch `epoch`.
+    ///
+    /// Graphs captured under an older epoch can never be replayed again, so
+    /// they are released here rather than at the next submission: a handle
+    /// whose model is gone may never submit again, and each of them holds an
+    /// instantiated graph and page-locked staging.
+    pub fn drained(&mut self, epoch: u64) {
         self.in_flight = false;
+        self.live.retain(|l| l.epoch == epoch);
     }
 
     /// Record `steps` into a graph, instantiate it and adopt it.
@@ -339,8 +355,8 @@ impl GraphCache {
                 args: s.args,
                 staging: stage,
                 staged: Vec::new(),
-                _uniform: s.uniform,
-                _bufs: s.bufs,
+                _uniform: s.uniform.as_ref().map(Arc::downgrade),
+                _bufs: s.bufs.iter().map(|(m, off)| (Arc::downgrade(m), *off)).collect(),
             });
         }
         let graph = capture.finish()?;
@@ -348,7 +364,14 @@ impl GraphCache {
         counters.captures.fetch_add(1, Ordering::Relaxed);
         self.live.insert(
             0,
-            LiveGraph { sig: sig.clone(), epoch, _graph: graph, exec, _clears: clears.to_vec(), nodes },
+            LiveGraph {
+                sig: sig.clone(),
+                epoch,
+                _graph: graph,
+                exec,
+                _clears: clears.iter().map(Arc::downgrade).collect(),
+                nodes,
+            },
         );
         // Oldest capture out. Dropping it releases its instantiated graph, its
         // pinned staging and its hold on every buffer it named.

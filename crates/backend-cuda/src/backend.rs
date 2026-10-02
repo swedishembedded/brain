@@ -320,6 +320,10 @@ pub struct CudaBackend {
     /// Uniform allocations shared by every step of the same shape - see
     /// [`UniformKey`].
     uniforms: Mutex<HashMap<UniformKey, UniformSlot>>,
+    /// The allocator epoch at which [`Self::release_dead_uniforms`] last swept
+    /// `uniforms`. A buffer can only die by being freed, which moves the
+    /// epoch, so an unchanged epoch means there is nothing new to find.
+    uniforms_swept_at: AtomicU64,
     /// Page-locked staging for the unbatched path - see [`StagingPool`].
     staging: Mutex<StagingPool>,
     /// The capture state machine. `None` when this handle will never capture:
@@ -414,6 +418,7 @@ impl CudaBackend {
             compiled,
             native,
             uniforms: Mutex::new(HashMap::new()),
+            uniforms_swept_at: AtomicU64::new(0),
             staging: Mutex::new(StagingPool::default()),
             graph,
             capturing: AtomicBool::new(false),
@@ -620,6 +625,32 @@ impl CudaBackend {
             UniformSlot { mem: mem.clone(), keep: bufs.iter().map(|(m, _)| Arc::downgrade(m)).collect() },
         );
         mem
+    }
+
+    /// Free the uniform blocks of steps whose buffers no longer exist.
+    ///
+    /// Such an entry can never be matched again (its key names addresses of
+    /// freed allocations), but it keeps a device allocation resident. They used
+    /// to be found only when the table reached its size cap or the same key was
+    /// asked for again, so a handle that outlived its model kept one block per
+    /// distinct step shape until it was dropped. Called where the host has just
+    /// synchronised, so nothing in flight can still be reading a block.
+    fn release_dead_uniforms(&self) {
+        let epoch = self.ctx.alloc_epoch();
+        if self.uniforms_swept_at.swap(epoch, Ordering::AcqRel) == epoch {
+            return;
+        }
+        let dead: Vec<UniformSlot> = {
+            let mut cache = self.uniforms.lock().unwrap_or_else(|e| e.into_inner());
+            let keys: Vec<UniformKey> = cache
+                .iter()
+                .filter(|(_, s)| !s.keep.iter().all(|w| w.strong_count() > 0))
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.iter().filter_map(|k| cache.remove(k)).collect()
+        };
+        // Freed outside the lock: `cuMemFree` waits for the device.
+        drop(dead);
     }
 
     fn record(
@@ -1334,11 +1365,12 @@ impl backend_api::Backend for CudaBackend {
         self.refuse_during_capture("poll_wait");
         self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
         self.recycle_staging();
+        self.release_dead_uniforms();
         if self.timing.load(Ordering::Acquire) {
             self.collect_timings();
         }
         if let Some(cache) = &self.graph {
-            cache.lock().unwrap_or_else(|e| e.into_inner()).drained();
+            cache.lock().unwrap_or_else(|e| e.into_inner()).drained(self.ctx.alloc_epoch());
         }
     }
 
