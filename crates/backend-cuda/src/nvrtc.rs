@@ -87,6 +87,8 @@ struct Nvrtc {
     get_program_log: unsafe extern "C" fn(NvrtcProgram, *mut c_char) -> NvrtcResult,
     get_cubin_size: unsafe extern "C" fn(NvrtcProgram, *mut usize) -> NvrtcResult,
     get_cubin: unsafe extern "C" fn(NvrtcProgram, *mut c_char) -> NvrtcResult,
+    get_ptx_size: unsafe extern "C" fn(NvrtcProgram, *mut usize) -> NvrtcResult,
+    get_ptx: unsafe extern "C" fn(NvrtcProgram, *mut c_char) -> NvrtcResult,
 }
 
 // A mapped library plus bare `extern "C"` pointers; NVRTC compilations are
@@ -135,6 +137,10 @@ fn load() -> Result<Nvrtc, String> {
                     // was cached.
                     get_cubin_size: sym(&lib, b"nvrtcGetCUBINSize\0")?,
                     get_cubin: sym(&lib, b"nvrtcGetCUBIN\0")?,
+                    // PTX is the portable fallback an ahead-of-time build
+                    // keeps for devices newer than every cubin it shipped.
+                    get_ptx_size: sym(&lib, b"nvrtcGetPTXSize\0")?,
+                    get_ptx: sym(&lib, b"nvrtcGetPTX\0")?,
                     _lib: lib,
                 })
             })()
@@ -246,9 +252,17 @@ impl Target {
 /// listed has no arch-specific variant as far as this crate knows, which makes
 /// it fall back to the plain target - the safe direction.
 pub fn arch_specific_available(cc: Cc, nvrtc: (u32, u32)) -> bool {
+    arch_specific_since(cc).is_some_and(|since| nvrtc >= since)
+}
+
+/// The first NVRTC version that can emit `sm_<cc>a`, or `None` where the
+/// architecture has no arch-specific variant at all. Independent of the
+/// toolkit installed - an ahead-of-time cubin built elsewhere can be loaded
+/// without one.
+pub fn arch_specific_since(cc: Cc) -> Option<(u32, u32)> {
     const INTRODUCED: &[(Cc, (u32, u32))] =
         &[((9, 0), (12, 0)), ((10, 0), (12, 8)), ((12, 0), (12, 8)), ((10, 1), (12, 8)), ((10, 3), (12, 9)), ((12, 1), (12, 9))];
-    INTRODUCED.iter().any(|(c, since)| *c == cc && nvrtc >= *since)
+    INTRODUCED.iter().find(|(c, _)| *c == cc).map(|(_, since)| *since)
 }
 
 /// The compile flags the generated tier is built with, for a queried compute
@@ -260,11 +274,17 @@ pub fn arch_specific_available(cc: Cc, nvrtc: (u32, u32)) -> bool {
 /// absolute (maxabs), so a "better" answer is still a failure, and a
 /// contracted accumulation drifts further the longer the reduction.
 pub fn flags(target: &Target, defines: &[(&str, &str)]) -> Vec<String> {
+    flags_for_arch(&target.name(), defines)
+}
+
+/// [`flags`] for an architecture NAME: `sm_90a` for a cubin, `compute_61` for
+/// the PTX an ahead-of-time build keeps as its portable fallback.
+pub fn flags_for_arch(arch: &str, defines: &[(&str, &str)]) -> Vec<String> {
     let mut f = vec![
-        // Real architecture (`sm_`), not virtual (`compute_`): the output is a
-        // cubin for exactly the capability the device reported, which is read
-        // back at run time and never assumed.
-        format!("--gpu-architecture={}", target.name()),
+        // A cubin is built for a real architecture (`sm_`): exactly the
+        // capability the device reported, which is read back at run time and
+        // never assumed. Only the PTX fallback names a virtual one.
+        format!("--gpu-architecture={arch}"),
         "--fmad=false".to_string(),
     ];
     f.extend(defines.iter().map(|(k, v)| format!("-D{k}={v}")));
@@ -277,6 +297,23 @@ pub fn flags(target: &Target, defines: &[(&str, &str)]) -> Vec<String> {
 /// compile failure is a defect in the generator and the line it names is the
 /// only way back to the IR that produced it.
 pub fn compile(src: &str, target: &Target, defines: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    compile_image(src, &target.name(), defines, Image::Cubin)
+}
+
+/// Compile `src` to PTX for the virtual architecture `compute_<cc>`. The text
+/// is returned NUL-terminated, which is the form `cuModuleLoadData` takes for
+/// a PTX image.
+pub fn compile_ptx(src: &str, cc: Cc, defines: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    compile_image(src, &format!("compute_{}{}", cc.0, cc.1), defines, Image::Ptx)
+}
+
+#[derive(Clone, Copy)]
+enum Image {
+    Cubin,
+    Ptx,
+}
+
+fn compile_image(src: &str, arch: &str, defines: &[(&str, &str)], image: Image) -> Result<Vec<u8>, String> {
     let n = nvrtc().map_err(str::to_string)?;
     let csrc = CString::new(src).map_err(|_| "source contains a NUL byte".to_string())?;
     let name = CString::new("brain-generated.cu").unwrap();
@@ -291,7 +328,7 @@ pub fn compile(src: &str, target: &Target, defines: &[(&str, &str)]) -> Result<V
         return Err(format!("nvrtcCreateProgram failed with {rc}"));
     }
     // From here on every exit must destroy the program.
-    let result = compile_loaded(n, prog, target, defines);
+    let result = compile_loaded(n, prog, arch, defines, image);
     // SAFETY: `prog` was created above and is destroyed exactly once.
     unsafe {
         (n.destroy_program)(&mut prog);
@@ -299,8 +336,8 @@ pub fn compile(src: &str, target: &Target, defines: &[(&str, &str)]) -> Result<V
     result
 }
 
-fn compile_loaded(n: &Nvrtc, prog: NvrtcProgram, target: &Target, defines: &[(&str, &str)]) -> Result<Vec<u8>, String> {
-    let opts: Vec<CString> = flags(target, defines).into_iter().map(|f| CString::new(f).unwrap()).collect();
+fn compile_loaded(n: &Nvrtc, prog: NvrtcProgram, arch: &str, defines: &[(&str, &str)], image: Image) -> Result<Vec<u8>, String> {
+    let opts: Vec<CString> = flags_for_arch(arch, defines).into_iter().map(|f| CString::new(f).unwrap()).collect();
     let ptrs: Vec<*const c_char> = opts.iter().map(|o| o.as_ptr()).collect();
     // SAFETY: `ptrs` names `opts.len()` valid NUL-terminated strings that
     // outlive the call.
@@ -308,26 +345,30 @@ fn compile_loaded(n: &Nvrtc, prog: NvrtcProgram, target: &Target, defines: &[(&s
 
     let log = program_log(n, prog);
     if rc != NVRTC_SUCCESS {
-        return Err(format!("nvrtcCompileProgram failed with {rc}:\n{log}"));
+        return Err(format!("nvrtcCompileProgram for {arch} failed with {rc}:\n{log}"));
     }
     if !log.trim().is_empty() {
         tracing::warn!("NVRTC diagnostics for a generated kernel:\n{log}");
     }
 
+    let (size_fn, get_fn, what) = match image {
+        Image::Cubin => (n.get_cubin_size, n.get_cubin, "CUBIN"),
+        Image::Ptx => (n.get_ptx_size, n.get_ptx, "PTX"),
+    };
     let mut size = 0usize;
     // SAFETY: `size` is a valid out-parameter.
-    let rc = unsafe { (n.get_cubin_size)(prog, &mut size) };
+    let rc = unsafe { size_fn(prog, &mut size) };
     if rc != NVRTC_SUCCESS {
-        return Err(format!("nvrtcGetCUBINSize failed with {rc}"));
+        return Err(format!("nvrtcGet{what}Size failed with {rc}"));
     }
-    let mut cubin = vec![0u8; size];
-    // SAFETY: `cubin` is writable for exactly `size` bytes, which is what
+    let mut bytes = vec![0u8; size];
+    // SAFETY: `bytes` is writable for exactly `size` bytes, which is what
     // NVRTC just reported it needs.
-    let rc = unsafe { (n.get_cubin)(prog, cubin.as_mut_ptr() as *mut c_char) };
+    let rc = unsafe { get_fn(prog, bytes.as_mut_ptr() as *mut c_char) };
     if rc != NVRTC_SUCCESS {
-        return Err(format!("nvrtcGetCUBIN failed with {rc}"));
+        return Err(format!("nvrtcGet{what} failed with {rc}"));
     }
-    Ok(cubin)
+    Ok(bytes)
 }
 
 fn program_log(n: &Nvrtc, prog: NvrtcProgram) -> String {

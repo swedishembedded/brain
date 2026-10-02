@@ -40,6 +40,7 @@
 //! A card's properties are an answer this crate asks for at run time, never a
 //! constant, and never a permanent ceiling - see [`driver::CudaDevice`].
 
+pub mod aot;
 pub mod backend;
 pub mod driver;
 pub mod exec;

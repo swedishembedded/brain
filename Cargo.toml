@@ -39,6 +39,7 @@ default-members = [
     "crates/gpu-core",
     "crates/kernels",
     "crates/kernels-cuda",
+    "crates/cuda-aot",
     "crates/arch",
     "crates/checkpoint",
     "crates/gguf",

@@ -995,6 +995,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-cuda-aot"
+version = "1.2.0"
+dependencies = [
+ "brain-backend-cuda",
+ "brain-kernels",
+ "brain-kernels-cuda",
+ "brain-wgsl-cuda",
+]
+
+[[package]]
 name = "brain-data"
 version = "1.2.0"
 dependencies = [

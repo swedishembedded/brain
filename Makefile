@@ -76,7 +76,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: cuda/aot check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -130,6 +130,7 @@ help:
 	@echo "  make crates/<crate>/examples/<name>/{build,run}   build, then run, a crate example"
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
+	@echo "  make cuda/aot [LANE=12|13]   build the CUDA kernels ahead of time (cubins + PTX + manifest) for driver-only machines"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
 	@echo "  make cuda-table/check        fail if THAT catalogue drifted, or a .cu is unregistered"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
@@ -890,6 +891,14 @@ cuda-coverage:
 # whole workspace. `make test/cuda-matrix CRATES="qwen3 gpt2"` runs a few.
 test/cuda-matrix:
 	scripts/test/cuda-matrix.py -o cuda-matrix.json $(CRATES)
+
+# Compile the generated tier and the native kernels into cubins + PTX with a
+# manifest, in the AOT directory the CUDA backend reads (BRAIN_CUDA_AOT_DIR, or
+# `cuda-aot` under the pipeline cache). A machine with a driver and no toolkit
+# then runs them without NVRTC. `make cuda/aot LANE=12` and `LANE=13` fill one
+# directory in turn; ARGS passes flags through (`ARGS="--targets sm_90"`).
+cuda/aot:
+	scripts/build/cuda-aot.sh $(ARGS)
 
 gh200/probe:
 	$(MAKE) -C tools/gh200-probe

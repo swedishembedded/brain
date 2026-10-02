@@ -169,6 +169,8 @@ See [`docs/using/serving.md`](serving.md) for what admission/backpressure means 
 | `BRAIN_PIPELINE_CACHE_DIR` | directory for the GPU pipeline/shader cache | backend default |
 | `BRAIN_CUDA_GRAPHS` | `0`, `off` or `false` turns off CUDA graph capture, so every dispatch is launched on its own; for bisecting a suspected capture bug on a running system | on |
 | `BRAIN_NVRTC` | exact NVRTC library to load for the CUDA backend (a path or a SONAME); the only library tried when set | search `CUDA_PATH`, then the system loader |
+| `BRAIN_CUDA_AOT_DIR` | directory of ahead-of-time CUDA images and their manifest (`make cuda/aot`) | `cuda-aot` under the pipeline cache directory |
+| `BRAIN_CUDA_AOT` | `0` ignores the ahead-of-time directory so kernels compile with NVRTC | on |
 | `BRAIN_QWEN_CTX` | Qwen built context length | 24576 |
 | `BRAIN_QWEN_MAX_BATCH` | Qwen serving batch slots | 16 |
 | `BRAIN_QWEN_KV_INT8` | int8 KV cache (`0` opts out) | on |

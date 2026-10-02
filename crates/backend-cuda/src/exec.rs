@@ -39,9 +39,18 @@ use crate::driver::{
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
     CuEvent, CuModule, CuStream, Driver, ExecFns, GraphFns, CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE,
 };
+use crate::nvrtc::Cc;
 use std::ffi::{c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// `compute_61` as `(6, 1)`.
+fn parse_compute(target: &str) -> Option<Cc> {
+    let digits = target.strip_prefix("compute_")?;
+    // The minor is one digit and the major the rest: `compute_100` is 10.0.
+    let (major, minor) = digits.split_at(digits.len().checked_sub(1)?);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
 
 /// What a kernel declares about how it must be compiled, beyond its source.
 #[derive(Clone, Debug, Default)]
@@ -568,9 +577,86 @@ impl Context {
     }
 
     /// [`Self::compile`] under [`CompileOptions`].
+    ///
+    /// Where the machine code comes from, in order: an ahead-of-time cubin for
+    /// this device (see [`crate::aot`]), the disk cache or NVRTC, and the
+    /// ahead-of-time PTX the driver compiles itself. A candidate the driver
+    /// refuses to load is skipped, not fatal: the next may be fine. When none
+    /// works the error names every source tried and why it failed, because
+    /// "no kernel" on a driver-only machine has exactly one remedy
+    /// (`make cuda/aot`) and the message must say so.
     pub fn compile_with(&self, src: &str, entry: &str, opts: &CompileOptions) -> Result<Module, String> {
-        let c = self.cubin_with(src, entry, opts)?;
-        self.load(&c.cubin)
+        let defines: Vec<(&str, &str)> = opts.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut tried: Vec<String> = Vec::new();
+        let store = match crate::aot::global() {
+            Ok(s) => s,
+            Err(e) => {
+                tried.push(format!("AOT manifest unusable: {e}"));
+                None
+            }
+        };
+
+        if let Some(store) = store {
+            for target in crate::aot::cubin_targets(self.cc, opts.features) {
+                let key = crate::aot::aot_key(src, entry, &target.name(), &defines);
+                if let Some(e) = store.find(&key) {
+                    match store.image(e).and_then(|img| self.load(&img)) {
+                        Ok(m) => {
+                            tracing::debug!(entry, target = %target.name(), "backend-cuda: loaded an AOT cubin");
+                            return Ok(m);
+                        }
+                        Err(why) => tried.push(format!("AOT {} rejected: {why}", target.name())),
+                    }
+                }
+            }
+        }
+
+        match self.cubin_with(src, entry, opts).and_then(|c| self.load(&c.cubin)) {
+            Ok(m) => return Ok(m),
+            // A kernel that needs the arch-specific suffix on a device that
+            // has none is not "missing a binary": it cannot run here at all,
+            // and PTX cannot change that.
+            Err(e) if opts.features == crate::nvrtc::ArchFeatures::Required && e.contains("arch-specific") => return Err(e),
+            Err(e) => tried.push(format!("NVRTC: {e}")),
+        }
+
+        if let (Some(store), false) = (store, opts.features == crate::nvrtc::ArchFeatures::Required) {
+            // The highest virtual architecture not above this device's: the
+            // closest PTX the driver can compile for it.
+            let mut ptx: Vec<(Cc, &crate::aot::Entry)> = store
+                .entries()
+                .iter()
+                .filter(|e| e.kind == crate::aot::Kind::Ptx)
+                .filter_map(|e| Some((parse_compute(&e.target)?, e)))
+                .filter(|(cc, e)| *cc <= self.cc && e.key == crate::aot::aot_key(src, entry, &e.target, &defines))
+                .collect();
+            ptx.sort_by_key(|(cc, _)| std::cmp::Reverse(*cc));
+            for (_, e) in ptx {
+                match store.image(e).and_then(|img| self.load(&img)) {
+                    Ok(m) => {
+                        tracing::debug!(entry, target = %e.target, "backend-cuda: the driver compiled AOT PTX");
+                        return Ok(m);
+                    }
+                    Err(why) => tried.push(format!("AOT PTX {} rejected: {why}", e.target)),
+                }
+            }
+            if !tried.iter().any(|t| t.starts_with("AOT")) {
+                tried.push(format!(
+                    "AOT: {} has no image for this source (built for: {})",
+                    store.dir().display(),
+                    store.targets().join(", ")
+                ));
+            }
+        } else if store.is_none() && !tried.iter().any(|t| t.starts_with("AOT")) {
+            tried.push("AOT: no manifest (BRAIN_CUDA_AOT_DIR, or `cuda-aot` under the cache directory)".to_string());
+        }
+        Err(format!(
+            "no usable binary for kernel `{entry}` on {} (sm_{}{}): {}. Run `make cuda/aot` with a CUDA toolkit to build ahead-of-time images, or make NVRTC available (BRAIN_NVRTC, CUDA_PATH)",
+            self.name,
+            self.cc.0,
+            self.cc.1,
+            tried.join("; ")
+        ))
     }
 
     /// Load an already-compiled cubin.

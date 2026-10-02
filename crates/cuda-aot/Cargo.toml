@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+[package]
+name = "brain-cuda-aot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline builder for brain's CUDA kernels: compiles the generated tier and the native kernels into per-architecture cubins plus a manifest the CUDA backend loads without NVRTC."
+
+[[bin]]
+name = "brain-cuda-aot"
+path = "src/main.rs"
+
+# The builder is the one place that needs the WHOLE kernel set in hand - the
+# WGSL catalogue and its CUDA translation, and the hand-written kernels - so it
+# is a crate of its own rather than a dependency of `backend-cuda`, which stays
+# light and loads what this produces.
+[dependencies]
+brain-backend-cuda.workspace = true
+brain-kernels.workspace = true
+brain-kernels-cuda.workspace = true
+brain-wgsl-cuda.workspace = true

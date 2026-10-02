@@ -20,8 +20,9 @@ Hopper systems.
   are compiled.
 - **NVRTC** (`libnvrtc`, part of the CUDA toolkit) to compile kernels the first
   time each is used; the result is cached on disk (`BRAIN_PIPELINE_CACHE_DIR`).
-  Without it the backend reports why and nothing runs on it: there are no
-  ahead-of-time binaries.
+  Without it a machine can still run every catalogue kernel and native kernel
+  from ahead-of-time images (below); a kernel with no image and no NVRTC is
+  reported by name.
 
 brain finds NVRTC in this order: the library named by `BRAIN_NVRTC` (the only
 one tried when set), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
@@ -40,6 +41,33 @@ on any other device rather than failing inside the compiler. The on-disk
 cubin cache is keyed on the target (suffix included), the compiler version, the
 flags, any specialization macros and the launch ABI version, so changing any of
 them recompiles instead of reusing a stale binary.
+
+### Machines with a driver and no toolkit
+
+`make cuda/aot` compiles the whole WGSL catalogue (through the CUDA
+translation) and the hand-written kernels offline into one cubin per
+architecture, plus portable PTX, and a manifest. The CUDA backend reads that
+directory when it exists, so such a machine runs those kernels with the driver
+alone:
+
+```bash
+make cuda/aot LANE=12     # sm_61 70 80 86 89 90 + PTX (Pascal through Hopper)
+make cuda/aot LANE=13     # sm_90 100 120 + PTX (Hopper and newer)
+```
+
+Run both lanes to fill one directory for a mixed fleet; copy the directory to
+the target machine and point `BRAIN_CUDA_AOT_DIR` at it. The images are build
+products and are never written into the repository; the directory defaults to
+`cuda-aot` under `BRAIN_PIPELINE_CACHE_DIR`. For one kernel on one device the
+backend takes, in order: the cubin for the device's architecture (the
+arch-specific one first when the kernel asks for it), a cubin for a lower minor
+of the same major, the disk cache or NVRTC, and finally the PTX, which the
+driver compiles itself. Images are matched by a hash of the generated source,
+the entry point, the target, the flags and the launch ABI version, so a stale
+image is never used for edited source, and each image is checked against the
+manifest's checksum before the driver sees it. `BRAIN_CUDA_AOT=0` ignores the
+directory. Kernels created at run time by dtype or KV-tier specialisation are
+not in the catalogue and still need NVRTC.
 
 ### Installing a toolkit without root
 
