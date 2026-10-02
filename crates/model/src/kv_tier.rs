@@ -570,6 +570,6 @@ mod tests {
 
     #[test]
     fn an_unset_environment_variable_is_f32() {
-        assert_eq!(KvTier::from_env("BRAIN_KV_TIER_TEST_UNSET_VARIABLE"), Ok(KvTier::F32));
+        assert_eq!(KvTier::from_env("KV_TIER_TEST_UNSET_VARIABLE"), Ok(KvTier::F32));
     }
 }

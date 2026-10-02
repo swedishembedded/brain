@@ -438,6 +438,16 @@ Promote a knob there when the pipeline it tunes becomes real.
   the `ltxv_bench` binary (decoded-pixel dump, upsampler selection, and
   low-frequency substitution for isolating decode error).
 
+**CUDA memory and profiling knobs:** `BRAIN_CUDA_BLOCK_CACHE_MB` (size of the
+held-freed-block cache in MiB; `0` turns it off, unset sizes it from device
+memory between 256 MiB and 4 GiB), `BRAIN_CUDA_MEMPOOL` (`0` disables the
+stream-ordered pool the held blocks come from), `BRAIN_NO_GDN_FAST` (`1` pins
+Gated DeltaNet prefill to the portable kernels for A/B), `BRAIN_PREFILL_ARENA`
+(`0` runs the `qwen35_gguf_prefill_profile` rounds without the scratch arena),
+`BRAIN_PREFILL_PROFILE_SKIP_TABLE` (stop that profile after the production
+rounds), and `BRAIN_PROFILE_CONTEXT=<tokens>` / `BRAIN_PROFILE_BATCH=<n>`
+(long-context batch shape for `qwen35_decode_profile`).
+
 **Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
 logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
 serialised-submit path the wgpu backend otherwise selects per adapter).
