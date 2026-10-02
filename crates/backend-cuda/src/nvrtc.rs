@@ -20,9 +20,10 @@
 //! # The cache key
 //!
 //! Everything that can change the emitted machine code takes part in the key:
-//! the source text, the compute capability it is compiled FOR, the NVRTC
-//! version doing the compiling, the exact compile flags, and the entry point
-//! name. Miss any of those and a stale cubin is served for a different
+//! the source text, the target it is compiled FOR (compute capability and the
+//! arch-specific suffix), the NVRTC version doing the compiling, the exact
+//! compile flags, the specialization macros, the launch ABI version and the
+//! entry point name. Miss any of those and a stale cubin is served for a different
 //! question - which, for a compute kernel, means wrong numbers rather than a
 //! crash. The file is published with `rename(2)` so a concurrent reader sees
 //! either the old entry or the complete new one, never a half-written cubin.
@@ -169,6 +170,87 @@ pub fn version() -> Result<(u32, u32), String> {
     Ok((ma.max(0) as u32, mi.max(0) as u32))
 }
 
+/// A compute capability as `(major, minor)`.
+pub type Cc = (u32, u32);
+
+/// The version of the contract between a compiled kernel and the code that
+/// launches it: argument order and widths, how bound lengths and the uniform
+/// block follow the pointers. A cubin compiled under one contract and launched
+/// under another reads its arguments from the wrong slots, so the version is
+/// part of every cache key and every ahead-of-time manifest. Bump it whenever
+/// that contract changes.
+pub const CUBIN_ABI_VERSION: u32 = 1;
+
+/// What a kernel says about the architecture-specific instruction set
+/// (`sm_90a`: `wgmma`, `setmaxnreg`, TMA multicast and friends).
+///
+/// Arch-specific code runs on exactly one compute capability and on none
+/// other, so it is a property a kernel DECLARES and a device either has or
+/// lacks - never something to switch on everywhere.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ArchFeatures {
+    /// The source is valid on every target from its floor upward; compile for
+    /// the plain `sm_XY`. The generated tier is always this.
+    #[default]
+    Portable,
+    /// The source has an arch-specific fast path guarded by the feature macros
+    /// (`__CUDA_ARCH_FEAT_SM90_ALL`) and a portable body for the rest: use the
+    /// suffix where it exists and the plain target elsewhere.
+    Preferred,
+    /// The source is only valid with the suffix. Where the device or toolkit
+    /// cannot provide it the kernel is refused, not compiled into an error.
+    Required,
+}
+
+/// The machine-code target of one compilation: a real architecture (`sm_`),
+/// with or without the arch-specific suffix.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Target {
+    pub cc: Cc,
+    /// Compile for `sm_<cc>a`.
+    pub arch_specific: bool,
+}
+
+impl Target {
+    /// The plain, forward-compatible-within-a-major target for `cc`.
+    pub const fn plain(cc: Cc) -> Target {
+        Target { cc, arch_specific: false }
+    }
+
+    /// The target for a device of capability `cc` and a kernel declaring
+    /// `features`, under NVRTC `nvrtc`.
+    pub fn resolve(cc: Cc, features: ArchFeatures, nvrtc: (u32, u32)) -> Result<Target, String> {
+        let available = arch_specific_available(cc, nvrtc);
+        match features {
+            ArchFeatures::Portable => Ok(Target::plain(cc)),
+            ArchFeatures::Preferred => Ok(Target { cc, arch_specific: available }),
+            ArchFeatures::Required if available => Ok(Target { cc, arch_specific: true }),
+            ArchFeatures::Required => Err(format!(
+                "the kernel needs arch-specific code (sm_{}{}a) and compute capability {}.{} with NVRTC {}.{} cannot provide it",
+                cc.0, cc.1, cc.0, cc.1, nvrtc.0, nvrtc.1
+            )),
+        }
+    }
+
+    /// The architecture name NVRTC and the manifest use: `sm_90`, `sm_90a`.
+    pub fn name(&self) -> String {
+        format!("sm_{}{}{}", self.cc.0, self.cc.1, if self.arch_specific { "a" } else { "" })
+    }
+}
+
+/// Whether `sm_<cc>a` exists, and whether NVRTC `nvrtc` can emit it.
+///
+/// The suffix is defined per architecture by NVIDIA (Hopper from CUDA 12.0,
+/// Blackwell from 12.8, its later parts from 12.9), so this is a table of
+/// when each was introduced, not a rule about the numbers. A capability not
+/// listed has no arch-specific variant as far as this crate knows, which makes
+/// it fall back to the plain target - the safe direction.
+pub fn arch_specific_available(cc: Cc, nvrtc: (u32, u32)) -> bool {
+    const INTRODUCED: &[(Cc, (u32, u32))] =
+        &[((9, 0), (12, 0)), ((10, 0), (12, 8)), ((12, 0), (12, 8)), ((10, 1), (12, 8)), ((10, 3), (12, 9)), ((12, 1), (12, 9))];
+    INTRODUCED.iter().any(|(c, since)| *c == cc && nvrtc >= *since)
+}
+
 /// The compile flags the generated tier is built with, for a queried compute
 /// capability.
 ///
@@ -177,22 +259,24 @@ pub fn version() -> Result<(u32, u32), String> {
 /// reference rounds twice. The cross-backend agreement this project asserts is
 /// absolute (maxabs), so a "better" answer is still a failure, and a
 /// contracted accumulation drifts further the longer the reduction.
-pub fn flags(cc: (u32, u32)) -> Vec<String> {
-    vec![
+pub fn flags(target: &Target, defines: &[(&str, &str)]) -> Vec<String> {
+    let mut f = vec![
         // Real architecture (`sm_`), not virtual (`compute_`): the output is a
         // cubin for exactly the capability the device reported, which is read
         // back at run time and never assumed.
-        format!("--gpu-architecture=sm_{}{}", cc.0, cc.1),
+        format!("--gpu-architecture={}", target.name()),
         "--fmad=false".to_string(),
-    ]
+    ];
+    f.extend(defines.iter().map(|(k, v)| format!("-D{k}={v}")));
+    f
 }
 
-/// Compile `src` to a cubin for compute capability `cc`.
+/// Compile `src` to a cubin for `target`, with `defines` as `-DNAME=VALUE`.
 ///
 /// The NVRTC log is included in the error, because a generated kernel's
 /// compile failure is a defect in the generator and the line it names is the
 /// only way back to the IR that produced it.
-pub fn compile(src: &str, cc: (u32, u32)) -> Result<Vec<u8>, String> {
+pub fn compile(src: &str, target: &Target, defines: &[(&str, &str)]) -> Result<Vec<u8>, String> {
     let n = nvrtc().map_err(str::to_string)?;
     let csrc = CString::new(src).map_err(|_| "source contains a NUL byte".to_string())?;
     let name = CString::new("brain-generated.cu").unwrap();
@@ -207,7 +291,7 @@ pub fn compile(src: &str, cc: (u32, u32)) -> Result<Vec<u8>, String> {
         return Err(format!("nvrtcCreateProgram failed with {rc}"));
     }
     // From here on every exit must destroy the program.
-    let result = compile_loaded(n, prog, cc);
+    let result = compile_loaded(n, prog, target, defines);
     // SAFETY: `prog` was created above and is destroyed exactly once.
     unsafe {
         (n.destroy_program)(&mut prog);
@@ -215,8 +299,8 @@ pub fn compile(src: &str, cc: (u32, u32)) -> Result<Vec<u8>, String> {
     result
 }
 
-fn compile_loaded(n: &Nvrtc, prog: NvrtcProgram, cc: (u32, u32)) -> Result<Vec<u8>, String> {
-    let opts: Vec<CString> = flags(cc).into_iter().map(|f| CString::new(f).unwrap()).collect();
+fn compile_loaded(n: &Nvrtc, prog: NvrtcProgram, target: &Target, defines: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+    let opts: Vec<CString> = flags(target, defines).into_iter().map(|f| CString::new(f).unwrap()).collect();
     let ptrs: Vec<*const c_char> = opts.iter().map(|o| o.as_ptr()).collect();
     // SAFETY: `ptrs` names `opts.len()` valid NUL-terminated strings that
     // outlive the call.
@@ -266,17 +350,34 @@ fn program_log(n: &Nvrtc, prog: NvrtcProgram) -> String {
 
 /// The cache key for one compilation: hex sha256 over every input that can
 /// change the output.
-pub fn cache_key(src: &str, entry: &str, cc: (u32, u32), nvrtc_version: (u32, u32)) -> String {
+pub fn cache_key(src: &str, entry: &str, target: &Target, nvrtc_version: (u32, u32), defines: &[(&str, &str)]) -> String {
+    cache_key_with_abi(src, entry, target, nvrtc_version, defines, CUBIN_ABI_VERSION)
+}
+
+/// [`cache_key`] under an explicit launch ABI version - the seam that lets a
+/// test show the version is part of the key.
+pub fn cache_key_with_abi(
+    src: &str,
+    entry: &str,
+    target: &Target,
+    nvrtc_version: (u32, u32),
+    defines: &[(&str, &str)],
+    abi: u32,
+) -> String {
     use sha2::{Digest, Sha256};
+    // The set of macros is the question, not the order they were listed in.
+    let mut sorted = defines.to_vec();
+    sorted.sort_unstable();
     let mut h = Sha256::new();
     // Each field is length-prefixed so no two different tuples can hash the
     // same byte stream by concatenating differently.
     for field in [
         src.as_bytes(),
         entry.as_bytes(),
-        format!("cc{}.{}", cc.0, cc.1).as_bytes(),
+        target.name().as_bytes(),
         format!("nvrtc{}.{}", nvrtc_version.0, nvrtc_version.1).as_bytes(),
-        flags(cc).join(" ").as_bytes(),
+        flags(target, &sorted).join(" ").as_bytes(),
+        format!("abi{abi}").as_bytes(),
     ] {
         h.update((field.len() as u64).to_le_bytes());
         h.update(field);
@@ -321,24 +422,87 @@ pub fn cache_store(key: &str, cubin: &[u8]) {
 mod tests {
     use super::*;
 
+    fn key(src: &str, entry: &str, cc: Cc, nvrtc: (u32, u32)) -> String {
+        cache_key(src, entry, &Target::plain(cc), nvrtc, &[])
+    }
+
     /// Every input that can change the compiled output must change the key.
     /// A key that ignores one of them serves machine code compiled for a
     /// different question, which for a kernel means wrong numbers.
     #[test]
     fn the_cache_key_separates_every_input_that_changes_the_output() {
-        let base = cache_key("a", "k", (6, 1), (12, 2));
-        assert_ne!(base, cache_key("b", "k", (6, 1), (12, 2)), "source");
-        assert_ne!(base, cache_key("a", "j", (6, 1), (12, 2)), "entry name");
-        assert_ne!(base, cache_key("a", "k", (7, 0), (12, 2)), "compute capability");
-        assert_ne!(base, cache_key("a", "k", (6, 1), (12, 3)), "NVRTC version");
-        assert_eq!(base, cache_key("a", "k", (6, 1), (12, 2)), "and is stable");
+        let base = key("a", "k", (6, 1), (12, 2));
+        assert_ne!(base, key("b", "k", (6, 1), (12, 2)), "source");
+        assert_ne!(base, key("a", "j", (6, 1), (12, 2)), "entry name");
+        assert_ne!(base, key("a", "k", (7, 0), (12, 2)), "compute capability");
+        assert_ne!(base, key("a", "k", (6, 1), (12, 3)), "NVRTC version");
+        assert_eq!(base, key("a", "k", (6, 1), (12, 2)), "and is stable");
+    }
+
+    /// `sm_90` and `sm_90a` are different machine code for the same device:
+    /// the arch-specific one carries instructions the plain one cannot encode.
+    #[test]
+    fn the_cache_key_separates_the_arch_suffix_the_specialization_and_the_abi() {
+        let t90 = Target::plain((9, 0));
+        let t90a = Target { cc: (9, 0), arch_specific: true };
+        let base = cache_key("a", "k", &t90, (12, 9), &[]);
+        assert_ne!(base, cache_key("a", "k", &t90a, (12, 9), &[]), "arch suffix");
+        assert_ne!(base, cache_key("a", "k", &t90, (12, 9), &[("TILE", "64")]), "specialization");
+        assert_ne!(
+            cache_key("a", "k", &t90, (12, 9), &[("TILE", "64")]),
+            cache_key("a", "k", &t90, (12, 9), &[("TILE", "128")]),
+            "specialization value"
+        );
+        assert_eq!(
+            cache_key("a", "k", &t90, (12, 9), &[("A", "1"), ("B", "2")]),
+            cache_key("a", "k", &t90, (12, 9), &[("B", "2"), ("A", "1")]),
+            "the order specializations are listed in is not part of the question"
+        );
+        assert_eq!(base, cache_key_with_abi("a", "k", &t90, (12, 9), &[], CUBIN_ABI_VERSION), "the live ABI is the default");
+        assert_ne!(base, cache_key_with_abi("a", "k", &t90, (12, 9), &[], CUBIN_ABI_VERSION + 1), "launch ABI version");
     }
 
     /// Length-prefixing, not concatenation: `("ab","c")` and `("a","bc")` are
     /// different compilations and must be different keys.
     #[test]
     fn the_cache_key_cannot_be_confused_by_a_shifted_field_boundary() {
-        assert_ne!(cache_key("ab", "c", (6, 1), (12, 2)), cache_key("a", "bc", (6, 1), (12, 2)));
+        assert_ne!(key("ab", "c", (6, 1), (12, 2)), key("a", "bc", (6, 1), (12, 2)));
+    }
+
+    /// The arch-specific target is chosen from the queried capability and the
+    /// toolkit, never assumed: Hopper gets `sm_90a` when asked and able, every
+    /// other device the plain name, and a kernel that REQUIRES the suffix is
+    /// refused where it cannot be had instead of being compiled into an error.
+    #[test]
+    fn the_arch_specific_target_is_chosen_from_capability_and_toolkit() {
+        let name = |cc, f, v| Target::resolve(cc, f, v).map(|t| t.name());
+        assert_eq!(name((9, 0), ArchFeatures::Portable, (12, 9)).unwrap(), "sm_90");
+        assert_eq!(name((9, 0), ArchFeatures::Preferred, (12, 9)).unwrap(), "sm_90a");
+        assert_eq!(name((9, 0), ArchFeatures::Required, (13, 0)).unwrap(), "sm_90a");
+        // Preferred degrades to the plain name where the suffix does not exist.
+        assert_eq!(name((8, 0), ArchFeatures::Preferred, (12, 9)).unwrap(), "sm_80");
+        assert_eq!(name((8, 9), ArchFeatures::Preferred, (13, 0)).unwrap(), "sm_89");
+        // A toolkit that predates the suffix cannot emit it.
+        assert_eq!(name((9, 0), ArchFeatures::Preferred, (11, 8)).unwrap(), "sm_90");
+        // Required is a refusal, with the reason, never a silent downgrade.
+        let e = name((8, 6), ArchFeatures::Required, (12, 9)).unwrap_err();
+        assert!(e.contains("8.6") && e.contains("arch-specific"), "{e}");
+        let e = name((9, 0), ArchFeatures::Required, (11, 8)).unwrap_err();
+        assert!(e.contains("11.8"), "{e}");
+    }
+
+    /// Arch-specific code runs on exactly the capability it names, so `sm_90a`
+    /// is not offered for a 9.x device that is not 9.0, and the Blackwell
+    /// suffixes need a toolkit that knows them.
+    #[test]
+    fn the_arch_suffix_exists_only_where_the_toolkit_and_architecture_define_it() {
+        assert!(arch_specific_available((9, 0), (12, 0)));
+        assert!(!arch_specific_available((9, 1), (13, 0)));
+        assert!(!arch_specific_available((9, 0), (11, 8)));
+        assert!(arch_specific_available((10, 0), (12, 8)));
+        assert!(!arch_specific_available((10, 0), (12, 4)));
+        assert!(arch_specific_available((12, 0), (13, 0)));
+        assert!(!arch_specific_available((7, 5), (13, 0)));
     }
 
     /// A CUDA 13 toolkit installs `libnvrtc.so.13`, and nothing links the
@@ -356,17 +520,17 @@ mod tests {
     /// silently getting another would make a toolkit pin meaningless.
     #[test]
     fn an_explicit_override_is_the_only_candidate() {
-        assert_eq!(candidate_libraries(Some("/opt/x/libnvrtc.so.12"), Some("/cuda")), ["/opt/x/libnvrtc.so.12"]);
+        assert_eq!(candidate_libraries(Some("pinned/libnvrtc.so.12"), Some("toolkit")), ["pinned/libnvrtc.so.12"]);
     }
 
     /// A toolkit root is searched before the system loader, `lib64` before
     /// `lib`, so a user-owned toolkit wins over whatever the loader finds first.
     #[test]
     fn a_toolkit_root_is_searched_before_the_system_loader() {
-        let c = candidate_libraries(None, Some("/cuda"));
+        let c = candidate_libraries(None, Some("toolkit"));
         let at = |needle: &str| c.iter().position(|l| l == needle).unwrap_or_else(|| panic!("{needle} missing from {c:?}"));
-        assert!(at("/cuda/lib64/libnvrtc.so.13") < at("/cuda/lib/libnvrtc.so.13"));
-        assert!(at("/cuda/lib/libnvrtc.so") < at("libnvrtc.so.13"));
+        assert!(at("toolkit/lib64/libnvrtc.so.13") < at("toolkit/lib/libnvrtc.so.13"));
+        assert!(at("toolkit/lib/libnvrtc.so") < at("libnvrtc.so.13"));
         assert_eq!(c.last().map(String::as_str), Some("libnvrtc.so"));
     }
 
@@ -374,8 +538,11 @@ mod tests {
     /// tier's numerical agreement depends on contraction being off.
     #[test]
     fn contraction_is_disabled_and_the_architecture_is_the_queried_one() {
-        let f = flags((7, 5));
+        let f = flags(&Target::plain((7, 5)), &[]);
         assert!(f.iter().any(|o| o == "--fmad=false"), "{f:?}");
         assert!(f.iter().any(|o| o == "--gpu-architecture=sm_75"), "{f:?}");
+        let f = flags(&Target { cc: (9, 0), arch_specific: true }, &[("TILE", "64")]);
+        assert!(f.iter().any(|o| o == "--gpu-architecture=sm_90a"), "{f:?}");
+        assert!(f.iter().any(|o| o == "-DTILE=64"), "{f:?}");
     }
 }

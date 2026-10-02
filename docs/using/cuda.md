@@ -28,6 +28,19 @@ one tried when set), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
 then the system loader, trying `libnvrtc.so.13`, `.12`, `.11` and the
 unversioned name.
 
+### Compile targets
+
+Kernels are compiled for the capability the driver reports, as real machine
+code (`sm_90`, not a virtual architecture). A kernel that uses
+architecture-specific instructions (Hopper's warpgroup MMA and TMA multicast)
+declares it, and is compiled for the suffixed target (`sm_90a`) only on a
+device and toolkit that provide it: a kernel that merely prefers the suffix
+falls back to the plain target elsewhere, and one that requires it is declined
+on any other device rather than failing inside the compiler. The on-disk
+cubin cache is keyed on the target (suffix included), the compiler version, the
+flags, any specialization macros and the launch ABI version, so changing any of
+them recompiles instead of reusing a stale binary.
+
 ### Installing a toolkit without root
 
 `make cuda/install LANE=12` or `LANE=13` downloads NVIDIA's redistributable

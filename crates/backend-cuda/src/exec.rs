@@ -43,6 +43,15 @@ use std::ffi::{c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+/// What a kernel declares about how it must be compiled, beyond its source.
+#[derive(Clone, Debug, Default)]
+pub struct CompileOptions {
+    /// Whether it needs, can use, or must not use the arch-specific suffix.
+    pub features: crate::nvrtc::ArchFeatures,
+    /// Specialization macros, `-DNAME=VALUE`.
+    pub defines: Vec<(String, String)>,
+}
+
 /// A compiled cubin, and whether it came back from the on-disk cache.
 pub struct Cubin {
     pub cubin: Vec<u8>,
@@ -531,21 +540,36 @@ impl Context {
     }
 
     /// Compile `src` for THIS device's capability, through the on-disk cubin
-    /// cache.
+    /// cache. Portable code: the plain `sm_XY` target.
     pub fn cubin(&self, src: &str, entry: &str) -> Result<Cubin, String> {
+        self.cubin_with(src, entry, &CompileOptions::default())
+    }
+
+    /// [`Self::cubin`] with the kernel's declared architecture features and
+    /// specialization macros. The target is resolved from THIS device's
+    /// capability and the loaded NVRTC, so a kernel that declares
+    /// [`ArchFeatures::Required`] is refused on a device that cannot run it.
+    pub fn cubin_with(&self, src: &str, entry: &str, opts: &CompileOptions) -> Result<Cubin, String> {
         let version = crate::nvrtc::version()?;
-        let key = crate::nvrtc::cache_key(src, entry, self.cc, version);
+        let target = crate::nvrtc::Target::resolve(self.cc, opts.features, version)?;
+        let defines: Vec<(&str, &str)> = opts.defines.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let key = crate::nvrtc::cache_key(src, entry, &target, version, &defines);
         if let Some(cubin) = crate::nvrtc::cache_load(&key) {
             return Ok(Cubin { cubin, key, cached: true });
         }
-        let cubin = crate::nvrtc::compile(src, self.cc)?;
+        let cubin = crate::nvrtc::compile(src, &target, &defines)?;
         crate::nvrtc::cache_store(&key, &cubin);
         Ok(Cubin { cubin, key, cached: false })
     }
 
     /// Compile and load `src`, returning the module its entry points live in.
     pub fn compile(&self, src: &str, entry: &str) -> Result<Module, String> {
-        let c = self.cubin(src, entry)?;
+        self.compile_with(src, entry, &CompileOptions::default())
+    }
+
+    /// [`Self::compile`] under [`CompileOptions`].
+    pub fn compile_with(&self, src: &str, entry: &str, opts: &CompileOptions) -> Result<Module, String> {
+        let c = self.cubin_with(src, entry, opts)?;
         self.load(&c.cubin)
     }
 
