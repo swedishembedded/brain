@@ -74,9 +74,20 @@ ragged tile edges, where they read a little past the end and mask the result.
 
 A few hot kernels also have a hand-written CUDA version that replaces the
 generated one on a CUDA device (`docs/reference/kernels-cuda.md` lists them).
-Today that is the int8 decode GEMV, which reads weights at about three times
-the rate of the generated kernel and returns bit-identical results.
+The int8 decode GEMV reads weights at about three times the rate of the
+generated kernel, and a handful of fused kernels each replace a whole chain of
+small ones in a decode step - the residual add + norm + int8 quantiser, the
+SwiGLU and attention-gate epilogues, a Gated DeltaNet layer's step, a gated-
+attention layer's prep, and a layer's projections of one activation. All of
+them return bit-identical results to the chains they replace.
 `BRAIN_NO_NATIVE_KERNELS=1` keeps every dispatch on the generated tier.
+
+A repeated submission is also recorded into a CUDA graph and replayed, and a
+decode step is replayed whole, from recycled scratch buffers, in a few chunks so
+the card starts before the host has built the rest of the step.
+`BRAIN_CUDA_GRAPHS=0` turns that off. `qwen35_decode_profile` reports the
+per-token spread and the host calls per token (a steady-state token makes no
+allocation and no individual launch).
 
 `make cuda-coverage` generates and compiles every kernel for the device in
 front of it and writes which are runnable and which are refused, and why, to

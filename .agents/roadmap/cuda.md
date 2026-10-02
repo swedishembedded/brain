@@ -692,9 +692,11 @@ Four things had to be true, and each is asserted in
 
 1. **A per-step parameter change must not move a device address.** The uniform
    allocation is keyed on `(kind, buffers+offsets, parameter word count)` -
-   the dispatch's structure, with the parameter VALUES excluded - and each
-   step's first graph node copies that step's own parameters into it from
-   page-locked host staging. Pinned because a copy from pageable memory is
+   the dispatch's structure, with the parameter VALUES excluded. A captured
+   graph then gives every step its own slice of ONE graph-private parameter
+   block, and the graph's first node copies the whole block from page-locked
+   host staging in one go (see the decode section below for why it is one node
+   and not one per step). Pinned because a copy from pageable memory is
    rejected during capture. The key also excludes `threads`, which the plan
    listed: the grid is not a property of the storage, and keying on it would
    hand every advancing position a fresh uniform address, which is exactly
@@ -749,10 +751,11 @@ of caller - one that changes parameters every submission and never reads -
 visible as a number rather than as unexplained slowness; it gets correct
 answers at roughly the unbatched cost.
 
-A handle keeps up to four captured graphs rather than one, and that is a
+A handle keeps up to eight captured graphs rather than one, and that is a
 measurement rather than a preference: instantiating costs milliseconds, so a
 caller alternating between two shapes with a single slot re-instantiates on
-every switch and ends up slower than launching each dispatch.
+every switch and ends up slower than launching each dispatch. (Four until a
+decode token became several graphs of its own - see below.)
 
 Two defects were found and fixed while doing this, both in code that predates
 it: `CudaBackend` listed its `Context` as its FIRST field, so Rust dropped the
@@ -774,6 +777,78 @@ stream from a pool of page-locked blocks that are lent to a submission and
 returned when the device next drains (`StagingPool`). The unbatched path is
 now faster than it was before this work, not slower: it also no longer
 allocates a device uniform per step.
+
+### Decode throughput - Qwen3.8-27B int8 on one card, from 81 to 12.4 ms/token
+
+Measured with `qwen35_decode_profile` (real 27B Q8_0 GGUF, one GH200, a 12-token
+prompt, best of several runs on a quiet window - the card is shared and a busy
+neighbour doubles every number, so quote best-of and the spread it prints).
+`nsys profile --trace=cuda --cuda-graph-trace=node` plus the sqlite kernel table
+gives device-busy time against the token's span.
+
+| stage | ms/token | kernels/token | notes |
+|---|---|---|---|
+| starting point (native int8 GEMV landed) | 81 | 2500 | device busy ~25 ms; 2500 alloc/free pairs, no graph |
+| whole token one replayed graph | 32 | 2500 | arena + pass + one parameter copy |
+| `add_rms_quant`, `quant_epilogue` | 24.5 | 1893 | 4 launches -> 1 at each norm boundary |
+| `gdn_decode` | 17.0 | 985 | 19 kernels -> 1 per GDN layer |
+| `gqa_decode_prep` + chunked issue | 14.5 | 865 | the card starts while the host builds |
+| first chunk early | 14.2 | 865 | |
+| multi GEMV | 14.0 | 629 | projections of one activation, one launch |
+| `quant_epilogue` on 1024 threads | 12.4 | 629 | |
+
+Device-busy time per token went 25 ms -> ~13.5 ms; the GEMVs are now ~9.4 ms of it
+(27 GiB at about 2.9 TB/s against a ~7.7 ms floor at the 3.75 TB/s the LM head
+reaches). What each step was, in the order it was found - the full account is in
+knowledge #205 and #206:
+
+1. **The graph path did not engage on the real tape.** A decode submits per
+   layer and a capture needed one shape twice in a row, so a run made one
+   capture. `begin_pass`/`end_pass` (`Backend`, `Gpu::pass_scope`) hold the
+   per-layer submissions and issue the token as one; the capture trigger
+   remembers a set of recent shapes (a token is the layer stack and then the
+   head, alternating).
+2. **Every temporary was a `cuMemAlloc` and a `cuMemFree`**, the latter waiting
+   for the whole device and discarding every graph. The decode runs in named
+   scratch arenas (`Gpu::scratch_scope_in`; the layer stack and the head share a
+   handle and used to evict each other), the per-token inputs are recycled
+   buffers that are written, and the attention scratch stride is bucketed to 128
+   keys so it is constant token to token. `qwen35_decode_profile` prints
+   `0 cuMemAlloc, 0 individual launches, N graph replays` per token as the check.
+3. **One copy node per step cost ~12 us of device time between kernels**, enough
+   that a replayed token was slower than launching each kernel. A graph now has
+   one parameter block and one host-to-device copy.
+4. **Native fused kernels** (CUDA only, selected by name through
+   `Gpu::fused_step`, `BRAIN_NO_NATIVE_KERNELS=1` keeps the WGSL chains), each
+   gated BYTE-for-byte against the chain it replaces on the same device:
+
+   | kernel | replaces | gate |
+   |---|---|---|
+   | `add_rms_quant` | add2, rmsnorm_rows, max_abs_rows, quant_pack | `gpu-core/tests/add_rms_quant_native.rs` |
+   | `quant_epilogue` | silu_mul / sigmoid+mul, max_abs_rows, quant_pack | `gpu-core/tests/quant_epilogue_native.rs` |
+   | `gdn_decode` | 19 kernels of a GDN layer's step | `model/tests/gdn_decode_native.rs` |
+   | `gqa_decode_prep` | split, QK norm, rope, KV append (8 kernels) | `model/tests/gqa_decode_prep_native.rs` |
+   | `matmul_i8_gemv_multi` | up to 4 projections of one activation | `gpu-core/tests/i8_gemv_multi_native.rs` |
+
+   and through the whole decode tape in `qwen35/tests/decode_fusion.rs`
+   (`Qwen35::set_decode_fusion` is the A/B switch). Identity is achievable and is
+   the bar because every one of them keeps the reference's own reduction order
+   (the 64-lane sum of squares, the ascending L2/RMS sums, the contraction over
+   the key index) and its own `expf`/`1/sqrtf`/`rint` expressions.
+5. **The card sat idle while the host built the token** (~2.7 ms of recording and
+   resolving ~860 steps in front of ~13 ms of device work). `flush` inside a
+   pass issues the held steps once 64 (first chunk) / 256 (later chunks) are
+   held, never by timing, so the chunks repeat and replay.
+
+What is left, ordered by size: the GEMVs (~2 ms above the floor, mid-size
+projections run at 2.7-2.8 TB/s), the SwiGLU epilogue (`silu`'s `expf` and two
+IEEE divisions an element, ~5.7 us at 17408 wide), `gdn_decode` (16 blocks on 132
+SMs, ~16 us), and the host's ~2.5 ms step build, which is hidden behind device
+work except for the first chunk. Attention is the one part that scales with
+context and is NOT yet fused: at 12 positions a token is 12.4 ms, at 1500 it is
+~30 ms because the decode still runs the three-kernel score/softmax/apply triad
+(one thread per key in the scores kernel) rather than the split-key flash decode
+the WGSL catalogue has.
 
 ## Not delivered - what is still missing
 
@@ -873,11 +948,12 @@ tuned kernel are deferred.**
   same `ComputeSet`, and the CLI flag wins over it; `check-device-env-single-source.sh`
   holds both variables to a single reader. A test binary or an embedding
   application can therefore be pointed at CUDA without a CLI.
-- **Four captured graphs at most, per handle.** Instantiation costs
+- **Eight captured graphs at most, per handle.** Instantiation costs
   milliseconds, so it only pays amortised over many replays; a caller
-  alternating between more than four shapes evicts and re-instantiates, and
+  alternating between more than eight shapes evicts and re-instantiates, and
   would be slower than launching each dispatch. The number is a judgement,
-  not a measurement of where the knee is.
+  not a measurement of where the knee is: a decode token needs five or six
+  (its layer-stack chunks plus the head).
 - **Graph capture is switched off with `BRAIN_CUDA_GRAPHS=0`** (or
   `CudaBackend::with_graph_capture(false)` from Rust). There is still no CLI flag
   for it.
@@ -886,17 +962,16 @@ tuned kernel are deferred.**
   `graph_replays`, and `launch_stats` is reachable only from Rust. The
   `staging_waits` counter in particular is a field diagnostic that currently
   nothing in the field can read.
-- **A submission with two same-shaped steps carrying different parameters is
-  correct but serialising.** They share one uniform allocation, so the copy
-  of the second must wait for the first's kernel; the replay path expresses
-  that as graph edges, which is right, but a submission full of such pairs
-  has less parallelism available than one with private uniforms would. Not
-  observed to matter, not measured either.
-- **Graph capture is validated on one model's forward.** `gpt2`'s tiny
-  cross-backend parity runs through it and still agrees to `8.940697e-8`, and
-  `cuda_graphs.rs` covers the mechanism directly. No decode loop, no backward
-  pass and no long run has been driven through it, so "correct across a couple
-  of positions and one forward" is the whole of the evidence.
+- **Two same-shaped steps with different parameters share a uniform when
+  issued one at a time.** On the unbatched path the second's upload must wait
+  for the first's kernel. A captured graph gives every step its own parameter
+  slice, so replay has no such serialisation (asserted by
+  `cuda_pass.rs::two_steps_of_one_shape_with_different_parameters_keep_their_own`).
+- **Graph capture is validated on one model's forward and one model's decode.**
+  `gpt2`'s tiny cross-backend parity runs through it and still agrees to
+  `8.940697e-8`, `cuda_graphs.rs`/`cuda_pass.rs` cover the mechanism directly,
+  and Qwen3.8-27B's decode runs through it (`decode_steady_state.rs`,
+  `gguf_resident_real.rs`). No backward pass has been driven through it.
 - **`scripts/gates/parity-gate.sh` runs one CUDA step**
   (`cuda_provider_matmul`, which skips without a device); the wider catalogue
   and the backward kernels are not in it.

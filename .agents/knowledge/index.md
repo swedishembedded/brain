@@ -245,3 +245,5 @@ What belongs where:
 | 202 | WGSL clamps out-of-range accesses; generated CUDA must too | [`202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md`](202-wgsl-clamps-out-of-range-accesses-generated-cuda-must-too.md) |
 | 203 | Work queued while creating an object must be fenced for the other streams | [`203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md`](203-work-queued-while-creating-an-object-must-be-fenced-for-other-streams.md) |
 | 204 | A cache that holds a buffer strongly makes the device handle an owner of the model | [`204-a-cache-that-holds-a-buffer-strongly-makes-the-handle-an-owner-of-the-model.md`](204-a-cache-that-holds-a-buffer-strongly-makes-the-handle-an-owner-of-the-model.md) |
+| 205 | A decode token is host-bound until it is one replayed graph | [`205-a-decode-token-is-host-bound-until-it-is-one-replayed-graph.md`](205-a-decode-token-is-host-bound-until-it-is-one-replayed-graph.md) |
+| 206 | In a small latency-bound kernel, issue every load before any use, and every store after | [`206-issue-every-load-before-any-use.md`](206-issue-every-load-before-any-use.md) |
