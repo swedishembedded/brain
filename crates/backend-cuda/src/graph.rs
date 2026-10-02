@@ -244,9 +244,14 @@ unsafe impl Send for Resolved {}
 /// launching each dispatch. A handful of slots makes each shape's
 /// instantiation a once-per-shape cost, which is what the design assumed.
 ///
+/// Eight, because a decode token is itself several graphs: its layer stack is
+/// issued in chunks (see `crate::backend::PASS_FLUSH_STEPS`) so the card can
+/// start on the first while the host builds the rest, and the head after its
+/// readback is one more. A bound below that would evict a chunk every token.
+///
 /// Small on purpose: each one holds an instantiated graph and page-locked
 /// staging until it is evicted, replaced or invalidated by a free.
-const MAX_LIVE: usize = 4;
+const MAX_LIVE: usize = 8;
 
 /// How many distinct recent shapes [`GraphCache::seen`] remembers.
 const MAX_SEEN: usize = 8;

@@ -48,7 +48,7 @@ pub mod live;
 pub mod nvrtc;
 pub mod policy;
 
-pub use backend::{CudaBackend, LaunchStats};
+pub use backend::{CudaBackend, LaunchStats, PASS_FLUSH_STEPS};
 pub use driver::{driver, CudaDevice};
 pub use live::{call_totals, live_resources, CallTotals, LiveResources};
 

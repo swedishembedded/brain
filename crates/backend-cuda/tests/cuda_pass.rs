@@ -243,6 +243,58 @@ fn two_steps_of_one_shape_with_different_parameters_keep_their_own() {
     assert!(b.launch_stats().graph_replays > 0, "the pass was never replayed, so this proves nothing about replay");
 }
 
+/// A `flush` inside a pass hands the work held so far to the card WITHOUT
+/// waiting, once enough is held to be worth a launch - so the host can keep
+/// building the rest of the step while the card runs the first part. Without
+/// it the card sat idle for the whole host-side build of a decode token
+/// (~2.5 ms of a ~16): the pass was one submission, issued at the end.
+///
+/// The chunks must be the same chunks every token, or no graph would repeat:
+/// the cut depends only on how much has been held, never on timing.
+#[test]
+fn a_flush_inside_a_pass_issues_chunks_that_replay() {
+    let Some(b) = backend() else { return };
+    const ROUNDS: usize = 5;
+    const S: f32 = 0.5;
+    let chunk = backend_cuda::PASS_FLUSH_STEPS;
+    let n = 3 * chunk + chunk / 2;
+    let inp = b.storage_init("inp", &input());
+    let outs: Vec<_> = (0..n).map(|_| b.storage(N as u64)).collect();
+    let params = [N as u32, S.to_bits()];
+
+    let before = b.launch_stats();
+    for _ in 0..ROUNDS {
+        b.begin_pass();
+        for o in &outs {
+            b.submit(&[], &[b.step(AXPY, &[o, &inp], &params, N as u32)]);
+            b.flush();
+        }
+        b.end_pass();
+        b.poll_wait();
+    }
+    let after = b.launch_stats();
+    // Three full chunks and the remainder, each its own graph.
+    assert_eq!(after.graph_captures - before.graph_captures, 4, "the pass was not cut into its four fixed chunks");
+    assert!(after.graph_replays - before.graph_replays >= 4 * (ROUNDS as u64 - 2), "the chunks were not replayed");
+    let want = input();
+    for o in &outs {
+        let got = b.read(o, N);
+        for i in 0..N {
+            let expect = ROUNDS as f32 * S * want[i];
+            assert!((got[i] - expect).abs() <= 1e-5 * expect.abs().max(1.0), "element {i}: got {}, want {expect}", got[i]);
+        }
+    }
+}
+
+/// Outside a pass `flush` has nothing to hold and nothing to do.
+#[test]
+fn a_flush_outside_a_pass_is_a_no_op() {
+    let Some(b) = backend() else { return };
+    let before = b.launch_stats().host_launches;
+    b.flush();
+    assert_eq!(b.launch_stats().host_launches, before);
+}
+
 /// Submissions the caller makes on its own, outside a pass, are captured only
 /// when one repeats the one before it - the original trigger. A prefill round
 /// is hundreds of small submissions in a fixed order, some of which recur every

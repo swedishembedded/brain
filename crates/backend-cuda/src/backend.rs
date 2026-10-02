@@ -452,6 +452,19 @@ pub struct CudaBackend {
     ctx: exec::Context,
 }
 
+/// Steps an open pass holds before a [`backend_api::Backend::flush`] issues them
+/// to the card.
+///
+/// A pass is one submission, issued when it ends - which left the card idle for
+/// the whole host-side build of a decode token (about 2.5 ms of a 16 ms step).
+/// A `flush` inside the pass hands what is held to the card without waiting, so
+/// the host builds the rest while the first part runs; but each chunk is a graph
+/// of its own, and a launch costs the host and the card something, so only once
+/// this many steps are held. The cut depends on nothing but how many steps have
+/// been held when `flush` is called, so a repeating pass is cut at the same
+/// steps every iteration and each chunk repeats and replays.
+pub const PASS_FLUSH_STEPS: usize = 256;
+
 /// Turns submission capture off when set to `0`, `off` or `false`.
 const ENV_GRAPHS: &str = "BRAIN_CUDA_GRAPHS";
 
@@ -1481,6 +1494,21 @@ impl backend_api::Backend for CudaBackend {
         self.issue_held();
         self.issue_all(clears, resolved, false);
         self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// Inside a pass, issue what is held so far once [`PASS_FLUSH_STEPS`] steps
+    /// are; otherwise a no-op, as it is for every backend that issues each
+    /// submission as it is made.
+    fn flush(&self) {
+        let due = {
+            let pass = self.pass.lock().unwrap_or_else(|e| e.into_inner());
+            pass.depth > 0 && pass.held.len() >= PASS_FLUSH_STEPS
+        };
+        if due {
+            let t0 = std::time::Instant::now();
+            self.issue_held();
+            self.counters.host_nanos.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
     }
 
     fn begin_pass(&self) {
