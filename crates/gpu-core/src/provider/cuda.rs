@@ -36,13 +36,23 @@
 //!
 //! # Scope
 //!
-//! `Op::MatMul`, forward, f32, `[Act, Weight, Out]` - the operand bundle
-//! `model::ops::Ops::matmul`'s own F32 arm builds, with the same uniform
-//! (`[m, k, n]`) the portable `matmul.wgsl` reads. Anything else (a
-//! quantized weight tier, a backward pass, another operator) is declined by
-//! [`CudaProvider::accepts`] and served by the WGSL reference provider
-//! exactly as before - a decline, never a forced failure and never a
-//! silently different answer.
+//! Two requests, both `Op::MatMul`, forward only:
+//!
+//! * plain f32, `[Act, Weight, Out]` - the operand bundle
+//!   `model::ops::Ops::matmul`'s own F32 arm builds, with the same uniform
+//!   (`[m, k, n]`) the portable `matmul.wgsl` reads;
+//! * the int8 dynamic-activation GEMM, `[Act, Weight, ActScale, WeightScale,
+//!   Out]` with group-32 weight scales - the prefill GEMM of every int8
+//!   resident model, run on int8 tensor cores (`matmul_i8_mma`). It is taken
+//!   only above the decode regime ([`select::DECODE_REGIME_MAX_ROWS`] rows -
+//!   below that the portable GEMV family is the right shape), only when K is a
+//!   whole number of 64-element tiles, and only on a device whose capability
+//!   reaches the kernel's own floor.
+//!
+//! Anything else (another weight tier or scale group, a backward pass,
+//! another operator) is declined by [`CudaProvider::accepts`] and served by
+//! the WGSL reference provider exactly as before - a decline, never a forced
+//! failure and never a silently different answer.
 
 use std::sync::Mutex;
 
@@ -58,6 +68,24 @@ use super::{LowerCtx, Lowered, OpRequest, OperatorProvider, Pass, Role};
 /// the same [`super::OpRequest`] feed either provider.
 const MATMUL_BINDINGS: &[BindKind] =
     &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `matmul_i8_dyn.wgsl`'s own `@binding` order: uniform, packed activations,
+/// packed weights, per-token activation scale, group weight scale, output.
+const MATMUL_I8_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// Elements of K per weight scale the int8 tensor-core kernel folds at (one
+/// `k32` MMA). A layout with a different group is declined, not approximated.
+const I8_MMA_GROUP: u32 = 32;
+
+/// Elements of K per staged tile of the int8 tensor-core kernel (two groups).
+const I8_MMA_K_TILE: u32 = 64;
 
 /// Whether the device has taken this kernel, cached per provider instance -
 /// the same one-provider-per-device assumption `coopmat::CoopMatProvider` and
@@ -78,12 +106,13 @@ pub struct CudaProvider {
     /// against cannot be constructed (see [`CudaProvider::for_gpu`]).
     cc: Cc,
     matmul: Mutex<Registration>,
+    matmul_i8: Mutex<Registration>,
 }
 
 impl CudaProvider {
     /// A provider that resolves kernels against compute capability `cc`.
     pub fn new(cc: Cc) -> CudaProvider {
-        CudaProvider { cc, matmul: Mutex::new(Registration::Unattempted) }
+        CudaProvider { cc, matmul: Mutex::new(Registration::Unattempted), matmul_i8: Mutex::new(Registration::Unattempted) }
     }
 
     /// The provider for `gpu`, or `None` when this handle's device reports no
@@ -104,33 +133,37 @@ impl CudaProvider {
         self.cc
     }
 
-    /// The registry entry this provider would run for `op` on its device, or
-    /// `None` when the registry offers nothing for that operator at this
-    /// capability.
-    pub fn kernel(&self, op: select::Op) -> Option<&'static CudaKernel> {
-        kernels_cuda::find(op, Dtype::F32, self.cc)
+    /// The registry entry this provider would run for `op` at weight tier
+    /// `dtype` on its device, or `None` when the registry offers nothing for
+    /// that operator and tier at this capability.
+    pub fn kernel(&self, op: select::Op, dtype: Dtype) -> Option<&'static CudaKernel> {
+        if dtype == Dtype::I8 {
+            // The int8 tensor-core GEMM is asked for by name: the registry's
+            // (MatMul, I8) answer stays the decode GEMV `native_upgrade` resolves.
+            return kernels_cuda::get("matmul_i8_mma").filter(|k| k.min_cc <= self.cc);
+        }
+        kernels_cuda::find(op, dtype, self.cc)
     }
 
     /// [`Self::kernel`]'s registry name - what a test or a diagnostic reports
     /// without having to reach into the registry itself.
-    pub fn kernel_name(&self, op: select::Op) -> Option<&'static str> {
-        self.kernel(op).map(|k| k.name)
+    pub fn kernel_name(&self, op: select::Op, dtype: Dtype) -> Option<&'static str> {
+        self.kernel(op, dtype).map(|k| k.name)
     }
 
-    /// Register the matmul kernel on `gpu`'s backend if this is the first
-    /// call, else reuse the cached id/decline.
-    fn matmul_id(&self, gpu: &crate::Gpu) -> Option<NativeId> {
-        let mut reg = self.matmul.lock().unwrap_or_else(|e| e.into_inner());
+    /// Register `k` on `gpu`'s backend if this is the first call for this
+    /// slot, else reuse the cached id/decline.
+    fn register(&self, slot: &Mutex<Registration>, k: &'static CudaKernel, bindings: &'static [BindKind], gpu: &crate::Gpu) -> Option<NativeId> {
+        let mut reg = slot.lock().unwrap_or_else(|e| e.into_inner());
         match *reg {
             Registration::Registered(id) => Some(id),
             Registration::Declined => None,
             Registration::Unattempted => {
-                let k = self.kernel(select::Op::MatMul)?;
                 let id = gpu.register_native(&NativeSpec::Cuda {
                     src: k.src,
                     entry: k.entry,
                     block_dim: k.block_dim,
-                    bindings: MATMUL_BINDINGS,
+                    bindings,
                     shared_bytes: k.shared_bytes,
                 });
                 *reg = match id {
@@ -142,21 +175,38 @@ impl CudaProvider {
         }
     }
 
-    /// The operand bundle this provider's matmul kernel reads: exactly
-    /// `[Act, Weight, Out]`, all f32.
+    /// The weight tier of the kernel `req` is shaped for, or `None` when it
+    /// is neither request this provider implements.
     ///
-    /// Checked structurally rather than trusted: the request's `shape.dtype`
-    /// names the WEIGHT tier, and a bundle for a quantized tier carries five
-    /// operands with two scale planes in the middle. Binding those to a
-    /// three-pointer kernel would read scales as weights - a wrong answer, not
-    /// a crash.
-    fn is_plain_f32_matmul(req: &OpRequest) -> bool {
-        req.shape.dtype == Dtype::F32
-            && req.operands.len() == 3
-            && req.operands[0].role == Role::Act
-            && req.operands[1].role == Role::Weight
-            && req.operands[2].role == Role::Out
-            && req.operands.iter().all(|o| o.dtype == DType::F32)
+    /// Checked structurally rather than trusted: `shape.dtype` names the
+    /// WEIGHT tier, and the operand bundle is what the kernel actually binds.
+    /// A quantized bundle has five operands with two scale planes in the
+    /// middle; binding those to a three-pointer kernel would read scales as
+    /// weights - a wrong answer, not a crash. The same holds for the uniform:
+    /// the int8 kernel reads `[m, k/4, n]`, and a request whose uniform
+    /// disagrees with its own shape is refused rather than launched.
+    fn shape_of(req: &OpRequest) -> Option<Dtype> {
+        let roles = |want: &[(Role, DType)]| {
+            req.operands.len() == want.len() && req.operands.iter().zip(want).all(|(o, (r, d))| o.role == *r && o.dtype == *d)
+        };
+        match req.shape.dtype {
+            Dtype::F32 if roles(&[(Role::Act, DType::F32), (Role::Weight, DType::F32), (Role::Out, DType::F32)]) => Some(Dtype::F32),
+            Dtype::I8
+                if roles(&[
+                    (Role::Act, DType::I8),
+                    (Role::Weight, DType::I8),
+                    (Role::ActScale, DType::F32),
+                    (Role::WeightScale, DType::F32),
+                    (Role::Out, DType::F32),
+                ]) && req.group == I8_MMA_GROUP
+                    && req.shape.m > select::DECODE_REGIME_MAX_ROWS
+                    && req.shape.k % I8_MMA_K_TILE == 0
+                    && req.attrs == [req.shape.m, req.shape.k / 4, req.shape.n] =>
+            {
+                Some(Dtype::I8)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -190,34 +240,39 @@ impl OperatorProvider for CudaProvider {
         // `Step` onto the caller's tape, replayable exactly like a WGSL one.
         req.op == select::Op::MatMul
             && req.pass == Pass::Forward
-            && Self::is_plain_f32_matmul(req)
-            && self.kernel(select::Op::MatMul).is_some()
+            && match Self::shape_of(req) {
+                Some(dt) => self.kernel(select::Op::MatMul, dt).is_some(),
+                None => false,
+            }
     }
 
     fn lower(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        if req.op != select::Op::MatMul || !Self::is_plain_f32_matmul(req) {
+        let dt = match (req.op, Self::shape_of(req)) {
+            (select::Op::MatMul, Some(dt)) => dt,
+            _ => {
+                return Err(format!(
+                    "cuda::CudaProvider::lower: {:?} at dtype {:?} is not implemented (plain f32 MatMul and group-32 int8 MatMul only)",
+                    req.op, req.shape.dtype
+                ))
+            }
+        };
+        let k = self.kernel(select::Op::MatMul, dt).ok_or_else(|| {
+            format!("cuda::CudaProvider::lower: no native {dt:?} MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1)
+        })?;
+        let (slot, bindings) = if dt == Dtype::I8 { (&self.matmul_i8, MATMUL_I8_BINDINGS) } else { (&self.matmul, MATMUL_BINDINGS) };
+        let Some(id) = self.register(slot, k, bindings, ctx.gpu) else {
             return Err(format!(
-                "cuda::CudaProvider::lower: {:?} at dtype {:?} is not implemented (plain f32 MatMul only)",
-                req.op, req.shape.dtype
-            ));
-        }
-        let k = self
-            .kernel(select::Op::MatMul)
-            .ok_or_else(|| format!("cuda::CudaProvider::lower: no native MatMul kernel at compute capability {}.{}", self.cc.0, self.cc.1))?;
-        let Some(id) = self.matmul_id(ctx.gpu) else {
-            return Err(
-                "cuda::CudaProvider::lower: this device declined the native matmul kernel \
+                "cuda::CudaProvider::lower: this device declined the native {dt:?} matmul kernel \
                  (register_native returned None) - falling back to the WGSL reference provider"
-                    .to_string(),
-            );
+            ));
         };
 
         let bufs: Vec<&backend_api::DeviceBuffer> = req.operands.iter().map(|o| o.buf).collect();
         let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
-        // The uniform is the reference kernel's own `[m, k, n]`, passed
-        // through untouched - the hand-written kernel reads the identical
-        // layout on purpose, so there is no second place a shape could be
-        // spelled differently.
+        // The uniform is the reference kernel's own (`[m, k, n]` for f32,
+        // `[m, k/4, n]` for int8), passed through untouched - the hand-written
+        // kernel reads the identical layout on purpose, so there is no second
+        // place a shape could be spelled differently.
         let blocks = k.blocks_for(req.shape.m, req.shape.n);
         let step = ctx
             .gpu
@@ -253,6 +308,7 @@ mod tests {
             pass,
             operands,
             attrs: &[],
+            group: 32,
             bind: &|_| panic!("the CUDA provider never calls OpRequest::bind - it has no WGSL name table"),
         }
     }
@@ -276,7 +332,7 @@ mod tests {
         let x = gpu.storage(1);
         let operands = f32_bundle(&x);
         let below = CudaProvider::new((1, 0));
-        assert!(below.kernel(select::Op::MatMul).is_none());
+        assert!(below.kernel(select::Op::MatMul, Dtype::F32).is_none() && below.kernel(select::Op::MatMul, Dtype::I8).is_none());
         assert!(!below.accepts(&req(Pass::Forward, &operands, shape(64, 64, 64, Dtype::F32)), false));
     }
 
@@ -291,13 +347,25 @@ mod tests {
         // A capability above every declared floor, so the decline below can
         // only come from the request and never from kernel resolution.
         let p = CudaProvider::new((99, 0));
-        assert!(p.kernel(select::Op::MatMul).is_some());
+        assert!(p.kernel(select::Op::MatMul, Dtype::F32).is_some() && p.kernel(select::Op::MatMul, Dtype::I8).is_some());
 
         let operands = f32_bundle(&x);
         assert!(p.accepts(&req(Pass::Forward, &operands, shape(64, 64, 64, Dtype::F32)), false));
         assert!(!p.accepts(&req(Pass::Backward, &operands, shape(64, 64, 64, Dtype::F32)), false));
+        // Three f32 operands under an I8 shape: the bundle, not the label, decides.
         assert!(!p.accepts(&req(Pass::Forward, &operands, shape(64, 64, 64, Dtype::I8)), false));
+    }
 
+    /// The int8 tensor-core kernel is taken for exactly the layout it
+    /// implements: group-32 scales, a K that is a whole number of 64-wide
+    /// tiles, a row count above the decode regime, and a uniform that agrees
+    /// with the shape. Each deviation is a decline (the portable kernel then
+    /// serves it), never a launch that reads the wrong plane.
+    #[test]
+    fn the_int8_tensor_core_kernel_is_taken_only_for_the_layout_it_implements() {
+        let gpu = crate::testgpu::dev(&[("matmul", kernels::MATMUL)]);
+        let x = gpu.storage(1);
+        let p = CudaProvider::new((99, 0));
         let quantized = [
             Operand { role: Role::Act, buf: &x, range: (0, 1), dtype: DType::I8 },
             Operand { role: Role::Weight, buf: &x, range: (0, 0), dtype: DType::I8 },
@@ -305,7 +373,19 @@ mod tests {
             Operand { role: Role::WeightScale, buf: &x, range: (0, 0), dtype: DType::F32 },
             Operand { role: Role::Out, buf: &x, range: (0, 1), dtype: DType::F32 },
         ];
-        assert!(!p.accepts(&req(Pass::Forward, &quantized, shape(64, 64, 64, Dtype::I8)), false));
+        let with = |m: u32, n: u32, k: u32, group: u32, attrs: &[u32]| {
+            let sh = shape(m, n, k, Dtype::I8);
+            let mut r = req(Pass::Forward, &quantized, sh);
+            r.group = group;
+            r.attrs = attrs;
+            p.accepts(&r, false)
+        };
+        assert!(with(256, 5120, 5120, 32, &[256, 1280, 5120]), "the real prefill shape is the kernel's own");
+        assert!(!with(256, 5120, 5120, 16, &[256, 1280, 5120]), "group-16 (Q6_K) scales are a different layout");
+        assert!(!with(8, 5120, 5120, 32, &[8, 1280, 5120]), "decode-regime row counts belong to the GEMV family");
+        assert!(!with(256, 5120, 5152, 32, &[256, 1288, 5120]), "K must be a whole number of 64-wide tiles");
+        assert!(!with(256, 5120, 5120, 32, &[256, 5120, 5120]), "the uniform carries K/4, not K");
+        assert!(!with(256, 5120, 5120, 32, &[]), "a request without its uniform is malformed");
     }
 
     /// On a backend that cannot compile CUDA C++ (every backend but the CUDA

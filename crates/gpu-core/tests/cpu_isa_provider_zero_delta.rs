@@ -92,6 +92,7 @@ fn cpu_isa_f32_matmul_is_bit_identical_to_the_hidden_fastpath() {
             pass: Pass::Forward,
             operands: &operands,
             attrs: &[m, k, n],
+            group: 32,
             bind: &bind_f32,
         };
         let selector: Arc<dyn KernelSelector> = Arc::new(CachedSelector::new(select::AlwaysReference));
@@ -172,6 +173,7 @@ fn cpu_isa_i8_matmul_reaches_the_native_avx2_gemm() {
         pass: Pass::Forward,
         operands: &operands,
         attrs: &[m, kg, n],
+        group: 32,
         bind: &bind_f32, // unused by CpuIsaProvider's I8 arm
     };
     let selector: Arc<dyn KernelSelector> = Arc::new(CachedSelector::new(select::AlwaysReference));

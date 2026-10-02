@@ -140,6 +140,13 @@ pub struct OpRequest<'a> {
     pub pass: Pass,
     pub operands: &'a [Operand<'a>],
     pub attrs: &'a [u32],
+    /// Elements of K covered by one weight scale, for the group-scaled
+    /// quantized tiers (`Dtype::I8`: 32 for Q8_0/Q5_0/Q4_0, 16 for Q6_K).
+    /// Not derivable from the operand bundle - the scale plane's length is not
+    /// part of an [`Operand`] - and a kernel that folds scales per 32-element
+    /// MMA must be able to refuse a layout it does not implement. Float
+    /// weights have no scale; they pass 32 and nothing reads it.
+    pub group: u32,
     pub bind: &'a dyn Fn(select::KernelVariant) -> (usize, &'static str),
 }
 
@@ -557,6 +564,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &[],
             attrs: &[],
+            group: 32,
             bind: &bind,
         };
         let caps = DeviceCaps::portable_baseline(backend_api::DeviceClass::Cpu);
@@ -594,6 +602,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &[],
             attrs: &[],
+            group: 32,
             bind: &bind,
         };
         let caps = DeviceCaps::portable_baseline(backend_api::DeviceClass::Cpu);

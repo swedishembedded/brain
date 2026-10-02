@@ -101,6 +101,7 @@ fn request<'a>(operands: &'a [Operand<'a>], attrs: &'a [u32]) -> OpRequest<'a> {
         pass: Pass::Forward,
         operands,
         attrs,
+        group: 32,
         bind: &bind,
     }
 }

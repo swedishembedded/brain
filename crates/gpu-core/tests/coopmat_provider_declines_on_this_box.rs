@@ -65,6 +65,7 @@ fn coopmat_provider_requires_is_unsatisfied_by_this_boxs_real_vulkan_caps() {
         pass: Pass::Forward,
         operands: &[],
         attrs: &[],
+        group: 32,
         bind: &|_| panic!("coopmat provider never calls OpRequest::bind"),
     };
     let requirement = provider.requires(&req);

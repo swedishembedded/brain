@@ -177,6 +177,7 @@ mod tests {
             pass,
             operands,
             attrs: &[],
+            group: 32,
             bind: &|_| panic!("coopmat provider never calls OpRequest::bind - it has no kernel-name table"),
         }
     }

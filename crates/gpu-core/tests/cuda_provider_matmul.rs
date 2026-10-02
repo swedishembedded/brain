@@ -119,6 +119,7 @@ fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuf
         pass: Pass::Forward,
         operands: &operands,
         attrs: &attrs,
+        group: 32,
         bind: &bind,
     };
     let mut steps = Vec::new();
@@ -176,11 +177,12 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
         pass: Pass::Forward,
         operands: &probe_operands,
         attrs: &[],
+        group: 32,
         bind: &bind,
     };
     assert!(provider.accepts(&probe, false), "a plain f32 MatMul is what this provider exists for");
     assert_eq!(provider.source(&probe), ImplSource::Tuned, "a hand-written kernel is the Tuned tier");
-    eprintln!("cuda_provider_matmul: tuned kernel {:?}", provider.kernel_name(select::Op::MatMul));
+    eprintln!("cuda_provider_matmul: tuned kernel {:?}", provider.kernel_name(select::Op::MatMul, Dtype::F32));
 
     let x = gpu.storage_init("x", &seeded(1, (m * k) as usize));
     let w = gpu.storage_init("w", &seeded(2, (n * k) as usize));
@@ -253,6 +255,7 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
         pass: Pass::Forward,
         operands: &operands,
         attrs: &attrs,
+        group: 32,
         bind: &bind,
     };
     let caps = gpu.caps();
@@ -324,6 +327,7 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
             pass: case.pass,
             operands: &operands,
             attrs: &[],
+            group: 32,
             bind: &bind,
         };
         assert!(

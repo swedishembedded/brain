@@ -1315,7 +1315,7 @@ impl Ops {
                     Operand { role: Role::Weight, buf: wb, range: (0, 0), dtype: dt },
                     Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
                 ];
-                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, group: 32, bind: &bind };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
@@ -1374,7 +1374,7 @@ impl Ops {
                     Operand { role: Role::WeightScale, buf: sw, range: (0, 0), dtype: Dtype::F32 },
                     Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
                 ];
-                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, group, bind: &bind };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
@@ -1438,7 +1438,7 @@ impl Ops {
                     Operand { role: Role::ActGroupSum, buf: xgs, range: go, dtype: Dtype::F32 },
                     Operand { role: Role::Out, buf: y, range: oo, dtype: Dtype::F32 },
                 ];
-                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, bind: &bind };
+                let req = OpRequest { op: Op::MatMul, shape, pass: Pass::Forward, operands: &operands, attrs: &attrs, group: 32, bind: &bind };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
@@ -1515,6 +1515,7 @@ impl Ops {
                     pass: Pass::Forward,
                     operands: &operands,
                     attrs: &attrs,
+                    group: 32,
                     bind: &bind,
                 };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
@@ -1599,6 +1600,7 @@ impl Ops {
                     pass: Pass::Forward,
                     operands: &operands,
                     attrs: &attrs,
+                    group: 32,
                     bind: &bind,
                 };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
@@ -1900,6 +1902,7 @@ impl Ops {
                     pass: Pass::Backward,
                     operands: &operands,
                     attrs: &attrs,
+                    group: 32,
                     bind: &bind,
                 };
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
@@ -1952,6 +1955,7 @@ impl Ops {
             pass: Pass::Backward,
             operands: &operands,
             attrs: &attrs,
+            group: 32,
             bind: &bind,
         };
         let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };

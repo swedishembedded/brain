@@ -151,6 +151,7 @@ fn assert_backward_gemm_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &Parit
             pass: case.pass,
             operands: &operands,
             attrs: &attrs,
+            group: 32,
             bind: &bind,
         };
         let mut steps = Vec::new();
@@ -238,7 +239,7 @@ fn assert_matmul_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &ParityCase) 
         Operand { role: Role::Out, buf: &y_ref, range: (0, (m * n) as u64), dtype: DType::F32 },
     ];
     let req_ref =
-        OpRequest { op: case.op, shape: case.shape, pass: case.pass, operands: &operands_ref, attrs: &attrs, bind: &bind };
+        OpRequest { op: case.op, shape: case.shape, pass: case.pass, operands: &operands_ref, attrs: &attrs, group: 32, bind: &bind };
     let mut steps_ref = Vec::new();
     {
         let mut ctx = LowerCtx { gpu, caps: &caps, steps: &mut steps_ref, capture: false };
@@ -252,7 +253,7 @@ fn assert_matmul_parity(gpu: &Gpu, p: &dyn OperatorProvider, case: &ParityCase) 
         Operand { role: Role::Out, buf: &y_got, range: (0, (m * n) as u64), dtype: DType::F32 },
     ];
     let req_got =
-        OpRequest { op: case.op, shape: case.shape, pass: case.pass, operands: &operands_got, attrs: &attrs, bind: &bind };
+        OpRequest { op: case.op, shape: case.shape, pass: case.pass, operands: &operands_got, attrs: &attrs, group: 32, bind: &bind };
     let mut steps_got = Vec::new();
     {
         let mut ctx = LowerCtx { gpu, caps: &caps, steps: &mut steps_got, capture: false };
@@ -446,6 +447,7 @@ mod tests {
                 pass: Pass::Backward,
                 operands: &operands,
                 attrs: &attrs,
+                group: 32,
                 bind: &bind,
             };
             let mut steps = Vec::new();

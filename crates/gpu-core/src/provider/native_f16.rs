@@ -253,6 +253,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &[],
             attrs: &[],
+            group: 32,
             bind: &bind,
         }
     }

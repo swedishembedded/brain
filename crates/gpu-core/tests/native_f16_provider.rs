@@ -191,6 +191,7 @@ fn native_f16_matmul_subnormal_product_matches_documented_flush_to_zero() {
         pass: Pass::Forward,
         operands: &operands,
         attrs: &[1, 1, 1],
+        group: 32,
         bind: &bind,
     };
     let mut steps = Vec::new();

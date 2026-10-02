@@ -57,6 +57,12 @@ pub type Cc = (u32, u32);
 /// they are; source text is held to what it uses.
 pub const DP4A_MIN_CC: Cc = (6, 1);
 
+/// The compute capability that introduced the warp-level `mma.sync` int8
+/// tensor-core instructions (`m16n8k32`) and `cp.async`. Like [`DP4A_MIN_CC`]
+/// this is a property of the instruction set, not of a device: it exists so
+/// a kernel whose body issues them cannot declare a lower floor.
+pub const MMA_S8_MIN_CC: Cc = (8, 0);
+
 /// The lowest compute capability a CUDA 12.x toolchain will emit code for at
 /// all (`--gpu-architecture=sm_50`). A kernel whose text uses nothing beyond
 /// the always-available core - shared memory, `__syncthreads`, fp32
@@ -182,6 +188,27 @@ pub const ALL: &[CudaKernel] = &[
         // ever asks the driver to launch.
         shared_bytes: 2 * 16 * (64 + 1) * 4,
         src: include_str!("../cu/matmul_f32_tiled.cu"),
+    },
+    CudaKernel {
+        name: "matmul_i8_mma",
+        // Asked for by name by `CudaProvider` (above the decode regime), never
+        // resolved by `find`: the (MatMul, I8) answer is the decode GEMV, and a
+        // higher floor here must not win it on `max_by_key`.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_matmul_i8_mma",
+        what: "int8 tensor-core GEMM (mma.sync m16n8k32), dynamic per-token activation scale, group-32 weight scale folded per MMA",
+        reported: "native:matmul_i8_mma",
+        block_dim: 128,
+        // 64 activation rows x 64 weight rows per block (four warps of 32x32);
+        // the kernel numbers its blocks row-tile-fastest.
+        tile: (64, 64),
+        // 4 stages x (64x64 + 64x64 int8 tiles + 64x2 f32 group scales).
+        shared_bytes: 4 * (64 * 64 + 64 * 64 + 64 * 2 * 4),
+        src: include_str!("../cu/matmul_i8_mma.cu"),
     },
     CudaKernel {
         name: "matmul_i8_gemv",
@@ -402,6 +429,12 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
             errs.push(format!(
                 "{}: uses __dp4a but declares min_cc {}.{}, below the capability that introduced it ({}.{})",
                 k.name, k.min_cc.0, k.min_cc.1, DP4A_MIN_CC.0, DP4A_MIN_CC.1
+            ));
+        }
+        if (code.contains("mma.sync") || code.contains("cp.async")) && k.min_cc < MMA_S8_MIN_CC {
+            errs.push(format!(
+                "{}: issues mma.sync/cp.async but declares min_cc {}.{}, below the capability that introduced them ({}.{})",
+                k.name, k.min_cc.0, k.min_cc.1, MMA_S8_MIN_CC.0, MMA_S8_MIN_CC.1
             ));
         }
         if k.block_dim == 0 || k.block_dim % 32 != 0 {

@@ -258,6 +258,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &operands,
             attrs: &[m, k, n],
+            group: 32,
             bind: &bind,
         };
         let mut steps = Vec::new();
@@ -298,6 +299,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &operands,
             attrs: &[1, 1, 1],
+            group: 32,
             bind: &bind,
         };
         let mut steps = Vec::new();
@@ -322,6 +324,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &operands,
             attrs: &[1, 1, 1],
+            group: 32,
             bind: &bind,
         };
         let mut steps = Vec::new();
@@ -365,6 +368,7 @@ mod tests {
             pass: Pass::Forward,
             operands: &[],
             attrs: &[],
+            group: 32,
             bind: &bind,
         };
         let mut steps = Vec::new();
