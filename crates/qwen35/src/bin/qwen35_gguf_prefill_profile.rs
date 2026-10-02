@@ -22,8 +22,8 @@
 //!   BRAIN_QWEN35_GGUF=<path to Qwen3.8-27B*.gguf> qwen35_gguf_prefill_profile [depth] [rows] [rounds]
 //!
 //! `depth` (default 256) prompt tokens establish the KV depth first, `rows`
-//! (default 256) is the round width, `rounds` (default 2) the rounds per
-//! measured region.
+//! (default 256) is the round width, `rounds` (default 4) the rounds per
+//! measured region; the fastest of them is reported.
 
 use checkpoint::gguf::MmapGguf;
 use qwen35::int8_gguf_resident::{resident_config, Qwen35GgufResident};
@@ -37,7 +37,7 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let depth: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(256);
     let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);
-    let rounds: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(2);
+    let rounds: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
     let cap = depth + 2 * rows * rounds;
 
     let Ok(path) = std::env::var("BRAIN_QWEN35_GGUF") else {
@@ -65,22 +65,22 @@ fn main() {
 
     let seed = inst.tokenize("The quick brown fox jumps over the lazy dog while a kalman filter estimates the state of a noisy system. ");
     let prompt: Vec<u32> = seed.iter().cycle().take(depth as usize).copied().collect();
-    let p = inst.profile_chunk_round(&prompt, rows, rounds);
+    let p = inst.profile_prefill_rounds(&prompt, rows, rounds);
 
     println!();
-    println!("depth {depth}, {rows} rows x {rounds} rounds");
-    println!("  layer stack : {:9.2} ms/round  {:9.1} tok/s", p.carry_ms(), rows as f64 * 1e3 / p.carry_ms());
-    println!("  head        : {:9.2} ms/round", p.head_ms());
-    println!("  whole round : {:9.2} ms/round  {:9.1} tok/s", p.round_ms(), rows as f64 * 1e3 / p.round_ms());
+    println!("depth {depth}, {rows} rows, {rounds} round(s) per region - fastest round reported (a shared card only ever adds time)");
+    let walls: Vec<String> = p.round_s.iter().map(|s| format!("{:.0}", s * 1e3)).collect();
+    println!("  whole rounds (ms)   : {}", walls.join(" "));
+    println!("  best round          : {:9.2} ms   {:9.1} tok/s", p.best_round_s() * 1e3, p.best_tok_per_s());
     if p.table.is_empty() {
         println!("(per-kernel device timing unavailable on this backend)");
         return;
     }
     let total = p.device_ms();
     println!();
-    println!("=== per-kernel device time, layer stack ({rounds} round(s), total {total:.1} ms) ===");
-    println!("{:<34} {:>10} {:>12} {:>8} {:>7}", "kernel", "ms", "ms/round", "calls", "%");
+    println!("=== per-kernel device time, layer stack, least-interfered round (total {total:.1} ms; launches serialised by the timers) ===");
+    println!("{:<34} {:>10} {:>8} {:>7}", "kernel", "ms", "calls", "%");
     for (name, ms, calls) in &p.table {
-        println!("{name:<34} {ms:>10.3} {:>12.3} {calls:>8} {:>6.1}%", ms / rounds as f64, 100.0 * ms / total.max(1e-9));
+        println!("{name:<34} {ms:>10.3} {calls:>8} {:>6.1}%", 100.0 * ms / total.max(1e-9));
     }
 }

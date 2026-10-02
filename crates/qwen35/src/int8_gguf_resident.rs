@@ -2077,6 +2077,108 @@ impl Qwen35GgufInstance {
 }
 
 impl Qwen35GgufInstance {
+    /// **Prefill rounds, timed one at a time** - the measurement a shared
+    /// device needs.
+    ///
+    /// [`Self::profile_chunk_round`] sums its rounds, which is the right shape
+    /// for a quiet card and the wrong one for a card other processes are
+    /// time-slicing: interference only ever ADDS time, so the honest figure is
+    /// the fastest round, not the mean. This runs `rounds` real chunk rounds
+    /// (layer stack + head, the production path) after warming up on `prompt`,
+    /// timing each, then runs `rounds` more with per-kernel device timing
+    /// armed, one table per round. [`PrefillRoundsProfile`] reports the best
+    /// round of each region.
+    ///
+    /// Panics rather than truncating if the prompt plus the profiled rounds run
+    /// past capacity.
+    pub fn profile_prefill_rounds(&self, prompt: &[u32], rows: u32, rounds: u32) -> PrefillRoundsProfile {
+        assert!(rows > 0 && rounds > 0, "profile_prefill_rounds: rows and rounds must be > 0");
+        assert!(!prompt.is_empty(), "profile_prefill_rounds: needs a non-empty prompt to establish decode state");
+        let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
+        assert!(need <= self.cap as u64, "profile_prefill_rounds: prompt ({}) + 2*{rounds} rounds of {rows} = {need} exceeds capacity {}", prompt.len(), self.cap);
+
+        self.reset();
+        let (_, mut pos) = self.replay_prompt(prompt, 0).expect("profile_prefill_rounds warm-up");
+        let block: Vec<u32> = vec![prompt[prompt.len() - 1]; rows as usize];
+        self.poll_wait();
+
+        let head = self.shards.last().expect("a plan always has at least one stage");
+        let mut round_s = Vec::with_capacity(rounds as usize);
+        for _ in 0..rounds {
+            let t = std::time::Instant::now();
+            let (hidden, _) = self.stack_chunk_carry(&block, pos, 0).expect("profile_prefill_rounds round");
+            let flat = crate::stream::head_logits_rows_on(&head.qwen35.gpu, &self.head.ops, &self.cfg, &self.head.norm, &self.head.w, &hidden, rows);
+            self.poll_wait();
+            std::hint::black_box(flat.len());
+            round_s.push(t.elapsed().as_secs_f64());
+            pos += rows;
+        }
+
+        let timed = self.shards.iter().all(|s| s.qwen35.gpu.set_kernel_timing(true));
+        let mut best: Option<(f64, Vec<(String, f64, u64)>)> = None;
+        for _ in 0..rounds {
+            for s in &self.shards {
+                s.qwen35.gpu.reset_kernel_times();
+            }
+            self.stack_chunk_carry(&block, pos, 0).expect("profile_prefill_rounds timed round");
+            self.poll_wait();
+            pos += rows;
+            if !timed {
+                break;
+            }
+            let mut merged: std::collections::BTreeMap<String, (f64, u64)> = Default::default();
+            for s in &self.shards {
+                for (name, ms, calls) in s.qwen35.gpu.kernel_times().unwrap_or_default() {
+                    let e = merged.entry(name).or_insert((0.0, 0));
+                    e.0 += ms;
+                    e.1 += calls;
+                }
+            }
+            let mut table: Vec<(String, f64, u64)> = merged.into_iter().map(|(n, (ms, c))| (n, ms, c)).collect();
+            table.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let total: f64 = table.iter().map(|r| r.1).sum();
+            if best.as_ref().is_none_or(|(t, _)| total < *t) {
+                best = Some((total, table));
+            }
+        }
+        for s in &self.shards {
+            s.qwen35.gpu.set_kernel_timing(false);
+        }
+        PrefillRoundsProfile { rows, round_s, table: best.map(|b| b.1).unwrap_or_default() }
+    }
+}
+
+/// What [`Qwen35GgufInstance::profile_prefill_rounds`] measured.
+#[derive(Clone, Debug)]
+pub struct PrefillRoundsProfile {
+    /// Rows in each round.
+    pub rows: u32,
+    /// Wall seconds of each whole round (layer stack + head), in run order.
+    pub round_s: Vec<f64>,
+    /// `(kernel, device ms, calls)` of the layer stack for the round with the
+    /// least total device time, descending by time. Empty when the backend
+    /// cannot time kernels.
+    pub table: Vec<(String, f64, u64)>,
+}
+
+impl PrefillRoundsProfile {
+    /// Seconds of the fastest round.
+    pub fn best_round_s(&self) -> f64 {
+        self.round_s.iter().copied().fold(f64::INFINITY, f64::min)
+    }
+
+    /// Prompt tokens per second of the fastest round.
+    pub fn best_tok_per_s(&self) -> f64 {
+        self.rows as f64 / self.best_round_s()
+    }
+
+    /// Summed device time of the table, in ms.
+    pub fn device_ms(&self) -> f64 {
+        self.table.iter().map(|(_, ms, _)| ms).sum()
+    }
+}
+
+impl Qwen35GgufInstance {
     /// **What the GDN state snapshot costs**, in ms per round - the second
     /// structural cost `generate_speculative` pays on every round that proposes
     /// anything, and one that is easy to over-estimate by reading its BYTE
