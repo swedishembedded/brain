@@ -148,7 +148,7 @@ use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
 use crate::q8::Qwen35Q8;
-use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, GdnStore, Qwen35};
+use crate::model::{pipelines, MOE_GROUPED_MIN_ROWS, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, GdnStore, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s window cap. No on-device
 /// multi-step schedule is built (see module doc) - 1 keeps
@@ -190,12 +190,15 @@ pub struct EngineOptions {
     /// record_decode`) instead of building it every token. Only the int8 expert
     /// tier can be recorded; for an fp32 engine this is ignored.
     pub decode_tapes: bool,
+    /// Rows from which the int8 expert GEMMs group each expert's slots
+    /// ([`Qwen35::set_moe_grouped_min_rows`]).
+    pub moe_grouped_min_rows: u32,
 }
 
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true }
+        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS }
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -207,6 +210,10 @@ impl EngineOptions {
     }
     pub fn with_prefill_chunk(mut self, rows: u32) -> EngineOptions {
         self.prefill_chunk = rows.max(1);
+        self
+    }
+    pub fn with_moe_grouped_min_rows(mut self, rows: u32) -> EngineOptions {
+        self.moe_grouped_min_rows = rows;
         self
     }
     pub fn with_decode_tapes(mut self, on: bool) -> EngineOptions {
@@ -473,6 +480,7 @@ impl Engine {
         // sequence.
         let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(opts.prefill_chunk) };
         let model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
+        model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);
         let n_layers = cfg.n_layers as usize;
         let mut gqa_kv: Vec<KvLayer> = Vec::with_capacity(n_layers);
         for ty in cfg.layer_types() {

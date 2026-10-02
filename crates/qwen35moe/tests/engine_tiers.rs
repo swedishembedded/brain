@@ -158,3 +158,41 @@ fn an_int8_engine_built_from_a_source_tracks_the_fp32_engine() {
     let e = rel_l2(&i8h, &f32h);
     assert!(e < 0.1, "the int8 engine's prompt hidden differs from fp32's by {e:e}");
 }
+
+/// Grouping each expert's slots is a speed choice: the grouped GEMM computes a
+/// slot exactly as the one-slot-per-pass kernel does, so an engine that always
+/// groups (a prefill round, then batched decode) is bit-for-bit one that never
+/// does.
+#[test]
+fn grouped_expert_gemms_leave_prefill_and_decode_bit_identical() {
+    let c = cfg();
+    let w = weights(&c);
+    let build = |min_rows: u32| {
+        Engine::from_source(c.clone(), &w, EngineOptions::new(24, 3).with_tier(TierPolicy::uniform(Dtype::I8)).with_prefill_chunk(5).with_moe_grouped_min_rows(min_rows))
+    };
+    let (mut grouped, mut plain) = (build(1), build(u32::MAX));
+    if !grouped.gpu().caps().numeric.int8_dot || !grouped.gpu().caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("grouped expert GEMMs need a packed int8 dot and workgroup barriers");
+    }
+    let prompts = [prompt(&c, 1, 11), prompt(&c, 2, 7), prompt(&c, 3, 9)];
+    let admit = |e: &mut Engine| -> (Vec<BlockTable>, Vec<Vec<u32>>) {
+        let mut tables = Vec::new();
+        let mut hiddens = Vec::new();
+        for p in &prompts {
+            let mut t = BlockTable::new();
+            hiddens.push(e.prefill(&mut t, p).iter().map(|x| x.to_bits()).collect());
+            tables.push(t);
+        }
+        (tables, hiddens)
+    };
+    let ((mut ta, ha), (mut tb, hb)) = (admit(&mut grouped), admit(&mut plain));
+    assert_eq!(ha, hb, "prefill hidden states differ");
+    let mut toks = vec![4u32, 5, 6];
+    for step in 0..4 {
+        let a = grouped.forward_batched_topk(&mut ta.iter_mut().collect::<Vec<_>>(), &toks, 4);
+        let b = plain.forward_batched_topk(&mut tb.iter_mut().collect::<Vec<_>>(), &toks, 4);
+        let bits = |r: &Vec<Vec<(u32, f32)>>| r.iter().map(|row| row.iter().map(|&(i, v)| (i, v.to_bits())).collect::<Vec<_>>()).collect::<Vec<_>>();
+        assert_eq!(bits(&a), bits(&b), "decode step {step} differs");
+        toks = a.iter().map(|r| r[0].0).collect();
+    }
+}

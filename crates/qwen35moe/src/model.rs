@@ -315,6 +315,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),           // 112
     ("pool_rows_gather2", kernels::POOL_ROWS_GATHER2),           // 113
     ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2),         // 114
+    ("moe_route_count", kernels::MOE_ROUTE_COUNT),               // 115
+    ("moe_route_scan", kernels::MOE_ROUTE_SCAN),                 // 116
+    ("moe_route_emit", kernels::MOE_ROUTE_EMIT),                 // 117
+    ("moe_i8_grouped", kernels::MOE_I8_GROUPED),                 // 118
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -511,6 +515,10 @@ const ARGMAX_FINAL: usize = 111;
 const TOPK_EXTRACT_STEP: usize = 112;
 const POOL_ROWS_GATHER2: usize = 113;
 const POOL_ROWS_SCATTER2: usize = 114;
+const MOE_ROUTE_COUNT: usize = 115;
+const MOE_ROUTE_SCAN: usize = 116;
+const MOE_ROUTE_EMIT: usize = 117;
+const MOE_I8_GROUPED: usize = 118;
 /// Partial-argmax chunks the device head splits a `[vocab]` row into
 /// (`argmax_part` then `argmax_final`) - the same split `qwen35` uses.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
@@ -522,6 +530,14 @@ const CHUNK_ARENA_MIN_ROWS: u32 = 16;
 /// Weight rows one `moe_i8_gemv_gather` workgroup covers (64 threads, 16 lanes
 /// per row) - the kernel's own constant, restated here only to size its grid.
 const MOE_GATHER_COLS: u32 = 4;
+/// Slots per tile and weight rows per workgroup of `moe_i8_grouped` - that
+/// kernel's own constants, restated to size its grid and the routing tables.
+const MOE_GROUPED_MR: u32 = 8;
+const MOE_GROUPED_COLS: u32 = 4;
+/// Rows at which the expert GEMMs switch from one slot per weight pass
+/// (`moe_i8_gemv_gather`) to the grouped kernel. Below it a token's experts are
+/// mostly distinct matrices and there is nothing to share.
+pub const MOE_GROUPED_MIN_ROWS: u32 = 16;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -950,6 +966,9 @@ pub struct Qwen35 {
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
     chunk_arena_min_rows: Cell<u32>,
+    /// Rows from which the int8 expert GEMMs run grouped - see
+    /// [`Self::set_moe_grouped_min_rows`].
+    moe_grouped_min_rows: Cell<u32>,
     /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`
     /// (`bh = linear_num_value_heads`, single sequence) for GDN layers; a
     /// size-1 dummy at GQA layer indices. Threaded across `step` calls by
@@ -1648,6 +1667,7 @@ impl Qwen35 {
             dec_cap: t,
             gqa_kv,
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
+            moe_grouped_min_rows: Cell::new(MOE_GROUPED_MIN_ROWS),
             gdn_state,
             gdn_hist,
             lora_a,
@@ -2250,13 +2270,31 @@ impl Qwen35 {
                 &own_router
             }
         };
+        // At prefill row counts every expert has many slots: order them by expert
+        // (three tiny dispatches) so each weight row is read once per tile of
+        // slots instead of once per slot.
+        let ne = e + shared;
+        let grouped = n >= self.moe_grouped_min_rows.get();
+        let (route_tab, route_perm) = if grouped { (g.storage(2 * (ne as u64 + 1)), g.storage(slots as u64)) } else { (g.storage(1), g.storage(1)) };
         let gather = |bank: &Bank8, xq: &DeviceBuffer, sx: &DeviceBuffer, out: &DeviceBuffer, xdiv: u32| {
-            g.dispatch(
-                MOE_I8_GEMV_GATHER,
-                &[xq, sx, &ids, &bank.packed, &bank.scale, out],
-                &[slots, bank.k / 4, bank.n, xdiv],
-                Dispatch::Workgroups(slots * bank.n.div_ceil(MOE_GATHER_COLS)),
-            )
+            if grouped {
+                // Worst-case tile count (an expert's last tile may be partial); a
+                // workgroup past the real count finds the table's end and exits.
+                let tiles = ne + slots.div_ceil(MOE_GROUPED_MR);
+                g.dispatch(
+                    MOE_I8_GROUPED,
+                    &[xq, sx, &route_tab, &route_perm, &bank.packed, &bank.scale, out],
+                    &[ne, bank.k / 4, bank.n, xdiv],
+                    Dispatch::Workgroups(tiles * bank.n.div_ceil(MOE_GROUPED_COLS)),
+                )
+            } else {
+                g.dispatch(
+                    MOE_I8_GEMV_GATHER,
+                    &[xq, sx, &ids, &bank.packed, &bank.scale, out],
+                    &[slots, bank.k / 4, bank.n, xdiv],
+                    Dispatch::Workgroups(slots * bank.n.div_ceil(MOE_GATHER_COLS)),
+                )
+            }
         };
 
         let mut steps = vec![rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&p("ln2.weight")), &xn2, d, n, c.rms_eps)];
@@ -2266,6 +2304,12 @@ impl Qwen35 {
         // output and was a third of a decode step's device time.
         self.ops.matmul(&mut steps, router_w, &self.ops.act_f32(&xn2, 0, n, d), &logits, 0);
         steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, shared], Dispatch::Workgroups(n)));
+        if grouped {
+            let counts = g.storage(ne as u64);
+            steps.push(g.dispatch(MOE_ROUTE_COUNT, &[&ids, &counts], &[slots, ne], Dispatch::Workgroups(ne)));
+            steps.push(g.dispatch(MOE_ROUTE_SCAN, &[&counts, &route_tab], &[ne, MOE_GROUPED_MR], Dispatch::Workgroups(1)));
+            steps.push(g.dispatch(MOE_ROUTE_EMIT, &[&ids, &route_tab, &route_perm], &[slots, ne], Dispatch::Workgroups(ne)));
+        }
         steps.push(gather(&ml.gate, &q8.xq, &q8.sx, &gate_out, slots_per_row));
         steps.push(gather(&ml.up, &q8.xq, &q8.sx, &up_out, slots_per_row));
         steps.push(g.dispatch(MOE_SWIGLU_QUANT, &[&gate_out, &up_out, &hq, &sh], &[slots, ff], Dispatch::Workgroups(slots)));
@@ -3163,6 +3207,15 @@ impl Qwen35 {
     /// [`CHUNK_ARENA_MIN_ROWS`]). A test hook: the tiny configs this crate's
     /// tests run at have a `block_size` far below any useful threshold, so
     /// without it only the unpooled side would ever be exercised.
+    /// Rows from which [`Self::moe_sublayer_i8`] groups each expert's slots
+    /// (default [`MOE_GROUPED_MIN_ROWS`]); `u32::MAX` never does, `1` always does.
+    /// Both compute every slot identically, so this is a speed choice - and a test
+    /// hook, since the tiny configs the tests run are far below any useful
+    /// threshold.
+    pub fn set_moe_grouped_min_rows(&self, rows: u32) {
+        self.moe_grouped_min_rows.set(rows.max(1));
+    }
+
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35moe::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
