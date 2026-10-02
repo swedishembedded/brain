@@ -23,6 +23,13 @@
 //!
 //! `steps` defaults to 8 profiled decode passes per region. `json-out`, when
 //! given, writes a `brain perf`-shaped baseline artifact to that path.
+//!
+//! **Long-context batches** - `BRAIN_PROFILE_CONTEXT=<tokens>` switches to a
+//! SYNTHETIC context (fresh caches, decode work at a real position, as `brain
+//! perf run longctx` does) and `BRAIN_PROFILE_BATCH=<n>` (default 1) sets the
+//! batch; the KV cache storage comes from `BRAIN_QWEN35_KV`. The report is the
+//! per-kernel DEVICE time per decode step, which a loaded host cannot distort
+//! the way it stretches the wall clock.
 
 use std::time::Instant;
 
@@ -64,6 +71,10 @@ fn main() {
 
     let tier = Qwen35GgufResident::tier_from_env();
     println!("weight tier: {}", tier.describe());
+    if let Some(context) = std::env::var("BRAIN_PROFILE_CONTEXT").ok().and_then(|s| s.parse::<u32>().ok()) {
+        let batch = std::env::var("BRAIN_PROFILE_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        return synthetic_context(&path, devices, &tier, context, batch, steps);
+    }
 
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
     let cfg = resident_config(&mg, CAP).expect("resident_config");
@@ -118,6 +129,35 @@ fn main() {
         let doc = baseline_json(&p, weight_bytes, prompt.len() as u32, &placed, &tier);
         std::fs::write(&out, serde_json::to_string_pretty(&doc).expect("serialize")).unwrap_or_else(|e| panic!("write {out}: {e}"));
         println!("\nwrote baseline artifact: {out}");
+    }
+}
+
+/// `batch` rows decoding at a synthetic `context`: the per-kernel device time
+/// per step, and what share the attention kernels (the ones the KV tier changes)
+/// take.
+fn synthetic_context(path: &str, devices: Vec<(Device, u64)>, tier: &model::ops::TierPolicy, context: u32, batch: u32, steps: u32) {
+    let kv = Qwen35GgufResident::kv_tier_from_env().unwrap_or_else(|e| panic!("{e}"));
+    let r = Qwen35GgufResident::new(path.to_string(), devices, context, tier.clone()).with_kv_tier(kv).with_max_batch(batch);
+    let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
+    if placed.is_empty() {
+        eprintln!("batch {batch} x {context} tokens with a {kv} KV cache does not fit these GPUs");
+        std::process::exit(3);
+    }
+    let t0 = Instant::now();
+    let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
+    println!("synthetic context {context}, batch {batch}, kv {kv}: cold load {:.1} s over {:?}", t0.elapsed().as_secs_f64(), placed);
+    let position = context - 2 * steps - 2;
+    let p = inst.profile_decode_batch_at(batch, position, steps).unwrap_or_else(|e| panic!("{e}"));
+    println!("  wall (production flush path) {:.2} ms/step", 1e3 * p.wall_s / p.steps as f64);
+    if p.rows.is_empty() {
+        println!("  (per-kernel device timing unavailable on this backend)");
+        return;
+    }
+    let total = p.device_ms() / steps as f64;
+    println!("  device time {total:.2} ms/step ({:.2} tok/s total, {:.3} tok/s per stream)", batch as f64 * 1e3 / total, 1e3 / total);
+    println!("{:<44} {:>12} {:>8} {:>7}", "kernel", "ms/step", "calls", "%");
+    for (name, ms, calls) in p.rows.iter().take(12) {
+        println!("{name:<44} {:>12.3} {:>8} {:>6.1}%", ms / steps as f64, calls / steps as u64, 100.0 * ms / p.device_ms().max(1e-9));
     }
 }
 

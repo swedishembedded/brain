@@ -1852,13 +1852,8 @@ impl Qwen35GgufInstance {
         let last = prompt[prompt.len() - 1];
         self.poll_wait();
 
-        // Region 1: the production path. The token fed back is `last` rather
-        // than a sampled id - the cost of a decode step is its shapes, which do
-        // not depend on WHICH token it is, and reusing one id keeps the profile
-        // from wandering into an EOS.
-        let t0 = std::time::Instant::now();
-        for _ in 0..steps {
-            self.stack_step(last, pos, 0).expect("profile_decode production region");
+        self.profile_regions(steps, |_| {
+            self.stack_step(last, pos, 0).expect("profile_decode step");
             pos += 1;
         }
         self.poll_wait();
@@ -1871,9 +1866,8 @@ impl Qwen35GgufInstance {
             s.qwen35.gpu.reset_kernel_times();
         }
         let t1 = std::time::Instant::now();
-        for _ in 0..steps {
-            self.stack_step(last, pos, 0).expect("profile_decode timed region");
-            pos += 1;
+        for i in steps..2 * steps {
+            step(i);
         }
         self.poll_wait();
         let timed_wall_s = t1.elapsed().as_secs_f64();
@@ -1887,6 +1881,17 @@ impl Qwen35GgufInstance {
                     e.1 += calls;
                 }
             }
+        })
+    }
+
+    /// [`Self::profile_decode`]'s two regions over `step`, called once per
+    /// profiled pass with the pass index: the production flush path timed on
+    /// the wall, then the same passes with per-dispatch timestamps armed.
+    fn profile_regions(&self, steps: u32, mut step: impl FnMut(u32)) -> DecodeProfile {
+        // Region 1: the production path.
+        let t0 = std::time::Instant::now();
+        for i in 0..steps {
+            step(i);
         }
         for s in &self.shards {
             s.qwen35.gpu.set_kernel_timing(false);
@@ -1924,6 +1929,41 @@ impl Qwen35GgufInstance {
         assert!(!prompt.is_empty(), "profile_chunk_round: needs a non-empty prompt to establish decode state");
         let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
         assert!(need <= self.cap as u64, "profile_chunk_round: prompt ({}) + 2*{rounds} rounds of {rows} = {need} exceeds capacity {}", prompt.len(), self.cap);
+    /// [`Self::profile_decode`] for a BATCH decoding at a SYNTHETIC context:
+    /// `batch` rows, every one at absolute position `position + pass`, over
+    /// whatever the cache rows hold ([`Self::decode_batch_at`]'s contract).
+    ///
+    /// The device time per kernel is what a loaded host cannot distort: the
+    /// wall clock of a decode pass includes the host recording ~1250
+    /// dispatches, which another process's CPU load stretches, while a kernel's
+    /// own timestamp pair does not move. This is how a long-context decode step
+    /// is priced when prefilling the context for real would take hours.
+    pub fn profile_decode_batch_at(&self, batch: u32, position: u32, steps: u32) -> Result<DecodeProfile, String> {
+        if batch == 0 || steps == 0 {
+            return Err(format!("{MODEL}: profile_decode_batch_at needs a batch and a step count (got {batch} x {steps})"));
+        }
+        let last = position as u64 + 2 * steps as u64;
+        if last >= self.cap as u64 {
+            return Err(format!("{MODEL}: profiling {steps} passes from position {position} runs to {last}, past this instance's capacity {}", self.cap));
+        }
+        let tokens = vec![1u32; batch as usize];
+        // One unrecorded pass first: pipeline compilation is not decode time.
+        self.decode_batch_at(&tokens, &vec![position; batch as usize])?;
+        self.poll_wait();
+        let mut failure = None;
+        let profile = self.profile_regions(steps, |i| {
+            if failure.is_none() {
+                if let Err(e) = self.decode_batch_at(&tokens, &vec![position + 1 + i; batch as usize]) {
+                    failure = Some(e);
+                }
+            }
+        });
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(profile),
+        }
+    }
+
 
         self.reset();
         let (_, mut pos) = self.replay_prompt(prompt, 0).expect("profile_chunk_round warm-up");
@@ -2294,6 +2334,9 @@ impl Qwen35GgufResident {
     }
 
     /// How many sequences one batch may carry - [`Self::with_max_batch`].
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
+    /// into [`layer_cost`] at the bytes that tier really occupies.
+    kv_tier: KvTier,
     pub fn max_batch(&self) -> u32 {
         self.max_batch
     }
@@ -2325,6 +2368,34 @@ impl Qwen35GgufResident {
     /// be opened or understood, or the model does not fit across the devices
     /// given. That is [`MultiDeviceResidentModel::estimate_multi`]'s
     /// documented "unavailable" signal, which `ResidencyManager::claim_multi`
+    /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
+    /// `bf16` halves the resident cache and `int8` (one scale per (token,
+    /// kv-head) row) quarters it, at the cost of rounding each cached element
+    /// once as it is written; the attention arithmetic stays `f32`. The
+    /// recurrent state of the GDN layers is not part of the cache and stays
+    /// `f32`.
+    ///
+    /// Charged into the placement ([`layer_cost`]), so a compact tier lets more
+    /// sequences (or a longer context) fit on the same cards. Must be set
+    /// BEFORE the first `estimate_multi`/`activate_multi` call.
+    pub fn with_kv_tier(mut self, kv: KvTier) -> Qwen35GgufResident {
+        self.kv_tier = kv;
+        self
+    }
+
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
+    pub fn kv_tier(&self) -> KvTier {
+        self.kv_tier
+    }
+
+    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
+    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
+    /// an error rather than a silent fallback, for the reason
+    /// [`Self::tier_from_env`] gives.
+    pub fn kv_tier_from_env() -> Result<KvTier, String> {
+        KvTier::from_env(KV_ENV)
+    }
+
     /// turns into a clean per-job error instead of a dispatcher crash.
     fn plan(&self) -> Plan {
         if let Some(p) = self.plan.get() {
@@ -2334,9 +2405,6 @@ impl Qwen35GgufResident {
         // A losing racer's value is dropped; `plan_uncached` is a pure
         // function of `self`, so which racer wins cannot matter.
         let _ = self.plan.set(computed.clone());
-    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
-    /// into [`layer_cost`] at the bytes that tier really occupies.
-    kv_tier: KvTier,
         computed
     }
 
@@ -2378,34 +2446,6 @@ impl Qwen35GgufResident {
                 Device::Gpu(_) => caps.push((i, cap)),
                 other => eprintln!("{MODEL}: ignoring non-GPU device {other:?} (this model is GPU-only)"),
             }
-    /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
-    /// `bf16` halves the resident cache and `int8` (one scale per (token,
-    /// kv-head) row) quarters it, at the cost of rounding each cached element
-    /// once as it is written; the attention arithmetic stays `f32`. The
-    /// recurrent state of the GDN layers is not part of the cache and stays
-    /// `f32`.
-    ///
-    /// Charged into the placement ([`layer_cost`]), so a compact tier lets more
-    /// sequences (or a longer context) fit on the same cards. Must be set
-    /// BEFORE the first `estimate_multi`/`activate_multi` call.
-    pub fn with_kv_tier(mut self, kv: KvTier) -> Qwen35GgufResident {
-        self.kv_tier = kv;
-        self
-    }
-
-    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
-    pub fn kv_tier(&self) -> KvTier {
-        self.kv_tier
-    }
-
-    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
-    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
-    /// an error rather than a silent fallback, for the reason
-    /// [`Self::tier_from_env`] gives.
-    pub fn kv_tier_from_env() -> Result<KvTier, String> {
-        KvTier::from_env(KV_ENV)
-    }
-
         }
         let Some(placements) = model::shard::plan_fewest_devices(&cost, &caps) else {
             eprintln!(
@@ -2944,46 +2984,6 @@ mod tests {
     /// projections at Q4 while holding the two GDN state-sensitive gates
     /// (`in_proj_a`/`in_proj_b`, the decay/beta projections - ~94 MB total
     /// across 48 GDN layers, essentially free to keep at full precision)
-    /// FITS ONE 24 GB P40, unlike the uniform-INT8 tier above which needs
-    /// two. Pure arithmetic, no GPU and no checkpoint - if this regresses,
-    /// the single-card cascade the M24 plan is built on (no cross-card
-    /// residual handoff, MTP legal again since a whole shard fits one card,
-    /// a second card free for a concurrent sequence) silently stops being
-    /// true.
-    #[test]
-    fn a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_one_24gb_card() {
-        let cfg = Qwen35Config::qwen38_27b();
-        let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
-        let cost = layer_cost(&cfg, 2048, &policy_c, KvTier::F32, 1);
-        let i8_cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
-        assert!(
-            cost.total() < i8_cost.total(),
-            "a narrower tier must cost fewer bytes than uniform I8: q4 {} >= i8 {}",
-            cost.total(),
-            i8_cost.total()
-        );
-        let p40 = 24 * GB;
-        let one = model::shard::plan_by_capacity(&cost, &[(0, p40)]);
-        assert!(
-            one.is_some(),
-            "policy C ({} bytes) must fit one {p40}-byte card - it is the whole point of narrowing the tier; \
-             uniform I8 needs {} bytes and correctly does not fit",
-            cost.total(),
-            i8_cost.total()
-        );
-        let one = one.unwrap();
-        assert_eq!(one.len(), 1, "a single-card plan must be exactly one stage");
-        assert!(one[0].shard.embed && one[0].shard.head, "the lone stage must own both endpoints");
-        assert_eq!(one[0].shard.start, 0);
-        assert_eq!(one[0].shard.end, cfg.n_layers as usize);
-        assert!(one[0].bytes <= p40);
-    }
-
-    /// A [`TierPolicy`] that is uniform Q4 with NO exception also fits one
-    /// card, with more headroom than policy C - the reference point that
-    /// isolates what holding the GDN gates at F32 costs (a few MB, per
-    /// [`Qwen35Config::layer_weight_bytes`]'s own ground-truth test) against
-    /// what it buys (see M24's roadmap entry for the position-sweep quality
     /// The most sequences of `cap` tokens the planner admits on ONE card of
     /// `usable` bytes, by the same `plan_fewest_devices` the resident uses.
     fn max_batch_on_one_card(cfg: &Qwen35Config, cap: u32, kv: KvTier, usable: u64) -> u32 {
@@ -3024,6 +3024,46 @@ mod tests {
         assert_eq!(max_batch_on_one_card(&cfg, 131_072, KvTier::Int8, huge), 32);
     }
 
+    /// FITS ONE 24 GB P40, unlike the uniform-INT8 tier above which needs
+    /// two. Pure arithmetic, no GPU and no checkpoint - if this regresses,
+    /// the single-card cascade the M24 plan is built on (no cross-card
+    /// residual handoff, MTP legal again since a whole shard fits one card,
+    /// a second card free for a concurrent sequence) silently stops being
+    /// true.
+    #[test]
+    fn a_q4_mlp_tier_with_gdn_gates_held_at_f32_fits_one_24gb_card() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let policy_c = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
+        let cost = layer_cost(&cfg, 2048, &policy_c, KvTier::F32, 1);
+        let i8_cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
+        assert!(
+            cost.total() < i8_cost.total(),
+            "a narrower tier must cost fewer bytes than uniform I8: q4 {} >= i8 {}",
+            cost.total(),
+            i8_cost.total()
+        );
+        let p40 = 24 * GB;
+        let one = model::shard::plan_by_capacity(&cost, &[(0, p40)]);
+        assert!(
+            one.is_some(),
+            "policy C ({} bytes) must fit one {p40}-byte card - it is the whole point of narrowing the tier; \
+             uniform I8 needs {} bytes and correctly does not fit",
+            cost.total(),
+            i8_cost.total()
+        );
+        let one = one.unwrap();
+        assert_eq!(one.len(), 1, "a single-card plan must be exactly one stage");
+        assert!(one[0].shard.embed && one[0].shard.head, "the lone stage must own both endpoints");
+        assert_eq!(one[0].shard.start, 0);
+        assert_eq!(one[0].shard.end, cfg.n_layers as usize);
+        assert!(one[0].bytes <= p40);
+    }
+
+    /// A [`TierPolicy`] that is uniform Q4 with NO exception also fits one
+    /// card, with more headroom than policy C - the reference point that
+    /// isolates what holding the GDN gates at F32 costs (a few MB, per
+    /// [`Qwen35Config::layer_weight_bytes`]'s own ground-truth test) against
+    /// what it buys (see M24's roadmap entry for the position-sweep quality
     /// comparison this arithmetic alone cannot make).
     #[test]
     fn uniform_q4_fits_one_24gb_card_with_more_headroom_than_policy_c() {
