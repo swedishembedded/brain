@@ -1485,6 +1485,33 @@ impl Qwen35GgufInstance {
         Ok(TapeTrace { decode: dec, chunk, ids })
     }
 
+    /// The `[vocab]` logits the model assigns at each position of `forced`
+    /// when its continuation of `prompt` is TEACHER-FORCED: row `i` is what the
+    /// model predicts after `prompt` and `forced[..i]`, whatever it would have
+    /// sampled itself.
+    ///
+    /// What a numerical change to the stack (a narrower KV tier, a weight tier)
+    /// is measured with: two configurations scored along the SAME token
+    /// stream can be compared logit for logit, where two free-running greedy
+    /// generations diverge at the first flipped argmax and stop being
+    /// comparable from there on. The prompt goes through the chunked prefill
+    /// tape and each forced token through the decode tape - the path a served
+    /// request takes.
+    pub fn teacher_forced_logits(&self, prompt: &[u32], forced: &[u32]) -> Result<Vec<Vec<f32>>, String> {
+        if prompt.is_empty() {
+            return Err(format!("{MODEL}: empty prompt"));
+        }
+        self.reset();
+        let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
+        let mut rows = Vec::with_capacity(forced.len());
+        for &id in forced {
+            rows.push(logits);
+            logits = self.stack_step(id, pos, 0)?;
+            pos += 1;
+        }
+        Ok(rows)
+    }
+
     /// **Real SPECULATIVE generation** of one sequence, greedy, across every
     /// stage - [`Self::generate`]'s sibling, not its replacement, and
     /// byte-for-byte identical to it at `temp = 0` whatever `draft` proposes.
@@ -1855,6 +1882,17 @@ impl Qwen35GgufInstance {
         self.profile_regions(steps, |_| {
             self.stack_step(last, pos, 0).expect("profile_decode step");
             pos += 1;
+        })
+    }
+
+    /// [`Self::profile_decode`]'s two regions over `step`, called once per
+    /// profiled pass with the pass index: the production flush path timed on
+    /// the wall, then the same passes with per-dispatch timestamps armed.
+    fn profile_regions(&self, steps: u32, mut step: impl FnMut(u32)) -> DecodeProfile {
+        // Region 1: the production path.
+        let t0 = std::time::Instant::now();
+        for i in 0..steps {
+            step(i);
         }
         self.poll_wait();
         let wall_s = t0.elapsed().as_secs_f64();
@@ -1881,17 +1919,6 @@ impl Qwen35GgufInstance {
                     e.1 += calls;
                 }
             }
-        })
-    }
-
-    /// [`Self::profile_decode`]'s two regions over `step`, called once per
-    /// profiled pass with the pass index: the production flush path timed on
-    /// the wall, then the same passes with per-dispatch timestamps armed.
-    fn profile_regions(&self, steps: u32, mut step: impl FnMut(u32)) -> DecodeProfile {
-        // Region 1: the production path.
-        let t0 = std::time::Instant::now();
-        for i in 0..steps {
-            step(i);
         }
         for s in &self.shards {
             s.qwen35.gpu.set_kernel_timing(false);
@@ -1902,33 +1929,6 @@ impl Qwen35GgufInstance {
         DecodeProfile { steps, wall_s, timed_wall_s, rows }
     }
 
-    /// **The CHUNK tape at a chosen row count**, profiled the same way
-    /// [`Self::profile_decode`] profiles the decode tape - and the measurement
-    /// a speculative decoder's per-round floor is read off.
-    ///
-    /// A verify round is structurally a prefill round
-    /// ([`Self::stack_chunk_carry`]), so the cost this reports at `rows = 1..8`
-    /// IS the cost `generate_speculative` pays per round before any draft
-    /// token is accepted, and the cost at `rows = 256` is the one chunked
-    /// prefill was tuned for. Reporting both from one entry point is the point:
-    /// a fixed per-round cost is only visible as the RATIO between them.
-    ///
-    /// The two halves are timed apart because they scale differently and a
-    /// merged figure hides which one moved:
-    /// * `carry_s` - the layer stack over every stage
-    ///   ([`Self::stack_chunk_carry`]), where a per-round fixed cost lives;
-    /// * `head_s` - the `[rows, vocab]` INT8 head projection, which is real
-    ///   work proportional to `rows` and is not a fixed cost at all.
-    ///
-    /// `prompt` establishes a realistic recurrent state and KV depth first, so
-    /// the profiled rounds are steady-state rather than cold. Panics rather
-    /// than truncating if the prompt plus the profiled rounds run past
-    /// capacity.
-    pub fn profile_chunk_round(&self, prompt: &[u32], rows: u32, rounds: u32) -> ChunkRoundProfile {
-        assert!(rows > 0 && rounds > 0, "profile_chunk_round: rows and rounds must be > 0");
-        assert!(!prompt.is_empty(), "profile_chunk_round: needs a non-empty prompt to establish decode state");
-        let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
-        assert!(need <= self.cap as u64, "profile_chunk_round: prompt ({}) + 2*{rounds} rounds of {rows} = {need} exceeds capacity {}", prompt.len(), self.cap);
     /// [`Self::profile_decode`] for a BATCH decoding at a SYNTHETIC context:
     /// `batch` rows, every one at absolute position `position + pass`, over
     /// whatever the cache rows hold ([`Self::decode_batch_at`]'s contract).
@@ -1964,6 +1964,33 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// **The CHUNK tape at a chosen row count**, profiled the same way
+    /// [`Self::profile_decode`] profiles the decode tape - and the measurement
+    /// a speculative decoder's per-round floor is read off.
+    ///
+    /// A verify round is structurally a prefill round
+    /// ([`Self::stack_chunk_carry`]), so the cost this reports at `rows = 1..8`
+    /// IS the cost `generate_speculative` pays per round before any draft
+    /// token is accepted, and the cost at `rows = 256` is the one chunked
+    /// prefill was tuned for. Reporting both from one entry point is the point:
+    /// a fixed per-round cost is only visible as the RATIO between them.
+    ///
+    /// The two halves are timed apart because they scale differently and a
+    /// merged figure hides which one moved:
+    /// * `carry_s` - the layer stack over every stage
+    ///   ([`Self::stack_chunk_carry`]), where a per-round fixed cost lives;
+    /// * `head_s` - the `[rows, vocab]` INT8 head projection, which is real
+    ///   work proportional to `rows` and is not a fixed cost at all.
+    ///
+    /// `prompt` establishes a realistic recurrent state and KV depth first, so
+    /// the profiled rounds are steady-state rather than cold. Panics rather
+    /// than truncating if the prompt plus the profiled rounds run past
+    /// capacity.
+    pub fn profile_chunk_round(&self, prompt: &[u32], rows: u32, rounds: u32) -> ChunkRoundProfile {
+        assert!(rows > 0 && rounds > 0, "profile_chunk_round: rows and rounds must be > 0");
+        assert!(!prompt.is_empty(), "profile_chunk_round: needs a non-empty prompt to establish decode state");
+        let need = prompt.len() as u64 + 2 * rows as u64 * rounds as u64;
+        assert!(need <= self.cap as u64, "profile_chunk_round: prompt ({}) + 2*{rounds} rounds of {rows} = {need} exceeds capacity {}", prompt.len(), self.cap);
 
         self.reset();
         let (_, mut pos) = self.replay_prompt(prompt, 0).expect("profile_chunk_round warm-up");
@@ -2307,6 +2334,9 @@ pub struct Qwen35GgufResident {
     /// [`Self::with_max_batch`]. Charged into [`layer_cost`], so the planner
     /// budgets the slots it will actually allocate.
     max_batch: u32,
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
+    /// into [`layer_cost`] at the bytes that tier really occupies.
+    kv_tier: KvTier,
     plan: OnceLock<Plan>,
 }
 
@@ -2334,11 +2364,36 @@ impl Qwen35GgufResident {
     }
 
     /// How many sequences one batch may carry - [`Self::with_max_batch`].
-    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`]. Charged
-    /// into [`layer_cost`] at the bytes that tier really occupies.
-    kv_tier: KvTier,
     pub fn max_batch(&self) -> u32 {
         self.max_batch
+    }
+
+    /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
+    /// `bf16` halves the resident cache and `int8` (one scale per (token,
+    /// kv-head) row) quarters it, at the cost of rounding each cached element
+    /// once as it is written; the attention arithmetic stays `f32`. The
+    /// recurrent state of the GDN layers is not part of the cache and stays
+    /// `f32`.
+    ///
+    /// Charged into the placement ([`layer_cost`]), so a compact tier lets more
+    /// sequences (or a longer context) fit on the same cards. Must be set
+    /// BEFORE the first `estimate_multi`/`activate_multi` call.
+    pub fn with_kv_tier(mut self, kv: KvTier) -> Qwen35GgufResident {
+        self.kv_tier = kv;
+        self
+    }
+
+    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
+    pub fn kv_tier(&self) -> KvTier {
+        self.kv_tier
+    }
+
+    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
+    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
+    /// an error rather than a silent fallback, for the reason
+    /// [`Self::tier_from_env`] gives.
+    pub fn kv_tier_from_env() -> Result<KvTier, String> {
+        KvTier::from_env(KV_ENV)
     }
 
     /// Per-sequence `prompt + max_new` ceiling, from `BRAIN_QWEN35_GGUF_CTX`
@@ -2368,34 +2423,6 @@ impl Qwen35GgufResident {
     /// be opened or understood, or the model does not fit across the devices
     /// given. That is [`MultiDeviceResidentModel::estimate_multi`]'s
     /// documented "unavailable" signal, which `ResidencyManager::claim_multi`
-    /// Store the GQA layers' K and V in `kv` instead of `f32` (the default).
-    /// `bf16` halves the resident cache and `int8` (one scale per (token,
-    /// kv-head) row) quarters it, at the cost of rounding each cached element
-    /// once as it is written; the attention arithmetic stays `f32`. The
-    /// recurrent state of the GDN layers is not part of the cache and stays
-    /// `f32`.
-    ///
-    /// Charged into the placement ([`layer_cost`]), so a compact tier lets more
-    /// sequences (or a longer context) fit on the same cards. Must be set
-    /// BEFORE the first `estimate_multi`/`activate_multi` call.
-    pub fn with_kv_tier(mut self, kv: KvTier) -> Qwen35GgufResident {
-        self.kv_tier = kv;
-        self
-    }
-
-    /// How the GQA layers' K/V are stored - [`Self::with_kv_tier`].
-    pub fn kv_tier(&self) -> KvTier {
-        self.kv_tier
-    }
-
-    /// The KV tier named by `BRAIN_QWEN35_KV` ([`KV_ENV`]: `f32`, `bf16` or
-    /// `int8`), default `f32` (unchanged behaviour). An unrecognised value is
-    /// an error rather than a silent fallback, for the reason
-    /// [`Self::tier_from_env`] gives.
-    pub fn kv_tier_from_env() -> Result<KvTier, String> {
-        KvTier::from_env(KV_ENV)
-    }
-
     /// turns into a clean per-job error instead of a dispatcher crash.
     fn plan(&self) -> Plan {
         if let Some(p) = self.plan.get() {
@@ -2957,33 +2984,6 @@ mod tests {
         assert_eq!(large.per_layer[gdn], small.per_layer[gdn], "GDN state is O(1) in context, not O(T)");
     }
 
-    /// The real model at the real shape does NOT fit one 24 GB P40 and DOES
-    /// fit two - the whole reason this resident exists. Pure arithmetic, no
-    /// GPU and no checkpoint: it is a property of the published dims.
-    #[test]
-    fn the_real_model_needs_two_24gb_cards_and_fits_them() {
-        let cfg = Qwen35Config::qwen38_27b();
-        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
-        let p40 = 24 * GB; // 24 GiB usable, i.e. a card with no reserve at all
-        assert!(cost.total() > p40, "if it fitted one card this resident would be pointless: {} bytes", cost.total());
-        assert!(model::shard::plan_by_capacity(&cost, &[(0, p40)]).is_none(), "one card must be reported infeasible, not planned");
-        let two = model::shard::plan_fewest_devices(&cost, &[(0, p40), (1, p40)]).expect("two 24 GiB cards must hold it");
-        assert_eq!(two.len(), 2);
-        assert_eq!(two[0].shard.start, 0);
-        assert!(two[0].shard.embed && !two[0].shard.head);
-        assert_eq!(two[1].shard.end, cfg.n_layers as usize);
-        assert!(two[1].shard.head && !two[1].shard.embed);
-        assert_eq!(two[0].shard.end, two[1].shard.start, "contiguous, no gap");
-        for p in &two {
-            assert!(p.bytes <= p40, "stage of {} bytes overruns a {p40}-byte card", p.bytes);
-        }
-    }
-
-    /// M24's headline capacity claim, as a standing gate rather than a
-    /// one-off calculation: a per-leaf tier that puts the bulk MLP
-    /// projections at Q4 while holding the two GDN state-sensitive gates
-    /// (`in_proj_a`/`in_proj_b`, the decay/beta projections - ~94 MB total
-    /// across 48 GDN layers, essentially free to keep at full precision)
     /// The most sequences of `cap` tokens the planner admits on ONE card of
     /// `usable` bytes, by the same `plan_fewest_devices` the resident uses.
     fn max_batch_on_one_card(cfg: &Qwen35Config, cap: u32, kv: KvTier, usable: u64) -> u32 {
@@ -3024,6 +3024,33 @@ mod tests {
         assert_eq!(max_batch_on_one_card(&cfg, 131_072, KvTier::Int8, huge), 32);
     }
 
+    /// The real model at the real shape does NOT fit one 24 GB P40 and DOES
+    /// fit two - the whole reason this resident exists. Pure arithmetic, no
+    /// GPU and no checkpoint: it is a property of the published dims.
+    #[test]
+    fn the_real_model_needs_two_24gb_cards_and_fits_them() {
+        let cfg = Qwen35Config::qwen38_27b();
+        let cost = layer_cost(&cfg, 2048, &TierPolicy::uniform(Dtype::I8), KvTier::F32, 1);
+        let p40 = 24 * GB; // 24 GiB usable, i.e. a card with no reserve at all
+        assert!(cost.total() > p40, "if it fitted one card this resident would be pointless: {} bytes", cost.total());
+        assert!(model::shard::plan_by_capacity(&cost, &[(0, p40)]).is_none(), "one card must be reported infeasible, not planned");
+        let two = model::shard::plan_fewest_devices(&cost, &[(0, p40), (1, p40)]).expect("two 24 GiB cards must hold it");
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].shard.start, 0);
+        assert!(two[0].shard.embed && !two[0].shard.head);
+        assert_eq!(two[1].shard.end, cfg.n_layers as usize);
+        assert!(two[1].shard.head && !two[1].shard.embed);
+        assert_eq!(two[0].shard.end, two[1].shard.start, "contiguous, no gap");
+        for p in &two {
+            assert!(p.bytes <= p40, "stage of {} bytes overruns a {p40}-byte card", p.bytes);
+        }
+    }
+
+    /// M24's headline capacity claim, as a standing gate rather than a
+    /// one-off calculation: a per-leaf tier that puts the bulk MLP
+    /// projections at Q4 while holding the two GDN state-sensitive gates
+    /// (`in_proj_a`/`in_proj_b`, the decay/beta projections - ~94 MB total
+    /// across 48 GDN layers, essentially free to keep at full precision)
     /// FITS ONE 24 GB P40, unlike the uniform-INT8 tier above which needs
     /// two. Pure arithmetic, no GPU and no checkpoint - if this regresses,
     /// the single-card cascade the M24 plan is built on (no cross-card
