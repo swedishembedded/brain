@@ -100,6 +100,7 @@ pub struct Kernel {
 }
 
 mod aggregate;
+mod matrix;
 mod uniform;
 mod vector;
 
@@ -283,6 +284,8 @@ enum Eval {
     /// A struct value: a C++ expression of the struct's private type, see
     /// [`aggregate`].
     Agg(String, Handle<naga::Type>),
+    /// A matrix value, scalarised column-major; see [`matrix`].
+    Matrix(matrix::Mat, Ty),
     Place(Place),
 }
 
@@ -325,6 +328,8 @@ enum GlobalKind {
     /// A kernel pointer parameter for a storage binding. `vec` is
     /// `(components, stride in words)` when the array's elements are vectors.
     Storage { ident: String, elem: Ty, vec: Option<(u32, u32)>, nel: String },
+    /// A `__shared__` scalar.
+    WorkGroupScalar { ident: String, ty: Ty },
     /// A `__shared__` array.
     WorkGroup { ident: String, elem: Ty, vec: Option<(u32, u32)>, nel: String },
     /// The uniform block, read through byte offsets. Holds the block's type.
@@ -340,7 +345,7 @@ enum GlobalKind {
 
 fn block_has_barrier(b: &Block) -> bool {
     b.iter().any(|s| match s {
-        Statement::ControlBarrier(_) => true,
+        Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => true,
         Statement::Block(inner) => block_has_barrier(inner),
         Statement::If { accept, reject, .. } => block_has_barrier(accept) || block_has_barrier(reject),
         Statement::Loop { body, continuing, .. } => {
@@ -389,7 +394,7 @@ fn block_has_return(b: &Block) -> bool {
 fn check_barrier_structure(body: &Block) -> Result<(), String> {
     for s in body.iter() {
         match s {
-            Statement::ControlBarrier(_) => {}
+            Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => {}
             Statement::Loop { body, continuing, .. } => {
                 if block_has_barrier(body) || block_has_barrier(continuing) {
                     return Err("a barrier inside a loop is not supported by the generated tier; \
@@ -502,6 +507,7 @@ impl<'a> Gen<'a> {
         // Bindings and workgroup scratch, in a stable order.
         let mut bindings: Vec<(u32, String, Ty, u32)> = Vec::new();
         let mut shared: Vec<(String, Ty, u32)> = Vec::new();
+        let mut shared_scalars: Vec<(String, Ty)> = Vec::new();
         let mut uniform_bytes = 0usize;
         for (h, gv) in self.m.global_variables.iter() {
             match gv.space {
@@ -528,6 +534,14 @@ impl<'a> Gen<'a> {
                     self.globals.insert(h, GlobalKind::Storage { ident, elem, vec, nel: format!("__nel{b}") });
                 }
                 AddressSpace::WorkGroup => {
+                    if let TypeInner::Scalar(s) = &self.m.types[gv.ty].inner {
+                        let ty = Ty::from_scalar(*s)?;
+                        let name = gv.name.clone().unwrap_or_else(|| format!("wg{}", shared.len() + shared_scalars.len()));
+                        let ident = format!("__wg_{}", ident_of(&name));
+                        shared_scalars.push((ident.clone(), ty));
+                        self.globals.insert(h, GlobalKind::WorkGroupScalar { ident, ty });
+                        continue;
+                    }
                     let (elem, count) = array_info(self.m, gv.ty)?;
                     let layout = array_layout(self.m, gv.ty)?;
                     let (vec, nel) = (layout.vec, count / layout.stride());
@@ -586,7 +600,13 @@ impl<'a> Gen<'a> {
         for (ident, elem, count) in &shared {
             let _ = writeln!(body, "  __shared__ {} {ident}[{count}];", elem.c());
         }
-        if !shared.is_empty() {
+        for (ident, ty) in &shared_scalars {
+            let _ = writeln!(body, "  __shared__ {} {ident};", ty.c());
+        }
+        if !shared.is_empty() || !shared_scalars.is_empty() {
+            for (ident, ty) in &shared_scalars {
+                let _ = writeln!(body, "  if (threadIdx.x == 0u) {ident} = {};", ty.zero());
+            }
             for (ident, elem, count) in &shared {
                 let _ = writeln!(
                     body,
@@ -681,12 +701,16 @@ impl<'a> Gen<'a> {
         let mut terminated = false;
 
         for s in b.iter() {
-            if let Statement::ControlBarrier(_) = s {
+            if let Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } = s {
                 if open {
                     let _ = writeln!(out, "{pad}}}");
                     open = false;
                 }
-                let _ = writeln!(out, "{pad}__syncthreads();");
+                if let Statement::WorkGroupUniformLoad { pointer, result } = s {
+                    self.uniform_load(*pointer, *result, out, &pad)?;
+                } else {
+                    let _ = writeln!(out, "{pad}__syncthreads();");
+                }
                 continue;
             }
             if self.guarded && may_deactivate && !open {
@@ -865,6 +889,23 @@ impl<'a> Gen<'a> {
             let _ = writeln!(out, "{}}}", "  ".repeat(depth));
         }
         Ok(Flow { terminated, may_deactivate })
+    }
+
+    /// `workgroupUniformLoad(&x)`: the value every thread reads, between two
+    /// barriers - the first so a write that precedes it is visible, the second
+    /// so a write that follows cannot change what a slower thread reads.
+    fn uniform_load(&mut self, pointer: Handle<Expression>, result: Handle<Expression>, out: &mut String, pad: &str) -> Result<(), String> {
+        let Place::Lvalue(lv, ty) = self.place(pointer, out, 1)? else {
+            return Err("workgroupUniformLoad of something that is not a scalar".into());
+        };
+        let name = format!("__e{}", self.n_tmp);
+        self.n_tmp += 1;
+        self.decls.push(format!("{} {name};", ty.c()));
+        let _ = writeln!(out, "{pad}__syncthreads();");
+        let _ = writeln!(out, "{pad}{name} = {lv};");
+        let _ = writeln!(out, "{pad}__syncthreads();");
+        self.cache.insert(result, Eval::Value(name, ty));
+        Ok(())
     }
 
     // -- expressions --------------------------------------------------------
@@ -1067,6 +1108,17 @@ impl<'a> Gen<'a> {
                 self.n_tmp += 1;
                 self.cache.insert(h, Eval::Vector(names, ty));
             }
+            Eval::Matrix(m, ty) => {
+                let mut names = Vec::with_capacity(m.elems.len());
+                for (k, text) in m.elems.iter().enumerate() {
+                    let name = format!("__e{}_m{k}", self.n_tmp);
+                    self.decls.push(format!("{} {name};", ty.c()));
+                    let _ = writeln!(out, "{}{name} = {text};", "  ".repeat(depth));
+                    names.push(name);
+                }
+                self.n_tmp += 1;
+                self.cache.insert(h, Eval::Matrix(matrix::Mat { elems: names, ..m }, ty));
+            }
             Eval::Agg(text, ty) => {
                 let name = format!("__e{}", self.n_tmp);
                 self.n_tmp += 1;
@@ -1100,6 +1152,7 @@ impl<'a> Gen<'a> {
             Eval::Agg(..) | Eval::Place(Place::Struct { .. }) | Eval::Place(Place::Array { .. }) => {
                 Err("expected a scalar, got a struct or an array".into())
             }
+            Eval::Matrix(..) => Err("expected a scalar, got a matrix".into()),
             Eval::Place(_) => Err("expected a value, got an unindexed array or a block of device memory".into()),
         }
     }
@@ -1115,7 +1168,19 @@ impl<'a> Gen<'a> {
             Eval::Agg(..) | Eval::Place(Place::Struct { .. }) | Eval::Place(Place::Array { .. }) => {
                 Err("expected a scalar or vector, got a struct or an array".into())
             }
+            Eval::Matrix(..) => Err("expected a scalar or vector, got a matrix".into()),
             Eval::Place(_) => Err("expected a value, got an unindexed array or a block of device memory".into()),
+        }
+    }
+
+    /// An operand of a matrix product, as a matrix or a vector value.
+    fn matrix_operand(&mut self, e: Eval) -> Result<Eval, String> {
+        match e {
+            Eval::Matrix(..) | Eval::Vector(..) => Ok(e),
+            Eval::Place(Place::VecRef { base, n, ty }) => {
+                Ok(Eval::Vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty))
+            }
+            _ => Err("a matrix product with an operand that is neither a matrix nor a vector".into()),
         }
     }
 
@@ -1134,7 +1199,7 @@ impl<'a> Gen<'a> {
     fn place(&mut self, h: Handle<Expression>, out: &mut String, depth: usize) -> Result<Place, String> {
         match self.eval(h, out, depth)? {
             Eval::Place(p) => Ok(p),
-            Eval::Value(..) | Eval::Vector(..) | Eval::Agg(..) => Err("expected a place, got a value".into()),
+            Eval::Value(..) | Eval::Vector(..) | Eval::Agg(..) | Eval::Matrix(..) => Err("expected a place, got a value".into()),
         }
     }
 
@@ -1157,6 +1222,7 @@ impl<'a> Gen<'a> {
                         None => Place::ArrayBase(ident, elem, nel),
                     }))
                 }
+                Some(GlobalKind::WorkGroupScalar { ident, ty }) => Ok(Eval::Place(Place::Lvalue(ident, ty))),
                 Some(GlobalKind::Uniform(ty)) => Ok(Eval::Place(self.mem_place("__params".to_string(), "0".to_string(), ty)?)),
                 Some(GlobalKind::StorageMem { ident, elem, stride, nel }) => {
                     Ok(Eval::Place(Place::MemArray { ptr: ident, off: "0".to_string(), elem, stride, nel }))
@@ -1186,6 +1252,7 @@ impl<'a> Gen<'a> {
                 Eval::Value(v, t) => Ok(Eval::Value(v, t)),
                 Eval::Vector(c, t) => Ok(Eval::Vector(c, t)),
                 Eval::Agg(text, ty) => Ok(Eval::Agg(text, ty)),
+                Eval::Matrix(m, t) => Ok(Eval::Matrix(m, t)),
                 Eval::Place(place) => self.load_place(place),
             },
             Expression::Access { base, index } => {
@@ -1292,6 +1359,14 @@ impl<'a> Gen<'a> {
                     Eval::Place(Place::ArrayBase(base, elem, nel)) => {
                         Ok(Eval::Place(Place::Lvalue(format!("{base}[{}]", clamped(&format!("(size_t)({index}u)"), &nel)), elem)))
                     }
+                    // Column `index` of a matrix value.
+                    Eval::Matrix(m, t) => {
+                        let c = *index as usize;
+                        if c >= m.cols {
+                            return Err(format!("matrix column {index} out of range"));
+                        }
+                        Ok(Eval::Vector(m.elems[c * m.rows..(c + 1) * m.rows].to_vec(), t))
+                    }
                     Eval::Place(Place::Lvalue(..)) | Eval::Place(Place::MemScalar { .. }) | Eval::Value(..) => {
                         Err("AccessIndex on a scalar".into())
                     }
@@ -1312,6 +1387,14 @@ impl<'a> Gen<'a> {
                     &x,
                 ))
             }
+            Expression::Binary { op: BinaryOperator::Multiply, left, right }
+                if matches!(self.eval(*left, out, depth)?, Eval::Matrix(..)) || matches!(self.eval(*right, out, depth)?, Eval::Matrix(..)) =>
+            {
+                let l = self.eval(*left, out, depth)?;
+                let r = self.eval(*right, out, depth)?;
+                let (l, r) = (self.matrix_operand(l)?, self.matrix_operand(r)?);
+                matrix::multiply(l, r)
+            }
             Expression::Binary { op, left, right } => {
                 let l = self.lanes(*left, out)?;
                 let r = self.lanes(*right, out)?;
@@ -1331,8 +1414,20 @@ impl<'a> Gen<'a> {
                     }
                     return self.compose_aggregate(*ty, parts);
                 }
+                if let TypeInner::Matrix { columns, rows, scalar } = &self.m.types[*ty].inner {
+                    let t = Ty::from_scalar(*scalar)?;
+                    let mut elems = Vec::new();
+                    for c in components {
+                        elems.extend(self.lanes(*c, out)?.comps);
+                    }
+                    let (cols, rows) = (*columns as usize, *rows as usize);
+                    if elems.len() != cols * rows {
+                        return Err(format!("a {cols}x{rows} matrix composed from {} components", elems.len()));
+                    }
+                    return Ok(Eval::Matrix(matrix::Mat { elems, cols, rows }, t));
+                }
                 let Some(shape) = vector_shape(self.m, *ty) else {
-                    return Err("only vectors and structs can be composed (matrices are unsupported)".into());
+                    return Err("only vectors, matrices and structs can be composed".into());
                 };
                 let (t, n, _) = shape?;
                 let mut comps = Vec::with_capacity(n as usize);
@@ -1362,6 +1457,10 @@ impl<'a> Gen<'a> {
                     other => Err(format!("unsupported relational function {other:?}")),
                 }
             }
+            Expression::Math { fun: fun @ (MathFunction::Determinant | MathFunction::Transpose), arg, .. } => match self.eval(*arg, out, depth)? {
+                Eval::Matrix(m, t) => matrix::math(*fun, m, t),
+                _ => Err(format!("{fun:?} of something that is not a matrix")),
+            },
             Expression::Math { fun, arg, arg1, arg2, .. } => {
                 let mut args = vec![self.lanes(*arg, out)?];
                 for h in [arg1, arg2].into_iter().flatten() {
@@ -1419,7 +1518,9 @@ impl<'a> Gen<'a> {
                     match self.constant(*c)? {
                         Eval::Value(v, _) => comps.push(v),
                         Eval::Vector(v, _) => comps.extend(v),
-                        Eval::Place(_) | Eval::Agg(..) => return Err("a vector constant built from a place or a struct".into()),
+                        Eval::Place(_) | Eval::Agg(..) | Eval::Matrix(..) => {
+                            return Err("a vector constant built from a place, a struct or a matrix".into())
+                        }
                     }
                 }
                 Ok(Eval::Vector(comps, t))
@@ -1591,6 +1692,13 @@ fn math(fun: MathFunction, a: (&str, Ty), rest: &[(String, Ty)]) -> Result<Eval,
         Sin => (format!("sinf({x})"), Ty::F32),
         Cos => (format!("cosf({x})"), Ty::F32),
         Tanh => (format!("tanhf({x})"), Ty::F32),
+        Acos => (format!("acosf({x})"), Ty::F32),
+        Asin => (format!("asinf({x})"), Ty::F32),
+        Atan => (format!("atanf({x})"), Ty::F32),
+        // One multiply by the f32 constant the CPU tier uses: a different
+        // spelling (`x * 180 / pi`) rounds differently.
+        Degrees => (format!("(({x}) * {})", f32_text(1.0f32.to_degrees())?), Ty::F32),
+        Radians => (format!("(({x}) * {})", f32_text(1.0f32.to_radians())?), Ty::F32),
         Floor => (format!("floorf({x})"), Ty::F32),
         Ceil => (format!("ceilf({x})"), Ty::F32),
         Trunc => (format!("truncf({x})"), Ty::F32),

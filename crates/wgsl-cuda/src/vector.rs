@@ -174,7 +174,7 @@ fn difference(a: &Lanes, b: &Lanes) -> Result<Lanes, String> {
     match binary_lanes(BinaryOperator::Subtract, a, b)? {
         Eval::Vector(comps, ty) => Ok(Lanes::vector(comps, ty)),
         Eval::Value(text, ty) => Ok(Lanes::scalar(text, ty)),
-        Eval::Place(_) | Eval::Agg(..) => Err("a difference is not a place or a struct".into()),
+        Eval::Place(_) | Eval::Agg(..) | Eval::Matrix(..) => Err("a difference of vectors is a vector".into()),
     }
 }
 

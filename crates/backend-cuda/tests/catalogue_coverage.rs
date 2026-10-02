@@ -22,8 +22,10 @@
 //! - **broken**: generated but NVRTC rejects it, which is a generator defect.
 //!
 //! Set `BRAIN_CUDA_COVERAGE_OUT` to a path to write the report as JSON. The
-//! assertions are a ratchet: no kernel may be broken, and the refused set may
-//! only shrink.
+//! assertions are a ratchet: no kernel may be broken, and none may be refused -
+//! the whole catalogue is generated, so a new kernel that uses a construct the
+//! generator lacks fails here, by name, instead of at the model step that needs
+//! it.
 
 use std::collections::BTreeMap;
 
@@ -114,4 +116,6 @@ fn every_catalogue_kernel_is_runnable_or_refused_by_name() {
 
     let broken: Vec<_> = outcomes.iter().filter(|o| o.state == "broken").map(|o| format!("{}: {}", o.name, o.detail)).collect();
     assert!(broken.is_empty(), "{} generated kernel(s) NVRTC rejects, a generator defect:\n{}", broken.len(), broken.join("\n"));
+    let refused: Vec<_> = outcomes.iter().filter(|o| o.state == "refused").map(|o| format!("{}: {}", o.name, o.detail)).collect();
+    assert!(refused.is_empty(), "{} catalogue kernel(s) the generator refuses:\n{}", refused.len(), refused.join("\n"));
 }

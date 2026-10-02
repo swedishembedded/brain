@@ -204,7 +204,8 @@ impl Walk<'_> {
                     self.loop_diverged = true;
                 }
             }
-            Statement::ControlBarrier(_) => {
+            // `workgroupUniformLoad` is a barrier on each side of a load.
+            Statement::ControlBarrier(_) | Statement::WorkGroupUniformLoad { .. } => {
                 if !flow {
                     self.out.has_barrier_in_non_uniform_flow = true;
                 }

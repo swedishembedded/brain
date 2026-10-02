@@ -117,8 +117,94 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// `mat3x3` built from column vectors, `m * v`, `v * m`, `m * m`, a column of
+/// a product, `transpose` and `determinant`. Each sums in the order the CPU
+/// tier does, so the comparison below is bit-exact.
+const MATRIX: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> a: array<vec3<f32>>;
+@group(0) @binding(2) var<storage, read> b: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read_write> o: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= p.n) { return; }
+    let x = a[i];
+    let y = b[i];
+    let m = mat3x3<f32>(x, y, cross(x, y));
+    let t = mat3x3<f32>(y, x, x + y);
+    let mv = m * y;
+    let vm = y * m;
+    let mm = m * t;
+    let tr = transpose(m);
+    let base = i * 16u;
+    o[base] = mv.x;
+    o[base + 1u] = mv.y;
+    o[base + 2u] = mv.z;
+    o[base + 3u] = vm.x;
+    o[base + 4u] = vm.y;
+    o[base + 5u] = vm.z;
+    o[base + 6u] = determinant(m);
+    o[base + 7u] = mm[1].x;
+    o[base + 8u] = mm[2].z;
+    o[base + 9u] = tr[0].y;
+    o[base + 10u] = (mm * x).y;
+}
+"#;
+
+/// A workgroup scalar (zero at entry), and `workgroupUniformLoad` of it and of
+/// array elements, the loaded values steering a loop every thread runs.
+const UNIFORM_LOAD: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> o: array<f32>;
+var<workgroup> flag: f32;
+var<workgroup> span: array<u32, 2>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) li: vec3<u32>, @builtin(workgroup_id) wg: vec3<u32>) {
+    if (li.x == 0u) {
+        flag = flag + 3.0 + f32(wg.x);
+        span[0] = 1u + wg.x;
+        span[1] = 4u;
+    }
+    let f = workgroupUniformLoad(&flag);
+    let lo = workgroupUniformLoad(&span[0]);
+    let hi = workgroupUniformLoad(&span[1]);
+    var acc = 0.0;
+    for (var k = lo; k < hi; k = k + 1u) { acc = acc + f * f32(k); }
+    if (gid.x < p.n) { o[gid.x] = acc + f32(li.x); }
+}
+"#;
+
+/// The inverse trigonometric and angle-unit builtins.
+const TRIG: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read> x: array<f32>;
+@group(0) @binding(2) var<storage, read_write> o: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= p.n) { return; }
+    o[i * 5u] = acos(x[i]);
+    o[i * 5u + 1u] = asin(x[i]);
+    o[i * 5u + 2u] = atan(x[i]);
+    o[i * 5u + 3u] = degrees(x[i]);
+    o[i * 5u + 4u] = radians(x[i]);
+}
+"#;
+
 fn backend() -> Option<CudaBackend> {
-    match CudaBackend::try_new(&[("arith", ARITH), ("vec3", VEC3), ("dynamic", DYNAMIC), ("calls", CALLS)]) {
+    match CudaBackend::try_new(&[
+        ("arith", ARITH),
+        ("vec3", VEC3),
+        ("dynamic", DYNAMIC),
+        ("calls", CALLS),
+        ("matrix", MATRIX),
+        ("uniform_load", UNIFORM_LOAD),
+        ("trig", TRIG),
+    ]) {
         Ok(b) => Some(b),
         Err(e) => {
             brain_testutil::skip_unavailable(&format!("no usable CUDA backend: {e}"));
@@ -233,5 +319,87 @@ fn inlined_helper_functions_return_early_loop_and_read_storage_correctly() {
         let (a, bb) = (pick(i), pick(i + 1));
         let want = (((a.0 + a.0) + a.1) + sum_to(i % 8)) - (bb.1 + bb.1);
         assert_eq!(got[i].to_bits(), want.to_bits(), "element {i}: {} vs {want}", got[i]);
+    }
+}
+
+/// A 3x3 matrix as the host sees it: `m[c][r]`, column `c`, row `r`.
+type M3 = [[f32; 3]; 3];
+
+fn mat_vec(m: &M3, v: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|r| (m[0][r] * v[0] + m[1][r] * v[1]) + m[2][r] * v[2])
+}
+
+#[test]
+fn matrix_products_transpose_and_determinant_agree_with_the_cpu_tier_bit_for_bit() {
+    let Some(b) = backend() else { return };
+    let mut a = vec![0f32; N * 4];
+    let mut c = vec![0f32; N * 4];
+    for i in 0..N {
+        for k in 0..3 {
+            a[i * 4 + k] = sample(i * 3 + k, 5);
+            c[i * 4 + k] = sample(i * 3 + k, 6);
+        }
+    }
+    let (ba, bc) = (b.storage_init("a", &a), b.storage_init("b", &c));
+    let out = b.storage((N * 16) as u64);
+    b.submit(&[], &[b.step(4, &[&ba, &bc, &out], &[N as u32], N as u32)]);
+    let got = b.read(&out, N * 16);
+
+    for i in 0..N {
+        let x = [a[i * 4], a[i * 4 + 1], a[i * 4 + 2]];
+        let y = [c[i * 4], c[i * 4 + 1], c[i * 4 + 2]];
+        let cross = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        let m: M3 = [x, y, cross];
+        let t: M3 = [y, x, [x[0] + y[0], x[1] + y[1], x[2] + y[2]]];
+        let mv = mat_vec(&m, y);
+        let vm: [f32; 3] = std::array::from_fn(|col| (y[0] * m[col][0] + y[1] * m[col][1]) + y[2] * m[col][2]);
+        let mm: M3 = std::array::from_fn(|col| mat_vec(&m, t[col]));
+        // Cofactor expansion down the first column, `e(r, c) = m[c][r]`.
+        let e = |r: usize, col: usize| m[col][r];
+        let t0 = e(0, 0) * (e(1, 1) * e(2, 2) - e(1, 2) * e(2, 1));
+        let t1 = e(1, 0) * (e(0, 1) * e(2, 2) - e(0, 2) * e(2, 1));
+        let t2 = e(2, 0) * (e(0, 1) * e(1, 2) - e(0, 2) * e(1, 1));
+        let det = (t0 - t1) + t2;
+        let want = [mv[0], mv[1], mv[2], vm[0], vm[1], vm[2], det, mm[1][0], mm[2][2], m[1][0], mat_vec(&mm, x)[1]];
+        for (k, w) in want.iter().enumerate() {
+            assert_eq!(got[i * 16 + k].to_bits(), w.to_bits(), "invocation {i} output {k}: {} vs {w}", got[i * 16 + k]);
+        }
+    }
+}
+
+#[test]
+fn workgroup_scalars_start_at_zero_and_a_uniform_load_publishes_the_write() {
+    let Some(b) = backend() else { return };
+    let out = b.storage(N as u64);
+    b.submit(&[], &[b.step(5, &[&out], &[N as u32], N as u32)]);
+    let got = b.read(&out, N);
+    for g in 0..N {
+        let wg = (g / 64) as u32;
+        let f = 3.0f32 + wg as f32;
+        let mut acc = 0.0f32;
+        for k in 1 + wg..4 {
+            acc += f * k as f32;
+        }
+        let want = acc + (g % 64) as f32;
+        assert_eq!(got[g].to_bits(), want.to_bits(), "invocation {g}: {} vs {want}", got[g]);
+    }
+}
+
+#[test]
+fn inverse_trigonometry_and_angle_units_agree_with_the_host() {
+    let Some(b) = backend() else { return };
+    let x: Vec<f32> = (0..N).map(|i| (i as f32 / (N - 1) as f32) * 2.0 - 1.0).collect();
+    let bx = b.storage_init("x", &x);
+    let out = b.storage((N * 5) as u64);
+    b.submit(&[], &[b.step(6, &[&bx, &out], &[N as u32], N as u32)]);
+    let got = b.read(&out, N * 5);
+    for (i, &v) in x.iter().enumerate() {
+        // The device's transcendental functions are within a few ulp of the host's.
+        for (k, want) in [v.acos(), v.asin(), v.atan()].into_iter().enumerate() {
+            assert!((got[i * 5 + k] - want).abs() <= 4e-6, "element {i} function {k}: {} vs {want}", got[i * 5 + k]);
+        }
+        // A unit conversion is one multiply by the f32 constant: exact.
+        assert_eq!(got[i * 5 + 3].to_bits(), (v * 1.0f32.to_degrees()).to_bits(), "degrees({v})");
+        assert_eq!(got[i * 5 + 4].to_bits(), (v * 1.0f32.to_radians()).to_bits(), "radians({v})");
     }
 }
