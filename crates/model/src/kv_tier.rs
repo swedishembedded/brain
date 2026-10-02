@@ -400,6 +400,23 @@ pub struct FlashDecodeShape {
 const FLASH_TILE: u32 = 128;
 const FLASH_TILES_PER_SPLIT: u32 = 8;
 const FLASH_HEAD_DIM: u32 = 256;
+/// Workgroups a decode dispatch aims for: a card's SMs several times over, so a
+/// short context is not left to a handful of workgroups each walking its keys
+/// serially (at 1k tokens one sequence's two kv heads made FOUR workgroups and a
+/// 346 us layer on a GH200, for 4 MB of keys and values).
+const FLASH_TARGET_WORKGROUPS: u32 = 128;
+
+/// `(splits, tiles per split)` for a decode of `batch` sequences over `n_kv_heads`
+/// heads with room for `cap` keys: splits of up to [`FLASH_TILES_PER_SPLIT`] tiles,
+/// cut finer - down to one tile - until the dispatch reaches
+/// [`FLASH_TARGET_WORKGROUPS`]. A split past a sequence's live length costs one
+/// degenerate partial record, so over-splitting a short sequence is cheap.
+fn flash_splits(cap: u32, batch: u32, n_kv_heads: u32) -> (u32, u32) {
+    let tiles = cap.max(1).div_ceil(FLASH_TILE);
+    let wanted = FLASH_TARGET_WORKGROUPS.div_ceil((batch * n_kv_heads).max(1)).max(1);
+    let per_split = tiles.div_ceil(wanted).clamp(1, FLASH_TILES_PER_SPLIT);
+    (tiles.div_ceil(per_split), per_split)
+}
 
 impl KvKernels {
     /// Look `tier`'s kernels up on `gpu` by name. An error names the first
@@ -492,9 +509,9 @@ impl KvKernels {
         self.check(v);
         let group = s.n_heads / s.n_kv_heads;
         assert!(self.flash_decode_available(g, s.head_dim, group), "KvKernels::flash_decode: not available for head_dim {} group {group} on this device", s.head_dim);
-        let n_splits = s.cap.max(1).div_ceil(FLASH_TILE * FLASH_TILES_PER_SPLIT);
+        let (n_splits, tiles_per_split) = flash_splits(s.cap, s.batch, s.n_kv_heads);
         let part = g.storage(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (FLASH_HEAD_DIM as u64 + 2));
-        let params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, FLASH_TILES_PER_SPLIT];
+        let params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, tiles_per_split];
         let grid = Dispatch::Workgroups(s.batch * s.n_kv_heads * n_splits);
         let decode = self.decode.iter().find(|&&(gr, _)| gr == group).expect("checked by flash_decode_available").1;
         let split = match (&k.scales, &v.scales) {
@@ -532,6 +549,23 @@ impl KvKernels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long context keeps its 1024-key splits (the device is full anyway); a
+    /// short one is cut finer so even one sequence reaches the workgroup target,
+    /// and the splits always cover the cap.
+    #[test]
+    fn short_contexts_are_split_finer_and_long_ones_keep_whole_splits() {
+        assert_eq!(flash_splits(131_072, 1, 2), (128, 8));
+        assert_eq!(flash_splits(1288, 1, 2), (11, 1), "one tile per split: 11 splits x 2 kv heads");
+        assert_eq!(flash_splits(1288, 16, 2), (4, 3), "a batch of 16 already makes 32 groups: 4 splits each reach the target");
+        assert_eq!(flash_splits(1, 1, 2), (1, 1));
+        for (cap, batch, nkv) in [(1u32, 1u32, 1u32), (127, 3, 2), (128, 3, 2), (129, 64, 2), (4096, 1, 2), (50_000, 7, 4), (1_000_000, 1, 2)] {
+            let (n, per) = flash_splits(cap, batch, nkv);
+            assert!((1..=FLASH_TILES_PER_SPLIT).contains(&per));
+            assert!(n * per * FLASH_TILE >= cap, "splits cover the cap");
+            assert!((n - 1) * per * FLASH_TILE < cap.max(1), "no wholly empty trailing split");
+        }
+    }
 
     #[test]
     fn tiers_parse_by_their_printed_names_and_refuse_the_rest() {
