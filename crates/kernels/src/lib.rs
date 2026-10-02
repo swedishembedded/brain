@@ -730,6 +730,8 @@ pub const MOE_GROUP_COUNTS: &str = include_str!("../wgsl/moe_group_counts.wgsl")
 pub const MOE_GROUP_PERM_EMIT: &str = include_str!("../wgsl/moe_group_perm_emit.wgsl");
 /// `wgsl/moe_i8_gemv_gather.wgsl`
 pub const MOE_I8_GEMV_GATHER: &str = include_str!("../wgsl/moe_i8_gemv_gather.wgsl");
+/// `wgsl/moe_i8_grouped.wgsl`
+pub const MOE_I8_GROUPED: &str = include_str!("../wgsl/moe_i8_grouped.wgsl");
 /// `wgsl/moe_linear_gated.wgsl`
 pub const MOE_LINEAR_GATED: &str = include_str!("../wgsl/moe_linear_gated.wgsl");
 /// `wgsl/moe_linear_gated_dw.wgsl`
@@ -744,6 +746,12 @@ pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.
 pub const MOE_LINEAR_GATED_KQ: &str = include_str!("../wgsl/moe_linear_gated_kq.wgsl");
 /// `wgsl/moe_linear_gated_q4.wgsl`
 pub const MOE_LINEAR_GATED_Q4: &str = include_str!("../wgsl/moe_linear_gated_q4.wgsl");
+/// `wgsl/moe_route_count.wgsl`
+pub const MOE_ROUTE_COUNT: &str = include_str!("../wgsl/moe_route_count.wgsl");
+/// `wgsl/moe_route_emit.wgsl`
+pub const MOE_ROUTE_EMIT: &str = include_str!("../wgsl/moe_route_emit.wgsl");
+/// `wgsl/moe_route_scan.wgsl`
+pub const MOE_ROUTE_SCAN: &str = include_str!("../wgsl/moe_route_scan.wgsl");
 /// `wgsl/moe_router_topk.wgsl`
 pub const MOE_ROUTER_TOPK: &str = include_str!("../wgsl/moe_router_topk.wgsl");
 /// `wgsl/moe_scatter_scaled_add.wgsl`
@@ -1570,6 +1578,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_group_counts", MOE_GROUP_COUNTS),
     ("moe_group_perm_emit", MOE_GROUP_PERM_EMIT),
     ("moe_i8_gemv_gather", MOE_I8_GEMV_GATHER),
+    ("moe_i8_grouped", MOE_I8_GROUPED),
     ("moe_linear_gated", MOE_LINEAR_GATED),
     ("moe_linear_gated_dw", MOE_LINEAR_GATED_DW),
     ("moe_linear_gated_dx", MOE_LINEAR_GATED_DX),
@@ -1577,6 +1586,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
     ("moe_linear_gated_kq", MOE_LINEAR_GATED_KQ),
     ("moe_linear_gated_q4", MOE_LINEAR_GATED_Q4),
+    ("moe_route_count", MOE_ROUTE_COUNT),
+    ("moe_route_emit", MOE_ROUTE_EMIT),
+    ("moe_route_scan", MOE_ROUTE_SCAN),
     ("moe_router_topk", MOE_ROUTER_TOPK),
     ("moe_scatter_scaled_add", MOE_SCATTER_SCALED_ADD),
     ("moe_slot_combine", MOE_SLOT_COMBINE),
