@@ -196,6 +196,19 @@ memory, the link for system memory. A prefetch pays that cost up front. The
 oversubscription run (`OVERSUBSCRIBE=1`, which takes all free device memory) is
 available and was not run on a shared card.
 
+### Counting HBM and Grace memory separately
+
+The process memory ceiling (`--limit-vram-total`, `--limit-ram-total`) can account
+for a second tier per card: host memory the card reads coherently. It is off by
+default, so a ceiling governs the GPU-only run it always did. `BRAIN_COHERENT_TIER=1`
+declares the host as every card's second tier; only a managed allocation
+(`try_alloc_placed`) then spills into it when the card's ceiling refuses it, and
+ordinary device allocations never do. `memauth::MemoryAuthority::request_tiered`
+takes the tier policy directly (`DeviceOnly`, `AllowCoherentSpill`,
+`CoherentOnly`), grants report the tier they are charged to, and
+`residency::Budgets::set_coherent_tier` gives the residency planner the same
+second budget, charged only by a policy that allows it.
+
 ## Pooled scratch allocation
 
 A pass that repeats - a prefill round, a decode step's temporaries - frees and

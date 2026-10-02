@@ -1227,7 +1227,15 @@ mod native_facade {
             }
             let pool = self.placed_pool(policy);
             if let Some(auth) = memauth::authority() {
-                let grant = auth.request(pool, size, "placed").map_err(|d| memauth::denial_message(pool, "placed", size, d))?;
+                // Managed pages may sit in either tier, so they take the card's
+                // pool and, only where the process opted in to a coherent tier,
+                // spill into host memory. System memory is the host's. Without
+                // the opt-in both are charged exactly as before tiers existed.
+                let tier = match policy {
+                    backend_api::AllocPolicy::Managed => memauth::TierPolicy::AllowCoherentSpill,
+                    _ => memauth::TierPolicy::DeviceOnly,
+                };
+                let grant = auth.request_tiered(pool, size, "placed", tier).map_err(|d| memauth::denial_message(pool, "placed", size, d))?;
                 self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
             }
             self.inner.alloc_placed(label, size, policy)
