@@ -99,6 +99,48 @@ pub struct Topology {
     of: HashMap<Device, PoolId>,
     all_gpus: Option<PoolId>,
     all_npus: Option<PoolId>,
+    /// Per-device coherent tier: host memory the device can use directly - see
+    /// [`Tier`]. Empty unless a caller opts in.
+    coherent: HashMap<Device, PoolId>,
+    all_gpus_coherent: Option<PoolId>,
+}
+
+/// Which physical tier of memory a [`Grant`] is charged to.
+///
+/// A coherent CPU-GPU node has two: the card's own memory (HBM) and the CPU's
+/// memory (LPDDR), which the card reads coherently across the link at a fraction
+/// of HBM's bandwidth. The tiers are separate pools with separate capacities;
+/// whether the second is ever used is a policy ([`TierPolicy`]), off unless
+/// declared ([`Topology::declare_coherent_tier`]) and asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tier {
+    /// The device's own memory.
+    Device,
+    /// Host memory the device uses directly over a coherent link.
+    Coherent,
+}
+
+/// How a request chooses between a device's tiers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TierPolicy {
+    /// The device's own memory, as [`MemoryAuthority::request`]: the default,
+    /// and the only policy that ever applies to weights and hot buffers.
+    #[default]
+    DeviceOnly,
+    /// The device's own memory, then the coherent tier if the device has one and
+    /// the device pool refuses.
+    AllowCoherentSpill,
+    /// The coherent tier only: the request is for data that belongs in host
+    /// memory (system allocations).
+    CoherentOnly,
+}
+
+/// What each tier of a device could grant right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TierHeadroom {
+    pub device: u64,
+    /// `None` when the device has no declared coherent tier.
+    pub coherent: Option<u64>,
 }
 
 impl Topology {
@@ -123,6 +165,32 @@ impl Topology {
     pub fn declare_all_gpus(&mut self, p: PoolId) -> &mut Self {
         self.all_gpus = Some(p);
         self
+    }
+
+    /// Declare that `d` can additionally use pool `host` as a coherent tier (see
+    /// [`Tier`]). Opt-in: with no declaration a device has one tier and every
+    /// request behaves exactly as before the tier model existed.
+    pub fn declare_coherent_tier(&mut self, d: Device, host: PoolId) -> &mut Self {
+        self.coherent.insert(d, host);
+        self
+    }
+
+    /// [`Self::declare_coherent_tier`] for every GPU, which is what a process
+    /// ceiling on a Grace-Hopper node means: all the cards share the one host.
+    pub fn declare_all_gpus_coherent_tier(&mut self, host: PoolId) -> &mut Self {
+        self.all_gpus_coherent = Some(host);
+        self
+    }
+
+    /// `d`'s coherent tier pool, if one was declared AND it is a different pool
+    /// from `d`'s own - on a unified-memory box the two are the same bytes and a
+    /// spill into it would gain nothing.
+    pub fn coherent_tier_of(&self, d: Device) -> Option<PoolId> {
+        let host = self.coherent.get(&d).copied().or(match d {
+            Device::Gpu(_) => self.all_gpus_coherent,
+            _ => None,
+        })?;
+        (host != self.pool_of(d)).then_some(host)
     }
 
     /// [`Self::declare_all_gpus`] for the NPUs.
@@ -372,10 +440,15 @@ impl Inner {
 pub struct Grant {
     pool: PoolId,
     bytes: u64,
+    tier: Tier,
     auth: Arc<Inner>,
 }
 
 impl Grant {
+    /// Which tier of its device this claim is charged to.
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
     pub fn pool(&self) -> PoolId {
         self.pool
     }
@@ -392,7 +465,7 @@ impl Drop for Grant {
 
 impl std::fmt::Debug for Grant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Grant").field("pool", &self.pool).field("bytes", &self.bytes).finish()
+        f.debug_struct("Grant").field("pool", &self.pool).field("bytes", &self.bytes).field("tier", &self.tier).finish()
     }
 }
 
@@ -478,7 +551,45 @@ impl MemoryAuthority {
     /// the check and jointly exceed the pool, the exact over-commit this
     /// authority exists to make impossible.
     pub fn request(&self, device: Device, bytes: u64, _tag: &'static str) -> Result<Grant, Denied> {
-        let pool = self.0.topo.pool_of(device);
+        self.request_pool(self.0.topo.pool_of(device), bytes, Tier::Device)
+    }
+
+    /// [`Self::request`] choosing between the device's tiers by `policy`.
+    ///
+    /// [`TierPolicy::DeviceOnly`] is exactly [`Self::request`]. The others only
+    /// differ for a device with a declared coherent tier
+    /// ([`Topology::declare_coherent_tier`]): without one, `AllowCoherentSpill`
+    /// is `DeviceOnly` and `CoherentOnly` is refused as [`Denied::NeverFits`]
+    /// with nothing usable, so nothing reaches host memory by accident.
+    pub fn request_tiered(&self, device: Device, bytes: u64, tag: &'static str, policy: TierPolicy) -> Result<Grant, Denied> {
+        let coherent = self.0.topo.coherent_tier_of(device);
+        match (policy, coherent) {
+            (TierPolicy::DeviceOnly, _) | (TierPolicy::AllowCoherentSpill, None) => self.request(device, bytes, tag),
+            (TierPolicy::AllowCoherentSpill, Some(host)) => match self.request(device, bytes, tag) {
+                Ok(g) => Ok(g),
+                // The device's own refusal is the informative one if the host
+                // tier cannot take it either.
+                Err(device_denial) => self.request_pool(host, bytes, Tier::Coherent).map_err(|_| device_denial),
+            },
+            (TierPolicy::CoherentOnly, Some(host)) => self.request_pool(host, bytes, Tier::Coherent),
+            (TierPolicy::CoherentOnly, None) => {
+                Err(Denied::NeverFits { pool: self.0.topo.pool_of(device), want: bytes, usable: 0 })
+            }
+        }
+    }
+
+    /// What each of `device`'s tiers could grant right now.
+    pub fn headroom_tiers(&self, device: Device) -> TierHeadroom {
+        let coherent = self.0.topo.coherent_tier_of(device).map(|host| {
+            let (total, avail) = self.probed(host);
+            let charged = *self.0.charged.lock().unwrap().get(&host).unwrap_or(&0);
+            let reserved = *self.0.reserved.get(&host).unwrap_or(&0);
+            avail.min(total.saturating_sub(charged)).saturating_sub(reserved)
+        });
+        TierHeadroom { device: self.headroom(device), coherent }
+    }
+
+    fn request_pool(&self, pool: PoolId, bytes: u64, tier: Tier) -> Result<Grant, Denied> {
         // Probe BEFORE taking the ledger lock (probed() takes the memo lock;
         // never nest the two).
         let (total, avail) = self.probed(pool);
@@ -496,7 +607,7 @@ impl MemoryAuthority {
             return Err(Denied::WouldExceedPool { pool, want: bytes, headroom });
         }
         *charged.entry(pool).or_insert(0) += bytes;
-        Ok(Grant { pool, bytes, auth: self.0.clone() })
+        Ok(Grant { pool, bytes, tier, auth: self.0.clone() })
     }
 
     /// [`Self::request`] without the reason on failure, for a caller that
@@ -535,6 +646,78 @@ mod tests {
 
     fn auth(topo: Topology, probe: &Arc<FixedProbe>, reserved: &[(PoolId, u64)]) -> MemoryAuthority {
         MemoryAuthority::new(topo, probe.clone(), reserved.iter().copied().collect())
+    }
+
+    const HBM: PoolId = PoolId(1);
+    const LPDDR: PoolId = HOST_POOL;
+
+    /// A Grace-Hopper shape: the card's HBM and the CPU's LPDDR are separate pools.
+    fn grace_hopper(declare_tier: bool) -> (MemoryAuthority, Arc<FixedProbe>) {
+        let probe = Arc::new(FixedProbe::new());
+        probe.set(HBM, 96 * GB, 96 * GB);
+        probe.set(LPDDR, 480 * GB, 480 * GB);
+        let mut topo = Topology::new();
+        topo.declare(Device::Gpu(0), HBM).declare(Device::Cpu, LPDDR);
+        if declare_tier {
+            topo.declare_coherent_tier(Device::Gpu(0), LPDDR);
+        }
+        (auth(topo, &probe, &[]), probe)
+    }
+
+    /// Tiering is off unless declared: with no coherent tier, no policy ever
+    /// reaches host memory, and the default policy is the plain request.
+    #[test]
+    fn without_a_declared_tier_nothing_spills_to_host_memory() {
+        let (a, _) = grace_hopper(false);
+        assert_eq!(TierPolicy::default(), TierPolicy::DeviceOnly);
+        let g = a.request_tiered(Device::Gpu(0), 90 * GB, "w", TierPolicy::AllowCoherentSpill).expect("fits HBM");
+        assert_eq!(g.tier(), Tier::Device);
+        let over = a.request_tiered(Device::Gpu(0), 10 * GB, "w", TierPolicy::AllowCoherentSpill);
+        assert!(matches!(over, Err(Denied::WouldExceedPool { pool, .. }) if pool == HBM), "an undeclared tier must not absorb the overflow: {over:?}");
+        assert!(matches!(a.request_tiered(Device::Gpu(0), GB, "s", TierPolicy::CoherentOnly), Err(Denied::NeverFits { usable: 0, .. })));
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)).coherent, None);
+    }
+
+    /// With the tier declared, the two pools are accounted separately and a
+    /// grant says which one it is charged to.
+    #[test]
+    fn a_declared_tier_is_accounted_separately_from_the_device() {
+        let (a, _) = grace_hopper(true);
+        // The default policy still never touches the host tier.
+        assert!(a.request_tiered(Device::Gpu(0), 100 * GB, "w", TierPolicy::DeviceOnly).is_err());
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)), TierHeadroom { device: 96 * GB, coherent: Some(480 * GB) });
+
+        let hbm = a.request_tiered(Device::Gpu(0), 90 * GB, "hot", TierPolicy::AllowCoherentSpill).expect("HBM");
+        assert_eq!(hbm.tier(), Tier::Device);
+        let spill = a.request_tiered(Device::Gpu(0), 20 * GB, "cold", TierPolicy::AllowCoherentSpill).expect("spills to LPDDR");
+        assert_eq!((spill.tier(), spill.pool()), (Tier::Coherent, LPDDR));
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)), TierHeadroom { device: 6 * GB, coherent: Some(460 * GB) });
+        let host = a.request_tiered(Device::Gpu(0), 5 * GB, "sys", TierPolicy::CoherentOnly).expect("host tier");
+        assert_eq!(host.tier(), Tier::Coherent);
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)).device, 6 * GB, "a host-tier grant must not reduce the card's own headroom");
+
+        drop((hbm, spill, host));
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)), TierHeadroom { device: 96 * GB, coherent: Some(480 * GB) }, "dropping grants returns both tiers");
+    }
+
+    /// A request neither tier can take reports the device's own refusal.
+    #[test]
+    fn when_neither_tier_fits_the_device_denial_is_reported() {
+        let (a, _) = grace_hopper(true);
+        let r = a.request_tiered(Device::Gpu(0), 600 * GB, "huge", TierPolicy::AllowCoherentSpill);
+        assert!(matches!(r, Err(Denied::NeverFits { pool, .. }) if pool == HBM), "{r:?}");
+    }
+
+    /// On a unified-memory box the "host tier" is the device's own bytes: there is
+    /// no second tier to spill to.
+    #[test]
+    fn a_tier_in_the_devices_own_pool_is_not_a_tier() {
+        let probe = Arc::new(FixedProbe::new());
+        probe.set(HOST_POOL, 30 * GB, 30 * GB);
+        let mut topo = Topology::new();
+        topo.declare(Device::Gpu(0), HOST_POOL).declare(Device::Cpu, HOST_POOL).declare_coherent_tier(Device::Gpu(0), HOST_POOL);
+        let a = auth(topo, &probe, &[]);
+        assert_eq!(a.headroom_tiers(Device::Gpu(0)).coherent, None);
     }
 
     #[test]

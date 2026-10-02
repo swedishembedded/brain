@@ -50,6 +50,7 @@ pub const VRAM_POOL: PoolId = PoolId(3_000_000);
 /// same flag-beats-env shape as `--device`/`BRAIN_DEVICE`.
 const ENV_VRAM: &str = "BRAIN_LIMIT_VRAM_TOTAL";
 const ENV_RAM: &str = "BRAIN_LIMIT_RAM_TOTAL";
+const ENV_COHERENT_TIER: &str = "BRAIN_COHERENT_TIER";
 
 /// The published ceilings. `None` in a field means "no ceiling for that class
 /// of device" - never zero, which would mean "no memory at all".
@@ -59,6 +60,11 @@ pub struct Limits {
     pub vram_total: Option<u64>,
     /// `--limit-ram-total`: bytes of host RAM (CPU + every NPU).
     pub ram_total: Option<u64>,
+    /// Opt in to the coherent tier: every GPU may also use host memory as a
+    /// second tier of its own (`BRAIN_COHERENT_TIER=1`). Off by default, so a
+    /// ceiling on a coherent node governs the GPU-only run it always did; it
+    /// matters only to requests that ask for a tier ([`crate::TierPolicy`]).
+    pub coherent_tier: bool,
 }
 
 impl Limits {
@@ -102,7 +108,8 @@ impl Limits {
                 }
             }
         };
-        Limits { vram_total: read(ENV_VRAM), ram_total: read(ENV_RAM) }
+        let coherent_tier = std::env::var(ENV_COHERENT_TIER).map(|v| v == "1").unwrap_or(false);
+        Limits { vram_total: read(ENV_VRAM), ram_total: read(ENV_RAM), coherent_tier }
     }
 
     /// Which pool each class of device draws from under these ceilings.
@@ -111,6 +118,9 @@ impl Limits {
         t.declare_all_gpus(VRAM_POOL);
         t.declare_all_npus(HOST_POOL);
         t.declare(Device::Cpu, HOST_POOL);
+        if self.coherent_tier {
+            t.declare_all_gpus_coherent_tier(HOST_POOL);
+        }
         t
     }
 
@@ -209,7 +219,7 @@ static AUTHORITY: OnceLock<Option<MemoryAuthority>> = OnceLock::new();
 /// bypass.
 pub fn publish_limits(vram_total: Option<u64>, ram_total: Option<u64>) {
     let env = Limits::from_env();
-    let _ = LIMITS.set(Limits { vram_total: vram_total.or(env.vram_total), ram_total: ram_total.or(env.ram_total) });
+    let _ = LIMITS.set(Limits { vram_total: vram_total.or(env.vram_total), ram_total: ram_total.or(env.ram_total), coherent_tier: env.coherent_tier });
 }
 
 /// This process's ceilings: whatever [`publish_limits`] recorded, else the
@@ -318,6 +328,23 @@ mod tests {
         Arc::new(p)
     }
 
+    /// The coherent tier is off unless asked for: a ceiling on a coherent node
+    /// governs the device pool alone, and the tier appears only with the opt-in.
+    #[test]
+    fn the_coherent_tier_is_opt_in() {
+        assert!(!Limits::default().coherent_tier);
+        let base = Limits { vram_total: Some(8 * GB), ram_total: Some(64 * GB), ..Limits::default() };
+        assert_eq!(base.topology().coherent_tier_of(Device::Gpu(0)), None);
+        let tiered = Limits { coherent_tier: true, ..base };
+        assert_eq!(tiered.topology().coherent_tier_of(Device::Gpu(3)), Some(HOST_POOL), "every GPU gets the host as its second tier");
+        assert_eq!(tiered.topology().coherent_tier_of(Device::Cpu), None);
+        let a = tiered.authority_with_host(host(200 * GB)).expect("a ceiling was set");
+        let spill = a.request_tiered(Device::Gpu(0), 12 * GB, "cold", crate::TierPolicy::AllowCoherentSpill).expect("spills past the 8 GiB VRAM ceiling");
+        assert_eq!(spill.tier(), crate::Tier::Coherent);
+        let plain = base.authority_with_host(host(200 * GB)).expect("a ceiling was set");
+        assert!(plain.request_tiered(Device::Gpu(0), 12 * GB, "cold", crate::TierPolicy::AllowCoherentSpill).is_err());
+    }
+
     #[test]
     fn parse_size_reads_human_suffixes_and_plain_bytes() {
         assert_eq!(parse_size("8G").unwrap(), 8 * GB);
@@ -350,7 +377,7 @@ mod tests {
     /// box quietly use twice what the operator asked for.
     #[test]
     fn the_vram_ceiling_is_one_total_across_every_card() {
-        let l = Limits { vram_total: Some(8 * GB), ram_total: None };
+        let l = Limits { vram_total: Some(8 * GB), ram_total: None, ..Limits::default() };
         let a = l.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         let g0 = a.request(Device::Gpu(0), 6 * GB, "weights").expect("6 GiB fits an 8 GiB ceiling");
         assert!(
@@ -367,7 +394,7 @@ mod tests {
     /// tighter must win, in both directions.
     #[test]
     fn the_ram_ceiling_and_the_live_host_probe_both_bind() {
-        let l = Limits { vram_total: None, ram_total: Some(4 * GB) };
+        let l = Limits { vram_total: None, ram_total: Some(4 * GB), ..Limits::default() };
         let a = l.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         assert!(matches!(a.request(Device::Cpu, 5 * GB, "kv"), Err(Denied::NeverFits { .. })), "the flag must win when the box has plenty");
         assert!(a.request(Device::Cpu, 3 * GB, "kv").is_ok());
@@ -384,13 +411,13 @@ mod tests {
     /// only one flag must leave the other pool entirely unbounded.
     #[test]
     fn each_ceiling_governs_only_its_own_class_of_device() {
-        let l = Limits { vram_total: Some(2 * GB), ram_total: None };
+        let l = Limits { vram_total: Some(2 * GB), ram_total: None, ..Limits::default() };
         let a = l.authority_with_host(host(GB / 2)).expect("a ceiling was set");
         assert!(a.request(Device::Cpu, 64 * GB, "host").is_ok(), "--limit-vram-total alone must not start bounding host RAM");
         assert!(a.request(Device::Npu(0), 64 * GB, "npu").is_ok(), "an NPU is host memory, unbounded while --limit-ram-total is unset");
         assert!(matches!(a.request(Device::Gpu(0), 3 * GB, "dit"), Err(Denied::NeverFits { .. })));
 
-        let l = Limits { vram_total: None, ram_total: Some(2 * GB) };
+        let l = Limits { vram_total: None, ram_total: Some(2 * GB), ..Limits::default() };
         let a = l.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         assert!(matches!(a.request(Device::Npu(0), 3 * GB, "npu"), Err(Denied::NeverFits { .. })), "an NPU draws from the RAM ceiling");
         assert!(a.request(Device::Gpu(0), 64 * GB, "dit").is_ok(), "--limit-ram-total alone must not bound VRAM");
@@ -401,7 +428,7 @@ mod tests {
     /// capacity the ceiling would refuse.
     #[test]
     fn clamp_reports_the_tighter_of_the_real_capacity_and_the_ceiling() {
-        let l = Limits { vram_total: Some(8 * GB), ram_total: Some(16 * GB) };
+        let l = Limits { vram_total: Some(8 * GB), ram_total: Some(16 * GB), ..Limits::default() };
         assert_eq!(l.clamp(Device::Gpu(0), 24 * GB), 8 * GB, "a 24 GiB card under an 8 GiB ceiling is an 8 GiB budget");
         assert_eq!(l.clamp(Device::Gpu(0), 4 * GB), 4 * GB, "the ceiling never INFLATES a smaller real capacity");
         assert_eq!(l.clamp(Device::Cpu, 128 * GB), 16 * GB);
@@ -428,7 +455,7 @@ mod tests {
     /// operator what to do next.
     #[test]
     fn a_denial_names_the_flag_and_the_numbers() {
-        let l = Limits { vram_total: Some(GB), ram_total: None };
+        let l = Limits { vram_total: Some(GB), ram_total: None, ..Limits::default() };
         let a = l.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         let d = a.request(Device::Gpu(0), 4 * GB, "storage").unwrap_err();
         let msg = denial_message(Device::Gpu(0), "storage", 4 * GB, d);
@@ -438,12 +465,12 @@ mod tests {
 
         // A ceiling can be crossed by a small buffer too; the message must
         // stay informative there instead of rounding everything to 0.00 GiB.
-        let tiny = Limits { vram_total: Some(128 << 10), ram_total: None }.authority_with_host(host(200 * GB)).expect("a ceiling was set");
+        let tiny = Limits { vram_total: Some(128 << 10), ram_total: None, ..Limits::default() }.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         let small = tiny.request(Device::Gpu(0), 256 << 10, "uniform").unwrap_err();
         let msg = denial_message(Device::Gpu(0), "uniform", 256 << 10, small);
         assert!(msg.contains("256.00 KiB"), "a sub-MiB request must be readable: {msg}");
 
-        let l = Limits { vram_total: None, ram_total: Some(GB) };
+        let l = Limits { vram_total: None, ram_total: Some(GB), ..Limits::default() };
         let a = l.authority_with_host(host(200 * GB)).expect("a ceiling was set");
         let d = a.request(Device::Cpu, 4 * GB, "storage").unwrap_err();
         assert!(denial_message(Device::Cpu, "storage", 4 * GB, d).contains("--limit-ram-total"));
