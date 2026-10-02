@@ -2682,8 +2682,12 @@ the fused head_dim-256 prefill gains bf16/int8 variants by template
 * on the real checkpoint (`gguf_kv_tier_real.rs`, 1795-token prompt, 24 forced
   positions): this model is W8A8 and chaotic at the 10% level - the f32 cache's
   own decode tape vs its chunk tape differ by a mean logits rel-L2 of 0.134 -
-  so the bound is that floor, measured in the same run: bf16 0.152 (1.13x the
-  floor), top-1 24/24; int8 0.159 (1.19x), top-1 23/24.
+  so the bound is that floor, measured in the same run (0.135): bf16 0.147
+  (1.09x the floor), top-1 23/24 - the one flip is at a position where the f32
+  cache's own margin over its runner-up was 0.2 logits; int8 0.152 (1.13x),
+  top-1 24/24. (Before the fused decode the same runs read bf16 0.152 / 24 of 24
+  and int8 0.159 / 23 of 24: single-flip noise either way, which is why the gate
+  is 90% top-1 plus the floor multiple, not a perfect score.)
 
 **The attention was the real problem.** Profiled on the idle card at 128k,
 batch 1, the triad cost 1.8 s per step: `decode_softmax_batched` is ONE thread
