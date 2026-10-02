@@ -369,6 +369,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/gdn_decode.cu"),
     },
     CudaKernel {
+        name: "gdn_decode_pool",
+        // `gdn_decode` over a batch whose state lives as rows of two pools: a second
+        // entry point of that kernel's own file, which shares its block body. A
+        // fused kernel asked for by name (see `add_rms_quant`).
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_decode_pool",
+        what: "one Gated DeltaNet decode step for every sequence of a batch in one launch, updating each sequence's pool row of state and conv window in place; the single-sequence body per (key head, row), bit-identical to the 19-kernel WGSL chain",
+        reported: "native:gdn_decode_pool",
+        block_dim: 384,
+        // One block per (key head, batch row).
+        tile: (1, 1),
+        shared_bytes: 4 * 128 * 4 + 3 * 128 * 4 + 3 * 4,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
+    CudaKernel {
         name: "gqa_decode_prep",
         // A fused kernel asked for by name (see `add_rms_quant`); the operator
         // and tier are unique in this table.

@@ -56,6 +56,23 @@
 // `0.0f + k*delta` the reference's `bmm_acc` computes, so a negative zero
 // behaves identically too.
 //
+// The batched, pooled entry (`brain_gdn_decode_pool`)
+// ---------------------------------------------------
+// A serving engine keeps each resident sequence's recurrent state and conv window
+// as a ROW of a per-layer pool, and a decode step is a batch of such sequences.
+// `brain_gdn_decode_pool` is this kernel over a batch: block (key head `kh`,
+// batch row `bi`) runs the identical single-sequence body on that row's inputs
+// (`mixed`, `bproj`, `aproj`, `z`, `gated` are `[b, ...]`) and on pool row
+// `rows[bi]` of `hist` and `state`, which it updates in place. No copy of the
+// state is staged in or out, and nothing is shared between rows (the pool rows of
+// a batch are distinct), so each row's result is the single-sequence kernel's, bit
+// for bit. params gains `b` at index 6.
+//
+//   params : u32 [nkh, nvh, group, l2_eps, rms_eps, q_scale, b, 0]
+//   mixed  : [b, conv_dim]    bproj, aproj : [b, nvh]    z, gated : [b, nvh * 128]
+//   hist   : [rows, conv_dim, 3]    state : [rows, nvh, 128, 128]   (pools, RW)
+//   rows   : [b] u32                the pool row of each batch row
+//
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
@@ -69,10 +86,12 @@ __device__ __forceinline__ float brain_silu(float v) {
     return __fdiv_rn(v, __fadd_rn(1.0f, expf(-v)));
 }
 
-extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
-brain_gdn_decode(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
-                 const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
-                 float* state, const float* z, const float* norm_w, float* gated) {
+// One sequence's step for key head `kh`: every pointer is already the sequence's
+// own (its token's inputs, its window and its state).
+__device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params, unsigned int kh, const float* mixed,
+                                                      const float* conv_w, float* hist, const float* bproj,
+                                                      const float* aproj, const float* a_log, const float* dt_bias,
+                                                      float* state, const float* z, const float* norm_w, float* gated) {
     const unsigned int nkh = params[0];
     const unsigned int nvh = params[1];
     const unsigned int group = params[2];
@@ -80,8 +99,6 @@ brain_gdn_decode(const unsigned int* params, const float* mixed, const float* co
     const float rms_eps = __uint_as_float(params[4]);
     const float q_scale = __uint_as_float(params[5]);
 
-    const unsigned int kh = blockIdx.y * gridDim.x + blockIdx.x;  // key head
-    if (kh >= nkh) { return; }                                     // block-uniform
     const unsigned int t = threadIdx.x;
     const unsigned int slot = t / BRAIN_GDN_HD;       // which of this key head's value heads
     const unsigned int j = t % BRAIN_GDN_HD;          // column of that head's state
@@ -243,4 +260,33 @@ brain_gdn_decode(const unsigned int* params, const float* mixed, const float* co
         const float nrm = __fmul_rn(__fmul_rn(nw, normed[slot][j]), inv_rms[slot]);
         gated[(unsigned long long)vh * BRAIN_GDN_HD + j] = __fmul_rn(nrm, brain_silu(zin));
     }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
+brain_gdn_decode(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
+                 const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
+                 float* state, const float* z, const float* norm_w, float* gated) {
+    const unsigned int kh = blockIdx.y * gridDim.x + blockIdx.x;  // key head
+    if (kh >= params[0]) { return; }                               // block-uniform
+    brain_gdn_decode_body(params, kh, mixed, conv_w, hist, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GDN_MAX_GROUP * BRAIN_GDN_HD, 1)
+brain_gdn_decode_pool(const unsigned int* params, const float* mixed, const float* conv_w, float* hist,
+                      const float* bproj, const float* aproj, const float* a_log, const float* dt_bias,
+                      float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows) {
+    const unsigned int nkh = params[0];
+    const unsigned int nvh = params[1];
+    const unsigned int b = params[6];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int bi = blk / nkh;                // batch row
+    const unsigned int kh = blk - bi * nkh;           // key head
+    if (bi >= b) { return; }                          // block-uniform
+    const unsigned long long conv_dim = 2ull * nkh * BRAIN_GDN_HD + static_cast<unsigned long long>(nvh) * BRAIN_GDN_HD;
+    const unsigned long long row = rows[bi];
+    brain_gdn_decode_body(params, kh, mixed + bi * conv_dim, conv_w, hist + row * conv_dim * (BRAIN_GDN_KW - 1),
+                          bproj + static_cast<unsigned long long>(bi) * nvh, aproj + static_cast<unsigned long long>(bi) * nvh,
+                          a_log, dt_bias, state + row * nvh * BRAIN_GDN_HD * BRAIN_GDN_HD,
+                          z + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD, norm_w,
+                          gated + static_cast<unsigned long long>(bi) * nvh * BRAIN_GDN_HD);
 }

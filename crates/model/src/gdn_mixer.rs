@@ -583,6 +583,16 @@ pub fn gdn_mixer_decode_state_fwd(
     let state_len = nvh * khd * vhd;
     let hist_len = conv_dim * (kw - 1);
 
+    // A pooled batch the native kernel serves runs in place on its rows: no
+    // staging in or out, and the whole step is one launch.
+    if let GdnDecodeState::Pool(pool) = batch_state {
+        if pool.fuse {
+            if let Some(gated) = gdn_mixer_decode_pooled_fused(g, shape, w, mixed_qkv, bproj, aproj, z, pool) {
+                return gated;
+            }
+        }
+    }
+
     // Stage the batch's persistent state contiguously - see this function's
     // own doc. One sequence over its own buffers binds them directly instead.
     let (state, hist) = match batch_state {
@@ -608,17 +618,6 @@ pub fn gdn_mixer_decode_state_fwd(
         }
         GdnDecodeState::Streams(streams) => (streams[0].state.clone(), streams[0].hist.clone()),
     };
-
-    // One sequence over a pool row: the native launch does the whole step on the
-    // staged copy, which is then returned to its row like any other.
-    if let GdnDecodeState::Pool(pool) = batch_state {
-        if pool.fuse && b == 1 {
-            if let Some(gated) = gdn_mixer_decode_fused(g, shape, w, mixed_qkv, bproj, aproj, z, &GdnStream { state: &state, hist: &hist }) {
-                g.submit(&[], &[g.step(pool.scatter, &[&state, &hist, pool.rows, pool.state, pool.hist], &[b, state_len, hist_len], b * (state_len + hist_len))]);
-                return gated;
-            }
-        }
-    }
 
     // 1. Streaming causal conv1d + SiLU (activation after the conv). No
     // NLC/NCHW round trip: `gdn_causal_conv1d_step`'s x/y are `[N, C]`, which
@@ -752,6 +751,41 @@ pub fn gdn_mixer_decode_fused(
     let step = g.fused_step(
         gpu_core::Fused::GdnDecode,
         &[mixed_qkv, w.conv1d_weight, stream.hist, bproj, aproj, w.a_log, w.dt_bias, stream.state, z, w.norm_weight, &gated],
+        &params,
+    )?;
+    g.submit(&[], &[step]);
+    Some(gated)
+}
+
+/// [`gdn_mixer_decode_state_fwd`] for a BATCH over pool rows as a single native
+/// launch - the `gdn_decode_pool` kernel, which runs [`gdn_mixer_decode_fused`]'s
+/// body for every (key head, sequence) on that sequence's pool row of `state` and
+/// `hist`, in place. Returns `gated` (`[b, value_dim]`); each row is what
+/// [`gdn_mixer_decode_fused`] and the nineteen-kernel chain produce for it.
+///
+/// `None` - nothing submitted, the pools untouched - where the device is not
+/// offered the kernel or the shape is outside its block shape (128-wide key and
+/// value heads, a 4-tap conv, at most three value heads per key head).
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_mixer_decode_pooled_fused(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    pool: &GdnPoolRows,
+) -> Option<DeviceBuffer> {
+    let gdn = shape.gdn;
+    if gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || gdn.h % shape.nkh != 0 {
+        return None;
+    }
+    let gated = g.storage(gdn.b as u64 * shape.value_dim() as u64);
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), gdn.b, 0];
+    let step = g.fused_step(
+        gpu_core::Fused::GdnDecodePool,
+        &[mixed_qkv, w.conv1d_weight, pool.hist, bproj, aproj, w.a_log, w.dt_bias, pool.state, z, w.norm_weight, &gated, pool.rows],
         &params,
     )?;
     g.submit(&[], &[step]);

@@ -26,7 +26,7 @@ use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
 use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
-use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnStream};
+use model::gdn_mixer::{gdn_mixer_decode_fused, gdn_mixer_decode_fwd, gdn_mixer_decode_state_fwd, GdnDecodeState, GdnMixerDecodeIds, GdnMixerIds, GdnMixerShape, GdnMixerWeights, GdnPoolRows, GdnStream};
 
 const KERNELS: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),
@@ -58,6 +58,8 @@ const KERNELS: &[(&str, &str)] = &[
     ("gdn_layout_permute", kernels::GDN_LAYOUT_PERMUTE),
     ("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP),
     ("splice", kernels::SPLICE),
+    ("pool_rows_gather2", kernels::POOL_ROWS_GATHER2),
+    ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2),
 ];
 
 fn idx(g: &Gpu, name: &str) -> usize {
@@ -272,5 +274,56 @@ fn a_run_of_steps_stays_byte_identical() {
         assert_eq!(bits(g.read(&b, value_dim as usize)), bits(g.read(&a, value_dim as usize)), "step {step}: output differs");
         assert_eq!(bits(g.read(&s_nat, state_len)), bits(g.read(&s_ref, state_len)), "step {step}: state differs");
         assert_eq!(bits(g.read(&h_nat, hist_len)), bits(g.read(&h_ref, hist_len)), "step {step}: window differs");
+    }
+}
+
+/// A batch over rows of a pool, as one launch that updates the rows in place, is
+/// the batch staged in, run through the chain and staged out - to the bit, for the
+/// layer's outputs and for EVERY row of both pools (a row that is not in the batch
+/// must come through untouched).
+#[test]
+fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&g) {
+        brain_testutil::skip_unavailable("native fused kernels need a CUDA device");
+        return;
+    }
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    // (key heads, group, batch, pool rows, picked rows): one row, a ragged
+    // order, the real 35B-A3B head counts (16 key heads x 2) at a decode batch.
+    let cases: [(u32, u32, &[u32], u32); 4] = [(2, 3, &[1], 3), (2, 2, &[3, 0, 2], 5), (16, 2, &[5, 1, 7, 0, 3, 6], 8), (1, 1, &[2, 4, 0, 1, 3], 5)];
+    for (case, &(nkh, group, picked, pool_rows)) in cases.iter().enumerate() {
+        let (nvh, b) = (nkh * group, picked.len() as u32);
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
+        let state_len = (nvh * dk * dv) as usize;
+        let hist_len = (conv_dim * (kw - 1)) as usize;
+        let mut r = Lcg::new(0x900d_0000 + case as u64);
+        let conv_w = g.storage_init("conv_w", &rnd(&mut r, (conv_dim * kw) as usize, 0.5));
+        let a_log = g.storage_init("a_log", &rnd(&mut r, nvh as usize, 0.5));
+        let dt_bias = g.storage_init("dt_bias", &rnd(&mut r, nvh as usize, 0.5));
+        let norm_w = g.storage_init("norm_w", &rnd(&mut r, dv as usize, 0.5));
+        let ones = g.storage_init("ones", &vec![1.0f32; dk as usize]);
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let mixed = g.storage_init("mixed", &rnd(&mut r, (b * conv_dim) as usize, 1.0));
+        let bp = g.storage_init("bp", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let ap = g.storage_init("ap", &rnd(&mut r, (b * nvh) as usize, 1.0));
+        let z = g.storage_init("z", &rnd(&mut r, (b * value_dim) as usize, 1.0));
+        let state0 = rnd(&mut r, pool_rows as usize * state_len, 0.3);
+        let hist0 = rnd(&mut r, pool_rows as usize * hist_len, 0.3);
+        let rows = g.storage_init("rows", &picked.iter().map(|&i| f32::from_bits(i)).collect::<Vec<_>>());
+
+        let run = |fuse: bool| {
+            let (st, hi) = (g.storage_init("state", &state0), g.storage_init("hist", &hist0));
+            let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse };
+            let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, &GdnDecodeState::Pool(pool));
+            g.poll_wait();
+            (bits(g.read(&gated, (b * value_dim) as usize)), bits(g.read(&st, pool_rows as usize * state_len)), bits(g.read(&hi, pool_rows as usize * hist_len)))
+        };
+        let (chain, fused) = (run(false), run(true));
+        let ctx = format!("case {case}: nkh={nkh} group={group} batch={b}");
+        assert_eq!(fused.0, chain.0, "layer output differs: {ctx}");
+        assert_eq!(fused.1, chain.1, "state pool differs: {ctx}");
+        assert_eq!(fused.2, chain.2, "window pool differs: {ctx}");
     }
 }
