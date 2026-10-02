@@ -501,7 +501,15 @@ impl KvKernels {
         let params = [s.n, s.n_heads, s.n_kv_heads, s.head_dim, s.n_heads / s.n_kv_heads, s.block_size, 1];
         let grid = Dispatch::Workgroups(s.n_heads * s.n.div_ceil(64));
         match (&k.scales, &v.scales) {
-            (None, None) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid),
+            (None, None) => {
+                // The fp32 tier's planes are what the fp16 tensor-core kernel
+                // reads (same buffers, uniform and geometry as the portable one);
+                // a bf16 plane is not, and keeps its own pipeline.
+                let native = (self.tier == KvTier::F32)
+                    .then(|| crate::block::native_paged_flash_prefill(g, s.head_dim, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, s.n_heads * s.n.div_ceil(64)))
+                    .flatten();
+                native.unwrap_or_else(|| g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid))
+            }
             (Some(ks), Some(vs)) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs], &params, grid),
             _ => unreachable!("check() pinned both planes to one tier"),
         }

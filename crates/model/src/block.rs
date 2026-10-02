@@ -699,12 +699,12 @@ pub fn gqa_chunk_fused(g: &Gpu, k: &GqaChunkIds, head_dim: u32) -> Option<usize>
 /// [`gpu_core::provider::cuda::paged_flash_prefill_step`] where a native
 /// backend exists at all; `None` (the portable kernel) on wasm.
 #[cfg(not(target_arch = "wasm32"))]
-fn native_paged_flash_prefill(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
+pub(crate) fn native_paged_flash_prefill(g: &Gpu, head_dim: u32, bufs: &[&DeviceBuffer; 6], params: &[u32], blocks: u32) -> Option<Step> {
     gpu_core::provider::cuda::paged_flash_prefill_step(g, head_dim, bufs, params, blocks)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
+pub(crate) fn native_paged_flash_prefill(_g: &Gpu, _head_dim: u32, _bufs: &[&DeviceBuffer; 6], _params: &[u32], _blocks: u32) -> Option<Step> {
     None
 }
 
