@@ -94,10 +94,35 @@ BRAIN_QWEN35_GGUF_TIER=q4    # per-leaf quantization tier: "i8" (default), "q4",
                              # to pin specific tensors at fp32; a malformed
                              # grammar panics rather than serving a silently
                              # wrong precision
+BRAIN_QWEN35_KV=int8         # how the 16 GQA layers store K/V: "f32" (default), "bf16"
+                             # (half the bytes) or "int8" (one scale per token and kv
+                             # head, ~3.9x fewer bytes); anything else is an error
 BRAIN_QWEN35_GGUF_DEBUG=1    # extra diagnostics on the streaming GGUF residency path
 ```
 
 What it does differently:
+
+- **A compact KV cache** (`model::kv_tier`, `BRAIN_QWEN35_KV`). At 128k
+  context the 16 GQA layers' KV cache is the whole bound on the batch - 16 GiB
+  per sequence in f32 against 27 GiB of INT8 weights - so it can be stored
+  narrower: `bf16` (8 GiB per sequence at 128k) or `int8` with one f32 scale
+  per (token, kv-head) row (4.06 GiB). The attention arithmetic stays f32; each
+  element is rounded once when it is written and widened as it is read, by the
+  paged-KV kernel family (`paged_kv_append_batched_word`/
+  `paged_kv_append_i8_clipped_batched`, the `paged_decode_*` scores/apply and the
+  fused head_dim-256 prefill, whose bf16 and int8 loads are template variants of
+  the f32 source), on every backend. The planner charges the real bytes, so one
+  97 GiB GH200 admits 4 / 8 / 15 sequences of 128k at f32 / bf16 / int8. Decode
+  attention at head_dim 256 is the fused split-key kernel
+  (`paged_flash_decode_gqa_hd256`, a GQA group of 6 or 8) in every tier - one
+  layer at 128k is 0.83 / 0.54 / 0.42 ms for one sequence against 63 ms for the
+  scores/softmax/apply triad it replaced (`.agents/roadmap/qwen35.md` M30). The
+  recurrent state of the 48 GDN layers (150 MiB per sequence) is not part of the
+  cache and stays f32. Default stays `f32`. Gates: per-kernel rounding bounds in
+  `crates/model/tests/kv_tier.rs`, logits agreement through chunked prefill and
+  batched decode in `crates/qwen35/tests/kv_tier.rs`, and top-1 agreement on a
+  real prompt in `crates/qwen35/tests/gguf_kv_tier_real.rs`. `brain perf run
+  longctx` reports the tier as `kv_precision`.
 
 - **No fp32 intermediate anywhere.** `checkpoint::gguf::MmapGguf` is a
   `TensorSource`, so `Qwen35::new_i8_shard` streams each leaf out of the

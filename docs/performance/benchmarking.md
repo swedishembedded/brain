@@ -64,8 +64,19 @@ brain perf run longctx --target qwen:/path/to/Qwen3-8B --context 32768
 ```
 
 Targets: `qwen35:<gguf>` (or `qwen35-gguf`, which reads `BRAIN_QWEN35_GGUF`; the
-weight tier comes from `BRAIN_QWEN35_GGUF_TIER`) for the Qwen3.8 GGUF resident,
-and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
+weight tier comes from `BRAIN_QWEN35_GGUF_TIER`, the KV cache storage from
+`BRAIN_QWEN35_KV` = `f32` (default) | `bf16` | `int8`) for the Qwen3.8 GGUF
+resident, and `qwen:<weights>[:i8w][:kvf32]` for the Qwen3 paged serving engine.
+The planner charges the KV tier's real bytes, so the batch the sweep can reach
+at a long context, and the out-of-memory boundary it records, move with it.
+
+A long-context decode step on a card other processes share is better priced by
+kernel DEVICE time than by wall clock (the host records ~1250 dispatches per
+step and another tenant's CPU load stretches that): `BRAIN_PROFILE_CONTEXT=131072
+BRAIN_PROFILE_BATCH=4 BRAIN_QWEN35_KV=int8 qwen35_decode_profile` prints the
+per-kernel device ms per step, and `cargo test --release -p brain-model --test
+kv_tier_decode_bench -- --ignored --nocapture` times one attention layer per KV
+tier, interleaved min-of-N, against the triad.
 
 It reports, in one artifact and one table:
 

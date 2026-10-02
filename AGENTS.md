@@ -106,6 +106,10 @@ application", "an orchestrator"). Enforced by `make check/scope`
    the sharding, the int8 decode tape, or `ssm_a` (that one was found and
    fixed - lesson #70); see `.agents/roadmap/qwen35.md` M21 for the
    rule-out table.
+   That resident's 16 GQA layers store their KV cache `f32` (default), `bf16`
+   or per-row `int8` (`BRAIN_QWEN35_KV`, `model::kv_tier`: 4 / 8 / 15 sequences
+   of 128k on one GH200) and decode through a fused split-key attention
+   (`paged_flash_decode_gqa_hd256`) in every tier; see M30 in the same ledger.
 3. **Sparse MoE Transformer** (`crates/toymoe`) - RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
 4. **GLM-5.2 decoder** (`crates/glmdsa`) - `glm_moe_dsa`: **MLA** (low-rank q/kv with

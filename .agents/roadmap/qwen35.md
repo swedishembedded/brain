@@ -2638,6 +2638,98 @@ the arena's allocation-churn benefit above the threshold was independently
 re-measured here (M6.10's claim is taken as given, and the threshold is placed
 so that nothing above it changes).
 
+### M30 (DONE): a compact KV cache (bf16, per-row int8) and a decode attention that reads it at bandwidth - 4 -> 15 sequences of 128k on one GH200
+
+The headline benchmark is Qwen3.8-27B batched decode at 128k context on one
+97 GiB GH200, GPU only. There the 16 GQA layers' KV cache, not the 27 GiB of
+INT8 weights, bounds the batch: `4 kv heads x 256 x 2 (K,V) x 4 B` is 8 KiB per
+token per layer, **16 GiB per sequence in f32**, so 4 sequences fit.
+
+**Design.** `model::kv_tier` is a storage choice, not a model choice: a
+`KvPlane` holds a layer's K or V as `f32`, `bf16` (two per word, the top half of
+an f32) or `int8` (four per word, one f32 scale per (token, kv-head) row), and
+`KvKernels` binds a plane to that tier's append, scores, apply, fused prefill
+and fused decode kernels, looked up by name on the model's own pipeline list.
+The arithmetic stays f32 in every tier; an element is rounded once on write and
+widened on read. Selected by `BRAIN_QWEN35_KV=f32|bf16|int8` (default f32,
+unchanged; an unknown value refuses to serve), charged into the placement at the
+tier's real bytes (`Qwen35Config::layer_decode_state_bytes`,
+`int8_gguf_resident::layer_cost`), refused when a pool cannot be indexed by the
+kernels' `u32` element offsets (2^32 elements = 32 sequences of 128k), and
+reported as `kv_precision` by `brain perf run longctx`. `f16` is not offered:
+the repo's template has no f16 pack on the write side, and bf16 already halves
+the bytes. The existing paged-KV kernels (`paged_kv_append_batched_word`,
+`paged_kv_append_i8_clipped_batched`, the `paged_decode_*` pairs) are reused;
+the fused head_dim-256 prefill gains bf16/int8 variants by template
+(`int8_kv_variant`, `kv_tier_variant`), no second copy of attention.
+
+**Bytes per sequence at 128k (planner, exact):**
+
+| tier | KV per sequence | + GDN state | planner max batch on one GH200 (2 GiB reserve) |
+|---|---:|---:|---:|
+| f32  | 16.00 GiB (17.18 GB) | 0.15 GiB | **4**  |
+| bf16 |  8.00 GiB ( 8.59 GB) | 0.15 GiB | **8**  |
+| int8 |  4.06 GiB ( 4.36 GB) | 0.15 GiB | **15** |
+
+**Accuracy.** Gated three ways, each against a bound that means something:
+* per kernel (`crates/model/tests/kv_tier.rs`, CPU and GPU): what the device
+  stored is within the format's rounding bound (bf16 `2^-8` relative, int8
+  `scale/2`), and every read kernel equals the f32 kernel over the plane's own
+  decoded values (decode scores/apply 1e-4, fused prefill bit-identical here);
+* through the model at random weights (`crates/qwen35/tests/kv_tier.rs`, chunked
+  prefill over two rounds then batched decode of two sequences in one pool):
+  logits rel-L2 vs f32 at the real attention dims bf16 2.1e-4, int8 8.6e-4;
+* on the real checkpoint (`gguf_kv_tier_real.rs`, 1795-token prompt, 24 forced
+  positions): this model is W8A8 and chaotic at the 10% level - the f32 cache's
+  own decode tape vs its chunk tape differ by a mean logits rel-L2 of 0.134 -
+  so the bound is that floor, measured in the same run: bf16 0.152 (1.13x the
+  floor), top-1 24/24; int8 0.159 (1.19x), top-1 23/24.
+
+**The attention was the real problem.** Profiled on the idle card at 128k,
+batch 1, the triad cost 1.8 s per step: `decode_softmax_batched` is ONE thread
+per (sequence, head) walking 131072 keys (721-1438 ms) and
+`paged_decode_apply_batched` one thread per channel doing the same (610-1010 ms)
+- against ~6 ms for the bytes the step reads. A smaller KV cache saves memory
+either way and saves time only once the attention reads it at bandwidth, so
+`paged_flash_decode_gqa_hd256` (+ `_combine`) replaces the triad: a workgroup
+per (sequence, kv head, 1024-key split) attends all 6 (or 8) query heads that
+share the head, so K and V are read once per group, not once per head. Its
+first version was bound at 95% of the L1/TEX pipe with DRAM at 8% (scalar loads,
+one per element in every tier, each key scored by four threads); the second
+loads 16-byte pieces, scores each key once for all heads, and uses explicit
+`fma` (the CUDA build is `--fmad=false`), with `GRP` specialised per model.
+Gated against exact f64 attention at 5e-6 relative for every tier and both
+groups. One GQA layer at 128k, interleaved min-of-31, ms (`kv_tier_decode_bench`):
+
+| batch | triad f32 | fused f32 | fused bf16 | fused int8 |
+|---:|---:|---:|---:|---:|
+| 1 | 63.5 | 0.83 | 0.54 | 0.42 |
+| 4 | 84.8 | 2.99 | 1.75 | 1.32 |
+| 8 | 101.6 | 5.68 | 3.34 | 2.47 |
+
+A full decode step, kernel DEVICE time (`qwen35_decode_profile` with
+`BRAIN_PROFILE_CONTEXT=131072`, best of 3 on a quiet card), ms/step and attention
+share: f32 b1 70.1 (12.3), b2 104.8 (29.6); bf16 b1 69.6 (7.9), b4 127.8 (26.5);
+int8 b1 65.1 (6.1), b4 119.2 (19.9), b8 187.1 (38.2) = 14 / 19 / 14 / 31 / 15 / 34 / 43
+tok/s. Per sequence the attention is 14.8 ms (f32), 6.6 (bf16), 5.0 (int8).
+
+**What is NOT done / not claimed.**
+* The fused kernel is still instruction- and L1-bound, not DRAM-bound (int8 at
+  ~0.8 TB/s of ~4): each key row is read by one thread per key, so 32 lanes touch
+  32 lines per load. A coalesced K phase needs a cross-lane reduction (shared
+  memory + barriers, or subgroup ops this repo does not use) - the next lever.
+* At batch >= 4 the step is dominated by `matmul_i8_gemv_reg` (62 ms at b4, 96 ms
+  at b8, against 32 ms at b1): the weight GEMV does not stay weight-read bound as
+  the batch grows. That is the GEMV work, not this one; with the weights at their
+  b1 cost the 15-sequence int8 step would be ~135 ms.
+* Wall-clock `brain perf run longctx` numbers were taken while other tenants ran
+  on the card and are not comparable across tiers; the device-time and min-of-N
+  tables above are the ones to read. A batch of 12 or more was not run live (the
+  card was shared); the planner answers for 15.
+* The decode fusion is head_dim 256 with a GQA group of 6 or 8 on a device that
+  runs barrier kernels; everything else, and the CPU backend, keeps the triad.
+  wgpu/Vulkan backends were not run (this node has only CUDA).
+
 ## Not yet done
 
 
