@@ -530,7 +530,7 @@ fn qkv_prepare(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaMixerWe
 
 /// The mixer's sigmoid output gate, shared by both forward entry points:
 /// `(gate, ctx_gated) = (sigmoid(q_gate), ctx * gate)`.
-fn gate_ctx(g: &Gpu, ids: &GqaMixerIds, ctx: &DeviceBuffer, q_gate: &DeviceBuffer, n: u32, qd: u32) -> (DeviceBuffer, DeviceBuffer) {
+pub fn gate_ctx(g: &Gpu, ids: &GqaMixerIds, ctx: &DeviceBuffer, q_gate: &DeviceBuffer, n: u32, qd: u32) -> (DeviceBuffer, DeviceBuffer) {
     let gate = g.storage((n * qd) as u64);
     let ctx_gated = g.storage((n * qd) as u64);
     g.submit(

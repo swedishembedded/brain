@@ -256,7 +256,7 @@ fn pooled_decode_matches_per_sequence_decode_and_spares_the_other_rows() {
     let (pool_state, pool_hist) = (g.storage_init("pool_state", &flat(&st0)), g.storage_init("pool_hist", &flat(&hi0)));
     let rows: Vec<f32> = picked.iter().map(|&i| f32::from_bits(i)).collect();
     let rows = g.storage_init("rows", &rows);
-    let pool = GdnPoolRows { state: &pool_state, hist: &pool_hist, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2") };
+    let pool = GdnPoolRows { state: &pool_state, hist: &pool_hist, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: false };
     let (mixed_b, bp_b, ap_b, z_b) = (g.storage_init("mixed", &flat(&mixed)), g.storage_init("bp", &flat(&bp)), g.storage_init("ap", &flat(&ap)), g.storage_init("z", &flat(&zz)));
     let gated = gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape_of(batch), &w, &mixed_b, &bp_b, &ap_b, &z_b, &GdnDecodeState::Pool(pool));
     let got = g.read(&gated, (batch * value_dim) as usize);

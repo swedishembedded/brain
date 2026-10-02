@@ -489,6 +489,10 @@ pub struct GdnPoolRows<'a> {
     /// `pool_rows_gather2.wgsl` and `pool_rows_scatter2.wgsl`.
     pub gather: usize,
     pub scatter: usize,
+    /// Run a one-sequence step as the single native launch
+    /// ([`gdn_mixer_decode_fused`]) where the device is offered it. Off, the
+    /// step is always the nineteen-kernel chain it is gated against.
+    pub fuse: bool,
 }
 
 /// Where [`gdn_mixer_decode_state_fwd`] finds each batch row's state.
@@ -604,6 +608,17 @@ pub fn gdn_mixer_decode_state_fwd(
         }
         GdnDecodeState::Streams(streams) => (streams[0].state.clone(), streams[0].hist.clone()),
     };
+
+    // One sequence over a pool row: the native launch does the whole step on the
+    // staged copy, which is then returned to its row like any other.
+    if let GdnDecodeState::Pool(pool) = batch_state {
+        if pool.fuse && b == 1 {
+            if let Some(gated) = gdn_mixer_decode_fused(g, shape, w, mixed_qkv, bproj, aproj, z, &GdnStream { state: &state, hist: &hist }) {
+                g.submit(&[], &[g.step(pool.scatter, &[&state, &hist, pool.rows, pool.state, pool.hist], &[b, state_len, hist_len], b * (state_len + hist_len))]);
+                return gated;
+            }
+        }
+    }
 
     // 1. Streaming causal conv1d + SiLU (activation after the conv). No
     // NLC/NCHW round trip: `gdn_causal_conv1d_step`'s x/y are `[N, C]`, which
