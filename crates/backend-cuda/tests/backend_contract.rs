@@ -322,6 +322,33 @@ fn a_shared_handle_uses_the_parents_buffers_and_compiled_kernels() {
     assert_eq!(parent.compiled_kernel_count(), 2, "add2 was recompiled by the sibling");
 }
 
+/// Registering one native kernel again - from the same handle or from a
+/// sibling sharing its device - returns the module already loaded instead of
+/// compiling and loading another. Every `Gpu` built over a model that carries
+/// the kernel registers it, and the registry is shared by all siblings for
+/// the life of the device, so a registration that appended each time would
+/// grow the device's loaded-module set once per handle ever built.
+#[test]
+fn registering_a_native_kernel_twice_reuses_the_loaded_module() {
+    use backend_api::{BindKind, NativeSpec};
+    const SRC: &str = "extern \"C\" __global__ void brain_probe_noop(const unsigned int* p, float* out) { }";
+    const SPEC: NativeSpec = NativeSpec::Cuda {
+        src: SRC,
+        entry: "brain_probe_noop",
+        block_dim: 32,
+        bindings: &[BindKind::Uniform, BindKind::StorageReadWrite],
+        shared_bytes: 0,
+    };
+    let Some(parent) = backend() else { return };
+    let Some(sibling) = parent.share() else { panic!("the CUDA backend must be able to share a device") };
+    let first = parent.register_native(&SPEC).expect("a trivial kernel compiles");
+    assert_eq!(parent.native_kernel_count(), 1);
+    assert_eq!(parent.register_native(&SPEC), Some(first), "same handle, same kernel");
+    assert_eq!(parent.native_kernel_count(), 1, "re-registering must not load a second module");
+    assert_eq!(sibling.register_native(&SPEC), Some(first), "a sibling over the same catalogue gets the same id");
+    assert_eq!(parent.native_kernel_count(), 1, "a sibling's registration must reuse the shared module");
+}
+
 /// Per-kernel DEVICE time, from events recorded around each launch rather than
 /// from the host clock. The host measures launch + execute + fence, whose floor
 /// inflates small kernels by more than an order of magnitude, so a profiler

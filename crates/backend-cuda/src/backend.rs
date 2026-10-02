@@ -146,6 +146,22 @@ pub(crate) struct Compiled {
     /// Diagnostic name, so a launch failure says which kernel failed whether
     /// it came from the WGSL catalogue or from a provider's own registry.
     name: String,
+    /// For a native kernel, what it was registered from - so registering the
+    /// same spec again finds this module instead of loading another. `None`
+    /// for a catalogue kernel.
+    native_key: Option<NativeKey>,
+}
+
+/// The identity of a registered native kernel: everything
+/// [`backend_api::NativeSpec::Cuda`] says about it. Two registrations with
+/// equal keys are the same kernel and share one loaded module.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct NativeKey {
+    src: &'static str,
+    entry: &'static str,
+    block_dim: u32,
+    bindings: &'static [backend_api::BindKind],
+    shared_bytes: u32,
 }
 
 /// What a uniform allocation is shared by: the dispatch's **structure**, with
@@ -548,6 +564,12 @@ impl CudaBackend {
         })
     }
 
+    /// How many native kernels are loaded on this device - shared by every
+    /// sibling handle, so it counts distinct kernels, not registrations.
+    pub fn native_kernel_count(&self) -> usize {
+        self.native.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// The first `kind` value that names a [`backend_api::Backend::register_native`]d
     /// kernel rather than a WGSL catalogue entry.
     fn native_base(&self) -> usize {
@@ -614,6 +636,7 @@ impl CudaBackend {
             takes_uniform: gen.uniform_bytes > 0,
             takes_lengths: true,
             name: k.name.clone(),
+            native_key: None,
             _module: module,
         });
         tracing::debug!(kernel = %k.name, block_dim = c.block_dim, "backend-cuda compiled a kernel");
@@ -1210,6 +1233,15 @@ impl backend_api::Backend for CudaBackend {
             );
             return None;
         }
+        let key = NativeKey { src, entry, block_dim: *block_dim, bindings, shared_bytes: *shared_bytes };
+        let id_of = |idx: usize| backend_api::NativeId((self.native_base() + idx) as u32);
+        // The registry is shared by every sibling handle, so a registration
+        // that always appended would load one more module per handle ever
+        // built over a model carrying this kernel, for the life of the device.
+        let existing = |native: &[Arc<Compiled>]| native.iter().position(|c| c.native_key == Some(key));
+        if let Some(idx) = existing(&self.native.lock().unwrap_or_else(|e| e.into_inner())) {
+            return Some(id_of(idx));
+        }
         let module = match self.ctx.compile(src, entry) {
             Ok(m) => m,
             Err(e) => {
@@ -1243,11 +1275,17 @@ impl backend_api::Backend for CudaBackend {
             takes_uniform: bindings.contains(&backend_api::BindKind::Uniform),
             takes_lengths: false,
             name: format!("native:{entry}"),
+            native_key: Some(key),
             _module: module,
         });
         let mut native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+        // Another handle may have registered the same kernel while this one
+        // compiled; keep theirs and let this module unload with `c`.
+        if let Some(idx) = existing(&native) {
+            return Some(id_of(idx));
+        }
         native.push(c);
-        Some(backend_api::NativeId((self.native_base() + native.len() - 1) as u32))
+        Some(id_of(native.len() - 1))
     }
 
     /// Record a dispatch of a [`Self::register_native`]d kernel. `threads` is
