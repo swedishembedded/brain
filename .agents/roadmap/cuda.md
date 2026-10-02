@@ -850,17 +850,105 @@ context and is NOT yet fused: at 12 positions a token is 12.4 ms, at 1500 it is
 (one thread per key in the scores kernel) rather than the split-key flash decode
 the WGSL catalogue has.
 
+### Prefill on tensor cores - Qwen3.8-27B INT8, GH200 (cc 9.0)
+
+Cold prefill of the resident INT8 GGUF was 155 tok/s at 512 tokens. The
+per-kernel profile (`qwen35_gguf_prefill_profile`, device-timed) said 85% of it
+was `matmul_i8_dyn`, a DP4A GEMM at ~10 TOPS on a part with int8 tensor cores,
+and that the next three costs were the Gated DeltaNet chunk math
+(`gdn_ut_step` x 63 launches per layer, the one-thread-per-output `bmm`) and the
+scalar fp32 flash-prefill. Each was replaced behind a capability gate (CUDA
+compute capability >= 8.0, `BRAIN_NO_PROVIDER=cuda` / `BRAIN_NO_GDN_FAST=1` /
+`BRAIN_CUDA_BLOCK_CACHE_MB=0` switch them off), and the portable path stays the
+fallback and the reference every new path is held to.
+
+**Why not cuBLASLt.** The weights carry one scale per 32 elements of K (GGUF
+Q8_0); a library int8 GEMM scales per output row or column. The scale can only
+be applied where the int32 sum ends, which is every `k32` - one MMA. That is
+not expressible as a library call, and requantising to per-row scales would
+change what the model computes. So the GEMM is native (`matmul_i8_mma`,
+`mma.sync.m16n8k32`): every MMA starts from an accumulator seeded with the bit
+pattern of 1.5 * 2^23, so the integer result comes back as the float
+`1.5 * 2^23 + i` (exact, `|i| <= 32*127*128`); one FADD removes the bias and one
+FFMA applies the group scale into an fp32 running sum in ascending group order.
+No int->float conversion, no library, no handle to create or leak, and it runs
+inside the same stream, graphs and fences as every other step.
+
+What changed, each gated by its own test (all skip without a CUDA device):
+
+| piece | file | held to |
+|---|---|---|
+| int8 GEMM on int8 MMA, 64x64 tile, 4-stage `cp.async`, registry entry keyed by weight tier, routed through `CudaProvider` above the decode regime for group-32 scales and `K % 64 == 0` | `kernels-cuda/cu/matmul_i8_mma.cu`, `gpu-core/tests/cuda_provider_matmul_i8.rs` | the portable DP4A kernel on the real 27B shapes to 2e-5 of the output RMS (measured 2.4e-6, fp32 rounding of the group fold) and an f64 oracle |
+| causal paged flash-prefill, `head_dim` 256, fp16 MMA, fp32 pool and accumulators | `kernels-cuda/cu/flash_prefill_f16_hd256.cu`, `gpu-core/tests/cuda_flash_prefill.rs` | the fp32 portable kernel and an f64 oracle to 1.2e-2 of the output RMS (measured worst element 5.8e-3: fp16 rounding of Q, K, V, P) |
+| UT transform in one workgroup-per-matrix dispatch | `kernels/wgsl/gdn_ut_fwd.wgsl`, `model/tests/gdn_ut_fwd.rs` | the `gdn_ut_step` loop, bit for bit |
+| 64x64-tile register-blocked batched matmul for `bmm`/`bmm_acc` | `kernels/wgsl/bmm_tiled.wgsl`, `model/tests/bmm_tiled.rs` | `bmm`/`bmm_acc`, bit for bit |
+| the whole across-chunk recurrence in one persistent launch | `kernels-cuda/cu/gdn_chunk_loop_f32.cu`, `model/tests/gdn_chunk_fwd_fast.rs` | the nine-dispatch-per-chunk walk, bit for bit, at every chunk length 64..1 |
+| a bounded block cache so a freed block is reissued instead of waiting in `cuMemFree` | `backend-cuda/src/exec.rs`, `backend-cuda/tests/block_cache.rs`, `qwen35/tests/cuda_leaks.rs` | counters back to baseline exactly (opt-in per handle; see lesson 207) |
+
+`gpu_core::provider::cuda` carries the seam: the GEMM is a provider request;
+flash-prefill and the chunk recurrence are drop-ins at their one call site
+(`model::block::gqa_chunk_step`, `model::gdn::gdn_chunk_fwd`) through
+`paged_flash_prefill_step` / `gdn_chunk_loop_step`, which answer `None` - and
+the caller dispatches the portable kernel - for any decline. Kernels carry
+their own binding list; `Gpu::native_kernel` offers a native kernel to the
+backend once per handle.
+
+A tensor-core stack also runs 1024-row prefill rounds instead of 256: what a
+round pays per dispatch is a real fraction of it once the arithmetic is cheap
+(table at `TENSOR_CORE_PREFILL_TOKENS`).
+
+**Measured** (GH200, one card shared with other jobs, so the figures are the
+fastest of repeated runs taken while the card was idle; `brain perf run longctx
+--target qwen35-gguf --ladder 1 --steps 1`, "before" is the same binary with the
+paths above switched off):
+
+| prefill tokens | before tok/s | after tok/s |
+|---|---|---|
+| 512 | 149 | 1789 |
+| 4096 | 145 | 1878 |
+| 16384 | 130 | 1606 |
+
+Per-kernel table of one 256-row round at depth 256 (device time, ms):
+`matmul_i8_dyn` 1257 -> `matmul_i8_mma` 60.5; `bmm` + `bmm_acc` 91 -> `bmm_tiled`
+7.2 + the recurrence kernel 11.1; `gdn_ut_step` x 3024 launches 42 -> `gdn_ut_fwd`
+3.6; `paged_flash_prefill_hd256` 85 (2.1 TFLOPS) -> 4.5 (55 TFLOPS at 2k keys). A
+round is device-bound again: 188 ms wall for 150 ms of kernels, the rest being
+the ~7,800 stream operations (a launch and a parameter upload per step).
+
+**Not done, in the order it would pay:**
+
+- The per-step parameter upload. Every step is a launch preceded by a
+  `cuMemcpyHtoDAsync` of its few uniform words, and the stream pays a bubble
+  between the two (median 4.8 us over ~7,800 operations a round, ~40 ms).
+  Passing the uniform as a `__grid_constant__` kernel argument would remove
+  the copy, the uniform allocation and the per-step bookkeeping, but it changes
+  the generated kernels' signature and the graph path's parameter update.
+- The int8 GEMM is at ~225 TOPS and issue-bound on the group fold (eight ALU
+  instructions per MMA); a wider warp tile and two k-tiles per barrier are the
+  untried levers. Per-row weight scales (not what GGUF Q8_0 carries) would let a
+  library GEMM run at several times that.
+- The ~25 small elementwise kernels (layout permutes, row scales, norms, the
+  quantise pair) are ~75 ms of a round, each bound by its own launch; fusing
+  `max_abs_rows` + `quant_pack` and the GDN glue is where that goes.
+- Flash-prefill is 55 TFLOPS, hd256 only, fp32 pool. An fp16 KV shadow would
+  halve its staging and let it use `cp.async`.
+- `head_dim != 256`, `dk/dv != 128`, group-16 (Q6_K) scales and chunks above 64
+  decline to the portable path by construction.
+
 ## Not delivered - what is still missing
 
 **One model's forward, one tuned kernel. Backward, breadth and every other
 tuned kernel are deferred.**
 
-- **The tuned tier is ONE operator at ONE dtype.** Plain f32 `Op::MatMul`,
-  forward. Every quantized weight tier (`I8`/`Q4`/K-quant), both backward
-  GEMMs and every other operator are still answered by the generated tier -
-  correctly, and visibly so in the dispatch record.
-- **No DP4A / int8 tuned kernel.** The milestone was named for one. It was not
-  written, and the reason is worth stating rather than leaving as an omission:
+- **The tuned tier is a short list.** Plain f32 `Op::MatMul`, the int8
+  group-scaled GEMM, the fp16 flash-prefill and the Gated DeltaNet chunk
+  recurrence (see "Prefill on tensor cores" above), all forward. The other
+  quantized weight tiers (`Q4`/K-quant), both backward GEMMs and every other
+  operator are still answered by the generated tier - correctly, and visibly so
+  in the dispatch record.
+- **No DP4A int8 kernel** (superseded for cc >= 8.0 by the int8-MMA one above;
+  below that capability the portable DP4A WGSL kernel is still what runs). The
+  original milestone was not written, and the reason is worth stating rather than leaving as an omission:
   the gate this tier had to clear is agreement with the fp32 WGSL reference to
   1e-6, which an int8 path does not answer at all, and the quantized operand
   bundle (five operands, two scale planes, a per-dtype `k` convention that

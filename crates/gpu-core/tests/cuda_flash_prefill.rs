@@ -123,10 +123,10 @@ impl Problem {
         let w: Vec<f64> = scores.iter().map(|s| (s - mx).exp()).collect();
         let z: f64 = w.iter().sum();
         let mut out = vec![0f64; HD as usize];
-        for j in 0..len {
+        for (j, wj) in w.iter().enumerate() {
             let vr = &self.v_pool[self.row_of[j] as usize * kv_row + hkv * HD as usize..][..HD as usize];
-            for d in 0..HD as usize {
-                out[d] += w[j] / z * vr[d] as f64;
+            for (o, v) in out.iter_mut().zip(vr) {
+                *o += wj / z * *v as f64;
             }
         }
         out

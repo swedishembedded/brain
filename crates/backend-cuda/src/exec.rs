@@ -1187,6 +1187,12 @@ impl BlockCache {
     }
 }
 
+// The raw context handle is only used under `cuCtxSetCurrent`, and everything else
+// is behind a `Mutex` or an atomic - the same reasoning as `Context` and
+// `DeviceMem`, whose `Arc`s this is shared through.
+unsafe impl Send for BlockCache {}
+unsafe impl Sync for BlockCache {}
+
 impl Drop for BlockCache {
     fn drop(&mut self) {
         self.trim();

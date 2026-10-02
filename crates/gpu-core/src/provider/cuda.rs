@@ -185,7 +185,7 @@ impl CudaProvider {
                     (Role::Out, DType::F32),
                 ]) && req.group == I8_MMA_GROUP
                     && req.shape.m > select::DECODE_REGIME_MAX_ROWS
-                    && req.shape.k % I8_MMA_K_TILE == 0
+                    && req.shape.k.is_multiple_of(I8_MMA_K_TILE)
                     && req.attrs == [req.shape.m, req.shape.k / 4, req.shape.n] =>
             {
                 Some(Dtype::I8)
