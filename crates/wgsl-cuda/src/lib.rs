@@ -1235,7 +1235,7 @@ impl<'a> Gen<'a> {
                 Eval::Place(Place::ArrayBase(_, _, nel))
                 | Eval::Place(Place::VecArrayBase { nel, .. })
                 | Eval::Place(Place::MemArray { nel, .. }) => {
-                    Ok(Eval::Value(format!("(unsigned int)({nel})"), Ty::U32))
+                    Ok(Eval::Value(format!("__brain_len32({nel})"), Ty::U32))
                 }
                 _ => Err("arrayLength of something that is not an array".into()),
             },
@@ -1858,6 +1858,12 @@ const PREAMBLE: &str = r#"// Generated from WGSL by brain's wgsl-cuda (the T0 ti
 __device__ __forceinline__ size_t __brain_clamp(size_t i, size_t n) {
   return i < n ? i : (n ? n - 1 : 0);
 }
+// `arrayLength` returns a u32. A binding past 2^32 elements (reachable here
+// because every address is computed in `size_t`) saturates rather than wrapping
+// to a small, wrong length.
+__device__ __forceinline__ unsigned int __brain_len32(size_t n) {
+  return n > 0xffffffffull ? 0xffffffffu : (unsigned int)n;
+}
 __device__ __forceinline__ unsigned int __brain_uu32(const unsigned int* p, size_t off) {
   return p[off >> 2u];
 }
@@ -2097,7 +2103,10 @@ fn main(@builtin(local_invocation_id) li: vec3<u32>) {
         // element count is its word count over four.
         assert!(k.source.contains("float* __b1, float* __b3, unsigned long long __n1, unsigned long long __n3)"), "{}", k.source);
         assert!(k.source.contains("__nel3 = __n3 / 4u"), "{}", k.source);
-        assert!(k.source.contains("(unsigned int)(__nel1)"), "{}", k.source);
+        // `arrayLength` is a u32 in WGSL; an array longer than that saturates
+        // instead of reporting its length modulo 2^32.
+        assert!(k.source.contains("__brain_len32(__nel1)"), "{}", k.source);
+        assert!(!k.source.contains("(unsigned int)(__nel1)"), "{}", k.source);
     }
 }
 

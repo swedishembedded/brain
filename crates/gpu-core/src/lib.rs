@@ -23,8 +23,8 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, NumericSupport, Step,
-    StepMeta,
+    f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemoryLimits, NumericSupport,
+    Step, StepMeta,
 };
 pub use backend_api::select;
 
@@ -1144,9 +1144,28 @@ mod native_facade {
         /// not silently.
         pub fn try_new_cuda(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
             let kernels = &Self::expanded(kernels, false);
-            let inner = backend_cuda::CudaBackend::try_new(kernels)?;
+            let (identity, mem_device) = Self::cuda_target(crate::devices::selected_device());
+            let inner = match &identity {
+                Some(id) => backend_cuda::CudaBackend::try_new_on(kernels, id)?,
+                None => backend_cuda::CudaBackend::try_new(kernels)?,
+            };
             record_caps(&inner);
-            Ok(Gpu::wrap(Box::new(inner), Self::kernel_names(kernels)))
+            Ok(Gpu::wrap_on(Box::new(inner), Self::kernel_names(kernels), mem_device))
+        }
+
+        /// Which physical card a CUDA handle opens for the ambient selection, and
+        /// which memory pool its allocations are charged to.
+        ///
+        /// The two must name the same card: a handle opened on CUDA ordinal 0 and
+        /// charged to the ambient `gpu1` spent one card's memory against the
+        /// other card's ceiling. With a registry card selected the handle opens
+        /// THAT card by identity and is charged to its canonical index; with none
+        /// (no enumerated card) it opens ordinal 0 and is charged to `gpu0`.
+        pub(crate) fn cuda_target(selected: Option<&crate::devices::DeviceId>) -> (Option<backend_api::GpuIdentity>, memauth::Device) {
+            match selected {
+                Some(d) => (Some(d.identity.clone()), memauth::Device::Gpu(d.index)),
+                None => (None, memauth::Device::Gpu(0)),
+            }
         }
 
         // ---- allocation, and the process-wide ceiling it is charged to -----
@@ -1459,6 +1478,13 @@ mod native_facade {
         /// pick attention backends per-card instead of assuming a fixed limit.
         pub fn max_storage_binding_bytes(&self) -> u64 {
             self.inner.max_storage_binding_bytes()
+        }
+        /// The device's memory limits as four separate answers - allocation,
+        /// binding, workspace and working set. See `backend_api::MemoryLimits`
+        /// for which consumer reads which; tile and slab budgets read the
+        /// working set, never the binding ceiling.
+        pub fn memory_limits(&self) -> backend_api::MemoryLimits {
+            self.inner.memory_limits()
         }
         /// Largest single ALLOCATION this device allows, in bytes - see
         /// `backend_api::Backend::max_buffer_bytes` for why this is a separate
@@ -2254,6 +2280,31 @@ fn assert_no_output_alias(bufs: &[&DeviceBuffer]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CUDA handle opens, and is charged against, the card the ambient
+    /// selection resolves to - not ordinal 0 under the selected card's pool.
+    #[test]
+    fn a_cuda_handle_is_opened_and_charged_on_the_selected_card() {
+        let second = crate::devices::DeviceId {
+            index: 1,
+            identity: backend_api::GpuIdentity {
+                name: "second".into(),
+                vendor_id: 0x10de,
+                device_id: 0,
+                uuid: Some([7; 16]),
+                pci_bus: None,
+                ordinal: 1,
+                vram_bytes: 0,
+                class: DeviceClass::DiscreteGpu,
+            },
+        };
+        let (id, pool) = Gpu::cuda_target(Some(&second));
+        assert_eq!(id.as_ref(), Some(&second.identity), "the selected card is opened by identity");
+        assert_eq!(pool, memauth::Device::Gpu(1), "and charged to its own canonical index");
+        let (id, pool) = Gpu::cuda_target(None);
+        assert!(id.is_none(), "with no enumerated card the first CUDA ordinal is opened");
+        assert_eq!(pool, memauth::Device::Gpu(0), "and charged to gpu0, the card that ordinal is");
+    }
 
     #[test]
     fn f_packs_float_bits() {

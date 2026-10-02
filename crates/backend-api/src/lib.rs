@@ -47,6 +47,11 @@ pub mod impl_source;
 /// these instead of inventing (or omitting) its own.
 pub mod hardware;
 
+/// A device's memory limits as separate answers: allocation, binding,
+/// workspace and working set.
+pub mod memory;
+pub use memory::MemoryLimits;
+
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross
 // threads), but NOT on wasm: WebGPU's `wgpu::Buffer`/`Device` are `Rc`-based and
@@ -1355,6 +1360,15 @@ pub trait Backend: Send + Sync {
     /// host backend, whose only limit is the allocator's.
     fn max_buffer_bytes(&self) -> u64 {
         u64::MAX
+    }
+
+    /// The device's memory limits as four separate answers - see
+    /// [`MemoryLimits`]. The default derives all four from
+    /// [`Self::max_storage_binding_bytes`] and [`Self::max_buffer_bytes`], which
+    /// is what every backend that does not tell them apart meant by them, so a
+    /// backend only overrides this when it can answer the questions separately.
+    fn memory_limits(&self) -> MemoryLimits {
+        MemoryLimits::uniform(self.max_storage_binding_bytes(), self.max_buffer_bytes())
     }
 
     /// Bytes of device memory whose last host handle has been DROPPED but

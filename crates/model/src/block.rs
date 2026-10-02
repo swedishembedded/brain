@@ -3108,9 +3108,18 @@ pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
     {
         return w;
     }
-    // Queried, never assumed - and never smaller than the portable floor, so a
-    // backend that under-reports cannot make the tiling worse than it was.
-    let bytes = gpu.max_storage_binding_bytes() / TILE_BUDGET_FRACTION;
+    tile_budget_words_from(&gpu.memory_limits())
+}
+
+/// The tile budget a device with these limits supports: its **working set**,
+/// not its binding ceiling. The binding is the most one dispatch may name; the
+/// working set is how much of that a tiling pipeline should aim for, and the two
+/// differ on a card with far more memory than the portable binding figure.
+///
+/// Queried, never assumed - and never smaller than the portable floor, so a
+/// backend that under-reports cannot make the tiling worse than it was.
+pub fn tile_budget_words_from(limits: &gpu_core::MemoryLimits) -> u64 {
+    let bytes = limits.working_set_bytes / TILE_BUDGET_FRACTION;
     (bytes / 4).max(TILE_BUDGET_WORDS)
 }
 
@@ -3718,7 +3727,7 @@ mod kv_cache_tests {
 mod tests {
     use super::{
         flash_gate, flash_spans_supported, flash_spans_table, flash_spans_workgroups, gemm_tile,
-        gemm_variant, pick_gemm, tiles_with_budget, GemmTile, GemmVariants, FLASH_SPANS_BR,
+        gemm_variant, pick_gemm, tile_budget_words_from, tiles_with_budget, GemmTile, GemmVariants, FLASH_SPANS_BR,
         TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS,
     };
     use gpu_core::{DeviceCaps, DeviceClass};
@@ -3932,6 +3941,25 @@ mod tests {
             next += cnt;
         }
         assert_eq!(next as u64, vocab);
+    }
+
+    /// The budget follows the working set, not the binding: a device whose
+    /// binding is wide but whose working set is modest must not size tiles from
+    /// the binding, and a device whose working set is wide gets the larger tile.
+    #[test]
+    fn the_tile_budget_is_derived_from_the_working_set() {
+        let gib = 1u64 << 30;
+        let l = gpu_core::MemoryLimits {
+            max_allocation_bytes: 80 * gib,
+            max_binding_bytes: 4 * gib - 1,
+            workspace_bytes: gib,
+            working_set_bytes: 2 * gib,
+        };
+        assert_eq!(tile_budget_words_from(&l), (2 * gib / TILE_BUDGET_FRACTION) / 4);
+        let wide_binding = gpu_core::MemoryLimits { max_binding_bytes: 16 * gib, ..l };
+        assert_eq!(tile_budget_words_from(&wide_binding), tile_budget_words_from(&l), "the binding ceiling must not move the tile budget");
+        let uniform = gpu_core::MemoryLimits::uniform(2047 * 1024 * 1024, 8 * gib);
+        assert_eq!(tile_budget_words_from(&uniform), (2047 * 1024 * 1024 / TILE_BUDGET_FRACTION) / 4, "a backend with one number keeps its pre-split budget");
     }
 
     /// A small budget must still force the tiled path, which is what

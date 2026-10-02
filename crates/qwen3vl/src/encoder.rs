@@ -160,7 +160,7 @@ fn attn_chunk(g: &Gpu, sh: &VitShape, n: u32) -> u32 {
     if model::vit::flash_ids(g).is_some() {
         return attn_chunk_for(sh, n, 0).min(n);
     }
-    let budget = ATTN_SLAB_BUDGET.min(g.max_storage_binding_bytes());
+    let budget = ATTN_SLAB_BUDGET.min(g.memory_limits().working_set_bytes);
     attn_chunk_for(sh, n, budget).min(n)
 }
 

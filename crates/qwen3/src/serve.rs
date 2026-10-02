@@ -3009,14 +3009,14 @@ impl Engine {
 
     /// Build the swap staging buffers on first use. Sized to
     /// [`KV_SWAP_STAGING_BYTES`], clamped to the pool's own block count (never
-    /// stage more blocks than can exist) and to what one storage binding on
-    /// this device allows.
+    /// stage more blocks than can exist) and to the scratch workspace this
+    /// device allows.
     fn ensure_swap_bufs(&mut self) {
         if self.swap.is_some() {
             return;
         }
         let per_block = self.kv_block_words as u64 * 4;
-        let cap_bytes = KV_SWAP_STAGING_BYTES.min(self.gpu.max_storage_binding_bytes());
+        let cap_bytes = KV_SWAP_STAGING_BYTES.min(self.gpu.memory_limits().workspace_bytes);
         let mut blocks = (cap_bytes / per_block).clamp(1, self.alloc.num_blocks() as u64) as u32;
         // Halve on a memory-ceiling refusal rather than panicking: this
         // allocation happens the first time a sequence is preempted, which is

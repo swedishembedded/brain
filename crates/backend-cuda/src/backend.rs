@@ -1242,11 +1242,47 @@ fn bytemuck_words(params: &[u32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(params.as_ptr() as *const u8, params.len() * 4) }
 }
 
+/// The most a single binding can name, in bytes: what a `u32` element index
+/// reaches over one-byte elements. Every generated kernel indexes by `u32`
+/// (WGSL has no wider index), and the generator does the address arithmetic in
+/// `size_t`, so a binding up to this size is addressed without a wrap whatever
+/// the element type. A buffer LARGER than this is still allocatable and is
+/// reached through sub-range bindings (`step_sliced`).
+const BINDABLE_BYTES_MAX: u64 = u32::MAX as u64;
+
+/// The floor of the working set: the portable binding figure, which is what
+/// tile budgets were sized against before the limits were split. A card is never
+/// given a smaller slab than this.
+const WORKING_SET_FLOOR_BYTES: u64 = 2 * 1024 * 1024 * 1024 - 1;
+
+/// This device's memory limits, from its total memory and the allocation
+/// ceiling `free_bytes` (the card's free memory when asked).
+///
+/// * **Allocation** is the free memory: an allocation larger than that fails.
+/// * **Binding** is `min(total, u32::MAX)`: see [`BINDABLE_BYTES_MAX`].
+/// * **Working set** is a sixteenth of the card, between the portable floor and
+///   the binding. A card of 32 GiB or less keeps the slab it always had; a larger
+///   one tiles with a larger slab (the Qwen3-8B vocabulary head, 2.49 GB at fp32,
+///   becomes one tile instead of two). It is NOT the binding: a tile is one
+///   binding, but a pipeline also holds its logits, activations and the model.
+/// * **Workspace** is a sixty-fourth of the card, between 64 MiB and 1 GiB, and
+///   never above the working set.
+pub(crate) fn memory_limits_for(total_bytes: u64, free_bytes: u64) -> backend_api::MemoryLimits {
+    let binding = total_bytes.min(BINDABLE_BYTES_MAX);
+    let working_set = (total_bytes / 16).clamp(WORKING_SET_FLOOR_BYTES, BINDABLE_BYTES_MAX).min(binding);
+    let workspace = (total_bytes / 64).clamp(64 << 20, 1 << 30).min(working_set);
+    backend_api::MemoryLimits {
+        max_allocation_bytes: free_bytes,
+        max_binding_bytes: binding,
+        workspace_bytes: workspace,
+        working_set_bytes: working_set,
+    }
+}
+
 /// Build this device's capability report from what the driver answered.
 ///
-/// Nothing here is a constant about a card. The one judgement call is
-/// [`DeviceCaps::max_storage_binding_bytes`], which is deliberately NOT
-/// reported - see [`CudaBackend::max_storage_binding_bytes`].
+/// Nothing here is a constant about a card. Memory limits are not part of this
+/// report; see [`memory_limits_for`].
 fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
     let i = ctx.device_info();
     let mut arch = ArchDesc::default();
@@ -1740,29 +1776,25 @@ impl backend_api::Backend for CudaBackend {
         "cuda"
     }
 
-    /// Deliberately the portable ~2 GiB, NOT this card's real VRAM.
-    ///
-    /// This number is read as a *tile-budget divisor* by chunked model code
-    /// (`model::block::tile_budget_words_for` and its siblings in `wan` and
-    /// `s3dit`), which sizes a working slab as a fraction of it. Answering
-    /// honestly with a large card's memory therefore does not unlock a bigger
-    /// binding - it makes those pipelines size slabs the device cannot
-    /// allocate. The honest ceiling this backend CAN report without that
-    /// consequence is [`Self::max_buffer_bytes`], which is a different
-    /// question (the largest single allocation) and has no divisor semantics
-    /// attached to it.
+    /// The bindable range, from [`memory_limits_for`] - see there for why it is
+    /// the u32 byte range and not this card's memory, and why tile budgets do
+    /// not read it.
     fn max_storage_binding_bytes(&self) -> u64 {
-        2 * 1024 * 1024 * 1024 - 1
+        memory_limits_for(self.ctx.device_info().total_mem, 0).max_binding_bytes
     }
 
-    /// The largest single allocation, from `cuMemGetInfo` at construction.
+    /// The largest single allocation, from `cuMemGetInfo`.
     ///
     /// Free memory rather than total: an allocation larger than what is free
-    /// fails, whoever else is resident. It is a snapshot - the trait documents
-    /// `caps`-adjacent reads as cached, and re-querying per call would make a
-    /// sharding decision depend on another process's timing.
+    /// fails, whoever else is resident. It is read live, so it moves with other
+    /// processes; a sharding decision that needs a stable figure takes
+    /// [`CudaDevice::total_mem`](crate::driver::CudaDevice) instead.
     fn max_buffer_bytes(&self) -> u64 {
         self.ctx.mem_info().map(|(free, _)| free).unwrap_or(0)
+    }
+
+    fn memory_limits(&self) -> backend_api::MemoryLimits {
+        memory_limits_for(self.ctx.device_info().total_mem, self.max_buffer_bytes())
     }
 
     /// A second handle onto this device: the same primary context, so the same
@@ -1816,23 +1848,52 @@ impl backend_api::Backend for CudaBackend {
 mod tests {
     use super::*;
 
-    /// The tile-budget divisor rule, pinned where it is easy to "fix" by
-    /// reporting the real number: `max_storage_binding_bytes` must stay the
-    /// portable ceiling, and it must be strictly below `max_buffer_bytes` on
-    /// any device with more than 2 GiB free, because they answer different
-    /// questions. Skipped where there is no device.
+    const GIB: u64 = 1 << 30;
+
+    /// The four limits answer four questions, so on a card with real memory they
+    /// are four different numbers - and the slab a tiling pipeline aims for stays
+    /// at the portable floor on a card of up to 32 GiB, growing only on a larger
+    /// one.
     #[test]
-    fn the_binding_ceiling_is_the_portable_one_and_not_the_card_s_memory() {
+    fn the_limits_are_separate_and_a_mid_size_card_keeps_its_slab() {
+        let p40_class = memory_limits_for(24 * GIB, 23 * GIB);
+        assert_eq!(p40_class.max_allocation_bytes, 23 * GIB);
+        assert_eq!(p40_class.max_binding_bytes, u32::MAX as u64);
+        assert_eq!(p40_class.working_set_bytes, 2 * GIB - 1, "a card of 32 GiB or less keeps the portable slab");
+        assert!(p40_class.is_consistent());
+
+        let big = memory_limits_for(96 * GIB, 90 * GIB);
+        assert_eq!(big.max_allocation_bytes, 90 * GIB);
+        assert_eq!(big.working_set_bytes, u32::MAX as u64, "6 GiB of slab is capped at what one binding names");
+        assert_eq!(big.workspace_bytes, GIB, "a sixty-fourth of 96 GiB is 1.5 GiB, capped at 1 GiB");
+        assert!(big.working_set_bytes > p40_class.working_set_bytes);
+        assert!(big.is_consistent());
+    }
+
+    /// A card smaller than the portable binding must not be told it can bind more
+    /// memory than it has.
+    #[test]
+    fn a_tiny_card_is_not_promised_more_than_it_has() {
+        let tiny = memory_limits_for(GIB, GIB / 2);
+        assert_eq!(tiny.max_binding_bytes, GIB);
+        assert_eq!(tiny.working_set_bytes, GIB);
+        assert!(tiny.workspace_bytes <= tiny.working_set_bytes);
+        assert!(tiny.is_consistent());
+    }
+
+    /// The live backend reports what the pure function does for ITS driver's
+    /// totals, and the allocation ceiling is a free-memory reading of the device.
+    /// Skipped where there is no device.
+    #[test]
+    fn the_backend_reports_the_split_limits() {
         use backend_api::Backend as _;
         let Ok(b) = CudaBackend::try_new(&[]) else { return };
-        assert_eq!(b.max_storage_binding_bytes(), 2 * 1024 * 1024 * 1024 - 1);
-        let (free, total) = b.ctx.mem_info().expect("cuMemGetInfo");
-        assert!(total > 0, "a device reporting no memory at all");
-        // Free memory moves between the two queries whenever anything else on
-        // the card allocates (another test, another process), so equality
-        // would be a race; what the number must be is a free-memory reading.
-        let _ = free;
-        assert!(b.max_buffer_bytes() > 0 && b.max_buffer_bytes() <= total, "max_buffer_bytes must be a free-memory reading of this device");
+        let (_, total) = b.ctx.mem_info().expect("cuMemGetInfo");
+        let l = b.memory_limits();
+        let want = memory_limits_for(total, l.max_allocation_bytes);
+        assert_eq!(l, want);
+        assert_eq!(b.max_storage_binding_bytes(), l.max_binding_bytes);
+        assert!(l.max_allocation_bytes > 0 && l.max_allocation_bytes <= total, "max_allocation_bytes must be a free-memory reading of this device");
     }
 
     /// While one handle is capturing a graph, another handle on the same card

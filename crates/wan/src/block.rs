@@ -194,14 +194,14 @@ pub fn attn_mode(gpu: &Gpu) -> AttnMode {
 }
 
 /// Query rows per materialised score chunk, so `[heads, chunk, keys]` stays
-/// inside a fraction of this device's per-binding ceiling. Never below 64 (a
+/// inside a fraction of this device's working set. Never below 64 (a
 /// smaller chunk buys nothing and multiplies dispatches) and never above the
 /// query count.
 pub fn score_chunk(gpu: &Gpu, heads: u32, keys: u32, queries: u32) -> u32 {
     // Bytes on both sides: a slab of `chunk` query rows costs
     // `heads · keys · 4` bytes per row, and two of them (scores and probs) must
-    // fit alongside everything else, hence half the ceiling.
-    let budget = gpu.max_storage_binding_bytes() / 2;
+    // fit alongside everything else, hence half the working set.
+    let budget = gpu.memory_limits().working_set_bytes / 2;
     let per_row = (heads as u64) * (keys as u64) * 4;
     let c = (budget / per_row.max(1)).max(64).min(u32::MAX as u64) as u32;
     c.min(queries).max(1)

@@ -141,6 +141,25 @@ Floating-point contraction is switched off in the generated code, so a kernel
 rounds the way the reference rounds; results agree with the CPU to
 floating-point reduction-order differences, and many are bit-identical.
 
+## Memory limits
+
+A CUDA device reports four separate memory limits (`Gpu::memory_limits()`), because
+one number cannot answer all four questions:
+
+| limit | what it answers | CUDA value |
+|---|---|---|
+| allocation | largest single allocation | the device's free memory when asked |
+| binding | largest range one dispatch binds | `min(device memory, 4 GiB - 1)`, the range a 32-bit index reaches |
+| workspace | largest scratch or staging block a pass takes | a sixty-fourth of the device, 64 MiB to 1 GiB |
+| working set | slab a tiling pipeline aims for; tile budgets derive from it | a sixteenth of the device, from 2 GiB - 1 up to the binding |
+
+A device of 32 GiB or less keeps the slab it always had; a larger one tiles with a
+larger slab, so a vocabulary head that needed two tiles fits in one. Buffers larger
+than the binding are allocatable and are reached through sub-range bindings; the
+generator does its address arithmetic in 64 bits, and a test addresses a 5 GiB
+buffer past the 4 GiB mark. The Vulkan and wgpu backends keep the limits they
+report.
+
 ## Memory is returned when a model is dropped
 
 Everything the CUDA backend takes from the driver - device allocations, page-locked

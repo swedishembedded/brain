@@ -311,17 +311,21 @@ Three questions the driver is asked that it was not asked before
 warp size) plus `cuMemsetD8` and `cuMemGetInfo`. Nothing about a card is
 written down.
 
-### Caps - two different ceilings, deliberately answered differently
+### Memory limits - four questions, four answers
 
-`max_storage_binding_bytes` stays the portable `2 GiB - 1`. It is read as a
-tile-budget **divisor** (`model::block::tile_budget_words_for`, and the same
-shape in `wan` and `s3dit`), so reporting a large card's real memory there does
-not unlock a bigger binding - it makes those pipelines size slabs the device
-cannot allocate.
-
-`max_buffer_bytes` answers the other question (the largest single allocation)
-and has no divisor semantics attached, so it reports `cuMemGetInfo`'s free
-figure honestly.
+One `max_storage_binding_bytes` used to answer every memory question, and
+because chunked pipelines read it as a tile-budget divisor, CUDA reported the
+portable `2 GiB - 1` so they would not size slabs the device could not bind. The
+limits are now separate (`backend_api::MemoryLimits`, `Backend::memory_limits`,
+`Gpu::memory_limits`): the largest allocation (`cuMemGetInfo` free memory), the
+bindable range (`min(total, u32::MAX)`: what a 32-bit element index reaches
+whatever the element type; larger buffers are reached by sub-range bindings), the
+workspace (a sixty-fourth of the card, 64 MiB to 1 GiB) and the working set (a
+sixteenth of the card, from the old `2 GiB - 1` up to the binding), which is what
+`model::block::tile_budget_words_for` and its siblings read. A card of 32 GiB or
+less keeps its old slab. `max_storage_binding_bytes` stays as the binding.
+Backends that do not tell the limits apart (wgpu, Vulkan) report their one
+number in every field.
 
 Everything else in `DeviceCaps`/`ArchDesc` is a query: SM count, max threads
 per block, shared memory per block, warp size, integrated-or-discrete.
@@ -1168,10 +1172,10 @@ again at the point it is used.
   metadata cross-checks are WGSL-text-specific with zero purchase on CUDA C++.
   A sibling crate with its own registry and its own gate is cheaper than one
   script hosting two disjoint validators.
-- **Caps must NOT report the honest numbers.** `max_storage_binding_bytes` is
-  used as a tile-budget *divisor*, so reporting the card's real VRAM there
-  makes chunked pipelines size slabs they cannot allocate. Keep `2 GiB - 1`,
-  and expose a `cuMemGetInfo`-derived `max_buffer_bytes` separately.
+- **The binding is not the tile budget.** Reporting the card's real VRAM as the
+  one binding figure made chunked pipelines size slabs they cannot bind, and
+  reporting `2 GiB - 1` starved them on a large card. Superseded by the split
+  limits (see "Memory limits"): tile budgets read the working set.
 - **Tier policy is a `const` + ratchet test, not a `.toml`.** A tier table is a
   status ledger; those live in `.agents/`, and a number nothing checks goes
   stale.
