@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! A freed device block is kept for the next allocation of its size instead of
-//! going back to the driver - and every byte of it is still returned when its
-//! owner goes.
+//! While a repeated pass asks for it, a freed device block is kept for the next
+//! allocation of its size instead of going back to the driver - and every byte
+//! of it is still returned when the pass ends or its owner goes.
 //!
 //! Swedish Embedded AB implements low-latency GPU inference services for its
 //! clients, where a driver free on the hot path stalls the whole pipeline. If
@@ -22,6 +22,9 @@
 //!
 //! # What is asserted
 //!
+//! - **opt-in**: nothing is held until [`Context::hold_freed_blocks`] says so, so
+//!   an idle handle frees exactly as it always did (`leaks.rs` holds that for
+//!   every other owner), and turning it off returns what was held;
 //! - **reuse**: a block freed and reallocated at its size stays allocated from
 //!   the driver's point of view (the live counters do not dip) and is held by
 //!   the cache in between;
@@ -29,9 +32,9 @@
 //!   an allocation that does not fit under it goes straight back to the driver;
 //! - **returned**: dropping the context (and every block it handed out) returns
 //!   the counters to baseline - the cache is not a leak, it is a bounded loan;
-//! - **worth holding**: only blocks in the size range worth caching are held at
-//!   all - a tiny block, or one larger than the cache could ever hold, goes
-//!   straight back to the driver;
+//! - **what is held**: any block up to half the cap - tiny per-step uniforms
+//!   included, whose driver round trips add up - while a block larger than the
+//!   cache could ever hold (a model weight) goes straight back to the driver;
 //! - **zeroed storage**: `Backend::storage` still hands back zeros from a
 //!   recycled block, because model code adds into fresh accumulators.
 //!
@@ -52,14 +55,38 @@ fn serial() -> MutexGuard<'static, ()> {
 
 const MIB: usize = 1 << 20;
 
+/// A context with holding switched on - the state a prefill round runs in.
 fn ctx() -> Option<Context> {
     match Context::open(0) {
-        Ok(c) => Some(c),
+        Ok(c) => {
+            c.hold_freed_blocks(true);
+            Some(c)
+        }
         Err(e) => {
             brain_testutil::skip_unavailable(&format!("no usable CUDA device: {e}"));
             None
         }
     }
+}
+
+#[test]
+fn nothing_is_held_until_asked_and_turning_it_off_returns_what_was_held() {
+    let _s = serial();
+    let Some(ctx) = ctx() else { return };
+    let base = live_resources();
+    ctx.hold_freed_blocks(false);
+    drop(ctx.alloc(4 * MIB).expect("alloc"));
+    assert_eq!(ctx.cached_bytes(), 0, "a context that was not asked to hold anything holds nothing");
+    assert_eq!(live_resources(), base, "an unasked-for free must reach the driver at once");
+
+    ctx.hold_freed_blocks(true);
+    drop(ctx.alloc(4 * MIB).expect("alloc"));
+    drop(ctx.alloc(7 * MIB).expect("alloc"));
+    assert_eq!(ctx.cached_bytes(), 11 * MIB as u64);
+    assert_eq!(live_resources().device_allocs, base.device_allocs + 2, "held blocks are still allocated");
+    ctx.hold_freed_blocks(false);
+    assert_eq!(ctx.cached_bytes(), 0);
+    assert_eq!(live_resources(), base, "turning holding off must return every held block");
 }
 
 #[test]
@@ -83,14 +110,16 @@ fn a_freed_block_is_held_for_the_next_allocation_of_its_size() {
 }
 
 #[test]
-fn only_blocks_of_the_size_worth_caching_are_held() {
+fn a_block_too_large_for_the_cache_goes_straight_back() {
     let _s = serial();
     let Some(ctx) = ctx() else { return };
     let before = live_resources().device_allocs;
-    // Tiny blocks (a step's uniform, a scale plane) are cheap to free and
-    // numerous; a huge block is a model weight that must go back at once.
+    // A step's uniform is a few words and is held like any other block...
     drop(ctx.alloc(256).expect("alloc"));
-    assert_eq!(ctx.cached_bytes(), 0, "a tiny block is returned to the driver immediately");
+    assert_eq!(ctx.cached_bytes(), 256, "a tiny block is held too: freeing it costs the host a driver call");
+    ctx.trim_cache();
+    // ...but a block larger than half the cache could ever hold (a model weight)
+    // is returned at once.
     let huge = (ctx.cache_cap_bytes() as usize).saturating_add(MIB);
     if let Ok(block) = ctx.alloc(huge) {
         drop(block);
@@ -126,6 +155,7 @@ fn dropping_the_context_and_its_blocks_returns_everything() {
     let base = live_resources();
     {
         let ctx = Context::open(0).expect("second handle");
+        ctx.hold_freed_blocks(true);
         let blocks: Vec<_> = [2, 3, 5, 8].iter().map(|m| ctx.alloc(m * MIB).expect("alloc")).collect();
         drop(blocks);
         assert!(ctx.cached_bytes() > 0, "the blocks should be cached, or this proves nothing");
@@ -143,6 +173,7 @@ fn a_block_outliving_its_context_is_still_freed() {
     let base = live_resources();
     let straggler = {
         let ctx = Context::open(0).expect("second handle");
+        ctx.hold_freed_blocks(true);
         ctx.alloc(6 * MIB).expect("alloc")
     };
     // The context is gone; the block must still be valid to drop, and free.
@@ -158,6 +189,7 @@ fn storage_from_a_recycled_block_is_zero() {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
     };
+    b.hold_freed_blocks(true);
     let n = (2 * MIB / 4) as u64;
     let dirty = b.storage_init("dirty", &vec![7.0f32; n as usize]);
     drop(dirty);

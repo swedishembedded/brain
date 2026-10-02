@@ -1622,6 +1622,10 @@ impl backend_api::Backend for CudaBackend {
         self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).totals.clear();
     }
 
+    fn hold_freed_blocks(&self, on: bool) {
+        self.ctx.hold_freed_blocks(on);
+    }
+
     fn kind(&self) -> &'static str {
         "cuda"
     }

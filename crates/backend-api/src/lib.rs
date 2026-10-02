@@ -1282,6 +1282,16 @@ pub trait Backend: Send + Sync {
         0
     }
 
+    /// Ask the backend to keep freed device blocks for reuse (`true`) or to
+    /// return them and go back to freeing immediately (`false`).
+    ///
+    /// A repeated pass that frees and re-allocates the same sizes every
+    /// iteration (a prefill round's per-layer temporaries) can ask for this
+    /// for the duration of the pass; outside it a free is a free, so a handle
+    /// that is merely idle holds nothing back. The default is a no-op: a
+    /// backend whose frees are already cheap has nothing to hold.
+    fn hold_freed_blocks(&self, _on: bool) {}
+
     /// What this device can actually do - see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.
     fn caps(&self) -> DeviceCaps;

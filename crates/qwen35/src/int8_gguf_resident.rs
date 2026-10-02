@@ -2114,6 +2114,11 @@ impl Qwen35GgufInstance {
             pos += rows;
         }
 
+        // `BRAIN_PREFILL_PROFILE_SKIP_TABLE=1` stops after the production rounds -
+        // for attaching a sampling profiler to them without the kernel timers.
+        if std::env::var_os("BRAIN_PREFILL_PROFILE_SKIP_TABLE").is_some() {
+            return PrefillRoundsProfile { rows, round_s, table: Vec::new() };
+        }
         let timed = self.shards.iter().all(|s| s.qwen35.gpu.set_kernel_timing(true));
         let mut best: Option<(f64, Vec<(String, f64, u64)>)> = None;
         for _ in 0..rounds {

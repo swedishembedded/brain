@@ -80,6 +80,12 @@ fn model_lifetime(gpu: &Gpu) {
     for &tok in &tokens {
         assert!(m.step(tok).iter().all(|x| x.is_finite()));
     }
+    // Chunked prefill rounds in the scratch-arena regime: the backend holds freed
+    // blocks for reuse while the arena is open and must give every one back when
+    // the round releases it.
+    m.set_chunk_arena_min_rows(1);
+    m.reset_decode_cache();
+    assert!(m.prefill_chunked(&tokens, 4).iter().all(|x| x.is_finite()));
     drop(m);
 }
 

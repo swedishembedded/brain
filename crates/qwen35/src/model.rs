@@ -3175,6 +3175,12 @@ impl Qwen35 {
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
         let pooled = n >= self.chunk_arena_min_rows.get();
+        if pooled {
+            // The quantised activations and the GEMM outputs are allocated by
+            // the `Ops` handle, a `share` of `g` with its own allocator; the
+            // arena scope below only covers `g`.
+            self.ops.gpu().hold_freed_blocks(true);
+        }
         // What an UNPOOLED round owes instead of the arena's drain. Nothing is
         // recycled there, so no dispatch can be overwritten while it still
         // reads - but every layer's temporaries are still DROPPED as the next

@@ -1257,6 +1257,10 @@ mod native_facade {
             };
             g[at].1.enter();
             drop(g);
+            // A repeated pass is exactly the workload that frees and reallocates
+            // the same sizes every iteration; let the backend hold the freed
+            // blocks until `scratch_release`.
+            self.inner.hold_freed_blocks(true);
             ScratchScope { gpu: self }
         }
 
@@ -1289,7 +1293,21 @@ mod native_facade {
                 .unwrap_or((0, 0))
         }
 
-        /// Drop the default arena and every buffer it is holding.
+        /// Ask this handle's backend to keep freed device blocks for reuse
+        /// (`true`) or to return them and free immediately again (`false`) - see
+        /// [`backend_api::Backend::hold_freed_blocks`]. [`Self::scratch_scope`]
+        /// switches it on for its own handle; a model whose passes run on more
+        /// than one handle (a `share`d ops handle allocates the quantised
+        /// activations) switches it on for those too.
+        pub fn hold_freed_blocks(&self, on: bool) {
+            self.inner.hold_freed_blocks(on);
+        }
+
+        /// Drop the default arena and every buffer it is holding. Blocks the backend
+        /// has been holding for reuse stay held until the handle is dropped or
+        /// [`Self::hold_freed_blocks`] is turned off: the next round wants
+        /// them, and returning and re-taking hundreds of them per round is the
+        /// cost holding exists to avoid.
         pub fn scratch_release(&self) {
             self.scratch_release_in(DEFAULT_ARENA);
         }

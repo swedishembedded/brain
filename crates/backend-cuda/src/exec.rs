@@ -263,6 +263,13 @@ impl Context {
         })
     }
 
+    /// Start (`true`) or stop (`false`) holding freed blocks for reuse. Off is
+    /// the state every context is opened in and it frees exactly as the driver
+    /// would; turning it off returns whatever is held.
+    pub fn hold_freed_blocks(&self, on: bool) {
+        self.cache.set_enabled(on);
+    }
+
     /// Bytes of freed device blocks this context is holding for reuse. They are
     /// still allocated from the driver (and counted by
     /// [`crate::live_resources`]) until reissued, trimmed, or the context and
@@ -1059,9 +1066,12 @@ impl Drop for DeviceMem {
 ///   owner's zeroing and kernels after the old owner's. Another handle's
 ///   stream is covered by moving the block's [`Fence`] with it.
 /// * **Bounded.** Held bytes never exceed [`BlockCache::cap`]; a block that does
-///   not fit goes straight to the driver. Only blocks from [`MIN_CACHED_BYTES`]
-///   up to half the cap are held: a step's tiny uniform is cheap to free and
-///   there are thousands, and a model weight must go back at once.
+///   not fit goes straight to the driver. Blocks up to half the cap are held,
+///   whatever their size: the multi-megabyte activations are what block the host
+///   in `cuMemFree`, but a prefill round also frees a couple of thousand tiny
+///   per-step uniforms, and at several microseconds per driver call each way
+///   those cost about as much host time as the large blocks. A model weight is
+///   larger than half the cap, so it goes back to the driver at once.
 /// * **Returned.** The blocks are an `Arc` owned by the context AND by every
 ///   block it handed out, so they are freed - and counted as freed - when the
 ///   last of those goes, whichever is last. `OOM` while holding blocks trims
@@ -1074,6 +1084,8 @@ struct BlockCache {
     fns: &'static ExecFns,
     ctx: CuContext,
     cap: AtomicU64,
+    /// Whether freed blocks are held at all - see [`Context::hold_freed_blocks`].
+    enabled: std::sync::atomic::AtomicBool,
     held: std::sync::Mutex<Held>,
     /// Keeps the primary context alive until the last held block is freed.
     _primary: Arc<PrimaryRef>,
@@ -1090,13 +1102,6 @@ struct HeldBlock {
     fence: Option<Fence>,
 }
 
-/// Smallest block worth holding. Measured on a prefill round of the real 27B: the
-/// sub-kilobyte blocks (a step's uniform) free in about 3 us each and never wait
-/// for the device, while the 1-64 KiB per-layer activations and scale planes
-/// free in milliseconds under load, because that is where `cuMemFree` blocks
-/// until the card has drained.
-const MIN_CACHED_BYTES: usize = 1 << 10;
-
 /// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
 /// between 256 MiB and 4 GiB, unless `BRAIN_CUDA_BLOCK_CACHE_MB` says otherwise.
 fn cache_cap_for(total: u64) -> u64 {
@@ -1108,7 +1113,14 @@ fn cache_cap_for(total: u64) -> u64 {
 
 impl BlockCache {
     fn new(d: &'static Driver, fns: &'static ExecFns, ctx: CuContext, primary: Arc<PrimaryRef>, cap: u64) -> BlockCache {
-        BlockCache { d, fns, ctx, cap: AtomicU64::new(cap), held: Default::default(), _primary: primary }
+        BlockCache { d, fns, ctx, cap: AtomicU64::new(cap), enabled: std::sync::atomic::AtomicBool::new(false), held: Default::default(), _primary: primary }
+    }
+
+    fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Release);
+        if !on {
+            self.trim();
+        }
     }
 
     fn set_cap(&self, cap: u64) {
@@ -1125,9 +1137,6 @@ impl BlockCache {
 
     /// A held block of exactly `len` bytes, if there is one.
     fn take(&self, len: usize) -> Option<HeldBlock> {
-        if len < MIN_CACHED_BYTES {
-            return None;
-        }
         let mut h = self.held.lock().unwrap_or_else(|e| e.into_inner());
         let block = h.by_size.get_mut(&len)?.pop()?;
         h.bytes -= len as u64;
@@ -1137,7 +1146,7 @@ impl BlockCache {
     /// Hold the block if it is worth it and fits; `false` means the caller frees it.
     fn keep(&self, ptr: CuDevicePtr, len: usize, fence: Option<Fence>) -> bool {
         let cap = self.cap();
-        if len < MIN_CACHED_BYTES || len as u64 > cap / 2 {
+        if !self.enabled.load(Ordering::Acquire) || len as u64 > cap / 2 {
             return false;
         }
         let mut h = self.held.lock().unwrap_or_else(|e| e.into_inner());
