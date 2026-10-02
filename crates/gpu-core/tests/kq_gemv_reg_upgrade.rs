@@ -21,7 +21,7 @@ use kernels::template::interned;
 /// Deterministic signed activation codes in `[-100, 100]`.
 fn rand_i8_codes(seed: u64, n: usize) -> Vec<i8> {
     let mut r = data::rng::Lcg::new(seed);
-    (0..n).map(|_| (r.next_u32() % 201) as i32 as i8 - 100).collect()
+    (0..n).map(|_| ((r.next_u32() % 201) as i32 - 100) as i8).collect()
 }
 
 /// Unsigned affine weight codes in `[0, min(2^bits, 32))` - real Q4_K/Q5_K
