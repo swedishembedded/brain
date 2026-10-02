@@ -26,8 +26,8 @@ fn a_backend_that_cannot_compile_cuda_declines_every_native_entry_point() {
 
     // Every native kernel in the registry is refused, and the refusal is remembered.
     for k in kernels_cuda::ALL {
-        assert!(gpu.native_kernel(k).is_none(), "{}: a backend with no CUDA must decline the registration", k.name);
-        assert!(gpu.native_kernel(k).is_none(), "{}: the decline is stable", k.name);
+        assert!(gpu.native_kernel(k, &[]).is_none(), "{}: a backend with no CUDA must decline the registration", k.name);
+        assert!(gpu.native_kernel(k, &[]).is_none(), "{}: the decline is stable", k.name);
     }
 
     let buf = gpu.storage(1);
