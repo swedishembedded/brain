@@ -14,10 +14,10 @@
 //! is the one `i8_gemv_reg_upgrade.rs` holds for the WGSL pair: the RAW BITS
 //! are identical to the WGSL tier. That is stronger than a tolerance and it is
 //! achievable, because the native kernel keeps the WGSL kernel's 64 virtual
-//! accumulators and its fold order. The reference here is `matmul_i8_gemv_ref`
-//! - the same source under a name the upgrade table does not know - so both
-//! sides run on the same device, from the same inputs, differing in which
-//! kernel ran.
+//! accumulators and its fold order. The reference here is `matmul_i8_gemv_ref`,
+//! the same source under a name the upgrade table does not know, so both sides
+//! run on the same device, from the same inputs, differing in which kernel
+//! ran.
 //!
 //! Shapes cover what the vector-load path can get wrong: `kg` that is not a
 //! whole number of the kernel's 64-word stride (tails), `n` that is not a
@@ -210,6 +210,26 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
                 );
             }
         }
+    }
+}
+
+/// Seeded random shapes and binding windows, so the grid above is not the
+/// only place the vector path and its tails have been looked at.
+#[test]
+fn random_shapes_and_windows_are_byte_identical() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) || !gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("native int8 GEMV needs a CUDA device");
+        return;
+    }
+    let mut r = data::rng::Lcg::new(0x5eed_1234);
+    for _ in 0..60 {
+        let m = 1 + r.next_u32() % NATIVE_ROWS;
+        let kg = 8 * (1 + r.next_u32() % 200);
+        let n = 1 + r.next_u32() % 100;
+        let lead = [0, 1, 2, 3, 4].map(|_| u64::from(r.next_u32() % 8));
+        let (got, want) = run(&gpu, &Case { m, kg, n, lead });
+        assert_eq!(got, want, "native int8 GEMV differs at m={m} kg={kg} n={n} lead={lead:?}");
     }
 }
 
