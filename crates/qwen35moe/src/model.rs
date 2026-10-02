@@ -134,6 +134,7 @@ use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
 // test crates call it as such), unlike the scratch-buffer types above, which
 // were never used outside this module even before they lived here.
 pub use model::gdn::gdn_chunk_size;
+use model::kv_tier::{KvKernels, KvLayer, KvTier};
 use model::moe::{
     expert_fwd, expert_fwd_grouped, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
     ExpertGrads, ExpertScratch, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs,
@@ -295,6 +296,9 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // batched decode path dispatches them directly, so they get hand-numbered
     // consts like every other kernel it uses. Appended at the true end, same
     // convention as every tier above.
+    // 102-104: the f32 KV tier's append/scores/apply, resolved by NAME through
+    // `model::kv_tier::KvKernels` (the compact tiers' siblings ride in
+    // `pipelines()`), never by these positions.
     ("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED),   // 102
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 103
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),   // 104
@@ -305,6 +309,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("moe_i8_gemv_gather", kernels::MOE_I8_GEMV_GATHER),         // 107
     ("moe_swiglu_quant", kernels::MOE_SWIGLU_QUANT),             // 108
     ("moe_slot_combine", kernels::MOE_SLOT_COMBINE),             // 109
+    // -- device-side head (greedy / top-k) tier -- see `Qwen35::head_*_dev`.
+    ("argmax_part", kernels::ARGMAX_PART),                       // 110
+    ("argmax_final", kernels::ARGMAX_FINAL),                     // 111
+    ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),           // 112
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -387,6 +395,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
         v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
+        // The compact KV tiers (`model::kv_tier`) are resolved BY NAME when a
+        // cache of that tier is used, so their kernels ride along here.
+        let kv = model::kv_tier::kernel_list(&v);
+        v.extend(kv);
         v
     })
 }
@@ -487,14 +499,22 @@ const SCAN_ADD: usize = 98;
 const MOE_GROUP_PERM_EMIT: usize = 99;
 const MATMUL_REG3_GROUPED: usize = 100;
 const MOE_GROUP_COMBINE: usize = 101;
-const PAGED_KV_APPEND_BATCHED: usize = 102;
-const PAGED_DECODE_SCORES_BATCHED: usize = 103;
-const PAGED_DECODE_APPLY_BATCHED: usize = 104;
 const DECODE_SOFTMAX_BATCHED: usize = 105;
 const MOE_ROUTER_TOPK: usize = 106;
 const MOE_I8_GEMV_GATHER: usize = 107;
 const MOE_SWIGLU_QUANT: usize = 108;
 const MOE_SLOT_COMBINE: usize = 109;
+const ARGMAX_PART: usize = 110;
+const ARGMAX_FINAL: usize = 111;
+const TOPK_EXTRACT_STEP: usize = 112;
+/// Partial-argmax chunks the device head splits a `[vocab]` row into
+/// (`argmax_part` then `argmax_final`) - the same split `qwen35` uses.
+const HEAD_ARGMAX_CHUNKS: u32 = 256;
+/// Rows at or above which a chunk round draws its per-layer temporaries from
+/// [`gpu_core::scratch::Arena`] - and so pays that arena's drain, a blocking
+/// `poll_wait` per layer. See `qwen35::model::CHUNK_ARENA_MIN_ROWS` for the
+/// measured crossover (the trade depends on the row count and nothing else).
+const CHUNK_ARENA_MIN_ROWS: u32 = 16;
 /// Weight rows one `moe_i8_gemv_gather` workgroup covers (64 threads, 16 lanes
 /// per row) - the kernel's own constant, restated here only to size its grid.
 const MOE_GATHER_COLS: u32 = 4;
@@ -582,21 +602,6 @@ fn grouped_expert_ids() -> GroupedExpertFwdIds {
 /// `conv1d_fwd`.
 fn gdn_conv_ids() -> GdnConvIds {
     GdnConvIds { causal_conv1d_step: CAUSAL_CONV1D_STEP }
-}
-
-/// [`model::block::gqa_decode_batched_step`]'s kernel ids -- every resident
-/// sequence's one new token appended to, and attended against, ONE shared
-/// paged KV pool per layer in a single dispatch set. Dispatched by
-/// [`Qwen35::run_decode_batch`] in place of `layer_gqa_fwd`'s whole-sequence
-/// `gqa_fwd`; the same ids `qwen35::model::gqa_decode_batched_ids` resolves,
-/// through the same shared `model::block` primitive.
-fn gqa_decode_batched_ids() -> model::block::GqaDecodeBatchedIds {
-    model::block::GqaDecodeBatchedIds {
-        kv_append_batched: PAGED_KV_APPEND_BATCHED,
-        scores_batched: PAGED_DECODE_SCORES_BATCHED,
-        softmax_batched: DECODE_SOFTMAX_BATCHED,
-        apply_batched: PAGED_DECODE_APPLY_BATCHED,
-    }
 }
 
 /// [`model::gdn_mixer::gdn_mixer_decode_fwd`]'s decode-only kernel ids.
@@ -937,8 +942,10 @@ pub struct Qwen35 {
     /// convention for "this slot doesn't apply to this layer type" rather
     /// than an `Option`, so every layer index still has a plain buffer to
     /// index by `l`).
-    gqa_kcache: Vec<DeviceBuffer>,
-    gqa_vcache: Vec<DeviceBuffer>,
+    gqa_kv: Vec<KvLayer>,
+    /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
+    /// [`Self::set_chunk_arena_min_rows`].
+    chunk_arena_min_rows: Cell<u32>,
     /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`
     /// (`bh = linear_num_value_heads`, single sequence) for GDN layers; a
     /// size-1 dummy at GQA layer indices. Threaded across `step` calls by
@@ -1003,17 +1010,67 @@ pub struct Qwen35 {
 /// these for a new sequence can reuse that same construction loop.
 /// What one BATCHED DECODE step hands [`Qwen35::layer_gqa_fwd`]. `paged`/
 /// `cos`/`sin` are built ONCE per step and shared unchanged by every GQA layer;
-/// the two pools are per layer, so they are rebound each time round the layer
+/// the layer's KV pool is per layer, so it is rebound each time round the layer
 /// loop. The `qwen35moe` twin of `qwen35::model::GqaDecodeCtx` - both are thin
 /// holders for the same shared `model::gqa_mixer::PagedDecodeBatch`.
 pub(crate) struct GqaDecodeCtx<'a> {
     pub paged: &'a model::gqa_mixer::PagedDecodeBatch<'a>,
-    pub pool_k: &'a DeviceBuffer,
-    pub pool_v: &'a DeviceBuffer,
+    /// This layer's K and V pool, in the pool's [`KvTier`].
+    pub layer: &'a KvLayer,
     /// `[bsz, rotary_dim/2]` M-RoPE tables - row `b` is sequence `b`'s OWN
     /// decode position, and the rows of one batch are unrelated positions.
     pub cos: &'a DeviceBuffer,
     pub sin: &'a DeviceBuffer,
+}
+
+/// What one CHUNKED-prefill round hands [`Qwen35::layer_gqa_fwd`] so its GQA
+/// layers attend the sequence's persistent KV cache instead of an isolated
+/// `[T,T]` causal block over the round alone. Every field is built ONCE per
+/// round by [`Qwen35::run_prefill_chunk_stage`] and shared unchanged by every GQA
+/// layer in it (`layer` excepted - that is per layer). The twin of
+/// `qwen35::model::GqaChunkCtx`.
+pub(crate) struct GqaChunkCtx<'a> {
+    /// Where this sequence's KV rows START in the bound pool: `0` for a flat
+    /// dedicated cache, `phys * cap` for a window of a shared pool
+    /// ([`DecodeCaches::gqa_base_row`]).
+    pub base_row: u32,
+    /// Absolute position of this round's FIRST token (`0` on round 1).
+    pub start: u32,
+    /// The per-sequence KV cache row capacity ([`DecodeCaches::gqa_cap`]).
+    pub cap: u32,
+    pub layer: &'a KvLayer,
+    /// `[n]` u32, every entry `base_row / cap` - the single-block table this
+    /// sequence's KV window is.
+    pub block_ids: DeviceBuffer,
+    /// `[n]` u32 with `offsets[i] == start+i`: the row each chunk token's K/V
+    /// is appended at in that block.
+    pub offsets: DeviceBuffer,
+    /// `[n]` u32 with `seq_lens[i] == start+i+1`: this round's causal mask.
+    pub seq_lens: DeviceBuffer,
+    /// This round's own `[n, rotary_dim/2]` M-RoPE tables, for absolute
+    /// positions `start..start+n`.
+    pub cos: &'a DeviceBuffer,
+    pub sin: &'a DeviceBuffer,
+}
+
+/// Which cached-KV shape a [`Qwen35::layer_gqa_fwd`] call is running in. `None`
+/// is the isolated `[T,T]` causal block a training/whole-sequence forward wants;
+/// the two `Some` arms are the two ways a SERVING pass attends a persistent
+/// cache - one sequence's many tokens ([`GqaChunkCtx`]) or many sequences' one
+/// token each ([`GqaDecodeCtx`]).
+pub(crate) enum GqaCached<'a> {
+    Chunk(&'a GqaChunkCtx<'a>),
+    Decode(&'a GqaDecodeCtx<'a>),
+}
+
+/// Which recurrent-state shape a [`Qwen35::layer_gdn_fwd`] call is running in:
+/// the Gated-DeltaNet counterpart of [`GqaCached`] - a whole-sequence forward
+/// that starts from zero state, one sequence's prefill round continuing its own
+/// state, or one decode token for each of several independent sequences.
+pub(crate) enum GdnCall<'a> {
+    Whole,
+    Chunk(model::gdn_mixer::GdnStream<'a>),
+    Decode(&'a [model::gdn_mixer::GdnStream<'a>]),
 }
 
 /// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where its
@@ -1039,11 +1096,11 @@ pub(crate) struct BatchSeq<'a> {
 /// per-layer paged KV pool plus one [`BatchSeq`] per sequence.
 pub(crate) struct BatchDecodeCaches<'a> {
     /// Per-layer `[num_blocks*gqa_cap, kv_dim]` KV pool for the full-attention
-    /// layers (a dummy at GDN indices). A sequence's own `[gqa_cap, kv_dim]`
-    /// window is rows `phys*gqa_cap..`; a caller with one dedicated cache per
-    /// sequence is the `num_blocks = 1`, `phys = 0` case.
-    pub gqa_kpool: &'a [DeviceBuffer],
-    pub gqa_vpool: &'a [DeviceBuffer],
+    /// layers (a placeholder at GDN indices), each layer's K and V planes in
+    /// the pool's [`KvTier`]. A sequence's own `[gqa_cap, kv_dim]` window is
+    /// rows `phys*gqa_cap..`; a caller with one dedicated cache per sequence
+    /// is the `num_blocks = 1`, `phys = 0` case.
+    pub gqa_kv: &'a [KvLayer],
     /// Pool rows one physical block spans - the per-sequence KV capacity, and
     /// the paged kernels' `block_size`.
     pub gqa_cap: u32,
@@ -1052,10 +1109,9 @@ pub(crate) struct BatchDecodeCaches<'a> {
 }
 
 pub(crate) struct DecodeCaches<'a> {
-    /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (dummy at GDN
-    /// indices) -- `model::block::gqa_decode_step`'s own `kcache`/`vcache`.
-    pub gqa_kcache: &'a [DeviceBuffer],
-    pub gqa_vcache: &'a [DeviceBuffer],
+    /// Per-layer `[cap, kv_dim]` KV cache for GQA layers (placeholder at GDN
+    /// indices), each layer's K and V planes in the cache's [`KvTier`].
+    pub gqa_kv: &'a [KvLayer],
     /// Cache row capacity, shared by every GQA layer's cache in this call
     /// (one per-sequence capacity, not a per-layer one).
     pub gqa_cap: u32,
@@ -1462,8 +1518,7 @@ impl Qwen35 {
         // `dec_cap = t`: this pass's decode capacity is this instance's own
         // fixed prefill length (see `dec_cap`'s own doc).
         let kv_dim = cfg.kv_dim() as u64;
-        let mut gqa_kcache = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gqa_vcache = Vec::with_capacity(cfg.n_layers as usize);
+        let mut gqa_kv = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_state = Vec::with_capacity(cfg.n_layers as usize);
         let mut gdn_hist = Vec::with_capacity(cfg.n_layers as usize);
         let gdn_bh = cfg.linear_num_value_heads as u64;
@@ -1472,14 +1527,12 @@ impl Qwen35 {
         for ty in cfg.layer_types() {
             match ty {
                 LayerType::Full => {
-                    gqa_kcache.push(gpu.storage(t as u64 * kv_dim));
-                    gqa_vcache.push(gpu.storage(t as u64 * kv_dim));
+                    gqa_kv.push(KvLayer::new(&gpu, KvTier::F32, t as u64, kv_dim, cfg.head_dim as u64));
                     gdn_state.push(gpu.storage(1));
                     gdn_hist.push(gpu.storage(1));
                 }
                 LayerType::Linear => {
-                    gqa_kcache.push(gpu.storage(1));
-                    gqa_vcache.push(gpu.storage(1));
+                    gqa_kv.push(KvLayer::placeholder(&gpu));
                     gdn_state.push(gpu.storage(gdn_state_len));
                     gdn_hist.push(gpu.storage(gdn_hist_len));
                 }
@@ -1517,8 +1570,8 @@ impl Qwen35 {
             ce_grad_uni,
             dec_pos: Cell::new(0),
             dec_cap: t,
-            gqa_kcache,
-            gqa_vcache,
+            gqa_kv,
+            chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
             gdn_state,
             gdn_hist,
             lora_a,
@@ -1715,7 +1768,7 @@ impl Qwen35 {
 
     // ---- one Gated DeltaNet (Linear) layer --------------------------------
 
-    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, decode: Option<&[model::gdn_mixer::GdnStream]>) -> (DeviceBuffer, Option<GdnLayerActs>) {
+    fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, call: GdnCall) -> (DeviceBuffer, Option<GdnLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1764,9 +1817,13 @@ impl Qwen35 {
         // continuing its own recurrent state and conv window; the
         // whole-sequence forward keeps this instance's shape and starts from
         // zero state.
-        let gdn = match decode {
-            None => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
-            Some(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
+        let gdn = match &call {
+            GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
+            // A chunked round is ONE sequence's `n` rows, with its own chunk
+            // size (`n` is a round's length, unrelated to this instance's
+            // construction-time `t`).
+            GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
+            GdnCall::Decode(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
         let weights = model::gdn_mixer::GdnMixerWeights {
@@ -1776,12 +1833,13 @@ impl Qwen35 {
             norm_weight: self.w(&p("norm.weight")),
             ones_khd: &self.ones_khd,
         };
-        let (gated, internals) = match decode {
-            None => model::gdn_mixer::gdn_mixer_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train),
-            Some(streams) => (
+        let (gated, internals) = match call {
+            GdnCall::Decode(streams) => (
                 model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams),
                 None,
             ),
+            GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
+            GdnCall::Chunk(cont) => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont)),
         };
 
         // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
@@ -1802,7 +1860,14 @@ impl Qwen35 {
 
     // ---- one GQA (Full) layer ----------------------------------------------
 
-    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, decode: Option<&GqaDecodeCtx>) -> (DeviceBuffer, Option<GqaLayerActs>) {
+    /// The attention kernels for `layer`'s KV tier, resolved by name on this
+    /// device. A failure means the tier's kernels are not in [`pipelines`],
+    /// which is a build defect, not a runtime condition.
+    fn kv_kernels(&self, layer: &KvLayer) -> KvKernels {
+        KvKernels::resolve(&self.gpu, layer.k.tier()).unwrap_or_else(|e| panic!("qwen35moe: {e}"))
+    }
+
+    fn layer_gqa_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, cached: Option<GqaCached>) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1835,22 +1900,48 @@ impl Qwen35 {
         // pool instead of an isolated `[T,T]` causal block - see
         // `GqaDecodeCtx`.
         let shape = model::gqa_mixer::GqaMixerShape { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd, rotary_half: c.rotary_dim() / 2, rms_eps: c.rms_eps };
-        let (cos, sin) = decode.map_or((&self.cos, &self.sin), |dc| (dc.cos, dc.sin));
+        let (cos, sin) = match &cached {
+            None => (&self.cos, &self.sin),
+            Some(GqaCached::Chunk(ch)) => (ch.cos, ch.sin),
+            Some(GqaCached::Decode(dc)) => (dc.cos, dc.sin),
+        };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
-        let (ctx_gated, internals) = match decode {
+        let (ctx_gated, internals) = match cached {
             None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
-            Some(dc) => (
-                model::gqa_mixer::gqa_mixer_decode_batched_fwd(
+            Some(GqaCached::Chunk(ch)) => (
+                model::gqa_mixer::gqa_mixer_chunk_kv_fwd(
                     g,
                     &gqa_mixer_ids(),
-                    &gqa_decode_batched_ids(),
+                    &self.kv_kernels(ch.layer),
+                    DECODE_SOFTMAX_BATCHED,
                     &shape,
                     &weights,
                     &q_full,
                     &k,
                     &v,
-                    dc.pool_k,
-                    dc.pool_v,
+                    n,
+                    ch.base_row,
+                    ch.start,
+                    ch.cap,
+                    ch.layer,
+                    &ch.block_ids,
+                    &ch.offsets,
+                    &ch.seq_lens,
+                ),
+                None,
+            ),
+            Some(GqaCached::Decode(dc)) => (
+                model::gqa_mixer::gqa_mixer_decode_batched_kv_fwd(
+                    g,
+                    &gqa_mixer_ids(),
+                    &self.kv_kernels(dc.layer),
+                    DECODE_SOFTMAX_BATCHED,
+                    &shape,
+                    &weights,
+                    &q_full,
+                    &k,
+                    &v,
+                    dc.layer,
                     n,
                     dc.paged,
                 ),
@@ -2261,7 +2352,7 @@ impl Qwen35 {
 
             let (attn_out, mixer_acts) = match ty {
                 LayerType::Linear => {
-                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, None);
+                    let (o, a) = self.layer_gdn_fwd(l, &xn1, n, GdnCall::Whole);
                     (o, a.map(|a| MixerActs::Gdn(Box::new(a))))
                 }
                 LayerType::Full => {
@@ -2755,8 +2846,7 @@ impl Qwen35 {
         // own doc for why `run_decode_step` takes it as an explicit parameter
         // rather than reading `self.gqa_kcache`/`self.gdn_state` directly.
         let caches = DecodeCaches {
-            gqa_kcache: &self.gqa_kcache,
-            gqa_vcache: &self.gqa_vcache,
+            gqa_kv: &self.gqa_kv,
             gqa_cap: self.dec_cap,
             // This instance's own caches are dedicated per-sequence buffers,
             // not a pool window -- see `DecodeCaches::gqa_base_row`.
@@ -2785,7 +2875,7 @@ impl Qwen35 {
             caches.gqa_cap
         );
         let seqs = [BatchSeq { phys: caches.gqa_base_row / caches.gqa_cap, pos, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist }];
-        let batch = BatchDecodeCaches { gqa_kpool: caches.gqa_kcache, gqa_vpool: caches.gqa_vcache, gqa_cap: caches.gqa_cap, seqs: &seqs };
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs };
         self.run_decode_batch(&[token_id], &batch)
     }
 
@@ -2864,11 +2954,11 @@ impl Qwen35 {
                 LayerType::Linear => {
                     let streams: Vec<model::gdn_mixer::GdnStream> =
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
-                    self.layer_gdn_fwd(l, &xn1, bsz, Some(&streams)).0
+                    self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(&streams)).0
                 }
                 LayerType::Full => {
-                    let dctx = GqaDecodeCtx { paged: &paged, pool_k: &caches.gqa_kpool[l], pool_v: &caches.gqa_vpool[l], cos: &cos, sin: &sin };
-                    self.layer_gqa_fwd(l, &xn1, bsz, Some(&dctx)).0
+                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
+                    self.layer_gqa_fwd(l, &xn1, bsz, Some(GqaCached::Decode(&dctx))).0
                 }
             };
 
@@ -2894,6 +2984,241 @@ impl Qwen35 {
         let xn_final = g.storage((bsz * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, bsz, self.cfg.rms_eps)]);
         xn_final
+    }
+
+    /// Rows at or above which a chunk round pools its per-layer scratch (see
+    /// [`CHUNK_ARENA_MIN_ROWS`]). A test hook: the tiny configs this crate's
+    /// tests run at have a `block_size` far below any useful threshold, so
+    /// without it only the unpooled side would ever be exercised.
+    pub fn set_chunk_arena_min_rows(&self, rows: u32) {
+        assert!(rows > 0, "qwen35moe::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
+        self.chunk_arena_min_rows.set(rows);
+    }
+
+    /// **One ROUND of a chunked prefill**: `tokens.len()` consecutive prompt
+    /// tokens starting at absolute position `pos_start`, pushed through the
+    /// whole layer stack with ONE dispatch shape per layer instead of
+    /// [`Self::run_decode_step`]'s one per token. Returns the round's LAST
+    /// token's final-norm hidden state (`[d_model]`, unread) - the only row a
+    /// prefill's caller wants, and the row a following round or decode step
+    /// continues from.
+    ///
+    /// **State contract.** `caches` is left in EXACTLY the state a
+    /// token-by-token replay of the same tokens would have left it in: rows
+    /// `pos_start..pos_start+n` of every GQA layer's K/V planes hold the round's
+    /// QK-normed, RoPE'd keys and values (the round's queries attended rows
+    /// `0..=pos_start+i`), and every Gated-DeltaNet layer's state/conv window
+    /// continues from the previous round, so rounds and single-token steps
+    /// mix freely on one sequence. The `qwen35` twin's contract, with this
+    /// model's MoE sublayer in place of the dense MLP.
+    pub(crate) fn run_prefill_chunk(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let n = tokens.len() as u32;
+        assert!(n > 0, "qwen35moe::run_prefill_chunk: empty chunk (no token to produce a hidden state from)");
+        assert!(
+            self.shard.embed && self.shard.head,
+            "qwen35moe::run_prefill_chunk is whole-model only (this shard has embed={}, head={})",
+            self.shard.embed,
+            self.shard.head
+        );
+        assert!(
+            pos_start + n <= caches.gqa_cap,
+            "qwen35moe::run_prefill_chunk: chunk ends at position {} but the KV cache holds {} rows",
+            pos_start + n,
+            caches.gqa_cap
+        );
+        assert!(
+            caches.gqa_cap > 0 && caches.gqa_base_row.is_multiple_of(caches.gqa_cap),
+            "qwen35moe::run_prefill_chunk: gqa_base_row {} is not a whole number of {}-row blocks",
+            caches.gqa_base_row,
+            caches.gqa_cap
+        );
+
+        let tok_buf = g.storage(n as u64);
+        g.write(&tok_buf, tokens);
+        let mut res = g.storage((n * d) as u64);
+        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+
+        // Built ONCE per round, shared by every GQA layer in it: the round's
+        // own M-RoPE table (absolute positions), its causal `seq_lens`, and the
+        // single-block table a flat per-sequence KV cache degenerates to.
+        let positions: Vec<[u32; 3]> = (0..n).map(|i| [pos_start + i, pos_start + i, pos_start + i]).collect();
+        let (cos, sin) = qwen3vl::mrope::mrope_tables(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta);
+        let cos = g.storage_init("qwen35moe.prefill_chunk.cos", &cos);
+        let sin = g.storage_init("qwen35moe.prefill_chunk.sin", &sin);
+        let block_ids = g.storage(n as u64);
+        let offsets = g.storage(n as u64);
+        let seq_lens = g.storage(n as u64);
+        g.write(&block_ids, &vec![caches.gqa_base_row / caches.gqa_cap; n as usize]);
+        g.write(&offsets, &(0..n).map(|i| pos_start + i).collect::<Vec<u32>>());
+        g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
+
+        let pooled = n >= self.chunk_arena_min_rows.get();
+        // What an UNPOOLED round owes instead of the arena's drain: nothing is
+        // recycled there, but every layer's temporaries are still DROPPED as
+        // the next layer's are taken, and the backend refuses an allocation once
+        // more than its reclaim ceiling sits dropped-and-unreclaimed. So an
+        // unpooled round drains on BYTES, not on a layer count.
+        let reclaim_budget = g.reclaim_ceiling_bytes() / 2;
+        let types = c.layer_types();
+        #[allow(clippy::needless_range_loop)]
+        for l in self.shard.start..self.shard.end {
+            // A replay arena, not a fixed drain schedule: every layer's outer
+            // temporaries (`xn1`, `xmid`, `res_next`, ...) are the same size
+            // requested in the same call order whatever the layer's own type,
+            // each dead the moment its one consumer's dispatch is recorded.
+            let _scope = pooled.then(|| g.scratch_scope());
+
+            let xn1 = g.storage((n * d) as u64);
+            g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, c.rms_eps)]);
+
+            let mixer_out = match types[l] {
+                LayerType::Linear => {
+                    let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
+                    self.layer_gdn_fwd(l, &xn1, n, GdnCall::Chunk(cont)).0
+                }
+                LayerType::Full => {
+                    let ctx = GqaChunkCtx {
+                        base_row: caches.gqa_base_row,
+                        start: pos_start,
+                        cap: caches.gqa_cap,
+                        layer: &caches.gqa_kv[l],
+                        block_ids: block_ids.clone(),
+                        offsets: offsets.clone(),
+                        seq_lens: seq_lens.clone(),
+                        cos: &cos,
+                        sin: &sin,
+                    };
+                    self.layer_gqa_fwd(l, &xn1, n, Some(GqaCached::Chunk(&ctx))).0
+                }
+            };
+
+            let xmid = g.storage((n * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[n * d], n * d)]);
+
+            let (moe_out, _) = self.moe_sublayer(l, &xmid, n);
+            let res_next = g.storage((n * d) as u64);
+            g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &res_next], &[n * d], n * d)]);
+            res = res_next;
+
+            // The liveness boundary: building the whole layer first and THEN
+            // draining lets the host overlap recording with the previous
+            // layer's device work, while the `poll_wait` proves no recycled slot
+            // is still being read before `flush` lets this layer's writes
+            // reach the device.
+            if pooled || g.pending_reclaim_bytes() > reclaim_budget {
+                g.poll_wait();
+            }
+            g.flush();
+        }
+        if pooled {
+            g.scratch_release();
+        }
+
+        let xn_final = g.storage((n * d) as u64);
+        g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, n, c.rms_eps)]);
+        // Only the LAST row is ever wanted (the round's next-token prediction,
+        // or the seam into the next round).
+        let last = g.storage(d as u64);
+        g.submit(&[], &[g.step(CONCAT_SPLIT, &[&xn_final, &last], &[1, n * d, d, (n - 1) * d, 1, 1], d)]);
+        last
+    }
+
+    /// **Chunked prefill** of a whole prompt against THIS instance's own
+    /// per-sequence decode state - the multi-token-per-dispatch sibling of
+    /// calling [`Self::step`] once per prompt token. Consumes `tokens` in rounds
+    /// of at most `max_chunk`, each continuing from the state the previous one
+    /// left, advances `decode_pos` by the whole prompt and returns the LAST
+    /// token's final-norm hidden state. A following [`Self::step`] continues as
+    /// if the prompt had been replayed one token at a time.
+    pub fn prefill_chunked(&self, tokens: &[u32], max_chunk: u32) -> Vec<f32> {
+        assert_eq!(self.b, 1, "qwen35moe::prefill_chunked requires b==1 (single sequence)");
+        assert!(!tokens.is_empty(), "qwen35moe::prefill_chunked: empty prompt");
+        assert!(max_chunk > 0, "qwen35moe::prefill_chunked: max_chunk must be > 0");
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("qwen35moe::prefill_chunked: token {bad} exceeds vocab {}", self.cfg.vocab);
+        }
+        let mut pos = self.dec_pos.get();
+        assert!(
+            pos + tokens.len() as u32 <= self.dec_cap,
+            "qwen35moe::prefill_chunked: prompt ends at position {} but this instance's decode capacity is {}",
+            pos + tokens.len() as u32,
+            self.dec_cap
+        );
+        let caches = DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.dec_cap, gqa_base_row: 0, gdn_state: &self.gdn_state, gdn_hist: &self.gdn_hist };
+        let mut hidden = None;
+        for round in tokens.chunks(max_chunk as usize) {
+            hidden = Some(self.run_prefill_chunk(round, pos, &caches));
+            pos += round.len() as u32;
+        }
+        self.dec_pos.set(pos);
+        let hidden = hidden.expect("prefill_chunked: prompt is non-empty (asserted above)");
+        self.gpu.read(&hidden, self.cfg.d_model as usize)
+    }
+
+    /// Device-side head epilogue over a `[rows, d_model]` block of final-normed
+    /// hidden states: `logits[rows, vocab]` in one GEMM against the resident
+    /// head weight.
+    pub(crate) fn head_logits_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
+        let g = &self.gpu;
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let logits = g.storage(rows as u64 * v as u64);
+        g.submit(&[], &[g.step(MATMUL, &[hidden, self.w(self.cfg.head_weight()), &logits], &[rows, d, v], rows * v)]);
+        logits
+    }
+
+    /// [`Self::head_logits_rows_dev`] reduced to `rows` greedy picks entirely on
+    /// the device (`argmax_part` + `argmax_final`): only the winning indices are
+    /// read back, never the `[rows, vocab]` logits.
+    pub(crate) fn head_argmax_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> Vec<u32> {
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let logits = self.head_logits_rows_dev(hidden, rows);
+        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
+        let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
+        let out = g.storage(rows as u64);
+        g.submit(
+            &[],
+            &[
+                g.step(ARGMAX_PART, &[&logits, &part], &[rows, v, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS),
+                g.step(ARGMAX_FINAL, &[&part, &out], &[rows, HEAD_ARGMAX_CHUNKS], rows),
+            ],
+        );
+        g.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+    }
+
+    /// [`Self::head_logits_rows_dev`] reduced to every row's top-`cap` (token id,
+    /// logit) candidates, best first, entirely on the device: `cap` rounds of
+    /// (`argmax_part`+`argmax_final`, `topk_extract_step`), each masking the
+    /// winner out of `logits` before the next - only `rows * cap` pairs are read
+    /// back.
+    pub(crate) fn head_topk_rows_dev(&self, hidden: &DeviceBuffer, rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+        assert!(cap > 0, "head_topk_rows_dev: cap must be > 0");
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let logits = self.head_logits_rows_dev(hidden, rows);
+        let chunk = v.div_ceil(HEAD_ARGMAX_CHUNKS);
+        let part = g.storage(rows as u64 * HEAD_ARGMAX_CHUNKS as u64 * 2);
+        let arg = g.storage(rows as u64);
+        let vals = g.storage((rows * cap) as u64);
+        let idx = g.storage((rows * cap) as u64);
+        let mut steps: Vec<Step> = Vec::new();
+        for col in 0..cap {
+            steps.push(g.step(ARGMAX_PART, &[&logits, &part], &[rows, v, HEAD_ARGMAX_CHUNKS, chunk], rows * HEAD_ARGMAX_CHUNKS));
+            steps.push(g.step(ARGMAX_FINAL, &[&part, &arg], &[rows, HEAD_ARGMAX_CHUNKS], rows));
+            steps.push(g.step(TOPK_EXTRACT_STEP, &[&arg, &logits, &vals, &idx], &[rows, v, cap, col], rows));
+        }
+        g.submit(&[], &steps);
+        let vals = g.read(&vals, (rows * cap) as usize);
+        let idx = g.read(&idx, (rows * cap) as usize);
+        (0..rows as usize)
+            .map(|r| {
+                let s = r * cap as usize;
+                idx[s..s + cap as usize].iter().map(|&x| x as u32).zip(vals[s..s + cap as usize].iter().copied()).collect()
+            })
+            .collect()
     }
 
     pub fn poll_wait(&self) {
