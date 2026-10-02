@@ -25,6 +25,9 @@
 use gpu_core::select::{self, KernelVariant};
 use gpu_core::{f, DeviceBuffer, DeviceCaps, DeviceClass, Gpu, Step};
 
+use crate::kv_tier::{KvAppend, KvKernels, KvLayer, PrefillShape};
+use crate::ops::PagedDecodeShape;
+
 /// The "this model registered no kernel for this slot" sentinel, for every
 /// index set in this module - the `model::block` twin of
 /// [`crate::vit::UNREGISTERED`], and the same value.
@@ -540,6 +543,51 @@ pub fn gqa_decode_batched_step(
     ]
 }
 
+/// [`gqa_decode_batched_step`] over a [`KvLayer`] in any [`KvTier`]: the same
+/// five dispatches and buffer contracts, with the pool a layer's K and V planes
+/// instead of two `f32` buffers, so a compact tier changes what is resident and
+/// not what is computed.
+///
+/// `softmax` is the caller's `decode_softmax_batched` pipeline; the append,
+/// scores and apply kernels are `kv`'s, resolved for the planes' tier.
+pub fn gqa_decode_batched_step_kv(
+    g: &Gpu,
+    kv: &KvKernels,
+    softmax: usize,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    batch: u32,
+    block_size: u32,
+    max_bt: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    layer: &KvLayer,
+    blocks: &DeviceBuffer,
+    offsets: &DeviceBuffer,
+    block_tables: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    assert!(batch > 0, "gqa_decode_batched_step_kv: empty batch");
+    assert!(max_bt > 0, "gqa_decode_batched_step_kv: max_bt must be >= 1");
+    assert!(cap <= max_bt * block_size, "gqa_decode_batched_step_kv: cap {cap} exceeds the addressable pool window {} per sequence", max_bt * block_size);
+    let kv_stride = n_kv_heads * head_dim;
+    let append = KvAppend { batch, kv_stride, block_size, head_dim };
+    let shape = PagedDecodeShape { batch, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
+    vec![
+        kv.append(g, &layer.k, k_new, blocks, offsets, append),
+        kv.append(g, &layer.v, v_new, blocks, offsets, append),
+        kv.scores(g, q, &layer.k, block_tables, seq_lens, scores, shape),
+        g.step(softmax, &[scores, seq_lens, probs], &[batch, n_heads, cap], batch * n_heads),
+        kv.apply(g, probs, &layer.v, block_tables, seq_lens, ctx, shape),
+    ]
+}
+
 /// Bulk-fill a KV cache's rows `0..n` from a batched prefill's contiguous
 /// `k`/`v` output - see [`gqa_decode_step`]'s doc for why one `kv_append`
 /// dispatch suffices (a flat prefix copy, since the cache and the batched
@@ -705,6 +753,61 @@ pub fn gqa_chunk_step(
     steps.push(g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max));
     steps.push(g.step(k.softmax_batched, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads));
     steps.push(g.step(k.apply_batched, &[probs, vcache, block_ids, seq_lens, ctx], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1], n * n_heads * head_dim));
+    steps
+}
+
+/// [`gqa_chunk_step`] over a [`KvLayer`] in any [`KvTier`].
+///
+/// The chunk's `n` K/V rows are appended through the tier's own append kernel
+/// at `(block_ids[i], offsets[i])` - `offsets[i] == start + i` and every
+/// `block_ids[i] == base_row / cap` - which is the flat window
+/// [`kv_cache_fill_at`] writes for an `f32` cache, expressed as the paged append
+/// every tier has. The queries then attend rows `0..=start+i` through the
+/// fused `head_dim = 256` prefill kernel where [`paged_attention_fused`]
+/// selects it on this device, and through the scores/softmax/apply triad (the
+/// `[n, n_heads, start+n]` score slab [`gqa_chunk_step`] documents) otherwise.
+///
+/// `block_ids`/`offsets`/`seq_lens` are `[n]` u32 and caller-owned, shared by
+/// every GQA layer of the round. `softmax` is the caller's
+/// `decode_softmax_batched` pipeline.
+pub fn gqa_chunk_step_kv(
+    g: &Gpu,
+    kv: &KvKernels,
+    softmax: usize,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    base_row: u32,
+    start: u32,
+    n: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    k_new: &DeviceBuffer,
+    v_new: &DeviceBuffer,
+    layer: &KvLayer,
+    block_ids: &DeviceBuffer,
+    offsets: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let t_max = start + n;
+    assert!(t_max <= cap, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {cap}");
+    assert!(base_row.is_multiple_of(cap), "gqa_chunk_step_kv: base_row {base_row} is not a whole number of {cap}-row blocks, so no block_ids value can address it");
+    let kv_stride = n_kv_heads * head_dim;
+    let append = KvAppend { batch: n, kv_stride, block_size: cap, head_dim };
+    let mut steps = vec![kv.append(g, &layer.k, k_new, block_ids, offsets, append), kv.append(g, &layer.v, v_new, block_ids, offsets, append)];
+    if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
+        steps.push(kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, block_ids, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size: cap }));
+        return steps;
+    }
+    // `max_bt = 1`: one physical block backs the whole sequence, so a row's
+    // block table is the single entry `block_ids` holds.
+    let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size: cap, kv_stride, cap: t_max, max_bt: 1, scale: 1.0 / (head_dim as f32).sqrt() };
+    steps.push(kv.scores(g, q, &layer.k, block_ids, seq_lens, scores, shape));
+    steps.push(g.step(softmax, &[scores, seq_lens, probs], &[n, n_heads, t_max], n * n_heads));
+    steps.push(kv.apply(g, probs, &layer.v, block_ids, seq_lens, ctx, shape));
     steps
 }
 

@@ -42,16 +42,16 @@
 //! # Addressing limit
 //!
 //! The kernels index a pool with `u32` element offsets, so one plane may hold
-//! at most [`MAX_PLANE_ELEMS`] elements ([`KvTier::fits_addressing`]). At
-//! `kv_stride = 1024` that is 4 194 303 token rows - 32 sequences of 128k.
+//! at most [`MAX_PLANE_ELEMS`] (2^32) elements ([`KvTier::fits_addressing`]). At
+//! `kv_stride = 1024` that is 4 194 304 token rows - 32 sequences of 128k.
 
 use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 
 use crate::ops::PagedDecodeShape;
 
 /// Largest number of elements one plane may hold: the kernels' `u32` element
-/// index. Past it a pool would silently alias its own start.
-pub const MAX_PLANE_ELEMS: u64 = u32::MAX as u64;
+/// index reaches `0..2^32`. Past it a pool would silently alias its own start.
+pub const MAX_PLANE_ELEMS: u64 = 1 << 32;
 
 /// How a KV plane is stored. See the module doc for the layouts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -399,7 +399,6 @@ impl KvKernels {
 
     /// The fused causal prefill dispatch over `k`/`v` planes (one pipeline for
     /// every tier; the compact ones read their planes in place).
-    #[allow(clippy::too_many_arguments)]
     pub fn flash_prefill_hd256(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Step {
         self.check(k);
         self.check(v);
@@ -448,8 +447,8 @@ mod tests {
 
     #[test]
     fn addressing_stops_at_the_u32_element_index() {
-        assert!(KvTier::fits_addressing(4 * 1024 * 1024 - 1, 1024));
-        assert!(!KvTier::fits_addressing(4 * 1024 * 1024, 1024));
+        assert!(KvTier::fits_addressing(4 * 1024 * 1024, 1024), "2^32 elements: the last index is 2^32 - 1");
+        assert!(!KvTier::fits_addressing(4 * 1024 * 1024 + 1, 1024));
     }
 
     #[test]
