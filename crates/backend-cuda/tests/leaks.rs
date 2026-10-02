@@ -358,6 +358,7 @@ fn the_eager_path_reuses_staging_across_synchronised_steps() {
         b.poll_wait();
     }
     assert_eq!(live_resources().pinned_allocs, steady, "a synchronised decode loop allocated page-locked memory after warm-up");
+    assert!(steady <= 4, "{steady} page-locked allocations for 32 steps: staging is not shared");
     drop((inp, outs, b, p));
 }
 

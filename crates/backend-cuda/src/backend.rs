@@ -64,7 +64,7 @@ use backend_api::{
 
 use crate::driver::{CuDevicePtr, CuFunction};
 use crate::exec;
-use crate::graph::{GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig};
+use crate::graph::{GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig, STAGING_ALIGN_WORDS};
 
 /// One device allocation, behind an `Arc` so a [`DeviceBuffer`] clone and a
 /// recorded [`Step`] both keep it alive - `DeviceBuffer` aliasing is by design
@@ -178,7 +178,7 @@ struct UniformSlot {
     keep: Vec<Weak<exec::DeviceMem>>,
 }
 
-/// Page-locked host blocks the unbatched path stages its parameters through.
+/// Page-locked host memory the unbatched path stages its parameters through.
 ///
 /// It exists because the obvious alternative is a trap. A *synchronous*
 /// host-to-device copy runs on the legacy default stream, and the legacy
@@ -189,17 +189,70 @@ struct UniformSlot {
 /// longer that way than as eight launches with the uploads already done.
 ///
 /// So the upload is enqueued on the dispatch stream instead, which requires
-/// page-locked source memory that stays untouched until the copy runs. A block
-/// is lent to a submission and only returns to the pool once the device has
-/// drained - `read`/`poll_wait`, which a decode step performs every token.
+/// page-locked source memory that stays untouched until the copy runs.
+///
+/// # Bounded by construction
+///
+/// A step's parameters are a handful of words, so the pool is a few
+/// [`STAGING_SLAB_WORDS`] slabs handed out by bump allocation rather than one
+/// driver allocation per step: `cuMemAllocHost` is a driver call with its own
+/// bookkeeping, and a decode token is thousands of steps. Regions stay valid
+/// until the device has drained (`read`/`poll_wait`, which a decode step
+/// performs every token), at which point the whole pool is reused from the
+/// start. The pool never holds more than [`STAGING_MAX_WORDS`]; a caller that
+/// never synchronises hits that bound and pays one synchronise to reuse it -
+/// slow, never wrong, and never unbounded pinned memory. Everything is freed
+/// when the handle drops.
 #[derive(Default)]
 struct StagingPool {
-    /// Available blocks, keyed by exact length in words so a lent block is
-    /// always the size the copy it serves expects.
-    free: HashMap<usize, Vec<exec::PinnedMem>>,
-    /// Blocks a submission has used, whose copies the device may not have run
-    /// yet. Reusing one of these would overwrite a pending upload's source.
-    lent: Vec<exec::PinnedMem>,
+    slabs: Vec<exec::PinnedMem>,
+    /// The slab regions are currently being carved from, and how many of its
+    /// words are taken.
+    cursor: usize,
+    used: usize,
+    /// Words held across all slabs, against [`STAGING_MAX_WORDS`].
+    total_words: usize,
+}
+
+/// Words per staging slab (256 KiB).
+const STAGING_SLAB_WORDS: usize = 1 << 16;
+/// Most page-locked words a handle's staging may hold (4 MiB).
+const STAGING_MAX_WORDS: usize = 1 << 20;
+
+impl StagingPool {
+    /// A region of `words` that no other call is handed until [`Self::reset`],
+    /// as `(slab, word offset)`. `Ok(None)` when [`STAGING_MAX_WORDS`] is
+    /// reached: the caller must drain the device and reset.
+    fn reserve(&mut self, ctx: &exec::Context, words: usize) -> Result<Option<(usize, usize)>, String> {
+        let take = words.next_multiple_of(STAGING_ALIGN_WORDS).max(STAGING_ALIGN_WORDS);
+        loop {
+            match self.slabs.get(self.cursor) {
+                Some(slab) if slab.words() - self.used >= take => {
+                    let at = (self.cursor, self.used);
+                    self.used += take;
+                    return Ok(Some(at));
+                }
+                Some(_) => {
+                    self.cursor += 1;
+                    self.used = 0;
+                }
+                None => {
+                    let cap = take.max(STAGING_SLAB_WORDS);
+                    if self.total_words + cap > STAGING_MAX_WORDS {
+                        return Ok(None);
+                    }
+                    self.slabs.push(ctx.pinned(cap)?);
+                    self.total_words += cap;
+                }
+            }
+        }
+    }
+
+    /// The device has drained, so every region handed out has been read.
+    fn reset(&mut self) {
+        self.cursor = 0;
+        self.used = 0;
+    }
 }
 
 /// What the handle knows about one registered kernel before anything compiles
@@ -732,47 +785,45 @@ impl CudaBackend {
         }
     }
 
-    /// A page-locked block of exactly `words`, lent until the device drains.
+    /// Enqueue a copy of `words` into `dst` on the dispatch stream, staged
+    /// through the pinned pool.
     ///
-    /// The device-drain condition is what makes reuse safe, and it is checked
-    /// rather than assumed: a block only returns to the pool through
-    /// [`Self::recycle_staging`], which is called where the host has just
-    /// synchronised. If a caller never synchronises, the pool grows until the
-    /// cap below forces a synchronise of its own - slow, but never wrong.
-    fn staging_for(&self, words: &[u32]) -> exec::PinnedMem {
-        /// Enough lent blocks to say the caller is not synchronising at all.
-        /// A decode step returns everything it borrowed every token.
-        const CAP: usize = 8192;
+    /// Reserving, filling and enqueuing happen under the pool's lock, and
+    /// [`Self::drain_staging`] resets under the same lock around its
+    /// synchronise. That pairing is what makes reuse safe when two threads
+    /// share a handle: a reset can never recycle a region whose copy was
+    /// enqueued after the synchronise that was supposed to cover it.
+    fn stage_upload(&self, dst: &exec::DeviceMem, words: &[u32]) {
         let mut pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
-        if pool.lent.len() >= CAP && pool.free.get(&words.len()).is_none_or(Vec::is_empty) {
-            drop(pool);
+        let mut at = pool
+            .reserve(&self.ctx, words.len())
+            .unwrap_or_else(|e| panic!("backend-cuda: page-locked staging of {} words: {e}", words.len()));
+        if at.is_none() {
             self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
-            self.recycle_staging();
-            pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
+            pool.reset();
+            at = pool
+                .reserve(&self.ctx, words.len())
+                .unwrap_or_else(|e| panic!("backend-cuda: page-locked staging of {} words: {e}", words.len()));
         }
-        let block = match pool.free.get_mut(&words.len()).and_then(Vec::pop) {
-            Some(b) => b,
-            None => self
-                .ctx
-                .pinned(words.len())
-                .unwrap_or_else(|e| panic!("backend-cuda: page-locked staging of {} words: {e}", words.len())),
-        };
-        block.fill(words);
-        block
+        let (slab, offset) = at.unwrap_or_else(|| {
+            panic!(
+                "backend-cuda: a step's {} parameter words exceed the {STAGING_MAX_WORDS}-word staging bound",
+                words.len()
+            )
+        });
+        let block = &pool.slabs[slab];
+        block.fill_at(offset, words);
+        self.ctx
+            .upload_async_range(dst, block, offset, words.len())
+            .unwrap_or_else(|e| panic!("backend-cuda: uploading a step's uniform failed: {e}"));
     }
 
-    /// Hand a used staging block back to the pool as lent.
-    fn lend_staging(&self, block: exec::PinnedMem) {
-        self.staging.lock().unwrap_or_else(|e| e.into_inner()).lent.push(block);
-    }
-
-    /// The device has drained, so every lent block's copy has run.
-    fn recycle_staging(&self) {
+    /// Wait for the device, then make the whole staging pool reusable. See
+    /// [`Self::stage_upload`] for why the wait is inside the lock.
+    fn drain_staging(&self) {
         let mut pool = self.staging.lock().unwrap_or_else(|e| e.into_inner());
-        let lent = std::mem::take(&mut pool.lent);
-        for b in lent {
-            pool.free.entry(b.words()).or_default().push(b);
-        }
+        self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+        pool.reset();
     }
 
     /// Issue one resolved dispatch on its own - the unbatched path, and the
@@ -785,11 +836,7 @@ impl CudaBackend {
             // `StagingPool`. On the stream it is simply ordered: the previous
             // step's kernel has read this shared uniform before the next step
             // overwrites it.
-            let stage = self.staging_for(&r.params);
-            self.ctx
-                .upload_async(u, &stage)
-                .unwrap_or_else(|e| panic!("backend-cuda: uploading a step's uniform failed: {e}"));
-            self.lend_staging(stage);
+            self.stage_upload(u, &r.params);
         }
         let (gx, gy) = grid_ws(r.threads, r.per_block);
         let start = self.timing.load(Ordering::Acquire).then(|| self.stamp()).flatten();
@@ -1363,8 +1410,7 @@ impl backend_api::Backend for CudaBackend {
     /// wait has already happened by the time the next one is built.
     fn poll_wait(&self) {
         self.refuse_during_capture("poll_wait");
-        self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
-        self.recycle_staging();
+        self.drain_staging();
         self.release_dead_uniforms();
         if self.timing.load(Ordering::Acquire) {
             self.collect_timings();

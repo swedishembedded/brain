@@ -329,7 +329,24 @@ impl Context {
     /// what a capture requires, and the ownership is what makes the lifetime
     /// statable.
     pub fn upload_async(&self, mem: &DeviceMem, src: &PinnedMem) -> Result<(), String> {
-        let bytes = src.words * 4;
+        self.upload_async_range(mem, src, 0, src.words)
+    }
+
+    /// [`Self::upload_async`] of `words` words starting `word_offset` words
+    /// into `src` - what lets many small parameter blocks share one pinned
+    /// allocation. The same lifetime rule applies to that range.
+    pub fn upload_async_range(
+        &self,
+        mem: &DeviceMem,
+        src: &PinnedMem,
+        word_offset: usize,
+        words: usize,
+    ) -> Result<(), String> {
+        let end = word_offset.checked_add(words).ok_or("async upload range overflows")?;
+        if end > src.words {
+            return Err(format!("async upload of words {word_offset}..{end} from a {}-word pinned block", src.words));
+        }
+        let bytes = words * 4;
         if bytes > mem.len {
             return Err(format!("async upload of {bytes} bytes into a {}-byte allocation", mem.len));
         }
@@ -337,10 +354,11 @@ impl Context {
             return Ok(());
         }
         self.make_current()?;
-        // SAFETY: `src` owns `bytes` page-locked bytes and the bound above
-        // proves the destination holds at least that many.
+        // SAFETY: the range check above proves `src` owns `bytes` page-locked
+        // bytes at that offset, and the bound above proves the destination
+        // holds at least that many.
         self.d.check(
-            unsafe { (self.fns.memcpy_htod_async)(mem.ptr, src.ptr as *const c_void, bytes, self.stream) },
+            unsafe { (self.fns.memcpy_htod_async)(mem.ptr, src.ptr.add(word_offset) as *const c_void, bytes, self.stream) },
             "cuMemcpyHtoDAsync",
         )
     }
@@ -860,16 +878,24 @@ impl PinnedMem {
     /// # Panics
     /// If `src` is longer than the block.
     pub fn fill(&self, src: &[u32]) {
+        self.fill_at(0, src);
+    }
+
+    /// [`Self::fill`] starting `word_offset` words into the block.
+    ///
+    /// # Panics
+    /// If the range does not lie inside the block.
+    pub fn fill_at(&self, word_offset: usize, src: &[u32]) {
         assert!(
-            src.len() <= self.words,
-            "backend-cuda: {} words written into a {}-word pinned staging block",
+            word_offset.checked_add(src.len()).is_some_and(|end| end <= self.words),
+            "backend-cuda: {} words written at word {word_offset} of a {}-word pinned staging block",
             src.len(),
             self.words
         );
-        // SAFETY: the block owns `self.words` u32s, the bound above proves
-        // `src` fits, and the two regions cannot overlap (one is page-locked
-        // driver memory, the other is the caller's).
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr, src.len()) };
+        // SAFETY: the block owns `self.words` u32s, the bound above proves the
+        // destination range lies inside it, and the two regions cannot overlap
+        // (one is page-locked driver memory, the other is the caller's).
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.add(word_offset), src.len()) };
     }
 }
 

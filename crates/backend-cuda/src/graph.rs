@@ -59,6 +59,11 @@ use std::sync::{Arc, Weak};
 use crate::driver::{CuDevicePtr, CuFunction, CuGraphNode, CuKernelNodeParams};
 use crate::exec;
 
+/// Alignment, in words, of every parameter block carved out of a pinned
+/// staging allocation. Four words keeps each block on a 16-byte boundary, which
+/// is what the widest scalar a kernel reads from its uniform needs.
+pub(crate) const STAGING_ALIGN_WORDS: usize = 4;
+
 /// One dispatch's *structure*: everything a graph node records, minus the two
 /// things a replay is allowed to change.
 ///
@@ -137,9 +142,10 @@ pub(crate) struct LiveNode {
     per_block: u32,
     threads: u32,
     args: Vec<CuDevicePtr>,
-    /// Page-locked host staging this node's first graph node copies from.
-    /// `None` for a step with no parameters of its own to supply.
-    staging: Option<exec::PinnedMem>,
+    /// Where in the graph's pinned staging ([`LiveGraph::staging`]) this
+    /// node's first graph node copies its parameters from, as `(word offset,
+    /// words)`. `None` for a step with no parameters of its own to supply.
+    staging: Option<(usize, usize)>,
     /// What is currently in `staging`. A replay that would write the same
     /// words writes nothing, which is not a micro-optimisation: writing is
     /// what forces the wait below, so a submission that repeats unchanged
@@ -166,6 +172,10 @@ pub(crate) struct LiveGraph {
     /// purpose and a re-capture is what replaces both.
     _graph: exec::Graph,
     exec: exec::GraphExec,
+    /// One page-locked block holding every node's parameters, each at the
+    /// offset its [`LiveNode::staging`] names. One driver allocation per graph
+    /// rather than one per node: a decode graph is thousands of nodes.
+    staging: Option<exec::PinnedMem>,
     _clears: Vec<Weak<exec::DeviceMem>>,
     nodes: Vec<LiveNode>,
 }
@@ -313,16 +323,22 @@ impl GraphCache {
         steps: &[Resolved],
         counters: &GraphCounters,
     ) -> Result<(), String> {
-        // The staging blocks are allocated BEFORE the capture opens:
-        // `cuMemAllocHost` is not a stream operation and has no business
-        // inside a captured region.
-        let mut staging = Vec::with_capacity(steps.len());
+        // The staging is allocated BEFORE the capture opens: `cuMemAllocHost`
+        // is not a stream operation and has no business inside a captured
+        // region.
+        let mut words = 0usize;
+        let mut slots = Vec::with_capacity(steps.len());
         for s in steps {
-            staging.push(match (s.uniform.as_ref(), s.params.is_empty()) {
-                (Some(_), false) => Some(ctx.pinned(s.params.len())?),
+            slots.push(match (s.uniform.as_ref(), s.params.is_empty()) {
+                (Some(_), false) => {
+                    let at = words;
+                    words += s.params.len().next_multiple_of(STAGING_ALIGN_WORDS);
+                    Some((at, s.params.len()))
+                }
                 _ => None,
             });
         }
+        let staging = if words > 0 { Some(ctx.pinned(words)?) } else { None };
 
         let capture = ctx.begin_capture()?;
         // The submission's clears are nodes of the graph like everything else.
@@ -333,12 +349,12 @@ impl GraphCache {
             ctx.zero(c)?;
         }
         let mut nodes = Vec::with_capacity(steps.len());
-        for (s, stage) in steps.iter().cloned().zip(staging) {
-            if let (Some(u), Some(st)) = (s.uniform.as_ref(), stage.as_ref()) {
+        for (s, slot) in steps.iter().cloned().zip(slots) {
+            if let (Some(u), Some((at, n)), Some(st)) = (s.uniform.as_ref(), slot, staging.as_ref()) {
                 // The step's FIRST node: its parameters land in the stable
                 // uniform allocation before its kernel reads them, in stream
                 // order, every replay.
-                ctx.upload_async(u, st)?;
+                ctx.upload_async_range(u, st, at, n)?;
             }
             let (gx, gy) = backend_api::grid_ws(s.threads, s.per_block);
             // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
@@ -353,7 +369,7 @@ impl GraphCache {
                 per_block: s.per_block,
                 threads: s.threads,
                 args: s.args,
-                staging: stage,
+                staging: slot,
                 staged: Vec::new(),
                 _uniform: s.uniform.as_ref().map(Arc::downgrade),
                 _bufs: s.bufs.iter().map(|(m, off)| (Arc::downgrade(m), *off)).collect(),
@@ -369,6 +385,7 @@ impl GraphCache {
                 epoch,
                 _graph: graph,
                 exec,
+                staging,
                 _clears: clears.iter().map(Arc::downgrade).collect(),
                 nodes,
             },
@@ -423,9 +440,9 @@ impl GraphCache {
             self.in_flight = false;
         }
         for (node, step) in live.nodes.iter_mut().zip(steps) {
-            if let Some(st) = &node.staging {
+            if let (Some((at, _)), Some(st)) = (node.staging, live.staging.as_ref()) {
                 if node.staged != step.params {
-                    st.fill(&step.params);
+                    st.fill_at(at, &step.params);
                     node.staged.clear();
                     node.staged.extend_from_slice(&step.params);
                 }
