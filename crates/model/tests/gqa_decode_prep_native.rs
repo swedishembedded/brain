@@ -90,8 +90,12 @@ fn bits(v: Vec<f32>) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
 
+/// Whether this device is offered the native kernels: a CUDA device, with
+/// `BRAIN_NO_NATIVE_KERNELS` (the A/B switch that pins the WGSL tier) unset.
+/// Under it these gates skip, and the "offered only where it can run" test
+/// asserts the withholding.
 fn is_cuda(g: &Gpu) -> bool {
-    g.kind() == "cuda" && g.caps().arch.compute_capability.is_some()
+    g.kind() == "cuda" && g.caps().arch.compute_capability.is_some() && !std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
 }
 
 struct Case {

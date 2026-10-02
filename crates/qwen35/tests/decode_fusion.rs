@@ -91,6 +91,13 @@ fn the_fused_decode_tape_is_bit_identical_with_128_wide_linear_attention_heads()
     bit_identical(wide_gdn());
 }
 
+/// Whether the native kernels are withheld process-wide (`BRAIN_NO_NATIVE_KERNELS`):
+/// a decode step is then the unfused chain whatever the toggle says, so the
+/// launch-count claims below have nothing to compare.
+fn withheld() -> bool {
+    std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
+}
+
 /// A fresh model's first two decode steps are issued and recorded launch by
 /// launch (the eager step, then the capturing one), so the launch count over
 /// them is twice the dispatches in a token. The fused tape has strictly fewer.
@@ -108,6 +115,10 @@ fn launches(gpu: &Gpu, cfg: &Qwen35Config, fusion: bool) -> u64 {
 #[test]
 fn the_fused_decode_tape_launches_fewer_kernels() {
     let _s = serial();
+    if withheld() {
+        brain_testutil::skip_unavailable("BRAIN_NO_NATIVE_KERNELS withholds the fused kernels");
+        return;
+    }
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
@@ -127,6 +138,10 @@ fn the_fused_decode_tape_launches_fewer_kernels() {
 #[test]
 fn the_gdn_step_is_one_launch_with_128_wide_heads() {
     let _s = serial();
+    if withheld() {
+        brain_testutil::skip_unavailable("BRAIN_NO_NATIVE_KERNELS withholds the fused kernels");
+        return;
+    }
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;

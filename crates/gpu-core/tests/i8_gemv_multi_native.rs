@@ -26,8 +26,12 @@ use gpu_core::{Dispatch, Fused, Gpu};
 const KERNELS: &[(&str, &str)] = &[("matmul_i8_gemv_ref", kernels::MATMUL_I8_GEMV)];
 const K_REF: usize = 0;
 
+/// Whether this device is offered the native kernels: a CUDA device, with
+/// `BRAIN_NO_NATIVE_KERNELS` (the A/B switch that pins the WGSL tier) unset.
+/// Under it these gates skip, and the "offered only where it can run" test
+/// asserts the withholding.
 fn is_cuda(gpu: &Gpu) -> bool {
-    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some()
+    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && !std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
 }
 
 fn packed(words: usize, seed: u64) -> Vec<u32> {
