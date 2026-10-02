@@ -503,3 +503,54 @@ fn buffers_that_came_and_went_do_not_pin_their_uniform_blocks() {
     drop(b);
 }
 
+
+/// Everything a handle hands out may be dropped after the handle itself - a
+/// model drops its device handle ahead of its buffers, and a graph or module
+/// is only ever held by something that outlives a call. When the handle was
+/// the last holder of the primary context, a destroy that reaches the driver
+/// after the context is gone is refused (or faults) and the object is never
+/// freed. No other context is open here on purpose: that is the only state in
+/// which the ordering matters.
+#[test]
+fn objects_outlive_the_handle_that_made_them() {
+    let _s = serial();
+    let base = live_resources();
+    let Ok(c) = Context::open(0) else {
+        brain_testutil::skip_unavailable("no usable CUDA device");
+        return;
+    };
+    let module = c.compile(TOUCH, "touch").ok();
+    let graphs = module.as_ref().filter(|_| c.graphs().is_ok()).map(|m| {
+        let f = m.function("touch").expect("entry point");
+        let out = c.alloc(1024).expect("alloc");
+        let cap = c.begin_capture().expect("begin capture");
+        c.launch(&f, (1, 1, 1), (32, 1, 1), &[&out]).expect("launch");
+        let graph = cap.finish().expect("finish");
+        let exec = c.instantiate(&graph).expect("instantiate");
+        c.sync().expect("sync");
+        (graph, exec, out)
+    });
+    let pinned = c.pinned(64).expect("pinned");
+    let event = c.event().expect("event");
+    let mem = c.alloc(4096).expect("alloc");
+    drop(c);
+    // Objects that hold the context alive by themselves go first, so that the
+    // graph, the instantiated graph and the module are the LAST holders.
+    drop((pinned, event, mem));
+    // Run on a thread with a deadline: destroying a graph or module after the
+    // context is gone does not fail, it blocks inside the driver forever.
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Some((graph, exec, out)) = graphs {
+            drop(out);
+            drop(exec);
+            drop(graph);
+        }
+        drop(module);
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("dropping a graph or module after its handle hung the driver");
+    assert_eq!(live_resources(), base, "an object dropped after its handle was not freed");
+}

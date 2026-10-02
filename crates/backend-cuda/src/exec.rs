@@ -456,7 +456,7 @@ impl Context {
             "cuModuleLoadData",
         )?;
         crate::live::module_loaded();
-        Ok(Module { d: self.d, fns: self.fns, ctx: self.ctx, m })
+        Ok(Module { d: self.d, fns: self.fns, ctx: self.ctx, m, _primary: self.primary.clone() })
     }
 
     /// Launch `f` over `grid` blocks of `block` threads with one pointer
@@ -577,7 +577,7 @@ impl Context {
         // built on this context. No instantiation flags are requested.
         self.d.check(unsafe { (g.graph_instantiate)(&mut e, graph.graph, 0) }, "cuGraphInstantiate")?;
         crate::live::graph_exec_created();
-        Ok(GraphExec { d: self.d, g, ctx: self.ctx, e })
+        Ok(GraphExec { d: self.d, g, ctx: self.ctx, e, _primary: self.primary.clone() })
     }
 
     /// Enqueue a whole instantiated graph on [`Self::stream`] - one driver
@@ -725,7 +725,7 @@ impl Capture<'_> {
             return Err("cuStreamEndCapture produced no graph".into());
         }
         crate::live::graph_created();
-        Ok(Graph { d: self.ctx.d, g: self.g, graph })
+        Ok(Graph { d: self.ctx.d, g: self.g, graph, _primary: self.ctx.primary.clone() })
     }
 }
 
@@ -751,6 +751,7 @@ pub struct Graph {
     d: &'static Driver,
     g: &'static GraphFns,
     graph: CuGraph,
+    _primary: Arc<PrimaryRef>,
 }
 
 impl Drop for Graph {
@@ -777,6 +778,7 @@ pub struct GraphExec {
     g: &'static GraphFns,
     ctx: CuContext,
     e: CuGraphExec,
+    _primary: Arc<PrimaryRef>,
 }
 
 impl Drop for GraphExec {
@@ -986,6 +988,7 @@ pub struct Module {
     fns: &'static ExecFns,
     ctx: CuContext,
     m: CuModule,
+    _primary: Arc<PrimaryRef>,
 }
 
 impl Module {
