@@ -35,8 +35,12 @@ const KERNELS: &[(&str, &str)] =
 const K_GEMV: usize = 0;
 const K_REF: usize = 1;
 
-/// Rows of x the native kernel serves per weight pass.
-const NATIVE_ROWS: u32 = 8;
+/// Rows of x one block of the native kernel covers; more rows take more blocks
+/// of the grid, each re-reading the weights.
+const TILE_ROWS: u32 = 8;
+/// Rows of x the native kernel serves: the decode regime, the same bound the
+/// WGSL GEMV it stands in for has (`select::DECODE_REGIME_MAX_ROWS`).
+const NATIVE_ROWS: u32 = backend_api::select::DECODE_REGIME_MAX_ROWS;
 /// Packed words per weight-scale group.
 const WPG: usize = 8;
 /// Written around every window so an out-of-window write shows.
@@ -174,7 +178,7 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
     for m in 1..=NATIVE_ROWS {
         assert_eq!(gpu.native_kernel_for(K_GEMV, &[m, 1280, 1024]), Some("matmul_i8_gemv"), "m={m}");
     }
-    assert_eq!(gpu.native_kernel_for(K_GEMV, &[NATIVE_ROWS + 1, 1280, 1024]), None, "past one tile keeps the WGSL ladder");
+    assert_eq!(gpu.native_kernel_for(K_GEMV, &[NATIVE_ROWS + 1, 1280, 1024]), None, "past the decode regime keeps the prefill kernels");
     assert_eq!(gpu.native_kernel_for(K_GEMV, &[1, 1284, 1024]), None, "K not a whole number of scale groups");
     // The reference alias is deliberately not upgraded; it is what makes the
     // comparison a comparison.
@@ -200,7 +204,9 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
     let ragged = [1, 3, 1, 2, 5];
     let quad = [4, 4, 4, 4, 4];
     for (kg, n) in [(8u32, 1u32), (16, 7), (72, 9), (136, 129), (328, 33), (1280, 64)] {
-        for m in 1..=NATIVE_ROWS {
+        // Every row count of the first tile, then ones that end a tile, split
+        // across tiles, leave a ragged last tile and fill the regime.
+        for m in (1..=TILE_ROWS).chain([9, 12, 16, 17, 24, 31, NATIVE_ROWS]) {
             for lead in [aligned, ragged, quad] {
                 let (got, want) = run(&gpu, &Case { m, kg, n, lead });
                 assert_eq!(
@@ -230,21 +236,6 @@ fn random_shapes_and_windows_are_byte_identical() {
         let lead = [0, 1, 2, 3, 4].map(|_| u64::from(r.next_u32() % 8));
         let (got, want) = run(&gpu, &Case { m, kg, n, lead });
         assert_eq!(got, want, "native int8 GEMV differs at m={m} kg={kg} n={n} lead={lead:?}");
-    }
-}
-
-/// Past the native tile the dispatch keeps the WGSL ladder and still agrees -
-/// the redirect is per dispatch, so a caller never sees it flip.
-#[test]
-fn a_shape_past_the_native_tile_still_matches() {
-    let gpu = gpu_core::testgpu::dev(KERNELS);
-    if !gpu.caps().workgroup_reductions || !gpu.caps().numeric.int8_dot {
-        brain_testutil::skip_unavailable("no packed int8 dot on this device");
-        return;
-    }
-    for m in [9u32, 12, 32] {
-        let (got, want) = run(&gpu, &Case { m, kg: 136, n: 65, lead: [0; 5] });
-        assert_eq!(got, want, "m={m}");
     }
 }
 

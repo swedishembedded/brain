@@ -501,6 +501,21 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
+/// The int8 GEMV/tile crossover on `caps`: [`I8_GEMV_MAX_ROWS`] where the
+/// GEMV is the portable kernel, the whole decode regime where the device runs
+/// a native one (it reports a CUDA compute capability). The native kernel keeps
+/// the weight stream at full width and covers more rows with more blocks - four
+/// weight passes at 32 rows - where the register-tiled kernel's 128x128 tile
+/// leaves a 16-row batch on a few blocks: measured on a GH200 at 16 rows of a
+/// 35B-A3B decode, that kernel was 59% of the step (125 ms of 211).
+pub fn i8_gemv_max_rows(caps: &DeviceCaps) -> u32 {
+    if caps.arch.compute_capability.is_some() {
+        DECODE_REGIME_MAX_ROWS
+    } else {
+        I8_GEMV_MAX_ROWS
+    }
+}
+
 /// The fp32/storage-tier register-tiled GEMM ([`KernelVariant::RegisterTiled`])
 /// needs at least this many rows to be worth it - below it the 128×128 tile is
 /// mostly idle and the naive one-thread-per-output kernel wins outright.
@@ -788,7 +803,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => {
                 if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
                     vec![PackedInt8]
-                } else if shape.m <= I8_GEMV_MAX_ROWS {
+                } else if shape.m <= i8_gemv_max_rows(caps) {
                     vec![WorkgroupPerOutput, PackedInt8]
                 } else {
                     vec![PackedInt8, WorkgroupPerOutput]
@@ -1483,6 +1498,23 @@ mod tests {
         let mut c = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
         c.numeric = NumericSupport { int8_dot: true, ..NumericSupport::BASELINE };
         c
+    }
+
+    /// A device that runs the native int8 GEMV keeps the GEMV through the whole
+    /// decode regime; one that does not keeps the portable crossover.
+    #[test]
+    fn native_int8_gemv_devices_keep_the_gemv_through_the_decode_regime() {
+        let portable = gpu_caps();
+        let mut cuda = gpu_caps();
+        cuda.arch.compute_capability = Some((9, 0));
+        for m in [1u32, 8, 9, 16, 32] {
+            let sh = shape(m, 4096, 2048, Dtype::I8);
+            let on_cuda = DefaultSelector.select(Op::MatMul, sh, &cuda);
+            assert_eq!(on_cuda, KernelVariant::WorkgroupPerOutput, "m={m} on a native-GEMV device");
+            let on_portable = DefaultSelector.select(Op::MatMul, sh, &portable);
+            assert_eq!(on_portable == KernelVariant::WorkgroupPerOutput, m <= I8_GEMV_MAX_ROWS, "m={m} on a portable device");
+        }
+        assert_eq!(DefaultSelector.select(Op::MatMul, shape(33, 4096, 2048, Dtype::I8), &cuda), KernelVariant::PackedInt8);
     }
 
     fn cpu_caps() -> DeviceCaps {

@@ -66,15 +66,16 @@ const I8_GEMV_BINDINGS: &[BindKind] = &[
 
 /// `Params { m, kg, n }`. The kernel needs `K` to be a whole number of 32
 /// element weight-scale groups (`kg % 8 == 0`, the WGSL kernel's own
-/// contract) and serves one tile of `m` rows per weight pass: more rows would
-/// re-stream the weights once per tile, which the WGSL `MREG` ladder avoids.
+/// contract). It serves the whole decode regime the WGSL GEMV does: a block
+/// covers one tile of rows, and more rows take more blocks of the grid, each
+/// re-streaming the weights - four passes at 32 rows is still far less than the
+/// register-tiled prefill kernel's mostly idle 128x128 tiles cost there.
 fn serves_i8_gemv(p: &[u32]) -> bool {
     let (m, kg, n) = match p {
         [m, kg, n, ..] => (*m, *kg, *n),
         _ => return false,
     };
-    let rows = kernels_cuda::get("matmul_i8_gemv").map_or(0, |k| k.tile.0);
-    m >= 1 && m <= rows && n >= 1 && kg >= 8 && kg % 8 == 0
+    m >= 1 && m <= backend_api::select::DECODE_REGIME_MAX_ROWS && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
 pub(crate) const ROWS: &[Row] = &[Row {
@@ -382,7 +383,9 @@ mod tests {
         assert!(serves_i8_gemv(&[1, 1280, 17408]));
         assert!(serves_i8_gemv(&[8, 8, 1]));
         assert!(!serves_i8_gemv(&[0, 1280, 64]), "no rows");
-        assert!(!serves_i8_gemv(&[9, 1280, 64]), "past one tile of x rows");
+        assert!(serves_i8_gemv(&[9, 1280, 64]), "a second tile of x rows is more blocks, not another kernel");
+        assert!(serves_i8_gemv(&[32, 1280, 64]));
+        assert!(!serves_i8_gemv(&[33, 1280, 64]), "past the decode regime");
         assert!(!serves_i8_gemv(&[1, 1284, 64]), "K not a whole number of scale groups");
         assert!(!serves_i8_gemv(&[1, 1280]), "short params");
     }
