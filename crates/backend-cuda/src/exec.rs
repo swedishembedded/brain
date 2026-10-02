@@ -1090,8 +1090,12 @@ struct HeldBlock {
     fence: Option<Fence>,
 }
 
-/// Smallest block worth holding.
-const MIN_CACHED_BYTES: usize = 64 << 10;
+/// Smallest block worth holding. Measured on a prefill round of the real 27B: the
+/// sub-kilobyte blocks (a step's uniform) free in about 3 us each and never wait
+/// for the device, while the 1-64 KiB per-layer activations and scale planes
+/// free in milliseconds under load, because that is where `cuMemFree` blocks
+/// until the card has drained.
+const MIN_CACHED_BYTES: usize = 1 << 10;
 
 /// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
 /// between 256 MiB and 4 GiB, unless `BRAIN_CUDA_BLOCK_CACHE_MB` says otherwise.

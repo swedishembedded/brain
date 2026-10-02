@@ -63,6 +63,14 @@ fn main() {
     println!("qwen35 prefill profile: {} layers, weight tier {}, {} stage(s), backend {}", cfg.n_layers, tier.describe(), placed.len(), gpu_core::backend_name());
     let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
 
+    // A/B switch: `BRAIN_PREFILL_ARENA=0` runs the rounds without the scratch arena
+    // (and so without its per-layer drain), `1` forces it on.
+    match std::env::var("BRAIN_PREFILL_ARENA").as_deref() {
+        Ok("0") => inst.set_chunk_arena_min_rows(u32::MAX),
+        Ok("1") => inst.set_chunk_arena_min_rows(1),
+        _ => {}
+    }
+
     let seed = inst.tokenize("The quick brown fox jumps over the lazy dog while a kalman filter estimates the state of a noisy system. ");
     let prompt: Vec<u32> = seed.iter().cycle().take(depth as usize).copied().collect();
     let p = inst.profile_prefill_rounds(&prompt, rows, rounds);
