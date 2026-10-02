@@ -576,23 +576,52 @@ pub fn gqa_decode_batched_step_kv(
     ctx: &DeviceBuffer,
 ) -> Vec<Step> {
     assert!(batch > 0, "gqa_decode_batched_step_kv: empty batch");
+    let append = KvAppend { batch, kv_stride: n_kv_heads * head_dim, block_size, head_dim };
+    let mut steps = vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)];
+    steps.extend(gqa_decode_batched_attend_steps_kv(g, kv, softmax, n_heads, n_kv_heads, head_dim, batch, block_size, max_bt, cap, q, layer, block_tables, seq_lens, ctx));
+    steps
+}
+
+/// [`gqa_decode_batched_step_kv`] without the two KV appends: the attention
+/// over a layer that already holds this step's new K and V row - the fused
+/// split-key kernel where [`KvKernels::flash_decode_available`], the
+/// scores/softmax/apply triad otherwise. For a caller whose own kernel has done
+/// the appends (the fused decode prep writes them as it normalises and rotates
+/// the head).
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_decode_batched_attend_steps_kv(
+    g: &Gpu,
+    kv: &KvKernels,
+    softmax: usize,
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    batch: u32,
+    block_size: u32,
+    max_bt: u32,
+    cap: u32,
+    q: &DeviceBuffer,
+    layer: &KvLayer,
+    block_tables: &DeviceBuffer,
+    seq_lens: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    assert!(batch > 0, "gqa_decode_batched_step_kv: empty batch");
     assert!(max_bt > 0, "gqa_decode_batched_step_kv: max_bt must be >= 1");
     assert!(cap <= max_bt * block_size, "gqa_decode_batched_step_kv: cap {cap} exceeds the addressable pool window {} per sequence", max_bt * block_size);
     let kv_stride = n_kv_heads * head_dim;
-    let append = KvAppend { batch, kv_stride, block_size, head_dim };
     let shape = PagedDecodeShape { batch, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
-    let mut steps = vec![kv.append(g, &layer.k, k_new, blocks, offsets, append), kv.append(g, &layer.v, v_new, blocks, offsets, append)];
     if kv.flash_decode_available(g, head_dim, n_heads / n_kv_heads) {
         let fused = FlashDecodeShape { batch, n_heads, n_kv_heads, head_dim, block_size, max_bt, cap };
-        steps.extend(kv.flash_decode(g, q, &layer.k, &layer.v, block_tables, seq_lens, ctx, fused));
-        return steps;
+        return kv.flash_decode(g, q, &layer.k, &layer.v, block_tables, seq_lens, ctx, fused);
     }
     let scores = g.storage(batch as u64 * n_heads as u64 * cap as u64);
     let probs = g.storage(batch as u64 * n_heads as u64 * cap as u64);
-    steps.push(kv.scores(g, q, &layer.k, block_tables, seq_lens, &scores, shape));
-    steps.push(g.step(softmax, &[&scores, seq_lens, &probs], &[batch, n_heads, cap], batch * n_heads));
-    steps.push(kv.apply(g, &probs, &layer.v, block_tables, seq_lens, ctx, shape));
-    steps
+    vec![
+        kv.scores(g, q, &layer.k, block_tables, seq_lens, &scores, shape),
+        g.step(softmax, &[&scores, seq_lens, &probs], &[batch, n_heads, cap], batch * n_heads),
+        kv.apply(g, &probs, &layer.v, block_tables, seq_lens, ctx, shape),
+    ]
 }
 
 /// Bulk-fill a KV cache's rows `0..n` from a batched prefill's contiguous

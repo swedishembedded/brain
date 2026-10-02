@@ -1949,21 +1949,35 @@ impl Qwen35 {
                 None,
             ),
             Some(GqaCached::Decode(dc)) if epilogue => {
-                // The sigmoid output gate rides on the quantisation below.
-                let (ctx, q_gate) = model::gqa_mixer::gqa_mixer_decode_batched_kv_attend(
-                    g,
-                    &gqa_mixer_ids(),
-                    &self.kv_kernels(dc.layer),
-                    DECODE_SOFTMAX_BATCHED,
-                    &shape,
-                    &weights,
-                    &q_full,
-                    &k,
-                    &v,
-                    dc.layer,
-                    n,
-                    dc.paged,
-                );
+                // The sigmoid output gate rides on the quantisation below. The
+                // front half of the attention (split, QK norm, rotation, KV
+                // append) is one native launch for a single sequence on an f32
+                // KV tier where the device is offered it, and the chain of eight
+                // otherwise.
+                let kv = self.kv_kernels(dc.layer);
+                let (ctx, q_gate) = self
+                    .decode_fusion
+                    .get()
+                    .then(|| {
+                        model::gqa_mixer::gqa_mixer_decode_fused_kv_attend(g, &kv, DECODE_SOFTMAX_BATCHED, &shape, &weights, &q_full, &k, &v, dc.layer, n, dc.paged)
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        model::gqa_mixer::gqa_mixer_decode_batched_kv_attend(
+                            g,
+                            &gqa_mixer_ids(),
+                            &kv,
+                            DECODE_SOFTMAX_BATCHED,
+                            &shape,
+                            &weights,
+                            &q_full,
+                            &k,
+                            &v,
+                            dc.layer,
+                            n,
+                            dc.paged,
+                        )
+                    });
                 let (gated, act) = self.quant_epilogue(2, &ctx, Some(&q_gate), n, shape.qd());
                 o_proj_act = Some(act);
                 (gated.expect("a gated epilogue hands back its product"), None)

@@ -113,6 +113,13 @@ pub enum Fused {
     /// read, `gated` written. The head and conv shapes are the CALLER's to
     /// check - the params cannot say them.
     GdnDecode,
+    /// `gqa_decode_prep`: for ONE token of a gated-attention layer, the
+    /// `[value|gate]` split, the per-head QK RMSNorm, the partial rotary
+    /// rotation and the K/V append into the paged pools. Params `[nh, nkv,
+    /// head_dim, half, eps (f32 bits), block_size, 0, 0]`; bindings `q_full, k,
+    /// v, q_norm, k_norm, cos, sin, blocks, offsets` read, `q_out, q_gate,
+    /// pool_k, pool_v` written.
+    GqaDecodePrep,
 }
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
@@ -154,6 +161,26 @@ const GDN_DECODE_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `gqa_decode_prep`'s bindings: params, `q_full`, `k`, `v`, `q_norm`,
+/// `k_norm`, `cos`, `sin`, `blocks`, `offsets`, `q_out`, `q_gate`, `pool_k`,
+/// `pool_v`.
+const GQA_DECODE_PREP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
 impl Fused {
 
     /// The `kernels_cuda` registry entry's name.
@@ -162,6 +189,7 @@ impl Fused {
             Fused::AddRmsQuant => "add_rms_quant",
             Fused::QuantEpilogue => "quant_epilogue",
             Fused::GdnDecode => "gdn_decode",
+            Fused::GqaDecodePrep => "gqa_decode_prep",
         }
     }
 
@@ -170,6 +198,7 @@ impl Fused {
             Fused::AddRmsQuant => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
             Fused::GdnDecode => GDN_DECODE_BINDINGS,
+            Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
         }
     }
 
@@ -187,6 +216,9 @@ impl Fused {
             // A block is one key head's `group` value heads, 128 threads each
             // (3 is what one SM's registers hold at 128 live state words).
             Fused::GdnDecode => matches!(params, [nkh, nvh, group, ..] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group),
+            // A head is one 256-thread block holding up to 512 values; the
+            // rotated span `2 * half` has to fit inside it.
+            Fused::GqaDecodePrep => matches!(params, [nh, nkv, hd, half, ..] if *nh >= 1 && *nkv >= 1 && nh % nkv == 0 && (2..=512).contains(hd) && *half >= 1 && 2 * half <= *hd),
         }
     }
 
@@ -195,6 +227,7 @@ impl Fused {
         match self {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
             Fused::GdnDecode => params[0],
+            Fused::GqaDecodePrep => params[0] + params[1],
         }
     }
 }

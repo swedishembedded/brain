@@ -249,6 +249,24 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 4 * 128 * 4 + 3 * 128 * 4 + 3 * 4,
         src: include_str!("../cu/gdn_decode.cu"),
     },
+    CudaKernel {
+        name: "gqa_decode_prep",
+        // A fused kernel asked for by name (see `add_rms_quant`); the operator
+        // and tier are unique in this table.
+        op: Op::PagedAttention,
+        weight: Dtype::F32,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gqa_decode_prep",
+        what: "gated-attention decode prep in one launch: [value|gate] split, per-head QK RMSNorm, partial rotary, KV append; a block per head, bit-identical to the 8-kernel WGSL chain",
+        reported: "native:gqa_decode_prep",
+        block_dim: 256,
+        // One block per head (query heads, then key heads).
+        tile: (1, 1),
+        // The head's 512 staged values and the shared inverse norm.
+        shared_bytes: 512 * 4 + 4,
+        src: include_str!("../cu/gqa_decode_prep.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of
