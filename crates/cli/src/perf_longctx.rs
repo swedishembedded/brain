@@ -72,11 +72,23 @@ fn elapsed_ms(started: Instant) -> f64 {
 pub struct Qwen35Engine {
     path: String,
     tier: model::ops::TierPolicy,
+    /// How the GQA layers' K/V are stored (`BRAIN_QWEN35_KV`).
+    kv_tier: model::kv_tier::KvTier,
     gpus: Vec<(u32, String, u64)>,
     max_context: Option<u32>,
     inst: Option<Qwen35GgufInstance>,
     /// Real in-vocab token ids prompts are cut from, tokenised once.
     prompt_seed: Option<Vec<u32>>,
+}
+
+/// The artifact's name for a KV tier: `fp32`/`bf16`/`int8`, the spellings the
+/// paged engine's own fingerprint and the weight tier already use.
+fn kv_label(kv: model::kv_tier::KvTier) -> &'static str {
+    match kv {
+        model::kv_tier::KvTier::F32 => "fp32",
+        model::kv_tier::KvTier::Bf16 => "bf16",
+        model::kv_tier::KvTier::Int8 => "int8",
+    }
 }
 
 impl Qwen35Engine {
@@ -90,6 +102,7 @@ impl Qwen35Engine {
         Ok(Qwen35Engine {
             path: path.to_string(),
             tier: Qwen35GgufResident::tier_from_env(),
+            kv_tier: Qwen35GgufResident::kv_tier_from_env()?,
             gpus,
             max_context: Some(cfg.max_position_embeddings).filter(|&n| n > 0),
             inst: None,
@@ -102,7 +115,7 @@ impl Qwen35Engine {
     }
 
     fn resident(&self, batch: u32, context: u32) -> Qwen35GgufResident {
-        Qwen35GgufResident::new(self.path.clone(), self.devices(), context, self.tier.clone()).with_max_batch(batch)
+        Qwen35GgufResident::new(self.path.clone(), self.devices(), context, self.tier.clone()).with_kv_tier(self.kv_tier).with_max_batch(batch)
     }
 
     /// The devices the placement planner admits this sizing on; empty when it
@@ -117,8 +130,9 @@ impl LongContextEngine for Qwen35Engine {
         EngineInfo {
             model: qwen35::int8_gguf_resident::MODEL.to_string(),
             weight_tier: self.tier.describe(),
-            // The GQA window and the recurrent state are fp32 words.
-            kv_precision: "fp32".into(),
+            // The GQA window is stored in the chosen KV tier; the recurrent
+            // state is fp32 words whatever it is.
+            kv_precision: kv_label(self.kv_tier).into(),
             backend: gpu_core::backend_name().to_string(),
             devices: self.gpus.iter().map(|(i, name, _)| format!("gpu{i} {name}")).collect(),
             context_kind: ContextKind::Synthetic,
@@ -132,7 +146,7 @@ impl LongContextEngine for Qwen35Engine {
     fn plan(&mut self, batch: u32, context: u32) -> Result<Fit, String> {
         let mg = MmapGguf::open(&self.path).map_err(|e| format!("open {}: {e}", self.path))?;
         let cfg = resident_config(&mg, context)?;
-        let needed = layer_cost(&cfg, context, &self.tier, batch).total();
+        let needed = layer_cost(&cfg, context, &self.tier, self.kv_tier, batch).total();
         let usable = self.gpus.iter().map(|g| g.2).sum();
         let fits = !self.placement(&self.resident(batch, context)).is_empty();
         Ok(Fit { fits, needed_bytes: needed, usable_bytes: usable })
@@ -405,6 +419,18 @@ mod tests {
         assert!(options(&Args { ladder: Some("1,zero".into()), ..Default::default() }, "gpu", false).is_err());
         let d = options(&Args::default(), "gpu", false).unwrap();
         assert!(d.prefill.is_empty() && d.ladder.first() == Some(&1));
+    }
+
+    /// The artifact's fingerprint must say how the KV cache was stored: a
+    /// batch ceiling measured on a compact cache is not comparable to one
+    /// measured on `f32`, and `fp32` hard-coded would label them identically.
+    #[test]
+    fn the_qwen35_engine_reports_the_kv_tier_it_plans_and_runs_with() {
+        for kv in model::kv_tier::KvTier::ALL {
+            let engine = Qwen35Engine { path: String::new(), tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8), kv_tier: kv, gpus: Vec::new(), max_context: None, inst: None, prompt_seed: None };
+            assert_eq!(engine.describe().kv_precision, kv_label(kv));
+            assert!(model::kv_tier::KvTier::ALL.iter().map(|k| kv_label(*k)).collect::<std::collections::HashSet<_>>().len() == 3, "every tier needs its own label");
+        }
     }
 
     #[test]
