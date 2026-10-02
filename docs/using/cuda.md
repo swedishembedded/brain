@@ -60,11 +60,14 @@ Every kernel is written once, in WGSL. The CUDA backend translates each to CUDA
 C++ and compiles it with NVRTC, so the same source runs on every backend and
 the answers are held to the CPU reference. A kernel the translator cannot yet
 express is refused **by name at the dispatch that needs it** rather than
-approximated or run elsewhere. The translator handles scalars and vectors,
-workgroup memory and barriers (including inside loops, when every thread of
-the workgroup reaches them), user helper functions, and the register-tiled
-matrix multiplies and fused attention kernels. Not yet translated: a few
-3D-reconstruction and splatting kernels that use nested structures.
+approximated or run elsewhere. The translator handles scalars, vectors,
+matrix products and determinants, structs (nested in the parameter block, as locals,
+as helper arguments and results, and as records in a storage binding), arrays
+as values, workgroup memory and barriers (including inside loops, when every
+thread of the workgroup reaches them), user helper functions, and the
+register-tiled matrix multiplies and fused attention kernels. Every kernel in
+the catalogue is translated; `make cuda-coverage` below shows it for the
+device in front of you.
 
 An out-of-range array index never touches memory outside the array, as WGSL
 requires of every implementation: the translated kernel clamps the index to the
