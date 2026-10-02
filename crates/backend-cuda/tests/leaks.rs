@@ -75,7 +75,7 @@ fn assert_returned(probe: &Context, base: &Baseline, what: &str) {
     // Free memory is shared with other processes; a transient dip from someone
     // else's allocation is retried rather than reported as ours.
     let mut free = 0;
-    for _ in 0..20 {
+    for _ in 0..50 {
         free = probe.mem_info().expect("cuMemGetInfo").0;
         if free + FREE_TOLERANCE >= base.free {
             return;

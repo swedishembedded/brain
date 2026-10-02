@@ -32,3 +32,5 @@ pollster = "0.4"
 
 [dev-dependencies]
 brain-testutil.workspace = true
+# Live-resource counters and free-memory reads for the CUDA lifetime gates.
+brain-backend-cuda.workspace = true
