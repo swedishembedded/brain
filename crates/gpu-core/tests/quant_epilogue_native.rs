@@ -130,7 +130,7 @@ fn the_fused_kernel_is_offered_only_where_it_can_run() {
     assert!(gpu.has_fused(Fused::QuantEpilogue));
     assert!(Fused::QuantEpilogue.serves(&[17408, 1, 1, 0]));
     assert!(!Fused::QuantEpilogue.serves(&[17410, 1, 1, 0]), "k not a multiple of 4 cannot be packed");
-    assert!(!Fused::QuantEpilogue.serves(&[256 * 73, 1, 1, 0]), "wider than the registers hold");
+    assert!(!Fused::QuantEpilogue.serves(&[1024 * 19, 1, 1, 0]), "wider than the registers hold");
     assert!(!Fused::QuantEpilogue.serves(&[64, 1, 3, 0]), "unknown mode");
     assert!(!Fused::QuantEpilogue.serves(&[64, 0, 1, 0]), "no rows");
 }

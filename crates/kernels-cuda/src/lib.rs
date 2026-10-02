@@ -255,12 +255,12 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_quant_epilogue",
-        what: "silu_mul / sigmoid-gate / plain producer + per-row int8 scale + pack in one launch; 256 threads per row, bit-identical to the chain it replaces",
+        what: "silu_mul / sigmoid-gate / plain producer + per-row int8 scale + pack in one launch; 1024 threads per row, bit-identical to the chain it replaces",
         reported: "native:quant_epilogue",
-        block_dim: 256,
+        block_dim: 1024,
         tile: (1, 1),
-        // 8 warp maxima + 256 x 72 quantised bytes exchanged between threads.
-        shared_bytes: 8 * 4 + 256 * 72,
+        // 32 warp maxima + 1024 x 18 quantised bytes exchanged between threads.
+        shared_bytes: 32 * 4 + 1024 * 18,
         src: include_str!("../cu/quant_epilogue.cu"),
     },
     CudaKernel {

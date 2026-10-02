@@ -238,9 +238,9 @@ impl Fused {
             // registers: up to 80 of them (5120 wide), and a whole number of
             // int8 words.
             Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 4 && d % 4 == 0 && *d <= 64 * 80),
-            // 256 threads per row keep `k / 256` elements each in registers: up
-            // to 72 of them.
-            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 256 * 72 && *mode <= 2),
+            // 1024 threads per row keep `k / 1024` elements each in registers:
+            // up to 18 of them.
+            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 1024 * 18 && *mode <= 2),
             // A block is one key head's `group` value heads, 128 threads each
             // (3 is what one SM's registers hold at 128 live state words).
             Fused::GdnDecode => matches!(params, [nkh, nvh, group, ..] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group),

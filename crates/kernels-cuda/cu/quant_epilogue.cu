@@ -34,7 +34,7 @@
 // `round` is half-to-even, i.e. `rintf`). Nothing here is order-sensitive, so
 // the result is the chain's, bit for bit, however the row is split over threads.
 //
-// One 256-thread block per row; a thread keeps its elements in registers from
+// One 1024-thread block per row; a thread keeps its elements in registers from
 // the single read to the quantiser, and the four int8 of an output word, which
 // belong to four different threads, are exchanged through shared memory so
 // every store is a whole coalesced word. A row wider than
@@ -44,11 +44,14 @@
 // No `__restrict__` anywhere, deliberately: brain's device buffers alias by
 // design (a sliced step binds ranges of one allocation).
 
-#define BRAIN_QE_THREADS 256
-// Elements one thread keeps in registers: rows up to 256 * this wide. 72 covers
+#define BRAIN_QE_THREADS 1024
+// Elements one thread keeps in registers: rows up to 1024 * this wide. 18 covers
 // 18432, which holds Qwen3.8-27B's widest decode activation, the 17408-wide MLP
-// hidden; two such arrays per thread are what the register budget allows.
-#define BRAIN_QE_MAX_ELEMS 72
+// hidden. A thousand threads rather than a few hundred because the work is
+// issue- and latency-bound (an `expf` and two IEEE divisions an element): the
+// 17408-wide product took 8.8 us on 256 threads and 5.7 us on 1024, the extra
+// warps hiding the dependent chains, at the same instruction count.
+#define BRAIN_QE_MAX_ELEMS 18
 
 extern "C" __global__ void __launch_bounds__(BRAIN_QE_THREADS)
 brain_quant_epilogue(const unsigned int* params, const float* a, const float* b, float* y,
