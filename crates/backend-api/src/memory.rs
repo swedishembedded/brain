@@ -68,6 +68,101 @@ impl MemoryLimits {
     }
 }
 
+/// What the driver says about how host and device memory can be shared on this
+/// machine. Every field is a query result, never inferred from the device
+/// class: a coherent Grace-Hopper node reports an integrated flag of zero and
+/// still lets the GPU read ordinary host allocations, and an integrated part
+/// may offer none of this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlacementFacts {
+    /// Managed (migrating) allocations can be made.
+    pub managed_memory: bool,
+    /// The device can access ordinary pageable host memory without registering
+    /// it (address-translation services): a plain host allocation is a valid
+    /// kernel argument.
+    pub pageable_memory_access: bool,
+    /// ...and does so through the host's page tables, so first touch and page
+    /// placement are the host's.
+    pub pageable_via_host_page_tables: bool,
+    /// The host-device link carries every native atomic operation.
+    pub host_native_atomics: bool,
+    /// The device can touch managed memory while the CPU does.
+    pub concurrent_managed_access: bool,
+    /// The CPU can read managed memory that lives on the device without
+    /// migrating it.
+    pub direct_managed_from_host: bool,
+    /// Host memory can be registered (pinned in place) for device access.
+    pub host_register: bool,
+}
+
+impl PlacementFacts {
+    /// Nothing is shared: the answer of a backend that asks no such question.
+    pub const NONE: PlacementFacts = PlacementFacts {
+        managed_memory: false,
+        pageable_memory_access: false,
+        pageable_via_host_page_tables: false,
+        host_native_atomics: false,
+        concurrent_managed_access: false,
+        direct_managed_from_host: false,
+        host_register: false,
+    };
+
+    /// Whether an allocation under `policy` can be made and used by kernels.
+    pub fn supports(&self, policy: AllocPolicy) -> bool {
+        match policy {
+            AllocPolicy::Device => true,
+            AllocPolicy::Managed => self.managed_memory,
+            AllocPolicy::System => self.pageable_memory_access,
+        }
+    }
+}
+
+/// Where an allocation's bytes live, as an explicit choice.
+///
+/// [`AllocPolicy::Device`] is the default and the only policy any model weight
+/// or hot buffer is allocated with. The other two are opt-in tools for data
+/// that is touched rarely, is larger than the card, or is shared with the
+/// host; nothing in the engine selects them on its own, and a backend that
+/// cannot honour one refuses it rather than quietly allocating on the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum AllocPolicy {
+    /// Device memory (HBM on a discrete or Grace-Hopper part).
+    #[default]
+    Device,
+    /// Managed memory: one address, migrated between host and device by the
+    /// driver on demand.
+    Managed,
+    /// Ordinary host memory used directly by kernels (needs
+    /// [`PlacementFacts::pageable_memory_access`]); it stays where the host's
+    /// allocator put it, which on a coherent node is the CPU's memory, read by
+    /// the GPU across the link.
+    System,
+}
+
+/// Advice about a managed or system range, as the driver's `cuMemAdvise` takes
+/// it. The device is always this backend's own device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemAdvice {
+    /// Mostly read: the driver may keep read-only copies on each processor.
+    ReadMostly,
+    UnsetReadMostly,
+    /// Keep the pages on the device.
+    PreferDevice,
+    /// Keep the pages in host memory.
+    PreferHost,
+    UnsetPreferred,
+    /// The device will access the range: map it up front instead of faulting.
+    AccessedByDevice,
+    UnsetAccessedByDevice,
+}
+
+/// Where [`crate::Backend::prefetch`] moves a range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrefetchTarget {
+    Device,
+    Host,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +175,21 @@ mod tests {
         assert_eq!(l.workspace_bytes, l.max_binding_bytes);
         assert_eq!(l.working_set_bytes, l.max_binding_bytes);
         assert!(l.is_consistent());
+    }
+
+    /// Nothing outside the device is assumed shareable until the driver says so,
+    /// and the default allocation policy is the device.
+    #[test]
+    fn placement_defaults_to_the_device_and_assumes_no_sharing() {
+        assert_eq!(AllocPolicy::default(), AllocPolicy::Device);
+        let none = PlacementFacts::default();
+        assert_eq!(none, PlacementFacts::NONE);
+        assert!(none.supports(AllocPolicy::Device));
+        assert!(!none.supports(AllocPolicy::Managed));
+        assert!(!none.supports(AllocPolicy::System));
+        let ats = PlacementFacts { pageable_memory_access: true, ..PlacementFacts::NONE };
+        assert!(ats.supports(AllocPolicy::System));
+        assert!(!ats.supports(AllocPolicy::Managed), "system memory access does not imply managed allocation");
     }
 
     #[test]

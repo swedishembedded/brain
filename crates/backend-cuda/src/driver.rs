@@ -82,6 +82,15 @@ const ATTR_COMPUTE_CAPABILITY_MINOR: c_int = 76;
 const ATTR_MULTIPROCESSOR_COUNT: c_int = 16;
 /// `CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED`.
 const ATTR_MEMORY_POOLS_SUPPORTED: c_int = 115;
+// The memory-placement questions: what the driver says about sharing memory
+// with the host. Asked, never inferred from `ATTR_INTEGRATED`.
+const ATTR_MANAGED_MEMORY: c_int = 83;
+const ATTR_HOST_NATIVE_ATOMIC_SUPPORTED: c_int = 86;
+const ATTR_PAGEABLE_MEMORY_ACCESS: c_int = 88;
+const ATTR_CONCURRENT_MANAGED_ACCESS: c_int = 89;
+const ATTR_HOST_REGISTER_SUPPORTED: c_int = 99;
+const ATTR_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES: c_int = 100;
+const ATTR_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST: c_int = 101;
 
 /// The loaded driver: the `libloading::Library` plus the entry points resolved
 /// out of it once, with `cuInit` already called.
@@ -107,6 +116,9 @@ pub struct Driver {
     /// The stream-ordered allocator entry points, resolved separately again: a
     /// driver without them allocates and frees exactly as before.
     pool: Result<PoolFns, String>,
+    /// Managed allocation, prefetch and advice, resolved separately: a driver
+    /// without them has no placement policies and everything else works.
+    place: Result<PlaceFns, String>,
 }
 
 /// The context / memory / module / launch half of the Driver API.
@@ -180,6 +192,9 @@ pub struct ExecFns {
     pub(crate) stream_wait_event: unsafe extern "C" fn(CuStream, CuEvent, u32) -> CuResult,
     pub(crate) event_elapsed_time: unsafe extern "C" fn(*mut f32, CuEvent, CuEvent) -> CuResult,
     pub(crate) event_destroy: unsafe extern "C" fn(CuEvent) -> CuResult,
+    /// Blocks the host until the event has completed: what freeing host memory
+    /// a device kernel may still be reading has to wait on.
+    pub(crate) event_synchronize: unsafe extern "C" fn(CuEvent) -> CuResult,
     pub(crate) mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     pub(crate) mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
     /// `cuFuncSetAttribute`: how a kernel opts in to more dynamic shared memory
@@ -334,6 +349,31 @@ pub struct PoolFns {
     pub(crate) free_async: unsafe extern "C" fn(CuDevicePtr, CuStream) -> CuResult,
 }
 
+/// `CUmemLocation`: where a prefetch or an advice applies. Two ints, passed by
+/// value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuMemLocation {
+    /// `CU_MEM_LOCATION_TYPE_DEVICE` (1) or `CU_MEM_LOCATION_TYPE_HOST` (2).
+    pub kind: c_int,
+    /// The device handle for a device location; 0 for the host.
+    pub id: c_int,
+}
+
+/// Managed allocation, prefetch and advice.
+///
+/// `cuMemPrefetchAsync_v2` and `cuMemAdvise_v2` take a `CUmemLocation`; the
+/// unsuffixed names are the older ABI that takes a device handle, so the
+/// suffixed ones are what `dlsym` has to ask for (CUDA 12.2 and newer).
+pub struct PlaceFns {
+    pub(crate) alloc_managed: unsafe extern "C" fn(*mut CuDevicePtr, usize, u32) -> CuResult,
+    pub(crate) prefetch_async: unsafe extern "C" fn(CuDevicePtr, usize, CuMemLocation, u32, CuStream) -> CuResult,
+    pub(crate) advise: unsafe extern "C" fn(CuDevicePtr, usize, c_int, CuMemLocation) -> CuResult,
+}
+
+/// `CU_MEM_ATTACH_GLOBAL`.
+pub const MEM_ATTACH_GLOBAL: u32 = 1;
+
 /// `CUmemPoolProps`, laid out for the fields brain sets and padded to the
 /// largest size any driver generation has used (88 bytes; the trailing members
 /// are reserved or, from CUDA 12, `maxSize`, and zero means the default for
@@ -399,10 +439,12 @@ fn load() -> Result<Driver, String> {
         let exec = load_exec(&lib);
         let graph = load_graph(&lib);
         let pool = load_pool(&lib);
+        let place = load_place(&lib);
         let d = Driver {
             exec,
             graph,
             pool,
+            place,
             device_get_count: sym(&lib, b"cuDeviceGetCount\0")?,
             device_get: sym(&lib, b"cuDeviceGet\0")?,
             device_get_name: sym(&lib, b"cuDeviceGetName\0")?,
@@ -454,6 +496,7 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         stream_wait_event: sym(lib, b"cuStreamWaitEvent\0")?,
         event_elapsed_time: sym(lib, b"cuEventElapsedTime\0")?,
         event_destroy: sym(lib, b"cuEventDestroy_v2\0")?,
+        event_synchronize: sym(lib, b"cuEventSynchronize\0")?,
         mem_alloc_host: sym(lib, b"cuMemAllocHost_v2\0")?,
         mem_free_host: sym(lib, b"cuMemFreeHost\0")?,
         func_set_attribute: sym(lib, b"cuFuncSetAttribute\0")?,
@@ -498,6 +541,19 @@ unsafe fn load_pool(lib: &libloading::Library) -> Result<PoolFns, String> {
     })
 }
 
+/// Resolve the placement half. A missing symbol disables placement policies
+/// only.
+///
+/// # Safety
+/// Same contract as [`load_exec`].
+unsafe fn load_place(lib: &libloading::Library) -> Result<PlaceFns, String> {
+    Ok(PlaceFns {
+        alloc_managed: sym(lib, b"cuMemAllocManaged\0")?,
+        prefetch_async: sym(lib, b"cuMemPrefetchAsync_v2\0")?,
+        advise: sym(lib, b"cuMemAdvise_v2\0")?,
+    })
+}
+
 /// Resolve one NUL-terminated symbol name AT the type the caller expects,
 /// yielding the bare function pointer.
 ///
@@ -529,6 +585,11 @@ impl Driver {
     /// The stream-ordered allocator entry points, or why this driver has none.
     pub fn pool(&self) -> Result<&PoolFns, &str> {
         self.pool.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// The placement entry points, or why this driver has none.
+    pub fn place(&self) -> Result<&PlaceFns, &str> {
+        self.place.as_ref().map_err(|e| e.as_str())
     }
 
     /// Whether the device at `ordinal` supports stream-ordered memory pools.
@@ -642,7 +703,23 @@ impl Driver {
             shared_mem_optin: self.attribute(dev, ATTR_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN).unwrap_or(0).max(0) as u32,
             cluster_launch: self.attribute(dev, ATTR_CLUSTER_LAUNCH).unwrap_or(0) != 0,
             warp_size: self.attribute(dev, ATTR_WARP_SIZE)?.max(0) as u32,
+            placement: self.placement_facts(dev),
         })
+    }
+
+    /// The placement attributes of one device. An attribute the driver cannot
+    /// answer is `false`: an unknown capability is never assumed present.
+    fn placement_facts(&self, dev: CuDevice) -> backend_api::PlacementFacts {
+        let ask = |attr| self.attribute(dev, attr).map(|v| v != 0).unwrap_or(false);
+        backend_api::PlacementFacts {
+            managed_memory: ask(ATTR_MANAGED_MEMORY) && self.place.is_ok(),
+            pageable_memory_access: ask(ATTR_PAGEABLE_MEMORY_ACCESS),
+            pageable_via_host_page_tables: ask(ATTR_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES),
+            host_native_atomics: ask(ATTR_HOST_NATIVE_ATOMIC_SUPPORTED),
+            concurrent_managed_access: ask(ATTR_CONCURRENT_MANAGED_ACCESS),
+            direct_managed_from_host: ask(ATTR_DIRECT_MANAGED_MEM_ACCESS_FROM_HOST),
+            host_register: ask(ATTR_HOST_REGISTER_SUPPORTED),
+        }
     }
 
     /// Describe every device this driver exposes, in CUDA ordinal order.
@@ -693,6 +770,10 @@ pub struct CudaDevice {
     /// that writes that number down instead of asking is wrong the day one
     /// does not.
     pub warp_size: u32,
+    /// What the driver says about sharing memory with the host. Not derived from
+    /// [`Self::integrated`]: a coherent Grace-Hopper node is not integrated and
+    /// still shares.
+    pub placement: backend_api::PlacementFacts,
 }
 
 impl CudaDevice {
@@ -758,6 +839,7 @@ mod tests {
             shared_mem_optin: 0,
             cluster_launch: false,
             warp_size: 0,
+            placement: backend_api::PlacementFacts::NONE,
         };
         assert_eq!(d.pci_bus_id(), "0000:82:00.0");
     }

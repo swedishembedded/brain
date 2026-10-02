@@ -76,7 +76,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: cuda/aot container container/ci container/smoke check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: gh200/placement cuda/aot container container/ci container/smoke check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -917,6 +917,13 @@ container/smoke:
 gh200/probe:
 	$(MAKE) -C tools/gh200-probe
 	tools/gh200-probe/probe
+
+# Device vs managed vs system memory: first touch, steady-state read bandwidth
+# and the prefetch effect (BUFFER_MIB sizes the buffer; OVERSUBSCRIBE=1 adds the
+# oversubscription run, which takes all free device memory).
+gh200/placement:
+	$(MAKE) -C tools/gh200-probe
+	tools/gh200-probe/probe --placement
 
 # Regenerate the DIAMOND parity fixtures (gitignored - never committed) from
 # the reference implementation (resources/world-models/repos/diamond, or set

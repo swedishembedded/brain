@@ -23,8 +23,8 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemoryLimits, NumericSupport,
-    Step, StepMeta,
+    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, MemAdvice, MemoryLimits,
+    NumericSupport, PlacementFacts, PrefetchTarget, Step, StepMeta,
 };
 pub use backend_api::select;
 
@@ -1205,6 +1205,56 @@ mod native_facade {
             Ok(())
         }
 
+        /// What the driver says about sharing memory between host and device -
+        /// see `backend_api::PlacementFacts`. Asked once when the backend was
+        /// built; `PlacementFacts::NONE` on a backend that asks nothing.
+        pub fn placement_facts(&self) -> backend_api::PlacementFacts {
+            self.inner.placement_facts()
+        }
+
+        /// A zero-filled buffer under an explicit placement policy.
+        ///
+        /// `AllocPolicy::Device` is the ordinary [`Self::buffer`]. `Managed` and
+        /// `System` are opt-in for data that is touched rarely, is larger than the
+        /// card or is shared with the host: nothing in the engine selects them for
+        /// model weights or hot buffers, and a device that cannot honour one
+        /// refuses it here instead of allocating on the card. The bytes are
+        /// charged to the pool that holds them (see [`Self::placed_pool`]), and a
+        /// denial is returned as the message the infallible methods panic with.
+        pub fn try_alloc_placed(&self, label: &str, size: u64, policy: backend_api::AllocPolicy) -> Result<DeviceBuffer, String> {
+            if !self.inner.placement_facts().supports(policy) {
+                return Err(format!("the {} backend on this device cannot make a {policy:?} allocation", self.inner.kind()));
+            }
+            let pool = self.placed_pool(policy);
+            if let Some(auth) = memauth::authority() {
+                let grant = auth.request(pool, size, "placed").map_err(|d| memauth::denial_message(pool, "placed", size, d))?;
+                self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
+            }
+            self.inner.alloc_placed(label, size, policy)
+        }
+
+        /// The memory device an allocation under `policy` is charged to: the
+        /// card for device and managed memory (managed pages may migrate to it, so
+        /// the card's share is the safe count), the host for system memory.
+        pub fn placed_pool(&self, policy: backend_api::AllocPolicy) -> memauth::Device {
+            match policy {
+                backend_api::AllocPolicy::System => memauth::Device::Cpu,
+                _ => self.mem_device,
+            }
+        }
+
+        /// Move a byte range of a managed or system buffer toward `target`; see
+        /// `backend_api::Backend::prefetch`.
+        pub fn prefetch(&self, buf: &DeviceBuffer, offset_bytes: u64, bytes: u64, target: backend_api::PrefetchTarget) -> Result<(), String> {
+            self.inner.prefetch(buf, offset_bytes, bytes, target)
+        }
+
+        /// Advise the driver about a managed or system buffer; see
+        /// `backend_api::Backend::advise`.
+        pub fn advise(&self, buf: &DeviceBuffer, advice: backend_api::MemAdvice) -> Result<(), String> {
+            self.inner.advise(buf, advice)
+        }
+
         /// [`Self::try_charge`] for the infallible facade methods. Allocation
         /// failure has always been fatal here (the backends themselves panic
         /// or abort inside the driver on a failed `create_buffer`), so this
@@ -2304,6 +2354,22 @@ mod tests {
         let (id, pool) = Gpu::cuda_target(None);
         assert!(id.is_none(), "with no enumerated card the first CUDA ordinal is opened");
         assert_eq!(pool, memauth::Device::Gpu(0), "and charged to gpu0, the card that ordinal is");
+    }
+
+    /// Placement is opt-in and honest: the device policy is the ordinary buffer
+    /// everywhere, and a backend with no shared memory refuses the others
+    /// instead of quietly giving back device memory.
+    #[test]
+    fn placement_policies_are_refused_where_the_backend_cannot_honour_them() {
+        let gpu = Gpu::new_cpu(&[("add2", kernels::ADD2)]);
+        assert_eq!(gpu.placement_facts(), PlacementFacts::NONE);
+        assert!(gpu.try_alloc_placed("device", 64, AllocPolicy::Device).is_ok());
+        for policy in [AllocPolicy::Managed, AllocPolicy::System] {
+            let e = gpu.try_alloc_placed("placed", 64, policy).err().expect("refused");
+            assert!(e.contains("cannot make"), "{e}");
+        }
+        assert_eq!(gpu.placed_pool(AllocPolicy::System), memauth::Device::Cpu, "system memory is the host's bytes");
+        assert_eq!(gpu.placed_pool(AllocPolicy::Device), gpu.memory_device());
     }
 
     #[test]

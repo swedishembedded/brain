@@ -61,6 +61,15 @@ pub struct LiveResources {
     pub pool_allocs: u64,
     /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
     pub pool_bytes: u64,
+    /// Outstanding managed (`cuMemAllocManaged`) blocks.
+    pub managed_allocs: u64,
+    /// Bytes in those blocks, as requested.
+    pub managed_bytes: u64,
+    /// Outstanding system-memory blocks: host allocations brain made for a
+    /// kernel to use directly (an explicit placement policy).
+    pub system_allocs: u64,
+    /// Bytes in those blocks, as requested.
+    pub system_bytes: u64,
 }
 
 /// Monotonic, process-wide totals of the calls whose per-step repetition is a
@@ -121,6 +130,10 @@ struct Counters {
     mem_pools: AtomicU64,
     pool_allocs: AtomicU64,
     pool_bytes: AtomicU64,
+    managed_allocs: AtomicU64,
+    managed_bytes: AtomicU64,
+    system_allocs: AtomicU64,
+    system_bytes: AtomicU64,
 }
 
 static COUNTERS: Counters = Counters {
@@ -137,6 +150,10 @@ static COUNTERS: Counters = Counters {
     mem_pools: AtomicU64::new(0),
     pool_allocs: AtomicU64::new(0),
     pool_bytes: AtomicU64::new(0),
+    managed_allocs: AtomicU64::new(0),
+    managed_bytes: AtomicU64::new(0),
+    system_allocs: AtomicU64::new(0),
+    system_bytes: AtomicU64::new(0),
 };
 
 /// What this process currently holds through `backend-cuda`. See
@@ -157,6 +174,10 @@ pub fn live_resources() -> LiveResources {
         mem_pools: c.mem_pools.load(Ordering::Relaxed),
         pool_allocs: c.pool_allocs.load(Ordering::Relaxed),
         pool_bytes: c.pool_bytes.load(Ordering::Relaxed),
+        managed_allocs: c.managed_allocs.load(Ordering::Relaxed),
+        managed_bytes: c.managed_bytes.load(Ordering::Relaxed),
+        system_allocs: c.system_allocs.load(Ordering::Relaxed),
+        system_bytes: c.system_bytes.load(Ordering::Relaxed),
     }
 }
 
@@ -235,4 +256,20 @@ pub(crate) fn pool_alloc(bytes: usize) {
 pub(crate) fn pool_free(bytes: usize) {
     down(&COUNTERS.pool_allocs);
     COUNTERS.pool_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn managed_alloc(bytes: usize) {
+    up(&COUNTERS.managed_allocs);
+    COUNTERS.managed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn managed_free(bytes: usize) {
+    down(&COUNTERS.managed_allocs);
+    COUNTERS.managed_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn system_alloc(bytes: usize) {
+    up(&COUNTERS.system_allocs);
+    COUNTERS.system_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn system_free(bytes: usize) {
+    down(&COUNTERS.system_allocs);
+    COUNTERS.system_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
 }

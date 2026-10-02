@@ -1793,6 +1793,46 @@ impl backend_api::Backend for CudaBackend {
         self.ctx.mem_info().map(|(free, _)| free).unwrap_or(0)
     }
 
+    fn placement_facts(&self) -> backend_api::PlacementFacts {
+        self.ctx.device_info().placement
+    }
+
+    /// Managed and system allocations, zero-filled. Refused, with the driver's
+    /// reason, where the device cannot honour the policy: never a quiet device
+    /// allocation, because the caller asked for something specific.
+    fn alloc_placed(&self, label: &str, size: u64, policy: backend_api::AllocPolicy) -> Result<DeviceBuffer, String> {
+        use backend_api::AllocPolicy;
+        let mem = match policy {
+            AllocPolicy::Device => return Ok(self.buffer(label, size, BufUsage::STORAGE)),
+            AllocPolicy::Managed => self.ctx.alloc_managed(size.max(4) as usize),
+            AllocPolicy::System => self.ctx.alloc_system(size.max(4) as usize),
+        }
+        .map_err(|e| format!("backend-cuda: {policy:?} allocation of {size} bytes for {label} failed: {e}"))?;
+        Ok(self.wrap_initialised(mem))
+    }
+
+    fn prefetch(&self, buf: &DeviceBuffer, offset_bytes: u64, bytes: u64, target: backend_api::PrefetchTarget) -> Result<(), String> {
+        let mem = &CudaBuf::of(buf).mem;
+        self.ctx.prefetch(mem, offset_bytes as usize, bytes as usize, target == backend_api::PrefetchTarget::Device)?;
+        self.fence_out([mem]);
+        Ok(())
+    }
+
+    fn advise(&self, buf: &DeviceBuffer, advice: backend_api::MemAdvice) -> Result<(), String> {
+        use backend_api::MemAdvice::*;
+        // `CU_MEM_ADVISE_*` and whether the advice is about the host.
+        let (code, host) = match advice {
+            ReadMostly => (1, false),
+            UnsetReadMostly => (2, false),
+            PreferDevice => (3, false),
+            PreferHost => (3, true),
+            UnsetPreferred => (4, false),
+            AccessedByDevice => (5, false),
+            UnsetAccessedByDevice => (6, false),
+        };
+        self.ctx.advise(&CudaBuf::of(buf).mem, code, host)
+    }
+
     fn memory_limits(&self) -> backend_api::MemoryLimits {
         memory_limits_for(self.ctx.device_info().total_mem, self.max_buffer_bytes())
     }

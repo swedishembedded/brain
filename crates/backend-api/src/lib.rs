@@ -50,7 +50,7 @@ pub mod hardware;
 /// A device's memory limits as separate answers: allocation, binding,
 /// workspace and working set.
 pub mod memory;
-pub use memory::MemoryLimits;
+pub use memory::{AllocPolicy, MemAdvice, MemoryLimits, PlacementFacts, PrefetchTarget};
 
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross
@@ -1369,6 +1369,37 @@ pub trait Backend: Send + Sync {
     /// backend only overrides this when it can answer the questions separately.
     fn memory_limits(&self) -> MemoryLimits {
         MemoryLimits::uniform(self.max_storage_binding_bytes(), self.max_buffer_bytes())
+    }
+
+    /// What the driver says about sharing memory between host and device - see
+    /// [`PlacementFacts`]. Asked once at construction. The default is "nothing
+    /// is shared", which is what a backend that does not ask means.
+    fn placement_facts(&self) -> PlacementFacts {
+        PlacementFacts::NONE
+    }
+
+    /// A zero-filled buffer of `size` bytes under an explicit placement
+    /// [`AllocPolicy`]. [`AllocPolicy::Device`] is [`Self::buffer`]; the others
+    /// are opt-in and never chosen by the engine for weights or hot buffers. A
+    /// policy the backend cannot honour is an `Err`, never a silent device
+    /// allocation.
+    fn alloc_placed(&self, label: &str, size: u64, policy: AllocPolicy) -> Result<DeviceBuffer, String> {
+        match policy {
+            AllocPolicy::Device => Ok(self.buffer(label, size, BufUsage(BufUsage::STORAGE.0 | BufUsage::COPY_SRC.0 | BufUsage::COPY_DST.0))),
+            other => Err(format!("{} backend does not support {other:?} allocations", self.kind())),
+        }
+    }
+
+    /// Move `[offset_bytes, offset_bytes + bytes)` of a managed or system
+    /// buffer toward `target`, ordered on the backend's stream. An `Err` where
+    /// the backend has no such operation or the buffer is not placed memory.
+    fn prefetch(&self, _buf: &DeviceBuffer, _offset_bytes: u64, _bytes: u64, _target: PrefetchTarget) -> Result<(), String> {
+        Err(format!("{} backend does not support prefetch", self.kind()))
+    }
+
+    /// Advise the driver about a managed or system buffer - see [`MemAdvice`].
+    fn advise(&self, _buf: &DeviceBuffer, _advice: MemAdvice) -> Result<(), String> {
+        Err(format!("{} backend does not support memory advice", self.kind()))
     }
 
     /// Bytes of device memory whose last host handle has been DROPPED but

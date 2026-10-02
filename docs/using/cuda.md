@@ -160,6 +160,42 @@ generator does its address arithmetic in 64 bits, and a test addresses a 5 GiB
 buffer past the 4 GiB mark. The Vulkan and wgpu backends keep the limits they
 report.
 
+## Memory placement
+
+`Gpu::placement_facts()` reports what the driver says about sharing memory with
+the host: managed memory, pageable-memory access (the device reading ordinary
+host allocations), access through the host's page tables, native host atomics,
+concurrent managed access, direct host access to managed memory and host
+registration. They are driver attributes, not inferred from the integrated flag:
+a Grace-Hopper node is not integrated and reports all of them.
+
+Placement is opt-in. `Gpu::try_alloc_placed(label, bytes, policy)` takes
+`AllocPolicy::Device` (the default; the only policy used for model weights and hot
+buffers), `Managed` (the driver migrates pages between host and device) or
+`System` (ordinary host memory used directly by kernels). A device that cannot
+honour a policy refuses it; nothing is quietly allocated on the card instead.
+`Gpu::prefetch` and `Gpu::advise` move or advise a managed or system range.
+Managed memory is charged to the card's pool and system memory to the host's. The
+buffers are zero-filled; managed and system counts have their own entries in
+`backend_cuda::live_resources()`.
+
+`make gh200/placement` (`BUFFER_MIB` sizes the buffer) measures the same workload
+against each placement. On a Grace-Hopper node, 1 GiB, CUDA 13.0:
+
+| | device | managed | system |
+|---|---|---|---|
+| GPU first-touch write (GB/s) | 1877 | 45 | 6 |
+| steady read (GB/s) | 3736 | 3716 | 3725 |
+| CPU first touch, GPU first read (GB/s) | | 5.6 | 202 |
+| steady read of CPU-placed pages (GB/s) | | 3716 | 3716 |
+| prefetch to device (ms) | | 11 | 124 |
+
+The driver moves host-placed pages to the device as the GPU reads them, so repeated
+reads converge on HBM speed and the cost is the first pass: faults for managed
+memory, the link for system memory. A prefetch pays that cost up front. The
+oversubscription run (`OVERSUBSCRIBE=1`, which takes all free device memory) is
+available and was not run on a shared card.
+
 ## Pooled scratch allocation
 
 A pass that repeats - a prefill round, a decode step's temporaries - frees and

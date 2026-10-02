@@ -37,7 +37,7 @@
 use crate::driver::{
     CU_EVENT_DISABLE_TIMING, CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
-    CuEvent, CuMemPool, CuMemPoolProps, CuModule, CuStream, Driver, ExecFns, GraphFns, PoolFns,
+    CuEvent, CuMemLocation, CuMemPool, CuMemPoolProps, MEM_ATTACH_GLOBAL, CuModule, CuStream, Driver, ExecFns, GraphFns, PoolFns,
     CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE, MEMPOOL_ATTR_RELEASE_THRESHOLD,
     MEMPOOL_ATTR_RESERVED_MEM_CURRENT, MEMPOOL_ATTR_USED_MEM_CURRENT,
 };
@@ -436,6 +436,105 @@ impl Context {
             origin: Origin::Pool(pool.clone()),
             _primary: self.primary.clone(),
         })
+    }
+
+    /// Allocate `bytes` of managed memory (`cuMemAllocManaged`), zero-filled.
+    ///
+    /// An explicit placement policy: the driver migrates the pages between host
+    /// and device on demand, so nothing about where they live is promised. The
+    /// zeroing is done by the host on pages no kernel has touched, which leaves
+    /// them host-resident; the first device touch is then the fault the caller
+    /// measures or avoids with [`Self::prefetch`].
+    pub fn alloc_managed(&self, bytes: usize) -> Result<DeviceMem, String> {
+        let pf = self.d.place().map_err(str::to_string)?;
+        if !self.info.placement.managed_memory {
+            return Err("this device does not support managed memory".to_string());
+        }
+        let len = bytes.max(1);
+        self.make_current()?;
+        let mut ptr: CuDevicePtr = 0;
+        // SAFETY: `ptr` is a valid out-parameter.
+        self.d.check(unsafe { (pf.alloc_managed)(&mut ptr, len, MEM_ATTACH_GLOBAL) }, "cuMemAllocManaged")?;
+        crate::live::managed_alloc(len);
+        // SAFETY: the block is `len` bytes of managed memory the host may write
+        // while no kernel uses it, which is the case for a block not yet handed out.
+        unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, len) };
+        Ok(self.placed(ptr, bytes, Origin::Managed))
+    }
+
+    /// Allocate `bytes` of ordinary host memory for kernels to use directly,
+    /// zero-filled without being touched (fresh pages), so first touch stays the
+    /// caller's. Needs the device to access pageable memory; refused otherwise.
+    pub fn alloc_system(&self, bytes: usize) -> Result<DeviceMem, String> {
+        if !self.info.placement.pageable_memory_access {
+            return Err("this device cannot access pageable host memory".to_string());
+        }
+        let len = bytes.max(1);
+        // 64 KiB: the largest base page this host is known to use, so the block
+        // starts on a page boundary whichever page size the kernel runs.
+        let layout = std::alloc::Layout::from_size_align(len, 1 << 16).map_err(|e| e.to_string())?;
+        // SAFETY: `layout` has a non-zero size.
+        let p = unsafe { std::alloc::alloc_zeroed(layout) };
+        if p.is_null() {
+            return Err(format!("host allocation of {len} bytes failed"));
+        }
+        crate::live::system_alloc(len);
+        let stream = self.stream_guard.clone().ok_or("no stream")?;
+        Ok(self.placed(p as CuDevicePtr, bytes, Origin::System { layout, stream }))
+    }
+
+    fn placed(&self, ptr: CuDevicePtr, bytes: usize, origin: Origin) -> DeviceMem {
+        DeviceMem {
+            d: self.d,
+            fns: self.fns,
+            ctx: self.ctx,
+            ptr,
+            len: bytes,
+            epoch: self.alloc_epoch.clone(),
+            graph_epoch: self.graph_epoch.clone(),
+            graph_pinned: std::sync::atomic::AtomicBool::new(false),
+            fence: std::sync::Mutex::new(None),
+            origin,
+            _primary: self.primary.clone(),
+        }
+    }
+
+    fn placed_range(&self, mem: &DeviceMem, offset: usize, bytes: usize) -> Result<(CuDevicePtr, usize), String> {
+        if !matches!(mem.origin, Origin::Managed | Origin::System { .. }) {
+            return Err("prefetch and advice apply to managed or system memory, not device memory".to_string());
+        }
+        let end = offset.checked_add(bytes).ok_or("range overflows")?;
+        if end > mem.len {
+            return Err(format!("range {offset}..{end} is outside a {}-byte allocation", mem.len));
+        }
+        Ok((mem.ptr + offset as CuDevicePtr, bytes))
+    }
+
+    fn device_location(&self) -> Result<CuMemLocation, String> {
+        Ok(CuMemLocation { kind: 1, id: self.d.device_handle(self.info.ordinal)? })
+    }
+
+    /// Enqueue a migration of `[offset, offset + bytes)` of a managed or system
+    /// block to the device or the host, ordered on this handle's stream.
+    pub fn prefetch(&self, mem: &DeviceMem, offset: usize, bytes: usize, to_device: bool) -> Result<(), String> {
+        let pf = self.d.place().map_err(str::to_string)?;
+        let (ptr, bytes) = self.placed_range(mem, offset, bytes)?;
+        let loc = if to_device { self.device_location()? } else { CuMemLocation { kind: 2, id: 0 } };
+        self.make_current()?;
+        // SAFETY: the range was checked against the allocation above.
+        self.d.check(unsafe { (pf.prefetch_async)(ptr, bytes, loc, 0, self.stream) }, "cuMemPrefetchAsync")
+    }
+
+    /// Apply `cuMemAdvise` to a whole managed or system block. `advice` is a
+    /// `CU_MEM_ADVISE_*` value; `host` names the host rather than this device as
+    /// the location the advice is about.
+    pub fn advise(&self, mem: &DeviceMem, advice: i32, host: bool) -> Result<(), String> {
+        let pf = self.d.place().map_err(str::to_string)?;
+        let (ptr, bytes) = self.placed_range(mem, 0, mem.len)?;
+        let loc = if host { CuMemLocation { kind: 2, id: 0 } } else { self.device_location()? };
+        self.make_current()?;
+        // SAFETY: the range is the whole allocation.
+        self.d.check(unsafe { (pf.advise)(ptr, bytes, advice, loc) }, "cuMemAdvise")
     }
 
     /// Whether held blocks may live in a stream-ordered pool. On by default
@@ -1400,6 +1499,11 @@ impl DeviceMem {
     pub fn device_ptr(&self) -> CuDevicePtr {
         self.ptr
     }
+    /// The host address of a managed or system block, which the host can read
+    /// and write. `None` for device memory, which it cannot.
+    pub fn host_ptr(&self) -> Option<*mut u8> {
+        matches!(self.origin, Origin::Managed | Origin::System { .. }).then_some(self.ptr as *mut u8)
+    }
     /// Record that a captured graph names this block's address, so freeing it
     /// invalidates graphs ([`Context::graph_epoch`]). Idempotent.
     pub fn mark_graph_referenced(&self) {
@@ -1409,6 +1513,13 @@ impl DeviceMem {
 
 /// Where a [`DeviceMem`] came from, and so where it goes when dropped.
 enum Origin {
+    /// `cuMemAllocManaged`: one address the driver migrates between host and
+    /// device; `cuMemFree` frees it. An explicit placement policy.
+    Managed,
+    /// A host allocation brain made for kernels to use directly (needs address
+    /// translation services). Freed on the host, after the device is done with
+    /// it. An explicit placement policy.
+    System { layout: std::alloc::Layout, stream: Arc<StreamGuard> },
     /// `cuMemAlloc`; goes to the exact-size cache when that is holding, else
     /// back to the driver.
     Driver { cache: Arc<BlockCache> },
@@ -1445,6 +1556,40 @@ impl Drop for DeviceMem {
                 }
             }
             Origin::Pool(pool) => pool.free(self.ptr, len, fence),
+            Origin::Managed => {
+                // SAFETY: as for the driver arm; `cuMemFree` frees managed memory
+                // too and waits for the device.
+                unsafe {
+                    if (self.fns.ctx_set_current)(self.ctx) == 0 {
+                        let rc = (self.fns.mem_free)(self.ptr);
+                        if rc != 0 {
+                            tracing::warn!("cuMemFree of managed memory failed: {}", self.d.error_text(rc));
+                        } else {
+                            crate::live::managed_free(len);
+                        }
+                    }
+                }
+            }
+            Origin::System { layout, stream } => {
+                // The device may still be reading these host pages. Wait for this
+                // handle's stream and for the last foreign stream that touched
+                // them, and release them only if the wait succeeded: freeing
+                // memory a kernel is still using is worse than holding it.
+                // SAFETY: the context outlives the stream guard; the block came
+                // from `alloc_zeroed` with this layout and is freed once.
+                unsafe {
+                    let mut idle = (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.stream_synchronize)(stream.stream) == 0;
+                    if let Some(f) = fence {
+                        idle = idle && (self.fns.event_synchronize)(f.event.ev) == 0;
+                    }
+                    if idle {
+                        std::alloc::dealloc(self.ptr as *mut u8, *layout);
+                        crate::live::system_free(len);
+                    } else {
+                        tracing::warn!("a system-memory block could not be waited for and was left allocated");
+                    }
+                }
+            }
         }
         // AFTER the free (or the hand-over to the cache or pool), and
         // unconditionally: from here on this address may be handed to anyone, so

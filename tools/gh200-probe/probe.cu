@@ -18,6 +18,7 @@
 //
 // Build:  make -C tools/gh200-probe   (needs a CUDA toolkit, see `make cuda/install`)
 // Run:    tools/gh200-probe/probe > probe.json
+//         tools/gh200-probe/probe --placement   (device vs managed vs system memory)
 
 #include <cublasLt.h>
 #include <cuda_fp16.h>
@@ -31,6 +32,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#include <sys/mman.h>
 
 #define CK(x)                                                                      \
     do {                                                                           \
@@ -229,11 +232,168 @@ static double gemm_tflops(cublasLtHandle_t lt, const GemmCase& g, int m, int n, 
     return tf;
 }
 
-int main() {
+
+// ---------------------------------------------------------------------------
+// Placement: the same read/write workload against device, managed and system
+// (pageable, GPU-addressable through ATS) memory, so the cost of each placement
+// is a measurement on this machine and not an assumption. Run with
+// `probe --placement`; BUFFER_MIB (default 1024) sizes the buffer, and
+// OVERSUBSCRIBE=1 additionally allocates managed memory past the card's free
+// memory (it takes all of the free memory: do not run it on a shared card).
+// ---------------------------------------------------------------------------
+
+// One timed pass of `fn` with CUDA events, in ms. Unlike time_ms this runs once,
+// because a first touch cannot be repeated.
+template <class F>
+static double once_ms(F fn) {
+    cudaEvent_t a, b;
+    CK(cudaEventCreate(&a));
+    CK(cudaEventCreate(&b));
+    CK(cudaDeviceSynchronize());
+    CK(cudaEventRecord(a));
+    fn();
+    CK(cudaEventRecord(b));
+    CK(cudaEventSynchronize(b));
+    float ms;
+    CK(cudaEventElapsedTime(&ms, a, b));
+    CK(cudaEventDestroy(a));
+    CK(cudaEventDestroy(b));
+    return ms;
+}
+
+enum Kind { DEVICE = 0, MANAGED = 1, SYSTEM = 2 };
+
+// Fresh pages every call: system memory comes from an anonymous mapping so no
+// page is populated until something touches it.
+static void* place_alloc(Kind k, size_t bytes) {
+    void* p = nullptr;
+    if (k == DEVICE) {
+        if (cudaMalloc(&p, bytes) != cudaSuccess) { cudaGetLastError(); return nullptr; }
+    } else if (k == MANAGED) {
+        if (cudaMallocManaged(&p, bytes) != cudaSuccess) { cudaGetLastError(); return nullptr; }
+    } else {
+        p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return nullptr;
+    }
+    return p;
+}
+
+static void place_free(Kind k, void* p, size_t bytes) {
+    if (k == DEVICE || k == MANAGED) cudaFree(p); else munmap(p, bytes);
+}
+
+static const char* kind_name(Kind k) { return k == DEVICE ? "device" : k == MANAGED ? "managed" : "system"; }
+
+// A pass that faults or errors reports null instead of a number.
+static bool pass_ok() {
+    if (cudaDeviceSynchronize() != cudaSuccess) { cudaGetLastError(); return false; }
+    return true;
+}
+
+static void placement_one(Kind k, int sms, size_t bytes, float* sink, bool last) {
+    const size_t n = bytes / sizeof(float4);
+    const int blocks = sms * 8;
+    void* p = place_alloc(k, bytes);
+    printf("    \"%s\": ", kind_name(k));
+    if (!p) { printf("null%s\n", last ? "" : ","); return; }
+
+    // 1. First touch by the GPU: the first write pass over pages nobody has touched.
+    double gpu_first = once_ms([&] { write_kernel<<<blocks, 512>>>((float4*)p, n); });
+    bool ok = pass_ok();
+    // 2. Steady state: the same pages read again, after warm-up.
+    double steady = ok ? gbs((double)bytes, time_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); })) : 0;
+
+    // 3. First touch by the CPU, then the GPU's first read of those pages: where
+    //    the data lives after the CPU wrote it decides what this costs.
+    double cpu_first_read = 0, cpu_placed_steady = 0, prefetch_ms = 0, after_prefetch_read = 0, host_prefetch_back_ms = 0;
+    if (k != DEVICE && ok) {
+        place_free(k, p, bytes);
+        p = place_alloc(k, bytes);
+        memset(p, 1, bytes);
+        cpu_first_read = gbs((double)bytes, once_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); }));
+        // Repeated reads of pages the CPU placed: whether they stay on the host side
+        // (the link's rate) or are migrated to the device (HBM's) is the finding.
+        cpu_placed_steady = pass_ok() ? gbs((double)bytes, time_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); })) : 0;
+        pass_ok();
+        // 4. Prefetch effect: put the pages back on the host side, then move them to
+        //    the device ahead of the read and time both the move and the read.
+        int dev = 0;
+#if CUDART_VERSION >= 13000
+        cudaMemLocation host_loc = {cudaMemLocationTypeHost, 0};
+        cudaMemLocation dev_loc = {cudaMemLocationTypeDevice, dev};
+#define PREFETCH_HOST() cudaMemPrefetchAsync(p, bytes, host_loc, 0, 0)
+#define PREFETCH_DEVICE() cudaMemPrefetchAsync(p, bytes, dev_loc, 0, 0)
+#else
+#define PREFETCH_HOST() cudaMemPrefetchAsync(p, bytes, cudaCpuDeviceId, 0)
+#define PREFETCH_DEVICE() cudaMemPrefetchAsync(p, bytes, dev, 0)
+#endif
+        if (PREFETCH_HOST() == cudaSuccess) {
+            host_prefetch_back_ms = once_ms([&] {});  // drain
+            prefetch_ms = once_ms([&] { PREFETCH_DEVICE(); });
+            after_prefetch_read = gbs((double)bytes, once_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); }));
+            pass_ok();
+        } else {
+            cudaGetLastError();
+            prefetch_ms = -1;
+        }
+    }
+    printf("{\"gpu_first_touch_write_gbs\": %.1f, \"steady_read_gbs\": %.1f", ok ? gbs((double)bytes, gpu_first) : 0.0, steady);
+    if (k != DEVICE) {
+        printf(", \"cpu_first_touch_then_gpu_read_gbs\": %.1f, \"cpu_placed_steady_read_gbs\": %.1f, \"prefetch_to_device_ms\": %.2f, \"read_after_prefetch_gbs\": %.1f",
+               cpu_first_read, cpu_placed_steady, prefetch_ms, after_prefetch_read);
+    }
+    printf("}%s\n", last ? "" : ",");
+    (void)host_prefetch_back_ms;
+    place_free(k, p, bytes);
+}
+
+// Managed memory past the card's free memory: the driver evicts to host memory,
+// so a read pass shows the cost of thrashing. Takes all free device memory.
+static void oversubscription(int sms, float* sink) {
+    size_t free_b, total_b;
+    CK(cudaMemGetInfo(&free_b, &total_b));
+    size_t bytes = free_b + (free_b / 4);
+    bytes &= ~((size_t)(1 << 21) - 1);
+    void* p = place_alloc(MANAGED, bytes);
+    printf("  \"oversubscription\": ");
+    if (!p) { printf("null\n"); return; }
+    const size_t n = bytes / sizeof(float4);
+    const int blocks = sms * 8;
+    memset(p, 1, bytes);
+    double first = gbs((double)bytes, once_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); }));
+    bool ok = pass_ok();
+    double second = ok ? gbs((double)bytes, once_ms([&] { read_kernel<<<blocks, 512>>>((const float4*)p, n, sink); })) : 0;
+    ok = ok && pass_ok();
+    printf("{\"bytes\": %zu, \"free_bytes_before\": %zu, \"ok\": %s, \"first_pass_gbs\": %.1f, \"second_pass_gbs\": %.1f}\n",
+           bytes, free_b, ok ? "true" : "false", first, second);
+    place_free(MANAGED, p, bytes);
+}
+
+static void placement(int sms) {
+    const char* e = getenv("BUFFER_MIB");
+    size_t bytes = (e ? strtoull(e, nullptr, 10) : 1024ull) << 20;
+    float* sink;
+    CK(cudaMalloc(&sink, 4));
+    printf("{\n  \"buffer_bytes\": %zu,\n  \"placement\": {\n", bytes);
+    placement_one(DEVICE, sms, bytes, sink, false);
+    placement_one(MANAGED, sms, bytes, sink, false);
+    placement_one(SYSTEM, sms, bytes, sink, true);
+    const char* over = getenv("OVERSUBSCRIBE");
+    printf("  }%s\n", over && over[0] == '1' ? "," : "");
+    if (over && over[0] == '1') oversubscription(sms, sink);
+    printf("}\n");
+    CK(cudaFree(sink));
+}
+
+int main(int argc, char** argv) {
     int dev = 0;
     CK(cudaSetDevice(dev));
     cudaDeviceProp p;
     CK(cudaGetDeviceProperties(&p, dev));
+    if (argc > 1 && strcmp(argv[1], "--placement") == 0) {
+        placement(p.multiProcessorCount);
+        return 0;
+    }
     int rt, drv;
     cudaRuntimeGetVersion(&rt);
     cudaDriverGetVersion(&drv);
