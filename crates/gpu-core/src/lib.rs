@@ -241,6 +241,10 @@ mod upgrade;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_upgrade;
 
+/// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_upgrade::Fused;
+
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
 /// Native-only: `backend_api::Backend::register_native`/`step_native` (what
@@ -626,6 +630,10 @@ mod native_facade {
         /// [`crate::native_upgrade`]. Empty on every backend that cannot
         /// compile the registry's source.
         native_upgrades: Vec<crate::native_upgrade::Active>,
+        /// The native fused kernels this handle has been asked about, and what
+        /// the backend answered - resolved lazily, because resolving compiles
+        /// the kernel and most handles never ask. See [`Gpu::fused_step`].
+        fused: Mutex<Vec<(crate::native_upgrade::Fused, Option<backend_api::NativeId>)>>,
         /// Which pool this handle's allocations are charged to under
         /// `--limit-vram-total`/`--limit-ram-total` - the physical card this
         /// device was built on, or `Cpu` for the CPU backend. Resolved once at
@@ -685,6 +693,7 @@ mod native_facade {
                 cost_enabled: std::sync::atomic::AtomicBool::new(false),
                 upgrades,
                 native_upgrades,
+                fused: Mutex::new(Vec::new()),
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 arena: Mutex::new(Vec::new()),
@@ -1719,6 +1728,41 @@ mod native_facade {
         /// against.
         pub fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
             self.inner.register_native(spec)
+        }
+
+        /// The native id of `which` on this handle, resolved on first ask.
+        fn fused_id(&self, which: crate::native_upgrade::Fused) -> Option<backend_api::NativeId> {
+            let mut known = self.fused.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((_, id)) = known.iter().find(|(f, _)| *f == which) {
+                return *id;
+            }
+            let id = crate::native_upgrade::resolve_fused(self.inner.as_ref(), which);
+            known.push((which, id));
+            id
+        }
+
+        /// Whether this device is offered the native fused kernel `which`: a
+        /// CUDA device whose capability meets the kernel's floor, with
+        /// `BRAIN_NO_NATIVE_KERNELS` unset. A model that gets `false` builds its
+        /// own chain of WGSL dispatches instead.
+        pub fn has_fused(&self, which: crate::native_upgrade::Fused) -> bool {
+            self.fused_id(which).is_some()
+        }
+
+        /// One dispatch of the native fused kernel `which`, or `None` where it
+        /// is not offered or `params` is a shape it does not serve - the caller
+        /// then builds the WGSL chain the kernel replaces. `bufs` and `params`
+        /// are the kernel's own contract (see [`crate::Fused`]); the block count is
+        /// derived from `params`.
+        ///
+        /// Carries no [`StepMeta`], like [`Self::step_native`]: the cost
+        /// counters cannot price a kernel that is not in the WGSL catalogue.
+        pub fn fused_step(&self, which: crate::native_upgrade::Fused, bufs: &[&DeviceBuffer], params: &[u32]) -> Option<Step> {
+            if !which.serves(params) {
+                return None;
+            }
+            let id = self.fused_id(which)?;
+            self.step_native(id, bufs, params, which.blocks(params))
         }
 
         /// [`backend_api::Backend::step_native`] - the native-pipeline

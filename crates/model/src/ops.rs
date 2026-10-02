@@ -1082,6 +1082,18 @@ impl Ops {
         Act { x: x.clone(), xr0, m: rows, k, quant: Some(quant), xgs: None }
     }
 
+    /// The [`Act`] for rows `[0, rows)` of `x` (`[rows, k]`) that something
+    /// else has already quantised: `sx` holds the `[rows]` per-row scales and
+    /// `xq` the `[rows, k/4]` packed int8 rows, exactly what [`Ops::act`]'s two
+    /// dispatches would have written. This is the seam a fused kernel uses to
+    /// hand a linear its activation without the `max_abs_row` and `quant_pack`
+    /// dispatches (or the scratch allocation) [`Ops::act`] would add.
+    pub fn act_prequantized(&self, x: &DeviceBuffer, sx: &DeviceBuffer, xq: &DeviceBuffer, rows: u32, k: u32) -> Act {
+        assert!(rows > 0, "Ops::act_prequantized: rows must be > 0 (got 0)");
+        assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
+        Act { x: x.clone(), xr0: 0, m: rows, k, quant: Some(I8Scratch::from_parts(sx.clone(), k, xq.clone())), xgs: None }
+    }
+
     /// [`Ops::act`], plus the affine K-quant group-sum prepass
     /// (`quant_group_sum.wgsl`, M9) every [`Weight::KQuant`] matmul needs.
     /// Builds the SAME `I8Scratch` `act` does (identical `sx`/`xq`, so the

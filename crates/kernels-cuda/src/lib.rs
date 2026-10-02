@@ -190,6 +190,46 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 0,
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
+    CudaKernel {
+        name: "add_rms_quant",
+        // Not an operator a selector chooses an implementation of: a FUSED
+        // kernel a model asks for by name (`gpu_core::Fused`), with no WGSL twin
+        // to redirect. The operator and tier say what it produces - the packed
+        // int8 activation of an int8 linear, after a RMSNorm - and are unique in
+        // this table, so `find` can never confuse it with a matmul.
+        op: Op::RmsNorm,
+        weight: Dtype::I8,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_add_rms_quant",
+        what: "residual add + RMSNorm + per-row int8 scale + pack in one launch; 64 threads per row, bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack",
+        reported: "native:add_rms_quant",
+        block_dim: 64,
+        // One block per row of x.
+        tile: (1, 1),
+        // 64 lane partials + the 64 x 128 quantised bytes exchanged between lanes.
+        shared_bytes: 64 * 4 + 64 * 128,
+        src: include_str!("../cu/add_rms_quant.cu"),
+    },
+    CudaKernel {
+        name: "quant_epilogue",
+        // A fused kernel asked for by name, like `add_rms_quant`: the operator
+        // and tier say what it produces (per-row scales and a packed int8
+        // activation), and a fused kernel is always looked up through `get`,
+        // never through `find`, which is the matmul providers' selector.
+        op: Op::MaxAbsRow,
+        weight: Dtype::I8,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_quant_epilogue",
+        what: "silu_mul / sigmoid-gate / plain producer + per-row int8 scale + pack in one launch; 256 threads per row, bit-identical to the chain it replaces",
+        reported: "native:quant_epilogue",
+        block_dim: 256,
+        tile: (1, 1),
+        // 8 warp maxima + 256 x 72 quantised bytes exchanged between threads.
+        shared_bytes: 8 * 4 + 256 * 72,
+        src: include_str!("../cu/quant_epilogue.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

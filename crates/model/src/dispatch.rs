@@ -166,6 +166,14 @@ impl I8Scratch {
         }
     }
 
+    /// A scratch whose per-row scales and packed activation were produced by
+    /// something other than [`Self::quant_rows`] - a fused kernel that quantises
+    /// as part of the step that made the activation. `sx` is `[rows]` and `xq`
+    /// `[rows, k/4]`, the layout [`Self::new`] sizes for.
+    pub fn from_parts(sx: DeviceBuffer, k: u32, xq: DeviceBuffer) -> I8Scratch {
+        I8Scratch { sx, slots: vec![(k, xq)] }
+    }
+
     /// The packed-activation scratch for a K-wide activation.
     pub fn xq_for(&self, k: u32) -> &DeviceBuffer {
         self.slots

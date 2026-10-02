@@ -355,6 +355,30 @@ pub fn gqa_mixer_decode_batched_kv_fwd(
     batch: u32,
     paged: &PagedDecodeBatch,
 ) -> DeviceBuffer {
+    let (ctx, q_gate) = gqa_mixer_decode_batched_kv_attend(g, ids, kv, softmax, shape, w, q_full, k, v, layer, batch, paged);
+    gate_ctx(g, ids, &ctx, &q_gate, batch, shape.qd()).1
+}
+
+/// [`gqa_mixer_decode_batched_kv_fwd`] up to, but NOT including, the sigmoid
+/// output gate: returns `(ctx, q_gate)` - the attention output and the gate's
+/// pre-activation, both `[batch, n_heads*head_dim]` - so a caller that fuses
+/// `ctx * sigmoid(q_gate)` into the kernel that quantises it for `o_proj` can
+/// do so. The gated result is `gate_ctx`'s: `ctx * (1 / (1 + exp(-q_gate)))`.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_mixer_decode_batched_kv_attend(
+    g: &Gpu,
+    ids: &GqaMixerIds,
+    kv: &KvKernels,
+    softmax: usize,
+    shape: &GqaMixerShape,
+    w: &GqaMixerWeights,
+    q_full: &DeviceBuffer,
+    k: &DeviceBuffer,
+    v: &DeviceBuffer,
+    layer: &KvLayer,
+    batch: u32,
+    paged: &PagedDecodeBatch,
+) -> (DeviceBuffer, DeviceBuffer) {
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, batch);
@@ -384,7 +408,7 @@ pub fn gqa_mixer_decode_batched_kv_fwd(
             &ctx,
         ),
     );
-    gate_ctx(g, ids, &ctx, &prep.q_gate, batch, qd).1
+    (ctx, prep.q_gate)
 }
 
 /// The mixer's projections-to-attention-inputs half, shared byte-for-byte by

@@ -894,6 +894,9 @@ pub struct Qwen35 {
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
     chunk_arena_min_rows: Cell<u32>,
+    /// Whether a decode step may use the native fused kernels where the device
+    /// offers them - see [`Self::set_decode_fusion`].
+    decode_fusion: Cell<bool>,
 }
 
 /// Which per-sequence GQA cache / GDN recurrent state one [`Qwen35::
@@ -1471,6 +1474,7 @@ impl Qwen35 {
             taps: RefCell::new(Vec::new()),
             tapped: RefCell::new(Vec::new()),
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
+            decode_fusion: Cell::new(true),
         }
     }
 
@@ -1494,6 +1498,16 @@ impl Qwen35 {
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
+    }
+
+    /// **Turn the decode step's native fused kernels off (or back on).** On by
+    /// default, and on only matters where the device is offered them (a CUDA
+    /// device; `BRAIN_NO_NATIVE_KERNELS=1` withholds them process-wide). Off,
+    /// a decode step is the chain of WGSL dispatches the fused kernels replace,
+    /// which is what their output is gated bit-for-bit against - so this is the
+    /// A/B switch for that gate and for measuring the fusion, not a tuning knob.
+    pub fn set_decode_fusion(&self, on: bool) {
+        self.decode_fusion.set(on);
     }
 
     /// **Ask a chunk pass to hand back the residual leaving specific layers.**
@@ -1739,6 +1753,16 @@ impl Qwen35 {
     /// rows are one sequence's `n` next tokens continuing from a persistent
     /// recurrent state and conv history - see `model::gdn_mixer::GdnStream`.
     fn layer_gdn_fwd(&self, l: usize, xn1: &DeviceBuffer, n: u32, call: GdnCall) -> (DeviceBuffer, Option<GdnLayerActs>) {
+        self.layer_gdn_fwd_pre(l, xn1, None, false, n, call)
+    }
+
+    /// [`Self::layer_gdn_fwd`] given `xn1`'s activation already quantised
+    /// (`pre`), by a fused kernel that produced `xn1` and its int8 packing in
+    /// one launch. `None` quantises here, as every other caller does.
+    /// `epilogue` fuses the quantisation of what the layer hands `out_proj`
+    /// into one launch ([`Self::quant_epilogue`]); only a decode step, after
+    /// [`Self::fused_epilogue_ok`], sets it.
+    fn layer_gdn_fwd_pre(&self, l: usize, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32, call: GdnCall) -> (DeviceBuffer, Option<GdnLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1755,7 +1779,10 @@ impl Qwen35 {
         // happens in between).
         let mixed_qkv = g.storage((n * conv_dim) as u64);
         let mut s1 = Vec::new();
-        let act1 = self.ops_act(&mut s1, xn1, n, d);
+        let act1 = match pre {
+            Some(a) => a,
+            None => self.ops_act(&mut s1, xn1, n, d),
+        };
         if self.ops_linear(&mut s1, &act1, &p("in_proj_qkv.weight"), &mixed_qkv) {
             self.lora_fwd(&mut s1, "in_proj_qkv", xn1, &p("in_proj_qkv.weight"), &mixed_qkv, n, d, conv_dim);
         }
@@ -1815,7 +1842,7 @@ impl Qwen35 {
         let out = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            let act3 = self.ops_act(&mut s, &gated, n, value_dim);
+            let act3 = if epilogue { self.quant_epilogue(0, &gated, None, n, value_dim).1 } else { self.ops_act(&mut s, &gated, n, value_dim) };
             if self.ops_linear(&mut s, &act3, &p("out_proj.weight"), &out) {
                 self.lora_fwd(&mut s, "out_proj", &gated, &p("out_proj.weight"), &out, n, value_dim, d);
             }
@@ -1840,6 +1867,12 @@ impl Qwen35 {
     /// self_attn"` for the MTP head's own full-attention sublayer -
     /// reusing this function unchanged, since the mechanism is identical.
     fn layer_gqa_fwd(&self, prefix: &str, xn1: &DeviceBuffer, n: u32, cached: Option<GqaCached>) -> (DeviceBuffer, Option<GqaLayerActs>) {
+        self.layer_gqa_fwd_pre(prefix, xn1, None, false, n, cached)
+    }
+
+    /// [`Self::layer_gqa_fwd`] given `xn1`'s activation already quantised - see
+    /// [`Self::layer_gdn_fwd_pre`].
+    fn layer_gqa_fwd_pre(&self, prefix: &str, xn1: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32, cached: Option<GqaCached>) -> (DeviceBuffer, Option<GqaLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1853,7 +1886,10 @@ impl Qwen35 {
         let k = g.storage((n * kvd) as u64);
         let v = g.storage((n * kvd) as u64);
         let mut s1 = Vec::new();
-        let act1 = self.ops_act(&mut s1, xn1, n, d);
+        let act1 = match pre {
+            Some(a) => a,
+            None => self.ops_act(&mut s1, xn1, n, d),
+        };
         if self.ops_linear(&mut s1, &act1, &p("q_proj.weight"), &q_full) {
             self.lora_fwd(&mut s1, "q_proj", xn1, &p("q_proj.weight"), &q_full, n, d, qpd);
         }
@@ -1877,6 +1913,8 @@ impl Qwen35 {
             Some(GqaCached::Decode(dc)) => (dc.cos, dc.sin),
         };
         let weights = model::gqa_mixer::GqaMixerWeights { q_norm: self.w(&p("q_norm.weight")), k_norm: self.w(&p("k_norm.weight")), cos, sin };
+        // Set by the decode arm that fuses the sigmoid gate into the quantiser.
+        let mut o_proj_act: Option<Act> = None;
         let (ctx_gated, internals) = match cached {
             None => model::gqa_mixer::gqa_mixer_fwd(g, &gqa_mixer_ids(), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             Some(GqaCached::Chunk(ch)) => (
@@ -1901,6 +1939,26 @@ impl Qwen35 {
                 ),
                 None,
             ),
+            Some(GqaCached::Decode(dc)) if epilogue => {
+                // The sigmoid output gate rides on the quantisation below.
+                let (ctx, q_gate) = model::gqa_mixer::gqa_mixer_decode_batched_kv_attend(
+                    g,
+                    &gqa_mixer_ids(),
+                    &self.kv_kernels(dc.layer),
+                    DECODE_SOFTMAX_BATCHED,
+                    &shape,
+                    &weights,
+                    &q_full,
+                    &k,
+                    &v,
+                    dc.layer,
+                    n,
+                    dc.paged,
+                );
+                let (gated, act) = self.quant_epilogue(2, &ctx, Some(&q_gate), n, shape.qd());
+                o_proj_act = Some(act);
+                (gated.expect("a gated epilogue hands back its product"), None)
+            }
             Some(GqaCached::Decode(dc)) => (
                 model::gqa_mixer::gqa_mixer_decode_batched_kv_fwd(
                     g,
@@ -1925,7 +1983,10 @@ impl Qwen35 {
         let out = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            let act2 = self.ops_act(&mut s, &ctx_gated, n, shape.qd());
+            let act2 = match o_proj_act {
+                Some(a) => a,
+                None => self.ops_act(&mut s, &ctx_gated, n, shape.qd()),
+            };
             if self.ops_linear(&mut s, &act2, &p("o_proj.weight"), &out) {
                 self.lora_fwd(&mut s, "o_proj", &ctx_gated, &p("o_proj.weight"), &out, n, shape.qd(), d);
             }
@@ -1945,6 +2006,12 @@ impl Qwen35 {
     /// activation) - same "quantize once, share across sibling linears"
     /// discipline `layer_gdn_fwd`/`layer_gqa_fwd` use.
     fn mlp_fwd(&self, prefix: &str, xn2: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
+        self.mlp_fwd_pre(prefix, xn2, None, false, n)
+    }
+
+    /// [`Self::mlp_fwd`] given `xn2`'s activation already quantised - see
+    /// [`Self::layer_gdn_fwd_pre`].
+    fn mlp_fwd_pre(&self, prefix: &str, xn2: &DeviceBuffer, pre: Option<Act>, epilogue: bool, n: u32) -> (DeviceBuffer, Option<MlpLayerActs>) {
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
@@ -1955,7 +2022,10 @@ impl Qwen35 {
         let up = g.storage((n * ff) as u64);
         {
             let mut s = Vec::new();
-            let act1 = self.ops_act(&mut s, xn2, n, d);
+            let act1 = match pre {
+                Some(a) => a,
+                None => self.ops_act(&mut s, xn2, n, d),
+            };
             if self.ops_linear(&mut s, &act1, &p("gate.weight"), &gate_pre) {
                 self.lora_fwd(&mut s, "gate", xn2, &p("gate.weight"), &gate_pre, n, d, ff);
             }
@@ -1964,12 +2034,22 @@ impl Qwen35 {
             }
             g.submit(&[], &s);
         }
-        let h = g.storage((n * ff) as u64);
-        g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
+        let (h, down_act) = if epilogue {
+            // `silu(gate) * up` and its quantisation for `down` in one launch.
+            let (h, act) = self.quant_epilogue(1, &gate_pre, Some(&up), n, ff);
+            (h.expect("a silu_mul epilogue hands back its product"), Some(act))
+        } else {
+            let h = g.storage((n * ff) as u64);
+            g.submit(&[], &[g.step(SILU_MUL, &[&gate_pre, &up, &h], &[n * ff], n * ff)]);
+            (h, None)
+        };
         let down = g.storage((n * d) as u64);
         {
             let mut s = Vec::new();
-            let act2 = self.ops_act(&mut s, &h, n, ff);
+            let act2 = match down_act {
+                Some(a) => a,
+                None => self.ops_act(&mut s, &h, n, ff),
+            };
             if self.ops_linear(&mut s, &act2, &p("down.weight"), &down) {
                 self.lora_fwd(&mut s, "down", &h, &p("down.weight"), &down, n, ff, d);
             }
@@ -2570,6 +2650,86 @@ impl Qwen35 {
         self.gpu.read(&hidden, self.cfg.d_model as usize)
     }
 
+    /// Whether a decode step of `rows` rows may use the fused front end
+    /// ([`Self::rms_quant_front`]): the device is offered `add_rms_quant`, some
+    /// weight actually reads an int8 activation, the shape is one the kernel
+    /// serves, and the unfused chain would have normalised with the cooperative
+    /// RMSNorm - the only order the kernel reproduces. The last clause is what
+    /// makes the fusion invisible rather than merely close.
+    fn fused_front_ok(&self, rows: u32) -> bool {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let coop = block::rms_variant(g, RMSNORM, Some(RMSNORM_ROWS), rows, d).0 == RMSNORM_ROWS;
+        self.decode_fusion.get() && coop && !self.weights.values().all(|w| matches!(w, Weight::F32 { .. }))
+            && g.has_fused(gpu_core::Fused::AddRmsQuant)
+            && gpu_core::Fused::AddRmsQuant.serves(&[d, rows, f(RMS_EPS), 1])
+    }
+
+    /// Whether a decode step of `rows` rows may use [`Self::quant_epilogue`]
+    /// at every width the layers hand it: the device is offered the kernel and
+    /// some weight actually reads an int8 activation. The kernel's arithmetic
+    /// is the unfused chain's own (nothing in it is order-sensitive), so unlike
+    /// the front end there is no variant to match.
+    fn fused_epilogue_ok(&self, rows: u32) -> bool {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let widths = [c.intermediate_size, c.linear_value_dim(), c.q_proj_dim() / 2];
+        self.decode_fusion.get()
+            && !self.weights.values().all(|w| matches!(w, Weight::F32 { .. }))
+            && g.has_fused(gpu_core::Fused::QuantEpilogue)
+            && widths.iter().all(|&k| gpu_core::Fused::QuantEpilogue.serves(&[k, rows, 0, 0]))
+    }
+
+    /// One launch that produces the activation an int8 linear reads AND
+    /// quantises it: `mode` 0 quantises `a` as it is, 1 produces `silu(a) * b`,
+    /// 2 produces `a * sigmoid(b)`. Returns `(product, act)`; `product` is
+    /// `None` for mode 0, where the activation is `a` itself.
+    ///
+    /// Only call after [`Self::fused_epilogue_ok`].
+    fn quant_epilogue(&self, mode: u32, a: &DeviceBuffer, b: Option<&DeviceBuffer>, rows: u32, k: u32) -> (Option<DeviceBuffer>, Act) {
+        let g = &self.gpu;
+        let n = (rows * k) as u64;
+        let y = (mode != 0).then(|| g.storage(n));
+        let xq = g.storage(n / 4);
+        let sx = g.storage(rows as u64);
+        // Mode 0 reads no `b` and writes no `y`; the slots are still bound, and
+        // alias what is already there.
+        let step = g
+            .fused_step(gpu_core::Fused::QuantEpilogue, &[a, b.unwrap_or(a), y.as_ref().unwrap_or(&xq), &xq, &sx], &[k, rows, mode, 0])
+            .expect("fused_epilogue_ok said the device serves this shape");
+        g.submit(&[], &[step]);
+        let act = self.ops.act_prequantized(y.as_ref().unwrap_or(a), &sx, &xq, rows, k);
+        (y, act)
+    }
+
+    /// One launch of the fused front end of an int8 linear: `sum = a + b` (when
+    /// `b` is given), `xn = rmsnorm(sum) * w`, and the per-row int8 packing of
+    /// `xn` as a ready [`Act`]. Returns `(sum, xn, act)`; `sum` is `None` when
+    /// there was no `b`, and the caller keeps `a` as the residual.
+    ///
+    /// Only call after [`Self::fused_front_ok`].
+    fn rms_quant_front(&self, a: &DeviceBuffer, b: Option<&DeviceBuffer>, w: &DeviceBuffer, rows: u32) -> (Option<DeviceBuffer>, DeviceBuffer, Act) {
+        let g = &self.gpu;
+        let d = self.cfg.d_model;
+        let n = (rows * d) as u64;
+        let sum = b.map(|_| g.storage(n));
+        let xn = g.storage(n);
+        let xq = g.storage(n / 4);
+        let sx = g.storage(rows as u64);
+        // Without an addend the kernel reads neither `b` nor writes `sum`; the
+        // slots still have to be bound, so they alias what is already there.
+        let step = g
+            .fused_step(
+                gpu_core::Fused::AddRmsQuant,
+                &[a, b.unwrap_or(a), w, sum.as_ref().unwrap_or(&xn), &xn, &xq, &sx],
+                &[d, rows, f(RMS_EPS), b.is_some() as u32],
+            )
+            .expect("fused_front_ok said the device serves this shape");
+        g.submit(&[], &[step]);
+        let act = self.ops.act_prequantized(&xn, &sx, &xq, rows, d);
+        (sum, xn, act)
+    }
+
     /// One incremental decode step's full layer stack - the decode-shaped
     /// (`n=1`) sibling of [`Self::run_forward`], **shard-aware in exactly the
     /// same way**: only `self.shard`'s own layers run, the token embedding
@@ -2727,56 +2887,80 @@ impl Qwen35 {
         }
 
         let types = c.layer_types();
+
+        // Where the residual add, the norm and the activation quantisation that
+        // sit between two linears are ONE launch instead of four (`add2`,
+        // `rmsnorm_rows`, `max_abs_rows`, `quant_pack`) - and bit-identical to
+        // those four, which is why the gate is "the device offers the kernel and
+        // the unfused chain would have used the cooperative RMSNorm", never a
+        // tolerance. Off, the loop below is the unfused chain it always was.
+        let fused = self.fused_front_ok(bsz);
+        let epilogue = self.fused_epilogue_ok(bsz);
+        let first_ln1 = format!("blocks.{}.ln1.weight", self.shard.start);
+        // The next layer's `(xn1, activation)`, when the previous step produced it.
+        let mut front = (fused && self.shard.start < self.shard.end).then(|| {
+            let (_, xn, act) = self.rms_quant_front(&res, None, self.w(&first_ln1), bsz);
+            (xn, act)
+        });
+
         // `l` is the ABSOLUTE layer index (into `types`, `caches.*` and the
         // `blocks.{l}.*` weight names below), not just a loop counter -
         // exactly as in `Self::run_forward`.
         #[allow(clippy::needless_range_loop)]
         for l in self.shard.start..self.shard.end {
             let ty = types[l];
-            let xn1 = g.storage((bsz * d) as u64);
-            g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, bsz)]);
+            let (xn1, pre1) = match front.take() {
+                Some((xn, act)) => (xn, Some(act)),
+                None => {
+                    let xn1 = g.storage((bsz * d) as u64);
+                    g.submit(&[], &[rms_step(g, &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, bsz)]);
+                    (xn1, None)
+                }
+            };
 
             let mixer_out = match ty {
                 LayerType::Linear => {
                     let streams: Vec<model::gdn_mixer::GdnStream> =
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
-                    self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(&streams)).0
+                    self.layer_gdn_fwd_pre(l, &xn1, pre1, epilogue, bsz, GdnCall::Decode(&streams)).0
                 }
                 LayerType::Full => {
                     let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
-                    self.layer_gqa_fwd(&format!("blocks.{l}.self_attn"), &xn1, bsz, Some(GqaCached::Decode(&dctx))).0
+                    self.layer_gqa_fwd_pre(&format!("blocks.{l}.self_attn"), &xn1, pre1, epilogue, bsz, Some(GqaCached::Decode(&dctx))).0
                 }
             };
 
-            let xmid = g.storage((bsz * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[bsz * d], bsz * d)]);
+            let ln2 = format!("blocks.{l}.ln2.weight");
+            let (xmid, xn2, pre2) = if fused {
+                let (sum, xn, act) = self.rms_quant_front(&res, Some(&mixer_out), self.w(&ln2), bsz);
+                (sum.expect("an add front hands back its sum"), xn, Some(act))
+            } else {
+                let xmid = g.storage((bsz * d) as u64);
+                g.submit(&[], &[g.step(ADD2, &[&res, &mixer_out, &xmid], &[bsz * d], bsz * d)]);
+                let xn2 = g.storage((bsz * d) as u64);
+                g.submit(&[], &[rms_step(g, &xmid, self.w(&ln2), &xn2, d, bsz)]);
+                (xmid, xn2, None)
+            };
 
-            let xn2 = g.storage((bsz * d) as u64);
-            g.submit(&[], &[rms_step(g, &xmid, self.w(&format!("blocks.{l}.ln2.weight")), &xn2, d, bsz)]);
+            let (mlp_out, _) = self.mlp_fwd_pre(&format!("blocks.{l}.mlp"), &xn2, pre2, epilogue, bsz);
+            if fused && l + 1 < self.shard.end {
+                // The next layer's first norm rides on this residual add.
+                let (sum, xn, act) = self.rms_quant_front(&xmid, Some(&mlp_out), self.w(&format!("blocks.{}.ln1.weight", l + 1)), bsz);
+                res = sum.expect("an add front hands back its sum");
+                front = Some((xn, act));
+            } else {
+                let res_next = g.storage((bsz * d) as u64);
+                g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[bsz * d], bsz * d)]);
+                res = res_next;
+            }
 
-            let (mlp_out, _) = self.mlp_fwd(&format!("blocks.{l}.mlp"), &xn2, bsz);
-            let res_next = g.storage((bsz * d) as u64);
-            g.submit(&[], &[g.step(ADD2, &[&xmid, &mlp_out, &res_next], &[bsz * d], bsz * d)]);
-            res = res_next;
-
-            // Hand this layer to the device NOW and keep building the next one.
-            //
-            // `Gpu::submit` on this backend does not submit - it appends to a
-            // pending list that is flushed at the terminal readback - so
-            // WITHOUT this a decode step records every one of its ~1250
-            // dispatches (bind groups, uniforms and all) on the host before the
-            // card starts any of them, and then waits. Zero overlap, and at
-            // `n = 1` the host side of that is not small next to the device
-            // side.
-            //
-            // Measured, and it is not a small effect: this model used to get
-            // the overlap BY ACCIDENT, because the GQA decode path uploaded an
-            // M-RoPE row per GQA layer and `Gpu::write*` flushes the queue
-            // first. Deduplicating those uploads to one per step - a strictly
-            // smaller amount of work - cost 1.45x on the whole pass
-            // (7.19 -> 4.96 tok/s) purely by removing the flushes that had been
-            // pipelining the pass. Flushing on purpose, per layer, is what that
-            // accident was worth and is why the dedup is now free.
+            // A hand-off point per layer. On a backend that issues each
+            // submission when it is made this is where the card was kept fed
+            // while the host built the next layer (without it the whole step
+            // was recorded before the first dispatch ran, and removing the
+            // M-RoPE uploads that used to flush here cost 1.45x on the whole
+            // pass: 7.19 -> 4.96 tok/s). On one that holds a pass whole it is
+            // a no-op, and the step is issued as one when the pass ends.
             g.flush();
         }
 

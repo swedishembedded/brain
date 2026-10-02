@@ -85,6 +85,109 @@ pub(crate) const ROWS: &[Row] = &[Row {
     serves: serves_i8_gemv,
 }];
 
+/// A native kernel with no WGSL twin: it fuses a chain of dispatches the MODEL
+/// builds, so there is nothing to redirect and a model asks for it by name -
+/// [`crate::Gpu::fused_step`] - and keeps its own chain of WGSL dispatches for
+/// every device that is not offered it.
+///
+/// The conditions are [`resolve`]'s, minus the first (there is no WGSL upgrade
+/// to be active): a queried compute capability at or above the kernel's own
+/// floor, a backend that accepts the source, and `BRAIN_NO_NATIVE_KERNELS`
+/// unset. A shape outside [`Fused::serves`] is the caller's to route to its
+/// WGSL chain, exactly like a redirected dispatch the native kernel declines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fused {
+    /// `add_rms_quant`: residual add + RMSNorm + per-row int8 scale + pack.
+    /// Params `[d, rows, eps (f32 bits), flags]` (flags bit 0: add `b` first);
+    /// bindings `a, b, w` read, `sum, xn, xq, sx` written.
+    AddRmsQuant,
+    /// `quant_epilogue`: an elementwise producer (`mode` 0 plain, 1 `silu(a) *
+    /// b`, 2 `a * sigmoid(b)`) + per-row int8 scale + pack. Params `[k, rows,
+    /// mode, 0]`; bindings `a, b` read, `y, xq, sx` written.
+    QuantEpilogue,
+}
+
+/// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
+const ADD_RMS_QUANT_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+/// `quant_epilogue`'s bindings: params, `a`, `b`, `y`, `xq`, `sx`.
+const QUANT_EPILOGUE_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
+impl Fused {
+
+    /// The `kernels_cuda` registry entry's name.
+    pub fn registry_name(self) -> &'static str {
+        match self {
+            Fused::AddRmsQuant => "add_rms_quant",
+            Fused::QuantEpilogue => "quant_epilogue",
+        }
+    }
+
+    fn bindings(self) -> &'static [BindKind] {
+        match self {
+            Fused::AddRmsQuant => ADD_RMS_QUANT_BINDINGS,
+            Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
+        }
+    }
+
+    /// Whether the kernel serves a dispatch with these `params`. A `false`
+    /// means "use the WGSL chain", never an error.
+    pub fn serves(self, params: &[u32]) -> bool {
+        match self {
+            // One 64-thread block per row keeps `d / 64` elements per thread in
+            // registers: up to 80 of them (5120 wide), and a whole number of
+            // int8 words.
+            Fused::AddRmsQuant => matches!(params, [d, rows, _, _] if *rows >= 1 && *d >= 4 && d % 4 == 0 && *d <= 64 * 80),
+            // 256 threads per row keep `k / 256` elements each in registers: up
+            // to 72 of them.
+            Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 256 * 72 && *mode <= 2),
+        }
+    }
+
+    /// Blocks a dispatch with these `params` launches.
+    pub(crate) fn blocks(self, params: &[u32]) -> u32 {
+        match self {
+            Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
+        }
+    }
+}
+
+/// The native id of `which` on this backend, or `None` where it is not
+/// offered. Compiles on first use per backend, so a handle caches the answer.
+pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<NativeId> {
+    if disabled() {
+        return None;
+    }
+    let cc = backend.caps().arch.compute_capability?;
+    let k = kernels_cuda::get(which.registry_name())?;
+    if k.min_cc > cc {
+        return None;
+    }
+    backend.register_native(&NativeSpec::Cuda {
+        src: k.src,
+        entry: k.entry,
+        block_dim: k.block_dim,
+        bindings: which.bindings(),
+        shared_bytes: k.shared_bytes,
+    })
+}
+
 /// `BRAIN_NO_NATIVE_KERNELS=1` disables the tier. Read once: the policy must
 /// stay fixed for a given process.
 fn disabled() -> bool {
