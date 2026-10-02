@@ -43,6 +43,9 @@
 //! 4. **Capability-gated through `backend_api::select`** — the policy lives
 //!    there with everything else, never in a backend-name test here.
 //!
+//! A row resolved here may be superseded one tier up by a hand-written native
+//! kernel on a backend that can compile it - see [`crate::native_upgrade`].
+//!
 //! `BRAIN_NO_KERNEL_UPGRADE=1` disables the whole table (the A/B switch every
 //! measurement below was taken with).
 //!

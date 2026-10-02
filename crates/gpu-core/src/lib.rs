@@ -235,6 +235,12 @@ mod stepcache;
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
+/// [`upgrade`]'s second tier: a hand-written native kernel in place of the
+/// WGSL fast variant, on a backend that can compile it. Native-only, like the
+/// `register_native` seam it dispatches through.
+#[cfg(not(target_arch = "wasm32"))]
+mod native_upgrade;
+
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
 /// Native-only: `backend_api::Backend::register_native`/`step_native` (what
@@ -595,6 +601,10 @@ mod native_facade {
         /// which registered slot redirects to which faster slot. Usually empty;
         /// see [`crate::upgrade`] for what qualifies and why the seam exists.
         upgrades: Vec<crate::upgrade::Active>,
+        /// Native-kernel redirects layered over [`Self::upgrades`] - see
+        /// [`crate::native_upgrade`]. Empty on every backend that cannot
+        /// compile the registry's source.
+        native_upgrades: Vec<crate::native_upgrade::Active>,
         /// Which pool this handle's allocations are charged to under
         /// `--limit-vram-total`/`--limit-ram-total` - the physical card this
         /// device was built on, or `Cpu` for the CPU backend. Resolved once at
@@ -646,12 +656,14 @@ mod native_facade {
             // Per handle, once: the policy is a pure function of names + caps,
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
+            let native_upgrades = crate::native_upgrade::resolve(&names, inner.as_ref(), &upgrades);
             Gpu {
                 inner,
                 names,
                 counters: Mutex::new(Default::default()),
                 cost_enabled: std::sync::atomic::AtomicBool::new(false),
                 upgrades,
+                native_upgrades,
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 arena: Mutex::new(None),
@@ -1471,12 +1483,15 @@ mod native_facade {
                     return s;
                 }
             }
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
-            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
-            let step = self
-                .inner
-                .step(k, bufs, params, t)
-                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads });
+            let meta = StepMeta { kernel: kind, params: Some(params.to_vec()), threads };
+            let step = match self.native_step(kind, bufs, None, params) {
+                Some(s) => s.with_meta(meta),
+                None => {
+                    let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+                    crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
+                    self.inner.step(k, bufs, params, t).with_meta(meta)
+                }
+            };
             if armed {
                 if let Some(c) = self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     c.put(kind, bufs, &[], params, threads, &step);
@@ -1574,12 +1589,15 @@ mod native_facade {
                     return s;
                 }
             }
-            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
-            crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
-            let step = self
-                .inner
-                .step_sliced(k, bufs, offsets, params, t)
-                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads });
+            let meta = StepMeta { kernel: kind, params: Some(params.to_vec()), threads };
+            let step = match self.native_step(kind, bufs, Some(offsets), params) {
+                Some(s) => s.with_meta(meta),
+                None => {
+                    let (k, t) = crate::upgrade::apply(&self.upgrades, kind, Some(params), threads);
+                    crate::refuse_short_params(self.names.get(k).map(String::as_str).unwrap_or("?"), self.kernel_grid_at(k), params);
+                    self.inner.step_sliced(k, bufs, offsets, params, t).with_meta(meta)
+                }
+            };
             if armed {
                 if let Some(c) = self.memo.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     c.put(kind, bufs, offsets, params, threads, &step);
@@ -1741,6 +1759,29 @@ mod native_facade {
                 }
             }
             self.names.get(kind).map(|s| vec![s.as_str()]).unwrap_or_default()
+        }
+
+        /// The native step for a dispatch of kernel slot `kind`, when
+        /// [`crate::native_upgrade`] redirects it on this device. `None` keeps
+        /// the WGSL tier - including when the backend declines the step
+        /// (an id it does not recognise, or no native slicing path), which is
+        /// a fallback and never a failure.
+        fn native_step(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: Option<&[(u64, u64)]>, params: &[u32]) -> Option<Step> {
+            let (id, blocks) = crate::native_upgrade::apply(&self.native_upgrades, kind, params)?;
+            match offsets {
+                None => self.inner.step_native(id, bufs, params, blocks),
+                Some(o) => self.inner.step_native_sliced(id, bufs, o, params, blocks),
+            }
+        }
+
+        /// The `kernels_cuda` registry kernel a dispatch of slot `kind` with
+        /// caller `params` would run instead of its WGSL pipeline on this
+        /// device, or `None` when it keeps the WGSL tier. The native analogue
+        /// of [`Gpu::physical_kernel_names`], for tests and diagnostics to
+        /// assert the redirect really fired.
+        pub fn native_kernel_for(&self, kind: usize, params: &[u32]) -> Option<&'static str> {
+            let a = self.native_upgrades.iter().find(|a| a.slow == kind)?;
+            crate::native_upgrade::apply(&self.native_upgrades, kind, params).map(|_| a.kernel)
         }
 
         /// The pipeline slot a kernel name occupies on this handle, or `None`
