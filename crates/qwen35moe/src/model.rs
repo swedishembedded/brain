@@ -319,6 +319,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("moe_route_scan", kernels::MOE_ROUTE_SCAN),                 // 116
     ("moe_route_emit", kernels::MOE_ROUTE_EMIT),                 // 117
     ("moe_i8_grouped", kernels::MOE_I8_GROUPED),                 // 118
+    // Prefill fast path of the Gated-DeltaNet chunk forward, see
+    // `model::gdn::use_fast_kernels`.
+    ("gdn_ut_fwd", kernels::GDN_UT_FWD),                         // 119
+    ("bmm_tiled", kernels::BMM_TILED),                           // 120
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -519,6 +523,8 @@ const MOE_ROUTE_COUNT: usize = 115;
 const MOE_ROUTE_SCAN: usize = 116;
 const MOE_ROUTE_EMIT: usize = 117;
 const MOE_I8_GROUPED: usize = 118;
+const GDN_UT_FWD: usize = 119;
+const BMM_TILED: usize = 120;
 /// Partial-argmax chunks the device head splits a `[vocab]` row into
 /// (`argmax_part` then `argmax_final`) - the same split `qwen35` uses.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
@@ -589,7 +595,7 @@ fn gdn_ids() -> GdnIds {
         sub: SUB,
         mul: MUL,
         region_copy: REGION_COPY,
-        fast: None,
+        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED }),
     }
 }
 
