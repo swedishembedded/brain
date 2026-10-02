@@ -38,7 +38,9 @@
 //!   deferral GLM's `check_glm_mtp` treats as separate follow-on work), so
 //!   `n_layers` here is `block_count - 1 = 40` and every `blk.40.*` tensor is
 //!   dropped at import - **loudly counted, not silently ignored** (see
-//!   `import_gguf`'s coverage check).
+//!   `import_gguf's coverage check). Not every conversion carries that block: the
+//!   unsloth `Qwen3.6-35B-A3B` GGUFs have `block_count = 40` and no `nextn.*`
+//!   tensor, so [`config_from_gguf`] subtracts the MTP block only when the file has one.
 //! - 11 blocks carry `attn_q`/`attn_k`/`attn_v`/`attn_output`/`attn_q_norm`/
 //!   `attn_k_norm` (full attention) = the 10 real full-attention decoder
 //!   layers (`full_attention_interval=4` over 40 layers) **plus block 40's
@@ -128,9 +130,21 @@ pub fn config_from_gguf(mg: &MmapGguf) -> Result<Qwen35Config, String> {
     let kv = ArchKv::expect_architecture(mg, GGUF_ARCHITECTURE)?;
 
     let block_count = kv.req_u32("block_count")?;
-    // llama.cpp folds the MTP layer into the same blk.N index space as the
-    // last block (see this file's module doc) - drop it from n_layers.
-    let n_layers = block_count.checked_sub(1).ok_or("qwen35: block_count must be > 1 (MTP occupies the last block)")?;
+    // llama.cpp folds an MTP layer into the same blk.N index space as the last
+    // block (see this file's module doc), but only some conversions carry it:
+    // the bartowski Qwen3.5-35B-A3B file has `block_count = 41` with the MTP
+    // block at index 40, the unsloth Qwen3.6-35B-A3B file `block_count = 40`
+    // and no MTP block at all. The tensors say which - an MTP block is the one
+    // that owns `nextn.*` leaves - so a file without one keeps all
+    // `block_count` layers. (Reading the second as "depth + 1" silently dropped
+    // the real last layer.)
+    let last = block_count.checked_sub(1).ok_or("qwen35: block_count must be >= 1")?;
+    let nextn_prefix = format!("blk.{last}.nextn.");
+    let carries_mtp = mg.names().iter().any(|n| n.starts_with(&nextn_prefix));
+    let n_layers = if carries_mtp { last } else { block_count };
+    if n_layers == 0 {
+        return Err("qwen35: no decoder layer left once the MTP block is excluded".into());
+    }
 
     let d_model = kv.req_u32("embedding_length")?;
     let n_heads = kv.req_u32("attention.head_count")?;
@@ -381,6 +395,17 @@ pub mod testing {
     /// unrecognized leaf, to prove the coverage check actually distinguishes
     /// "dropped on purpose" from "silently lost".
     pub fn write_synthetic_gguf(path: &str) {
+        write_synthetic(path, true);
+    }
+
+    /// [`write_synthetic_gguf`] as a checkpoint that does NOT carry the MTP
+    /// block - what the unsloth Qwen3.6 GGUFs are: `block_count` is the real
+    /// decoder depth, not depth + 1.
+    pub fn write_synthetic_gguf_without_mtp(path: &str) {
+        write_synthetic(path, false);
+    }
+
+    fn write_synthetic(path: &str, with_mtp: bool) {
         let d = 4u64; // hidden
         let n_heads = 2u64;
         let head_dim = 4u64; // -> q_proj width doubled = 16
@@ -455,12 +480,14 @@ pub mod testing {
 
         // MTP: block index == n_layers (2), must be dropped, not miscounted
         // as a third real layer.
-        tensors.push(f32t(vec![d], "blk.2.attn_norm.weight"));
-        tensors.push(f32t(vec![d], "blk.2.nextn.enorm.weight"));
+        if with_mtp {
+            tensors.push(f32t(vec![d], "blk.2.attn_norm.weight"));
+            tensors.push(f32t(vec![d], "blk.2.nextn.enorm.weight"));
+        }
 
         let kvs = vec![
             kv("general.architecture", GgufValue::String(GGUF_ARCHITECTURE.to_string())),
-            kv("qwen35moe.block_count", GgufValue::U32(3)), // 2 real layers + 1 MTP
+            kv("qwen35moe.block_count", GgufValue::U32(if with_mtp { 3 } else { 2 })), // 2 real layers (+ 1 MTP)
             kv("qwen35moe.embedding_length", GgufValue::U32(d as u32)),
             kv("qwen35moe.attention.head_count", GgufValue::U32(n_heads as u32)),
             kv("qwen35moe.attention.head_count_kv", GgufValue::U32(n_kv as u32)),
@@ -516,6 +543,25 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+
+    /// `block_count` is the decoder depth PLUS the MTP block only when the file
+    /// carries one. The unsloth Qwen3.6-35B-A3B GGUF has none (`block_count =
+    /// 40`, 40 real layers); reading it as "depth + 1" dropped the real last
+    /// layer and the model produced fluent-looking nonsense after its first
+    /// token.
+    #[test]
+    fn a_checkpoint_without_an_mtp_block_keeps_every_layer() {
+        let path = std::env::temp_dir().join(format!("qwen35-import-test-nomtp-{}.gguf", std::process::id())).to_string_lossy().into_owned();
+        super::testing::write_synthetic_gguf_without_mtp(&path);
+        let mg = MmapGguf::open(&path).unwrap();
+        let cfg = config_from_gguf(&mg).unwrap();
+        assert_eq!(cfg.n_layers, 2, "block_count(2), no blk.2.nextn.* tensors: both blocks are real layers");
+        assert_eq!(cfg.layer_types(), vec![LayerType::Linear, LayerType::Full]);
+        // Both layers' tensors are classified as layers, none dropped as MTP.
+        let stats = import::dry_run(&mg, &cfg.param_list(), &|n| Ok(classify(n, &cfg)), "qwen35 no-mtp").expect("full coverage");
+        assert!(!stats.dropped.contains_key(DROP_MTP), "{stats}");
+        std::fs::remove_file(&path).ok();
+    }
     #[test]
     fn import_gguf_covers_every_planned_tensor_and_drops_mtp() {
         let dir = std::env::temp_dir().join(format!("qwen35-import-test-out-{}", std::process::id()));
