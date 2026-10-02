@@ -130,6 +130,11 @@ impl Context {
         // `cuDeviceGet`. The retain is released in `Drop`.
         d.check(unsafe { (fns.primary_ctx_retain)(&mut ctx, dev) }, "cuDevicePrimaryCtxRetain")?;
         crate::live::primary_retained();
+        // Counted as soon as there is a `Context` to drop, because `Drop`
+        // un-counts it: an early `?` below used to run `Drop` for a handle that
+        // had never been counted, wrapping the counter and leaving every later
+        // submission fencing against a second handle that did not exist.
+        let others = OPEN_CONTEXTS.fetch_add(1, Ordering::AcqRel);
         let mut c = Context {
             d,
             fns,
@@ -148,12 +153,11 @@ impl Context {
         // legacy default stream - see `ExecFns::stream_create`.
         d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
         crate::live::stream_created();
-        // The count goes up BEFORE the drain below, so any handle that submits
-        // after this point already fences. The drain covers work another handle
+        // The count went up BEFORE this drain, so any handle that submits after
+        // this point already fences. The drain covers work another handle
         // issued before it could know a second handle would exist: its buffers
         // carry no fence, and anything still running on them is waited for here
         // once rather than guessed at later.
-        let others = OPEN_CONTEXTS.fetch_add(1, Ordering::AcqRel);
         if others > 0 {
             // SAFETY: the context is current on this thread.
             d.check(unsafe { (fns.ctx_synchronize)() }, "cuCtxSynchronize")?;
@@ -718,9 +722,13 @@ impl Capture<'_> {
         let mut graph: CuGraph = std::ptr::null_mut();
         // SAFETY: `graph` is a valid out-parameter; the stream is the one
         // `begin_capture` started on.
-        self.ctx
-            .d
-            .check(unsafe { (self.g.stream_end_capture)(self.ctx.stream, &mut graph) }, "cuStreamEndCapture")?;
+        let rc = unsafe { (self.g.stream_end_capture)(self.ctx.stream, &mut graph) };
+        if rc != 0 && !graph.is_null() {
+            // A failed end must not strand whatever graph the driver did hand
+            // back: nothing else owns it.
+            unsafe { (self.g.graph_destroy)(graph) };
+        }
+        self.ctx.d.check(rc, "cuStreamEndCapture")?;
         if graph.is_null() {
             return Err("cuStreamEndCapture produced no graph".into());
         }
@@ -739,7 +747,8 @@ impl Drop for Capture<'_> {
         // hands back is discarded immediately - this path is reached only
         // when the capture is being abandoned.
         unsafe {
-            if (self.g.stream_end_capture)(self.ctx.stream, &mut graph) == 0 && !graph.is_null() {
+            (self.g.stream_end_capture)(self.ctx.stream, &mut graph);
+            if !graph.is_null() {
                 (self.g.graph_destroy)(graph);
             }
         }
