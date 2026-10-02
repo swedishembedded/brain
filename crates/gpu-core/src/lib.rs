@@ -64,13 +64,6 @@ pub enum Dispatch {
     Workgroups(u32),
 }
 
-static KERNEL_GRIDS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, KernelGrid>>> =
-    std::sync::OnceLock::new();
-
-fn grid_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, KernelGrid>> {
-    KERNEL_GRIDS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
 /// Strip WGSL comments, so the reading below is of CODE and not of prose.
 ///
 /// Load-bearing, not tidiness: eight shaders name `workgroupBarrier` only in
@@ -171,16 +164,40 @@ pub fn parse_params_words(src: &str) -> Option<u32> {
     Some(words)
 }
 
-/// Record each kernel's thread mapping under its name.
+/// One handle's pipeline set: the kernel names, and each kernel's thread
+/// mapping read from the source this handle registered under that name.
 ///
-/// Keyed by name because every constructor funnels through
-/// [`Gpu::expanded`] while the handle keeps only names. A name arriving
-/// twice with different sources keeps the first reading rather than
-/// flipping between them.
-pub(crate) fn register_kernel_grids(kernels: &[(&str, &str)]) {
-    let mut reg = grid_registry().lock().unwrap_or_else(|e| e.into_inner());
-    for (name, src) in kernels {
-        reg.entry(name.to_string()).or_insert_with(|| parse_kernel_grid(src));
+/// Per handle, never per process. Model crates pick kernel names themselves
+/// and two of them use one name for different sources (`ce_value` is a
+/// two-word params block in one crate and a three-word one in another), so a
+/// process-wide table keyed by name kept whichever source arrived first and
+/// held every other crate's dispatch to it.
+#[derive(Debug)]
+pub(crate) struct KernelSet {
+    names: Vec<String>,
+    grids: Vec<KernelGrid>,
+}
+
+impl KernelSet {
+    /// Read each kernel's thread mapping now, while its source is in hand:
+    /// a handle never sees the source again.
+    pub(crate) fn new(kernels: &[(&str, &str)]) -> KernelSet {
+        KernelSet {
+            names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
+            grids: kernels.iter().map(|(_, src)| parse_kernel_grid(src)).collect(),
+        }
+    }
+
+    /// The thread mapping of kernel slot `kind`.
+    pub(crate) fn grid(&self, kind: usize) -> Option<KernelGrid> {
+        self.grids.get(kind).copied()
+    }
+}
+
+impl std::ops::Deref for KernelSet {
+    type Target = Vec<String>;
+    fn deref(&self) -> &Vec<String> {
+        &self.names
     }
 }
 
@@ -198,12 +215,6 @@ fn refuse_short_params(name: &str, grid: Option<KernelGrid>, params: &[u32]) {
         );
     }
 }
-
-/// The recorded mapping for a kernel name, if one was ever registered.
-pub fn kernel_grid(name: &str) -> Option<KernelGrid> {
-    grid_registry().lock().unwrap_or_else(|e| e.into_inner()).get(name).copied()
-}
-
 
 
 /// Per-kernel FLOP/int-OPS/bytes formulas + step-list accounting (offline
@@ -589,7 +600,7 @@ mod native_facade {
     /// leaked static crashed intermittently; atexit teardown crashed every run.
     pub struct WeakGpu {
         weak: Box<dyn backend_api::WeakBackend>,
-        names: Arc<Vec<String>>,
+        names: Arc<crate::KernelSet>,
         /// The pool the upgraded handle charges to - carried from the handle
         /// this was downgraded from, since it is the same physical device.
         mem_device: memauth::Device,
@@ -610,7 +621,7 @@ mod native_facade {
         /// Kernel names of this handle's pipeline set, index-aligned with the
         /// `kind` passed to `step*` - what resolves a recorded step back to a
         /// cost formula.
-        names: Arc<Vec<String>>,
+        names: Arc<crate::KernelSet>,
         /// Online OPS counters for THIS handle, folded in at `submit`. Handles
         /// are per model/stage by construction (`share`/`new_like` start fresh
         /// counters), so these are per-device, per-model numbers.
@@ -676,7 +687,7 @@ mod native_facade {
     }
 
     impl Gpu {
-        fn wrap(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>) -> Gpu {
+        fn wrap(inner: Box<dyn backend_api::Backend>, names: Arc<crate::KernelSet>) -> Gpu {
             let mem_device = Self::ambient_mem_device(inner.kind());
             Gpu::wrap_on(inner, names, mem_device)
         }
@@ -684,7 +695,7 @@ mod native_facade {
         /// [`Gpu::wrap`] for a handle whose physical card is known explicitly
         /// (`new_on`/`new_on_index`/`new_wgpu_multi`), rather than inherited
         /// from the ambient selection.
-        fn wrap_on(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>, mem_device: memauth::Device) -> Gpu {
+        fn wrap_on(inner: Box<dyn backend_api::Backend>, names: Arc<crate::KernelSet>, mem_device: memauth::Device) -> Gpu {
             // Per handle, once: the policy is a pure function of names + caps,
             // so `step` costs one compare against a usually-empty list.
             let upgrades = crate::upgrade::resolve(&names, &inner.caps());
@@ -718,8 +729,8 @@ mod native_facade {
             }
         }
 
-        fn kernel_names(kernels: &[(&str, &str)]) -> Arc<Vec<String>> {
-            Arc::new(kernels.iter().map(|(n, _)| n.to_string()).collect())
+        fn kernel_names(kernels: &[(&str, &str)]) -> Arc<crate::KernelSet> {
+            Arc::new(crate::KernelSet::new(kernels))
         }
 
         /// The caller's kernel list with any drop-in fast variants **appended**
@@ -738,10 +749,6 @@ mod native_facade {
                 Some(v) => std::borrow::Cow::Owned(v),
                 None => std::borrow::Cow::Borrowed(kernels),
             };
-            // Every constructor funnels through here, and this is the only
-            // place a handle ever sees kernel SOURCE. Read each one's thread
-            // mapping now, so `dispatch` can check it later from a name.
-            crate::register_kernel_grids(&out);
             out
         }
         /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
@@ -1533,7 +1540,7 @@ mod native_facade {
 
         /// This handle's thread mapping for kernel slot `kind`.
         pub fn kernel_grid_at(&self, kind: usize) -> Option<crate::KernelGrid> {
-            self.names.get(kind).and_then(|n| crate::kernel_grid(n))
+            self.names.grid(kind)
         }
 
         /// Dispatch a raw thread count.
@@ -2023,7 +2030,7 @@ mod wasm_facade {
 
     pub struct Gpu {
         inner: WgpuBackend,
-        names: Vec<String>,
+        names: crate::KernelSet,
         counters: Mutex<crate::cost::CostReport>,
         /// See the native facade: online tallying is off until
         /// `reset_ops_counters` arms it.
@@ -2038,13 +2045,12 @@ mod wasm_facade {
         pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
             let expanded = crate::upgrade::expand(kernels, false);
             let kernels: &[(&str, &str)] = expanded.as_deref().unwrap_or(kernels);
-            // The one place this facade sees kernel SOURCE, so - as in the
-            // native `Gpu::expanded` - it is where each kernel's thread
-            // mapping is read. Without it `Dispatch::Workgroups` would find no
-            // recorded workgroup size here and quietly multiply by one.
-            crate::register_kernel_grids(kernels);
             let inner = WgpuBackend::new_async(kernels).await;
-            let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
+            // The one place this facade sees kernel SOURCE, so it is where
+            // each kernel's thread mapping is read. Without it
+            // `Dispatch::Workgroups` would find no recorded workgroup size
+            // here and quietly multiply by one.
+            let names = crate::KernelSet::new(kernels);
             let upgrades = crate::upgrade::resolve(&names, &Backend::caps(&inner));
             Gpu { inner, names, counters: Mutex::new(Default::default()), cost_enabled: std::sync::atomic::AtomicBool::new(false), upgrades }
         }
@@ -2089,7 +2095,7 @@ mod wasm_facade {
         }
         /// This handle's thread mapping for kernel slot `kind`.
         pub fn kernel_grid_at(&self, kind: usize) -> Option<crate::KernelGrid> {
-            self.names.get(kind).and_then(|n| crate::kernel_grid(n))
+            self.names.grid(kind)
         }
         fn threads_for(&self, kind: usize, grid: crate::Dispatch) -> u32 {
             match grid {
