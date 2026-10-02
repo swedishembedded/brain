@@ -8,7 +8,11 @@
 // @gpu   yes-wg256
 // @npu   no
 // @quant none
-// @dtype f32
+// @dtype f32|bf16
+// @tpl   pool_k, pool_v -> bf16 storage variant (a compact KV cache, read in
+//        place; both loads index through the bare identifier `slot`).
+//        `kernels::template::int8_kv_variant` derives the int8-KV variant
+//        (one scale per (token, kv-head) row) from the same source.
 //
 // M2.5: `paged_flash_prefill`'s own `HD: u32 = 128u` caps it at `head_dim <=
 // 128` (its own header: "max head_dim; tiles are always this wide"). Qwen3.8

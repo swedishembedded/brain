@@ -185,7 +185,34 @@ pub fn dtype_variant(
 /// Named `"{name}#{binding}=w8"` (`"matmul#w=w8"`), like the other variants.
 pub fn int8_weight_variant(name: &str, src: &'static str, binding: &str, scales: &str) -> Result<Variant, String> {
     let vname = format!("{name}#{binding}=w8");
+    int8_scaled_variant(vname, src, binding, scales, |wi| format!("{wi} >> 5u"))
+}
 
+/// The KV-cache sibling of [`int8_weight_variant`]: rewrites the f32 pool
+/// binding `binding` (K or V of a paged cache) into packed int8 - four
+/// elements to a `u32` word, little-endian, the layout
+/// `paged_kv_append_i8_clipped_batched` writes - decoded on load as
+/// `scale * int8`, with ONE scale per `head_dim` consecutive elements (one
+/// (token, kv-head) row) read from a new storage binding `scales`.
+///
+/// `group` is the WGSL expression of that row width (`"p.head_dim"`): a pool's
+/// flat element index is `(slot * n_kv + kv_head) * head_dim + d`, so its
+/// scale index is exactly `index / head_dim`, the layout of the `scales` buffer
+/// the append kernel fills (`slot * n_kv + kv_head`). Chain two calls (feeding
+/// the first result's name and source to the second) for a kernel that reads
+/// both K and V: each appends its own scale binding after the last one.
+///
+/// Same bare-identifier index precondition as [`dtype_variant`]. Named
+/// `"{name}#{binding}=kv8"`.
+pub fn int8_kv_variant(name: &str, src: &'static str, binding: &str, scales: &str, group: &str) -> Result<Variant, String> {
+    let vname = format!("{name}#{binding}=kv8");
+    int8_scaled_variant(vname, src, binding, scales, |wi| format!("{wi} / {group}"))
+}
+
+/// What [`int8_weight_variant`] and [`int8_kv_variant`] share: pack `binding`
+/// as int8, append the `scales` binding, and decode each load as
+/// `scales[scale_index(wi)] * int8`. Interned by `(source, variant name)`.
+fn int8_scaled_variant(vname: String, src: &'static str, binding: &str, scales: &str, scale_index: impl Fn(&str) -> String) -> Result<Variant, String> {
     static CACHE: OnceLock<Mutex<HashMap<(usize, String), Variant>>> = OnceLock::new();
     let key = (src.as_ptr() as usize, vname.clone());
     let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
@@ -196,14 +223,17 @@ pub fn int8_weight_variant(name: &str, src: &'static str, binding: &str, scales:
     let with_decl = rewrite_packed_declaration(src, binding)?;
     // The scale binding follows the kernel's last one.
     let code = blank_comments(&with_decl);
-    let last = find_all_bindings(&code).into_iter().max().ok_or_else(|| format!("int8_weight_variant: `{name}` declares no `@binding`"))?;
-    let entry_at = code.find("@compute").ok_or_else(|| format!("int8_weight_variant: `{name}` has no `@compute` entry point"))?;
+    let last = find_all_bindings(&code).into_iter().max().ok_or_else(|| format!("{vname}: the kernel declares no `@binding`"))?;
+    let entry_at = code.find("@compute").ok_or_else(|| format!("{vname}: the kernel has no `@compute` entry point"))?;
     let mut with_scales = String::with_capacity(with_decl.len() + 96);
     with_scales.push_str(&with_decl[..entry_at]);
     with_scales.push_str(&format!("@group(0) @binding({}) var<storage, read> {scales}: array<f32>;\n\n", last + 1));
     with_scales.push_str(&with_decl[entry_at..]);
     let rewritten = rewrite_loads_with(&with_scales, binding, |wi| {
-        format!("(f32(bitcast<i32>(((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) << 24u) >> 24u) * {scales}[{wi} >> 5u])")
+        format!(
+            "(f32(bitcast<i32>(((({binding}[{wi} >> 2u]) >> (({wi} & 3u) * 8u)) & 255u) << 24u) >> 24u) * {scales}[{}])",
+            scale_index(wi)
+        )
     })?;
 
     let entry: Variant = (Box::leak(vname.into_boxed_str()), Box::leak(rewritten.into_boxed_str()));
@@ -1283,6 +1313,24 @@ mod tests {
         assert!(src.contains("* (f32(bitcast<i32>") && src.contains("* ws[wi >> 5u])"), "the weight load is decoded: {src}");
         // The same call is the same variant.
         assert_eq!(int8_weight_variant("matmul", crate::MATMUL, "w", "ws").unwrap().1.as_ptr(), src.as_ptr());
+    }
+
+    /// The KV-cache sibling of the weight variant: one scale per `head_dim`
+    /// consecutive elements (a (token, kv-head) row), so the scale of flat
+    /// element `wi` is `scales[wi / p.head_dim]`, and a kernel that reads K and
+    /// V chains two rewrites, each appending its own scale binding.
+    #[test]
+    fn the_int8_kv_variant_scales_by_head_row_and_chains_for_k_and_v() {
+        let (kn, ksrc) = int8_kv_variant("paged_flash_prefill_hd256", crate::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").unwrap();
+        assert_eq!(kn, "paged_flash_prefill_hd256#pool_k=kv8");
+        let (vn, vsrc) = int8_kv_variant(kn, ksrc, "pool_v", "v_scales", "p.head_dim").unwrap();
+        assert_eq!(vn, "paged_flash_prefill_hd256#pool_k=kv8#pool_v=kv8");
+        let squashed = vsrc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("pool_k: array<u32>") && squashed.contains("pool_v: array<u32>"), "both pools are packed int8: {vsrc}");
+        assert!(vsrc.contains("@binding(7) var<storage, read> k_scales: array<f32>;"), "k scales follow the last binding: {vsrc}");
+        assert!(vsrc.contains("@binding(8) var<storage, read> v_scales: array<f32>;"), "v scales follow the k scales: {vsrc}");
+        assert!(vsrc.contains("* k_scales[slot / p.head_dim])") && vsrc.contains("* v_scales[slot / p.head_dim])"), "each load is scaled per head row: {vsrc}");
+        assert_eq!(int8_kv_variant("paged_flash_prefill_hd256", crate::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").unwrap().1.as_ptr(), ksrc.as_ptr());
     }
 
     #[test]
