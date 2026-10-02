@@ -187,6 +187,14 @@ pub enum Op {
     /// `Scratch::{scores,probs}` its `max_prefill^2 * n_heads` term implies
     /// (see `qwen3::serve::paged_attn_scratch_bytes`).
     PagedAttentionFused,
+    /// Gated DeltaNet's across-chunk recurrence - the `v_prime`/`v_new`/
+    /// `out`/state-update sequence `model::gdn::gdn_chunk_fwd` walks chunk by
+    /// chunk. It has no portable single-kernel form (the WGSL path is a
+    /// sequence of nine small dispatches per chunk), so [`candidates`] offers
+    /// only the reference and the operator exists for the native registry to
+    /// key a persistent kernel on. Shape: `m` = chunk length, `n` = value
+    /// width, `k` = key width.
+    GatedDeltaChunkLoop,
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
     /// [`Op::Conv2d`] shape one dimension up, migrated from
@@ -1097,6 +1105,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             (0, Dtype::I8) if shape.m == 1 && shape.n <= 128 => vec![FusedFlash, Reference],
             _ => vec![Reference],
         },
+        // No portable fused form: see the variant's own doc.
+        Op::GatedDeltaChunkLoop => vec![Reference],
     };
     let filtered: Vec<KernelVariant> =
         raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();

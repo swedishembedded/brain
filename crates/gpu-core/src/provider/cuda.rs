@@ -87,6 +87,23 @@ const PAGED_FLASH_PREFILL_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `gdn_chunk_loop_f32`'s binding order: uniform, then key, query, w, u, g_cs,
+/// exp_g_cs, intra scores and the initial state (read), then the output and the
+/// final state (written).
+const GDN_CHUNK_LOOP_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageReadWrite,
+];
+
 /// Elements of K per weight scale the int8 tensor-core kernel folds at (one
 /// `k32` MMA). A layout with a different group is declined, not approximated.
 const I8_MMA_GROUP: u32 = 32;
@@ -185,6 +202,44 @@ impl CudaProvider {
 /// stating a tolerance, a parity gate) asks this rather than guessing.
 pub fn tensor_core_kernels_enabled(gpu: &crate::Gpu) -> bool {
     !super::disabled_providers().iter().any(|d| d == "cuda") && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
+}
+
+/// Value-column blocks `gdn_chunk_loop_f32` splits each head across; its launch
+/// is `bh * GDN_CHUNK_LOOP_SPLITS` blocks.
+const GDN_CHUNK_LOOP_SPLITS: u32 = 4;
+
+/// The native single-launch form of Gated DeltaNet's across-chunk recurrence, or
+/// `None` when the caller should walk the chunks with the portable dispatch
+/// sequence it was going to use anyway.
+///
+/// Like [`paged_flash_prefill_step`] this is a drop-in at one call site
+/// (`model::gdn::gdn_chunk_fwd`), not a provider request. `None` means: the
+/// head widths are not the kernel's `128`, the chunk is longer than its `64`
+/// rows, `cuda` is named in `BRAIN_NO_PROVIDER`, the device reports no
+/// capability (or one below the kernel's floor), or the backend declined it.
+///
+/// `bufs` is, in order, `key, query, w, u, g_cs, exp_g_cs, intra_scores,
+/// initial_state, out, final_state` - each in the chunk-major layout
+/// `model::gdn` documents. The kernel reads `initial_state` itself and writes
+/// `final_state`, so the caller records no state copy before it.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_loop_step(
+    gpu: &crate::Gpu,
+    bufs: &[&backend_api::DeviceBuffer; 10],
+    bh: u32,
+    c_len: u32,
+    dk: u32,
+    dv: u32,
+    n_chunks: u32,
+    scale: f32,
+) -> Option<crate::Step> {
+    if dk != 128 || dv != 128 || c_len == 0 || c_len > 64 || super::disabled_providers().iter().any(|d| d == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::find(select::Op::GatedDeltaChunkLoop, Dtype::F32, cc)?;
+    let id = gpu.native_kernel(kernel, GDN_CHUNK_LOOP_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &[bh, c_len, dk, dv, n_chunks, scale.to_bits()], bh * GDN_CHUNK_LOOP_SPLITS)
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256`, or

@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `gdn_chunk_fwd` with [`GdnIds::fast`] registered computes **exactly** what it
-//! computes without: the fused UT transform and the tiled batched matmul swap
-//! many dispatches for fewer without touching a single bit of the result, and
-//! they do it with fewer steps.
+//! computes without: the fused UT transform and the single-launch chunk
+//! recurrence swap many dispatches for few without touching a single bit of the
+//! result, and they do it with far fewer steps.
 //!
 //! Swedish Embedded AB implements low-latency chunked linear-attention
 //! pipelines for its clients. If your team needs expertise in cutting the
@@ -110,14 +110,23 @@ fn the_fast_kernels_change_the_step_count_and_nothing_else() {
         eprintln!("gdn_chunk_fwd_fast: this device does not take the fast kernels - skipping");
         return;
     }
-    // b=1, h=6, t=256 (4 chunks of 64), dk=dv=128.
-    let shape = GdnShape { b: 1, h: 6, t: 256, dk: 128, dv: 128, chunk: 64 };
-    let (slow_out, slow_state, slow_steps) = run(&g, &ids(&g, false), &shape);
-    let (fast_out, fast_state, fast_steps) = run(&g, &ids(&g, true), &shape);
-    assert!(slow_out.iter().all(|x| x.is_finite()), "the reference run produced non-finite values, so this proves nothing");
-    let first_diff = |a: &[f32], b: &[f32]| a.iter().zip(b).position(|(x, y)| x != y);
-    assert_eq!(first_diff(&slow_out, &fast_out), None, "the fast kernels changed the output");
-    assert_eq!(first_diff(&slow_state, &fast_state), None, "the fast kernels changed the final state");
-    // 63 `gdn_ut_step` rows + `add_identity` become one dispatch.
-    assert_eq!(slow_steps - fast_steps, 63, "the fused transform should replace 64 dispatches with 1 ({slow_steps} -> {fast_steps})");
+    // dk = dv = 128 throughout. The real chunk of 64 over four chunks (several
+    // heads, so the head split across blocks is exercised), then every shorter
+    // chunk a ragged round can land on (`gdn_chunk_size` picks the largest of
+    // 64..1 dividing the round: a 13-token round is 13 chunks of 1).
+    for (h, t, chunk) in [(6u32, 256u32, 64u32), (3, 96, 32), (2, 48, 16), (2, 24, 8), (5, 12, 4), (2, 13, 1)] {
+        let shape = GdnShape { b: 1, h, t, dk: 128, dv: 128, chunk };
+        let (slow_out, slow_state, slow_steps) = run(&g, &ids(&g, false), &shape);
+        let (fast_out, fast_state, fast_steps) = run(&g, &ids(&g, true), &shape);
+        assert!(slow_out.iter().all(|x| x.is_finite()), "h={h} t={t} chunk={chunk}: the reference run produced non-finite values, so this proves nothing");
+        let first_diff = |a: &[f32], b: &[f32]| a.iter().zip(b).position(|(x, y)| x != y);
+        assert_eq!(first_diff(&slow_out, &fast_out), None, "h={h} t={t} chunk={chunk}: the fast kernels changed the output");
+        assert_eq!(first_diff(&slow_state, &fast_state), None, "h={h} t={t} chunk={chunk}: the fast kernels changed the final state");
+        // Two replacements: the `chunk - 1` `gdn_ut_step` rows + `add_identity`
+        // become one dispatch, and the state copy plus nine dispatches per
+        // chunk become one launch for the whole recurrence.
+        let n_chunks = (t / chunk) as usize;
+        let removed = (chunk as usize - 1) + 9 * n_chunks;
+        assert_eq!(slow_steps - fast_steps, removed, "h={h} t={t} chunk={chunk}: expected the fused kernels to remove {removed} steps ({slow_steps} -> {fast_steps})");
+    }
 }

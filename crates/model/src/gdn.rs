@@ -700,6 +700,20 @@ impl GdnBwdScratchBufs {
     }
 }
 
+/// [`gpu_core::provider::cuda::gdn_chunk_loop_step`] where a native backend
+/// exists at all; `None` (the portable chunk loop) on wasm.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop(g: &Gpu, bufs: &[&DeviceBuffer; 10], bh: u32, c: u32, dk: u32, dv: u32, n_chunks: u32, scale: f32) -> Option<Step> {
+    gpu_core::provider::cuda::gdn_chunk_loop_step(g, bufs, bh, c, dk, dv, n_chunks, scale)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn native_chunk_loop(_g: &Gpu, _bufs: &[&DeviceBuffer; 10], _bh: u32, _c: u32, _dk: u32, _dv: u32, _n_chunks: u32, _scale: f32) -> Option<Step> {
+    None
+}
+
 /// Largest chunk `gdn_ut_fwd.wgsl` serves: one thread per column and a packed
 /// triangle sized for 64 rows (its header derives both).
 const GDN_UT_FWD_MAX_CHUNK: u32 = 64;
@@ -957,6 +971,17 @@ pub fn gdn_chunk_fwd(
         intra_scores: scratch.intra_scores,
     };
     let mut steps = gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
+
+    // ---- step 10 in one launch, where the device has a kernel for it ----
+    // The kernel reads `initial_state` and writes `final_state` itself, so the
+    // state copy and the whole chunk loop below are what it replaces.
+    if ids.fast.is_some() && use_fast_kernels(g) {
+        let bufs = [key, query, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
+        if let Some(step) = native_chunk_loop(g, &bufs, bh, c, dk, dv, n_chunks, scale) {
+            steps.push(step);
+            return steps;
+        }
+    }
 
     // ---- step 10: sequential across-chunk loop ----
     // `final_state` is the loop's own working buffer, seeded from `initial_state`.

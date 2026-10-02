@@ -230,6 +230,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/flash_prefill_f16_hd256.cu"),
     },
     CudaKernel {
+        name: "gdn_chunk_loop_f32",
+        op: Op::GatedDeltaChunkLoop,
+        weight: Dtype::F32,
+        by_name: false,
+        source: ImplSource::Tuned,
+        // Plain fp32 arithmetic and shared memory: nothing here needs a newer
+        // architecture. Which devices take it is the model's decision.
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_chunk_loop_f32",
+        what: "Gated DeltaNet's whole across-chunk recurrence in one launch (fp32, bit-identical to the nine-dispatch-per-chunk sequence), head split over four 32-column blocks",
+        reported: "native:gdn_chunk_loop_f32",
+        block_dim: 128,
+        // One block covers the whole chunk (up to 64 rows) of one head and 32 of its 128 value columns.
+        tile: (64, 32),
+        // State slice 128x32 + v_new 64x32 + the staged A tile 32x(128+1), all f32.
+        shared_bytes: (128 * 32 + 64 * 32 + 32 * 129) * 4,
+        src: include_str!("../cu/gdn_chunk_loop_f32.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8_gemv",
         op: Op::MatMul,
         weight: Dtype::I8,
