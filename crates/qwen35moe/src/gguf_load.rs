@@ -70,6 +70,12 @@ pub fn kv_tier_from_env() -> Result<KvTier, String> {
     KvTier::from_env(KV_ENV)
 }
 
+/// The tokenizer the GGUF embeds (`tokenizer.ggml.*`), raw: no chat template.
+pub fn tokenizer(mg: &MmapGguf) -> Result<data::qwen_tokenizer::QwenBpe, String> {
+    let gt = mg.tokenizer().ok_or_else(|| format!("{MODEL}: the GGUF carries no embedded tokenizer (tokenizer.ggml.* KV)"))?;
+    data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("{MODEL}: embedded tokenizer: {e}"))
+}
+
 /// The brain name under which a layer's whole expert stack of one projection
 /// (`gate`, `up` or `down`) is served: every expert's `[out, in]` matrix back
 /// to back in expert order, exactly llama.cpp's own layout.

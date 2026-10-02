@@ -38,11 +38,14 @@
 //! only happen once, at the very first call -- verified against
 //! `model::paged::BlockTable`'s own source, not assumed). So
 //! `table.blocks()[0]` is exactly the stable identity this module needs, and
-//! it is used as the key into a PRIVATE `HashMap<u32, GdnSlot>`
-//! ([`Engine::gdn_slots`]) this `Engine` owns -- allocated (zeroed) the first
-//! time a table is seen in [`Engine::prefill`], removed in
-//! [`Engine::release_table`] (which still calls `BlockTable::release` for the
-//! GQA side -- the GDN map is an ADDITION, not a replacement).
+//! it is the ROW of the engine's recurrent-state pools ([`GdnPool`]) that
+//! sequence owns: one `[num_blocks, state_len]` and one `[num_blocks, hist_len]`
+//! buffer per Gated-DeltaNet layer, so a decode step stages any batch with one
+//! gather and one scatter per layer (`pool_rows_*2.wgsl`) instead of a copy per
+//! sequence. A row is written when a table is first seen in [`Engine::prefill`]
+//! (or [`Engine::admit_synthetic`]) and forgotten in [`Engine::release_table`]
+//! (which still calls `BlockTable::release` for the GQA side -- the GDN pool is
+//! an ADDITION, not a replacement).
 //!
 //! # The GQA side: one shared pool per layer, block-table addressed
 //!
@@ -132,11 +135,11 @@
 //! - **Not built**: prefix-cache reuse ([`Engine::reclaim_prefix`] returns 0),
 //!   speculative decode, multi-GPU layer sharding, vision/DeepStack (text only).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
-use gpu_core::Gpu;
+use gpu_core::{DeviceBuffer, Gpu};
 use model::gdn::{RecurrentSlot, RecurrentSlotShape};
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
@@ -144,7 +147,8 @@ use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, Qwen35};
+use crate::q8::Qwen35Q8;
+use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, GdnStore, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s window cap. No on-device
 /// multi-step schedule is built (see module doc) - 1 keeps
@@ -232,6 +236,65 @@ fn gdn_slot_shape(cfg: &Qwen35Config) -> RecurrentSlotShape {
     RecurrentSlotShape { state_len, hist_len, is_recurrent }
 }
 
+/// Every resident sequence's Gated-DeltaNet recurrent state: per layer one pool
+/// of `num_blocks` rows of state and one of conv history, row `p` belonging to
+/// the sequence on physical block `p`. Zeroed once at construction; a row is
+/// overwritten wholesale when its sequence is admitted.
+struct GdnPool {
+    /// `[layer]`: `[num_blocks, state_len]`, a size-1 placeholder at GQA layers.
+    state: Vec<DeviceBuffer>,
+    hist: Vec<DeviceBuffer>,
+    shape: RecurrentSlotShape,
+    /// Physical blocks whose row holds a live sequence.
+    live: HashSet<u32>,
+    scatter: usize,
+}
+
+impl GdnPool {
+    fn new(gpu: &Gpu, shape: RecurrentSlotShape, rows: u32) -> GdnPool {
+        // The row kernels address a pool through u32 element offsets.
+        assert!(
+            (rows as u64) * shape.state_len.max(shape.hist_len) <= u32::MAX as u64,
+            "qwen35moe::serve::Engine: {rows} recurrent-state rows of {} elements are past a u32 element offset",
+            shape.state_len
+        );
+        let (mut state, mut hist) = (Vec::new(), Vec::new());
+        for &recurrent in &shape.is_recurrent {
+            let (s, h) = if recurrent { (rows as u64 * shape.state_len, rows as u64 * shape.hist_len) } else { (1, 1) };
+            state.push(gpu.storage(s.max(1)));
+            hist.push(gpu.storage(h.max(1)));
+        }
+        let clears: Vec<&DeviceBuffer> = state.iter().chain(hist.iter()).collect();
+        gpu.submit(&clears, &[]);
+        let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in this model's kernel set");
+        GdnPool { state, hist, shape, live: HashSet::new(), scatter }
+    }
+
+    /// Make `slot` the state of the sequence on `phys`: one scatter per
+    /// recurrent layer, overwriting the whole row.
+    fn store(&mut self, gpu: &Gpu, phys: u32, slot: &GdnSlot) {
+        let ids = gpu.storage(1);
+        gpu.write(&ids, &[phys]);
+        let (sl, hl) = (self.shape.state_len as u32, self.shape.hist_len as u32);
+        let steps: Vec<_> = (0..self.shape.is_recurrent.len())
+            .filter(|&l| self.shape.is_recurrent[l])
+            .map(|l| gpu.step(self.scatter, &[&slot.state[l], &slot.hist[l], &ids, &self.state[l], &self.hist[l]], &[1, sl, hl], sl + hl))
+            .collect();
+        gpu.submit(&[], &steps);
+        // The slot is about to be freed; its scatters must have read it.
+        gpu.poll_wait();
+        self.live.insert(phys);
+    }
+
+    fn forget(&mut self, phys: u32) {
+        self.live.remove(&phys);
+    }
+
+    fn is_live(&self, phys: u32) -> bool {
+        self.live.contains(&phys)
+    }
+}
+
 /// Device bytes of the paged GQA pool for `num_blocks` blocks of `block_size`
 /// rows in `kv_tier`, plus the Gated-DeltaNet slot of every block - a
 /// prediction made before any device allocation, as `PagedDecoder::kv_pool_bytes`
@@ -243,16 +306,39 @@ pub fn kv_pool_bytes(cfg: &Qwen35Config, kv_tier: KvTier, num_blocks: u32, block
     gqa + num_blocks as u64 * GdnSlot::bytes(&gdn_slot_shape(cfg))
 }
 
+/// Device bytes the weights occupy for `cfg` under `tier`, predicted before any
+/// allocation: an int8 linear is packed words plus one f32 scale per 32
+/// (`9/8` byte per weight), everything else - norms, the router, the GDN
+/// scalars, the embedding table - fp32. The leaves that are int8 are exactly
+/// those `Qwen35::new_on_tier_src` quantises: the mixer linears, the routed
+/// experts, the shared expert (it rides in the expert banks when it has their
+/// shape) and the untied head.
+pub fn weight_bytes(cfg: &Qwen35Config, tier: &TierPolicy) -> u64 {
+    let shared_in_banks = Qwen35Q8::shared_fits_bank(cfg) && tier.want("blocks.0.mlp.experts.0.gate.weight") == Dtype::I8;
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, count)| {
+            let linear = Qwen35Q8::is_i8_linear(&name)
+                || name == "lm_head.weight"
+                || (shared_in_banks && Qwen35Q8::is_shared_expert_linear(&name));
+            let bytes_per_weight_x8 = if linear && tier.want(&name) == Dtype::I8 { 9 } else { 32 };
+            count as u64 * bytes_per_weight_x8 / 8
+        })
+        .sum()
+}
+
 /// Recorded decode steps kept per engine. A tape pins the scratch of a whole
 /// step (megabytes at a few rows, hundreds at a few hundred), so the cache is
 /// bounded and the least recently used shape is dropped first.
 const MAX_DECODE_TAPES: usize = 8;
 
-/// What a recorded decode step is bound to: which sequences' recurrent state it
-/// updates (their physical blocks, in row order) and what its head returns.
+/// What a recorded decode step is bound to: how many rows it carries and what
+/// its head returns. Which sequences those rows are - their physical blocks,
+/// positions, tokens - is data the step reads from its metadata buffers, so one
+/// recording serves every batch of that size.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TapeKey {
-    phys: Vec<u32>,
+    rows: u32,
     topk: Option<u32>,
 }
 
@@ -337,10 +423,10 @@ pub struct Engine {
     gqa_kv: Vec<KvLayer>,
     kv_tier: KvTier,
     prefill_chunk: u32,
-    /// GDN recurrent state / conv history, keyed by `BlockTable::blocks()[0]` -
-    /// see module doc. Populated in [`Engine::prefill`] (or
-    /// [`Engine::admit_synthetic`]), removed in [`Engine::release_table`].
-    gdn_slots: HashMap<u32, GdnSlot>,
+    /// GDN recurrent state / conv history, one pool row per physical block -
+    /// see module doc. Written in [`Engine::prefill`] (or
+    /// [`Engine::admit_synthetic`]), forgotten in [`Engine::release_table`].
+    gdn: GdnPool,
 }
 
 impl Engine {
@@ -396,6 +482,7 @@ impl Engine {
             });
         }
         let decode_tapes = opts.decode_tapes && model.moe_int8_active();
+        let gdn = GdnPool::new(&model.gpu, gdn_slot_shape(&cfg), opts.max_concurrent);
         Engine {
             tapes: Vec::new(),
             decode_tapes,
@@ -405,25 +492,20 @@ impl Engine {
             gqa_kv,
             kv_tier: opts.kv_tier,
             prefill_chunk: opts.prefill_chunk,
-            gdn_slots: HashMap::new(),
+            gdn,
         }
     }
 
-    /// This sequence's `DecodeCaches` view: the GQA pool for its physical block
-    /// id, and its `GdnSlot`. Panics if no slot exists - every live
-    /// `BlockTable` this engine handed back from [`Engine::prefill`] has one, by
-    /// construction; a caller passing a table this engine never prefilled (or
-    /// one already released) is a caller bug, not a runtime condition to
-    /// degrade gracefully from.
-    fn caches_for(&self, phys: u32) -> DecodeCaches<'_> {
-        let slot = self.gdn_slot(phys);
+    /// The `DecodeCaches` of a sequence being prefilled on physical block
+    /// `phys`: its rows of the GQA pool and the private recurrent state `slot`
+    /// that [`GdnPool::store`] moves into the pool once the prompt is in.
+    fn prefill_caches<'a>(&'a self, phys: u32, slot: &'a GdnSlot) -> DecodeCaches<'a> {
         DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, gqa_base_row: phys * self.block_size, gdn_state: &slot.state, gdn_hist: &slot.hist }
     }
 
-    fn gdn_slot(&self, phys: u32) -> &GdnSlot {
-        self.gdn_slots.get(&phys).unwrap_or_else(|| {
-            panic!("qwen35moe::serve::Engine: no GdnSlot for physical block {phys} (table not prefilled by this engine, or already released)")
-        })
+    /// A zeroed private recurrent state for a sequence about to be admitted.
+    fn fresh_slot(&self) -> GdnSlot {
+        GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg))
     }
 
     /// Append one position to every table and return each sequence's
@@ -444,15 +526,24 @@ impl Engine {
             .collect()
     }
 
-    /// The `BatchSeq` rows of `coords` over this engine's recurrent-state slots.
-    fn seqs_for<'a>(&'a self, coords: &[(u32, u32)]) -> Vec<BatchSeq<'a>> {
+    /// The `BatchSeq` rows of `coords`. A table this engine never admitted (or
+    /// already released) has no recurrent state to step: a caller bug, not a
+    /// condition to degrade from.
+    fn seqs_for(&self, coords: &[(u32, u32)]) -> Vec<BatchSeq> {
         coords
             .iter()
-            .map(|&(phys, offset)| {
-                let slot = self.gdn_slot(phys);
-                BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist }
+            .map(|&(phys, pos)| {
+                assert!(
+                    self.gdn.is_live(phys),
+                    "qwen35moe::serve::Engine: no recurrent state for physical block {phys} (table not prefilled by this engine, or already released)"
+                );
+                BatchSeq { phys, pos }
             })
             .collect()
+    }
+
+    fn batch_caches<'a>(&'a self, seqs: &'a [BatchSeq]) -> BatchDecodeCaches<'a> {
+        BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs, gdn: GdnStore::Pool { state: &self.gdn.state, hist: &self.gdn.hist } }
     }
 
     /// ONE decode step for every `(sequence, input)` pair at once - the engine's
@@ -470,7 +561,7 @@ impl Engine {
         if !self.decode_tapes {
             let rows = inputs.len() as u32;
             let seqs = self.seqs_for(&coords);
-            let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
+            let caches = self.batch_caches(&seqs);
             // The readback that ends the step is the drain the arena's contract asks for.
             let _scope = self.model.gpu.scratch_scope();
             let hidden = self.model.run_decode_batch(inputs, &caches);
@@ -479,7 +570,7 @@ impl Engine {
                 DecodeHead::TopK(k) => DecodeOut::TopK(self.model.head_topk_rows_dev(&hidden, rows, k)),
             };
         }
-        let key = TapeKey { phys: coords.iter().map(|c| c.0).collect(), topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) } };
+        let key = TapeKey { rows: inputs.len() as u32, topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) } };
         match self.tapes.iter().position(|(k, _)| *k == key) {
             // Most recently used last.
             Some(i) => {
@@ -489,7 +580,7 @@ impl Engine {
             None => {
                 let tape = {
                     let seqs = self.seqs_for(&coords);
-                    let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
+                    let caches = self.batch_caches(&seqs);
                     self.model.record_decode(inputs, &caches, head)
                 };
                 if self.tapes.len() >= MAX_DECODE_TAPES {
@@ -595,11 +686,7 @@ impl Engine {
     /// `BlockAllocator` accounting) would leak.
     pub fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(&phys) = t.blocks().first() {
-            // A recorded step binds its sequences' recurrent state; one that
-            // names this block must not outlive it (it would keep the slot's
-            // buffers resident and update state nobody owns).
-            self.tapes.retain(|(k, _)| !k.phys.contains(&phys));
-            self.gdn_slots.remove(&phys);
+            self.gdn.forget(phys);
         }
         t.release(&mut self.alloc);
     }
@@ -624,17 +711,20 @@ impl Engine {
         // doc) - every later `append` (decode) reuses it.
         table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted");
         let phys = table.blocks()[0];
-        self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));
-
+        // The prompt runs over a private state, which then becomes this
+        // sequence's pool row: the prefill kernels bind one sequence's buffers.
+        let slot = self.fresh_slot();
         let d = self.model.cfg.d_model as usize;
         let mut hidden = None;
         let mut pos = 0u32;
         for round in prompt.chunks(self.prefill_chunk as usize) {
-            let h = self.model.run_prefill_chunk(round, pos, &self.caches_for(phys));
+            let h = self.model.run_prefill_chunk(round, pos, &self.prefill_caches(phys, &slot));
             pos += round.len() as u32;
             hidden = Some(h);
         }
-        self.model.gpu.read(&hidden.expect("a non-empty prompt has at least one round"), d)
+        let hidden = self.model.gpu.read(&hidden.expect("a non-empty prompt has at least one round"), d);
+        self.gdn.store(&self.model.gpu, phys, &slot);
+        hidden
     }
 
     /// Bring `table` to `position` cached tokens WITHOUT computing them: the
@@ -652,7 +742,8 @@ impl Engine {
         if table.is_empty() {
             table.reserve(position, &mut self.alloc)?;
             let phys = table.blocks()[0];
-            self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));
+            let zero = self.fresh_slot();
+            self.gdn.store(&self.model.gpu, phys, &zero);
         } else if table.len() < position {
             table.reserve(position - table.len(), &mut self.alloc)?;
         } else if table.len() > position {
@@ -693,7 +784,7 @@ impl Engine {
             // back - not dispatch by dispatch: per-dispatch timing of eager
             // launches carries the host's launch latency, which the tape removes.
             if self.decode_tapes {
-                let key = TapeKey { phys: tables.iter().map(|t| t.blocks()[0]).collect(), topk: None };
+                let key = TapeKey { rows: batch, topk: None };
                 if let Some((_, tape)) = self.tapes.iter().find(|(k, _)| *k == key) {
                     if let Some(rows) = self.model.gpu.profile_tape(tape.tape(), passes) {
                         profile.rows = rows.into_iter().map(|(n, ms, calls)| (n, ms * passes as f64, calls * passes as u64)).collect();

@@ -313,6 +313,8 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("argmax_part", kernels::ARGMAX_PART),                       // 110
     ("argmax_final", kernels::ARGMAX_FINAL),                     // 111
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),           // 112
+    ("pool_rows_gather2", kernels::POOL_ROWS_GATHER2),           // 113
+    ("pool_rows_scatter2", kernels::POOL_ROWS_SCATTER2),         // 114
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -507,6 +509,8 @@ const MOE_SLOT_COMBINE: usize = 109;
 const ARGMAX_PART: usize = 110;
 const ARGMAX_FINAL: usize = 111;
 const TOPK_EXTRACT_STEP: usize = 112;
+const POOL_ROWS_GATHER2: usize = 113;
+const POOL_ROWS_SCATTER2: usize = 114;
 /// Partial-argmax chunks the device head splits a `[vocab]` row into
 /// (`argmax_part` then `argmax_final`) - the same split `qwen35` uses.
 const HEAD_ARGMAX_CHUNKS: u32 = 256;
@@ -1070,7 +1074,7 @@ pub(crate) enum GqaCached<'a> {
 pub(crate) enum GdnCall<'a> {
     Whole,
     Chunk(model::gdn_mixer::GdnStream<'a>),
-    Decode(&'a [model::gdn_mixer::GdnStream<'a>]),
+    Decode(model::gdn_mixer::GdnDecodeState<'a>),
 }
 
 /// The device buffers a decode step reads for everything that varies from one
@@ -1127,18 +1131,31 @@ pub(crate) enum DecodeOut {
 /// state. The batched counterpart of the per-sequence half of
 /// [`DecodeCaches`]: the GQA POOL is shared by the whole batch
 /// ([`BatchDecodeCaches`]), this is everything that is not.
-pub(crate) struct BatchSeq<'a> {
+pub(crate) struct BatchSeq {
     /// The physical block backing this sequence's whole KV history, so its rows
     /// are `phys*gqa_cap .. +gqa_cap` of every layer's pool.
     pub phys: u32,
     /// Absolute decode position of this step's token for this sequence. The
     /// rows of one batch are unrelated positions.
     pub pos: u32,
-    /// Per-layer recurrent state / conv history, indexed by ABSOLUTE layer
-    /// index with a dummy at full-attention indices - [`DecodeCaches`]'s own
-    /// convention, and the same buffers.
-    pub gdn_state: &'a [DeviceBuffer],
-    pub gdn_hist: &'a [DeviceBuffer],
+}
+
+/// One sequence's per-layer recurrent state / conv history, indexed by ABSOLUTE
+/// layer index with a dummy at full-attention indices - [`DecodeCaches`]'s own
+/// convention, and the same buffers.
+pub(crate) struct GdnBufs<'a> {
+    pub state: &'a [DeviceBuffer],
+    pub hist: &'a [DeviceBuffer],
+}
+
+/// Where a batched decode step finds its sequences' Gated-DeltaNet state.
+pub(crate) enum GdnStore<'a> {
+    /// One buffer set per batch row, in row order: an instance's own decode state.
+    PerSeq(&'a [GdnBufs<'a>]),
+    /// Per-layer pools holding one row per resident sequence, picked by each
+    /// sequence's physical block ([`BatchSeq::phys`]): a whole batch is staged by
+    /// one dispatch in and one out per layer, however many sequences it has.
+    Pool { state: &'a [DeviceBuffer], hist: &'a [DeviceBuffer] },
 }
 
 /// What one [`Qwen35::run_decode_batch`] call reads and updates: the shared
@@ -1154,7 +1171,8 @@ pub(crate) struct BatchDecodeCaches<'a> {
     /// the paged kernels' `block_size`.
     pub gqa_cap: u32,
     /// One entry per batch row, in the same order as the `tokens` argument.
-    pub seqs: &'a [BatchSeq<'a>],
+    pub seqs: &'a [BatchSeq],
+    pub gdn: GdnStore<'a>,
 }
 
 pub(crate) struct DecodeCaches<'a> {
@@ -1892,8 +1910,8 @@ impl Qwen35 {
             ones_khd: &self.ones_khd,
         };
         let (gated, internals) = match call {
-            GdnCall::Decode(streams) => (
-                model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams),
+            GdnCall::Decode(state) => (
+                model::gdn_mixer::gdn_mixer_decode_state_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &state),
                 None,
             ),
             GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
@@ -2943,8 +2961,9 @@ impl Qwen35 {
             caches.gqa_base_row,
             caches.gqa_cap
         );
-        let seqs = [BatchSeq { phys: caches.gqa_base_row / caches.gqa_cap, pos, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist }];
-        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs };
+        let seqs = [BatchSeq { phys: caches.gqa_base_row / caches.gqa_cap, pos }];
+        let gdn = [GdnBufs { state: caches.gdn_state, hist: caches.gdn_hist }];
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, gdn: GdnStore::PerSeq(&gdn) };
         self.run_decode_batch(&[token_id], &batch)
     }
 
@@ -3049,9 +3068,21 @@ impl Qwen35 {
 
             let attn_out = match ty {
                 LayerType::Linear => {
-                    let streams: Vec<model::gdn_mixer::GdnStream> =
-                        caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
-                    self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(&streams)).0
+                    let streams: Vec<model::gdn_mixer::GdnStream>;
+                    let state = match &caches.gdn {
+                        GdnStore::PerSeq(bufs) => {
+                            streams = bufs.iter().map(|b| model::gdn_mixer::GdnStream { state: &b.state[l], hist: &b.hist[l] }).collect();
+                            model::gdn_mixer::GdnDecodeState::Streams(&streams)
+                        }
+                        GdnStore::Pool { state, hist } => model::gdn_mixer::GdnDecodeState::Pool(model::gdn_mixer::GdnPoolRows {
+                            state: &state[l],
+                            hist: &hist[l],
+                            rows: &meta.blocks,
+                            gather: POOL_ROWS_GATHER2,
+                            scatter: POOL_ROWS_SCATTER2,
+                        }),
+                    };
+                    self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(state)).0
                 }
                 LayerType::Full => {
                     let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &meta.cos, sin: &meta.sin };
