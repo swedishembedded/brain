@@ -81,8 +81,9 @@
 #define BRAIN_I8G_ROWS 8
 // Blocks per SM the register budget is sized for.
 #define BRAIN_I8G_MIN_BLOCKS 5
-// 16-byte vectors per thread in one stage of loads.
-#define BRAIN_I8G_UNROLL_NARROW 4
+// 16-byte vectors per thread in one stage of loads. Five divides the 20
+// vectors a thread reads of a 5120-wide row, the hottest decode width.
+#define BRAIN_I8G_UNROLL_NARROW 5
 #define BRAIN_I8G_UNROLL_WIDE 4
 // Up to this many rows of x are staged in registers with the weights.
 #define BRAIN_I8G_STAGED_ROWS 2
