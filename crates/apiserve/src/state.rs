@@ -19,6 +19,7 @@ use residency::{Executor, ModelSupplier};
 use uuid::Uuid;
 
 use crate::auth::{Authenticator, CallerExt, Principal, StaticKey};
+use crate::capabilities::AsyncJobs;
 use crate::hooks::RequestHooks;
 use crate::surface::Provider;
 
@@ -36,6 +37,8 @@ pub type JobRegistry = residency::jobs::JobRegistry<Uuid>;
 pub struct AppState {
     pub exec: Executor,
     pub jobs: JobRegistry,
+    /// The background jobs started through `/v1/jobs`.
+    pub async_jobs: Arc<AsyncJobs>,
     /// Who may call this surface. [`StaticKey`] unless an embedder replaced it.
     pub authenticator: Arc<dyn Authenticator>,
     /// What the embedder wants a say in on every call; `None` for a surface
@@ -66,6 +69,7 @@ impl AppState {
         AppState {
             exec,
             jobs: JobRegistry::new(),
+            async_jobs: Arc::default(),
             authenticator: Arc::new(StaticKey::new(key)),
             hooks: None,
             caller: None,

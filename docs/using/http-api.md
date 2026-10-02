@@ -98,6 +98,35 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   extra fields, and adds `native_finish_reason`.
 - Unimplemented OpenAI surfaces (files/fine-tuning/responses/batch/…) → 501/404.
 
+## Every model class: capabilities, run and jobs
+
+The dialect routes above exist for what a chat, embeddings or image client already
+speaks. Everything else brain serves (speech in and out, vision tasks, detection,
+segmentation, music, video, 3D) is reached through three dialect-neutral routes,
+present on every surface and behind the same key, hooks and admission:
+
+- `GET /v1/capabilities` lists every model's every action with its contract: params
+  (type, default, range, allowed values), blob inputs and blob outputs. Clients are
+  generated from it.
+- `POST /v1/run` runs one action and answers with its outputs and blobs.
+- `POST /v1/jobs` starts one in the background, for work too long to hold a request
+  open. `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),
+  `succeeded`, `failed` or `cancelled`; `GET /v1/jobs/{id}/result` returns the result
+  once it exists (409 while it is running); `DELETE /v1/jobs/{id}` cancels it, and the
+  running action sees the cancellation.
+
+A call is `{"model", "action", "params", "blobs": {name: {"media", "data", "meta"}}}`
+with `data` base64 and `media` one of `image`, `mask`, `audio`, `video`, `text`,
+`bytes`. A result is `{"outputs", "blobs"}` in the same blob shape. The call is
+checked against the action's own spec first (unknown params, wrong types, values
+out of range, a missing or mistyped blob are all a 400), and the request body is
+bounded at 64 MiB.
+
+A job belongs to the caller that started it: with an `Authenticator` that scopes
+callers, another caller gets 404 for an id that exists. Jobs live in memory, at most
+32 per caller and 1024 per surface, finished results are forgotten after an hour or
+when more than 1 GiB is retained, and a restart forgets them all.
+
 ## Which models each provider exposes
 
 `/models` per provider lists only the loaded models whose capability fits that

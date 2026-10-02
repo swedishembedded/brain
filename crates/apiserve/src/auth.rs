@@ -37,6 +37,13 @@ pub trait Authenticator: Send + Sync {
     /// # Errors
     /// A provider-shaped refusal (401, 403, 429...), sent to the caller as is.
     fn authenticate(&self, provider: Provider, headers: &HeaderMap) -> Result<Principal, ApiError>;
+
+    /// What separates this caller's background jobs from everyone else's: a
+    /// job is only ever visible to the scope that started it. The default is
+    /// one scope for everybody, right for a surface with a single key.
+    fn scope(&self, _principal: &Principal) -> String {
+        String::new()
+    }
 }
 
 /// The default [`Authenticator`]: one key for the whole surface.
