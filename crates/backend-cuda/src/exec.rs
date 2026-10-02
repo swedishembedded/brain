@@ -102,6 +102,8 @@ pub struct Context {
     /// allocation, which is why the counter lives on the context and is
     /// bumped in `DeviceMem`'s `Drop` - the one place a free actually occurs.
     alloc_epoch: Arc<AtomicU64>,
+    /// Freed device blocks held for reuse - see [`BlockCache`].
+    cache: Arc<BlockCache>,
 }
 
 // The context handle is used under `cuCtxSetCurrent` before every call, so it
@@ -135,6 +137,7 @@ impl Context {
         // had never been counted, wrapping the counter and leaving every later
         // submission fencing against a second handle that did not exist.
         let others = OPEN_CONTEXTS.fetch_add(1, Ordering::AcqRel);
+        let primary = Arc::new(PrimaryRef { fns, dev });
         let mut c = Context {
             d,
             fns,
@@ -144,10 +147,12 @@ impl Context {
             info: info.clone(),
             stream: std::ptr::null_mut(),
             stream_id: NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed),
-            primary: Arc::new(PrimaryRef { fns, dev }),
+            primary: primary.clone(),
             alloc_epoch: Arc::new(AtomicU64::new(0)),
+            cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
         };
         c.make_current()?;
+        c.cache.set_cap(cache_cap_for(c.mem_info().map(|m| m.1).unwrap_or(0)));
         // SAFETY: `stream` is a valid out-parameter and the context is
         // current. Non-blocking, so handles do not synchronise through the
         // legacy default stream - see `ExecFns::stream_create`.
@@ -221,13 +226,30 @@ impl Context {
     }
 
     /// Allocate `bytes` of device memory.
+    ///
+    /// A block of this exact size that an earlier allocation gave back is
+    /// reissued without a driver call (see [`BlockCache`]); otherwise this is
+    /// `cuMemAlloc`, and if the driver is out of memory while the cache holds
+    /// blocks, the cache is returned to it and the allocation retried once.
     pub fn alloc(&self, bytes: usize) -> Result<DeviceMem, String> {
-        self.make_current()?;
-        let mut ptr: CuDevicePtr = 0;
-        // SAFETY: `ptr` is a valid out-parameter; the `_v2` entry point takes
-        // a 64-bit size.
-        self.d.check(unsafe { (self.fns.mem_alloc)(&mut ptr, bytes.max(1)) }, "cuMemAlloc")?;
-        crate::live::device_alloc(bytes.max(1));
+        let len = bytes.max(1);
+        let (ptr, fence) = match self.cache.take(len) {
+            Some(held) => (held.ptr, held.fence),
+            None => {
+                self.make_current()?;
+                let mut ptr: CuDevicePtr = 0;
+                // SAFETY: `ptr` is a valid out-parameter; the `_v2` entry point takes
+                // a 64-bit size.
+                let mut rc = unsafe { (self.fns.mem_alloc)(&mut ptr, len) };
+                if rc != 0 && self.cache.trim() > 0 {
+                    // SAFETY: as above; the trim returned blocks to the driver.
+                    rc = unsafe { (self.fns.mem_alloc)(&mut ptr, len) };
+                }
+                self.d.check(rc, "cuMemAlloc")?;
+                crate::live::device_alloc(len);
+                (ptr, None)
+            }
+        };
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -235,9 +257,30 @@ impl Context {
             ptr,
             len: bytes,
             epoch: self.alloc_epoch.clone(),
-            fence: std::sync::Mutex::new(None),
+            fence: std::sync::Mutex::new(fence),
+            cache: self.cache.clone(),
             _primary: self.primary.clone(),
         })
+    }
+
+    /// Bytes of freed device blocks this context is holding for reuse. They are
+    /// still allocated from the driver (and counted by
+    /// [`crate::live_resources`]) until reissued, trimmed, or the context and
+    /// every block it handed out are gone.
+    pub fn cached_bytes(&self) -> u64 {
+        self.cache.bytes()
+    }
+
+    /// The most [`Self::cached_bytes`] can ever be: a fraction of the card's
+    /// memory, bounded both ways. `BRAIN_CUDA_BLOCK_CACHE_MB` overrides it (`0`
+    /// switches the cache off).
+    pub fn cache_cap_bytes(&self) -> u64 {
+        self.cache.cap()
+    }
+
+    /// Return every held block to the driver. Returns the bytes freed.
+    pub fn trim_cache(&self) -> u64 {
+        self.cache.trim()
     }
 
     /// Page-locked host staging of `words` u32s.
@@ -945,6 +988,8 @@ pub struct DeviceMem {
     /// The last work any handle's stream did to this allocation, when more than
     /// one handle is open. See [`Fence`].
     pub(crate) fence: std::sync::Mutex<Option<Fence>>,
+    /// Where this block goes when dropped, if it is worth keeping.
+    cache: Arc<BlockCache>,
     /// Keeps the context this allocation lives in alive until it is freed.
     _primary: Arc<PrimaryRef>,
 }
@@ -966,23 +1011,172 @@ impl DeviceMem {
 
 impl Drop for DeviceMem {
     fn drop(&mut self) {
-        // The context must be current for the free to reach the right device.
-        // SAFETY: `ctx` is kept alive by the `Context` that made this
-        // allocation, and `ptr` came from `cuMemAlloc` on it.
-        unsafe {
-            if (self.fns.ctx_set_current)(self.ctx) == 0 {
-                let rc = (self.fns.mem_free)(self.ptr);
-                if rc != 0 {
-                    tracing::warn!("cuMemFree failed: {}", self.d.error_text(rc));
-                } else {
-                    crate::live::device_free(self.len.max(1));
+        let len = self.len.max(1);
+        let fence = self.fence.get_mut().unwrap_or_else(|e| e.into_inner()).take();
+        // A block worth keeping goes to the cache, carrying the fence that says
+        // which stream last touched it, so its next owner waits on that work
+        // exactly as the first one would have. Anything else is freed here:
+        // `cuMemFree` also waits for the device, which is what made it safe to
+        // free a block another handle's stream was still reading.
+        if !self.cache.keep(self.ptr, len, fence) {
+            // The context must be current for the free to reach the right device.
+            // SAFETY: `ctx` is kept alive by the `Context` that made this
+            // allocation, and `ptr` came from `cuMemAlloc` on it.
+            unsafe {
+                if (self.fns.ctx_set_current)(self.ctx) == 0 {
+                    let rc = (self.fns.mem_free)(self.ptr);
+                    if rc != 0 {
+                        tracing::warn!("cuMemFree failed: {}", self.d.error_text(rc));
+                    } else {
+                        crate::live::device_free(len);
+                    }
                 }
             }
         }
-        // AFTER the free, and unconditionally: from here on the driver may
-        // hand this address to anyone, so anything caching device addresses
-        // must be able to see that it happened even if the free itself failed.
+        // AFTER the free (or the hand-over to the cache), and unconditionally:
+        // from here on this address may be handed to anyone - by the driver or
+        // by the cache - so anything caching device addresses must be able to
+        // see that it happened even if the free itself failed.
         self.epoch.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Freed device blocks, held by exact size for the next allocation of that size.
+///
+/// # Why
+///
+/// `cuMemFree` is an implicit device synchronisation, so freeing a
+/// multi-megabyte activation on the host's hot path blocks the host until the
+/// card has drained - lock step instead of running ahead. A prefill round drops
+/// about a dozen such blocks per layer and allocates the same sizes again in the
+/// next, and sampling the real 27B showed every host sample inside `cuMemFree`.
+/// Holding the block and handing it to the next request of its size removes the
+/// free and the allocation from the loop.
+///
+/// # What keeps it safe
+///
+/// * **Ordering.** Reuse is by this context's one stream, which orders the new
+///   owner's zeroing and kernels after the old owner's. Another handle's
+///   stream is covered by moving the block's [`Fence`] with it.
+/// * **Bounded.** Held bytes never exceed [`BlockCache::cap`]; a block that does
+///   not fit goes straight to the driver. Only blocks from [`MIN_CACHED_BYTES`]
+///   up to half the cap are held: a step's tiny uniform is cheap to free and
+///   there are thousands, and a model weight must go back at once.
+/// * **Returned.** The blocks are an `Arc` owned by the context AND by every
+///   block it handed out, so they are freed - and counted as freed - when the
+///   last of those goes, whichever is last. `OOM` while holding blocks trims
+///   them and retries, so the cache can never be what runs the card out.
+///
+/// Held blocks are still allocated from the driver, so they are still counted by
+/// [`crate::live_resources`] until they are reissued or freed.
+struct BlockCache {
+    d: &'static Driver,
+    fns: &'static ExecFns,
+    ctx: CuContext,
+    cap: AtomicU64,
+    held: std::sync::Mutex<Held>,
+    /// Keeps the primary context alive until the last held block is freed.
+    _primary: Arc<PrimaryRef>,
+}
+
+#[derive(Default)]
+struct Held {
+    by_size: std::collections::HashMap<usize, Vec<HeldBlock>>,
+    bytes: u64,
+}
+
+struct HeldBlock {
+    ptr: CuDevicePtr,
+    fence: Option<Fence>,
+}
+
+/// Smallest block worth holding.
+const MIN_CACHED_BYTES: usize = 64 << 10;
+
+/// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
+/// between 256 MiB and 4 GiB, unless `BRAIN_CUDA_BLOCK_CACHE_MB` says otherwise.
+fn cache_cap_for(total: u64) -> u64 {
+    if let Some(mb) = std::env::var("BRAIN_CUDA_BLOCK_CACHE_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+        return mb << 20;
+    }
+    (total / 16).clamp(256 << 20, 4 << 30)
+}
+
+impl BlockCache {
+    fn new(d: &'static Driver, fns: &'static ExecFns, ctx: CuContext, primary: Arc<PrimaryRef>, cap: u64) -> BlockCache {
+        BlockCache { d, fns, ctx, cap: AtomicU64::new(cap), held: Default::default(), _primary: primary }
+    }
+
+    fn set_cap(&self, cap: u64) {
+        self.cap.store(cap, Ordering::Release);
+    }
+
+    fn cap(&self) -> u64 {
+        self.cap.load(Ordering::Acquire)
+    }
+
+    fn bytes(&self) -> u64 {
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).bytes
+    }
+
+    /// A held block of exactly `len` bytes, if there is one.
+    fn take(&self, len: usize) -> Option<HeldBlock> {
+        if len < MIN_CACHED_BYTES {
+            return None;
+        }
+        let mut h = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let block = h.by_size.get_mut(&len)?.pop()?;
+        h.bytes -= len as u64;
+        Some(block)
+    }
+
+    /// Hold the block if it is worth it and fits; `false` means the caller frees it.
+    fn keep(&self, ptr: CuDevicePtr, len: usize, fence: Option<Fence>) -> bool {
+        let cap = self.cap();
+        if len < MIN_CACHED_BYTES || len as u64 > cap / 2 {
+            return false;
+        }
+        let mut h = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if h.bytes + len as u64 > cap {
+            return false;
+        }
+        h.bytes += len as u64;
+        h.by_size.entry(len).or_default().push(HeldBlock { ptr, fence });
+        true
+    }
+
+    /// Free every held block. Returns the bytes freed.
+    fn trim(&self) -> u64 {
+        let all = {
+            let mut h = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            h.bytes = 0;
+            std::mem::take(&mut h.by_size)
+        };
+        let mut freed = 0u64;
+        for (len, blocks) in all {
+            for b in blocks {
+                // SAFETY: the context is kept alive by `_primary`, and `ptr`
+                // came from `cuMemAlloc` on it and is held by nobody else.
+                unsafe {
+                    if (self.fns.ctx_set_current)(self.ctx) == 0 {
+                        let rc = (self.fns.mem_free)(b.ptr);
+                        if rc != 0 {
+                            tracing::warn!("cuMemFree of a held block failed: {}", self.d.error_text(rc));
+                        } else {
+                            crate::live::device_free(len);
+                            freed += len as u64;
+                        }
+                    }
+                }
+            }
+        }
+        freed
+    }
+}
+
+impl Drop for BlockCache {
+    fn drop(&mut self) {
+        self.trim();
     }
 }
 
