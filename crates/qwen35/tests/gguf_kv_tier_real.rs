@@ -87,11 +87,10 @@ fn argmax(v: &[f32]) -> u32 {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap()
 }
 
-/// A real natural-language prompt of about 1.4k tokens, from this repository's
-/// own documentation.
+/// A real natural-language prompt of about 1k tokens: a fixed page of prose
+/// kept beside the test so the prompt cannot change underneath it.
 fn prompt_text() -> String {
-    let doc = include_str!("../../../docs/models/qwen35.md");
-    let body: String = doc.chars().take(5600).collect();
+    let body = include_str!("fixtures/real_prompt.txt");
     format!("{body}\n\nIn one sentence, what does the page above describe?")
 }
 

@@ -1,0 +1,80 @@
+# Qwen3.8-27B (dense hybrid GDN/GQA decoder + MTP + vision)
+
+A 64-layer dense hybrid decoder - the dense sibling of
+[`qwen35moe`](qwen35moe.md): 3:1 Gated DeltaNet (chunked linear-attention) to
+GQA layers, a sigmoid attention-output gate, partial RoPE + M-RoPE on the GQA
+layers, but a plain dense SwiGLU MLP on every layer instead of a sparse MoE.
+Adds a single-layer multi-token-prediction (MTP) head sharing the token
+embedding and LM head, and a spliced Qwen3-VL-style vision tower (ViT +
+PatchMerger, reused unchanged) for image input. `reasoning_effort` and the
+chat-template flavor (`qwen3.8` default, `qwen3` opt-out) are chat-template
+concepts, not architectural ones - both are wired through the shared chat
+path (see the note at the end of this page).
+
+## Support
+
+| Capability | Supported |
+|---|---|
+| Inference             | [x] |
+| Training from scratch | [x] |
+| LoRA fine-tune         | [x] (rank/alpha adapters on all 12 targetable GDN/GQA/MLP projections) |
+| MTP head               | [x] (structural - no reference oracle available, gradchecked and overfit-tested only) |
+| Vision input            | [x] (real-dims parity-tested tower; end-to-end splice is structural only - no reference oracle for the composite) |
+| CLI                    | [x] |
+| HTTP API               | [x] |
+| D-Bus                  | [x] |
+| Batched serving        | [x] (paged, single-GPU, one active sequence at a time on the GPU - see "Hardware and limits") |
+
+## Getting the weights
+
+Model id: `brain/qwen35`, upstream `Qwen/Qwen3.8-27B-FP8`. Weights ship as
+DeepSeek-V3-style blockwise FP8 (E4M3 + BF16 `weight_scale_inv`), dequantized
+host-side at import. No GGUF importer for this architecture - the real
+checkpoint is safetensors-only.
+
+A **GGUF** of the same model IS servable, though - see "Serving the real
+checkpoint from its Q8_0 GGUF" below. That path reads
+`unsloth/Qwen3.8-27B-GGUF`'s `Q8_0` file directly and never writes an fp32
+intermediate.
+
+## Running it
+
+```bash
+brain qwen35 infer --weights qwen35.safetensors --tokenizer tokenizer.json --prompt "..."
+```
+
+Serving (HTTP/D-Bus, paged continuous batching): drop the checkpoint (and its
+sibling `tokenizer.json`) under the models directory and `brain serve` finds
+it with no env var at all - resolved through `qwen35::spec::Qwen35Spec` (a
+`ModelCard.family == "qwen35"` `.safetensors`, or a `general.architecture ==
+"qwen35"` GGUF, paired with a co-located, vocab-compatible tokenizer). A
+`--weights`/`--tokenizer` flag on `brain qwen35 infer` still names either
+file outright, and prints every real candidate (with the flag to pick it) if
+the models directory holds more than one.
+
+```bash
+brain serve
+```
+
+## Serving the real checkpoint from its Q8_0 GGUF (multi-GPU, INT8)
+
+Model id: `unsloth/Qwen3.8-27B-Q8_0`
+(`crates/qwen35/src/int8_gguf_resident.rs`). A SEPARATE resident from
+`brain/qwen35` above, not a mode of it - the two coexist and are registered
+independently.
+
+> **Status: correct.** The model plans across two 24 GiB P40s at INT8
+> (27.05 GiB, 7.44-8.57 tok/s decode, M22) or one card at Q4 (15.71-15.79
+> GiB, 10.89-12.46 tok/s decode, M24), and is bit-stable under greedy
+> sampling; a factual greedy continuation of `"The capital city of France
+> is"` produces `" Paris. Paris is the largest city in"`. Prefill is chunked
+> at both tiers (M26): a real 1731-token prompt at INT8 went from 262.8 s
+> (6.6 tok/s) to 26.5-26.8 s (64.6-65.4 tok/s), ~9.9x; a real 1555-token
+> prompt at Q4 went from 152.1 s (10.2 tok/s) to 22.9 s (68.0 tok/s), ~6.6x,
+> once `matmul_q4_dyn_reg` was wired into `Ops::bind`. Decode throughput does fall off with real context, not
+> just this smoke-test prompt: 9.58 tok/s measured at a genuine 1555-token
+> prompt vs 10.96-12.46 tok/s at this page's ~14-token one, consistent with
+> the 16 GQA layers' `O(context)` KV-read cost. M21 left this RED - the GGUF
+> conversion stores every GDN leaf indexed by value head in a different
+> head-order convention than brain (and the reference HF model) expect;
+> M23 found and fixed it (`crates/qwen35/src/int8_gguf_resident.rs`'s
