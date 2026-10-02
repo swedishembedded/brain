@@ -193,12 +193,16 @@ fn qwen35_q8_build_resident_shape_matches_the_designed_coverage() {
     let q8 = Qwen35Q8::build(&g, &init, &cfg, n_tokens, idx(&g, "max_abs_row"), idx(&g, "quant_pack"));
 
     assert_eq!(q8.moe.len(), cfg.n_layers as usize);
+    let (d, ff) = (cfg.d_model, cfg.moe_intermediate_size);
     for (l, layer) in q8.moe.iter().enumerate() {
-        assert_eq!(layer.experts.len(), cfg.n_experts as usize, "layer {l}: every expert must be quantized");
+        // One fused bank per projection holding EVERY expert (this config's shared
+        // expert is 7 wide, not the routed experts' 32, so it stays fp32 and out of
+        // the banks).
+        assert!(!layer.shared_in_bank(), "layer {l}: a shared expert of a different shape cannot be a bank block");
+        for (bank, n, k, what) in [(&layer.gate, ff, d, "gate"), (&layer.up, ff, d, "up"), (&layer.down, d, ff, "down")] {
+            assert_eq!((bank.blocks, bank.n, bank.k), (cfg.n_experts, n, k), "layer {l} {what}: every expert is one block of the bank");
+        }
     }
-
-    let total_expert_linears: usize = q8.moe.iter().map(|m| m.experts.len() * 3).sum();
-    assert_eq!(total_expert_linears, cfg.n_experts as usize * 3 * cfg.n_layers as usize);
 }
 
 /// Runs both an fp32 and an int8 `Qwen35` forward at [`tiny_i8_cfg`] from the
@@ -208,8 +212,7 @@ fn qwen35_q8_build_resident_shape_matches_the_designed_coverage() {
 /// both matter) -- each caller applies its own tolerance, since the CPU
 /// build (no `int8_dot`) is a full fp32 demotion and the default-backend
 /// build is genuinely quantized, two very different expected error bands.
-fn run_parity_report(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
-    let cfg = tiny_i8_cfg();
+fn run_parity_report(cfg: Qwen35Config, gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
     let b = 1;
     let t = cfg.block_size;
     let init = qwen35moe::init::init_weights(&cfg, 7);
@@ -242,7 +245,7 @@ fn run_parity_report(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
 /// demote to fp32 instead.
 #[test]
 fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
-    let (cos, rel) = run_parity_report(Gpu::new(pipelines()), Gpu::new(pipelines()));
+    let (cos, rel) = run_parity_report(tiny_i8_cfg(), Gpu::new(pipelines()), Gpu::new(pipelines()));
     eprintln!("qwen35moe int8 vs fp32 (tiny_i8_cfg, default backend): cosine={cos:.9} rel_l2={rel:.9}");
     // 8 chained layers (each with a quantized mixer AND a quantized 6-expert
     // MoE) is a much deeper quantization stack than `model::moe`'s own
@@ -282,7 +285,7 @@ fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
 /// quantization-noise tolerance the default-backend test above uses.
 #[test]
 fn int8_forward_matches_fp32_exactly_on_cpu_backend_lacking_int8_dot() {
-    let (cos, rel) = run_parity_report(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
+    let (cos, rel) = run_parity_report(tiny_i8_cfg(), Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
     eprintln!("qwen35moe int8 vs fp32 (tiny_i8_cfg, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.9}");
     assert!(cos > 0.999999, "qwen35moe CPU int8 build should be an almost-exact fp32 demotion: cosine={cos:.9} (want > 0.999999)");
     assert!(rel < 1e-4, "qwen35moe CPU int8 build should be an almost-exact fp32 demotion: rel_l2={rel:.9} (want < 1e-4)");
@@ -355,4 +358,24 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     assert!(quantized_count > 0, "tiny_i8_cfg must have at least one quantized linear to make this check meaningful");
     assert_eq!(i8_names.len(), fp32_names.len() - quantized_count);
     assert!(i8_names.iter().all(|n| !Qwen35Q8::is_i8_linear(n)), "int8 model's fp32 store must contain zero quantized names");
+}
+
+/// The same parity gate with the shared expert the routed experts' shape (32,
+/// as at the real scale), so it rides in the int8 banks as block `n_experts`
+/// and is routed by the same gather GEMV instead of the fp32 path - the
+/// configuration the real model runs in.
+#[test]
+fn int8_forward_tracks_fp32_with_the_shared_expert_in_the_banks() {
+    let cfg = Qwen35Config { shared_expert_intermediate_size: 32, ..tiny_i8_cfg() };
+    let init = qwen35moe::init::init_weights(&cfg, 7);
+    let model = Qwen35::new_on_i8(Gpu::new(pipelines()), cfg.clone(), 1, cfg.block_size, &init);
+    if !model.moe_int8_active() {
+        brain_testutil::skip_unavailable("ambient device has no int8_dot capability");
+        return;
+    }
+    assert!(model.moe_shared_in_bank(), "a shared expert of the routed experts' shape must be a bank block");
+    let (cos, rel) = run_parity_report(cfg, Gpu::new(pipelines()), Gpu::new(pipelines()));
+    eprintln!("qwen35moe int8 vs fp32 (shared expert in the banks): cosine={cos:.9} rel_l2={rel:.9}");
+    assert!(cos > 0.99, "cosine={cos:.6} (want > 0.99)");
+    assert!(rel < 0.1, "rel_l2={rel:.4} (want < 0.1)");
 }

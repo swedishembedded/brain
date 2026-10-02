@@ -121,8 +121,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::select::Dtype;
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::ops::{Act, Ops, Weight};
+use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
+use model::ops::{Act, Ops, TierPolicy, Weight};
 use model::Shard;
 use paramstore::{ParamStore, Role};
 
@@ -135,14 +135,14 @@ use model::gdn::{GdnBwdIds, GdnConvIds, GdnIds, GdnShape};
 // were never used outside this module even before they lived here.
 pub use model::gdn::gdn_chunk_size;
 use model::moe::{
-    expert_fwd, expert_fwd_grouped, expert_fwd_i8, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
-    ExpertGrads, ExpertScratch, ExpertScratch8, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs,
-    MoeIds, MoeIds8, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertIds, SharedExpertScratch,
+    expert_fwd, expert_fwd_grouped, moe_layer_bwd, router_fwd_kind, shared_expert_fwd, ExpertBwdScratch,
+    ExpertGrads, ExpertScratch, ExpertWeights, GroupedExpertFwdIds, GroupedExpertScratch, MoeActs,
+    MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, SharedExpertIds, SharedExpertScratch,
 };
 use optim::Optim;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::q8::Qwen35Q8;
+use crate::q8::{Bank8, Qwen35Q8};
 
 // ---- kernel pipeline (order fixes the indices below) -----------------------
 
@@ -197,6 +197,8 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `model::ops`'s own doc), exactly as `qwen3::model.rs`'s own `Q8`
     // pipeline registers under this same local name (`qwen/src/model.rs:159`).
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),                   // 40
+    // Slot 41 was the per-expert int8 expert kernel; the gather-layout tier at the
+    // end of this list replaced it. The entry stays so every index below holds.
     ("moe_linear_gated_i8", kernels::MOE_LINEAR_GATED_I8),       // 41
     // -- training (backward + AdamW) tier -- see `Qwen35::new_train`/`backward`.
     ("rms_inv", kernels::RMS_INV),                               // 42
@@ -297,6 +299,12 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED), // 103
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),   // 104
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),     // 105
+    // -- gather-layout int8 sparse-MoE tier -- see `Qwen35::moe_sublayer_i8`.
+    // Appended at the true end, same convention as every tier above.
+    ("moe_router_topk", kernels::MOE_ROUTER_TOPK),               // 106
+    ("moe_i8_gemv_gather", kernels::MOE_I8_GEMV_GATHER),         // 107
+    ("moe_swiglu_quant", kernels::MOE_SWIGLU_QUANT),             // 108
+    ("moe_slot_combine", kernels::MOE_SLOT_COMBINE),             // 109
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -425,7 +433,6 @@ const REGION_COPY: usize = 36;
 const CE_VALUE: usize = 37;
 const MAX_ABS_ROW: usize = 38;
 const QUANT_PACK: usize = 39;
-const MOE_LINEAR_GATED_I8: usize = 41;
 const RMS_INV: usize = 42;
 const RMSNORM_DX: usize = 43;
 const RMSNORM_DW: usize = 44;
@@ -484,6 +491,13 @@ const PAGED_KV_APPEND_BATCHED: usize = 102;
 const PAGED_DECODE_SCORES_BATCHED: usize = 103;
 const PAGED_DECODE_APPLY_BATCHED: usize = 104;
 const DECODE_SOFTMAX_BATCHED: usize = 105;
+const MOE_ROUTER_TOPK: usize = 106;
+const MOE_I8_GEMV_GATHER: usize = 107;
+const MOE_SWIGLU_QUANT: usize = 108;
+const MOE_SLOT_COMBINE: usize = 109;
+/// Weight rows one `moe_i8_gemv_gather` workgroup covers (64 threads, 16 lanes
+/// per row) - the kernel's own constant, restated here only to size its grid.
+const MOE_GATHER_COLS: u32 = 4;
 
 /// Every slot is a REAL kernel now (backward is wired, see [`Qwen35::backward`]):
 /// `rope`/`rope_bwd` still point at `rmsnorm` (index 0) because qwen35 never
@@ -588,16 +602,6 @@ fn gqa_decode_batched_ids() -> model::block::GqaDecodeBatchedIds {
 /// [`model::gdn_mixer::gdn_mixer_decode_fwd`]'s decode-only kernel ids.
 fn gdn_mixer_decode_ids() -> model::gdn_mixer::GdnMixerDecodeIds {
     model::gdn_mixer::GdnMixerDecodeIds { conv: gdn_conv_ids(), splice: SPLICE }
-}
-
-/// int8 counterpart of [`moe_ids`], for [`model::moe::expert_fwd_i8`].
-fn moe_ids8() -> MoeIds8 {
-    MoeIds8 {
-        linear_gated_i8: MOE_LINEAR_GATED_I8,
-        silu_mul: SILU_MUL,
-        scale_add: SCALE_ADD,
-        quant: [MAX_ABS_ROW, QUANT_PACK],
-    }
 }
 
 fn shared_expert_ids() -> SharedExpertIds {
@@ -715,6 +719,18 @@ struct GdnLayerActs {
 struct GqaLayerActs {
     internals: model::gqa_mixer::GqaMixerActs,
     ctx_gated: DeviceBuffer,
+}
+
+/// The shared expert's per-call scratch (see `Qwen35::shared_expert_steps`),
+/// kept by the training branch for backward and dropped by every other.
+struct SharedBufs {
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    mlp_out: DeviceBuffer,
+    gate_logits: DeviceBuffer,
+    gate_scalar: DeviceBuffer,
+    scaled: DeviceBuffer,
 }
 
 /// Everything [`Qwen35::moe_sublayer`]'s training branch saves - universal
@@ -1091,14 +1107,14 @@ fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, false, false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
     }
 
     /// Build on an existing device handle (test fixtures share one `Gpu` per
     /// binary - see `gpu_core::testgpu`).
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), false, shard)
     }
 
     /// [`Self::new`] with the int8 (DP4A) inference tier: the attention/GDN
@@ -1113,13 +1129,40 @@ impl Qwen35 {
     /// (`Qwen35::backward` panics regardless).
     pub fn new_i8(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, true, false, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), false, shard)
     }
 
     /// [`Self::new_i8`] on an existing device handle - see [`Self::new_on`].
     pub fn new_on_i8(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, true, false, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::I8), false, shard)
+    }
+
+    /// [`Self::new_on_i8`] streaming straight from a [`checkpoint::TensorSource`]
+    /// (a GGUF through `crate::gguf_load::source`): no host-side fp32 copy of
+    /// the model ever exists, one tensor is decoded at a time.
+    pub fn new_on_i8_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Qwen35 {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::I8), false, shard)
+    }
+
+    /// [`Self::new_on_i8_src`] at fp32: every weight a float buffer, streamed
+    /// from the source one tensor at a time. The reference tier a real-weight
+    /// comparison is made against (only a truncated model fits a card in fp32).
+    pub fn new_on_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Qwen35 {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, &TierPolicy::uniform(Dtype::F32), false, shard)
+    }
+
+    /// [`Self::new_on_i8_src`] at a per-leaf [`TierPolicy`]: `F32` and `I8` are
+    /// the tiers this model implements (any other is refused by name). The
+    /// leaves are matched by substring, so `"self_attn"` / `"out_proj"` /
+    /// `"mlp.experts"` select an attention block, one projection or the routed
+    /// experts - e.g. `uniform(I8).with(&["linear_attn", "self_attn"], F32)` is
+    /// int8 experts under fp32 mixers.
+    pub fn new_on_tier_src(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, src: &dyn checkpoint::TensorSource, tier: &TierPolicy) -> Qwen35 {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen35::new_impl_on(gpu, cfg, b, t, src, tier, false, shard)
     }
 
     /// Build a TRAINABLE model: every weight `Role::Trainable` (full-parameter
@@ -1129,13 +1172,13 @@ impl Qwen35 {
     /// `assert!(!(i8 && train))`).
     pub fn new_train(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(Gpu::new(pipelines()), cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
     }
 
     /// [`Self::new_train`] on an existing device handle - see [`Self::new_on`].
     pub fn new_train_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint
@@ -1152,7 +1195,7 @@ impl Qwen35 {
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, pipelines()).unwrap_or_else(|e| panic!("qwen35 shard placement: {e}"))
         };
-        Qwen35::new_impl_on(gpu, cfg, b, t, init, false, true, shard)
+        Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), true, shard)
     }
 
     fn new_impl_on(
@@ -1161,10 +1204,11 @@ impl Qwen35 {
         b: u32,
         t: u32,
         src: &dyn checkpoint::TensorSource,
-        i8: bool,
+        tier: &TierPolicy,
         train: bool,
         shard: Shard,
     ) -> Qwen35 {
+        let i8 = tier.quantizes_anything();
         assert!(!(i8 && train), "qwen35: int8 path is inference-only (Qwen35::new_train is fp32-only)");
         // Int8 weights are capability-driven, never assumed: the request only
         // takes effect where the packed-dot GEMM executes (the `Op::
@@ -1180,6 +1224,25 @@ impl Qwen35 {
         if i8 && !i8_on {
             eprintln!("qwen35moe: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
+        // Which quantizable linear the per-leaf policy puts at int8 on this
+        // device. F32 and I8 are the tiers this model implements; anything
+        // else is refused by name rather than silently run at another tier.
+        let quant = |name: &str| {
+            i8_on
+                && Qwen35Q8::is_i8_linear(name)
+                && match tier.want(name) {
+                    Dtype::I8 => true,
+                    Dtype::F32 => false,
+                    other => panic!("qwen35moe: tier {other:?} is not implemented for {name} (F32 and I8 only)"),
+                }
+        };
+        // The routed experts are one tier for the whole model (the policy is
+        // asked about a representative expert).
+        let experts_i8 = quant("blocks.0.mlp.experts.0.gate.weight");
+        // The shared expert rides in the banks (as block `n_experts`) when it has
+        // the routed experts' shape; the router and its shared gate then live in
+        // `q8`'s `router_ext`, so none of the four needs an fp32 copy here.
+        let shared_in_bank = experts_i8 && Qwen35Q8::shared_fits_bank(&cfg);
         let chunk = gdn_chunk_size(t);
         assert_eq!(
             t % chunk,
@@ -1211,7 +1274,11 @@ impl Qwen35 {
         // `cfg.lora.is_some()` never both hold here.
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
-            .filter(|(n, _)| !(i8_on && Qwen35Q8::is_i8_linear(n)))
+            .filter(|(n, _)| {
+                !quant(n)
+                    && !(shared_in_bank
+                        && (Qwen35Q8::is_shared_expert_linear(n) || n.ends_with("mlp.router.weight") || n.ends_with("mlp.shared_expert_gate.weight")))
+            })
             .map(|(n, c)| {
                 let role = if !train {
                     Role::Frozen
@@ -1246,7 +1313,7 @@ impl Qwen35 {
         // Quantize+upload the int8 MoE-expert linears from the SAME source,
         // streaming one tensor at a time (see `Qwen35Q8::build`'s own doc -
         // MoE experts only; the mixer linears build `weights` below instead).
-        let q8 = if i8_on { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
+        let q8 = if experts_i8 { Some(Qwen35Q8::build(&gpu, src, &cfg, b * t, MAX_ABS_ROW, QUANT_PACK)) } else { None };
 
         // Prefill/inference grouped-GEMM MoE infra (M5.12) -- built for
         // exactly the instances `moe_sublayer`'s grouped branch runs on: not
@@ -1306,7 +1373,7 @@ impl Qwen35 {
         );
         let mut weights: HashMap<String, Weight> = HashMap::new();
         let mut upload = |name: String, wn: usize, wk: usize| {
-            let w = if i8_on {
+            let w = if quant(&name) {
                 let mut built: Option<Weight> = None;
                 let found = src.with_tensor(&name, &mut |raw| {
                     built = Some(Weight::upload(&ops, raw, wn, wk, Dtype::I8));
@@ -1810,12 +1877,16 @@ impl Qwen35 {
     // ---- MoE sublayer, universal for every layer ---------------------------
 
     fn moe_sublayer(&self, l: usize, xmid: &DeviceBuffer, n: u32) -> (DeviceBuffer, Option<MoeLayerActs>) {
+        // The int8 tier has its own sublayer: device-side routing and one gather
+        // GEMV per projection over the fused expert banks (no host readback).
+        if let Some(q8) = &self.q8 {
+            return (self.moe_sublayer_i8(l, xmid, n, q8), None);
+        }
         let g = &self.gpu;
         let c = &self.cfg;
         let d = c.d_model;
         let e = c.n_experts;
         let moe_ff = c.moe_intermediate_size;
-        let shared_ff = c.shared_expert_intermediate_size;
         let p = |s: &str| format!("blocks.{l}.{s}");
 
         let xn2 = g.storage((n * d) as u64);
@@ -1833,7 +1904,7 @@ impl Qwen35 {
         steps.push(router_fwd_kind(g, &moe_ids(), RouterKind::Softmax { aux_coef: 0.0, z_coef: 0.0, norm_topk_prob: true, routed_scaling: 1.0 }, &shape, &router_logits, None, &gate, None));
 
         let moe_acc = g.storage((n * d) as u64);
-        // Router and gate above are ALWAYS fp32 (see `crate::q8`'s module
+        // Router and gate above are fp32 (see `crate::q8`'s module
         // doc for why); only the routed experts' gate/up/down switch tier.
         // Training builds additionally need EVERY expert's OWN gate_pre/up/h/
         // expert_out (not a shared scratch reused across experts -- see
@@ -1841,41 +1912,7 @@ impl Qwen35 {
         // `ExpertScratch` cannot serve backward), so `moe_acts` is `Some` only
         // for a training, non-int8 build (asserted mutually exclusive at
         // construction).
-        let moe_acts: Option<MoeActs> = if let Some(q8) = &self.q8 {
-            // xn2 quantized once, shared by every expert's gate/up (the
-            // down-projection's input `h` is expert-specific and quantized
-            // separately inside `expert_fwd_i8`'s own scratch).
-            q8.quant(g, &mut steps, &xn2, d, n);
-            let ml = &q8.moe[l];
-            let ids8 = moe_ids8();
-            let scratch8 = ExpertScratch8 {
-                gate_pre: &g.storage((n * moe_ff) as u64),
-                up: &g.storage((n * moe_ff) as u64),
-                h: &g.storage((n * moe_ff) as u64),
-                hq: &g.storage((n * moe_ff / 4) as u64),
-                sh: &g.storage(n as u64),
-                expert_out: &g.storage((n * d) as u64),
-            };
-            for ei in 0..e {
-                let ex = &ml.experts[ei as usize];
-                steps.extend(expert_fwd_i8(
-                    g,
-                    &ids8,
-                    &shape,
-                    &q8.xq,
-                    &q8.sx,
-                    &gate,
-                    ex.gate.as_moe(),
-                    ex.up.as_moe(),
-                    ex.down.as_moe(),
-                    &scratch8,
-                    &moe_acc,
-                    ei,
-                    ei != 0,
-                ));
-            }
-            None
-        } else if self.is_train {
+        let moe_acts: Option<MoeActs> = if self.is_train {
             let acts = MoeActs::new(g, &shape);
             for ei in 0..e {
                 let (gn, un, dn) = &self.moe_expert_names[l][ei as usize];
@@ -1938,37 +1975,7 @@ impl Qwen35 {
         };
 
         let moe_out = g.storage((n * d) as u64);
-        let sh_gate_pre = g.storage((n * shared_ff) as u64);
-        let sh_up = g.storage((n * shared_ff) as u64);
-        let sh_h = g.storage((n * shared_ff) as u64);
-        let sh_mlp_out = g.storage((n * d) as u64);
-        let sh_gate_logits = g.storage(n as u64);
-        let sh_gate_scalar = g.storage(n as u64);
-        let sh_scaled = g.storage((n * d) as u64);
-        let sh_scratch = SharedExpertScratch {
-            gate_pre: &sh_gate_pre,
-            up: &sh_up,
-            h: &sh_h,
-            mlp_out: &sh_mlp_out,
-            gate_logits: &sh_gate_logits,
-            gate_scalar: &sh_gate_scalar,
-            scaled: &sh_scaled,
-        };
-        steps.extend(shared_expert_fwd(
-            g,
-            &shared_expert_ids(),
-            n,
-            d,
-            shared_ff,
-            &xn2,
-            self.w(&p("mlp.shared_expert.gate.weight")),
-            self.w(&p("mlp.shared_expert.up.weight")),
-            self.w(&p("mlp.shared_expert.down.weight")),
-            Some(self.w(&p("mlp.shared_expert_gate.weight"))),
-            &sh_scratch,
-            &moe_acc,
-            &moe_out,
-        ));
+        let sh = self.shared_expert_steps(l, &xn2, n, &moe_acc, &moe_out, &mut steps);
 
         g.submit(&[], &steps);
 
@@ -1978,14 +1985,125 @@ impl Qwen35 {
             gate,
             fe: g.storage(e as u64),
             acts,
-            sh_gate_pre,
-            sh_up,
-            sh_h,
-            sh_mlp_out,
-            sh_gate_logits,
-            sh_gate_scalar,
+            sh_gate_pre: sh.gate_pre,
+            sh_up: sh.up,
+            sh_h: sh.h,
+            sh_mlp_out: sh.mlp_out,
+            sh_gate_logits: sh.gate_logits,
+            sh_gate_scalar: sh.gate_scalar,
         });
         (moe_out, acts)
+    }
+
+    /// The shared expert at fp32 - `moe_out = moe_acc + sigmoid(gate . x) *
+    /// SwiGLU(x)` - appended to `steps`, with its scratch handed back for the
+    /// training tape. The one definition of the shared expert's fp32 path,
+    /// reached from the dense/grouped/decode-sparse forwards and from the int8
+    /// forward whenever the shared expert does not fit the expert banks.
+    fn shared_expert_steps(&self, l: usize, xn2: &DeviceBuffer, n: u32, moe_acc: &DeviceBuffer, moe_out: &DeviceBuffer, steps: &mut Vec<Step>) -> SharedBufs {
+        let g = &self.gpu;
+        let (d, shared_ff) = (self.cfg.d_model, self.cfg.shared_expert_intermediate_size);
+        let p = |s: &str| format!("blocks.{l}.{s}");
+        let bufs = SharedBufs {
+            gate_pre: g.storage((n * shared_ff) as u64),
+            up: g.storage((n * shared_ff) as u64),
+            h: g.storage((n * shared_ff) as u64),
+            mlp_out: g.storage((n * d) as u64),
+            gate_logits: g.storage(n as u64),
+            gate_scalar: g.storage(n as u64),
+            scaled: g.storage((n * d) as u64),
+        };
+        let scratch = SharedExpertScratch {
+            gate_pre: &bufs.gate_pre,
+            up: &bufs.up,
+            h: &bufs.h,
+            mlp_out: &bufs.mlp_out,
+            gate_logits: &bufs.gate_logits,
+            gate_scalar: &bufs.gate_scalar,
+            scaled: &bufs.scaled,
+        };
+        steps.extend(shared_expert_fwd(
+            g,
+            &shared_expert_ids(),
+            n,
+            d,
+            shared_ff,
+            xn2,
+            self.w(&p("mlp.shared_expert.gate.weight")),
+            self.w(&p("mlp.shared_expert.up.weight")),
+            self.w(&p("mlp.shared_expert.down.weight")),
+            Some(self.w(&p("mlp.shared_expert_gate.weight"))),
+            &scratch,
+            moe_acc,
+            moe_out,
+        ));
+        bufs
+    }
+
+    /// The int8 MoE sublayer: router, routed experts and (when it fits the
+    /// banks) the shared expert, with NO host synchronisation and no
+    /// per-expert dispatch.
+    ///
+    /// ```text
+    /// xn2 --quant--> xq, sx
+    /// router matmul [n, d] x [E(+1), d] --> logits         (fp32: a routing decision is a hard top-k)
+    /// moe_router_topk --> ids[n, S], weight[n, S]          (S = top_k, +1 for the shared expert)
+    /// gather GEMV gate, up over the fused banks --> [n*S, ff]
+    /// moe_swiglu_quant --> hq, sh                          (SiLU(gate) * up, requantised per slot)
+    /// gather GEMV down --> y[n*S, d]
+    /// moe_slot_combine: out[row] = sum_s weight * y        (shared expert = slot top_k)
+    /// ```
+    ///
+    /// Every selected expert of every row is one `slot`; its expert is read out
+    /// of the bank by id. At decode that is `top_k + 1` slots per token and the
+    /// layer streams exactly the ~25 MB of weights those experts hold, in a
+    /// handful of dispatches instead of the 256-expert, ~1280-dispatch loop
+    /// this replaced.
+    fn moe_sublayer_i8(&self, l: usize, xmid: &DeviceBuffer, n: u32, q8: &Qwen35Q8) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let (d, e, ff, top_k) = (c.d_model, c.n_experts, c.moe_intermediate_size, c.top_k);
+        let ml = &q8.moe[l];
+        let shared = u32::from(ml.shared_in_bank());
+        let (slots_per_row, width) = (top_k + shared, e + shared);
+        let slots = n * slots_per_row;
+        let p = |s: &str| format!("blocks.{l}.{s}");
+
+        let xn2 = g.storage((n * d) as u64);
+        let logits = g.storage((n * width) as u64);
+        let (ids, weight) = (g.storage(slots as u64), g.storage(slots as u64));
+        let (gate_out, up_out) = (g.storage((slots * ff) as u64), g.storage((slots * ff) as u64));
+        let (hq, sh) = (g.storage((slots * ff / 4) as u64), g.storage(slots as u64));
+        let y = g.storage((slots * d) as u64);
+        let router_w = ml.router_ext.as_ref().unwrap_or_else(|| self.w(&p("mlp.router.weight")));
+        let gather = |bank: &Bank8, xq: &DeviceBuffer, sx: &DeviceBuffer, out: &DeviceBuffer, xdiv: u32| {
+            g.dispatch(
+                MOE_I8_GEMV_GATHER,
+                &[xq, sx, &ids, &bank.packed, &bank.scale, out],
+                &[slots, bank.k / 4, bank.n, xdiv],
+                Dispatch::Workgroups(slots * bank.n.div_ceil(MOE_GATHER_COLS)),
+            )
+        };
+
+        let mut steps = vec![rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&p("ln2.weight")), &xn2, d, n, c.rms_eps)];
+        q8.quant(g, &mut steps, &xn2, d, n);
+        steps.push(g.step(MATMUL, &[&xn2, router_w, &logits], &[n, d, width], n * width));
+        steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, shared], Dispatch::Workgroups(n)));
+        steps.push(gather(&ml.gate, &q8.xq, &q8.sx, &gate_out, slots_per_row));
+        steps.push(gather(&ml.up, &q8.xq, &q8.sx, &up_out, slots_per_row));
+        steps.push(g.dispatch(MOE_SWIGLU_QUANT, &[&gate_out, &up_out, &hq, &sh], &[slots, ff], Dispatch::Workgroups(slots)));
+        steps.push(gather(&ml.down, &hq, &sh, &y, 1));
+
+        let moe_out = g.storage((n * d) as u64);
+        if shared == 1 {
+            steps.push(g.step(MOE_SLOT_COMBINE, &[&y, &weight, &moe_out], &[n, d, slots_per_row], n * d));
+        } else {
+            let routed = g.storage((n * d) as u64);
+            steps.push(g.step(MOE_SLOT_COMBINE, &[&y, &weight, &routed], &[n, d, slots_per_row], n * d));
+            self.shared_expert_steps(l, &xn2, n, &routed, &moe_out, &mut steps);
+        }
+        g.submit(&[], &steps);
+        moe_out
     }
 
     /// Decode's sparse expert dispatch -- the `n==1` sibling of
@@ -2626,7 +2744,6 @@ impl Qwen35 {
     /// output.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         assert_eq!(self.b, 1, "qwen35moe::step requires b==1 (single sequence)");
-        assert!(self.q8.is_none(), "qwen35moe::step: fp32 decode only in this pass (int8 decode is out of scope)");
         assert!(
             (token_id as usize) < self.cfg.vocab as usize,
             "decode token id {token_id} exceeds vocab {} (checkpoint/tokenizer mismatch?)",
@@ -2842,6 +2959,12 @@ impl Qwen35 {
     /// observe the gate without reaching into the private `q8` field.
     pub fn moe_int8_active(&self) -> bool {
         self.q8.is_some()
+    }
+
+    /// Whether the shared expert rides in the int8 expert banks (as block
+    /// `n_experts`) rather than on the fp32 path - see `Qwen35Q8::shared_fits_bank`.
+    pub fn moe_shared_in_bank(&self) -> bool {
+        self.q8.as_ref().is_some_and(|q| q.moe.iter().all(|m| m.shared_in_bank()))
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {

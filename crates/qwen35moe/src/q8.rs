@@ -66,47 +66,51 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use model::moe::Lin8 as MoeLin8;
-
 pub use model::int8::quantize_weight;
 
 use crate::config::Qwen35Config;
 
-/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + group scale
-/// `[n, k/32]` - identical layout to `qwen3::q8::Lin8`, duplicated rather than
-/// reused because `qwen3::q8` is that crate's own private tier (its `Lin8` is
-/// not `pub` beyond `qwen`) and `model::moe::Lin8` is a borrowed VIEW
-/// (`&DeviceBuffer` fields, sized for one call) rather than an owner of the
-/// underlying buffers - this type is the OWNER; [`Lin8::as_moe`] borrows it
-/// into a `model::moe::Lin8` view at each `expert_fwd_i8` call site.
-pub struct Lin8 {
+/// One projection of every expert of a layer as ONE fused int8 bank: expert
+/// `e`'s `[n, k]` matrix is rows `e*n .. (e+1)*n` of a `[blocks * n, k/4]`
+/// packed-word buffer with a `[blocks * n, k/32]` group-scale sibling - exactly
+/// llama.cpp's own stacked-expert layout, so a Q8_0 GGUF becomes this by a byte
+/// repack. One buffer per projection per layer (not one per expert) is what
+/// lets a single `moe_i8_gemv_gather` dispatch serve every expert a token
+/// routes to.
+///
+/// `blocks` is `n_experts`, plus one when the shared expert rides in the bank
+/// as block `n_experts` (see [`Q8MoeLayer::router_ext`]).
+pub struct Bank8 {
     pub packed: DeviceBuffer,
     pub scale: DeviceBuffer,
-    pub k: u32, // input width (contraction dim)
-    pub n: u32, // output width
+    /// Output width of one expert's matrix.
+    pub n: u32,
+    /// Input width (contraction dimension).
+    pub k: u32,
+    pub blocks: u32,
 }
 
-impl Lin8 {
-    /// Borrow as the view `model::moe::expert_fwd_i8` expects.
-    pub fn as_moe(&self) -> MoeLin8<'_> {
-        MoeLin8 { wq: &self.packed, sw: &self.scale }
+/// One layer's routed experts (256 at real scale) as three fused banks, and -
+/// when the shared expert fits the same shape - the shared expert as the bank's
+/// last block.
+pub struct Q8MoeLayer {
+    pub gate: Bank8,
+    pub up: Bank8,
+    pub down: Bank8,
+    /// `[(n_experts + 1) * d_model]` f32 router weight with the shared expert's
+    /// gate row appended, so ONE matmul produces the routed logits and the
+    /// shared gate's logit. `Some` exactly when the shared expert is in the
+    /// banks; `None` leaves the shared expert on the fp32 path.
+    pub router_ext: Option<DeviceBuffer>,
+}
+
+impl Q8MoeLayer {
+    pub fn shared_in_bank(&self) -> bool {
+        self.router_ext.is_some()
     }
 }
 
-/// One routed expert's quantized gate/up/down.
-pub struct Lin8Expert {
-    pub gate: Lin8,
-    pub up: Lin8,
-    pub down: Lin8,
-}
-
-/// One layer's routed experts (256 at real scale), quantized. The router and
-/// shared expert are never in here - see this module's doc for why.
-pub struct Q8MoeLayer {
-    pub experts: Vec<Lin8Expert>,
-}
-
-/// Resident int8 MoE-expert linears for every layer + shared
+/// Resident int8 MoE-expert banks for every layer + shared
 /// activation-quant scratch. Single-GPU only (no sharding - `moe` is a plain
 /// `Vec` indexed by absolute layer index, not a `HashMap<usize, _>` of an
 /// owned subset the way `qwen3::q8::Q8` supports for its sharded pipeline;
@@ -130,7 +134,7 @@ pub struct Qwen35Q8 {
 
 impl Qwen35Q8 {
     /// Is `name` (e.g. `blocks.5.self_attn.q_proj.weight` or
-    /// `blocks.3.mlp.experts.17.down.weight`) one of the linears this module
+    /// `blocks.3.mlp.experts.17.down.weight`) one of the linears this tier
     /// quantizes? Mirrors `qwen3::q8::Q8::is_i8_linear`'s "leaf-name lookup"
     /// shape, extended with the per-expert-index prefix match the 256-expert
     /// MoE needs (an expert's own leaf embeds its index, so a fixed name
@@ -162,11 +166,31 @@ impl Qwen35Q8 {
         })
     }
 
-    /// Quantize+upload every layer's designated linears from `source`,
-    /// streaming one tensor at a time (peak host RAM ~= one tensor of f32 -
-    /// same discipline as `qwen3::q8::Q8::build`/`paramstore`'s own streaming
-    /// load). `n_tokens = b*t`, matching the model's own activation extent.
-    #[allow(clippy::too_many_arguments)]
+    /// Is `name` one of the shared expert's three projections - the leaves that
+    /// live in the int8 banks (as block `n_experts`) instead of the fp32 store
+    /// whenever [`Self::shared_fits_bank`].
+    pub fn is_shared_expert_linear(name: &str) -> bool {
+        name.strip_prefix("blocks.")
+            .and_then(|r| r.split_once('.'))
+            .is_some_and(|(_, leaf)| matches!(leaf, "mlp.shared_expert.gate.weight" | "mlp.shared_expert.up.weight" | "mlp.shared_expert.down.weight"))
+    }
+
+    /// The shared expert can ride in the routed experts' banks only if its
+    /// matrices have the routed experts' shape.
+    pub fn shared_fits_bank(cfg: &Qwen35Config) -> bool {
+        cfg.shared_expert_intermediate_size == cfg.moe_intermediate_size
+    }
+
+    /// Quantize+upload every layer's expert banks from `source`, one
+    /// projection at a time (peak host RAM ~= one bank's packed words - a
+    /// quarter of the fp32 bank - never the model; same discipline as
+    /// `paramstore`'s own streaming load). `n_tokens = b*t`, matching the
+    /// model's own activation extent.
+    ///
+    /// A source that lends llama.cpp's stacked tensors under `gguf_load::
+    /// bank_name` is read whole (a Q8_0 stack is a byte repack); any other
+    /// source (the tiny test checkpoints) is read expert by expert and
+    /// assembled, so both land in the same bank layout.
     pub fn build(
         gpu: &Gpu,
         source: &dyn checkpoint::TensorSource,
@@ -176,32 +200,27 @@ impl Qwen35Q8 {
         k_quant_pack: usize,
     ) -> Qwen35Q8 {
         let mut up = paramstore::upload::Uploader::new(gpu);
-        let mut mk = |name: &str, n: usize, k: usize| -> Lin8 {
-            let (pb, sb) = model::int8::upload_quantized(&mut up, source, name, n, k).unwrap_or_else(|e| panic!("qwen35 q8: {e}"));
-            Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 }
-        };
-
-        let d = cfg.d_model as usize;
-        let ff = cfg.moe_intermediate_size as usize;
+        let (d, ff) = (cfg.d_model as usize, cfg.moe_intermediate_size as usize);
+        let shared = Self::shared_fits_bank(cfg);
 
         let mut moe = Vec::with_capacity(cfg.n_layers as usize);
         for l in 0..cfg.n_layers as usize {
-            let mut experts = Vec::with_capacity(cfg.n_experts as usize);
-            for e in 0..cfg.n_experts {
-                let pe = |s: &str| format!("blocks.{l}.mlp.experts.{e}.{s}");
-                experts.push(Lin8Expert {
-                    gate: mk(&pe("gate.weight"), ff, d),
-                    up: mk(&pe("up.weight"), ff, d),
-                    down: mk(&pe("down.weight"), d, ff),
-                });
-            }
-            moe.push(Q8MoeLayer { experts });
+            let gate = build_bank(&mut up, source, cfg, l, "gate", ff, d, shared);
+            let up_bank = build_bank(&mut up, source, cfg, l, "up", ff, d, shared);
+            let down = build_bank(&mut up, source, cfg, l, "down", d, ff, shared);
+            let router_ext = shared.then(|| {
+                let mut w = Vec::with_capacity((cfg.n_experts as usize + 1) * d);
+                for name in [format!("blocks.{l}.mlp.router.weight"), format!("blocks.{l}.mlp.shared_expert_gate.weight")] {
+                    assert!(source.with_tensor(&name, &mut |t| w.extend_from_slice(t)), "qwen35 q8: missing {name}");
+                }
+                gpu.storage_init(&format!("blocks.{l}.mlp.router_ext"), &w)
+            });
+            moe.push(Q8MoeLayer { gate, up: up_bank, down, router_ext });
         }
 
         // `d_model` is the only width this module's sole quant call site
         // (`xn2`, feeding every expert's gate/up) ever reads -- the expert's
-        // own `h` is quantized separately inside `expert_fwd_i8`'s own
-        // scratch, not through this shared buffer.
+        // own `h` is quantized separately by `moe_swiglu_quant`.
         let sx = gpu.storage(n_tokens.max(1) as u64);
         let xq = gpu.storage(((n_tokens as u64) * (d as u64) / 4).max(1));
         Qwen35Q8 { moe, sx, xq, k_max_abs_row, k_quant_pack }
@@ -211,11 +230,53 @@ impl Qwen35Q8 {
     /// per-token scales `self.sx`. Call once per distinct input (shared by
     /// every linear that reads that SAME input, e.g. xn1 -> q/k/v-proj); a
     /// later `quant` call for a DIFFERENT input safely overwrites `xq`/`sx`
-    /// once every earlier consumer's `expert_fwd_i8` step has already been
-    /// pushed ahead of it in the same (or an earlier, already-submitted) step
-    /// list - identical in spirit to `qwen3::q8::Q8::quant`'s own doc.
+    /// once every earlier consumer's step has already been pushed ahead of it
+    /// in the same (or an earlier, already-submitted) step list - identical in
+    /// spirit to `qwen3::q8::Q8::quant`'s own doc.
     pub fn quant(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, n_tokens: u32) {
         s.push(gpu.step(self.k_max_abs_row, &[x, &self.sx], &[n_tokens, k], n_tokens));
         s.push(gpu.step(self.k_quant_pack, &[x, &self.sx, &self.xq], &[n_tokens, k], n_tokens * k / 4));
     }
+}
+
+/// One fused bank of `proj` (`gate`/`up`: `[ff, d]` per expert; `down`: `[d,
+/// ff]`), the shared expert appended as the last block when `with_shared`.
+#[allow(clippy::too_many_arguments)]
+fn build_bank(
+    up: &mut paramstore::upload::Uploader,
+    source: &dyn checkpoint::TensorSource,
+    cfg: &Qwen35Config,
+    layer: usize,
+    proj: &str,
+    n: usize,
+    k: usize,
+    with_shared: bool,
+) -> Bank8 {
+    let e = cfg.n_experts as usize;
+    // (source tensor, rows it contributes)
+    let mut parts: Vec<(String, usize)> = Vec::new();
+    let stacked = crate::gguf_load::bank_name(layer, proj);
+    if source.numel(&stacked) == Some(e * n * k) {
+        parts.push((stacked, e * n));
+    } else {
+        parts.extend((0..e).map(|ei| (format!("blocks.{layer}.mlp.experts.{ei}.{proj}.weight"), n)));
+    }
+    if with_shared {
+        parts.push((format!("blocks.{layer}.mlp.shared_expert.{proj}.weight"), n));
+    }
+    let rows: usize = parts.iter().map(|p| p.1).sum();
+    let gpu = up.gpu();
+    let (packed, scale) = (gpu.storage((rows * k / 4) as u64), gpu.storage((rows * k / model::int8::GROUP) as u64));
+    let (mut word_off, mut scale_off) = (0u64, 0u64);
+    for (name, part_rows) in &parts {
+        let (words, scales) =
+            model::int8::quantize_from(source, name, *part_rows, k).unwrap_or_else(|| panic!("qwen35 q8: '{name}' is not present in this source"));
+        gpu.write_at(&packed, word_off, &words);
+        gpu.write_f32_at(&scale, scale_off, &scales);
+        word_off += words.len() as u64;
+        scale_off += scales.len() as u64;
+        up.account(4 * (words.len() + scales.len()) as u64);
+        up.maybe_drain(&packed);
+    }
+    Bank8 { packed, scale, n: n as u32, k: k as u32, blocks: (e + usize::from(with_shared)) as u32 }
 }
