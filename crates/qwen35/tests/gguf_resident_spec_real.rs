@@ -13,37 +13,34 @@
 //! a drafter that is always right never exercises the accept/reject logic or
 //! the recurrent-state rollback the losslessness depends on.
 //!
-//! **Where that gate can and cannot be exact, measured.** Plain decode
-//! advances one token per `run_decode_batch` dispatch set; a speculative
-//! verify advances its rows per `run_prefill_chunk_stage`. Those compute the
-//! same function in a different reduction order, and on the real checkpoint
-//! the difference is large: `how_far_apart_are_the_decode_tape_and_the_chunk_
-//! tape_on_the_real_checkpoint` measures ~1.0-1.6 absolute on logits of order
-//! ten, at every position past the first.
+//! **Is it lossless against plain decode, token for token?** It is, because a
+//! verify round of up to 32 rows runs the decode tape's own machinery
+//! (`Qwen35::run_exact_round`: the same fused kernels, GEMV and paged attention,
+//! and one launch that takes a recurrent layer's rows in order), so the logits of
+//! a verify round are the bits plain decode produces for the same tokens
+//! (`how_far_apart_are_the_decode_tape_and_the_chunk_tape_on_the_real_checkpoint`
+//! asserts a distance of exactly zero, and `an_empty_draft_isolates_the_tape_...`
+//! asserts the same token stream).
 //!
-//! It reaches the ARGMAX at 1 of 24 positions - and at exactly the position
-//! whose top-two margin is 0.0169, where every other position's margin is
-//! 0.33 to 6.7. That is a genuine near-tie being broken differently by two
-//! equally valid tapes, on a prompt (`"The capital city of France is"`) whose
-//! own continuation is ambiguous; both results are fluent and correct
-//! ("...France is Paris" against "...Germany is Berlin").
+//! That is not free to get. The weights and the activations of this model are
+//! int8, so a tape that is only algebraically equal to plain decode moves a
+//! rounding decision somewhere in a late layer and the difference cascades to
+//! ~1.0-1.6 absolute on logits of order ten - the size of the quantisation
+//! noise, not of an rounding error. It reached the argmax at the position
+//! with a 0.0169 top-two margin and nowhere else, which looked like a
+//! near-tie broken two ways and was recorded here as "a pre-existing numerical
+//! property of the stack". It was not a property of the model but of the
+//! chunk tape: its attention is an online-softmax flash kernel and, past one
+//! row, its recurrence is the chunked-parallel form - different arithmetic from
+//! the decode tape's separate score/softmax/apply and its sequential recurrence.
+//! A round above 32 rows (a prompt round) still takes the chunk tape, and
+//! `Qwen35GgufInstance::set_exact_rounds(false)` takes it for short ones too, which
+//! is how the distance is still measured.
 //!
-//! So byte-identity to `generate` is not a property any speculative
-//! implementation over the chunk tape can have here - confirmed by driving
-//! this very loop with a drafter that proposes NOTHING, which reduces the
-//! accept/reject logic to a no-op and still diverges at exactly that token -
-//! and asserting it would blame this crate's speculation for a pre-existing
-//! numerical property of the stack.
-//!
-//! What IS asserted, exactly and without tolerance, is that speculation
-//! changes nothing *on a fixed tape*
-//! (`speculative_decoding_is_exactly_equivalent_to_the_same_tape_without_speculation`,
-//! measured with 9 of 17 proposals rejected, so the rollback runs on most
-//! rounds) - which is precisely the claim the accept/reject logic and the
-//! rollback are responsible for. The same claim is additionally gated against
-//! `generate`-equivalent plain decoding at `tiny()` dims in
-//! `tests/spec_decode.rs`, where the two tapes DO agree in argmax
-//! (`tests/decode_step.rs` asserts that) and the same code runs.
+//! The accept/reject logic and the recurrent-state rollback are gated on a fixed
+//! tape as well (`speculative_decoding_is_exactly_equivalent_to_the_same_tape_
+//! without_speculation`, with 9 of 17 proposals rejected so the rollback runs on
+//! most rounds), and at `tiny()` dims in `tests/spec_decode.rs`.
 //!
 //! **Is it faster, and by how much?** That is decided by one number - draft
 //! tokens accepted per round - and by a cost this particular model imposes
@@ -237,25 +234,38 @@ fn report(label: &str, r: &Run, stats: Option<&qwen35::model::SpecDecodeStats>, 
 /// each position of a real continuation: the `[vocab]` logits a single-token
 /// decode step produces, against the logits the same position gets from a
 /// one-row prefill chunk. Reported per position: worst absolute difference,
-/// whether the argmax moved, and the winning token's margin over the
-/// runner-up - because a tape difference only becomes a different TOKEN where
-/// that margin is smaller than the difference, and on a prompt whose
-/// continuation is genuinely ambiguous the margin can be near zero.
+/// How far apart the decode tape and a one-row verify round are, on the real
+/// checkpoint: the maximum absolute logit difference and whether the argmax
+/// moved, at every position of a 24-token continuation.
 ///
-/// `tests/decode_step.rs` asserts these two tapes agree in argmax at `tiny()`
-/// dims on random weights (bound 2e-2 on logits). This measures the same
-/// crossing where it actually matters.
+/// With the exact round (the default) the distance is zero: the two tapes are
+/// one tape. With it withdrawn the same measurement is what the chunk tape's
+/// own arithmetic costs - about 1.0-1.6 on logits of order ten, which is the
+/// quantisation noise of this W8A8 stack and reaches the argmax wherever the
+/// top-two margin is smaller than it. The second is printed, not asserted: it
+/// is a property of the chunk tape that prompt rounds still run.
 #[test]
 fn how_far_apart_are_the_decode_tape_and_the_chunk_tape_on_the_real_checkpoint() {
     let Some(inst) = load() else { return };
     let prompt = inst.tokenize("The capital city of France is");
     let steps = 24u32;
 
-    let trace = inst.tape_comparison_trace(&prompt, steps).expect("tape comparison trace");
-    let (dec_logits, chunk_logits) = (&trace.decode, &trace.chunk);
+    let exact = inst.tape_comparison_trace(&prompt, steps).expect("tape comparison trace");
+    let (worst, moved) = distance(&exact.decode, &exact.chunk, true);
+    assert_eq!(worst, 0.0, "a one-row verify round differs from a decode step by {worst:e} on logits");
+    assert_eq!(moved, 0, "the argmax of a verify round moved at {moved}/{steps} positions");
 
-    println!("\ndecode tape vs one-row chunk tape, real checkpoint, {steps} positions:");
-    println!("   pos |   maxabs |  argmax | top1-top2 margin (decode tape)");
+    inst.set_exact_rounds(false);
+    let chunk = inst.tape_comparison_trace(&prompt, steps).expect("chunk tape trace");
+    inst.set_exact_rounds(true);
+    println!("\ndecode tape vs the chunk tape proper (exact rounds withdrawn), real checkpoint, {steps} positions:");
+    let (worst, moved) = distance(&chunk.decode, &chunk.chunk, false);
+    println!("  worst maxabs over {steps} positions = {worst:e}, argmax moved at {moved}/{steps} positions");
+}
+
+/// Max absolute logit difference between two traces and how many positions the
+/// argmax moved at; `quiet` suppresses the per-position table.
+fn distance(dec_logits: &[Vec<f32>], chunk_logits: &[Vec<f32>], quiet: bool) -> (f32, usize) {
     let mut mismatches = 0usize;
     let mut worst = 0.0f32;
     for (i, (d, c)) in dec_logits.iter().zip(chunk_logits).enumerate() {
@@ -269,35 +279,22 @@ fn how_far_apart_are_the_decode_tape_and_the_chunk_tape_on_the_real_checkpoint()
         if ad != ac {
             mismatches += 1;
         }
-        println!("  {i:>4} | {err:>8.2e} | {:>7} | {margin:>8.4}{}", if ad == ac { "same" } else { "MOVED" }, if ad != ac { "   <-- a different token" } else { "" });
+        if !quiet {
+            println!("  {i:>4} | {err:>8.2e} | {:>7} | {margin:>8.4}{}", if ad == ac { "same" } else { "MOVED" }, if ad != ac { "   <-- a different token" } else { "" });
+        }
     }
-    println!("  worst maxabs over {steps} positions = {worst:e}, argmax moved at {mismatches}/{steps} positions");
-    println!(
-        "  -> a speculative decoder built on the chunk tape can be byte-identical to plain decode \
-         only where this count is zero; where it is not, the two tapes simply pick different tokens \
-         and no accept/reject logic can reconcile them."
-    );
+    (worst, mismatches)
 }
 
-/// **Isolating diagnostic**: when the speculative path and the plain path
-/// disagree, is the cause the accept/reject logic, or the fact that the two
-/// paths run numerically different tapes for the same arithmetic?
+/// **Isolating check**: when the speculative path and the plain path disagree,
+/// is the cause the accept/reject logic, or the two paths running different
+/// tapes for the same arithmetic?
 ///
-/// This drives the speculative loop with a drafter that proposes NOTHING.
-/// Every round is then a one-row verify chunk committing exactly one token -
-/// no proposals, no rejections, no rollback, the accept/reject logic reduced
-/// to a no-op - so the ONLY remaining difference from plain decode is which
-/// dispatch shape computed the row. Whatever it shows is therefore a property
-/// of the two tapes and not of this crate's speculation, which is why nothing
-/// about the token sequence is asserted here; the magnitude of that tape
-/// difference is measured by the test above, and the losslessness of the
-/// speculation proper is gated exactly, on a fixed tape, by the test below.
-///
-/// Measured on the real checkpoint: it diverges from `generate` at token 7 of
-/// `"The capital city of France is"`, both continuations fluent and correct
-/// ("...France is Paris" against "...Germany is Berlin"), and runs at 3.7
-/// tok/s against plain decode's 6.6 - the one-row chunk handicap that
-/// `generate_speculative`'s own doc records as this path's known floor.
+/// This drives the speculative loop with a drafter that proposes NOTHING. Every
+/// round is then a one-row verify chunk committing exactly one token - no
+/// proposals, no rejections, no rollback - so the ONLY difference from plain
+/// decode is which dispatch shape computed the row. The two must produce the
+/// same tokens: the verify round is the decode tape.
 #[test]
 fn an_empty_draft_isolates_the_tape_from_the_accept_reject_logic() {
     let Some(inst) = load() else { return };
@@ -309,36 +306,21 @@ fn an_empty_draft_isolates_the_tape_from_the_accept_reject_logic() {
     println!("\nempty-draft isolation, {max_new} tokens, greedy:");
     report("plain (decode tape)", &base, None, base.tok_s);
     report("empty draft (chunk)", &empty, Some(&stats), base.tok_s);
-    assert_eq!(stats.proposed, 0, "this diagnostic requires a drafter that proposes nothing");
+    assert_eq!(stats.proposed, 0, "this check requires a drafter that proposes nothing");
     assert_eq!(stats.target_forwards, stats.rounds, "an empty draft must never trigger a re-commit forward");
 
-    match base.ids.iter().zip(&empty.ids).position(|(a, b)| a != b) {
-        None => println!("  -> the one-row chunk tape and the decode tape agree token for token"),
-        Some(i) => println!(
-            "  -> the tapes diverge at token {i}: decode tape {:?} vs chunk tape {:?}\n     plain: {:?}\n     chunk: {:?}",
-            base.ids[i], empty.ids[i], base.text, empty.text
-        ),
-    }
-    assert!(empty.text.contains("Paris"), "the chunk tape must still continue this prompt with Paris, got {:?}", empty.text);
+    assert_eq!(base.ids, empty.ids, "a one-row verify round and a decode step chose different tokens:\n  plain: {:?}\n  chunk: {:?}", base.text, empty.text);
 }
 
-/// **The losslessness gate**, stated the only way it can be true at this
-/// scale: speculative decoding must produce EXACTLY what non-speculative
-/// decoding produces *on the same tape*.
+/// **The losslessness gate**: speculative decoding must produce EXACTLY what
+/// plain decoding produces, token for token, at `temp = 0` - the verify round is
+/// the decode tape, so there is nothing for the accept/reject decision or the
+/// recurrent-state rollback to hide behind.
 ///
-/// The baseline is this same loop driven by a drafter that proposes nothing,
-/// which reduces every round to one committed token per verify chunk - no
-/// proposals, no rejections, no rollback - while leaving the tape, the
-/// positions and the cache handling identical. The comparison therefore holds
-/// everything fixed except the thing this crate is responsible for (the
-/// accept/reject decision and the recurrent-state rollback), so a mismatch
-/// here is a bug in that logic and cannot be anything else.
-///
-/// Comparing against `generate` instead would be a weaker and misleading
-/// gate: it folds in the decode-tape/chunk-tape difference that
-/// `an_empty_draft_isolates_the_tape_from_the_accept_reject_logic` shows is
-/// present with zero speculation involved, so it would fail for a reason
-/// speculative decoding did not cause and could not fix.
+/// It is also checked against the same loop driven by a drafter that proposes
+/// nothing, which holds the tape, the positions and the cache handling fixed and
+/// varies only what this crate is responsible for: a mismatch against THAT is a
+/// bug in the accept/reject logic or the rollback and cannot be anything else.
 ///
 /// The drafter is the n-gram one, which on this prompt is wrong most of the
 /// time - measured 9 of 17 proposals accepted over 16 rounds, so most rounds
@@ -350,12 +332,14 @@ fn speculative_decoding_is_exactly_equivalent_to_the_same_tape_without_speculati
     let prompt = inst.tokenize("The capital city of France is");
     let max_new = 24u32;
 
+    let base = plain(&inst, &prompt, max_new);
     let (baseline, base_stats) = speculative(&inst, &prompt, max_new, 7, &mut |_c: &[u32], _w: u32| Vec::new());
     let (spec, stats) = speculative(&inst, &prompt, max_new, 7, &mut ngram_draft);
 
     println!("\nsame-tape equivalence, {max_new} tokens, greedy:");
-    report("no speculation", &baseline, Some(&base_stats), baseline.tok_s);
-    report("n-gram speculation", &spec, Some(&stats), baseline.tok_s);
+    report("plain decode", &base, None, base.tok_s);
+    report("no speculation", &baseline, Some(&base_stats), base.tok_s);
+    report("n-gram speculation", &spec, Some(&stats), base.tok_s);
     println!("  text: {:?}", spec.text);
 
     assert!(stats.proposed > 0, "this gate needs a drafter that actually proposes something");
@@ -366,19 +350,19 @@ fn speculative_decoding_is_exactly_equivalent_to_the_same_tape_without_speculati
         stats.proposed
     );
     assert_eq!(spec.ids, baseline.ids, "speculation changed the output on a fixed tape - the accept/reject logic or the recurrent-state rollback is wrong");
-    assert_eq!(spec.text, baseline.text, "speculation changed the decoded text on a fixed tape");
+    assert_eq!(spec.ids, base.ids, "speculation changed the output against plain decoding");
+    assert_eq!(spec.text, base.text, "speculation changed the decoded text against plain decoding");
 }
 
-/// **The quality gate against the plain path.** Both paths must answer the
-/// question correctly; they are NOT required to answer it with the same
-/// tokens, for the tape reason the two tests above establish and measure.
+/// **The answer gate.** Both paths must answer the question correctly.
 ///
-/// This is the weaker claim that survives that finding, and it is still worth
-/// gating: a speculative path that had, say, an off-by-one in its positions
-/// would produce fluent text that stopped answering the prompt, and nothing
-/// short of an assertion on the ANSWER catches that. "Finite and
-/// non-degenerate" is not a correctness check; a fact the model cannot get
-/// wrong, asked through the plainest possible request, is.
+/// Token equality (above) says the two paths agree; it does not say they are
+/// right, and a speculative path with, say, an off-by-one in its positions
+/// would produce fluent text that stopped answering the prompt in exactly the
+/// same way the plain path would not. Nothing short of an assertion on the
+/// ANSWER catches that. "Finite and non-degenerate" is not a correctness check;
+/// a fact the model cannot get wrong, asked through the plainest possible
+/// request, is.
 #[test]
 fn speculative_decode_still_answers_the_factual_prompt() {
     let Some(inst) = load() else { return };
@@ -418,13 +402,12 @@ fn speculative_decode_speedup_ladder() {
     println!("\nspeedup ladder, {max_new} tokens, greedy, one load:");
     report("plain decode", &base, None, base.tok_s);
 
-    // The same-tape floor: the speculative loop with nothing to speculate on.
-    // Every speedup below is quoted against PLAIN decode (what a user would
-    // actually have had), but correctness is checked against this, for the
-    // reason `speculative_decoding_is_exactly_equivalent_to_the_same_tape_
-    // without_speculation` explains.
+    // The floor: the speculative loop with nothing to speculate on. Every
+    // speedup below is quoted against PLAIN decode (what a user would actually
+    // have had), and every run must produce exactly plain decode's tokens.
     let (floor, floor_stats) = speculative(&inst, &prompt, max_new, 7, &mut |_c: &[u32], _w: u32| Vec::new());
     report("chunk tape, no spec", &floor, Some(&floor_stats), base.tok_s);
+    assert_eq!(floor.ids, base.ids, "the verify tape and the decode tape chose different tokens");
 
     // Oracle: propose exactly what that same tape goes on to produce. `ctx`
     // starts as the prompt, so the continuation index is `ctx.len() - prompt.len()`.
@@ -434,12 +417,12 @@ fn speculative_decode_speedup_ladder() {
             (0..want as usize).filter_map(|i| full.get(ctx.len() + i).copied()).collect()
         });
         report(&format!("oracle draft (k={k})"), &run, Some(&stats), base.tok_s);
-        assert_eq!(run.ids, floor.ids, "oracle-draft speculative decode changed the output at k={k}");
+        assert_eq!(run.ids, base.ids, "oracle-draft speculative decode changed the output at k={k}");
     }
 
     let (ng, stats) = speculative(&inst, &prompt, max_new, 7, &mut ngram_draft);
     report("n-gram draft (k=7)", &ng, Some(&stats), base.tok_s);
-    assert_eq!(ng.ids, floor.ids, "n-gram speculative decode changed the output");
+    assert_eq!(ng.ids, base.ids, "n-gram speculative decode changed the output");
     println!(
         "  -> the ceiling above is what a PERFECT drafter buys on this hardware. \
          It is bounded by two costs speculation does not remove: a one-row verify chunk is \
@@ -481,7 +464,8 @@ context than a pure attention stack would be.";
     let (spec, stats) = speculative(&inst, &prompt, max_new, 7, &mut ngram_draft);
     report("speculative (n-gram)", &spec, Some(&stats), base.tok_s);
 
-    assert_eq!(spec.ids, floor.ids, "speculative decoding changed the output on the repetition workload");
+    assert_eq!(floor.ids, base.ids, "the verify tape and the decode tape chose different tokens on the repetition workload");
+    assert_eq!(spec.ids, base.ids, "speculative decoding changed the output on the repetition workload");
     println!(
         "  -> {:.2} accepted draft tokens per round; break-even for this model is 2.0 \
          (a rejecting round pays a second target forward to re-commit, because its recurrent layers cannot be truncated)",

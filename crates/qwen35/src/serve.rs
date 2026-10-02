@@ -338,7 +338,7 @@ impl Engine {
             .zip(&slots)
             .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
             .collect();
-        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
+        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs, one_sequence: false };
         self.model.run_decode_batch(inputs, &caches, None)
     }
 

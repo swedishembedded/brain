@@ -856,6 +856,17 @@ impl Qwen35GgufInstance {
         }
     }
 
+    /// Every stage's [`Qwen35::set_exact_rounds`]: whether a short chunk round
+    /// (a speculative verify round, a ragged prompt tail) runs as plain decode
+    /// steps and so agrees with plain decode bit for bit. On by default; the
+    /// off position is how a test measures the chunk tape's own distance from
+    /// the decode tape.
+    pub fn set_exact_rounds(&self, on: bool) {
+        for s in &self.shards {
+            s.qwen35.set_exact_rounds(on);
+        }
+    }
+
     /// How many cards the plan placed this instance on.
     pub fn stages(&self) -> usize {
         self.shards.len()
@@ -1012,7 +1023,7 @@ impl Qwen35GgufInstance {
         let mut carry = self.embed_rows(tokens)?;
         for s in &self.shards {
             let seqs = s.caches.batch(positions);
-            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs };
+            let caches = BatchDecodeCaches { gqa_kv: &s.caches.gqa_kv, gqa_cap: s.caches.cap, seqs: &seqs, one_sequence: false };
             carry = s.qwen35.decode_batch_stage(tokens, &caches, Some(&carry));
         }
         let last = self.shards.last().expect("a plan always has at least one stage");

@@ -87,43 +87,50 @@ matrix rather than a growing cache, its memory cost does not depend on the seque
     )
 }
 
-/// **The ladder**, for the record: what one round of the chunk tape costs at
-/// every row count speculation and prefill actually use, in BOTH scratch
-/// regimes, against one decode step.
+/// **The ladder**, for the record: what one round costs at every row count
+/// speculation and prefill actually use, against one decode step.
 ///
-/// Both columns, because the fix this file exists to gate is a threshold
-/// between them (`Qwen35::set_chunk_arena_min_rows`), and a threshold quoted
-/// from one measurement of one side is a guess. Pooled is the arena open - a
-/// device fence at every layer boundary, which is what a 256-row prefill round
-/// wants; unpooled is plain allocation and a `flush` per layer, the decode
-/// tape's own discipline.
+/// Up to 32 rows a round is the exact round (`Qwen35::run_exact_round`: the
+/// decode tape's own kernels, one replayed graph per round); the chunk tape
+/// proper - which prompt rounds still run, and which
+/// `Qwen35GgufInstance::set_exact_rounds(false)` gives back for short ones - is
+/// measured beside it in both of its scratch regimes, because the threshold
+/// between them (`Qwen35::set_chunk_arena_min_rows`) is a measurement and not a
+/// guess. Pooled is the arena open - a device fence at every layer boundary,
+/// which is what a 256-row prefill round wants; unpooled is plain allocation and
+/// a `flush` per layer.
 #[test]
 fn the_verify_round_cost_ladder() {
     let Some(inst) = load() else { return };
     let prompt = warm_prompt(&inst);
 
     let dec = inst.profile_decode(&prompt, 8);
-    println!("\nchunk-tape per-round cost, real checkpoint, {}-token warm prompt:", prompt.len());
+    println!("\nper-round cost, real checkpoint, {}-token warm prompt:", prompt.len());
     println!("  decode tape, 1 row          {:>8.1} ms/row   ({:.2} tok/s)", dec.wall_s * 1e3 / dec.steps as f64, dec.tok_per_s());
     // The OTHER per-round cost, measured rather than inferred from its byte
     // count: every round that proposes anything snapshots the recurrent state
     // before verifying, because whether a restore is needed is only known
     // after.
     println!("  GDN snapshot                {:>8.2} ms/round", inst.profile_gdn_snapshot(16));
-    println!("   rows | pooled layer ms |  unpooled layer ms | pooled/unpooled | head ms | unpooled ms/row");
-    for rows in [1u32, 3, 7, 8, 16, 32, 64, 128, 256] {
+    println!("   rows | exact layer ms | chunk pooled ms | chunk unpooled ms | head ms | exact ms/row | exact vs decode x");
+    for rows in [1u32, 2, 3, 4, 7, 8, 16, 32, 64, 128, 256] {
         let rounds = if rows >= 128 { 2 } else { 6 };
+        inst.set_exact_rounds(true);
+        let exact = inst.profile_chunk_round(&prompt, rows, rounds);
+        inst.set_exact_rounds(false);
         inst.set_chunk_arena_min_rows(1);
         let pooled = inst.profile_chunk_round(&prompt, rows, rounds);
         inst.set_chunk_arena_min_rows(u32::MAX);
         let plain = inst.profile_chunk_round(&prompt, rows, rounds);
+        inst.set_exact_rounds(true);
         println!(
-            "  {rows:>5} | {:>15.1} | {:>18.1} | {:>15.2} | {:>7.1} | {:>15.2}",
+            "  {rows:>5} | {:>14.1} | {:>15.1} | {:>17.1} | {:>7.1} | {:>12.2} | {:>8.2}",
+            exact.carry_ms(),
             pooled.carry_ms(),
             plain.carry_ms(),
-            pooled.carry_ms() / plain.carry_ms(),
-            plain.head_ms(),
-            plain.carry_ms_per_row()
+            exact.head_ms(),
+            exact.carry_ms_per_row(),
+            rows as f64 * dec.wall_s * 1e3 / dec.steps as f64 / exact.round_ms(),
         );
     }
 }

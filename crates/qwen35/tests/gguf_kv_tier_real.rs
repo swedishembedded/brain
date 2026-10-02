@@ -31,7 +31,8 @@
 //! weights AND dynamically quantised activations), and that pipeline is chaotic
 //! at the 10% level: `gguf_i8_vs_fp32_real.rs` records the divergence compounding
 //! along the sequence through the recurrent state, and the same `f32` cache
-//! scored by its two dispatch shapes (the decode tape and the one-row chunk tape,
+//! scored by its two dispatch shapes (the decode tape and the one-row chunk tape
+//! with [`Qwen35GgufInstance::set_exact_rounds`] off,
 //! [`Qwen35GgufInstance::tape_comparison_trace`]) differs by a relative L2 of
 //! the same order - because a perturbation far below any KV rounding re-draws
 //! which activation values round up. So the bound on a compact tier's logits is
@@ -106,11 +107,16 @@ fn compact_kv_tiers_agree_with_the_f32_cache_on_a_real_prompt() {
     assert_eq!(reference.kv_tier(), KvTier::F32);
     let prompt = reference.tokenize(&text);
     assert!(prompt.len() > 700 && prompt.len() + (STEPS as usize) < CAP as usize, "prompt of {} tokens is out of range for this test", prompt.len());
+    // The floor needs two DIFFERENT renderings of the same cache, and a short
+    // chunk round now IS the decode tape unless that is withdrawn; the decode
+    // side of the trace is unaffected either way.
+    reference.set_exact_rounds(false);
     let trace = reference.tape_comparison_trace(&prompt, STEPS).expect("f32 trace");
     drop(reference);
     println!("prompt {} tokens; f32 greedy continuation: {:?}", prompt.len(), trace.ids);
 
-    // The floor: the f32 cache through its two dispatch shapes.
+    // The floor: the f32 cache through its two dispatch shapes, the decode tape
+    // and the chunk tape proper.
     let floor = Stats::of(&trace.decode, &trace.chunk, &trace.ids);
     println!("f32 decode tape vs f32 chunk tape (the numerics' own floor): {floor}");
 

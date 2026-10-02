@@ -50,7 +50,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use gpu_core::select::Dtype;
+use gpu_core::select::{Dtype, DECODE_REGIME_MAX_ROWS, I8_GEMV_MAX_ROWS};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use paramstore::{ParamStore, Role};
 
@@ -391,6 +391,19 @@ const HEAD_ARGMAX_CHUNKS: u32 = 256;
 /// its own: one shared arena would be evicted by each of them in turn.
 pub(crate) const DECODE_ARENA: &str = "qwen35.decode";
 
+/// The scratch arenas of a verify round of `2..=8` rows (one row is a decode
+/// step and uses [`DECODE_ARENA`]), one per row count: an arena replays a fixed
+/// sequence of requests and every row count asks for a different one.
+const ROUND_ARENAS: [&str; 7] = ["qwen35.round.2", "qwen35.round.3", "qwen35.round.4", "qwen35.round.5", "qwen35.round.6", "qwen35.round.7", "qwen35.round.8"];
+
+/// The arena a round of `rows` consecutive tokens of one sequence replays.
+fn round_arena(rows: u32) -> &'static str {
+    match rows {
+        0 | 1 => DECODE_ARENA,
+        r => ROUND_ARENAS[r as usize - 2],
+    }
+}
+
 /// The scratch arena the logits head of a decode step replays.
 pub(crate) const HEAD_ARENA: &str = "qwen35.head";
 
@@ -664,6 +677,9 @@ enum GdnCall<'a> {
     Whole,
     Chunk(model::gdn_mixer::GdnStream<'a>),
     Decode(&'a [model::gdn_mixer::GdnStream<'a>]),
+    /// `n` consecutive decode steps of one sequence, in order - a short verify
+    /// round, which must reproduce plain decode's arithmetic row by row.
+    Rows(model::gdn_mixer::GdnStream<'a>),
 }
 
 /// Which cached-KV shape a [`Qwen35::layer_gqa_fwd`] call is running in.
@@ -901,6 +917,9 @@ pub struct Qwen35 {
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
     chunk_arena_min_rows: Cell<u32>,
+    /// Whether a short chunk round runs as plain decode steps - see
+    /// [`Self::set_exact_rounds`].
+    exact_rounds: Cell<bool>,
     /// Whether a decode step may use the native fused kernels where the device
     /// offers them - see [`Self::set_decode_fusion`].
     decode_fusion: Cell<bool>,
@@ -978,6 +997,13 @@ pub(crate) struct BatchDecodeCaches<'a> {
     pub gqa_cap: u32,
     /// One entry per batch row, in the same order as the `tokens` argument.
     pub seqs: &'a [BatchSeq<'a>],
+    /// The rows are CONSECUTIVE tokens of ONE sequence, not unrelated
+    /// sequences: every entry of `seqs` names the same `phys` and the same
+    /// recurrent buffers, at successive `pos`. A Gated-DeltaNet layer then has
+    /// to take the rows in order, each from the state the previous one left,
+    /// which is what makes this a verify round and not a batch - see
+    /// [`Qwen35::run_exact_round`].
+    pub one_sequence: bool,
 }
 
 /// Cold copies of every Gated-DeltaNet layer's recurrent state and conv
@@ -1481,6 +1507,7 @@ impl Qwen35 {
             taps: RefCell::new(Vec::new()),
             tapped: RefCell::new(Vec::new()),
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
+            exact_rounds: Cell::new(true),
             decode_fusion: Cell::new(true),
         }
     }
@@ -1505,6 +1532,22 @@ impl Qwen35 {
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
+    }
+
+    /// **Run a short chunk round as plain decode steps, or as a chunk.** On
+    /// (the default), a round of up to [`DECODE_REGIME_MAX_ROWS`] rows is
+    /// computed by the decode tape's own machinery and agrees with decoding the
+    /// same tokens one at a time to the last bit (see
+    /// [`Self::run_exact_round`]); off, every round takes the chunk tape, whose
+    /// attention and recurrence are different arithmetic. Only a device that is
+    /// offered the native recurrent kernel has the exact form at all.
+    ///
+    /// The off position exists to MEASURE the chunk tape: the distance between
+    /// two correct renderings of the same model is the floor a numerical change
+    /// elsewhere (a narrower KV tier, say) is judged against, and with the
+    /// exact round on that distance is zero.
+    pub fn set_exact_rounds(&self, on: bool) {
+        self.exact_rounds.set(on);
     }
 
     /// **Turn the decode step's native fused kernels off (or back on).** On by
@@ -1841,6 +1884,7 @@ impl Qwen35 {
             GdnCall::Whole => GdnShape { b: self.b, h: nvh, t: self.t, dk: khd, dv: vhd, chunk: self.chunk },
             GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
             GdnCall::Decode(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
+            GdnCall::Rows(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn: gdn_shape, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
         let weights = model::gdn_mixer::GdnMixerWeights {
@@ -1862,6 +1906,11 @@ impl Qwen35 {
                 let gated = fused.unwrap_or_else(|| {
                     model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams)
                 });
+                (gated, None)
+            }
+            GdnCall::Rows(stream) => {
+                let gated = model::gdn_mixer::gdn_mixer_rows_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, &stream, n)
+                    .expect("exact_round_ok said the device serves the multi-row recurrent kernel at this shape");
                 (gated, None)
             }
             GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
@@ -2816,7 +2865,7 @@ impl Qwen35 {
             gdn_state: caches.gdn_state,
             gdn_hist: caches.gdn_hist,
         }];
-        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs };
+        let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: false };
         self.run_decode_batch(&[token_id], &batch, input_override)
     }
 
@@ -2870,8 +2919,14 @@ impl Qwen35 {
         // The linears' activation scratch is allocated through `self.ops`, which
         // runs on its own handle of the same device, so it has an arena of its
         // own to open.
-        let _ops_scratch = self.ops.gpu().scratch_scope_in(DECODE_ARENA);
-        let _scratch = g.scratch_scope_in(DECODE_ARENA);
+        //
+        // A round of one sequence's rows has an arena per row count: the arena
+        // replays a fixed request sequence, and a different count is a
+        // different one. One row is the decode step itself and shares its arena
+        // (and, with it, its graph).
+        let arena = if caches.one_sequence { round_arena(bsz) } else { DECODE_ARENA };
+        let _ops_scratch = self.ops.gpu().scratch_scope_in(arena);
+        let _scratch = g.scratch_scope_in(arena);
         let _pass = g.pass_scope();
 
         // Every host->device write of the token comes BEFORE the first
@@ -2973,7 +3028,12 @@ impl Qwen35 {
                 LayerType::Linear => {
                     let streams: Vec<model::gdn_mixer::GdnStream> =
                         caches.seqs.iter().map(|s| model::gdn_mixer::GdnStream { state: &s.gdn_state[l], hist: &s.gdn_hist[l] }).collect();
-                    self.layer_gdn_fwd_pre(l, &xn1, pre1, epilogue, bsz, GdnCall::Decode(&streams)).0
+                    let call = if caches.one_sequence {
+                        GdnCall::Rows(model::gdn_mixer::GdnStream { state: &caches.seqs[0].gdn_state[l], hist: &caches.seqs[0].gdn_hist[l] })
+                    } else {
+                        GdnCall::Decode(&streams)
+                    };
+                    self.layer_gdn_fwd_pre(l, &xn1, pre1, epilogue, bsz, call).0
                 }
                 LayerType::Full => {
                     let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
@@ -3125,6 +3185,10 @@ impl Qwen35 {
             "qwen35::run_prefill_chunk_stage: a LoRA build's adapter scratch holds {} rows, chunk is {n}",
             self.b * self.t
         );
+
+        if self.exact_round_ok(n) {
+            return self.run_exact_round(tokens, pos_start, caches, input_override);
+        }
 
         let mut res = if self.shard.embed {
             assert!(
@@ -3335,6 +3399,92 @@ impl Qwen35 {
         } else {
             res
         }
+    }
+
+    /// Whether a round of `n` rows runs as plain decode steps
+    /// ([`Self::run_exact_round`]) rather than as a chunk.
+    ///
+    /// Up to [`DECODE_REGIME_MAX_ROWS`] rows, where the device is offered the
+    /// native recurrent kernel the decode tape runs on and
+    /// [`Self::set_exact_rounds`] has not withdrawn it. Not under LoRA (its
+    /// adapter scratch is sized for the chunk shape) and not while a hidden tap
+    /// is armed (the tap reads the residual between layers, which a replayed
+    /// pass cannot do). Everything else keeps the chunk tape, which is also
+    /// what a device without the native kernels runs, at the tolerance
+    /// `tests/decode_step.rs` gates.
+    fn exact_round_ok(&self, n: u32) -> bool {
+        let c = &self.cfg;
+        let nvh = c.linear_num_value_heads;
+        let shape = model::gdn_mixer::GdnMixerShape {
+            gdn: GdnShape { b: 1, h: nvh, t: n, dk: c.linear_key_head_dim, dv: c.linear_value_head_dim, chunk: 1 },
+            nkh: c.linear_num_key_heads,
+            conv_kernel: c.linear_conv_kernel_dim,
+            rms_eps: c.rms_eps,
+        };
+        n <= DECODE_REGIME_MAX_ROWS
+            && self.exact_rounds.get()
+            && self.decode_fusion.get()
+            && c.lora.is_none()
+            && self.taps.borrow().is_empty()
+            && model::gdn_mixer::rows_fused_offered(&self.gpu, &shape)
+    }
+
+    /// **A short round as plain decode steps.** `tokens.len()` consecutive
+    /// tokens of one sequence, computed by the decode tape's own machinery and
+    /// therefore to its own bits: the same fused kernels, the same GEMV, the
+    /// same paged attention, and for the recurrent layers one launch that takes
+    /// the rows in order from the state the previous row left
+    /// ([`GdnCall::Rows`]).
+    ///
+    /// This is what a speculative verify round has to be. The weights and
+    /// activations are int8, so a tape that is merely algebraically equal moves
+    /// rounding decisions in late layers and the noise cascades to about a logit
+    /// at the head; verifying on that tape accepts and rejects tokens by a
+    /// different arithmetic than the plain decode it promises to reproduce
+    /// (`tests/chunk_tape_decode_parity.rs`). The chunk tape's attention (an
+    /// online-softmax flash kernel) and, past the first row, its chunked-parallel
+    /// recurrence are different arithmetic; this path has neither. It is also the
+    /// faster one at these row counts - one replayed graph per round, no
+    /// per-layer allocation - for the reasons the decode tape is
+    /// (`run_decode_batch`).
+    ///
+    /// The rows go through the batched decode machinery in groups of at most
+    /// [`I8_GEMV_MAX_ROWS`], the widest the native int8 GEMV serves in one pass
+    /// over the weights; a longer round is several groups, in order. Each group
+    /// is a whole pass over every layer, so the state hand-off between them is
+    /// the same one a decode step makes.
+    ///
+    /// Same contract as [`Self::run_prefill_chunk_stage`]: `[n, d_model]`,
+    /// final-normed on a head stage, the raw residual block otherwise.
+    fn run_exact_round(&self, tokens: &[u32], pos_start: u32, caches: &DecodeCaches, input_override: Option<&[f32]>) -> DeviceBuffer {
+        let d = self.cfg.d_model as usize;
+        assert!(
+            caches.gqa_cap > 0 && caches.gqa_base_row.is_multiple_of(caches.gqa_cap),
+            "qwen35::run_exact_round: gqa_base_row {} is not a whole number of {}-row blocks",
+            caches.gqa_base_row,
+            caches.gqa_cap
+        );
+        let phys = caches.gqa_base_row / caches.gqa_cap;
+        let group = |start: usize, len: usize| -> DeviceBuffer {
+            let seqs: Vec<BatchSeq> = (0..len)
+                .map(|i| BatchSeq { phys, pos: pos_start + (start + i) as u32, gdn_state: caches.gdn_state, gdn_hist: caches.gdn_hist })
+                .collect();
+            let batch = BatchDecodeCaches { gqa_kv: caches.gqa_kv, gqa_cap: caches.gqa_cap, seqs: &seqs, one_sequence: true };
+            let x = input_override.map(|x| &x[start * d..(start + len) * d]);
+            self.run_decode_batch(&tokens[start..start + len], &batch, x)
+        };
+        let step = I8_GEMV_MAX_ROWS as usize;
+        if tokens.len() <= step {
+            return group(0, tokens.len());
+        }
+        // Each group's output is read before the next group is issued, which is
+        // also the drain the scratch arenas require between passes.
+        let mut out = Vec::with_capacity(tokens.len() * d);
+        for start in (0..tokens.len()).step_by(step) {
+            let len = step.min(tokens.len() - start);
+            out.extend(self.gpu.read(&group(start, len), len * d));
+        }
+        self.gpu.storage_init("qwen35.round.out", &out)
     }
 
     /// Whether pushing a prompt through this build in multi-row ROUNDS
