@@ -144,7 +144,7 @@ use model::paged::{BlockAllocator, BlockTable};
 use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
-use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, Qwen35};
+use crate::model::{pipelines, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s window cap. No on-device
 /// multi-step schedule is built (see module doc) - 1 keeps
@@ -182,12 +182,16 @@ pub struct EngineOptions {
     pub kv_tier: KvTier,
     /// Prompt tokens per prefill round.
     pub prefill_chunk: u32,
+    /// Record a decode step once per batch shape and replay it (`Qwen35::
+    /// record_decode`) instead of building it every token. Only the int8 expert
+    /// tier can be recorded; for an fp32 engine this is ignored.
+    pub decode_tapes: bool,
 }
 
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK }
+        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true }
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -199,6 +203,10 @@ impl EngineOptions {
     }
     pub fn with_prefill_chunk(mut self, rows: u32) -> EngineOptions {
         self.prefill_chunk = rows.max(1);
+        self
+    }
+    pub fn with_decode_tapes(mut self, on: bool) -> EngineOptions {
+        self.decode_tapes = on;
         self
     }
 }
@@ -235,10 +243,81 @@ pub fn kv_pool_bytes(cfg: &Qwen35Config, kv_tier: KvTier, num_blocks: u32, block
     gqa + num_blocks as u64 * GdnSlot::bytes(&gdn_slot_shape(cfg))
 }
 
+/// Recorded decode steps kept per engine. A tape pins the scratch of a whole
+/// step (megabytes at a few rows, hundreds at a few hundred), so the cache is
+/// bounded and the least recently used shape is dropped first.
+const MAX_DECODE_TAPES: usize = 8;
+
+/// What a recorded decode step is bound to: which sequences' recurrent state it
+/// updates (their physical blocks, in row order) and what its head returns.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TapeKey {
+    phys: Vec<u32>,
+    topk: Option<u32>,
+}
+
+/// Where a profiled stretch of decode or prefill went: whole-pass wall time, and
+/// per-kernel DEVICE time (the table that ranks the work - a loaded host
+/// stretches the wall clock, never a kernel's own timestamp pair).
+#[derive(Debug, Clone)]
+pub struct KernelProfile {
+    /// Passes profiled in each region.
+    pub passes: u32,
+    /// Production-path wall seconds over `passes` passes.
+    pub wall_s: f64,
+    /// The fastest single production-path pass, seconds: on a shared host the
+    /// mean is what OTHER tenants' load makes it, the minimum is the cost of
+    /// the work itself.
+    pub best_pass_s: f64,
+    /// The median production-path pass, seconds.
+    pub median_pass_s: f64,
+    /// Seconds per pass the launching thread spent RUNNING (its own CPU time:
+    /// the host cost of recording and launching the pass), and seconds it spent
+    /// runnable-but-not-running because other tenants held the cores. Their
+    /// difference from `wall_s / passes` is the device wait. `(0, 0)` where the
+    /// kernel exposes no per-thread scheduler statistics.
+    pub host_run_s: f64,
+    pub host_wait_s: f64,
+    /// Per production-path pass: `(submissions, dispatches, host writes, uniform
+    /// blocks allocated)` - what the host paid to enqueue it. `None` where the
+    /// backend keeps no counters.
+    pub host_ops_per_pass: Option<(f64, f64, f64, f64)>,
+    /// Wall seconds of the same passes with timestamp queries armed (inflated;
+    /// for the table only).
+    pub timed_wall_s: f64,
+    /// `(kernel, device ms over the timed passes, dispatch count)`, slowest
+    /// first. Empty on a backend with no kernel timing.
+    pub rows: Vec<(String, f64, u64)>,
+}
+
+impl KernelProfile {
+    /// Summed kernel device time over the timed passes, ms.
+    pub fn device_ms(&self) -> f64 {
+        self.rows.iter().map(|r| r.1).sum()
+    }
+    /// Device milliseconds per pass.
+    pub fn device_ms_per_pass(&self) -> f64 {
+        self.device_ms() / self.passes.max(1) as f64
+    }
+}
+
+/// The calling thread's `(running, runnable-waiting)` nanoseconds so far, from the
+/// kernel's per-thread scheduler statistics; `None` where there are none.
+fn thread_sched_ns() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let mut f = text.split_whitespace().map(|v| v.parse::<u64>().ok());
+    Some((f.next()??, f.next()??))
+}
+
 /// Single-GPU `PagedDecoder` for Qwen3.5/3.6-35B-A3B. See this module's doc for
 /// the full design (why `block_size == max_seq_len`, the `GdnSlot` map, and
 /// what is and is not built).
 pub struct Engine {
+    /// Recorded decode steps by shape, least recently used first. Declared
+    /// before `model` so the buffers a tape pins are released before the device
+    /// handle that owns them.
+    tapes: Vec<(TapeKey, DecodeTape)>,
+    decode_tapes: bool,
     /// Owns the device handle, the weights, and the decode/prefill primitives
     /// (`Qwen35::run_decode_batch`, `Qwen35::run_prefill_chunk`) this whole engine
     /// is built on. Its OWN single-sequence decode state (`gqa_kv`/`gdn_state`) is
@@ -316,7 +395,10 @@ impl Engine {
                 LayerType::Linear => KvLayer::placeholder(&model.gpu),
             });
         }
+        let decode_tapes = opts.decode_tapes && model.moe_int8_active();
         Engine {
+            tapes: Vec::new(),
+            decode_tapes,
             model,
             alloc: BlockAllocator::new(opts.max_concurrent, opts.max_seq_len),
             block_size: opts.max_seq_len,
@@ -344,32 +426,81 @@ impl Engine {
         })
     }
 
-    /// ONE decode step for every `(table, input)` pair at once - the engine's
-    /// whole steady-state decode path, and a single set of GPU dispatches
-    /// whatever the batch size (`Qwen35::run_decode_batch`). Returns the
-    /// `[bsz, d_model]` final-norm hidden block, unread, for a device head.
-    ///
-    /// Each table gets its own position appended first (never a second physical
-    /// block, see module doc - `block_size == max_seq_len` means a sequence's
-    /// total length can never cross a block boundary). `offset == pos`: since
-    /// there is exactly one block per sequence, the position WITHIN that block
-    /// already IS the absolute decode position.
-    fn decode_hidden(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> gpu_core::DeviceBuffer {
-        assert_eq!(tables.len(), inputs.len(), "qwen35moe::serve::Engine::decode_hidden: tables/inputs length mismatch");
-        assert!(!tables.is_empty(), "qwen35moe::serve::Engine::decode_hidden: empty batch");
-        let mut coords: Vec<(u32, u32)> = Vec::with_capacity(tables.len());
-        for t in tables.iter_mut() {
-            let (_block, offset) = t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
-            coords.push((t.blocks()[0], offset));
-        }
-        let slots: Vec<&GdnSlot> = coords.iter().map(|&(phys, _)| self.gdn_slot(phys)).collect();
-        let seqs: Vec<BatchSeq> = coords
+    /// Append one position to every table and return each sequence's
+    /// `(physical block, absolute position)`. Each table gets its own position
+    /// appended first (never a second physical block, see module doc -
+    /// `block_size == max_seq_len` means a sequence's total length can never
+    /// cross a block boundary). `offset == pos`: since there is exactly one block
+    /// per sequence, the position WITHIN that block already IS the absolute
+    /// decode position.
+    fn advance_tables(&mut self, tables: &mut [&mut BlockTable]) -> Vec<(u32, u32)> {
+        assert!(!tables.is_empty(), "qwen35moe::serve::Engine: empty batch");
+        tables
+            .iter_mut()
+            .map(|t| {
+                let (_block, offset) = t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
+                (t.blocks()[0], offset)
+            })
+            .collect()
+    }
+
+    /// The `BatchSeq` rows of `coords` over this engine's recurrent-state slots.
+    fn seqs_for<'a>(&'a self, coords: &[(u32, u32)]) -> Vec<BatchSeq<'a>> {
+        coords
             .iter()
-            .zip(&slots)
-            .map(|(&(phys, offset), slot)| BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist })
-            .collect();
-        let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
-        self.model.run_decode_batch(inputs, &caches)
+            .map(|&(phys, offset)| {
+                let slot = self.gdn_slot(phys);
+                BatchSeq { phys, pos: offset, gdn_state: &slot.state, gdn_hist: &slot.hist }
+            })
+            .collect()
+    }
+
+    /// ONE decode step for every `(sequence, input)` pair at once - the engine's
+    /// whole steady-state decode path, and a single set of GPU dispatches
+    /// whatever the batch size - ending in the device head `head` selects.
+    ///
+    /// On the int8 tier the step is recorded once per batch shape
+    /// ([`Qwen35::record_decode`]) and every later token replays it: the host
+    /// writes a few small buffers and makes one submission instead of building
+    /// ~1600 dispatches. Otherwise the step is built each time, its scratch drawn
+    /// from the replay arena so the backend can still replay what repeats.
+    fn decode(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: DecodeHead) -> DecodeOut {
+        assert_eq!(tables.len(), inputs.len(), "qwen35moe::serve::Engine: tables/inputs length mismatch");
+        let coords = self.advance_tables(tables);
+        if !self.decode_tapes {
+            let rows = inputs.len() as u32;
+            let seqs = self.seqs_for(&coords);
+            let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
+            // The readback that ends the step is the drain the arena's contract asks for.
+            let _scope = self.model.gpu.scratch_scope();
+            let hidden = self.model.run_decode_batch(inputs, &caches);
+            return match head {
+                DecodeHead::Greedy => DecodeOut::Greedy(self.model.head_argmax_rows_dev(&hidden, rows)),
+                DecodeHead::TopK(k) => DecodeOut::TopK(self.model.head_topk_rows_dev(&hidden, rows, k)),
+            };
+        }
+        let key = TapeKey { phys: coords.iter().map(|c| c.0).collect(), topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) } };
+        match self.tapes.iter().position(|(k, _)| *k == key) {
+            // Most recently used last.
+            Some(i) => {
+                let hit = self.tapes.remove(i);
+                self.tapes.push(hit);
+            }
+            None => {
+                let tape = {
+                    let seqs = self.seqs_for(&coords);
+                    let caches = BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs: &seqs };
+                    self.model.record_decode(inputs, &caches, head)
+                };
+                if self.tapes.len() >= MAX_DECODE_TAPES {
+                    self.tapes.remove(0);
+                }
+                self.tapes.push((key, tape));
+            }
+        }
+        let (_, tape) = self.tapes.last().expect("the tape for this shape was just found or recorded");
+        let seqs = self.seqs_for(&coords);
+        self.model.replay_decode(tape, inputs, &seqs)
     }
 
     /// `logits = hidden @ head^T` for one `[d_model]` hidden row, on the device
@@ -464,6 +595,10 @@ impl Engine {
     /// `BlockAllocator` accounting) would leak.
     pub fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(&phys) = t.blocks().first() {
+            // A recorded step binds its sequences' recurrent state; one that
+            // names this block must not outlive it (it would keep the slot's
+            // buffers resident and update state nobody owns).
+            self.tapes.retain(|(k, _)| !k.phys.contains(&phys));
             self.gdn_slots.remove(&phys);
         }
         t.release(&mut self.alloc);
@@ -526,6 +661,115 @@ impl Engine {
         Ok(())
     }
 
+    /// The per-kernel profile of `passes` batched decode steps of `batch`
+    /// sequences at a synthetic context of `position` tokens
+    /// ([`Engine::admit_synthetic`]): the production path timed on the wall,
+    /// then the same passes with per-dispatch timestamps armed. Each sequence
+    /// advances one position per pass, so the context must leave room for `2 *
+    /// passes + 1` more tokens.
+    pub fn profile_decode_at(&mut self, batch: u32, position: u32, passes: u32) -> Result<KernelProfile, String> {
+        if batch == 0 || passes == 0 {
+            return Err(format!("profile_decode_at needs a batch and a pass count (got {batch} x {passes})"));
+        }
+        if position as u64 + 2 * passes as u64 + 1 >= self.block_size as u64 {
+            return Err(format!("profiling {passes} passes from position {position} runs past this engine's capacity {}", self.block_size));
+        }
+        let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
+        let outcome = (|| {
+            for t in tables.iter_mut() {
+                self.admit_synthetic(t, position)?;
+            }
+            let inputs = vec![1u32; batch as usize];
+            let step = |e: &mut Engine, tables: &mut Vec<BlockTable>| {
+                let mut rows: Vec<&mut BlockTable> = tables.iter_mut().collect();
+                e.forward_batched_greedy(&mut rows, &inputs);
+            };
+            // One unrecorded pass first: pipeline compilation is not decode time
+            // (and, on the tape path, it is the pass that records the tape).
+            step(self, &mut tables);
+            self.poll_wait();
+            let mut profile = self.profile_regions(passes, |e| step(e, &mut tables));
+            // A recorded step is priced as it runs - launched whole, back to
+            // back - not dispatch by dispatch: per-dispatch timing of eager
+            // launches carries the host's launch latency, which the tape removes.
+            if self.decode_tapes {
+                let key = TapeKey { phys: tables.iter().map(|t| t.blocks()[0]).collect(), topk: None };
+                if let Some((_, tape)) = self.tapes.iter().find(|(k, _)| *k == key) {
+                    if let Some(rows) = self.model.gpu.profile_tape(tape.tape(), passes) {
+                        profile.rows = rows.into_iter().map(|(n, ms, calls)| (n, ms * passes as f64, calls * passes as u64)).collect();
+                    }
+                }
+            }
+            Ok(profile)
+        })();
+        for mut t in tables {
+            self.release_table(&mut t);
+        }
+        outcome
+    }
+
+    /// The per-kernel profile of `passes` cold prefills of `tokens` tokens each
+    /// (rounds of [`Engine::max_prefill_tokens`]), same two regions.
+    pub fn profile_prefill(&mut self, tokens: u32, passes: u32) -> Result<KernelProfile, String> {
+        if tokens == 0 || tokens as u64 > self.block_size as u64 || passes == 0 {
+            return Err(format!("profile_prefill needs 1 <= tokens <= {} and a pass count (got {tokens} x {passes})", self.block_size));
+        }
+        let vocab = self.vocab() as u64;
+        let prompt: Vec<u32> = (0..tokens as u64).map(|i| ((i * 7919 + 13) % vocab) as u32).collect();
+        let once = |e: &mut Engine| {
+            let mut t = BlockTable::new();
+            e.prefill(&mut t, &prompt);
+            e.release_table(&mut t);
+        };
+        once(self);
+        self.poll_wait();
+        Ok(self.profile_regions(passes, once))
+    }
+
+    /// The two regions every profile shares: `passes` production-path passes
+    /// timed on the wall, then `passes` more with kernel timing armed.
+    fn profile_regions(&mut self, passes: u32, mut pass: impl FnMut(&mut Engine)) -> KernelProfile {
+        let sched0 = thread_sched_ns();
+        let ops0 = self.model.gpu.stats();
+        let t0 = std::time::Instant::now();
+        let mut each = Vec::with_capacity(passes as usize);
+        for _ in 0..passes {
+            let t = std::time::Instant::now();
+            pass(self);
+            self.poll_wait();
+            each.push(t.elapsed().as_secs_f64());
+        }
+        let wall_s = t0.elapsed().as_secs_f64();
+        let sched1 = thread_sched_ns();
+        let host_ops_per_pass = match (ops0, self.model.gpu.stats()) {
+            (Some(a), Some(b)) => {
+                let per = |x: u64, y: u64| (y - x) as f64 / passes as f64;
+                Some((per(a.submits, b.submits), per(a.dispatches, b.dispatches), per(a.writes, b.writes), per(a.uniform_allocs, b.uniform_allocs)))
+            }
+            _ => None,
+        };
+        let (host_run_s, host_wait_s) = match (sched0, sched1) {
+            (Some(a), Some(b)) => ((b.0 - a.0) as f64 * 1e-9 / passes as f64, (b.1 - a.1) as f64 * 1e-9 / passes as f64),
+            _ => (0.0, 0.0),
+        };
+        each.sort_by(|a, b| a.total_cmp(b));
+        let (best_pass_s, median_pass_s) = (each[0], each[each.len() / 2]);
+
+        // A backend that cannot time kernels reports no rows rather than zeros.
+        let timed = self.model.gpu.set_kernel_timing(true);
+        self.model.gpu.reset_kernel_times();
+        let t1 = std::time::Instant::now();
+        for _ in 0..passes {
+            pass(self);
+        }
+        self.poll_wait();
+        let timed_wall_s = t1.elapsed().as_secs_f64();
+        let mut rows: Vec<(String, f64, u64)> = if timed { self.model.gpu.kernel_times().unwrap_or_default() } else { Vec::new() };
+        self.model.gpu.set_kernel_timing(false);
+        rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+        KernelProfile { passes, wall_s, best_pass_s, median_pass_s, host_run_s, host_wait_s, host_ops_per_pass, timed_wall_s, rows }
+    }
+
     /// One greedy decode step for the WHOLE batch in one set of dispatches, the
     /// head on the device: only the `bsz` winning token ids are read back.
     pub fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
@@ -533,8 +777,10 @@ impl Engine {
         if tables.is_empty() {
             return Vec::new();
         }
-        let hidden = self.decode_hidden(tables, inputs);
-        self.model.head_argmax_rows_dev(&hidden, inputs.len() as u32)
+        match self.decode(tables, inputs, DecodeHead::Greedy) {
+            DecodeOut::Greedy(ids) => ids,
+            DecodeOut::TopK(_) => unreachable!("a greedy decode returns greedy picks"),
+        }
     }
 
     /// [`Engine::forward_batched_greedy`], repeated `k` times per sequence,
@@ -564,8 +810,10 @@ impl Engine {
         if tables.is_empty() {
             return Vec::new();
         }
-        let hidden = self.decode_hidden(tables, inputs);
-        self.model.head_topk_rows_dev(&hidden, inputs.len() as u32, k as u32)
+        match self.decode(tables, inputs, DecodeHead::TopK(k as u32)) {
+            DecodeOut::TopK(c) => c,
+            DecodeOut::Greedy(_) => unreachable!("a top-k decode returns candidates"),
+        }
     }
 }
 

@@ -65,6 +65,7 @@
 //! that never occurs at any real checkpoint size.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
+use model::ops::Weight;
 
 pub use model::int8::quantize_weight;
 
@@ -97,11 +98,11 @@ pub struct Q8MoeLayer {
     pub gate: Bank8,
     pub up: Bank8,
     pub down: Bank8,
-    /// `[(n_experts + 1) * d_model]` f32 router weight with the shared expert's
+    /// `[n_experts + 1, d_model]` f32 router weight with the shared expert's
     /// gate row appended, so ONE matmul produces the routed logits and the
     /// shared gate's logit. `Some` exactly when the shared expert is in the
     /// banks; `None` leaves the shared expert on the fp32 path.
-    pub router_ext: Option<DeviceBuffer>,
+    pub router_ext: Option<Weight>,
 }
 
 impl Q8MoeLayer {
@@ -213,7 +214,8 @@ impl Qwen35Q8 {
                 for name in [format!("blocks.{l}.mlp.router.weight"), format!("blocks.{l}.mlp.shared_expert_gate.weight")] {
                     assert!(source.with_tensor(&name, &mut |t| w.extend_from_slice(t)), "qwen35 q8: missing {name}");
                 }
-                gpu.storage_init(&format!("blocks.{l}.mlp.router_ext"), &w)
+                let (n, k) = (cfg.n_experts + 1, cfg.d_model);
+                Weight::F32 { w: gpu.storage_init(&format!("blocks.{l}.mlp.router_ext"), &w), n, k }
             });
             moe.push(Q8MoeLayer { gate, up: up_bank, down, router_ext });
         }

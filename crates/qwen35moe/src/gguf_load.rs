@@ -32,11 +32,43 @@
 use std::collections::HashMap;
 
 use checkpoint::gguf::MmapGguf;
+use gpu_core::select::Dtype;
+use model::kv_tier::KvTier;
+use model::ops::TierPolicy;
 use checkpoint::remap::{Fetch, RemapSource};
 use gguf::import::Mapped;
 use gguf::GdnFixSource;
 
 use crate::config::Qwen35Config;
+
+/// Catalog id of the model this loader serves: the released Q8_0 GGUF, named as
+/// its upstream release is (`https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF`).
+pub const MODEL: &str = "unsloth/Qwen3.6-35B-A3B-Q8_0";
+
+/// The environment variable naming the `.gguf` to serve.
+pub const GGUF_ENV: &str = "BRAIN_QWEN35MOE_GGUF";
+
+/// Per-leaf weight tier (`TierPolicy::parse`'s grammar: `"i8"`, `"f32"`, or
+/// `"i8,out_proj=f32"`); default uniform int8.
+pub const TIER_ENV: &str = "BRAIN_QWEN35MOE_TIER";
+
+/// How the GQA layers' K/V are stored: `f32` (default), `bf16` or `int8` - the
+/// same switch (and the same name) the dense Qwen3.x resident reads.
+pub const KV_ENV: &str = "BRAIN_QWEN35_KV";
+
+/// The weight tier from [`TIER_ENV`]. A parse failure panics rather than
+/// silently serving the wrong precision.
+pub fn tier_from_env() -> TierPolicy {
+    match std::env::var(TIER_ENV) {
+        Ok(s) => TierPolicy::parse(&s).unwrap_or_else(|e| panic!("{TIER_ENV}={s:?}: {e}")),
+        Err(_) => TierPolicy::uniform(Dtype::I8),
+    }
+}
+
+/// The KV tier from [`KV_ENV`]; an unknown name is an error, not a fallback.
+pub fn kv_tier_from_env() -> Result<KvTier, String> {
+    KvTier::from_env(KV_ENV)
+}
 
 /// The brain name under which a layer's whole expert stack of one projection
 /// (`gate`, `up` or `down`) is served: every expert's `[out, in]` matrix back

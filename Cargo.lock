@@ -2087,6 +2087,7 @@ name = "brain-qwen35moe"
 version = "2.0.0"
 dependencies = [
  "brain-audio",
+ "brain-backend-cuda",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",

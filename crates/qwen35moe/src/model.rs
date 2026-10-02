@@ -1073,6 +1073,55 @@ pub(crate) enum GdnCall<'a> {
     Decode(&'a [model::gdn_mixer::GdnStream<'a>]),
 }
 
+/// The device buffers a decode step reads for everything that varies from one
+/// token to the next - see `Qwen35::alloc_decode_meta`.
+pub(crate) struct DecodeMeta {
+    tokens: DeviceBuffer,
+    /// `[bsz, rotary_dim/2]` M-RoPE tables - row `b` is sequence `b`'s OWN
+    /// decode position.
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+    blocks: DeviceBuffer,
+    offsets: DeviceBuffer,
+    block_tables: DeviceBuffer,
+    seq_lens: DeviceBuffer,
+}
+
+/// What a recorded decode step's head produces.
+pub(crate) enum DecodeHead {
+    /// The greedy token of every row.
+    Greedy,
+    /// Every row's top-`cap` (token, logit) candidates.
+    TopK(u32),
+}
+
+enum TapeOut {
+    Greedy(DeviceBuffer),
+    TopK { vals: DeviceBuffer, idx: DeviceBuffer, cap: u32 },
+}
+
+/// One decode step recorded whole (`Qwen35::record_decode`): the dispatches, the
+/// buffers they bind and the head's output buffer. Holds its working set alive.
+pub(crate) struct DecodeTape {
+    tape: gpu_core::tape::Tape,
+    meta: DecodeMeta,
+    bsz: u32,
+    out: TapeOut,
+}
+
+impl DecodeTape {
+    /// The recording, for profiling it.
+    pub(crate) fn tape(&self) -> &gpu_core::tape::Tape {
+        &self.tape
+    }
+}
+
+/// What a replayed decode step read back.
+pub(crate) enum DecodeOut {
+    Greedy(Vec<u32>),
+    TopK(Vec<Vec<(u32, f32)>>),
+}
+
 /// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where its
 /// KV history lives, where this step's token goes, and its own Gated-DeltaNet
 /// state. The batched counterpart of the per-sequence half of
@@ -1159,6 +1208,9 @@ fn shard_param_list(cfg: &Qwen35Config, shard: &Shard) -> Vec<(String, usize)> {
         })
         .collect()
 }
+
+/// The untied output projection's parameter name.
+const UNTIED_HEAD: &str = "lm_head.weight";
 
 impl Qwen35 {
     pub fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
@@ -1285,7 +1337,7 @@ impl Qwen35 {
         // else is refused by name rather than silently run at another tier.
         let quant = |name: &str| {
             i8_on
-                && Qwen35Q8::is_i8_linear(name)
+                && (Qwen35Q8::is_i8_linear(name) || name == UNTIED_HEAD)
                 && match tier.want(name) {
                     Dtype::I8 => true,
                     Dtype::F32 => false,
@@ -1464,6 +1516,12 @@ impl Qwen35 {
                     upload(p("o_proj.weight"), d_u, hq_u);
                 }
             }
+        }
+
+        // The untied head: int8 under an int8 policy (the GGUF's own `Q8_0`
+        // `output.weight`), read once per decode pass instead of 2 GB of fp32.
+        if shard.head && cfg.head_weight() == UNTIED_HEAD && quant(UNTIED_HEAD) {
+            upload(UNTIED_HEAD.to_string(), cfg.vocab as usize, cfg.d_model as usize);
         }
 
         let n = (b * t) as u64;
@@ -2166,7 +2224,14 @@ impl Qwen35 {
         let (gate_out, up_out) = (g.storage((slots * ff) as u64), g.storage((slots * ff) as u64));
         let (hq, sh) = (g.storage((slots * ff / 4) as u64), g.storage(slots as u64));
         let y = g.storage((slots * d) as u64);
-        let router_w = ml.router_ext.as_ref().unwrap_or_else(|| self.w(&p("mlp.router.weight")));
+        let own_router;
+        let router_w: &Weight = match &ml.router_ext {
+            Some(w) => w,
+            None => {
+                own_router = Weight::F32 { w: self.w(&p("mlp.router.weight")).clone(), n: e, k: d };
+                &own_router
+            }
+        };
         let gather = |bank: &Bank8, xq: &DeviceBuffer, sx: &DeviceBuffer, out: &DeviceBuffer, xdiv: u32| {
             g.dispatch(
                 MOE_I8_GEMV_GATHER,
@@ -2178,7 +2243,10 @@ impl Qwen35 {
 
         let mut steps = vec![rmsnorm_fwd(g, &kernel_ids(), xmid, self.w(&p("ln2.weight")), &xn2, d, n, c.rms_eps)];
         q8.quant(g, &mut steps, &xn2, d, n);
-        steps.push(g.step(MATMUL, &[&xn2, router_w, &logits], &[n, d, width], n * width));
+        // Through the `Ops` façade, not the naive one-thread-per-output `matmul`: at
+        // decode's one row that kernel walks the whole `k = d_model` serially per
+        // output and was a third of a decode step's device time.
+        self.ops.matmul(&mut steps, router_w, &self.ops.act_f32(&xn2, 0, n, d), &logits, 0);
         steps.push(g.dispatch(MOE_ROUTER_TOPK, &[&logits, &ids, &weight], &[n, e, top_k, shared], Dispatch::Workgroups(n)));
         steps.push(gather(&ml.gate, &q8.xq, &q8.sx, &gate_out, slots_per_row));
         steps.push(gather(&ml.up, &q8.xq, &q8.sx, &up_out, slots_per_row));
@@ -2386,8 +2454,9 @@ impl Qwen35 {
         let xn_final = if self.shard.head {
             let xn_final = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &self.res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
-            let v = self.cfg.vocab;
-            g.submit(&[], &[g.step(MATMUL, &[&xn_final, self.w(self.cfg.head_weight()), &self.logits], &[n, d, v], n * v)]);
+            let mut head_steps = Vec::new();
+            self.head_matmul(&mut head_steps, &xn_final, n, &self.logits);
+            g.submit(&[], &head_steps);
             xn_final
         } else {
             g.storage(1)
@@ -2899,51 +2968,79 @@ impl Qwen35 {
     /// `tokens` is one token id per sequence, in `caches.seqs` order; the
     /// return value is the `[bsz, d_model]` final-norm hidden block.
     pub(crate) fn run_decode_batch(&self, tokens: &[u32], caches: &BatchDecodeCaches) -> DeviceBuffer {
-        let g = &self.gpu;
-        let c = &self.cfg;
-        let d = c.d_model;
         let bsz = tokens.len() as u32;
         assert!(bsz > 0, "qwen35moe::run_decode_batch: empty batch");
         assert_eq!(tokens.len(), caches.seqs.len(), "qwen35moe::run_decode_batch: {} tokens for {} sequences", tokens.len(), caches.seqs.len());
         for s in caches.seqs {
             assert!(s.pos < caches.gqa_cap, "qwen35moe::run_decode_batch: decode position {} exceeds the per-sequence capacity {}", s.pos, caches.gqa_cap);
         }
+        let meta = self.alloc_decode_meta(bsz);
+        self.write_decode_meta(&meta, tokens, caches.seqs);
+        // The scores/probs stride of the unfused attention path, sized to the
+        // batch's longest LIVE sequence rather than the engine's configured
+        // ceiling: it is pure addressing, not a compute bound (see
+        // `gqa_decode_batched_step`).
+        let cap = caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1);
+        self.decode_layers(&meta, bsz, caches, cap)
+    }
 
-        let tok_buf = g.storage(bsz as u64);
-        g.write(&tok_buf, tokens);
-        let mut res = g.storage((bsz * d) as u64);
-        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+    /// The device buffers a decode step READS for everything that changes from
+    /// one token to the next: the token ids, the batch's M-RoPE rows (each
+    /// sequence at its OWN position) and the four paged-KV index buffers. A
+    /// step's dispatches bind these buffers and nothing else varies between
+    /// tokens, which is what lets a step be recorded once ([`Self::record_decode`])
+    /// and replayed with [`Self::write_decode_meta`] updating them.
+    fn alloc_decode_meta(&self, bsz: u32) -> DecodeMeta {
+        let g = &self.gpu;
+        let rows = bsz as u64 * (self.cfg.rotary_dim() / 2) as u64;
+        DecodeMeta {
+            tokens: g.storage(bsz as u64),
+            cos: g.storage(rows),
+            sin: g.storage(rows),
+            blocks: g.storage(bsz as u64),
+            offsets: g.storage(bsz as u64),
+            block_tables: g.storage(bsz as u64),
+            seq_lens: g.storage(bsz as u64),
+        }
+    }
 
-        // Built ONCE per step and shared by every layer in it: the batch's
-        // M-RoPE table at each sequence's OWN position, and the four paged-KV
-        // index buffers. The rows of one batch are unrelated positions in
-        // unrelated physical blocks, which is the whole difference from a
-        // single sequence's many tokens.
-        let positions: Vec<[u32; 3]> = caches.seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
+    /// Fill a [`DecodeMeta`] for this step's tokens and sequences.
+    fn write_decode_meta(&self, m: &DecodeMeta, tokens: &[u32], seqs: &[BatchSeq]) {
+        let (g, c) = (&self.gpu, &self.cfg);
+        g.write(&m.tokens, tokens);
+        let positions: Vec<[u32; 3]> = seqs.iter().map(|s| [s.pos, s.pos, s.pos]).collect();
         let (cos_rows, sin_rows) = qwen3vl::mrope::mrope_tables(&positions, c.mrope_section, c.rotary_dim(), c.rope_theta);
-        let cos = g.storage_init("qwen35moe.decode_batch.cos", &cos_rows);
-        let sin = g.storage_init("qwen35moe.decode_batch.sin", &sin_rows);
-        let blocks = g.storage(bsz as u64);
-        g.write(&blocks, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
-        let offsets = g.storage(bsz as u64);
-        g.write(&offsets, &caches.seqs.iter().map(|s| s.pos).collect::<Vec<u32>>());
+        g.write_f32(&m.cos, &cos_rows);
+        g.write_f32(&m.sin, &sin_rows);
+        let phys: Vec<u32> = seqs.iter().map(|s| s.phys).collect();
+        g.write(&m.blocks, &phys);
+        g.write(&m.offsets, &seqs.iter().map(|s| s.pos).collect::<Vec<u32>>());
         // `max_bt = 1`: this engine gives a sequence ONE physical block for its
         // whole KV history, so its block table is a single entry.
-        let block_tables = g.storage(bsz as u64);
-        g.write(&block_tables, &caches.seqs.iter().map(|s| s.phys).collect::<Vec<u32>>());
-        let seq_lens = g.storage(bsz as u64);
-        g.write(&seq_lens, &caches.seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+        g.write(&m.block_tables, &phys);
+        g.write(&m.seq_lens, &seqs.iter().map(|s| s.pos + 1).collect::<Vec<u32>>());
+    }
+
+    /// The layer stack of one decode step over `meta`'s buffers: embedding,
+    /// every layer, the final norm. `cap` is the unfused attention's scores
+    /// stride and the fused attention's split count, so a step that will be
+    /// replayed passes the pool's whole capacity (the kernels mask by each
+    /// sequence's length) and one that will not passes the live maximum.
+    fn decode_layers(&self, meta: &DecodeMeta, bsz: u32, caches: &BatchDecodeCaches, cap: u32) -> DeviceBuffer {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let d = c.d_model;
+        let mut res = g.storage((bsz * d) as u64);
+        g.submit(&[], &[g.step(EMBED, &[&meta.tokens, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+
         let paged = model::gqa_mixer::PagedDecodeBatch {
-            blocks: &blocks,
-            offsets: &offsets,
-            block_tables: &block_tables,
-            seq_lens: &seq_lens,
+            blocks: &meta.blocks,
+            offsets: &meta.offsets,
+            block_tables: &meta.block_tables,
+            seq_lens: &meta.seq_lens,
             block_size: caches.gqa_cap,
             max_bt: 1,
-            // The scores/probs stride, sized to the batch's longest LIVE
-            // sequence rather than the engine's configured ceiling: it is pure
-            // addressing, not a compute bound (see `gqa_decode_batched_step`).
-            cap: caches.seqs.iter().map(|s| s.pos + 1).max().unwrap_or(1),
+            cap,
         };
 
         for (l, ty) in c.layer_types().iter().enumerate() {
@@ -2957,7 +3054,7 @@ impl Qwen35 {
                     self.layer_gdn_fwd(l, &xn1, bsz, GdnCall::Decode(&streams)).0
                 }
                 LayerType::Full => {
-                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &cos, sin: &sin };
+                    let dctx = GqaDecodeCtx { paged: &paged, layer: &caches.gqa_kv[l], cos: &meta.cos, sin: &meta.sin };
                     self.layer_gqa_fwd(l, &xn1, bsz, Some(GqaCached::Decode(&dctx))).0
                 }
             };
@@ -2984,6 +3081,51 @@ impl Qwen35 {
         let xn_final = g.storage((bsz * d) as u64);
         g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w("norm.weight"), &xn_final, d, bsz, self.cfg.rms_eps)]);
         xn_final
+    }
+
+    /// **Record one whole decode step** - layers AND head - as a [`DecodeTape`]:
+    /// the same dispatches [`Self::run_decode_batch`] builds, captured instead of
+    /// launched, over buffers the tape keeps alive. [`Self::replay_decode`] then
+    /// runs a step for the price of one submission plus a handful of small
+    /// writes, where building it costs tens of milliseconds of host time - more
+    /// than the card spends executing it.
+    ///
+    /// The tape is bound to this batch's SHAPE and sequences: its row count, the
+    /// per-sequence recurrent-state buffers in `caches.seqs`, the KV pool. What
+    /// differs token to token (ids, positions, KV lengths) goes through the
+    /// tape's [`DecodeMeta`], rewritten by each replay. Needs the int8 tier: the
+    /// fp32 decode's sparse expert dispatch reads the router's choice back to the
+    /// host mid-step, which a recording cannot do.
+    pub(crate) fn record_decode(&self, tokens: &[u32], caches: &BatchDecodeCaches, head: DecodeHead) -> DecodeTape {
+        let bsz = tokens.len() as u32;
+        assert!(self.q8.is_some(), "qwen35moe::record_decode needs the int8 expert tier: the fp32 decode reads routing back to the host mid-step");
+        assert!(bsz > 0 && tokens.len() == caches.seqs.len(), "qwen35moe::record_decode: {} tokens for {} sequences", tokens.len(), caches.seqs.len());
+        let meta = self.alloc_decode_meta(bsz);
+        self.write_decode_meta(&meta, tokens, caches.seqs);
+        let g = &self.gpu;
+        g.begin_tape();
+        let hidden = self.decode_layers(&meta, bsz, caches, caches.gqa_cap);
+        let out = match head {
+            DecodeHead::Greedy => TapeOut::Greedy(self.head_argmax_rows_record(&hidden, bsz)),
+            DecodeHead::TopK(cap) => {
+                let (vals, idx) = self.head_topk_rows_record(&hidden, bsz, cap);
+                TapeOut::TopK { vals, idx, cap }
+            }
+        };
+        DecodeTape { tape: g.end_tape(), meta, bsz, out }
+    }
+
+    /// Run a recorded decode step for `tokens` at the positions in `seqs` (the
+    /// SAME sequences the tape was recorded for, in the same order), and read
+    /// back what the recorded head produced. See [`Self::record_decode`].
+    pub(crate) fn replay_decode(&self, tape: &DecodeTape, tokens: &[u32], seqs: &[BatchSeq]) -> DecodeOut {
+        assert_eq!(tokens.len(), tape.bsz as usize, "qwen35moe::replay_decode: a tape recorded for {} rows replayed with {}", tape.bsz, tokens.len());
+        self.write_decode_meta(&tape.meta, tokens, seqs);
+        self.gpu.replay_tape(&tape.tape);
+        match &tape.out {
+            TapeOut::Greedy(out) => DecodeOut::Greedy(self.gpu.read(out, tape.bsz as usize).into_iter().map(|x| x as u32).collect()),
+            TapeOut::TopK { vals, idx, cap } => DecodeOut::TopK(self.read_topk(vals, idx, tape.bsz, *cap)),
+        }
     }
 
     /// Rows at or above which a chunk round pools its per-layer scratch (see
@@ -3163,16 +3305,44 @@ impl Qwen35 {
     /// head weight.
     pub(crate) fn head_logits_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let g = &self.gpu;
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let v = self.cfg.vocab;
         let logits = g.storage(rows as u64 * v as u64);
-        g.submit(&[], &[g.step(MATMUL, &[hidden, self.w(self.cfg.head_weight()), &logits], &[rows, d, v], rows * v)]);
+        let mut steps = Vec::new();
+        self.head_matmul(&mut steps, hidden, rows, &logits);
+        g.submit(&[], &steps);
         logits
+    }
+
+    /// `logits = hidden @ head^T` through the façade, at whatever tier the head
+    /// was loaded: the int8 weight in `self.weights` (activation quantised
+    /// here) or the fp32 parameter.
+    fn head_matmul(&self, steps: &mut Vec<Step>, hidden: &DeviceBuffer, rows: u32, logits: &DeviceBuffer) {
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let name = self.cfg.head_weight();
+        match self.weights.get(name) {
+            Some(head) => {
+                let act = self.ops.act(steps, hidden, 0, rows, d);
+                self.ops.matmul(steps, head, &act, logits, 0);
+            }
+            None => {
+                let head = Weight::F32 { w: self.w(name).clone(), n: v, k: d };
+                self.ops.matmul(steps, &head, &self.ops.act_f32(hidden, 0, rows, d), logits, 0);
+            }
+        }
     }
 
     /// [`Self::head_logits_rows_dev`] reduced to `rows` greedy picks entirely on
     /// the device (`argmax_part` + `argmax_final`): only the winning indices are
     /// read back, never the `[rows, vocab]` logits.
     pub(crate) fn head_argmax_rows_dev(&self, hidden: &DeviceBuffer, rows: u32) -> Vec<u32> {
+        let out = self.head_argmax_rows_record(hidden, rows);
+        self.gpu.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+    }
+
+    /// The dispatches of [`Self::head_argmax_rows_dev`] without the readback:
+    /// returns the `[rows]` buffer of winning indices, written once the
+    /// dispatches have run - so a recording can include the head.
+    fn head_argmax_rows_record(&self, hidden: &DeviceBuffer, rows: u32) -> DeviceBuffer {
         let g = &self.gpu;
         let v = self.cfg.vocab;
         let logits = self.head_logits_rows_dev(hidden, rows);
@@ -3186,7 +3356,7 @@ impl Qwen35 {
                 g.step(ARGMAX_FINAL, &[&part, &out], &[rows, HEAD_ARGMAX_CHUNKS], rows),
             ],
         );
-        g.read(&out, rows as usize).into_iter().map(|x| x as u32).collect()
+        out
     }
 
     /// [`Self::head_logits_rows_dev`] reduced to every row's top-`cap` (token id,
@@ -3195,6 +3365,13 @@ impl Qwen35 {
     /// winner out of `logits` before the next - only `rows * cap` pairs are read
     /// back.
     pub(crate) fn head_topk_rows_dev(&self, hidden: &DeviceBuffer, rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+        let (vals, idx) = self.head_topk_rows_record(hidden, rows, cap);
+        self.read_topk(&vals, &idx, rows, cap)
+    }
+
+    /// The dispatches of [`Self::head_topk_rows_dev`] without the readback:
+    /// returns the `[rows, cap]` value and index buffers.
+    fn head_topk_rows_record(&self, hidden: &DeviceBuffer, rows: u32, cap: u32) -> (DeviceBuffer, DeviceBuffer) {
         assert!(cap > 0, "head_topk_rows_dev: cap must be > 0");
         let g = &self.gpu;
         let v = self.cfg.vocab;
@@ -3211,8 +3388,12 @@ impl Qwen35 {
             steps.push(g.step(TOPK_EXTRACT_STEP, &[&arg, &logits, &vals, &idx], &[rows, v, cap, col], rows));
         }
         g.submit(&[], &steps);
-        let vals = g.read(&vals, (rows * cap) as usize);
-        let idx = g.read(&idx, (rows * cap) as usize);
+        (vals, idx)
+    }
+
+    fn read_topk(&self, vals: &DeviceBuffer, idx: &DeviceBuffer, rows: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
+        let vals = self.gpu.read(vals, (rows * cap) as usize);
+        let idx = self.gpu.read(idx, (rows * cap) as usize);
         (0..rows as usize)
             .map(|r| {
                 let s = r * cap as usize;
