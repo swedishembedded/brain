@@ -41,7 +41,7 @@ use crate::driver::{
 };
 use std::ffi::{c_int, c_void, CString};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// A compiled cubin, and whether it came back from the on-disk cache.
 pub struct Cubin {
@@ -104,6 +104,10 @@ pub struct Context {
     alloc_epoch: Arc<AtomicU64>,
     /// Freed device blocks held for reuse - see [`BlockCache`].
     cache: Arc<BlockCache>,
+    /// Held for as long as this handle's stream is being captured. A drain
+    /// started by another handle takes it before waiting on the stream; see
+    /// [`Context::drain_other_handles`].
+    capture_gate: Arc<Mutex<()>>,
 }
 
 // The context handle is used under `cuCtxSetCurrent` before every call, so it
@@ -150,6 +154,7 @@ impl Context {
             primary: primary.clone(),
             alloc_epoch: Arc::new(AtomicU64::new(0)),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
+            capture_gate: Arc::new(Mutex::new(())),
         };
         c.make_current()?;
         c.cache.set_cap(cache_cap_for(c.mem_info().map(|m| m.1).unwrap_or(0)));
@@ -163,11 +168,42 @@ impl Context {
         // issued before it could know a second handle would exist: its buffers
         // carry no fence, and anything still running on them is waited for here
         // once rather than guessed at later.
+        let own_stream = c.stream as usize;
+        OPEN_STREAMS.lock().unwrap_or_else(|p| p.into_inner()).push(OpenStream {
+            ctx: ctx as usize,
+            stream: own_stream,
+            capture_gate: c.capture_gate.clone(),
+        });
         if others > 0 {
-            // SAFETY: the context is current on this thread.
-            d.check(unsafe { (fns.ctx_synchronize)() }, "cuCtxSynchronize")?;
+            c.drain_other_handles()?;
         }
         Ok(c)
+    }
+
+    /// Wait for everything every OTHER handle on this device has issued.
+    ///
+    /// A stream wait per handle rather than `cuCtxSynchronize`, and never on a
+    /// stream that is being captured. Another thread may be capturing a graph
+    /// on its own handle, and the driver refuses to wait on a capturing stream
+    /// ("operation not permitted when stream is capturing") - and the refusal
+    /// also invalidates that capture, so merely trying costs the other thread
+    /// its graph. Each handle's [`Context::capture_gate`] is held for the whole
+    /// of its captures, so taking it here waits for a capture to end and keeps
+    /// a new one from starting during the wait. Work issued on the stream
+    /// before a capture began is still in flight, and is what this waits for.
+    ///
+    /// [`OPEN_STREAMS`] stays locked throughout. A handle's `Drop` takes the
+    /// same lock before destroying its stream, so no stream is destroyed
+    /// underneath the wait.
+    fn drain_other_handles(&self) -> Result<(), String> {
+        let open = OPEN_STREAMS.lock().unwrap_or_else(|p| p.into_inner());
+        for other in open.iter().filter(|o| o.ctx == self.ctx as usize && o.stream != self.stream as usize) {
+            let _not_capturing = other.capture_gate.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: the context is current on this thread, the stream belongs
+            // to it, and the lock held above keeps it alive.
+            self.d.check(unsafe { (self.fns.stream_synchronize)(other.stream as CuStream) }, "cuStreamSynchronize")?;
+        }
+        Ok(())
     }
 
     /// This handle's identity among streams.
@@ -627,13 +663,14 @@ impl Context {
     pub fn begin_capture(&self) -> Result<Capture<'_>, String> {
         let g = self.graphs().map_err(str::to_string)?;
         self.make_current()?;
+        let gate = self.capture_gate.lock().unwrap_or_else(|p| p.into_inner());
         // SAFETY: the context is current and `self.stream` was created on it.
         // The mode is thread-local, so this constrains only this thread.
         self.d.check(
             unsafe { (g.stream_begin_capture)(self.stream, CAPTURE_MODE_THREAD_LOCAL) },
             "cuStreamBeginCapture",
         )?;
-        Ok(Capture { ctx: self, g, ended: false })
+        Ok(Capture { ctx: self, g, ended: false, _gate: gate })
     }
 
     /// Instantiate `graph` into an executable one.
@@ -709,6 +746,9 @@ impl Drop for Context {
         // is reference-counted, so this does not tear down a context another
         // holder is still using.
         unsafe {
+            if !self.stream.is_null() {
+                OPEN_STREAMS.lock().unwrap_or_else(|p| p.into_inner()).retain(|o| o.stream != self.stream as usize);
+            }
             if !self.stream.is_null()
                 && (self.fns.ctx_set_current)(self.ctx) == 0
                 && (self.fns.stream_destroy)(self.stream) == 0
@@ -735,6 +775,8 @@ pub struct Capture<'a> {
     ctx: &'a Context,
     g: &'static GraphFns,
     ended: bool,
+    /// Keeps other handles' drains off this stream until the capture is over.
+    _gate: MutexGuard<'a, ()>,
 }
 
 impl Capture<'_> {
@@ -876,6 +918,17 @@ unsafe impl Sync for GraphExec {}
 /// Handles currently open on any device. While it is one, nothing needs ordering
 /// between handles and the fencing in [`Fence`] is skipped entirely.
 static OPEN_CONTEXTS: AtomicUsize = AtomicUsize::new(0);
+/// A handle's stream, as another handle's drain needs to name it.
+struct OpenStream {
+    ctx: usize,
+    stream: usize,
+    capture_gate: Arc<Mutex<()>>,
+}
+
+/// The stream of every open handle, on every device. Guards stream lifetime
+/// against [`Context::drain_other_handles`]: see there.
+static OPEN_STREAMS: Mutex<Vec<OpenStream>> = Mutex::new(Vec::new());
+
 /// Source of [`Context::stream_id`].
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 

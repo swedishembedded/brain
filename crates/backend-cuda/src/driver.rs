@@ -111,14 +111,10 @@ pub struct ExecFns {
     pub(crate) primary_ctx_retain: unsafe extern "C" fn(*mut CuContext, CuDevice) -> CuResult,
     pub(crate) primary_ctx_release: unsafe extern "C" fn(CuDevice) -> CuResult,
     pub(crate) ctx_set_current: unsafe extern "C" fn(CuContext) -> CuResult,
-    /// `cuCtxSynchronize`. Used in exactly one place: draining the device when a
-    /// second handle opens (see `Context::open`). Every ordinary wait is
-    /// `cuStreamSynchronize` on the handle's own stream, because waiting on the
-    /// whole shared context fails while any handle is capturing a graph.
-    pub(crate) ctx_synchronize: unsafe extern "C" fn() -> CuResult,
-    /// `cuStreamSynchronize`, not `cuCtxSynchronize`: the primary context is
+    /// `cuStreamSynchronize`, never `cuCtxSynchronize`: the primary context is
     /// shared by every handle on the device, and waiting on the whole context
-    /// fails while ANY handle's stream is capturing a graph.
+    /// fails while ANY handle's stream is capturing a graph. Even draining the
+    /// device is a stream wait per handle - see `Context::drain_other_handles`.
     pub(crate) stream_synchronize: unsafe extern "C" fn(CuStream) -> CuResult,
     pub(crate) mem_alloc: unsafe extern "C" fn(*mut CuDevicePtr, usize) -> CuResult,
     pub(crate) mem_free: unsafe extern "C" fn(CuDevicePtr) -> CuResult,
@@ -336,7 +332,6 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         primary_ctx_retain: sym(lib, b"cuDevicePrimaryCtxRetain\0")?,
         primary_ctx_release: sym(lib, b"cuDevicePrimaryCtxRelease_v2\0")?,
         ctx_set_current: sym(lib, b"cuCtxSetCurrent\0")?,
-        ctx_synchronize: sym(lib, b"cuCtxSynchronize\0")?,
         stream_synchronize: sym(lib, b"cuStreamSynchronize\0")?,
         mem_alloc: sym(lib, b"cuMemAlloc_v2\0")?,
         mem_free: sym(lib, b"cuMemFree_v2\0")?,
