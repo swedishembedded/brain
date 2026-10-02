@@ -196,3 +196,48 @@ fn storage_from_a_recycled_block_is_zero() {
     let clean = b.storage(n);
     assert!(b.read(&clean, n as usize).iter().all(|&x| x == 0.0), "recycled storage was not zeroed");
 }
+
+/// **A held block carries another stream's pending work with it.**
+///
+/// Handle A allocates a block, handle B (its own stream) runs a long chain of
+/// kernels on it, and the block is dropped back into A's cache with B's work
+/// still queued - nothing drains, because the host ran ahead. A's next
+/// allocation of that size reissues the block and zeroes it. Unless A's stream
+/// first waits for B's work, the zeroing runs ahead of B's kernels and B writes
+/// into what A now believes is fresh storage: silent wrong numbers, which is
+/// what the real-dims prefill gate saw (1e-3 more error with holding on) before
+/// `Context::alloc` waited on a held block's fence.
+#[test]
+fn a_reissued_block_waits_for_the_other_streams_work_on_it() {
+    let _s = serial();
+    let kernels: &[(&str, &str)] = &[("axpy", kernels::AXPY)];
+    let Ok(a) = CudaBackend::try_new(kernels) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let Some(b) = a.share() else {
+        brain_testutil::skip_unavailable("cannot open a second handle");
+        return;
+    };
+    a.hold_freed_blocks(true);
+    let n = (4 * MIB / 4) as u32;
+    let steps = 400; // enough queued kernel time that an unordered zero is overtaken
+    let src = b.storage_init("src", &vec![1.0f32; n as usize]);
+
+    for round in 0..6 {
+        let x = a.storage(n as u64);
+        // B (another stream) accumulates into x, 400 dependent launches deep.
+        let params = [n, 1.0f32.to_bits()];
+        let chain: Vec<_> = (0..steps).map(|_| b.step(0, &[&x, &src], &params, n)).collect();
+        b.submit(&[], &chain);
+        drop(chain);
+        drop(x);
+
+        // The same size comes straight back; it must be zero, whatever B is still doing.
+        let y = a.storage(n as u64);
+        let got = a.read(&y, n as usize);
+        assert!(got.iter().all(|&v| v == 0.0), "round {round}: a reissued block was written by another stream after it was zeroed");
+        drop(y);
+        b.poll_wait();
+    }
+}

@@ -234,7 +234,21 @@ impl Context {
     pub fn alloc(&self, bytes: usize) -> Result<DeviceMem, String> {
         let len = bytes.max(1);
         let (ptr, fence) = match self.cache.take(len) {
-            Some(held) => (held.ptr, held.fence),
+            Some(held) => {
+                // Another handle's stream may still be working on this block: it
+                // was the last to touch it, and nothing drained since. Reissuing
+                // is a new use, so this stream waits for that work before it
+                // zeroes or writes the block - exactly the wait any other use
+                // of a fenced buffer pays - and from then on nothing foreign is
+                // pending, so the new owner starts unfenced. The same stream
+                // needs no wait: it orders its own work.
+                if let Some(f) = held.fence {
+                    if f.stream_id != self.stream_id {
+                        self.wait_event(&f.event)?;
+                    }
+                }
+                (held.ptr, None)
+            }
             None => {
                 self.make_current()?;
                 let mut ptr: CuDevicePtr = 0;
@@ -1064,7 +1078,8 @@ impl Drop for DeviceMem {
 ///
 /// * **Ordering.** Reuse is by this context's one stream, which orders the new
 ///   owner's zeroing and kernels after the old owner's. Another handle's
-///   stream is covered by moving the block's [`Fence`] with it.
+///   stream is covered by moving the block's [`Fence`] along with it and having
+///   the allocating stream wait on it when the block is reissued.
 /// * **Bounded.** Held bytes never exceed [`BlockCache::cap`]; a block that does
 ///   not fit goes straight to the driver. Blocks up to half the cap are held,
 ///   whatever their size: the multi-megabyte activations are what block the host
