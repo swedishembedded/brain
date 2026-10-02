@@ -104,6 +104,8 @@ enum Settled {
 struct Log {
     begun: Vec<(String, String, String)>,
     settled: Vec<Settled>,
+    /// When set, the hooks do not list any model.
+    hidden: bool,
 }
 
 /// Records every call it sees; refuses `broke` at the door, and fails to record
@@ -115,6 +117,10 @@ struct RecorderTicket {
 }
 
 impl RequestHooks for Recorder {
+    fn listed(&self, _model: &str) -> bool {
+        !self.0.lock().unwrap().hidden
+    }
+
     fn begin(&self, call: &Call<'_>) -> Result<Box<dyn Ticket>, ApiError> {
         let caller = call.caller.and_then(|p| p.downcast_ref::<Caller>()).map_or("anonymous", |c| c.0);
         if caller == "broke" {
@@ -278,4 +284,24 @@ async fn the_anthropic_dialect_authenticates_by_x_api_key_and_settles_the_same_w
     assert_eq!(log.begun.len(), 1);
     assert_eq!(log.begun[0].0, "alice");
     assert_eq!(log.settled, [Settled::Done { prompt: 5, completion: 2 }]);
+}
+
+#[tokio::test]
+async fn hooks_decide_which_models_are_listed() {
+    let rig = rig(Provider::OpenAI);
+    let get = |uri: &str| Request::builder().uri(uri.to_string()).header(header::AUTHORIZATION, "Bearer alice-key").body(Body::empty()).unwrap();
+
+    let (_, body) = json_body(rig.app.clone().oneshot(get("/models")).await.unwrap()).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 1, "a model is listed unless the hooks say otherwise");
+    let (_, body) = json_body(rig.app.clone().oneshot(get("/v1/capabilities")).await.unwrap()).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+    rig.log.lock().unwrap().hidden = true;
+
+    let (_, body) = json_body(rig.app.clone().oneshot(get("/models")).await.unwrap()).await;
+    assert!(body["data"].as_array().unwrap().is_empty(), "a hidden model is not listed: {body}");
+    let (status, _) = json_body(rig.app.clone().oneshot(get("/models/brain-chat")).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nor can it be looked up by name");
+    let (_, body) = json_body(rig.app.clone().oneshot(get("/v1/capabilities")).await.unwrap()).await;
+    assert!(body["data"].as_array().unwrap().is_empty());
 }

@@ -170,6 +170,10 @@ traits on `AppState`:
   streamed answer whose client disconnected. A settlement that returns an error
   fails the request: an answer nobody is accountable for is not served.
 
+`RequestHooks::listed` decides which models `/models`, `/models/{id}` and
+`/v1/capabilities` show (everything, by default), so an application can advertise only
+what it sells.
+
 Both are optional, and a surface without them behaves exactly as before.
 
 ## Security

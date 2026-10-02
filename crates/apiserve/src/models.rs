@@ -34,13 +34,13 @@ pub fn routes() -> Router<AppState> {
 /// `GET /models` — the provider-shaped list of exposed models.
 async fn list(State(state): State<AppState>) -> Json<Value> {
     let models = catalog::exposed(&state.exec, state.provider);
-    let cards: Vec<Value> = models.iter().map(|(name, caps, ctx)| card(state.provider, name, *caps, *ctx)).collect();
+    let cards: Vec<Value> = models.iter().filter(|(name, _, _)| state.lists(name)).map(|(name, caps, ctx)| card(state.provider, name, *caps, *ctx)).collect();
     Json(envelope(state.provider, cards))
 }
 
 /// `GET /models/{id}` — one model card, or 404 if it is not exposed here.
 async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|(n, _, _)| *n == id);
+    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|(n, _, _)| *n == id && state.lists(n));
     match found {
         Some((name, caps, ctx)) => Ok(Json(card(state.provider, &name, caps, ctx))),
         None => Err(ApiError::model_not_found(state.provider, &id)),

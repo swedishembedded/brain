@@ -101,6 +101,11 @@ impl AppState {
         AppState { caller: caller.map(|axum::Extension(principal)| principal), ..self.clone() }
     }
 
+    /// Whether the hooks list `model` on this surface.
+    pub fn lists(&self, model: &str) -> bool {
+        self.hooks.as_ref().is_none_or(|hooks| hooks.listed(model))
+    }
+
     /// Override the admission deadline (builder-style). Used by tests to force fast
     /// shedding without slow real-time waits.
     pub fn with_admit_deadline(mut self, deadline: Duration) -> AppState {

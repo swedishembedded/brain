@@ -58,6 +58,13 @@ pub trait Ticket: Send {
 
 /// The embedder's view of every call a surface serves.
 pub trait RequestHooks: Send + Sync {
+    /// Whether `model` is listed on this surface (`/models` and the capability
+    /// catalogue). The default lists everything. A model that is not listed is
+    /// not advertised; refusing a call to it is `begin`'s business.
+    fn listed(&self, _model: &str) -> bool {
+        true
+    }
+
     /// Decides whether the call may run, and returns what settles it.
     ///
     /// # Errors

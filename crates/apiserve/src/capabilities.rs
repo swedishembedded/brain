@@ -144,6 +144,7 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
     let manifests = state.exec.manifests();
     let data: Vec<Value> = manifests
         .iter()
+        .filter(|manifest| state.lists(&manifest.model))
         .flat_map(|manifest| {
             manifest.actions.iter().map(move |action| {
                 let params: Vec<Value> = action
