@@ -298,8 +298,9 @@ enum Place {
     /// A kernel-private struct (a `var`, or a member or element of one),
     /// refined by `AccessIndex`.
     Struct { lv: String, ty: Handle<naga::Type> },
-    /// A kernel-private array of structs awaiting an index.
-    StructArray { lv: String, elem: Handle<naga::Type>, nel: String },
+    /// A kernel-private array (a `var`, or a member or element of one), held in
+    /// a C++ wrapper struct whose `v` is the elements; see [`aggregate`].
+    Array { lv: String, ty: Handle<naga::Type> },
     /// A vector or struct in device memory (the uniform block or a storage
     /// binding of structs): `ptr` is a word pointer, `off` a byte offset.
     Mem { ptr: String, off: String, ty: Handle<naga::Type> },
@@ -515,7 +516,7 @@ impl<'a> Gen<'a> {
                         // elements mix scalar kinds, so no one element type
                         // would be right for the pointer.
                         let ident = format!("__b{b}");
-                        self.cpp_struct(elem)?;
+                        self.cpp_type(elem)?;
                         bindings.push((b, ident.clone(), Ty::U32, stride / 4));
                         self.globals.insert(h, GlobalKind::StorageMem { ident, elem, stride, nel: format!("__nel{b}") });
                         continue;
@@ -733,7 +734,7 @@ impl<'a> Gen<'a> {
                                 let _ = writeln!(out, "{pad}{} = {text};", vec_comp(&base, c));
                             }
                         }
-                        Place::Struct { lv, .. } => {
+                        Place::Struct { lv, .. } | Place::Array { lv, .. } => {
                             let (v, _) = self.agg(*value, out)?;
                             let _ = writeln!(out, "{pad}{lv} = {v};");
                         }
@@ -885,22 +886,10 @@ impl<'a> Gen<'a> {
             let name = lv.name.clone().unwrap_or_default();
             let ident = format!("__l{tag}{i}_{}", ident_of(&name));
             match &self.m.types[lv.ty].inner {
-                TypeInner::Array { base, size: naga::ArraySize::Constant(count), .. }
-                    if matches!(self.m.types[*base].inner, TypeInner::Struct { .. }) =>
-                {
-                    let cpp = self.cpp_struct(*base)?;
-                    self.decls.push(format!("{cpp} {ident}[{count}] = {{}};"));
-                    locals.insert(h, Place::StructArray { lv: ident, elem: *base, nel: count.to_string() });
-                }
                 TypeInner::Array { .. } => {
-                    let (elem, count) = array_info(self.m, lv.ty)?;
-                    self.decls.push(format!("{} {ident}[{count}] = {{}};", elem.c()));
-                    let layout = array_layout(self.m, lv.ty)?;
-                    let nel = layout.count.ok_or("a local array needs a fixed size")?.to_string();
-                    let place = match layout.vec {
-                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel },
-                        None => Place::ArrayBase(ident, elem, nel),
-                    };
+                    let cpp = self.cpp_type(lv.ty)?;
+                    self.decls.push(format!("{cpp} {ident} = {{}};"));
+                    let place = self.private_place(ident, lv.ty)?;
                     locals.insert(h, place);
                 }
                 TypeInner::Scalar(s) => {
@@ -915,7 +904,7 @@ impl<'a> Gen<'a> {
                     locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty });
                 }
                 TypeInner::Struct { .. } => {
-                    let cpp = self.cpp_struct(lv.ty)?;
+                    let cpp = self.cpp_type(lv.ty)?;
                     self.decls.push(format!("{cpp} {ident} = {{}};"));
                     locals.insert(h, Place::Struct { lv: ident, ty: lv.ty });
                 }
@@ -948,7 +937,7 @@ impl<'a> Gen<'a> {
                         let _ = writeln!(out, "  {} = {text};", vec_comp(&base, c));
                     }
                 }
-                Place::Struct { lv, .. } => {
+                Place::Struct { lv, .. } | Place::Array { lv, .. } => {
                     let (text, _) = self.agg(init, out)?;
                     let _ = writeln!(out, "  {lv} = {text};");
                 }
@@ -992,7 +981,7 @@ impl<'a> Gen<'a> {
         let id = self.n_call;
         self.n_call += 1;
 
-        let ret_agg = callee.result.as_ref().map(|r| r.ty).filter(|t| matches!(self.m.types[*t].inner, naga::TypeInner::Struct { .. }));
+        let ret_agg = callee.result.as_ref().map(|r| r.ty).filter(|t| matches!(self.m.types[*t].inner, naga::TypeInner::Struct { .. } | naga::TypeInner::Array { .. }));
         let (slots, ret_ty) = match &callee.result {
             None => (Vec::new(), Ty::U32),
             Some(r) if ret_agg.is_some() => (vec![format!("__call{id}_r")], scalar_zero_ty(r.ty)),
@@ -1007,7 +996,7 @@ impl<'a> Gen<'a> {
         for slot in &slots {
             match ret_agg {
                 Some(sty) => {
-                    let cpp = self.cpp_struct(sty)?;
+                    let cpp = self.cpp_type(sty)?;
                     self.decls.push(format!("{cpp} {slot};"));
                 }
                 None => self.decls.push(format!("{} {slot};", ret_ty.c())),
@@ -1081,7 +1070,7 @@ impl<'a> Gen<'a> {
             Eval::Agg(text, ty) => {
                 let name = format!("__e{}", self.n_tmp);
                 self.n_tmp += 1;
-                let cpp = self.cpp_struct(ty)?;
+                let cpp = self.cpp_type(ty)?;
                 self.decls.push(format!("{cpp} {name};"));
                 let _ = writeln!(out, "{}{name} = {text};", "  ".repeat(depth));
                 self.cache.insert(h, Eval::Agg(name, ty));
@@ -1108,7 +1097,9 @@ impl<'a> Gen<'a> {
             Eval::Value(v, t) => Ok((v, t)),
             Eval::Place(Place::Lvalue(lv, t)) => Ok((lv, t)),
             Eval::Vector(..) | Eval::Place(Place::VecRef { .. }) => Err("expected a scalar, got a vector".into()),
-            Eval::Agg(..) | Eval::Place(Place::Struct { .. }) => Err("expected a scalar, got a struct".into()),
+            Eval::Agg(..) | Eval::Place(Place::Struct { .. }) | Eval::Place(Place::Array { .. }) => {
+                Err("expected a scalar, got a struct or an array".into())
+            }
             Eval::Place(_) => Err("expected a value, got an unindexed array or a block of device memory".into()),
         }
     }
@@ -1121,7 +1112,9 @@ impl<'a> Gen<'a> {
             Eval::Place(Place::Lvalue(lv, t)) => Ok(vector::Lanes::scalar(lv, t)),
             Eval::Vector(c, t) => Ok(vector::Lanes::vector(c, t)),
             Eval::Place(Place::VecRef { base, n, ty }) => Ok(vector::Lanes::vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty)),
-            Eval::Agg(..) | Eval::Place(Place::Struct { .. }) => Err("expected a scalar or vector, got a struct".into()),
+            Eval::Agg(..) | Eval::Place(Place::Struct { .. }) | Eval::Place(Place::Array { .. }) => {
+                Err("expected a scalar or vector, got a struct or an array".into())
+            }
             Eval::Place(_) => Err("expected a value, got an unindexed array or a block of device memory".into()),
         }
     }
@@ -1129,7 +1122,7 @@ impl<'a> Gen<'a> {
     /// An expression that must be a struct: its C++ expression and type.
     fn agg(&mut self, h: Handle<Expression>, out: &mut String) -> Result<(String, Handle<naga::Type>), String> {
         match self.eval(h, out, 1)? {
-            Eval::Agg(text, ty) | Eval::Place(Place::Struct { lv: text, ty }) => Ok((text, ty)),
+            Eval::Agg(text, ty) | Eval::Place(Place::Struct { lv: text, ty }) | Eval::Place(Place::Array { lv: text, ty }) => Ok((text, ty)),
             Eval::Place(place @ Place::Mem { .. }) => match self.load_place(place)? {
                 Eval::Agg(text, ty) => Ok((text, ty)),
                 _ => Err("expected a struct".into()),
@@ -1172,9 +1165,9 @@ impl<'a> Gen<'a> {
             },
             Expression::LocalVariable(l) => Ok(Eval::Place(self.locals[l].clone())),
             Expression::ArrayLength(array) => match self.eval(*array, out, depth)? {
+                Eval::Place(Place::Array { ty, .. }) => Ok(Eval::Value(format!("(unsigned int)({})", self.array_count(ty)?), Ty::U32)),
                 Eval::Place(Place::ArrayBase(_, _, nel))
                 | Eval::Place(Place::VecArrayBase { nel, .. })
-                | Eval::Place(Place::StructArray { nel, .. })
                 | Eval::Place(Place::MemArray { nel, .. }) => {
                     Ok(Eval::Value(format!("(unsigned int)({nel})"), Ty::U32))
                 }
@@ -1206,6 +1199,11 @@ impl<'a> Gen<'a> {
                     }
                     return Ok(Eval::Value(chain, t));
                 }
+                if let Eval::Agg(text, ty) = self.eval(*base, out, depth)? {
+                    let (idx, _) = self.value(*index, out)?;
+                    let place = self.array_element(&text, ty, &idx)?;
+                    return self.load_place(place);
+                }
                 let b = self.place(*base, out, depth)?;
                 let (idx, _) = self.value(*index, out)?;
                 match b {
@@ -1229,9 +1227,7 @@ impl<'a> Gen<'a> {
                     Place::VecRef { base, n, ty } => {
                         Ok(Eval::Place(Place::Lvalue(format!("(&{base})[{}]", clamped(&format!("(size_t)({idx})"), &n.to_string())), ty)))
                     }
-                    Place::StructArray { lv, elem, nel } => {
-                        Ok(Eval::Place(Place::Struct { lv: format!("{lv}[{}]", clamped(&format!("(size_t)({idx})"), &nel)), ty: elem }))
-                    }
+                    Place::Array { lv, ty } => Ok(Eval::Place(self.array_element(&lv, ty, &idx)?)),
                     Place::MemArray { ptr, off, elem, stride, nel } => {
                         Ok(Eval::Place(self.mem_element(ptr, &off, elem, stride, &nel, &idx)?))
                     }
@@ -1276,12 +1272,14 @@ impl<'a> Gen<'a> {
                     })),
                     // A struct value's member, and a member of a kernel-private
                     // struct.
-                    Eval::Agg(text, sty) => self.struct_member_value(&text, sty, *index),
                     Eval::Place(Place::Struct { lv, ty }) => Ok(Eval::Place(self.struct_member_place(&lv, ty, *index)?)),
-                    Eval::Place(Place::StructArray { lv, elem, nel }) => Ok(Eval::Place(Place::Struct {
-                        lv: format!("{lv}[{}]", clamped(&format!("(size_t)({index}u)"), &nel)),
-                        ty: elem,
-                    })),
+                    Eval::Place(Place::Array { lv, ty }) => Ok(Eval::Place(self.array_element(&lv, ty, &format!("{index}u"))?)),
+                    // An element of an array VALUE (a parameter, a result).
+                    Eval::Agg(text, ty) if matches!(self.m.types[ty].inner, naga::TypeInner::Array { .. }) => {
+                        let place = self.array_element(&text, ty, &format!("{index}u"))?;
+                        self.load_place(place)
+                    }
+                    Eval::Agg(text, sty) => self.struct_member_value(&text, sty, *index),
                     // Hazard 2: a member of device memory is read at the offset
                     // WGSL's layout rules put it at, never at a C++ struct's.
                     Eval::Place(Place::Mem { ptr, off, ty }) => match &self.m.types[ty].inner {
@@ -1326,12 +1324,12 @@ impl<'a> Gen<'a> {
                 vector::select_lanes(&c, &a, &r)
             }
             Expression::Compose { ty, components } => {
-                if matches!(self.m.types[*ty].inner, TypeInner::Struct { .. }) {
+                if matches!(self.m.types[*ty].inner, TypeInner::Struct { .. } | TypeInner::Array { .. }) {
                     let mut parts = Vec::with_capacity(components.len());
                     for c in components {
                         parts.push(self.eval(*c, out, depth)?);
                     }
-                    return self.compose_struct(*ty, parts);
+                    return self.compose_aggregate(*ty, parts);
                 }
                 let Some(shape) = vector_shape(self.m, *ty) else {
                     return Err("only vectors and structs can be composed (matrices are unsupported)".into());
@@ -1386,8 +1384,8 @@ impl<'a> Gen<'a> {
 
     /// The zero value of a scalar or vector type.
     fn zero_value(&mut self, ty: Handle<naga::Type>) -> Result<Eval, String> {
-        if matches!(self.m.types[ty].inner, TypeInner::Struct { .. }) {
-            return self.zero_struct(ty);
+        if matches!(self.m.types[ty].inner, TypeInner::Struct { .. } | TypeInner::Array { .. }) {
+            return self.zero_aggregate(ty);
         }
         match vector_shape(self.m, ty) {
             Some(shape) => {

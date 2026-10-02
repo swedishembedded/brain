@@ -74,9 +74,28 @@ impl Gen<'_> {
     /// The C++ name of struct type `ty`, defining it (and the structs it holds)
     /// on first use. Definitions are emitted ahead of the kernel, innermost
     /// first, which is the order they are registered in.
-    pub(super) fn cpp_struct(&mut self, ty: Handle<naga::Type>) -> Result<String, String> {
+    pub(super) fn cpp_type(&mut self, ty: Handle<naga::Type>) -> Result<String, String> {
         if let Some(name) = self.struct_names.get(&ty) {
             return Ok(name.clone());
+        }
+        if let TypeInner::Array { size: ArraySize::Constant(n), base, .. } = &self.m.types[ty].inner {
+            // An array VALUE (a parameter, a result, a struct member) is a
+            // struct around the elements, so it copies and assigns like any
+            // other value; `v` is the flat array a place indexes into.
+            let (n, base) = (n.get(), *base);
+            let (elem, count) = match &self.m.types[base].inner {
+                TypeInner::Scalar(s) => (Ty::from_scalar(*s)?.c().to_string(), n),
+                TypeInner::Vector { .. } => {
+                    let (t, _, stride) = vector_shape(self.m, base).expect("a vector")?;
+                    (t.c().to_string(), n * stride)
+                }
+                TypeInner::Struct { .. } => (self.cpp_type(base)?, n),
+                other => return Err(format!("an array of {other:?} is unsupported")),
+            };
+            let name = format!("__A{}", self.struct_names.len());
+            self.struct_defs.push(format!("struct {name} {{ {elem} v[{count}]; }};\n"));
+            self.struct_names.insert(ty, name.clone());
+            return Ok(name);
         }
         let TypeInner::Struct { members, .. } = &self.m.types[ty].inner else {
             return Err(format!("expected a struct, got {:?}", self.m.types[ty].inner));
@@ -98,19 +117,8 @@ impl Gen<'_> {
         match &self.m.types[ty].inner {
             TypeInner::Scalar(s) => Ok(format!("{} {name}", Ty::from_scalar(*s)?.c())),
             TypeInner::Vector { size, scalar } => Ok(format!("{} {name}[{}]", Ty::from_scalar(*scalar)?.c(), *size as u32)),
-            TypeInner::Struct { .. } => Ok(format!("{} {name}", self.cpp_struct(ty)?)),
-            TypeInner::Array { base, size: ArraySize::Constant(n), .. } => {
-                let n = n.get();
-                match &self.m.types[*base].inner {
-                    TypeInner::Scalar(s) => Ok(format!("{} {name}[{n}]", Ty::from_scalar(*s)?.c())),
-                    TypeInner::Vector { .. } => {
-                        let (t, _, stride) = vector_shape(self.m, *base).expect("a vector")?;
-                        Ok(format!("{} {name}[{}]", t.c(), n * stride))
-                    }
-                    TypeInner::Struct { .. } => Ok(format!("{} {name}[{n}]", self.cpp_struct(*base)?)),
-                    other => Err(format!("an array of {other:?} is unsupported")),
-                }
-            }
+            TypeInner::Struct { .. } => Ok(format!("{} {name}", self.cpp_type(ty)?)),
+            TypeInner::Array { size: ArraySize::Constant(_), .. } => Ok(format!("{} {name}", self.cpp_type(ty)?)),
             other => Err(format!("unsupported member type {other:?}")),
         }
     }
@@ -123,23 +131,12 @@ impl Gen<'_> {
                 Ok(Place::VecRef { base: format!("{lv}[0]"), n: *size as u32, ty: Ty::from_scalar(*scalar)? })
             }
             TypeInner::Struct { .. } => {
-                self.cpp_struct(ty)?;
+                self.cpp_type(ty)?;
                 Ok(Place::Struct { lv, ty })
             }
-            TypeInner::Array { base, size: ArraySize::Constant(n), .. } => {
-                let nel = n.get().to_string();
-                match &self.m.types[*base].inner {
-                    TypeInner::Scalar(s) => Ok(Place::ArrayBase(lv, Ty::from_scalar(*s)?, nel)),
-                    TypeInner::Vector { .. } => {
-                        let (elem, n, stride) = vector_shape(self.m, *base).expect("a vector")?;
-                        Ok(Place::VecArrayBase { ident: lv, elem, n, stride, nel })
-                    }
-                    TypeInner::Struct { .. } => {
-                        self.cpp_struct(*base)?;
-                        Ok(Place::StructArray { lv, elem: *base, nel })
-                    }
-                    other => Err(format!("an array of {other:?} is unsupported")),
-                }
+            TypeInner::Array { size: ArraySize::Constant(_), .. } => {
+                self.cpp_type(ty)?;
+                Ok(Place::Array { lv, ty })
             }
             other => Err(format!("unsupported type {other:?}")),
         }
@@ -162,15 +159,10 @@ impl Gen<'_> {
         self.private_place(format!("{lv}.{}", member(index as usize)), mty)
     }
 
-    /// Member `index` of a struct VALUE: a scalar or vector is its value, a
-    /// struct is a struct value, and an array stays a place to be indexed.
+    /// Member `index` of a struct VALUE.
     pub(super) fn struct_member_value(&mut self, text: &str, sty: Handle<naga::Type>, index: u32) -> Result<Eval, String> {
         let place = self.struct_member_place(&format!("({text})"), sty, index)?;
-        match place {
-            // An array member stays a place, to be indexed.
-            Place::ArrayBase(..) | Place::VecArrayBase { .. } | Place::StructArray { .. } => Ok(Eval::Place(place)),
-            place => self.load_place(place),
-        }
+        self.load_place(place)
     }
 
     /// What reading `place` produces, for the places that hold a value.
@@ -178,7 +170,7 @@ impl Gen<'_> {
         match place {
             Place::Lvalue(lv, t) => Ok(Eval::Value(lv, t)),
             Place::VecRef { base, n, ty } => Ok(Eval::Vector((0..n as usize).map(|c| super::vec_comp(&base, c)).collect(), ty)),
-            Place::Struct { lv, ty } => Ok(Eval::Agg(lv, ty)),
+            Place::Struct { lv, ty } | Place::Array { lv, ty } => Ok(Eval::Agg(lv, ty)),
             Place::MemScalar { ptr, off, ty } => Ok(Eval::Value(format!("{}({ptr}, {off})", read_helper(ty)?), ty)),
             Place::Mem { ptr, off, ty } => match &self.m.types[ty].inner {
                 TypeInner::Vector { size, scalar } => {
@@ -189,7 +181,7 @@ impl Gen<'_> {
                     Ok(Eval::Vector(lanes, t))
                 }
                 TypeInner::Struct { .. } => {
-                    let name = self.cpp_struct(ty)?;
+                    let name = self.cpp_type(ty)?;
                     Ok(Eval::Agg(format!("{name}{}", self.mem_init(&ptr, &off, ty)?), ty))
                 }
                 other => Err(format!("cannot load {other:?} from device memory")),
@@ -260,7 +252,7 @@ impl Gen<'_> {
                 for (mty, moff) in members {
                     let at = offset_plus(off, moff);
                     parts.push(match &self.m.types[mty].inner {
-                        TypeInner::Struct { .. } => format!("{}{}", self.cpp_struct(mty)?, self.mem_init(ptr, &at, mty)?),
+                        TypeInner::Struct { .. } => format!("{}{}", self.cpp_type(mty)?, self.mem_init(ptr, &at, mty)?),
                         _ => self.mem_init(ptr, &at, mty)?,
                     });
                 }
@@ -274,7 +266,7 @@ impl Gen<'_> {
                         TypeInner::Scalar(_) | TypeInner::Struct { .. } => {
                             let init = self.mem_init(ptr, &at, *base)?;
                             parts.push(match &self.m.types[*base].inner {
-                                TypeInner::Struct { .. } => format!("{}{init}", self.cpp_struct(*base)?),
+                                TypeInner::Struct { .. } => format!("{}{init}", self.cpp_type(*base)?),
                                 _ => init,
                             });
                         }
@@ -295,7 +287,8 @@ impl Gen<'_> {
                         other => return Err(format!("an array of {other:?} is unsupported")),
                     }
                 }
-                Ok(format!("{{{}}}", parts.join(", ")))
+                // The array is the wrapper's one member.
+                Ok(format!("{{{{{}}}}}", parts.join(", ")))
             }
             other => Err(format!("cannot read {other:?} from device memory")),
         }
@@ -324,7 +317,7 @@ impl Gen<'_> {
                 Ok(())
             }
             (TypeInner::Struct { .. }, Eval::Agg(text, _)) => {
-                let name = self.cpp_struct(ty)?;
+                let name = self.cpp_type(ty)?;
                 let tmp = format!("__st{}", self.n_tmp);
                 self.n_tmp += 1;
                 let _ = writeln!(out, "{pad}{{");
@@ -366,7 +359,7 @@ impl Gen<'_> {
                     let at = offset_plus(off, e * stride);
                     match &self.m.types[base].inner {
                         TypeInner::Scalar(_) | TypeInner::Struct { .. } => {
-                            self.store_cpp(ptr, &at, base, &format!("{cpp}[{e}]"), out, pad)?;
+                            self.store_cpp(ptr, &at, base, &format!("{cpp}.v[{e}]"), out, pad)?;
                         }
                         TypeInner::Vector { size, scalar } => {
                             let t = Ty::from_scalar(*scalar)?;
@@ -374,7 +367,7 @@ impl Gen<'_> {
                             for c in 0..*size as u32 {
                                 let _ = writeln!(
                                     out,
-                                    "{pad}{}({ptr}, {}, {cpp}[{}]);",
+                                    "{pad}{}({ptr}, {}, {cpp}.v[{}]);",
                                     write_helper(t)?,
                                     offset_plus(&at, 4 * c),
                                     e * words + c
@@ -401,31 +394,84 @@ impl Gen<'_> {
                 let lanes = lanes.iter().map(|l| coerce(l, *vt, t)).collect::<Result<Vec<_>, _>>()?;
                 Ok(format!("{{{}}}", lanes.join(", ")))
             }
-            (TypeInner::Struct { .. }, Eval::Agg(text, _)) => Ok(text.clone()),
+            (TypeInner::Struct { .. } | TypeInner::Array { .. }, Eval::Agg(text, _)) => Ok(text.clone()),
             (other, _) => Err(format!("a struct member of type {other:?} cannot be built from this component")),
         }
     }
 
-    /// `Compose` of struct type `ty` from its member values.
-    pub(super) fn compose_struct(&mut self, ty: Handle<naga::Type>, comps: Vec<Eval>) -> Result<Eval, String> {
-        let name = self.cpp_struct(ty)?;
-        let TypeInner::Struct { members, .. } = &self.m.types[ty].inner else {
-            return Err("compose of a non-struct".into());
+    /// `Compose` of struct or array type `ty` from its member values.
+    pub(super) fn compose_aggregate(&mut self, ty: Handle<naga::Type>, comps: Vec<Eval>) -> Result<Eval, String> {
+        let name = self.cpp_type(ty)?;
+        let (parts, wrap) = match &self.m.types[ty].inner {
+            TypeInner::Struct { members, .. } => {
+                let tys: Vec<Handle<naga::Type>> = members.iter().map(|m| m.ty).collect();
+                if tys.len() != comps.len() {
+                    return Err(format!("a struct of {} members composed from {} components", tys.len(), comps.len()));
+                }
+                let mut parts = Vec::with_capacity(comps.len());
+                for (mty, c) in tys.into_iter().zip(&comps) {
+                    parts.push(self.init_of(mty, c)?);
+                }
+                (parts, false)
+            }
+            TypeInner::Array { base, .. } => {
+                let base = *base;
+                let mut parts = Vec::with_capacity(comps.len());
+                for c in &comps {
+                    match (&self.m.types[base].inner, c) {
+                        // An array of vectors is flat, a vec3 padded to its
+                        // four-word stride.
+                        (TypeInner::Vector { .. }, Eval::Vector(lanes, vt)) => {
+                            let (t, _, stride) = vector_shape(self.m, base).expect("a vector")?;
+                            for k in 0..stride as usize {
+                                parts.push(match lanes.get(k) {
+                                    Some(l) => coerce(l, *vt, t)?,
+                                    None => t.zero().to_string(),
+                                });
+                            }
+                        }
+                        _ => parts.push(self.init_of(base, c)?),
+                    }
+                }
+                (parts, true)
+            }
+            other => return Err(format!("compose of {other:?}")),
         };
-        let tys: Vec<Handle<naga::Type>> = members.iter().map(|m| m.ty).collect();
-        if tys.len() != comps.len() {
-            return Err(format!("a struct of {} members composed from {} components", tys.len(), comps.len()));
-        }
-        let mut parts = Vec::with_capacity(comps.len());
-        for (mty, c) in tys.into_iter().zip(&comps) {
-            parts.push(self.init_of(mty, c)?);
-        }
-        Ok(Eval::Agg(format!("{name}{{{}}}", parts.join(", ")), ty))
+        let braces = if wrap { format!("{name}{{{{{}}}}}", parts.join(", ")) } else { format!("{name}{{{}}}", parts.join(", ")) };
+        Ok(Eval::Agg(braces, ty))
     }
 
-    /// The zero value of struct type `ty`: C++'s `{}`, which is WGSL's too.
-    pub(super) fn zero_struct(&mut self, ty: Handle<naga::Type>) -> Result<Eval, String> {
-        let name = self.cpp_struct(ty)?;
+    /// The zero value of struct or array type `ty`: C++'s `{}`, which is
+    /// WGSL's too.
+    pub(super) fn zero_aggregate(&mut self, ty: Handle<naga::Type>) -> Result<Eval, String> {
+        let name = self.cpp_type(ty)?;
         Ok(Eval::Agg(format!("{name}{{}}"), ty))
+    }
+
+    /// The element count of the array type `ty`.
+    pub(super) fn array_count(&self, ty: Handle<naga::Type>) -> Result<u32, String> {
+        match &self.m.types[ty].inner {
+            TypeInner::Array { size: ArraySize::Constant(n), .. } => Ok(n.get()),
+            other => Err(format!("expected a fixed-size array, got {other:?}")),
+        }
+    }
+
+    /// Element `idx` (a C++ index expression) of the array whose wrapper is the
+    /// C++ lvalue `lv`, clamped to the array like every other index.
+    pub(super) fn array_element(&mut self, lv: &str, ty: Handle<naga::Type>, idx: &str) -> Result<Place, String> {
+        let TypeInner::Array { base, .. } = &self.m.types[ty].inner else {
+            return Err("indexing something that is not an array".into());
+        };
+        let base = *base;
+        let at = clamped(&format!("(size_t)({idx})"), &self.array_count(ty)?.to_string());
+        match &self.m.types[base].inner {
+            TypeInner::Scalar(s) => Ok(Place::Lvalue(format!("{lv}.v[{at}]"), Ty::from_scalar(*s)?)),
+            TypeInner::Vector { .. } => {
+                let (t, n, stride) = vector_shape(self.m, base).expect("a vector")?;
+                Ok(Place::VecRef { base: format!("{lv}.v[{at} * {stride}u]"), n, ty: t })
+            }
+            TypeInner::Struct { .. } => Ok(Place::Struct { lv: format!("{lv}.v[{at}]"), ty: base }),
+            other => Err(format!("an array of {other:?} is unsupported")),
+        }
     }
 }

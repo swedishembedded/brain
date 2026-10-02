@@ -127,8 +127,50 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Arrays as values: returned from a helper, passed to one and indexed at run
+/// time there, held as a struct member, built with a constructor, and an array
+/// of vectors (whose `vec3` elements are four words wide) returned and indexed.
+const ARRAY_VALUES: &str = r#"
+struct P { n: u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read_write> o: array<f32>;
+
+struct Part { part: array<f32, 5>, tag: u32 };
+
+fn ramp(x: f32) -> array<f32, 5> {
+    var z: array<f32, 5>;
+    for (var k = 0u; k < 5u; k = k + 1u) { z[k] = x + f32(k); }
+    return z;
+}
+fn twice_at(a: array<f32, 5>, k: u32) -> f32 { return a[k % 5u] * 2.0; }
+fn pair(x: f32) -> array<vec3<f32>, 2> {
+    var v: array<vec3<f32>, 2>;
+    v[0] = vec3<f32>(x, x + 1.0, x + 2.0);
+    v[1] = v[0] * 2.0;
+    return v;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= p.n) { return; }
+    let r = ramp(f32(i));
+    var q: Part;
+    q.part = r;
+    q.tag = i;
+    let c = array<f32, 3>(f32(i), 1.5, 2.5);
+    let w = pair(f32(i));
+    o[i * 8u] = twice_at(r, i);
+    o[i * 8u + 1u] = q.part[(i + 2u) % 5u];
+    o[i * 8u + 2u] = c[i % 3u];
+    o[i * 8u + 3u] = w[1].z;
+    o[i * 8u + 4u] = w[i % 2u].y;
+    o[i * 8u + 5u] = f32(q.tag);
+}
+"#;
+
 fn backend() -> Option<CudaBackend> {
-    match CudaBackend::try_new(&[("nested", NESTED), ("uniform_array", UNIFORM_ARRAY), ("storage", STORAGE)]) {
+    match CudaBackend::try_new(&[("nested", NESTED), ("uniform_array", UNIFORM_ARRAY), ("storage", STORAGE), ("array_values", ARRAY_VALUES)]) {
         Ok(b) => Some(b),
         Err(e) => {
             brain_testutil::skip_unavailable(&format!("no usable CUDA backend: {e}"));
@@ -266,4 +308,28 @@ fn struct_records_in_storage_are_read_and_written_at_their_wgsl_layout() {
     }
     assert_bits(&dst, &want, "records");
     assert_bits(&o, &want_o, "length + member");
+}
+
+#[test]
+fn array_values_returned_passed_held_and_composed_agree_with_the_host() {
+    let Some(b) = backend() else { return };
+    let out = b.storage((N * 8) as u64);
+    b.submit(&[], &[b.step(3, &[&out], &[N as u32], N as u32)]);
+    let got = b.read(&out, N * 8);
+
+    let mut want = vec![0f32; N * 8];
+    for i in 0..N {
+        let x = i as f32;
+        let ramp: Vec<f32> = (0..5).map(|k| x + k as f32).collect();
+        let c = [x, 1.5, 2.5];
+        let w0 = [x, x + 1.0, x + 2.0];
+        let w1 = [w0[0] * 2.0, w0[1] * 2.0, w0[2] * 2.0];
+        want[i * 8] = ramp[i % 5] * 2.0;
+        want[i * 8 + 1] = ramp[(i + 2) % 5];
+        want[i * 8 + 2] = c[i % 3];
+        want[i * 8 + 3] = w1[2];
+        want[i * 8 + 4] = if i % 2 == 0 { w0[1] } else { w1[1] };
+        want[i * 8 + 5] = x;
+    }
+    assert_bits(&got, &want, "array values");
 }
