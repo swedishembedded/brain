@@ -57,6 +57,7 @@ fn handles_that_dispatch_the_native_kernel_return_every_byte_they_took() {
     // One warm cycle so one-time driver state is not counted as a leak.
     one_cycle(&anchor);
     let before = anchor.max_buffer_bytes();
+    let own_before = brain_testutil::own_gpu_memory_mib();
     for _ in 0..CYCLES {
         let gpu = Gpu::new(KERNELS);
         one_cycle(&gpu);
@@ -65,6 +66,16 @@ fn handles_that_dispatch_the_native_kernel_return_every_byte_they_took() {
         one_cycle(&gpu.share());
     }
     anchor.poll_wait();
+    // The card is shared: another process loading a model moves device-wide
+    // free memory by gigabytes. Where the driver says what THIS process holds,
+    // that is the figure a leak shows up in.
+    if let (Some(b), Some(a)) = (own_before, brain_testutil::own_gpu_memory_mib()) {
+        assert!(
+            a <= b + (SLACK_BYTES >> 20) + 1,
+            "the driver attributes {a} MiB to this process after {CYCLES} build/dispatch/drop cycles against {b} MiB before - something a handle owns outlived it"
+        );
+        return;
+    }
     let after = anchor.max_buffer_bytes();
     assert!(
         after + SLACK_BYTES >= before,
