@@ -42,15 +42,45 @@ const FREE_TOLERANCE: u64 = 96 << 20;
 
 struct Baseline {
     live: LiveResources,
+    /// Device-wide free memory, the fallback when the driver will not say what
+    /// this process holds.
     free: u64,
+    /// What the driver attributes to this process, in MiB, when it will say.
+    own_mib: Option<u64>,
 }
 
 fn baseline(probe: &Context) -> Baseline {
-    Baseline { live: live_resources(), free: probe.mem_info().expect("cuMemGetInfo").0 }
+    Baseline { live: live_resources(), free: probe.mem_info().expect("cuMemGetInfo").0, own_mib: brain_testutil::own_gpu_memory_mib() }
 }
 
+/// The exact counters, then the driver's opinion - about THIS process when it
+/// can say (`brain_testutil::own_gpu_memory_mib`). The card is shared, and
+/// another process loading a model moves device-wide free memory by gigabytes,
+/// which a gate on it reports as a leak that is not ours; only where the
+/// per-process figure is unavailable does this fall back to free memory.
 fn assert_returned(probe: &Context, base: &Baseline, what: &str) {
     assert_eq!(live_resources(), base.live, "{what}: live CUDA objects did not return to baseline");
+    let tolerance_mib = FREE_TOLERANCE >> 20;
+    if let Some(own_before) = base.own_mib {
+        let mut own = own_before;
+        let mut asked = true;
+        for _ in 0..50 {
+            match brain_testutil::own_gpu_memory_mib() {
+                Some(now) => own = now,
+                None => {
+                    asked = false;
+                    break;
+                }
+            }
+            if own <= own_before + tolerance_mib {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if asked {
+            panic!("{what}: the driver attributes {own} MiB to this process against {own_before} MiB before - the model's memory was not returned");
+        }
+    }
     let mut free = 0;
     for _ in 0..50 {
         free = probe.mem_info().expect("cuMemGetInfo").0;

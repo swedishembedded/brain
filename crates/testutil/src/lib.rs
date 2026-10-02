@@ -235,6 +235,42 @@ pub fn mem(label: &str) {
     );
 }
 
+/// Device memory, in MiB, the NVIDIA driver attributes to THIS process, or
+/// `None` where it cannot be asked (no `nvidia-smi`, a container whose process
+/// ids differ from the host's, a driver that lists no compute applications).
+///
+/// What a leak gate on a shared card has to compare. `cuMemGetInfo` free memory
+/// is the whole device's, so another process loading a model mid-test moves it
+/// by gigabytes and a gate on it fails for a leak that is not ours. The
+/// per-process figure moves only with this process's own allocations, its
+/// context and its loaded modules, which is exactly what a leak gate is about.
+/// Summed over every device the process has a context on; MiB granularity.
+pub fn own_gpu_memory_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    parse_own_memory_mib(&String::from_utf8_lossy(&out.stdout), std::process::id())
+}
+
+/// The rows of `nvidia-smi --query-compute-apps=pid,used_memory` (`pid, MiB`)
+/// that belong to `pid`, summed; `None` when none does.
+fn parse_own_memory_mib(csv: &str, pid: u32) -> Option<u64> {
+    let mut found = None;
+    for line in csv.lines() {
+        let mut cols = line.split(',').map(str::trim);
+        if let (Some(row_pid), Some(mib)) = (cols.next(), cols.next()) {
+            if row_pid.parse::<u32>() == Ok(pid) {
+                // `[N/A]` where the driver does not report it: no answer.
+                let mib = mib.parse::<u64>().ok()?;
+                *found.get_or_insert(0) += mib;
+            }
+        }
+    }
+    found
+}
+
 fn status_kb(key: &str) -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap_or_default()
@@ -443,6 +479,17 @@ mod tests {
         assert_eq!(cols.next(), Some("test-cap"));
         assert_eq!(cols.next(), Some("needs test-hardware"));
         assert!(cols.next().is_some(), "a location column was recorded");
+    }
+
+    /// The per-process GPU memory reading takes this process's rows and only
+    /// its rows, summed across devices.
+    #[test]
+    fn own_gpu_memory_is_the_sum_of_this_process_s_rows() {
+        let csv = "1000, 17180\n4242, 812\n4242, 100\n1001, 5\n";
+        assert_eq!(parse_own_memory_mib(csv, 4242), Some(912));
+        assert_eq!(parse_own_memory_mib(csv, 7), None);
+        assert_eq!(parse_own_memory_mib("4242, [N/A]\n", 4242), None);
+        assert_eq!(parse_own_memory_mib("", 4242), None);
     }
 
     /// (c) `BRAIN_REQUIRE_CAPABILITIES` naming `cap` promotes the same call to
