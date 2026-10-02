@@ -141,13 +141,15 @@ What it does differently:
 - **No MTP.** `cfg.mtp` is forced `false` - `Qwen35::new_impl_on` requires MTP
   to sit on a whole shard, which a multi-card split is not. The GGUF's
   `blk.64.*` block is excluded by `gguf_import::classify` itself.
-- **`ssm_a` is un-transformed on read.** llama.cpp's converter stores
-  `-exp(A_log)`; brain's `gdn_decay_gate.wgsl` wants `A_log`. Both the
-  offline importer (`Mapped::Transformed`) and this resident
-  (`SsmALogFix`) apply `gguf::import::ElemOp::LnNeg`. Importing verbatim
-  makes the Gated-DeltaNet decay gate up to 260x too strong and the model
-  stops integrating context - it was found by the real end-to-end gate, not
-  by any structural check. See `.agents/knowledge/` #70.
+- **`ssm_a` and the value-head order are undone on read.** llama.cpp's
+  converter stores `-exp(A_log)` (brain's `gdn_decay_gate.wgsl` wants
+  `A_log`) and stores every value-head-indexed Gated-DeltaNet leaf group-major
+  (brain: sub-major). Both the offline importer (`Mapped::Transformed`) and
+  this resident (`gguf::GdnFixSource`) apply `gguf::import::ElemOp::GdnVHeads`
+  (`gguf::gdn_order`). Importing verbatim makes the decay gate up to 260x too
+  strong and points every head at another head's state - it was found by the
+  real end-to-end gate, not by any structural check. See `.agents/knowledge/`
+  #70.
 - **Text only, one sequence per dispatch, per-token prefill** - same shape as
   `crate::serve::Engine` and for the same reasons.
 

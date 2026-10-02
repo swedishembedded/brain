@@ -227,7 +227,8 @@ const DROP_OTHER: &str = "vision (v.*/mm.*) or an unrecognized leaf";
 /// `n_layers` is the real decoder depth - MTP's block, at index `n_layers`, is
 /// always dropped, and a caller doing a truncated load passes its own smaller
 /// depth to drop every block past the cut the same way.
-fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
+pub(crate) fn classify(name: &str, cfg: &Qwen35Config) -> Mapped {
+    let (n_layers, n_experts) = (cfg.n_layers, cfg.n_experts);
     // The `blk.N.leaf` / `token_embd` / `output` / `output_norm` structure is
     // llama.cpp's, shared by every architecture it converts, so the splitting
     // is `gguf::import`'s and only the leaf decision below is qwen35moe's.
@@ -240,6 +241,10 @@ fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
         import::Leaf::Block { layer, leaf } => (layer, leaf),
     };
     let p = |s: &str| format!("blocks.{l}.{s}");
+    let gdn = |into: String| match gguf::GdnLeaf::of(&into) {
+        Some(leaf) => Mapped::Transformed { into, op: gguf::import::ElemOp::GdnVHeads { leaf, order: cfg.gdn_head_order() } },
+        None => unreachable!("classify names a GDN leaf gdn_order does not know: {into}"),
+    };
     // The leaf VOCABULARY (which spellings exist and what they structurally
     // mean) is `gguf::leaf`'s, shared with `qwen3`; only the brain-parameter
     // suffix below is qwen35moe-specific.
@@ -257,20 +262,20 @@ fn classify(name: &str, n_layers: u32, n_experts: u32) -> Mapped {
         Role::AttnQNorm => Mapped::Simple(p("self_attn.q_norm.weight")),
         Role::AttnKNorm => Mapped::Simple(p("self_attn.k_norm.weight")),
         Role::AttnOutput => Mapped::Simple(p("self_attn.o_proj.weight")),
-        // Gated DeltaNet (linear attention).
-        Role::AttnQkv => Mapped::Simple(p("linear_attn.in_proj_qkv.weight")),
-        Role::AttnGate => Mapped::Simple(p("linear_attn.in_proj_z.weight")),
-        Role::SsmAlpha => Mapped::Simple(p("linear_attn.in_proj_a.weight")),
-        Role::SsmBeta => Mapped::Simple(p("linear_attn.in_proj_b.weight")),
-        Role::SsmConv1d => Mapped::Simple(p("linear_attn.conv1d.weight")),
-        // NOT a plain rename: llama.cpp's converter stores `-exp(A_log)` and
-        // `model::gdn`'s decay gate wants `A_log` - see `gguf::import::ElemOp::LnNeg`
-        // for the measured consequence of getting this wrong (the identical
-        // defect was found on `qwen35`'s own GGUF route, on real weights).
-        Role::SsmA => Mapped::Transformed { into: p("linear_attn.A_log"), op: gguf::import::ElemOp::LnNeg },
-        Role::SsmDtBias => Mapped::Simple(p("linear_attn.dt_bias")),
+        // Gated DeltaNet (linear attention). Eight of these leaves are indexed
+        // by VALUE head, which llama.cpp stores group-major; the model wants
+        // sub-major (see `gguf::gdn_order`). `ssm_a` additionally holds
+        // `-exp(A_log)`, which `GdnLeaf::ALog`'s fix undoes too - a plain
+        // `ElemOp::LnNeg` here was the original defect's other half.
+        Role::AttnQkv => gdn(p("linear_attn.in_proj_qkv.weight")),
+        Role::AttnGate => gdn(p("linear_attn.in_proj_z.weight")),
+        Role::SsmAlpha => gdn(p("linear_attn.in_proj_a.weight")),
+        Role::SsmBeta => gdn(p("linear_attn.in_proj_b.weight")),
+        Role::SsmConv1d => gdn(p("linear_attn.conv1d.weight")),
+        Role::SsmA => gdn(p("linear_attn.A_log")),
+        Role::SsmDtBias => gdn(p("linear_attn.dt_bias")),
         Role::SsmNorm => Mapped::Simple(p("linear_attn.norm.weight")),
-        Role::SsmOut => Mapped::Simple(p("linear_attn.out_proj.weight")),
+        Role::SsmOut => gdn(p("linear_attn.out_proj.weight")),
         // MoE.
         Role::FfnGateInp => Mapped::Simple(p("mlp.router.weight")),
         Role::FfnGateInpShexp => Mapped::Simple(p("mlp.shared_expert_gate.weight")),
@@ -314,7 +319,7 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
     import::to_st(
         mg,
         &params,
-        &|n| Ok(classify(n, cfg.n_layers, cfg.n_experts)),
+        &|n| Ok(classify(n, &cfg)),
         out_path,
         &cfg.to_json(),
         Some(&card),
@@ -350,7 +355,7 @@ pub fn import_gguf_truncated_to_map(mg: &checkpoint::gguf::MmapGguf, cfg: &Qwen3
     // tensors past the cut are dropped by `classify`'s own `l >= n_layers`
     // rule before the driver ever asks for their bytes, while the top-level
     // tensors (`tok`/`lm_head`/`norm`) are wanted regardless of truncation.
-    import::to_map(mg, &cfg.param_list(), &|n| Ok(classify(n, cfg.n_layers, cfg.n_experts)), "qwen35 truncated")
+    import::to_map(mg, &cfg.param_list(), &|n| Ok(classify(n, cfg)), "qwen35 truncated")
 }
 
 /// Test fixtures for this importer, shared across crates.
@@ -380,12 +385,12 @@ pub mod testing {
         let n_heads = 2u64;
         let head_dim = 4u64; // -> q_proj width doubled = 16
         let n_kv = 1u64;
-        let lin_kh = 1u64;
+        let lin_kh = 2u64; // with lin_vh = 4: group 2, so the value-head reorder is not the identity
         let lin_kd = 3u64; // key_head_dim
-        let lin_vh = 2u64;
+        let lin_vh = 4u64;
         let lin_vd = 3u64; // value_head_dim (kept distinct from lin_kd)
-        let key_dim = lin_kh * lin_kd; // 3
-        let value_dim = lin_vh * lin_vd; // 6
+        let key_dim = lin_kh * lin_kd; // 6
+        let value_dim = lin_vh * lin_vd; // 12
         let conv_k = 2u64;
         let n_experts = 3u64;
         let moe_ff = 2u64;
@@ -497,8 +502,8 @@ mod tests {
         assert_eq!(cfg.head_dim, 4);
         assert_eq!(cfg.full_attention_interval, 2);
         assert_eq!(cfg.layer_types(), vec![LayerType::Linear, LayerType::Full]);
-        assert_eq!(cfg.linear_num_key_heads, 1);
-        assert_eq!(cfg.linear_num_value_heads, 2);
+        assert_eq!(cfg.linear_num_key_heads, 2);
+        assert_eq!(cfg.linear_num_value_heads, 4);
         assert_eq!(cfg.linear_key_head_dim, 3);
         assert_eq!(cfg.linear_value_head_dim, 3);
         assert_eq!(cfg.n_experts, 3);
@@ -536,6 +541,59 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+
+    /// llama.cpp stores a Gated-DeltaNet layer's value heads group-major
+    /// (`g * num_k_heads + k`); the model indexes them sub-major
+    /// (`k * group + g`). At `num_k_heads = 2, group = 2` the head order is
+    /// `[0, 2, 1, 3]`, so the import must read head `h` from `src_head(h)` for
+    /// every leaf that is indexed by value head - hand-computed here from the
+    /// fixture's own `(i + 1) * 0.1` values, not from the implementation.
+    #[test]
+    fn import_regroups_the_gated_deltanet_value_heads() {
+        let dir = std::env::temp_dir().join(format!("qwen35-import-test-regroup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let src = dir.join("src.gguf").to_string_lossy().into_owned();
+        let out = dir.join("out.safetensors").to_string_lossy().into_owned();
+        synthetic_gguf(&src);
+        import_gguf(&src, &out, None).unwrap();
+        let reader = checkpoint::weightio::WeightReader::open(&out).unwrap();
+        let got = |n: &str| reader.tensor(&format!("blocks.0.linear_attn.{n}")).unwrap();
+        let close = |a: &[f32], b: &[f32], what: &str| {
+            assert_eq!(a.len(), b.len(), "{what}");
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                assert!((x - y).abs() < 1e-5, "{what}[{i}]: got {x}, want {y}");
+            }
+        };
+
+        // dt_bias = [0.1, 0.2, 0.3, 0.4] on disk -> heads read from [0, 2, 1, 3].
+        close(&got("dt_bias"), &[0.1, 0.3, 0.2, 0.4], "dt_bias");
+        // ssm_a = -[0.1 .. 0.4] holds -exp(A_log): A_log = ln(-ssm_a), same order.
+        let ln = |x: f32| x.ln();
+        close(&got("A_log"), &[ln(0.1), ln(0.3), ln(0.2), ln(0.4)], "A_log");
+        // in_proj_a / in_proj_b: one row of d_model = 4 per head, row r = 0.1*(4r+1 ..= 4r+4).
+        let row = |r: usize| (0..4).map(|c| (r * 4 + c + 1) as f32 * 0.1).collect::<Vec<f32>>();
+        let want_rows: Vec<f32> = [0, 2, 1, 3].iter().flat_map(|&r| row(r)).collect();
+        close(&got("in_proj_a.weight"), &want_rows, "in_proj_a");
+        close(&got("in_proj_b.weight"), &want_rows, "in_proj_b");
+        // in_proj_z: 3 rows (value_head_dim) of width 4 per head.
+        let want_z: Vec<f32> = [0usize, 2, 1, 3].iter().flat_map(|&h| (0..3).flat_map(move |r| row(h * 3 + r))).collect();
+        close(&got("in_proj_z.weight"), &want_z, "in_proj_z");
+        // out_proj [d_model = 4, value_dim = 12]: head blocks of 3 columns per row.
+        let want_out: Vec<f32> = (0..4)
+            .flat_map(|r| [0usize, 2, 1, 3].iter().flat_map(move |&h| (0..3).map(move |c| (r * 12 + h * 3 + c + 1) as f32 * 0.1)).collect::<Vec<f32>>())
+            .collect();
+        close(&got("out_proj.weight"), &want_out, "out_proj");
+        // The q|k prefix (rows 0..2*key_dim = 12) of in_proj_qkv and conv1d is untouched; v rows move.
+        let qkv = got("in_proj_qkv.weight");
+        let first_prefix_rows = 12 * 4;
+        close(&qkv[..first_prefix_rows], &(0..first_prefix_rows).map(|i| (i + 1) as f32 * 0.1).collect::<Vec<f32>>(), "in_proj_qkv q|k prefix");
+        let want_v: Vec<f32> = [0usize, 2, 1, 3].iter().flat_map(|&h| (0..3).flat_map(move |r| row(12 + h * 3 + r))).collect();
+        close(&qkv[first_prefix_rows..], &want_v, "in_proj_qkv v rows");
+        // Everything that is not indexed by value head is a plain copy.
+        close(&got("norm.weight"), &[0.1, 0.2, 0.3], "norm");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn expert_stack_slices_are_contiguous_and_ordered_by_expert_index() {
         // A dedicated shape-focused check: expert e's slice of a

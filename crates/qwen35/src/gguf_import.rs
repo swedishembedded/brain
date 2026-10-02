@@ -61,7 +61,7 @@ use std::collections::HashSet;
 use checkpoint::gguf::{GgufValue, MmapGguf};
 use checkpoint::st::ModelCard;
 use checkpoint::weightio::StWriter;
-use gguf::import::{self, ElemOp, ImportStats, Leaf, Mapped};
+use gguf::import::{self, ImportStats, Leaf, Mapped};
 use gguf::leaf::Role;
 use gguf::ArchKv;
 
@@ -260,12 +260,12 @@ pub(crate) fn classify(name: &str, cfg: &Qwen35Config) -> Mapped {
     let Some(role) = gguf::leaf::role(leaf) else { return Mapped::Dropped(DROP_OTHER) };
     let Some(suffix) = block_leaf_suffix(role, ty) else { return Mapped::Dropped(DROP_OTHER) };
     let brain = format!("blocks.{l}.{suffix}");
-    match role {
-        // `ssm_a` is the ONE leaf in this architecture that is not a plain
-        // rename: llama.cpp's converter stores `-exp(A_log)`, brain's
-        // `gdn_decay_gate.wgsl` wants `A_log`. See `ElemOp::LnNeg`.
-        Role::SsmA => Mapped::Transformed { into: brain, op: ElemOp::LnNeg },
-        _ => Mapped::Simple(brain),
+    // Eight Gated-DeltaNet leaves are not plain renames: they are indexed by
+    // VALUE head, which llama.cpp stores group-major (and `ssm_a` holds
+    // `-exp(A_log)` on top). See `gguf::gdn_order`.
+    match gguf::GdnLeaf::of(&brain) {
+        Some(leaf) => Mapped::Transformed { into: brain, op: gguf::import::ElemOp::GdnVHeads { leaf, order: cfg.gdn_head_order() } },
+        None => Mapped::Simple(brain),
     }
 }
 
@@ -600,6 +600,40 @@ mod tests {
         };
         assert!(matches!(classify("blk.0.attn_wibble.weight", &cfg), Mapped::Dropped(DROP_OTHER)));
         assert!(matches!(classify("blk.5.attn_norm.weight", &cfg), Mapped::Dropped(DROP_MTP_BLOCK)), "beyond n_layers must be the MTP drop, not the generic one");
+    }
+
+    /// The offline converter must reorder EVERY value-head-indexed Gated-
+    /// DeltaNet leaf, not only `ssm_a` (it once applied `ln(-x)` alone, so a
+    /// `brain import` of the real GGUF produced a checkpoint with permuted
+    /// heads that no structural check could see). Every other linear-layer
+    /// leaf stays a plain rename.
+    #[test]
+    fn every_value_head_indexed_gdn_leaf_is_reordered_by_the_offline_converter() {
+        let dir = std::env::temp_dir().join(format!("qwen35-gguf-import-test-gdn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let src = dir.join("src.gguf").to_string_lossy().into_owned();
+        synthetic_gguf(&src);
+        let cfg = config_from_gguf(&MmapGguf::open(&src).unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        for (gguf_leaf, brain_leaf) in [
+            ("ssm_a", "A_log"),
+            ("ssm_dt.bias", "dt_bias"),
+            ("ssm_conv1d.weight", "conv1d.weight"),
+            ("attn_qkv.weight", "in_proj_qkv.weight"),
+            ("attn_gate.weight", "in_proj_z.weight"),
+            ("ssm_alpha.weight", "in_proj_a.weight"),
+            ("ssm_beta.weight", "in_proj_b.weight"),
+            ("ssm_out.weight", "out_proj.weight"),
+        ] {
+            match classify(&format!("blk.0.{gguf_leaf}"), &cfg) {
+                Mapped::Transformed { into, op: gguf::import::ElemOp::GdnVHeads { order, .. } } => {
+                    assert_eq!(into, format!("blocks.0.linear_attn.{brain_leaf}"));
+                    assert_eq!(order, cfg.gdn_head_order());
+                }
+                other => panic!("{gguf_leaf} must be a GdnVHeads transform, got {other:?}"),
+            }
+        }
+        assert_eq!(classify("blk.0.ssm_norm.weight", &cfg), Mapped::Simple("blocks.0.linear_attn.norm.weight".to_string()));
     }
 
     /// Integration check against the REAL checkpoint: set `BRAIN_QWEN35_GGUF`

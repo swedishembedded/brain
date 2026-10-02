@@ -246,6 +246,19 @@ impl Qwen35Config {
         self.linear_num_value_heads / self.linear_num_key_heads
     }
 
+    /// The value-head geometry `gguf::gdn_order` needs to undo llama.cpp's
+    /// group-major head order on a GGUF-sourced checkpoint.
+    pub fn gdn_head_order(&self) -> gguf::GdnHeadOrder {
+        gguf::GdnHeadOrder {
+            num_k_heads: self.linear_num_key_heads as usize,
+            group: self.linear_group() as usize,
+            head_dim: self.linear_value_head_dim as usize,
+            key_dim: self.linear_key_dim() as usize,
+            d_model: self.d_model as usize,
+            conv_kernel: self.linear_conv_kernel_dim as usize,
+        }
+    }
+
     pub fn head_weight(&self) -> &'static str {
         if self.tie_embeddings {
             "tok.weight"

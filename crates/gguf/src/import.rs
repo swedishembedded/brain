@@ -30,6 +30,8 @@ use std::fmt;
 use checkpoint::gguf::MmapGguf;
 use checkpoint::st::ModelCard;
 use checkpoint::weightio::StWriter;
+
+use crate::gdn_order::{GdnHeadOrder, GdnLeaf};
 use serde_json::Value;
 
 /// One GGUF source tensor's disposition at import.
@@ -76,6 +78,12 @@ pub enum Mapped {
 /// only a real end-to-end generation catches it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElemOp {
+    /// The Gated-DeltaNet value-head reorder `leaf` needs (and, for `A_log`,
+    /// `ln(-x)` as well): see [`crate::gdn_order`]. Not elementwise despite
+    /// living here - it permutes a tensor's heads - but it is the same kind of
+    /// thing: a value-level disagreement between llama.cpp's converter and the
+    /// reference checkpoint that no structural check can see.
+    GdnVHeads { leaf: GdnLeaf, order: GdnHeadOrder },
     /// `x -> ln(-x)`: recover an SSM/Gated-DeltaNet layer's `A_log` from the
     /// `ssm_a` llama.cpp actually stores, which is `-exp(A_log)`
     /// (`convert_hf_to_gguf.py` applies `-torch.exp(...)` on the way in, so
@@ -103,6 +111,11 @@ impl ElemOp {
     /// not a `NaN` that surfaces 60 layers later.
     pub fn apply(self, name: &str, data: &mut [f32]) -> Result<(), String> {
         match self {
+            ElemOp::GdnVHeads { leaf, order } => {
+                let fixed = order.fix(leaf, name, data)?;
+                data.copy_from_slice(&fixed);
+                Ok(())
+            }
             ElemOp::LnNeg => {
                 if let Some(bad) = data.iter().find(|v| **v >= 0.0 || !v.is_finite()) {
                     return Err(format!(

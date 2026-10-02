@@ -18,6 +18,8 @@
 //!   FFN, MoE FFN, Gated-DeltaNet/SSM), shared by every decoder-LM importer so
 //!   `attn_q.weight`/`ffn_gate.weight`/`ssm_alpha.weight` are spelled once,
 //!   not re-transcribed per model.
+//! - [`gdn_order`] - the Gated-DeltaNet value-head order llama.cpp stores,
+//!   undone: one definition for the offline converter and the streaming loaders.
 //! - [`int8_direct`] - a Q8_0 tensor straight into brain's packed-int8
 //!   layout as a byte repack (no dequantize-then-requantize), now that
 //!   `model::int8::GROUP` matches Q8_0's own block size.
@@ -42,6 +44,7 @@
 pub mod deepseek_ocr;
 pub mod deepseek_ocr_vision;
 pub mod deepseekocr2_vision;
+pub mod gdn_order;
 pub mod import;
 pub mod int8_direct;
 pub mod kquant;
@@ -49,6 +52,7 @@ pub mod kv;
 pub mod leaf;
 pub mod route;
 
+pub use gdn_order::{GdnFixSource, GdnHeadOrder, GdnLeaf};
 pub use import::{ImportStats, Mapped};
 pub use int8_direct::try_i8_rect;
 pub use kquant::{try_kq_rect, KqLayout, KqRect};

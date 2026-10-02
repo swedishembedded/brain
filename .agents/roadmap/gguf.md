@@ -66,8 +66,8 @@ review of this codebase assumed:
       `weightio::WeightReader::nbytes` depends on that). `WeightReader` and
       `RemapSource` forward it (`RemapSource::Fetch::Slice` only when the
       slice lands on whole blocks, `Fetch::Concat` always declines - no
-      single contiguous byte range to lend). `qwen35::int8_gguf_resident::
-      SsmALogFix` gets an EXPLICIT refusal (not just the inherited default)
+      single contiguous byte range to lend). `gguf::gdn_order::
+      GdnFixSource` gets an EXPLICIT refusal (not just the inherited default)
       per lesson #70: a zero-copy block lend for the transformed
       `linear_attn.A_log` leaf would bypass `ElemOp::LnNeg` and hand a caller
       llama.cpp's untransformed bytes. New `checkpoint::srccheck::
