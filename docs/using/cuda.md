@@ -72,6 +72,12 @@ last element of the buffer range it was bound to (the slice, for a sliced
 dispatch), the same as the reference backends do. Kernels rely on this at
 ragged tile edges, where they read a little past the end and mask the result.
 
+A few hot kernels also have a hand-written CUDA version that replaces the
+generated one on a CUDA device (`docs/reference/kernels-cuda.md` lists them).
+Today that is the int8 decode GEMV, which reads weights at about three times
+the rate of the generated kernel and returns bit-identical results.
+`BRAIN_NO_NATIVE_KERNELS=1` keeps every dispatch on the generated tier.
+
 `make cuda-coverage` generates and compiles every kernel for the device in
 front of it and writes which are runnable and which are refused, and why, to
 `cuda-coverage.json` (`OUT=path` to move it).

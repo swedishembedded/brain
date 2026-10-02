@@ -575,6 +575,100 @@ ship, and `Ops::matmul_dx`/`matmul_dw` are additionally exercised by
 When a non-WGSL provider claims either, the fixture it needs should be
 written then, against that provider's actual operand bundle.
 
+### The int8 decode GEMV - a native kernel behind the upgrade seam
+
+Qwen3.8-27B INT8 decode streams 27 GiB of weights once per token and ~55% of its
+device time was `matmul_i8_gemv_reg#MREG=1` reading them at about a quarter of
+HBM bandwidth: the generated tier loads one 32-bit word per lane per step.
+`crates/kernels-cuda/cu/matmul_i8_gemv.cu` is the hand-written replacement, and
+it is the first native kernel that is dispatched through the *transparent
+upgrade seam* (`gpu_core::native_upgrade`) rather than through an
+`OperatorProvider`: the int8 linears bind `matmul_i8_gemv` by kernel index and
+never go through `Ops::matmul`'s provider chain, so a provider would never see
+them.
+
+<!-- perf-number: measured on one GH200 (cc 9.0), see the ledger below -->
+**What it does.** 16-byte `ld.global.nc` weight loads (L1 no-allocate), `__dp4a`,
+and every load of a stage - weights, scales and the matching vectors of x -
+issued before any is consumed. Sixteen threads serve one weight row and thread
+`j` owns virtual lanes `4j..4j+3` of the WGSL kernel's 64-lane layout, so the
+vector load IS the four lanes' words and the fold walks the 16 threads in
+ascending order with warp shuffles. Products and sums are explicit
+round-to-nearest operations. The result is **bit-identical** to the WGSL tier,
+not within a tolerance, which is why every existing int8 gate passes unchanged.
+Up to eight rows of x are served per weight pass (the WGSL `MREG` ladder up to
+8); more rows keep the WGSL ladder, because a second tile row would re-stream
+the weights from HBM.
+
+**How it is selected.** `native_upgrade::resolve` runs after
+`upgrade::resolve` for every `Gpu` handle and activates a row only when (1) the
+WGSL upgrade for the same kernel is active, so the capability policy has already
+chosen a workgroup-per-output GEMV, (2) the device reports a compute capability
+and the registry has a kernel for this operator AND weight tier at or below it,
+and (3) the backend accepts the source in `register_native`. Every other
+backend answers `None` there, so wgpu, Vulkan and the CPU JIT are untouched
+without a backend-name test. The decision per dispatch is `native_upgrade::
+apply` (m in 1..=8, `kg % 8 == 0`); `Gpu::native_kernel_for` exposes it to
+tests. `BRAIN_NO_NATIVE_KERNELS=1` pins the WGSL tier.
+
+Two things the work needed in shared code: the registry resolved by operator
+and capability alone, so `CudaKernel` gained a `weight` tier and `find`/
+`best_for` take it (otherwise the fp32 provider would have been handed the
+int8 kernel); and `register_native` appended a module per call to a registry
+every sibling handle shares, so each `Gpu` built over an int8 model would have
+loaded one more module for the life of the device - registration is now
+idempotent per spec.
+
+**Gates.** `crates/gpu-core/tests/i8_gemv_native.rs`: the redirect fires exactly
+for the shapes it serves; raw-bit equality with the WGSL tier over tails, ragged
+`n`, unaligned and aligned binding windows (the scalar-load path), sentinels
+around every window, 60 seeded random shapes, and the real 27B projection
+widths. A mutation of the fold order fails it. `i8_gemv_native_leak.rs`
+builds and drops 24 handles that dispatch the kernel and requires the device to
+return every byte; `compute-sanitizer --leak-check full` over both files
+reported 0 errors and 0 bytes leaked.
+
+**What was measured, and what it says** (device-timed with the backend's
+per-launch events, each shape cycling >= 768 MiB of distinct weight copies so
+nothing is read from L2; m = 1, `i8_gemv_native_bench`, best of 7):
+
+<!-- perf-number: ledger of one measurement session on one shared GH200 -->
+| shape (K x N) | WGSL GB/s | native GB/s |
+|---|---|---|
+| 5120 x 1024 | 317 | 538 |
+| 5120 x 6144 / 6144 x 5120 | 807 / 796 | 1819 / 1954 |
+| 5120 x 10240 | 910 | 2436 |
+| 5120 x 12288 | 812-947 | 2517 |
+| 17408 x 5120 (ffn down) | 1030 | 2828 |
+| 5120 x 17408 (ffn gate/up) | 1003 | 2764 |
+| 5120 x 248320 (lm head) | 950-1069 | 3752 |
+
+The ceilings on this card, from `tools/gh200-probe`: 3818 GB/s read, 3437 GB/s
+copy (read plus write counted), 3677 GB/s write. In the production dispatch
+path the 100 MB shapes reach 72-74% of the probe's read ceiling (69-71% of the
+nominal 4 TB/s) and the head 98% (94%). The smaller projections are short enough (tens of microseconds) that
+a per-launch floor every kernel in this path pays (a trivial elementwise kernel
+measures about 8 us in the same profile) is a large share of them; timed on
+their own with back-to-back launches the same kernel reads 3.1-3.2 TB/s on the
+100 MB shapes. At m = 8 the kernel is arithmetic-bound, not bandwidth-bound
+(a dp4a, a convert, a multiply and an add per word per row, none of which may be
+contracted if the bits are to match): 1.4-1.6 TB/s against the WGSL tier's
+0.3 TB/s.
+
+End to end, `qwen35_decode_profile 4` on the real Q8_0 checkpoint (one GH200,
+shared with other jobs, so only the device-timed rows are compared): the GEMV
+went from 32.2-32.7 ms/token (55-56% of device kernel time) to 12.8 ms/token
+(34%); the whole production decode pass from 99-120 ms/token to 82-84 ms/token
+(host-side time varies between runs, which is why the pass is not used to
+judge the kernel). `cargo test --release -p brain-qwen35` (92 tests in the
+main lane) passes unchanged.
+
+Not done: the generated tier's other decode kernels (`rmsnorm_rows`,
+`max_abs_rows`, `quant_pack`, `bmm`) are now the larger share of what is left;
+the q4 and K-quant GEMVs have no native kernel; a weight-tier axis on
+`PolicyEntry` still has to land before a contract can be written for this
+kernel.
+
 ### CUDA Graphs - a repeated submission is captured once and replayed
 
 `submit` no longer issues one driver call per dispatch when the submission's
