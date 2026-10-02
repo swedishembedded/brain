@@ -186,14 +186,67 @@ fn dropping_a_real_gguf_instance_returns_all_device_memory() {
     let base = baseline(&probe);
     for round in 0..2 {
         let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
-        let held = baseline(&probe).free;
-        assert!(held < base.free, "round {round}: the model did not occupy any device memory, so this proves nothing");
-        println!("round {round}: model holds {} MiB of device memory", (base.free - held) >> 20);
+        // What the model holds, by this process's own exact counter: the card's
+        // free memory moves with every other tenant's allocations and cannot say
+        // whether THIS model occupied anything.
+        let held = live_resources().device_bytes.saturating_sub(base.live.device_bytes);
+        assert!(held > 1 << 30, "round {round}: the model did not occupy any device memory, so this proves nothing");
+        println!("round {round}: model holds {} MiB of device memory", held >> 20);
         inst.prefill_timed(&[1, 2, 3, 4, 5, 6, 7, 8]).expect("prefill");
         for pos in 8..16u32 {
             inst.decode_batch_at(&[pos + 1], &[pos]).expect("decode");
         }
         drop(inst);
         assert_returned(&probe, &base, &format!("round {round}: real GGUF instance"));
+    }
+}
+
+/// The same on the real checkpoint with a compact KV cache and a batch: the
+/// planes' packed words, row scales and append ceilings, and the fused decode's
+/// per-layer partial-state scratch, all returned - exactly, by the process's own
+/// counters.
+#[test]
+fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_object() {
+    use model::kv_tier::KvTier;
+    use qwen35::int8_gguf_resident::{Qwen35GgufResident, GGUF_ENV};
+    use residency::multi::MultiDeviceResidentModel;
+    use residency::{Device, ResidentModel};
+
+    let _s = serial();
+    let Ok(path) = std::env::var(GGUF_ENV) else {
+        brain_testutil::skip(&format!("{GGUF_ENV} unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)"));
+        return;
+    };
+    let Ok(_probe) = Context::open(0) else {
+        brain_testutil::skip_unavailable("no usable CUDA device");
+        return;
+    };
+    const RESERVE: u64 = 2 << 30;
+    let devices: Vec<(Device, u64)> = gpu_core::devices::gpus()
+        .iter()
+        .map(|d| (Device::Gpu(d.index), d.identity.vram_bytes.saturating_sub(RESERVE)))
+        .filter(|&(_, usable)| usable > 0)
+        .collect();
+    if devices.is_empty() {
+        brain_testutil::skip_unavailable("no GPU with queryable VRAM");
+        return;
+    }
+    let baseline = live_resources();
+    for tier in [KvTier::Bf16, KvTier::Int8] {
+        let r = Qwen35GgufResident::new(path.clone(), devices.clone(), 4096, TierPolicy::uniform(Dtype::I8)).with_kv_tier(tier).with_max_batch(2);
+        let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
+        if placed.is_empty() {
+            brain_testutil::skip_unavailable("the checkpoint does not fit the GPUs this run may use");
+            return;
+        }
+        let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
+        assert_eq!(inst.kv_tier(), tier);
+        inst.prefill_timed(&[1, 2, 3, 4, 5, 6, 7, 8]).expect("prefill");
+        for pos in 8..12u32 {
+            inst.decode_batch_at(&[pos + 1, pos + 2], &[pos, pos + 20]).expect("batched decode");
+        }
+        assert!(live_resources().device_bytes > baseline.device_bytes + (1 << 30), "{tier}: the model occupied no device memory, so this proves nothing");
+        drop(inst);
+        assert_eq!(live_resources(), baseline, "{tier}: dropping the instance left CUDA objects behind");
     }
 }
