@@ -178,6 +178,20 @@ kernel one multiprocessor keeps resident, as the driver computes it for that
 kernel's register and shared-memory use; times the multiprocessor count it is
 the grid that fills the device. `CudaLaunch::NONE` is the plain launch.
 
+## Container image for Arm servers
+
+`make container` builds an aarch64 image for Grace-Hopper and other Arm + CUDA
+servers from `tools/container/aarch64-cuda.Containerfile`. The runtime image
+holds the `brain` binary and the ahead-of-time kernel images of both toolkit
+lanes and no CUDA toolkit: the driver comes from the host through the
+container runtime, and kernels load without NVRTC. `make container/ci` builds
+the CI stage, which runs the gates that need no GPU (paths, scope, file size,
+license headers, the kernel tables, `cargo check`, and the CUDA crates' tests
+on the CPU), so a CI runner and a developer machine run the same recipe.
+`make container/smoke` runs `brain devices` in the image on the host's GPU.
+Set `CONTAINER_ENGINE` to choose between docker and podman and `BRAIN_IMAGE`
+for the tag.
+
 ## Checking a machine
 
 ```bash

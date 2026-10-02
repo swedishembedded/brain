@@ -76,7 +76,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: cuda/aot check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: cuda/aot container container/ci container/smoke check/workspace help build/debug build/release samples/list check/samples check/sdk-features deb deb/debug deb/release test/doc test/slow test/full test/times test/capability-report wm/play wm-fixtures test test/rl gradcheck kernels-regen kernels-table kernels-table/check samples-manifest samples-manifest/check knowledge-index knowledge-index/check cuda-table cuda-table/check parity requirements environment environment/openvino npu-diagnose bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect data/tts \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -131,6 +131,9 @@ help:
 	@echo "  make kernels-table           regenerate docs/reference/kernels.md from the .wgsl sources"
 	@echo "  make kernels-table/check     fail if that catalogue has drifted (part of test/full)"
 	@echo "  make cuda/aot [LANE=12|13]   build the CUDA kernels ahead of time (cubins + PTX + manifest) for driver-only machines"
+	@echo "  make container               build the aarch64 CUDA runtime image (driver-only, AOT kernels)"
+	@echo "  make container/ci            build the image's CI stage: the gates that need no GPU"
+	@echo "  make container/smoke         run the image on this host's GPU (brain devices)"
 	@echo "  make cuda-table              regenerate docs/reference/kernels-cuda.md from crates/kernels-cuda"
 	@echo "  make cuda-table/check        fail if THAT catalogue drifted, or a .cu is unregistered"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
@@ -899,6 +902,17 @@ test/cuda-matrix:
 # directory in turn; ARGS passes flags through (`ARGS="--targets sm_90"`).
 cuda/aot:
 	scripts/build/cuda-aot.sh $(ARGS)
+
+# The aarch64 CUDA image and its CI-equivalent gates; see
+# tools/container/aarch64-cuda.Containerfile and scripts/build/container.sh.
+container:
+	scripts/build/container.sh runtime
+
+container/ci:
+	scripts/build/container.sh ci
+
+container/smoke:
+	scripts/build/container.sh smoke
 
 gh200/probe:
 	$(MAKE) -C tools/gh200-probe
