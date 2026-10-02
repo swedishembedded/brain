@@ -33,7 +33,7 @@ use clip::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// The CLIP encoders behind the scheduler (`BRAIN_CLIP_DIR` = the released
 /// checkpoint root, in the SDXL layout: `text_encoder/`, `text_encoder_2/`,
@@ -54,9 +54,9 @@ impl ClipResident {
     /// does not serve this model, exactly as an unset variable already meant.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ClipResident> {
-        let assembly = crate::resolver_cli::served_assembly(models_dir, "clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
+        let assembly = loader::served::served_assembly(models_dir, "clip", &clip::spec::ClipSpec, &[RoleEnv { role: "towers", var: "BRAIN_CLIP_DIR" }])?;
         Self::new(assembly.roles.get("towers")?.to_string_lossy().into_owned())
     }
 

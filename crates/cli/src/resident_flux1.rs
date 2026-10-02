@@ -22,7 +22,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use flux1::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// FLUX.1 behind the scheduler. The checkpoint root - a released diffusers
 /// FLUX.1 directory holding `transformer/`, `vae/`, `text_encoder/`,
@@ -39,12 +39,12 @@ impl Flux1Resident {
     ///
     /// `None` (not served, never a daemon startup failure) when the store
     /// holds no released FLUX.1 pipeline, or holds more than one and nothing
-    /// says which - see `crate::resolver_cli::served_assembly`.
+    /// says which - see `loader::served::served_assembly`.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux1Resident> {
-        let assembly = crate::resolver_cli::served_assembly(models_dir, "flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
+        let assembly = loader::served::served_assembly(models_dir, "flux1", &flux1::spec::Flux1Spec, &[RoleEnv { role: "root", var: "BRAIN_FLUX1_DIR" }])?;
         Self::new(assembly.roles.get("root")?.to_string_lossy().into_owned())
     }
 

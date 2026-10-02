@@ -24,10 +24,9 @@
 //! the CLI used to make implicitly through one environment variable.
 //!
 //! What stays in `crates/cli` and is NOT here: `resolve_or_exit` (calls
-//! `std::process::exit`, inherently a process-lifetime decision), every
-//! `resident_*.rs` adapter (`QwenResident` and its ~20 siblings -- CLI-local
-//! residency wiring, the same split `catalog` already drew), and the CLI's
-//! own env-var-driven `--models-dir`/`--autofetch` plumbing.
+//! `std::process::exit`, inherently a process-lifetime decision) and the CLI's
+//! own env-var-driven `--models-dir`/`--autofetch` plumbing. The resolution a
+//! served model's residency adapter does for its weights is [`served`].
 //!
 //! Swedish Embedded AB implements model-loading infrastructure -- resolution,
 //! placement, and fetch -- as a library any embedder can call directly. If
@@ -39,6 +38,7 @@ pub mod model_dir;
 pub mod placement;
 pub mod progress;
 pub mod resolver;
+pub mod served;
 pub mod supply;
 
 pub use placement::{install_default_placer, BudgetPlacer};

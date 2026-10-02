@@ -40,7 +40,7 @@ use arcface::caps::ArcFaceSession;
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// The directory holding `glintr100.onnx` (and `scrfd_10g_bnkps.onnx` beside it
 /// for the default aligned path): `BRAIN_ARCFACE_DIR` if the operator set it,
@@ -48,11 +48,11 @@ use crate::resolver_cli::RoleEnv;
 /// `arcface::spec::ArcFaceSpec`'s `weights` role.
 ///
 /// The resolver resolves that role to the released GRAPH while the variable
-/// names the DIRECTORY holding it; [`crate::resolver_cli::containing_dir`] is
+/// names the DIRECTORY holding it; [`loader::served::containing_dir`] is
 /// what makes either source produce the directory `ArcFaceSession::load` takes.
 ///
 /// `None` when the store holds no released ArcFace graph, or holds more than
-/// one and nothing says which - see `crate::resolver_cli::served_assembly`.
+/// one and nothing says which - see `loader::served::served_assembly`.
 ///
 /// Public because the embedder has a SECOND caller that is not a resident:
 /// `brain yolov8 detect --identity-ref` builds an `ArcFaceSession` in-process
@@ -60,10 +60,10 @@ use crate::resolver_cli::RoleEnv;
 /// here, rather than each growing its own env/store precedence rules.
 ///
 /// `models_dir` is the caller's resolved models directory (see
-/// `crate::resolver_cli::served_assembly`).
+/// `loader::served::served_assembly`).
 pub fn dir_from_env(models_dir: Option<&std::path::Path>) -> Option<String> {
-    let assembly = crate::resolver_cli::served_assembly(models_dir, "arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
-    crate::resolver_cli::containing_dir(assembly.roles.get("weights")?)
+    let assembly = loader::served::served_assembly(models_dir, "arcface", &arcface::spec::ArcFaceSpec, &[RoleEnv { role: "weights", var: "BRAIN_ARCFACE_DIR" }])?;
+    loader::served::containing_dir(assembly.roles.get("weights")?)
 }
 
 /// The antelopev2 identity embedder behind the scheduler (`BRAIN_ARCFACE_DIR` =
@@ -78,7 +78,7 @@ impl ArcFaceResident {
     /// (not served, never a daemon startup failure) when there is none.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<ArcFaceResident> {
         Self::new(dir_from_env(models_dir)?)
     }

@@ -14,7 +14,7 @@
 use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// FLUX.2 Klein resident model family, gated on the four weight env vars
 /// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
@@ -64,9 +64,9 @@ impl Flux2Resident {
     /// registered".
     ///
     /// `models_dir` is the caller's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Flux2Resident> {
-        let assembly = crate::resolver_cli::served_assembly(
+        let assembly = loader::served::served_assembly(
             models_dir,
             "flux2",
             &flux2::spec::Flux2Spec,
@@ -108,7 +108,7 @@ impl Flux2Resident {
     /// skipped - it never drops every other real, independently-servable
     /// checkpoint with it.
     pub fn all_from_store(models_dir: Option<&std::path::Path>) -> Vec<Flux2Resident> {
-        crate::resolver_cli::served_assemblies(
+        loader::served::served_assemblies(
             models_dir,
             "flux2",
             &flux2::spec::Flux2Spec,

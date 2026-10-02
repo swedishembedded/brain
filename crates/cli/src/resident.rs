@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use s3dit::pipeline::{HotPipeline, Image, Paths};
 
 use crate::resident_llm::QwenResident;
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// The one shared serving [`Executor`], plus the CONCRETE model handles a
 /// caller needs for an inherent method the erased `Arc<dyn ResidentModel>`
@@ -540,9 +540,9 @@ impl ZImageResident {
     /// they deliberately want every path named outright.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_store(models_dir: Option<&std::path::Path>) -> Option<ZImageResident> {
-        let assembly = crate::resolver_cli::served_assembly(
+        let assembly = loader::served::served_assembly(
             models_dir,
             "s3dit",
             &s3dit::spec::S3ditSpec,

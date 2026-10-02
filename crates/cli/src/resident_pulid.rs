@@ -19,7 +19,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use pulid::caps::Session;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// PuLID-conditioned FLUX.1 behind the scheduler. Five components, all
 /// required, each resolved from its own environment variable when set and
@@ -56,12 +56,12 @@ impl PulidResident {
     ///
     /// `None` (not served, never a daemon startup failure) when the store
     /// cannot answer for some role and nothing named it - see
-    /// `crate::resolver_cli::served_assembly`.
+    /// `loader::served::served_assembly`.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<PulidResident> {
-        let assembly = crate::resolver_cli::served_assembly(
+        let assembly = loader::served::served_assembly(
             models_dir,
             "pulid",
             &pulid::spec::PulidSpec,
@@ -77,13 +77,13 @@ impl PulidResident {
         // already a directory, and the adapter role is the checkpoint itself
         // (`pulid::caps::Session` accepts the file or its directory). The
         // other three name a directory their loader joins a known release
-        // filename onto - see `crate::resolver_cli::containing_dir`.
+        // filename onto - see `loader::served::containing_dir`.
         Self::new(
             assembly.roles.get("flux1")?.to_string_lossy().into_owned(),
             assembly.roles.get("pulid")?.to_string_lossy().into_owned(),
-            crate::resolver_cli::containing_dir(assembly.roles.get("arcface")?)?,
-            crate::resolver_cli::containing_dir(assembly.roles.get("clip")?)?,
-            crate::resolver_cli::containing_dir(assembly.roles.get("bisenet")?)?,
+            loader::served::containing_dir(assembly.roles.get("arcface")?)?,
+            loader::served::containing_dir(assembly.roles.get("clip")?)?,
+            loader::served::containing_dir(assembly.roles.get("bisenet")?)?,
         )
     }
 

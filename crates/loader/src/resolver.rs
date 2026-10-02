@@ -10,10 +10,9 @@
 //! `crates/cli::resolver_cli` keeps everything that genuinely IS
 //! CLI-specific on top of these: `resolve_or_exit` (calls
 //! `std::process::exit` -- a process-lifetime decision that has no meaning
-//! for an in-process embedder), `extract_role_overrides` (parses `--<role>`
-//! flags out of `argv`), and the served/resident path (`served_assembly`,
-//! which answers an ambiguity by suggesting an environment variable to set,
-//! a daemon-operator idiom, not a library concern).
+//! for an in-process embedder) and `extract_role_overrides` (parses
+//! `--<role>` flags out of `argv`). The served/resident path, which answers an
+//! ambiguity by suggesting an environment variable to set, is [`crate::served`].
 
 use std::collections::BTreeMap;
 use std::path::Path;

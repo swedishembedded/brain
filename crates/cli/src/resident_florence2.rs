@@ -23,7 +23,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use florence2::caps::FlorenceSession;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resolver_cli::RoleEnv;
+use loader::served::RoleEnv;
 
 /// Florence-2 behind the scheduler (`BRAIN_FLORENCE2_DIR` = the directory
 /// holding `config.json`, `model.safetensors` and `tokenizer.json`).
@@ -40,9 +40,9 @@ impl Florence2Resident {
     /// nothing says which.
     ///
     /// `models_dir` is the serving process's resolved models directory (see
-    /// `crate::resolver_cli::served_assembly`).
+    /// `loader::served::served_assembly`).
     pub fn from_env(models_dir: Option<&std::path::Path>) -> Option<Florence2Resident> {
-        let assembly = crate::resolver_cli::served_assembly(models_dir, "florence2", &florence2::spec::Florence2Spec, &[RoleEnv { role: "weights", var: "BRAIN_FLORENCE2_DIR" }])?;
+        let assembly = loader::served::served_assembly(models_dir, "florence2", &florence2::spec::Florence2Spec, &[RoleEnv { role: "weights", var: "BRAIN_FLORENCE2_DIR" }])?;
         Self::new(assembly.roles.get("weights")?.to_string_lossy().into_owned())
     }
 

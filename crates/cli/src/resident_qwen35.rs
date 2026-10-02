@@ -339,7 +339,7 @@ pub fn multi_gpu_gguf_from_env(models_dir: Option<&std::path::Path>, gpus: &[(u3
 /// this one's. `None` (never a guessed path) when the resolver names no
 /// `.gguf` `weights`.
 ///
-/// Goes through [`crate::resolver_cli::served_assembly`], not `try_resolve`
+/// Goes through [`loader::served::served_assembly`], not `try_resolve`
 /// directly: a store holding more than one real `qwen35`-architecture GGUF
 /// (a released checkpoint alongside an unrelated quantization someone else
 /// dropped in the same model dir) is a real, common shape, and `try_resolve`
@@ -353,10 +353,10 @@ pub fn multi_gpu_gguf_from_env(models_dir: Option<&std::path::Path>, gpus: &[(u3
 /// `qwen35` GGUF happens to share the store.
 fn resolve_qwen35_gguf(models_dir: Option<&std::path::Path>) -> Option<String> {
     let bindings = [
-        crate::resolver_cli::RoleEnv { role: "weights", var: "BRAIN_QWEN35_GGUF" },
-        crate::resolver_cli::RoleEnv { role: "tokenizer", var: "BRAIN_QWEN35_GGUF" },
+        loader::served::RoleEnv { role: "weights", var: "BRAIN_QWEN35_GGUF" },
+        loader::served::RoleEnv { role: "tokenizer", var: "BRAIN_QWEN35_GGUF" },
     ];
-    let assembly = crate::resolver_cli::served_assembly(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &bindings)?;
+    let assembly = loader::served::served_assembly(models_dir, "qwen35", &qwen35::spec::Qwen35Spec, &bindings)?;
     assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()).filter(|p| p.ends_with(".gguf"))
 }
 
