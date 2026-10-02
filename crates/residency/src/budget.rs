@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use memauth::PoolId;
+use memauth::{PoolId, Tier, TierPolicy};
 
 use crate::Device;
 
@@ -79,11 +79,57 @@ pub struct Budgets {
     devices: HashMap<Device, Budget>,
     pools: HashMap<PoolId, Budget>,
     pool_of: HashMap<Device, PoolId>,
+    /// Opt-in second tier per device: host memory the device can use directly
+    /// (Grace LPDDR beside HBM). Empty unless a caller declares one, so a device
+    /// has exactly its own [`Budget`] and every figure above is unchanged.
+    coherent: HashMap<Device, Budget>,
 }
 
 impl Budgets {
     pub fn new() -> Budgets {
-        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new() }
+        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new(), coherent: HashMap::new() }
+    }
+    /// Declare `device`'s coherent tier: `total` bytes of host memory it can use
+    /// directly, `reserved` of it kept free. Only [`Self::place_tiered`] with a
+    /// policy that allows the tier ever charges it; [`Self::free_on`] and
+    /// [`Self::fits_on`] keep meaning the device's own memory.
+    pub fn set_coherent_tier(&mut self, device: Device, total: u64, reserved: u64) -> &mut Self {
+        self.coherent.insert(device, Budget::new(total, reserved));
+        self
+    }
+    /// Free bytes in `device`'s coherent tier, `None` when it has none.
+    pub fn coherent_free(&self, device: Device) -> Option<u64> {
+        self.coherent.get(&device).map(|b| b.free())
+    }
+    /// Charge `bytes` to the tier `policy` allows and say which it was, or `None`
+    /// when no allowed tier has room (nothing is charged). The device's own
+    /// memory is always tried first, except under [`TierPolicy::CoherentOnly`].
+    pub fn place_tiered(&mut self, device: Device, bytes: u64, policy: TierPolicy) -> Option<Tier> {
+        let device_first = policy != TierPolicy::CoherentOnly;
+        if device_first && self.fits_on(device, bytes) {
+            self.alloc(device, bytes);
+            return Some(Tier::Device);
+        }
+        if policy == TierPolicy::DeviceOnly {
+            return None;
+        }
+        let tier = self.coherent.get_mut(&device)?;
+        if !tier.fits(bytes) {
+            return None;
+        }
+        tier.alloc(bytes);
+        Some(Tier::Coherent)
+    }
+    /// Release a [`Self::place_tiered`] charge from the tier it was placed in.
+    pub fn release_tier(&mut self, device: Device, tier: Tier, bytes: u64) {
+        match tier {
+            Tier::Device => self.release(device, bytes),
+            Tier::Coherent => {
+                if let Some(b) = self.coherent.get_mut(&device) {
+                    b.release(bytes);
+                }
+            }
+        }
     }
     /// Set a device's total capacity and reserved headroom.
     pub fn set(&mut self, device: Device, total: u64, reserved: u64) -> &mut Self {
@@ -204,6 +250,36 @@ mod tests {
         assert_eq!(bs.get(Device::Gpu(0)).unwrap().free(), 12 * GB);
         assert_eq!(bs.get(Device::Gpu(1)).unwrap().free(), 22 * GB);
         assert_eq!(bs.get(Device::Cpu).unwrap().free(), 120 * GB);
+    }
+
+    /// A device's own memory is a tier of one unless a coherent tier is declared,
+    /// and a declared tier is charged only by a policy that allows it - the default
+    /// never reaches host memory, so a GPU-only run is unchanged.
+    #[test]
+    fn the_coherent_tier_is_opt_in_and_never_charged_by_the_default_policy() {
+        let mut bs = Budgets::new();
+        bs.set(Device::Gpu(0), 96 * GB, 0).set(Device::Cpu, 480 * GB, 0);
+        // No tier declared: spilling is the same as device-only.
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 100 * GB, TierPolicy::AllowCoherentSpill), None);
+        assert_eq!(bs.coherent_free(Device::Gpu(0)), None);
+        assert_eq!(bs.place_tiered(Device::Gpu(0), GB, TierPolicy::CoherentOnly), None);
+
+        bs.set_coherent_tier(Device::Gpu(0), 400 * GB, 0);
+        // The default policy and the plain figures still mean the device alone.
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 100 * GB, TierPolicy::DeviceOnly), None, "the default never reaches host memory");
+        assert_eq!(bs.free_on(Device::Gpu(0)), 96 * GB);
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 90 * GB, TierPolicy::default()), Some(Tier::Device));
+        // Overflow spills only when allowed, and is accounted in its own tier.
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 20 * GB, TierPolicy::AllowCoherentSpill), Some(Tier::Coherent));
+        assert_eq!(bs.free_on(Device::Gpu(0)), 6 * GB, "a host-tier charge must not reduce the card's own free bytes");
+        assert_eq!(bs.coherent_free(Device::Gpu(0)), Some(380 * GB));
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 5 * GB, TierPolicy::CoherentOnly), Some(Tier::Coherent));
+        assert_eq!(bs.place_tiered(Device::Gpu(0), 500 * GB, TierPolicy::AllowCoherentSpill), None, "nothing is charged when no tier fits");
+        assert_eq!(bs.coherent_free(Device::Gpu(0)), Some(375 * GB));
+
+        bs.release_tier(Device::Gpu(0), Tier::Coherent, 25 * GB);
+        bs.release_tier(Device::Gpu(0), Tier::Device, 90 * GB);
+        assert_eq!((bs.free_on(Device::Gpu(0)), bs.coherent_free(Device::Gpu(0))), (96 * GB, Some(400 * GB)));
     }
 
     /// With no pool declared, `_on` must be numerically identical to the
