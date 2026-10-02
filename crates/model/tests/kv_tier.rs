@@ -29,7 +29,7 @@
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::paged_attention_fused;
-use model::kv_tier::{kernel_list, KvAppend, KvKernels, KvPlane, KvTier, PrefillShape};
+use model::kv_tier::{kernel_list, FlashDecodeShape, KvAppend, KvKernels, KvPlane, KvTier, PrefillShape};
 use model::ops::PagedDecodeShape;
 
 /// Real-device tests share one adapter; see `kv_bf16_roundtrip.rs`.
@@ -239,6 +239,79 @@ fn fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g: &Gp
     assert!(worst <= 1e-3, "{label} {tier}: fused prefill over the compact plane differs from f32-over-decoded by {worst}");
 }
 
+/// Gate 2c: the fused split-key decode over compact planes equals exact
+/// attention (f64, on the host) over the planes' decoded values - several
+/// sequences of different lengths, the longest crossing several key splits and
+/// not a multiple of the tile, blocks scattered through the pool, `n_heads / n_kv`
+/// query heads sharing each kv head.
+fn fused_decode_equals_exact_attention_over_the_decoded_planes(g: &Gpu, tier: KvTier, label: &str, n_heads: u32, n_kv: u32) {
+    let s = Shape { n_heads, n_kv, head_dim: 256, block_size: 64, num_blocks: 80 };
+    let group = (s.n_heads / s.n_kv) as usize;
+    let lens = [3000u32, 70, 1500, 1];
+    let max_bt = (*lens.iter().max().unwrap()).div_ceil(s.block_size);
+    // Hand each sequence its blocks from one shuffled list, so no two logical
+    // neighbours are physical neighbours.
+    let mut ids: Vec<u32> = (0..s.num_blocks).collect();
+    ids.sort_by_key(|i| (i * 37 + 11) % 101); // 37 is coprime to 101, so the keys are distinct
+    let (mut tables, mut cursor) = (Vec::new(), 0usize);
+    for &len in &lens {
+        let n = len.div_ceil(s.block_size) as usize;
+        tables.push(ids[cursor..cursor + n].to_vec());
+        cursor += n;
+    }
+    let (mut blocks, mut offsets, mut krows, mut vrows) = (vec![], vec![], vec![], vec![]);
+    for (b, &len) in lens.iter().enumerate() {
+        let (bl, of) = place(len, s.block_size, &tables[b]);
+        blocks.extend(bl);
+        offsets.extend(of);
+        krows.extend(random(0xE000 + b as u64, (len * s.kv_stride()) as usize));
+        vrows.extend(random(0xF000 + b as u64, (len * s.kv_stride()) as usize));
+    }
+    let (kc, vc) = (filled(g, tier, &s, &krows, &blocks, &offsets), filled(g, tier, &s, &vrows, &blocks, &offsets));
+    let kdec = kc.read_dequantized(g, s.rows() as usize, s.kv_stride() as usize, s.head_dim as usize);
+    let vdec = vc.read_dequantized(g, s.rows() as usize, s.kv_stride() as usize, s.head_dim as usize);
+
+    let batch = lens.len() as u32;
+    let mut table_h = vec![0u32; (batch * max_bt) as usize];
+    for (b, t) in tables.iter().enumerate() {
+        table_h[b * max_bt as usize..b * max_bt as usize + t.len()].copy_from_slice(t);
+    }
+    // Queries large enough that the softmax is peaky: a flat one would hide a
+    // wrong key window behind an average.
+    let q_h: Vec<f32> = random(0xC0FFEE, (batch * s.n_heads * s.head_dim) as usize).iter().map(|x| x * 0.5).collect();
+    let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, &lens));
+    let ctx = g.storage((batch * s.n_heads * s.head_dim) as u64);
+    let kernels = KvKernels::resolve(g, tier).unwrap();
+    let shape = FlashDecodeShape { batch, n_heads: s.n_heads, n_kv_heads: s.n_kv, head_dim: s.head_dim, block_size: s.block_size, max_bt, cap: *lens.iter().max().unwrap() };
+    assert!(kernels.flash_decode_available(g, s.head_dim, s.n_heads / s.n_kv), "{label} {tier}: the fused decode must be available for this shape");
+    g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
+    let got = g.read(&ctx, (batch * s.n_heads * s.head_dim) as usize);
+
+    let (hd, scale) = (s.head_dim as usize, 1.0 / (s.head_dim as f64).sqrt());
+    let mut worst = 0f64;
+    for (b, &len) in lens.iter().enumerate() {
+        for h in 0..s.n_heads as usize {
+            let kvh = h / group;
+            let qh = &q_h[(b * s.n_heads as usize + h) * hd..][..hd];
+            let row = |j: usize| -> usize {
+                let slot = (tables[b][j / s.block_size as usize] * s.block_size) as usize + j % s.block_size as usize;
+                slot * s.kv_stride() as usize + kvh * hd
+            };
+            let scores: Vec<f64> = (0..len as usize).map(|j| scale * (0..hd).map(|d| qh[d] as f64 * kdec[row(j) + d] as f64).sum::<f64>()).collect();
+            let m = scores.iter().fold(f64::MIN, |a, &x| a.max(x));
+            let z: f64 = scores.iter().map(|x| (x - m).exp()).sum();
+            for d in 0..hd {
+                let want: f64 = (0..len as usize).map(|j| (scores[j] - m).exp() / z * vdec[row(j) + d] as f64).sum();
+                let have = got[(b * s.n_heads as usize + h) * hd + d] as f64;
+                let err = (want - have).abs();
+                worst = worst.max(err / want.abs().max(0.05));
+                assert!(err <= 2e-5 + 2e-4 * want.abs(), "{label} {tier} b={b} h={h} d={d}: fused decode {have} vs exact {want}");
+            }
+        }
+    }
+    eprintln!("{label} {tier} fused decode, group {group}: worst relative error to exact {worst:.2e}");
+}
+
 fn on_cpu(f: impl Fn(&Gpu, KvTier, &str)) {
     let g = Gpu::new_cpu(kernels());
     for tier in [KvTier::Bf16, KvTier::Int8] {
@@ -247,13 +320,23 @@ fn on_cpu(f: impl Fn(&Gpu, KvTier, &str)) {
 }
 
 fn on_gpu(f: impl Fn(&Gpu, KvTier, &str)) {
+    on_gpu_in(&[KvTier::Bf16, KvTier::Int8], f);
+}
+
+/// [`on_gpu`] with the `f32` tier too, for gates whose reference is not another
+/// tier's kernel.
+fn on_gpu_with_f32(f: impl Fn(&Gpu, KvTier, &str)) {
+    on_gpu_in(&KvTier::ALL, f);
+}
+
+fn on_gpu_in(tiers: &[KvTier], f: impl Fn(&Gpu, KvTier, &str)) {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let g = Gpu::new_gpu(kernels());
-    for tier in [KvTier::Bf16, KvTier::Int8] {
+    for &tier in tiers {
         f(&g, tier, "gpu");
     }
 }
@@ -286,5 +369,19 @@ fn fused_prefill_reads_compact_planes_exactly_as_f32_reads_their_decoded_values_
             return;
         }
         fused_prefill_over_compact_planes_equals_f32_over_their_decoded_values(g, tier, label);
+    });
+}
+
+#[test]
+fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_values_on_gpu() {
+    on_gpu_with_f32(|g, tier, label| {
+        if !g.caps().workgroup_reductions {
+            brain_testutil::skip_unavailable("this device does not run workgroup-barrier kernels");
+            return;
+        }
+        // Qwen3.8-27B's group of six, and the 35B-A3B sibling's eight.
+        for (n_heads, n_kv) in [(12, 2), (16, 2)] {
+            fused_decode_equals_exact_attention_over_the_decoded_planes(g, tier, label, n_heads, n_kv);
+        }
     });
 }

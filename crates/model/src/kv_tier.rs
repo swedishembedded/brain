@@ -248,6 +248,27 @@ struct Names {
     prefill_hd256: &'static str,
 }
 
+/// The tier-independent merge pass of the fused decode.
+const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
+
+/// The GQA group sizes (query heads per kv head) the fused decode is
+/// specialised for - its loops over a group's heads are unrolled into
+/// registers, so each group is its own pipeline. 6 is Qwen3.8-27B (24 heads /
+/// 4 kv), 8 the 35B-A3B sibling (16 / 2); any other group keeps the triad.
+const FLASH_GROUPS: [u32; 2] = [6, 8];
+
+/// The pipeline name of the fused decode for `tier` at GQA group `group`:
+/// `GRP` specialisation first, then the tier's storage rewrite - the names
+/// `kernels::template::interned` and `kv_tier_variant` give them.
+fn decode_name(tier: KvTier, group: u32) -> String {
+    let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &[("GRP", group)]);
+    match tier {
+        KvTier::F32 => base,
+        KvTier::Bf16 => format!("{base}#kv=bf16"),
+        KvTier::Int8 => format!("{base}#kv=int8"),
+    }
+}
+
 const F32_NAMES: Names = Names {
     append: "paged_kv_append_batched",
     scores: "paged_decode_scores_batched",
@@ -283,7 +304,7 @@ impl KvTier {
 /// for, across all tiers - what a model that offers the compact tiers adds to
 /// its own pipeline list. Names already in `existing` are not repeated.
 pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str)> {
-    use kernels::template::{dtype_variant, dtype_variant_store, int8_kv_variant};
+    use kernels::template::{dtype_variant, dtype_variant_store, int8_kv_variant, interned, kv_tier_variant, CompactKv};
     use gpu_core::select::Dtype;
 
     let have: std::collections::HashSet<&str> = existing.iter().map(|(n, _)| *n).collect();
@@ -291,7 +312,15 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
     let bf16_prefill = dtype_variant(bf16_prefill_k.0, bf16_prefill_k.1, "pool_v", Dtype::BF16).expect("pool_v is templatable");
     let i8_prefill_k = int8_kv_variant("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256, "pool_k", "k_scales", "p.head_dim").expect("pool_k is templatable");
     let i8_prefill = int8_kv_variant(i8_prefill_k.0, i8_prefill_k.1, "pool_v", "v_scales", "p.head_dim").expect("pool_v is templatable");
+    let mut decode = Vec::new();
+    for group in FLASH_GROUPS {
+        let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &[("GRP", group)]).expect("the decode kernel declares GRP");
+        decode.push(base);
+        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Bf16).expect("the decode kernel marks its kv-tier blocks"));
+        decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
+    }
     let all: Vec<(&'static str, &'static str)> = vec![
+        (FLASH_COMBINE, kernels::PAGED_FLASH_DECODE_GQA_COMBINE),
         (F32_NAMES.append, kernels::PAGED_KV_APPEND_BATCHED),
         (F32_NAMES.scores, kernels::PAGED_DECODE_SCORES_BATCHED),
         (F32_NAMES.apply, kernels::PAGED_DECODE_APPLY_BATCHED),
@@ -305,7 +334,7 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
         (INT8_NAMES.apply, kernels::PAGED_DECODE_APPLY_I8_BATCHED),
         i8_prefill,
     ];
-    all.into_iter().filter(|(n, _)| !have.contains(n)).collect()
+    all.into_iter().chain(decode).filter(|(n, _)| !have.contains(n)).collect()
 }
 
 /// The pipeline indices of one tier's kernels on one [`Gpu`], and the step
@@ -316,6 +345,11 @@ pub struct KvKernels {
     scores: usize,
     apply: usize,
     prefill_hd256: usize,
+    /// `(group, pipeline)` of the fused decode, for the groups this device was
+    /// given a specialisation of; empty when the model did not register them
+    /// (a missing fused decode is a slower decode, never a wrong one).
+    decode: Vec<(u32, usize)>,
+    decode_combine: Option<usize>,
 }
 
 /// What a batched append writes: `batch` token rows (one per sequence, or one
@@ -341,13 +375,42 @@ pub struct PrefillShape {
     pub block_size: u32,
 }
 
+/// The fused decode's shape: `batch` sequences, one query row each, against a
+/// paged pool whose longest live sequence has `cap` keys.
+#[derive(Clone, Copy, Debug)]
+pub struct FlashDecodeShape {
+    pub batch: u32,
+    pub n_heads: u32,
+    pub n_kv_heads: u32,
+    pub head_dim: u32,
+    pub block_size: u32,
+    pub max_bt: u32,
+    /// An upper bound on every `seq_lens` entry; it sizes the split count.
+    pub cap: u32,
+}
+
+/// Keys per tile of the fused decode kernel (`paged_flash_decode_gqa_hd256`'s
+/// `TILE`) and tiles per split: a split covers 1024 keys, so a 128k context is
+/// 128 splits per (sequence, kv head) and even one sequence fills the device.
+const FLASH_TILE: u32 = 128;
+const FLASH_TILES_PER_SPLIT: u32 = 8;
+const FLASH_HEAD_DIM: u32 = 256;
+
 impl KvKernels {
     /// Look `tier`'s kernels up on `gpu` by name. An error names the first
     /// missing kernel: the model did not register [`kernel_list`].
     pub fn resolve(gpu: &Gpu, tier: KvTier) -> Result<KvKernels, String> {
         let names = tier.names();
         let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("KV tier {tier}: kernel '{name}' is not registered on this Gpu (add model::kv_tier::kernel_list to its pipelines)"));
-        Ok(KvKernels { tier, append: find(names.append)?, scores: find(names.scores)?, apply: find(names.apply)?, prefill_hd256: find(names.prefill_hd256)? })
+        Ok(KvKernels {
+            tier,
+            append: find(names.append)?,
+            scores: find(names.scores)?,
+            apply: find(names.apply)?,
+            prefill_hd256: find(names.prefill_hd256)?,
+            decode: FLASH_GROUPS.iter().filter_map(|&group| gpu.kernel_index(&decode_name(tier, group)).map(|i| (group, i))).collect(),
+            decode_combine: gpu.kernel_index(FLASH_COMBINE),
+        })
     }
 
     pub fn tier(&self) -> KvTier {
@@ -395,6 +458,39 @@ impl KvKernels {
             None => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, ctx], &params, threads),
             Some(sc) => g.step(self.apply, &[probs, &v.data, block_tables, seq_lens, sc, ctx], &params, threads),
         }
+    }
+
+    /// Whether [`Self::flash_decode`] can run this shape on `g`: head_dim 256,
+    /// a GQA group the model registered a specialisation for
+    /// ([`FLASH_GROUPS`]), and a device that runs workgroup-barrier kernels
+    /// (not the CPU JIT, which keeps the scores/softmax/apply triad).
+    pub fn flash_decode_available(&self, g: &Gpu, head_dim: u32, group: u32) -> bool {
+        head_dim == FLASH_HEAD_DIM && self.decode_combine.is_some() && self.decode.iter().any(|&(gr, _)| gr == group) && g.caps().workgroup_reductions
+    }
+
+    /// Fused decode attention over `k`/`v` planes: attends each sequence's
+    /// query row (`q`, `[batch, n_heads * 256]`) against its `seq_lens[b]`
+    /// keys and writes `ctx` (`[batch, n_heads * 256]`). Two dispatches - the
+    /// split-key pass and the merge - and no score slab. See
+    /// `paged_flash_decode_gqa_hd256.wgsl` for the design and why it exists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flash_decode(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_tables: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: FlashDecodeShape) -> Vec<Step> {
+        self.check(k);
+        self.check(v);
+        let group = s.n_heads / s.n_kv_heads;
+        assert!(self.flash_decode_available(g, s.head_dim, group), "KvKernels::flash_decode: not available for head_dim {} group {group} on this device", s.head_dim);
+        let n_splits = s.cap.max(1).div_ceil(FLASH_TILE * FLASH_TILES_PER_SPLIT);
+        let part = g.storage(s.batch as u64 * s.n_heads as u64 * n_splits as u64 * (FLASH_HEAD_DIM as u64 + 2));
+        let params = [s.batch, s.n_heads, s.n_kv_heads, s.head_dim, group, s.block_size, s.max_bt, n_splits, FLASH_TILES_PER_SPLIT];
+        let grid = Dispatch::Workgroups(s.batch * s.n_kv_heads * n_splits);
+        let decode = self.decode.iter().find(|&&(gr, _)| gr == group).expect("checked by flash_decode_available").1;
+        let split = match (&k.scales, &v.scales) {
+            (None, None) => g.dispatch(decode, &[q, &k.data, &v.data, block_tables, seq_lens, &part], &params, grid),
+            (Some(ks), Some(vs)) => g.dispatch(decode, &[q, &k.data, &v.data, block_tables, seq_lens, &part, ks, vs], &params, grid),
+            _ => unreachable!("check() pinned both planes to one tier"),
+        };
+        let combine = g.step(self.decode_combine.expect("checked by flash_decode_available"), &[&part, ctx], &[s.batch, s.n_heads, s.head_dim, n_splits], s.batch * s.n_heads * 256);
+        vec![split, combine]
     }
 
     /// The fused causal prefill dispatch over `k`/`v` planes (one pipeline for

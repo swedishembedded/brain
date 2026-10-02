@@ -333,14 +333,8 @@ pub fn gqa_mixer_chunk_kv_fwd(
     let qd = shape.qd();
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
 
-    let t_max = start + n;
-    let scores = g.storage(n as u64 * nh as u64 * t_max as u64);
-    let probs = g.storage(n as u64 * nh as u64 * t_max as u64);
     let ctx = g.storage((n * qd) as u64);
-    g.submit(
-        &[],
-        &crate::block::gqa_chunk_step_kv(g, kv, softmax, nh, nkv, hd, base_row, start, n, cap, &prep.q_normed, &prep.k_normed, v, layer, block_ids, offsets, seq_lens, &scores, &probs, &ctx),
-    );
+    g.submit(&[], &crate::block::gqa_chunk_step_kv(g, kv, softmax, nh, nkv, hd, base_row, start, n, cap, &prep.q_normed, &prep.k_normed, v, layer, block_ids, offsets, seq_lens, &ctx));
     gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
 }
 
@@ -365,8 +359,6 @@ pub fn gqa_mixer_decode_batched_kv_fwd(
     let qd = shape.qd();
     let prep = qkv_prepare(g, ids, shape, w, q_full, k, batch);
 
-    let scores = g.storage(batch as u64 * nh as u64 * paged.cap as u64);
-    let probs = g.storage(batch as u64 * nh as u64 * paged.cap as u64);
     let ctx = g.storage((batch * qd) as u64);
     g.submit(
         &[],
@@ -389,8 +381,6 @@ pub fn gqa_mixer_decode_batched_kv_fwd(
             paged.offsets,
             paged.block_tables,
             paged.seq_lens,
-            &scores,
-            &probs,
             &ctx,
         ),
     );
