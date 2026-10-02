@@ -153,7 +153,7 @@ fn grouped_matches_gather(gpu: &Gpu, slots: usize, k: usize, n: usize, xdiv: usi
         &[],
         &[
             gpu.dispatch(K_GATHER, &[&xb, &sxb, &idb, &wb, &swb, &want], &[slots as u32, kg as u32, n as u32, xdiv as u32], Dispatch::Workgroups(slots as u32 * (n as u32).div_ceil(GATHER_COLS))),
-            gpu.dispatch(K_GROUPED, &[&xb, &sxb, &tab, &perm, &wb, &swb, &got], &[ne as u32, kg as u32, n as u32, xdiv as u32], Dispatch::Workgroups(max_tiles * (n as u32).div_ceil(GROUPED_COLS))),
+            gpu.dispatch(K_GROUPED, &[&xb, &sxb, &tab, &perm, &wb, &swb, &got], &[max_tiles, kg as u32, n as u32, xdiv as u32, ne as u32], Dispatch::Workgroups(max_tiles * (n as u32).div_ceil(GROUPED_COLS))),
         ],
     );
     gpu.poll_wait();

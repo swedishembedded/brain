@@ -25,7 +25,10 @@
 // lane fold, so a slot's output does not depend on which kernel or which batch
 // computed it - a prefill and a decode step agree on a token's expert outputs.
 //
-//   params : u32 [ne, kg, n, xdiv]    ne = experts (n_experts + shared)
+//   params : u32 [tiles, kg, n, xdiv, ne]
+//            tiles = the tile count the dispatch is sized for (an upper bound of
+//            the router's real count, `ne + ceil(slots / 8)`); ne = experts
+//            (n_experts + shared)
 //   xq     : [rows, kg] u32           4 int8 per word
 //   sx     : [rows] f32               per-row activation scale
 //   tab    : [2 * (ne + 1)] u32       `moe_route_scan.wgsl`
@@ -34,18 +37,18 @@
 //   sw     : [ne * n, kg/8] f32
 //   out    : [slots, n] f32           slot-major, like the gather kernel's
 //
-// Dispatch: `ceil(n / 4)` column tiles x `max_tiles` MR-slot tiles, where
-// `max_tiles` bounds the tile count the router can produce
-// (`ne + ceil(slots / MR)`); a block past the table's real tile count does
-// nothing. Tiles are numbered expert-major, column tile fastest, so blocks that
+// Dispatch: `ceil(n / 4)` column tiles x `tiles` MR-slot tiles, where `tiles`
+// bounds the tile count the router can produce (`ne + ceil(slots / MR)`); a block
+// past the table's real tile count does nothing. Tiles are numbered expert-major, column tile fastest, so blocks that
 // run together read the same activation rows and consecutive tiles of an expert
 // find its weights in L2.
 
 struct Params {
-    ne: u32,
+    tiles: u32,
     kg: u32,
     n: u32,
     xdiv: u32,
+    ne: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;

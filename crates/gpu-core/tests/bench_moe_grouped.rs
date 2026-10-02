@@ -115,7 +115,7 @@ fn run(gpu: &Gpu, tokens: u32, k: u32, n: u32, xdiv_per_row: bool) {
         ],
     );
     let tiles = NE + slots.div_ceil(MR);
-    let grouped = [gpu.dispatch(4, &[&xq, &sx, &tab, &perm, &wq, &sw, &out], &[NE, kg, n, xdiv], Dispatch::Workgroups(tiles * n.div_ceil(4)))];
+    let grouped = [gpu.dispatch(4, &[&xq, &sx, &tab, &perm, &wq, &sw, &out], &[tiles, kg, n, xdiv, NE], Dispatch::Workgroups(tiles * n.div_ceil(4)))];
     report("grouped", &timed(gpu, &grouped, "moe_i8_grouped"));
 
     let route = [

@@ -49,9 +49,12 @@ pub(crate) struct Row {
     /// The storage/uniform bindings of `slow`, in order - the native kernel
     /// takes the identical list.
     pub bindings: &'static [BindKind],
-    /// Whether the native kernel serves a dispatch of these caller params
-    /// (`Params { m, kg, n }`).
+    /// Whether the native kernel serves a dispatch of these caller params.
     pub serves: fn(&[u32]) -> bool,
+    /// Whether `slow` must also have an ACTIVE [`crate::upgrade`] row on this
+    /// device (condition 1 of the module doc). A kernel with no WGSL sibling to
+    /// upgrade to - there is no regime choice to defer to - says `false`.
+    pub requires_wgsl_upgrade: bool,
 }
 
 /// `matmul_i8_gemv.wgsl`'s bindings: params, `xq`, `wq`, `sx`, `sw`, `out`.
@@ -78,13 +81,40 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
     m >= 1 && m <= backend_api::select::DECODE_REGIME_MAX_ROWS && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
-pub(crate) const ROWS: &[Row] = &[Row {
-    slow: "matmul_i8_gemv",
-    weight: Dtype::I8,
-    op: Op::MatMul,
-    bindings: I8_GEMV_BINDINGS,
-    serves: serves_i8_gemv,
-}];
+/// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
+/// `out`.
+const MOE_I8_GROUPED_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// `Params { tiles, kg, n, xdiv, ne }`. The kernel needs `K` to be a whole number
+/// of 32-element weight-scale groups (`kg % 8 == 0`, the WGSL kernel's own
+/// contract) and the routing tables `ne` experts wide.
+fn serves_moe_i8_grouped(p: &[u32]) -> bool {
+    match p {
+        [tiles, kg, n, xdiv, ne, ..] => *tiles >= 1 && *n >= 1 && *kg >= 8 && kg % 8 == 0 && *xdiv >= 1 && *ne >= 1,
+        _ => false,
+    }
+}
+
+pub(crate) const ROWS: &[Row] = &[
+    Row { slow: "matmul_i8_gemv", weight: Dtype::I8, op: Op::MatMul, bindings: I8_GEMV_BINDINGS, serves: serves_i8_gemv, requires_wgsl_upgrade: true },
+    Row {
+        slow: "moe_i8_grouped",
+        weight: Dtype::I8,
+        op: Op::MoeExpertLinear,
+        bindings: MOE_I8_GROUPED_BINDINGS,
+        serves: serves_moe_i8_grouped,
+        requires_wgsl_upgrade: false,
+    },
+];
 
 /// A native kernel with no WGSL twin: it fuses a chain of dispatches the MODEL
 /// builds, so there is nothing to redirect and a model asks for it by name -
@@ -330,7 +360,9 @@ pub(crate) fn resolve(
     ROWS.iter()
         .filter_map(|row| {
             let slow = names.iter().position(|n| n == row.slow)?;
-            wgsl_upgrades.iter().find(|a| a.slow == slow)?;
+            if row.requires_wgsl_upgrade {
+                wgsl_upgrades.iter().find(|a| a.slow == slow)?;
+            }
             let k = kernels_cuda::find(row.op, row.weight, cc)?;
             let id = backend.register_native(&NativeSpec::Cuda {
                 src: k.src,
@@ -376,6 +408,20 @@ mod tests {
         let wgsl = kernels::MATMUL_I8_GEMV_REG;
         let declared = wgsl.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
         assert_eq!(declared, row.bindings.len());
+    }
+
+    #[test]
+    fn the_grouped_moe_row_names_a_registry_entry_with_its_own_bindings() {
+        let row = ROWS.iter().find(|r| r.slow == "moe_i8_grouped").expect("the row");
+        let k = kernels_cuda::get("moe_i8_grouped_mma").expect("registry entry");
+        assert_eq!((k.op, k.weight), (row.op, row.weight));
+        let declared = kernels::MOE_I8_GROUPED.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
+        assert_eq!(declared, row.bindings.len());
+        // No WGSL sibling exists to upgrade to, so the row must not wait for one.
+        assert!(!row.requires_wgsl_upgrade);
+        assert!(serves_moe_i8_grouped(&[40, 512, 2048, 9, 257]));
+        assert!(!serves_moe_i8_grouped(&[40, 516, 2048, 9, 257]), "K not a whole number of scale groups");
+        assert!(!serves_moe_i8_grouped(&[40, 512, 2048]), "short params");
     }
 
     #[test]

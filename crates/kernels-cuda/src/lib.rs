@@ -287,6 +287,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "moe_i8_grouped_mma",
+        // The native twin of `moe_i8_grouped.wgsl`, redirected to by
+        // `gpu_core::native_upgrade`: the (MoeExpertLinear, I8) answer. The decode
+        // regime's expert GEMV (`moe_i8_gemv_gather`) has no twin.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::I8,
+        by_name: false,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_moe_i8_grouped_mma",
+        what: "sparse-MoE int8 GEMM over a fused expert bank with each expert's slots grouped, on int8 tensor cores (mma.sync m16n8k32), group-32 weight scale folded per MMA; bit-identical to moe_i8_grouped",
+        reported: "native:moe_i8_grouped_mma",
+        block_dim: 128,
+        // One tile of the router's tables (8 slots of one expert) by 64 weight
+        // rows per block (four warps of 16), tile-major.
+        tile: (1, 64),
+        shared_bytes: 0,
+        src: include_str!("../cu/moe_i8_grouped_mma.cu"),
+    },
+    CudaKernel {
         name: "add_rms_quant",
         // Not an operator a selector chooses an implementation of: a FUSED
         // kernel a model asks for by name (`gpu_core::Fused`), with no WGSL twin

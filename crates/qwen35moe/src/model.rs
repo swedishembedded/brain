@@ -2290,7 +2290,7 @@ impl Qwen35 {
                 g.dispatch(
                     MOE_I8_GROUPED,
                     &[xq, sx, &route_tab, &route_perm, &bank.packed, &bank.scale, out],
-                    &[ne, bank.k / 4, bank.n, xdiv],
+                    &[tiles, bank.k / 4, bank.n, xdiv, ne],
                     Dispatch::Workgroups(tiles * bank.n.div_ceil(MOE_GROUPED_COLS)),
                 )
             } else {
