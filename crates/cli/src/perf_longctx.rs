@@ -20,7 +20,11 @@
 //!   artifact, different model family; its decode context is synthetic too
 //!   (the block table is extended to the position without prefilling).
 //!
-//! Both are GPU only: `plan` counts device memory and nothing else, and a
+//! * [`Qwen35MoeEngine`] - Qwen3.6-35B-A3B (256-expert sparse MoE over Gated
+//!   DeltaNet + GQA layers) straight from its released GGUF on one GPU, through
+//!   the paged serving engine. Its decode context is synthetic too.
+//!
+//! All are GPU only: `plan` counts device memory and nothing else, and a
 //! sizing that does not fit ends the sweep rather than spilling to the host.
 
 use std::collections::HashMap;
@@ -189,6 +193,149 @@ impl LongContextEngine for Qwen35Engine {
 
     fn unload(&mut self) {
         self.inst = None;
+    }
+}
+
+// ------------------------------------------------------------ qwen35moe
+
+/// Positions past the measured context a loaded engine keeps room for: the
+/// scenario's warm-up and timed steps each advance every sequence by one.
+const MOE_DECODE_HEADROOM: u32 = 256;
+
+/// Device bytes beyond weights and KV that a loaded engine holds: the fixed
+/// activation scratch and the output logits (`FIXED`), and the per-sequence
+/// scratch of a recorded decode step and of the head's `[rows, vocab]` logits
+/// (`PER_SEQUENCE`). Calibrated against the driver's own used-memory reading
+/// on a GH200 (see the test below, which pins the shape of the estimate).
+const MOE_SCRATCH_FIXED: u64 = 3 << 30;
+const MOE_SCRATCH_PER_SEQUENCE: u64 = 24 << 20;
+
+/// The Qwen3.6-35B-A3B GGUF (`qwen35moe:<gguf>` / `qwen35moe-gguf`).
+pub struct Qwen35MoeEngine {
+    path: String,
+    cfg: qwen35moe::config::Qwen35Config,
+    tier: model::ops::TierPolicy,
+    kv_tier: model::kv_tier::KvTier,
+    gpu: (u32, String, u64),
+    eng: Option<qwen35moe::serve::Engine>,
+    tables: Vec<BlockTable>,
+    /// Real in-vocab token ids prompts are cut from, tokenised once.
+    prompt_seed: Option<Vec<u32>>,
+}
+
+impl Qwen35MoeEngine {
+    pub fn open(path: &str) -> Result<Qwen35MoeEngine, String> {
+        let gpu = gpu_budget().into_iter().next().ok_or("no GPU with queryable memory: longctx is GPU-only and has no host fallback")?;
+        let mg = MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let cfg = qwen35moe::gguf_load::resident_config(&mg, 1)?;
+        Ok(Qwen35MoeEngine {
+            path: path.to_string(),
+            cfg,
+            tier: qwen35moe::gguf_load::tier_from_env(),
+            kv_tier: qwen35moe::gguf_load::kv_tier_from_env()?,
+            gpu,
+            eng: None,
+            tables: Vec::new(),
+            prompt_seed: None,
+        })
+    }
+
+    /// Per-sequence capacity an engine serving `context`-token decode needs.
+    fn capacity(context: u32) -> u32 {
+        context.saturating_add(MOE_DECODE_HEADROOM)
+    }
+
+    fn needed_bytes(&self, batch: u32, context: u32) -> u64 {
+        qwen35moe::serve::weight_bytes(&self.cfg, &self.tier)
+            + qwen35moe::serve::kv_pool_bytes(&self.cfg, self.kv_tier, batch, Self::capacity(context))
+            + MOE_SCRATCH_FIXED
+            + batch as u64 * MOE_SCRATCH_PER_SEQUENCE
+    }
+}
+
+impl LongContextEngine for Qwen35MoeEngine {
+    fn describe(&self) -> EngineInfo {
+        EngineInfo {
+            model: qwen35moe::gguf_load::MODEL.to_string(),
+            weight_tier: self.tier.describe(),
+            kv_precision: kv_label(self.kv_tier).into(),
+            backend: gpu_core::backend_name().to_string(),
+            devices: vec![format!("gpu{} {}", self.gpu.0, self.gpu.1)],
+            context_kind: ContextKind::Synthetic,
+        }
+    }
+
+    fn max_context(&self) -> Option<u32> {
+        Some(self.cfg.max_position_embeddings).filter(|&n| n > 0)
+    }
+
+    fn plan(&mut self, batch: u32, context: u32) -> Result<Fit, String> {
+        let needed = self.needed_bytes(batch, context);
+        Ok(Fit { fits: needed <= self.gpu.2, needed_bytes: needed, usable_bytes: self.gpu.2 })
+    }
+
+    fn load(&mut self, batch: u32, context: u32) -> Result<(), String> {
+        self.eng = None;
+        self.tables.clear();
+        let mg = MmapGguf::open(&self.path).map_err(|e| format!("open {}: {e}", self.path))?;
+        let cfg = qwen35moe::gguf_load::resident_config(&mg, Self::capacity(context))?;
+        let src = qwen35moe::gguf_load::source(&mg, &cfg)?;
+        let opts = qwen35moe::serve::EngineOptions::new(Self::capacity(context), batch).with_tier(self.tier.clone()).with_kv_tier(self.kv_tier);
+        // Allocation failure on the device surfaces as a panic from the engine
+        // constructor; it is the out-of-memory boundary, not a crash.
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| qwen35moe::serve::Engine::from_source(cfg, &src, opts))).map_err(|p| {
+            p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "engine construction panicked".into())
+        })?;
+        if self.prompt_seed.is_none() {
+            use data::tokenizer::Tokenizer;
+            let text = "The quick brown fox jumps over the lazy dog while a kalman filter estimates the state of a noisy system. ";
+            self.prompt_seed = Some(qwen35moe::gguf_load::tokenizer(&mg)?.encode(text));
+        }
+        self.eng = Some(built);
+        Ok(())
+    }
+
+    fn prefill(&mut self, prompt_tokens: u32) -> Result<f64, String> {
+        let eng = self.eng.as_mut().ok_or("prefill before load")?;
+        let seed = self.prompt_seed.as_ref().ok_or("prefill before load")?;
+        let prompt: Vec<u32> = seed.iter().cycle().take(prompt_tokens as usize).copied().collect();
+        let mut table = BlockTable::new();
+        let t = Instant::now();
+        // Returns the last hidden state to the host, so the clock covers the device.
+        eng.prefill(&mut table, &prompt);
+        let secs = t.elapsed().as_secs_f64();
+        eng.release_table(&mut table);
+        Ok(secs)
+    }
+
+    fn decode_step(&mut self, positions: &[u32]) -> Result<f64, String> {
+        let eng = self.eng.as_mut().ok_or("decode before load")?;
+        self.tables.resize_with(positions.len(), BlockTable::new);
+        // A sequence is brought to its position without computing the context
+        // (`Engine::admit_synthetic`); consecutive steps then find it there.
+        for (table, &p) in self.tables.iter_mut().zip(positions) {
+            eng.admit_synthetic(table, p)?;
+        }
+        let tokens = vec![1u32; positions.len()];
+        let mut rows: Vec<&mut BlockTable> = self.tables.iter_mut().collect();
+        let t = Instant::now();
+        // Greedy decode reads each row's next token back to the host.
+        let out = eng.forward_batched_greedy(&mut rows, &tokens);
+        let ms = elapsed_ms(t);
+        if out.len() != positions.len() {
+            return Err(format!("engine returned {} tokens for {} rows", out.len(), positions.len()));
+        }
+        Ok(ms)
+    }
+
+    fn device_used_bytes(&self) -> Option<u64> {
+        driver_used_bytes()
+    }
+
+    fn unload(&mut self) {
+        // Tables first: they name blocks of the pool the engine owns.
+        self.tables.clear();
+        self.eng = None;
     }
 }
 
@@ -395,6 +542,13 @@ pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
     if let Some(path) = spec.strip_prefix("qwen35:") {
         return Ok(Box::new(Qwen35Engine::open(path)?));
     }
+    if let Some(path) = spec.strip_prefix("qwen35moe:") {
+        return Ok(Box::new(Qwen35MoeEngine::open(path)?));
+    }
+    if spec == "qwen35moe-gguf" {
+        let path = std::env::var(qwen35moe::gguf_load::GGUF_ENV).map_err(|_| format!("target qwen35moe-gguf reads {}; set it to a Qwen3.6-35B-A3B GGUF", qwen35moe::gguf_load::GGUF_ENV))?;
+        return Ok(Box::new(Qwen35MoeEngine::open(&path)?));
+    }
     if spec == "qwen35-gguf" {
         let path = std::env::var(qwen35::int8_gguf_resident::GGUF_ENV).map_err(|_| format!("target qwen35-gguf reads {}; set it to a Qwen3.8 GGUF", qwen35::int8_gguf_resident::GGUF_ENV))?;
         return Ok(Box::new(Qwen35Engine::open(&path)?));
@@ -402,7 +556,7 @@ pub fn build_engine(spec: &str) -> Result<Box<dyn LongContextEngine>, String> {
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return Ok(Box::new(QwenPagedEngine::open(weights)?));
     }
-    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>, qwen35-gguf or qwen:<weights>[:i8w][:kvf32]"))
+    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>, qwen35-gguf, qwen35moe:<gguf>, qwen35moe-gguf or qwen:<weights>[:i8w][:kvf32]"))
 }
 
 #[cfg(test)]
@@ -431,6 +585,38 @@ mod tests {
             assert_eq!(engine.describe().kv_precision, kv_label(kv));
             assert!(model::kv_tier::KvTier::ALL.iter().map(|k| kv_label(*k)).collect::<std::collections::HashSet<_>>().len() == 3, "every tier needs its own label");
         }
+    }
+
+    fn moe_engine(tier: model::ops::TierPolicy, kv: model::kv_tier::KvTier) -> Qwen35MoeEngine {
+        let cfg = qwen35moe::config::Qwen35Config::qwen35_35b_a3b();
+        Qwen35MoeEngine { path: String::new(), cfg, tier, kv_tier: kv, gpu: (0, "test".into(), 96 << 30), eng: None, tables: Vec::new(), prompt_seed: None }
+    }
+
+    /// The MoE planner has to say what the run will hold: the released Q8_0
+    /// file is 36.9 GB and brain's int8 layout carries an f32 scale per 32
+    /// weights, so the weights are ~39 GB; the KV pool grows with the batch and
+    /// the context, and a compact tier is smaller than fp32. The artifact names
+    /// the tier and the kv precision it ran with.
+    #[test]
+    fn the_qwen35moe_planner_counts_weights_kv_and_reports_its_tiers() {
+        use model::kv_tier::KvTier;
+        let i8 = || model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+        let mut e = moe_engine(i8(), KvTier::F32);
+        let weights = qwen35moe::serve::weight_bytes(&e.cfg, &e.tier) as f64 / 1e9;
+        assert!((36.0..42.0).contains(&weights), "int8 weights are {weights:.1} GB");
+        let small = e.plan(1, 1024).unwrap();
+        assert!(small.needed_bytes > qwen35moe::serve::weight_bytes(&e.cfg, &e.tier));
+        assert!(e.plan(8, 1024).unwrap().needed_bytes > small.needed_bytes);
+        assert!(e.plan(1, 131_072).unwrap().needed_bytes > small.needed_bytes);
+        let fp32_kv = e.plan(8, 65_536).unwrap().needed_bytes;
+        let mut compact = moe_engine(i8(), KvTier::Int8);
+        assert!(compact.plan(8, 65_536).unwrap().needed_bytes < fp32_kv);
+        assert_eq!(compact.describe().kv_precision, "int8");
+        assert_eq!(compact.describe().weight_tier, "i8");
+        assert_eq!(compact.describe().context_kind, ContextKind::Synthetic);
+        // An fp32 model of this size cannot fit a card, and the planner says so.
+        let mut f32_model = moe_engine(model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32), KvTier::F32);
+        assert!(!f32_model.plan(1, 1024).unwrap().fits);
     }
 
     #[test]

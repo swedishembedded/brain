@@ -112,7 +112,7 @@ OPTIONS
   --device cpu|gpu|vulkan  (global flag, handled by the main dispatcher)
 
 LONG CONTEXT
-  brain perf run longctx --target <qwen35:<gguf> | qwen35-gguf | qwen:<weights>>
+  brain perf run longctx --target <qwen35:<gguf> | qwen35-gguf | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>>
                          --context N [--ladder 1,2,4,...] [--prefill 1024,4096,...]
                          [--steps N]
       One model on one GPU at a long context: prefill speed, single-stream
@@ -401,7 +401,7 @@ fn run(args: &[String]) {
         let art = match scenario.as_str() {
             "longctx" => target_spec
                 .as_deref()
-                .ok_or_else(|| "longctx needs --target qwen35:<gguf> | qwen35-gguf | qwen:<weights>".to_string())
+                .ok_or_else(|| "longctx needs --target qwen35:<gguf> | qwen35-gguf | qwen35moe:<gguf> | qwen35moe-gguf | qwen:<weights>".to_string())
                 .and_then(|spec| crate::perf_longctx::run(spec, &longctx, &opt.device, opt.smoke)),
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             // Budget (device slots) and passes (denoise steps) are fixed,
