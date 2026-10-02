@@ -40,7 +40,18 @@ What it taught, in the order it should be applied:
    one handle (a `share`d `Ops` handle allocates the quantised activations)
    must switch it on for each: the first version enabled it on the model's own
    handle and left the activations - the large blocks - going to the driver.
-5. **A shared card makes every number a distribution.** Other processes
+5. **`cuMemFree` was also the only thing ordering a reused address against
+   other streams.** Because it drains the whole device, nothing was ever
+   pending on a block that came back from the allocator. A held block is
+   reissued with other handles' kernels possibly still queued on it, so the
+   cache carries the block's fence and the allocating stream waits on it before
+   zeroing or writing (`a_reissued_block_waits_for_the_other_streams_work_on_it`
+   queues 400 launches from a second handle and fails without the wait). The
+   symptom that exposed it was not a crash: the real-dims chunked-prefill gate
+   drifted from 1.00e-3 to 1.95e-3, inside its own bar. A gate whose bar leaves
+   room for a defect is a gate that reports it as a number to read, so read the
+   number whenever a change that should not move it does.
+6. **A shared card makes every number a distribution.** Other processes
    time-slice the card, which only ever adds time to a measurement. Report the
    fastest of several rounds, check the card is idle before and during, and
    compare against a "before" taken with the same binary and the new paths
