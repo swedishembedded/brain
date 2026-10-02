@@ -338,6 +338,7 @@ fn registering_a_native_kernel_twice_reuses_the_loaded_module() {
         block_dim: 32,
         bindings: &[BindKind::Uniform, BindKind::StorageReadWrite],
         shared_bytes: 0,
+        launch: backend_api::CudaLaunch::NONE,
     };
     let Some(parent) = backend() else { return };
     let Some(sibling) = parent.share() else { panic!("the CUDA backend must be able to share a device") };

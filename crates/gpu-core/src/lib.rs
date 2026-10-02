@@ -1759,6 +1759,14 @@ mod native_facade {
             self.inner.register_native(spec)
         }
 
+        /// [`backend_api::Backend::native_max_active_blocks`]: how many blocks of
+        /// the registered native kernel `id` one multiprocessor keeps resident
+        /// (`None` where the backend cannot say). Times the multiprocessor count
+        /// in `caps()` it is the grid that fills the device.
+        pub fn native_max_active_blocks(&self, id: backend_api::NativeId) -> Option<u32> {
+            self.inner.native_max_active_blocks(id)
+        }
+
         /// The native id of `which` on this handle, resolved on first ask.
         fn fused_id(&self, which: crate::native_upgrade::Fused) -> Option<backend_api::NativeId> {
             let mut known = self.fused.lock().unwrap_or_else(|e| e.into_inner());
@@ -1818,6 +1826,7 @@ mod native_facade {
                     block_dim: kernel.block_dim,
                     bindings,
                     shared_bytes: kernel.shared_bytes,
+                    launch: backend_api::CudaLaunch::NONE,
                 })
             })
         }

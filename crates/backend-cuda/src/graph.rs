@@ -110,6 +110,9 @@ pub(crate) struct GraphCounters {
     pub captures: AtomicU64,
     pub replays: AtomicU64,
     pub grid_updates: AtomicU64,
+    /// Nodes given new by-value scalar arguments - see
+    /// [`crate::backend::LaunchStats::graph_scalar_updates`].
+    pub scalar_updates: AtomicU64,
     /// How often a replay had to wait for the device before it could change
     /// something the in-flight graph was still using. Counted rather than
     /// hidden: it is the one place this mechanism can give host time back,
@@ -142,15 +145,19 @@ pub(crate) struct GraphCounters {
 pub(crate) struct LiveNode {
     node: CuGraphNode,
     func: CuFunction,
-    /// Keeps the module loaded: `func` is only a valid handle while it is.
-    _module: Arc<crate::backend::Compiled>,
+    /// Keeps the module loaded - `func` is only a valid handle while it is -
+    /// and carries the launch shape a re-pointed node must repeat.
+    compiled: Arc<crate::backend::Compiled>,
     block_dim: u32,
     /// What one block covers for THIS kind of kernel - the work-group size for
     /// a catalogue kernel, and one for a native kernel whose `threads` already
     /// counts blocks.
     per_block: u32,
     threads: u32,
+    /// The kernel's argument slots: pointers, then by-value scalars from
+    /// [`LiveNode::scalar_at`]. A replay overwrites the scalar tail in place.
     args: Vec<CuDevicePtr>,
+    scalar_at: usize,
     /// Where in the graph's pinned staging ([`LiveGraph::staging`]), and so in
     /// its device parameter block ([`LiveGraph::_params`], laid out
     /// identically), this node's parameters live, as `(word offset, words)`.
@@ -212,6 +219,10 @@ pub(crate) struct Resolved {
     pub compiled: Arc<crate::backend::Compiled>,
     pub func: CuFunction,
     pub args: Vec<CuDevicePtr>,
+    /// Index in `args` of the first by-value scalar (`args.len()` when the
+    /// kernel takes none). Everything before it is a pointer the signature
+    /// pins; everything from it on may change between replays.
+    pub scalar_at: usize,
     pub per_block: u32,
     pub threads: u32,
     /// The step's own parameter words, or empty when its uniform is supplied
@@ -448,15 +459,16 @@ impl GraphCache {
             // SAFETY: `s.func` was resolved from `s.compiled`'s module, which
             // the node below keeps loaded, and `s.args` is the argument list
             // that module's entry point takes.
-            unsafe { ctx.launch_raw(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &args)? };
+            unsafe { ctx.launch_shaped(s.func, (gx, gy, 1), (s.compiled.block_dim, 1, 1), &s.compiled.shape, &args)? };
             nodes.push(LiveNode {
                 node: capture.last_node()?,
                 func: s.func,
-                _module: s.compiled.clone(),
+                compiled: s.compiled.clone(),
                 block_dim: s.compiled.block_dim,
                 per_block: s.per_block,
                 threads: s.threads,
                 args,
+                scalar_at: s.scalar_at,
                 staging: slot,
                 staged: Vec::new(),
                 _uniform: s.uniform.as_ref().map(Arc::downgrade),
@@ -518,11 +530,11 @@ impl GraphCache {
         // updated with a launch pending. A replay that changes NEITHER is
         // therefore free of any wait, which is the whole reason the comparison
         // is made before the writes rather than after them.
-        let changed = live
-            .nodes
-            .iter()
-            .zip(steps)
-            .any(|(n, s)| n.threads != s.threads || (n.staging.is_some() && n.staged != s.params));
+        let changed = live.nodes.iter().zip(steps).any(|(n, s)| {
+            n.threads != s.threads
+                || n.args[n.scalar_at..] != s.args[s.scalar_at..]
+                || (n.staging.is_some() && n.staged != s.params)
+        });
         if changed && self.in_flight {
             counters.staging_waits.fetch_add(1, Ordering::Relaxed);
             ctx.sync()?;
@@ -536,7 +548,14 @@ impl GraphCache {
                     node.staged.extend_from_slice(&step.params);
                 }
             }
-            if node.threads != step.threads {
+            let scalars_changed = node.args[node.scalar_at..] != step.args[step.scalar_at..];
+            if node.threads != step.threads || scalars_changed {
+                if scalars_changed {
+                    // Scalars are baked into the node's argument list; the
+                    // pointers before them are what the signature pinned.
+                    let at = node.scalar_at;
+                    node.args[at..].copy_from_slice(&step.args[at..]);
+                }
                 let (gx, gy) = backend_api::grid_ws(step.threads, node.per_block);
                 let mut params: Vec<*mut std::ffi::c_void> = node
                     .args
@@ -551,7 +570,9 @@ impl GraphCache {
                     block_dim_x: node.block_dim,
                     block_dim_y: 1,
                     block_dim_z: 1,
-                    shared_mem_bytes: 0,
+                    // Dynamic shared memory is part of the node and survives
+                    // a re-point only if it is passed again here.
+                    shared_mem_bytes: node.compiled.shape.shared_bytes,
                     kernel_params: params.as_mut_ptr(),
                     extra: std::ptr::null_mut(),
                 };
@@ -561,8 +582,13 @@ impl GraphCache {
                 // addresses cannot have moved because the allocations behind
                 // them are held by this node.
                 unsafe { ctx.set_kernel_node_grid(&live.exec, node.node, &p)? };
-                node.threads = step.threads;
-                counters.grid_updates.fetch_add(1, Ordering::Relaxed);
+                if node.threads != step.threads {
+                    node.threads = step.threads;
+                    counters.grid_updates.fetch_add(1, Ordering::Relaxed);
+                }
+                if scalars_changed {
+                    counters.scalar_updates.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         ctx.launch_graph(&live.exec)?;

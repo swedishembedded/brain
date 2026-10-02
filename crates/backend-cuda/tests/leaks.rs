@@ -461,6 +461,7 @@ fn registered_native_kernels_are_unloaded_with_the_backend() {
         block_dim: 32,
         bindings: &[backend_api::BindKind::StorageReadWrite],
         shared_bytes: 0,
+        launch: backend_api::CudaLaunch::NONE,
     };
     {
         let warm = backend().expect("backend");

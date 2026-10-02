@@ -121,6 +121,23 @@ fn bound_words(mem: &exec::DeviceMem, off_bytes: u64, len_words: u64) -> u64 {
     if len_words == 0 { avail } else { len_words.min(avail) }
 }
 
+/// The 64-bit argument slots for a native kernel's by-value scalars, from the
+/// step's parameter words. A 32-bit scalar is its value zero-extended - the
+/// kernel reads the low four bytes of its slot - and a 64-bit one is its two
+/// words, low first. `register`/`step_native` guarantee `words` holds exactly
+/// the words the kinds consume.
+fn encode_scalars(kinds: &[backend_api::ScalarKind], words: &[u32]) -> Vec<u64> {
+    let mut at = 0;
+    kinds
+        .iter()
+        .map(|k| {
+            let v = if k.words() == 1 { u64::from(words[at]) } else { u64::from(words[at]) | (u64::from(words[at + 1]) << 32) };
+            at += k.words();
+            v
+        })
+        .collect()
+}
+
 /// One compiled kernel, cached under its `kind`.
 pub(crate) struct Compiled {
     /// The entry point, resolved once when the module was loaded rather than
@@ -143,6 +160,12 @@ pub(crate) struct Compiled {
     /// pointers: true for a generated kernel (see `wgsl_cuda::Kernel`), false
     /// for a native one, whose signature is the provider's own.
     takes_lengths: bool,
+    /// Dynamic shared memory and cluster dimensions this kernel is launched
+    /// with - fixed at registration, and carried into every captured node.
+    pub(crate) shape: exec::Shape,
+    /// By-value scalar arguments after the pointers; empty for a kernel that
+    /// takes a uniform block (or nothing).
+    pub(crate) scalars: &'static [backend_api::ScalarKind],
     /// Diagnostic name, so a launch failure says which kernel failed whether
     /// it came from the WGSL catalogue or from a provider's own registry.
     name: String,
@@ -162,6 +185,7 @@ struct NativeKey {
     block_dim: u32,
     bindings: &'static [backend_api::BindKind],
     shared_bytes: u32,
+    launch: backend_api::CudaLaunch,
 }
 
 /// What a uniform allocation is shared by: the dispatch's **structure**, with
@@ -352,6 +376,10 @@ pub struct LaunchStats {
     /// Kernel nodes re-pointed at a new grid inside an already instantiated
     /// graph - a sequence length advancing, in the loop this exists for.
     pub grid_updates: u64,
+    /// Kernel nodes given new by-value scalar arguments inside an already
+    /// instantiated graph - a native kernel whose scalars (a position, a
+    /// scale) change between replays.
+    pub graph_scalar_updates: u64,
     /// Replays that had to wait for the device before overwriting their
     /// parameter staging. Zero whenever the caller reads between submissions,
     /// which a decoder does every token.
@@ -618,6 +646,18 @@ impl CudaBackend {
         self.native.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// The registered native kernel `id` names on THIS handle, if any.
+    fn native_kernel_of(&self, id: backend_api::NativeId) -> Option<Arc<Compiled>> {
+        let idx = (id.0 as usize).checked_sub(self.native_base())?;
+        self.native.lock().unwrap_or_else(|e| e.into_inner()).get(idx).cloned()
+    }
+
+    /// The most shared memory per block a kernel may opt in to on this device,
+    /// bytes; 0 where the driver does not report it.
+    pub fn native_shared_optin_bytes(&self) -> u32 {
+        self.ctx.device_info().shared_mem_optin
+    }
+
     /// The first `kind` value that names a [`backend_api::Backend::register_native`]d
     /// kernel rather than a WGSL catalogue entry.
     fn native_base(&self) -> usize {
@@ -683,6 +723,8 @@ impl CudaBackend {
             n_bindings: gen.bindings.len(),
             takes_uniform: gen.uniform_bytes > 0,
             takes_lengths: true,
+            shape: exec::Shape::default(),
+            scalars: &[],
             name: k.name.clone(),
             native_key: None,
             _module: module,
@@ -833,6 +875,8 @@ impl CudaBackend {
             // The kernel reads the low 64 bits as `unsigned long long`.
             args.extend(st.lens.iter().copied());
         }
+        let scalar_at = args.len();
+        args.extend(encode_scalars(c.scalars, &st.params));
         let func = c.func;
         // A catalogue dispatch counts INVOCATIONS and the grid is laid out by
         // dividing them across the kernel's declared work-group size; a
@@ -846,6 +890,7 @@ impl CudaBackend {
         Resolved {
             func,
             args,
+            scalar_at,
             per_block,
             threads: st.threads,
             params: st.params.clone(),
@@ -913,7 +958,7 @@ impl CudaBackend {
         let start = self.timing.load(Ordering::Acquire).then(|| self.stamp()).flatten();
         // SAFETY: `r.func` was resolved from `r.compiled`'s module, which `r`
         // holds an `Arc` to, and `r.args` is that entry point's argument list.
-        unsafe { self.ctx.launch_raw(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.args) }
+        unsafe { self.ctx.launch_shaped(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.compiled.shape, &r.args) }
             .unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
         crate::live::host_launched(1);
@@ -1040,6 +1085,7 @@ impl CudaBackend {
             graph_captures: g.captures.load(Ordering::Relaxed),
             graph_replays: g.replays.load(Ordering::Relaxed),
             grid_updates: g.grid_updates.load(Ordering::Relaxed),
+            graph_scalar_updates: g.scalar_updates.load(Ordering::Relaxed),
             staging_waits: g.staging_waits.load(Ordering::Relaxed),
             graph_param_copies: g.param_copies.load(Ordering::Relaxed),
         }
@@ -1364,7 +1410,7 @@ impl backend_api::Backend for CudaBackend {
     /// memory than the kernel declares, never because of anything written
     /// down about any architecture.
     fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
-        let backend_api::NativeSpec::Cuda { src, entry, block_dim, bindings, shared_bytes } = spec else {
+        let backend_api::NativeSpec::Cuda { src, entry, block_dim, bindings, shared_bytes, launch } = spec else {
             // SPIR-V is a Vulkan pipeline image and `HostFn` is a CPU
             // provider's own function; neither is source this driver can
             // compile. See `NativeSpec`'s own doc.
@@ -1379,15 +1425,40 @@ impl backend_api::Backend for CudaBackend {
             );
             return None;
         }
-        if *shared_bytes > self.caps.workgroup_mem_bytes {
+        // Static shared memory is bounded by what every launch may use; the
+        // dynamic part only by what the kernel has OPTED in to, up to the
+        // device's own queried ceiling. Without the opt-in the driver would
+        // refuse the launch, so the kernel is declined here, by name, instead.
+        let total_shared = u64::from(*shared_bytes) + u64::from(launch.dynamic_shared_bytes);
+        let shared_limit = if launch.shared_opt_in {
+            u64::from(self.ctx.device_info().shared_mem_optin.max(self.caps.workgroup_mem_bytes))
+        } else {
+            u64::from(self.caps.workgroup_mem_bytes)
+        };
+        if total_shared > shared_limit {
             tracing::info!(
-                shared_bytes = *shared_bytes,
-                limit = self.caps.workgroup_mem_bytes,
-                "backend-cuda: declining a native kernel that wants more shared memory than this device reported"
+                entry = %entry,
+                shared_bytes = total_shared,
+                limit = shared_limit,
+                opted_in = launch.shared_opt_in,
+                "backend-cuda: declining a native kernel that wants more shared memory than it may use on this device"
             );
             return None;
         }
-        let key = NativeKey { src, entry, block_dim: *block_dim, bindings, shared_bytes: *shared_bytes };
+        if let Some(dims) = launch.cluster {
+            // 8 is the portable cluster-size limit; a larger one is a
+            // non-portable opt-in this registration does not offer.
+            let size = dims.iter().map(|&d| u64::from(d)).product::<u64>();
+            if dims.contains(&0) || size > 8 || !self.ctx.can_launch_clusters() {
+                tracing::info!(entry = %entry, ?dims, "backend-cuda: declining a native kernel whose cluster this device cannot launch");
+                return None;
+            }
+        }
+        if !launch.scalars.is_empty() && bindings.contains(&backend_api::BindKind::Uniform) {
+            tracing::info!(entry = %entry, "backend-cuda: declining a native kernel that declares both scalar arguments and a uniform block");
+            return None;
+        }
+        let key = NativeKey { src, entry, block_dim: *block_dim, bindings, shared_bytes: *shared_bytes, launch: *launch };
         let id_of = |idx: usize| backend_api::NativeId((self.native_base() + idx) as u32);
         // The registry is shared by every sibling handle, so a registration
         // that always appended would load one more module per handle ever
@@ -1396,7 +1467,8 @@ impl backend_api::Backend for CudaBackend {
         if let Some(idx) = existing(&self.native.lock().unwrap_or_else(|e| e.into_inner())) {
             return Some(id_of(idx));
         }
-        let module = match self.ctx.compile(src, entry) {
+        let options = exec::CompileOptions { features: launch.arch, defines: Vec::new() };
+        let module = match self.ctx.compile_with(src, entry, &options) {
             Ok(m) => m,
             Err(e) => {
                 tracing::info!(entry = %entry, reason = %e, "backend-cuda: this device declined a native kernel");
@@ -1416,9 +1488,18 @@ impl backend_api::Backend for CudaBackend {
                 return None;
             }
         };
+        if launch.shared_opt_in && launch.dynamic_shared_bytes > 0 {
+            // SAFETY: `func` was just resolved from `module`, still loaded.
+            if let Err(e) = unsafe { self.ctx.allow_dynamic_shared(func, launch.dynamic_shared_bytes) } {
+                tracing::info!(entry = %entry, reason = %e, "backend-cuda: the driver refused the shared-memory opt-in");
+                return None;
+            }
+        }
         let c = Arc::new(Compiled {
             func,
             block_dim: *block_dim,
+            shape: exec::Shape { shared_bytes: launch.dynamic_shared_bytes, cluster: launch.cluster },
+            scalars: launch.scalars,
             // STORAGE bindings only - the uniform is counted separately
             // below, exactly as it is for a generated kernel (whose
             // `bindings` list never includes it). Counting it here would
@@ -1469,16 +1550,45 @@ impl backend_api::Backend for CudaBackend {
         threads: u32,
     ) -> Option<Step> {
         let kind = id.0 as usize;
-        let base = self.native_base();
-        let live = kind >= base && (kind - base) < self.native.lock().unwrap_or_else(|e| e.into_inner()).len();
-        if !live || offsets.len() != bufs.len() {
+        let c = self.native_kernel_of(id);
+        if c.is_none() || offsets.len() != bufs.len() {
             // An id from a different handle (or a different backend) names
             // nothing here. Answering `None` lets the provider fall back;
             // launching whatever happened to be at that index would run the
             // wrong kernel.
             return None;
         }
+        let c = c?;
+        // The parameter words are the kernel's scalar arguments, so the count
+        // is part of its signature. A wrong count would read past the slice or
+        // hand the kernel a half-formed 64-bit value.
+        let want_words: usize = c.scalars.iter().map(|k| k.words()).sum();
+        if !c.scalars.is_empty() && params.len() != want_words {
+            tracing::info!(kernel = %c.name, got = params.len(), want = want_words, "backend-cuda: declining a native step with the wrong number of scalar words");
+            return None;
+        }
+        // A cluster launch needs a grid of whole clusters; padding it would run
+        // blocks the caller never asked for.
+        if let Some(dims) = c.shape.cluster {
+            let size: u32 = dims.iter().product();
+            if threads % size != 0 {
+                tracing::info!(kernel = %c.name, blocks = threads, cluster = size, "backend-cuda: declining a native step whose grid is not a whole number of clusters");
+                return None;
+            }
+        }
         Some(self.record(kind, bufs, Some(offsets), params, threads))
+    }
+
+    fn native_max_active_blocks(&self, id: backend_api::NativeId) -> Option<u32> {
+        let c = self.native_kernel_of(id)?;
+        // SAFETY: `c.func` is an entry point of the module `c` keeps loaded.
+        match unsafe { self.ctx.max_active_blocks(c.func, c.block_dim, c.shape.shared_bytes) } {
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::info!(kernel = %c.name, reason = %e, "backend-cuda: the driver would not answer an occupancy query");
+                None
+            }
+        }
     }
 
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {

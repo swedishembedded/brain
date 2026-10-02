@@ -52,6 +52,16 @@ fn parse_compute(target: &str) -> Option<Cc> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
+/// The part of a launch beyond the grid and block: dynamic shared memory and
+/// a thread-block cluster. The default is a plain launch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shape {
+    /// Dynamic shared memory per block, in bytes.
+    pub shared_bytes: u32,
+    /// Cluster dimensions in blocks.
+    pub cluster: Option<[u32; 3]>,
+}
+
 /// What a kernel declares about how it must be compiled, beyond its source.
 #[derive(Clone, Debug, Default)]
 pub struct CompileOptions {
@@ -729,33 +739,113 @@ impl Context {
         block: (u32, u32, u32),
         args: &[CuDevicePtr],
     ) -> Result<(), String> {
+        self.launch_shaped(f, grid, block, &Shape::default(), args)
+    }
+
+    /// [`Self::launch_raw`] with the launch shape beyond the grid: dynamic
+    /// shared memory and thread-block clusters.
+    ///
+    /// Each argument is one 64-bit slot, which is how both pointers and
+    /// by-value scalars are passed: `cuLaunchKernel` reads from each slot as
+    /// many bytes as the kernel's parameter is wide, so a 32-bit scalar is its
+    /// value in the low half of its slot (this layout is little-endian) and a
+    /// 64-bit one fills it.
+    ///
+    /// # Safety
+    /// As [`Self::launch_raw`]; and a nonzero `shape.shared_bytes` above the
+    /// default limit must have been opted in to for `f`.
+    pub unsafe fn launch_shaped(
+        &self,
+        f: CuFunction,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shape: &Shape,
+        args: &[CuDevicePtr],
+    ) -> Result<(), String> {
         self.make_current()?;
         let mut values: Vec<CuDevicePtr> = args.to_vec();
         let mut params: Vec<*mut c_void> =
             values.iter_mut().map(|v| v as *mut CuDevicePtr as *mut c_void).collect();
-        // SAFETY: `params` names `args.len()` valid pointers to device
-        // addresses that outlive the call, the function belongs to a module
-        // still loaded in this context (the caller's obligation), and no
-        // dynamic shared memory is requested (the generated kernels declare
-        // theirs statically).
+        let Some(dims) = shape.cluster else {
+            // SAFETY: `params` names `args.len()` valid pointers to 64-bit
+            // slots that outlive the call, and the function belongs to a module
+            // still loaded in this context (the caller's obligation).
+            return self.d.check(
+                unsafe {
+                    (self.fns.launch_kernel)(
+                        f,
+                        grid.0,
+                        grid.1,
+                        grid.2,
+                        block.0,
+                        block.1,
+                        block.2,
+                        shape.shared_bytes,
+                        self.stream,
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    )
+                },
+                "cuLaunchKernel",
+            );
+        };
+        let launch_ex = self.fns.launch_kernel_ex.ok_or("this driver has no cuLaunchKernelEx, so no cluster launch")?;
+        let mut attr = crate::driver::CuLaunchAttribute::cluster(dims);
+        let config = crate::driver::CuLaunchConfig {
+            grid_dim_x: grid.0,
+            grid_dim_y: grid.1,
+            grid_dim_z: grid.2,
+            block_dim_x: block.0,
+            block_dim_y: block.1,
+            block_dim_z: block.2,
+            shared_mem_bytes: shape.shared_bytes,
+            stream: self.stream,
+            attrs: &mut attr,
+            num_attrs: 1,
+        };
+        // SAFETY: as above, plus `config` and the one attribute it points at
+        // outlive the call.
         self.d.check(
-            unsafe {
-                (self.fns.launch_kernel)(
-                    f,
-                    grid.0,
-                    grid.1,
-                    grid.2,
-                    block.0,
-                    block.1,
-                    block.2,
-                    0,
-                    self.stream,
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                )
-            },
-            "cuLaunchKernel",
+            unsafe { launch_ex(&config, f, params.as_mut_ptr(), std::ptr::null_mut()) },
+            "cuLaunchKernelEx",
         )
+    }
+
+    /// Allow `f` up to `bytes` of dynamic shared memory per block: the opt-in
+    /// every launch above the default 48 KiB needs, and which the driver caps at
+    /// the device's own limit ([`crate::driver::CudaDevice::shared_mem_optin`]).
+    ///
+    /// # Safety
+    /// `f` must name an entry point of a module loaded in this context.
+    pub unsafe fn allow_dynamic_shared(&self, f: CuFunction, bytes: u32) -> Result<(), String> {
+        self.make_current()?;
+        // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+        const MAX_DYNAMIC_SHARED_SIZE_BYTES: c_int = 8;
+        self.d.check(
+            unsafe { (self.fns.func_set_attribute)(f, MAX_DYNAMIC_SHARED_SIZE_BYTES, bytes as c_int) },
+            "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)",
+        )
+    }
+
+    /// How many blocks of `f` one multiprocessor keeps resident at `block`
+    /// threads and `dynamic_shared` bytes of dynamic shared memory, as the
+    /// driver computes it from the kernel's own register and shared-memory use.
+    ///
+    /// # Safety
+    /// `f` must name an entry point of a module loaded in this context.
+    pub unsafe fn max_active_blocks(&self, f: CuFunction, block: u32, dynamic_shared: u32) -> Result<u32, String> {
+        self.make_current()?;
+        let mut n: c_int = 0;
+        self.d.check(
+            unsafe { (self.fns.occupancy_max_active_blocks)(&mut n, f, block as c_int, dynamic_shared as usize) },
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    /// Whether this device and driver can launch thread-block clusters.
+    pub fn can_launch_clusters(&self) -> bool {
+        self.info.cluster_launch && self.fns.launch_kernel_ex.is_some()
     }
 
     /// Whether this driver exposes the CUDA Graphs entry points at all, and if

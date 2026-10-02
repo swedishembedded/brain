@@ -165,6 +165,7 @@ fn child_cubins_run_with_no_nvrtc() {
         block_dim: 32,
         bindings: &[backend_api::BindKind::StorageReadWrite],
         shared_bytes: 0,
+        launch: backend_api::CudaLaunch::NONE,
     };
     assert!(b.register_native(&spec).is_some(), "a native kernel with an AOT image registers without NVRTC");
     println!("{MARKER}");
@@ -229,6 +230,7 @@ fn child_missing_image_is_a_clear_error() {
         block_dim: 32,
         bindings: &[backend_api::BindKind::StorageReadWrite],
         shared_bytes: 0,
+        launch: backend_api::CudaLaunch::NONE,
     };
     assert!(b.register_native(&spec).is_none(), "the provider is told no, and falls back");
     println!("{MARKER}");

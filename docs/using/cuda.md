@@ -155,6 +155,29 @@ created is gone. `cargo test -p brain-backend-cuda --test leaks` runs that check
 over every owner, and `compute-sanitizer --leak-check full` over the same test
 binaries reports no leaked allocations.
 
+## Native kernel launch contract
+
+A hand-written CUDA kernel registers with `NativeSpec::Cuda` and a
+`CudaLaunch` that declares how it is launched, beyond its source:
+
+- `dynamic_shared_bytes` and `shared_opt_in`: dynamic shared memory per block,
+  and the opt-in to more than the 48 KiB every device grants by default. The
+  device's queried limit is the ceiling; a registration above it is declined,
+  not truncated.
+- `cluster`: thread-block cluster dimensions (at most 8 blocks), launched
+  through `cuLaunchKernelEx`. The block count of a dispatch must be a multiple
+  of the cluster size. A device that cannot launch clusters declines the
+  kernel.
+- `scalars`: typed by-value arguments after the buffer pointers (32- and 64-bit
+  integers and floats). Their values may change between dispatches, including
+  inside a replayed CUDA graph.
+- `arch`: whether the kernel prefers or requires the `sm_XYa` target.
+
+`Gpu::native_max_active_blocks` returns the number of blocks of a registered
+kernel one multiprocessor keeps resident, as the driver computes it for that
+kernel's register and shared-memory use; times the multiprocessor count it is
+the grid that fills the device. `CudaLaunch::NONE` is the plain launch.
+
 ## Checking a machine
 
 ```bash

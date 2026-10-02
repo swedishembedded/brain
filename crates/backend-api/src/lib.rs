@@ -379,6 +379,94 @@ pub enum BindKind {
     Uniform,
 }
 
+/// What a native CUDA kernel declares about the architecture-specific
+/// instruction set (`sm_90a`: warpgroup MMA, `setmaxnreg`, TMA multicast).
+///
+/// Arch-specific code runs on exactly one compute capability and none other,
+/// so it is a property a kernel DECLARES and a device either has or lacks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ArchFeatures {
+    /// Valid on every target from its floor upward; compiled for the plain
+    /// `sm_XY`. What the generated tier and most hand-written kernels are.
+    #[default]
+    Portable,
+    /// Has an arch-specific fast path guarded by the feature macros
+    /// (`__CUDA_ARCH_FEAT_SM90_ALL`) and a portable body for the rest: the
+    /// suffix is used where it exists and the plain target elsewhere.
+    Preferred,
+    /// Valid only with the suffix. A device or toolchain that cannot provide
+    /// it declines the kernel rather than failing inside the compiler.
+    Required,
+}
+
+/// The type of one scalar argument a native kernel takes BY VALUE, after its
+/// buffer pointers. The values of a step arrive as 32-bit `params` words (the
+/// same slice a kernel with a uniform block gets); a scalar of 64 bits spans
+/// two consecutive words, low word first.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScalarKind {
+    U32,
+    I32,
+    F32,
+    U64,
+    I64,
+    F64,
+}
+
+impl ScalarKind {
+    /// How many `params` words one value of this type occupies.
+    pub const fn words(self) -> usize {
+        match self {
+            ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => 1,
+            ScalarKind::U64 | ScalarKind::I64 | ScalarKind::F64 => 2,
+        }
+    }
+}
+
+/// How a native CUDA kernel is launched, beyond its source: the part of a
+/// kernel's contract that `cuLaunchKernel` with static shared memory and one
+/// uniform block cannot express. [`CudaLaunch::NONE`] is the plain launch every
+/// kernel registered before this existed uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CudaLaunch {
+    /// Dynamic shared memory per block in bytes (`extern __shared__`), on top
+    /// of [`NativeSpec::Cuda::shared_bytes`]. Fixed for the registration: a
+    /// kernel whose size varies per call registers once per size.
+    pub dynamic_shared_bytes: u32,
+    /// Opt in to more shared memory per block than the 48 KiB every device
+    /// grants by default (`cuFuncSetAttribute`,
+    /// `MAX_DYNAMIC_SHARED_SIZE_BYTES`). Without it a registration whose total
+    /// shared memory exceeds that is declined; with it, the device's own
+    /// queried opt-in limit is the ceiling.
+    pub shared_opt_in: bool,
+    /// Thread-block cluster dimensions in blocks (`cuLaunchKernelEx`'s cluster
+    /// attribute). The block count a dispatch passes must be a multiple of the
+    /// product, which is at most 8. Declined on a device that cannot launch
+    /// clusters.
+    pub cluster: Option<[u32; 3]>,
+    /// By-value scalar arguments, in signature order, after the buffer
+    /// pointers. Non-empty means the step's `params` words feed these scalars
+    /// and NOT a uniform block, so it cannot be combined with
+    /// [`BindKind::Uniform`]. Their values may change from one dispatch to the
+    /// next (also inside a replayed CUDA graph).
+    pub scalars: &'static [ScalarKind],
+    /// Whether the source needs, can use or must not use the arch-specific
+    /// target suffix.
+    pub arch: ArchFeatures,
+}
+
+impl CudaLaunch {
+    /// A plain launch: static shared memory only, no cluster, no scalar
+    /// arguments, portable code.
+    pub const NONE: CudaLaunch =
+        CudaLaunch { dynamic_shared_bytes: 0, shared_opt_in: false, cluster: None, scalars: &[], arch: ArchFeatures::Portable };
+
+    /// How many `params` words [`Self::scalars`] consume.
+    pub fn scalar_words(&self) -> usize {
+        self.scalars.iter().map(|s| s.words()).sum()
+    }
+}
+
 /// A provider's own compiled kernel, handed to [`Backend::register_native`] -
 /// the wave-2 (native f16, cooperative-matrix, CPU ISA pack) counterpart of
 /// the `(name, wgsl_source)` pair every WGSL kernel registers with today.
@@ -390,7 +478,9 @@ pub enum NativeSpec {
     /// CUDA C++ **source text** (`brain-kernels-cuda`'s registry): the
     /// backend that accepts it compiles it for the compute capability IT
     /// queried from its own device, which is why no architecture is named
-    /// here and no pre-compiled image is carried.
+    /// here and no pre-compiled image is carried. What a kernel needs of the
+    /// architecture-specific target (`sm_90a`) is declared in
+    /// [`CudaLaunch::arch`], and the backend resolves it against the device.
     ///
     /// `block_dim` is threads per block, a property of the kernel's own index
     /// arithmetic rather than a tuning knob the backend may change - the same
@@ -407,6 +497,9 @@ pub enum NativeSpec {
         /// the shared-memory limit is a queried device property, not a
         /// constant anywhere.
         shared_bytes: u32,
+        /// The launch contract beyond the above: dynamic shared memory,
+        /// cluster dimensions, by-value scalars, arch-specific code.
+        launch: CudaLaunch,
     },
     /// A host-native compute path (a CPU ISA-pack provider's own function),
     /// named for diagnostics/profiling only - the backend that accepts this
@@ -1419,6 +1512,16 @@ pub trait Backend: Send + Sync {
             return None;
         }
         self.step_native(id, bufs, params, threads)
+    }
+
+    /// How many blocks of a registered native kernel one multiprocessor can
+    /// keep resident, as the driver computes it for the kernel's own register
+    /// and shared-memory use at its declared block size and dynamic shared
+    /// memory (`cuOccupancyMaxActiveBlocksPerMultiprocessor`). `None` when this
+    /// backend cannot say or does not know `id`. Multiply by the device's
+    /// multiprocessor count for the grid that fills it.
+    fn native_max_active_blocks(&self, _id: NativeId) -> Option<u32> {
+        None
     }
 
     /// Whether THIS device was granted the WGSL `enable f16;` native-compute

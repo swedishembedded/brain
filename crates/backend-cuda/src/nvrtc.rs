@@ -187,26 +187,7 @@ pub type Cc = (u32, u32);
 /// that contract changes.
 pub const CUBIN_ABI_VERSION: u32 = 1;
 
-/// What a kernel says about the architecture-specific instruction set
-/// (`sm_90a`: `wgmma`, `setmaxnreg`, TMA multicast and friends).
-///
-/// Arch-specific code runs on exactly one compute capability and on none
-/// other, so it is a property a kernel DECLARES and a device either has or
-/// lacks - never something to switch on everywhere.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum ArchFeatures {
-    /// The source is valid on every target from its floor upward; compile for
-    /// the plain `sm_XY`. The generated tier is always this.
-    #[default]
-    Portable,
-    /// The source has an arch-specific fast path guarded by the feature macros
-    /// (`__CUDA_ARCH_FEAT_SM90_ALL`) and a portable body for the rest: use the
-    /// suffix where it exists and the plain target elsewhere.
-    Preferred,
-    /// The source is only valid with the suffix. Where the device or toolkit
-    /// cannot provide it the kernel is refused, not compiled into an error.
-    Required,
-}
+pub use backend_api::ArchFeatures;
 
 /// The machine-code target of one compilation: a real architecture (`sm_`),
 /// with or without the arch-specific suffix.

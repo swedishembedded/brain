@@ -36,7 +36,7 @@
 //! switch the native kernel's own measurements are taken with.
 
 use backend_api::select::{Dtype, Op};
-use backend_api::{BindKind, Backend, NativeId, NativeSpec};
+use backend_api::{BindKind, Backend, CudaLaunch, NativeId, NativeSpec};
 
 /// One drop-in native replacement for a registered kernel.
 pub(crate) struct Row {
@@ -287,6 +287,7 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
         block_dim: k.block_dim,
         bindings: which.bindings(),
         shared_bytes: k.shared_bytes,
+        launch: CudaLaunch::NONE,
     })
 }
 
@@ -336,6 +337,7 @@ pub(crate) fn resolve(
                 block_dim: k.block_dim,
                 bindings: row.bindings,
                 shared_bytes: k.shared_bytes,
+                launch: CudaLaunch::NONE,
             })?;
             Some(Active { slow, id, kernel: k.name, tile: k.tile, serves: row.serves })
         })

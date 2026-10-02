@@ -68,6 +68,8 @@ const VENDOR_NVIDIA: u32 = 0x10de;
 // QUESTION asked of whatever card is present.
 const ATTR_MAX_THREADS_PER_BLOCK: c_int = 1;
 const ATTR_MAX_SHARED_MEMORY_PER_BLOCK: c_int = 8;
+const ATTR_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN: c_int = 97;
+const ATTR_CLUSTER_LAUNCH: c_int = 120;
 const ATTR_WARP_SIZE: c_int = 10;
 const ATTR_INTEGRATED: c_int = 18;
 const ATTR_PCI_BUS_ID: c_int = 33;
@@ -173,7 +175,64 @@ pub struct ExecFns {
     pub(crate) event_destroy: unsafe extern "C" fn(CuEvent) -> CuResult,
     pub(crate) mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     pub(crate) mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
+    /// `cuFuncSetAttribute`: how a kernel opts in to more dynamic shared memory
+    /// than the default 48 KiB (`CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`).
+    pub(crate) func_set_attribute: unsafe extern "C" fn(CuFunction, c_int, c_int) -> CuResult,
+    /// `cuOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, f, block_size,
+    /// dynamic_smem)`: how many blocks of `f` one multiprocessor keeps resident.
+    pub(crate) occupancy_max_active_blocks:
+        unsafe extern "C" fn(*mut c_int, CuFunction, c_int, usize) -> CuResult,
+    /// `cuLaunchKernelEx`, which carries launch attributes (thread-block
+    /// clusters). Optional: a CUDA 11 driver lacks it, and a kernel that needs
+    /// a cluster is then declined rather than the whole backend.
+    pub(crate) launch_kernel_ex: Option<
+        unsafe extern "C" fn(*const CuLaunchConfig, CuFunction, *mut *mut c_void, *mut *mut c_void) -> CuResult,
+    >,
 }
+
+/// `CUlaunchAttribute`: an id, padding to 8 bytes, and a 64-byte value union
+/// aligned to 8 (it holds pointers in its other members).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CuLaunchAttribute {
+    pub id: u32,
+    pub pad: [u8; 4],
+    pub value: [u64; 8],
+}
+
+/// `CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION`.
+pub const LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION: u32 = 4;
+
+impl CuLaunchAttribute {
+    /// The cluster-dimension attribute: `value.clusterDim` is three
+    /// consecutive `unsigned int`s, which on this little-endian layout are the
+    /// first 12 bytes of the union.
+    pub fn cluster(dims: [u32; 3]) -> CuLaunchAttribute {
+        let mut value = [0u64; 8];
+        value[0] = u64::from(dims[0]) | (u64::from(dims[1]) << 32);
+        value[1] = u64::from(dims[2]);
+        CuLaunchAttribute { id: LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION, pad: [0; 4], value }
+    }
+}
+
+/// `CUlaunchConfig`.
+#[repr(C)]
+pub struct CuLaunchConfig {
+    pub grid_dim_x: u32,
+    pub grid_dim_y: u32,
+    pub grid_dim_z: u32,
+    pub block_dim_x: u32,
+    pub block_dim_y: u32,
+    pub block_dim_z: u32,
+    pub shared_mem_bytes: u32,
+    pub stream: CuStream,
+    pub attrs: *mut CuLaunchAttribute,
+    pub num_attrs: u32,
+}
+
+// The attribute union is laid out by little-endian byte order above.
+#[cfg(target_endian = "big")]
+compile_error!("CuLaunchAttribute::cluster assumes a little-endian host");
 
 /// `CUDA_KERNEL_NODE_PARAMS`, **version 1**.
 ///
@@ -352,6 +411,9 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         event_destroy: sym(lib, b"cuEventDestroy_v2\0")?,
         mem_alloc_host: sym(lib, b"cuMemAllocHost_v2\0")?,
         mem_free_host: sym(lib, b"cuMemFreeHost\0")?,
+        func_set_attribute: sym(lib, b"cuFuncSetAttribute\0")?,
+        occupancy_max_active_blocks: sym(lib, b"cuOccupancyMaxActiveBlocksPerMultiprocessor\0")?,
+        launch_kernel_ex: sym(lib, b"cuLaunchKernelEx\0").ok(),
     })
 }
 
@@ -503,6 +565,10 @@ impl Driver {
             multiprocessors: self.attribute(dev, ATTR_MULTIPROCESSOR_COUNT)?.max(0) as u32,
             max_threads_per_block: self.attribute(dev, ATTR_MAX_THREADS_PER_BLOCK)?.max(0) as u32,
             shared_mem_per_block: self.attribute(dev, ATTR_MAX_SHARED_MEMORY_PER_BLOCK)?.max(0) as u32,
+            // Newer attributes: a driver that does not know one answers with an
+            // error, which means "no" here and must not make the device unusable.
+            shared_mem_optin: self.attribute(dev, ATTR_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN).unwrap_or(0).max(0) as u32,
+            cluster_launch: self.attribute(dev, ATTR_CLUSTER_LAUNCH).unwrap_or(0) != 0,
             warp_size: self.attribute(dev, ATTR_WARP_SIZE)?.max(0) as u32,
         })
     }
@@ -543,6 +609,13 @@ pub struct CudaDevice {
     /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`, bytes - what a
     /// `var<workgroup>` declaration is measured against.
     pub shared_mem_per_block: u32,
+    /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`, bytes - the
+    /// most shared memory a block may use once the kernel opts in, or 0 where
+    /// the driver does not report it.
+    pub shared_mem_optin: u32,
+    /// `CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH` - the device launches thread-block
+    /// clusters.
+    pub cluster_launch: bool,
     /// `CU_DEVICE_ATTRIBUTE_WARP_SIZE` - the subgroup width, asked for rather
     /// than assumed. Every NVIDIA part shipped so far answers 32; a backend
     /// that writes that number down instead of asking is wrong the day one
@@ -610,6 +683,8 @@ mod tests {
             multiprocessors: 0,
             max_threads_per_block: 0,
             shared_mem_per_block: 0,
+            shared_mem_optin: 0,
+            cluster_launch: false,
             warp_size: 0,
         };
         assert_eq!(d.pci_bus_id(), "0000:82:00.0");

@@ -344,7 +344,7 @@ fn sweep_tile_configurations() {
                 format!("#define BRAIN_I8_BM {bm}\n#define BRAIN_I8_BN {bn}\n#define BRAIN_I8_WARPS_M {wm}\n#define BRAIN_I8_WARPS_N {wn}\n#define BRAIN_I8_STAGES {st}\n{src}").into_boxed_str(),
             );
             let smem = st * (bm * 64 + bn * 64 + bn * 8);
-            let Some(id) = gpu.register_native(&NativeSpec::Cuda { src: text, entry: "brain_matmul_i8_mma", block_dim: wm * wn * 32, bindings, shared_bytes: smem }) else {
+            let Some(id) = gpu.register_native(&NativeSpec::Cuda { src: text, entry: "brain_matmul_i8_mma", block_dim: wm * wn * 32, bindings, shared_bytes: smem, launch: backend_api::CudaLaunch::NONE }) else {
                 eprintln!("sweep: {m}x{n}x{k} cfg {bm}x{bn} w{wm}x{wn} s{st}: declined");
                 continue;
             };
