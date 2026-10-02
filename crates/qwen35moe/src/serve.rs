@@ -193,12 +193,15 @@ pub struct EngineOptions {
     /// Rows from which the int8 expert GEMMs group each expert's slots
     /// ([`Qwen35::set_moe_grouped_min_rows`]).
     pub moe_grouped_min_rows: u32,
+    /// Take the fused native decode kernels where the device is offered them
+    /// ([`Qwen35::set_decode_fusion`]).
+    pub decode_fusion: bool,
 }
 
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS }
+        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true }
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -214,6 +217,10 @@ impl EngineOptions {
     }
     pub fn with_moe_grouped_min_rows(mut self, rows: u32) -> EngineOptions {
         self.moe_grouped_min_rows = rows;
+        self
+    }
+    pub fn with_decode_fusion(mut self, on: bool) -> EngineOptions {
+        self.decode_fusion = on;
         self
     }
     pub fn with_decode_tapes(mut self, on: bool) -> EngineOptions {
@@ -481,6 +488,7 @@ impl Engine {
         let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(opts.prefill_chunk) };
         let model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
         model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);
+        model.set_decode_fusion(opts.decode_fusion);
         let n_layers = cfg.n_layers as usize;
         let mut gqa_kv: Vec<KvLayer> = Vec::with_capacity(n_layers);
         for ty in cfg.layer_types() {
@@ -610,6 +618,21 @@ impl Engine {
         let h = g.storage_init("qwen35moe.admit.hidden", hidden);
         let logits = self.model.head_logits_rows_dev(&h, 1);
         g.read(&logits, self.model.cfg.vocab as usize)
+    }
+
+    /// Turn the fused native decode kernels on or off for the steps that follow
+    /// ([`Qwen35::set_decode_fusion`]). Recorded steps keep the kernels they were
+    /// recorded with, so they are dropped.
+    pub fn set_decode_fusion(&mut self, on: bool) {
+        self.tapes.clear();
+        self.model.set_decode_fusion(on);
+    }
+
+    /// Record decode steps and replay them, or build every step: the same answer,
+    /// at a very different host cost. Drops what was recorded.
+    pub fn set_decode_tapes(&mut self, on: bool) {
+        self.tapes.clear();
+        self.decode_tapes = on && self.model.moe_int8_active();
     }
 
     pub fn free_blocks(&self) -> u32 {
