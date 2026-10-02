@@ -130,10 +130,10 @@ pub(crate) struct GraphCounters {
 /// A graph node holds a bare device address; if the allocation behind it were
 /// freed, the allocator could hand that address to the next caller and the
 /// graph would then read and write a live tensor at full speed, with nothing
-/// to fault on. What prevents that is [`LiveGraph::epoch`]: any free bumps the
-/// allocator's epoch, and a graph captured under an older one is discarded
-/// before it can be matched, so it is never replayed against a recycled
-/// address.
+/// to fault on. What prevents that is [`LiveGraph::epoch`]: freeing a block a
+/// graph names bumps the context's graph epoch, and a graph captured under an
+/// older one is discarded before it can be matched, so it is never replayed
+/// against a recycled address. Blocks no graph names do not move it.
 ///
 /// The handles are weak because strong ones made a graph an owner of the
 /// model's tensors: a model that dropped its buffers while the device handle
@@ -182,7 +182,7 @@ unsafe impl Sync for LiveNode {}
 
 pub(crate) struct LiveGraph {
     sig: SubmitSig,
-    /// The allocator's free count when this was captured.
+    /// The context's graph epoch when this was captured.
     epoch: u64,
     /// Kept only to own it: an instantiated graph outlives the graph it was
     /// instantiated from, but destroying the source early would serve no
@@ -477,6 +477,15 @@ impl GraphCache {
         }
         let graph = capture.finish()?;
         let exec = ctx.instantiate(&graph)?;
+        // Every block a node names, so that freeing one of them - and only
+        // those - invalidates graphs (`Context::graph_epoch`).
+        for s in steps {
+            s.uniform.iter().for_each(|u| u.mark_graph_referenced());
+            s.bufs.iter().for_each(|(m, _)| m.mark_graph_referenced());
+        }
+        clears.iter().for_each(|c| c.mark_graph_referenced());
+        // The graph's own parameter block is not marked: only the graph holds
+        // its address, so releasing it with the graph names nobody else.
         counters.captures.fetch_add(1, Ordering::Relaxed);
         self.live.insert(
             0,

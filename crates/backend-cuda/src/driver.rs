@@ -47,6 +47,8 @@ pub type CuEvent = *mut c_void;
 pub type CuGraph = *mut c_void;
 pub type CuGraphExec = *mut c_void;
 pub type CuGraphNode = *mut c_void;
+/// `CUmemoryPool` - an opaque handle to a stream-ordered allocation pool.
+pub type CuMemPool = *mut c_void;
 /// `CUdeviceptr` - an integer device address, NOT a host pointer. It is 64-bit
 /// on every 64-bit platform the driver supports, and passing it to
 /// `cuLaunchKernel` means passing a pointer TO this integer, never the integer
@@ -78,6 +80,8 @@ const ATTR_PCI_DOMAIN_ID: c_int = 50;
 const ATTR_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 const ATTR_COMPUTE_CAPABILITY_MINOR: c_int = 76;
 const ATTR_MULTIPROCESSOR_COUNT: c_int = 16;
+/// `CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED`.
+const ATTR_MEMORY_POOLS_SUPPORTED: c_int = 115;
 
 /// The loaded driver: the `libloading::Library` plus the entry points resolved
 /// out of it once, with `cuInit` already called.
@@ -100,6 +104,9 @@ pub struct Driver {
     /// The graph entry points, resolved separately again: a driver too old to
     /// capture graphs still runs every dispatch one at a time.
     graph: Result<GraphFns, String>,
+    /// The stream-ordered allocator entry points, resolved separately again: a
+    /// driver without them allocates and frees exactly as before.
+    pool: Result<PoolFns, String>,
 }
 
 /// The context / memory / module / launch half of the Driver API.
@@ -313,6 +320,42 @@ pub struct GraphFns {
     pub(crate) graph_exec_destroy: unsafe extern "C" fn(CuGraphExec) -> CuResult,
 }
 
+/// The stream-ordered memory pool entry points, resolved as their own group.
+///
+/// A missing symbol (a driver older than CUDA 11.2) disables pooled allocation
+/// and nothing else.
+pub struct PoolFns {
+    pub(crate) pool_create: unsafe extern "C" fn(*mut CuMemPool, *const CuMemPoolProps) -> CuResult,
+    pub(crate) pool_destroy: unsafe extern "C" fn(CuMemPool) -> CuResult,
+    pub(crate) pool_set_attribute: unsafe extern "C" fn(CuMemPool, c_int, *mut c_void) -> CuResult,
+    pub(crate) pool_get_attribute: unsafe extern "C" fn(CuMemPool, c_int, *mut c_void) -> CuResult,
+    pub(crate) pool_trim_to: unsafe extern "C" fn(CuMemPool, usize) -> CuResult,
+    pub(crate) alloc_from_pool_async: unsafe extern "C" fn(*mut CuDevicePtr, usize, CuMemPool, CuStream) -> CuResult,
+    pub(crate) free_async: unsafe extern "C" fn(CuDevicePtr, CuStream) -> CuResult,
+}
+
+/// `CUmemPoolProps`, laid out for the fields brain sets and padded to the
+/// largest size any driver generation has used (88 bytes; the trailing members
+/// are reserved or, from CUDA 12, `maxSize`, and zero means the default for
+/// both). Zero padding is what keeps one definition valid across drivers.
+#[repr(C)]
+pub struct CuMemPoolProps {
+    /// `CU_MEM_ALLOCATION_TYPE_PINNED`.
+    pub alloc_type: c_int,
+    /// `CU_MEM_HANDLE_TYPE_NONE`: not shared with another process.
+    pub handle_types: c_int,
+    /// `CU_MEM_LOCATION_TYPE_DEVICE`.
+    pub location_type: c_int,
+    pub location_id: c_int,
+    pub win32_security_attributes: *mut c_void,
+    pub tail: [u8; 64],
+}
+
+/// `CU_MEMPOOL_ATTR_*`.
+pub const MEMPOOL_ATTR_RELEASE_THRESHOLD: c_int = 4;
+pub const MEMPOOL_ATTR_RESERVED_MEM_CURRENT: c_int = 5;
+pub const MEMPOOL_ATTR_USED_MEM_CURRENT: c_int = 7;
+
 // Every field is either a mapped `Library` (which `libloading` already
 // documents as `Send + Sync`) or a bare `extern "C"` function pointer. The
 // driver's own entry points used here are thread-safe reads.
@@ -355,9 +398,11 @@ fn load() -> Result<Driver, String> {
 
         let exec = load_exec(&lib);
         let graph = load_graph(&lib);
+        let pool = load_pool(&lib);
         let d = Driver {
             exec,
             graph,
+            pool,
             device_get_count: sym(&lib, b"cuDeviceGetCount\0")?,
             device_get: sym(&lib, b"cuDeviceGet\0")?,
             device_get_name: sym(&lib, b"cuDeviceGetName\0")?,
@@ -436,6 +481,23 @@ unsafe fn load_graph(lib: &libloading::Library) -> Result<GraphFns, String> {
     })
 }
 
+/// Resolve the stream-ordered allocator half. A missing symbol disables pooled
+/// allocation only.
+///
+/// # Safety
+/// Same contract as [`load_exec`].
+unsafe fn load_pool(lib: &libloading::Library) -> Result<PoolFns, String> {
+    Ok(PoolFns {
+        pool_create: sym(lib, b"cuMemPoolCreate\0")?,
+        pool_destroy: sym(lib, b"cuMemPoolDestroy\0")?,
+        pool_set_attribute: sym(lib, b"cuMemPoolSetAttribute\0")?,
+        pool_get_attribute: sym(lib, b"cuMemPoolGetAttribute\0")?,
+        pool_trim_to: sym(lib, b"cuMemPoolTrimTo\0")?,
+        alloc_from_pool_async: sym(lib, b"cuMemAllocFromPoolAsync\0")?,
+        free_async: sym(lib, b"cuMemFreeAsync\0")?,
+    })
+}
+
 /// Resolve one NUL-terminated symbol name AT the type the caller expects,
 /// yielding the bare function pointer.
 ///
@@ -462,6 +524,16 @@ impl Driver {
     /// is an ordinary answer that costs launch batching and nothing else.
     pub fn graph(&self) -> Result<&GraphFns, &str> {
         self.graph.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// The stream-ordered allocator entry points, or why this driver has none.
+    pub fn pool(&self) -> Result<&PoolFns, &str> {
+        self.pool.as_ref().map_err(|e| e.as_str())
+    }
+
+    /// Whether the device at `ordinal` supports stream-ordered memory pools.
+    pub fn supports_memory_pools(&self, ordinal: u32) -> bool {
+        self.pool.is_ok() && self.device(ordinal).and_then(|d| self.attribute(d, ATTR_MEMORY_POOLS_SUPPORTED)).map(|v| v != 0).unwrap_or(false)
     }
 
     /// A `CUdevice` handle for an ordinal, for callers that go on to open a

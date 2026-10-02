@@ -1128,7 +1128,7 @@ impl CudaBackend {
             // Read AFTER the signature is built: every allocation the
             // signature names is held by a `Resolved`, so nothing it describes
             // can be freed between the two.
-            let epoch = self.ctx.alloc_epoch();
+            let epoch = self.ctx.graph_epoch();
             let plan = cache.plan(&self.ctx, &sig, epoch, chunk);
             let outcome = match plan {
                 Plan::Eager => Ok(false),
@@ -1728,7 +1728,7 @@ impl backend_api::Backend for CudaBackend {
             self.collect_timings();
         }
         if let Some(cache) = &self.graph {
-            cache.lock().unwrap_or_else(|e| e.into_inner()).drained(self.ctx.alloc_epoch());
+            cache.lock().unwrap_or_else(|e| e.into_inner()).drained(self.ctx.graph_epoch());
         }
     }
 

@@ -55,10 +55,13 @@ fn serial() -> MutexGuard<'static, ()> {
 
 const MIB: usize = 1 << 20;
 
-/// A context with holding switched on - the state a prefill round runs in.
+/// A context with holding switched on - the state a prefill round runs in - on
+/// the exact-size cache. This file pins the cache's contract; `mem_pool.rs` pins
+/// the stream-ordered pool that backs held blocks where the driver has one.
 fn ctx() -> Option<Context> {
     match Context::open(0) {
         Ok(c) => {
+            c.use_stream_ordered_pool(false);
             c.hold_freed_blocks(true);
             Some(c)
         }

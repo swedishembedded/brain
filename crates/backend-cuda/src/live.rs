@@ -53,6 +53,14 @@ pub struct LiveResources {
     pub modules: u64,
     /// Outstanding `cuDevicePrimaryCtxRetain` retains not yet released.
     pub primary_retains: u64,
+    /// Outstanding `CUmemoryPool`s (stream-ordered allocation pools).
+    pub mem_pools: u64,
+    /// Outstanding blocks handed out from a pool and not yet freed. A freed
+    /// block stays in its pool, bounded by the pool's release threshold, and
+    /// goes back to the driver when the pool is trimmed or destroyed.
+    pub pool_allocs: u64,
+    /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
+    pub pool_bytes: u64,
 }
 
 /// Monotonic, process-wide totals of the calls whose per-step repetition is a
@@ -71,11 +79,16 @@ pub struct CallTotals {
     pub host_launches: u64,
     /// Captured graphs replayed.
     pub graph_replays: u64,
+    /// Blocks taken from a stream-ordered pool (`cuMemAllocFromPoolAsync`),
+    /// whether or not freed since: the pooled counterpart of
+    /// [`Self::device_alloc_calls`].
+    pub pool_alloc_calls: u64,
 }
 
 static TOTAL_DEVICE_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOST_LAUNCHES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_GRAPH_REPLAYS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_POOL_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// See [`CallTotals`].
 pub fn call_totals() -> CallTotals {
@@ -83,6 +96,7 @@ pub fn call_totals() -> CallTotals {
         device_alloc_calls: TOTAL_DEVICE_ALLOC_CALLS.load(Ordering::Relaxed),
         host_launches: TOTAL_HOST_LAUNCHES.load(Ordering::Relaxed),
         graph_replays: TOTAL_GRAPH_REPLAYS.load(Ordering::Relaxed),
+        pool_alloc_calls: TOTAL_POOL_ALLOC_CALLS.load(Ordering::Relaxed),
     }
 }
 
@@ -104,6 +118,9 @@ struct Counters {
     graph_execs: AtomicU64,
     modules: AtomicU64,
     primary_retains: AtomicU64,
+    mem_pools: AtomicU64,
+    pool_allocs: AtomicU64,
+    pool_bytes: AtomicU64,
 }
 
 static COUNTERS: Counters = Counters {
@@ -117,6 +134,9 @@ static COUNTERS: Counters = Counters {
     graph_execs: AtomicU64::new(0),
     modules: AtomicU64::new(0),
     primary_retains: AtomicU64::new(0),
+    mem_pools: AtomicU64::new(0),
+    pool_allocs: AtomicU64::new(0),
+    pool_bytes: AtomicU64::new(0),
 };
 
 /// What this process currently holds through `backend-cuda`. See
@@ -134,6 +154,9 @@ pub fn live_resources() -> LiveResources {
         graph_execs: c.graph_execs.load(Ordering::Relaxed),
         modules: c.modules.load(Ordering::Relaxed),
         primary_retains: c.primary_retains.load(Ordering::Relaxed),
+        mem_pools: c.mem_pools.load(Ordering::Relaxed),
+        pool_allocs: c.pool_allocs.load(Ordering::Relaxed),
+        pool_bytes: c.pool_bytes.load(Ordering::Relaxed),
     }
 }
 
@@ -197,4 +220,19 @@ pub(crate) fn primary_retained() {
 }
 pub(crate) fn primary_released() {
     down(&COUNTERS.primary_retains);
+}
+pub(crate) fn mem_pool_created() {
+    up(&COUNTERS.mem_pools);
+}
+pub(crate) fn mem_pool_destroyed() {
+    down(&COUNTERS.mem_pools);
+}
+pub(crate) fn pool_alloc(bytes: usize) {
+    TOTAL_POOL_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
+    up(&COUNTERS.pool_allocs);
+    COUNTERS.pool_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+}
+pub(crate) fn pool_free(bytes: usize) {
+    down(&COUNTERS.pool_allocs);
+    COUNTERS.pool_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
 }

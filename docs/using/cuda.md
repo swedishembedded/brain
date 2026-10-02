@@ -160,10 +160,29 @@ generator does its address arithmetic in 64 bits, and a test addresses a 5 GiB
 buffer past the 4 GiB mark. The Vulkan and wgpu backends keep the limits they
 report.
 
+## Pooled scratch allocation
+
+A pass that repeats - a prefill round, a decode step's temporaries - frees and
+allocates the same kind of block every iteration, and `cuMemFree` waits for the
+device. While a handle is holding freed blocks (`Gpu::hold_freed_blocks`, which
+`scratch_scope` switches on) its allocations come from a stream-ordered pool
+(`cuMemAllocFromPoolAsync`, `cuMemFreeAsync`): a free is enqueued instead of
+waited for, and any block that fits is reissued, whatever its size. The pool keeps
+at most the retention cap of idle bytes (a sixteenth of the card, 256 MiB to
+4 GiB; `BRAIN_CUDA_BLOCK_CACHE_MB` overrides) once its stream has run, returns all
+of it when holding stops, and is destroyed with the handle. A block larger than
+half the cap, a model weight, goes to the driver directly.
+
+On a Grace-Hopper node one prefill-shaped round (268 blocks) cost the host about
+2000 microseconds through the driver, 200 through the pool, and 32 through the
+older exact-size cache on an idle device. `BRAIN_CUDA_MEMPOOL=0` selects that
+cache, which is used automatically where the driver has no memory pools. Freeing
+a block that no captured graph names no longer discards graphs.
+
 ## Memory is returned when a model is dropped
 
 Everything the CUDA backend takes from the driver - device allocations, page-locked
-staging, events, streams, captured graphs and loaded kernels - is released when
+staging, memory pools, events, streams, captured graphs and loaded kernels - is released when
 the object that owns it is dropped, including while the device handle lives on
 to serve the next model. A loaded Qwen3.8-27B returns its ~28 GiB when the
 instance is dropped.

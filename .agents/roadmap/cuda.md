@@ -710,11 +710,13 @@ Four things had to be true, and each is asserted in
    Node handles come from `cuStreamGetCaptureInfo_v2` read immediately after
    each recorded launch - `cuGraphGetNodes` returns nodes in an unspecified
    order and cannot say which node came from which launch.
-3. **A free must invalidate the graph.** `Context` carries an `alloc_epoch`
-   bumped in `DeviceMem`'s `Drop` - the one place a free actually happens -
-   and a captured graph records the epoch it was captured at. The guard is
-   coarse on purpose: any free at all, not an analysis of which addresses
-   moved.
+3. **A free of a block the graph names must invalidate the graph.** `Context`
+   carries a `graph_epoch` bumped in `DeviceMem`'s `Drop` when the block was
+   marked as named by a captured graph, and a captured graph records the epoch
+   it was captured at. (It started as a coarse `alloc_epoch` bumped by any
+   free; that epoch remains, for sweeps of dead uniforms, but a prefill pass's
+   temporaries freed between decode steps must not cost the decode graph its
+   replay.)
 4. **`read`/`poll_wait` must never land inside a captured region.** Capture
    begins and ends inside one `submit`, so a read can only fall between two
    submissions; kernel compilation, module loading and entry-point resolution
@@ -1135,7 +1137,8 @@ generation, and not a WGSL translation for anything performance-critical.
 | **12** | Multi-GPU: NCCL as a `dlopen`ed provider for `Collective`; `Shard.gpu_index`/`check-multi-gpu-sharding.sh` cover CUDA-identified devices; one `memauth::PoolId` shared between a CUDA and a Vulkan handle on the same physical card | a two-device collective test (skip-if-fewer-than-2) and a memauth test asserting one `PoolId` per physical card across both backend handles, so `--limit-vram-total` stops double-counting |
 | **13** | Surfacing and gate graduation: `brain devices` per-op tier column and per-card CUDA visibility; `--trace-impl`; `braintop`'s `DeviceBudget`-side field; cost formulas for CUDA steps in `gpu-core/src/cost.rs`; `StepMeta` for `step_native`; CI-built AOT cubins alongside the NVRTC dev path; CUDA joins `scripts/gates/parity-gate.sh` as a real line, not a skip | `cost.rs`'s existing coverage ratchet extended to CUDA steps and made red before the formulas land; `parity-gate.sh`'s CUDA line green on a full run, gated on M7-M11 landing first |
 
-Ordering rationale: the allocator (M6) is a prerequisite for everything after
+Ordering rationale: the allocator (M6, done for transient lifetimes as an owned stream-ordered
+pool behind `hold_freed_blocks`, see `mem_pool.rs`) is a prerequisite for everything after
 it - graph replay, backward's extra live buffers and every library call all
 need address-stable, reusable memory, not a `cuMemAlloc` per step. Backward
 (M7) comes before the fast hand-written kernels so correctness gates exist

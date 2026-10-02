@@ -225,8 +225,8 @@ fn a_grid_that_grows_is_re_pointed_rather_than_re_instantiated() {
 /// straight back to the next allocation, so a graph that outlived a free could
 /// be replayed against memory that now belongs to something else - reading and
 /// writing a live tensor at full speed, with no fault and no wrong-looking
-/// number until much later. The guard is coarse on purpose: any free at all,
-/// not an analysis of which addresses moved.
+/// number until much later. So freeing a block the graph names invalidates it;
+/// `freeing_a_block_no_graph_names_leaves_the_graph_alone` is the other half.
 #[test]
 fn freeing_an_allocation_invalidates_the_captured_graph() {
     let Some(b) = backend() else { return };
@@ -262,6 +262,50 @@ fn freeing_an_allocation_invalidates_the_captured_graph() {
                 "output {j} element {i}: got {}, want {expect} after re-capture",
                 got[i]
             );
+        }
+    }
+}
+
+/// The other half of the guard above: a free of a block NO graph names cannot
+/// recycle an address a graph recorded, so it must not cost the graph its
+/// replay. A prefill pass frees dozens of temporaries between decode steps; if
+/// each of those discarded the decode graph, capture would never pay for itself.
+#[test]
+fn freeing_a_block_no_graph_names_leaves_the_graph_alone() {
+    let Some(b) = backend() else { return };
+    const S: f32 = 1.0;
+    let inp = b.storage_init("inp", &input());
+    let outs: Vec<_> = (0..4).map(|_| b.storage(N as u64)).collect();
+    for _ in 0..3 {
+        round(&b, &outs, &inp, N, S);
+    }
+    b.poll_wait();
+    let captured = b.launch_stats();
+    assert_eq!(captured.graph_captures, 1, "nothing was captured, so this proves nothing");
+
+    // Scratch that churns, held and unheld, none of it bound by the graph.
+    for hold in [false, true] {
+        b.hold_freed_blocks(hold);
+        for _ in 0..8 {
+            drop(b.storage(4096));
+        }
+    }
+    b.hold_freed_blocks(false);
+
+    for _ in 0..3 {
+        round(&b, &outs, &inp, N, S);
+    }
+    b.poll_wait();
+    let after = b.launch_stats();
+    assert_eq!(after.graph_captures, 1, "freeing blocks the graph never named discarded it");
+    assert!(after.graph_replays > captured.graph_replays, "the surviving graph was not replayed");
+
+    let want = input();
+    for o in &outs {
+        let got = b.read(o, N);
+        for i in 0..N {
+            let expect = 6.0 * S * want[i];
+            assert!((got[i] - expect).abs() <= 1e-5 * expect.abs().max(1.0), "element {i}: got {}, want {expect}", got[i]);
         }
     }
 }
