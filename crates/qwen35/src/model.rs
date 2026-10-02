@@ -1827,10 +1827,19 @@ impl Qwen35 {
             ones_khd: &self.ones_khd,
         };
         let (gated, internals) = match call {
-            GdnCall::Decode(streams) => (
-                model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams),
-                None,
-            ),
+            GdnCall::Decode(streams) => {
+                // One sequence's step as a single native launch where the device
+                // is offered it; the nineteen-kernel chain otherwise (and for a
+                // batch, which the kernel does not serve).
+                let fused = match streams {
+                    [only] if self.decode_fusion.get() => model::gdn_mixer::gdn_mixer_decode_fused(g, &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, only),
+                    _ => None,
+                };
+                let gated = fused.unwrap_or_else(|| {
+                    model::gdn_mixer::gdn_mixer_decode_fwd(g, &gdn_mixer_ids(), &gdn_mixer_decode_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, streams)
+                });
+                (gated, None)
+            }
             GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
             GdnCall::Chunk(cont) => {
                 model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont))

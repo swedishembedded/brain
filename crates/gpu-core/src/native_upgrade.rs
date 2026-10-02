@@ -105,6 +105,14 @@ pub enum Fused {
     /// b`, 2 `a * sigmoid(b)`) + per-row int8 scale + pack. Params `[k, rows,
     /// mode, 0]`; bindings `a, b` read, `y, xq, sx` written.
     QuantEpilogue,
+    /// `gdn_decode`: one Gated DeltaNet decode step (conv, SiLU, L2 norm,
+    /// gates, delta-rule state update, gated RMSNorm) for ONE sequence with
+    /// 128-wide key and value heads and a 4-tap conv. Params `[nkh, nvh, group,
+    /// l2_eps, rms_eps, q_scale, 0, 0]` (floats as bits); bindings `mixed,
+    /// conv_w, hist (RW), bproj, aproj, a_log, dt_bias, state (RW), z, norm_w`
+    /// read, `gated` written. The head and conv shapes are the CALLER's to
+    /// check - the params cannot say them.
+    GdnDecode,
 }
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
@@ -129,6 +137,23 @@ const QUANT_EPILOGUE_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `gdn_decode`'s bindings: params, `mixed`, `conv_w`, `hist`, `bproj`,
+/// `aproj`, `a_log`, `dt_bias`, `state`, `z`, `norm_w`, `gated`.
+const GDN_DECODE_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
 impl Fused {
 
     /// The `kernels_cuda` registry entry's name.
@@ -136,6 +161,7 @@ impl Fused {
         match self {
             Fused::AddRmsQuant => "add_rms_quant",
             Fused::QuantEpilogue => "quant_epilogue",
+            Fused::GdnDecode => "gdn_decode",
         }
     }
 
@@ -143,6 +169,7 @@ impl Fused {
         match self {
             Fused::AddRmsQuant => ADD_RMS_QUANT_BINDINGS,
             Fused::QuantEpilogue => QUANT_EPILOGUE_BINDINGS,
+            Fused::GdnDecode => GDN_DECODE_BINDINGS,
         }
     }
 
@@ -157,6 +184,9 @@ impl Fused {
             // 256 threads per row keep `k / 256` elements each in registers: up
             // to 72 of them.
             Fused::QuantEpilogue => matches!(params, [k, rows, mode, _] if *rows >= 1 && *k >= 4 && k % 4 == 0 && *k <= 256 * 72 && *mode <= 2),
+            // A block is one key head's `group` value heads, 128 threads each
+            // (3 is what one SM's registers hold at 128 live state words).
+            Fused::GdnDecode => matches!(params, [nkh, nvh, group, ..] if *nkh >= 1 && (1..=3).contains(group) && *nvh == nkh * group),
         }
     }
 
@@ -164,6 +194,7 @@ impl Fused {
     pub(crate) fn blocks(self, params: &[u32]) -> u32 {
         match self {
             Fused::AddRmsQuant | Fused::QuantEpilogue => params[1],
+            Fused::GdnDecode => params[0],
         }
     }
 }

@@ -29,6 +29,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `matmul_i8_gemv` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_gemv` | packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, dp4a, bit-identical to matmul_i8_gemv_reg |
 | `add_rms_quant` | RmsNorm | I8 | tuned | 5.0 | `brain_add_rms_quant` | residual add + RMSNorm + per-row int8 scale + pack in one launch; 64 threads per row, bit-identical to add2 + rmsnorm_rows + max_abs_rows + quant_pack |
 | `quant_epilogue` | MaxAbsRow | I8 | tuned | 5.0 | `brain_quant_epilogue` | silu_mul / sigmoid-gate / plain producer + per-row int8 scale + pack in one launch; 256 threads per row, bit-identical to the chain it replaces |
+| `gdn_decode` | RmsNorm | F32 | tuned | 5.0 | `brain_gdn_decode` | one Gated DeltaNet decode step in one launch: conv+SiLU, L2 norm, gates, delta-rule state update, gated RMSNorm; a block per key head, bit-identical to the 19-kernel WGSL chain |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

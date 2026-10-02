@@ -230,6 +230,25 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 8 * 4 + 256 * 72,
         src: include_str!("../cu/quant_epilogue.cu"),
     },
+    CudaKernel {
+        name: "gdn_decode",
+        // A fused kernel asked for by name (see `add_rms_quant`): the whole
+        // Gated DeltaNet decode step, which ends in a gated RMSNorm. Its
+        // operator and tier are unique in this table.
+        op: Op::RmsNorm,
+        weight: Dtype::F32,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gdn_decode",
+        what: "one Gated DeltaNet decode step in one launch: conv+SiLU, L2 norm, gates, delta-rule state update, gated RMSNorm; a block per key head, bit-identical to the 19-kernel WGSL chain",
+        reported: "native:gdn_decode",
+        block_dim: 384,
+        // One block per key head.
+        tile: (1, 1),
+        // q, k, conv_q, conv_k, 3 x normed and the three inverse norms.
+        shared_bytes: 4 * 128 * 4 + 3 * 128 * 4 + 3 * 4,
+        src: include_str!("../cu/gdn_decode.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

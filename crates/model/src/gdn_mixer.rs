@@ -649,6 +649,42 @@ pub fn gdn_mixer_decode_fwd(
     gated
 }
 
+/// [`gdn_mixer_decode_fwd`] for ONE sequence as a single native launch - the
+/// `gdn_decode` kernel, which does the conv, the gates, the delta-rule state
+/// update and the gated norm that function dispatches nineteen kernels for, and
+/// leaves `stream`'s state and conv window updated exactly as it does. Returns
+/// `gated` (`[1, value_dim]`).
+///
+/// `None` - nothing submitted, `stream` untouched - where the device is not
+/// offered the kernel, or the shape is outside its block shape: one sequence,
+/// 128-wide key and value heads, a 4-tap conv, and at most three value heads
+/// per key head. The caller then runs [`gdn_mixer_decode_fwd`], which is what
+/// this is gated byte-for-byte against (`tests/gdn_decode_native.rs`).
+pub fn gdn_mixer_decode_fused(
+    g: &Gpu,
+    shape: &GdnMixerShape,
+    w: &GdnMixerWeights,
+    mixed_qkv: &DeviceBuffer,
+    bproj: &DeviceBuffer,
+    aproj: &DeviceBuffer,
+    z: &DeviceBuffer,
+    stream: &GdnStream,
+) -> Option<DeviceBuffer> {
+    let gdn = shape.gdn;
+    if gdn.b != 1 || gdn.t != 1 || gdn.dk != 128 || gdn.dv != 128 || shape.conv_kernel != 4 || shape.nkh == 0 || gdn.h % shape.nkh != 0 {
+        return None;
+    }
+    let gated = g.storage(shape.value_dim() as u64);
+    let params = [shape.nkh, gdn.h, shape.group(), f(1e-6), f(shape.rms_eps), f(1.0f32 / (gdn.dk as f32).sqrt()), 0, 0];
+    let step = g.fused_step(
+        gpu_core::Fused::GdnDecode,
+        &[mixed_qkv, w.conv1d_weight, stream.hist, bproj, aproj, w.a_log, w.dt_bias, stream.state, z, w.norm_weight, &gated],
+        &params,
+    )?;
+    g.submit(&[], &[step]);
+    Some(gated)
+}
+
 /// Reverse of [`gdn_mixer_fwd`]: `d_gated` (the caller's own `out_proj`
 /// backward output) -> `(d_mixed_qkv, d_bproj, d_aproj, d_z)`, for the
 /// caller's own `in_proj_*` backward. `n` must match the forward call's own.
