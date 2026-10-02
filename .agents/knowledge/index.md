@@ -248,3 +248,4 @@ What belongs where:
 | 205 | A decode token is host-bound until it is one replayed graph | [`205-a-decode-token-is-host-bound-until-it-is-one-replayed-graph.md`](205-a-decode-token-is-host-bound-until-it-is-one-replayed-graph.md) |
 | 206 | In a small latency-bound kernel, issue every load before any use, and every store after | [`206-issue-every-load-before-any-use.md`](206-issue-every-load-before-any-use.md) |
 | 207 | `cuMemFree` is a device synchronisation, and a fast kernel hides behind it | [`207-cumemfree-is-a-device-synchronisation-and-a-fast-kernel-hides-behind-it.md`](207-cumemfree-is-a-device-synchronisation-and-a-fast-kernel-hides-behind-it.md) |
+| 208 | What lives in the binary is outside every library invariant | [`208-what-lives-in-the-binary-is-outside-every-library-invariant.md`](208-what-lives-in-the-binary-is-outside-every-library-invariant.md) |
