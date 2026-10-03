@@ -654,18 +654,26 @@ fn load_qwen3(model_id: &str, capacity: u32, tokenizer: Option<String>, download
         crate::text::resolve_hub_weights(model_id, download_policy)?
     };
 
-    let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3 embedding: {weights}: {e}")))?;
-    let cfg = qwen3::QwenConfig::from_reader(&reader).map_err(|e| Error::Backend(format!("qwen3 embedding: {weights}: {e}")))?;
+    // Any format the decoder reads, as it is on disk: a Hugging Face
+    // checkpoint directory (Qwen3-Embedding is released as one), a GGUF or a
+    // brain file.
+    let (cfg, src) = qwen3::open_checkpoint(&weights).map_err(|e| Error::Backend(format!("qwen3 embedding: {e}")))?;
+    let file = Path::new(&weights)
+        .is_file()
+        .then(|| checkpoint::weightio::WeightReader::open(&weights).map_err(|e| Error::Backend(format!("qwen3 embedding: {weights}: {e}"))))
+        .transpose()?;
+    let beside = Path::new(&weights).is_dir().then(|| Path::new(&weights).join("tokenizer.json")).filter(|t| t.is_file()).map(|t| t.to_string_lossy().into_owned());
 
     let tok = if let Some(t) = &tokenizer {
         data::qwen_tokenizer::QwenBpe::from_file(t).map_err(Error::Backend)?
-    } else if let Some(gt) = reader.tokenizer() {
+    } else if let Some(gt) = file.as_ref().and_then(|r| r.tokenizer()) {
         data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(Error::Backend)?
-    } else if let Some(rt) = &resolved_tokenizer {
-        data::qwen_tokenizer::QwenBpe::from_file(rt).map_err(Error::Backend)?
+    } else if let Some(rt) = resolved_tokenizer.or(beside) {
+        data::qwen_tokenizer::QwenBpe::from_file(&rt).map_err(Error::Backend)?
     } else {
         return Err(Error::MissingArgument(format!("{weights}: no tokenizer embedded (not a .gguf) and none resolved")));
     };
+    drop(file);
 
     if capacity > cfg.block_size {
         return Err(Error::Backend(format!(
@@ -675,10 +683,10 @@ fn load_qwen3(model_id: &str, capacity: u32, tokenizer: Option<String>, download
     }
 
     let shard = qwen3::Shard::whole(cfg.n_layers as usize);
-    // `reader` moves into the closure: `Qwen::from_reader_decode` borrows it
-    // internally, and `place_and_build` calls the closure exactly once.
-    let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", move || qwen3::Qwen::from_reader_decode(&reader, capacity))
-        .map_err(Error::Backend)?;
+    let model = qwen3::footprint::place_and_build(&cfg, &shard, qwen3::Dtype::F32, 1, capacity, false, true, "qwen3", || {
+        qwen3::Qwen::new_shard_dt_decode(cfg.clone(), capacity, &*src, shard.clone(), qwen3::Dtype::F32)
+    })
+    .map_err(Error::Backend)?;
 
     Ok(Backend::Qwen3 { model: Box::new(model), tok, capacity })
 }
