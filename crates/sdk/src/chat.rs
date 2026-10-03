@@ -56,8 +56,8 @@
 //! template, tool schemas, `tool_choice`, sampling, stop strings),
 //! `qwen3::chat::SeqState` (the `<think>`/`<tool_call>` scanner, stop
 //! strings, cancellation, finish reason) and
-//! `qwen3::sample::generate_kv_stream_cancellable` (chunked prefill, KV-cached
-//! decode). [`ChatRequest::render_prompt`] and [`ChatRequest::parse_reply`]
+//! `qwen3::sample::generate_kv_stream_on_device` (chunked prefill, KV-cached
+//! decode, the LM head applied on the device). [`ChatRequest::render_prompt`] and [`ChatRequest::parse_reply`]
 //! are those same functions with no model behind them.
 //!
 //! **One generation at a time.** The model holds its KV cache across a

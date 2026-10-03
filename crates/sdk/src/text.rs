@@ -297,17 +297,13 @@ impl TextGenerationPipeline {
 }
 
 /// One loaded Qwen3 decoder and everything a generation reads besides the
-/// request: the tokenizer, the LM head, the stop ids, the context it was
+/// request: the tokenizer, the stop ids, the context it was
 /// built for and what it was built from. Both the text and the chat surface
 /// run their generations through [`Engine::run`], so the two cannot diverge
 /// on templating, sampling, stop strings or cancellation.
 pub(crate) struct Engine {
     model: qwen3::Qwen,
     pub(crate) tok: data::qwen_tokenizer::QwenBpe,
-    /// The (possibly tied) LM head, `[vocab, d_model]`, applied host-side by
-    /// the sampler. Read once at load: reading it per request is a whole
-    /// head's device-to-host copy on every call.
-    head: Vec<f32>,
     /// The ids that end a generation: the checkpoint's own
     /// (`data::generation::stop_ids`, from its `generation_config.json`,
     /// tokenizer config or GGUF) plus its chat format's end-of-turn token.
@@ -407,7 +403,7 @@ impl Engine {
         let mut rng = data::rng::Rng::new(req.seed);
         let mut seq = qwen3::chat::SeqState::new(req, cancel.clone());
         let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
-        let generated = qwen3::sample::generate_kv_stream_cancellable(
+        let generated = qwen3::sample::generate_kv_stream_on_device(
             &self.model,
             &req.ids,
             req.max_new,
@@ -416,7 +412,6 @@ impl Engine {
             req.top_p,
             &self.eos,
             &mut rng,
-            &self.head,
             cancel,
             prefill_chunk,
             &mut |_i, t| {
@@ -637,8 +632,9 @@ impl TextGenerationPipelineBuilder {
 
         // Built for KV-cache DECODE, which is the only thing a generation
         // ever drives (`Engine::run`: prefill, then one token at a time).
-        // A decode build has no logits buffer - the LM head is applied
-        // host-side - and its KV cache is the only thing that scales with the
+        // A decode build has no batched logits buffer - the LM head is applied
+        // per token on the device (`Qwen::decode_logits`, which allocates its
+        // one `[vocab]` row on first use) - and its KV cache is the only thing that scales with the
         // context: the batched constructor's `t*vocab` logits buffer alone
         // exceeds the 2 GiB binding limit for Qwen3-0.6B at 4096 tokens.
         let shard = qwen3::Shard::whole(cfg.n_layers as usize);
@@ -653,8 +649,7 @@ impl TextGenerationPipelineBuilder {
         // could not be loaded is never reported, and before the pipeline is
         // handed out, so the digest describes the bytes this load read.
         let identity = crate::chat::ModelIdentity { base: crate::chat::WeightsIdentity::of_path(&weights, base_id)?, adapter: None };
-        let head = model.read_weight(model.cfg.head_weight());
-        let mut engine = Engine { model, tok, head, eos, format, precision, capacity, identity, weights: weights.clone(), folded: Vec::new() };
+        let mut engine = Engine { model, tok, eos, format, precision, capacity, identity, weights: weights.clone(), folded: Vec::new() };
         match &adapter {
             // An fp32 base takes the adapter's delta exactly, so it is folded
             // in and decode costs what the base's does.

@@ -175,6 +175,55 @@ pub fn generate_kv_stream_cancellable(
     // Row-parallel: the single-threaded head was measured at hundreds of ms
     // PER TOKEN at real vocabularies (one implementation: model::hostmath).
     let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
+    generate_kv_core(model, prompt, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
+}
+
+/// [`generate_kv_stream_cancellable`] with the LM head applied **on the
+/// device** the weights already live on ([`Qwen::decode_logits`], tiled over
+/// the vocabulary for the binding limit), so a generation needs no host copy
+/// of the head and spends no host compute per token: at a 152k-token
+/// vocabulary and `d_model` 3584 that is a 2.2 GB table held in RAM and a
+/// half-gigaflop matvec per token on the CPU. The tokens are the host head's:
+/// both are the same GEMV, and the logits agree to rounding.
+///
+/// `decode_logits` reads the hidden state the last prefill or step left on the
+/// device, so the core calls it directly after each of those and ignores the
+/// hidden state it is handed.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream_on_device(
+    model: &Qwen,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    cancel: &capability::CancelToken,
+    prefill_chunk: usize,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
+    let logits_of = |_hidden: &[f32]| -> Vec<f32> { model.decode_logits() };
+    generate_kv_core(model, prompt, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
+}
+
+/// The chunked-prefill, KV-cached decode loop both heads share; `logits_of`
+/// turns the hidden state of the position just computed into `[vocab]` logits.
+#[allow(clippy::too_many_arguments)]
+fn generate_kv_core(
+    model: &Qwen,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    cancel: &capability::CancelToken,
+    prefill_chunk: usize,
+    logits_of: &dyn Fn(&[f32]) -> Vec<f32>,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
     model.reset_cache();
     let mut out = Vec::with_capacity(max_new);
     // Feed the prompt in as few prefill calls as the cancellation policy
@@ -405,6 +454,34 @@ mod kv_gen_tests {
             );
             assert_eq!(chunked, baseline, "chunk size {chunk} must not change the sampled tokens");
         }
+    }
+
+    /// The device head is the same GEMV as the host head, applied where the
+    /// weights already are: greedy generation through it must pick exactly the
+    /// tokens the host-head sampler picks, at every prefill chunk size, and
+    /// must honour an armed cancel token the same way.
+    #[test]
+    fn device_head_generation_matches_the_host_head_greedy() {
+        if gpu_disabled() {
+            return;
+        }
+        let model = tiny_model(3);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7];
+        let head = model.read_weight(model.cfg.head_weight());
+        let cancel = capability::CancelToken::default();
+        let mut r = data::rng::Rng::new(4);
+        let host = generate_kv_stream_with_head(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &head, &mut |_, _| true);
+        assert!(!host.is_empty());
+        for chunk in [1usize, 3, prompt.len()] {
+            let mut r = data::rng::Rng::new(4);
+            let device = generate_kv_stream_on_device(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &cancel, chunk, &mut |_, _| true);
+            assert_eq!(device, host, "chunk size {chunk}: the device head must pick the host head's tokens");
+        }
+        let armed = capability::CancelToken::armed();
+        armed.cancel();
+        let mut r = data::rng::Rng::new(4);
+        let none = generate_kv_stream_on_device(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &armed, 2, &mut |_, _| true);
+        assert!(none.is_empty(), "an armed cancel stops before any token");
     }
 
     /// A cancel token armed before the call must stop the generation at the
