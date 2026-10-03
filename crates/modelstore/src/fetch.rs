@@ -107,6 +107,28 @@ pub fn file_digest(path: &Path) -> std::io::Result<String> {
     Ok(format!("sha256:{}", sha256_file(path)?))
 }
 
+/// The content digest naming a base: a file's own ([`file_digest`]), or for a
+/// `transformers` directory the digest of its `config.json` and weight files'
+/// digests in name order, so a change to any of them is a different base. A
+/// fine-tune records it and a server recomputes it to bind an adapter to the
+/// base it was trained on, so both must call this one function.
+pub fn base_digest(path: &Path) -> std::io::Result<String> {
+    if !path.is_dir() {
+        return file_digest(path);
+    }
+    let mut names: Vec<_> = std::fs::read_dir(path)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "config.json" || n.ends_with(".safetensors") || n.ends_with(".bin") || n.ends_with(".index.json")))
+        .collect();
+    names.sort();
+    let mut combined = String::new();
+    for p in &names {
+        combined.push_str(&format!("{}={}\n", p.file_name().and_then(|n| n.to_str()).unwrap_or_default(), file_digest(p)?));
+    }
+    Ok(format!("sha256:{}", bytes_digest(combined.as_bytes())))
+}
+
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -172,6 +194,32 @@ mod tests {
         // The algorithm-tagged form every identity and record carries.
         assert_eq!(file_digest(&path).unwrap(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert!(file_digest(&dir.join("absent.bin")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base is named by its file's digest, or for a `transformers`
+    /// directory by its config and weight files together: a change to any of
+    /// them is another base, and files that do not shape the model are not
+    /// part of the name.
+    #[test]
+    fn a_base_directory_is_named_by_its_config_and_weights() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-base-digest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        let file = dir.join("model.safetensors");
+        assert_eq!(base_digest(&file).unwrap(), file_digest(&file).unwrap(), "a file is named by its own digest");
+
+        let named = base_digest(&dir).unwrap();
+        assert!(named.starts_with("sha256:"), "{named}");
+        assert_ne!(named, file_digest(&file).unwrap());
+
+        std::fs::write(dir.join("README.md"), b"notes").unwrap();
+        assert_eq!(base_digest(&dir).unwrap(), named, "a README does not shape the model");
+        std::fs::write(dir.join("config.json"), b"{\"layers\":1}").unwrap();
+        assert_ne!(base_digest(&dir).unwrap(), named, "a config change is another base");
+        assert!(base_digest(&dir.join("absent")).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -38,9 +38,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The base checkpoint a server folds adapters into: its file, the id it
-/// was resolved under (when it came from `BRAIN_QWEN_WEIGHTS`), and its
-/// digest, hashed at most once and only when an adapter asks for it (the
+/// The base checkpoint a server folds adapters into: its file (or a
+/// `transformers` directory), the id it was resolved under (when it came from
+/// `BRAIN_QWEN_WEIGHTS`), and its digest, hashed at most once and only when an adapter asks for it (the
 /// base is gigabytes; an adapter bound by id never needs it hashed).
 pub struct ServedBase {
     path: PathBuf,
@@ -55,7 +55,7 @@ impl ServedBase {
 
     fn digest(&self) -> Result<&str, String> {
         self.digest
-            .get_or_init(|| brain_modelstore::fetch::file_digest(&self.path).map_err(|e| format!("the served base {}: {e}", self.path.display())))
+            .get_or_init(|| brain_modelstore::fetch::base_digest(&self.path).map_err(|e| format!("the served base {}: {e}", self.path.display())))
             .as_deref()
             .map_err(Clone::clone)
     }
@@ -244,6 +244,27 @@ mod tests {
         // Same id, different bytes: the digest decides, not the name.
         let err = verify_adapter(&adapter, &ServedBase::new(&other, Some("local/base".to_string()))).unwrap_err();
         assert!(err.contains(&digest(&base)) && err.contains(&digest(&other)), "a mismatch names both digests: {err}");
+    }
+
+    /// A Hugging Face directory served as the base is named by its config and
+    /// weights together, the same digest the fine-tune recorded; changing a
+    /// weight file is another base and refuses the adapter.
+    #[test]
+    fn an_adapter_verifies_against_a_served_hugging_face_directory() {
+        let dir = tmp("hf-dir");
+        let base = dir.join("DeepSeek-R1-Distill-Qwen-1.5B");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), b"{}").unwrap();
+        write_base(&base.join("model.safetensors"), 1.0);
+        let adapter = dir.join("adapter.safetensors");
+        let trained_on = brain_modelstore::fetch::base_digest(&base).unwrap();
+        write_adapter(&adapter, "local/DeepSeek-R1-Distill-Qwen-1.5B:local:chat:latest", "local/DeepSeek-R1-Distill-Qwen-1.5B", Some(trained_on), 0.5);
+
+        verify_adapter(&adapter, &ServedBase::new(&base, None)).expect("the directory the adapter was trained on verifies");
+
+        write_base(&base.join("model.safetensors"), 2.0);
+        let err = verify_adapter(&adapter, &ServedBase::new(&base, None)).unwrap_err();
+        assert!(err.contains("refusing to fold it into a different base"), "{err}");
     }
 
     /// An adapter whose card records no base digest falls back to its base

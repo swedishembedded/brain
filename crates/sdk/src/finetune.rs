@@ -610,25 +610,10 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
     }
 }
 
-/// The content digest naming a base: a file's own, or for a `transformers`
-/// directory the digest of its `config.json` and weight files' digests in
-/// name order, so any change to any of them is a different base.
+/// The content digest naming a base ([`brain_modelstore::fetch::base_digest`]:
+/// the file's own, or a `transformers` directory's config and weights).
 pub(crate) fn base_digest(path: &Path) -> Result<String> {
-    if !path.is_dir() {
-        return digest(path);
-    }
-    let mut names: Vec<_> = std::fs::read_dir(path)
-        .map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "config.json" || n.ends_with(".safetensors") || n.ends_with(".bin") || n.ends_with(".index.json")))
-        .collect();
-    names.sort();
-    let mut combined = String::new();
-    for p in &names {
-        combined.push_str(&format!("{}={}\n", p.file_name().and_then(|n| n.to_str()).unwrap_or_default(), digest(p)?));
-    }
-    Ok(format!("sha256:{}", brain_modelstore::fetch::bytes_digest(combined.as_bytes())))
+    brain_modelstore::fetch::base_digest(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
 pub(crate) fn digest(path: &Path) -> Result<String> {
