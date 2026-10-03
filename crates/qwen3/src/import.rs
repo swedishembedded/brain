@@ -21,7 +21,12 @@ use crate::hf::{HfNames, HfTensor};
 /// (`None` for one the model deliberately does not store), or an error
 /// naming a tensor this decoder does not have - never silently skipped.
 fn hf_param(name: &str, cfg: &QwenConfig) -> Result<Option<String>, String> {
-    match HfNames::CAUSAL_LM.to_brain(name, cfg) {
+    hf_param_under(&HfNames::CAUSAL_LM, name, cfg)
+}
+
+/// [`hf_param`] for tensors named under `names`.
+fn hf_param_under(names: &HfNames, name: &str, cfg: &QwenConfig) -> Result<Option<String>, String> {
+    match names.to_brain(name, cfg) {
         HfTensor::Param(p) => Ok(Some(p)),
         HfTensor::Dropped => Ok(None),
         HfTensor::Foreign | HfTensor::Unknown => Err(format!("import: checkpoint tensor '{name}' is not part of this decoder's configuration")),
@@ -79,6 +84,11 @@ pub fn brain_init_from_hf(
 pub enum Naming {
     /// HuggingFace `transformers` names.
     Hf,
+    /// HuggingFace names of a headless backbone: the decoder's own tensors
+    /// with no `model.` prefix and no head (`embed_tokens.weight`,
+    /// `layers.N...`), the way an embedding checkpoint such as
+    /// Qwen3-Embedding ships.
+    HfBackbone,
     /// llama.cpp GGUF names.
     Gguf,
     /// Already brain's own parameter names (a prior `brain qwen3 import`'s
@@ -105,6 +115,8 @@ impl Naming {
             Naming::Gguf
         } else if r.names().any(|n| n == "tok.weight") {
             Naming::Brain
+        } else if r.names().any(|n| n == "embed_tokens.weight") {
+            Naming::HfBackbone
         } else {
             Naming::Hf
         }
@@ -116,6 +128,7 @@ impl Naming {
     pub fn to_brain(self, name: &str, cfg: &QwenConfig) -> Result<Option<String>, String> {
         match self {
             Naming::Hf => hf_param(name, cfg),
+            Naming::HfBackbone => hf_param_under(&crate::hf::HfNames { prefix: "", head: "lm_head.weight" }, name, cfg),
             Naming::Gguf => Ok(crate::gguf_import::gguf_to_brain(name, cfg.tie_embeddings)),
             Naming::Brain => Ok(Some(name.to_string())),
         }
@@ -430,6 +443,40 @@ mod tests {
             .collect();
         std::fs::remove_file(dir.join("model.safetensors")).unwrap();
         checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+    }
+
+    /// A headless backbone (the way Qwen3-Embedding ships: `embed_tokens.weight`,
+    /// `layers.N...`, `norm.weight`, no `model.` prefix and no head) reads as
+    /// the plain checkpoint does, tensor for tensor.
+    #[test]
+    fn a_backbone_without_the_model_prefix_reads_as_the_plain_checkpoint_does() {
+        use checkpoint::TensorSource;
+
+        let plain = build_hf_dir(2, true);
+        let cfg = crate::hf::decoder_config(&std::fs::read_to_string(plain.join("config.json")).unwrap()).unwrap();
+        let bare = plain.with_extension("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::copy(plain.join("config.json"), bare.join("config.json")).unwrap();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = checkpoint::safetensors::read_model_dir(&plain)
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name != "lm_head.weight")
+            .map(|t| (t.name.trim_start_matches("model.").to_string(), t.shape.iter().map(|&s| s as u64).collect(), t.data))
+            .collect();
+        checkpoint::st::save_safetensors(bare.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None).unwrap();
+
+        let (pr, br) = (checkpoint::weightio::WeightReader::open_hf_dir(&plain).unwrap(), checkpoint::weightio::WeightReader::open_hf_dir(&bare).unwrap());
+        assert_eq!(Naming::of(&pr), Naming::Hf);
+        assert_eq!(Naming::of(&br), Naming::HfBackbone);
+        let (want, got) = (source(&pr, &cfg).unwrap(), source(&br, &cfg).unwrap());
+        for (name, _) in cfg.param_list() {
+            let (mut a, mut b) = (None, None);
+            assert!(want.with_tensor(&name, &mut |d| a = Some(d.to_vec())), "plain missing {name}");
+            assert!(got.with_tensor(&name, &mut |d| b = Some(d.to_vec())), "bare missing {name}");
+            assert_eq!(a, b, "{name}");
+        }
+        std::fs::remove_dir_all(&plain).ok();
+        std::fs::remove_dir_all(&bare).ok();
     }
 
     /// A composite checkpoint (a vision-language model) nests the decoder under
