@@ -604,6 +604,22 @@ pub struct QwenResident {
     max_prefill_cap: u32,
 }
 
+/// What `BRAIN_QWEN_WEIGHTS` names, as the `(path to open, repo directory,
+/// base id)` a [`QwenResident`] serves. A directory is what every other
+/// weights variable takes, so accept one here too: `resolve_base` turns a repo
+/// directory into the checkpoint inside it (for a Hugging Face directory its
+/// `config.json`, which `qwen3::store_checkpoint_path` turns back into the
+/// directory, the form `open_checkpoint` reads), and leaves a plain file path
+/// alone. Unresolvable is not fatal - the path travels on verbatim so
+/// `activate` reports it against the real open, which is where every other
+/// bad path is reported.
+fn resolve_served_base(spec: &str) -> (String, Option<std::path::PathBuf>, Option<String>) {
+    match loader::model_dir::resolve_base(spec, None) {
+        Ok((weights, dir, id)) => (qwen3::store_checkpoint_path(&weights, &dir).to_string_lossy().into_owned(), Some(dir), Some(id)),
+        Err(_) => (spec.to_string(), None, None),
+    }
+}
+
 impl QwenResident {
     /// `cfg` carries every `--qwen-*` flag `brain serve` parsed; model
     /// SELECTION stays the two env vars named below (see
@@ -611,15 +627,7 @@ impl QwenResident {
     pub fn from_env(cfg: QwenServeConfig) -> Option<QwenResident> {
         let spec = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
 
-        // A directory is what every other weights variable takes, so accept one
-        // here too: `resolve_base` turns a repo directory into the checkpoint
-        // inside it, and leaves a plain file path alone. Unresolvable is not
-        // fatal - the path travels on verbatim so `activate` reports it against
-        // the real open, which is where every other bad path is reported.
-        let (path, dir, base_id) = match loader::model_dir::resolve_base(&spec, None) {
-            Ok((weights, dir, id)) => (weights.to_string_lossy().into_owned(), Some(dir), Some(id)),
-            Err(_) => (spec, None, None),
-        };
+        let (path, dir, base_id) = resolve_served_base(&spec);
 
         // A tokenizer beside the checkpoint needs no second variable.
         let tokenizer = match std::env::var("BRAIN_QWEN_TOKENIZER").ok().filter(|t| !t.is_empty()) {
@@ -1275,6 +1283,39 @@ fn run_batch_scheduled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BRAIN_QWEN_WEIGHTS` naming a Hugging Face repo directory serves the
+    /// directory itself, the form `open_checkpoint` reads (its `config.json`
+    /// holds the architecture); a carded brain checkpoint serves as its
+    /// file, and a path that resolves to nothing travels on verbatim.
+    #[test]
+    fn a_served_hugging_face_directory_is_opened_as_the_directory() {
+        let root = std::env::temp_dir().join(format!("catalog-served-base-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let hf = root.join("deepseek-ai").join("DeepSeek-R1-Distill-Qwen-1.5B");
+        let native = root.join("Qwen").join("Qwen3-0.6B");
+        for dir in [&hf, &native] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("config.json"), br#"{"architectures":["Qwen2ForCausalLM"],"model_type":"qwen2"}"#).unwrap();
+            std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        }
+        // A complete shard set: a real (tiny) safetensors file, as an inventory sees one.
+        checkpoint::st::save_safetensors(hf.join("model.safetensors").to_str().unwrap(), &[("weight".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::json!({}), None).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
+        checkpoint::st::save_safetensors(native.join("model.brain.safetensors").to_str().unwrap(), &[("weight".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::json!({"vocab_size": 23}), Some(&card)).unwrap();
+
+        let (path, dir, id) = resolve_served_base(hf.to_str().unwrap());
+        assert_eq!(id.as_deref(), Some("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"), "resolved, not passed on verbatim");
+        assert_eq!(dir.as_deref(), Some(hf.as_path()));
+        assert_eq!(path, hf.to_str().unwrap());
+
+        let (path, _, _) = resolve_served_base(native.to_str().unwrap());
+        assert_eq!(path, native.join("model.brain.safetensors").to_str().unwrap());
+
+        let missing = root.join("absent");
+        assert_eq!(resolve_served_base(missing.to_str().unwrap()), (missing.to_str().unwrap().to_string(), None, None));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// REGRESSION: `on_device(Device::Cpu, f)` used to run `f` completely
     /// unscoped, so a residency fallback to the host tier left every
