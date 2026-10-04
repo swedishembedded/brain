@@ -501,8 +501,14 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
         .transpose()?;
     let mut extra = std::collections::BTreeMap::new();
     extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(inv.get_bool("enable_thinking").unwrap_or(true)));
-    let text = t.render(turns, tools, true, &extra).map_err(|e| e.to_string())?;
-    let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
+    let mut text = t.render(turns, tools, true, &extra).map_err(|e| e.to_string())?;
+    let mut thinking_open = text.trim_end_matches('\n').ends_with("<think>");
+    // A template that opens a reasoning block has no switch to close it:
+    // switching thinking off closes it empty, so the reply is the answer.
+    if thinking_open && inv.get_bool("enable_thinking") == Some(false) {
+        text.push_str("\n</think>\n\n");
+        thinking_open = false;
+    }
     Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw: false })
 }
 
@@ -1116,6 +1122,25 @@ mod tests {
         assert!(p.thinking_open);
         let with_tools = inv.clone().set("tools", json!(r#"[{"type":"function","function":{"name":"f","parameters":{}}}]"#));
         assert!(render_prompt_as(&format, &with_tools).unwrap_err().contains("tools"));
+    }
+
+    /// Thinking switched off answers right away for a template that opens a
+    /// reasoning block, though it has no switch of its own: the prompt closes
+    /// the block empty, so the reply is the answer; switched on, or unsaid, the
+    /// block stays open for the model to reason in.
+    #[test]
+    fn switching_thinking_off_closes_the_block_a_template_opens() {
+        let tok = byte_tok(&["<s>", "<｜User｜>", "<｜Assistant｜>"]);
+        let format = ChatFormat::for_checkpoint(Some(&template_dir("r1-off", R1_LIKE)), &tok);
+        let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#));
+        let off = render_prompt_as(&format, &inv.clone().set("enable_thinking", json!(false))).unwrap();
+        assert_eq!(off.text, "<s><｜User｜>hi<｜Assistant｜><think>\n\n</think>\n\n");
+        assert!(!off.thinking_open, "the reply is the answer, not reasoning");
+        for on in [inv.clone().set("enable_thinking", json!(true)), inv] {
+            let p = render_prompt_as(&format, &on).unwrap();
+            assert_eq!(p.text, "<s><｜User｜>hi<｜Assistant｜><think>\n");
+            assert!(p.thinking_open);
+        }
     }
 
     /// A ChatML template, or a ChatML vocabulary with no template, keeps the
