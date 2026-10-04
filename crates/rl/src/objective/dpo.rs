@@ -128,6 +128,10 @@ pub struct DpoConfig {
     /// log-probability margin `u`.
     pub beta: f32,
     pub seq_len: usize,
+    /// Weight of the anchor on the chosen answer: its mean negative
+    /// log-likelihood is added to the loss (see [`add_chosen_nll`]). Zero is
+    /// plain DPO.
+    pub nll_weight: f32,
 }
 
 /// One pair's [`model::Batch::LmWeighted`] weights (applied uniformly
@@ -169,6 +173,20 @@ pub fn pair_term(beta: f32, sum_new_chosen: f32, sum_ref_chosen: f32, sum_new_re
     let loss = softplus(-u);
     let w = beta * sigmoid(-u) * count;
     PairTerm { weight_chosen: w, weight_rejected: -w, loss }
+}
+
+/// `term` with the chosen answer's anchor added: `nll_weight` times the mean
+/// negative log-likelihood of the chosen tokens (`-sum_new_chosen /
+/// count_chosen`), the regulariser that keeps DPO from lowering the chosen
+/// answer's own probability. Its gradient on each chosen position's CE is
+/// `nll_weight / count_chosen`, which the weight carries scaled by `count`,
+/// as [`pair_term`]'s does. A zero weight returns `term` unchanged.
+pub fn add_chosen_nll(term: PairTerm, nll_weight: f32, sum_new_chosen: f32, count_chosen: usize, count: f32) -> PairTerm {
+    if nll_weight == 0.0 || count_chosen == 0 {
+        return term;
+    }
+    let n = count_chosen as f32;
+    PairTerm { weight_chosen: term.weight_chosen + nll_weight * count / n, weight_rejected: term.weight_rejected, loss: term.loss - nll_weight * sum_new_chosen / n }
 }
 
 /// Sum `new_lp`/`ref_lp` (and count active positions) over row `row`'s
@@ -308,7 +326,7 @@ fn pack_pair(cfg: &DpoConfig, pair: &DpoPair, chosen_ref: &[f32], rejected_ref: 
 /// reference-normalized margin `(logpi_c - logref_c) - (logpi_r - logref_r)`
 /// (in nats, without `beta`). `model` must be built at `b = 2`, `t =
 /// seq_len`, with weighted loss enabled.
-pub fn weigh_pair<M: Model>(beta: f32, model: &M, packed: &PackedPair) -> (PairTerm, f32) {
+pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &PackedPair) -> (PairTerm, f32) {
     let seq_len = packed.seq_len();
     model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
     let _ = model.forward();
@@ -317,7 +335,7 @@ pub fn weigh_pair<M: Model>(beta: f32, model: &M, packed: &PackedPair) -> (PairT
     let (sum_new_chosen, sum_ref_chosen, count_chosen) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
     let (sum_new_rejected, sum_ref_rejected, count_rejected) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
     let count = (count_chosen + count_rejected).max(1) as f32;
-    let term = pair_term(beta, sum_new_chosen, sum_ref_chosen, sum_new_rejected, sum_ref_rejected, count);
+    let term = add_chosen_nll(pair_term(beta, sum_new_chosen, sum_ref_chosen, sum_new_rejected, sum_ref_rejected, count), nll_weight, sum_new_chosen, count_chosen, count);
     let margin = (sum_new_chosen - sum_ref_chosen) - (sum_new_rejected - sum_ref_rejected);
 
     let mut weights = vec![0f32; 2 * seq_len];
@@ -445,11 +463,11 @@ impl<M: Model> Objective<M> for Dpo {
                     pending.push_back(pack_pair(&self.cfg, &pair, &chosen_ref, &rejected_ref));
                 }
                 let packed = pending.pop_front().expect("just ensured pending is non-empty");
-                weigh_pair(self.cfg.beta, model, &packed)
+                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, &packed)
             }
             Source::Dataset { pairs, referenced } => {
                 assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in prepare(), which was not called");
-                weigh_pair(self.cfg.beta, model, rng.choice(pairs))
+                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs))
             }
         };
         self.last_margin = margin;
@@ -533,6 +551,21 @@ mod tests {
         // At the reference the margin is zero and the loss is ln 2.
         let at_reference = pair_term(0.1, -7.0, -7.0, -9.0, -9.0, 4.0);
         assert!((at_reference.loss - std::f32::consts::LN_2).abs() < 1e-6, "{at_reference:?}");
+    }
+
+    /// The anchor on the chosen answer adds `nll_weight` times its mean
+    /// negative log-likelihood to the loss, and exactly that term's gradient
+    /// to every chosen position's weight; the rejected row is untouched.
+    #[test]
+    fn the_chosen_anchor_adds_its_mean_nll_to_the_loss_and_its_gradient_to_the_chosen_weight() {
+        let plain = pair_term(0.5, -8.0, -9.0, -4.0, -3.5, 12.0);
+        let anchored = add_chosen_nll(plain, 0.4, -8.0, 4, 12.0);
+        // Mean NLL is 8 / 4 = 2 nats per token.
+        assert!((anchored.loss - (plain.loss + 0.4 * 2.0)).abs() < 1e-6, "{anchored:?}");
+        // d(0.4 * sum_CE / 4) / d(CE_t) = 0.1 on every chosen position, scaled by the 12 active positions.
+        assert!((anchored.weight_chosen - (plain.weight_chosen + 0.1 * 12.0)).abs() < 1e-5, "{anchored:?}");
+        assert_eq!(anchored.weight_rejected, plain.weight_rejected);
+        assert_eq!(add_chosen_nll(plain, 0.0, -8.0, 4, 12.0), plain, "no weight, no change");
     }
 
     /// Each row's targets are exactly its supervised tokens, one position

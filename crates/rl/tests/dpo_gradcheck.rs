@@ -26,6 +26,9 @@ use qwen3::{Qwen, QwenConfig};
 use rl::objective::dpo::{weigh_pair, PackedPair};
 
 const BETA: f32 = 0.4;
+/// The chosen-answer anchor is checked together with the preference term: the
+/// loss and the gradient must agree with it on.
+const NLL_WEIGHT: f32 = 0.3;
 const SEQ_LEN: usize = 6;
 
 /// A tiny `qwen3::Qwen` built with `b=2` (chosen row 0, rejected row 1):
@@ -77,7 +80,7 @@ impl CheckModel for DpoHarness {
     /// this file's own header on why `Qwen::forward()`'s own return value
     /// cannot be used here.
     fn loss(&self) -> f32 {
-        let (term, _margin) = weigh_pair(BETA, &self.m, &self.pair);
+        let (term, _margin) = weigh_pair(BETA, NLL_WEIGHT, &self.m, &self.pair);
         self.fwd_done.set(true);
         term.loss
     }

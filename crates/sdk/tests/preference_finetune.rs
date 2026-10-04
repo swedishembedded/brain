@@ -174,3 +174,33 @@ fn a_cancelled_preference_run_resumes_to_the_uninterrupted_result() {
     assert!(!stopped.resume_state.unwrap().exists(), "an exported run leaves no state behind");
     assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
 }
+
+/// The chosen-answer anchor is part of the run: it is refused when negative,
+/// recorded in the training record, and a state from a run without it is not
+/// resumed into one with it.
+#[test]
+fn the_chosen_answer_anchor_is_recorded_and_part_of_a_runs_identity() {
+    let model = chat_model_dir("pref-nll");
+    let err = fine_tune(&model, &model.join("bad")).nll_weight(-1.0).run().unwrap_err();
+    assert!(err.to_string().contains("nll_weight"), "{err}");
+
+    let anchored = fine_tune(&model, &model.join("anchored")).nll_weight(0.5).run().unwrap();
+    assert_eq!(anchored.nll_weight, 0.5);
+    let card = checkpoint::st::read_card(anchored.adapter.as_deref().unwrap().to_str().unwrap()).unwrap().expect("the adapter carries a card");
+    let training = card.training.expect("the card records its training run");
+    assert_eq!(training.hyperparams["nll_weight"].as_f64(), Some(0.5));
+    let plain = fine_tune(&model, &model.join("plain")).run().unwrap();
+    assert_ne!(anchored.adapter_digest, plain.adapter_digest, "the anchor changes what is learned");
+
+    let out = model.join("interrupted");
+    let cancel = brain::CancelToken::armed();
+    fine_tune(&model, &out)
+        .run_with(&cancel, |p| {
+            if p.step == 2 {
+                cancel.cancel();
+            }
+        })
+        .unwrap();
+    let err = fine_tune(&model, &out).nll_weight(0.5).run().unwrap_err();
+    assert!(err.to_string().contains("different data or a different starting point"), "{err}");
+}

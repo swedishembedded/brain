@@ -72,6 +72,7 @@ pub struct PreferenceFineTune {
     rank: Option<u32>,
     alpha: Option<f32>,
     beta: f32,
+    nll_weight: f32,
     steps: u32,
     lr: f32,
     seed: u64,
@@ -97,6 +98,7 @@ impl PreferenceFineTune {
             rank: None,
             alpha: None,
             beta: DEFAULT_DPO_BETA,
+            nll_weight: 0.0,
             steps: 100,
             lr: 3e-4,
             seed: 1337,
@@ -167,6 +169,15 @@ impl PreferenceFineTune {
         self
     }
 
+    /// Weight of an anchor on the chosen answer: its mean negative
+    /// log-likelihood is added to the DPO loss (default 0, plain DPO). DPO
+    /// alone can lower the probability of both answers while widening the
+    /// margin between them; the anchor keeps the chosen one from falling.
+    pub fn nll_weight(mut self, weight: f32) -> Self {
+        self.nll_weight = weight;
+        self
+    }
+
     /// Optimizer steps, one pair each (default 100). The first fifth warms
     /// the rate up, and it decays over all of them.
     pub fn steps(mut self, steps: u32) -> Self {
@@ -225,6 +236,9 @@ impl PreferenceFineTune {
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<PreferenceFineTuneOutcome> {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no out directory; call .out_dir(path)".to_string()))?;
+        if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
+            return Err(Error::Backend(format!("PreferenceFineTune: nll_weight must be zero or positive, got {}", self.nll_weight)));
+        }
         if !(self.beta.is_finite() && self.beta > 0.0) {
             return Err(Error::Backend(format!("PreferenceFineTune: beta must be a positive number, got {}", self.beta)));
         }
@@ -260,6 +274,7 @@ impl PreferenceFineTune {
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
             "beta_bits": self.beta.to_bits(),
+            "nll_weight_bits": self.nll_weight.to_bits(),
         });
         let state_path = out_dir.join(STATE_FILE);
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
@@ -273,7 +288,7 @@ impl PreferenceFineTune {
             None => qwen3::finetune::LoraStart::Fresh,
         };
         let policy = lora_model(weights_str, rank, alpha, &opts, &start)?;
-        let objective = rl::objective::dpo::Dpo::from_dataset(rl::objective::dpo::DpoConfig { beta: self.beta, seq_len }, packed);
+        let objective = rl::objective::dpo::Dpo::from_dataset(rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight }, packed);
         let fit_err = |e: std::io::Error| Error::Backend(format!("training: {e}"));
         let (report, trained) = match policy {
             qwen3::finetune::Trained::Single(m) => {
@@ -302,6 +317,7 @@ impl PreferenceFineTune {
             rank,
             alpha,
             beta: self.beta,
+            nll_weight: self.nll_weight,
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
             train_score: None,
@@ -323,6 +339,7 @@ impl PreferenceFineTune {
                 "rank": rank,
                 "alpha": alpha,
                 "beta": self.beta,
+                "nll_weight": self.nll_weight,
                 "steps": self.steps,
                 "lr": self.lr,
                 "block": block,
@@ -385,6 +402,7 @@ pub struct PreferenceFineTuneOutcome {
     pub rank: u32,
     pub alpha: f32,
     pub beta: f32,
+    pub nll_weight: f32,
     /// The digest of the adapter this run continued - also the reference's
     /// adapter - if it continued one.
     pub trained_from: Option<String>,
@@ -421,6 +439,7 @@ impl PreferenceFineTuneOutcome {
             "rank": self.rank,
             "alpha": self.alpha,
             "beta": self.beta,
+            "nll_weight": self.nll_weight,
             "train_score": score(&self.train_score),
             "held_out_score": score(&self.held_out_score),
         })
