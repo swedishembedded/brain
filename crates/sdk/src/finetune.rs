@@ -66,6 +66,8 @@ pub struct ChatFineTune {
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
     replay: Vec<PathBuf>,
+    replay_share: Option<f32>,
+    grad_accum: u32,
     continue_from: Option<PathBuf>,
     out_dir: Option<PathBuf>,
     adapter_id: Option<String>,
@@ -106,6 +108,8 @@ impl ChatFineTune {
             dataset: None,
             held_out: None,
             replay: Vec::new(),
+            replay_share: None,
+            grad_accum: 1,
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -147,10 +151,27 @@ impl ChatFineTune {
     /// Mix every record of another chat dataset into training - earlier
     /// experience replayed so the new data does not overwrite it. May be
     /// called more than once; each file is validated like the dataset. The
-    /// mix is exactly the union of the files: to replay a fraction, pass a
-    /// file holding that fraction.
+    /// mix is the union of the files unless [`Self::replay_share`] is set.
     pub fn replay(mut self, path: impl Into<PathBuf>) -> Self {
         self.replay.push(path.into());
+        self
+    }
+
+    /// The share of training draws that come from the replay files in all
+    /// (0 < share < 1), however large they are next to the dataset. Examples
+    /// are drawn uniformly with replacement, so a replay set many times the
+    /// dataset's size would otherwise take almost every step; this repeats
+    /// the dataset's records enough times that replay is drawn this often,
+    /// which weights them exactly. Without it the mix is the plain union.
+    pub fn replay_share(mut self, share: f32) -> Self {
+        self.replay_share = Some(share);
+        self
+    }
+
+    /// Micro-batches summed into each optimizer step (default 1). Rows are
+    /// single examples, so this is the effective batch size.
+    pub fn grad_accum(mut self, micro_batches: u32) -> Self {
+        self.grad_accum = micro_batches;
         self
     }
 
@@ -300,7 +321,11 @@ impl ChatFineTune {
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
-        let mut training = train_samples.clone();
+        let repeats = self.replay_share.map_or(Ok(1), |share| dataset_repeats(train_samples.len(), replay_samples.len(), share))?;
+        let mut training = Vec::with_capacity(train_samples.len() * repeats + replay_samples.len());
+        for _ in 0..repeats {
+            training.extend(train_samples.iter().cloned());
+        }
         training.extend(replay_samples.iter().cloned());
         // The packed validation split is only read for an eval the run does
         // not ask for; it is the held-out set when there is one.
@@ -314,7 +339,10 @@ impl ChatFineTune {
         crate::device::resolve(&self.device)?;
         let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
 
-        let opts = fit_opts(self.steps, block, self.lr, self.seed);
+        if self.grad_accum == 0 {
+            return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
+        }
+        let opts = model::FitOpts { grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, self.seed) };
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,
@@ -323,6 +351,8 @@ impl ChatFineTune {
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
+            "dataset_repeats": repeats,
+            "grad_accum": self.grad_accum,
         });
         let state_path = out_dir.join(STATE_FILE);
         let mut on_step = |s: &model::StepReport| {
@@ -600,6 +630,20 @@ pub(crate) fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
     Ok(max.map_or(block, |m| block.min(m)))
 }
 
+/// How many times the dataset's `target` records must be listed so that, drawn
+/// uniformly with replacement from them and the `replay` records, a replay
+/// record is drawn `share` of the time.
+fn dataset_repeats(target: usize, replay: usize, share: f32) -> Result<usize> {
+    if !(share > 0.0 && share < 1.0) {
+        return Err(Error::Backend(format!("ChatFineTune: replay_share must be between 0 and 1, got {share}")));
+    }
+    if replay == 0 || target == 0 {
+        return Ok(1);
+    }
+    let wanted = f64::from(1.0 - share) / f64::from(share) * replay as f64 / target as f64;
+    Ok((wanted.round() as usize).max(1))
+}
+
 pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     model::FitOpts {
         steps,
@@ -654,6 +698,23 @@ mod tests {
         assert_eq!(block_for(100, Some(100)).unwrap(), 100);
         assert_eq!(block_for(70, Some(512)).unwrap(), 128);
         assert!(block_for(600, Some(512)).unwrap_err().to_string().contains("max_block"));
+    }
+
+    /// A replay set many times the dataset must not take every draw: listing
+    /// the dataset enough times gives replay its share, and no replay or no
+    /// share leaves the plain union.
+    #[test]
+    fn a_replay_share_sets_how_often_the_dataset_is_listed() {
+        // 100 target + 900 replay: a quarter replay needs 3 x 900 = 2700 target rows.
+        assert_eq!(dataset_repeats(100, 900, 0.25).unwrap(), 27);
+        let (target, replay) = (100.0_f64 * 27.0, 900.0_f64);
+        assert!((replay / (target + replay) - 0.25).abs() < 0.01);
+        // The dataset is never listed fewer than once, even when replay is already scarcer than asked.
+        assert_eq!(dataset_repeats(100, 10, 0.5).unwrap(), 1);
+        assert_eq!(dataset_repeats(100, 0, 0.25).unwrap(), 1);
+        for bad in [0.0, 1.0, -0.1, f32::NAN] {
+            assert!(dataset_repeats(1, 1, bad).unwrap_err().to_string().contains("replay_share"));
+        }
     }
 }
 
