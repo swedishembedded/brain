@@ -259,7 +259,7 @@ impl LongContextEngine for QwenPagedEngine {
 
     fn plan(&mut self, batch: u32, context: u32) -> Result<Fit, String> {
         let (_, num_blocks, _) = Self::geometry(batch, context);
-        let weights = if self.weights_int8 { crate::resident_llm::weights_int8_bytes(&self.cfg) } else { crate::resident_llm::weights_fp32_bytes(&self.cfg) };
+        let weights = if self.weights_int8 { catalog::resident_llm::weights_int8_bytes(&self.cfg) } else { catalog::resident_llm::weights_fp32_bytes(&self.cfg) };
         let kv = qwen3::serve::kv_pool_bytes(&self.cfg, BLOCK_SIZE, num_blocks, self.kv_int8);
         let needed = weights + kv + self.scratch_bytes(batch, context, self.fused_scratch == Some(true));
         Ok(Fit { fits: needed <= self.gpu.2, needed_bytes: needed, usable_bytes: self.gpu.2 })
