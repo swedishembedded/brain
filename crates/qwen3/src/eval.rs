@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use data::chat::ChatSample;
+use data::chat::{ChatSample, RenderOpts};
 use data::chat_template::ChatTemplate;
 use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
@@ -116,6 +116,13 @@ pub fn score_chat(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &Ch
 /// linears actually landed on (a device without an f16 path demotes the
 /// request) is reported, never silently swallowed.
 pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, dt: Dtype) -> ChatScore {
+    score_chat_rendered(weights, adapter, tok, tmpl, samples, block, dt, RenderOpts::default())
+}
+
+/// [`score_chat_dt`] rendering the samples as `render` says: a run that trained
+/// with [`RenderOpts::keep_reasoning`] is scored the way it trained.
+#[allow(clippy::too_many_arguments)]
+pub fn score_chat_rendered(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, dt: Dtype, render: RenderOpts) -> ChatScore {
     let model = load_scored_model(weights, adapter, block, dt);
     eprintln!(
         "eval: weight tier requested {dt:?}, linears landed {:?}",
@@ -133,7 +140,7 @@ pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: 
         // A template-encoding failure is a data/config problem, not a
         // too-long sample -- surfaced loudly (the CLI half of this fix
         // already reports them), never silently folded into `skipped`.
-        let (ids, mask) = match s.encode(tok, tmpl) {
+        let (ids, mask) = match s.encode_with(tok, tmpl, render) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("eval: sample {i}: chat-template encode failed ({e}); skipping");

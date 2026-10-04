@@ -80,6 +80,7 @@ pub struct ChatFineTune {
     device: Device,
     bf16_base: bool,
     int8_base: bool,
+    keep_reasoning: bool,
 }
 
 /// The tier the frozen base is held at: int8 over bf16 over fp32.
@@ -119,6 +120,7 @@ impl ChatFineTune {
             device: Device::default(),
             bf16_base: false,
             int8_base: false,
+            keep_reasoning: false,
         }
     }
 
@@ -235,6 +237,19 @@ impl ChatFineTune {
         self
     }
 
+    /// Train the reasoning of the assistant turns it supervises. A reasoning
+    /// model's chat template drops `<think>...</think>` from the assistant
+    /// turns it renders - DeepSeek-R1's keeps only what follows the last
+    /// `</think>` - so a record whose answer follows `<think>\n\n</think>\n\n`
+    /// would train on the answer alone, while the model is asked with its think
+    /// block already open. With this set a supervised turn keeps its
+    /// `</think>`, and the model trains on what it will be asked: scoring
+    /// before and after renders the same way.
+    pub fn keep_reasoning(mut self, on: bool) -> Self {
+        self.keep_reasoning = on;
+        self
+    }
+
     /// Hold the frozen base at bf16, half the bytes of fp32 (a 7B decoder
     /// then trains on one 24 GB card); the adapters and optimiser stay fp32.
     /// Scoring before and after runs at the same tier.
@@ -291,12 +306,13 @@ impl ChatFineTune {
         // not ask for; it is the held-out set when there is one.
         let val = held_out.as_deref().unwrap_or(&training[..]);
         let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
+        let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
         let prepared_dir = out_dir.join(PREPARED_DIR);
-        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, data::chat::RenderOpts::default(), cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+        let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;
 
         crate::device::resolve(&self.device)?;
-        let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier));
+        let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
 
         let opts = fit_opts(self.steps, block, self.lr, self.seed);
         let base_digest = base_digest(&open)?;
@@ -374,7 +390,7 @@ impl ChatFineTune {
         drop(trained);
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
-        outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier));
+        outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -520,11 +536,12 @@ pub fn score_chat(base: &str, adapter: Option<&Path>, held_out: &Path) -> Result
         }
         None => None,
     };
-    Ok(score_records(weights_str, adapter, &tok, &tmpl, &records, block_for(longest, None)?, qwen3::Dtype::F32))
+    Ok(score_records(weights_str, adapter, &tok, &tmpl, &records, block_for(longest, None)?, qwen3::Dtype::F32, data::chat::RenderOpts::default()))
 }
 
-fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype) -> HeldOutScore {
-    let s = qwen3::eval::score_chat_dt(weights, adapter, tok, tmpl, records, block, tier);
+#[allow(clippy::too_many_arguments)]
+fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype, render: data::chat::RenderOpts) -> HeldOutScore {
+    let s = qwen3::eval::score_chat_rendered(weights, adapter, tok, tmpl, records, block, tier, render);
     HeldOutScore { loss: (s.positions > 0).then_some(s.loss), token_accuracy: s.token_accuracy, positions: s.positions, records: s.samples, skipped: s.skipped }
 }
 
