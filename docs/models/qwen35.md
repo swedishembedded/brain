@@ -63,24 +63,20 @@ Model id: `unsloth/Qwen3.8-27B-Q8_0`
 `brain/qwen35` above, not a mode of it - the two coexist and are registered
 independently.
 
-> **Status: correct.** The model plans across two 24 GiB P40s at INT8
-> (27.05 GiB, 7.44-8.57 tok/s decode, M22) or one card at Q4 (15.71-15.79
-> GiB, 10.89-12.46 tok/s decode, M24), and is bit-stable under greedy
-> sampling; a factual greedy continuation of `"The capital city of France
-> is"` produces `" Paris. Paris is the largest city in"`. Prefill is chunked
-> at both tiers (M26): a real 1731-token prompt at INT8 went from 262.8 s
-> (6.6 tok/s) to 26.5-26.8 s (64.6-65.4 tok/s), ~9.9x; a real 1555-token
-> prompt at Q4 went from 152.1 s (10.2 tok/s) to 22.9 s (68.0 tok/s), ~6.6x,
-> once `matmul_q4_dyn_reg` was wired into `Ops::bind`. Decode throughput does fall off with real context, not
-> just this smoke-test prompt: 9.58 tok/s measured at a genuine 1555-token
-> prompt vs 10.96-12.46 tok/s at this page's ~14-token one, consistent with
-> the 16 GQA layers' `O(context)` KV-read cost. M21 left this RED - the GGUF
-> conversion stores every GDN leaf indexed by value head in a different
-> head-order convention than brain (and the reference HF model) expect;
-> M23 found and fixed it (`crates/qwen35/src/int8_gguf_resident.rs`'s
-> `GdnHeadOrder`). See `.agents/roadmap/qwen35.md`'s "Final measurement
-> summary" section for the full real-number table and M23/M24/M26 for the
-> investigations and fixes behind it.
+> **Status: correct.** The model plans onto however many cards it needs at
+> INT8, or one card at Q4, and is bit-stable under greedy sampling; a factual
+> greedy continuation of `"The capital city of France is"` produces `" Paris.
+> Paris is the largest city in"`. Prefill is chunked at both tiers. M21 left
+> this RED - the GGUF conversion stores every GDN leaf indexed by value head
+> in a different head-order convention than brain (and the reference HF model)
+> expect; M23 found and fixed it (`crates/qwen35/src/int8_gguf_resident.rs`'s
+> `GdnHeadOrder`).
+>
+> Decode speed depends on the backend and the GPU, and the numbers recorded
+> while this resident was brought up came from pre-tensor-core cards, so they
+> say nothing about a current one. On an NVIDIA GPU, pass `--backend cuda`
+> (see `docs/using/cuda.md`); the default wgpu path leaves its tensor cores
+> idle. Measure on the machine you serve from.
 
 ```bash
 # drop the file anywhere under the models directory (e.g.
@@ -131,9 +127,10 @@ What it does differently:
   need ~108 GB of disk for the fp32 conversion.)
 - **Layer-sharded across as many cards as it needs**, by
   `model::shard::plan_fewest_devices` over real per-layer byte costs. On a
-  box with two 24 GiB Tesla P40s and the default 2 GiB/card reserve it plans
+  box with two 24 GiB cards and the default 2 GiB/card reserve it plans
   **27.05 GiB total: layers 0..34 on gpu0 (13.67 GiB), 34..64 on gpu1 (13.38
-  GiB)**. One card is correctly reported infeasible rather than attempted.
+  GiB)**. A card count that cannot hold the layers is reported infeasible
+  rather than attempted; a card with room for all of them takes them all.
 - **The endpoints are not in a shard.** Both `[248320, 5120]` tables are 5.09
   GB as fp32, which is over a P40's `max_buffer_size` AND 2.4x its 2047 MiB
   storage-binding limit - not a tight fit, an impossible one. The embedding
