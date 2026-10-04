@@ -204,3 +204,25 @@ fn the_chosen_answer_anchor_is_recorded_and_part_of_a_runs_identity() {
     let err = fine_tune(&model, &out).nll_weight(0.5).run().unwrap_err();
     assert!(err.to_string().contains("different data or a different starting point"), "{err}");
 }
+
+/// A larger effective batch and kept reasoning are choices of the run: each
+/// is refused when unusable, recorded on the adapter's card, and changes
+/// what is learned or how the pairs are rendered.
+#[test]
+fn accumulation_and_kept_reasoning_are_recorded_and_change_the_run() {
+    let model = chat_model_dir("pref-accum");
+    let err = fine_tune(&model, &model.join("zero")).grad_accum(0).run().unwrap_err();
+    assert!(err.to_string().contains("grad_accum"), "{err}");
+
+    let plain = fine_tune(&model, &model.join("plain")).run().unwrap();
+    let accumulated = fine_tune(&model, &model.join("accum")).grad_accum(2).run().unwrap();
+    assert_ne!(accumulated.adapter_digest, plain.adapter_digest, "two pairs per update is a different gradient");
+    let card = checkpoint::st::read_card(accumulated.adapter.as_deref().unwrap().to_str().unwrap()).unwrap().expect("the adapter carries a card");
+    let hyperparams = card.training.expect("the card records its training run").hyperparams;
+    assert_eq!(hyperparams["grad_accum"].as_u64(), Some(2));
+    assert_eq!(hyperparams["keep_reasoning"].as_bool(), Some(false));
+
+    let kept = fine_tune(&model, &model.join("kept")).keep_reasoning(true).run().unwrap();
+    let card = checkpoint::st::read_card(kept.adapter.as_deref().unwrap().to_str().unwrap()).unwrap().expect("the adapter carries a card");
+    assert_eq!(card.training.unwrap().hyperparams["keep_reasoning"].as_bool(), Some(true));
+}

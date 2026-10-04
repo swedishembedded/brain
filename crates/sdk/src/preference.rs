@@ -73,6 +73,8 @@ pub struct PreferenceFineTune {
     alpha: Option<f32>,
     beta: f32,
     nll_weight: f32,
+    grad_accum: u32,
+    keep_reasoning: bool,
     steps: u32,
     lr: f32,
     seed: u64,
@@ -99,6 +101,8 @@ impl PreferenceFineTune {
             alpha: None,
             beta: DEFAULT_DPO_BETA,
             nll_weight: 0.0,
+            grad_accum: 1,
+            keep_reasoning: false,
             steps: 100,
             lr: 3e-4,
             seed: 1337,
@@ -178,6 +182,25 @@ impl PreferenceFineTune {
         self
     }
 
+    /// Pairs summed into each optimizer step (default 1), the effective
+    /// batch size. One pair per update is a noisy gradient for a preference
+    /// objective.
+    pub fn grad_accum(mut self, pairs: u32) -> Self {
+        self.grad_accum = pairs;
+        self
+    }
+
+    /// Train on the reasoning of each candidate (default off). A reasoning
+    /// model's template drops a closed think block from the assistant turns it
+    /// renders as history, which is how every candidate is rendered here; with
+    /// this set the block is kept, so a model that is asked from an empty
+    /// closed block trains on exactly that form. See
+    /// [`crate::ChatFineTune::keep_reasoning`].
+    pub fn keep_reasoning(mut self, on: bool) -> Self {
+        self.keep_reasoning = on;
+        self
+    }
+
     /// Optimizer steps, one pair each (default 100). The first fifth warms
     /// the rate up, and it decays over all of them.
     pub fn steps(mut self, steps: u32) -> Self {
@@ -239,6 +262,9 @@ impl PreferenceFineTune {
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
             return Err(Error::Backend(format!("PreferenceFineTune: nll_weight must be zero or positive, got {}", self.nll_weight)));
         }
+        if self.grad_accum == 0 {
+            return Err(Error::Backend("PreferenceFineTune: grad_accum must be at least 1".to_string()));
+        }
         if !(self.beta.is_finite() && self.beta > 0.0) {
             return Err(Error::Backend(format!("PreferenceFineTune: beta must be a positive number, got {}", self.beta)));
         }
@@ -249,8 +275,9 @@ impl PreferenceFineTune {
         // Every file is checked against the base's own template before a
         // device is claimed.
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
-        let train = encode_checked(dataset, &tok, &tmpl, self.max_block)?;
-        let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None)).transpose()?;
+        let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
+        let train = encode_checked(dataset, &tok, &tmpl, self.max_block, render)?;
+        let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None, render)).transpose()?;
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
         let block = block_for(longest(&train), self.max_block)?;
         let seq_len = block as usize;
@@ -263,7 +290,7 @@ impl PreferenceFineTune {
         crate::device::resolve(&self.device)?;
 
         // Both rows of a pair share one forward.
-        let opts = model::FitOpts { batch_size: 2, ..fit_opts(self.steps, block, self.lr, self.seed) };
+        let opts = model::FitOpts { batch_size: 2, grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, self.seed) };
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
@@ -275,6 +302,8 @@ impl PreferenceFineTune {
             "alpha_bits": alpha.to_bits(),
             "beta_bits": self.beta.to_bits(),
             "nll_weight_bits": self.nll_weight.to_bits(),
+            "grad_accum": self.grad_accum,
+            "keep_reasoning": self.keep_reasoning,
         });
         let state_path = out_dir.join(STATE_FILE);
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
@@ -340,6 +369,8 @@ impl PreferenceFineTune {
                 "alpha": alpha,
                 "beta": self.beta,
                 "nll_weight": self.nll_weight,
+                "grad_accum": self.grad_accum,
+                "keep_reasoning": self.keep_reasoning,
                 "steps": self.steps,
                 "lr": self.lr,
                 "block": block,
@@ -476,7 +507,7 @@ pub fn score_preference(base: &str, adapter: &Path, dataset: &Path) -> Result<Pr
     checkpoint::weightio::WeightReader::open(weights_str).map_err(|e| Error::Backend(format!("{weights_str}: {e}")))?;
     checkpoint::st::read_card(utf8(adapter)?).map_err(|e| Error::Backend(format!("{}: {e}", adapter.display())))?;
     let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
-    let pairs = encode_checked(dataset, &tok, &tmpl, None)?;
+    let pairs = encode_checked(dataset, &tok, &tmpl, None, data::chat::RenderOpts::default())?;
     Ok(score_pairs(weights_str, None, utf8(adapter)?, &pairs))
 }
 
@@ -496,8 +527,8 @@ fn score_pairs(weights: &str, reference: Option<&str>, policy: &str, pairs: &[(E
     }
 }
 
-fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>) -> Result<Vec<(EncodedTurn, EncodedTurn)>> {
-    let (summary, pairs) = crate::preference_dataset::check_pairs(path, tok, tmpl, max_block).map_err(Error::Backend)?;
+fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>, render: data::chat::RenderOpts) -> Result<Vec<(EncodedTurn, EncodedTurn)>> {
+    let (summary, pairs) = crate::preference_dataset::check_pairs(path, tok, tmpl, max_block, render).map_err(Error::Backend)?;
     if summary.pairs == 0 {
         return Err(Error::Backend(format!("{}: holds no preference pairs", path.display())));
     }

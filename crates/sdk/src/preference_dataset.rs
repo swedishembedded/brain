@@ -24,6 +24,7 @@
 use std::path::Path;
 
 use data::chat_template::ChatTemplate;
+use data::chat::RenderOpts;
 use data::preference::{EncodedTurn, PreferenceSample};
 use data::qwen_tokenizer::QwenBpe;
 
@@ -59,19 +60,19 @@ pub fn validate_preference_dataset_for(path: impl AsRef<Path>, model_dir: impl A
     let tmpl = ChatTemplate::from_model_dir(model_dir).map_err(|e| format!("{}: could not load the chat template: {e}", model_dir.display()))?;
     let tok_path = model_dir.join("tokenizer.json");
     let tok = QwenBpe::from_file(tok_path.to_str().unwrap_or_default()).map_err(|e| format!("{}: could not load the tokenizer: {e}", tok_path.display()))?;
-    check_pairs(path.as_ref(), &tok, &tmpl, max_block).map(|(summary, _)| summary)
+    check_pairs(path.as_ref(), &tok, &tmpl, max_block, RenderOpts::default()).map(|(summary, _)| summary)
 }
 
 /// [`validate_preference_dataset_for`] with the tokenizer and template
 /// already loaded, handing back the rendered pairs so a caller does not
 /// render them twice.
-pub(crate) fn check_pairs(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>) -> Result<(PreferenceDatasetSummary, Vec<(EncodedTurn, EncodedTurn)>), String> {
+pub(crate) fn check_pairs(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Option<u32>, render: RenderOpts) -> Result<(PreferenceDatasetSummary, Vec<(EncodedTurn, EncodedTurn)>), String> {
     let pairs = PreferenceSample::from_jsonl(path).map_err(|e| e.to_string())?;
     let mut encoded = Vec::with_capacity(pairs.len());
     let mut longest = 0usize;
     for (index, pair) in pairs.iter().enumerate() {
         let record = || format!("{}: record {}", path.display(), index + 1);
-        let (chosen, rejected) = pair.encode(tok, tmpl).map_err(|e| format!("{} cannot be rendered for training: {e}", record()))?;
+        let (chosen, rejected) = pair.encode_with(tok, tmpl, render).map_err(|e| format!("{} cannot be rendered for training: {e}", record()))?;
         for (name, turn) in [("chosen", &chosen), ("rejected", &rejected)] {
             if !turn.mask.iter().any(|m| *m) {
                 return Err(format!("{}: \"{name}\" renders to no supervised token", record()));
