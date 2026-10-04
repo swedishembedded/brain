@@ -188,6 +188,12 @@ for call in &reply.tool_calls {
 - `request.render_prompt()` and `request.parse_reply(raw)` need no model:
   the prompt the request renders to, and a recorded completion parsed the way
   a generation's own is.
+- `brain::ChatTokenizer` turns that prompt into token ids and ids back into
+  text, for a loop that trains or scores on ids and must feed the model the
+  tokens serving would: `ChatTokenizer::from_model_dir(dir)?.prompt_ids(&request)?`
+  is the rendered prompt tokenized by the checkpoint's own tokenizer, and
+  `.decode(&ids)` reads a generation back. There is no second template to drift
+  from the first.
 
 A pipeline runs one generation at a time (it is `Send`, not `Sync`): give it
 its own thread, or share it behind a `Mutex`.

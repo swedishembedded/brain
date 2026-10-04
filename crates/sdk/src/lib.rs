@@ -91,36 +91,38 @@ mod asr;
 mod auto;
 #[cfg(feature = "creature")]
 mod creature;
+/// `brain::DecisionPipeline` - calibrated probabilities over options supplied
+/// per request. Its own surface because its output space lives in the CALL,
+/// which no generative pipeline's shape can express.
+#[cfg(feature = "decision")]
+pub mod decision;
 #[cfg(feature = "vision")]
 mod depth;
 #[cfg(feature = "vision")]
 mod detect;
 #[cfg(feature = "device")]
 mod device;
-mod error;
-#[cfg(any(feature = "vision", feature = "text"))]
-mod embedding;
-#[cfg(feature = "text")]
-mod embed_train;
 #[cfg(feature = "text")]
 mod embed_finetune;
+#[cfg(feature = "text")]
+mod embed_train;
+#[cfg(any(feature = "vision", feature = "text"))]
+mod embedding;
+mod error;
 #[cfg(feature = "forecast")]
 mod forecast;
 #[cfg(feature = "vision")]
 mod ground;
 #[cfg(feature = "imagetype")]
 mod image;
-#[cfg(feature = "image")]
-mod pipeline;
 #[cfg(feature = "audio")]
 mod music;
-/// `brain::DecisionPipeline` - calibrated probabilities over options supplied
-/// per request. Its own surface because its output space lives in the CALL,
-/// which no generative pipeline's shape can express.
+#[cfg(feature = "image")]
+mod pipeline;
 #[cfg(feature = "decision")]
-pub mod decision;
-#[cfg(feature = "decision")]
-pub use decision::{Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec, DEFAULT_TRAIN_BATCH};
+pub use decision::{
+    Choice, DecisionPipeline, DecisionPipelineBuilder, TrainSpec, DEFAULT_TRAIN_BATCH,
+};
 
 /// Learning to reach a known goal state by retracing random walks away from
 /// it - a policy rolled out with one forward pass per action and no search.
@@ -138,38 +140,46 @@ pub use solve;
 #[cfg(feature = "study")]
 pub mod chat_dataset;
 #[cfg(feature = "study")]
-pub mod study;
-#[cfg(feature = "study")]
 mod finetune;
 #[cfg(feature = "study")]
-pub use finetune::{score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore};
+pub mod study;
+#[cfg(feature = "study")]
+pub use finetune::{
+    score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore,
+};
 #[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]
 pub mod preference_dataset;
 #[cfg(feature = "study")]
-pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA};
+pub use preference::{
+    score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore,
+    DEFAULT_DPO_BETA,
+};
 #[cfg(feature = "study")]
-pub use preference_dataset::{validate_preference_dataset, validate_preference_dataset_for, PreferenceDatasetSummary};
+pub use preference_dataset::{
+    validate_preference_dataset, validate_preference_dataset_for, PreferenceDatasetSummary,
+};
 
 #[cfg(feature = "reader")]
 pub mod reader;
 #[cfg(feature = "reader")]
 pub use audit::acceptance::LedgerFacts;
+#[cfg(feature = "study")]
+pub use chat_dataset::{validate_chat_dataset, validate_chat_dataset_for, ChatDatasetSummary};
 #[cfg(feature = "reader")]
 pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome, MIN_EPISODE_CHARS};
 #[cfg(feature = "study")]
-pub use chat_dataset::{validate_chat_dataset, validate_chat_dataset_for, ChatDatasetSummary};
-#[cfg(feature = "study")]
 pub use study::{
-    Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,
+    Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve,
+    ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,
 };
 #[cfg(feature = "decision")]
 pub mod control;
 #[cfg(feature = "decision")]
 pub use control::{
-    Agreement, Candidates, ControlPipeline, ControlPipelineBuilder, ControlSpec,
-    Counterfactual, Demonstration, Env, Rollout, Situation, Spend, ValueFit,
+    Agreement, Candidates, ControlPipeline, ControlPipelineBuilder, ControlSpec, Counterfactual,
+    Demonstration, Env, Rollout, Situation, Spend, ValueFit,
 };
 #[cfg(feature = "decision")]
 pub mod conversion;
@@ -214,7 +224,7 @@ pub use rlcd::{
     ada_ece, bayes_action, bayes_risk, check_information_refinement, classwise_ece, confidence,
     coverage_accuracy, decision_loss, decision_loss_soft, ece, failure_auroc, regret,
     reliability_bins, voi, witness_search, Answer, BayesAction, CostMatrix, DecisionContract,
-    Distribution, Features, Learner, LossConfig, Observation, OracleKind, Opt, Question,
+    Distribution, Features, Learner, LossConfig, Observation, Opt, OracleKind, Question,
     ReliabilityBin, RlcdExample, RlcdPipeline, RlcdPipelineBuilder, RlcdSpec, WitnessFamily, World,
 };
 
@@ -232,6 +242,11 @@ pub mod artifact;
 /// caller names are also re-exported at the top level.
 #[cfg(feature = "text")]
 pub mod chat;
+/// Token ids of a chat prompt, and back: what a loop that trains on ids needs.
+#[cfg(feature = "text")]
+pub mod chat_tokens;
+#[cfg(feature = "text")]
+pub mod qa;
 #[cfg(feature = "resolve")]
 mod resolve_policy;
 #[cfg(feature = "image")]
@@ -242,8 +257,6 @@ mod segment;
 mod text;
 #[cfg(feature = "three-d")]
 mod three_d;
-#[cfg(feature = "text")]
-pub mod qa;
 #[cfg(feature = "audio")]
 mod tts;
 #[cfg(feature = "image")]
@@ -263,10 +276,6 @@ pub use error::{Error, ForecastFailure};
 /// whatever hardware the machine actually has.
 #[cfg(feature = "device")]
 pub use gpu_core::devices::DeviceSpec as Device;
-/// A numeric tier. Re-exported, not reinvented: the SAME type flux2's own
-/// `Pipeline::build_sized` takes (`model::dispatch::Precision`).
-#[cfg(feature = "resolve")]
-pub use model::dispatch::Precision as DType;
 /// How a pipeline builder may use the network to resolve a `model_id`.
 /// Re-exported, not reinvented: the SAME type `loader::supply::
 /// ensure_default_weights` already takes. See
@@ -274,48 +283,25 @@ pub use model::dispatch::Precision as DType;
 /// exposes it as a knob today.
 #[cfg(feature = "resolve")]
 pub use loader::DownloadPolicy;
+/// A numeric tier. Re-exported, not reinvented: the SAME type flux2's own
+/// `Pipeline::build_sized` takes (`model::dispatch::Precision`).
+#[cfg(feature = "resolve")]
+pub use model::dispatch::Precision as DType;
 
-#[cfg(feature = "audio")]
-pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
-#[cfg(feature = "auto")]
-pub use auto::{AutoPipeline, AutoPipelineBuilder};
-#[cfg(feature = "creature")]
-pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring};
-#[cfg(feature = "vision")]
-pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
-#[cfg(feature = "three-d")]
-pub use three_d::{Reconstruction, ReconstructionBuilder};
-#[cfg(feature = "vision")]
-pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
-#[cfg(any(feature = "vision", feature = "text"))]
-pub use embedding::{Embedding, EmbeddingOptions, EmbeddingPipeline, EmbeddingPipelineBuilder};
-#[cfg(feature = "text")]
-pub use embed_train::EmbeddingTrainer;
-#[cfg(feature = "text")]
-pub use embed_finetune::EncoderFineTuner;
-#[cfg(feature = "forecast")]
-pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
-#[cfg(feature = "vision")]
-pub use ground::{GroundedBox, GroundingOptions, GroundingPipeline, GroundingPipelineBuilder};
 /// The forecasting domain types [`ForecastPipeline::forecast_with`] needs
 /// for anything past the simple `.forecast(series, horizon)` call --
 /// re-exported from `brain-forecast`, not reinvented (that crate IS the
 /// model-agnostic seam; wrapping it again here would be a second,
 /// competing representation of the same domain).
 #[cfg(feature = "forecast")]
-pub use ::forecast::{Block, Capabilities, Forecast, ForecastSpec, Item, Panel, Representation, TargetForecast, Variate};
-#[cfg(feature = "imagetype")]
-pub use image::Image;
-#[cfg(feature = "image")]
-pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
-#[cfg(feature = "image")]
-pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
-#[cfg(feature = "vision")]
-pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
-#[cfg(feature = "text")]
-pub use text::{GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder};
-#[cfg(feature = "text")]
-pub use chat::{ChatMessage, ChatPipeline, ChatRequest, ChatResponse};
+pub use ::forecast::{
+    Block, Capabilities, Forecast, ForecastSpec, Item, Panel, Representation, TargetForecast,
+    Variate,
+};
+#[cfg(feature = "audio")]
+pub use asr::{TranscribePipeline, TranscribePipelineBuilder, Transcript};
+#[cfg(feature = "auto")]
+pub use auto::{AutoPipeline, AutoPipelineBuilder};
 /// Cooperative cancellation for a streaming call such as
 /// [`ChatPipeline::generate_stream`]. Re-exported, not reinvented: the SAME
 /// token every served invocation carries. Make one with
@@ -323,10 +309,44 @@ pub use chat::{ChatMessage, ChatPipeline, ChatRequest, ChatResponse};
 /// [`ChatFineTune::run_with`] takes the same token.
 #[cfg(any(feature = "text", feature = "study"))]
 pub use capability::CancelToken;
-#[cfg(feature = "audio")]
-pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
+#[cfg(feature = "text")]
+pub use chat::{ChatMessage, ChatPipeline, ChatRequest, ChatResponse};
+#[cfg(feature = "text")]
+pub use chat_tokens::ChatTokenizer;
+#[cfg(feature = "creature")]
+pub use creature::{Arena, Beat, Creature, CreatureBuilder, MotorMap, WingWiring};
+#[cfg(feature = "vision")]
+pub use depth::{DepthMap, DepthOptions, DepthPipeline, DepthPipelineBuilder};
+#[cfg(feature = "vision")]
+pub use detect::{DetectOptions, Detection, DetectionPipeline, DetectionPipelineBuilder};
+#[cfg(feature = "text")]
+pub use embed_finetune::EncoderFineTuner;
+#[cfg(feature = "text")]
+pub use embed_train::EmbeddingTrainer;
+#[cfg(any(feature = "vision", feature = "text"))]
+pub use embedding::{Embedding, EmbeddingOptions, EmbeddingPipeline, EmbeddingPipelineBuilder};
+#[cfg(feature = "forecast")]
+pub use forecast::{ForecastPipeline, ForecastPipelineBuilder};
+#[cfg(feature = "vision")]
+pub use ground::{GroundedBox, GroundingOptions, GroundingPipeline, GroundingPipelineBuilder};
+#[cfg(feature = "imagetype")]
+pub use image::Image;
 #[cfg(feature = "audio")]
 pub use music::{MusicOptions, MusicPipeline, MusicPipelineBuilder, Song};
+#[cfg(feature = "image")]
+pub use pipeline::{ImageGenerationOptions, ImagePipeline, ImagePipelineBuilder};
+#[cfg(feature = "image")]
+pub use restore::{RestoreOptions, RestorePipeline, RestorePipelineBuilder};
+#[cfg(feature = "vision")]
+pub use segment::{Mask, Prompt, SegmentOptions, SegmentPipeline, SegmentPipelineBuilder};
+#[cfg(feature = "text")]
+pub use text::{
+    GeneratedText, TextGenerationOptions, TextGenerationPipeline, TextGenerationPipelineBuilder,
+};
+#[cfg(feature = "three-d")]
+pub use three_d::{Reconstruction, ReconstructionBuilder};
+#[cfg(feature = "audio")]
+pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
 #[cfg(feature = "image")]
 pub use upscale::{UpscaleOptions, UpscalePipeline, UpscalePipelineBuilder};
 #[cfg(feature = "video")]
