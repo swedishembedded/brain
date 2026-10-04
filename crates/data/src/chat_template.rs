@@ -325,6 +325,40 @@ impl ChatTemplate {
         tmpl.render(ctx).map_err(|e| TemplateError(format!("{e:#}")))
     }
 
+    /// The generation prompt for `messages` asking the model not to reason.
+    ///
+    /// Models reach no-think mode three ways, and this is the one place that
+    /// knows them: a template with a switch is asked to turn it off
+    /// (`enable_thinking`, Qwen3's; `thinking`, DeepSeek-V3.1's); a template
+    /// that opens a reasoning block and has no switch (DeepSeek-R1-Distill's
+    /// ends its generation prompt inside `<think>`) has the block closed
+    /// empty, which is how that model is meant to be run without reasoning;
+    /// and a template that never reasons renders as it always does.
+    pub fn render_no_think(&self, messages: Value, tools: Option<Value>, extra: &BTreeMap<String, Value>) -> Result<String, TemplateError> {
+        let mut extra = extra.clone();
+        extra.insert("enable_thinking".to_string(), Value::from(false));
+        extra.insert("thinking".to_string(), Value::from(false));
+        let mut text = self.render(messages, tools, true, &extra)?;
+        if text.trim_end_matches('\n').ends_with("<think>") {
+            text.push_str("\n</think>\n\n");
+        }
+        Ok(text)
+    }
+
+    /// What a no-think prompt puts after the assistant token, from the first
+    /// reasoning tag on (`<think>\n\n</think>\n\n`, or `</think>`): the block
+    /// a model asked not to reason is trained to follow. `None` when the
+    /// template's no-think prompt has no such tag - a model that never reasons.
+    #[must_use]
+    pub fn no_think_block(&self) -> Option<String> {
+        let probe = || parse_json_ordered(r#"[{"role":"user","content":"x"}]"#).ok();
+        let plain = self.render(probe()?, None, false, &BTreeMap::new()).ok()?;
+        let asked = self.render_no_think(probe()?, None, &BTreeMap::new()).ok()?;
+        let tail = asked.strip_prefix(plain.as_str())?;
+        let at = ["<think>", "</think>"].iter().filter_map(|tag| tail.find(tag)).min()?;
+        Some(tail[at..].to_string())
+    }
+
     /// Render the full conversation once, AND determine each message's byte
     /// range within it — for SFT loss masking, which needs to know exactly
     /// which tokens came from which message.
@@ -751,5 +785,37 @@ mod tests {
         let t = ChatTemplate::compile("{{ 'hello world'.startswith('hello') }}").unwrap();
         let out = t.render(Value::from(Vec::<Value>::new()), None, false, &BTreeMap::new()).unwrap();
         assert_eq!(out, "True");
+    }
+
+    const R1_STYLE: &str = "{% for m in messages %}{% if m.role == 'user' %}<U>{{ m.content }}{% else %}<A>{{ m.content }}{% endif %}{% endfor %}{% if add_generation_prompt %}<A><think>\n{% endif %}";
+    const QWEN3_STYLE: &str = "{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<assistant>{% if enable_thinking is defined and enable_thinking is false %}<think>\n\n</think>\n\n{% endif %}{% endif %}";
+    const V31_STYLE: &str = "{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<A>{% if thinking is defined and thinking is true %}<think>{% else %}</think>{% endif %}{% endif %}";
+    const PLAIN: &str = "{% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}{% if add_generation_prompt %}<assistant>{% endif %}";
+
+    /// Every way the models in use are put in no-think mode, by one call: a
+    /// template with a switch (`enable_thinking`, `thinking`) is asked to turn
+    /// it off; one that opens a reasoning block and has no switch is closed
+    /// empty, which is how its model is meant to be run without reasoning; a
+    /// template that never reasons is left as it is.
+    #[test]
+    fn a_template_renders_a_prompt_that_asks_for_no_reasoning() {
+        let messages = || parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        let off = |src: &str| ChatTemplate::compile(src).unwrap().render_no_think(messages(), None, &BTreeMap::new()).unwrap();
+        assert_eq!(off(R1_STYLE), "<user>hi<A><think>\n\n</think>\n\n".replace("<user>", "<U>"));
+        assert_eq!(off(QWEN3_STYLE), "<user>hi<assistant><think>\n\n</think>\n\n");
+        assert_eq!(off(V31_STYLE), "<user>hi<A></think>");
+        assert_eq!(off(PLAIN), "<user>hi<assistant>");
+    }
+
+    /// The block a no-think prompt puts after the assistant token, which a
+    /// model asked without reasoning is trained to follow: `None` for a model
+    /// that never reasons.
+    #[test]
+    fn the_no_think_block_is_what_a_no_think_prompt_adds_after_the_assistant_token() {
+        let block = |src: &str| ChatTemplate::compile(src).unwrap().no_think_block();
+        assert_eq!(block(R1_STYLE).as_deref(), Some("<think>\n\n</think>\n\n"));
+        assert_eq!(block(QWEN3_STYLE).as_deref(), Some("<think>\n\n</think>\n\n"));
+        assert_eq!(block(V31_STYLE).as_deref(), Some("</think>"));
+        assert_eq!(block(PLAIN), None);
     }
 }

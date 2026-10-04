@@ -500,15 +500,16 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
         .then(|| data::chat_template::parse_json_ordered(&format!("[{}]", tools.join(","))).map_err(|e| e.to_string()))
         .transpose()?;
     let mut extra = std::collections::BTreeMap::new();
-    extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(inv.get_bool("enable_thinking").unwrap_or(true)));
-    let mut text = t.render(turns, tools, true, &extra).map_err(|e| e.to_string())?;
-    let mut thinking_open = text.trim_end_matches('\n').ends_with("<think>");
-    // A template that opens a reasoning block has no switch to close it:
-    // switching thinking off closes it empty, so the reply is the answer.
-    if thinking_open && inv.get_bool("enable_thinking") == Some(false) {
-        text.push_str("\n</think>\n\n");
-        thinking_open = false;
+    let text = if inv.get_bool("enable_thinking") == Some(false) {
+        // However this model's template reaches no-think mode (see
+        // `ChatTemplate::render_no_think`), the caller only says so.
+        t.render_no_think(turns, tools, &extra)
+    } else {
+        extra.insert("enable_thinking".to_string(), data::chat_template::Value::from(true));
+        t.render(turns, tools, true, &extra)
     }
+    .map_err(|e| e.to_string())?;
+    let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
     Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw: false })
 }
 

@@ -82,7 +82,7 @@ pub struct ChatFineTune {
     device: Device,
     bf16_base: bool,
     int8_base: bool,
-    keep_reasoning: bool,
+    thinking: bool,
 }
 
 /// The tier the frozen base is held at: int8 over bf16 over fp32.
@@ -124,7 +124,7 @@ impl ChatFineTune {
             device: Device::default(),
             bf16_base: false,
             int8_base: false,
-            keep_reasoning: false,
+            thinking: true,
         }
     }
 
@@ -258,16 +258,18 @@ impl ChatFineTune {
         self
     }
 
-    /// Train the reasoning of the assistant turns it supervises. A reasoning
-    /// model's chat template drops `<think>...</think>` from the assistant
-    /// turns it renders - DeepSeek-R1's keeps only what follows the last
-    /// `</think>` - so a record whose answer follows `<think>\n\n</think>\n\n`
-    /// would train on the answer alone, while the model is asked with its think
-    /// block already open. With this set a supervised turn keeps its
-    /// `</think>`, and the model trains on what it will be asked: scoring
-    /// before and after renders the same way.
-    pub fn keep_reasoning(mut self, on: bool) -> Self {
-        self.keep_reasoning = on;
+    /// Whether the model is trained to reason before it answers (the
+    /// default: records are rendered as the base's template renders them). Off,
+    /// the model is trained for no-think mode: each supervised answer follows
+    /// the block the base's template leaves a no-think prompt in
+    /// ([`data::chat_template::ChatTemplate::no_think_block`]) and keeps it
+    /// through rendering, so training sees what a model asked not to reason is
+    /// asked from - without it, a reasoning model trained on bare answers and
+    /// asked with its think block closed (or open) has never seen that state.
+    /// A base that never reasons is unaffected. Scoring before and after
+    /// renders the same way.
+    pub fn thinking(mut self, on: bool) -> Self {
+        self.thinking = on;
         self
     }
 
@@ -318,6 +320,15 @@ impl ChatFineTune {
         }
         let held_out = self.held_out.as_deref().map(|path| read_checked(path, &model_dir)).transpose()?;
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+        let no_think = if self.thinking { None } else { tmpl.no_think_block() };
+        let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
+        let (train_samples, replay_samples, held_out) = match &no_think {
+            Some(block) => {
+                let answered = |samples: Vec<ChatSample>| samples.iter().map(|s| s.answering_without_thinking(block)).collect::<Vec<_>>();
+                (answered(train_samples), answered(replay_samples), held_out.map(answered))
+            }
+            None => (train_samples, replay_samples, held_out),
+        };
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
@@ -331,7 +342,6 @@ impl ChatFineTune {
         // not ask for; it is the held-out set when there is one.
         let val = held_out.as_deref().unwrap_or(&training[..]);
         let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
-        let render = data::chat::RenderOpts { keep_reasoning: self.keep_reasoning };
         let prepared_dir = out_dir.join(PREPARED_DIR);
         let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
         let block = block_for(prepared.longest_example, self.max_block)?;

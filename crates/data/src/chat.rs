@@ -175,6 +175,30 @@ pub struct ChatSample {
 }
 
 impl ChatSample {
+    /// This sample for a model asked not to reason: each supervised answer
+    /// that has no reasoning block of its own starts with `block` (the
+    /// template's [`ChatTemplate::no_think_block`]), so the model trains on the
+    /// state its no-think prompt leaves it in. Encode it with
+    /// [`RenderOpts::keep_reasoning`], or a reasoning model's template drops
+    /// the block. Turns that are not supervised, that call a tool or that
+    /// carry their own `</think>` are left as they are.
+    #[must_use]
+    pub fn answering_without_thinking(&self, block: &str) -> ChatSample {
+        let messages = self
+            .messages
+            .iter()
+            .map(|m| {
+                let answer = m.role == "assistant" && m.train && m.tool_calls.is_empty() && !m.content.contains(THINK_END);
+                if answer {
+                    ChatMessage { content: format!("{block}{}", m.content), ..m.clone() }
+                } else {
+                    m.clone()
+                }
+            })
+            .collect();
+        ChatSample { messages, tools: self.tools.clone() }
+    }
+
     /// [`ChatSample::encode_with`] at the default [`RenderOpts`].
     pub fn encode(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
         self.encode_with(tok, tmpl, RenderOpts::default())
@@ -521,6 +545,28 @@ pub fn prepare_chat(train: &[ChatExample], val: &[ChatExample], tok: &dyn Tokeni
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    fn answering(content: &str, train: bool) -> ChatMessage {
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train }
+    }
+
+    /// A model asked not to reason is trained on what it is asked from: each
+    /// supervised answer follows the no-think block. An answer not supervised,
+    /// one that already closes a reasoning block, and a turn that calls a tool
+    /// are not touched.
+    #[test]
+    fn a_supervised_answer_follows_the_no_think_block() {
+        let call = ChatMessage { tool_calls: vec![ToolCall { id: Some("c".into()), name: "f".into(), arguments: "{}".into() }], ..answering("", true) };
+        let sample = ChatSample {
+            messages: vec![ChatMessage::user("q"), answering("first", true), answering("context", false), answering("<think>x</think>done", true), call.clone()],
+            tools: Vec::new(),
+        };
+        let out = sample.answering_without_thinking("<think>\n\n</think>\n\n");
+        let said: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(said, ["q", "<think>\n\n</think>\n\nfirst", "context", "<think>x</think>done", ""]);
+        assert_eq!(out.messages[4].tool_calls.len(), 1, "the call is kept");
+    }
 
     #[test]
     fn from_jsonl_parses_a_packed_multi_turn_sample() {
