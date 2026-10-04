@@ -146,3 +146,51 @@ fn an_unregistered_architecture_is_refused_and_names_the_registered_ones() {
         assert!(msg.contains(arch), "the message must name the registered architectures: {msg}");
     }
 }
+
+/// A cap on the training row, shorter than the model's own context, still runs
+/// a cycle to a verdict: the rows are as long as the prompt and the completion
+/// need, not as long as the model could take.
+#[test]
+fn a_cycle_trains_on_rows_capped_below_the_models_context() {
+    if skip() {
+        return;
+    }
+    let dir = tmp("capped");
+    let base = dir.join("base.safetensors");
+    write_base(&base);
+    let outcome = Improve::from_pretrained(base.to_string_lossy().into_owned())
+        .expect("from_pretrained")
+        .adapter_dir(dir.join("adapters"))
+        .work_dir(dir.join("work"))
+        .lora(4)
+        .seed(7)
+        .held_out_seed(8)
+        // The model's context is 32; a prompt of 3 and 8 new tokens need 11.
+        .run(FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] }, FracMatchVerifier, &ImproveOptions { steps: 4, max_new: 8, max_seq_len: Some(16), ..ImproveOptions::default() })
+        .expect("a capped cycle must run");
+    assert!(outcome.p_value.is_finite());
+}
+
+/// A cap that cannot hold the prompt and the completion is an error that says
+/// so, before anything trains.
+#[test]
+fn a_cap_too_small_for_the_prompt_and_the_completion_is_refused_by_name() {
+    let dir = tmp("cap-too-small");
+    let base = dir.join("base.safetensors");
+    write_base(&base);
+    let err = Improve::from_pretrained(base.to_string_lossy().into_owned())
+        .expect("from_pretrained")
+        .adapter_dir(dir.join("adapters"))
+        .work_dir(dir.join("work"))
+        .run(FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4] }, FracMatchVerifier, &ImproveOptions { steps: 1, max_new: 8, max_seq_len: Some(8), ..ImproveOptions::default() })
+        .expect_err("a cap below prompt + max_new must be refused");
+    let msg = format!("{err}");
+    assert!(msg.contains("max_seq_len") && msg.contains("11"), "{msg}");
+}
+
+/// The default leaves the cap off: a cycle trains on the model's own context
+/// unless the caller says otherwise.
+#[test]
+fn the_cap_is_off_by_default() {
+    assert_eq!(ImproveOptions::default().max_seq_len, None);
+}

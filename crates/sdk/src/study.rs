@@ -1017,11 +1017,18 @@ pub struct ImproveOptions {
     pub steps: u32,
     pub lr: f32,
     pub seed: u64,
+    /// The longest training row, in tokens: a prompt and the completion
+    /// sampled for it. `None`, the default, trains on rows as long as the
+    /// model's own context, which a long-context model pays for dearly even
+    /// when its prompts and completions are short; a cap at the longest
+    /// prompt plus `max_new` trains on what is there. A cap that cannot hold
+    /// the longest prompt plus `max_new` is refused before anything trains.
+    pub max_seq_len: Option<usize>,
 }
 
 impl Default for ImproveOptions {
     fn default() -> Self {
-        ImproveOptions { group_size: 4, clip_eps: 0.2, temperature: 0.8, max_new: 32, steps: 100, lr: 5e-3, seed: data::rng::random_seed() }
+        ImproveOptions { group_size: 4, clip_eps: 0.2, temperature: 0.8, max_new: 32, steps: 100, lr: 5e-3, seed: data::rng::random_seed(), max_seq_len: None }
     }
 }
 
@@ -1212,7 +1219,21 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
     let lora = A::lora(imp.rank, alpha);
     let targets = lora.targets.clone();
     let block = base_cfg.block_size();
-    let study_cfg = A::study_config(&base_cfg, lora, block);
+    // The length of a training row: the model's own context unless capped. The
+    // study's config carries it too, since the loss buffers are sized by it.
+    let train_block = opts.max_seq_len.map_or(block, |cap| u32::try_from(cap).unwrap_or(u32::MAX).min(block));
+    let study_cfg = A::study_config(&base_cfg, lora, train_block);
+    let longest_prompt = env.tasks(imp.held_out_seed).iter().map(|t| t.prompt.len()).max().unwrap_or(0);
+    if longest_prompt + opts.max_new > train_block as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "max_seq_len {train_block} cannot hold the longest prompt ({longest_prompt}) plus max_new ({}) = {}: raise max_seq_len or lower max_new",
+                opts.max_new,
+                longest_prompt + opts.max_new
+            ),
+        ));
+    }
 
     // The cycle's own base: the caller's weights plus a ZERO adapter - same
     // reasoning as `DocumentStudy`'s `study-base.safetensors` (this module's
@@ -1226,13 +1247,13 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
     let eval_verifier = verifier.clone();
 
     let rollout = RolloutParams { max_new: opts.max_new, sample: SampleParams { temp: opts.temperature, ..SampleParams::greedy() }, eos: None };
-    let grpo_cfg = GrpoConfig { group_size: opts.group_size, clip_eps: opts.clip_eps, kl_beta: 0.0, seq_len: block as usize, rollout, max_attempts: 8 };
+    let grpo_cfg = GrpoConfig { group_size: opts.group_size, clip_eps: opts.clip_eps, kl_beta: 0.0, seq_len: train_block as usize, rollout, max_attempts: 8 };
     let objective = Grpo::new(env, verifier, grpo_cfg);
 
     let fit = model::FitOpts {
         steps: opts.steps,
         batch_size: 1,
-        block_size: block,
+        block_size: train_block,
         lr: opts.lr,
         min_lr: opts.lr * 0.1,
         warmup: 0,
