@@ -35,7 +35,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::chat::{messages_from_wire, ChatSample, WireMessage, WireRole, WireToolCall};
+use crate::chat::{messages_from_wire, ChatSample, RenderOpts, WireMessage, WireRole, WireToolCall};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::qwen_tokenizer::QwenBpe;
 
@@ -72,9 +72,17 @@ impl PreferenceSample {
     /// Render both candidates through the checkpoint's own chat template,
     /// exactly as [`ChatSample::encode`] renders a training record.
     pub fn encode(&self, tok: &QwenBpe, tmpl: &ChatTemplate) -> Result<(EncodedTurn, EncodedTurn), TemplateError> {
-        let (ids, mask) = self.chosen.encode(tok, tmpl)?;
+        self.encode_with(tok, tmpl, RenderOpts::default())
+    }
+
+    /// [`Self::encode`] with `opts`, as [`ChatSample::encode_with`] renders a
+    /// training record: with `keep_reasoning`, a candidate's closed think
+    /// block stays in its rendered turn instead of being dropped by a
+    /// template that strips reasoning from history.
+    pub fn encode_with(&self, tok: &QwenBpe, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(EncodedTurn, EncodedTurn), TemplateError> {
+        let (ids, mask) = self.chosen.encode_with(tok, tmpl, opts)?;
         let chosen = EncodedTurn { ids, mask };
-        let (ids, mask) = self.rejected.encode(tok, tmpl)?;
+        let (ids, mask) = self.rejected.encode_with(tok, tmpl, opts)?;
         Ok((chosen, EncodedTurn { ids, mask }))
     }
 

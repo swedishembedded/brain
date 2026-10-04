@@ -97,3 +97,28 @@ fn reasoning_is_trained_only_when_kept() {
     let dropped = trained(RenderOpts::default());
     assert!(!dropped.contains("carry one") && dropped.contains("42"), "R1's template drops history reasoning: {dropped:?}");
 }
+
+/// A preference pair trains on the form its model is asked from: with the
+/// reasoning kept, each candidate keeps the closed think block it opens with,
+/// which R1's template would otherwise strip from the rendered turn.
+#[test]
+fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked() {
+    let Some((tok, tmpl)) = checkpoint("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B") else {
+        brain_testutil::skip("DeepSeek-R1-Distill-Qwen-1.5B not downloaded");
+        return;
+    };
+    let turn = |answer: &str| ChatSample {
+        messages: vec![ChatMessage::user("Shall we wait?"), ChatMessage::assistant(&format!("<think>\n\n</think>\n\n{answer}"), true)],
+        tools: Vec::new(),
+    };
+    let pair = data::preference::PreferenceSample { chosen: turn("Do not wait."), rejected: turn("Wait.") };
+    let supervised = |opts: RenderOpts| {
+        let (chosen, rejected) = pair.encode_with(&tok, &tmpl, opts).unwrap();
+        (tok.decode(&chosen.supervised()), tok.decode(&rejected.supervised()))
+    };
+    let (chosen, rejected) = supervised(RenderOpts { keep_reasoning: true });
+    assert!(chosen.contains("<think>\n\n</think>\n\nDo not wait."), "{chosen:?}");
+    assert!(rejected.contains("<think>\n\n</think>\n\nWait."), "{rejected:?}");
+    let (dropped, _) = supervised(RenderOpts::default());
+    assert!(!dropped.contains("</think>"), "R1's template strips it: {dropped:?}");
+}
