@@ -56,7 +56,15 @@ pub fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, P
     let r = brain_modelref::ModelRef::parse(base).map_err(|e| format!("{base}: not a file, and not a valid model ref ({e})"))?;
     let root = store_root.ok_or_else(|| format!("{base}: a model ref, but no models directory resolved (name one, or set BRAIN_MODELS_DIR or HOME)"))?;
     let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
-    Ok((local.weights, local.dir, r.to_string()))
+    Ok((checkpoint_of(&local), local.dir, r.to_string()))
+}
+
+/// What a caller opens as the weights of a store entry. A compound manifest
+/// anchors `weights` at `brain.manifest.json` itself and names the checkpoint
+/// in its `weights` role (the repo directory for a pulled Hugging Face
+/// model); opening the anchor would read the manifest as tensors.
+fn checkpoint_of(local: &brain_modelstore::LocalModel) -> PathBuf {
+    local.roles.as_ref().and_then(|roles| roles.get("weights")).cloned().unwrap_or_else(|| local.weights.clone())
 }
 
 /// A repo directory -> the same `(weights, dir, id)` a `vendor/repo` ref
@@ -70,7 +78,7 @@ fn resolve_repo_dir(dir: &Path) -> Result<(PathBuf, PathBuf, String), String> {
     let root = parent.parent().ok_or_else(unservable)?;
     let r = brain_modelref::ModelRef::parse(&format!("{vendor}/{repo}")).map_err(|_| unservable())?;
     let local = brain_modelstore::Store::new(root).local(&r).ok_or_else(unservable)?;
-    Ok((local.weights, local.dir, r.to_string()))
+    Ok((checkpoint_of(&local), local.dir, r.to_string()))
 }
 
 #[cfg(test)]
@@ -151,6 +159,29 @@ mod tests {
         assert_eq!(path, repo_dir.join("model.brain.safetensors"));
         assert_eq!(base_dir, repo_dir);
         assert_eq!(id, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn resolve_base_opens_a_pulled_checkpoint_directory_not_its_manifest() {
+        // A pulled Hugging Face checkpoint is a compound manifest whose
+        // `weights` role is the repo directory itself. The weights a caller
+        // opens are that directory, never `brain.manifest.json`.
+        let dir = tmp("compound-manifest");
+        let repo_dir = dir.join("deepseek-ai").join("R1-Tiny");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(
+            repo_dir.join("brain.manifest.json"),
+            br#"{"id":"deepseek-ai/R1-Tiny","family":"qwen2","roles":{"weights":"."}}"#,
+        )
+        .unwrap();
+
+        for base in [repo_dir.to_str().unwrap(), "deepseek-ai/R1-Tiny"] {
+            let (path, base_dir, id) = resolve_base(base, Some(&dir)).unwrap();
+            assert_eq!(path, repo_dir, "{base}");
+            assert_eq!(base_dir, repo_dir, "{base}");
+            assert_eq!(id, "deepseek-ai/R1-Tiny");
+        }
     }
 
     #[test]
