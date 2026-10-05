@@ -56,6 +56,11 @@ pub struct HorizonConfig {
     pub knots: Vec<f32>,
     /// Weight of the masked-value objective relative to the event objective.
     pub value_weight: f32,
+    /// The additive baseline in place of the set encoder: summed token
+    /// embeddings read out linearly into each code's log-hazard (no
+    /// attention, no value head). See `model::additive`.
+    #[serde(default)]
+    pub additive: bool,
 }
 
 impl HorizonConfig {
@@ -74,6 +79,7 @@ impl HorizonConfig {
             n_codes,
             knots: vec![0.0, 1.0, 2.5, 4.0],
             value_weight: 0.5,
+            additive: false,
         }
     }
 
@@ -133,6 +139,27 @@ impl HorizonConfig {
             self.d_ff as usize,
             self.rank as usize,
         );
+        if self.additive {
+            let k = self.n_codes as usize;
+            return vec![
+                ("tok.gamma".to_string(), self.vocab as usize * d),
+                ("tok.beta".to_string(), self.vocab as usize * d),
+                (
+                    "value_bins.weight".to_string(),
+                    d * self.value_table() as usize,
+                ),
+                (
+                    "time_bins.weight".to_string(),
+                    d * self.time_table() as usize,
+                ),
+                ("additive.state.weight".to_string(), k * d),
+                (
+                    "additive.time.weight".to_string(),
+                    k * self.time_features() as usize,
+                ),
+                ("hazard.code.bias".to_string(), k),
+            ];
+        }
         let mut v = vec![
             ("tok.gamma".to_string(), self.vocab as usize * d),
             ("tok.beta".to_string(), self.vocab as usize * d),

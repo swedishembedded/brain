@@ -188,11 +188,17 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    and competing absorbing codes, the hazard head, and the closed-form
    cumulative incidence (`survival.rs`, against textbook competing-risk
    values). The loss kernels are held to their formula on the CPU backend.
-   Open: a proportional-hazards baseline on the same contract. Depth zero is
-   NOT one - with no attention layer the summary token never sees the other
-   tokens and its state is a constant - so the baseline needs a pooled path
-   (the mean of the token rows) feeding a linear hazard. Also open: a
-   cross-check of the NLL against an external survival library on a fixture.
+   The baseline on the same contract is `HorizonConfig::additive`: token
+   embeddings summed per subject and read out linearly into each code's
+   log-hazard beside the per-piece time effects - an additive (GAM)
+   proportional-hazards model, with each variable's effect a smooth curve
+   through its soft bins. Gradient-checked like the encoder; it recovers the
+   additive synthetic truth slightly better than the set encoder does, which
+   is the point: on real data the encoder has to beat it. (Depth zero of the
+   encoder is NOT a baseline: with no attention layer the summary token never
+   sees the other tokens.) Open: a cross-check of the event NLL against an
+   external survival library on a fixture (the evaluation arithmetic in
+   `crates/survival` already is).
 2. **Set encoder, value embedding, measurement and masked heads.** Done:
    FiLM over soft bins, time-ago bins, a pre-LN bidirectional set encoder
    with padding masked out of attention, the summary state, the masked-value
@@ -211,9 +217,15 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    propagation; **backbone B** with real-valued RoPE. A synthetic process with
    known continuous-time dynamics (irregular sampling, gaps far longer than
    training gaps) is the extrapolation test.
-4. **Evaluation arithmetic.** Antolini and Uno concordance, IPCW Brier and its
-   integral, D-calibration, calibration slope and intercept at a horizon, all
-   accepting sampling weights, in the crate that owns evaluation arithmetic.
+4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
+   weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
+   and Uno concordance with competing causes; IPCW Brier score and its
+   integral; D-calibration; calibration at a horizon (observed over expected,
+   IPCW logistic recalibration intercept and slope, risk groups). Held to
+   scikit-survival and scikit-learn on reference data
+   (`tools/goldens/survival_metrics_reference.py`). Antolini's
+   time-dependent concordance is not implemented: the horizon concordance
+   the evaluation protocol uses is Uno's.
 5. **Uncertainty.** Seeded ensembles and a conformal post-process over the
    cumulative incidence (conformalised survival distributions); the model
    reports an interval, never a point.

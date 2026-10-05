@@ -28,6 +28,8 @@ use optim::Optim;
 use paramstore::ParamStore;
 use serde_json::Value;
 
+mod additive;
+
 use crate::batch::HostBatch;
 use crate::config::HorizonConfig;
 
@@ -152,6 +154,8 @@ struct Inputs {
     event: DeviceBuffer,
     exposure: DeviceBuffer,
     subject_weight: DeviceBuffer,
+    /// `[B, B*N]` 1 where a token row belongs to the subject (additive mode only).
+    pool: DeviceBuffer,
 }
 
 /// The timeline model on one device, sized for `b` subjects per batch.
@@ -191,6 +195,11 @@ pub struct Horizon {
     d_h: DeviceBuffer,
     d_h0: DeviceBuffer,
     d_az: DeviceBuffer,
+    // additive mode
+    lz: DeviceBuffer,
+    lzrep: DeviceBuffer,
+    tf: DeviceBuffer,
+    d_lz: DeviceBuffer,
     d_z: DeviceBuffer,
     d_vpred: DeviceBuffer,
     d_xf: DeviceBuffer,
@@ -258,6 +267,7 @@ impl Horizon {
             event: input("event", bp * k),
             exposure: input("exposure", bp * k),
             subject_weight: input("subject_weight", bb),
+            pool: input("pool", if cfg.additive { bb * bn } else { 1 }),
         };
         let layers = (0..cfg.n_layers)
             .map(|_| Layer {
@@ -300,6 +310,10 @@ impl Horizon {
             d_h: st(bp * r),
             d_h0: st(bp * r),
             d_az: st(bb * r),
+            lz: st(bb * k),
+            lzrep: st(bp * k),
+            tf: st(bp * k),
+            d_lz: st(bb * k),
             d_z: st(bb * d),
             d_vpred: st(bn * 2),
             d_xf: st(bn * d),
@@ -357,6 +371,12 @@ impl Horizon {
         g.write_f32(&i.event, &hb.event);
         g.write_f32(&i.exposure, &hb.exposure);
         g.write_f32(&i.subject_weight, &hb.subject_weight);
+        if self.cfg.additive {
+            g.write_f32(
+                &i.pool,
+                &additive::pool_matrix(hb, self.cfg.max_tokens as usize),
+            );
+        }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -377,15 +397,16 @@ impl Horizon {
         }
     }
 
-    fn forward_steps(&self) -> Vec<Step> {
+    /// The token embedding `e = gamma[tok] * (value_bins @ Wv^T) + beta[tok]
+    /// + time_bins @ Wt^T`, into `res[0]`; shared by both encoders.
+    fn embedding_steps(&self) -> Vec<Step> {
         let c = &self.cfg;
         let g = &self.gpu;
         let i = &self.inp;
-        let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
-        let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
-        let (bn, bp, b) = (self.b * n, self.b * p, self.b);
+        let (n, d) = (c.max_tokens, c.d_model);
+        let bn = self.b * n;
         let (vt, tt) = (c.value_table(), c.time_table());
-        let mut s = vec![
+        vec![
             g.step(
                 EMBED,
                 &[&i.token_ids, self.w("tok.gamma"), &self.gam],
@@ -413,7 +434,20 @@ impl Horizon {
                 bn * d,
             ),
             g.step(ADD2, &[&self.e1, &self.te, &self.res[0]], &[bn * d], bn * d),
-        ];
+        ]
+    }
+
+    fn forward_steps(&self) -> Vec<Step> {
+        if self.cfg.additive {
+            return self.additive_forward_steps();
+        }
+        let c = &self.cfg;
+        let g = &self.gpu;
+        let i = &self.inp;
+        let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
+        let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
+        let (bn, bp, b) = (self.b * n, self.b * p, self.b);
+        let mut s = self.embedding_steps();
         let a = self.bidir();
         for (l, lb) in self.layers.iter().enumerate() {
             let pn = |name: &str| format!("blocks.{l}.{name}");
@@ -608,6 +642,9 @@ impl Horizon {
     }
 
     fn backward_steps(&self) -> Vec<Step> {
+        if self.cfg.additive {
+            return self.additive_backward_steps();
+        }
         let c = &self.cfg;
         let g = &self.gpu;
         let i = &self.inp;
@@ -615,7 +652,6 @@ impl Horizon {
         let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.b * n, self.b * p, self.b);
-        let (vt, tt) = (c.value_table(), c.time_table());
         let last = c.n_layers as usize;
         let mut s = vec![
             // hazard head
@@ -950,9 +986,20 @@ impl Horizon {
                 bn * d,
             ));
         }
-        // token embedding: e = gamma[tok] * phi + beta[tok] + te
+        s.extend(self.embedding_backward_steps());
+        s
+    }
+
+    /// Backward of [`Self::embedding_steps`] from the gradient in `dres[0]`.
+    fn embedding_backward_steps(&self) -> Vec<Step> {
+        let c = &self.cfg;
+        let g = &self.gpu;
+        let i = &self.inp;
+        let gr = |name: &str| self.ps.g(name);
+        let (d, bn) = (c.d_model, self.b * c.max_tokens);
+        let (vt, tt) = (c.value_table(), c.time_table());
         let d0 = &self.dres[0];
-        s.extend([
+        vec![
             g.step(
                 MATMUL_DW,
                 &[d0, &i.time_bins, gr("time_bins.weight")],
@@ -979,8 +1026,7 @@ impl Horizon {
                 &[bn, vt, d],
                 d * vt,
             ),
-        ]);
-        s
+        ]
     }
 
     /// Submit the forward pass (no readback).
@@ -1006,12 +1052,15 @@ impl Horizon {
             .iter()
             .map(|&x| x as f64)
             .sum();
-        let value: f64 = self
-            .gpu
-            .read(&self.vloss, bn)
-            .iter()
-            .map(|&x| x as f64)
-            .sum();
+        let value: f64 = if c.additive {
+            0.0 // no value head
+        } else {
+            self.gpu
+                .read(&self.vloss, bn)
+                .iter()
+                .map(|&x| x as f64)
+                .sum()
+        };
         (event as f32, value as f32)
     }
 
@@ -1023,7 +1072,8 @@ impl Horizon {
 
     /// Accumulate gradients of the last forward's loss.
     pub fn backward(&self) {
-        self.gpu.submit(&[&self.d_az], &self.bwd);
+        self.gpu
+            .submit(&[&self.d_az, &self.d_lz, &self.dres[0]], &self.bwd);
     }
 
     /// Log-hazards of the last forward, `[b, pieces, codes]`.

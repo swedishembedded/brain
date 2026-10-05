@@ -23,7 +23,7 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
             cfg.d_ff as f32
         } else if name == "hazard.code.weight" {
             cfg.rank as f32
-        } else if name == "hazard.time.weight" {
+        } else if name == "hazard.time.weight" || name == "additive.time.weight" {
             cfg.time_features() as f32
         } else {
             d
@@ -58,7 +58,14 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
             vec![0.0; numel]
         } else if name.ends_with("attn.out.weight") || name.ends_with("ffn.down.weight") {
             noise(residual / fan_in(&name).sqrt())
-        } else if name == "hazard.code.weight" || name == "value_head.weight" {
+        } else if name == "additive.state.weight" {
+            // z is a SUM over a subject's tokens: start each token's
+            // contribution to the log-hazard small.
+            noise(0.01 / fan_in(&name).sqrt())
+        } else if name == "hazard.code.weight"
+            || name == "value_head.weight"
+            || name == "additive.time.weight"
+        {
             noise(0.1 / fan_in(&name).sqrt())
         } else {
             noise(1.0 / fan_in(&name).sqrt())

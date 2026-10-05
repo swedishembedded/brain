@@ -29,8 +29,9 @@ pub const SHARED: [&str; 6] = [
     "hazard.code.bias",
 ];
 
-/// A tiny model with a batch that exercises every loss term.
-pub fn fixture(seed: u64) -> Horizon {
+/// A tiny model with a batch that exercises every loss term; `additive`
+/// selects the additive baseline in place of the set encoder.
+pub fn fixture(seed: u64, additive: bool) -> Horizon {
     let (subjects, _) = population(200, seed);
     let has = |code: &str| {
         subjects
@@ -55,15 +56,13 @@ pub fn fixture(seed: u64) -> Horizon {
         },
     )
     .expect("vocab");
-    let cfg = HorizonConfig::tiny(vocab.len(), CODES.len() as u32);
+    let mut cfg = HorizonConfig::tiny(vocab.len(), CODES.len() as u32);
+    cfg.additive = additive;
     let enc: Vec<Encoded> = chosen.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = enc.iter().take(3).collect();
     // Four slots, three subjects: the fourth slot is all padding.
     let hb = assemble(&cfg, &refs, 4, 0.6, &mut data::rng::Rng::new(seed ^ 0x51));
-    assert!(
-        hb.value_state.contains(&1),
-        "fixture hides an exact value"
-    );
+    assert!(hb.value_state.contains(&1), "fixture hides an exact value");
     let init = horizon::init_weights(&cfg, seed);
     let model = Horizon::new(cfg, 4, &init);
     model.set_batch(&hb);
@@ -72,9 +71,29 @@ pub fn fixture(seed: u64) -> Horizon {
 
 /// Directional checks over every tensor plus element-wise checks over [`SHARED`].
 pub fn check_horizon(seed: u64) -> Report {
-    let model = fixture(seed);
+    let model = fixture(seed, false);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x1234);
     for name in SHARED {
+        report
+            .checks
+            .extend(elementwise_check(&model, name, 1e-2).checks);
+    }
+    report
+}
+
+/// The additive baseline: every tensor directionally, and element-wise the
+/// tables its pooling sum and its per-subject fold share across rows.
+pub fn check_horizon_additive(seed: u64) -> Report {
+    let model = fixture(seed, true);
+    let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x4321);
+    for name in [
+        "tok.gamma",
+        "tok.beta",
+        "value_bins.weight",
+        "time_bins.weight",
+        "additive.state.weight",
+        "hazard.code.bias",
+    ] {
         report
             .checks
             .extend(elementwise_check(&model, name, 1e-2).checks);

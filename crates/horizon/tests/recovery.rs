@@ -24,6 +24,20 @@ fn a_trained_model_recovers_the_true_cumulative_incidence() {
     if skip_gpu() {
         return;
     }
+    recovers(false);
+}
+
+/// The truth is additive on the log-hazard scale, so the additive baseline
+/// must recover it too: it is the model the set encoder is compared against.
+#[test]
+fn the_additive_baseline_recovers_an_additive_truth() {
+    if skip_gpu() {
+        return;
+    }
+    recovers(true);
+}
+
+fn recovers(additive: bool) {
     let (train, _) = population(30_000, 1);
     let (held_out, _) = population(5_000, 3);
     let (test, truth) = population(1_500, 2);
@@ -44,6 +58,7 @@ fn a_trained_model_recovers_the_true_cumulative_incidence() {
             0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0,
         ],
         value_weight: 0.2,
+        additive,
     };
     let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let enc_test: Vec<Encoded> = test.iter().map(|s| encode(s, &vocab, &cfg)).collect();
@@ -88,7 +103,7 @@ fn a_trained_model_recovers_the_true_cumulative_incidence() {
             }
             let n = truth_k.len() as f64;
             let (err, base, bias) = (err / n, base / n, bias / n);
-            println!("{code} at {t}: mean |pred - truth| {err:.4}, covariate-blind {base:.4}, bias {bias:+.4}");
+            println!("additive={additive} {code} at {t}: mean |pred - truth| {err:.4}, covariate-blind {base:.4}, bias {bias:+.4}");
             assert!(
                 err < 0.35 * base,
                 "{code} at {t}: error {err:.4} is not well below the covariate-blind {base:.4}"
