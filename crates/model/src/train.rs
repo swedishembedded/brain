@@ -804,6 +804,9 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     // rewriting the whole checkpoint at every improvement cost a real run
     // 19.8 GB of writes to preserve a 20 MB adapter.
     let mut best_held: Option<HashMap<String, Vec<f32>>> = None;
+    // The best parameters were too large to hold and there was no path to
+    // write them to: the returned model is the last one.
+    let mut best_lost = false;
 
     for step in first_step..opts.steps {
         let lr = cosine_lr(step, opts);
@@ -823,16 +826,22 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
                 match watch.observe(eval_loss) {
                     Watch::Improved => {
-                        // Hold the best parameters if they fit, and write them
-                        // once after the loop; a trainable set too large to
-                        // hold falls back to writing the checkpoint here, as
-                        // this always did.
-                        if let Some(p) = out {
-                            match hold_trainable(&model, BEST_IN_MEMORY_FLOATS) {
-                                Some(held) => best_held = Some(held),
-                                None => {
-                                    model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-                                    kept_best = true;
+                        // Hold the best parameters if they fit, and restore
+                        // them into the model (and write them, given a path)
+                        // once after the loop. A trainable set too large to
+                        // hold falls back to writing the checkpoint here; with
+                        // no path to write to, the last parameters are all
+                        // there is, and the run says so when it ends.
+                        match hold_trainable(&model, BEST_IN_MEMORY_FLOATS) {
+                            Some(held) => best_held = Some(held),
+                            None => {
+                                best_held = None;
+                                match out {
+                                    Some(p) => {
+                                        model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+                                        kept_best = true;
+                                    }
+                                    None => best_lost = true,
                                 }
                             }
                         }
@@ -890,18 +899,25 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         }
     }
 
-    // Held parameters are written exactly once, here. Restoring them into the
-    // model first means what lands on disk is the checkpoint the best
-    // held-out loss was measured on, not the last one trained.
-    if let (Some(held), Some(p)) = (best_held.take(), out) {
+    // Held parameters are restored into the model here, so the model returned
+    // - and, given a path, what lands on disk, written exactly once - is the
+    // one the best held-out loss was measured on, not the last one trained.
+    if let Some(held) = best_held.take() {
         for (name, w) in &held {
             model.write_weight(name, w);
         }
         model.poll_wait();
-        let ts = std::time::Instant::now();
-        model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-        println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
-        kept_best = true;
+        match out {
+            Some(p) => {
+                let ts = std::time::Instant::now();
+                model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+                println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+                kept_best = true;
+            }
+            None => println!("restored the best parameters (held-out loss {:.4})", watch.best()),
+        }
+    } else if best_lost {
+        println!("the best parameters were too large to hold and there is no checkpoint path: the model is the last step's");
     }
 
     // The final save would overwrite the best checkpoint with the last one,
@@ -1331,6 +1347,21 @@ mod tests {
         // Step 4's eval (index 3) was the best, and `adamw_step` is called
         // with t = step + 1, so the best parameters are 4.0.
         assert_eq!(saves[0], vec![4.0], "the checkpoint must hold the best step's parameters");
+    }
+
+    /// A caller that keeps the returned model in memory (no checkpoint path)
+    /// gets the best step's parameters too: early stopping without them only
+    /// decides when to stop, and hands back a model trained `patience`
+    /// evaluations past its best.
+    #[test]
+    fn without_a_checkpoint_path_the_returned_model_holds_the_best_parameters() {
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1];
+        let opts = FitOpts { steps: 6, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() };
+        let obj = Curve { evals, next: std::cell::Cell::new(0) };
+        let (_, model) =
+            fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(model.read_weight("w"), vec![4.0], "the returned model must be the best step's");
+        assert!(model.saves.borrow().is_empty(), "nothing is written without a path");
     }
 
     /// Every step runs with the run's AdamW hyperparameters, not constants.
