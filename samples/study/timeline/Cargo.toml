@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/study/timeline` -> `sample-study-timeline`. The Makefile's
+# `samples/%/{build,run}` rules depend on that mapping; `make check/samples`
+# enforces it.
+name = "sample-study-timeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: train a continuous-time timeline model on records with competing outcomes, check it against the true risk, calibrate it into intervals, and save it for serving, through the public brain SDK."
+publish = false
+
+[dependencies]
+# The ONLY brain dependency a sample may have is the SDK facade, and it must
+# NAME the surfaces it uses - see samples/README.md rules 1 and 2. `timeline`
+# is the model and the survival evaluation arithmetic.
+brain = { workspace = true, features = ["timeline"] }
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+# Measured at 26.
+max-brain-crates = 26

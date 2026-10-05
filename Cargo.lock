@@ -5982,6 +5982,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-study-timeline"
+version = "2.0.0"
+dependencies = [
+ "brain",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-text-embed"
 version = "2.0.0"
 dependencies = [

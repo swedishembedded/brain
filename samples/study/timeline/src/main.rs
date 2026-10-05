@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Train a timeline model on irregular records with competing outcomes, check
+//! it against the risk that generated the data, turn its risk into calibrated
+//! intervals, and save it for serving - through the public brain SDK.
+//!
+//! ```text
+//! sample-study-timeline [--out DIR] [--subjects N] [--steps N] [--seed N]
+//! ```
+//!
+//! The data are brain's synthetic population: age-dependent competing deaths
+//! driven by two measurements (one detection-limited) and a diagnosis, a
+//! non-absorbing onset, and an irrelevant covariate - with the true
+//! cumulative incidence of every subject known. The model sees only the
+//! records. On subjects it never saw, its ten-year risk of the first cause of
+//! death is compared with the truth and with a covariate-blind estimate; the
+//! program exits non-zero unless it is closer to the truth and has the lower
+//! Brier score.
+//!
+//! Swedish Embedded AB implements time-to-event prediction from irregular
+//! records for its clients. If your team needs expertise in survival
+//! modelling, competing risks or calibrated risk intervals, you can procure
+//! our services by sending an email to info@swedishembedded.com.
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use brain::survival::brier::brier;
+use brain::survival::calibration::at_horizon;
+use brain::survival::concordance::uno;
+use brain::survival::estimate::{aalen_johansen, censoring};
+use brain::survival::venn_abers::{merged, VennAbers};
+use brain::timeline::synthetic::{population, Truth, CODES};
+use brain::timeline::{observed, Subject};
+use brain::{TimelineModel, TimelineSpec};
+
+const USAGE: &str = "\
+usage: sample-study-timeline [--out DIR] [--subjects N] [--steps N] [--seed N]
+
+  --out DIR        where the saved model and a file of test subjects go
+                   (default: <tmp>/sample-study-timeline)
+  --subjects N     training subjects (default 20000; a fifth as many are held
+                   out for early stopping and calibration, a quarter tested)
+  --steps N        optimizer steps at most (default 3000)
+  --seed N         seed of the weights and batches (default 1)
+";
+
+/// The cause the sample reports on, and the horizon, in years.
+const CAUSE: &str = "death:a";
+const HORIZON: f64 = 10.0;
+/// Test subjects written beside the model for the serving sample.
+const SERVED_SUBJECTS: usize = 20;
+
+struct Args(Vec<String>);
+
+impl Args {
+    fn take(&mut self, flag: &str) -> Option<String> {
+        let i = self.0.iter().position(|a| a == flag)?;
+        if i + 1 >= self.0.len() {
+            return None;
+        }
+        self.0.remove(i);
+        Some(self.0.remove(i))
+    }
+
+    fn parse<T: std::str::FromStr>(&mut self, flag: &str, default: T) -> Result<T, String> {
+        self.take(flag)
+            .map(|v| v.parse().map_err(|_| format!("{flag} {v:?}: not a valid value")))
+            .unwrap_or(Ok(default))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut a = Args(std::env::args().skip(1).collect());
+    if a.0.iter().any(|x| x == "--help" || x == "-h") {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    let parsed = (|| -> Result<(PathBuf, usize, u32, u64), String> {
+        let out = a.take("--out").map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("sample-study-timeline"));
+        let config = (out, a.parse("--subjects", 20_000)?, a.parse("--steps", 3000)?, a.parse("--seed", 1)?);
+        match a.0.first() {
+            Some(extra) => Err(format!("unexpected argument {extra:?}")),
+            None => Ok(config),
+        }
+    })();
+    let (out, n, steps, seed) = match parsed {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    match run(&out, n, steps, seed) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The risk of [`CAUSE`] by [`HORIZON`] per subject, as the model predicts it.
+fn risk(model: &TimelineModel, subjects: &[Subject]) -> brain::Result<Vec<f64>> {
+    Ok(model.predict(subjects)?.iter().map(|p| p.cif(CAUSE, HORIZON).unwrap_or(f64::NAN)).collect())
+}
+
+fn run(out: &Path, n: usize, steps: u32, seed: u64) -> brain::Result<bool> {
+    let (train, _) = population(n, 1);
+    let (held, _) = population(n / 5, 2);
+    let (test, truth): (Vec<Subject>, Vec<Truth>) = population(n / 4, 3);
+    let deaths = ["death:a", "death:b"];
+    let spec = TimelineSpec::new(CODES, deaths)
+        .knots(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0])
+        .max_tokens(8)
+        .steps(steps)
+        .seed(seed);
+    println!("training on {} subjects, early-stopping on {}", train.len(), held.len());
+    let (model, report) = TimelineModel::train(&train, &held, &spec)?;
+    println!("stopped after {} steps; held-out event NLL {:.4}", report.steps, report.held_out_event_nll);
+
+    // The cause of interest first, the other death competing.
+    let obs = observed(&test, &deaths);
+    let g = censoring(&obs);
+    let predicted = risk(&model, &test)?;
+    let true_risk: Vec<f64> = truth.iter().map(|t| t.cif(0, HORIZON)).collect();
+    let blind_value = aalen_johansen(&observed(&train, &deaths), 0).at(HORIZON);
+    let blind = vec![blind_value; test.len()];
+    let error = |r: &[f64]| r.iter().zip(&true_risk).map(|(a, b)| (a - b).abs()).sum::<f64>() / r.len() as f64;
+    let score = |r: &[f64]| brier(r, &obs, 0, HORIZON, &g);
+    let (model_error, blind_error) = (error(&predicted), error(&blind));
+    println!("\n{CAUSE} by {HORIZON} years on {} unseen subjects:", test.len());
+    println!("  mean |risk - true risk|  model {model_error:.4}  covariate-blind {blind_error:.4}");
+    let briers = (score(&predicted), score(&true_risk), score(&blind));
+    if let (Some(m), Some(t), Some(b)) = briers {
+        println!("  IPCW Brier score         model {m:.4}  true risk {t:.4}  covariate-blind {b:.4}");
+    }
+    if let Some(c) = uno(&predicted, &obs, 0, HORIZON, &g) {
+        println!("  Uno concordance          model {c:.3}");
+    }
+
+    // Intervals calibrated on the early-stopping subjects, never trained on.
+    let held_obs = observed(&held, &deaths);
+    let va = VennAbers::at_horizon(&risk(&model, &held)?, &held_obs, 0, HORIZON, &censoring(&held_obs));
+    let intervals: Vec<(f64, f64)> = predicted.iter().map(|&r| va.interval(r, 1.0)).collect();
+    let merged_risk: Vec<f64> = intervals.iter().copied().map(merged).collect();
+    let mut widths: Vec<f64> = intervals.iter().map(|(p0, p1)| p1 - p0).collect();
+    widths.sort_by(f64::total_cmp);
+    let (raw, cal) = (at_horizon(&predicted, &obs, 0, HORIZON, &g, 10), at_horizon(&merged_risk, &obs, 0, HORIZON, &g, 10));
+    println!("  calibration slope        raw {:.3}  Venn-Abers {:.3}", raw.slope, cal.slope);
+    println!("  interval width           median {:.4}  90th percentile {:.4}", widths[widths.len() / 2], widths[widths.len() * 9 / 10]);
+    println!("  first subject            risk {:.4}  interval [{:.4}, {:.4}]  truth {:.4}", predicted[0], intervals[0].0, intervals[0].1, true_risk[0]);
+
+    let dir = out.join("model");
+    model.save(&dir)?;
+    let lines: String = test.iter().take(SERVED_SUBJECTS).map(|s| serde_json::to_string(s).map(|l| l + "\n")).collect::<Result<_, _>>().map_err(|e| brain::Error::Backend(e.to_string()))?;
+    std::fs::write(out.join("subjects.jsonl"), lines)?;
+    println!("\nsaved the model to {} and {SERVED_SUBJECTS} test subjects to {}", dir.display(), out.join("subjects.jsonl").display());
+
+    let better = model_error < blind_error && matches!(briers, (Some(m), _, Some(b)) if m < b);
+    if !better {
+        eprintln!("the model did not beat the covariate-blind estimate");
+    }
+    Ok(better)
+}
