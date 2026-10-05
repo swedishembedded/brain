@@ -1493,6 +1493,7 @@ dependencies = [
  "brain-glmdsa",
  "brain-gpt2",
  "brain-gpu-core",
+ "brain-horizon",
  "brain-kernels",
  "brain-lfm2",
  "brain-ltxv",
@@ -1522,6 +1523,23 @@ dependencies = [
 [[package]]
 name = "brain-hfsm"
 version = "2.0.0"
+
+[[package]]
+name = "brain-horizon"
+version = "2.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-testutil",
+ "bytemuck",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "brain-imaging"

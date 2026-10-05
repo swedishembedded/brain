@@ -97,6 +97,7 @@ pub use sam_hd::{check_sam_hd, check_sam_hd_shared};
 /// of its own. A bespoke [`CheckModel`] harness over the crate's own
 /// `Timesfm3Train`, not the blanket `model::Model` impl: that trait is
 /// LM-shaped (`vocab()`/`block_size()`) and this is a forecaster.
+pub mod horizon;
 pub mod timesfm3;
 pub use timesfm3::{check_timesfm3, check_timesfm3_lora, check_timesfm3_one_layer};
 

@@ -1,7 +1,8 @@
 # horizon - roadmap
 
-`crates/horizon` (planned, nothing implemented yet) - brain's **continuous-time
-subject-timeline model**: it reads the irregular history of one subject
+`crates/horizon` - brain's **continuous-time subject-timeline model** (phases 1
+and 2 below are done; the temporal backbone, evaluation arithmetic,
+uncertainty and serving are not): it reads the irregular history of one subject
 (measurements with values, events, interventions, each at a real-valued time)
 and answers, for any query time in the future, two kinds of question:
 
@@ -171,25 +172,41 @@ bidirectional and causal attention, rope tables, `gdn_chunk_fwd/bwd`,
 
 New, each with a CPU and GPU path, a kernel header and a gradient check:
 
-| Kernel | Why |
-|---|---|
-| `softplus` / `softplus_bwd`, `log1p_exp` | positive rates and hazards outside the GDN gate |
-| `pexp_nll_value` / `pexp_nll_grad` | piecewise-exponential counting-process NLL with an exposure matrix (event mask, exposure per piece), weighted per subject |
-| `cif_closed_form` (+ backward) | competing-risk cumulative incidence from the hazard table, for the calibration-aware loss and inference |
-| `gauss_tobit_nll_value` / `_grad` | heteroscedastic Gaussian NLL with censored-at-limit terms, weighted |
-| `dt_decay_gate` | `-softplus(a) * Δt` fused into the GDN gate input |
+| Kernel | Why | Status |
+|---|---|---|
+| `pexp_nll_value` / `pexp_nll_grad` | piecewise-exponential counting-process NLL with an exposure matrix, weighted per subject | done |
+| `gauss_cens_nll_value` / `_grad` (+ `wgsl/lib/normal.wgsl`) | heteroscedastic Gaussian NLL with censored-at-limit (Tobit) terms, weighted | done |
+| `dt_decay_gate` | `-softplus(a) * Δt` fused into the GDN gate input | phase 3 |
+| `cif_closed_form` (+ backward) | only if a calibration term needs the incidence inside the loss; inference computes it on the host (`survival::Curves`) | not needed yet |
 
 ## 6. Phases
 
-1. **Contract and head-only model.** `timeline-v1` types, vocabulary, the
-   hazard head and its kernels on a static encoder (no backbone). With zero
-   hidden layers this IS a proportional-hazards model on the age timescale,
-   which is the baseline every later phase must beat. Gate: the NLL matches a
-   reference survival library on a fixture to a stated tolerance; gradcheck
-   green on CPU and GPU; a synthetic dataset with known hazards is recovered.
-2. **Set encoder, value embedding, measurement and masked heads.** Gradcheck
-   per block and whole model; an overfit test; a synthetic fixture where a
-   value below a detection limit carries signal that the Tobit term recovers.
+1. **Contract and head-only model.** Done: `timeline-v1` (`timeline.rs`,
+   validated at entry), the fitted vocabulary with quantile value transform
+   (`vocab.rs`), encoding that admits only what is known at the prediction
+   time (`encode.rs`, tested), exact exposure with delayed entry, censoring
+   and competing absorbing codes, the hazard head, and the closed-form
+   cumulative incidence (`survival.rs`, against textbook competing-risk
+   values). The loss kernels are held to their formula on the CPU backend.
+   Open: a proportional-hazards baseline on the same contract. Depth zero is
+   NOT one - with no attention layer the summary token never sees the other
+   tokens and its state is a constant - so the baseline needs a pooled path
+   (the mean of the token rows) feeding a linear hazard. Also open: a
+   cross-check of the NLL against an external survival library on a fixture.
+2. **Set encoder, value embedding, measurement and masked heads.** Done:
+   FiLM over soft bins, time-ago bins, a pre-LN bidirectional set encoder
+   with padding masked out of attention, the summary state, the masked-value
+   head with Tobit states. `gradcheck::horizon::check_horizon` (directional
+   over every tensor, element-wise over the shared tables) passes on the CPU
+   JIT, wgpu and CUDA. `tests/recovery.rs`: trained with held-out early
+   stopping on a synthetic population with known age-dependent competing
+   hazards, a non-absorbing onset, a detection-limited covariate and an
+   irrelevant one, the predicted cumulative incidence on unseen subjects is
+   within a third of the covariate-blind error at 5 and 10 years, with a
+   bias under a fifth of the mean. Found on the way (and fixed, with a
+   regression test): an event lying one ulp past its window end was counted
+   as censored, which biased every hazard down; window ends computed from
+   event times are now inside their window.
 3. **Backbone A** with the physical-time gate and the mean-reverting
    propagation; **backbone B** with real-valued RoPE. A synthetic process with
    known continuous-time dynamics (irregular sampling, gaps far longer than
