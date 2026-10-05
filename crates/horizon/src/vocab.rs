@@ -193,6 +193,26 @@ impl Vocab {
     }
 }
 
+impl Vocab {
+    /// The `q` quantile, in `var`'s own unit, of a forecast `(mu, sigma)` on
+    /// its normal-score scale: the normal quantile mapped back through the
+    /// variable's empirical distribution.
+    pub fn forecast_quantile(&self, var: &str, mu: f64, sigma: f64, q: f64) -> Option<f64> {
+        let y = mu + sigma * model::hostmath::ndtri(q);
+        self.value_at(var, (model::hostmath::log_ndtr(y as f32) as f64).exp())
+    }
+
+    /// The value of numeric `var` at empirical CDF `u` (the inverse of
+    /// [`Vocab::cdf`]: linear between knots, clamped to the observed range).
+    pub fn value_at(&self, var: &str, u: f64) -> Option<f64> {
+        let k = self.knots.get(var)?;
+        let pos = u.clamp(0.0, 1.0) * (k.len() - 1) as f64;
+        let lo = (pos.floor() as usize).min(k.len() - 1);
+        let hi = (lo + 1).min(k.len() - 1);
+        Some(k[lo] + (pos - lo as f64) * (k[hi] - k[lo]))
+    }
+}
+
 /// `n` knots at evenly spaced probabilities over sorted `vals` (linear
 /// interpolation between order statistics).
 fn quantile_knots(sorted: &[f64], n: usize) -> Vec<f64> {
@@ -286,6 +306,21 @@ mod tests {
             assert!(u >= prev, "monotone");
             prev = u;
         }
+    }
+
+    #[test]
+    fn value_at_inverts_the_cdf_between_distinct_knots() {
+        let subjects: Vec<Subject> = (0..50)
+            .map(|i| subject(&i.to_string(), 100.0 + i as f64, "never"))
+            .collect();
+        let codes = vec!["death".to_string()];
+        let v = Vocab::fit(&subjects, &codes, &codes, &FitOptions::default()).unwrap();
+        for x in [100.0, 112.5, 131.0, 149.0] {
+            let back = v.value_at("sbp", v.cdf("sbp", x).unwrap()).unwrap();
+            assert!((back - x).abs() < 1e-9, "{x} -> {back}");
+        }
+        assert_eq!(v.value_at("sbp", 2.0), Some(149.0), "clamped to the range");
+        assert_eq!(v.value_at("nope", 0.5), None);
     }
 
     #[test]

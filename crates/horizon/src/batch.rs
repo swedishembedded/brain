@@ -46,6 +46,18 @@ pub struct HostBatch {
     pub exposure: Vec<f32>,
     /// `[B]` normalised subject weights (sum to 1 over real subjects).
     pub subject_weight: Vec<f32>,
+    /// `[B*F]` the variable each forecast slot asks for (`PAD` when empty).
+    pub forecast_token: Vec<u32>,
+    /// `[B*F]` the subject each forecast slot belongs to.
+    pub forecast_subject: Vec<u32>,
+    /// `[B*F, time_bins]` how long after entry, soft-binned.
+    pub forecast_time: Vec<f32>,
+    /// `[B*F]` normal-score targets.
+    pub forecast_target: Vec<f32>,
+    /// `[B*F]` 0 not scored, else the value state.
+    pub forecast_state: Vec<u32>,
+    /// `[B*F]` normalised forecast-loss weight (includes the configured weight).
+    pub forecast_weight: Vec<f32>,
 }
 
 /// Per-(subject, piece) time features, shared by training and prediction:
@@ -92,6 +104,7 @@ pub fn assemble(
         cfg.n_codes as usize,
         cfg.time_features() as usize,
     );
+    let nfc = cfg.forecasts as usize;
     let mut hb = HostBatch {
         n_subjects: subjects.len(),
         token_ids: vec![PAD; b * n],
@@ -107,7 +120,14 @@ pub fn assemble(
         event: vec![0.0; b * p * k],
         exposure: vec![0.0; b * p * k],
         subject_weight: vec![0.0; b],
+        forecast_token: vec![PAD; b * nfc],
+        forecast_subject: (0..b * nfc).map(|r| (r / nfc.max(1)) as u32).collect(),
+        forecast_time: vec![0.0; b * nfc * cfg.time_bins as usize],
+        forecast_target: vec![0.0; b * nfc],
+        forecast_state: vec![0; b * nfc],
+        forecast_weight: vec![0.0; b * nfc],
     };
+    let mut forecast_total = 0.0f32;
     let wsum: f32 = subjects.iter().map(|s| s.weight).sum();
     let mut masked_weight = 0.0f32;
     for (i, s) in subjects.iter().enumerate() {
@@ -160,6 +180,19 @@ pub fn assemble(
         hb.subject_weight[i] = if wsum > 0.0 { s.weight / wsum } else { 0.0 };
         let feats = piece_features(cfg, s.entry, s.calendar_at_entry);
         hb.time_features[i * p * nf..][..p * nf].copy_from_slice(&feats);
+        for (j, f) in s.forecasts.iter().take(nfc).enumerate() {
+            let slot = i * nfc + j;
+            hb.forecast_token[slot] = f.token;
+            for &(bin, w) in &f.ahead_bins {
+                hb.forecast_time[slot * cfg.time_bins as usize + bin as usize] = w;
+            }
+            if let Some((y, state)) = f.target {
+                hb.forecast_target[slot] = y;
+                hb.forecast_state[slot] = state as u32;
+                hb.forecast_weight[slot] = s.weight;
+                forecast_total += s.weight;
+            }
+        }
         for (code, o) in s.outcomes.iter().enumerate() {
             for (piece, &x) in o.exposure.iter().enumerate() {
                 hb.exposure[(i * p + piece) * k + code] = x;
@@ -168,6 +201,10 @@ pub fn assemble(
                 hb.event[(i * p + piece as usize) * k + code] = 1.0;
             }
         }
+    }
+    if forecast_total > 0.0 {
+        let scale = cfg.forecast_weight / forecast_total;
+        hb.forecast_weight.iter_mut().for_each(|w| *w *= scale);
     }
     if masked_weight > 0.0 {
         let scale = cfg.value_weight / masked_weight;

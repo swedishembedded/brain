@@ -9,7 +9,7 @@ use data::rng::Rng;
 use model::Objective;
 
 use crate::batch::assemble;
-use crate::encode::Encoded;
+use crate::encode::{Encoded, Forecast};
 use crate::model::Horizon;
 
 /// The timeline objective: event NLL plus masked-value NLL on random training
@@ -120,4 +120,48 @@ pub fn predict_states(model: &Horizon, subjects: &[Encoded]) -> Vec<Vec<f32>> {
         out.extend((0..chunk.len()).map(|i| z[i * d..(i + 1) * d].to_vec()));
     });
     out
+}
+
+/// `(mu, sigma)` on the normal-score scale for each subject's forecast
+/// queries (at most `cfg.forecasts` per subject, built with
+/// [`crate::encode::forecast_query`]), in order.
+pub fn predict_forecasts(
+    model: &Horizon,
+    subjects: &[Encoded],
+    queries: &[Vec<Forecast>],
+) -> Result<Vec<Vec<(f32, f32)>>, String> {
+    let nf = model.cfg.forecasts as usize;
+    if subjects.len() != queries.len() {
+        return Err(format!(
+            "{} subjects but {} query lists",
+            subjects.len(),
+            queries.len()
+        ));
+    }
+    if let Some(q) = queries.iter().find(|q| q.len() > nf) {
+        return Err(format!(
+            "{} forecast queries for one subject; the model takes at most {nf}",
+            q.len()
+        ));
+    }
+    let asked: Vec<Encoded> = subjects
+        .iter()
+        .zip(queries)
+        .map(|(s, q)| Encoded {
+            forecasts: q.clone(),
+            ..s.clone()
+        })
+        .collect();
+    let mut out = Vec::with_capacity(subjects.len());
+    for_each_batch(model, &asked, |chunk, m| {
+        let p = m.read_forecasts();
+        for (i, s) in chunk.iter().enumerate() {
+            out.push(
+                (0..s.forecasts.len())
+                    .map(|j| (p[2 * (i * nf + j)], p[2 * (i * nf + j) + 1].exp()))
+                    .collect(),
+            );
+        }
+    });
+    Ok(out)
 }

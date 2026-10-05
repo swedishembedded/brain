@@ -29,6 +29,7 @@ use paramstore::ParamStore;
 use serde_json::Value;
 
 mod additive;
+mod forecast;
 
 use crate::batch::HostBatch;
 use crate::config::HorizonConfig;
@@ -235,6 +236,8 @@ pub struct Horizon {
     ln_inv: DeviceBuffer,
     /// Partial column sums of the two-stage bias gradient.
     bias_part: DeviceBuffer,
+    /// The forecast head, when the configuration asks for one.
+    fc: Option<forecast::ForecastBufs>,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
 }
@@ -350,6 +353,7 @@ impl Horizon {
             ln_mean: st(bn),
             ln_inv: st(bn),
             bias_part: st(BIAS_GRAD_CHUNKS as u64 * (3 * d).max(ff).max(k).max(r)),
+            fc: forecast::ForecastBufs::new(&gpu, &cfg, b),
             fwd: Vec::new(),
             bwd: Vec::new(),
             cfg,
@@ -391,6 +395,9 @@ impl Horizon {
         g.write_f32(&i.event, &hb.event);
         g.write_f32(&i.exposure, &hb.exposure);
         g.write_f32(&i.subject_weight, &hb.subject_weight);
+        if let Some(f) = &self.fc {
+            f.write(g, hb);
+        }
         if self.cfg.additive {
             g.write(
                 &i.pool_mask,
@@ -740,6 +747,7 @@ impl Horizon {
                 bp * k,
             ),
         ]);
+        s.extend(self.forecast_forward_steps());
         s
     }
 
@@ -755,7 +763,10 @@ impl Horizon {
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.b * n, self.b * p, self.b);
         let last = c.n_layers as usize;
-        let mut s = vec![
+        // The forecast head first: its share of the state gradient goes into
+        // d_z (cleared before this list), the hazard head's is added to it.
+        let mut s = self.forecast_backward_steps();
+        s.extend(vec![
             // hazard head
             g.step(
                 PEXP_GRAD,
@@ -812,7 +823,7 @@ impl Horizon {
                 b,
                 d,
                 r,
-                0,
+                1,
             ),
             // value head
             g.step(
@@ -882,7 +893,7 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ),
-        ];
+        ]);
         let a = self.bidir();
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];
@@ -1107,10 +1118,11 @@ impl Horizon {
     }
 
     /// The batch loss of the last forward: the weighted mean event NLL plus
-    /// the weighted value NLL.
+    /// the weighted value NLL and, with a forecast head, the weighted
+    /// forecast NLL.
     pub fn loss(&self) -> f32 {
         let (event, value) = self.loss_parts();
-        event + value
+        event + value + self.forecast_loss() as f32
     }
 
     /// `(event NLL, value NLL)` of the last forward.
@@ -1144,7 +1156,8 @@ impl Horizon {
 
     /// Accumulate gradients of the last forward's loss.
     pub fn backward(&self) {
-        self.gpu.submit(&[&self.d_az, &self.d_lz], &self.bwd);
+        self.gpu
+            .submit(&[&self.d_az, &self.d_lz, &self.d_z], &self.bwd);
     }
 
     /// Log-hazards of the last forward, `[b, pieces, codes]`.

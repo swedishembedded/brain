@@ -213,6 +213,16 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    regression test): an event lying one ulp past its window end was counted
    as censored, which biased every hazard down; window ends computed from
    event times are now inside their window.
+2b. **Forecast head.** Done: a variable's value at a time after entry, from
+   the summary state, the variable and the time ahead (`model::forecast`),
+   trained on future measurements that never enter the encoder (their
+   existence would leak survival into every hazard); censored-Gaussian on the
+   normal-score scale, mapped back through the empirical distribution.
+   Gradient-checked; on a synthetic population with known drifting
+   trajectories (`tests/forecast.rs`) the median forecast at 3 and 5 years
+   is several times closer to the truth than carrying the entry value
+   forward, and the 5th-95th percentile interval holds about nine in ten
+   held-out follow-up measurements. `TimelineModel::forecast` in the SDK.
 3. **Backbone A** with the physical-time gate and the mean-reverting
    propagation; **backbone B** with real-valued RoPE. A synthetic process with
    known continuous-time dynamics (irregular sampling, gaps far longer than

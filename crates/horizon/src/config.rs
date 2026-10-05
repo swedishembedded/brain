@@ -61,6 +61,13 @@ pub struct HorizonConfig {
     /// attention, no value head). See `model::additive`.
     #[serde(default)]
     pub additive: bool,
+    /// Future measurements scored per subject by the forecast head (0: no
+    /// forecast head). See `model::forecast`.
+    #[serde(default)]
+    pub forecasts: u32,
+    /// Weight of the forecast objective relative to the event objective.
+    #[serde(default)]
+    pub forecast_weight: f32,
 }
 
 impl HorizonConfig {
@@ -83,6 +90,8 @@ impl HorizonConfig {
             knots: DEFAULT_KNOTS.to_vec(),
             value_weight: 0.2,
             additive: false,
+            forecasts: 0,
+            forecast_weight: 0.0,
         }
     }
 
@@ -102,6 +111,8 @@ impl HorizonConfig {
             knots: vec![0.0, 1.0, 2.5, 4.0],
             value_weight: 0.5,
             additive: false,
+            forecasts: 0,
+            forecast_weight: 0.0,
         }
     }
 
@@ -128,6 +139,9 @@ impl HorizonConfig {
 
     /// Check the configuration is buildable.
     pub fn validate(&self) -> Result<(), String> {
+        if self.additive && self.forecasts > 0 {
+            return Err("horizon: the additive baseline has no forecast head".into());
+        }
         if !self.d_model.is_multiple_of(self.n_heads) {
             return Err(format!(
                 "horizon: d_model {} is not a multiple of n_heads {}",
@@ -225,6 +239,19 @@ impl HorizonConfig {
             ("hazard.code.weight".to_string(), self.n_codes as usize * r),
             ("hazard.code.bias".to_string(), self.n_codes as usize),
         ]);
+        if self.forecasts > 0 {
+            v.extend([
+                ("forecast.var".to_string(), self.vocab as usize * d),
+                (
+                    "forecast.time.weight".to_string(),
+                    d * self.time_bins as usize,
+                ),
+                ("forecast.hidden.weight".to_string(), d * d),
+                ("forecast.hidden.bias".to_string(), d),
+                ("forecast.out.weight".to_string(), 2 * d),
+                ("forecast.out.bias".to_string(), 2),
+            ]);
+        }
         v
     }
 

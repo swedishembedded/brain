@@ -13,26 +13,28 @@
 
 use horizon::batch::assemble;
 use horizon::encode::{encode, Encoded};
-use horizon::synthetic::{population, CODES};
+use horizon::synthetic::{population_with_followup, CODES};
 use horizon::vocab::{FitOptions, Vocab};
 use horizon::{Horizon, HorizonConfig};
 
 use crate::{directional_check, elementwise_check, Report};
 
 /// The tensors a reverse pass folds or shares across rows.
-pub const SHARED: [&str; 6] = [
+pub const SHARED: [&str; 7] = [
     "tok.gamma",
     "tok.beta",
     "value_bins.weight",
     "time_bins.weight",
     "hazard.state.bias",
     "hazard.code.bias",
+    "forecast.var",
 ];
 
 /// A tiny model with a batch that exercises every loss term; `additive`
-/// selects the additive baseline in place of the set encoder.
+/// selects the additive baseline in place of the set encoder, and the set
+/// encoder carries a forecast head scored on the follow-up measurements.
 pub fn fixture(seed: u64, additive: bool) -> Horizon {
-    let (subjects, _) = population(200, seed);
+    let (subjects, _) = population_with_followup(200, seed);
     let has = |code: &str| {
         subjects
             .iter()
@@ -58,11 +60,16 @@ pub fn fixture(seed: u64, additive: bool) -> Horizon {
     .expect("vocab");
     let mut cfg = HorizonConfig::tiny(vocab.len(), CODES.len() as u32);
     cfg.additive = additive;
+    if !additive {
+        cfg.forecasts = 2;
+        cfg.forecast_weight = 0.7;
+    }
     let enc: Vec<Encoded> = chosen.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = enc.iter().take(3).collect();
     // Four slots, three subjects: the fourth slot is all padding.
     let hb = assemble(&cfg, &refs, 4, 0.6, &mut data::rng::Rng::new(seed ^ 0x51));
     assert!(hb.value_state.contains(&1), "fixture hides an exact value");
+    assert!(additive || hb.forecast_state.iter().any(|&s| s != 0), "fixture scores a forecast");
     let init = horizon::init_weights(&cfg, seed);
     let model = Horizon::new(cfg, 4, &init);
     model.set_batch(&hb);

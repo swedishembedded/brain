@@ -24,9 +24,11 @@
 
 use std::path::Path;
 
-use horizon::encode::{encode, Encoded};
+use horizon::encode::{encode, forecast_query, Encoded};
 use horizon::survival::Curves;
-use horizon::train::{event_nll, predict_log_hazards, predict_states, TimelineObjective};
+use horizon::train::{
+    event_nll, predict_forecasts, predict_log_hazards, predict_states, TimelineObjective,
+};
 use horizon::vocab::{FitOptions, Vocab};
 use horizon::Horizon;
 
@@ -131,6 +133,7 @@ pub struct TimelineSpec {
     mask_rate: f64,
     seed: u64,
     vocab: FitOptions,
+    forecasts: Option<(u32, f32)>,
 }
 
 impl TimelineSpec {
@@ -154,6 +157,7 @@ impl TimelineSpec {
             mask_rate: DEFAULT_MASK_RATE,
             seed: 1,
             vocab: FitOptions::default(),
+            forecasts: None,
         }
     }
     /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
@@ -212,6 +216,13 @@ impl TimelineSpec {
         self.seed = seed;
         self
     }
+    /// Train a forecast head on up to `per_subject` future measurements of
+    /// each subject (observations after its entry), weighted `weight`
+    /// against the event objective; [`TimelineModel::forecast`] needs it.
+    pub fn forecasts(mut self, per_subject: u32, weight: f32) -> Self {
+        self.forecasts = Some((per_subject, weight));
+        self
+    }
     /// Quantile knots per numeric variable, and the subjects a categorical
     /// level needs to get its own token.
     pub fn vocabulary(mut self, knots: usize, min_count: usize) -> Self {
@@ -232,6 +243,10 @@ impl TimelineSpec {
         }
         if let Some(n) = self.max_tokens {
             cfg.max_tokens = n;
+        }
+        if let Some((n, w)) = self.forecasts {
+            cfg.forecasts = n;
+            cfg.forecast_weight = w;
         }
         cfg
     }
@@ -400,6 +415,48 @@ impl TimelineModel {
     /// probing or clustering).
     pub fn states(&self, subjects: &[Subject]) -> Result<Vec<Vec<f32>>> {
         Ok(predict_states(&self.model, &self.encode(subjects)?))
+    }
+
+    /// Quantiles (`levels`, each in `(0, 1)`) of numeric `var`, in its own
+    /// unit, `ahead` after each subject's entry; one list per subject. Needs
+    /// a model trained with [`TimelineSpec::forecasts`].
+    pub fn forecast(
+        &self,
+        subjects: &[Subject],
+        var: &str,
+        ahead: f64,
+        levels: &[f64],
+    ) -> Result<Vec<Vec<f64>>> {
+        if self.model.cfg.forecasts == 0 {
+            return Err(Error::Backend(
+                "this model has no forecast head: train it with TimelineSpec::forecasts".into(),
+            ));
+        }
+        if let Some(l) = levels.iter().find(|l| !(**l > 0.0 && **l < 1.0)) {
+            return Err(Error::Backend(format!(
+                "quantile level {l} is outside (0, 1)"
+            )));
+        }
+        let query = forecast_query(&self.vocab, &self.model.cfg, var, ahead).ok_or_else(|| {
+            Error::Backend(format!("{var} is not a numeric variable of this model"))
+        })?;
+        let enc = self.encode(subjects)?;
+        let queries = vec![vec![query]; enc.len()];
+        let pred = predict_forecasts(&self.model, &enc, &queries).map_err(Error::Backend)?;
+        Ok(pred
+            .iter()
+            .map(|p| {
+                let (mu, sigma) = (p[0].0 as f64, p[0].1 as f64);
+                levels
+                    .iter()
+                    .map(|&q| {
+                        self.vocab
+                            .forecast_quantile(var, mu, sigma, q)
+                            .unwrap_or(f64::NAN)
+                    })
+                    .collect()
+            })
+            .collect())
     }
 
     /// The weighted mean event NLL over `subjects` (lower is better; the

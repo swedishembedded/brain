@@ -71,6 +71,45 @@ pub struct Encoded {
     pub calendar_at_entry: f64,
     /// Per outcome code.
     pub outcomes: Vec<Outcome>,
+    /// Future measurements the forecast head is scored on (at most
+    /// `HorizonConfig::forecasts`, the earliest first).
+    pub forecasts: Vec<Forecast>,
+}
+
+/// A measurement at a time after entry: what the forecast head predicts.
+/// Its value never reaches the encoder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Forecast {
+    /// The variable's token id.
+    pub token: u32,
+    /// How long after entry, in the dataset's unit.
+    pub ahead: f64,
+    /// Soft bins over how long after entry.
+    pub ahead_bins: Vec<(u32, f32)>,
+    /// The normal-score target and its state; `None` for a query to predict.
+    pub target: Option<(f32, ValueState)>,
+}
+
+/// Soft bins over a time difference on the log scale the time-ago axis uses.
+fn span_bins(dt: f64, n: u32) -> Vec<(u32, f32)> {
+    soft_bins((1.0 + dt.max(0.0)).ln() / (1.0 + TIME_AGO_SPAN).ln(), n)
+}
+
+/// A forecast query: the value of numeric `var` `ahead` after entry. `None`
+/// for a variable the vocabulary has no knots for.
+pub fn forecast_query(
+    vocab: &Vocab,
+    cfg: &HorizonConfig,
+    var: &str,
+    ahead: f64,
+) -> Option<Forecast> {
+    vocab.knots.get(var)?;
+    Some(Forecast {
+        token: vocab.numeric_token(var),
+        ahead,
+        ahead_bins: span_bins(ahead, cfg.time_bins),
+        target: None,
+    })
 }
 
 /// Soft weights over `n` evenly spaced bin centres for `x` in `[0, 1]`:
@@ -88,7 +127,7 @@ pub fn soft_bins(x: f64, n: u32) -> Vec<(u32, f32)> {
 
 /// Map an empirical CDF to a normal score, kept off the infinite ends by half
 /// a knot's width.
-fn normal_score(u: f64, knots: usize) -> f32 {
+pub(crate) fn normal_score(u: f64, knots: usize) -> f32 {
     let eps = 0.5 / knots as f64;
     ndtri(u.clamp(eps, 1.0 - eps)) as f32
 }
@@ -175,7 +214,36 @@ pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
         entry: s.entry,
         calendar_at_entry: s.calendar_at_entry,
         outcomes: outcomes(s, vocab, &cfg.knots),
+        forecasts: forecasts(s, vocab, cfg),
     }
+}
+
+/// The subject's future numeric measurements as forecast targets, the
+/// earliest first, at most `cfg.forecasts`.
+fn forecasts(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Vec<Forecast> {
+    if cfg.forecasts == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<Forecast> = s
+        .observations
+        .iter()
+        .filter(|o| o.t > s.entry)
+        .filter_map(|o| {
+            let (x, state) = match &o.value {
+                Value::Number(x) => (*x, ValueState::Exact),
+                Value::Below { below } => (*below, ValueState::Below),
+                Value::Above { above } => (*above, ValueState::Above),
+                Value::Category(_) => return None,
+            };
+            let u = vocab.cdf(&o.var, x)?;
+            let mut f = forecast_query(vocab, cfg, &o.var, o.t - s.entry)?;
+            f.target = Some((normal_score(u, vocab.knots[&o.var].len()), state));
+            Some(f)
+        })
+        .collect();
+    out.sort_by(|a, b| a.ahead.total_cmp(&b.ahead).then(a.token.cmp(&b.token)));
+    out.truncate(cfg.forecasts as usize);
+    out
 }
 
 /// Exposure and event piece per outcome code.

@@ -73,6 +73,42 @@ impl Truth {
     }
 }
 
+/// Standard deviation of the noise around `x1`'s trajectory after entry.
+pub const X1_NOISE: f64 = 0.3;
+/// Times after entry at which [`population_with_followup`] measures `x1`.
+pub const FOLLOW_UP_VISITS: [f64; 3] = [1.0, 3.0, 5.0];
+
+impl Truth {
+    /// The true distribution of `x1` at `ahead` after entry, `(mean, sd)`:
+    /// it drifts up by 0.2 a year in group b and down by 0.05 elsewhere.
+    pub fn x1_at(&self, ahead: f64) -> (f64, f64) {
+        let slope = if self.group_b { 0.2 } else { -0.05 };
+        (self.x1 + slope * ahead, X1_NOISE)
+    }
+}
+
+/// [`population`] with `x1` measured again at [`FOLLOW_UP_VISITS`] after
+/// entry, at each visit the subject was alive and under follow-up for: the
+/// longitudinal measurements a forecast is scored against.
+pub fn population_with_followup(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
+    let (mut subjects, truths) = population(n, seed);
+    let mut rng = Rng::new(seed ^ 0x5EED_F011_0000_0001);
+    for (s, tr) in subjects.iter_mut().zip(&truths) {
+        let exit = s.at_risk[0].to;
+        for ahead in FOLLOW_UP_VISITS {
+            if s.entry + ahead < exit {
+                let (mean, sd) = tr.x1_at(ahead);
+                s.observations.push(Observation {
+                    t: s.entry + ahead,
+                    var: "x1".into(),
+                    value: Value::Number(mean + sd * rng.next_gaussian()),
+                });
+            }
+        }
+    }
+    (subjects, truths)
+}
+
 /// `n` subjects and their truths, deterministic in `seed`.
 pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
     let mut rng = Rng::new(seed);

@@ -53,7 +53,10 @@ encoder with a summary token turns the subject into a state; cause-specific
 piecewise-constant hazards read that state together with age and calendar
 time per piece, and cumulative incidence follows in closed form. A masked-
 value objective (Gaussian, with detection-limit terms) trains the encoder on
-the values themselves. `TimelineSpec::additive(true)` trains the additive
+the values themselves. With `TimelineSpec::forecasts`, a forecast head reads
+the same state to predict a variable's distribution at a later time (trained
+on the subjects' future measurements, never fed to the encoder, since a
+later measurement says the subject was alive then). `TimelineSpec::additive(true)` trains the additive
 proportional-hazards baseline on the same inputs instead.
 
 ## SDK
@@ -65,6 +68,8 @@ let spec = TimelineSpec::new(["death:heart", "death:other"], ["death:heart", "de
 let (model, report) = TimelineModel::train(&train, &held_out, &spec)?;
 let p = model.predict(&held_out)?;
 let ten_year_risk = p[0].cif("death:heart", 10.0);
+// With a forecast head (TimelineSpec::forecasts): HbA1c in 5 years: median, 5th and 95th percentiles.
+// let hba1c = model.forecast(&held_out, "hba1c_pct", 5.0, &[0.05, 0.5, 0.95])?;
 model.save("model")?;
 ```
 
