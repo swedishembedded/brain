@@ -117,8 +117,12 @@ fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
+/// The longest Newton step of the recalibration fit, on the log-odds scale.
+const MAX_NEWTON_STEP: f64 = 5.0;
+
 /// Weighted logistic regression of `y` on `[1, x]` (or on the offset `x`
-/// with slope fixed to one when `fixed_slope`), by Newton's method.
+/// with slope fixed to one when `fixed_slope`), by damped Newton steps; NaN
+/// when the system has no solution.
 fn logistic(x: &[f64], y: &[f64], v: &[f64], fixed_slope: bool) -> (f64, f64) {
     let (mut a, mut b) = (0.0, 1.0);
     for _ in 0..100 {
@@ -139,8 +143,15 @@ fn logistic(x: &[f64], y: &[f64], v: &[f64], fixed_slope: bool) -> (f64, f64) {
             let det = haa * hbb - hab * hab;
             ((hbb * ga - hab * gb) / det, (haa * gb - hab * ga) / det)
         };
-        a += da;
-        b += db;
+        // A singular system (no spread in the predictions, separation) has no
+        // fit: not measured, never a number from a division by zero.
+        if !(da.is_finite() && db.is_finite()) {
+            return (f64::NAN, f64::NAN);
+        }
+        // Large weights can overshoot: no step longer than a few units.
+        let scale = (da.abs().max(db.abs()) / MAX_NEWTON_STEP).max(1.0);
+        a += da / scale;
+        b += db / scale;
         if da.abs() + db.abs() < 1e-12 {
             break;
         }
@@ -309,5 +320,21 @@ mod tests {
         let extreme: Vec<f64> = truth.iter().map(|&p| sigmoid(2.0 * logit(p))).collect();
         let over = at_horizon(&extreme, &obs, 0, t, &g, 10);
         assert!((over.slope - 0.5).abs() < 0.05, "{over:?}");
+    }
+
+    #[test]
+    fn predictions_without_spread_have_no_slope() {
+        let obs: Vec<Obs> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Obs::event(1.0, 0)
+                } else {
+                    Obs::censored(5.0)
+                }
+            })
+            .collect();
+        let g = censoring(&obs);
+        let cal = at_horizon(&[0.3; 20], &obs, 0, 2.0, &g, 2);
+        assert!(cal.slope.is_nan(), "{cal:?}");
     }
 }

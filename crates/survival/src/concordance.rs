@@ -118,8 +118,12 @@ fn counts(
 }
 
 /// Harrell's C for `cause`: higher `risk` should mean an earlier event.
-/// `None` when no pair is comparable.
+/// `None` when no pair is comparable or a risk is not a finite number (a NaN
+/// has no rank: it would be counted somewhere, silently).
 pub fn harrell(risk: &[f64], obs: &[Obs], cause: usize) -> Option<f64> {
+    if risk.iter().any(|r| !r.is_finite()) {
+        return None;
+    }
     let (conc, comp) = counts(risk, obs, cause, |_| true, |_| 1.0);
     (comp > 0.0).then(|| conc / comp)
 }
@@ -127,8 +131,11 @@ pub fn harrell(risk: &[f64], obs: &[Obs], cause: usize) -> Option<f64> {
 /// Uno's C for `cause`, truncated at `tau`: cases with `T < tau`, each
 /// weighted by `1 / G(T)^2` with `g` the censoring distribution (estimated on
 /// the TRAINING data, [`crate::estimate::censoring`]). `None` when no pair is
-/// comparable or `G` reaches zero at a case.
+/// comparable, `G` reaches zero at a case, or a risk is not finite.
 pub fn uno(risk: &[f64], obs: &[Obs], cause: usize, tau: f64, g: &Step) -> Option<f64> {
+    if risk.iter().any(|r| !r.is_finite()) {
+        return None;
+    }
     if obs
         .iter()
         .any(|o| o.cause == Some(cause) && o.time < tau && g.at(o.time) <= 0.0)

@@ -197,6 +197,11 @@ pub fn cluster_bootstrap(
         values.len() == weights.len() && values.len() == clusters.len(),
         "one value, weight and cluster per unit"
     );
+    // A non-finite unit would make every resample containing it NaN: no
+    // interval rather than a meaningless one.
+    if values.iter().chain(weights).any(|x| !x.is_finite()) {
+        return None;
+    }
     let mut by: std::collections::BTreeMap<u64, (f64, f64)> = std::collections::BTreeMap::new();
     for ((v, w), c) in values.iter().zip(weights).zip(clusters) {
         let e = by.entry(*c).or_default();

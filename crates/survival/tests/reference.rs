@@ -184,3 +184,16 @@ fn the_trial_effect_matches_statsmodels() {
         );
     }
 }
+
+/// A NaN risk or value is not measured, never silently ranked or averaged.
+#[test]
+fn non_finite_inputs_are_not_measured() {
+    let obs = [Obs::event(1.0, 0), Obs::censored(2.0), Obs::event(3.0, 0)];
+    let g = censoring(&obs);
+    assert!(harrell(&[0.9, f64::NAN, 0.1], &obs, 0).is_none());
+    assert!(uno(&[0.9, 0.5, f64::NAN], &obs, 0, 5.0, &g).is_none());
+    assert!(harrell(&[0.9, 0.5, 0.1], &obs, 0).is_some());
+    let none =
+        survival::compare::cluster_bootstrap(&[1.0, f64::NAN], &[1.0, 1.0], &[1, 2], 10, 0.95, 1);
+    assert!(none.is_none());
+}
