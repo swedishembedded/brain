@@ -68,6 +68,51 @@ pub fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<Subject>> {
         .collect()
 }
 
+/// Each subject's observed outcome among `codes`, for the metrics in
+/// [`crate::survival`]: the time from entry to its first event of any of the
+/// codes inside that code's observation window (its cause is the code's
+/// index in `codes`), else censored at the end of the window of `codes[0]`.
+/// Codes listed together compete: evaluate a cause of death with the other
+/// causes listed after it, a first diagnosis with the causes of death after
+/// it.
+pub fn observed(subjects: &[Subject], codes: &[&str]) -> Vec<survival::Obs> {
+    subjects
+        .iter()
+        .map(|s| {
+            let mut first: Option<(f64, usize)> = None;
+            for e in s.events.iter().filter(|e| e.t > s.entry) {
+                let Some(k) = codes.iter().position(|c| *c == e.code) else {
+                    continue;
+                };
+                let Some(w) = s.window(&e.code) else { continue };
+                // Inside the window, with the same rounding slack the encoder allows.
+                if e.t <= w.to + 1e-9 * w.to.abs().max(1.0) && first.is_none_or(|(t, _)| e.t < t) {
+                    first = Some((e.t, k));
+                }
+            }
+            let weight = s.weight;
+            match first {
+                Some((t, k)) => survival::Obs {
+                    time: t - s.entry,
+                    cause: Some(k),
+                    weight,
+                },
+                None => {
+                    let end = codes
+                        .first()
+                        .and_then(|c| s.window(c))
+                        .map_or(s.entry, |w| w.to);
+                    survival::Obs {
+                        time: end - s.entry,
+                        cause: None,
+                        weight,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 /// What to train: the outcome codes, the model's shape and the optimiser's
 /// schedule. Only the codes are required; everything else has a default.
 #[derive(Clone, Debug)]
@@ -421,6 +466,43 @@ mod tests {
         );
         assert!(!cfg.additive);
         assert!(s.clone().additive(true).config(&vocab).additive);
+    }
+
+    #[test]
+    fn observed_outcomes_compete_and_censor_at_the_window() {
+        let line = |events: &str| {
+            Subject::from_json_line(&format!(
+                r#"{{"subject_id":"a","weight":2,"source":"s","entry":50,"calendar_at_entry":2000,"events":[{events}],"at_risk":[{{"code":"*","from":50,"to":60}}]}}"#
+            ))
+            .unwrap()
+        };
+        let s = [
+            line(r#"{"t":45,"code":"x"},{"t":53,"code":"y"},{"t":55,"code":"x"}"#),
+            line(""),
+            line(r#"{"t":61,"code":"x"}"#),
+        ];
+        let o = observed(&s, &["x", "y"]);
+        assert_eq!(
+            o[0],
+            survival::Obs {
+                time: 3.0,
+                cause: Some(1),
+                weight: 2.0
+            },
+            "y came first; history before entry ignored"
+        );
+        assert_eq!(
+            o[1],
+            survival::Obs {
+                time: 10.0,
+                cause: None,
+                weight: 2.0
+            }
+        );
+        assert_eq!(
+            o[2].cause, None,
+            "an event after the window is not observed"
+        );
     }
 
     #[test]

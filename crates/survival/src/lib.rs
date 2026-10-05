@@ -19,6 +19,8 @@
 //! - [`concordance`]: Harrell's C and Uno's truncated, IPCW-weighted C, with
 //!   competing causes, in `O(n log n)`.
 //! - [`brier`]: the IPCW Brier score at a horizon and its integral.
+//! - [`compare`]: two models on the same data - the corrected resampled
+//!   t-test across folds and a cluster bootstrap over units.
 //! - [`calibration`]: D-calibration over predicted survival, and calibration
 //!   at a horizon (observed-over-expected, IPCW logistic recalibration
 //!   intercept and slope, a risk-group table).
@@ -30,6 +32,7 @@
 
 pub mod brier;
 pub mod calibration;
+pub mod compare;
 pub mod concordance;
 pub mod estimate;
 mod special;

@@ -20,36 +20,46 @@
 use crate::estimate::Step;
 use crate::Obs;
 
+/// Each subject's own term of the IPCW Brier score at `t` (before its
+/// sampling weight): what [`brier`] averages, and what a paired comparison of
+/// two models differences subject by subject. `None` when `G` is zero where
+/// it is needed.
+pub fn brier_terms(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> Option<Vec<f64>> {
+    assert_eq!(cif.len(), obs.len(), "one prediction per subject");
+    let g_t = g.at(t);
+    cif.iter()
+        .zip(obs)
+        .map(|(f, o)| {
+            if o.time <= t {
+                match o.cause {
+                    Some(c) => {
+                        let gi = g.at(o.time);
+                        let y = if c == cause { 1.0 } else { 0.0 };
+                        (gi > 0.0).then(|| (y - f).powi(2) / gi)
+                    }
+                    None => Some(0.0),
+                }
+            } else {
+                (g_t > 0.0).then(|| f * f / g_t)
+            }
+        })
+        .collect()
+}
+
 /// The IPCW Brier score of `cif` (one prediction per subject: the
 /// probability of `cause` by `t`). `g` is the censoring distribution,
 /// estimated on the training data. `None` when `G` is zero where it is needed.
 pub fn brier(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> Option<f64> {
-    assert_eq!(cif.len(), obs.len(), "one prediction per subject");
-    let g_t = g.at(t);
-    let (mut sum, mut weight) = (0.0, 0.0);
-    for (f, o) in cif.iter().zip(obs) {
-        weight += o.weight;
-        let term = if o.time <= t {
-            match o.cause {
-                Some(c) => {
-                    let gi = g.at(o.time);
-                    if gi <= 0.0 {
-                        return None;
-                    }
-                    let y = if c == cause { 1.0 } else { 0.0 };
-                    (y - f).powi(2) / gi
-                }
-                None => 0.0,
-            }
-        } else {
-            if g_t <= 0.0 {
-                return None;
-            }
-            f * f / g_t
-        };
-        sum += o.weight * term;
-    }
-    (weight > 0.0).then(|| sum / weight)
+    let terms = brier_terms(cif, obs, cause, t, g)?;
+    let weight: f64 = obs.iter().map(|o| o.weight).sum();
+    (weight > 0.0).then(|| {
+        terms
+            .iter()
+            .zip(obs)
+            .map(|(x, o)| x * o.weight)
+            .sum::<f64>()
+            / weight
+    })
 }
 
 /// The Brier score integrated over `times` by the trapezoid rule and divided
