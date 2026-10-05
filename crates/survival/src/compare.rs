@@ -115,7 +115,7 @@ pub struct TTest {
     pub df: f64,
     /// Two-sided p-value.
     pub p_two_sided: f64,
-    /// 95% confidence interval of the mean difference.
+    /// Confidence interval of the mean difference at level 0.95.
     pub ci95: (f64, f64),
 }
 
