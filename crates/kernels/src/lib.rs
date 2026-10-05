@@ -424,6 +424,16 @@ pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 pub const GATE_ROW_DG: &str = include_str!("../wgsl/gate_row_dg.wgsl");
 /// `wgsl/gate_row_dh.wgsl`
 pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
+/// `wgsl/gauss_cens_nll_grad.wgsl`, after `wgsl/lib/{normal}.wgsl`
+pub const GAUSS_CENS_NLL_GRAD: &str = concat!(
+    include_str!("../wgsl/lib/normal.wgsl"),
+    include_str!("../wgsl/gauss_cens_nll_grad.wgsl"),
+);
+/// `wgsl/gauss_cens_nll_value.wgsl`, after `wgsl/lib/{normal}.wgsl`
+pub const GAUSS_CENS_NLL_VALUE: &str = concat!(
+    include_str!("../wgsl/lib/normal.wgsl"),
+    include_str!("../wgsl/gauss_cens_nll_value.wgsl"),
+);
 /// `wgsl/gdn_add_identity.wgsl`
 pub const GDN_ADD_IDENTITY: &str = include_str!("../wgsl/gdn_add_identity.wgsl");
 /// `wgsl/gdn_chunk_cumsum_step.wgsl`
@@ -879,6 +889,10 @@ pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_
 pub const PAGED_KV_APPEND_BATCHED_WORD: &str = include_str!("../wgsl/paged_kv_append_batched_word.wgsl");
 /// `wgsl/paged_kv_append_i8_clipped_batched.wgsl`
 pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
+/// `wgsl/pexp_nll_grad.wgsl`
+pub const PEXP_NLL_GRAD: &str = include_str!("../wgsl/pexp_nll_grad.wgsl");
+/// `wgsl/pexp_nll_value.wgsl`
+pub const PEXP_NLL_VALUE: &str = include_str!("../wgsl/pexp_nll_value.wgsl");
 /// `wgsl/pinball_grad_w.wgsl`
 pub const PINBALL_GRAD_W: &str = include_str!("../wgsl/pinball_grad_w.wgsl");
 /// `wgsl/pinball_value_w.wgsl`
@@ -1428,6 +1442,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
+    ("gauss_cens_nll_grad", GAUSS_CENS_NLL_GRAD),
+    ("gauss_cens_nll_value", GAUSS_CENS_NLL_VALUE),
     ("gdn_add_identity", GDN_ADD_IDENTITY),
     ("gdn_chunk_cumsum_step", GDN_CHUNK_CUMSUM_STEP),
     ("gdn_chunk_reverse_cumsum_step", GDN_CHUNK_REVERSE_CUMSUM_STEP),
@@ -1641,6 +1657,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
     ("paged_kv_append_batched_word", PAGED_KV_APPEND_BATCHED_WORD),
     ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
+    ("pexp_nll_grad", PEXP_NLL_GRAD),
+    ("pexp_nll_value", PEXP_NLL_VALUE),
     ("pinball_grad_w", PINBALL_GRAD_W),
     ("pinball_value_w", PINBALL_VALUE_W),
     ("pixel_shuffle", PIXEL_SHUFFLE),

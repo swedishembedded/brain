@@ -157,6 +157,63 @@ pub fn gelu_exact(x: f32) -> f32 {
     0.5 * x * (1.0 + erf(x * std::f32::consts::FRAC_1_SQRT_2))
 }
 
+/// `log erfc(z)` for `z >= 0`, in log space so the tail never underflows:
+/// the Chebyshev-fitted `erfcc` form (fractional error below 1.2e-7). The host
+/// twin of `wgsl/lib/normal.wgsl`'s `normal_log_erfc_pos`, same formula and
+/// same evaluation order.
+pub fn log_erfc_pos(z: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.5 * z);
+    let poly = -1.265_512_2
+        + t * (1.000_023_7
+            + t * (0.374_091_96
+                + t * (0.096_784_18
+                    + t * (-0.186_288_06
+                        + t * (0.278_868_07 + t * (-1.135_204 + t * (1.488_515_9 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
+    t.ln() - z * z + poly
+}
+
+/// `log Phi(x)`, the log of the standard normal CDF, finite far into the
+/// lower tail. Host twin of `normal_log_cdf` in `wgsl/lib/normal.wgsl`.
+pub fn log_ndtr(x: f32) -> f32 {
+    let z = -x * std::f32::consts::FRAC_1_SQRT_2;
+    if z >= 0.0 {
+        -std::f32::consts::LN_2 + log_erfc_pos(z)
+    } else {
+        -std::f32::consts::LN_2 + (2.0 - log_erfc_pos(-z).exp()).ln()
+    }
+}
+
+/// The inverse Mills ratio `phi(x) / Phi(x)`: the derivative of
+/// [`log_ndtr`]. Host twin of `normal_mills` in `wgsl/lib/normal.wgsl`.
+pub fn normal_mills(x: f32) -> f32 {
+    const HALF_LOG_2PI: f32 = 0.918_938_5;
+    (-0.5 * x * x - HALF_LOG_2PI - log_ndtr(x)).exp()
+}
+
+/// The standard normal quantile function `Phi^-1(p)` for `p` in `(0, 1)`, in
+/// f64 (Acklam's rational approximation, relative error below 1.2e-9). Host
+/// preprocessing only - mapping an empirical CDF to normal scores - so there is
+/// no kernel twin. Panics outside `(0, 1)`: a caller passing 0 or 1 has an
+/// unclamped empirical CDF, which is its defect to fix, not one to hide here.
+pub fn ndtri(p: f64) -> f64 {
+    assert!(p > 0.0 && p < 1.0, "ndtri: p = {p} is outside (0, 1)");
+    const A: [f64; 6] = [-3.969_683_028_665_376e1, 2.209_460_984_245_205e2, -2.759_285_104_469_687e2, 1.383_577_518_672_69e2, -3.066_479_806_614_716e1, 2.506_628_277_459_239];
+    const B: [f64; 5] = [-5.447_609_879_822_406e1, 1.615_858_368_580_409e2, -1.556_989_798_598_866e2, 6.680_131_188_771_972e1, -1.328_068_155_288_572e1];
+    const C: [f64; 6] = [-7.784_894_002_430_293e-3, -3.223_964_580_411_365e-1, -2.400_758_277_161_838, -2.549_732_539_343_734, 4.374_664_141_464_968, 2.938_163_982_698_783];
+    const D: [f64; 4] = [7.784_695_709_041_462e-3, 3.224_671_290_700_398e-1, 2.445_134_137_142_996, 3.754_408_661_907_416];
+    const P_LOW: f64 = 0.024_25;
+    let tail = |q: f64| (((((C[0] * q + C[1]) * q + C[2]) * q + C[3]) * q + C[4]) * q + C[5]) / ((((D[0] * q + D[1]) * q + D[2]) * q + D[3]) * q + 1.0);
+    if p < P_LOW {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p <= 1.0 - P_LOW {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((A[0] * r + A[1]) * r + A[2]) * r + A[3]) * r + A[4]) * r + A[5]) * q / (((((B[0] * r + B[1]) * r + B[2]) * r + B[3]) * r + B[4]) * r + 1.0)
+    } else {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    }
+}
+
 /// SiLU / swish: `x * sigmoid(x)`.
 #[inline]
 pub fn silu(x: f32) -> f32 {
@@ -526,6 +583,126 @@ mod tests {
         let got = rmsnorm_rows(&x, &g, rows, d, eps);
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
             assert!((a - b).abs() < 1e-5, "element {i}: host {a} vs wgsl {b}");
+        }
+    }
+
+    /// `log Phi` against values computed in arbitrary precision (mpmath,
+    /// `log(ncdf(x))`), deep in the lower tail where `ln(Phi(x))` in plain f32
+    /// would be `-inf`, at zero, and in the upper tail where `Phi -> 1`.
+    #[test]
+    fn log_ndtr_is_accurate_from_the_far_tail_to_the_upper_half() {
+        let cases: [(f32, f64); 6] = [
+            (-30.0, -454.321_243_956_343_2),
+            (-10.0, -53.231_285_150_512_47),
+            (-5.0, -15.064_998_393_988_725),
+            (0.0, -std::f64::consts::LN_2),
+            (2.0, -0.023_012_909_328_963_488),
+            (6.0, -9.865_876_455_243_757e-10),
+        ];
+        for (x, want) in cases {
+            let got = log_ndtr(x) as f64;
+            // Relative in the tail; absolute near zero, where an f32 CDF close
+            // to one cannot resolve its distance from one below ~1e-7.
+            let tol = (1e-6 * want.abs()).max(1e-7);
+            assert!((got - want).abs() <= tol, "log_ndtr({x}) = {got}, want {want}");
+        }
+        // The Mills ratio is the derivative of log Phi: a central difference agrees.
+        for x in [-8.0f32, -2.0, 0.0, 1.5] {
+            let h = 1e-2f32;
+            let fd = (log_ndtr(x + h) - log_ndtr(x - h)) / (2.0 * h);
+            assert!((normal_mills(x) - fd).abs() < 2e-3 * normal_mills(x).max(1.0), "mills({x})");
+        }
+    }
+
+    /// The normal quantile against arbitrary-precision values (mpmath,
+    /// `sqrt(2) * erfinv(2p - 1)`), in both tails and the centre.
+    #[test]
+    fn ndtri_matches_arbitrary_precision_quantiles() {
+        let cases = [
+            (1e-6, -4.753_424_308_822_899),
+            (0.001, -3.090_232_306_167_813_5),
+            (0.025, -1.959_963_984_540_054_2),
+            (0.5, 0.0),
+            (0.8, 0.841_621_233_572_914_4),
+            (0.975, 1.959_963_984_540_053_9),
+            (0.999_999, 4.753_424_308_817_088),
+        ];
+        for (p, want) in cases {
+            let got = ndtri(p);
+            assert!((got - want).abs() <= 2e-9 * (1.0 + want.abs()), "ndtri({p}) = {got}, want {want}");
+        }
+    }
+
+    /// The censored-Gaussian loss kernels against the host formula they
+    /// implement, every state, through the CPU backend.
+    #[test]
+    fn gauss_cens_nll_kernels_match_the_host_formula() {
+        let mu = [0.3f32, -1.0, 2.0, 0.0, 0.5];
+        let ls = [0.1f32, -0.4, 0.7, 0.0, -0.2];
+        let y = [1.0f32, -9.0, 1.5, 3.0, 0.4];
+        let state = [1u32, 2, 3, 0, 2];
+        let w = [0.5f32, 1.0, 2.0, 1.0, 0.25];
+        let pred: Vec<f32> = mu.iter().zip(&ls).flat_map(|(&m, &l)| [m, l]).collect();
+        let n = mu.len();
+        let gpu = gpu_core::Gpu::new_cpu(&[
+            ("gauss_cens_nll_value", kernels::GAUSS_CENS_NLL_VALUE),
+            ("gauss_cens_nll_grad", kernels::GAUSS_CENS_NLL_GRAD),
+        ]);
+        let pb = gpu.storage_init("pred", &pred);
+        let yb = gpu.storage_init("y", &y);
+        let sb = gpu.buffer("state", 4 * n as u64, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+        gpu.write(&sb, &state);
+        let wb = gpu.storage_init("w", &w);
+        let ob = gpu.storage(n as u64);
+        let gb = gpu.storage(2 * n as u64);
+        let steps = [
+            gpu.step(0, &[&pb, &yb, &sb, &wb, &ob], &[n as u32], n as u32),
+            gpu.step(1, &[&pb, &yb, &sb, &wb, &gb], &[n as u32], n as u32),
+        ];
+        gpu.submit(&[], &steps);
+        let (val, grad) = (gpu.read(&ob, n), gpu.read(&gb, 2 * n));
+        for i in 0..n {
+            let (sig, z) = (ls[i].exp(), (y[i] - mu[i]) / ls[i].exp());
+            let (want, dmu, dls) = match state[i] {
+                0 => (0.0, 0.0, 0.0),
+                1 => (0.5 * z * z + ls[i] + 0.918_938_5, -z / sig, 1.0 - z * z),
+                2 => (-log_ndtr(z), normal_mills(z) / sig, normal_mills(z) * z),
+                _ => (-log_ndtr(-z), -normal_mills(-z) / sig, -normal_mills(-z) * z),
+            };
+            let close = |a: f32, b: f32| (a - b).abs() <= 1e-5 * (1.0 + b.abs());
+            assert!(close(val[i], w[i] * want), "value {i}: {} vs {}", val[i], w[i] * want);
+            assert!(close(grad[2 * i], w[i] * dmu), "d mu {i}: {} vs {}", grad[2 * i], w[i] * dmu);
+            assert!(close(grad[2 * i + 1], w[i] * dls), "d logsig {i}: {} vs {}", grad[2 * i + 1], w[i] * dls);
+        }
+    }
+
+    /// The piecewise-exponential loss kernels against their formula: two
+    /// subjects, three pieces, two codes, different weights.
+    #[test]
+    fn pexp_nll_kernels_match_the_host_formula() {
+        let (subj, pieces, k) = (2usize, 3usize, 2usize);
+        let n = subj * pieces * k;
+        let loglam: Vec<f32> = (0..n).map(|e| -2.0 + 0.3 * e as f32 - 0.05 * (e * e) as f32).collect();
+        let event: Vec<f32> = (0..n).map(|e| if e == 3 || e == 10 { 1.0 } else { 0.0 }).collect();
+        let expo: Vec<f32> = (0..n).map(|e| [1.0f32, 0.5, 2.0, 0.0][e % 4]).collect();
+        let w = [0.7f32, 1.6];
+        let inv_wsum = 1.0 / (w[0] + w[1]);
+        let gpu = gpu_core::Gpu::new_cpu(&[("pexp_nll_value", kernels::PEXP_NLL_VALUE), ("pexp_nll_grad", kernels::PEXP_NLL_GRAD)]);
+        let (lb, eb, xb, wb) = (gpu.storage_init("l", &loglam), gpu.storage_init("e", &event), gpu.storage_init("x", &expo), gpu.storage_init("w", &w));
+        let (ob, gb) = (gpu.storage(n as u64), gpu.storage(n as u64));
+        let params = [(subj * pieces) as u32, k as u32, pieces as u32, gpu_core::f(inv_wsum)];
+        let steps = [
+            gpu.step(0, &[&lb, &eb, &xb, &wb, &ob], &params, n as u32),
+            gpu.step(1, &[&lb, &eb, &xb, &wb, &gb], &params, n as u32),
+        ];
+        gpu.submit(&[], &steps);
+        let (val, grad) = (gpu.read(&ob, n), gpu.read(&gb, n));
+        for e in 0..n {
+            let s = w[e / (k * pieces)] * inv_wsum;
+            let want = s * (loglam[e].exp() * expo[e] - event[e] * loglam[e]);
+            let dwant = s * (loglam[e].exp() * expo[e] - event[e]);
+            assert!((val[e] - want).abs() <= 1e-6 * (1.0 + want.abs()), "value {e}");
+            assert!((grad[e] - dwant).abs() <= 1e-6 * (1.0 + dwant.abs()), "grad {e}");
         }
     }
 
