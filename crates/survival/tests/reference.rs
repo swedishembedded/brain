@@ -142,3 +142,45 @@ fn every_metric_matches_the_reference_libraries() {
         );
     }
 }
+
+/// The treatment effect with and without a prognostic score, against
+/// statsmodels' OLS with HC3 standard errors
+/// (`tools/goldens/trial_effect_reference.py`).
+#[test]
+fn the_trial_effect_matches_statsmodels() {
+    let r: Value = serde_json::from_str(include_str!("../testdata/effect_reference.json"))
+        .expect("effect_reference.json");
+    let outcome = floats(&r["outcome"]);
+    let treated: Vec<bool> = r["treated"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|x| x.as_bool().expect("bool"))
+        .collect();
+    let score = floats(&r["score"]);
+    for (name, got) in [
+        (
+            "unadjusted",
+            survival::effect::ancova(&outcome, &treated, None).expect("estimable"),
+        ),
+        (
+            "adjusted",
+            survival::effect::ancova(&outcome, &treated, Some(&score)).expect("estimable"),
+        ),
+    ] {
+        let want = &r[name];
+        close(
+            got.estimate,
+            want["estimate"].as_f64().unwrap(),
+            &format!("{name} estimate"),
+        );
+        close(got.se, want["se"].as_f64().unwrap(), &format!("{name} se"));
+        close(got.lo, want["lo"].as_f64().unwrap(), &format!("{name} lo"));
+        close(got.hi, want["hi"].as_f64().unwrap(), &format!("{name} hi"));
+        assert!(
+            (got.p_value - want["p_value"].as_f64().unwrap()).abs() < 1e-7,
+            "{name} p {}",
+            got.p_value
+        );
+    }
+}

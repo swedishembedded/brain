@@ -3,7 +3,7 @@ name = "brain-survival"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Survival estimation and evaluation arithmetic: weighted Kaplan-Meier and Aalen-Johansen, IPCW concordance and Brier score, D-calibration, calibration at a horizon. Pure host f64, no brain dependency."
+description = "Survival estimation and evaluation arithmetic: weighted Kaplan-Meier and Aalen-Johansen, IPCW concordance and Brier score, D-calibration, calibration at a horizon, Venn-Abers intervals, and a randomised treatment effect adjusted by a prognostic score. Pure host f64, no brain dependency."
 
 [lib]
 name = "survival"

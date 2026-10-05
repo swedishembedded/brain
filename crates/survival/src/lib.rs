@@ -24,6 +24,8 @@
 //! - [`calibration`]: D-calibration over predicted survival, and calibration
 //!   at a horizon (observed-over-expected, IPCW logistic recalibration
 //!   intercept and slope, a risk-group table).
+//! - [`effect`]: the effect of an assigned treatment in a randomised trial,
+//!   adjusted by a model's prognostic score (PROCOVA), with HC3 errors.
 //! - [`venn_abers`]: a predicted risk by a horizon as a Venn-Abers interval,
 //!   calibrated by isotonic regression on held-out subjects under IPCW.
 //!
@@ -36,6 +38,7 @@ pub mod brier;
 pub mod calibration;
 pub mod compare;
 pub mod concordance;
+pub mod effect;
 pub mod estimate;
 mod special;
 pub mod venn_abers;

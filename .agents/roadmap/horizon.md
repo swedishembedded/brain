@@ -256,6 +256,12 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    grows. Open: seeded ensembles for the spread due to training, and
    conformalised survival distributions over whole curves (they need
    percentile times inside follow-up, which a low-event cohort rarely has).
+   Interventional arithmetic: `survival::effect` estimates a randomised
+   treatment effect adjusted by a model's prognostic score (PROCOVA, HC3
+   errors), held to statsmodels (`tools/goldens/trial_effect_reference.py`)
+   and, in simulation, keeping its error rate and coverage while narrowing
+   the interval as the score's correlation with the outcome predicts. Open:
+   a trial whose outcome a trained model can score at baseline.
 6. **SDK and serving.** SDK done: `brain::TimelineModel` (`timeline`
    surface, `brain_arch::Domain::Timeline`, architecture row `horizon`,
    `docs/models/horizon.md`) trains with held-out early stopping, predicts
