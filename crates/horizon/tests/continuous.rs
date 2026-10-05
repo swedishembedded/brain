@@ -14,8 +14,8 @@
 //! elapsed time at the rates it learned. Out of distribution it must be the
 //! closer of the two to the best prediction, and in distribution no more
 //! than a quarter worse than the set encoder. The attention arm (rotary
-//! angles from real time) is trained and reported beside them as the
-//! comparison; it is held to nothing.
+//! angles from real time), the comparison, is held to beating the set
+//! encoder out of distribution as well.
 
 use horizon::encode::{encode, Encoded};
 use horizon::saved::Saved;
@@ -142,6 +142,10 @@ fn the_state_across_visits_extrapolates_over_long_gaps() {
     assert!(
         state_far < set_far,
         "out of distribution the state across visits must be closer to the best prediction"
+    );
+    assert!(
+        attn_far < set_far,
+        "out of distribution the attention arm must be closer to the best prediction than the set encoder"
     );
     assert!(
         state_near <= 1.25 * set_near,
