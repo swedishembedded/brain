@@ -9,11 +9,6 @@ use model::hostmath::gaussian;
 
 use crate::config::HorizonConfig;
 
-/// The initial log-hazard of every code: about one event per hundred units of
-/// time at risk, a plausible order for annual adult mortality and harmless
-/// elsewhere (the bias is learned first and fastest).
-const INITIAL_LOG_HAZARD: f32 = -4.6;
-
 /// Initial weights for `cfg`, a pure function of `seed`.
 pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     let residual = 1.0 / (2.0 * cfg.n_layers.max(1) as f32).sqrt();
@@ -50,7 +45,7 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
         } else if name == "value_bins.weight" || name == "time_bins.weight" {
             noise(0.3)
         } else if name.ends_with(".bias") && name.starts_with("hazard.code") {
-            vec![INITIAL_LOG_HAZARD; numel]
+            vec![cfg.initial_log_hazard; numel]
         } else if name.ends_with("ln1.weight")
             || name.ends_with("ln2.weight")
             || name == "ln_f.weight"
@@ -109,7 +104,7 @@ mod tests {
         }
         assert!(a["hazard.code.bias"]
             .iter()
-            .all(|&x| x == INITIAL_LOG_HAZARD));
+            .all(|&x| x == cfg.initial_log_hazard));
         let mut cfg = cfg;
         cfg.visits = 3;
         let s = &init_weights(&cfg, 3)["visit.state"];

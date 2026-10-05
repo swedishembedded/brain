@@ -80,6 +80,46 @@ pub struct HorizonConfig {
     /// What carries the visits to the prediction time (with `visits > 0`).
     #[serde(default)]
     pub backbone: Backbone,
+    /// How the two clocks enter the hazard's time features.
+    #[serde(default)]
+    pub clocks: Clocks,
+    /// Every outcome code's initial log-hazard per unit of time (learned
+    /// first and fastest; it only sets where training starts).
+    #[serde(default = "default_initial_log_hazard")]
+    pub initial_log_hazard: f32,
+}
+
+/// About one event per hundred units of time at risk: a plausible order for
+/// annual adult mortality, and harmless elsewhere.
+fn default_initial_log_hazard() -> f32 {
+    -4.6
+}
+
+/// The subject's clock and the calendar, centred and scaled before they enter
+/// the hazard as `(t - center) / scale` (and the subject clock's square). The
+/// defaults suit human cohorts timed in years; data on another timescale set
+/// their own so the features stay of order one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Clocks {
+    /// The subject clock's centre (age 60 by default).
+    pub subject_center: f64,
+    /// The subject clock's scale.
+    pub subject_scale: f64,
+    /// The calendar's centre (2010 by default).
+    pub calendar_center: f64,
+    /// The calendar's scale.
+    pub calendar_scale: f64,
+}
+
+impl Default for Clocks {
+    fn default() -> Clocks {
+        Clocks {
+            subject_center: 60.0,
+            subject_scale: 20.0,
+            calendar_center: 2010.0,
+            calendar_scale: 10.0,
+        }
+    }
 }
 
 /// What carries a subject's visits to the prediction time.
@@ -119,6 +159,8 @@ impl HorizonConfig {
             forecast_weight: 0.0,
             visits: 0,
             backbone: Backbone::State,
+            clocks: Clocks::default(),
+            initial_log_hazard: default_initial_log_hazard(),
         }
     }
 
@@ -142,6 +184,8 @@ impl HorizonConfig {
             forecast_weight: 0.0,
             visits: 0,
             backbone: Backbone::State,
+            clocks: Clocks::default(),
+            initial_log_hazard: default_initial_log_hazard(),
         }
     }
 
@@ -175,6 +219,9 @@ impl HorizonConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.additive && self.forecasts > 0 {
             return Err("horizon: the additive baseline has no forecast head".into());
+        }
+        if !(self.clocks.subject_scale > 0.0 && self.clocks.calendar_scale > 0.0) {
+            return Err("horizon: clock scales must be positive".into());
         }
         if self.additive && self.visits > 0 {
             return Err("horizon: the additive baseline has no state across visits".into());
@@ -346,6 +393,15 @@ mod tests {
         assert!(bad.validate().is_err());
         assert_eq!(c.pieces(), 3);
         assert_eq!(c.time_features(), 6);
+        let old = r#"{"vocab":10,"max_tokens":8,"d_model":8,"n_layers":1,"n_heads":2,"d_ff":12,"value_bins":4,"time_bins":3,"rank":5,"n_codes":3,"knots":[0.0,1.0,2.5,4.0],"value_weight":0.5}"#;
+        assert_eq!(
+            HorizonConfig::from_json(&serde_json::from_str(old).unwrap()).unwrap(),
+            c,
+            "a checkpoint header from before the clocks were configurable reads as the defaults"
+        );
+        bad = c.clone();
+        bad.clocks.subject_scale = 0.0;
+        assert!(bad.validate().is_err());
         bad = c.clone();
         bad.additive = true;
         bad.visits = 2;

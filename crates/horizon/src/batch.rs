@@ -75,18 +75,20 @@ pub struct HostBatch {
 }
 
 /// Per-(subject, piece) time features, shared by training and prediction:
-/// age at the piece midpoint (centred and scaled, and its square), calendar
-/// time at the midpoint, and a one-hot of the piece.
+/// the subject clock at the piece midpoint (centred and scaled by
+/// `cfg.clocks`, and its square), calendar time at the midpoint (likewise),
+/// and a one-hot of the piece.
 pub fn piece_features(cfg: &HorizonConfig, entry: f64, calendar: f64) -> Vec<f32> {
     let p = cfg.pieces() as usize;
     let mut f = vec![0.0f32; p * cfg.time_features() as usize];
     for (i, k) in cfg.knots.windows(2).enumerate() {
         let mid = 0.5 * (k[0] + k[1]) as f64;
-        let age = ((entry + mid - 60.0) / 20.0) as f32;
+        let ck = &cfg.clocks;
+        let age = ((entry + mid - ck.subject_center) / ck.subject_scale) as f32;
         let row = &mut f[i * cfg.time_features() as usize..][..cfg.time_features() as usize];
         row[0] = age;
         row[1] = age * age;
-        row[2] = ((calendar + mid - 2010.0) / 10.0) as f32;
+        row[2] = ((calendar + mid - ck.calendar_center) / ck.calendar_scale) as f32;
         row[3 + i] = 1.0;
     }
     f
