@@ -8,7 +8,8 @@
 //!   their training data, so their results are positively correlated and the
 //!   naive standard error is too small; the correction inflates the variance
 //!   of the mean difference from `s^2 / J` to `(1/J + n_test/n_train) s^2`.
-//! - [`cluster_bootstrap`]: a percentile interval for a weighted mean of
+//! - [`cluster_bootstrap`] and [`cluster_bootstrap_by`]: a percentile
+//!   interval for a weighted mean (or any statistic) of
 //!   per-unit values (for example per-subject differences in Brier terms on a
 //!   locked test), resampling whole clusters (survey primary sampling units,
 //!   households) with replacement so within-cluster correlation is respected.
@@ -157,6 +158,30 @@ pub struct Interval {
     pub hi: f64,
 }
 
+/// A deterministic stream of indices in `0..n` (splitmix64).
+fn resampler(n: usize, seed: u64) -> impl FnMut() -> usize {
+    let mut state = seed;
+    move || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % n as u64) as usize
+    }
+}
+
+fn percentile_interval(estimate: f64, mut stats: Vec<f64>, level: f64) -> Interval {
+    stats.sort_by(f64::total_cmp);
+    let reps = stats.len();
+    let at = |q: f64| stats[((q * (reps - 1) as f64).round() as usize).min(reps - 1)];
+    let alpha = (1.0 - level) / 2.0;
+    Interval {
+        estimate,
+        lo: at(alpha),
+        hi: at(1.0 - alpha),
+    }
+}
+
 /// A percentile interval at `level` (e.g. 0.95) for the weighted mean of
 /// `values`, resampling whole `clusters` with replacement `reps` times,
 /// deterministic in `seed`.
@@ -179,37 +204,59 @@ pub fn cluster_bootstrap(
         e.1 += w;
     }
     let sums: Vec<(f64, f64)> = by.into_values().collect();
-    if sums.len() < 2 {
+    if sums.len() < 2 || reps == 0 {
         return None;
     }
-    let total = |pick: &mut dyn FnMut() -> usize| {
-        let (mut num, mut den) = (0.0, 0.0);
-        for _ in 0..sums.len() {
-            let (a, b) = sums[pick()];
-            num += a;
-            den += b;
-        }
-        num / den
-    };
     let estimate = sums.iter().map(|s| s.0).sum::<f64>() / sums.iter().map(|s| s.1).sum::<f64>();
-    let mut state = seed;
-    let n = sums.len() as u64;
-    let mut pick = || {
-        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        ((z ^ (z >> 31)) % n) as usize
-    };
-    let mut stats: Vec<f64> = (0..reps).map(|_| total(&mut pick)).collect();
-    stats.sort_by(f64::total_cmp);
-    let at = |q: f64| stats[((q * (reps - 1) as f64).round() as usize).min(reps - 1)];
-    let alpha = (1.0 - level) / 2.0;
-    Some(Interval {
-        estimate,
-        lo: at(alpha),
-        hi: at(1.0 - alpha),
-    })
+    let mut pick = resampler(sums.len(), seed);
+    let stats: Vec<f64> = (0..reps)
+        .map(|_| {
+            let (mut num, mut den) = (0.0, 0.0);
+            for _ in 0..sums.len() {
+                let (a, b) = sums[pick()];
+                num += a;
+                den += b;
+            }
+            num / den
+        })
+        .collect();
+    Some(percentile_interval(estimate, stats, level))
+}
+
+/// A percentile interval at `level` for ANY statistic of a sample of units:
+/// `stat` is computed on the indices of the units in a resample (whole
+/// `clusters` drawn with replacement, a unit appearing once per draw of its
+/// cluster), `reps` times, deterministic in `seed`. Replicates on which
+/// `stat` has no value are dropped; `None` if more than a tenth are.
+pub fn cluster_bootstrap_by(
+    clusters: &[u64],
+    reps: usize,
+    level: f64,
+    seed: u64,
+    stat: impl Fn(&[usize]) -> Option<f64>,
+) -> Option<Interval> {
+    let mut by: std::collections::BTreeMap<u64, Vec<usize>> = std::collections::BTreeMap::new();
+    for (i, c) in clusters.iter().enumerate() {
+        by.entry(*c).or_default().push(i);
+    }
+    let groups: Vec<Vec<usize>> = by.into_values().collect();
+    if groups.len() < 2 || reps == 0 {
+        return None;
+    }
+    let estimate = stat(&(0..clusters.len()).collect::<Vec<_>>())?;
+    let mut pick = resampler(groups.len(), seed);
+    let mut stats = Vec::with_capacity(reps);
+    let mut sample = Vec::with_capacity(clusters.len());
+    for _ in 0..reps {
+        sample.clear();
+        for _ in 0..groups.len() {
+            sample.extend_from_slice(&groups[pick()]);
+        }
+        if let Some(x) = stat(&sample) {
+            stats.push(x);
+        }
+    }
+    (stats.len() * 10 >= reps * 9).then(|| percentile_interval(estimate, stats, level))
 }
 
 #[cfg(test)]
