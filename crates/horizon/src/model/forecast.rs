@@ -149,7 +149,7 @@ impl Horizon {
             self.b,
             self.cfg.vocab,
         );
-        vec![
+        let mut s = vec![
             g.step(
                 GAUSS_GRAD,
                 &[&f.pred, &f.target, &f.state, &f.weight, &f.d_pred],
@@ -158,7 +158,9 @@ impl Horizon {
             ),
             self.bias_grad_part(&f.d_pred, bf, 2),
             self.bias_grad_final(gr("forecast.out.bias"), bf, 2),
-            self.mm_dw(&f.d_pred, &f.h, gr("forecast.out.weight"), bf, d, 2),
+        ];
+        s.extend(self.mm_dw(&f.d_pred, &f.h, gr("forecast.out.weight"), bf, d, 2));
+        s.extend([
             self.mm_dx(
                 &f.d_pred,
                 self.w("forecast.out.weight"),
@@ -171,18 +173,20 @@ impl Horizon {
             g.step(GELU_BWD, &[&f.h0, &f.d_h, &f.d_h0], &[bf * d], bf * d),
             self.bias_grad_part(&f.d_h0, bf, d),
             self.bias_grad_final(gr("forecast.hidden.bias"), bf, d),
-            self.mm_dw(&f.d_h0, &f.q, gr("forecast.hidden.weight"), bf, d, d),
-            self.mm_dx(
-                &f.d_h0,
-                self.w("forecast.hidden.weight"),
-                &f.d_q,
-                bf,
-                d,
-                d,
-                0,
-            ),
-            // q = z[subject] + var[token] + time: the same gradient to all three.
-            self.mm_dw(&f.d_q, &f.time, gr("forecast.time.weight"), bf, nt, d),
+        ]);
+        s.extend(self.mm_dw(&f.d_h0, &f.q, gr("forecast.hidden.weight"), bf, d, d));
+        s.extend([self.mm_dx(
+            &f.d_h0,
+            self.w("forecast.hidden.weight"),
+            &f.d_q,
+            bf,
+            d,
+            d,
+            0,
+        )]);
+        // q = z[subject] + var[token] + time: the same gradient to all three.
+        s.extend(self.mm_dw(&f.d_q, &f.time, gr("forecast.time.weight"), bf, nt, d));
+        s.extend([
             g.step(
                 EMB_BWD,
                 &[&f.token, &f.d_q, gr("forecast.var")],
@@ -195,7 +199,8 @@ impl Horizon {
                 &[bf, d, b],
                 b * d,
             ),
-        ]
+        ]);
+        s
     }
 
     /// The forecast head's loss of the last forward (the weighted NLL).

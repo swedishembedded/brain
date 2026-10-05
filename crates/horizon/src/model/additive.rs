@@ -115,21 +115,23 @@ impl Horizon {
             ),
             self.bias_grad_part(&self.d_loglam, bp, k),
             self.bias_grad_final(gr("hazard.code.bias"), bp, k),
-            self.mm_dw(
-                &self.d_loglam,
-                &i.time_features,
-                gr("additive.time.weight"),
-                bp,
-                nf,
-                k,
-            ),
-            g.step(
-                EMB_BWD,
-                &[&i.piece_subject, &self.d_loglam, &self.d_lz],
-                &[bp, k, b],
-                b * k,
-            ),
-            self.mm_dw(&self.d_lz, &self.z, gr("additive.state.weight"), b, d, k),
+        ];
+        s.extend(self.mm_dw(
+            &self.d_loglam,
+            &i.time_features,
+            gr("additive.time.weight"),
+            bp,
+            nf,
+            k,
+        ));
+        s.extend([g.step(
+            EMB_BWD,
+            &[&i.piece_subject, &self.d_loglam, &self.d_lz],
+            &[bp, k, b],
+            b * k,
+        )]);
+        s.extend(self.mm_dw(&self.d_lz, &self.z, gr("additive.state.weight"), b, d, k));
+        s.extend([
             self.mm_dx(
                 &self.d_lz,
                 self.w("additive.state.weight"),
@@ -145,7 +147,7 @@ impl Horizon {
                 &[b, c.max_tokens, d],
                 bn * d,
             ),
-        ];
+        ]);
         s.extend(self.embedding_backward_steps());
         s
     }

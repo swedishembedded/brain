@@ -280,6 +280,20 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    predict` runs it locally; `tests/caps.rs` holds the served output to the
    in-process prediction.
 
+### Training throughput
+
+`examples/step_profile.rs` times one training step by stage and per kernel
+on the device `BRAIN_BACKEND` selects. The backward pass was dominated by
+reductions over the batch's rows done with a handful of threads: the weight
+gradients, the LayerNorm parameter gradients and the token-table gradients.
+They are now two-stage: the split-K weight gradient on devices with
+workgroup reductions (the CPU keeps its native kernels, other devices the
+one-stage ones), chunked LayerNorm gradients and row-blocked token tables on
+every backend - each gradient-checked on the CPU JIT, wgpu and CUDA, the
+recovery, forecast and extrapolation tests unchanged on CUDA. What remains
+in the step is the shared attention kernels and the narrow forward GEMMs;
+next is recording the step as one replayed tape.
+
 ## 7. What decides between the alternatives
 
 Backbone A vs B, soft bins vs FiLM, quantile vs Gaussian measurement head:

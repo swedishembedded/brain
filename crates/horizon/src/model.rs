@@ -45,8 +45,6 @@ const ADD2: usize = 6;
 const LAYERNORM: usize = 7;
 const LN_STATS: usize = 8;
 const LN_DX: usize = 9;
-const LN_DGAMMA: usize = 10;
-const LN_DBETA: usize = 11;
 const LAYERNORM_ROWS: usize = 12;
 const LN_STATS_ROWS: usize = 13;
 const LN_DX_ROWS: usize = 14;
@@ -74,6 +72,21 @@ const SEGMENT_BCAST: usize = 42;
 const CT_SCAN: usize = 43;
 const CT_SCAN_BWD: usize = 44;
 const ROPE_POS: usize = 45;
+const MATMUL_DW_SPLITK: usize = 46;
+const DW_SPLITK_REDUCE: usize = 47;
+const LN_DGAMMA_PART: usize = 48;
+const EMB_BWD_PART: usize = 49;
+/// Partial gradients the token-table backward may hold at once: bounds its
+/// row blocks for a large vocabulary.
+const EMB_PART_ELEMS: u64 = 1 << 22;
+/// Row blocks of the token-table backward at most.
+const EMB_PART_MAX_BLOCKS: u64 = 64;
+/// Workgroups the split-K weight gradient aims to occupy: a few per
+/// compute unit of a large device, so the contraction over tens of thousands
+/// of rows is spread across the whole card.
+const DW_SPLITK_TARGET_WGS: u32 = 512;
+/// Slices of the split-K weight gradient at most (bounds its scratch).
+const DW_SPLITK_MAX_SLICES: u32 = 128;
 /// Row chunks per column of the two-stage bias gradient: one serial walk
 /// over every row per column is a handful of threads on a wide device.
 const BIAS_GRAD_CHUNKS: u32 = 64;
@@ -109,6 +122,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("ln_stats", kernels::LN_STATS),
     ("layernorm_dx", kernels::LAYERNORM_DX),
+    // Unused since the two-stage LayerNorm gradients; kept so the indices
+    // after them stay put.
     ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
     ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
@@ -146,6 +161,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("ct_state_scan", kernels::CT_STATE_SCAN),
     ("ct_state_scan_bwd", kernels::CT_STATE_SCAN_BWD),
     ("rope_pos", kernels::ROPE_POS),
+    ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+    ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
+    ("layernorm_dgamma_part", kernels::LAYERNORM_DGAMMA_PART),
+    ("emb_bwd_part", kernels::EMB_BWD_PART),
     // Cooperative grad-norm, resolved by name by `optim::Optim`. Kept last:
     // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
@@ -183,6 +202,20 @@ struct Inputs {
     subject_weight: DeviceBuffer,
     /// `[B*N]` 1 for a real, non-summary token row: what the additive mode sums.
     pool_mask: DeviceBuffer,
+}
+
+/// Whether `gpu` takes the split-K weight gradient: a GPU that runs
+/// workgroup-cooperative kernels. The CPU backend keeps its native one-stage
+/// kernels, and so does a device without workgroup reductions.
+fn splitk_dw(gpu: &Gpu) -> bool {
+    gpu.kind() != "cpu" && gpu.caps().workgroup_reductions
+}
+
+/// Row blocks of the token-table backward: as many as fit the partial-sum
+/// budget, at most [`EMB_PART_MAX_BLOCKS`].
+fn emb_blocks(cfg: &HorizonConfig) -> u32 {
+    let per = cfg.vocab as u64 * cfg.d_model as u64;
+    (EMB_PART_ELEMS / per.max(1)).clamp(1, EMB_PART_MAX_BLOCKS) as u32
 }
 
 /// The timeline model on one device, sized for `b` subjects per batch.
@@ -247,6 +280,13 @@ pub struct Horizon {
     ln_inv: DeviceBuffer,
     /// Partial column sums of the two-stage bias gradient.
     bias_part: DeviceBuffer,
+    /// Per-slice partial weight gradients of the split-K path (`None` where
+    /// the device runs the one-stage kernels).
+    dw_part: Option<DeviceBuffer>,
+    /// Per-block partial gradients of the token tables.
+    emb_part: DeviceBuffer,
+    /// Row blocks of the token-table backward.
+    emb_blocks: u32,
     /// The forecast head, when the configuration asks for one.
     fc: Option<forecast::ForecastBufs>,
     /// The state across visits, when the configuration asks for one.
@@ -369,6 +409,19 @@ impl Horizon {
             ln_mean: st(bn),
             ln_inv: st(bn),
             bias_part: st(BIAS_GRAD_CHUNKS as u64 * (3 * d).max(ff).max(k).max(r)),
+            emb_blocks: emb_blocks(&cfg),
+            emb_part: st(emb_blocks(&cfg) as u64 * cfg.vocab as u64 * d),
+            dw_part: splitk_dw(&gpu).then(|| {
+                // The largest weight any backward GEMM writes.
+                let largest = cfg
+                    .param_list()
+                    .iter()
+                    .filter(|(name, _)| name.ends_with(".weight"))
+                    .map(|(_, numel)| *numel as u64)
+                    .max()
+                    .unwrap_or(1);
+                st(DW_SPLITK_MAX_SLICES as u64 * largest)
+            }),
             fc: forecast::ForecastBufs::new(&gpu, &cfg, b),
             bb: backbone::BackboneBufs::new(&gpu, &cfg, b),
             fwd: Vec::new(),
@@ -477,7 +530,11 @@ impl Horizon {
         self.gpu.dispatch(kern, &[dy, w, dx], &[m, k, n, acc], grid)
     }
 
-    /// `dw += dy^T @ x` (`[m, n]^T x [m, k]`).
+    /// `dw += dy^T @ x` (`[m, n]^T x [m, k]`). The contraction runs over the
+    /// batch's rows - tens of thousands - while the output is a small weight,
+    /// so a device that can run workgroup-cooperative kernels splits the
+    /// rows across many workgroups (`matmul_dw_reg_splitk`) and sums the
+    /// slices (`dw_splitk_reduce`); others keep the one-stage kernels.
     #[allow(clippy::too_many_arguments)]
     fn mm_dw(
         &self,
@@ -487,10 +544,69 @@ impl Horizon {
         m: u32,
         k: u32,
         n: u32,
-    ) -> Step {
-        let (kern, grid) =
-            block::pick_gemm(n as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, false);
-        self.gpu.dispatch(kern, &[dy, x, dw], &[m, k, n], grid)
+    ) -> Vec<Step> {
+        let Some(part) = &self.dw_part else {
+            let (kern, grid) =
+                block::pick_gemm(n as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, false);
+            return vec![self.gpu.dispatch(kern, &[dy, x, dw], &[m, k, n], grid)];
+        };
+        let tiles = n.div_ceil(128) * k.div_ceil(128);
+        // Each slice is at least one BK chunk of rows.
+        let slices = DW_SPLITK_TARGET_WGS
+            .div_ceil(tiles)
+            .min(DW_SPLITK_MAX_SLICES)
+            .min(m.div_ceil(8))
+            .max(1);
+        vec![
+            self.gpu.dispatch(
+                MATMUL_DW_SPLITK,
+                &[dy, x, part],
+                &[m, k, n, slices],
+                gpu_core::Dispatch::Workgroups(slices * tiles),
+            ),
+            self.gpu.step(DW_SPLITK_REDUCE, &[part, dw], &[n * k, slices, 1], n * k),
+        ]
+    }
+
+    /// `table += scatter of dx by token` over `rows` rows: the partial sums
+    /// of contiguous row blocks, then the blocks folded into the table.
+    fn emb_grad(&self, tokens: &DeviceBuffer, dx: &DeviceBuffer, table: &DeviceBuffer, rows: u32) -> [Step; 2] {
+        let (d, v, blocks) = (self.cfg.d_model, self.cfg.vocab, self.emb_blocks);
+        [
+            self.gpu.step(
+                EMB_BWD_PART,
+                &[tokens, dx, &self.emb_part],
+                &[rows, d, v, blocks],
+                blocks * v * d,
+            ),
+            self.gpu.step(DW_SPLITK_REDUCE, &[&self.emb_part, table], &[v * d, blocks, 1], v * d),
+        ]
+    }
+
+    /// The LayerNorm parameter gradients of `y = LN(x) * gamma + beta` from
+    /// `dy` (`[rows, d]`), with the row statistics `ln_stats_fwd` left in
+    /// `ln_mean`/`ln_inv`: both as two-stage column reductions over row
+    /// chunks, accumulated into `dgamma` and `dbeta`.
+    fn ln_param_grads(
+        &self,
+        dy: &DeviceBuffer,
+        x: &DeviceBuffer,
+        dgamma: &DeviceBuffer,
+        dbeta: &DeviceBuffer,
+        d: u32,
+        rows: u32,
+    ) -> [Step; 4] {
+        [
+            self.gpu.step(
+                LN_DGAMMA_PART,
+                &[dy, x, &self.ln_mean, &self.ln_inv, &self.bias_part],
+                &[rows, d, BIAS_GRAD_CHUNKS],
+                d * BIAS_GRAD_CHUNKS,
+            ),
+            self.bias_grad_final(dgamma, rows, d),
+            self.bias_grad_part(dy, rows, d),
+            self.bias_grad_final(dbeta, rows, d),
+        ]
     }
 
     /// Stage one of `db += column sums of dy` (`[m, n]`): partial sums over row chunks.
@@ -805,7 +921,9 @@ impl Horizon {
             ),
             self.bias_grad_part(&self.d_loglam, bp, k),
             self.bias_grad_final(gr("hazard.code.bias"), bp, k),
-            self.mm_dw(&self.d_loglam, &self.h, gr("hazard.code.weight"), bp, r, k),
+        ]);
+        s.extend(self.mm_dw(&self.d_loglam, &self.h, gr("hazard.code.weight"), bp, r, k));
+        s.extend(vec![
             self.mm_dx(
                 &self.d_loglam,
                 self.w("hazard.code.weight"),
@@ -821,14 +939,16 @@ impl Horizon {
                 &[bp * r],
                 bp * r,
             ),
-            self.mm_dw(
-                &self.d_h0,
-                &i.time_features,
-                gr("hazard.time.weight"),
-                bp,
-                nf,
-                r,
-            ),
+        ]);
+        s.extend(self.mm_dw(
+            &self.d_h0,
+            &i.time_features,
+            gr("hazard.time.weight"),
+            bp,
+            nf,
+            r,
+        ));
+        s.extend(vec![
             // d_az is cleared before this list runs (emb_bwd accumulates).
             g.step(
                 EMB_BWD,
@@ -838,7 +958,9 @@ impl Horizon {
             ),
             self.bias_grad_part(&self.d_az, b, r),
             self.bias_grad_final(gr("hazard.state.bias"), b, r),
-            self.mm_dw(&self.d_az, &self.z, gr("hazard.state.weight"), b, d, r),
+        ]);
+        s.extend(self.mm_dw(&self.d_az, &self.z, gr("hazard.state.weight"), b, d, r));
+        s.extend(vec![
             self.mm_dx(
                 &self.d_az,
                 self.w("hazard.state.weight"),
@@ -863,7 +985,9 @@ impl Horizon {
             ),
             self.bias_grad_part(&self.d_vpred, bn, 2),
             self.bias_grad_final(gr("value_head.bias"), bn, 2),
-            self.mm_dw(&self.d_vpred, &self.xf, gr("value_head.weight"), bn, d, 2),
+        ]);
+        s.extend(self.mm_dw(&self.d_vpred, &self.xf, gr("value_head.weight"), bn, d, 2));
+        s.extend(vec![
             self.mm_dx(
                 &self.d_vpred,
                 self.w("value_head.weight"),
@@ -887,19 +1011,16 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ),
-            g.step(
-                LN_DGAMMA,
-                &[
-                    &self.d_xf,
-                    &self.res[last],
-                    &self.ln_mean,
-                    &self.ln_inv,
-                    gr("ln_f.weight"),
-                ],
-                &[d, bn],
-                d,
-            ),
-            g.step(LN_DBETA, &[&self.d_xf, gr("ln_f.bias")], &[d, bn], d),
+        ]);
+        s.extend(self.ln_param_grads(
+            &self.d_xf,
+            &self.res[last],
+            gr("ln_f.weight"),
+            gr("ln_f.bias"),
+            d,
+            bn,
+        ));
+        s.extend(vec![
             block::layernorm_dx_bwd(
                 g,
                 &LN_IDS,
@@ -918,7 +1039,7 @@ impl Horizon {
             let pn = |name: &str| format!("blocks.{l}.{name}");
             // MLP
             s.extend(self.bias_grad(&self.dres[l + 1], gr(&pn("ffn.down.bias")), bn, d));
-            s.push(self.mm_dw(
+            s.extend(self.mm_dw(
                 &self.dres[l + 1],
                 &lb.up,
                 gr(&pn("ffn.down.weight")),
@@ -942,7 +1063,7 @@ impl Horizon {
                 bn * ff,
             ));
             s.extend(self.bias_grad(&self.d_up_pre, gr(&pn("ffn.up.bias")), bn, ff));
-            s.push(self.mm_dw(
+            s.extend(self.mm_dw(
                 &self.d_up_pre,
                 &lb.ln2_out,
                 gr(&pn("ffn.up.weight")),
@@ -969,23 +1090,13 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ));
-            s.push(g.step(
-                LN_DGAMMA,
-                &[
-                    &self.d_branch,
-                    &lb.xmid,
-                    &self.ln_mean,
-                    &self.ln_inv,
-                    gr(&pn("ln2.weight")),
-                ],
-                &[d, bn],
+            s.extend(self.ln_param_grads(
+                &self.d_branch,
+                &lb.xmid,
+                gr(&pn("ln2.weight")),
+                gr(&pn("ln2.bias")),
                 d,
-            ));
-            s.push(g.step(
-                LN_DBETA,
-                &[&self.d_branch, gr(&pn("ln2.bias"))],
-                &[d, bn],
-                d,
+                bn,
             ));
             s.push(block::layernorm_dx_bwd(
                 g,
@@ -1006,7 +1117,7 @@ impl Horizon {
             ));
             // attention
             s.extend(self.bias_grad(&self.dxmid, gr(&pn("attn.out.bias")), bn, d));
-            s.push(self.mm_dw(&self.dxmid, &lb.ctx, gr(&pn("attn.out.weight")), bn, d, d));
+            s.extend(self.mm_dw(&self.dxmid, &lb.ctx, gr(&pn("attn.out.weight")), bn, d, d));
             s.push(self.mm_dx(
                 &self.dxmid,
                 self.w(&pn("attn.out.weight")),
@@ -1027,7 +1138,7 @@ impl Horizon {
                 &self.d_qkv,
             ));
             s.extend(self.bias_grad(&self.d_qkv, gr(&pn("attn.qkv.bias")), bn, 3 * d));
-            s.push(self.mm_dw(
+            s.extend(self.mm_dw(
                 &self.d_qkv,
                 &lb.ln1_out,
                 gr(&pn("attn.qkv.weight")),
@@ -1054,23 +1165,13 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ));
-            s.push(g.step(
-                LN_DGAMMA,
-                &[
-                    &self.d_branch,
-                    &self.res[l],
-                    &self.ln_mean,
-                    &self.ln_inv,
-                    gr(&pn("ln1.weight")),
-                ],
-                &[d, bn],
+            s.extend(self.ln_param_grads(
+                &self.d_branch,
+                &self.res[l],
+                gr(&pn("ln1.weight")),
+                gr(&pn("ln1.bias")),
                 d,
-            ));
-            s.push(g.step(
-                LN_DBETA,
-                &[&self.d_branch, gr(&pn("ln1.bias"))],
-                &[d, bn],
-                d,
+                bn,
             ));
             s.push(block::layernorm_dx_bwd(
                 g,
@@ -1103,31 +1204,20 @@ impl Horizon {
         let (d, bn) = (c.d_model, self.sets * c.max_tokens);
         let (vt, tt) = (c.value_table(), c.time_table());
         let d0 = &self.dres[0];
-        vec![
-            self.mm_dw(d0, &i.time_bins, gr("time_bins.weight"), bn, tt, d),
-            g.step(
-                EMB_BWD,
-                &[&i.token_ids, d0, gr("tok.beta")],
-                &[bn, d, c.vocab],
-                c.vocab * d,
-            ),
-            g.step(MUL, &[d0, &self.phi, &self.d_gam], &[bn * d], bn * d),
-            g.step(
-                EMB_BWD,
-                &[&i.token_ids, &self.d_gam, gr("tok.gamma")],
-                &[bn, d, c.vocab],
-                c.vocab * d,
-            ),
-            g.step(MUL, &[d0, &self.gam, &self.d_phi], &[bn * d], bn * d),
-            self.mm_dw(
-                &self.d_phi,
-                &i.value_bins,
-                gr("value_bins.weight"),
-                bn,
-                vt,
-                d,
-            ),
-        ]
+        let mut s = self.mm_dw(d0, &i.time_bins, gr("time_bins.weight"), bn, tt, d);
+        s.extend(self.emb_grad(&i.token_ids, d0, gr("tok.beta"), bn));
+        s.push(g.step(MUL, &[d0, &self.phi, &self.d_gam], &[bn * d], bn * d));
+        s.extend(self.emb_grad(&i.token_ids, &self.d_gam, gr("tok.gamma"), bn));
+        s.push(g.step(MUL, &[d0, &self.gam, &self.d_phi], &[bn * d], bn * d));
+        s.extend(self.mm_dw(
+            &self.d_phi,
+            &i.value_bins,
+            gr("value_bins.weight"),
+            bn,
+            vt,
+            d,
+        ));
+        s
     }
 
     /// Submit the forward pass (no readback).

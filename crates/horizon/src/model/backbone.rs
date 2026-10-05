@@ -346,8 +346,8 @@ impl Horizon {
         // summed over subjects.
         steps.extend(self.bias_grad(&v.part, gr("visit.state"), b, 2 * d));
         steps.extend(self.bias_grad(&v.d_xg, gr("visit.in.bias"), s, 2 * d));
+        steps.extend(self.mm_dw(&v.d_xg, &v.u, gr("visit.in.weight"), s, d, 2 * d));
         steps.extend([
-            self.mm_dw(&v.d_xg, &v.u, gr("visit.in.weight"), s, d, 2 * d),
             self.mm_dx(&v.d_xg, self.w("visit.in.weight"), &v.d_u, s, d, 2 * d, 0),
             g.step(
                 ROW_SCATTER,
@@ -371,8 +371,8 @@ impl Horizon {
         let mut steps: Vec<Step> = self
             .bias_grad(&self.d_z, gr("visit.attn.out.bias"), b, d)
             .into();
+        steps.extend(self.mm_dw(&self.d_z, &a.cq, gr("visit.attn.out.weight"), b, d, d));
         steps.extend([
-            self.mm_dw(&self.d_z, &a.cq, gr("visit.attn.out.weight"), b, d, d),
             self.mm_dx(
                 &self.d_z,
                 self.w("visit.attn.out.weight"),
@@ -401,15 +401,15 @@ impl Horizon {
         ));
         steps.extend(self.rope(a, &a.d_qkv, -1.0));
         steps.extend(self.bias_grad(&a.d_qkv, gr("visit.attn.qkv.bias"), rows, 3 * d));
+        steps.extend(self.mm_dw(
+            &a.d_qkv,
+            &a.seq,
+            gr("visit.attn.qkv.weight"),
+            rows,
+            d,
+            3 * d,
+        ));
         steps.extend([
-            self.mm_dw(
-                &a.d_qkv,
-                &a.seq,
-                gr("visit.attn.qkv.weight"),
-                rows,
-                d,
-                3 * d,
-            ),
             self.mm_dx(
                 &a.d_qkv,
                 self.w("visit.attn.qkv.weight"),

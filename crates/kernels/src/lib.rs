@@ -378,6 +378,8 @@ pub const ELU: &str = include_str!("../wgsl/elu.wgsl");
 pub const ELU_BWD: &str = include_str!("../wgsl/elu_bwd.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
+/// `wgsl/emb_bwd_part.wgsl`
+pub const EMB_BWD_PART: &str = include_str!("../wgsl/emb_bwd_part.wgsl");
 /// `wgsl/emb_bwd_uniq.wgsl`
 pub const EMB_BWD_UNIQ: &str = include_str!("../wgsl/emb_bwd_uniq.wgsl");
 /// `wgsl/embed.wgsl`
@@ -614,6 +616,8 @@ pub const LAYERNORM2D: &str = include_str!("../wgsl/layernorm2d.wgsl");
 pub const LAYERNORM_DBETA: &str = include_str!("../wgsl/layernorm_dbeta.wgsl");
 /// `wgsl/layernorm_dgamma.wgsl`
 pub const LAYERNORM_DGAMMA: &str = include_str!("../wgsl/layernorm_dgamma.wgsl");
+/// `wgsl/layernorm_dgamma_part.wgsl`
+pub const LAYERNORM_DGAMMA_PART: &str = include_str!("../wgsl/layernorm_dgamma_part.wgsl");
 /// `wgsl/layernorm_dx.wgsl`
 pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
 /// `wgsl/layernorm_dx_rows.wgsl`
@@ -1429,6 +1433,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("elu", ELU),
     ("elu_bwd", ELU_BWD),
     ("emb_bwd", EMB_BWD),
+    ("emb_bwd_part", EMB_BWD_PART),
     ("emb_bwd_uniq", EMB_BWD_UNIQ),
     ("embed", EMBED),
     ("embed_tile", EMBED_TILE),
@@ -1541,6 +1546,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm2d", LAYERNORM2D),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
+    ("layernorm_dgamma_part", LAYERNORM_DGAMMA_PART),
     ("layernorm_dx", LAYERNORM_DX),
     ("layernorm_dx_rows", LAYERNORM_DX_ROWS),
     ("layernorm_nobias", LAYERNORM_NOBIAS),

@@ -224,6 +224,7 @@ load of it must already be bare-identifier-indexed.
 | [`elu`](../../crates/kernels/wgsl/elu.wgsl) | ELU (Exponential Linear Unit) forward:  y = x  if x > 0, y = alpha*(exp(x)-1) otherwise | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`elu_bwd`](../../crates/kernels/wgsl/elu_bwd.wgsl) | ELU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`emb_bwd`](../../crates/kernels/wgsl/emb_bwd.wgsl) | Embedding backward (also the tied lm_head's weight) | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
+| [`emb_bwd_part`](../../crates/kernels/wgsl/emb_bwd_part.wgsl) | Stage one of the embedding backward: per block of rows, each vocabulary row's partial gradient | one thread per (row block, vocabulary row, channel), serial scan of its block | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`emb_bwd_uniq`](../../crates/kernels/wgsl/emb_bwd_uniq.wgsl) | Embedding backward over the DISTINCT looked-up rows only - compact twin of emb_bwd | one thread per (distinct row, channel), serial scan of the tokens | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`embed`](../../crates/kernels/wgsl/embed.wgsl) | Embedding gather: x[t, c] = emb[token[t], c] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
 | [`embed_tile`](../../crates/kernels/wgsl/embed_tile.wgsl) | Embedding gather over a VOCAB TILE | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32\|bf16\|f16 |
@@ -336,6 +337,7 @@ load of it must already be bare-identifier-indexed.
 | [`layernorm2d`](../../crates/kernels/wgsl/layernorm2d.wgsl) | Channels-first LayerNorm (ConvNeXt / SAM 2's `LayerNorm2d`), FUSED - the normalisation runs in NCHW, with no permute either side | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`layernorm_dbeta`](../../crates/kernels/wgsl/layernorm_dbeta.wgsl) | LayerNorm backward w.r.t. beta | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`layernorm_dgamma`](../../crates/kernels/wgsl/layernorm_dgamma.wgsl) | LayerNorm backward w.r.t. gamma | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`layernorm_dgamma_part`](../../crates/kernels/wgsl/layernorm_dgamma_part.wgsl) | Stage one of the LayerNorm gamma gradient: per row chunk and column, the partial sum of dy * xhat | one thread per (chunk, column), rows strided by the chunk count | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`layernorm_dx`](../../crates/kernels/wgsl/layernorm_dx.wgsl) | LayerNorm backward w.r.t. x | one thread per output element, 4 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`layernorm_dx_rows`](../../crates/kernels/wgsl/layernorm_dx_rows.wgsl) | LayerNorm backward w.r.t. x, one WORKGROUP per row - the coalesced variant | 64-thread workgroup tile, 1 barrier | 4/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`layernorm_nobias`](../../crates/kernels/wgsl/layernorm_nobias.wgsl) | LayerNorm forward, weight-only (no bias term at all) | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
