@@ -229,7 +229,7 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    at `softplus` rates over the elapsed time and moves towards each visit
    through a sigmoid gate (the delta rule with a diagonal state), propagated
    to the prediction time in closed form; time reaches the model only through
-   the gaps. Gradient-checked on the CPU JIT (directional over every tensor,
+   the gaps. Gradient-checked on the CPU JIT, wgpu and CUDA (directional over every tensor,
    element-wise over the rates and population state). The extrapolation test
    (`tests/continuous.rs`, `synthetic::drifting`: an Ornstein-Uhlenbeck risk
    factor at irregular visits, the best prediction exact by Kalman filtering)
@@ -238,11 +238,11 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    distribution. **Backbone B** done (`Backbone::Attention`, kernel
    `rope_pos`: rotary angles at real-valued positions, its own adjoint with
    the angle negated): a query token at the prediction time attends over the
-   visits; gradient-checked on the CPU JIT. On the same test both backbones
+   visits; gradient-checked on the CPU JIT, wgpu and CUDA. On the same test both backbones
    beat the single set in and out of distribution, the state closer in
    distribution and the attention out of it (one data seed). Open: the
    matrix-state delta rule (the existing GDN recurrence with the decay made
-   physical); the GPU gradient check once the device is free.
+   physical).
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
    weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
    and Uno concordance with competing causes; IPCW Brier score and its
