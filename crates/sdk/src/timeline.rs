@@ -381,7 +381,7 @@ impl TimelineModel {
             .map_err(Error::Backend)?
             .into_iter()
             .map(|curves| Prediction {
-                curves,
+                members: vec![curves],
                 codes: self.saved.vocab.codes.clone(),
                 last_knot,
             })
@@ -443,39 +443,75 @@ impl TimelineModel {
     }
 }
 
-/// One subject's predicted outcome curves.
+/// One subject's predicted outcome curves: one model's, or the equal-weight
+/// mixture of several models' ([`Prediction::ensemble`]).
 #[derive(Clone, Debug)]
 pub struct Prediction {
-    curves: Curves,
+    members: Vec<Curves>,
     codes: Vec<String>,
     last_knot: f64,
 }
 
 impl Prediction {
+    /// The ensemble of `parts` (one subject's predictions from models trained
+    /// apart, say with different seeds): every probability is the mean of the
+    /// parts'. `None` for no parts, or parts over different outcome codes or
+    /// horizons.
+    pub fn ensemble(parts: &[Prediction]) -> Option<Prediction> {
+        let first = parts.first()?;
+        if parts.iter().any(|p| p.codes != first.codes || p.last_knot != first.last_knot) {
+            return None;
+        }
+        Some(Prediction {
+            members: parts.iter().flat_map(|p| p.members.iter().cloned()).collect(),
+            codes: first.codes.clone(),
+            last_knot: first.last_knot,
+        })
+    }
     /// Probability that `code` happens within `t` (in the dataset's unit) of
     /// the prediction time; `None` for an unknown code. Held constant past
     /// the last knot ([`Prediction::horizon`]): the model says nothing later.
     pub fn cif(&self, code: &str, t: f64) -> Option<f64> {
-        self.codes
-            .iter()
-            .position(|c| c == code)
-            .map(|k| self.curves.cif(k, t))
+        self.member_cifs(code, t).map(|v| v.iter().sum::<f64>() / v.len() as f64)
+    }
+    /// Each member's probability that `code` happens within `t`: their spread
+    /// is the disagreement between models trained apart.
+    pub fn member_cifs(&self, code: &str, t: f64) -> Option<Vec<f64>> {
+        let k = self.codes.iter().position(|c| c == code)?;
+        Some(self.members.iter().map(|m| m.cif(k, t)).collect())
     }
     /// Probability of no absorbing outcome within `t`.
     pub fn survival(&self, t: f64) -> f64 {
-        self.curves.survival(t)
+        self.members.iter().map(|m| m.survival(t)).sum::<f64>() / self.members.len() as f64
     }
     /// The time by which survival falls to `q`, if within the knots.
     pub fn survival_quantile(&self, q: f64) -> Option<f64> {
-        self.curves.survival_quantile(q)
+        if let [only] = self.members.as_slice() {
+            return only.survival_quantile(q);
+        }
+        // The mixture's survival is continuous and decreasing: bisect.
+        if self.survival(self.last_knot) > q {
+            return None;
+        }
+        let (mut lo, mut hi) = (0.0, self.last_knot);
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if self.survival(mid) > q {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Some(hi)
     }
     /// The longest horizon the model predicts to.
     pub fn horizon(&self) -> f64 {
         self.last_knot
     }
-    /// The underlying curves (hazard per piece and code).
-    pub fn curves(&self) -> &Curves {
-        &self.curves
+    /// The members' curves (hazard per piece and code): one for a single
+    /// model.
+    pub fn members(&self) -> &[Curves] {
+        &self.members
     }
 }
 
@@ -546,7 +582,29 @@ mod tests {
         let path = dir.join("bad.jsonl");
         std::fs::write(&path, "{\"subject_id\":\"a\",\"source\":\"s\",\"entry\":1,\"calendar_at_entry\":2000}\n\n{\"subject_id\":\"b\"}\n").unwrap();
         let err = read_jsonl(&path).unwrap_err().to_string();
-        assert!(err.contains(":3:"), "{err}");
+        assert!(err.contains("line 3"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_ensemble_averages_its_members() {
+        let knots = [0.0f32, 1.0, 5.0];
+        let one = |rate: f32| Prediction {
+            members: vec![Curves::new(&[rate.ln(), rate.ln()], &knots, &[true])],
+            codes: vec!["death".into()],
+            last_knot: 5.0,
+        };
+        let (a, b) = (one(0.1), one(0.3));
+        let same = Prediction::ensemble(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(same.cif("death", 2.0), a.cif("death", 2.0));
+        let both = Prediction::ensemble(&[a.clone(), b.clone()]).unwrap();
+        let mean = 0.5 * ((1.0 - (-0.2f64).exp()) + (1.0 - (-0.6f64).exp()));
+        assert!((both.cif("death", 2.0).unwrap() - mean).abs() < 1e-6);
+        assert_eq!(both.member_cifs("death", 2.0).unwrap().len(), 2);
+        let median = both.survival_quantile(0.5).unwrap();
+        assert!((both.survival(median) - 0.5).abs() < 1e-9, "{median}");
+        let other = Prediction { last_knot: 4.0, ..one(0.2) };
+        assert!(Prediction::ensemble(&[a, other]).is_none(), "different horizons do not mix");
+        assert!(Prediction::ensemble(&[]).is_none());
     }
 }
