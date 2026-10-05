@@ -36,6 +36,6 @@ pub mod timeline;
 pub mod train;
 pub mod vocab;
 
-pub use config::HorizonConfig;
+pub use config::{Backbone, HorizonConfig};
 pub use init::init_weights;
 pub use model::{Horizon, PIPELINES};

@@ -235,10 +235,14 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    factor at irregular visits, the best prediction exact by Kalman filtering)
    trains with last gaps of at most two years and scores six to ten: the
    state is closer to the best prediction than the single set, there and in
-   distribution. Open: the matrix-state delta rule (the existing GDN
-   recurrence with the decay made physical), and **backbone B** with
-   real-valued RoPE as the comparison arm; the GPU gradient check once the
-   device is free.
+   distribution. **Backbone B** done (`Backbone::Attention`, kernel
+   `rope_pos`: rotary angles at real-valued positions, its own adjoint with
+   the angle negated): a query token at the prediction time attends over the
+   visits; gradient-checked on the CPU JIT. On the same test both backbones
+   beat the single set in and out of distribution, the state closer in
+   distribution and the attention out of it (one data seed). Open: the
+   matrix-state delta rule (the existing GDN recurrence with the decay made
+   physical); the GPU gradient check once the device is free.
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
    weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
    and Uno concordance with competing causes; IPCW Brier score and its

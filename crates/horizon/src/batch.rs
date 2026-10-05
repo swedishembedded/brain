@@ -37,6 +37,13 @@ pub struct HostBatch {
     /// (0 for its first, -1 for an unused slot), then per subject the time
     /// from its last visit to entry. Read only with a state across visits.
     pub visit_dt: Vec<f32>,
+    /// `[B * (visit slots + 1)]` the time of each visit slot relative to
+    /// entry (minus how long before), then 0 for the prediction-time query;
+    /// read by the attention backbone.
+    pub seq_pos: Vec<f32>,
+    /// `[B * (visit slots + 1)]` 1 for a real visit or the query, 0 for an
+    /// unused visit slot.
+    pub seq_keep: Vec<u32>,
     /// `[B*N]` value targets (normal scores).
     pub value_target: Vec<f32>,
     /// `[B*N]` 0 not scored, 1 exact, 2 below, 3 above.
@@ -122,6 +129,10 @@ pub fn assemble(
         time_bins: vec![0.0; sets * n * tt],
         summary_rows: (0..sets).map(|i| (i * n) as u32).collect(),
         visit_dt: [vec![-1.0; sets], vec![0.0; b]].concat(),
+        seq_pos: vec![0.0; b * (vs + 1)],
+        seq_keep: (0..b * (vs + 1))
+            .map(|r| u32::from(r % (vs + 1) == vs))
+            .collect(),
         value_target: vec![0.0; sets * n],
         value_state: vec![0; sets * n],
         value_weight: vec![0.0; sets * n],
@@ -154,6 +165,11 @@ pub fn assemble(
                 hb.visit_dt[first_slot + j] = gap as f32;
             }
             hb.visit_dt[sets + i] = visits.last().map_or(0.0, |v| v.ago as f32);
+            for (j, v) in visits.iter().enumerate() {
+                let row = i * (vs + 1) + (first_slot - i * vs) + j;
+                hb.seq_pos[row] = -v.ago as f32;
+                hb.seq_keep[row] = 1;
+            }
         }
         let numeric: Vec<(usize, usize)> = visits
             .iter()

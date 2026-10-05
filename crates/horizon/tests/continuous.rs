@@ -13,7 +13,9 @@
 //! it never saw at that length; the state across visits forgets over the
 //! elapsed time at the rates it learned. Out of distribution it must be the
 //! closer of the two to the best prediction, and in distribution no more
-//! than a quarter worse than the set encoder.
+//! than a quarter worse than the set encoder. The attention arm (rotary
+//! angles from real time) is trained and reported beside them as the
+//! comparison; it is held to nothing.
 
 use horizon::encode::{encode, Encoded};
 use horizon::saved::Saved;
@@ -34,7 +36,13 @@ const LONG_GAPS: Gaps = Gaps {
 };
 const HORIZON: f64 = 5.0;
 
-fn train(visits: u32, vocab: &Vocab, train: &[Subject], held: &[Subject]) -> Saved {
+fn train(
+    visits: u32,
+    backbone: horizon::Backbone,
+    vocab: &Vocab,
+    train: &[Subject],
+    held: &[Subject],
+) -> Saved {
     let mut cfg = HorizonConfig::default_for(vocab.len(), 1);
     cfg.max_tokens = 8;
     cfg.d_model = 32;
@@ -43,6 +51,7 @@ fn train(visits: u32, vocab: &Vocab, train: &[Subject], held: &[Subject]) -> Sav
     cfg.rank = 16;
     cfg.knots = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0];
     cfg.visits = visits;
+    cfg.backbone = backbone;
     let enc =
         |s: &[Subject]| -> Vec<Encoded> { s.iter().map(|x| encode(x, vocab, &cfg)).collect() };
     let (enc_train, enc_held) = (enc(train), enc(held));
@@ -98,8 +107,9 @@ fn the_state_across_visits_extrapolates_over_long_gaps() {
     let (far_s, far_best) = drifting::population(3_000, 4, &LONG_GAPS, 10.0);
     let codes = vec![drifting::CODE.to_string()];
     let vocab = Vocab::fit(&train_s, &codes, &codes, &FitOptions::default()).unwrap();
-    let set = train(0, &vocab, &train_s, &held_s);
-    let state = train(4, &vocab, &train_s, &held_s);
+    let set = train(0, horizon::Backbone::State, &vocab, &train_s, &held_s);
+    let state = train(4, horizon::Backbone::State, &vocab, &train_s, &held_s);
+    let attention = train(4, horizon::Backbone::Attention, &vocab, &train_s, &held_s);
     // What a covariate-blind prediction would score: the population's risk.
     let blind = |best: &[Posterior]| {
         let mean = best.iter().map(|p| p.cif(HORIZON)).sum::<f64>() / best.len() as f64;
@@ -116,9 +126,19 @@ fn the_state_across_visits_extrapolates_over_long_gaps() {
         error(&set, &far_s, &far_best),
         error(&state, &far_s, &far_best),
     );
+    let (attn_near, attn_far) = (
+        error(&attention, &near_s, &near_best),
+        error(&attention, &far_s, &far_best),
+    );
     println!("risk by {HORIZON} years, mean |predicted - best possible|:");
-    println!("  last visit 0-2 years before:  set encoder {set_near:.4}  state across visits {state_near:.4}  population risk {:.4}", blind(&near_best));
-    println!("  last visit 6-10 years before: set encoder {set_far:.4}  state across visits {state_far:.4}  population risk {:.4}", blind(&far_best));
+    println!(
+        "  last visit 0-2 years before:  set encoder {set_near:.4}  state {state_near:.4}  attention {attn_near:.4}  population risk {:.4}",
+        blind(&near_best)
+    );
+    println!(
+        "  last visit 6-10 years before: set encoder {set_far:.4}  state {state_far:.4}  attention {attn_far:.4}  population risk {:.4}",
+        blind(&far_best)
+    );
     assert!(
         state_far < set_far,
         "out of distribution the state across visits must be closer to the best prediction"

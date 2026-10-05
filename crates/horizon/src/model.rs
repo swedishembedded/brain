@@ -73,6 +73,7 @@ const SEGMENT_SUM: usize = 41;
 const SEGMENT_BCAST: usize = 42;
 const CT_SCAN: usize = 43;
 const CT_SCAN_BWD: usize = 44;
+const ROPE_POS: usize = 45;
 /// Row chunks per column of the two-stage bias gradient: one serial walk
 /// over every row per column is a handful of threads on a wide device.
 const BIAS_GRAD_CHUNKS: u32 = 64;
@@ -144,6 +145,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("segment_bcast_rows", kernels::SEGMENT_BCAST_ROWS),
     ("ct_state_scan", kernels::CT_STATE_SCAN),
     ("ct_state_scan_bwd", kernels::CT_STATE_SCAN_BWD),
+    ("rope_pos", kernels::ROPE_POS),
     // Cooperative grad-norm, resolved by name by `optim::Optim`. Kept last:
     // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
@@ -402,8 +404,9 @@ impl Horizon {
         g.write_f32(&i.value_bins, &hb.value_bins);
         g.write_f32(&i.time_bins, &hb.time_bins);
         g.write(&i.summary_rows, &hb.summary_rows);
-        if self.bb.is_some() {
+        if let Some(bb) = &self.bb {
             g.write_f32(&i.visit_dt, &hb.visit_dt);
+            bb.write(g, hb);
         }
         g.write_f32(&i.value_target, &hb.value_target);
         g.write(&i.value_state, &hb.value_state);
@@ -1171,8 +1174,11 @@ impl Horizon {
 
     /// Accumulate gradients of the last forward's loss.
     pub fn backward(&self) {
-        self.gpu
-            .submit(&[&self.d_az, &self.d_lz, &self.d_z], &self.bwd);
+        let mut clears = vec![&self.d_az, &self.d_lz, &self.d_z];
+        if let Some(bb) = &self.bb {
+            clears.extend(bb.cleared());
+        }
+        self.gpu.submit(&clears, &self.bwd);
     }
 
     /// Log-hazards of the last forward, `[b, pieces, codes]`.

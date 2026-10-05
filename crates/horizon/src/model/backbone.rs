@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The continuous-time state across visits (`HorizonConfig::visits > 0`).
+//! What carries a subject's visits to the prediction time
+//! (`HorizonConfig::visits > 0`), in one of two forms.
+//!
+//! **State** (`Backbone::State`):
 //!
 //! ```text
 //! u   = xf[summary row of each visit]                                  [S, D]
@@ -18,13 +21,31 @@
 //! the gap that was never trained there. Each visit moves the state towards
 //! its own evidence by a learned gate - the diagonal form of the delta rule.
 //! A new visit costs one more step; the history is never re-encoded.
+//!
+//! **Attention** (`Backbone::Attention`), the comparison arm:
+//!
+//! ```text
+//! seq = [u of the subject's visit slots | query]                       [B*(V+1), D]
+//! qkv = seq @ Wqkv^T + bqkv, q and k rotated by their row's real time
+//!       relative to the prediction time (rotary angles, unused slots masked)
+//! z   = query + (Attn(qkv)[query row] @ Wo^T + bo)                     [B, D]
+//! ```
+//!
+//! The query attends to every visit by content and by how long before the
+//! prediction time it was; nothing ties a gap's effect to a decay.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use super::*;
+use crate::config::Backbone;
 
-/// Device buffers of the state across visits, allocated when `cfg.visits > 0`.
-pub(super) struct BackboneBufs {
+/// The rotary base of the attention arm: with times in years and heads of a
+/// few channels, the rotation frequencies span about a radian a year down to
+/// a few thousandths - months to decades.
+const ROPE_THETA: f32 = 1000.0;
+
+/// Device buffers of the state arm.
+pub(super) struct StateBufs {
     u: DeviceBuffer,
     xg: DeviceBuffer,
     hs: DeviceBuffer,
@@ -33,54 +54,256 @@ pub(super) struct BackboneBufs {
     part: DeviceBuffer,
 }
 
+/// Device buffers of the attention arm.
+pub(super) struct AttnBufs {
+    /// `[S]` each visit set's row in the sequences (constant).
+    seq_rows: DeviceBuffer,
+    /// `[B]` each subject's query row (constant).
+    query_rows: DeviceBuffer,
+    /// `[B]` zeros: every subject reads the one query embedding (constant).
+    query_index: DeviceBuffer,
+    pos: DeviceBuffer,
+    keep: DeviceBuffer,
+    u: DeviceBuffer,
+    qe: DeviceBuffer,
+    seq: DeviceBuffer,
+    qkv: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    cq: DeviceBuffer,
+    proj: DeviceBuffer,
+    d_cq: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    d_qkv: DeviceBuffer,
+    d_seq: DeviceBuffer,
+    d_u: DeviceBuffer,
+    d_qa: DeviceBuffer,
+    d_qe: DeviceBuffer,
+}
+
+/// The visit backbone's buffers, allocated when `cfg.visits > 0`.
+pub(super) enum BackboneBufs {
+    State(StateBufs),
+    Attention(AttnBufs),
+}
+
 impl BackboneBufs {
     pub(super) fn new(gpu: &Gpu, cfg: &HorizonConfig, b: u32) -> Option<BackboneBufs> {
         if cfg.visits == 0 {
             return None;
         }
-        let (s, d, bb) = (
-            (b * cfg.sets_per_subject()) as u64,
-            cfg.d_model as u64,
-            b as u64,
-        );
+        let vs = cfg.sets_per_subject();
+        let (s, d, bb) = ((b * vs) as u64, cfg.d_model as u64, b as u64);
         let st = |x: u64| gpu.storage(x);
-        Some(BackboneBufs {
-            u: st(s * d),
-            xg: st(s * 2 * d),
-            hs: st(s * d),
-            d_u: st(s * d),
-            d_xg: st(s * 2 * d),
-            part: st(bb * 2 * d),
+        Some(match cfg.backbone {
+            Backbone::State => BackboneBufs::State(StateBufs {
+                u: st(s * d),
+                xg: st(s * 2 * d),
+                hs: st(s * d),
+                d_u: st(s * d),
+                d_xg: st(s * 2 * d),
+                part: st(bb * 2 * d),
+            }),
+            Backbone::Attention => {
+                let t = vs + 1;
+                let rows = (b * t) as u64;
+                let att = bb * cfg.n_heads as u64 * (t * t) as u64;
+                let input = |label: &str, words: u64| {
+                    gpu.buffer(label, words * 4, BufUsage::STORAGE | BufUsage::COPY_DST)
+                };
+                let (seq_rows, query_rows, query_index) = (
+                    input("seq_rows", s),
+                    input("query_rows", bb),
+                    input("query_index", bb),
+                );
+                let set_rows: Vec<u32> = (0..b * vs).map(|x| (x / vs) * t + x % vs).collect();
+                let q_rows: Vec<u32> = (0..b).map(|i| i * t + vs).collect();
+                gpu.write(&seq_rows, &set_rows);
+                gpu.write(&query_rows, &q_rows);
+                gpu.write(&query_index, &vec![0u32; b as usize]);
+                BackboneBufs::Attention(AttnBufs {
+                    seq_rows,
+                    query_rows,
+                    query_index,
+                    pos: input("seq_pos", rows),
+                    keep: input("seq_keep", rows),
+                    u: st(s * d),
+                    qe: st(bb * d),
+                    seq: st(rows * d),
+                    qkv: st(rows * 3 * d),
+                    scores: st(att),
+                    probs: st(att),
+                    ctx: st(rows * d),
+                    cq: st(bb * d),
+                    proj: st(bb * d),
+                    d_cq: st(bb * d),
+                    d_ctx: st(rows * d),
+                    d_scores: st(att),
+                    d_qkv: st(rows * 3 * d),
+                    d_seq: st(rows * d),
+                    d_u: st(s * d),
+                    d_qa: st(bb * d),
+                    d_qe: st(bb * d),
+                })
+            }
         })
+    }
+
+    /// Upload the batch's per-visit inputs.
+    pub(super) fn write(&self, gpu: &Gpu, hb: &HostBatch) {
+        if let BackboneBufs::Attention(a) = self {
+            gpu.write_f32(&a.pos, &hb.seq_pos);
+            gpu.write(&a.keep, &hb.seq_keep);
+        }
+    }
+
+    /// Buffers the backward pass must find zeroed.
+    pub(super) fn cleared(&self) -> Vec<&DeviceBuffer> {
+        match self {
+            BackboneBufs::State(_) => Vec::new(),
+            BackboneBufs::Attention(a) => vec![&a.d_ctx],
+        }
     }
 }
 
 impl Horizon {
     /// From the encoder's output to the state `z` the heads read: the summary
-    /// row of each subject, or, across visits, the state the visits leave.
+    /// row of each subject, or what its visits leave at the prediction time.
     pub(super) fn state_forward_steps(&self) -> Vec<Step> {
         let g = &self.gpu;
         let i = &self.inp;
         let (d, b, s) = (self.cfg.d_model, self.b, self.sets);
-        let Some(v) = &self.bb else {
-            return vec![g.step(EMBED, &[&i.summary_rows, &self.xf, &self.z], &[d, b], b * d)];
+        match &self.bb {
+            None => vec![g.step(EMBED, &[&i.summary_rows, &self.xf, &self.z], &[d, b], b * d)],
+            Some(BackboneBufs::State(v)) => vec![
+                g.step(EMBED, &[&i.summary_rows, &self.xf, &v.u], &[d, s], s * d),
+                self.mm(&v.u, self.w("visit.in.weight"), &v.xg, s, d, 2 * d),
+                g.step(
+                    BIAS_ADD,
+                    &[&v.xg, self.w("visit.in.bias")],
+                    &[s, 2 * d],
+                    s * 2 * d,
+                ),
+                g.step(
+                    CT_SCAN,
+                    &[&v.xg, &i.visit_dt, self.w("visit.state"), &v.hs, &self.z],
+                    &[b, self.cfg.visits, d],
+                    b * d,
+                ),
+            ],
+            Some(BackboneBufs::Attention(a)) => self.attention_forward_steps(a),
+        }
+    }
+
+    fn attention(&self) -> Bidir {
+        let d = self.cfg.d_model;
+        Bidir {
+            b: self.b,
+            t: self.cfg.visits + 1,
+            n_heads: self.cfg.n_heads,
+            head_dim: d / self.cfg.n_heads,
+            stride: 3 * d,
+            q_off: 0,
+            k_off: d,
+            v_off: 2 * d,
+        }
+    }
+
+    /// Rotate the q and k regions of `qkv` by each row's time (`dir` 1), or
+    /// back (`dir` -1, the adjoint).
+    fn rope(&self, a: &AttnBufs, qkv: &DeviceBuffer, dir: f32) -> [Step; 2] {
+        let d = self.cfg.d_model;
+        let (h, hd) = (self.cfg.n_heads, d / self.cfg.n_heads);
+        let rows = self.b * (self.cfg.visits + 1);
+        let threads = rows * h * (hd / 2);
+        let step = |off: u32| {
+            self.gpu.step(
+                ROPE_POS,
+                &[&a.pos, qkv],
+                &[
+                    rows,
+                    h,
+                    hd,
+                    3 * d,
+                    off,
+                    gpu_core::f(ROPE_THETA),
+                    gpu_core::f(dir),
+                ],
+                threads,
+            )
         };
-        vec![
-            g.step(EMBED, &[&i.summary_rows, &self.xf, &v.u], &[d, s], s * d),
-            self.mm(&v.u, self.w("visit.in.weight"), &v.xg, s, d, 2 * d),
+        [step(0), step(d)]
+    }
+
+    fn attention_forward_steps(&self, a: &AttnBufs) -> Vec<Step> {
+        let g = &self.gpu;
+        let i = &self.inp;
+        let (d, b, s) = (self.cfg.d_model, self.b, self.sets);
+        let t = self.cfg.visits + 1;
+        let rows = b * t;
+        let att = self.attention();
+        let mut steps = vec![
+            g.step(EMBED, &[&i.summary_rows, &self.xf, &a.u], &[d, s], s * d),
             g.step(
-                BIAS_ADD,
-                &[&v.xg, self.w("visit.in.bias")],
-                &[s, 2 * d],
-                s * 2 * d,
+                ROW_SCATTER,
+                &[&a.seq_rows, &a.u, &a.seq],
+                &[s, d, rows],
+                s * d,
             ),
             g.step(
-                CT_SCAN,
-                &[&v.xg, &i.visit_dt, self.w("visit.state"), &v.hs, &self.z],
-                &[b, self.cfg.visits, d],
+                EMBED,
+                &[&a.query_index, self.w("visit.query"), &a.qe],
+                &[d, b],
                 b * d,
             ),
-        ]
+            g.step(
+                ROW_SCATTER,
+                &[&a.query_rows, &a.qe, &a.seq],
+                &[b, d, rows],
+                b * d,
+            ),
+            self.mm(
+                &a.seq,
+                self.w("visit.attn.qkv.weight"),
+                &a.qkv,
+                rows,
+                d,
+                3 * d,
+            ),
+            g.step(
+                BIAS_ADD,
+                &[&a.qkv, self.w("visit.attn.qkv.bias")],
+                &[rows, 3 * d],
+                rows * 3 * d,
+            ),
+        ];
+        steps.extend(self.rope(a, &a.qkv, 1.0));
+        let mut attn = block::bidir_fwd(g, &BIDIR, &att, &a.qkv, &a.scores, &a.probs, &a.ctx);
+        // Unused visit slots are never keys.
+        attn.insert(
+            1,
+            g.step(
+                KEYPAD,
+                &[&a.keep, &a.scores],
+                &[b, self.cfg.n_heads, t],
+                b * self.cfg.n_heads * t * t,
+            ),
+        );
+        steps.extend(attn);
+        steps.extend([
+            g.step(EMBED, &[&a.query_rows, &a.ctx, &a.cq], &[d, b], b * d),
+            self.mm(&a.cq, self.w("visit.attn.out.weight"), &a.proj, b, d, d),
+            g.step(
+                BIAS_ADD,
+                &[&a.proj, self.w("visit.attn.out.bias")],
+                &[b, d],
+                b * d,
+            ),
+            g.step(ADD2, &[&a.qe, &a.proj, &self.z], &[b * d], b * d),
+        ]);
+        steps
     }
 
     /// The adjoint of [`Horizon::state_forward_steps`]: `d_z` (complete) into
@@ -93,13 +316,17 @@ impl Horizon {
         let bn = s * self.cfg.max_tokens;
         // The summary rows carry no value target (d_xf is zero there), so
         // their gradient is exactly the state's.
-        let Some(v) = &self.bb else {
-            return vec![g.step(
-                ROW_SCATTER,
-                &[&i.summary_rows, &self.d_z, &self.d_xf],
-                &[b, d, bn],
-                b * d,
-            )];
+        let v = match &self.bb {
+            None => {
+                return vec![g.step(
+                    ROW_SCATTER,
+                    &[&i.summary_rows, &self.d_z, &self.d_xf],
+                    &[b, d, bn],
+                    b * d,
+                )]
+            }
+            Some(BackboneBufs::Attention(a)) => return self.attention_backward_steps(a),
+            Some(BackboneBufs::State(v)) => v,
         };
         let mut steps = vec![g.step(
             CT_SCAN_BWD,
@@ -125,6 +352,86 @@ impl Horizon {
             g.step(
                 ROW_SCATTER,
                 &[&i.summary_rows, &v.d_u, &self.d_xf],
+                &[s, d, bn],
+                s * d,
+            ),
+        ]);
+        steps
+    }
+
+    fn attention_backward_steps(&self, a: &AttnBufs) -> Vec<Step> {
+        let g = &self.gpu;
+        let i = &self.inp;
+        let gr = |name: &str| self.ps.g(name);
+        let (d, b, s) = (self.cfg.d_model, self.b, self.sets);
+        let rows = b * (self.cfg.visits + 1);
+        let bn = s * self.cfg.max_tokens;
+        // z = qe + proj: the out-projection, then the query rows of d_ctx
+        // (the rest stay zero: only the query's context is read).
+        let mut steps: Vec<Step> = self
+            .bias_grad(&self.d_z, gr("visit.attn.out.bias"), b, d)
+            .into();
+        steps.extend([
+            self.mm_dw(&self.d_z, &a.cq, gr("visit.attn.out.weight"), b, d, d),
+            self.mm_dx(
+                &self.d_z,
+                self.w("visit.attn.out.weight"),
+                &a.d_cq,
+                b,
+                d,
+                d,
+                0,
+            ),
+            g.step(
+                ROW_SCATTER,
+                &[&a.query_rows, &a.d_cq, &a.d_ctx],
+                &[b, d, rows],
+                b * d,
+            ),
+        ]);
+        steps.extend(block::bidir_bwd(
+            g,
+            &BIDIR,
+            &self.attention(),
+            &a.qkv,
+            &a.probs,
+            &a.d_ctx,
+            &a.d_scores,
+            &a.d_qkv,
+        ));
+        steps.extend(self.rope(a, &a.d_qkv, -1.0));
+        steps.extend(self.bias_grad(&a.d_qkv, gr("visit.attn.qkv.bias"), rows, 3 * d));
+        steps.extend([
+            self.mm_dw(
+                &a.d_qkv,
+                &a.seq,
+                gr("visit.attn.qkv.weight"),
+                rows,
+                d,
+                3 * d,
+            ),
+            self.mm_dx(
+                &a.d_qkv,
+                self.w("visit.attn.qkv.weight"),
+                &a.d_seq,
+                rows,
+                d,
+                3 * d,
+                0,
+            ),
+            // The sequence rows back to the visits and to the query.
+            g.step(EMBED, &[&a.seq_rows, &a.d_seq, &a.d_u], &[d, s], s * d),
+            g.step(EMBED, &[&a.query_rows, &a.d_seq, &a.d_qa], &[d, b], b * d),
+            g.step(ADD2, &[&a.d_qa, &self.d_z, &a.d_qe], &[b * d], b * d),
+            g.step(
+                EMB_BWD,
+                &[&a.query_index, &a.d_qe, gr("visit.query")],
+                &[b, d, 1],
+                d,
+            ),
+            g.step(
+                ROW_SCATTER,
+                &[&i.summary_rows, &a.d_u, &self.d_xf],
                 &[s, d, bn],
                 s * d,
             ),

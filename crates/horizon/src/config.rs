@@ -77,6 +77,22 @@ pub struct HorizonConfig {
     /// is what the heads read. See `model::backbone`.
     #[serde(default)]
     pub visits: u32,
+    /// What carries the visits to the prediction time (with `visits > 0`).
+    #[serde(default)]
+    pub backbone: Backbone,
+}
+
+/// What carries a subject's visits to the prediction time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Backbone {
+    /// A per-channel state that reverts towards the population over the
+    /// elapsed time and moves towards each visit through a gate.
+    #[default]
+    State,
+    /// One layer of attention from a query token at the prediction time over
+    /// the visits, with rotary angles from real time before entry.
+    Attention,
 }
 
 impl HorizonConfig {
@@ -102,6 +118,7 @@ impl HorizonConfig {
             forecasts: 0,
             forecast_weight: 0.0,
             visits: 0,
+            backbone: Backbone::State,
         }
     }
 
@@ -124,6 +141,7 @@ impl HorizonConfig {
             forecasts: 0,
             forecast_weight: 0.0,
             visits: 0,
+            backbone: Backbone::State,
         }
     }
 
@@ -258,14 +276,23 @@ impl HorizonConfig {
             ("hazard.code.weight".to_string(), self.n_codes as usize * r),
             ("hazard.code.bias".to_string(), self.n_codes as usize),
         ]);
-        if self.visits > 0 {
-            v.extend([
+        match (self.visits > 0, self.backbone) {
+            (false, _) => {}
+            (true, Backbone::State) => v.extend([
                 // Each visit's summary projected to [input | gate pre-activation].
                 ("visit.in.weight".to_string(), 2 * d * d),
                 ("visit.in.bias".to_string(), 2 * d),
                 // [raw rate (softplus) | population state] per channel.
                 ("visit.state".to_string(), 2 * d),
-            ]);
+            ]),
+            (true, Backbone::Attention) => v.extend([
+                // The prediction-time query token.
+                ("visit.query".to_string(), d),
+                ("visit.attn.qkv.weight".to_string(), 3 * d * d),
+                ("visit.attn.qkv.bias".to_string(), 3 * d),
+                ("visit.attn.out.weight".to_string(), d * d),
+                ("visit.attn.out.bias".to_string(), d),
+            ]),
         }
         if self.forecasts > 0 {
             v.extend([

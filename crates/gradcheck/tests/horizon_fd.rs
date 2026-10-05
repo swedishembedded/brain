@@ -4,7 +4,9 @@
 //! Gradient-check gate for `horizon`'s training graph, on whichever backend
 //! `BRAIN_DEVICE` selects (run it under both `cpu` and the GPU).
 
-use gradcheck::horizon::{check_horizon, check_horizon_additive, check_horizon_visits};
+use gradcheck::horizon::{
+    check_horizon, check_horizon_additive, check_horizon_attention, check_horizon_visits,
+};
 use gradcheck::Report;
 
 const ATOL: f32 = 4e-3;
@@ -63,6 +65,19 @@ fn horizon_visits_analytic_grads_match_finite_differences() {
         gate(
             check_horizon_visits(seed),
             &format!("state across visits, seed {seed}"),
+        );
+    }
+}
+
+#[test]
+fn horizon_attention_analytic_grads_match_finite_differences() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    for seed in [3u64, 11] {
+        gate(
+            check_horizon_attention(seed),
+            &format!("attention across visits, seed {seed}"),
         );
     }
 }

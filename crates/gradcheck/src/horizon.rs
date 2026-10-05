@@ -112,7 +112,7 @@ pub fn check_horizon_additive(seed: u64) -> Report {
 /// A tiny model with a state across three visit slots, on subjects measured
 /// at irregular visits: one with more visits than slots, one with a single
 /// visit, one who dies, and an empty batch slot.
-pub fn fixture_visits(seed: u64) -> Horizon {
+pub fn fixture_visits(seed: u64, backbone: horizon::Backbone) -> Horizon {
     let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 3.0), visits: (1, 5) };
     let (subjects, _) = drifting::population(300, seed, &gaps, 6.0);
     let visits = |s: &horizon::timeline::Subject| s.observations.len();
@@ -126,6 +126,7 @@ pub fn fixture_visits(seed: u64) -> Horizon {
     let vocab = Vocab::fit(&subjects, &codes, &codes, &FitOptions { knots: 9, min_count: 1 }).expect("vocab");
     let mut cfg = HorizonConfig::tiny(vocab.len(), 1);
     cfg.visits = 3;
+    cfg.backbone = backbone;
     let enc: Vec<Encoded> = [many, one, dies].iter().map(|&i| encode(&subjects[i], &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = enc.iter().collect();
     let hb = assemble(&cfg, &refs, 4, 0.5, &mut data::rng::Rng::new(seed ^ 0x77));
@@ -141,9 +142,21 @@ pub fn fixture_visits(seed: u64) -> Horizon {
 /// tables shared across rows and the per-channel rates and population state
 /// every subject's scan reads.
 pub fn check_horizon_visits(seed: u64) -> Report {
-    let model = fixture_visits(seed);
+    let model = fixture_visits(seed, horizon::Backbone::State);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x7777);
     for name in ["tok.gamma", "tok.beta", "value_bins.weight", "time_bins.weight", "visit.state", "visit.in.bias", "hazard.code.bias"] {
+        report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
+    }
+    report
+}
+
+/// The attention arm across visits: every tensor directionally, and
+/// element-wise the shared tables and the one query embedding every subject
+/// reads.
+pub fn check_horizon_attention(seed: u64) -> Report {
+    let model = fixture_visits(seed, horizon::Backbone::Attention);
+    let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x7a7a);
+    for name in ["tok.gamma", "tok.beta", "visit.query", "visit.attn.qkv.bias", "visit.attn.out.bias", "hazard.code.bias"] {
         report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
     }
     report

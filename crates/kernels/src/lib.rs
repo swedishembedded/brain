@@ -1005,6 +1005,8 @@ pub const ROPE_PARTIAL: &str = include_str!("../wgsl/rope_partial.wgsl");
 pub const ROPE_PARTIAL_AT: &str = include_str!("../wgsl/rope_partial_at.wgsl");
 /// `wgsl/rope_partial_bwd.wgsl`
 pub const ROPE_PARTIAL_BWD: &str = include_str!("../wgsl/rope_partial_bwd.wgsl");
+/// `wgsl/rope_pos.wgsl`
+pub const ROPE_POS: &str = include_str!("../wgsl/rope_pos.wgsl");
 /// `wgsl/rope_sub.wgsl`
 pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
 /// `wgsl/rope_train.wgsl`
@@ -1723,6 +1725,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rope_partial", ROPE_PARTIAL),
     ("rope_partial_at", ROPE_PARTIAL_AT),
     ("rope_partial_bwd", ROPE_PARTIAL_BWD),
+    ("rope_pos", ROPE_POS),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),
     ("rope_train_bwd", ROPE_TRAIN_BWD),

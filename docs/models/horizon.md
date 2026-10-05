@@ -73,6 +73,14 @@ last visit at most two years before entry predicts subjects whose last
 visit was six to ten years before closer to that best prediction than the
 single-set encoder does (`tests/continuous.rs`).
 
+`HorizonConfig::backbone = Backbone::Attention` replaces the state with one
+layer of attention from a query token at the prediction time over the
+visits, rotary angles taken from each visit's real time before entry. On
+the same test both backbones beat the single set in and out of
+distribution; the state is the closer of the two in distribution and the
+attention out of it, on one seed of the data - which ships is a measurement
+on the data at hand.
+
 ## SDK
 
 ```rust
