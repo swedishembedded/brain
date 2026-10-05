@@ -537,6 +537,8 @@ load of it must already be bare-identifier-indexed.
 | [`scale_row`](../../crates/kernels/wgsl/scale_row.wgsl) | Per-row (per-sample) scalar scale on a row-major [N, M] tensor - spec | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`scan_add`](../../crates/kernels/wgsl/scan_add.wgsl) | Exclusive prefix scan, stage 2 | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | n/a |
 | [`scan_block`](../../crates/kernels/wgsl/scan_block.wgsl) | Exclusive prefix scan, stage 1 of the generic multi-pass scan | one thread per output element | 3/5 | ✓ | ✓ | - | - | n/a |
+| [`segment_bcast_rows`](../../crates/kernels/wgsl/segment_bcast_rows.wgsl) | Backward of segment_sum_rows: each segment's gradient broadcast to its masked rows | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`segment_sum_rows`](../../crates/kernels/wgsl/segment_sum_rows.wgsl) | Masked sum of each fixed-length segment of rows: pooling of contiguous per-item rows | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`sift_match`](../../crates/kernels/wgsl/sift_match.wgsl) | descriptor matching: each descriptor's best and second-best dot product in another image's set | 64-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ | - | - | f32 |
 | [`sigmoid`](../../crates/kernels/wgsl/sigmoid.wgsl) | Sigmoid activation:  y = 1 / (1 + exp(-x)) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`sigmoid_bwd`](../../crates/kernels/wgsl/sigmoid_bwd.wgsl) | Sigmoid backward:  dx = dy * s * (1 - s),  s = sigmoid(x) | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
