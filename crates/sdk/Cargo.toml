@@ -31,7 +31,7 @@ default = ["full"]
 # `viewport` is in here despite being a tier rather than a surface, for the
 # reason the comment above gives: `cargo test -p brain` runs whatever `full`
 # selects, and a feature nobody builds is a feature whose tests never run.
-full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "reader", "video", "multimodal", "auto", "viewport", "three-d"]
+full = ["image", "creature", "forecast", "text", "vision", "audio", "decision", "study", "reader", "video", "multimodal", "auto", "viewport", "three-d", "timeline"]
 
 # --- presentation tier, not a surface. `brain::viewport`: a window and an RGB8
 #     canvas with the drawing an instrument panel needs, or the same canvas with
@@ -58,6 +58,9 @@ image = ["resolve", "imagetype", "dep:brain-flux2", "dep:brain-s3dit", "dep:brai
 # fincast have neither a `default_ref` nor any resolver wiring registered
 # anywhere yet, so they are a tracked gap, not silently unsupported.
 forecast = ["resolve", "dep:brain-forecast", "dep:brain-kronos", "dep:brain-timesfm3"]
+# `brain::TimelineModel` (horizon: risk over time from irregular records) and
+# `brain::survival`, the evaluation arithmetic it is judged with.
+timeline = ["dep:brain-horizon", "dep:brain-survival", "dep:brain-model", "dep:serde_json"]
 # `brain::Reconstruction`: photographs in, a 3D Gaussian Splatting scene out -
 # the photogrammetry pipeline (`brain-recon`: structure from motion, stereo
 # and the fit) and the scene it returns (`brain-splat`). Selects `device` for
@@ -213,6 +216,8 @@ brain-fly = { workspace = true, optional = true }
 brain-flybody = { workspace = true, optional = true }
 brain-flux2 = { workspace = true, optional = true }
 brain-forecast = { workspace = true, optional = true }
+brain-horizon = { workspace = true, optional = true }
+brain-survival = { workspace = true, optional = true }
 brain-gpu-core = { workspace = true, optional = true }
 brain-imaging = { workspace = true, optional = true }
 brain-kronos = { workspace = true, optional = true }

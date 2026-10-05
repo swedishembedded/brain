@@ -64,6 +64,28 @@ pub struct HorizonConfig {
 }
 
 impl HorizonConfig {
+    /// The default model for `vocab` tokens and `n_codes` outcome codes:
+    /// sized for cohorts of tens of thousands of subjects with a few hundred
+    /// variables each, where a model of a few hundred thousand parameters is
+    /// already more than the events can pin down.
+    pub fn default_for(vocab: u32, n_codes: u32) -> HorizonConfig {
+        HorizonConfig {
+            vocab,
+            max_tokens: 128,
+            d_model: 64,
+            n_layers: 2,
+            n_heads: 4,
+            d_ff: 128,
+            value_bins: 16,
+            time_bins: 8,
+            rank: 32,
+            n_codes,
+            knots: DEFAULT_KNOTS.to_vec(),
+            value_weight: 0.2,
+            additive: false,
+        }
+    }
+
     /// A small configuration for tests and gradient checks.
     pub fn tiny(vocab: u32, n_codes: u32) -> HorizonConfig {
         HorizonConfig {

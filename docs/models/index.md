@@ -99,6 +99,12 @@ named on the model's own page (see
 | [`kronos`](kronos.md) | OHLCV bar forecasting | [x] | [x] | [x] |
 | [`timesfm3`](timesfm3.md) | natively multivariate probabilistic forecasting | [x] | | |
 
+## Time to event
+
+| Architecture | Solves | Infer | Train |
+|---|---|:---:|:---:|
+| [`horizon`](horizon.md) | per-outcome risk by any horizon from irregular records, competing outcomes, censored follow-up | [x] | [x] |
+
 ## World models and control
 
 | Architecture | Solves | Infer | Train |

@@ -229,11 +229,15 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
 5. **Uncertainty.** Seeded ensembles and a conformal post-process over the
    cumulative incidence (conformalised survival distributions); the model
    reports an interval, never a point.
-6. **SDK and serving.** A `flow::Stages` pipeline (`train/evaluate/save/ask`),
-   a capability with one action (timeline + query times in, curves and
-   distributions out) and a `catalog` entry. A new `brain_arch::Domain`
-   variant if neither `Forecast` (regular grid) nor `Decision` fits the
-   request shape, which on present reading neither does.
+6. **SDK and serving.** SDK done: `brain::TimelineModel` (`timeline`
+   surface, `brain_arch::Domain::Timeline`, architecture row `horizon`,
+   `docs/models/horizon.md`) trains with held-out early stopping, predicts
+   closed-form curves (`Prediction::cif`/`survival`), exposes the summary
+   state, saves and loads (weights with the configuration in the header, the
+   vocabulary beside them), and re-exports `brain::survival` and the
+   synthetic population; `crates/sdk/tests/timeline.rs` trains, saves,
+   reloads and predicts identically. Open: the serving surface (a capability
+   with one action, a `catalog` entry, CLI verb, D-Bus).
 
 ## 7. What decides between the alternatives
 

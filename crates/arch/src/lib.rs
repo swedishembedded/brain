@@ -78,6 +78,17 @@ pub enum Domain {
     /// no meaning without one, and the serving contract has to carry the
     /// allowed answers rather than only a prompt.
     Decision,
+    /// Predicts WHEN things happen to a subject from its irregular history:
+    /// per-outcome probabilities by any horizon, with competing outcomes and
+    /// censored follow-up.
+    ///
+    /// A separate domain because neither neighbour's shape fits. `Forecast`
+    /// continues a REGULAR time grid of values; here observations arrive at
+    /// arbitrary times, the output is a set of time-to-event curves rather
+    /// than a continuation, and the training data are censored. `Decision`
+    /// returns one distribution over caller-supplied options with no time
+    /// axis at all.
+    Timeline,
     /// brain's own architecture, no upstream reference. Real (gradient-checked,
     /// benchmarked) but excluded from `brain caps`, `brain --help` and the
     /// docs model list - see the [`Source::Toy`] naming rule above.
@@ -275,6 +286,8 @@ pub const ARCHS: &[Arch] = &[
         hf: &["BertModel"],
         default_ref: Some("sentence-transformers/all-MiniLM-L6-v2")
     ),
+    // -- Timeline -------------------------------------------------------
+    arch!("horizon", "Horizon continuous-time subject-timeline model (time-to-event)", Timeline, Brain, "brain-horizon"),
     // -- Text decoders --------------------------------------------------
     arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"]),
     // "qwen3" is the real config.json `model_type` fallback value (used when

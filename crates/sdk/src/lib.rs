@@ -117,6 +117,14 @@ mod music;
 /// `brain::DecisionPipeline` - calibrated probabilities over options supplied
 /// per request. Its own surface because its output space lives in the CALL,
 /// which no generative pipeline's shape can express.
+/// `brain::TimelineModel` - risk over time from irregular records (horizon).
+#[cfg(feature = "timeline")]
+pub mod timeline;
+#[cfg(feature = "timeline")]
+pub use timeline::{Prediction as TimelinePrediction, TimelineModel, TimelineReport, TimelineSpec};
+/// Survival estimation and time-to-event evaluation arithmetic.
+#[cfg(feature = "timeline")]
+pub use survival;
 #[cfg(feature = "decision")]
 pub mod decision;
 #[cfg(feature = "decision")]

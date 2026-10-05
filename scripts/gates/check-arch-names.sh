@@ -137,7 +137,7 @@ done
 # silently matches nothing there (word-splitting still works in a bare `for`
 # loop, which is why that half of this looked fine while the `case` half did
 # not; caught by the ORPHAN check flagging every single docs page at once).
-non_toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", (Text|Multimodal|Audio|Vision|Image|Video|ThreeD|Forecast|World)' "$ARCH_TABLE" \
+non_toy_ids=$(grep -oE 'arch!\("[a-z0-9]+", "[^"]*", (Text|Multimodal|Audio|Vision|Image|Video|ThreeD|Forecast|World|Timeline)' "$ARCH_TABLE" \
              | sed -E 's/^arch!\("([a-z0-9]+)".*/\1/' | tr '\n' ' ')
 
 for id in $non_toy_ids; do

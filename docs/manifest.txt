@@ -172,6 +172,7 @@ docs/models/chronos2.md
 docs/models/fincast.md
 docs/models/kronos.md
 docs/models/timesfm3.md
+docs/models/horizon.md
 docs/models/world-models.md
 docs/models/diamond.md
 docs/models/genieredux.md
