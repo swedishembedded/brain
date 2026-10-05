@@ -19,9 +19,12 @@
 //! Brier score does (a case at `T_i <= t` by `1 / G(T_i)`, a subject free at
 //! `t` by `1 / G(t)`, a competing event first by `1 / G(T_i)`), times its
 //! sampling weight. The validity guarantee is then asymptotic, through `G`.
-//! The new subject enters with its own sampling weight and no censoring
-//! factor: it stands for itself, where each labelled calibration subject
-//! also stands for the censored ones like it.
+//! The new subject enters with the weight its caller gives it and no
+//! censoring factor: it stands for itself, where each labelled calibration
+//! subject also stands for the censored ones like it. Under sampling weights
+//! that vary widely, give it [`VennAbers::mean_weight`] - an average
+//! calibration subject - rather than its own survey weight, which would let
+//! one heavily weighted subject swing its own interval to the extremes.
 
 use crate::estimate::Step;
 use crate::Obs;
@@ -35,6 +38,8 @@ pub struct VennAbers {
     /// Per distinct score: total weight and weighted count of events.
     weight: Vec<f64>,
     events: Vec<f64>,
+    /// Labelled calibration subjects.
+    count: usize,
 }
 
 /// One block of the pool-adjacent-violators fit.
@@ -98,6 +103,7 @@ impl VennAbers {
             scores: Vec::new(),
             weight: Vec::new(),
             events: Vec::new(),
+            count: labelled.len(),
         };
         for (s, y, w) in labelled {
             if va.scores.last() == Some(&s) {
@@ -115,6 +121,14 @@ impl VennAbers {
     /// How many distinct calibration scores there are.
     pub fn len(&self) -> usize {
         self.scores.len()
+    }
+
+    /// The mean weight (sampling weight over the censoring probability) of a
+    /// labelled calibration subject: the weight a new subject enters with as
+    /// an average one. `None` without calibration subjects.
+    pub fn mean_weight(&self) -> Option<f64> {
+        let n = self.count;
+        (n > 0).then(|| self.weight.iter().sum::<f64>() / n as f64)
     }
 
     /// Whether no calibration subject was labelled.
@@ -214,6 +228,22 @@ mod tests {
         // Below every calibration score, labelled 1 it stands alone.
         let (r0, r1) = va.interval(0.0, 1.0);
         assert!(r0 == 0.0 && (r1 - 0.5).abs() < 1e-12, "{r0} {r1}");
+    }
+
+    #[test]
+    fn the_mean_weight_is_an_average_labelled_subject() {
+        let obs = [
+            Obs::event(0.5, 0).weighted(2.0),
+            Obs::censored(2.0).weighted(4.0),
+            Obs::censored(0.5),
+        ];
+        let va = VennAbers::at_horizon(&[0.1, 0.1, 0.3], &obs, 0, 1.0, &censoring(&[]));
+        // The subject censored before the horizon is not labelled.
+        assert_eq!(va.mean_weight(), Some(3.0));
+        assert_eq!(
+            VennAbers::at_horizon(&[], &[], 0, 1.0, &censoring(&[])).mean_weight(),
+            None
+        );
     }
 
     #[test]
