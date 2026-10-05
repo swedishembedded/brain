@@ -66,3 +66,37 @@ fn train_save_load_predict() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Both visit backbones save and load: the loaded model predicts the same
+/// curves as the trained one.
+#[test]
+fn visit_backbones_save_and_load() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use brain::timeline::synthetic::drifting::{self, Gaps};
+    use brain::timeline::Backbone;
+    let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 2.0), visits: (1, 4) };
+    let (train, _) = drifting::population(2000, 1, &gaps, 10.0);
+    let (held_out, _) = drifting::population(300, 2, &gaps, 10.0);
+    for backbone in [Backbone::State, Backbone::Attention] {
+        let spec = TimelineSpec::new([drifting::CODE], [drifting::CODE])
+            .knots(vec![0.0, 2.0, 5.0, 10.0])
+            .max_tokens(8)
+            .steps(60)
+            .batch(64)
+            .visits(4)
+            .backbone(backbone);
+        let (model, _) = TimelineModel::train(&train, &held_out, &spec).unwrap();
+        let dir = std::env::temp_dir().join(format!("brain-timeline-visits-{backbone:?}-{}", std::process::id()));
+        model.save(&dir).unwrap();
+        let loaded = TimelineModel::load(&dir).unwrap();
+        assert_eq!(loaded.config().visits, 4);
+        assert_eq!(loaded.config().backbone, backbone);
+        let (a, b) = (model.predict(&held_out[..40]).unwrap(), loaded.predict(&held_out[..40]).unwrap());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.cif(drifting::CODE, 5.0), y.cif(drifting::CODE, 5.0), "{backbone:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

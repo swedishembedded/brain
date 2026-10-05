@@ -15,9 +15,9 @@ Nothing in the model knows the domain: variables and outcome codes are data.
 | Training from scratch | [x] |
 | Inference | [x] (SDK) |
 | LoRA fine-tune | [ ] |
-| CLI (`brain <arch> <action>`) | [ ] |
-| HTTP API | [ ] |
-| D-Bus | [ ] |
+| CLI (`brain <arch> <action>`) | [x] (`brain horizon predict`) |
+| HTTP API | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
+| D-Bus | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
 
 ## Data: `timeline-v1`
 
@@ -120,8 +120,12 @@ the host's, never a request parameter.
 
 ## Limits
 
-- One summary state per prediction time: a subject's history is a set, not a
-  trajectory, and predicting from a later visit means a new record with a
-  later `entry`. A recurrent backbone over visits is planned.
+- One prediction time per record: predicting from a later visit means a new
+  record with a later `entry`. With `TimelineSpec::visits` the history before
+  it is read visit by visit; without, as one set.
+- An event at exactly the entry time is neither history nor outcome: history
+  is strictly before entry, outcomes strictly after.
+- The population state the visit state reverts to is one constant per
+  channel, not yet a function of age and calendar time.
 - Curves are held constant past the last knot; the model says nothing about
   later times.
