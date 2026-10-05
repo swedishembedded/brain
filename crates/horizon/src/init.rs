@@ -41,7 +41,9 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
             .map(|x| x * std)
             .collect::<Vec<f32>>()
         };
-        let v = if name == "tok.gamma" {
+        let v = if name == "visit.state" {
+            visit_state(cfg.d_model as usize)
+        } else if name == "tok.gamma" {
             noise(0.02).into_iter().map(|x| 1.0 + x).collect()
         } else if name == "tok.beta" {
             noise(0.02)
@@ -75,6 +77,22 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
     out
 }
 
+/// The continuous-time state's initial `[raw rate | population state]`: rates
+/// log-spaced from one per tenth of a time unit to one per hundred units
+/// (raw = the inverse of softplus), so some channels forget within a visit
+/// interval and others carry a lifetime; the population state starts at 0.
+fn visit_state(d: usize) -> Vec<f32> {
+    let (fast, slow) = (10.0f64.ln(), 0.01f64.ln());
+    let mut v: Vec<f32> = (0..d)
+        .map(|c| {
+            let r = (fast + (slow - fast) * c as f64 / (d.max(2) - 1) as f64).exp();
+            (r.exp_m1().ln()) as f32
+        })
+        .collect();
+    v.resize(2 * d, 0.0);
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +110,15 @@ mod tests {
         assert!(a["hazard.code.bias"]
             .iter()
             .all(|&x| x == INITIAL_LOG_HAZARD));
+        let mut cfg = cfg;
+        cfg.visits = 3;
+        let s = &init_weights(&cfg, 3)["visit.state"];
+        let softplus = |x: f32| (1.0 + x.exp()).ln();
+        let d = cfg.d_model as usize;
+        assert!(
+            (softplus(s[0]) - 10.0).abs() < 1e-3 && (softplus(s[d - 1]) - 0.01).abs() < 1e-5,
+            "{s:?}"
+        );
+        assert!(s[d..].iter().all(|&m| m == 0.0));
     }
 }

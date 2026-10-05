@@ -29,6 +29,7 @@ use paramstore::ParamStore;
 use serde_json::Value;
 
 mod additive;
+mod backbone;
 mod forecast;
 
 use crate::batch::HostBatch;
@@ -70,6 +71,8 @@ const BIAS_GRAD_PART: usize = 39;
 const BIAS_GRAD_FINAL: usize = 40;
 const SEGMENT_SUM: usize = 41;
 const SEGMENT_BCAST: usize = 42;
+const CT_SCAN: usize = 43;
+const CT_SCAN_BWD: usize = 44;
 /// Row chunks per column of the two-stage bias gradient: one serial walk
 /// over every row per column is a handful of threads on a wide device.
 const BIAS_GRAD_CHUNKS: u32 = 64;
@@ -139,6 +142,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_grad_final", kernels::BIAS_GRAD_FINAL),
     ("segment_sum_rows", kernels::SEGMENT_SUM_ROWS),
     ("segment_bcast_rows", kernels::SEGMENT_BCAST_ROWS),
+    ("ct_state_scan", kernels::CT_STATE_SCAN),
+    ("ct_state_scan_bwd", kernels::CT_STATE_SCAN_BWD),
     // Cooperative grad-norm, resolved by name by `optim::Optim`. Kept last:
     // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
@@ -164,6 +169,8 @@ struct Inputs {
     value_bins: DeviceBuffer,
     time_bins: DeviceBuffer,
     summary_rows: DeviceBuffer,
+    /// Time gaps of the visit slots and to entry (see `HostBatch::visit_dt`).
+    visit_dt: DeviceBuffer,
     value_target: DeviceBuffer,
     value_state: DeviceBuffer,
     value_weight: DeviceBuffer,
@@ -186,6 +193,8 @@ pub struct Horizon {
     pub ps: ParamStore,
     opt: Optim,
     b: u32,
+    /// Sets the encoder reads per batch: `b` times the sets per subject.
+    sets: u32,
     inp: Inputs,
     gam: DeviceBuffer,
     bet: DeviceBuffer,
@@ -238,6 +247,8 @@ pub struct Horizon {
     bias_part: DeviceBuffer,
     /// The forecast head, when the configuration asks for one.
     fc: Option<forecast::ForecastBufs>,
+    /// The state across visits, when the configuration asks for one.
+    bb: Option<backbone::BackboneBufs>,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
 }
@@ -269,8 +280,9 @@ impl Horizon {
             cfg.n_codes as u64,
             cfg.time_features() as u64,
         );
-        let (bn, bp, bb) = (b as u64 * n, b as u64 * p, b as u64);
-        let bhnn = bb * cfg.n_heads as u64 * n * n;
+        let sets = b * cfg.sets_per_subject();
+        let (bn, bp, bb) = (sets as u64 * n, b as u64 * p, b as u64);
+        let bhnn = sets as u64 * cfg.n_heads as u64 * n * n;
         let st = |x: u64| gpu.storage(x);
         let input = |label: &str, words: u64| {
             gpu.buffer(label, words * 4, BufUsage::STORAGE | BufUsage::COPY_DST)
@@ -280,7 +292,8 @@ impl Horizon {
             keep: input("keep", bn),
             value_bins: input("value_bins", bn * cfg.value_table() as u64),
             time_bins: input("time_bins", bn * cfg.time_table() as u64),
-            summary_rows: input("summary_rows", bb),
+            summary_rows: input("summary_rows", sets as u64),
+            visit_dt: input("visit_dt", sets as u64 + bb),
             value_target: input("value_target", bn),
             value_state: input("value_state", bn),
             value_weight: input("value_weight", bn),
@@ -306,6 +319,7 @@ impl Horizon {
             .collect();
         let mut m = Horizon {
             b,
+            sets,
             inp,
             gam: st(bn * d),
             bet: st(bn * d),
@@ -354,6 +368,7 @@ impl Horizon {
             ln_inv: st(bn),
             bias_part: st(BIAS_GRAD_CHUNKS as u64 * (3 * d).max(ff).max(k).max(r)),
             fc: forecast::ForecastBufs::new(&gpu, &cfg, b),
+            bb: backbone::BackboneBufs::new(&gpu, &cfg, b),
             fwd: Vec::new(),
             bwd: Vec::new(),
             cfg,
@@ -377,16 +392,19 @@ impl Horizon {
         let i = &self.inp;
         assert_eq!(
             hb.summary_rows.len(),
-            self.b as usize,
-            "batch assembled for {} slots, model sized for {}",
+            self.sets as usize,
+            "batch assembled for {} sets, model sized for {}",
             hb.summary_rows.len(),
-            self.b
+            self.sets
         );
         g.write(&i.token_ids, &hb.token_ids);
         g.write(&i.keep, &hb.keep);
         g.write_f32(&i.value_bins, &hb.value_bins);
         g.write_f32(&i.time_bins, &hb.time_bins);
         g.write(&i.summary_rows, &hb.summary_rows);
+        if self.bb.is_some() {
+            g.write_f32(&i.visit_dt, &hb.visit_dt);
+        }
         g.write_f32(&i.value_target, &hb.value_target);
         g.write(&i.value_state, &hb.value_state);
         g.write_f32(&i.value_weight, &hb.value_weight);
@@ -413,7 +431,7 @@ impl Horizon {
     fn bidir(&self) -> Bidir {
         let d = self.cfg.d_model;
         Bidir {
-            b: self.b,
+            b: self.sets,
             t: self.cfg.max_tokens,
             n_heads: self.cfg.n_heads,
             head_dim: d / self.cfg.n_heads,
@@ -507,7 +525,7 @@ impl Horizon {
         let g = &self.gpu;
         let i = &self.inp;
         let (n, d) = (c.max_tokens, c.d_model);
-        let bn = self.b * n;
+        let bn = self.sets * n;
         let (vt, tt) = (c.value_table(), c.time_table());
         vec![
             g.step(
@@ -553,7 +571,7 @@ impl Horizon {
         let i = &self.inp;
         let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
-        let (bn, bp, b) = (self.b * n, self.b * p, self.b);
+        let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
         let a = self.bidir();
         for (l, lb) in self.layers.iter().enumerate() {
@@ -590,8 +608,8 @@ impl Horizon {
                 g.step(
                     KEYPAD,
                     &[&i.keep, &lb.scores],
-                    &[b, c.n_heads, n],
-                    b * c.n_heads * n * n,
+                    &[self.sets, c.n_heads, n],
+                    self.sets * c.n_heads * n * n,
                 ),
             );
             s.extend(attn);
@@ -695,8 +713,10 @@ impl Horizon {
                 &[bn],
                 bn,
             ),
+        ]);
+        s.extend(self.state_forward_steps());
+        s.extend([
             // hazard head
-            g.step(EMBED, &[&i.summary_rows, &self.xf, &self.z], &[d, b], b * d),
             self.mm(&self.z, self.w("hazard.state.weight"), &self.az, b, d, r),
             g.step(
                 BIAS_ADD,
@@ -761,7 +781,7 @@ impl Horizon {
         let gr = |name: &str| self.ps.g(name);
         let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
-        let (bn, bp, b) = (self.b * n, self.b * p, self.b);
+        let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let last = c.n_layers as usize;
         // The forecast head first: its share of the state gradient goes into
         // d_z (cleared before this list), the hazard head's is added to it.
@@ -850,14 +870,9 @@ impl Horizon {
                 2,
                 0,
             ),
-            // The summary rows carry no value target (d_xf is zero there), so
-            // their gradient is exactly the pooled state's.
-            g.step(
-                ROW_SCATTER,
-                &[&i.summary_rows, &self.d_z, &self.d_xf],
-                &[b, d, bn],
-                b * d,
-            ),
+        ]);
+        s.extend(self.state_backward_steps());
+        s.extend(vec![
             // final norm
             block::ln_stats_fwd(
                 g,
@@ -1082,7 +1097,7 @@ impl Horizon {
         let g = &self.gpu;
         let i = &self.inp;
         let gr = |name: &str| self.ps.g(name);
-        let (d, bn) = (c.d_model, self.b * c.max_tokens);
+        let (d, bn) = (c.d_model, self.sets * c.max_tokens);
         let (vt, tt) = (c.value_table(), c.time_table());
         let d0 = &self.dres[0];
         vec![
@@ -1129,7 +1144,7 @@ impl Horizon {
     pub fn loss_parts(&self) -> (f32, f32) {
         let c = &self.cfg;
         let bpk = (self.b * c.pieces() * c.n_codes) as usize;
-        let bn = (self.b * c.max_tokens) as usize;
+        let bn = (self.sets * c.max_tokens) as usize;
         let event: f64 = self
             .gpu
             .read(&self.hloss, bpk)
@@ -1176,7 +1191,7 @@ impl Horizon {
     /// The value head's `(mu, log sigma)` per token row of the last forward.
     pub fn read_value_predictions(&self) -> Vec<f32> {
         self.gpu
-            .read(&self.vpred, (self.b * self.cfg.max_tokens * 2) as usize)
+            .read(&self.vpred, (self.sets * self.cfg.max_tokens * 2) as usize)
     }
 
     /// Zero every gradient.

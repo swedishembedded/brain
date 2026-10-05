@@ -126,6 +126,7 @@ pub struct TimelineSpec {
     seed: u64,
     vocab: FitOptions,
     forecasts: Option<(u32, f32)>,
+    visits: Option<u32>,
 }
 
 impl TimelineSpec {
@@ -150,6 +151,7 @@ impl TimelineSpec {
             seed: 1,
             vocab: FitOptions::default(),
             forecasts: None,
+            visits: None,
         }
     }
     /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
@@ -215,6 +217,14 @@ impl TimelineSpec {
         self.forecasts = Some((per_subject, weight));
         self
     }
+    /// Carry a continuous-time state across the most recent `visits` visits
+    /// (distinct observation times) instead of reading the whole history as
+    /// one set: between visits the state reverts towards the population over
+    /// the elapsed time, so gaps longer than any in training extrapolate.
+    pub fn visits(mut self, visits: u32) -> Self {
+        self.visits = Some(visits);
+        self
+    }
     /// Quantile knots per numeric variable, and the subjects a categorical
     /// level needs to get its own token.
     pub fn vocabulary(mut self, knots: usize, min_count: usize) -> Self {
@@ -239,6 +249,9 @@ impl TimelineSpec {
         if let Some((n, w)) = self.forecasts {
             cfg.forecasts = n;
             cfg.forecast_weight = w;
+        }
+        if let Some(v) = self.visits {
+            cfg.visits = v;
         }
         cfg
     }

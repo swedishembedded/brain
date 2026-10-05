@@ -3,9 +3,12 @@
 
 //! Encoded subjects flattened into the arrays one forward pass reads.
 //!
-//! Row `b * max_tokens` is subject `b`'s summary token; its inputs follow and
-//! the rest of its rows are padding (masked out of attention, out of every
-//! loss). Weights are normalised here, so both loss kernels' host sums are the
+//! The encoder reads `sets_per_subject` sets per subject slot (one, or one
+//! per visit slot with a state across visits; visits fill the last slots, the
+//! most recent last). Row `set * max_tokens` is a set's summary token; its
+//! inputs follow and the rest of its rows are padding (masked out of
+//! attention, out of every loss). An empty set - an unused visit slot, a
+//! subject slot past the batch - has no summary token either. Weights are normalised here, so both loss kernels' host sums are the
 //! weighted MEAN: the event loss over subjects, the value loss over the
 //! values that were hidden for it.
 
@@ -28,8 +31,12 @@ pub struct HostBatch {
     pub value_bins: Vec<f32>,
     /// `[B*N, time_table]` time-ago bin weights.
     pub time_bins: Vec<f32>,
-    /// `[B]` the summary token's row.
+    /// `[S]` each set's summary-token row (`S = B * sets_per_subject`).
     pub summary_rows: Vec<u32>,
+    /// `[S + B]`: per visit slot the time since the subject's previous visit
+    /// (0 for its first, -1 for an unused slot), then per subject the time
+    /// from its last visit to entry. Read only with a state across visits.
+    pub visit_dt: Vec<f32>,
     /// `[B*N]` value targets (normal scores).
     pub value_target: Vec<f32>,
     /// `[B*N]` 0 not scored, 1 exact, 2 below, 3 above.
@@ -105,16 +112,19 @@ pub fn assemble(
         cfg.time_features() as usize,
     );
     let nfc = cfg.forecasts as usize;
+    let vs = cfg.sets_per_subject() as usize;
+    let sets = b * vs;
     let mut hb = HostBatch {
         n_subjects: subjects.len(),
-        token_ids: vec![PAD; b * n],
-        keep: vec![0; b * n],
-        value_bins: vec![0.0; b * n * vt],
-        time_bins: vec![0.0; b * n * tt],
-        summary_rows: (0..b).map(|i| (i * n) as u32).collect(),
-        value_target: vec![0.0; b * n],
-        value_state: vec![0; b * n],
-        value_weight: vec![0.0; b * n],
+        token_ids: vec![PAD; sets * n],
+        keep: vec![0; sets * n],
+        value_bins: vec![0.0; sets * n * vt],
+        time_bins: vec![0.0; sets * n * tt],
+        summary_rows: (0..sets).map(|i| (i * n) as u32).collect(),
+        visit_dt: [vec![-1.0; sets], vec![0.0; b]].concat(),
+        value_target: vec![0.0; sets * n],
+        value_state: vec![0; sets * n],
+        value_weight: vec![0.0; sets * n],
         piece_subject: (0..b * p).map(|r| (r / p) as u32).collect(),
         time_features: vec![0.0; b * p * nf],
         event: vec![0.0; b * p * k],
@@ -131,19 +141,30 @@ pub fn assemble(
     let wsum: f32 = subjects.iter().map(|s| s.weight).sum();
     let mut masked_weight = 0.0f32;
     for (i, s) in subjects.iter().enumerate() {
-        let row0 = i * n;
-        hb.token_ids[row0] = CLS;
-        hb.keep[row0] = 1;
-        // The summary token carries the "present" bin like every value-less
-        // token: an input of beta alone has near-zero variance, which the
-        // first LayerNorm then amplifies into an ill-conditioned row.
-        hb.value_bins[row0 * vt + (cfg.value_bins + BIN_PRESENT) as usize] = 1.0;
-        let numeric: Vec<usize> = s
-            .tokens
+        // Visits fill the last slots of the subject's sets, the most recent last.
+        let first_slot = i * vs + vs - s.visits.len().min(vs);
+        let visits = &s.visits[s.visits.len().saturating_sub(vs)..];
+        if cfg.visits > 0 {
+            for (j, v) in visits.iter().enumerate() {
+                let gap = if j == 0 {
+                    0.0
+                } else {
+                    visits[j - 1].ago - v.ago
+                };
+                hb.visit_dt[first_slot + j] = gap as f32;
+            }
+            hb.visit_dt[sets + i] = visits.last().map_or(0.0, |v| v.ago as f32);
+        }
+        let numeric: Vec<(usize, usize)> = visits
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.target.is_some())
-            .map(|(j, _)| j)
+            .flat_map(|(j, v)| {
+                v.tokens
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| t.target.is_some())
+                    .map(move |(k, _)| (j, k))
+            })
             .collect();
         let hide = if mask_rate > 0.0 && !numeric.is_empty() {
             ((numeric.len() as f64 * mask_rate).round() as usize).max(1)
@@ -157,24 +178,34 @@ pub fn assemble(
             chosen.swap(j, r);
         }
         let hidden = &chosen[..hide];
-        for (j, t) in s.tokens.iter().enumerate() {
-            let row = row0 + 1 + j;
-            hb.token_ids[row] = t.id;
-            hb.keep[row] = 1;
-            if hidden.contains(&j) {
-                hb.value_bins[row * vt + (cfg.value_bins + BIN_MASK) as usize] = 1.0;
-                let (y, state) = t.target.expect("only numeric tokens are hidden");
-                hb.value_target[row] = y;
-                hb.value_state[row] = state as u32;
-                hb.value_weight[row] = s.weight; // normalised below
-                masked_weight += s.weight;
-            } else {
-                for &(bin, w) in &t.value_bins {
-                    hb.value_bins[row * vt + bin as usize] = w;
+        for (j, v) in visits.iter().enumerate() {
+            let row0 = (first_slot + j) * n;
+            hb.token_ids[row0] = CLS;
+            hb.keep[row0] = 1;
+            // The summary token carries the "present" bin like every
+            // value-less token: an input of beta alone has near-zero
+            // variance, which the first LayerNorm then amplifies into an
+            // ill-conditioned row.
+            hb.value_bins[row0 * vt + (cfg.value_bins + BIN_PRESENT) as usize] = 1.0;
+            for (k, t) in v.tokens.iter().enumerate() {
+                let row = row0 + 1 + k;
+                hb.token_ids[row] = t.id;
+                hb.keep[row] = 1;
+                if hidden.contains(&(j, k)) {
+                    hb.value_bins[row * vt + (cfg.value_bins + BIN_MASK) as usize] = 1.0;
+                    let (y, state) = t.target.expect("only numeric tokens are hidden");
+                    hb.value_target[row] = y;
+                    hb.value_state[row] = state as u32;
+                    hb.value_weight[row] = s.weight; // normalised below
+                    masked_weight += s.weight;
+                } else {
+                    for &(bin, w) in &t.value_bins {
+                        hb.value_bins[row * vt + bin as usize] = w;
+                    }
                 }
-            }
-            for &(bin, w) in &t.time_bins {
-                hb.time_bins[row * tt + bin as usize] = w;
+                for &(bin, w) in &t.time_bins {
+                    hb.time_bins[row * tt + bin as usize] = w;
+                }
             }
         }
         hb.subject_weight[i] = if wsum > 0.0 { s.weight / wsum } else { 0.0 };
@@ -300,5 +331,39 @@ mod tests {
             again.value_state, hb.value_state,
             "the seed reproduces the mask"
         );
+    }
+
+    #[test]
+    fn visits_fill_the_last_slots_with_their_gaps() {
+        let (_, mut cfg) = fixture();
+        cfg.visits = 3;
+        let line = r#"{"subject_id":"c","source":"s","entry":50,"calendar_at_entry":2000,
+           "observations":[{"t":41,"var":"x","value":1},{"t":44,"var":"x","value":2},{"t":44,"var":"y","value":2}],
+           "at_risk":[{"code":"*","from":50,"to":52}]}"#;
+        let subject = crate::timeline::Subject::from_json_line(line).unwrap();
+        let codes = vec!["death".to_string()];
+        let v = Vocab::fit(
+            std::slice::from_ref(&subject),
+            &codes,
+            &codes,
+            &FitOptions {
+                knots: 5,
+                min_count: 1,
+            },
+        )
+        .unwrap();
+        cfg.vocab = v.len();
+        let e = encode(&subject, &v, &cfg);
+        let hb = assemble(&cfg, &[&e], 2, 0.0, &mut Rng::new(1));
+        let n = cfg.max_tokens as usize;
+        // Slot 0 unused; visit at 41 then at 44 (3 later); entry 6 after.
+        assert_eq!(
+            hb.visit_dt,
+            vec![-1.0, 0.0, 3.0, -1.0, -1.0, -1.0, 6.0, 0.0]
+        );
+        assert_eq!(hb.summary_rows.len(), 6);
+        assert_eq!(hb.keep[0], 0, "an unused visit slot is empty");
+        assert_eq!(hb.keep[n..n + 3], [1, 1, 0]);
+        assert_eq!(hb.keep[2 * n..2 * n + 4], [1, 1, 1, 0]);
     }
 }

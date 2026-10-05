@@ -223,10 +223,22 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    is several times closer to the truth than carrying the entry value
    forward, and the 5th-95th percentile interval holds about nine in ten
    held-out follow-up measurements. `TimelineModel::forecast` in the SDK.
-3. **Backbone A** with the physical-time gate and the mean-reverting
-   propagation; **backbone B** with real-valued RoPE. A synthetic process with
-   known continuous-time dynamics (irregular sampling, gaps far longer than
-   training gaps) is the extrapolation test.
+3. **Backbone A.** Done in its diagonal form (`HorizonConfig::visits`,
+   `model::backbone`, kernels `ct_state_scan` and its adjoint): one set per
+   visit, a per-channel state that reverts towards a learned population state
+   at `softplus` rates over the elapsed time and moves towards each visit
+   through a sigmoid gate (the delta rule with a diagonal state), propagated
+   to the prediction time in closed form; time reaches the model only through
+   the gaps. Gradient-checked on the CPU JIT (directional over every tensor,
+   element-wise over the rates and population state). The extrapolation test
+   (`tests/continuous.rs`, `synthetic::drifting`: an Ornstein-Uhlenbeck risk
+   factor at irregular visits, the best prediction exact by Kalman filtering)
+   trains with last gaps of at most two years and scores six to ten: the
+   state is closer to the best prediction than the single set, there and in
+   distribution. Open: the matrix-state delta rule (the existing GDN
+   recurrence with the decay made physical), and **backbone B** with
+   real-valued RoPE as the comparison arm; the GPU gradient check once the
+   device is free.
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
    weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
    and Uno concordance with competing causes; IPCW Brier score and its

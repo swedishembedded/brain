@@ -68,6 +68,15 @@ pub struct HorizonConfig {
     /// Weight of the forecast objective relative to the event objective.
     #[serde(default)]
     pub forecast_weight: f32,
+    /// Visits carried by the continuous-time state (0: one set over the
+    /// whole history, no state across visits). With `visits > 0` every
+    /// distinct observation time is a visit encoded as its own set, the most
+    /// recent `visits` of them are kept, and a state that reverts towards a
+    /// learned population state between visits - at learned rates, over the
+    /// elapsed time - and moves towards each visit's evidence through a gate
+    /// is what the heads read. See `model::backbone`.
+    #[serde(default)]
+    pub visits: u32,
 }
 
 impl HorizonConfig {
@@ -92,6 +101,7 @@ impl HorizonConfig {
             additive: false,
             forecasts: 0,
             forecast_weight: 0.0,
+            visits: 0,
         }
     }
 
@@ -113,7 +123,13 @@ impl HorizonConfig {
             additive: false,
             forecasts: 0,
             forecast_weight: 0.0,
+            visits: 0,
         }
+    }
+
+    /// Sets the encoder runs per subject: one per visit, or one.
+    pub fn sets_per_subject(&self) -> u32 {
+        self.visits.max(1)
     }
 
     /// Hazard pieces.
@@ -141,6 +157,9 @@ impl HorizonConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.additive && self.forecasts > 0 {
             return Err("horizon: the additive baseline has no forecast head".into());
+        }
+        if self.additive && self.visits > 0 {
+            return Err("horizon: the additive baseline has no state across visits".into());
         }
         if !self.d_model.is_multiple_of(self.n_heads) {
             return Err(format!(
@@ -239,6 +258,15 @@ impl HorizonConfig {
             ("hazard.code.weight".to_string(), self.n_codes as usize * r),
             ("hazard.code.bias".to_string(), self.n_codes as usize),
         ]);
+        if self.visits > 0 {
+            v.extend([
+                // Each visit's summary projected to [input | gate pre-activation].
+                ("visit.in.weight".to_string(), 2 * d * d),
+                ("visit.in.bias".to_string(), 2 * d),
+                // [raw rate (softplus) | population state] per channel.
+                ("visit.state".to_string(), 2 * d),
+            ]);
+        }
         if self.forecasts > 0 {
             v.extend([
                 ("forecast.var".to_string(), self.vocab as usize * d),
@@ -291,5 +319,9 @@ mod tests {
         assert!(bad.validate().is_err());
         assert_eq!(c.pieces(), 3);
         assert_eq!(c.time_features(), 6);
+        bad = c.clone();
+        bad.additive = true;
+        bad.visits = 2;
+        assert!(bad.validate().is_err());
     }
 }

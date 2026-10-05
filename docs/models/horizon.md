@@ -59,6 +59,20 @@ on the subjects' future measurements, never fed to the encoder, since a
 later measurement says the subject was alive then). `TimelineSpec::additive(true)` trains the additive
 proportional-hazards baseline on the same inputs instead.
 
+With `TimelineSpec::visits(n)` the history is read visit by visit: every
+distinct observation time is its own set, the most recent `n` are kept, and
+a continuous-time state carries them to the prediction time. Between visits
+the state reverts towards a learned population state at a learned rate per
+channel, over the time that actually passed; each visit then moves it
+towards its own evidence through a learned gate. Time reaches the model only
+through those gaps, so a gap longer than any in training is extrapolated by
+the same exponential rather than by an embedding never trained there. On a
+synthetic risk factor that drifts in continuous time (`synthetic::drifting`,
+whose best possible prediction is known exactly), a model trained with the
+last visit at most two years before entry predicts subjects whose last
+visit was six to ten years before closer to that best prediction than the
+single-set encoder does (`tests/continuous.rs`).
+
 ## SDK
 
 ```rust

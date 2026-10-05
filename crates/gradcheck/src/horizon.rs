@@ -13,6 +13,7 @@
 
 use horizon::batch::assemble;
 use horizon::encode::{encode, Encoded};
+use horizon::synthetic::drifting::{self, Gaps};
 use horizon::synthetic::{population_with_followup, CODES};
 use horizon::vocab::{FitOptions, Vocab};
 use horizon::{Horizon, HorizonConfig};
@@ -104,6 +105,46 @@ pub fn check_horizon_additive(seed: u64) -> Report {
         report
             .checks
             .extend(elementwise_check(&model, name, 1e-2).checks);
+    }
+    report
+}
+
+/// A tiny model with a state across three visit slots, on subjects measured
+/// at irregular visits: one with more visits than slots, one with a single
+/// visit, one who dies, and an empty batch slot.
+pub fn fixture_visits(seed: u64) -> Horizon {
+    let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 3.0), visits: (1, 5) };
+    let (subjects, _) = drifting::population(300, seed, &gaps, 6.0);
+    let visits = |s: &horizon::timeline::Subject| s.observations.len();
+    let many = subjects.iter().position(|s| visits(s) >= 4).expect("a subject with many visits");
+    let one = subjects.iter().position(|s| visits(s) == 1).expect("a subject with one visit");
+    let dies = subjects
+        .iter()
+        .position(|s| s.events.iter().any(|e| e.t - s.entry < 3.5) && visits(s) >= 2)
+        .expect("a death inside the knots");
+    let codes = vec![drifting::CODE.to_string()];
+    let vocab = Vocab::fit(&subjects, &codes, &codes, &FitOptions { knots: 9, min_count: 1 }).expect("vocab");
+    let mut cfg = HorizonConfig::tiny(vocab.len(), 1);
+    cfg.visits = 3;
+    let enc: Vec<Encoded> = [many, one, dies].iter().map(|&i| encode(&subjects[i], &vocab, &cfg)).collect();
+    let refs: Vec<&Encoded> = enc.iter().collect();
+    let hb = assemble(&cfg, &refs, 4, 0.5, &mut data::rng::Rng::new(seed ^ 0x77));
+    assert!(hb.value_state.contains(&1), "fixture hides a value");
+    assert!(hb.visit_dt.iter().any(|&g| g > 0.0), "fixture has a gap between visits");
+    let init = horizon::init_weights(&cfg, seed);
+    let model = Horizon::new(cfg, 4, &init);
+    model.set_batch(&hb);
+    model
+}
+
+/// The state across visits: every tensor directionally, and element-wise the
+/// tables shared across rows and the per-channel rates and population state
+/// every subject's scan reads.
+pub fn check_horizon_visits(seed: u64) -> Report {
+    let model = fixture_visits(seed);
+    let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x7777);
+    for name in ["tok.gamma", "tok.beta", "value_bins.weight", "time_bins.weight", "visit.state", "visit.in.bias", "hazard.code.bias"] {
+        report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
     }
     report
 }

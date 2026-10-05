@@ -26,6 +26,8 @@ use data::rng::Rng;
 
 use crate::timeline::{AtRisk, Event, Observation, Subject, Value};
 
+pub mod drifting;
+
 /// Simulation and integration step, in years.
 pub const STEP: f64 = 0.02;
 /// The outcome codes, in the order the generator reports them.

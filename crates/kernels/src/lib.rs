@@ -336,6 +336,10 @@ pub const CONVTR2D_DX: &str = include_str!("../wgsl/convtr2d_dx.wgsl");
 pub const COPY_COLS: &str = include_str!("../wgsl/copy_cols.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
+/// `wgsl/ct_state_scan.wgsl`
+pub const CT_STATE_SCAN: &str = include_str!("../wgsl/ct_state_scan.wgsl");
+/// `wgsl/ct_state_scan_bwd.wgsl`
+pub const CT_STATE_SCAN_BWD: &str = include_str!("../wgsl/ct_state_scan_bwd.wgsl");
 /// `wgsl/decode_advance.wgsl`
 pub const DECODE_ADVANCE: &str = include_str!("../wgsl/decode_advance.wgsl");
 /// `wgsl/decode_feed.wgsl`
@@ -1402,6 +1406,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr2d_dx", CONVTR2D_DX),
     ("copy_cols", COPY_COLS),
     ("crop2d", CROP2D),
+    ("ct_state_scan", CT_STATE_SCAN),
+    ("ct_state_scan_bwd", CT_STATE_SCAN_BWD),
     ("decode_advance", DECODE_ADVANCE),
     ("decode_feed", DECODE_FEED),
     ("decode_softmax", DECODE_SOFTMAX),

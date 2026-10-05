@@ -56,11 +56,23 @@ pub struct Outcome {
     pub event_piece: Option<u32>,
 }
 
+/// What was known at one time before (or at) entry, encoded as one set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Visit {
+    /// How long before entry, in the dataset's unit.
+    pub ago: f64,
+    /// Its tokens (without the summary token), at most `max_tokens - 1`.
+    pub tokens: Vec<Token>,
+}
+
 /// A subject ready to batch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Encoded {
-    /// Input tokens (without the summary token), at most `max_tokens - 1`.
-    pub tokens: Vec<Token>,
+    /// The sets the encoder reads, oldest first. Without a state across
+    /// visits (`HorizonConfig::visits == 0`) one set holds the whole known
+    /// history; with it, one per distinct time, the most recent
+    /// `HorizonConfig::visits` of them.
+    pub visits: Vec<Visit>,
     /// Known tokens left out because the subject had more than fit.
     pub truncated: usize,
     /// Sampling weight.
@@ -135,9 +147,12 @@ pub(crate) fn normal_score(u: f64, knots: usize) -> f32 {
 /// Encode one subject.
 pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
     let nb = cfg.value_bins;
+    // With a state across visits time enters only through the gaps the state
+    // decays over: every token is "at its own visit", so a gap longer than any
+    // in training never reaches an embedding that was not trained there.
     let time_bins = |t: f64| -> Vec<(u32, f32)> {
         let ago = s.entry - t;
-        if ago.abs() < 1e-9 {
+        if cfg.visits > 0 || ago.abs() < 1e-9 {
             vec![(cfg.time_bins, 1.0)] // measured at entry: its own bin
         } else {
             soft_bins(
@@ -196,19 +211,24 @@ pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
         };
         tokens.push((s.entry - e.t, tok));
     }
-    // Deterministic truncation: the entry visit first, then the most recent
-    // history; ties by token id.
-    tokens.sort_by(|a, b| {
-        a.0.partial_cmp(&b.0)
-            .expect("finite")
-            .then(a.1.id.cmp(&b.1.id))
-    });
     let cap = cfg.max_tokens as usize - 1;
-    let truncated = tokens.len().saturating_sub(cap);
-    tokens.truncate(cap);
-
+    let (visits, truncated) = if cfg.visits == 0 {
+        // Deterministic truncation: the entry visit first, then the most
+        // recent history; ties by token id.
+        let total = tokens.len();
+        let kept = most_recent(tokens, cap);
+        (
+            vec![Visit {
+                ago: 0.0,
+                tokens: kept,
+            }],
+            total.saturating_sub(cap),
+        )
+    } else {
+        by_visit(tokens, cap, cfg.visits as usize)
+    };
     Encoded {
-        tokens: tokens.into_iter().map(|(_, t)| t).collect(),
+        visits,
         truncated,
         weight: s.weight as f32,
         entry: s.entry,
@@ -216,6 +236,40 @@ pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
         outcomes: outcomes(s, vocab, &cfg.knots),
         forecasts: forecasts(s, vocab, cfg),
     }
+}
+
+/// The `cap` tokens closest to entry, ties by token id.
+fn most_recent(mut tokens: Vec<(f64, Token)>, cap: usize) -> Vec<Token> {
+    tokens.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+    tokens.truncate(cap);
+    tokens.into_iter().map(|(_, t)| t).collect()
+}
+
+/// Tokens grouped by the time they were recorded: the `keep` most recent
+/// times, each capped at `cap` tokens (ties by id), oldest first; and how
+/// many tokens were left out.
+fn by_visit(tokens: Vec<(f64, Token)>, cap: usize, keep: usize) -> (Vec<Visit>, usize) {
+    let total = tokens.len();
+    let mut groups: Vec<(f64, Vec<(f64, Token)>)> = Vec::new();
+    let mut sorted = tokens;
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for t in sorted {
+        match groups.last_mut() {
+            Some((ago, g)) if *ago == t.0 => g.push(t),
+            _ => groups.push((t.0, vec![t])),
+        }
+    }
+    groups.truncate(keep);
+    let mut visits: Vec<Visit> = groups
+        .into_iter()
+        .map(|(ago, g)| Visit {
+            ago,
+            tokens: most_recent(g, cap),
+        })
+        .collect();
+    visits.reverse();
+    let kept: usize = visits.iter().map(|v| v.tokens.len()).sum();
+    (visits, total - kept)
 }
 
 /// The subject's future numeric measurements as forecast targets, the
@@ -339,20 +393,20 @@ mod tests {
         let e = encode(&s, &v, &cfg);
         // sbp@50, crp@50, smoking@50, weight@25, dx@44: the sbp at 52 and both
         // post-entry events are the future.
-        assert_eq!(e.tokens.len(), 5);
-        assert!(e
+        assert_eq!(e.visits[0].tokens.len(), 5);
+        assert!(e.visits[0]
             .tokens
             .iter()
             .all(|t| t.id != v.event_token("death:heart")));
-        let sbp: Vec<_> = e
+        let sbp: Vec<_> = e.visits[0]
             .tokens
             .iter()
             .filter(|t| t.id == v.numeric_token("sbp"))
             .collect();
         assert_eq!(sbp.len(), 1, "one sbp is known, the later one is not");
         // Entry-visit tokens come first and carry the "at entry" time bin.
-        assert_eq!(e.tokens[0].time_bins, vec![(cfg.time_bins, 1.0)]);
-        let crp = e
+        assert_eq!(e.visits[0].tokens[0].time_bins, vec![(cfg.time_bins, 1.0)]);
+        let crp = e.visits[0]
             .tokens
             .iter()
             .find(|t| t.id == v.numeric_token("crp"))
@@ -402,13 +456,38 @@ mod tests {
         let (s, v, mut cfg) = fixture();
         cfg.max_tokens = 4;
         let e = encode(&s, &v, &cfg);
-        assert_eq!(e.tokens.len(), 3);
+        assert_eq!(e.visits[0].tokens.len(), 3);
         assert_eq!(e.truncated, 2);
         assert!(
-            e.tokens
+            e.visits[0]
+                .tokens
                 .iter()
                 .all(|t| t.time_bins == vec![(cfg.time_bins, 1.0)]),
             "the entry visit is kept first"
         );
+    }
+
+    #[test]
+    fn with_a_state_across_visits_each_time_is_its_own_set() {
+        let (s, v, mut cfg) = fixture();
+        cfg.visits = 2;
+        let e = encode(&s, &v, &cfg);
+        // Known: three tokens at entry, dx 6 before, weight 25 before; the
+        // two most recent times are kept, oldest first.
+        let agos: Vec<f64> = e.visits.iter().map(|v| v.ago).collect();
+        assert_eq!(agos, vec![6.0, 0.0]);
+        assert_eq!(e.visits[0].tokens.len(), 1);
+        assert_eq!(e.visits[0].tokens[0].id, v.event_token("dx"));
+        assert_eq!(e.visits[1].tokens.len(), 3);
+        assert_eq!(e.truncated, 1, "the weight 25 before entry is left out");
+        assert!(
+            e.visits
+                .iter()
+                .flat_map(|v| &v.tokens)
+                .all(|t| t.time_bins == vec![(cfg.time_bins, 1.0)]),
+            "time reaches the state through its gaps alone"
+        );
+        cfg.visits = 5;
+        assert_eq!(encode(&s, &v, &cfg).visits.len(), 3);
     }
 }

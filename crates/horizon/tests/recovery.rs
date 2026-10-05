@@ -61,6 +61,7 @@ fn recovers(additive: bool) {
         additive,
         forecasts: 0,
         forecast_weight: 0.0,
+        visits: 0,
     };
     let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let enc_test: Vec<Encoded> = test.iter().map(|s| encode(s, &vocab, &cfg)).collect();
