@@ -38,6 +38,7 @@ use horizon::Horizon;
 pub use horizon::synthetic;
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
 pub use horizon::HorizonConfig as TimelineConfig;
+pub use horizon::Backbone;
 
 use crate::{Error, Result};
 
@@ -127,6 +128,7 @@ pub struct TimelineSpec {
     vocab: FitOptions,
     forecasts: Option<(u32, f32)>,
     visits: Option<u32>,
+    backbone: Option<horizon::Backbone>,
 }
 
 impl TimelineSpec {
@@ -152,6 +154,7 @@ impl TimelineSpec {
             vocab: FitOptions::default(),
             forecasts: None,
             visits: None,
+            backbone: None,
         }
     }
     /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
@@ -225,6 +228,13 @@ impl TimelineSpec {
         self.visits = Some(visits);
         self
     }
+    /// What carries the visits to the prediction time with
+    /// [`TimelineSpec::visits`]: the continuous-time state (the default) or
+    /// attention with rotary angles from real time.
+    pub fn backbone(mut self, backbone: Backbone) -> Self {
+        self.backbone = Some(backbone);
+        self
+    }
     /// Quantile knots per numeric variable, and the subjects a categorical
     /// level needs to get its own token.
     pub fn vocabulary(mut self, knots: usize, min_count: usize) -> Self {
@@ -252,6 +262,9 @@ impl TimelineSpec {
         }
         if let Some(v) = self.visits {
             cfg.visits = v;
+        }
+        if let Some(b) = self.backbone {
+            cfg.backbone = b;
         }
         cfg
     }
