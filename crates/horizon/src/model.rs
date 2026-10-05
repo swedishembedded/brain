@@ -36,42 +36,51 @@ use crate::config::HorizonConfig;
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
 const BIAS_ADD: usize = 2;
-const BIAS_GRAD: usize = 3;
-const MATMUL_DX: usize = 4;
-const MATMUL_DW: usize = 5;
-const MUL: usize = 6;
-const ADD2: usize = 7;
-const LAYERNORM: usize = 8;
-const LN_STATS: usize = 9;
-const LN_DX: usize = 10;
-const LN_DGAMMA: usize = 11;
-const LN_DBETA: usize = 12;
-const LAYERNORM_ROWS: usize = 13;
-const LN_STATS_ROWS: usize = 14;
-const LN_DX_ROWS: usize = 15;
-const KEYPAD: usize = 23;
-const GELU: usize = 24;
-const GELU_BWD: usize = 25;
-const EMB_BWD: usize = 26;
-const ROW_SCATTER: usize = 27;
-const PEXP_VALUE: usize = 28;
-const PEXP_GRAD: usize = 29;
-const GAUSS_VALUE: usize = 30;
-const GAUSS_GRAD: usize = 31;
-const GRADNORM_SQ: usize = 32;
-const GRAD_SCALE: usize = 33;
-const ADAMW: usize = 34;
-const CLIP_COEF: usize = 35;
-const GRAD_SCALE_BUF: usize = 36;
+const MATMUL_DX: usize = 3;
+const MATMUL_DW: usize = 4;
+const MUL: usize = 5;
+const ADD2: usize = 6;
+const LAYERNORM: usize = 7;
+const LN_STATS: usize = 8;
+const LN_DX: usize = 9;
+const LN_DGAMMA: usize = 10;
+const LN_DBETA: usize = 11;
+const LAYERNORM_ROWS: usize = 12;
+const LN_STATS_ROWS: usize = 13;
+const LN_DX_ROWS: usize = 14;
+const KEYPAD: usize = 22;
+const GELU: usize = 23;
+const GELU_BWD: usize = 24;
+const EMB_BWD: usize = 25;
+const ROW_SCATTER: usize = 26;
+const PEXP_VALUE: usize = 27;
+const PEXP_GRAD: usize = 28;
+const GAUSS_VALUE: usize = 29;
+const GAUSS_GRAD: usize = 30;
+const GRADNORM_SQ: usize = 31;
+const GRAD_SCALE: usize = 32;
+const ADAMW: usize = 33;
+const CLIP_COEF: usize = 34;
+const GRAD_SCALE_BUF: usize = 35;
+const MATMUL_REG3: usize = 36;
+const MATMUL_DX_REG: usize = 37;
+const MATMUL_DW_REG: usize = 38;
+const BIAS_GRAD_PART: usize = 39;
+const BIAS_GRAD_FINAL: usize = 40;
+const SEGMENT_SUM: usize = 41;
+const SEGMENT_BCAST: usize = 42;
+/// Row chunks per column of the two-stage bias gradient: one serial walk
+/// over every row per column is a handful of threads on a wide device.
+const BIAS_GRAD_CHUNKS: u32 = 64;
 
 const BIDIR: BidirIds = BidirIds {
-    scores: 16,
-    softmax: 17,
-    apply: 18,
-    dscores: 19,
-    dv: 20,
-    dq: 21,
-    dk: 22,
+    scores: 15,
+    softmax: 16,
+    apply: 17,
+    dscores: 18,
+    dv: 19,
+    dq: 20,
+    dk: 21,
 };
 const LN_IDS: LayerNormIds = LayerNormIds {
     layernorm: LAYERNORM,
@@ -88,7 +97,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
-    ("bias_grad", kernels::BIAS_GRAD),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("mul", kernels::MUL),
@@ -122,7 +130,16 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("adamw", kernels::ADAMW),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
-    // Cooperative grad-norm, resolved by name by `optim::Optim`.
+    // The tiled GEMMs and the two-stage bias gradient, chosen per shape.
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("bias_grad_part", kernels::BIAS_GRAD_PART),
+    ("bias_grad_final", kernels::BIAS_GRAD_FINAL),
+    ("segment_sum_rows", kernels::SEGMENT_SUM_ROWS),
+    ("segment_bcast_rows", kernels::SEGMENT_BCAST_ROWS),
+    // Cooperative grad-norm, resolved by name by `optim::Optim`. Kept last:
+    // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
@@ -154,8 +171,8 @@ struct Inputs {
     event: DeviceBuffer,
     exposure: DeviceBuffer,
     subject_weight: DeviceBuffer,
-    /// `[B, B*N]` 1 where a token row belongs to the subject (additive mode only).
-    pool: DeviceBuffer,
+    /// `[B*N]` 1 for a real, non-summary token row: what the additive mode sums.
+    pool_mask: DeviceBuffer,
 }
 
 /// The timeline model on one device, sized for `b` subjects per batch.
@@ -216,6 +233,8 @@ pub struct Horizon {
     d_phi: DeviceBuffer,
     ln_mean: DeviceBuffer,
     ln_inv: DeviceBuffer,
+    /// Partial column sums of the two-stage bias gradient.
+    bias_part: DeviceBuffer,
     fwd: Vec<Step>,
     bwd: Vec<Step>,
 }
@@ -267,7 +286,7 @@ impl Horizon {
             event: input("event", bp * k),
             exposure: input("exposure", bp * k),
             subject_weight: input("subject_weight", bb),
-            pool: input("pool", if cfg.additive { bb * bn } else { 1 }),
+            pool_mask: input("pool_mask", bn),
         };
         let layers = (0..cfg.n_layers)
             .map(|_| Layer {
@@ -330,6 +349,7 @@ impl Horizon {
             d_phi: st(bn * d),
             ln_mean: st(bn),
             ln_inv: st(bn),
+            bias_part: st(BIAS_GRAD_CHUNKS as u64 * (3 * d).max(ff).max(k).max(r)),
             fwd: Vec::new(),
             bwd: Vec::new(),
             cfg,
@@ -372,9 +392,9 @@ impl Horizon {
         g.write_f32(&i.exposure, &hb.exposure);
         g.write_f32(&i.subject_weight, &hb.subject_weight);
         if self.cfg.additive {
-            g.write_f32(
-                &i.pool,
-                &additive::pool_matrix(hb, self.cfg.max_tokens as usize),
+            g.write(
+                &i.pool_mask,
+                &additive::pool_mask(hb, self.cfg.max_tokens as usize),
             );
         }
     }
@@ -395,6 +415,82 @@ impl Horizon {
             k_off: d,
             v_off: 2 * d,
         }
+    }
+
+    /// `out = x @ w^T` (`[m, k] x [n, k]`), tiled when the shape pays for it.
+    #[allow(clippy::too_many_arguments)]
+    fn mm(
+        &self,
+        x: &DeviceBuffer,
+        w: &DeviceBuffer,
+        out: &DeviceBuffer,
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Step {
+        let (kern, grid) = block::pick_gemm(m as usize, n as usize, MATMUL, MATMUL_REG3, false);
+        self.gpu.dispatch(kern, &[x, w, out], &[m, k, n], grid)
+    }
+
+    /// `dx = dy @ w` (`[m, n] x [n, k]`), assigned or (`acc = 1`) accumulated.
+    #[allow(clippy::too_many_arguments)]
+    fn mm_dx(
+        &self,
+        dy: &DeviceBuffer,
+        w: &DeviceBuffer,
+        dx: &DeviceBuffer,
+        m: u32,
+        k: u32,
+        n: u32,
+        acc: u32,
+    ) -> Step {
+        let (kern, grid) =
+            block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, false);
+        self.gpu.dispatch(kern, &[dy, w, dx], &[m, k, n, acc], grid)
+    }
+
+    /// `dw += dy^T @ x` (`[m, n]^T x [m, k]`).
+    #[allow(clippy::too_many_arguments)]
+    fn mm_dw(
+        &self,
+        dy: &DeviceBuffer,
+        x: &DeviceBuffer,
+        dw: &DeviceBuffer,
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Step {
+        let (kern, grid) =
+            block::pick_gemm(n as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, false);
+        self.gpu.dispatch(kern, &[dy, x, dw], &[m, k, n], grid)
+    }
+
+    /// Stage one of `db += column sums of dy` (`[m, n]`): partial sums over row chunks.
+    fn bias_grad_part(&self, dy: &DeviceBuffer, m: u32, n: u32) -> Step {
+        self.gpu.step(
+            BIAS_GRAD_PART,
+            &[dy, &self.bias_part],
+            &[m, n, BIAS_GRAD_CHUNKS],
+            n * BIAS_GRAD_CHUNKS,
+        )
+    }
+
+    /// Stage two: fold the partial sums into `db` (accumulating).
+    fn bias_grad_final(&self, db: &DeviceBuffer, m: u32, n: u32) -> Step {
+        self.gpu.step(
+            BIAS_GRAD_FINAL,
+            &[&self.bias_part, db],
+            &[m, n, BIAS_GRAD_CHUNKS],
+            n,
+        )
+    }
+
+    /// Both stages of the bias gradient.
+    fn bias_grad(&self, dy: &DeviceBuffer, db: &DeviceBuffer, m: u32, n: u32) -> [Step; 2] {
+        [
+            self.bias_grad_part(dy, m, n),
+            self.bias_grad_final(db, m, n),
+        ]
     }
 
     /// The token embedding `e = gamma[tok] * (value_bins @ Wv^T) + beta[tok]
@@ -419,19 +515,23 @@ impl Horizon {
                 &[d, bn],
                 bn * d,
             ),
-            g.step(
-                MATMUL,
-                &[&i.value_bins, self.w("value_bins.weight"), &self.phi],
-                &[bn, vt, d],
-                bn * d,
+            self.mm(
+                &i.value_bins,
+                self.w("value_bins.weight"),
+                &self.phi,
+                bn,
+                vt,
+                d,
             ),
             g.step(MUL, &[&self.gam, &self.phi, &self.gp], &[bn * d], bn * d),
             g.step(ADD2, &[&self.gp, &self.bet, &self.e1], &[bn * d], bn * d),
-            g.step(
-                MATMUL,
-                &[&i.time_bins, self.w("time_bins.weight"), &self.te],
-                &[bn, tt, d],
-                bn * d,
+            self.mm(
+                &i.time_bins,
+                self.w("time_bins.weight"),
+                &self.te,
+                bn,
+                tt,
+                d,
             ),
             g.step(ADD2, &[&self.e1, &self.te, &self.res[0]], &[bn * d], bn * d),
         ]
@@ -462,11 +562,13 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.ln1_out, self.w(&pn("attn.qkv.weight")), &lb.qkv],
-                &[bn, d, 3 * d],
-                bn * 3 * d,
+            s.push(self.mm(
+                &lb.ln1_out,
+                self.w(&pn("attn.qkv.weight")),
+                &lb.qkv,
+                bn,
+                d,
+                3 * d,
             ));
             s.push(g.step(
                 BIAS_ADD,
@@ -486,11 +588,13 @@ impl Horizon {
                 ),
             );
             s.extend(attn);
-            s.push(g.step(
-                MATMUL,
-                &[&lb.ctx, self.w(&pn("attn.out.weight")), &self.proj],
-                &[bn, d, d],
-                bn * d,
+            s.push(self.mm(
+                &lb.ctx,
+                self.w(&pn("attn.out.weight")),
+                &self.proj,
+                bn,
+                d,
+                d,
             ));
             s.push(g.step(
                 BIAS_ADD,
@@ -515,11 +619,13 @@ impl Horizon {
                 bn,
                 LN_EPS,
             ));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.ln2_out, self.w(&pn("ffn.up.weight")), &lb.up_pre],
-                &[bn, d, ff],
-                bn * ff,
+            s.push(self.mm(
+                &lb.ln2_out,
+                self.w(&pn("ffn.up.weight")),
+                &lb.up_pre,
+                bn,
+                d,
+                ff,
             ));
             s.push(g.step(
                 BIAS_ADD,
@@ -528,11 +634,13 @@ impl Horizon {
                 bn * ff,
             ));
             s.push(g.step(GELU, &[&lb.up_pre, &lb.up], &[bn * ff], bn * ff));
-            s.push(g.step(
-                MATMUL,
-                &[&lb.up, self.w(&pn("ffn.down.weight")), &self.ffn_out],
-                &[bn, ff, d],
-                bn * d,
+            s.push(self.mm(
+                &lb.up,
+                self.w(&pn("ffn.down.weight")),
+                &self.ffn_out,
+                bn,
+                ff,
+                d,
             ));
             s.push(g.step(
                 BIAS_ADD,
@@ -561,12 +669,7 @@ impl Horizon {
                 LN_EPS,
             ),
             // value head
-            g.step(
-                MATMUL,
-                &[&self.xf, self.w("value_head.weight"), &self.vpred],
-                &[bn, d, 2],
-                bn * 2,
-            ),
+            self.mm(&self.xf, self.w("value_head.weight"), &self.vpred, bn, d, 2),
             g.step(
                 BIAS_ADD,
                 &[&self.vpred, self.w("value_head.bias")],
@@ -587,12 +690,7 @@ impl Horizon {
             ),
             // hazard head
             g.step(EMBED, &[&i.summary_rows, &self.xf, &self.z], &[d, b], b * d),
-            g.step(
-                MATMUL,
-                &[&self.z, self.w("hazard.state.weight"), &self.az],
-                &[b, d, r],
-                b * r,
-            ),
+            self.mm(&self.z, self.w("hazard.state.weight"), &self.az, b, d, r),
             g.step(
                 BIAS_ADD,
                 &[&self.az, self.w("hazard.state.bias")],
@@ -605,19 +703,23 @@ impl Horizon {
                 &[r, bp],
                 bp * r,
             ),
-            g.step(
-                MATMUL,
-                &[&i.time_features, self.w("hazard.time.weight"), &self.cf],
-                &[bp, nf, r],
-                bp * r,
+            self.mm(
+                &i.time_features,
+                self.w("hazard.time.weight"),
+                &self.cf,
+                bp,
+                nf,
+                r,
             ),
             g.step(ADD2, &[&self.rep, &self.cf, &self.h0], &[bp * r], bp * r),
             g.step(GELU, &[&self.h0, &self.h], &[bp * r], bp * r),
-            g.step(
-                MATMUL,
-                &[&self.h, self.w("hazard.code.weight"), &self.loglam],
-                &[bp, r, k],
-                bp * k,
+            self.mm(
+                &self.h,
+                self.w("hazard.code.weight"),
+                &self.loglam,
+                bp,
+                r,
+                k,
             ),
             g.step(
                 BIAS_ADD,
@@ -667,23 +769,17 @@ impl Horizon {
                 &[bp, k, p, gpu_core::f(1.0)],
                 bp * k,
             ),
-            g.step(
-                BIAS_GRAD,
-                &[&self.d_loglam, gr("hazard.code.bias")],
-                &[bp, k],
+            self.bias_grad_part(&self.d_loglam, bp, k),
+            self.bias_grad_final(gr("hazard.code.bias"), bp, k),
+            self.mm_dw(&self.d_loglam, &self.h, gr("hazard.code.weight"), bp, r, k),
+            self.mm_dx(
+                &self.d_loglam,
+                self.w("hazard.code.weight"),
+                &self.d_h,
+                bp,
+                r,
                 k,
-            ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_loglam, &self.h, gr("hazard.code.weight")],
-                &[bp, r, k],
-                k * r,
-            ),
-            g.step(
-                MATMUL_DX,
-                &[&self.d_loglam, self.w("hazard.code.weight"), &self.d_h],
-                &[bp, r, k, 0],
-                bp * r,
+                0,
             ),
             g.step(
                 GELU_BWD,
@@ -691,11 +787,13 @@ impl Horizon {
                 &[bp * r],
                 bp * r,
             ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_h0, &i.time_features, gr("hazard.time.weight")],
-                &[bp, nf, r],
-                r * nf,
+            self.mm_dw(
+                &self.d_h0,
+                &i.time_features,
+                gr("hazard.time.weight"),
+                bp,
+                nf,
+                r,
             ),
             // d_az is cleared before this list runs (emb_bwd accumulates).
             g.step(
@@ -704,23 +802,17 @@ impl Horizon {
                 &[bp, r, b],
                 b * r,
             ),
-            g.step(
-                BIAS_GRAD,
-                &[&self.d_az, gr("hazard.state.bias")],
-                &[b, r],
+            self.bias_grad_part(&self.d_az, b, r),
+            self.bias_grad_final(gr("hazard.state.bias"), b, r),
+            self.mm_dw(&self.d_az, &self.z, gr("hazard.state.weight"), b, d, r),
+            self.mm_dx(
+                &self.d_az,
+                self.w("hazard.state.weight"),
+                &self.d_z,
+                b,
+                d,
                 r,
-            ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_az, &self.z, gr("hazard.state.weight")],
-                &[b, d, r],
-                r * d,
-            ),
-            g.step(
-                MATMUL_DX,
-                &[&self.d_az, self.w("hazard.state.weight"), &self.d_z],
-                &[b, d, r, 0],
-                b * d,
+                0,
             ),
             // value head
             g.step(
@@ -735,23 +827,17 @@ impl Horizon {
                 &[bn],
                 bn,
             ),
-            g.step(
-                BIAS_GRAD,
-                &[&self.d_vpred, gr("value_head.bias")],
-                &[bn, 2],
+            self.bias_grad_part(&self.d_vpred, bn, 2),
+            self.bias_grad_final(gr("value_head.bias"), bn, 2),
+            self.mm_dw(&self.d_vpred, &self.xf, gr("value_head.weight"), bn, d, 2),
+            self.mm_dx(
+                &self.d_vpred,
+                self.w("value_head.weight"),
+                &self.d_xf,
+                bn,
+                d,
                 2,
-            ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_vpred, &self.xf, gr("value_head.weight")],
-                &[bn, d, 2],
-                2 * d,
-            ),
-            g.step(
-                MATMUL_DX,
-                &[&self.d_vpred, self.w("value_head.weight"), &self.d_xf],
-                &[bn, d, 2, 0],
-                bn * d,
+                0,
             ),
             // The summary rows carry no value target (d_xf is zero there), so
             // their gradient is exactly the pooled state's.
@@ -802,27 +888,23 @@ impl Horizon {
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
             // MLP
-            s.push(g.step(
-                BIAS_GRAD,
-                &[&self.dres[l + 1], gr(&pn("ffn.down.bias"))],
-                &[bn, d],
+            s.extend(self.bias_grad(&self.dres[l + 1], gr(&pn("ffn.down.bias")), bn, d));
+            s.push(self.mm_dw(
+                &self.dres[l + 1],
+                &lb.up,
+                gr(&pn("ffn.down.weight")),
+                bn,
+                ff,
                 d,
             ));
-            s.push(g.step(
-                MATMUL_DW,
-                &[&self.dres[l + 1], &lb.up, gr(&pn("ffn.down.weight"))],
-                &[bn, ff, d],
-                d * ff,
-            ));
-            s.push(g.step(
-                MATMUL_DX,
-                &[
-                    &self.dres[l + 1],
-                    self.w(&pn("ffn.down.weight")),
-                    &self.d_up,
-                ],
-                &[bn, ff, d, 0],
-                bn * ff,
+            s.push(self.mm_dx(
+                &self.dres[l + 1],
+                self.w(&pn("ffn.down.weight")),
+                &self.d_up,
+                bn,
+                ff,
+                d,
+                0,
             ));
             s.push(g.step(
                 GELU_BWD,
@@ -830,23 +912,23 @@ impl Horizon {
                 &[bn * ff],
                 bn * ff,
             ));
-            s.push(g.step(
-                BIAS_GRAD,
-                &[&self.d_up_pre, gr(&pn("ffn.up.bias"))],
-                &[bn, ff],
+            s.extend(self.bias_grad(&self.d_up_pre, gr(&pn("ffn.up.bias")), bn, ff));
+            s.push(self.mm_dw(
+                &self.d_up_pre,
+                &lb.ln2_out,
+                gr(&pn("ffn.up.weight")),
+                bn,
+                d,
                 ff,
             ));
-            s.push(g.step(
-                MATMUL_DW,
-                &[&self.d_up_pre, &lb.ln2_out, gr(&pn("ffn.up.weight"))],
-                &[bn, d, ff],
-                ff * d,
-            ));
-            s.push(g.step(
-                MATMUL_DX,
-                &[&self.d_up_pre, self.w(&pn("ffn.up.weight")), &self.d_branch],
-                &[bn, d, ff, 0],
-                bn * d,
+            s.push(self.mm_dx(
+                &self.d_up_pre,
+                self.w(&pn("ffn.up.weight")),
+                &self.d_branch,
+                bn,
+                d,
+                ff,
+                0,
             ));
             s.push(block::ln_stats_fwd(
                 g,
@@ -894,23 +976,16 @@ impl Horizon {
                 bn * d,
             ));
             // attention
-            s.push(g.step(
-                BIAS_GRAD,
-                &[&self.dxmid, gr(&pn("attn.out.bias"))],
-                &[bn, d],
+            s.extend(self.bias_grad(&self.dxmid, gr(&pn("attn.out.bias")), bn, d));
+            s.push(self.mm_dw(&self.dxmid, &lb.ctx, gr(&pn("attn.out.weight")), bn, d, d));
+            s.push(self.mm_dx(
+                &self.dxmid,
+                self.w(&pn("attn.out.weight")),
+                &self.d_ctx,
+                bn,
                 d,
-            ));
-            s.push(g.step(
-                MATMUL_DW,
-                &[&self.dxmid, &lb.ctx, gr(&pn("attn.out.weight"))],
-                &[bn, d, d],
-                d * d,
-            ));
-            s.push(g.step(
-                MATMUL_DX,
-                &[&self.dxmid, self.w(&pn("attn.out.weight")), &self.d_ctx],
-                &[bn, d, d, 0],
-                bn * d,
+                d,
+                0,
             ));
             s.extend(block::bidir_bwd(
                 g,
@@ -922,23 +997,23 @@ impl Horizon {
                 &self.d_scores,
                 &self.d_qkv,
             ));
-            s.push(g.step(
-                BIAS_GRAD,
-                &[&self.d_qkv, gr(&pn("attn.qkv.bias"))],
-                &[bn, 3 * d],
+            s.extend(self.bias_grad(&self.d_qkv, gr(&pn("attn.qkv.bias")), bn, 3 * d));
+            s.push(self.mm_dw(
+                &self.d_qkv,
+                &lb.ln1_out,
+                gr(&pn("attn.qkv.weight")),
+                bn,
+                d,
                 3 * d,
             ));
-            s.push(g.step(
-                MATMUL_DW,
-                &[&self.d_qkv, &lb.ln1_out, gr(&pn("attn.qkv.weight"))],
-                &[bn, d, 3 * d],
-                3 * d * d,
-            ));
-            s.push(g.step(
-                MATMUL_DX,
-                &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_branch],
-                &[bn, d, 3 * d, 0],
-                bn * d,
+            s.push(self.mm_dx(
+                &self.d_qkv,
+                self.w(&pn("attn.qkv.weight")),
+                &self.d_branch,
+                bn,
+                d,
+                3 * d,
+                0,
             ));
             s.push(block::ln_stats_fwd(
                 g,
@@ -1000,12 +1075,7 @@ impl Horizon {
         let (vt, tt) = (c.value_table(), c.time_table());
         let d0 = &self.dres[0];
         vec![
-            g.step(
-                MATMUL_DW,
-                &[d0, &i.time_bins, gr("time_bins.weight")],
-                &[bn, tt, d],
-                d * tt,
-            ),
+            self.mm_dw(d0, &i.time_bins, gr("time_bins.weight"), bn, tt, d),
             g.step(
                 EMB_BWD,
                 &[&i.token_ids, d0, gr("tok.beta")],
@@ -1020,11 +1090,13 @@ impl Horizon {
                 c.vocab * d,
             ),
             g.step(MUL, &[d0, &self.gam, &self.d_phi], &[bn * d], bn * d),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_phi, &i.value_bins, gr("value_bins.weight")],
-                &[bn, vt, d],
-                d * vt,
+            self.mm_dw(
+                &self.d_phi,
+                &i.value_bins,
+                gr("value_bins.weight"),
+                bn,
+                vt,
+                d,
             ),
         ]
     }
@@ -1072,8 +1144,7 @@ impl Horizon {
 
     /// Accumulate gradients of the last forward's loss.
     pub fn backward(&self) {
-        self.gpu
-            .submit(&[&self.d_az, &self.d_lz, &self.dres[0]], &self.bwd);
+        self.gpu.submit(&[&self.d_az, &self.d_lz], &self.bwd);
     }
 
     /// Log-hazards of the last forward, `[b, pieces, codes]`.

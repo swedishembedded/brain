@@ -16,27 +16,20 @@
 //! evaluation; restricted to a few standard risk factors it is the
 //! conventional risk-score baseline.
 //!
-//! The pooling sum is `pool @ e` with `pool` the `[B, B*N]` membership
-//! matrix, computed as `matmul_dx` (which multiplies without transposing the
-//! right operand); its gradient back to the token rows is `pool^T @ dz`, a
-//! `matmul_dw`.
+//! A subject's rows are contiguous, so the pooling is a masked sum over each
+//! fixed-length segment of rows (`segment_sum_rows`) and its gradient the
+//! segment's gradient broadcast back to its rows (`segment_bcast_rows`).
 
 use gpu_core::Step;
 
 use super::*;
 use crate::batch::HostBatch;
 
-/// The `[B, B*N]` membership matrix: 1 where row `j` is a real, non-summary
-/// token of subject `b`.
-pub(super) fn pool_matrix(hb: &HostBatch, n: usize) -> Vec<f32> {
-    let b = hb.summary_rows.len();
-    let mut m = vec![0.0; b * b * n];
-    for s in 0..b {
-        for row in s * n + 1..(s + 1) * n {
-            if hb.keep[row] == 1 {
-                m[s * b * n + row] = 1.0;
-            }
-        }
+/// `[B*N]` 1 for a real, non-summary token row: the rows the pooling sums.
+pub(super) fn pool_mask(hb: &HostBatch, n: usize) -> Vec<u32> {
+    let mut m = hb.keep.clone();
+    for s in 0..hb.summary_rows.len() {
+        m[s * n] = 0;
     }
     m
 }
@@ -47,32 +40,29 @@ impl Horizon {
         let g = &self.gpu;
         let i = &self.inp;
         let (d, k, nf) = (c.d_model, c.n_codes, c.time_features());
-        let (bn, bp, b) = (self.b * c.max_tokens, self.b * c.pieces(), self.b);
+        let (bp, b) = (self.b * c.pieces(), self.b);
         let mut s = self.embedding_steps();
         s.extend([
             g.step(
-                MATMUL_DX,
-                &[&i.pool, &self.res[0], &self.z],
-                &[b, d, bn, 0],
+                SEGMENT_SUM,
+                &[&i.pool_mask, &self.res[0], &self.z],
+                &[b, c.max_tokens, d],
                 b * d,
             ),
-            g.step(
-                MATMUL,
-                &[&self.z, self.w("additive.state.weight"), &self.lz],
-                &[b, d, k],
-                b * k,
-            ),
+            self.mm(&self.z, self.w("additive.state.weight"), &self.lz, b, d, k),
             g.step(
                 EMBED,
                 &[&i.piece_subject, &self.lz, &self.lzrep],
                 &[k, bp],
                 bp * k,
             ),
-            g.step(
-                MATMUL,
-                &[&i.time_features, self.w("additive.time.weight"), &self.tf],
-                &[bp, nf, k],
-                bp * k,
+            self.mm(
+                &i.time_features,
+                self.w("additive.time.weight"),
+                &self.tf,
+                bp,
+                nf,
+                k,
             ),
             g.step(
                 ADD2,
@@ -102,8 +92,7 @@ impl Horizon {
         s
     }
 
-    /// `d_lz` and `dres[0]` are cleared before this list runs (both are
-    /// accumulated into).
+    /// `d_lz` is cleared before this list runs (it is accumulated into).
     pub(super) fn additive_backward_steps(&self) -> Vec<Step> {
         let c = &self.cfg;
         let g = &self.gpu;
@@ -124,17 +113,15 @@ impl Horizon {
                 &[bp, k, c.pieces(), gpu_core::f(1.0)],
                 bp * k,
             ),
-            g.step(
-                BIAS_GRAD,
-                &[&self.d_loglam, gr("hazard.code.bias")],
-                &[bp, k],
+            self.bias_grad_part(&self.d_loglam, bp, k),
+            self.bias_grad_final(gr("hazard.code.bias"), bp, k),
+            self.mm_dw(
+                &self.d_loglam,
+                &i.time_features,
+                gr("additive.time.weight"),
+                bp,
+                nf,
                 k,
-            ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_loglam, &i.time_features, gr("additive.time.weight")],
-                &[bp, nf, k],
-                k * nf,
             ),
             g.step(
                 EMB_BWD,
@@ -142,22 +129,20 @@ impl Horizon {
                 &[bp, k, b],
                 b * k,
             ),
-            g.step(
-                MATMUL_DW,
-                &[&self.d_lz, &self.z, gr("additive.state.weight")],
-                &[b, d, k],
-                k * d,
+            self.mm_dw(&self.d_lz, &self.z, gr("additive.state.weight"), b, d, k),
+            self.mm_dx(
+                &self.d_lz,
+                self.w("additive.state.weight"),
+                &self.d_z,
+                b,
+                d,
+                k,
+                0,
             ),
             g.step(
-                MATMUL_DX,
-                &[&self.d_lz, self.w("additive.state.weight"), &self.d_z],
-                &[b, d, k, 0],
-                b * d,
-            ),
-            g.step(
-                MATMUL_DW,
-                &[&i.pool, &self.d_z, &self.dres[0]],
-                &[b, d, bn],
+                SEGMENT_BCAST,
+                &[&i.pool_mask, &self.d_z, &self.dres[0]],
+                &[b, c.max_tokens, d],
                 bn * d,
             ),
         ];
