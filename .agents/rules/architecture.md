@@ -102,6 +102,13 @@ Six layers. Each may depend only on layers above it.
                            `decide::loss` rather than owning it, so no caller
                            changed and no logic exists twice; the same
                            `check-crate-layers.sh` gate covers it.
+   survival                survival estimation and evaluation arithmetic:
+                           weighted Kaplan-Meier, the censoring distribution,
+                           Aalen-Johansen, IPCW concordance and Brier score,
+                           D-calibration, calibration at a horizon. A LEAF for
+                           the same reason: pure f64 host arithmetic that a
+                           model crate, an application or a sample evaluates
+                           time-to-event predictions with, without a model.
 
  ─── 4. models ─────────────────────────────────────────────────────────────
    decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder  timeseries

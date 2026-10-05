@@ -2546,6 +2546,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-survival"
+version = "2.0.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "brain-t5encoder"
 version = "2.0.0"
 dependencies = [

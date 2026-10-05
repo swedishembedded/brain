@@ -239,6 +239,7 @@ brain-deepseek2 = { path = "crates/deepseek2" }
 brain-toyseq2seq = { path = "crates/toyseq2seq" }
 brain-toyautoencoder = { path = "crates/toyautoencoder" }
 brain-horizon = { path = "crates/horizon" }
+brain-survival = { path = "crates/survival" }
 brain-diffusion = { path = "crates/diffusion" }
 brain-vae = { path = "crates/vae" }
 brain-dit = { path = "crates/dit" }
