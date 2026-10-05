@@ -24,6 +24,8 @@
 //! - [`calibration`]: D-calibration over predicted survival, and calibration
 //!   at a horizon (observed-over-expected, IPCW logistic recalibration
 //!   intercept and slope, a risk-group table).
+//! - [`venn_abers`]: a predicted risk by a horizon as a Venn-Abers interval,
+//!   calibrated by isotonic regression on held-out subjects under IPCW.
 //!
 //! Weights are sampling weights: a subject of integer weight `w` contributes
 //! exactly as `w` copies of it would (the tests hold every metric to that).
@@ -36,6 +38,7 @@ pub mod compare;
 pub mod concordance;
 pub mod estimate;
 mod special;
+pub mod venn_abers;
 
 /// One subject's observed outcome.
 #[derive(Clone, Copy, Debug, PartialEq)]
