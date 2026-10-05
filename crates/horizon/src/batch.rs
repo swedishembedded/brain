@@ -95,7 +95,9 @@ pub fn piece_features(cfg: &HorizonConfig, entry: f64, calendar: f64) -> Vec<f32
 /// Assemble a batch of exactly `b` subject slots. `mask_rate` hides that
 /// fraction of each subject's numeric values (at least one when it has any)
 /// for the masked-value objective; `0` hides none, and then no value is
-/// scored. `rng` decides which, so a seed reproduces the batch.
+/// scored. `rng` decides which, so a seed reproduces the batch. The additive
+/// model has no value head, so nothing is hidden for it whatever the rate:
+/// hiding would only corrupt its inputs, with no objective to train.
 pub fn assemble(
     cfg: &HorizonConfig,
     subjects: &[&Encoded],
@@ -119,6 +121,7 @@ pub fn assemble(
         cfg.time_features() as usize,
     );
     let nfc = cfg.forecasts as usize;
+    let mask_rate = if cfg.additive { 0.0 } else { mask_rate };
     let vs = cfg.sets_per_subject() as usize;
     let sets = b * vs;
     let mut hb = HostBatch {
@@ -381,5 +384,20 @@ mod tests {
         assert_eq!(hb.keep[0], 0, "an unused visit slot is empty");
         assert_eq!(hb.keep[n..n + 3], [1, 1, 0]);
         assert_eq!(hb.keep[2 * n..2 * n + 4], [1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn the_additive_model_has_no_value_objective_so_nothing_is_hidden() {
+        let (enc, mut cfg) = fixture();
+        cfg.additive = true;
+        let refs: Vec<&Encoded> = enc.iter().collect();
+        let hb = assemble(&cfg, &refs, 2, 0.5, &mut Rng::new(7));
+        assert!(hb.value_state.iter().all(|&s| s == 0), "no value is scored");
+        let mask_bin = (cfg.value_bins + BIN_MASK) as usize;
+        let vt = cfg.value_table() as usize;
+        assert!(
+            (0..hb.keep.len()).all(|r| hb.value_bins[r * vt + mask_bin] == 0.0),
+            "no input is replaced by the mask bin"
+        );
     }
 }

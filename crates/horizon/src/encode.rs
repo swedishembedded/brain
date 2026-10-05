@@ -337,9 +337,12 @@ fn outcomes(s: &Subject, vocab: &Vocab, knots: &[f32]) -> Vec<Outcome> {
                 .windows(2)
                 .map(|k| (b.min(k[1]) - a.max(k[0])).max(0.0))
                 .collect();
-            // The event counts only if observed inside the window and inside the knots.
+            // The event counts only if observed inside the window, while the
+            // subject was still at risk (an event dated after an absorbing
+            // one would be scored with no exposure behind it), and inside the
+            // knots.
             let rel = (event - s.entry) as f32;
-            let event_piece = (event <= to && event.is_finite() && rel > a)
+            let event_piece = (event <= to && event <= absorbed && event.is_finite() && rel > a)
                 .then(|| knots.windows(2).position(|k| rel > k[0] && rel <= k[1]))
                 .flatten()
                 .map(|p| p as u32);
@@ -489,5 +492,24 @@ mod tests {
         );
         cfg.visits = 5;
         assert_eq!(encode(&s, &v, &cfg).visits.len(), 3);
+    }
+
+    #[test]
+    fn an_event_dated_after_death_is_not_an_event() {
+        let (mut s, v, cfg) = fixture();
+        // dx moved past the death at 53.5: the subject was no longer at risk.
+        for e in s
+            .events
+            .iter_mut()
+            .filter(|e| e.code == "dx" && e.t > s.entry)
+        {
+            e.t = 53.8;
+        }
+        let dx = &encode(&s, &v, &cfg).outcomes[2];
+        assert_eq!(dx.event_piece, None, "{dx:?}");
+        assert!(
+            dx.exposure.iter().sum::<f32>() > 0.0,
+            "exposure up to the death is kept"
+        );
     }
 }

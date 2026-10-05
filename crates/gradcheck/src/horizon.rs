@@ -69,7 +69,7 @@ pub fn fixture(seed: u64, additive: bool) -> Horizon {
     let refs: Vec<&Encoded> = enc.iter().take(3).collect();
     // Four slots, three subjects: the fourth slot is all padding.
     let hb = assemble(&cfg, &refs, 4, 0.6, &mut data::rng::Rng::new(seed ^ 0x51));
-    assert!(hb.value_state.contains(&1), "fixture hides an exact value");
+    assert!(additive || hb.value_state.contains(&1), "fixture hides an exact value");
     assert!(additive || hb.forecast_state.iter().any(|&s| s != 0), "fixture scores a forecast");
     let init = horizon::init_weights(&cfg, seed);
     let model = Horizon::new(cfg, 4, &init);
