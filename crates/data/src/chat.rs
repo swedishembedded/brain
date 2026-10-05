@@ -62,7 +62,7 @@ impl ChatExample {
         let mut messages: Vec<ChatMessage> = self.system.iter().map(ChatMessage::system).collect();
         messages.push(ChatMessage::user(self.user.clone()));
         messages.push(ChatMessage::assistant(self.assistant.clone(), true));
-        ChatSample { messages, tools: Vec::new() }
+        ChatSample { messages, tools: Vec::new(), rendered: None }
     }
 }
 
@@ -172,6 +172,18 @@ pub struct ChatSample {
     /// preamble). Order-preserving `minijinja::Value`s, never
     /// `serde_json::Value` -- see `chat_template`'s module doc.
     pub tools: Vec<minijinja::Value>,
+    /// Set on a sample made by [`ChatSample::answers_as_asked`]: the text to
+    /// encode, which `messages` then no longer describe.
+    pub rendered: Option<Rendered>,
+}
+
+/// One answer as a model is asked for it: the prompt its template renders
+/// for the conversation so far, and what the template renders for the
+/// answer after it. Only the completion is supervised.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    pub prompt: String,
+    pub completion: String,
 }
 
 impl ChatSample {
@@ -196,7 +208,45 @@ impl ChatSample {
                 }
             })
             .collect();
-        ChatSample { messages, tools: self.tools.clone() }
+        ChatSample { messages, tools: self.tools.clone(), rendered: None }
+    }
+
+    /// This sample as one example per supervised answer, each the way the
+    /// model is asked for it: the prompt its template renders for the
+    /// conversation so far (with reasoning off when `thinking` is `false`),
+    /// then the answer as the template renders it after that prompt, so a
+    /// dialogue trains each reply on the prompt it will be given.
+    ///
+    /// A template renders an earlier turn of a dialogue without its reasoning
+    /// and an answer that is last with it, so one rendering of the whole
+    /// conversation cannot show every answer the way it is asked for; and its
+    /// message boundaries are refused as not prefix-stable. `None` when a
+    /// supervised message is not an assistant answer (a tool call, a
+    /// supervised prompt turn): such a sample is encoded as a whole.
+    ///
+    /// # Errors
+    /// The template renders an answer that does not follow its prompt.
+    pub fn answers_as_asked(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<Option<Vec<ChatSample>>, TemplateError> {
+        let answers = |m: &ChatMessage| m.role == "assistant" && m.tool_calls.is_empty();
+        if self.messages.iter().any(|m| m.train && !answers(m)) {
+            return Ok(None);
+        }
+        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
+        let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
+        let none = std::collections::BTreeMap::new();
+        let mut out = Vec::new();
+        for at in (0..self.messages.len()).filter(|&at| self.messages[at].train) {
+            let asked = minijinja::Value::from(values[..at].to_vec());
+            let prompt = if thinking { tmpl.render(asked, tools.clone(), true, &none)? } else { tmpl.render_no_think(asked, tools.clone(), &none)? };
+            let full = tmpl.render(minijinja::Value::from(values[..=at].to_vec()), tools.clone(), false, &none)?;
+            let Some(completion) = full.strip_prefix(prompt.as_str()) else {
+                return Err(TemplateError(format!(
+                    "the answer at message {at} does not follow the prompt the model is asked from: the template renders the conversation so far differently with and without it"
+                )));
+            };
+            out.push(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { prompt, completion: completion.to_string() }) });
+        }
+        Ok(Some(out))
     }
 
     /// [`ChatSample::encode_with`] at the default [`RenderOpts`].
@@ -217,6 +267,13 @@ impl ChatSample {
     /// message is not prefix-stable -- see `render_with_message_boundaries`'s
     /// doc for exactly when that happens.
     pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        if let Some(Rendered { prompt, completion }) = &self.rendered {
+            let (mut ids, answer) = (tok.encode(prompt), tok.encode(completion));
+            let mut mask = vec![false; ids.len()];
+            mask.extend(std::iter::repeat_n(true, answer.len()));
+            ids.extend(answer);
+            return Ok((ids, mask));
+        }
         let messages: Vec<ChatMessage> = if opts.keep_reasoning {
             self.messages
                 .iter()
@@ -372,7 +429,7 @@ fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    Ok(ChatSample { messages: messages_from_wire(record.messages)?, tools: record.tools })
+    Ok(ChatSample { messages: messages_from_wire(record.messages)?, tools: record.tools, rendered: None })
 }
 
 /// One conversation's wire messages as [`ChatMessage`]s, with the semantic
@@ -561,11 +618,44 @@ mod tests {
         let sample = ChatSample {
             messages: vec![ChatMessage::user("q"), answering("first", true), answering("context", false), answering("<think>x</think>done", true), call.clone()],
             tools: Vec::new(),
+            rendered: None,
         };
         let out = sample.answering_without_thinking("<think>\n\n</think>\n\n");
         let said: Vec<&str> = out.messages.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(said, ["q", "<think>\n\n</think>\n\nfirst", "context", "<think>x</think>done", ""]);
         assert_eq!(out.messages[4].tool_calls.len(), 1, "the call is kept");
+    }
+
+    /// A dialogue of several supervised answers trains for no-think mode under
+    /// Qwen3's own template: it is not refused, and each answer is trained as
+    /// the model is asked for it - after the prompt a no-think request renders
+    /// for the conversation so far, whose earlier answers carry no reasoning
+    /// block - with only the answer supervised.
+    #[test]
+    fn each_answer_of_a_dialogue_is_trained_as_the_model_is_asked_for_it() {
+        let tmpl = ChatTemplate::compile(include_str!("../testdata/qwen3_chat_template.jinja")).unwrap();
+        let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, train };
+        let dialogue = ChatSample {
+            messages: vec![turn("system", "s", false), turn("user", "q1", false), turn("assistant", "a1", true), turn("user", "q2", false), turn("assistant", "a2", true)],
+            ..ChatSample::default()
+        };
+        let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
+        let tok = crate::tokenizer::CharTokenizer::from_corpus(&chars);
+        let samples = dialogue.answers_as_asked(&tmpl, false).unwrap().expect("plain answers");
+        assert_eq!(samples.len(), 2);
+        let supervised = |sample: &ChatSample| {
+            let (ids, mask) = sample.encode(&tok, &tmpl).expect("encodes");
+            let said: String = ids.iter().zip(&mask).filter(|(_, m)| **m).map(|(i, _)| tok.decode(&[*i])).collect();
+            let shown: String = ids.iter().zip(&mask).filter(|(_, m)| !**m).map(|(i, _)| tok.decode(&[*i])).collect();
+            (shown, said)
+        };
+        let (shown, said) = supervised(&samples[0]);
+        assert!(shown.ends_with("<think>\n\n</think>\n\n"), "{shown:?}");
+        assert_eq!(said, "a1<|im_end|>\n");
+        let (shown, said) = supervised(&samples[1]);
+        assert!(shown.contains("a1") && !shown.contains("<think>\n\n</think>\n\na1"), "an earlier answer has no reasoning block: {shown:?}");
+        assert!(shown.ends_with("<think>\n\n</think>\n\n"), "{shown:?}");
+        assert_eq!(said, "a2<|im_end|>\n");
     }
 
     #[test]

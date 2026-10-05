@@ -55,6 +55,7 @@ fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
             ChatMessage::assistant("2+2 is 4.", true),
         ],
         tools: Vec::new(),
+        rendered: None,
     };
 
     let (ids, mask) = sample.encode(&tok, &tmpl).expect("encode");
@@ -107,6 +108,7 @@ fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_convers
             ChatMessage::assistant("2+2 is 4, and it's 18C and sunny in Paris.", true),
         ],
         tools: Vec::new(),
+        rendered: None,
     };
 
     let err = sample.encode(&tok, &tmpl).unwrap_err();

@@ -39,7 +39,7 @@ use minijinja::Environment;
 pub use minijinja::Value;
 
 #[derive(Debug)]
-pub struct TemplateError(String);
+pub struct TemplateError(pub(crate) String);
 
 impl fmt::Display for TemplateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

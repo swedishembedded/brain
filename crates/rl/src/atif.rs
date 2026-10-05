@@ -109,7 +109,7 @@ pub fn to_chat_sample(traj: &Trajectory) -> Result<ChatSample, String> {
     if messages.is_empty() {
         return Err("trajectory has no SFT-eligible steps".to_string());
     }
-    Ok(ChatSample { messages, tools: Vec::new() })
+    Ok(ChatSample { messages, tools: Vec::new(), rendered: None })
 }
 
 fn push_step(step: &TraceStep, out: &mut Vec<ChatMessage>) -> Result<(), String> {

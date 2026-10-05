@@ -313,22 +313,16 @@ impl ChatFineTune {
 
         // Every file is checked against the base's own template before a
         // device is claimed.
-        let train_samples = read_checked(dataset, &model_dir)?;
-        let mut replay_samples = Vec::new();
-        for path in &self.replay {
-            replay_samples.extend(read_checked(path, &model_dir)?);
-        }
-        let held_out = self.held_out.as_deref().map(|path| read_checked(path, &model_dir)).transpose()?;
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
-        let (train_samples, replay_samples, held_out) = match &no_think {
-            Some(block) => {
-                let answered = |samples: Vec<ChatSample>| samples.iter().map(|s| s.answering_without_thinking(block)).collect::<Vec<_>>();
-                (answered(train_samples), answered(replay_samples), held_out.map(answered))
-            }
-            None => (train_samples, replay_samples, held_out),
-        };
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
+        let train_samples = asked.read(dataset)?;
+        let mut replay_samples = Vec::new();
+        for path in &self.replay {
+            replay_samples.extend(asked.read(path)?);
+        }
+        let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
@@ -609,6 +603,48 @@ pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha:
 }
 
 /// Validate `path` against the base's tokenizer and template, then read it.
+/// How a fine-tune's records are asked for: the base's tokenizer and template,
+/// and for a model trained for no-think mode the block its prompt leaves open.
+struct Asked<'a> {
+    tok: &'a QwenBpe,
+    tmpl: &'a ChatTemplate,
+    no_think: Option<&'a str>,
+    render: data::chat::RenderOpts,
+}
+
+impl Asked<'_> {
+    /// The samples of `path` as they are trained on, each checked to encode
+    /// against the template and to supervise something. For no-think mode a
+    /// dialogue is one example per answer, each as the model is asked for it
+    /// ([`ChatSample::answers_as_asked`]); a record that is not made of plain
+    /// answers keeps its shape, its answers following the block.
+    fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
+        let summary = crate::validate_chat_dataset(path).map_err(Error::Backend)?;
+        if summary.trained_messages == 0 {
+            return Err(Error::Backend(format!("{}: holds no supervised turns (`\"train\": true`)", path.display())));
+        }
+        let records = ChatSample::from_jsonl(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+        let mut samples = Vec::with_capacity(records.len());
+        for (at, record) in records.iter().enumerate() {
+            let invalid = |e: &dyn std::fmt::Display| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1));
+            match self.no_think {
+                None => samples.push(record.clone()),
+                Some(block) => match record.answers_as_asked(self.tmpl, false).map_err(|e| invalid(&e))? {
+                    Some(asked) => samples.extend(asked),
+                    None => samples.push(record.answering_without_thinking(block)),
+                },
+            }
+        }
+        for (at, sample) in samples.iter().enumerate() {
+            let (ids, mask) = sample.encode_with(self.tok, self.tmpl, self.render).map_err(|e| Error::Backend(format!("{}: example {} cannot be encoded for training: {e}", path.display(), at + 1)))?;
+            if !mask.iter().any(|m| *m) {
+                return Err(Error::Backend(format!("{}: example {} encodes to {} token(s) with none supervised, so training on it would be a no-op", path.display(), at + 1, ids.len())));
+            }
+        }
+        Ok(samples)
+    }
+}
+
 fn read_checked(path: &Path, model_dir: &Path) -> Result<Vec<ChatSample>> {
     let summary = crate::validate_chat_dataset_for(path, model_dir).map_err(Error::Backend)?;
     if summary.trained_messages == 0 {

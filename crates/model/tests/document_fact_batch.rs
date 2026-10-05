@@ -94,6 +94,7 @@ fn to_chat_sample((fact, question, answer): &Triple) -> ChatSample {
     ChatSample {
         messages: vec![ChatMessage::system(*fact), ChatMessage::user(*question), ChatMessage::assistant(*answer, true)],
         tools: Vec::new(),
+        rendered: None,
     }
 }
 

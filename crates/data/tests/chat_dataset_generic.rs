@@ -41,6 +41,7 @@ fn conversation(i: usize) -> ChatSample {
             ChatMessage::assistant(format!("def f():\n    \"\"\"Return {i}.\"\"\"\n    return {i}"), true),
         ],
         tools: Vec::new(),
+        rendered: None,
     }
 }
 
@@ -85,6 +86,7 @@ fn reasoning_is_trained_only_when_kept() {
     let sample = ChatSample {
         messages: vec![ChatMessage::user("What is 17 + 25?"), ChatMessage::assistant("<think>\n17 + 25: seven and five carry one.\n</think>\n\n42", true)],
         tools: Vec::new(),
+        rendered: None,
     };
     let trained = |opts: RenderOpts| {
         let (ids, mask) = sample.encode_with(&tok, &tmpl, opts).unwrap();
@@ -110,6 +112,7 @@ fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked()
     let turn = |answer: &str| ChatSample {
         messages: vec![ChatMessage::user("Shall we wait?"), ChatMessage::assistant(&format!("<think>\n\n</think>\n\n{answer}"), true)],
         tools: Vec::new(),
+        rendered: None,
     };
     let pair = data::preference::PreferenceSample { chosen: turn("Do not wait."), rejected: turn("Wait.") };
     let supervised = |opts: RenderOpts| {

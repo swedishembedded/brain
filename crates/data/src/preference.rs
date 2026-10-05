@@ -170,7 +170,7 @@ fn pair_from_wire(record: WirePreference) -> Result<PreferenceSample, String> {
         let mut wire: Vec<WireMessage> = prompt.iter().cloned().map(|t| t.into_message(false)).collect();
         wire.push(turn.into_message(true));
         let messages = messages_from_wire(wire).map_err(|e| format!("\"prompt\" + \"{field}\" (messages[{prompt_len}] is \"{field}\"): {e}"))?;
-        Ok(ChatSample { messages, tools: record.tools.clone() })
+        Ok(ChatSample { messages, tools: record.tools.clone(), rendered: None })
     };
     let chosen = complete("chosen", &record.prompt, record.chosen)?;
     let rejected = complete("rejected", &record.prompt, record.rejected)?;
