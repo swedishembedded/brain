@@ -446,7 +446,12 @@ Gated DeltaNet prefill to the portable kernels for A/B), `BRAIN_PREFILL_ARENA`
 (`0` runs the `qwen35_gguf_prefill_profile` rounds without the scratch arena),
 `BRAIN_PREFILL_PROFILE_SKIP_TABLE` (stop that profile after the production
 rounds), and `BRAIN_PROFILE_CONTEXT=<tokens>` / `BRAIN_PROFILE_BATCH=<n>`
-(long-context batch shape for `qwen35_decode_profile`).
+(long-context batch shape for `qwen35_decode_profile`). The
+`qwen35moe_decode_profile` binary reads `BRAIN_PROFILE_PREFILL=<tokens>`
+(profile a cold prefill of that many tokens instead of decode),
+`BRAIN_PROFILE_CHUNK=<tokens>` (its prefill round size) and
+`BRAIN_PROFILE_GROUPED_MIN_ROWS=<rows>` (the row count from which its expert
+GEMMs group their slots).
 
 **Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
 logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
