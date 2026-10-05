@@ -61,6 +61,7 @@ pub mod resident_flux1;
 pub mod resident_flux2;
 pub mod resident_forecast;
 pub mod resident_januspro;
+pub mod resident_horizon;
 pub mod resident_lfm;
 pub mod resident_llm;
 pub mod resident_ltxv;
@@ -464,6 +465,15 @@ pub fn models() -> Vec<ModelEntry> {
             },
             spec: Some(("qwen35", &qwen35::spec::Qwen35Spec)),
             resident: None,
+        },
+        // The timeline model: a directory a caller trained and saved (no
+        // released weights to resolve), named per request locally and by
+        // `BRAIN_HORIZON_DIR` on a served surface.
+        ModelEntry {
+            manifest: horizon::caps::manifest,
+            provider: always!(horizon::caps::HorizonProvider::new()),
+            spec: None,
+            resident: resident!(crate::resident_horizon::HorizonResident::from_env),
         },
         ModelEntry {
             manifest: lfm2::caps::manifest,

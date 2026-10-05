@@ -236,9 +236,14 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    (`tools/goldens/survival_metrics_reference.py`). Antolini's
    time-dependent concordance is not implemented: the horizon concordance
    the evaluation protocol uses is Uno's.
-5. **Uncertainty.** Seeded ensembles and a conformal post-process over the
-   cumulative incidence (conformalised survival distributions); the model
-   reports an interval, never a point.
+5. **Uncertainty.** Done: Venn-Abers intervals for a risk by a horizon
+   (`survival::venn_abers`): isotonic calibration on held-out subjects under
+   inverse-probability-of-censoring weights, one fit per label of the new
+   subject; overconfident scores come out with a calibration slope near one,
+   with and without censoring, and the intervals narrow as calibration data
+   grows. Open: seeded ensembles for the spread due to training, and
+   conformalised survival distributions over whole curves (they need
+   percentile times inside follow-up, which a low-event cohort rarely has).
 6. **SDK and serving.** SDK done: `brain::TimelineModel` (`timeline`
    surface, `brain_arch::Domain::Timeline`, architecture row `horizon`,
    `docs/models/horizon.md`) trains with held-out early stopping, predicts
@@ -246,8 +251,12 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    state, saves and loads (weights with the configuration in the header, the
    vocabulary beside them), and re-exports `brain::survival` and the
    synthetic population; `crates/sdk/tests/timeline.rs` trains, saves,
-   reloads and predicts identically. Open: the serving surface (a capability
-   with one action, a `catalog` entry, CLI verb, D-Bus).
+   reloads and predicts identically. Serving done: `horizon::saved` owns the
+   saved-model directory (the SDK delegates to it), `horizon::caps` the one
+   `predict` action, a catalog entry and resident adapter
+   (`BRAIN_HORIZON_DIR`) put it on HTTP and D-Bus, and `brain horizon
+   predict` runs it locally; `tests/caps.rs` holds the served output to the
+   in-process prediction.
 
 ## 7. What decides between the alternatives
 

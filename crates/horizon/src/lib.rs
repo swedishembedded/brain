@@ -19,13 +19,17 @@
 //! Pipeline: [`timeline::Subject`] -> [`encode::encode`] (only what is known
 //! at the prediction time) -> [`batch::assemble`] -> [`Horizon`] (device
 //! forward/backward, gradient-checked) -> [`train`] (the engine's step loop)
-//! -> [`survival::Curves`].
+//! -> [`survival::Curves`]. A trained model is kept on disk as a [`saved`]
+//! directory; [`caps`] serves its predictions through the capability
+//! interface.
 
 pub mod batch;
+pub mod caps;
 pub mod config;
 pub mod encode;
 pub mod init;
 pub mod model;
+pub mod saved;
 pub mod survival;
 pub mod synthetic;
 pub mod timeline;

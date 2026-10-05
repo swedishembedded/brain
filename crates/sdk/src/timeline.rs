@@ -25,9 +25,10 @@
 use std::path::Path;
 
 use horizon::encode::{encode, forecast_query, Encoded};
+use horizon::saved::{parse_jsonl, Saved};
 use horizon::survival::Curves;
 use horizon::train::{
-    event_nll, predict_forecasts, predict_log_hazards, predict_states, TimelineObjective,
+    event_nll, predict_forecasts, predict_states, TimelineObjective,
 };
 use horizon::vocab::{FitOptions, Vocab};
 use horizon::Horizon;
@@ -53,21 +54,12 @@ pub const DEFAULT_EVAL_INTERVAL: u32 = 100;
 /// Share of each subject's numeric values hidden for the value objective.
 pub const DEFAULT_MASK_RATE: f64 = 0.3;
 
-const WEIGHTS_FILE: &str = "model.safetensors";
-const VOCAB_FILE: &str = "vocab.json";
 
 /// Read a `timeline-v1` file: one subject per line, every line validated.
 pub fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<Subject>> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
-    text.lines()
-        .enumerate()
-        .filter(|(_, l)| !l.trim().is_empty())
-        .map(|(n, l)| {
-            Subject::from_json_line(l)
-                .map_err(|e| Error::Backend(format!("{}:{}: {e}", path.display(), n + 1)))
-        })
-        .collect()
+    parse_jsonl(&text).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
 }
 
 /// Each subject's observed outcome among `codes`, for the metrics in
@@ -271,15 +263,14 @@ pub struct TimelineReport {
 
 /// A trained timeline model with its vocabulary.
 pub struct TimelineModel {
-    model: Horizon,
-    vocab: Vocab,
+    saved: Saved,
 }
 
 impl std::fmt::Debug for TimelineModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimelineModel")
-            .field("config", &self.model.cfg)
-            .field("codes", &self.vocab.codes)
+            .field("config", &self.saved.model.cfg)
+            .field("codes", &self.saved.vocab.codes)
             .finish()
     }
 }
@@ -338,75 +329,48 @@ impl TimelineModel {
             parameters,
             truncated_tokens,
         };
-        Ok((TimelineModel { model, vocab }, report))
+        Ok((TimelineModel { saved: Saved { model, vocab } }, report))
     }
 
     /// Load a model [`TimelineModel::save`] wrote.
     pub fn load(dir: impl AsRef<Path>) -> Result<TimelineModel> {
-        let dir = dir.as_ref();
-        let vocab = Vocab::from_json(&std::fs::read_to_string(dir.join(VOCAB_FILE))?)
-            .map_err(Error::Backend)?;
-        let weights = dir.join(WEIGHTS_FILE);
-        let path = weights
-            .to_str()
-            .ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", weights.display())))?;
-        let model = Horizon::load(path, DEFAULT_BATCH).map_err(Error::Backend)?;
-        Ok(TimelineModel { model, vocab })
+        Ok(TimelineModel {
+            saved: Saved::load(dir.as_ref()).map_err(Error::Backend)?,
+        })
     }
 
     /// Write the weights (with the configuration in their header) and the
     /// vocabulary into `dir`.
     pub fn save(&self, dir: impl AsRef<Path>) -> Result<()> {
-        let dir = dir.as_ref();
-        std::fs::create_dir_all(dir)?;
-        let weights = dir.join(WEIGHTS_FILE);
-        let path = weights
-            .to_str()
-            .ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", weights.display())))?;
-        self.model.save(path);
-        let vocab = serde_json::to_string(&self.vocab)
-            .map_err(|e| Error::Backend(format!("vocab: {e}")))?;
-        std::fs::write(dir.join(VOCAB_FILE), vocab)?;
-        Ok(())
+        self.saved.save(dir.as_ref()).map_err(Error::Backend)
     }
 
     /// The outcome codes, in the model's order.
     pub fn codes(&self) -> &[String] {
-        &self.vocab.codes
+        &self.saved.vocab.codes
     }
 
     /// The model's configuration.
     pub fn config(&self) -> &TimelineConfig {
-        &self.model.cfg
+        &self.saved.model.cfg
     }
 
     fn encode(&self, subjects: &[Subject]) -> Result<Vec<Encoded>> {
-        subjects
-            .iter()
-            .map(|s| {
-                s.validate()
-                    .map(|_| encode(s, &self.vocab, &self.model.cfg))
-                    .map_err(Error::Backend)
-            })
-            .collect()
+        self.saved.encode(subjects).map_err(Error::Backend)
     }
 
     /// One prediction per subject, in order.
     pub fn predict(&self, subjects: &[Subject]) -> Result<Vec<Prediction>> {
-        let enc = self.encode(subjects)?;
-        let absorbing: Vec<bool> = self
-            .vocab
-            .codes
-            .iter()
-            .map(|c| self.vocab.absorbing.contains(c))
-            .collect();
-        let knots = &self.model.cfg.knots;
-        Ok(predict_log_hazards(&self.model, &enc)
+        let last_knot = self.saved.horizon();
+        Ok(self
+            .saved
+            .predict(subjects)
+            .map_err(Error::Backend)?
             .into_iter()
-            .map(|lh| Prediction {
-                curves: Curves::new(&lh, knots, &absorbing),
-                codes: self.vocab.codes.clone(),
-                last_knot: *knots.last().expect("knots") as f64,
+            .map(|curves| Prediction {
+                curves,
+                codes: self.saved.vocab.codes.clone(),
+                last_knot,
             })
             .collect())
     }
@@ -414,7 +378,7 @@ impl TimelineModel {
     /// The learned summary state of each subject (its representation, for
     /// probing or clustering).
     pub fn states(&self, subjects: &[Subject]) -> Result<Vec<Vec<f32>>> {
-        Ok(predict_states(&self.model, &self.encode(subjects)?))
+        Ok(predict_states(&self.saved.model, &self.encode(subjects)?))
     }
 
     /// Quantiles (`levels`, each in `(0, 1)`) of numeric `var`, in its own
@@ -427,7 +391,7 @@ impl TimelineModel {
         ahead: f64,
         levels: &[f64],
     ) -> Result<Vec<Vec<f64>>> {
-        if self.model.cfg.forecasts == 0 {
+        if self.saved.model.cfg.forecasts == 0 {
             return Err(Error::Backend(
                 "this model has no forecast head: train it with TimelineSpec::forecasts".into(),
             ));
@@ -437,12 +401,12 @@ impl TimelineModel {
                 "quantile level {l} is outside (0, 1)"
             )));
         }
-        let query = forecast_query(&self.vocab, &self.model.cfg, var, ahead).ok_or_else(|| {
+        let query = forecast_query(&self.saved.vocab, &self.saved.model.cfg, var, ahead).ok_or_else(|| {
             Error::Backend(format!("{var} is not a numeric variable of this model"))
         })?;
         let enc = self.encode(subjects)?;
         let queries = vec![vec![query]; enc.len()];
-        let pred = predict_forecasts(&self.model, &enc, &queries).map_err(Error::Backend)?;
+        let pred = predict_forecasts(&self.saved.model, &enc, &queries).map_err(Error::Backend)?;
         Ok(pred
             .iter()
             .map(|p| {
@@ -450,7 +414,7 @@ impl TimelineModel {
                 levels
                     .iter()
                     .map(|&q| {
-                        self.vocab
+                        self.saved.vocab
                             .forecast_quantile(var, mu, sigma, q)
                             .unwrap_or(f64::NAN)
                     })
@@ -462,7 +426,7 @@ impl TimelineModel {
     /// The weighted mean event NLL over `subjects` (lower is better; the
     /// quantity training early-stops on).
     pub fn event_nll(&self, subjects: &[Subject]) -> Result<f32> {
-        Ok(event_nll(&self.model, &self.encode(subjects)?))
+        Ok(event_nll(&self.saved.model, &self.encode(subjects)?))
     }
 }
 

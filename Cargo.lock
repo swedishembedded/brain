@@ -734,6 +734,7 @@ dependencies = [
  "brain-glmdsa",
  "brain-gpt2",
  "brain-gpu-core",
+ "brain-horizon",
  "brain-imaging",
  "brain-imgpipe",
  "brain-januspro",
@@ -1530,6 +1531,7 @@ version = "2.0.0"
 name = "brain-horizon"
 version = "2.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

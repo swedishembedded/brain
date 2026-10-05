@@ -76,7 +76,25 @@ model.save("model")?;
 Training early-stops on the held-out event likelihood and keeps the best
 model. Evaluate with `brain::survival`: Uno's concordance, the IPCW Brier
 score and its integral, D-calibration and calibration at a horizon, all
-accepting sampling weights.
+accepting sampling weights. `brain::survival::venn_abers` turns a risk by a
+horizon into an interval `(p0, p1)`, calibrated on subjects the model was not
+trained on.
+
+## Serving
+
+A saved model directory (what `TimelineModel::save` writes) is served by one
+action, `predict`: `timeline-v1` subjects in, survival and each code's
+cumulative incidence at the requested times out, as JSON lines. Times past
+the last knot are refused.
+
+```bash
+brain horizon predict --weights model/ --times 5,10 \
+    --in subjects=subjects.jsonl --out predictions=predictions.jsonl
+```
+
+`brain serve` serves it on HTTP and D-Bus as `brain/horizon` when
+`BRAIN_HORIZON_DIR` names the saved model directory; there the directory is
+the host's, never a request parameter.
 
 ## Limits
 
@@ -85,4 +103,3 @@ accepting sampling weights.
   later `entry`. A recurrent backbone over visits is planned.
 - Curves are held constant past the last knot; the model says nothing about
   later times.
-- No serving surface yet (CLI, HTTP, D-Bus).
