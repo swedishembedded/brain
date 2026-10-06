@@ -22,7 +22,8 @@
 //!   An existing directory is refused before any training starts.
 //! - `eval` judges a saved model on a dataset it was neither trained,
 //!   early-stopped nor calibrated on (`TimelineModel::evaluate`), as JSON.
-//! - `calibrate` fits Venn-Abers calibrators on a validation set
+//! - `calibrate` fits calibrators (logistic by default, or Venn-Abers) on a
+//!   validation set
 //!   ([`crate::saved::Saved::calibrate`]'s arithmetic). Through the CLI it
 //!   writes `calibration.json` into the model directory, or a calibrated copy
 //!   into `out`, refusing to overwrite without `force`; on a served surface it
@@ -115,7 +116,7 @@ pub fn eval_spec() -> ActionSpec {
 pub fn calibrate_spec() -> ActionSpec {
     ActionSpec::new(
         "calibrate",
-        "fit Venn-Abers calibrators for the given horizons on validation subjects the model was neither trained nor early-stopped on",
+        "fit calibrators for the given horizons on validation subjects the model was neither trained nor early-stopped on",
     )
     .param(
         ParamSpec::new("weights", ParamType::Str, "directory of a saved timeline model (not an ensemble)")
@@ -123,7 +124,8 @@ pub fn calibrate_spec() -> ActionSpec {
             .host_env(crate::caps::DIR_VAR),
     )
     .param(ParamSpec::new("horizons", ParamType::Str, "comma-separated horizons after entry to calibrate, each within the model's knots").required())
-    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer validation events by then (and as many still event-free) is not calibrated").default(json!(MIN_EVENTS)).min(1.0))
+    .param(ParamSpec::new("kind", ParamType::Str, "logistic (intercept, and slope where the data show it is not one; no interval) or venn_abers (isotonic with its interval)").default(json!(calibration::Kind::default().name())))
+    .param(ParamSpec::new("min_events", ParamType::Int, "a (code, horizon) with fewer validation events by then (and as many still event-free) is not calibrated; default 100 for logistic, 500 for venn_abers").min(1.0))
     .param(ParamSpec::new("out", ParamType::Str, "write a calibrated copy of the model here instead of calibration.json into 'weights' (must not exist)").host_resolved())
     .param(ParamSpec::new("force", ParamType::Bool, "overwrite an existing calibration.json (or the directory at 'out')").default(json!(false)).host_resolved())
     .input(BlobSpec::new("validation", Media::Text, "validation subjects: timeline-v1").required())
@@ -384,12 +386,20 @@ fn fit_calibration(saved: &Saved, inv: &Invocation) -> Result<(Calibration, Outc
         saved.vocab.check_units(s).map_err(|e| format!("horizon: {e}"))?;
     }
     let horizons = horizons(inv, true)?;
-    let min_events = usize::try_from(int_param(inv, "min_events", MIN_EVENTS as i64))
-        .map_err(|_| "horizon: min_events is out of range".to_string())?;
+    let kind = match inv.get_str("kind") {
+        Some(name) => calibration::Kind::from_name(&name).map_err(|e| format!("horizon: {e}"))?,
+        None => calibration::Kind::default(),
+    };
+    let min_events = match inv.get_i64("min_events") {
+        Some(n) => usize::try_from(n).map_err(|_| "horizon: min_events is out of range".to_string())?,
+        None => kind.min_events(),
+    };
     let digest = saved.weights_digest().map_err(|e| format!("horizon: {e}"))?;
-    let calibration = Calibration::fit(saved, digest, &validation, &horizons, min_events).map_err(|e| format!("horizon: {e}"))?;
+    let calibration = Calibration::fit(saved, digest, &validation, &horizons, kind, min_events)
+        .map_err(|e| format!("horizon: {e}"))?;
     let text = calibration.to_json().map_err(|e| format!("horizon: {e}"))?;
     let outcome = Outcome::new()
+        .set("kind", json!(kind.name()))
         .set("calibrated", json!(calibration.entries().len()))
         .set(
             "uncalibrated",

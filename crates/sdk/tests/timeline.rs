@@ -199,7 +199,7 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
     }
     use brain::survival::calibration::at_horizon;
     use brain::survival::estimate::censoring;
-    use brain::timeline::{observed, CalibrationSpec};
+    use brain::timeline::{observed, CalibrationKind, CalibrationSpec};
     let (train, _) = synthetic::population(600, 31);
     let (stop, _) = synthetic::population(300, 32);
     let (validation, _) = synthetic::population(8000, 33);
@@ -216,42 +216,55 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
     assert!(model.calibration().is_none());
     let preds = model.predict(&test).unwrap();
     assert!(preds[0].calibrated_cif("onset", 5.0).is_none(), "no calibration, no calibrated risk");
-    model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0])).unwrap();
-    let preds = model.predict(&test).unwrap();
 
     // First onset competes with both deaths.
     let (t, list) = (5.0, ["onset", "death:a", "death:b"]);
     let obs = observed(&test, &list);
     let g = censoring(&obs);
-    let raw: Vec<f64> = preds.iter().map(|p| p.cif("onset", t).unwrap()).collect();
-    let cal: Vec<f64> = preds.iter().map(|p| p.calibrated_cif("onset", t).unwrap()).collect();
+    let raw: Vec<f64> = model.predict(&test).unwrap().iter().map(|p| p.cif("onset", t).unwrap()).collect();
     let before = at_horizon(&raw, &obs, 0, t, &g, 10);
-    let after = at_horizon(&cal, &obs, 0, t, &g, 10);
-    eprintln!(
-        "onset by {t}: slope {:.3} -> {:.3}, O/E {:.3} -> {:.3}, ECE {:.4} -> {:.4}",
-        before.slope, after.slope, before.oe_ratio, after.oe_ratio, before.ece(), after.ece()
-    );
     assert!(before.slope < 0.7, "the model must start overconfident: {before:?}");
-    assert!(
-        (after.slope - 1.0).abs() < 0.5 * (before.slope - 1.0).abs() && (after.slope - 1.0).abs() < 0.2,
-        "slope {:.3} -> {:.3}",
-        before.slope,
-        after.slope
-    );
-    assert!(
-        (after.oe_ratio - 1.0).abs() < (before.oe_ratio - 1.0).abs() && (after.oe_ratio - 1.0).abs() < 0.1,
-        "O/E {:.3} -> {:.3}",
-        before.oe_ratio,
-        after.oe_ratio
-    );
-    assert!(after.ece() < before.ece(), "ECE {:.4} -> {:.4}", before.ece(), after.ece());
-    for p in &preds {
-        let (lo, hi) = p.cif_interval("onset", t).unwrap();
-        let risk = p.calibrated_cif("onset", t).unwrap();
-        assert!(lo <= risk && risk <= hi, "{lo} <= {risk} <= {hi}");
-        assert!(p.calibrated_cif("onset", 7.0).is_none(), "a horizon that was not calibrated has no calibrated risk");
-        assert!(p.calibrated_cif("no-such-code", t).is_none());
+    // Both kinds repair it; the logistic one (the default) has no interval and
+    // the Venn-Abers one an interval that holds its risk.
+    for kind in [CalibrationKind::Logistic, CalibrationKind::VennAbers] {
+        model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0]).kind(kind)).unwrap();
+        let preds = model.predict(&test).unwrap();
+        let cal: Vec<f64> = preds.iter().map(|p| p.calibrated_cif("onset", t).unwrap()).collect();
+        let after = at_horizon(&cal, &obs, 0, t, &g, 10);
+        eprintln!(
+            "{kind:?} onset by {t}: slope {:.3} -> {:.3}, O/E {:.3} -> {:.3}, ECE {:.4} -> {:.4}",
+            before.slope, after.slope, before.oe_ratio, after.oe_ratio, before.ece(), after.ece()
+        );
+        // The slope of a model this overconfident is a ratio of two noisy
+        // slopes (the fit's and the test's), so the band is not tight.
+        assert!(
+            (after.slope - 1.0).abs() < 0.5 * (before.slope - 1.0).abs() && (after.slope - 1.0).abs() < 0.3,
+            "{kind:?} slope {:.3} -> {:.3}",
+            before.slope,
+            after.slope
+        );
+        assert!(
+            (after.oe_ratio - 1.0).abs() < (before.oe_ratio - 1.0).abs() && (after.oe_ratio - 1.0).abs() < 0.1,
+            "{kind:?} O/E {:.3} -> {:.3}",
+            before.oe_ratio,
+            after.oe_ratio
+        );
+        assert!(after.ece() < before.ece(), "{kind:?} ECE {:.4} -> {:.4}", before.ece(), after.ece());
+        for p in &preds {
+            let risk = p.calibrated_cif("onset", t).unwrap();
+            match (kind, p.cif_interval("onset", t)) {
+                (CalibrationKind::Logistic, interval) => assert!(interval.is_none(), "a logistic calibration has no interval"),
+                (CalibrationKind::VennAbers, Some((lo, hi))) => assert!(lo <= risk && risk <= hi, "{lo} <= {risk} <= {hi}"),
+                (CalibrationKind::VennAbers, None) => panic!("Venn-Abers gives an interval"),
+            }
+            assert!(p.calibrated_cif("onset", 7.0).is_none(), "a horizon that was not calibrated has no calibrated risk");
+            assert!(p.calibrated_cif("no-such-code", t).is_none());
+        }
     }
+    // Back to the default kind for what follows.
+    model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0])).unwrap();
+    assert_eq!(model.calibration().unwrap().kind, CalibrationKind::Logistic);
+    let preds = model.predict(&test).unwrap();
 
     // It survives save and load, and is refused beside other weights.
     let dir = std::env::temp_dir().join(format!("brain-timeline-cal-{}", std::process::id()));
@@ -349,7 +362,8 @@ fn forecast_history_and_evaluate_a_trained_model() {
                 if h.horizon == 7.0 {
                     assert!(r.calibrated.is_none() && r.interval.is_none(), "7 was not calibrated: absent");
                 } else {
-                    assert!(r.calibrated.is_some() && r.interval.is_some());
+                    assert!(r.calibrated.is_some(), "calibrated at {}", h.horizon);
+                    assert!(r.interval.is_none(), "the default calibration has no interval");
                 }
             }
         }

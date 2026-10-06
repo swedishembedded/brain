@@ -12,6 +12,7 @@
 //! few events.
 
 use capability::{Blob, Invocation, Media, Provider};
+use horizon::calibration::Kind;
 use horizon::caps::HorizonProvider;
 use horizon::saved::Saved;
 use horizon::synthetic::{population, CODES};
@@ -49,7 +50,7 @@ fn a_calibration_survives_save_and_load_and_is_served() {
     }
     let (validation, _) = population(1500, 21);
     let mut saved = model(3, vocab(&validation));
-    saved.calibrate(&validation, &HORIZONS, 30).unwrap();
+    saved.calibrate(&validation, &HORIZONS, Kind::VennAbers, 30).unwrap();
     let cal = saved.calibration.clone().unwrap();
     assert_eq!(cal.validation_subjects, 1500);
 
@@ -105,7 +106,7 @@ fn a_calibration_survives_save_and_load_and_is_served() {
                 match cal.apply(code, h, c.cif(k, h)) {
                     Some(x) => {
                         assert!((served.as_f64().unwrap() - x.risk).abs() < 1e-12);
-                        assert!((line["cif_interval"][code][i][1].as_f64().unwrap() - x.upper).abs() < 1e-12);
+                        assert!((line["cif_interval"][code][i][1].as_f64().unwrap() - x.interval.unwrap().1).abs() < 1e-12);
                     }
                     None => assert!(served.is_null() && line["cif_interval"][code][i].is_null(), "{code}@{h}: {served}"),
                 }
@@ -123,7 +124,7 @@ fn a_calibration_of_other_weights_is_refused_and_an_old_directory_loads_uncalibr
     let (validation, _) = population(1500, 22);
     let v = vocab(&validation);
     let mut a = model(3, v.clone());
-    a.calibrate(&validation, &[5.0], 30).unwrap();
+    a.calibrate(&validation, &[5.0], Kind::VennAbers, 30).unwrap();
     let (dir_a, dir_b) = (scratch("a"), scratch("b"));
     a.save(&dir_a).unwrap();
     // Same configuration, different weights, A's calibration.
@@ -163,13 +164,69 @@ fn too_few_events_calibrate_nothing_and_a_bad_request_is_refused() {
     }
     let (validation, _) = population(300, 23);
     let mut saved = model(3, vocab(&validation));
-    saved.calibrate(&validation, &HORIZONS, 10_000).unwrap();
-    let cal = saved.calibration.as_ref().unwrap();
-    assert!(cal.entries().is_empty());
-    assert_eq!(cal.uncalibrated().len(), CODES.len() * HORIZONS.len());
-    assert!(cal.apply("death:a", 5.0, 0.1).is_none());
-    assert!(saved.calibrate(&validation, &[11.0], 30).unwrap_err().contains("outside the model's range"));
-    assert!(saved.calibrate(&validation, &[0.0], 30).is_err());
-    assert!(saved.calibrate(&[], &[5.0], 30).is_err());
-    assert!(saved.calibrate(&validation, &[], 30).is_err());
+    for kind in [Kind::Logistic, Kind::VennAbers] {
+        saved.calibrate(&validation, &HORIZONS, kind, 10_000).unwrap();
+        let cal = saved.calibration.as_ref().unwrap();
+        assert!(cal.entries().is_empty());
+        assert_eq!(cal.uncalibrated().len(), CODES.len() * HORIZONS.len());
+        assert!(cal.apply("death:a", 5.0, 0.1).is_none());
+        assert!(saved.calibrate(&validation, &[11.0], kind, 30).unwrap_err().contains("outside the model's range"));
+        assert!(saved.calibrate(&validation, &[0.0], kind, 30).is_err());
+        assert!(saved.calibrate(&[], &[5.0], kind, 30).is_err());
+        assert!(saved.calibrate(&validation, &[], kind, 30).is_err());
+    }
+}
+
+#[test]
+fn a_logistic_calibration_survives_save_and_load_and_is_served_without_an_interval() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    let (validation, _) = population(1500, 24);
+    let mut saved = model(3, vocab(&validation));
+    saved.calibrate(&validation, &HORIZONS, Kind::Logistic, 30).unwrap();
+    let cal = saved.calibration.clone().unwrap();
+    assert_eq!(cal.kind, Kind::Logistic);
+    assert_eq!(cal.min_events, 30);
+    assert!(!cal.entries().is_empty(), "the test needs calibrated horizons");
+    for code in CODES {
+        for h in HORIZONS {
+            let gap = cal.uncalibrated().iter().find(|g| g.code == code && g.horizon == h);
+            assert_eq!(cal.entry(code, h).is_some(), gap.is_none(), "{code}@{h}: an entry or a gap, never both or neither");
+        }
+    }
+
+    let dir = scratch("logistic");
+    saved.save(&dir).unwrap();
+    let file: Value = serde_json::from_slice(&std::fs::read(dir.join("calibration.json")).unwrap()).unwrap();
+    assert_eq!(file["kind"], "logistic", "the kind is recorded in the file");
+    let back = Saved::load(&dir).unwrap().calibration.clone().expect("the calibration loads");
+    assert_eq!(back.kind, Kind::Logistic);
+    let curves = saved.predict(&validation[..40]).unwrap();
+    let jsonl: String = validation[..5].iter().map(|s| serde_json::to_string(s).unwrap() + "\n").collect();
+    let inv = Invocation::new()
+        .set("weights", json!(dir.to_string_lossy()))
+        .set("times", json!("2, 5, 10, 7.5"))
+        .blob("subjects", Blob::new(Media::Text, jsonl.into_bytes()));
+    let out = HorizonProvider::new().action("predict").unwrap().run(&inv, &mut |_| {}).unwrap();
+    let text = std::str::from_utf8(&out.blobs["predictions"].bytes).unwrap();
+    for (line, c) in text.lines().zip(&curves) {
+        let line: Value = serde_json::from_str(line).unwrap();
+        for (k, code) in CODES.iter().enumerate() {
+            for (i, h) in [2.0, 5.0, 10.0, 7.5].into_iter().enumerate() {
+                let raw = c.cif(k, h);
+                assert_eq!(cal.apply(code, h, raw), back.apply(code, h, raw), "{code}@{h}");
+                let served = &line["cif_calibrated"][code][i];
+                match cal.apply(code, h, raw) {
+                    Some(x) => {
+                        assert!(x.interval.is_none());
+                        assert!((served.as_f64().unwrap() - x.risk).abs() < 1e-12);
+                    }
+                    None => assert!(served.is_null(), "{code}@{h}: {served}"),
+                }
+                assert!(line["cif_interval"][code][i].is_null(), "a logistic calibration has no interval");
+            }
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -34,7 +34,7 @@ use horizon::train::{event_nll, event_nll_each, predict_forecasts, predict_state
 /// A synthetic population with KNOWN hazards, to check a pipeline against the
 /// truth before trusting it on real data.
 pub use horizon::synthetic;
-pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
+pub use horizon::calibration::{observed, Calibration, Gap, Kind as CalibrationKind, Reason as GapReason, MIN_EVENTS};
 pub use horizon::ensemble::{Kind as EnsembleKind, Manifest as EnsembleManifest, MemberRecord};
 pub use horizon::fit::{
     TrainSpec as TimelineSpec, DEFAULT_BATCH, DEFAULT_EVAL_INTERVAL, DEFAULT_LR, DEFAULT_MASK_RATE,
@@ -64,29 +64,41 @@ pub fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<Subject>> {
 }
 
 /// How to calibrate a trained model ([`TimelineModel::calibrate`]): the
-/// horizons whose risks are to be calibrated, and the event minimum a horizon
-/// needs on the validation subjects to be.
+/// horizons whose risks are to be calibrated, the kind of calibrator and the
+/// event minimum a horizon needs on the validation subjects to be.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalibrationSpec {
     horizons: Vec<f64>,
-    min_events: usize,
+    kind: CalibrationKind,
+    min_events: Option<usize>,
 }
 
 impl CalibrationSpec {
     /// Calibrate the risk by each of `horizons` (after entry, in the data's
-    /// unit, each within the model's knots).
+    /// unit, each within the model's knots), with the default
+    /// [`CalibrationKind::Logistic`].
     pub fn new(horizons: impl IntoIterator<Item = f64>) -> CalibrationSpec {
         CalibrationSpec {
             horizons: horizons.into_iter().collect(),
-            min_events: MIN_EVENTS,
+            kind: CalibrationKind::default(),
+            min_events: None,
         }
+    }
+    /// The kind of calibrator: [`CalibrationKind::Logistic`] (the default; a
+    /// smooth map fitted on few parameters, no interval) or
+    /// [`CalibrationKind::VennAbers`] (isotonic, with an interval, and far
+    /// more events needed).
+    pub fn kind(mut self, kind: CalibrationKind) -> Self {
+        self.kind = kind;
+        self
     }
     /// Calibrate a (code, horizon) only if the validation subjects hold at
     /// least this many events of the code by then, and as many still
-    /// event-free ([`MIN_EVENTS`] unless set). A lower minimum fits a
-    /// calibrator to fewer events; the others are reported, not guessed.
+    /// event-free ([`CalibrationKind::min_events`] of the kind unless set). A
+    /// lower minimum fits a calibrator to fewer events, which adds noise; the
+    /// others are reported, not guessed.
     pub fn min_events(mut self, n: usize) -> Self {
-        self.min_events = n;
+        self.min_events = Some(n);
         self
     }
 }
@@ -200,7 +212,7 @@ impl TimelineModel {
     }
 
     /// Fit the model's calibration on `validation` subjects: for every outcome
-    /// code and every horizon of `spec`, a Venn-Abers calibrator under
+    /// code and every horizon of `spec`, a calibrator of the spec's kind under
     /// inverse-probability-of-censoring weights, the censoring distribution
     /// estimated on `validation` itself. Use subjects the model was neither
     /// trained nor early-stopped on, and never the test set the result is
@@ -216,7 +228,12 @@ impl TimelineModel {
         spec: &CalibrationSpec,
     ) -> Result<&Calibration> {
         self.saved
-            .calibrate(validation, &spec.horizons, spec.min_events)
+            .calibrate(
+                validation,
+                &spec.horizons,
+                spec.kind,
+                spec.min_events.unwrap_or_else(|| spec.kind.min_events()),
+            )
             .map_err(Error::Backend)?;
         self.calibration()
             .ok_or_else(|| Error::Backend("calibration was not stored".into()))
@@ -596,8 +613,8 @@ impl Prediction {
         self.member_cifs(code, t).map(|v| v.iter().sum::<f64>() / v.len() as f64)
     }
     /// The calibrated probability that `code` happens within exactly `t`:
-    /// the Venn-Abers risk of the model's raw one, at a horizon the model was
-    /// calibrated for. `None` for an unknown code, an uncalibrated model, and
+    /// the calibrated risk (see [`CalibrationKind`]) of the model's raw one,
+    /// at a horizon the model was calibrated for. `None` for an unknown code, an uncalibrated model, and
     /// a horizon that was not calibrated (including one whose validation data
     /// had too few events): absent, never a number made up. For an ensemble,
     /// the mean of its members' calibrated risks, `None` unless every member
@@ -609,13 +626,15 @@ impl Prediction {
     /// The Venn-Abers interval `(p0, p1)` behind [`Prediction::calibrated_cif`]:
     /// one end is calibrated whatever the model, and the width says how little
     /// calibration data stands behind the score. `None` wherever
-    /// [`Prediction::calibrated_cif`] is.
+    /// [`Prediction::calibrated_cif`] is, and for a logistic calibration (the
+    /// default kind), which has no interval.
     pub fn cif_interval(&self, code: &str, t: f64) -> Option<(f64, f64)> {
         let each = self.calibrated_each(code, t)?;
         let n = each.len() as f64;
+        let intervals: Vec<(f64, f64)> = each.iter().map(|c| c.interval).collect::<Option<_>>()?;
         Some((
-            each.iter().map(|c| c.lower).sum::<f64>() / n,
-            each.iter().map(|c| c.upper).sum::<f64>() / n,
+            intervals.iter().map(|i| i.0).sum::<f64>() / n,
+            intervals.iter().map(|i| i.1).sum::<f64>() / n,
         ))
     }
     fn calibrated_each(&self, code: &str, t: f64) -> Option<Vec<horizon::calibration::Calibrated>> {

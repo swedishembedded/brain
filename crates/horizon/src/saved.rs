@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::calibration::{self, Calibration};
+use crate::calibration::{self, Calibration, Kind};
 use crate::encode::{encode, Encoded};
 use crate::support::{self, AssessOptions, Assessment, Support};
 use crate::survival::Curves;
@@ -146,11 +146,12 @@ impl Saved {
         &mut self,
         validation: &[Subject],
         horizons: &[f64],
+        kind: Kind,
         min_events: usize,
     ) -> Result<(), String> {
         let digest = self.weights_digest()?;
         self.calibration = Some(Arc::new(Calibration::fit(
-            self, digest, validation, horizons, min_events,
+            self, digest, validation, horizons, kind, min_events,
         )?));
         Ok(())
     }

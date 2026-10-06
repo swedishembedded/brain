@@ -123,6 +123,9 @@ fn train_eval_calibrate_predict_through_the_capability_layer() {
         .blob("validation", jsonl(&validation));
     let calibrated = run("calibrate", &calibrate).unwrap();
     assert!(calibrated.outputs["calibrated"].as_u64().unwrap() > 0);
+    assert_eq!(calibrated.outputs["kind"], json!("logistic"), "the default kind, recorded in the file");
+    let bad = run("calibrate", &calibrate.clone().set("kind", json!("platt")).set("force", json!(true))).unwrap_err();
+    assert!(bad.contains("unknown kind"), "{bad}");
     assert!(model.join("calibration.json").is_file());
     assert_eq!(
         std::fs::read(model.join("calibration.json")).unwrap(),

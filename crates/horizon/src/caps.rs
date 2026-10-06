@@ -33,8 +33,9 @@
 //! operator raises the threshold past it on purpose.
 //!
 //! A model saved with a calibration also answers `cif_calibrated` (the
-//! calibrated risk) and `cif_interval` (its Venn-Abers interval) beside the
-//! raw `cif`, per code and time; `null` at a time that was not calibrated.
+//! calibrated risk) and `cif_interval` (its Venn-Abers interval; `null`
+//! throughout for the logistic calibration, which has none) beside the raw
+//! `cif`, per code and time; `null` at a time that was not calibrated.
 //!
 //! The model directory is the one `TimelineModel::save` (SDK) writes. On a
 //! served surface it is host configuration (`BRAIN_HORIZON_DIR`), never a
@@ -337,7 +338,7 @@ fn render_subjects(req: &Request, members: &[(&Saved, &[Scored])]) -> Outcome {
         if views.iter().any(|(saved, _)| saved.calibration.is_some()) {
             // `null` where any member is not calibrated at the horizon: absent,
             // never 0.
-            let per_code = |pick: &dyn Fn(Calibrated) -> Value, mean: &dyn Fn(Vec<Value>) -> Value| -> serde_json::Map<String, Value> {
+            let per_code = |pick: &dyn Fn(Calibrated) -> Option<Value>, mean: &dyn Fn(Vec<Value>) -> Value| -> serde_json::Map<String, Value> {
                 codes
                     .iter()
                     .enumerate()
@@ -345,9 +346,7 @@ fn render_subjects(req: &Request, members: &[(&Saved, &[Scored])]) -> Outcome {
                         let at = req.times.iter().map(|&t| {
                             let each: Option<Vec<Value>> = views
                                 .iter()
-                                .map(|(saved, v)| {
-                                    saved.calibration.as_ref()?.apply(code, t, v.curves.cif(k, t)).map(pick)
-                                })
+                                .map(|(saved, v)| pick(saved.calibration.as_ref()?.apply(code, t, v.curves.cif(k, t))?))
                                 .collect();
                             each.map_or(Value::Null, mean)
                         });
@@ -360,8 +359,9 @@ fn render_subjects(req: &Request, members: &[(&Saved, &[Scored])]) -> Outcome {
                 let end = |j: usize| each.iter().filter_map(|v| v[j].as_f64()).sum::<f64>() / n;
                 json!([end(0), end(1)])
             };
-            line["cif_calibrated"] = Value::Object(per_code(&|c| json!(c.risk), &mean_of));
-            line["cif_interval"] = Value::Object(per_code(&|c| json!([c.lower, c.upper]), &mean_pair));
+            line["cif_calibrated"] = Value::Object(per_code(&|c| Some(json!(c.risk)), &mean_of));
+            line["cif_interval"] =
+                Value::Object(per_code(&|c| c.interval.map(|(lo, hi)| json!([lo, hi])), &mean_pair));
         }
         out.push_str(&line.to_string());
         out.push('\n');

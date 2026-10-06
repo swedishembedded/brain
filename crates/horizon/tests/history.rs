@@ -180,7 +180,7 @@ fn a_forecast_reports_its_coverage_horizons_and_identity_and_refuses_what_it_can
 
     // Calibrated at 5 only: the interval and calibrated risk exist there and nowhere else.
     let (validation, _) = population(2500, 65);
-    saved.calibrate(&validation, &[5.0], 30).unwrap();
+    saved.calibrate(&validation, &[5.0], horizon::calibration::Kind::VennAbers, 30).unwrap();
     let f = one_with(&saved, &[5.0, 10.0]);
     let risk = |h: usize| &f.horizons[h].risks["onset"];
     let (cal, [lo, hi]) = (risk(0).calibrated.unwrap(), risk(0).interval.unwrap());

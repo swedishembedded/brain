@@ -26,7 +26,8 @@
 //!   knots, and survival;
 //! - **horizons**: for each horizon the request names, the raw risk and, only
 //!   where the model was calibrated for exactly that horizon, the calibrated
-//!   risk and its Venn-Abers interval - ABSENT otherwise, never zero. A
+//!   risk and, for a Venn-Abers calibration, its interval - ABSENT otherwise,
+//!   never zero. A
 //!   horizon past the last knot is refused, not extrapolated;
 //! - the **uncertainty** that exists: that interval, and for an ensemble the
 //!   range over its members;
@@ -189,7 +190,8 @@ pub struct CodeRisk {
     /// for this code at this horizon.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calibrated: Option<f64>,
-    /// The Venn-Abers interval behind `calibrated`; absent with it.
+    /// The Venn-Abers interval behind `calibrated`; absent with it, and
+    /// absent for a logistic calibration, which has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval: Option<[f64; 2]>,
     /// For an ensemble, the lowest and highest raw probability of its members.
@@ -385,13 +387,11 @@ impl RiskForecast {
                 let calibrated: Option<Vec<f64>> = each.iter().map(|r| r.calibrated).collect();
                 let interval: Option<Vec<[f64; 2]>> = each.iter().map(|r| r.interval).collect();
                 risk.calibrated = calibrated.map(|c| c.iter().sum::<f64>() / n);
-                risk.interval = interval.map(|i| {
+                // An interval exists only where every member has one (a
+                // logistic calibration has none) and a calibrated risk does.
+                risk.interval = interval.filter(|_| risk.calibrated.is_some()).map(|i| {
                     [i.iter().map(|x| x[0]).sum::<f64>() / n, i.iter().map(|x| x[1]).sum::<f64>() / n]
                 });
-                if risk.calibrated.is_none() || risk.interval.is_none() {
-                    risk.calibrated = None;
-                    risk.interval = None;
-                }
             }
         }
         out.ensemble = Some(EnsembleSummary {
@@ -409,7 +409,7 @@ fn code_risk(saved: &Saved, curves: &Curves, code: &str, k: usize, horizon: f64)
     CodeRisk {
         raw,
         calibrated: calibrated.map(|c| c.risk),
-        interval: calibrated.map(|c| [c.lower, c.upper]),
+        interval: calibrated.and_then(|c| c.interval).map(|(lo, hi)| [lo, hi]),
         member_range: None,
     }
 }
