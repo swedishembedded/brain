@@ -416,6 +416,56 @@ struct CausalLm {
     val: TokenDataset,
     batch_cfg: BatchConfig,
     itos: Option<Vec<char>>,
+    /// The order the training examples are drawn in, once the run has
+    /// begun: epochs of every example once. `None` before [`Objective::begin`]
+    /// and for a plain token stream, which is sampled in windows.
+    order: Option<EpochOrder>,
+}
+
+/// Which example each draw takes: the examples shuffled once per epoch, every
+/// one drawn once before any is drawn again, so a pass over the data is a
+/// pass and not a sample of it with some examples missed and others repeated.
+/// The order of an epoch is a function of the seed and the epoch alone, and a
+/// draw's place in it of the count of draws before it, so a run resumed at
+/// draw `n` continues the order a straight run follows.
+#[cfg(not(target_arch = "wasm32"))]
+struct EpochOrder {
+    seed: u64,
+    examples: usize,
+    drawn: u64,
+    /// The epoch `permutation` is the order of.
+    epoch: u64,
+    permutation: Vec<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EpochOrder {
+    fn new(seed: u64, examples: usize, drawn: u64) -> Self {
+        assert!(examples > 0, "an order over no examples");
+        let epoch = drawn / examples as u64;
+        EpochOrder { seed, examples, drawn, epoch, permutation: Self::shuffled(seed, examples, epoch) }
+    }
+
+    /// Fisher-Yates over the examples, seeded by the run's seed and the epoch.
+    fn shuffled(seed: u64, examples: usize, epoch: u64) -> Vec<usize> {
+        let mut rng = Rng::new(seed ^ epoch.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut order: Vec<usize> = (0..examples).collect();
+        for i in (1..examples).rev() {
+            order.swap(i, rng.gen_range_inclusive(0, i as i64) as usize);
+        }
+        order
+    }
+
+    fn next(&mut self) -> usize {
+        let epoch = self.drawn / self.examples as u64;
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            self.permutation = Self::shuffled(self.seed, self.examples, epoch);
+        }
+        let pick = self.permutation[(self.drawn % self.examples as u64) as usize];
+        self.drawn += 1;
+        pick
+    }
 }
 
 /// Build the ordinary causal-LM [`Objective`] any [`Model`] can plug into
@@ -431,7 +481,7 @@ pub fn causal_lm<M: Model>(
     batch_cfg: BatchConfig,
     itos: Option<Vec<char>>,
 ) -> impl Objective<M> {
-    CausalLm { train, val, batch_cfg, itos }
+    CausalLm { train, val, batch_cfg, itos, order: None }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -440,8 +490,12 @@ impl<M: Model> Objective<M> for CausalLm {
         "causal_lm"
     }
 
+    fn begin(&mut self, seed: u64, draws_done: u64) {
+        self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, draws_done));
+    }
+
     fn micro_step(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+        let (x, y) = self.draw(rng);
         let targets = targets_to_u32(&y);
         model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
         let loss = model.forward();
@@ -449,12 +503,17 @@ impl<M: Model> Objective<M> for CausalLm {
         loss
     }
 
+    /// The `k` batches are drawn up front, in the order one at a time would
+    /// draw them, so a model that overlaps them trains on the same data. A
+    /// model that takes a loss denominator gets the step's mean count of
+    /// supervised positions, so the step's gradient is the mean over its
+    /// supervised tokens - each token weighs the same whichever record it is
+    /// in - and the loss it reports is that per-token mean, the quantity a
+    /// held-out evaluation measures.
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
-        // The batches are drawn up front, in the order one at a time would
-        // draw them, so a model that overlaps them trains on the same data.
         let drawn: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
             .map(|_| {
-                let (x, y) = self.train.get_batch(&self.batch_cfg, rng);
+                let (x, y) = self.draw(rng);
                 (x, targets_to_u32(&y))
             })
             .collect();
@@ -464,9 +523,14 @@ impl<M: Model> Objective<M> for CausalLm {
                 return total;
             }
         }
+        let supervised: usize = drawn.iter().map(|(_, y)| y.iter().filter(|&&t| t != IGNORE).count()).sum();
+        let mean_supervised = supervised as f32 / k.max(1) as f32;
         let mut total = 0.0;
         for batch in batches {
             model.set_batch(batch);
+            if mean_supervised > 0.0 {
+                model.set_loss_denominator(mean_supervised);
+            }
             total += model.forward();
             model.backward();
         }
@@ -503,6 +567,18 @@ impl<M: Model> Objective<M> for CausalLm {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CausalLm {
+    /// The next training batch: the next examples of the epoch order, else
+    /// (before the run has begun, or for a stream of tokens) a random draw.
+    fn draw(&mut self, rng: &mut Rng) -> (Vec<u32>, Vec<i32>) {
+        if let Some(order) = self.order.as_mut() {
+            let picks: Vec<Option<usize>> = (0..self.batch_cfg.batch_size).map(|_| Some(order.next())).collect();
+            if let Some(batch) = self.train.example_batch(&self.batch_cfg, &picks) {
+                return batch;
+            }
+        }
+        self.train.get_batch(&self.batch_cfg, rng)
+    }
+
     /// The mean per-position loss over every supervised position of the
     /// validation split's `count` examples, each a row once, in order:
     /// [`Model::forward`] returns a batch's mean over its supervised
@@ -969,6 +1045,8 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         }
     }
 
+    obj.begin(opts.seed, u64::from(first_step) * u64::from(opts.grad_accum.max(1)) * opts.batch_size.max(1) as u64);
+
     let initial = {
         let mut sample_rng = rng.clone();
         let mut total = 0.0;
@@ -1144,7 +1222,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
 pub fn fit<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     let loaded = load(dir, opts)?;
     let model = build_or_resume::<M>(cfg, opts, out, loaded.vocab);
-    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos };
+    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos, order: None };
     fit_with(model, obj, opts, out)
 }
 
@@ -1209,7 +1287,7 @@ pub fn fit_from<M: Model>(
         }
     }
     let model = M::new(cfg, opts.batch_size, opts.block_size, &weights);
-    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos };
+    let obj = CausalLm { train: loaded.train, val: loaded.val, batch_cfg: loaded.batch_cfg, itos: loaded.itos, order: None };
     fit_with(model, obj, opts, out)
 }
 
@@ -1389,6 +1467,11 @@ mod tests {
         saves: std::rc::Rc<std::cell::RefCell<Vec<Vec<f32>>>>,
         /// The AdamW hyperparameters of every step, in order.
         adams: std::rc::Rc<std::cell::RefCell<Vec<optim::Adam>>>,
+        /// The loss denominator named for each batch, in order.
+        denominators: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
+        /// The first supervised target of each batch run forward, in order:
+        /// which example it was, when each example's targets are its own.
+        drawn: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
     }
 
     #[derive(Clone)]
@@ -1417,7 +1500,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -1430,8 +1513,13 @@ mod tests {
                 *self.targets.borrow_mut() = targets.to_vec();
             }
         }
+        fn set_loss_denominator(&self, tokens: f32) -> bool {
+            self.denominators.borrow_mut().push(tokens);
+            true
+        }
         fn forward(&self) -> f32 {
             let targets = self.targets.borrow();
+            self.drawn.borrow_mut().extend(targets.iter().find(|&&t| t != IGNORE));
             let supervised: Vec<f32> = targets.iter().filter(|&&t| t != IGNORE).map(|&t| t as f32).collect();
             if supervised.is_empty() {
                 0.0
@@ -1696,6 +1784,57 @@ mod tests {
         let obj = Curve { evals: vec![], next: std::cell::Cell::new(0) };
         fit_with(model, obj, &opts, None).expect("fit");
         assert_eq!(*adams.borrow(), vec![adam; 3]);
+    }
+
+    /// A causal-LM objective over `lengths.len()` examples, example `i` being
+    /// `lengths[i]` tokens all `10 + i`, so a batch says which example it is.
+    fn examples_objective(lengths: &[usize], block: usize) -> CausalLm {
+        let cfg = BatchConfig { batch_size: 1, block_size: block, ..Default::default() };
+        let (mut data, mut starts) = (Vec::new(), Vec::new());
+        for (i, &len) in lengths.iter().enumerate() {
+            starts.push(data.len());
+            data.extend(std::iter::repeat_n(10 + i as u32, len));
+        }
+        let dataset = || TokenDataset::new_examples(data.clone(), vec![true; data.len()], &starts, 0, &cfg).unwrap();
+        CausalLm { train: dataset(), val: dataset(), batch_cfg: cfg.clone(), itos: None, order: None }
+    }
+
+    /// A pass over the data takes every example once before any is taken
+    /// again, and a run resumed part way through an epoch carries on the order
+    /// a straight run follows.
+    #[test]
+    fn the_examples_are_drawn_in_epochs_without_replacement_and_a_resume_continues_the_order() {
+        let draws = |first: u64, count: u32| {
+            let mut obj = examples_objective(&[4; 5], 4);
+            Objective::<Recorder>::begin(&mut obj, 7, first);
+            let model = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
+            let mut rng = Rng::new(1);
+            Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, count);
+            let seen = model.drawn.borrow().clone();
+            seen
+        };
+        let straight = draws(0, 15);
+        for epoch in straight.chunks(5) {
+            let mut sorted = epoch.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(sorted, vec![10, 11, 12, 13, 14], "an epoch holds each example once: {straight:?}");
+        }
+        assert_ne!(straight[..5], straight[5..10], "each epoch is shuffled afresh");
+        assert_eq!(draws(8, 7), straight[8..], "a resume at draw 8 follows the straight run");
+    }
+
+    /// The `k` batches of an optimiser step share one denominator, the mean
+    /// count of their supervised positions, so a long record weighs what it
+    /// holds and not as much as a short one.
+    #[test]
+    fn the_batches_of_a_step_are_divided_by_the_steps_mean_supervised_count() {
+        // Examples of 3 and 7 tokens supervise 2 and 6 positions.
+        let mut obj = examples_objective(&[3, 7], 8);
+        Objective::<Recorder>::begin(&mut obj, 1, 0);
+        let model = Recorder::new(RecorderCfg, 1, 8, &HashMap::new());
+        let mut rng = Rng::new(1);
+        Objective::<Recorder>::micro_steps(&mut obj, &model, &mut rng, 2);
+        assert_eq!(*model.denominators.borrow(), vec![4.0, 4.0]);
     }
 
     fn tmp(name: &str) -> std::path::PathBuf {

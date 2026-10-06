@@ -43,6 +43,12 @@ pub trait Objective<M: Model> {
     /// support via [`Model::enable_weighted_loss`].
     fn prepare(&mut self, _model: &mut M) {}
 
+    /// The run is about to take its first step, `draws_done` micro-steps
+    /// into its data (more than 0 on a resume), seeded by `seed`: an
+    /// objective that orders its data by epochs positions itself here, so a
+    /// resumed run continues the order a straight run would have followed.
+    fn begin(&mut self, _seed: u64, _draws_done: u64) {}
+
     /// Run exactly one micro-step: draw a batch, upload it via
     /// [`Model::set_batch`], forward, decide any per-position loss weights,
     /// and backward - returning the scalar loss [`Model::forward`] produced.

@@ -291,6 +291,17 @@ pub trait Model {
         unimplemented!("{}: does not implement Model::set_loss_weights", std::any::type_name::<Self>());
     }
 
+    /// Divide the loss and gradient of the batch just set by `tokens` instead
+    /// of by its own count of supervised positions, so that batches
+    /// accumulated into one optimiser step share one denominator and the
+    /// step is a mean over its supervised tokens rather than a mean of
+    /// per-batch means. Call after [`Model::set_batch`]. Returns whether the
+    /// model honoured it; a model that cannot (the default) keeps its
+    /// per-batch normalisation.
+    fn set_loss_denominator(&self, _tokens: f32) -> bool {
+        false
+    }
+
     /// Run forward; return the scalar objective loss that `backward` differentiates.
     fn forward(&self) -> f32;
     /// Accumulate analytic gradients for the current batch into the ParamStore.

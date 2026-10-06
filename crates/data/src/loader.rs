@@ -223,12 +223,22 @@ impl TokenDataset {
     /// held-out evaluation needs, where a drawn sample would score a
     /// different subset every time.
     pub fn example_rows(&self, cfg: &BatchConfig, first: usize) -> Option<(Vec<u32>, Vec<i32>)> {
+        let picks: Vec<Option<usize>> = (first..first + cfg.batch_size).map(Some).collect();
+        self.example_batch(cfg, &picks)
+    }
+
+    /// The batch whose row `b` is example `picks[b]` - `None` is a row of
+    /// padding with [`IGNORE`] targets throughout, as is any example past the
+    /// last - laid out as [`TokenDataset::get_batch`] lays a drawn example
+    /// out. `None` for a plain token stream, which has no examples.
+    pub fn example_batch(&self, cfg: &BatchConfig, picks: &[Option<usize>]) -> Option<(Vec<u32>, Vec<i32>)> {
         let ex = self.examples.as_ref()?;
         let (bs, bl) = (cfg.batch_size, cfg.block_size);
+        assert_eq!(picks.len(), bs, "one pick per row");
         let mut x = vec![ex.pad; bs * bl];
         let mut y = vec![IGNORE; bs * bl];
-        for b in 0..bs {
-            let Some(&(a, e)) = ex.bounds.get(first + b) else { break };
+        for (b, pick) in picks.iter().enumerate() {
+            let Some(&(a, e)) = pick.and_then(|p| ex.bounds.get(p)) else { continue };
             for t in 0..bl {
                 let target = a + 1 + t;
                 let supervised = target < e && self.mask.as_ref().is_none_or(|m| m[target]);

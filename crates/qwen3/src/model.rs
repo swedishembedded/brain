@@ -1523,6 +1523,17 @@ impl Qwen {
         self.count.set(c.max(1) as f32);
     }
 
+    /// Divides the current batch's loss and gradient by `tokens` rather than
+    /// by the batch's own count of supervised positions. Batches accumulated
+    /// into one optimiser step name the step's mean count here, so the step
+    /// is a mean over its supervised tokens and a short record counts for
+    /// what it holds instead of as much as a long one. Call after
+    /// [`Self::set_batch`], which resets the denominator to the batch's own.
+    pub fn set_loss_denominator(&self, tokens: f32) {
+        assert!(tokens > 0.0, "the loss denominator must be positive, got {tokens}");
+        self.count.set(tokens);
+    }
+
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
     }
@@ -3716,6 +3727,10 @@ impl model::Model for Qwen {
             _ => panic!("qwen3::Qwen only supports Batch::Lm / Batch::LmWeighted"),
         }
     }
+    fn set_loss_denominator(&self, tokens: f32) -> bool {
+        Qwen::set_loss_denominator(self, tokens);
+        true
+    }
     fn enable_weighted_loss(&mut self) {
         Qwen::enable_weighted_loss(self)
     }
@@ -5193,5 +5208,53 @@ mod rollout_tests {
         let mut rng = Rng::new(1234);
         let out = model::train::generate(&model, &prompt, 6, 0.0, 0, &mut rng);
         assert_eq!(out, vec![2, 2, 2, 2, 2, 2]);
+    }
+}
+
+/// A batch's loss is a sum over its supervised tokens divided by a count:
+/// its own by default, or the one a caller names so that several batches
+/// accumulated into one step share a single denominator.
+#[cfg(test)]
+mod loss_denominator_tests {
+    use super::*;
+    use model::Model;
+
+    #[test]
+    fn a_named_denominator_scales_the_loss_and_its_gradient() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 42);
+        let model = Qwen::new(cfg.clone(), 1, cfg.block_size, &init);
+        let t = cfg.block_size as usize;
+        let x: Vec<u32> = (0..t as u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+        let mut y: Vec<u32> = (0..t as u32).map(|i| (i * 3 + 2) % cfg.vocab).collect();
+        for slot in y.iter_mut().take(t - 4) {
+            *slot = IGNORE;
+        }
+        let supervised = 4.0f32;
+        let grad_of = |denominator: Option<f32>| {
+            model.set_batch(&x, &y);
+            if let Some(d) = denominator {
+                model.set_loss_denominator(d);
+            }
+            model.zero_grads();
+            let loss = model.forward();
+            model.backward();
+            model.poll_wait();
+            let name = model.param_names().into_iter().find(|n| n.contains("wq")).unwrap();
+            (loss, model.read_grad(&name))
+        };
+        let (loss, grad) = grad_of(None);
+        let (half_loss, half_grad) = grad_of(Some(2.0 * supervised));
+        assert!((half_loss - loss / 2.0).abs() < 1e-5 * loss.abs().max(1.0), "{half_loss} vs {loss}");
+        assert!(grad.iter().any(|g| g.abs() > 1e-9));
+        for (g, h) in grad.iter().zip(&half_grad) {
+            assert!((h - g / 2.0).abs() <= 1e-5 + 1e-4 * g.abs(), "{h} vs {g}/2");
+        }
+        // The next batch is back to its own count.
+        let (again, _) = grad_of(None);
+        assert!((again - loss).abs() < 1e-6, "{again} vs {loss}");
     }
 }
