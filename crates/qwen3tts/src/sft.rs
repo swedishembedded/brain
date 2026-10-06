@@ -208,6 +208,7 @@ impl FinetuneOpts {
             mask_per_line: false,
             align_to_lines: false,
             patience: 0,
+            cooldown_steps: 0,
             adam: Default::default(),
         }
     }

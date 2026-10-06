@@ -141,6 +141,7 @@ fn train(args: &[String], base: Option<&str>) {
         mask_per_line: mask.is_some(),
         align_to_lines: align,
         patience: 0,
+        cooldown_steps: 0,
         seed,
         adam: glmdsa::ADAM,
     };

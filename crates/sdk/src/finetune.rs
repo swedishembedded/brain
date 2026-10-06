@@ -92,6 +92,8 @@ pub struct ChatFineTune {
     adapter_id: Option<String>,
     rank: Option<u32>,
     alpha: Option<f32>,
+    weight_decay: f32,
+    cooldown_steps: Option<u32>,
     steps: u32,
     lr: f32,
     seed: u64,
@@ -139,6 +141,8 @@ impl ChatFineTune {
             adapter_id: None,
             rank: None,
             alpha: None,
+            weight_decay: LORA_WEIGHT_DECAY,
+            cooldown_steps: None,
             steps: 100,
             lr: 3e-4,
             seed: 1337,
@@ -285,8 +289,25 @@ impl ChatFineTune {
         self
     }
 
-    /// Optimizer steps (default 100). The first fifth warms the rate up, and
-    /// it decays over all of them.
+    /// AdamW's decoupled weight decay on the adapter's matrices (default 0,
+    /// as LoRA recipes use: the adapter starts at zero and decay only pulls
+    /// it back there).
+    pub fn weight_decay(mut self, decay: f32) -> Self {
+        self.weight_decay = decay;
+        self
+    }
+
+    /// Steps a run whose [`Self::patience`] runs out spends bringing the
+    /// rate down to its floor before it stops (default a tenth of the
+    /// steps): the anneal a run stopped on a plateau would otherwise never
+    /// have, so the adapter it keeps is not the one trained at a high rate.
+    pub fn cooldown(mut self, steps: u32) -> Self {
+        self.cooldown_steps = Some(steps);
+        self
+    }
+
+    /// Optimizer steps (default 100). The first twentieth warms the rate up,
+    /// and it decays over all of them.
     pub fn steps(mut self, steps: u32) -> Self {
         self.steps = steps;
         self
@@ -450,6 +471,8 @@ impl ChatFineTune {
             // Keeping the best without a patience is a patience the run
             // never reaches.
             patience: if self.keep_best && self.patience == 0 { u32::MAX } else { self.patience },
+            weight_decay: self.weight_decay,
+            cooldown_steps: self.cooldown_steps.unwrap_or(self.steps / COOLDOWN_DIVISOR),
             ..fit_opts(self.steps, block, self.lr, self.seed)
         };
         let base_digest = base_digest(&open)?;
@@ -462,6 +485,7 @@ impl ChatFineTune {
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
+            "weight_decay_bits": self.weight_decay.to_bits(),
             "repeats": repeats,
             "grad_accum": self.grad_accum,
         });
@@ -504,6 +528,8 @@ impl ChatFineTune {
             block,
             rank,
             alpha,
+            lr: self.lr,
+            weight_decay: self.weight_decay,
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
             base_score,
@@ -531,6 +557,7 @@ impl ChatFineTune {
                 "eval_every": self.eval_every,
                 "patience": self.patience,
                 "lr": self.lr,
+                "weight_decay": self.weight_decay,
                 "block": block,
                 "train_records": outcome.train_records,
                 "replay_records": outcome.replay_records,
@@ -627,6 +654,10 @@ pub struct ChatFineTuneOutcome {
     pub block: u32,
     pub rank: u32,
     pub alpha: f32,
+    /// The peak learning rate of the run.
+    pub lr: f32,
+    /// The AdamW weight decay of the run.
+    pub weight_decay: f32,
     /// The digest of the adapter this run continued, if it continued one.
     pub trained_from: Option<String>,
     /// `sha256:<hex>` of the base checkpoint file the adapter was trained on -
@@ -669,6 +700,8 @@ impl ChatFineTuneOutcome {
             "block": self.block,
             "rank": self.rank,
             "alpha": self.alpha,
+            "lr": self.lr,
+            "weight_decay": self.weight_decay,
             "base_score": score(&self.base_score),
             "tuned_score": score(&self.tuned_score),
         })
@@ -901,6 +934,17 @@ fn mix_repeats(groups: &[(usize, f32)]) -> Result<Vec<usize>> {
     Ok(best.1)
 }
 
+/// AdamW weight decay of a LoRA fine-tune unless named: none. The adapter
+/// starts at zero, so decay only pulls what it has learned back towards it.
+pub(crate) const LORA_WEIGHT_DECAY: f32 = 0.0;
+
+/// The warmup is this share of the steps, as the divisor: a twentieth.
+const WARMUP_DIVISOR: u32 = 20;
+
+/// A run's cooldown after its patience runs out, unless named, is this
+/// share of its steps, as the divisor: a tenth.
+const COOLDOWN_DIVISOR: u32 = 10;
+
 pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
     model::FitOpts {
         steps,
@@ -908,9 +952,9 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         block_size: block,
         lr,
         min_lr: lr / 10.0,
-        warmup: steps / 5,
+        warmup: (steps / WARMUP_DIVISOR).max(1),
         decay_iters: steps,
-        weight_decay: 0.1,
+        weight_decay: LORA_WEIGHT_DECAY,
         grad_clip: 1.0,
         grad_accum: 1,
         // Held-out evidence is `score_chat`'s, measured on the served form;
@@ -924,6 +968,7 @@ pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::Fit
         mask_per_line: false,
         align_to_lines: false,
         patience: 0,
+        cooldown_steps: 0,
         adam: Default::default(),
     }
 }
@@ -945,6 +990,15 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fine-tune warms up over a twentieth of its steps, decays the rate
+    /// over all of them, and decays no weights unless asked.
+    #[test]
+    fn the_recipe_warms_up_briefly_and_decays_no_weights_by_default() {
+        let o = fit_opts(400, 256, 2e-4, 1);
+        assert_eq!((o.warmup, o.decay_iters, o.weight_decay), (20, 400, 0.0));
+        assert_eq!(fit_opts(10, 256, 2e-4, 1).warmup, 1);
+    }
 
     /// A row holds the longest record, grows in powers of two from 64, and
     /// never passes the caller's cap - a record past it is refused by size.

@@ -143,6 +143,7 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
         mask_per_line: false,
         align_to_lines: false,
         patience: 0,
+        cooldown_steps: 0,
         seed: 1234,
         adam: Default::default(),
     };

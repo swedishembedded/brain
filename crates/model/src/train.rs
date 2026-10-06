@@ -76,6 +76,15 @@ pub struct FitOpts {
     /// run cannot reach (`u32::MAX`) keeps the best evaluation's parameters
     /// and still runs every step.
     pub patience: u32,
+    /// Steps a run that runs out of [`Self::patience`] spends bringing its
+    /// rate down to [`Self::min_lr`] before it stops, evaluating as it goes
+    /// and still keeping the best evaluation. A schedule planned over
+    /// [`Self::decay_iters`] steps never reaches its end when the run stops
+    /// at a plateau, and the adapter it keeps would be the one trained at a
+    /// high rate; the cooldown is the anneal such a run does not otherwise
+    /// get. The most remaining steps of the run's budget are used; `0`
+    /// stops where the patience ran out.
+    pub cooldown_steps: u32,
     /// AdamW's β1, β2 and ε for every step of the run.
     pub adam: crate::Adam,
 }
@@ -103,6 +112,7 @@ impl Default for FitOpts {
             // Off: unchanged behaviour for every caller that has not asked
             // to stop early.
             patience: 0,
+            cooldown_steps: 0,
             adam: crate::Adam::default(),
         }
     }
@@ -746,11 +756,35 @@ struct Selection {
     /// The training losses since the last evaluation.
     interval_sum: f32,
     interval_count: u32,
+    /// The cooldown the run is in, once its patience has run out.
+    cooldown: Option<Cooldown>,
+}
+
+/// A cooldown in progress: the rate falls linearly from where the run stood
+/// to its floor over `steps`, the first of which is `first_step`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cooldown {
+    first_step: u32,
+    steps: u32,
+    from_lr: f32,
+}
+
+impl Cooldown {
+    /// The rate at `step` (0-based): the last step of the cooldown is at the floor.
+    fn lr(&self, step: u32, floor: f32) -> f32 {
+        let done = (step + 1 - self.first_step).min(self.steps) as f32 / self.steps as f32;
+        self.from_lr + (floor - self.from_lr) * done
+    }
+
+    /// Whether `step` is the last of the cooldown.
+    fn ends_at(&self, step: u32) -> bool {
+        step + 1 >= self.first_step + self.steps
+    }
 }
 
 impl Selection {
     fn new(opts: &FitOpts) -> Selection {
-        Selection { watch: EarlyStop::new(opts.patience), held: None, best_step: None, evaluations: Vec::new(), interval_sum: 0.0, interval_count: 0 }
+        Selection { watch: EarlyStop::new(opts.patience), held: None, best_step: None, evaluations: Vec::new(), interval_sum: 0.0, interval_count: 0, cooldown: None }
     }
 
     /// Whether the run keeps its best evaluation's parameters.
@@ -780,6 +814,7 @@ impl Selection {
             "held": self.held.is_some(),
             "interval_sum_bits": self.interval_sum.to_bits(),
             "interval_count": self.interval_count,
+            "cooldown": self.cooldown.map(|c| serde_json::json!([c.first_step, c.steps, c.from_lr.to_bits()])),
             "evaluations": self.evaluations.iter().map(|e| serde_json::json!([e.step, e.train_loss.to_bits(), e.eval_loss.to_bits()])).collect::<Vec<_>>(),
         })
     }
@@ -808,6 +843,10 @@ impl Selection {
             evaluations,
             interval_sum: bits(&value["interval_sum_bits"])?,
             interval_count: count(&value["interval_count"])?,
+            cooldown: match &value["cooldown"] {
+                serde_json::Value::Null => None,
+                c => Some(Cooldown { first_step: count(&c[0])?, steps: count(&c[1])?, from_lr: bits(&c[2])? }),
+            },
         })
     }
 }
@@ -931,6 +970,7 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
         "eval_interval": opts.eval_interval,
         "eval_batches": opts.eval_batches,
         "patience": opts.patience,
+        "cooldown_steps": opts.cooldown_steps,
     })
 }
 
@@ -1068,7 +1108,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     let mut stopped_early = false;
 
     for step in first_step..opts.steps {
-        let lr = cosine_lr(step, opts);
+        let lr = selection.cooldown.map_or_else(|| cosine_lr(step, opts), |c| c.lr(step, opts.min_lr));
         model.zero_grads();
         let step_loss = obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1));
         // average grads over accumulation steps
@@ -1082,7 +1122,8 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         selection.step_trained(loss);
 
         let last = step + 1 == opts.steps;
-        let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || (last && selection.selecting()));
+        let cooled = selection.cooldown.is_some_and(|c| c.ends_at(step));
+        let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
         if due {
             if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
                 let train_loss = selection.take_interval();
@@ -1114,23 +1155,43 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                         }
                     }
                     Watch::Wait => {}
-                    Watch::Stop => {
+                    Watch::Stop if selection.cooldown.is_none() && opts.cooldown_steps > 0 && step + 1 < opts.steps => {
+                        let steps = opts.cooldown_steps.min(opts.steps - (step + 1));
                         println!(
-                            "stopping at step {}: held-out loss has not improved for {} evaluations (best {:.4}), \
-                             while the training loss went on falling - past this point the model is learning the \
-                             training rows rather than the task",
+                            "step {:>6}: held-out loss has not improved for {} evaluations (best {:.4}); cooling the rate to its floor over {} steps",
                             step + 1,
                             opts.patience,
-                            selection.watch.best()
+                            selection.watch.best(),
+                            steps
                         );
-                        stopped_early = true;
-                        break;
+                        selection.cooldown = Some(Cooldown { first_step: step + 1, steps, from_lr: lr });
+                    }
+                    Watch::Stop => {
+                        // Patience that ran out again during the cooldown is
+                        // not a second stop; the cooldown's end is.
+                        if selection.cooldown.is_none() {
+                            println!(
+                                "stopping at step {}: held-out loss has not improved for {} evaluations (best {:.4}), \
+                                 while the training loss went on falling - past this point the model is learning the \
+                                 training rows rather than the task",
+                                step + 1,
+                                opts.patience,
+                                selection.watch.best()
+                            );
+                            stopped_early = true;
+                            break;
+                        }
                     }
                 }
             }
             for (name, value) in obj.metrics() {
                 println!("  {name}: {value:.4}");
             }
+        }
+        if cooled {
+            println!("stopping at step {}: the cooldown is done; the best evaluation's parameters are kept", step + 1);
+            stopped_early = true;
+            break;
         }
 
         // Wall-clock checkpointing: once the timer has expired, the NEXT completed
@@ -1467,6 +1528,8 @@ mod tests {
         saves: std::rc::Rc<std::cell::RefCell<Vec<Vec<f32>>>>,
         /// The AdamW hyperparameters of every step, in order.
         adams: std::rc::Rc<std::cell::RefCell<Vec<optim::Adam>>>,
+        /// The learning rate of every step, in order.
+        lrs: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
         /// The loss denominator named for each batch, in order.
         denominators: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
         /// The first supervised target of each batch run forward, in order:
@@ -1500,7 +1563,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), lrs: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -1531,7 +1594,8 @@ mod tests {
         fn zero_grads(&self) {}
         /// The step number IS the weight, so a saved checkpoint says which
         /// step it came from.
-        fn adamw_step(&self, t: u32, _lr: f32, _wd: f32, adam: optim::Adam, _clip: Option<f32>, _extra: f32) {
+        fn adamw_step(&self, t: u32, lr: f32, _wd: f32, adam: optim::Adam, _clip: Option<f32>, _extra: f32) {
+            self.lrs.borrow_mut().push(lr);
             *self.w.borrow_mut() = vec![t as f32];
             *self.moments.borrow_mut() = (vec![t as f32], vec![t as f32]);
             self.adams.borrow_mut().push(adam);
@@ -1784,6 +1848,36 @@ mod tests {
         let obj = Curve { evals: vec![], next: std::cell::Cell::new(0) };
         fit_with(model, obj, &opts, None).expect("fit");
         assert_eq!(*adams.borrow(), vec![adam; 3]);
+    }
+
+    /// A run that stops on its plateau does not stop at a high rate: it
+    /// spends its cooldown bringing the rate down to the floor, keeps
+    /// selecting on what it evaluates on the way, and stops there.
+    #[test]
+    fn a_run_that_hits_its_patience_anneals_over_its_cooldown_before_stopping() {
+        // Best at the second evaluation (step 4); patience 2 runs out at the
+        // fourth (step 8); the cooldown is steps 9..=12.
+        let evals = vec![0.5f32, 0.4, 0.45, 0.46, 0.47, 0.48];
+        let opts = FitOpts { steps: 100, lr: 1.0, min_lr: 0.1, warmup: 0, decay_iters: 100, eval_interval: 2, eval_batches: 1, patience: 2, cooldown_steps: 4, ..Default::default() };
+        let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let lrs = std::rc::Rc::clone(&model.lrs);
+        let (report, model) = fit_controlled(model, Curve { evals, next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert!(report.stopped_early);
+        assert_eq!(report.steps_completed, 12, "the cooldown, then the stop");
+        assert_eq!(report.kept_best, Some(KeptBest { step: 4, eval_loss: 0.4 }));
+        assert_eq!(model.read_weight("w"), vec![4.0]);
+        assert_eq!(report.evaluations.last().map(|e| e.step), Some(12), "the end of the cooldown is evaluated");
+        let lrs = lrs.borrow();
+        let cooling = &lrs[8..];
+        assert!(cooling.windows(2).all(|w| w[1] < w[0]), "{cooling:?}");
+        assert!((cooling[3] - 0.1).abs() < 1e-6, "the cooldown ends at the floor: {cooling:?}");
+        assert!(cooling[0] < lrs[7], "and starts from where the run stood: {lrs:?}");
+
+        // Without a cooldown the run stops where its patience ran out.
+        let opts = FitOpts { cooldown_steps: 0, ..opts };
+        let evals = vec![0.5f32, 0.4, 0.45, 0.46, 0.47, 0.48];
+        let (plain, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals, next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(plain.steps_completed, 8);
     }
 
     /// A causal-LM objective over `lengths.len()` examples, example `i` being
