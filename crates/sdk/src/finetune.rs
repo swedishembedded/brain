@@ -33,6 +33,14 @@
 //! the one training loop; scoring is `qwen3::eval::score_chat`. Nothing here
 //! is a second implementation of any of them.
 //!
+//! **The mix.** Training draws rows uniformly with replacement from the
+//! dataset and every replay file. [`ChatFineTune::replay`] files join the
+//! dataset as a plain union, or at [`ChatFineTune::replay_share`] of the
+//! draws together; [`ChatFineTune::replay_at`] gives one file a share of its
+//! own. A share is kept by listing each group of records as many times as
+//! its share needs ([`mix_repeats`]), so a replay set many times the
+//! dataset, or many times smaller, is drawn as often as asked.
+//!
 //! **Monitoring and selection.** With [`ChatFineTune::eval_every`] the run
 //! scores a monitoring set ([`ChatFineTune::monitor`], else the held-out set)
 //! as it trains and records the curve ([`ChatFineTuneOutcome::curve`]); with
@@ -77,6 +85,7 @@ pub struct ChatFineTune {
     monitor: Option<PathBuf>,
     replay: Vec<PathBuf>,
     replay_share: Option<f32>,
+    weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
     continue_from: Option<PathBuf>,
     out_dir: Option<PathBuf>,
@@ -123,6 +132,7 @@ impl ChatFineTune {
             monitor: None,
             replay: Vec::new(),
             replay_share: None,
+            weighted_replay: Vec::new(),
             grad_accum: 1,
             continue_from: None,
             out_dir: None,
@@ -208,14 +218,27 @@ impl ChatFineTune {
         self
     }
 
-    /// The share of training draws that come from the replay files in all
-    /// (0 < share < 1), however large they are next to the dataset. Examples
-    /// are drawn uniformly with replacement, so a replay set many times the
-    /// dataset's size would otherwise take almost every step; this repeats
-    /// the dataset's records enough times that replay is drawn this often,
-    /// which weights them exactly. Without it the mix is the plain union.
+    /// The share of training draws that come from the [`Self::replay`] files
+    /// in all (0 < share < 1), however large they are next to the dataset.
+    /// Examples are drawn uniformly with replacement, so a replay set many
+    /// times the dataset's size would otherwise take almost every step, and
+    /// one much smaller would hardly be drawn; the dataset's records and the
+    /// replay's are each listed as many times as puts the replay at this
+    /// share ([`mix_repeats`]). Without it the mix is the plain union.
     pub fn replay_share(mut self, share: f32) -> Self {
         self.replay_share = Some(share);
+        self
+    }
+
+    /// Mix another chat dataset into training at `share` of the draws
+    /// (0 < share < 1) of its own, beside the dataset and the [`Self::replay`]
+    /// files: records a run must keep drawing at a set rate whatever else is
+    /// trained, such as a base model's own answers replayed so the new data
+    /// does not move it off them. May be called more than once; the shares
+    /// of every weighted file and [`Self::replay_share`] together must leave
+    /// the dataset some of the draws.
+    pub fn replay_at(mut self, path: impl Into<PathBuf>, share: f32) -> Self {
+        self.weighted_replay.push((path.into(), share));
         self
     }
 
@@ -368,10 +391,15 @@ impl ChatFineTune {
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
         let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
-        let train_samples = asked.read(dataset)?;
+        let mut train_samples = asked.read(dataset)?;
+        let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();
         for path in &self.replay {
             replay_samples.extend(asked.read(path)?);
+        }
+        let mut weighted_samples = Vec::with_capacity(self.weighted_replay.len());
+        for (path, share) in &self.weighted_replay {
+            weighted_samples.push((asked.read(path)?, *share));
         }
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
@@ -381,12 +409,24 @@ impl ChatFineTune {
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
-        let repeats = self.replay_share.map_or(Ok(1), |share| dataset_repeats(train_samples.len(), replay_samples.len(), share))?;
-        let mut training = Vec::with_capacity(train_samples.len() * repeats + replay_samples.len());
-        for _ in 0..repeats {
-            training.extend(train_samples.iter().cloned());
+        // The groups of the mix, the dataset first: the replay files at
+        // their share when one is set, else in the dataset's own group as
+        // the plain union they always were; then each weighted file.
+        let replay_records = replay_samples.len() + weighted_samples.iter().map(|(s, _)| s.len()).sum::<usize>();
+        let mut groups: Vec<(Vec<ChatSample>, f32)> = Vec::new();
+        match self.replay_share {
+            Some(share) => groups.push((std::mem::take(&mut replay_samples), share)),
+            None => train_samples.append(&mut replay_samples),
         }
-        training.extend(replay_samples.iter().cloned());
+        groups.extend(weighted_samples);
+        let shares: Vec<(usize, f32)> = std::iter::once((train_samples.len(), 0.0)).chain(groups.iter().map(|(s, share)| (s.len(), *share))).collect();
+        let repeats = mix_repeats(&shares)?;
+        let mut training = Vec::new();
+        for (samples, &times) in std::iter::once(&train_samples).chain(groups.iter().map(|(s, _)| s)).zip(&repeats) {
+            for _ in 0..times {
+                training.extend(samples.iter().cloned());
+            }
+        }
         // The packed validation split is what a periodic evaluation scores:
         // the monitoring set, else the held-out set, else (unread, when
         // nothing is evaluated) the training set.
@@ -417,11 +457,12 @@ impl ChatFineTune {
             "base": base_digest,
             "dataset": digest(dataset)?,
             "replay": self.replay.iter().map(|p| digest(p)).collect::<Result<Vec<_>>>()?,
+            "weighted_replay": self.weighted_replay.iter().map(|(p, share)| Ok((digest(p)?, share.to_bits()))).collect::<Result<Vec<_>>>()?,
             "monitor": self.monitor.as_deref().map(digest).transpose()?,
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
-            "dataset_repeats": repeats,
+            "repeats": repeats,
             "grad_accum": self.grad_accum,
         });
         let state_path = out_dir.join(STATE_FILE);
@@ -451,8 +492,8 @@ impl ChatFineTune {
             resumed_at: report.resumed_at,
             initial_loss: Some(report.initial_loss),
             final_loss: report.final_loss,
-            train_records: train_samples.len(),
-            replay_records: replay_samples.len(),
+            train_records: dataset_records,
+            replay_records,
             monitor_records: monitor.as_ref().map_or(0, Vec::len),
             eval_every: self.eval_every,
             patience: self.patience,
@@ -804,18 +845,60 @@ pub(crate) fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
     Ok(max.map_or(block, |m| block.min(m)))
 }
 
-/// How many times the dataset's `target` records must be listed so that, drawn
-/// uniformly with replacement from them and the `replay` records, a replay
-/// record is drawn `share` of the time.
-fn dataset_repeats(target: usize, replay: usize, share: f32) -> Result<usize> {
-    if !(share > 0.0 && share < 1.0) {
-        return Err(Error::Backend(format!("ChatFineTune: replay_share must be between 0 and 1, got {share}")));
+/// The most times the smallest group of a mix is listed in search of a closer
+/// fit: repeats are whole numbers, and a ratio like 1.6 listed once or twice
+/// is far from itself, but at a few times more it rounds within the tolerance.
+const MIX_MAX_SCALE: usize = 16;
+
+/// How far a group's realised share of the rows may lie from the share asked
+/// before the mix is listed at a larger scale.
+const MIX_TOLERANCE: f64 = 0.01;
+
+/// How many times each group of records is listed so that, drawn uniformly
+/// with replacement from all the rows, a group's records come up its share
+/// of the time. `groups` is `(records, share)`, the dataset first: its share
+/// is whatever the others leave. Each group's weight per record is its share
+/// over its records; the repeats are those weights over the smallest, scaled
+/// by the smallest whole factor up to [`MIX_MAX_SCALE`] that puts every
+/// realised share within [`MIX_TOLERANCE`] of what was asked (the closest
+/// scale when none does). An empty group is listed once, which lists nothing.
+fn mix_repeats(groups: &[(usize, f32)]) -> Result<Vec<usize>> {
+    let Some(((dataset, _), replays)) = groups.split_first() else {
+        return Ok(Vec::new());
+    };
+    let mut total = 0.0f64;
+    for &(_, share) in replays {
+        if !(share > 0.0 && share < 1.0) {
+            return Err(Error::Backend(format!("ChatFineTune: a replay share must be between 0 and 1, got {share}")));
+        }
+        total += f64::from(share);
     }
-    if replay == 0 || target == 0 {
-        return Ok(1);
+    if total >= 1.0 {
+        return Err(Error::Backend(format!("ChatFineTune: the replay shares add up to {total}, leaving the dataset no draws")));
     }
-    let wanted = f64::from(1.0 - share) / f64::from(share) * replay as f64 / target as f64;
-    Ok((wanted.round() as usize).max(1))
+    let shares: Vec<(usize, f64)> = std::iter::once((*dataset, 1.0 - total)).chain(replays.iter().map(|&(n, s)| (n, f64::from(s)))).collect();
+    // Only a group with records is weighted; one without is listed once and adds nothing.
+    let weights: Vec<Option<f64>> = shares.iter().map(|&(n, share)| (n > 0).then(|| share / n as f64)).collect();
+    let Some(least) = weights.iter().flatten().copied().min_by(f64::total_cmp) else {
+        return Ok(vec![1; groups.len()]);
+    };
+    let at_scale = |scale: usize| -> Vec<usize> { weights.iter().map(|w| w.map_or(1, |w| ((w / least) * scale as f64).round().max(1.0) as usize)).collect() };
+    let deviation = |repeats: &[usize]| -> f64 {
+        let rows: f64 = repeats.iter().zip(&shares).map(|(&r, &(n, _))| (r * n) as f64).sum();
+        repeats.iter().zip(&shares).filter(|(_, &(n, _))| n > 0).map(|(&r, &(n, share))| ((r * n) as f64 / rows - share).abs()).fold(0.0, f64::max)
+    };
+    let mut best = (f64::INFINITY, Vec::new());
+    for scale in 1..=MIX_MAX_SCALE {
+        let repeats = at_scale(scale);
+        let off = deviation(&repeats);
+        if off <= MIX_TOLERANCE {
+            return Ok(repeats);
+        }
+        if off < best.0 {
+            best = (off, repeats);
+        }
+    }
+    Ok(best.1)
 }
 
 pub(crate) fn fit_opts(steps: u32, block: u32, lr: f32, seed: u64) -> model::FitOpts {
@@ -874,21 +957,47 @@ mod tests {
         assert!(block_for(600, Some(512)).unwrap_err().to_string().contains("max_block"));
     }
 
-    /// A replay set many times the dataset must not take every draw: listing
-    /// the dataset enough times gives replay its share, and no replay or no
-    /// share leaves the plain union.
+    /// The share each group's rows make of the mix `repeats` lists.
+    fn realised(groups: &[(usize, f32)], repeats: &[usize]) -> Vec<f64> {
+        let rows: Vec<f64> = groups.iter().zip(repeats).map(|(&(n, _), &r)| (n * r) as f64).collect();
+        let total: f64 = rows.iter().sum();
+        rows.iter().map(|r| r / total).collect()
+    }
+
+    /// A replay set many times the dataset must not take every draw, and one
+    /// much smaller must still be drawn its share: each group is listed as
+    /// often as its share needs, to within a hundredth; several weighted
+    /// groups each get their own share; no replay or no share leaves the
+    /// plain union; and a share that leaves the dataset nothing is refused.
     #[test]
-    fn a_replay_share_sets_how_often_the_dataset_is_listed() {
-        // 100 target + 900 replay: a quarter replay needs 3 x 900 = 2700 target rows.
-        assert_eq!(dataset_repeats(100, 900, 0.25).unwrap(), 27);
-        let (target, replay) = (100.0_f64 * 27.0, 900.0_f64);
-        assert!((replay / (target + replay) - 0.25).abs() < 0.01);
-        // The dataset is never listed fewer than once, even when replay is already scarcer than asked.
-        assert_eq!(dataset_repeats(100, 10, 0.5).unwrap(), 1);
-        assert_eq!(dataset_repeats(100, 0, 0.25).unwrap(), 1);
-        for bad in [0.0, 1.0, -0.1, f32::NAN] {
-            assert!(dataset_repeats(1, 1, bad).unwrap_err().to_string().contains("replay_share"));
+    fn a_replay_share_sets_how_often_each_group_is_listed() {
+        // 100 target + 900 replay at a quarter: 27 x 100 = 2700 target rows beside 900.
+        let large = [(100, 0.0), (900, 0.25)];
+        let repeats = mix_repeats(&large).unwrap();
+        assert_eq!(repeats, [27, 1]);
+        // 100 target + 10 replay at a half: the replay is listed ten times.
+        let scarce = [(100, 0.0), (10, 0.5)];
+        assert_eq!(mix_repeats(&scarce).unwrap(), [1, 10]);
+        // A ratio that rounds badly once is listed at a larger scale until it fits.
+        let awkward = [(278, 0.0), (150, 0.25)];
+        let repeats = mix_repeats(&awkward).unwrap();
+        let shares = realised(&awkward, &repeats);
+        assert!((shares[1] - 0.25).abs() <= MIX_TOLERANCE, "{repeats:?} -> {shares:?}");
+        // Two weighted groups and the dataset each at their share.
+        let three = [(278, 0.0), (60, 0.25), (93, 0.25)];
+        let repeats = mix_repeats(&three).unwrap();
+        let shares = realised(&three, &repeats);
+        for (got, want) in shares.iter().zip([0.5, 0.25, 0.25]) {
+            assert!((got - want).abs() <= MIX_TOLERANCE, "{repeats:?} -> {shares:?}");
         }
+        // Nothing to weight is the plain union; an empty group lists nothing.
+        assert_eq!(mix_repeats(&[(100, 0.0)]).unwrap(), [1]);
+        assert_eq!(mix_repeats(&[(100, 0.0), (0, 0.25)]).unwrap(), [1, 1]);
+        assert!(mix_repeats(&[]).unwrap().is_empty());
+        for bad in [0.0, 1.0, -0.1, f32::NAN] {
+            assert!(mix_repeats(&[(1, 0.0), (1, bad)]).unwrap_err().to_string().contains("replay share"));
+        }
+        assert!(mix_repeats(&[(1, 0.0), (1, 0.5), (1, 0.5)]).unwrap_err().to_string().contains("add up"));
     }
 }
 
