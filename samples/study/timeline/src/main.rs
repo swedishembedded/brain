@@ -31,6 +31,7 @@ use brain::survival::calibration::at_horizon;
 use brain::survival::concordance::uno;
 use brain::survival::estimate::{aalen_johansen, censoring};
 use brain::survival::venn_abers::{merged, VennAbers};
+use brain::timeline::synthetic::drifting::{self, Gaps};
 use brain::timeline::synthetic::{population, Truth, CODES};
 use brain::timeline::{observed, Subject};
 use brain::{TimelineModel, TimelineSpec};
@@ -51,6 +52,8 @@ const CAUSE: &str = "death:a";
 const HORIZON: f64 = 10.0;
 /// Test subjects written beside the model for the serving sample.
 const SERVED_SUBJECTS: usize = 20;
+/// The visit model's horizon, in years.
+const VISIT_HORIZON: f64 = 10.0;
 
 struct Args(Vec<String>);
 
@@ -162,6 +165,47 @@ fn run(out: &Path, n: usize, steps: u32, seed: u64) -> brain::Result<bool> {
     let better = model_error < blind_error && matches!(briers, (Some(m), _, Some(b)) if m < b);
     if !better {
         eprintln!("the model did not beat the covariate-blind estimate");
+    }
+    let visits_better = visits_model(out, n, steps, seed)?;
+    Ok(better && visits_better)
+}
+
+/// A second model for histories that GROW: trained on records whose risk
+/// factor is measured at several visits and drifts between them
+/// (`synthetic::drifting`, whose best possible prediction is known exactly),
+/// reading the most recent four visits one by one. A patient history with a
+/// checkup appended is a record like these; the first model, trained on one
+/// visit per subject, is outside its support there and says so. Saved to
+/// `<out>/model-visits` with twenty test subjects in `<out>/subjects-visits.jsonl`.
+fn visits_model(out: &Path, n: usize, steps: u32, seed: u64) -> brain::Result<bool> {
+    let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 2.0), visits: (1, 4) };
+    let (train, _) = drifting::population(n / 2, 4, &gaps, 10.0);
+    let (held, _) = drifting::population(n / 10, 5, &gaps, 10.0);
+    let (test, best) = drifting::population(n / 5, 6, &gaps, 10.0);
+    let spec = TimelineSpec::new([drifting::CODE], [drifting::CODE])
+        .knots(vec![0.0, 2.0, 5.0, 10.0])
+        .max_tokens(8)
+        .visits(4)
+        .steps(steps)
+        .seed(seed);
+    println!("\ntraining the visit model on {} subjects with up to four visits each", train.len());
+    let (model, report) = TimelineModel::train(&train, &held, &spec)?;
+    let predicted: Vec<f64> = model.predict(&test)?.iter().map(|p| p.cif(drifting::CODE, VISIT_HORIZON).unwrap_or(f64::NAN)).collect();
+    let true_risk: Vec<f64> = best.iter().map(|b| b.cif(VISIT_HORIZON)).collect();
+    let blind_value = aalen_johansen(&observed(&train, &[drifting::CODE]), 0).at(VISIT_HORIZON);
+    let error = |r: &dyn Fn(usize) -> f64| (0..test.len()).map(|i| (r(i) - true_risk[i]).abs()).sum::<f64>() / test.len() as f64;
+    let (model_error, blind_error) = (error(&|i| predicted[i]), error(&|_| blind_value));
+    println!("visit model stopped after {} steps; {} by {VISIT_HORIZON} years on {} unseen subjects:", report.steps, drifting::CODE, test.len());
+    println!("  mean |risk - best possible risk|  model {model_error:.4}  covariate-blind {blind_error:.4}");
+
+    let dir = out.join("model-visits");
+    model.save(&dir)?;
+    let lines: String = test.iter().take(SERVED_SUBJECTS).map(|s| serde_json::to_string(s).map(|l| l + "\n")).collect::<Result<_, _>>().map_err(|e| brain::Error::Backend(e.to_string()))?;
+    std::fs::write(out.join("subjects-visits.jsonl"), lines)?;
+    println!("saved the visit model to {} and {SERVED_SUBJECTS} test subjects to {}", dir.display(), out.join("subjects-visits.jsonl").display());
+    let better = model_error < blind_error;
+    if !better {
+        eprintln!("the visit model did not beat the covariate-blind estimate");
     }
     Ok(better)
 }

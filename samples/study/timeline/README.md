@@ -30,6 +30,15 @@ make samples/study/timeline/run ARGS="--out /tmp/timeline"
 * **An interval, not a point.** `brain::survival::venn_abers` calibrates the
   risk on the early-stopping subjects into a Venn-Abers interval per subject;
   the calibration slope before and after and the interval widths are printed.
+* **Histories that grow.** A second model reads visits one by one
+  (`TimelineSpec::visits`) and is trained on `synthetic::drifting`, a risk
+  factor measured at up to four visits whose best possible prediction is
+  known exactly; its ten-year risk is compared with that and with a
+  covariate-blind estimate. It is saved to `<out>/model-visits` with twenty
+  test subjects in `<out>/subjects-visits.jsonl`, what
+  [`history.sh`](../../shell/timeline/predict/README.md) appends checkups to.
+  The first model, trained on one visit per subject, is outside its own
+  support for a history with two visits and says so.
 * **Saved for serving.** The model is saved to `<out>/model` with twenty test
   subjects in `<out>/subjects.jsonl`: what
   [`samples/shell/timeline/predict`](../../shell/timeline/predict/README.md)

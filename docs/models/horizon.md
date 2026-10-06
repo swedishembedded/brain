@@ -459,8 +459,15 @@ number per subject set.
 ## Serving
 
 A saved model directory (what `TimelineModel::save` writes) is served by one
-action, `predict`: `timeline-v1` subjects in, survival and each code's
-cumulative incidence at the requested times out, as JSON lines. Times past
+action, `predict`, with one of two inputs. `timeline-v1` subjects (the
+`subjects` blob) give survival and each code's cumulative incidence at the
+requested times, as JSON lines. A patient history (the `history` blob: one
+object, an array or one per line, see Patient history) gives a structured
+forecast per history (see Structured forecast): the requested `times` are its
+horizons, one JSON line per history in the `predictions` blob and the same
+list as the `forecasts` output, so `--json` prints it. Giving both inputs is
+an error, as is a unit the model was not trained on; either fails its own
+request, not the batch it is in. Times past
 the last knot are refused. A calibrated model also answers `cif_calibrated`
 and `cif_interval` per code and time, `null` where that time was not
 calibrated.
@@ -483,7 +490,13 @@ prediction never depends on its batch neighbours or on padding
 ```bash
 brain horizon predict --weights model/ --times 5,10 \
     --in subjects=subjects.jsonl --out predictions=predictions.jsonl
+brain horizon predict --weights model/ --times 5,10 --history patient.json --json
 ```
+
+Every input blob of every capability also takes `--<name> PATH` as the
+shorthand for `--in <name>=PATH` (unless a parameter has that name), which is
+what `--history patient.json` is. `samples/shell/timeline/predict/history.sh`
+runs a patient through H0 to R0, an appended checkup to R1 and another to R2.
 
 `brain serve` serves it on HTTP and D-Bus as `brain/horizon` when
 `BRAIN_HORIZON_DIR` names the saved model directory; there the directory is

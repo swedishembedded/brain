@@ -220,11 +220,20 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
             inv = inv.set(&p.name, coerce(&p.ty, v));
         }
     }
+    let mut inputs: Vec<(String, String)> = Vec::new();
     for spec_val in matches.get_many::<String>("in").unwrap_or_default() {
         let Some((name, path)) = spec_val.split_once('=') else {
             eprintln!("brain: --in must be name=path (got {spec_val:?})");
             return 2;
         };
+        inputs.push((name.to_string(), path.to_string()));
+    }
+    for b in spec.inputs.iter().filter(|b| has_blob_flag(&spec, &b.name)) {
+        if let Some(path) = matches.get_one::<String>(&blob_arg_id(&b.name)) {
+            inputs.push((b.name.clone(), path.clone()));
+        }
+    }
+    for (name, path) in &inputs {
         match load_blob(&spec, name, path) {
             Ok(b) => inv = inv.blob(name, b),
             Err(e) => {
@@ -287,9 +296,22 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
     0
 }
 
+/// The clap id of the `--<name> PATH` shorthand for the input blob `name`.
+fn blob_arg_id(name: &str) -> String {
+    format!("blob:{name}")
+}
+
+/// Whether the input blob `name` also gets a `--<name> PATH` flag, the
+/// shorthand for `--in name=PATH`. Not when a param or a reserved flag
+/// already owns the word.
+fn has_blob_flag(spec: &ActionSpec, name: &str) -> bool {
+    !matches!(name, "in" | "out" | "json") && !spec.params.iter().any(|p| p.name == name)
+}
+
 /// Build a clap parser directly from an [`ActionSpec`]: one typed `--<param>` per
 /// param (required/enum/bool honoured by clap), plus repeatable `--in`/`--out
-/// name=path` and `--json`. All argument parsing goes through clap - no bespoke loop.
+/// name=path` (every input blob also takes `--<name> path`) and `--json`. All
+/// argument parsing goes through clap - no bespoke loop.
 fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
     let mut cmd = Command::new(format!("brain {model} {action}")).no_binary_name(true).about(spec.summary.clone());
     for p in &spec.params {
@@ -318,6 +340,10 @@ fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
             }
         }
         cmd = cmd.arg(arg);
+    }
+    for b in spec.inputs.iter().filter(|b| has_blob_flag(spec, &b.name)) {
+        let help = format!("input {} (same as --in {}=PATH): {}", b.media.name(), b.name, b.help);
+        cmd = cmd.arg(Arg::new(blob_arg_id(&b.name)).long(b.name.clone()).action(ArgAction::Set).value_name("PATH").help(help));
     }
     let in_help = if spec.inputs.is_empty() { "named binary input, e.g. image=in.ppm".to_string() } else { format!("named binary input ({})", spec.inputs.iter().map(|b| format!("{}=<{}>", b.name, b.media.name())).collect::<Vec<_>>().join(", ")) };
     cmd.arg(Arg::new("in").long("in").action(ArgAction::Append).value_name("NAME=PATH").help(in_help))
@@ -446,7 +472,7 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capability::BlobSpec;
+    use capability::{BlobSpec, ParamSpec};
 
     fn audio_spec() -> ActionSpec {
         ActionSpec::new("transcribe", "transcribe").input(BlobSpec::new("audio", Media::Audio, "raw mono f32 LE PCM at 16 kHz").required())
@@ -455,6 +481,22 @@ mod tests {
     /// A `--in audio=clip.wav` must be DECODED, not handed to the model as the
     /// literal RIFF bytes: same samples as a direct `wav::parse` +
     /// `resample_linear`, and tagged with the 16 kHz meta the ASR guards check.
+    #[test]
+    fn an_input_blob_is_also_a_flag_unless_a_param_owns_the_name() {
+        let spec = ActionSpec::new("act", "summary")
+            .param(ParamSpec::new("image", ParamType::Str, "a param that shares a blob's name"))
+            .input(BlobSpec::new("image", Media::Text, "owned by the param"))
+            .input(BlobSpec::new("history", Media::Text, "a text input"));
+        assert!(has_blob_flag(&spec, "history"));
+        assert!(!has_blob_flag(&spec, "image"), "the param owns the word");
+        assert!(!has_blob_flag(&spec, "json"));
+        let m = build_parser("m", "act", &spec)
+            .try_get_matches_from(["--history", "patient.json", "--in", "image=x.txt", "--json"])
+            .unwrap();
+        assert_eq!(m.get_one::<String>(&blob_arg_id("history")).map(String::as_str), Some("patient.json"));
+        assert_eq!(m.get_many::<String>("in").unwrap().collect::<Vec<_>>(), ["image=x.txt"]);
+    }
+
     #[test]
     fn load_blob_decodes_a_wav_file_to_16khz_f32_pcm() {
         let src_rate = 8000u32; // not 16 kHz, so the resample is actually exercised

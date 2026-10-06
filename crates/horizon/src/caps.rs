@@ -6,11 +6,22 @@
 //! and (through the catalog's resident adapter) the same action on every
 //! served surface.
 //!
-//! One action, `predict`: subjects in `timeline-v1` (one JSON object per
-//! line) go in as the `subjects` blob; for each, at every requested time, the
-//! probability of surviving every absorbing outcome and each outcome code's
-//! cumulative incidence come out as JSON lines. A time past the model's last
-//! knot is refused, not extrapolated: the model says nothing there.
+//! One action, `predict`. Its input is ONE of two blobs:
+//!
+//! - `subjects`: subjects in `timeline-v1` (one JSON object per line); for
+//!   each, at every requested time, the probability of surviving every
+//!   absorbing outcome and each outcome code's cumulative incidence come out
+//!   as JSON lines;
+//! - `history`: patient histories in the update format
+//!   ([`crate::history`]: one object, an array or one per line); for each, a
+//!   [`RiskForecast`](crate::forecast::RiskForecast) (identity, coverage,
+//!   curves, risks at the requested times as horizons, support, warnings),
+//!   one JSON line per history in the `predictions` blob and the same list
+//!   as the `forecasts` output. A forecast does not diagnose or recommend
+//!   treatment.
+//!
+//! A time past the model's last knot is refused, not extrapolated: the model
+//! says nothing there. Both kinds of request share one forward pass.
 //!
 //! Every answer carries `support`: whether the subject is inside what the model
 //! was trained on (`supported`: true, false, or null when the model records no
@@ -39,6 +50,8 @@ use capability::{
 use serde_json::{json, Value};
 
 use crate::calibration::Calibrated;
+use crate::forecast::{ForecastRequest, RiskForecast};
+use crate::history::PatientHistory;
 use crate::saved::{parse_jsonl, Saved, Scored};
 use crate::support::AssessOptions;
 use crate::timeline::Subject;
@@ -56,7 +69,7 @@ pub const DEFAULT_TIMES: &str = "5,10";
 pub fn predict_spec() -> ActionSpec {
     ActionSpec::new(
         "predict",
-        "outcome probabilities over time for each subject of a timeline-v1 file",
+        "outcome probabilities over time for each subject of a timeline-v1 file, or a structured risk forecast for each patient history",
     )
     .param(
         ParamSpec::new(
@@ -71,7 +84,7 @@ pub fn predict_spec() -> ActionSpec {
         ParamSpec::new(
             "times",
             ParamType::Str,
-            "comma-separated times after entry, in the data's unit",
+            "comma-separated times after entry (after as_of, for a history: its forecast horizons, each above 0), in the data's unit",
         )
         .default(json!(DEFAULT_TIMES)),
     )
@@ -83,11 +96,20 @@ pub fn predict_spec() -> ActionSpec {
         )
         .default(json!(DEFAULT_MAX_OOD_SCORE)),
     )
-    .input(BlobSpec::new("subjects", Media::Text, "timeline-v1: one subject per line").required())
+    .input(BlobSpec::new(
+        "subjects",
+        Media::Text,
+        "timeline-v1: one subject per line (give this or history)",
+    ))
+    .input(BlobSpec::new(
+        "history",
+        Media::Text,
+        "patient histories: JSON {as_of, birth?, static?, events: [{time, code, value?, unit?}]}, one object, an array or one per line (give this or subjects)",
+    ))
     .output(BlobSpec::new(
         "predictions",
         Media::Text,
-        "JSON lines: {subject_id, times, survival, cif: {code: [...]}, support: {supported, ood_score, warnings}} (+ cif_calibrated, cif_interval of a calibrated model); an unsupported subject: {subject_id, risk: \"unavailable\", reason, support}",
+        "JSON lines. For subjects: {subject_id, times, survival, cif: {code: [...]}, support: {supported, ood_score, warnings}} (+ cif_calibrated, cif_interval of a calibrated model); an unsupported subject: {subject_id, risk: \"unavailable\", reason, support}. For a history: a risk forecast {subject_id, as_of, model, coverage, risk, curves, horizons, support, input_warnings, disclaimer}",
     ))
 }
 
@@ -134,31 +156,93 @@ fn times(inv: &Invocation, horizon: f64) -> Result<Vec<f64>, String> {
 }
 
 /// One request, parsed and validated: its subjects, the times asked for and
-/// the support threshold above which a subject gets no probability.
+/// the support threshold above which a subject gets no probability. A request
+/// made of patient histories keeps them beside the subjects they became.
 struct Request {
     subjects: Vec<Subject>,
+    histories: Option<Vec<PatientHistory>>,
     times: Vec<f64>,
     max_ood_score: f64,
 }
 
+/// The text of the input blob `name`, if it was given.
+fn blob_text<'a>(inv: &'a Invocation, name: &str) -> Result<Option<&'a str>, String> {
+    inv.get_blob(name)
+        .map(|b| std::str::from_utf8(&b.bytes).map_err(|e| format!("horizon: {name} is not UTF-8: {e}")))
+        .transpose()
+}
+
 fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
-    let blob = inv
-        .get_blob("subjects")
-        .ok_or("horizon: the 'subjects' input blob is required")?;
-    let text = std::str::from_utf8(&blob.bytes)
-        .map_err(|e| format!("horizon: subjects are not UTF-8: {e}"))?;
-    let subjects = parse_jsonl(text).map_err(|e| format!("horizon: subjects {e}"))?;
+    let (subjects, histories) = match (blob_text(inv, "subjects")?, blob_text(inv, "history")?) {
+        (Some(_), Some(_)) => {
+            return Err("horizon: give either the 'subjects' or the 'history' input, not both".into())
+        }
+        (Some(text), None) => {
+            let subjects = parse_jsonl(text).map_err(|e| format!("horizon: subjects {e}"))?;
+            // A unit mismatch fails THIS request, not the batch it is scored in.
+            for s in &subjects {
+                saved.vocab.check_units(s).map_err(|e| format!("horizon: {e}"))?;
+            }
+            (subjects, None)
+        }
+        (None, Some(text)) => {
+            let histories = PatientHistory::parse_all(text).map_err(|e| format!("horizon: {e}"))?;
+            let subjects = histories
+                .iter()
+                .map(|h| h.to_subject(&saved.vocab).map_err(|e| format!("horizon: {e}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            (subjects, Some(histories))
+        }
+        (None, None) => {
+            return Err("horizon: the 'subjects' or the 'history' input blob is required".into())
+        }
+    };
     let times = times(inv, saved.horizon())?;
     let max_ood_score = match inv.get_f64("max_ood_score") {
         None => DEFAULT_MAX_OOD_SCORE,
         Some(m) if m > 0.0 => m,
         Some(m) => return Err(format!("horizon: max_ood_score must be positive, got {m}")),
     };
-    Ok(Request { subjects, times, max_ood_score })
+    if histories.is_some() {
+        ForecastRequest::new(times.iter().copied())
+            .max_ood_score(max_ood_score)
+            .validate(saved.horizon())
+            .map_err(|e| format!("horizon: {e}"))?;
+    }
+    Ok(Request { subjects, histories, times, max_ood_score })
+}
+
+/// One request of patient histories: a forecast per history, as JSON lines
+/// and as the `forecasts` output.
+fn render_forecasts(saved: &Saved, histories: &[PatientHistory], req: &Request, scored: &[Scored]) -> ActionResult {
+    let identity = saved.identity().map_err(|e| format!("horizon: {e}"))?;
+    let forecast_request = ForecastRequest::new(req.times.iter().copied()).max_ood_score(req.max_ood_score);
+    let forecasts: Vec<RiskForecast> = histories
+        .iter()
+        .zip(scored)
+        .map(|(h, s)| RiskForecast::from_scored(saved, &identity, h, s, &forecast_request))
+        .collect();
+    let mut out = String::new();
+    for f in &forecasts {
+        out.push_str(&serde_json::to_string(f).map_err(|e| format!("horizon: {e}"))?);
+        out.push('\n');
+    }
+    Ok(Outcome::new()
+        .set("subjects", json!(forecasts.len()))
+        .set("abstained", json!(forecasts.iter().filter(|f| !f.is_available()).count()))
+        .set("forecasts", serde_json::to_value(&forecasts).map_err(|e| format!("horizon: {e}"))?)
+        .blob("predictions", Blob::new(Media::Text, out.into_bytes())))
 }
 
 /// One request's answer: a JSON line per subject.
-fn render(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
+fn render(saved: &Saved, req: &Request, scored: &[Scored]) -> ActionResult {
+    if let Some(histories) = &req.histories {
+        return render_forecasts(saved, histories, req, scored);
+    }
+    Ok(render_subjects(saved, req, scored))
+}
+
+fn render_subjects(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
     let (mut out, mut abstained) = (String::new(), 0);
     for (s, Scored { curves: c, assessment }) in req.subjects.iter().zip(scored) {
         let mut support = json!({
@@ -268,7 +352,7 @@ pub fn predict_batch(saved: &Saved, invs: &[Invocation]) -> Vec<ActionResult> {
             let req = req?;
             let (mine, tail) = rest.split_at(req.subjects.len());
             rest = tail;
-            Ok(render(saved, &req, mine))
+            render(saved, &req, mine)
         })
         .collect()
 }
