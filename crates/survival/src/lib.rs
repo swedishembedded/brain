@@ -28,6 +28,8 @@
 //!   intercept and slope, a risk-group table).
 //! - [`effect`]: the effect of an assigned treatment in a randomised trial,
 //!   adjusted by a model's prognostic score (PROCOVA), with HC3 errors.
+//! - [`recalibration`]: a predicted risk by a horizon mapped through a fitted
+//!   logistic recalibration (intercept, or intercept and slope), under IPCW.
 //! - [`venn_abers`]: a predicted risk by a horizon as a Venn-Abers interval,
 //!   calibrated by isotonic regression on held-out subjects under IPCW.
 //!
@@ -43,6 +45,7 @@ pub mod compare;
 pub mod concordance;
 pub mod effect;
 pub mod estimate;
+pub mod recalibration;
 mod special;
 pub mod venn_abers;
 

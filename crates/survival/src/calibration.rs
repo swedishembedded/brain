@@ -120,13 +120,13 @@ impl HorizonCalibration {
     }
 }
 
-fn logit(p: f64) -> f64 {
+pub(crate) fn logit(p: f64) -> f64 {
     // Predictions of exactly 0 or 1 have no logit; move them inside by a hair.
     let p = p.clamp(1e-12, 1.0 - 1e-12);
     (p / (1.0 - p)).ln()
 }
 
-fn sigmoid(x: f64) -> f64 {
+pub(crate) fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
 
@@ -136,7 +136,7 @@ const MAX_NEWTON_STEP: f64 = 5.0;
 /// Weighted logistic regression of `y` on `[1, x]` (or on the offset `x`
 /// with slope fixed to one when `fixed_slope`), by damped Newton steps; NaN
 /// when the system has no solution.
-fn logistic(x: &[f64], y: &[f64], v: &[f64], fixed_slope: bool) -> (f64, f64) {
+pub(crate) fn logistic(x: &[f64], y: &[f64], v: &[f64], fixed_slope: bool) -> (f64, f64) {
     let (mut a, mut b) = (0.0, 1.0);
     for _ in 0..100 {
         let (mut ga, mut gb, mut haa, mut hab, mut hbb) = (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -172,6 +172,38 @@ fn logistic(x: &[f64], y: &[f64], v: &[f64], fixed_slope: bool) -> (f64, f64) {
     (a, b)
 }
 
+/// The subjects whose outcome by `t` is known, as a binary regression: the
+/// log-odds `x` of each one's predicted probability, its outcome `y` (an event
+/// of `cause` by `t`) and its inverse-probability-of-censoring weight `v`
+/// (sampling weight over `G` at its event time, or at `t` for a subject still
+/// event-free). A subject censored before `t` drops out, and so does one whose
+/// `G` is zero where it is needed.
+pub(crate) struct Labelled {
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub v: Vec<f64>,
+}
+
+pub(crate) fn labelled(cif: &[f64], obs: &[Obs], cause: usize, t: f64, g: &Step) -> Labelled {
+    let mut l = Labelled { x: vec![], y: vec![], v: vec![] };
+    for (f, o) in cif.iter().zip(obs) {
+        let (yi, gi) = if o.time <= t {
+            match o.cause {
+                Some(c) => (if c == cause { 1.0 } else { 0.0 }, g.at(o.time)),
+                None => continue,
+            }
+        } else {
+            (0.0, g.at(t))
+        };
+        if gi > 0.0 {
+            l.x.push(logit(*f));
+            l.y.push(yi);
+            l.v.push(o.weight / gi);
+        }
+    }
+    l
+}
+
 /// Calibration of `cif` (each subject's predicted probability of `cause` by
 /// `t`) against the outcomes, with `g` the censoring distribution from the
 /// training data and `groups` risk groups of equal weight.
@@ -187,23 +219,7 @@ pub fn at_horizon(
     let wsum: f64 = obs.iter().map(|o| o.weight).sum();
     let expected = cif.iter().zip(obs).map(|(f, o)| f * o.weight).sum::<f64>() / wsum;
     let observed = aalen_johansen(obs, cause).at(t);
-    // The binary outcome by t, IPC-weighted; censored before t drops out.
-    let (mut x, mut y, mut v) = (vec![], vec![], vec![]);
-    for (f, o) in cif.iter().zip(obs) {
-        let (yi, gi) = if o.time <= t {
-            match o.cause {
-                Some(c) => (if c == cause { 1.0 } else { 0.0 }, g.at(o.time)),
-                None => continue,
-            }
-        } else {
-            (0.0, g.at(t))
-        };
-        if gi > 0.0 {
-            x.push(logit(*f));
-            y.push(yi);
-            v.push(o.weight / gi);
-        }
-    }
+    let Labelled { x, y, v } = labelled(cif, obs, cause, t, g);
     let (intercept, slope) = logistic(&x, &y, &v, false);
     let (intercept_in_the_large, _) = logistic(&x, &y, &v, true);
     // Risk groups of equal weight, by prediction.
