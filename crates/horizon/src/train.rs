@@ -102,6 +102,20 @@ pub fn event_nll(model: &Horizon, subjects: &[Encoded]) -> f32 {
     (total / weight) as f32
 }
 
+/// Every subject's own event NLL of the OUTCOME codes (per unit of its
+/// weight), in order, from one pass over the batches: what [`event_nll`]
+/// averages. A subject's value does not depend on its batch neighbours.
+pub fn event_nll_each(model: &Horizon, subjects: &[Encoded]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(subjects.len());
+    for_each_batch(model, subjects, |chunk, m| {
+        let batch_weight: f64 = chunk.iter().map(|s| s.weight as f64).sum();
+        let by_slot = m.outcome_loss_by_slot();
+        // The kernel wrote w_i / sum(w) times the subject's NLL.
+        out.extend(chunk.iter().zip(by_slot).map(|(s, loss)| (loss * batch_weight / s.weight as f64) as f32));
+    });
+    out
+}
+
 /// Log-hazards `[pieces * codes]` for every subject, in order.
 pub fn predict_log_hazards(model: &Horizon, subjects: &[Encoded]) -> Vec<Vec<f32>> {
     let per = (model.cfg.pieces() * model.cfg.n_codes) as usize;

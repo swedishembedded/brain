@@ -39,6 +39,11 @@ fn train_save_load_predict() {
             "the loaded model predicts the same curves"
         );
     }
+    // Per-subject event NLL averages back to the pooled one (unit weights).
+    let each = model.event_nll_each(&held_out[..50]).unwrap();
+    let pooled = model.event_nll(&held_out[..50]).unwrap();
+    let mean = each.iter().sum::<f32>() / each.len() as f32;
+    assert!((mean - pooled).abs() < 1e-4 * (1.0 + pooled.abs()), "{mean} vs {pooled}");
     assert_eq!(a[0].cif("no-such-code", 1.0), None);
     assert!(a
         .iter()

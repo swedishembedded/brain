@@ -29,7 +29,7 @@ use horizon::encode::{encode, forecast_query, Encoded};
 use horizon::saved::{parse_jsonl, Saved, Scored};
 use horizon::survival::Curves;
 use horizon::train::{
-    event_nll, predict_forecasts, predict_states, TimelineObjective,
+    event_nll, event_nll_each, predict_forecasts, predict_states, TimelineObjective,
 };
 use horizon::vocab::{FitOptions, Vocab};
 use horizon::Horizon;
@@ -679,6 +679,13 @@ impl TimelineModel {
     /// listed, never reported from noise.
     pub fn evaluate(&self, subjects: &[Subject], spec: &EvaluationSpec) -> Result<Evaluation> {
         horizon::evaluation::evaluate(&self.saved, subjects, spec).map_err(Error::Backend)
+    }
+
+    /// Every subject's own event NLL of the outcome codes (per unit of its
+    /// weight), in order, from one pass: what [`TimelineModel::event_nll`]
+    /// averages, for paired comparisons between models subject by subject.
+    pub fn event_nll_each(&self, subjects: &[Subject]) -> Result<Vec<f32>> {
+        Ok(event_nll_each(&self.saved.model, &self.encode(subjects)?))
     }
 
     /// The weighted mean event NLL over `subjects` (lower is better; the

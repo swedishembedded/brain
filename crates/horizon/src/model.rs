@@ -1313,6 +1313,28 @@ impl Horizon {
         (outcome as f32, next as f32, value as f32)
     }
 
+    /// The outcome-code event loss of each batch slot of the last forward,
+    /// as the loss kernel wrote it (weighted, and scaled by the batch's total
+    /// weight): the sum over the slot's pieces and outcome columns. A padded
+    /// slot has weight zero and reads 0.
+    pub fn outcome_loss_by_slot(&self) -> Vec<f64> {
+        let c = &self.cfg;
+        let (k, pieces, outcomes) = (c.n_codes as usize, c.pieces() as usize, c.outcome_codes() as usize);
+        let per_slot = pieces * k;
+        let bpk = self.b as usize * per_slot;
+        self.gpu
+            .read(&self.hloss, bpk)
+            .chunks(per_slot)
+            .map(|slot| {
+                slot.iter()
+                    .enumerate()
+                    .filter(|(e, _)| e % k < outcomes)
+                    .map(|(_, &x)| x as f64)
+                    .sum()
+            })
+            .collect()
+    }
+
     /// Forward and loss.
     pub fn forward(&self) -> f32 {
         self.forward_submit();
