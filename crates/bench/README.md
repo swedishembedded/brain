@@ -76,12 +76,34 @@ small interpretable profile rather than a dozen raw numbers (`axes.rs`):
 | `state_tracking` | `parity`, `dyck` |
 | `compression` | `mad_compress` (a bottleneck autoencoder - see note) |
 | `arithmetic` | `mod_add` *(informational; never gates)* |
+| `forecasting` | `forecast_*` scenarios *(informational; ignore the decoder)* |
+| `survival` | `survival_single`, `survival_competing`, `survival_irregular`, `survival_longitudinal` *(informational; ignore the decoder)* |
 
 > **Note (non-LM benchmark):** `mad_compress` trains its own bottleneck
 > autoencoder (MSE head), not a causal next-token decoder, so it **ignores** the
 > supplied `DecoderLm`. Its `compression`-axis score reflects the autoencoder,
 > not the candidate architecture - a known limitation a future arch-aware
 > compression objective can address.
+
+### Survival benchmarks
+
+`survival_*` (`survival_bench.rs`) train a small `brain-horizon` model on
+synthetic records whose true risks are known (`horizon::synthetic`), so
+"does it recover what is in the data" has an answer. Like `mad_compress` they
+ignore the supplied `DecoderLm` and are informational. The headline score is
+the share of the achievable integrated Brier improvement the model captures
+over the strongest ablation baseline (0 = no better, 1 = as good as the
+oracle); the extra fields add Harrell/Uno C, time-dependent AUC, calibration
+O/E at the horizon, rank correlation with the true risk and the held-out
+event NLLs. Checks live in `tests/survival_bench.rs` (GPU: run with
+`--test-threads=1`, skipped under `MOE_SKIP_GPU_TESTS`):
+
+| benchmark | checks |
+|---|---|
+| `survival_single` | covariates -> one event under censoring: predicted risk ranks like the true risk (rank correlation, Harrell C, AUC near the true risk's) and is calibrated |
+| `survival_competing` | two causes with different covariates and time shapes: the model's cause-specific CIF matches the analytic `int h_k S`, which the generator's unit test holds to Aalen-Johansen |
+| `survival_irregular` | visit times carry the information, values are noise: a model that sees them beats a visit-blind one (visits swapped between subjects) on held-out event NLL |
+| `survival_longitudinal` | hidden state, noisy partial measurements, an action: measurements improve held-out event NLL over baseline covariates only, and future-measurement forecasts beat the population mean |
 
 ### The results artifact
 

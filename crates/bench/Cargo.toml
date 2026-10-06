@@ -28,4 +28,11 @@ brain-promote.workspace = true
 # Forecasting scenarios (fcbench) so the forecasting battery registers as
 # Benchmarks alongside the LM/algorithmic ones.
 brain-fcbench.workspace = true
+# Survival benchmarks (survival_*): a small horizon model trained on the
+# generators of `horizon::synthetic` and scored with `survival`'s estimators.
+# Neither is a leaf the layer gate constrains: `bench` already links every
+# model crate, and nothing below it depends on `bench`.
+brain-horizon.workspace = true
+brain-survival.workspace = true
+serde.workspace = true
 serde_json.workspace = true

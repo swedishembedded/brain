@@ -52,6 +52,7 @@ pub mod mqar;
 pub mod dyck;
 pub mod parity;
 pub mod scaling;
+pub mod survival_bench;
 pub mod toolcall;
 
 pub use metrics::Metrics;
@@ -163,6 +164,9 @@ pub fn registry() -> Vec<Box<dyn Benchmark>> {
     ];
     // Forecasting scenarios (informational; they ignore the decoder arch).
     benches.extend(forecast_bench::forecast_benchmarks());
+    // Synthetic survival problems with known truth (informational; they too
+    // train their own model and ignore the decoder arch).
+    benches.extend(survival_bench::survival_benchmarks());
     benches
 }
 
@@ -191,6 +195,7 @@ pub fn registry_smoke() -> Vec<Box<dyn Benchmark>> {
         Box::new(mad_compress::MadCompress { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
     ];
     benches.extend(forecast_bench::forecast_benchmarks_smoke());
+    benches.extend(survival_bench::survival_benchmarks_smoke(STEPS));
     benches
 }
 

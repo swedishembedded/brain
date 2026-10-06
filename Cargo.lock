@@ -626,11 +626,14 @@ dependencies = [
  "brain-fcbench",
  "brain-glmdsa",
  "brain-gpt2",
+ "brain-horizon",
  "brain-model",
  "brain-promote",
  "brain-qwen3",
+ "brain-survival",
  "brain-toyautoencoder",
  "brain-toymoe",
+ "serde",
  "serde_json",
 ]
 

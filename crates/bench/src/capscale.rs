@@ -153,6 +153,9 @@ fn grid_for(knob: Knob) -> Vec<(String, Size)> {
 /// - **forecasting** → `forecast_seasonal_trend`: the forecasting probe ignores
 ///   the swept decoder entirely (its skill is a property of the scenario, not the
 ///   arch), so its curve is flat — informational, reported for completeness.
+/// - **survival** → `survival_single`: the cheapest survival probe; like the
+///   forecasting one it trains its own `horizon` model and ignores the swept
+///   decoder, so its curve is flat (informational).
 pub fn representative_bench(axis: &str) -> Option<&'static str> {
     match axis {
         "recall" => Some("mqar"),
@@ -162,6 +165,7 @@ pub fn representative_bench(axis: &str) -> Option<&'static str> {
         "compression" => Some("mad_compress"),
         "arithmetic" => Some("mod_add"),
         "forecasting" => Some("forecast_seasonal_trend"),
+        "survival" => Some("survival_single"),
         _ => None,
     }
 }
@@ -188,6 +192,12 @@ fn build_bench(name: &str, cfg: &CapScaleConfig) -> Option<(Box<dyn Benchmark>, 
         // Forecasting probes ignore the decoder; build by scenario name.
         n if n.starts_with("forecast_") => {
             let b = crate::forecast_bench::build(n, e.max(8))?;
+            let informational = b.informational();
+            return Some((b, informational));
+        }
+        // Survival probes train their own horizon model; only the step budget applies.
+        n if n.starts_with("survival_") => {
+            let b = crate::survival_bench::build(n, steps)?;
             let informational = b.informational();
             return Some((b, informational));
         }

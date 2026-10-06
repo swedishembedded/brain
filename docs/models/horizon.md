@@ -81,6 +81,32 @@ distribution; the state is the closer of the two in distribution and the
 attention out of it, on one seed of the data - which ships is a measurement
 on the data at hand.
 
+## Benchmarks with known truth
+
+Four domain-free generators (`horizon::synthetic::{single, competing,
+irregular, longitudinal}`) return the truth a score needs, and
+`brain-bench` registers one benchmark per generator on the `survival` axis
+(`survival_single`, `survival_competing`, `survival_irregular`,
+`survival_longitudinal`). Each trains a small horizon model on the device
+`BRAIN_BACKEND` selects and scores it against the generator's truth with
+`brain-survival` (integrated Brier, Harrell/Uno C, time-dependent AUC,
+calibration at a horizon); the tests in `crates/bench/tests/survival_bench.rs`
+hold them to:
+
+- `survival_single`: covariates give one absorbing event under censoring; the
+  predicted risk ranks like the true risk and is calibrated.
+- `survival_competing`: two causes with different covariates and time shapes;
+  the model's cumulative incidence matches the analytic one (the generator's
+  own test holds that to Aalen-Johansen on the simulated data).
+- `survival_irregular`: the visit times carry the information and the values
+  are noise; the model beats the same model trained with every subject's
+  visits replaced by another's (`irregular::swap_visits`) on held-out event
+  NLL.
+- `survival_longitudinal`: a hidden state seen through noisy partial
+  measurements, with an action; the measurements improve held-out event NLL
+  over the baseline covariates alone (`longitudinal::baseline_only`), and the
+  forecast head beats the population mean for future measurements.
+
 ## SDK
 
 ```rust

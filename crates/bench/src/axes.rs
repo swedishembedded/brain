@@ -27,10 +27,14 @@
 //!   `forecast_seasonal_trend`, `forecast_ar1`, `forecast_garch_vol`,
 //!   `forecast_regime_switch`, `forecast_random_walk` (negative control),
 //!   `forecast_jump_diffusion` (all *informational*; they ignore the decoder arch).
+//! - **survival** - recovering known risks from censored, competing, irregular
+//!   and longitudinal records: `survival_single`, `survival_competing`,
+//!   `survival_irregular`, `survival_longitudinal` (all *informational*; each
+//!   trains its own small `horizon` model and ignores the decoder arch).
 
 /// The canonical list of capability axes, in display order.
 pub const AXES: &[&str] =
-    &["recall", "copying", "memory", "state_tracking", "compression", "arithmetic", "forecasting"];
+    &["recall", "copying", "memory", "state_tracking", "compression", "arithmetic", "forecasting", "survival"];
 
 /// The capability axis a benchmark belongs to. Unknown names map to `"other"` so
 /// a newly-registered benchmark is still surfaced (and a `debug_assert` in tests
@@ -45,6 +49,8 @@ pub fn axis_of(name: &str) -> &'static str {
         "mod_add" => "arithmetic",
         // Every forecasting scenario benchmark (forecast_seasonal_trend, …).
         n if n.starts_with("forecast_") => "forecasting",
+        // Every survival benchmark (survival_single, ...).
+        n if n.starts_with("survival_") => "survival",
         _ => "other",
     }
 }
@@ -78,6 +84,7 @@ mod tests {
         assert_eq!(axis_of("parity"), "state_tracking");
         assert_eq!(axis_of("mad_compress"), "compression");
         assert_eq!(axis_of("mod_add"), "arithmetic");
+        assert_eq!(axis_of("survival_competing"), "survival");
         assert_eq!(axis_of("???"), "other");
     }
 }
