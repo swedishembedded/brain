@@ -161,11 +161,14 @@ fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
 fn render(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
     let (mut out, mut abstained) = (String::new(), 0);
     for (s, Scored { curves: c, assessment }) in req.subjects.iter().zip(scored) {
-        let support = json!({
+        let mut support = json!({
             "supported": assessment.supported,
             "ood_score": assessment.ood_score,
             "warnings": assessment.warnings,
         });
+        if !assessment.advisories.is_empty() {
+            support["advisories"] = json!(assessment.advisories);
+        }
         if assessment.abstains(req.max_ood_score) {
             abstained += 1;
             let line = json!({

@@ -73,6 +73,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
                 t: ENTRY,
                 var: (*name).into(),
                 value: Value::Number(v),
+                unit: None,
             })
             .collect();
         let event = (time < censor).then_some((time, CODE));

@@ -29,6 +29,7 @@ One JSON object per line:
  "observations": [{"t": 50.0, "var": "sbp", "value": 131},
                   {"t": 50.0, "var": "crp", "value": {"below": 0.2}},
                   {"t": 50.0, "var": "smoking", "value": "never"},
+                  {"t": 50.0, "var": "ldl", "value": 3.1, "unit": "mmol/L"},
                   {"t": 25.0, "var": "weight", "value": 70}],
  "events": [{"t": 44.0, "code": "dx:hypertension"}, {"t": 62.5, "code": "death:heart"}],
  "at_risk": [{"code": "*", "from": 50.0, "to": 62.5}]}
@@ -41,6 +42,17 @@ One JSON object per line:
   events strictly before it. Events after it are outcomes inside their
   `at_risk` window (`*` covers every outcome code without a window of its
   own). A window may open after `entry` (delayed entry), never before.
+- `unit` on an observation is optional (files without it read as before).
+  Fitting records each numeric variable's unit from the training subjects in
+  `vocab.json`; every subject that states a unit for a variable must agree,
+  and a disagreement is a fit error naming the variable and both units. A
+  variable no subject gave a unit for stays unitless. horizon has no
+  conversion table: at prediction time a measurement stated in another unit
+  than the model's is REJECTED (error naming the variable, the subject and
+  both units), never converted; a unit stated for a variable the model
+  records as unitless is an advisory (below), never a guess. A unit is 1 to
+  32 characters without surrounding whitespace or control characters and is
+  compared byte for byte.
 - `weight` is a sampling weight (1 when absent); `group_id` keeps records
   together across a train/test split.
 
@@ -256,8 +268,9 @@ variable the levels seen, the event codes seen in histories, the ranges of
 entry clock, calendar time and history length (observations plus events, and
 distinct visits), and the mean and covariance of the learned state for a
 Mahalanobis distance (kept only when the training set has at least four
-subjects per state dimension). `timeline-v1` carries no units, so none are
-recorded: a unit mix-up shows as a value out of range, not by name.
+subjects per state dimension). Units are the
+vocabulary's, not the support's: a unit mix-up is rejected by name before a
+range could show it.
 
 `TimelineModel::assess(subjects)` returns, per subject, `supported`, a
 continuous `ood_score` and typed warnings:
@@ -269,6 +282,10 @@ continuous `ood_score` and typed warnings:
 | `entry_out_of_range`, `calendar_out_of_range` | the entry clock or calendar time is beyond the trained range plus the margin |
 | `history_length` | observations plus events, or visits, are far below or above any in training |
 | `state_out_of_support` | the Mahalanobis distance of the learned state is beyond the training set's 99.5th percentile plus half again |
+
+A unit stated for a variable the model records as unitless is listed under
+`advisories` (`unit_not_recorded`) beside the warnings: it never changes
+`supported` or the score and never withholds an answer.
 
 Each component is scaled so `1.0` is the edge of what is supported and the
 `ood_score` is the largest, so `supported` means a score of at most one. The

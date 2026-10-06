@@ -394,6 +394,10 @@ impl TimelineModel {
         if let Some((events, _)) = &spec.next_events {
             vocab = vocab.with_next_events(events).map_err(Error::Backend)?;
         }
+        // The training subjects fixed the units; held-out ones must agree.
+        for s in held_out {
+            vocab.check_units(s).map_err(Error::Backend)?;
+        }
         let cfg = spec.config(&vocab);
         cfg.validate().map_err(Error::Backend)?;
         let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();

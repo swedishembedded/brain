@@ -43,7 +43,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 fn obs(s: &mut Subject, var: &str, value: Value) {
-    s.observations.push(Observation { t: s.entry, var: var.into(), value });
+    s.observations.push(Observation { t: s.entry, var: var.into(), value, unit: None });
 }
 
 fn kinds(saved: &Saved, s: &Subject) -> Vec<Warning> {
@@ -115,7 +115,7 @@ fn what_is_outside_the_training_support_is_flagged_and_what_is_inside_is_not() {
     assert!(kinds(&saved, &bare).iter().any(|w| matches!(w, Warning::HistoryLength { measure, .. } if measure == "tokens")));
     let mut long = inside.clone();
     for i in 0..60 {
-        long.observations.push(Observation { t: long.entry - 1.0 - i as f64, var: "x1".into(), value: Value::Number(0.0) });
+        long.observations.push(Observation { t: long.entry - 1.0 - i as f64, var: "x1".into(), value: Value::Number(0.0), unit: None });
     }
     assert!(kinds(&saved, &long).iter().any(|w| matches!(w, Warning::HistoryLength { .. })));
 

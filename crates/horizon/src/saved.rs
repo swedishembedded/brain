@@ -135,13 +135,16 @@ impl Saved {
     pub fn assess(&self, subjects: &[Subject], opts: &AssessOptions) -> Result<Vec<Assessment>, String> {
         let enc = self.encode(subjects)?;
         let Some(support) = &self.support else {
-            return Ok(vec![Assessment::unknown(); subjects.len()]);
+            return Ok(subjects
+                .iter()
+                .map(|s| self.advised(Assessment::unknown(), s))
+                .collect());
         };
         let states = predict_states(&self.model, &enc);
         Ok(subjects
             .iter()
             .zip(&states)
-            .map(|(s, z)| support.assess(s, Some(z), opts))
+            .map(|(s, z)| self.advised(support.assess(s, Some(z), opts), s))
             .collect())
     }
 
@@ -156,12 +159,21 @@ impl Saved {
             .zip(predict_hazards_and_states(&self.model, &enc))
             .map(|(s, (lh, z))| Scored {
                 curves: Curves::outcomes(&lh, knots, columns, &absorbing),
-                assessment: self
-                    .support
-                    .as_ref()
-                    .map_or_else(Assessment::unknown, |sp| sp.assess(s, Some(&z), opts)),
+                assessment: self.advised(
+                    self.support
+                        .as_ref()
+                        .map_or_else(Assessment::unknown, |sp| sp.assess(s, Some(&z), opts)),
+                    s,
+                ),
             })
             .collect())
+    }
+
+    /// `assessment` with the input advisories of `subject` that depend on the
+    /// vocabulary rather than on the training support.
+    fn advised(&self, mut assessment: Assessment, subject: &Subject) -> Assessment {
+        assessment.advisories = support::unit_advisories(&self.vocab, subject);
+        assessment
     }
 
     fn absorbing(&self) -> Vec<bool> {
@@ -263,8 +275,9 @@ impl Saved {
         subjects
             .iter()
             .map(|s| {
-                s.validate()
-                    .map(|_| encode(s, &self.vocab, &self.model.cfg))
+                s.validate()?;
+                self.vocab.check_units(s)?;
+                Ok(encode(s, &self.vocab, &self.model.cfg))
             })
             .collect()
     }

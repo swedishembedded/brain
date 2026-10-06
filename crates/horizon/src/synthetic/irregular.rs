@@ -104,6 +104,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
                 t: ENTRY - ago,
                 var: VARIABLE.into(),
                 value: Value::Number(rng.next_gaussian()),
+                unit: None,
             });
             ago += exp1(rng.next_f64()) / rate;
         }

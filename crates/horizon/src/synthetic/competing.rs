@@ -97,6 +97,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
                 t: ENTRY,
                 var: (*name).into(),
                 value: Value::Number(v),
+                unit: None,
             })
             .collect();
         subjects.push(subject(format!("compete{i}"), observations, event, censor));

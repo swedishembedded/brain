@@ -49,6 +49,30 @@ pub struct Observation {
     pub var: String,
     /// The value.
     pub value: Value,
+    /// The unit `value` is stated in (`"mmol/L"`, `"kg"`); `None` when the
+    /// record states none. horizon never converts: a model trained on one
+    /// unit rejects a measurement stated in another ([`crate::vocab::Vocab::check_units`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+/// The longest unit string accepted.
+pub const MAX_UNIT_LEN: usize = 32;
+
+/// A unit string is 1 to [`MAX_UNIT_LEN`] characters, without leading or
+/// trailing whitespace or control characters. Its content is otherwise
+/// opaque: units are compared byte for byte, never interpreted.
+pub fn check_unit(unit: &str) -> Result<(), String> {
+    if unit.is_empty() || unit.trim() != unit {
+        return Err(format!("unit {unit:?} is empty or has surrounding whitespace"));
+    }
+    if unit.chars().count() > MAX_UNIT_LEN {
+        return Err(format!("unit is longer than {MAX_UNIT_LEN} characters"));
+    }
+    if unit.chars().any(char::is_control) {
+        return Err(format!("unit {unit:?} contains a control character"));
+    }
+    Ok(())
 }
 
 /// An event of one code at one time.
@@ -146,6 +170,10 @@ impl Subject {
                 Value::Category(_) => 0.0,
             };
             finite(&format!("observation {} value", o.var), v)?;
+            if let Some(unit) = &o.unit {
+                check_unit(unit)
+                    .map_err(|e| format!("subject {who}: observation {}: {e}", o.var))?;
+            }
         }
         for e in &self.events {
             finite(&format!("event {} time", e.code), e.t)?;
@@ -218,6 +246,21 @@ mod tests {
             "death after entry is an outcome, not history"
         );
         assert_eq!(s.window("death:heart").unwrap().to, 62.5);
+    }
+
+    #[test]
+    fn units_are_optional_and_malformed_ones_are_refused() {
+        let line = LINE.replace('\n', " ");
+        let plain = Subject::from_json_line(&line).unwrap();
+        assert!(plain.observations.iter().all(|o| o.unit.is_none()));
+        assert!(!serde_json::to_string(&plain).unwrap().contains("unit"), "absent stays absent");
+        let with = |unit: &str| line.replace(r#""var":"sbp","value":131.0"#, &format!(r#""var":"sbp","value":131.0,"unit":{unit}"#));
+        let s = Subject::from_json_line(&with(r#""mmHg""#)).unwrap();
+        assert_eq!(s.observations[0].unit.as_deref(), Some("mmHg"));
+        for bad in [r#""""#, r#"" mmHg""#, r#""m\u0000g""#, &format!("\"{}\"", "x".repeat(MAX_UNIT_LEN + 1))] {
+            let err = Subject::from_json_line(&with(bad)).unwrap_err();
+            assert!(err.contains("observation sbp") && err.contains("unit"), "{bad}: {err}");
+        }
     }
 
     #[test]

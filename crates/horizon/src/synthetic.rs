@@ -136,6 +136,7 @@ pub fn population_with_followup(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth
                     t: s.entry + ahead,
                     var: "x1".into(),
                     value: Value::Number(mean + sd * rng.next_gaussian()),
+                    unit: None,
                 });
             }
         }
@@ -185,6 +186,7 @@ pub fn population_shifted(n: usize, seed: u64, shift: Shift) -> (Vec<Subject>, V
                 t: entry,
                 var: "x1".into(),
                 value: Value::Number(truth.x1),
+                unit: None,
             },
             Observation {
                 t: entry,
@@ -194,22 +196,26 @@ pub fn population_shifted(n: usize, seed: u64, shift: Shift) -> (Vec<Subject>, V
                 } else {
                     Value::Number(truth.x2)
                 },
+                unit: None,
             },
             Observation {
                 t: entry,
                 var: "noise".into(),
                 value: Value::Number(rng.next_gaussian()),
+                unit: None,
             },
             Observation {
                 t: entry,
                 var: "group".into(),
                 value: Value::Category(group.into()),
+                unit: None,
             },
         ];
         observations.push(Observation {
             t: entry,
             var: "age".into(),
             value: Value::Number(entry),
+            unit: None,
         });
         let mut events = Vec::new();
         if truth.dx {

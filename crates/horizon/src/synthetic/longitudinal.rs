@@ -123,6 +123,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
             t: ENTRY,
             var: ARM.into(),
             value: Value::Category(ARMS[arm].into()),
+            unit: None,
         }];
         // Conjugate update of the N(0, 1) prior with each reading.
         let (mut precision, mut weighted) = (1.0, 0.0);
@@ -146,6 +147,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
                     t,
                     var: CHANNELS[j].into(),
                     value: Value::Number(y),
+                    unit: None,
                 });
             }
         }
@@ -168,6 +170,7 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
                         t: ENTRY + ahead,
                         var: (*channel).into(),
                         value: Value::Number(measure(&mut rng, j, truth.state(ahead))),
+                        unit: None,
                     });
                 }
             }

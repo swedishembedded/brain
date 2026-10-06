@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use crate::saved::Saved;
 use crate::timeline::{Subject, Value};
 use crate::train::predict_states;
+use crate::vocab::Vocab;
 
 /// The support file inside a saved model's directory.
 pub const FILE: &str = "support.json";
@@ -154,6 +155,15 @@ pub enum Warning {
         /// The most supported.
         high: f64,
     },
+    /// A unit was stated for a variable the model records as unitless: the
+    /// model cannot check it, so it says so rather than guess (an advisory:
+    /// it never lowers [`Assessment::supported`] or withholds an answer).
+    UnitNotRecorded {
+        /// The variable.
+        var: String,
+        /// The unit the subject stated.
+        unit: String,
+    },
     /// A learned state far from every training state.
     StateOutOfSupport {
         /// The subject's Mahalanobis distance.
@@ -174,6 +184,10 @@ pub struct Assessment {
     pub ood_score: Option<f64>,
     /// Every component past the edge, most severe first.
     pub warnings: Vec<Warning>,
+    /// Observations about the input that do not change the score and never
+    /// withhold an answer (see [`Warning::UnitNotRecorded`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<Warning>,
 }
 
 impl Assessment {
@@ -190,6 +204,7 @@ impl Assessment {
             supported: None,
             ood_score: None,
             warnings: Vec::new(),
+            advisories: Vec::new(),
         }
     }
 }
@@ -352,8 +367,9 @@ pub struct Support {
     /// Training subjects the statistics come from.
     pub subjects: usize,
     /// Numeric variable -> the range of its values (detection-limit values
-    /// count at their limit). timeline-v1 carries no units, so none are
-    /// recorded: a unit mix-up is caught by the range, not named.
+    /// count at their limit). The units are the vocabulary's
+    /// ([`Vocab::units`]), which rejects a mismatch by name before a range
+    /// can show it.
     pub variables: BTreeMap<String, Range>,
     /// Categorical variable -> the levels seen.
     pub categories: BTreeMap<String, BTreeSet<String>>,
@@ -370,6 +386,23 @@ pub struct Support {
     /// The learned state's statistics; `None` when the training set was too
     /// small to pin them down.
     pub state: Option<StateSupport>,
+}
+
+/// The units `subject` states for variables `vocab` records as unitless: one
+/// [`Warning::UnitNotRecorded`] per (variable, unit). A unit that differs from
+/// a recorded one is not an advisory but an error ([`Vocab::check_units`]).
+pub fn unit_advisories(vocab: &Vocab, subject: &Subject) -> Vec<Warning> {
+    let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for o in subject.known_observations() {
+        if let Some(unit) = &o.unit {
+            if vocab.knots.contains_key(&o.var) && !vocab.units.contains_key(&o.var) {
+                seen.insert((&o.var, unit));
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|(var, unit)| Warning::UnitNotRecorded { var: var.into(), unit: unit.into() })
+        .collect()
 }
 
 fn history_len(s: &Subject) -> (f64, f64) {
@@ -514,6 +547,7 @@ impl Support {
             supported: Some(ood_score <= 1.0),
             ood_score: Some(ood_score),
             warnings: scored.into_iter().filter(|s| s.0 > 1.0).map(|s| s.1).collect(),
+            advisories: Vec::new(),
         }
     }
 

@@ -114,6 +114,7 @@ pub fn population(n: usize, seed: u64, gaps: &Gaps, follow: f64) -> (Vec<Subject
                 t,
                 var: "x".into(),
                 value: Value::Number(y),
+                unit: None,
             });
             at = t;
         }

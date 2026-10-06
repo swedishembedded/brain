@@ -65,6 +65,12 @@ pub struct Vocab {
     /// self-supervised next-event objective. Empty for a pure outcome model.
     #[serde(default)]
     pub next_events: Vec<String>,
+    /// Numeric variable -> the unit its training values were stated in. A
+    /// variable no training record gave a unit for is absent: unitless. A
+    /// vocabulary saved before units existed has none, so every variable of
+    /// it is unitless.
+    #[serde(default)]
+    pub units: BTreeMap<String, String>,
     #[serde(skip)]
     index: HashMap<String, u32>,
 }
@@ -88,7 +94,28 @@ impl Vocab {
         let mut levels: BTreeMap<String, usize> = BTreeMap::new();
         let mut cat_vars: BTreeMap<String, ()> = BTreeMap::new();
         let mut history: BTreeMap<String, ()> = BTreeMap::new();
+        let mut units: BTreeMap<String, String> = BTreeMap::new();
         for s in subjects {
+            // Every observation states its unit, including the ones after
+            // entry that only the forecast head reads.
+            for o in &s.observations {
+                let (Some(unit), false) = (&o.unit, matches!(o.value, Value::Category(_))) else {
+                    continue;
+                };
+                match units.get(&o.var) {
+                    Some(first) if first != unit => {
+                        return Err(format!(
+                            "vocab: variable {} is stated in unit {first:?} and in unit {unit:?} (subject {}): \
+                             convert the training data to one unit",
+                            o.var, s.subject_id
+                        ))
+                    }
+                    Some(_) => {}
+                    None => {
+                        units.insert(o.var.clone(), unit.clone());
+                    }
+                }
+            }
             let mut seen_level: BTreeMap<String, ()> = BTreeMap::new();
             for o in s.known_observations() {
                 match &o.value {
@@ -108,6 +135,7 @@ impl Vocab {
                 history.insert(format!("e:{}", e.code), ());
             }
         }
+        let numeric_vars: std::collections::BTreeSet<String> = numeric.keys().cloned().collect();
         let mut tokens: Vec<String> = RESERVED.iter().map(|s| s.to_string()).collect();
         let mut knots = BTreeMap::new();
         for (var, mut vals) in numeric {
@@ -131,6 +159,7 @@ impl Vocab {
             codes: codes.to_vec(),
             absorbing: absorbing.to_vec(),
             next_events: Vec::new(),
+            units: units.into_iter().filter(|(var, _)| numeric_vars.contains(var)).collect(),
             index: HashMap::new(),
         };
         v.reindex();
@@ -212,6 +241,27 @@ impl Vocab {
     /// Outcome code id.
     pub fn code_id(&self, code: &str) -> Option<usize> {
         self.codes.iter().position(|c| c == code)
+    }
+
+    /// Refuse a subject with a measurement stated in a unit other than the one
+    /// the model was trained on. The error names the variable, the subject and
+    /// both units; nothing is converted (horizon has no conversion table) and
+    /// nothing is guessed. A measurement with no unit, or of a variable the
+    /// model records as unitless, passes: see [`crate::support::unit_advisories`]
+    /// for the second.
+    pub fn check_units(&self, subject: &Subject) -> Result<(), String> {
+        for o in &subject.observations {
+            if let (Some(given), Some(canonical)) = (&o.unit, self.units.get(&o.var)) {
+                if given != canonical {
+                    return Err(format!(
+                        "subject {}: observation of {} at {} is stated in unit {given:?} but the model was trained on {canonical:?}: \
+                         convert it before predicting (horizon never converts units)",
+                        subject.subject_id, o.var, o.t
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The empirical CDF of `value` for numeric `var`, in `[0, 1]`; `None`
@@ -349,6 +399,49 @@ mod tests {
         }
         assert_eq!(v.value_at("sbp", 2.0), Some(149.0), "clamped to the range");
         assert_eq!(v.value_at("nope", 0.5), None);
+    }
+
+    /// `sbp` stated in `unit` (None: no unit), plus an unitless `age`.
+    fn with_unit(id: &str, unit: Option<&str>) -> Subject {
+        let unit = unit.map_or(String::new(), |u| format!(r#","unit":"{u}""#));
+        Subject::from_json_line(&format!(
+            r#"{{"subject_id":"{id}","source":"s","entry":50,"calendar_at_entry":2000,
+            "observations":[{{"t":50,"var":"sbp","value":120{unit}}},{{"t":50,"var":"age","value":50}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn fit(subjects: &[Subject]) -> Result<Vocab, String> {
+        let codes = vec!["death".to_string()];
+        Vocab::fit(subjects, &codes, &codes, &FitOptions::default())
+    }
+
+    #[test]
+    fn the_canonical_unit_is_recorded_per_variable_and_a_disagreement_is_a_fit_error() {
+        let v = fit(&[with_unit("a", Some("mmHg")), with_unit("b", None), with_unit("c", Some("mmHg"))]).unwrap();
+        assert_eq!(v.units.get("sbp").map(String::as_str), Some("mmHg"));
+        assert!(!v.units.contains_key("age"), "a variable that states no unit stays unitless");
+        let err = fit(&[with_unit("a", Some("mmHg")), with_unit("b", Some("kPa"))]).unwrap_err();
+        assert!(err.contains("sbp") && err.contains("mmHg") && err.contains("kPa"), "{err}");
+    }
+
+    #[test]
+    fn a_vocabulary_without_units_loads_as_unitless() {
+        let v = fit(&[with_unit("a", Some("mmHg"))]).unwrap();
+        let mut json: serde_json::Value = serde_json::to_value(&v).unwrap();
+        json.as_object_mut().unwrap().remove("units");
+        let old = Vocab::from_json(&json.to_string()).unwrap();
+        assert!(old.units.is_empty());
+        assert!(old.check_units(&with_unit("x", Some("kPa"))).is_ok(), "nothing to compare against");
+    }
+
+    #[test]
+    fn a_unit_other_than_the_canonical_one_is_rejected_by_name_never_converted() {
+        let v = fit(&[with_unit("a", Some("mmHg"))]).unwrap();
+        assert!(v.check_units(&with_unit("ok", Some("mmHg"))).is_ok());
+        assert!(v.check_units(&with_unit("ok", None)).is_ok(), "no stated unit is not a mismatch");
+        let err = v.check_units(&with_unit("p7", Some("kPa"))).unwrap_err();
+        assert!(err.contains("sbp") && err.contains("p7") && err.contains("kPa") && err.contains("mmHg"), "{err}");
     }
 
     #[test]
