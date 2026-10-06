@@ -243,7 +243,9 @@ fn run_do_impl(argv: &[String], assembly: Option<&capability::Assembly>) -> i32 
         }
     }
     let mut out_paths: Vec<(String, String)> = Vec::new();
-    for spec_val in matches.get_many::<String>("out").unwrap_or_default() {
+    // An action with a param called `out` owns the word: no output-blob flag.
+    let blob_out_flag = !has_out_param(&spec);
+    for spec_val in matches.get_many::<String>("out").filter(|_| blob_out_flag).into_iter().flatten() {
         let Some((name, path)) = spec_val.split_once('=') else {
             eprintln!("brain: --out must be name=path (got {spec_val:?})");
             return 2;
@@ -301,6 +303,21 @@ fn blob_arg_id(name: &str) -> String {
     format!("blob:{name}")
 }
 
+/// Whether the action has a param named `out` (a directory to write, say),
+/// which then takes the `--out` flag from the generic `--out NAME=PATH`.
+fn has_out_param(spec: &ActionSpec) -> bool {
+    spec.params.iter().any(|p| p.name == "out")
+}
+
+/// The `--flag` words of `name`: itself, and with dashes for underscores
+/// (`--held-out` for `held_out`), as command lines are written.
+fn with_dashed_alias(arg: Arg, name: &str) -> Arg {
+    match name.contains('_') {
+        true => arg.alias(name.replace('_', "-")),
+        false => arg,
+    }
+}
+
 /// Whether the input blob `name` also gets a `--<name> PATH` flag, the
 /// shorthand for `--in name=PATH`. Not when a param or a reserved flag
 /// already owns the word.
@@ -315,7 +332,7 @@ fn has_blob_flag(spec: &ActionSpec, name: &str) -> bool {
 fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
     let mut cmd = Command::new(format!("brain {model} {action}")).no_binary_name(true).about(spec.summary.clone());
     for p in &spec.params {
-        let mut arg = Arg::new(p.name.clone()).long(p.name.clone()).help(p.help.clone());
+        let mut arg = with_dashed_alias(Arg::new(p.name.clone()).long(p.name.clone()).help(p.help.clone()), &p.name);
         if p.ty == ParamType::Bool {
             // A bool takes an OPTIONAL value: `--flag` is still `true` (every
             // existing call site keeps working), and `--flag false` / `--flag=0`
@@ -343,12 +360,14 @@ fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
     }
     for b in spec.inputs.iter().filter(|b| has_blob_flag(spec, &b.name)) {
         let help = format!("input {} (same as --in {}=PATH): {}", b.media.name(), b.name, b.help);
-        cmd = cmd.arg(Arg::new(blob_arg_id(&b.name)).long(b.name.clone()).action(ArgAction::Set).value_name("PATH").help(help));
+        cmd = cmd.arg(with_dashed_alias(Arg::new(blob_arg_id(&b.name)).long(b.name.clone()).action(ArgAction::Set).value_name("PATH").help(help), &b.name));
     }
     let in_help = if spec.inputs.is_empty() { "named binary input, e.g. image=in.ppm".to_string() } else { format!("named binary input ({})", spec.inputs.iter().map(|b| format!("{}=<{}>", b.name, b.media.name())).collect::<Vec<_>>().join(", ")) };
-    cmd.arg(Arg::new("in").long("in").action(ArgAction::Append).value_name("NAME=PATH").help(in_help))
-        .arg(Arg::new("out").long("out").action(ArgAction::Append).value_name("NAME=PATH").help("write a named output blob to a file, e.g. image=out.ppm"))
-        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("print scalar outputs as JSON"))
+    cmd = cmd.arg(Arg::new("in").long("in").action(ArgAction::Append).value_name("NAME=PATH").help(in_help));
+    if !has_out_param(spec) {
+        cmd = cmd.arg(Arg::new("out").long("out").action(ArgAction::Append).value_name("NAME=PATH").help("write a named output blob to a file, e.g. image=out.ppm"));
+    }
+    cmd.arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("print scalar outputs as JSON"))
 }
 
 /// Coerce a CLI string to the JSON value the param type expects.
@@ -495,6 +514,26 @@ mod tests {
             .unwrap();
         assert_eq!(m.get_one::<String>(&blob_arg_id("history")).map(String::as_str), Some("patient.json"));
         assert_eq!(m.get_many::<String>("in").unwrap().collect::<Vec<_>>(), ["image=x.txt"]);
+    }
+
+    /// A param called `out` takes the `--out` flag from the output-blob one,
+    /// and underscored names are also written with dashes.
+    #[test]
+    fn a_param_named_out_owns_the_flag_and_underscores_take_dashes() {
+        let spec = ActionSpec::new("train", "summary")
+            .param(ParamSpec::new("out", ParamType::Str, "a directory"))
+            .param(ParamSpec::new("next_events", ParamType::Str, "codes"))
+            .input(BlobSpec::new("held_out", Media::Text, "subjects"));
+        assert!(has_out_param(&spec));
+        let m = build_parser("m", "train", &spec)
+            .try_get_matches_from(["--out", "dir", "--next-events", "a,b", "--held-out", "h.jsonl"])
+            .unwrap();
+        assert_eq!(m.get_one::<String>("out").map(String::as_str), Some("dir"));
+        assert_eq!(m.get_one::<String>("next_events").map(String::as_str), Some("a,b"));
+        assert_eq!(m.get_one::<String>(&blob_arg_id("held_out")).map(String::as_str), Some("h.jsonl"));
+        let blobs = ActionSpec::new("act", "summary");
+        assert!(!has_out_param(&blobs));
+        assert!(build_parser("m", "act", &blobs).try_get_matches_from(["--out", "x=y"]).is_ok());
     }
 
     #[test]

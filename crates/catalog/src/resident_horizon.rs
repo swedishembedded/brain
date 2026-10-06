@@ -3,19 +3,35 @@
 
 //! The timeline model behind the residency scheduler.
 //!
-//! `activate` loads the saved model from `BRAIN_HORIZON_DIR` once, on the
-//! assigned device; the [`Instance`] owns it, so dropping the instance frees
-//! it. One action, `predict` - schema and work both come from
-//! `horizon::caps`, so this file holds no second copy of either. Concurrent
-//! requests are one batch: `run_batch` puts every request's subjects through
-//! one forward pass in device batches of the model's size and splits the
-//! answers back per request (`horizon::caps::predict_batch`).
+//! `activate` loads the saved model (or ensemble) from `BRAIN_HORIZON_DIR`
+//! once, on the assigned device; the [`Instance`] owns it, so dropping the
+//! instance frees it. Four actions - `predict`, `eval`, `calibrate` and
+//! `train` - whose schema and work come from `horizon::caps` and
+//! `horizon::lifecycle`, so this file holds no second copy of either.
+//! Concurrent `predict` requests are one batch: `run_batch` puts every
+//! request's subjects through one forward pass in device batches of the
+//! model's size and splits the answers back per request
+//! (`horizon::caps::predict_batch`).
+//!
+//! `eval` judges the held model on the request's subjects; `calibrate`
+//! returns the calibration it would write and writes nothing, since the served
+//! directory is the host's. `train` needs no loaded weights: it has its own
+//! instance (`config: "train"`, nothing loaded) and writes the finished model to
+//! the host's `BRAIN_HORIZON_TRAIN_DIR`, polling the job's cancel token every
+//! step.
 
 use std::path::{Path, PathBuf};
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use horizon::saved::{Saved, VOCAB_FILE, WEIGHTS_FILE};
+use horizon::ensemble::{Loaded, MEMBERS_DIR};
+use horizon::saved::{VOCAB_FILE, WEIGHTS_FILE};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+
+/// The instance config of the `train` action: no weights are loaded for it.
+const TRAIN_CONFIG: &str = "train";
+/// What a training run is budgeted for on the device: the models are small,
+/// so a flat allowance bounds the batches and the optimiser state.
+const TRAIN_BUDGET: u64 = 1 << 30;
 
 /// A saved timeline model behind the scheduler.
 pub struct HorizonResident {
@@ -33,15 +49,12 @@ impl HorizonResident {
         Self::new(Path::new(&dir))
     }
 
-    /// From a directory `TimelineModel::save` wrote; `None` if it is not one.
+    /// From a directory `TimelineModel::save` or `TimelineEnsemble::save`
+    /// wrote; `None` if it is neither.
     pub fn new(dir: &Path) -> Option<HorizonResident> {
-        let missing: Vec<&str> = [WEIGHTS_FILE, VOCAB_FILE]
-            .into_iter()
-            .filter(|f| !dir.join(f).is_file())
-            .collect();
-        if !missing.is_empty() {
+        if !Loaded::is_dir(dir) {
             eprintln!(
-                "brain: horizon not served ({} is missing {missing:?})",
+                "brain: horizon not served ({} holds neither {WEIGHTS_FILE} + {VOCAB_FILE} nor an ensemble)",
                 dir.display()
             );
             return None;
@@ -50,6 +63,23 @@ impl HorizonResident {
             dir: dir.to_path_buf(),
         })
     }
+
+    /// The size of every weights file below the directory: the model's, or
+    /// each member's.
+    fn weights_bytes(&self) -> u64 {
+        let size = |dir: &Path| {
+            std::fs::metadata(dir.join(WEIGHTS_FILE))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        let members = std::fs::read_dir(self.dir.join(MEMBERS_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| size(&e.path()))
+            .sum::<u64>();
+        size(&self.dir) + members
+    }
 }
 
 impl ResidentModel for HorizonResident {
@@ -57,52 +87,88 @@ impl ResidentModel for HorizonResident {
         horizon::caps::manifest_resident()
     }
 
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(horizon::caps::MODEL, "default")
+    fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
+        let config = if action == "train" { TRAIN_CONFIG } else { "default" };
+        InstanceKey::new(horizon::caps::MODEL, config)
     }
 
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        if key.config == TRAIN_CONFIG {
+            return MemCost::new(TRAIN_BUDGET, 0);
+        }
         // The weights plus a prediction batch's activations: the model is
         // small, so a flat allowance over the weights bounds the batch.
-        let weights = std::fs::metadata(self.dir.join(WEIGHTS_FILE))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        MemCost::new(weights.saturating_mul(2) + (256 << 20), 0)
+        MemCost::new(self.weights_bytes().saturating_mul(2) + (256 << 20), 0)
     }
 
-    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let saved = crate::resident_llm::on_device(device, || Saved::load(&self.dir))??;
-        Ok(Box::new(HorizonInstance { saved }))
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if key.config == TRAIN_CONFIG {
+            return Ok(Box::new(HorizonInstance { loaded: None }));
+        }
+        let loaded = crate::resident_llm::on_device(device, || Loaded::load(&self.dir))??;
+        Ok(Box::new(HorizonInstance { loaded: Some(loaded) }))
     }
 }
 
 struct HorizonInstance {
-    saved: Saved,
+    /// `None` for the training instance.
+    loaded: Option<Loaded>,
+}
+
+impl HorizonInstance {
+    fn model(&self) -> Result<&Loaded, String> {
+        self.loaded.as_ref().ok_or_else(|| "horizon: this instance holds no model".to_string())
+    }
 }
 
 impl Instance for HorizonInstance {
     fn run(
         &mut self,
-        _action: &str,
+        action: &str,
         inv: &Invocation,
         progress: &mut dyn FnMut(Progress),
     ) -> ActionResult {
-        progress(Progress::step(1, 1, "predict"));
-        horizon::caps::predict(&self.saved, inv)
+        match action {
+            "predict" => {
+                progress(Progress::step(1, 1, "predict"));
+                horizon::caps::predict(self.model()?, inv)
+            }
+            "eval" => {
+                progress(Progress::step(1, 1, "eval"));
+                horizon::lifecycle::eval(self.model()?, inv)
+            }
+            "calibrate" => {
+                progress(Progress::step(1, 1, "calibrate"));
+                horizon::lifecycle::calibrate_loaded(self.model()?, inv)
+            }
+            "train" => horizon::lifecycle::train(inv, progress),
+            other => Err(format!("horizon: no action '{other}'")),
+        }
     }
 
-    /// One forward pass over every request's subjects; a request that cannot
-    /// be answered fails alone.
+    /// One forward pass over every `predict` request's subjects; a request
+    /// that cannot be answered fails alone. The other actions answer one
+    /// request at a time (training and evaluation are not batchable).
     fn run_batch(
         &mut self,
-        _action: &str,
+        action: &str,
         invs: &[Invocation],
         progress: &mut dyn FnMut(usize, Progress),
     ) -> Vec<ActionResult> {
+        if action != "predict" {
+            return invs
+                .iter()
+                .enumerate()
+                .map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p)))
+                .collect();
+        }
         for i in 0..invs.len() {
             progress(i, Progress::step(1, 1, "predict"));
         }
-        horizon::caps::predict_batch(&self.saved, invs)
+        match self.model() {
+            Ok(loaded) => horizon::caps::predict_batch(loaded, invs),
+            Err(e) => invs.iter().map(|_| Err(e.clone())).collect(),
+        }
     }
 }
 
@@ -110,6 +176,7 @@ impl Instance for HorizonInstance {
 mod tests {
     use super::*;
     use capability::{Blob, Media};
+    use horizon::saved::Saved;
     use horizon::synthetic::{population, CODES};
     use horizon::vocab::{FitOptions, Vocab};
     use horizon::{Horizon, HorizonConfig};

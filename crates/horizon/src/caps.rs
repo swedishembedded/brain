@@ -50,8 +50,10 @@ use capability::{
 use serde_json::{json, Value};
 
 use crate::calibration::Calibrated;
+use crate::ensemble::{Loaded, Members};
 use crate::forecast::{ForecastRequest, RiskForecast};
 use crate::history::PatientHistory;
+use crate::lifecycle::{self, calibrate_spec, eval_spec, train_spec};
 use crate::saved::{parse_jsonl, Saved, Scored};
 use crate::support::AssessOptions;
 use crate::timeline::Subject;
@@ -75,7 +77,7 @@ pub fn predict_spec() -> ActionSpec {
         ParamSpec::new(
             "weights",
             ParamType::Str,
-            "directory of a saved timeline model (model.safetensors + vocab.json, and calibration.json when calibrated)",
+            "directory of a saved timeline model (model.safetensors + vocab.json, and calibration.json when calibrated) or of an ensemble (ensemble.json + members/)",
         )
         .required()
         .host_env(DIR_VAR),
@@ -118,7 +120,7 @@ pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "continuous-time timeline model: competing-outcome probabilities at any time from irregular records",
-        vec![predict_spec()],
+        vec![predict_spec(), train_spec(), eval_spec(), calibrate_spec()],
     )
 }
 
@@ -212,16 +214,33 @@ fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
     Ok(Request { subjects, histories, times, max_ood_score })
 }
 
-/// One request of patient histories: a forecast per history, as JSON lines
-/// and as the `forecasts` output.
-fn render_forecasts(saved: &Saved, histories: &[PatientHistory], req: &Request, scored: &[Scored]) -> ActionResult {
-    let identity = saved.identity().map_err(|e| format!("horizon: {e}"))?;
+/// One subject as every member of the model scored it: `(model, its scores)`.
+type Views<'a> = Vec<(&'a Saved, &'a Scored)>;
+
+/// One request of patient histories: a forecast per history (an ensemble's
+/// members combined into their mean and range), as JSON lines and as the
+/// `forecasts` output.
+fn render_forecasts(histories: &[PatientHistory], req: &Request, members: &[(&Saved, &[Scored])]) -> ActionResult {
     let forecast_request = ForecastRequest::new(req.times.iter().copied()).max_ood_score(req.max_ood_score);
+    let identities: Vec<_> = members
+        .iter()
+        .map(|(saved, _)| saved.identity().map_err(|e| format!("horizon: {e}")))
+        .collect::<Result<_, _>>()?;
     let forecasts: Vec<RiskForecast> = histories
         .iter()
-        .zip(scored)
-        .map(|(h, s)| RiskForecast::from_scored(saved, &identity, h, s, &forecast_request))
-        .collect();
+        .enumerate()
+        .map(|(i, h)| {
+            let parts: Vec<RiskForecast> = members
+                .iter()
+                .zip(&identities)
+                .map(|((saved, scored), identity)| RiskForecast::from_scored(saved, identity, h, &scored[i], &forecast_request))
+                .collect();
+            match parts.len() {
+                1 => Ok(parts.into_iter().next().expect("one part")),
+                _ => RiskForecast::ensemble(&parts).map_err(|e| format!("horizon: {e}")),
+            }
+        })
+        .collect::<Result<_, _>>()?;
     let mut out = String::new();
     for f in &forecasts {
         out.push_str(&serde_json::to_string(f).map_err(|e| format!("horizon: {e}"))?);
@@ -235,16 +254,35 @@ fn render_forecasts(saved: &Saved, histories: &[PatientHistory], req: &Request, 
 }
 
 /// One request's answer: a JSON line per subject.
-fn render(saved: &Saved, req: &Request, scored: &[Scored]) -> ActionResult {
+fn render(req: &Request, members: &[(&Saved, &[Scored])]) -> ActionResult {
     if let Some(histories) = &req.histories {
-        return render_forecasts(saved, histories, req, scored);
+        return render_forecasts(histories, req, members);
     }
-    Ok(render_subjects(saved, req, scored))
+    Ok(render_subjects(req, members))
 }
 
-fn render_subjects(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
+/// The assessment of the least-supported member: an ensemble is only as
+/// supported as its worst member says.
+fn weakest<'a>(views: &Views<'a>) -> &'a Scored {
+    views
+        .iter()
+        .map(|(_, s)| *s)
+        .max_by(|a, b| {
+            a.assessment
+                .ood_score
+                .partial_cmp(&b.assessment.ood_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("a model has at least one member")
+}
+
+fn render_subjects(req: &Request, members: &[(&Saved, &[Scored])]) -> Outcome {
+    let codes = &members[0].0.vocab.codes;
+    let n = members.len() as f64;
     let (mut out, mut abstained) = (String::new(), 0);
-    for (s, Scored { curves: c, assessment }) in req.subjects.iter().zip(scored) {
+    for (i, s) in req.subjects.iter().enumerate() {
+        let views: Views = members.iter().map(|(saved, scored)| (*saved, &scored[i])).collect();
+        let assessment = &weakest(&views).assessment;
         let mut support = json!({
             "supported": assessment.supported,
             "ood_score": assessment.ood_score,
@@ -253,7 +291,7 @@ fn render_subjects(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
         if !assessment.advisories.is_empty() {
             support["advisories"] = json!(assessment.advisories);
         }
-        if assessment.abstains(req.max_ood_score) {
+        if views.iter().any(|(_, v)| v.assessment.abstains(req.max_ood_score)) {
             abstained += 1;
             let line = json!({
                 "subject_id": s.subject_id,
@@ -265,43 +303,65 @@ fn render_subjects(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
             out.push('\n');
             continue;
         }
-        let cif: serde_json::Map<String, Value> = saved
-            .vocab
-            .codes
+        let cif_at = |k: usize, t: f64| views.iter().map(|(_, v)| v.curves.cif(k, t)).sum::<f64>() / n;
+        let cif: serde_json::Map<String, Value> = codes
             .iter()
             .enumerate()
-            .map(|(k, code)| {
-                (
-                    code.clone(),
-                    json!(req.times.iter().map(|&t| c.cif(k, t)).collect::<Vec<_>>()),
-                )
-            })
+            .map(|(k, code)| (code.clone(), json!(req.times.iter().map(|&t| cif_at(k, t)).collect::<Vec<_>>())))
             .collect();
         let mut line = json!({
             "subject_id": s.subject_id,
             "times": req.times,
-            "survival": req.times.iter().map(|&t| c.survival(t)).collect::<Vec<_>>(),
+            "survival": req.times.iter().map(|&t| views.iter().map(|(_, v)| v.curves.survival(t)).sum::<f64>() / n).collect::<Vec<_>>(),
             "cif": cif,
             "support": support,
         });
-        if let Some(cal) = &saved.calibration {
-            // `null` where the horizon is not calibrated: absent, never 0.
-            let per_code = |pick: &dyn Fn(Calibrated) -> Value| -> serde_json::Map<String, Value> {
-                saved
-                    .vocab
-                    .codes
+        if members.len() > 1 {
+            // The disagreement between the models trained apart.
+            let extreme = |pick: fn(f64, f64) -> f64, start: f64| -> serde_json::Map<String, Value> {
+                codes
+                    .iter()
+                    .enumerate()
+                    .map(|(k, code)| {
+                        let at = req.times.iter().map(|&t| views.iter().map(|(_, v)| v.curves.cif(k, t)).fold(start, pick));
+                        (code.clone(), Value::Array(at.map(|x| json!(x)).collect()))
+                    })
+                    .collect()
+            };
+            line["ensemble"] = json!({
+                "members": members.len(),
+                "cif_min": extreme(f64::min, f64::INFINITY),
+                "cif_max": extreme(f64::max, f64::NEG_INFINITY),
+            });
+        }
+        if views.iter().any(|(saved, _)| saved.calibration.is_some()) {
+            // `null` where any member is not calibrated at the horizon: absent,
+            // never 0.
+            let per_code = |pick: &dyn Fn(Calibrated) -> Value, mean: &dyn Fn(Vec<Value>) -> Value| -> serde_json::Map<String, Value> {
+                codes
                     .iter()
                     .enumerate()
                     .map(|(k, code)| {
                         let at = req.times.iter().map(|&t| {
-                            cal.apply(code, t, c.cif(k, t)).map_or(Value::Null, pick)
+                            let each: Option<Vec<Value>> = views
+                                .iter()
+                                .map(|(saved, v)| {
+                                    saved.calibration.as_ref()?.apply(code, t, v.curves.cif(k, t)).map(pick)
+                                })
+                                .collect();
+                            each.map_or(Value::Null, mean)
                         });
                         (code.clone(), Value::Array(at.collect()))
                     })
                     .collect()
             };
-            line["cif_calibrated"] = Value::Object(per_code(&|c| json!(c.risk)));
-            line["cif_interval"] = Value::Object(per_code(&|c| json!([c.lower, c.upper])));
+            let mean_of = |each: Vec<Value>| json!(each.iter().filter_map(Value::as_f64).sum::<f64>() / n);
+            let mean_pair = |each: Vec<Value>| {
+                let end = |j: usize| each.iter().filter_map(|v| v[j].as_f64()).sum::<f64>() / n;
+                json!([end(0), end(1)])
+            };
+            line["cif_calibrated"] = Value::Object(per_code(&|c| json!(c.risk), &mean_of));
+            line["cif_interval"] = Value::Object(per_code(&|c| json!([c.lower, c.upper]), &mean_pair));
         }
         out.push_str(&line.to_string());
         out.push('\n');
@@ -312,29 +372,34 @@ fn render_subjects(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
         .blob("predictions", Blob::new(Media::Text, out.into_bytes()))
 }
 
-/// `predict` on a loaded model: the work every surface shares.
-pub fn predict(saved: &Saved, inv: &Invocation) -> ActionResult {
-    predict_batch(saved, std::slice::from_ref(inv))
+/// `predict` on a loaded model or ensemble: the work every surface shares.
+pub fn predict(loaded: &impl Members, inv: &Invocation) -> ActionResult {
+    predict_batch(loaded, std::slice::from_ref(inv))
         .pop()
         .ok_or_else(|| "horizon: no result".to_string())?
 }
 
 /// Several `predict` requests through ONE forward pass over all their
-/// subjects (in device batches of the model's batch size), the curves split
-/// back per request, in order. A request that cannot be answered - a missing
-/// or malformed file, a time outside the model - fails alone: the others get
-/// their answers. A subject's curves never depend on the others in the pass
-/// (padding and neighbours are masked), so each answer equals the request run
-/// by itself.
-pub fn predict_batch(saved: &Saved, invs: &[Invocation]) -> Vec<ActionResult> {
-    let parsed: Vec<Result<Request, String>> =
-        invs.iter().map(|inv| parse_request(saved, inv)).collect();
+/// subjects (in device batches of the model's batch size; once per member of
+/// an ensemble), the curves split back per request, in order. A request that
+/// cannot be answered - a missing or malformed file, a time outside the model
+/// fails alone: the others get their answers. A subject's curves never
+/// depend on the others in the pass (padding and neighbours are masked), so
+/// each answer equals the request run by itself.
+pub fn predict_batch(loaded: &impl Members, invs: &[Invocation]) -> Vec<ActionResult> {
+    let lead = &loaded.members()[0];
+    let parsed: Vec<Result<Request, String>> = invs.iter().map(|inv| parse_request(lead, inv)).collect();
     let subjects: Vec<Subject> = parsed
         .iter()
         .flatten()
         .flat_map(|r| r.subjects.iter().cloned())
         .collect();
-    let curves = match saved.score(&subjects, &AssessOptions::default()) {
+    let scored: Result<Vec<Vec<Scored>>, String> = loaded
+        .members()
+        .iter()
+        .map(|m| m.score(&subjects, &AssessOptions::default()))
+        .collect();
+    let scored = match scored {
         Ok(c) => c,
         // Every subject was validated at parse time, so this is a device
         // failure: it is every valid request's failure, reported as such.
@@ -345,23 +410,29 @@ pub fn predict_batch(saved: &Saved, invs: &[Invocation]) -> Vec<ActionResult> {
                 .collect()
         }
     };
-    let mut rest = curves.as_slice();
+    let mut from = 0;
     parsed
         .into_iter()
         .map(|req| {
             let req = req?;
-            let (mine, tail) = rest.split_at(req.subjects.len());
-            rest = tail;
-            render(saved, &req, mine)
+            let range = from..from + req.subjects.len();
+            from = range.end;
+            let members: Vec<(&Saved, &[Scored])> = loaded
+                .members()
+                .iter()
+                .zip(&scored)
+                .map(|(saved, s)| (saved, &s[range.clone()]))
+                .collect();
+            render(&req, &members)
         })
         .collect()
 }
 
 /// The model loaded on first use, kept with the directory it came from.
-type Hot = Arc<Mutex<Option<(String, Saved)>>>;
+type Hot = Arc<Mutex<Option<(String, Loaded)>>>;
 
 /// The executable timeline model behind the manifest. Construction is free:
-/// the model loads on the first run and stays resident until another
+/// the model loads on the first `predict` and stays resident until another
 /// directory is asked for.
 #[derive(Default)]
 pub struct HorizonProvider {
@@ -379,11 +450,13 @@ impl Provider for HorizonProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "predict").then(|| {
-            Arc::new(PredictAction {
-                hot: self.hot.clone(),
-            }) as Arc<dyn Action>
-        })
+        match name {
+            "predict" => Some(Arc::new(PredictAction { hot: self.hot.clone() })),
+            "train" => Some(Arc::new(TrainAction)),
+            "eval" => Some(Arc::new(EvalAction)),
+            "calibrate" => Some(Arc::new(CalibrateAction)),
+            _ => None,
+        }
     }
 }
 
@@ -408,11 +481,49 @@ impl Action for PredictAction {
             *guard = None;
             *guard = Some((
                 dir.clone(),
-                Saved::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?,
+                Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?,
             ));
         }
         progress(Progress::step(1, 1, "predict"));
-        let (_, saved) = guard.as_ref().ok_or("horizon: no model loaded")?;
-        predict(saved, inv)
+        let (_, loaded) = guard.as_ref().ok_or("horizon: no model loaded")?;
+        predict(loaded, inv)
+    }
+}
+
+/// `train`: no model is loaded; see [`crate::lifecycle`].
+struct TrainAction;
+
+impl Action for TrainAction {
+    fn spec(&self) -> ActionSpec {
+        train_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        lifecycle::train(inv, progress)
+    }
+}
+
+struct EvalAction;
+
+impl Action for EvalAction {
+    fn spec(&self) -> ActionSpec {
+        eval_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let dir = inv.get_str("weights").ok_or("horizon: missing required param 'weights'")?;
+        let loaded = Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?;
+        progress(Progress::step(1, 1, "eval"));
+        lifecycle::eval(&loaded, inv)
+    }
+}
+
+struct CalibrateAction;
+
+impl Action for CalibrateAction {
+    fn spec(&self) -> ActionSpec {
+        calibrate_spec()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        progress(Progress::step(1, 1, "calibrate"));
+        lifecycle::calibrate(inv)
     }
 }

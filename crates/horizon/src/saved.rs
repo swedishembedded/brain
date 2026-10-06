@@ -73,7 +73,7 @@ pub struct Scored {
 }
 
 /// The SHA-256 of a file, as lowercase hex.
-fn file_digest(path: &Path) -> Result<String, String> {
+pub(crate) fn file_digest(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(hex(&Sha256::digest(&bytes)))
 }
@@ -304,6 +304,15 @@ impl Saved {
         Ok(())
     }
 
+    /// [`Saved::save`] into a new directory `dir`, atomically: see
+    /// [`write_dir_atomically`].
+    pub fn save_new(&self, dir: &Path, replace: bool) -> Result<(), String> {
+        if replace && dir.exists() && !dir.join(WEIGHTS_FILE).is_file() {
+            return Err(format!("{}: exists and is not a saved model: not replaced", dir.display()));
+        }
+        write_dir_atomically(dir, replace, |staging| self.save(staging))
+    }
+
     /// Each subject validated and encoded for this model.
     pub fn encode(&self, subjects: &[Subject]) -> Result<Vec<Encoded>, String> {
         subjects
@@ -348,6 +357,54 @@ impl Saved {
     pub fn horizon(&self) -> f64 {
         self.model.cfg.knots.last().map_or(0.0, |&k| f64::from(k))
     }
+}
+
+/// Fill a new directory `dir` with `write`, atomically: everything is written
+/// into a staging directory beside it and renamed into place only when `write`
+/// succeeded, so `dir` either holds the whole result or does not exist (a
+/// crash or a failure leaves nothing a loader could mistake for a model). An
+/// existing `dir` is refused unless `replace`, which swaps it only after the
+/// new one is complete.
+pub fn write_dir_atomically(
+    dir: &Path,
+    replace: bool,
+    write: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if dir.exists() && !replace {
+        return Err(format!("{}: already exists (not overwritten without force)", dir.display()));
+    }
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{}: not a usable directory name", dir.display()))?;
+    let parent = match dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let pid = std::process::id();
+    let staging = parent.join(format!(".{name}.new-{pid}"));
+    let backup = parent.join(format!(".{name}.old-{pid}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    let result = std::fs::create_dir(&staging)
+        .map_err(|e| format!("{}: {e}", staging.display()))
+        .and_then(|()| write(&staging))
+        .and_then(|()| {
+            let had_previous = dir.exists();
+            if had_previous {
+                std::fs::rename(dir, &backup).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            if let Err(e) = std::fs::rename(&staging, dir) {
+                if had_previous {
+                    let _ = std::fs::rename(&backup, dir);
+                }
+                return Err(format!("{}: {e}", dir.display()));
+            }
+            let _ = std::fs::remove_dir_all(&backup);
+            Ok(())
+        });
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 /// Subjects from `timeline-v1` text: one per non-blank line, each validated;

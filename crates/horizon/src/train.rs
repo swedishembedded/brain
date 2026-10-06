@@ -5,6 +5,9 @@
 //! owns the schedule, accumulation, clipping, early stopping and resume), and
 //! batched prediction.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use data::rng::Rng;
 use model::Objective;
 
@@ -19,6 +22,9 @@ pub struct TimelineObjective<'a> {
     held_out: Option<&'a [Encoded]>,
     mask_rate: f64,
     last_eval: Option<f32>,
+    /// Where every held-out evaluation is also reported, for a caller that
+    /// cannot reach the objective once the training loop owns it.
+    report_to: Option<Rc<Cell<Option<f32>>>>,
 }
 
 impl<'a> TimelineObjective<'a> {
@@ -35,7 +41,14 @@ impl<'a> TimelineObjective<'a> {
             held_out,
             mask_rate,
             last_eval: None,
+            report_to: None,
         }
+    }
+
+    /// Also write each held-out event NLL into `cell` as it is measured.
+    pub fn report_held_out_to(mut self, cell: Rc<Cell<Option<f32>>>) -> Self {
+        self.report_to = Some(cell);
+        self
     }
 }
 
@@ -62,6 +75,9 @@ impl Objective<Horizon> for TimelineObjective<'_> {
         let held_out = self.held_out?;
         let loss = event_nll(model, held_out);
         self.last_eval = Some(loss);
+        if let Some(cell) = &self.report_to {
+            cell.set(Some(loss));
+        }
         Some(loss)
     }
 
