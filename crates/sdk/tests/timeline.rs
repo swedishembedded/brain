@@ -101,6 +101,39 @@ fn visit_backbones_save_and_load() {
     }
 }
 
+/// Each mixer of the stack backbone trains, saves and loads: the loaded model
+/// predicts exactly the curves the trained one does.
+#[test]
+fn stack_mixers_save_and_load() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use brain::timeline::synthetic::drifting::{self, Gaps};
+    use brain::timeline::Mixer;
+    let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 2.0), visits: (1, 4) };
+    let (train, _) = drifting::population(2000, 1, &gaps, 10.0);
+    let (held_out, _) = drifting::population(300, 2, &gaps, 10.0);
+    for (mixer, blocks) in [(Mixer::Attention, 2), (Mixer::GatedDeltaNet, 2), (Mixer::Hybrid, 4)] {
+        let spec = TimelineSpec::new([drifting::CODE], [drifting::CODE])
+            .knots(vec![0.0, 2.0, 5.0, 10.0])
+            .max_tokens(8)
+            .steps(60)
+            .batch(64)
+            .visits(4)
+            .mixer(mixer, blocks);
+        let (model, _) = TimelineModel::train(&train, &held_out, &spec).unwrap();
+        let dir = std::env::temp_dir().join(format!("brain-timeline-stack-{mixer:?}-{}", std::process::id()));
+        model.save(&dir).unwrap();
+        let loaded = TimelineModel::load(&dir).unwrap();
+        assert_eq!(loaded.config().backbone, model.config().backbone, "{mixer:?}");
+        let (a, b) = (model.predict(&held_out[..40]).unwrap(), loaded.predict(&held_out[..40]).unwrap());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.cif(drifting::CODE, 5.0), y.cif(drifting::CODE, 5.0), "{mixer:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 /// The next-event group trains beside the outcomes, saves with the model and
 /// reads back identically; its first-event probabilities add up to the
 /// probability that any event has happened, and the held-out event NLL

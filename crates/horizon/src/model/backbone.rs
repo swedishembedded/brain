@@ -37,6 +37,7 @@
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use super::*;
+use super::stack::StackBufs;
 use crate::config::Backbone;
 
 /// The rotary base of the attention arm: with times in years and heads of a
@@ -87,6 +88,7 @@ pub(super) struct AttnBufs {
 pub(super) enum BackboneBufs {
     State(StateBufs),
     Attention(AttnBufs),
+    Stack(Box<StackBufs>),
 }
 
 impl BackboneBufs {
@@ -106,6 +108,7 @@ impl BackboneBufs {
                 d_xg: st(s * 2 * d),
                 part: st(bb * 2 * d),
             }),
+            Backbone::Stack(_) => BackboneBufs::Stack(Box::new(StackBufs::new(gpu, cfg, b))),
             Backbone::Attention => {
                 let t = vs + 1;
                 let rows = (b * t) as u64;
@@ -153,9 +156,21 @@ impl BackboneBufs {
 
     /// Upload the batch's per-visit inputs.
     pub(super) fn write(&self, gpu: &Gpu, hb: &HostBatch) {
-        if let BackboneBufs::Attention(a) = self {
-            gpu.write_f32(&a.pos, &hb.seq_pos);
-            gpu.write(&a.keep, &hb.seq_keep);
+        match self {
+            BackboneBufs::State(_) => {}
+            BackboneBufs::Attention(a) => {
+                gpu.write_f32(&a.pos, &hb.seq_pos);
+                gpu.write(&a.keep, &hb.seq_keep);
+            }
+            BackboneBufs::Stack(k) => k.write(gpu, hb),
+        }
+    }
+
+    /// Buffers the forward pass must find zeroed (it accumulates into them).
+    pub(super) fn forward_cleared(&self) -> Vec<&DeviceBuffer> {
+        match self {
+            BackboneBufs::Stack(k) => k.forward_cleared(),
+            _ => Vec::new(),
         }
     }
 
@@ -164,6 +179,7 @@ impl BackboneBufs {
         match self {
             BackboneBufs::State(_) => Vec::new(),
             BackboneBufs::Attention(a) => vec![&a.d_ctx],
+            BackboneBufs::Stack(k) => k.cleared(),
         }
     }
 }
@@ -194,6 +210,7 @@ impl Horizon {
                 ),
             ],
             Some(BackboneBufs::Attention(a)) => self.attention_forward_steps(a),
+            Some(BackboneBufs::Stack(k)) => self.stack_forward_steps(k),
         }
     }
 
@@ -211,17 +228,22 @@ impl Horizon {
         }
     }
 
-    /// Rotate the q and k regions of `qkv` by each row's time (`dir` 1), or
-    /// back (`dir` -1, the adjoint).
-    fn rope(&self, a: &AttnBufs, qkv: &DeviceBuffer, dir: f32) -> [Step; 2] {
+    /// Rotate the q and k regions of `qkv` (`rows` rows) by each row's time
+    /// in `pos` (`dir` 1), or back (`dir` -1, the adjoint).
+    pub(super) fn rope(
+        &self,
+        pos: &DeviceBuffer,
+        qkv: &DeviceBuffer,
+        rows: u32,
+        dir: f32,
+    ) -> [Step; 2] {
         let d = self.cfg.d_model;
         let (h, hd) = (self.cfg.n_heads, d / self.cfg.n_heads);
-        let rows = self.b * (self.cfg.visits + 1);
         let threads = rows * h * (hd / 2);
         let step = |off: u32| {
             self.gpu.step(
                 ROPE_POS,
-                &[&a.pos, qkv],
+                &[pos, qkv],
                 &[
                     rows,
                     h,
@@ -279,7 +301,7 @@ impl Horizon {
                 rows * 3 * d,
             ),
         ];
-        steps.extend(self.rope(a, &a.qkv, 1.0));
+        steps.extend(self.rope(&a.pos, &a.qkv, rows, 1.0));
         let mut attn = block::bidir_fwd(g, &BIDIR, &att, &a.qkv, &a.scores, &a.probs, &a.ctx);
         // Unused visit slots are never keys.
         attn.insert(
@@ -326,6 +348,7 @@ impl Horizon {
                 )]
             }
             Some(BackboneBufs::Attention(a)) => return self.attention_backward_steps(a),
+            Some(BackboneBufs::Stack(k)) => return self.stack_backward_steps(k),
             Some(BackboneBufs::State(v)) => v,
         };
         let mut steps = vec![g.step(
@@ -399,7 +422,7 @@ impl Horizon {
             &a.d_scores,
             &a.d_qkv,
         ));
-        steps.extend(self.rope(a, &a.d_qkv, -1.0));
+        steps.extend(self.rope(&a.pos, &a.d_qkv, rows, -1.0));
         steps.extend(self.bias_grad(&a.d_qkv, gr("visit.attn.qkv.bias"), rows, 3 * d));
         steps.extend(self.mm_dw(
             &a.d_qkv,

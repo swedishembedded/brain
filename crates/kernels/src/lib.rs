@@ -460,6 +460,10 @@ pub const GDN_DECAY_SCALE: &str = include_str!("../wgsl/gdn_decay_scale.wgsl");
 pub const GDN_DECAY_SCALE_BWD: &str = include_str!("../wgsl/gdn_decay_scale_bwd.wgsl");
 /// `wgsl/gdn_decay_scale_bwd_last.wgsl`
 pub const GDN_DECAY_SCALE_BWD_LAST: &str = include_str!("../wgsl/gdn_decay_scale_bwd_last.wgsl");
+/// `wgsl/gdn_gap_gate.wgsl`
+pub const GDN_GAP_GATE: &str = include_str!("../wgsl/gdn_gap_gate.wgsl");
+/// `wgsl/gdn_gap_gate_bwd.wgsl`
+pub const GDN_GAP_GATE_BWD: &str = include_str!("../wgsl/gdn_gap_gate_bwd.wgsl");
 /// `wgsl/gdn_layout_permute.wgsl`
 pub const GDN_LAYOUT_PERMUTE: &str = include_str!("../wgsl/gdn_layout_permute.wgsl");
 /// `wgsl/gdn_mask_strict_lower.wgsl`
@@ -1471,6 +1475,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gdn_decay_scale", GDN_DECAY_SCALE),
     ("gdn_decay_scale_bwd", GDN_DECAY_SCALE_BWD),
     ("gdn_decay_scale_bwd_last", GDN_DECAY_SCALE_BWD_LAST),
+    ("gdn_gap_gate", GDN_GAP_GATE),
+    ("gdn_gap_gate_bwd", GDN_GAP_GATE_BWD),
     ("gdn_layout_permute", GDN_LAYOUT_PERMUTE),
     ("gdn_mask_strict_lower", GDN_MASK_STRICT_LOWER),
     ("gdn_mask_strict_lower_bwd", GDN_MASK_STRICT_LOWER_BWD),

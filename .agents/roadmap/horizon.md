@@ -240,9 +240,13 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    the angle negated): a query token at the prediction time attends over the
    visits; gradient-checked on the CPU JIT, wgpu and CUDA. On the same test both backbones
    beat the single set in and out of distribution, the state closer in
-   distribution and the attention out of it (one data seed). Open: the
-   matrix-state delta rule (the existing GDN recurrence with the decay made
-   physical).
+   distribution and the attention out of it (one data seed). The
+   matrix-state delta rule is done as `Backbone::Stack` with
+   `Mixer::GatedDeltaNet` (`model::stack`; `gdn_gap_gate` makes the existing
+   chunked GDN recurrence's decay `-softplus(rate) * elapsed time`, per head,
+   padding passing the state through): block stacks of attention, GDN or a 3:1
+   hybrid, gradient-checked on the CPU JIT and CUDA, CPU/device parity,
+   batch-independence and long-gap-forgetting tests (`tests/stack.rs`).
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
    weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
    and Uno concordance with competing causes; IPCW Brier score and its

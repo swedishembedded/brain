@@ -40,7 +40,7 @@ pub use horizon::synthetic;
 pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
 pub use horizon::HorizonConfig as TimelineConfig;
-pub use horizon::Backbone;
+pub use horizon::{Backbone, Mixer, StackConfig};
 
 use crate::{Error, Result};
 
@@ -193,6 +193,16 @@ impl TimelineSpec {
     pub fn backbone(mut self, backbone: Backbone) -> Self {
         self.backbone = Some(backbone);
         self
+    }
+    /// Carry the visits (see [`TimelineSpec::visits`], which this needs)
+    /// through a stack of `blocks` residual blocks that mix the visit
+    /// sequence as `mixer`: [`Mixer::Attention`], [`Mixer::GatedDeltaNet`]
+    /// (a matrix-state delta rule whose decay is the exponential of the
+    /// physical time between visits) or [`Mixer::Hybrid`] (three Gated
+    /// DeltaNet blocks to every attention block). The same as
+    /// [`TimelineSpec::backbone`] with a [`Backbone::Stack`].
+    pub fn mixer(self, mixer: Mixer, blocks: u32) -> Self {
+        self.backbone(Backbone::Stack(StackConfig::new(mixer, blocks)))
     }
     /// Also model which of `events` (event codes, outcome codes or not) is the
     /// FIRST to happen after the prediction time, and when, weighted `weight`

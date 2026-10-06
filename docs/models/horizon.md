@@ -81,6 +81,49 @@ distribution; the state is the closer of the two in distribution and the
 attention out of it, on one seed of the data - which ships is a measurement
 on the data at hand.
 
+### A stack of sequence mixers over the visits
+
+`Backbone::Stack(StackConfig { mixer, blocks, hybrid_period })` (SDK:
+`TimelineSpec::visits(n).mixer(Mixer::..., blocks)`) replaces the single
+state or attention layer with `blocks` residual blocks over the visit
+sequence, in brain's usual pre-norm style: `x += Mixer(LN(x))`, then
+`x += MLP(LN(x))`. A subject's sequence is its visit slots in time order, a
+query token at the prediction time, and padding up to a whole number of
+chunks of the delta rule; the state the heads read is the final-norm output at
+the query row. `Mixer` says what each block mixes with:
+
+- `Mixer::Attention`: bidirectional multi-head attention over the visits,
+  rotary angles from each row's real time relative to the prediction time
+  (every visit precedes it, so visits seeing each other leaks nothing); unused
+  slots and padding are never keys.
+- `Mixer::GatedDeltaNet`: the matrix-state delta rule of `model::gdn` (the
+  recurrence the Qwen3.5 mixer trains with, on the same chunked kernels and
+  their hand-written backward), per head, with unit-norm `q` and `k`:
+  `S_t = exp(g_t) S_{t-1} (I - beta_t k_t k_t^T) + beta_t v_t k_t^T`,
+  `o_t = S_t q_t / sqrt(d_head)`. The decay is gap-aware:
+  `g_t = -softplus(rate_h) * dt_t`, with `dt_t` the physical time since the
+  previous visit (for the query, since the last visit) and `rate_h` a learned
+  rate per head per unit of time, so a longer gap decays more, exactly as the
+  diagonal state's exponential does, and a gap longer than any in training
+  extrapolates by the same exponential. The raw rates start log-spaced from
+  days to a century (as the diagonal state's do). An unused visit slot or a
+  padding row has `dt < 0`: it neither decays nor writes, and the recurrence
+  passes the state through it, so a subject's prediction is the same however
+  many empty slots or neighbours surround it (`tests/stack.rs`). `beta_t` is a
+  sigmoid of a projection of the token, so each visit decides how strongly it
+  overwrites what the state holds along its key. A new visit costs one more
+  recurrent step.
+- `Mixer::Hybrid`: Gated DeltaNet blocks with a full-attention block as every
+  `hybrid_period`-th block (default 4: three recurrent blocks to one attention
+  block, the last block of each group attending).
+
+The existing kernels cover the recurrence and its backward unchanged; the
+only new ones are the two elementwise gates, `gdn_gap_gate` (the log-decay
+from the elapsed time and the write strength, zero on padding) and its
+backward. `Backbone::State` and `Backbone::Attention` are untouched: their
+parameters, outputs and checkpoints read as before, and a configuration
+without a stack deserialises to what it did.
+
 With `TimelineSpec::next_events(codes, weight)` the hazard head carries a
 second group of columns after the outcome codes: the codes in the group
 compete for being the FIRST to happen after the prediction time, whether or
@@ -216,6 +259,14 @@ the host's, never a request parameter.
 - An event at exactly the entry time is neither history nor outcome: history
   is strictly before entry, outcomes strictly after.
 - The population state the visit state reverts to is one constant per
-  channel, not yet a function of age and calendar time.
+  channel, not yet a function of age and calendar time. A Gated DeltaNet
+  stack has no population state: its matrix decays towards zero over a long
+  gap, and the query token (a learned embedding) is what a far prediction
+  reads.
+- A Gated DeltaNet block has one decay rate per head, not per channel, and
+  the rate does not depend on the token; the delta rule's write strength does.
+- The stack's rows per subject are the visit slots plus the query, padded to
+  chunks of at most 16, so a model with many visit slots pays for the padding
+  and the chunked recurrence in sequence length.
 - Curves are held constant past the last knot; the model says nothing about
   later times.

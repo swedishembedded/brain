@@ -31,6 +31,7 @@ use serde_json::Value;
 mod additive;
 mod backbone;
 mod forecast;
+mod stack;
 
 use crate::batch::HostBatch;
 use crate::config::HorizonConfig;
@@ -76,6 +77,39 @@ const MATMUL_DW_SPLITK: usize = 46;
 const DW_SPLITK_REDUCE: usize = 47;
 const LN_DGAMMA_PART: usize = 48;
 const EMB_BWD_PART: usize = 49;
+// The Gated DeltaNet recurrence (`model::gdn`) and its two gates.
+const BMM: usize = 50;
+const BMM_ACC: usize = 51;
+const GDN_CHUNK_CUMSUM_STEP: usize = 52;
+const GDN_DECAY_MASK: usize = 53;
+const GDN_MASK_STRICT_LOWER: usize = 54;
+const GDN_UT_STEP: usize = 55;
+const GDN_ADD_IDENTITY: usize = 56;
+const SCALE_ROW: usize = 57;
+const GDN_ROW_SCALE_OFF: usize = 58;
+const GDN_DECAY_SCALE: usize = 59;
+const GDN_STATE_DECAY: usize = 60;
+const EXP: usize = 61;
+const SUB: usize = 62;
+const REGION_COPY: usize = 63;
+const SPLICE_ADD: usize = 64;
+const ROW_DOT: usize = 65;
+const SCALE_ADD: usize = 66;
+const GDN_CHUNK_REVERSE_CUMSUM_STEP: usize = 67;
+const GDN_UT_BWD_DATTN0: usize = 68;
+const GDN_UT_BWD_DTMAT: usize = 69;
+const GDN_MASK_STRICT_LOWER_BWD: usize = 70;
+const GDN_DECAY_MASK_BWD: usize = 71;
+const GDN_DECAY_SCALE_BWD: usize = 72;
+const GDN_DECAY_SCALE_BWD_LAST: usize = 73;
+const GDN_STATE_DECAY_BWD_DSCALE: usize = 74;
+const GDN_UT_FWD: usize = 75;
+const BMM_TILED: usize = 76;
+const GDN_LAYOUT_PERMUTE: usize = 77;
+const L2NORM_SCALE: usize = 78;
+const L2NORM_SCALE_DX: usize = 79;
+const GDN_GAP_GATE: usize = 80;
+const GDN_GAP_GATE_BWD: usize = 81;
 /// Partial gradients the token-table backward may hold at once: bounds its
 /// row blocks for a large vocabulary.
 const EMB_PART_ELEMS: u64 = 1 << 22;
@@ -165,6 +199,39 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
     ("layernorm_dgamma_part", kernels::LAYERNORM_DGAMMA_PART),
     ("emb_bwd_part", kernels::EMB_BWD_PART),
+    // The Gated DeltaNet mixer of the visit stack.
+    ("bmm", kernels::BMM),
+    ("bmm_acc", kernels::BMM_ACC),
+    ("gdn_chunk_cumsum_step", kernels::GDN_CHUNK_CUMSUM_STEP),
+    ("gdn_decay_mask", kernels::GDN_DECAY_MASK),
+    ("gdn_mask_strict_lower", kernels::GDN_MASK_STRICT_LOWER),
+    ("gdn_ut_step", kernels::GDN_UT_STEP),
+    ("gdn_add_identity", kernels::GDN_ADD_IDENTITY),
+    ("scale_row", kernels::SCALE_ROW),
+    ("gdn_row_scale_off", kernels::GDN_ROW_SCALE_OFF),
+    ("gdn_decay_scale", kernels::GDN_DECAY_SCALE),
+    ("gdn_state_decay", kernels::GDN_STATE_DECAY),
+    ("exp", kernels::EXP),
+    ("sub", kernels::SUB),
+    ("region_copy", kernels::REGION_COPY),
+    ("splice_add", kernels::SPLICE_ADD),
+    ("row_dot", kernels::ROW_DOT),
+    ("scale_add", kernels::SCALE_ADD),
+    ("gdn_chunk_reverse_cumsum_step", kernels::GDN_CHUNK_REVERSE_CUMSUM_STEP),
+    ("gdn_ut_bwd_dattn0", kernels::GDN_UT_BWD_DATTN0),
+    ("gdn_ut_bwd_dtmat", kernels::GDN_UT_BWD_DTMAT),
+    ("gdn_mask_strict_lower_bwd", kernels::GDN_MASK_STRICT_LOWER_BWD),
+    ("gdn_decay_mask_bwd", kernels::GDN_DECAY_MASK_BWD),
+    ("gdn_decay_scale_bwd", kernels::GDN_DECAY_SCALE_BWD),
+    ("gdn_decay_scale_bwd_last", kernels::GDN_DECAY_SCALE_BWD_LAST),
+    ("gdn_state_decay_bwd_dscale", kernels::GDN_STATE_DECAY_BWD_DSCALE),
+    ("gdn_ut_fwd", kernels::GDN_UT_FWD),
+    ("bmm_tiled", kernels::BMM_TILED),
+    ("gdn_layout_permute", kernels::GDN_LAYOUT_PERMUTE),
+    ("l2norm_scale", kernels::L2NORM_SCALE),
+    ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX),
+    ("gdn_gap_gate", kernels::GDN_GAP_GATE),
+    ("gdn_gap_gate_bwd", kernels::GDN_GAP_GATE_BWD),
     // Cooperative grad-norm, resolved by name by `optim::Optim`. Kept last:
     // the optimiser finds them by name, not by index.
     ("gradnorm_part", kernels::GRADNORM_PART),
@@ -329,6 +396,13 @@ impl Horizon {
         let input = |label: &str, words: u64| {
             gpu.buffer(label, words * 4, BufUsage::STORAGE | BufUsage::COPY_DST)
         };
+        // Rows the stack backbone's blocks normalise at once (LayerNorm
+        // statistics are shared scratch).
+        let stack_rows = if cfg.visits > 0 && cfg.stack().is_some() {
+            b as u64 * cfg.stack_layout().1 as u64
+        } else {
+            0
+        };
         let inp = Inputs {
             token_ids: input("token_ids", bn),
             keep: input("keep", bn),
@@ -406,8 +480,8 @@ impl Horizon {
             d_up_pre: st(bn * ff),
             d_gam: st(bn * d),
             d_phi: st(bn * d),
-            ln_mean: st(bn),
-            ln_inv: st(bn),
+            ln_mean: st(bn.max(stack_rows)),
+            ln_inv: st(bn.max(stack_rows)),
             bias_part: st(BIAS_GRAD_CHUNKS as u64 * (3 * d).max(ff).max(k).max(r)),
             emb_blocks: emb_blocks(&cfg),
             emb_part: st(emb_blocks(&cfg) as u64 * cfg.vocab as u64 * d),
@@ -637,6 +711,133 @@ impl Horizon {
         ]
     }
 
+    /// The adjoint of `y = LN(x) * gamma + beta` from `dy`: the parameter
+    /// gradients and `dx` (assigned), for the LayerNorm whose parameters are
+    /// named `(gamma, beta)`.
+    fn ln_backward_steps(
+        &self,
+        x: &DeviceBuffer,
+        (gamma, beta): (&str, &str),
+        dy: &DeviceBuffer,
+        dx: &DeviceBuffer,
+        rows: u32,
+    ) -> Vec<Step> {
+        let d = self.cfg.d_model;
+        let mut s = vec![block::ln_stats_fwd(
+            &self.gpu,
+            &LN_IDS,
+            x,
+            &self.ln_mean,
+            &self.ln_inv,
+            d,
+            rows,
+            LN_EPS,
+        )];
+        s.extend(self.ln_param_grads(dy, x, self.ps.g(gamma), self.ps.g(beta), d, rows));
+        s.push(block::layernorm_dx_bwd(
+            &self.gpu,
+            &LN_IDS,
+            x,
+            self.w(gamma),
+            dy,
+            dx,
+            d,
+            rows,
+            LN_EPS,
+        ));
+        s
+    }
+
+    /// The feed-forward sublayer of a pre-norm block over `rows` rows,
+    /// `out = x_mid + MLP(LN(x_mid))` with the parameters named
+    /// `{prefix}ln2.*` and `{prefix}ffn.*`. `(ln2_out, up_pre, up, ffn_out)`
+    /// are the block's activation buffers (the backward reads the first three).
+    fn mlp_forward_steps(
+        &self,
+        prefix: &str,
+        rows: u32,
+        x_mid: &DeviceBuffer,
+        (ln2_out, up_pre, up, ffn_out): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer),
+        out: &DeviceBuffer,
+    ) -> Vec<Step> {
+        let g = &self.gpu;
+        let (d, ff) = (self.cfg.d_model, self.cfg.d_ff);
+        let pn = |name: &str| self.w(&format!("{prefix}{name}"));
+        vec![
+            block::layernorm_fwd(
+                g,
+                &LN_IDS,
+                x_mid,
+                pn("ln2.weight"),
+                pn("ln2.bias"),
+                ln2_out,
+                d,
+                rows,
+                LN_EPS,
+            ),
+            self.mm(ln2_out, pn("ffn.up.weight"), up_pre, rows, d, ff),
+            g.step(
+                BIAS_ADD,
+                &[up_pre, pn("ffn.up.bias")],
+                &[rows, ff],
+                rows * ff,
+            ),
+            g.step(GELU, &[up_pre, up], &[rows * ff], rows * ff),
+            self.mm(up, pn("ffn.down.weight"), ffn_out, rows, ff, d),
+            g.step(
+                BIAS_ADD,
+                &[ffn_out, pn("ffn.down.bias")],
+                &[rows, d],
+                rows * d,
+            ),
+            g.step(ADD2, &[x_mid, ffn_out, out], &[rows * d], rows * d),
+        ]
+    }
+
+    /// The adjoint of [`Self::mlp_forward_steps`]: from `d_out` (the gradient
+    /// of the sublayer's output) the sublayer's parameter gradients and the
+    /// gradient of `x_mid` (`d_xmid`, assigned: the skip path plus the MLP
+    /// path). `scratch` is `(d_up, d_up_pre, d_branch, d_tmp)`.
+    fn mlp_backward_steps(
+        &self,
+        prefix: &str,
+        rows: u32,
+        x_mid: &DeviceBuffer,
+        (ln2_out, up_pre, up): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer),
+        d_out: &DeviceBuffer,
+        (d_up, d_up_pre, d_branch, d_tmp): (&DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer),
+        d_xmid: &DeviceBuffer,
+    ) -> Vec<Step> {
+        let g = &self.gpu;
+        let (d, ff) = (self.cfg.d_model, self.cfg.d_ff);
+        let pn = |name: &str| format!("{prefix}{name}");
+        let gr = |name: &str| self.ps.g(&pn(name));
+        let w = |name: &str| self.w(&pn(name));
+        let mut s: Vec<Step> = self.bias_grad(d_out, gr("ffn.down.bias"), rows, d).into();
+        s.extend(self.mm_dw(d_out, up, gr("ffn.down.weight"), rows, ff, d));
+        s.extend([
+            self.mm_dx(d_out, w("ffn.down.weight"), d_up, rows, ff, d, 0),
+            g.step(
+                GELU_BWD,
+                &[up_pre, d_up, d_up_pre],
+                &[rows * ff],
+                rows * ff,
+            ),
+        ]);
+        s.extend(self.bias_grad(d_up_pre, gr("ffn.up.bias"), rows, ff));
+        s.extend(self.mm_dw(d_up_pre, ln2_out, gr("ffn.up.weight"), rows, d, ff));
+        s.push(self.mm_dx(d_up_pre, w("ffn.up.weight"), d_branch, rows, d, ff, 0));
+        s.extend(self.ln_backward_steps(
+            x_mid,
+            (&pn("ln2.weight"), &pn("ln2.bias")),
+            d_branch,
+            d_tmp,
+            rows,
+        ));
+        s.push(g.step(ADD2, &[d_out, d_tmp, d_xmid], &[rows * d], rows * d));
+        s
+    }
+
     /// The token embedding `e = gamma[tok] * (value_bins @ Wv^T) + beta[tok]
     /// + time_bins @ Wt^T`, into `res[0]`; shared by both encoders.
     fn embedding_steps(&self) -> Vec<Step> {
@@ -688,7 +889,7 @@ impl Horizon {
         let c = &self.cfg;
         let g = &self.gpu;
         let i = &self.inp;
-        let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
+        let (n, d, r) = (c.max_tokens, c.d_model, c.rank);
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let mut s = self.embedding_steps();
@@ -752,51 +953,12 @@ impl Horizon {
                 &[bn * d],
                 bn * d,
             ));
-            s.push(block::layernorm_fwd(
-                g,
-                &LN_IDS,
+            s.extend(self.mlp_forward_steps(
+                &format!("blocks.{l}."),
+                bn,
                 &lb.xmid,
-                self.w(&pn("ln2.weight")),
-                self.w(&pn("ln2.bias")),
-                &lb.ln2_out,
-                d,
-                bn,
-                LN_EPS,
-            ));
-            s.push(self.mm(
-                &lb.ln2_out,
-                self.w(&pn("ffn.up.weight")),
-                &lb.up_pre,
-                bn,
-                d,
-                ff,
-            ));
-            s.push(g.step(
-                BIAS_ADD,
-                &[&lb.up_pre, self.w(&pn("ffn.up.bias"))],
-                &[bn, ff],
-                bn * ff,
-            ));
-            s.push(g.step(GELU, &[&lb.up_pre, &lb.up], &[bn * ff], bn * ff));
-            s.push(self.mm(
-                &lb.up,
-                self.w(&pn("ffn.down.weight")),
-                &self.ffn_out,
-                bn,
-                ff,
-                d,
-            ));
-            s.push(g.step(
-                BIAS_ADD,
-                &[&self.ffn_out, self.w(&pn("ffn.down.bias"))],
-                &[bn, d],
-                bn * d,
-            ));
-            s.push(g.step(
-                ADD2,
-                &[&lb.xmid, &self.ffn_out, &self.res[l + 1]],
-                &[bn * d],
-                bn * d,
+                (&lb.ln2_out, &lb.up_pre, &lb.up, &self.ffn_out),
+                &self.res[l + 1],
             ));
         }
         let last = &self.res[c.n_layers as usize];
@@ -898,7 +1060,7 @@ impl Horizon {
         let g = &self.gpu;
         let i = &self.inp;
         let gr = |name: &str| self.ps.g(name);
-        let (n, d, ff, r) = (c.max_tokens, c.d_model, c.d_ff, c.rank);
+        let (n, d, r) = (c.max_tokens, c.d_model, c.rank);
         let (p, k, nf) = (c.pieces(), c.n_codes, c.time_features());
         let (bn, bp, b) = (self.sets * n, self.b * p, self.b);
         let last = c.n_layers as usize;
@@ -999,121 +1161,25 @@ impl Horizon {
             ),
         ]);
         s.extend(self.state_backward_steps());
-        s.extend(vec![
-            // final norm
-            block::ln_stats_fwd(
-                g,
-                &LN_IDS,
-                &self.res[last],
-                &self.ln_mean,
-                &self.ln_inv,
-                d,
-                bn,
-                LN_EPS,
-            ),
-        ]);
-        s.extend(self.ln_param_grads(
-            &self.d_xf,
+        s.extend(self.ln_backward_steps(
             &self.res[last],
-            gr("ln_f.weight"),
-            gr("ln_f.bias"),
-            d,
+            ("ln_f.weight", "ln_f.bias"),
+            &self.d_xf,
+            &self.dres[last],
             bn,
         ));
-        s.extend(vec![
-            block::layernorm_dx_bwd(
-                g,
-                &LN_IDS,
-                &self.res[last],
-                self.w("ln_f.weight"),
-                &self.d_xf,
-                &self.dres[last],
-                d,
-                bn,
-                LN_EPS,
-            ),
-        ]);
         let a = self.bidir();
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
-            // MLP
-            s.extend(self.bias_grad(&self.dres[l + 1], gr(&pn("ffn.down.bias")), bn, d));
-            s.extend(self.mm_dw(
+            s.extend(self.mlp_backward_steps(
+                &format!("blocks.{l}."),
+                bn,
+                &lb.xmid,
+                (&lb.ln2_out, &lb.up_pre, &lb.up),
                 &self.dres[l + 1],
-                &lb.up,
-                gr(&pn("ffn.down.weight")),
-                bn,
-                ff,
-                d,
-            ));
-            s.push(self.mm_dx(
-                &self.dres[l + 1],
-                self.w(&pn("ffn.down.weight")),
-                &self.d_up,
-                bn,
-                ff,
-                d,
-                0,
-            ));
-            s.push(g.step(
-                GELU_BWD,
-                &[&lb.up_pre, &self.d_up, &self.d_up_pre],
-                &[bn * ff],
-                bn * ff,
-            ));
-            s.extend(self.bias_grad(&self.d_up_pre, gr(&pn("ffn.up.bias")), bn, ff));
-            s.extend(self.mm_dw(
-                &self.d_up_pre,
-                &lb.ln2_out,
-                gr(&pn("ffn.up.weight")),
-                bn,
-                d,
-                ff,
-            ));
-            s.push(self.mm_dx(
-                &self.d_up_pre,
-                self.w(&pn("ffn.up.weight")),
-                &self.d_branch,
-                bn,
-                d,
-                ff,
-                0,
-            ));
-            s.push(block::ln_stats_fwd(
-                g,
-                &LN_IDS,
-                &lb.xmid,
-                &self.ln_mean,
-                &self.ln_inv,
-                d,
-                bn,
-                LN_EPS,
-            ));
-            s.extend(self.ln_param_grads(
-                &self.d_branch,
-                &lb.xmid,
-                gr(&pn("ln2.weight")),
-                gr(&pn("ln2.bias")),
-                d,
-                bn,
-            ));
-            s.push(block::layernorm_dx_bwd(
-                g,
-                &LN_IDS,
-                &lb.xmid,
-                self.w(&pn("ln2.weight")),
-                &self.d_branch,
-                &self.d_tmp,
-                d,
-                bn,
-                LN_EPS,
-            ));
-            s.push(g.step(
-                ADD2,
-                &[&self.dres[l + 1], &self.d_tmp, &self.dxmid],
-                &[bn * d],
-                bn * d,
+                (&self.d_up, &self.d_up_pre, &self.d_branch, &self.d_tmp),
+                &self.dxmid,
             ));
             // attention
             s.extend(self.bias_grad(&self.dxmid, gr(&pn("attn.out.bias")), bn, d));
@@ -1155,34 +1221,12 @@ impl Horizon {
                 3 * d,
                 0,
             ));
-            s.push(block::ln_stats_fwd(
-                g,
-                &LN_IDS,
+            s.extend(self.ln_backward_steps(
                 &self.res[l],
-                &self.ln_mean,
-                &self.ln_inv,
-                d,
-                bn,
-                LN_EPS,
-            ));
-            s.extend(self.ln_param_grads(
-                &self.d_branch,
-                &self.res[l],
-                gr(&pn("ln1.weight")),
-                gr(&pn("ln1.bias")),
-                d,
-                bn,
-            ));
-            s.push(block::layernorm_dx_bwd(
-                g,
-                &LN_IDS,
-                &self.res[l],
-                self.w(&pn("ln1.weight")),
+                (&pn("ln1.weight"), &pn("ln1.bias")),
                 &self.d_branch,
                 &self.d_tmp,
-                d,
                 bn,
-                LN_EPS,
             ));
             s.push(g.step(
                 ADD2,
@@ -1222,7 +1266,8 @@ impl Horizon {
 
     /// Submit the forward pass (no readback).
     pub fn forward_submit(&self) {
-        self.gpu.submit(&[], &self.fwd);
+        let clears = self.bb.as_ref().map_or_else(Vec::new, |bb| bb.forward_cleared());
+        self.gpu.submit(&clears, &self.fwd);
     }
 
     /// The batch loss of the last forward: the weighted mean event NLL plus

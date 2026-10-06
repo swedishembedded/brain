@@ -11,6 +11,7 @@ use crate::config::HorizonConfig;
 
 /// Initial weights for `cfg`, a pure function of `seed`.
 pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    let blocks = cfg.stack().map_or(1, |s| s.blocks);
     let residual = 1.0 / (2.0 * cfg.n_layers.max(1) as f32).sqrt();
     let fan_in = |name: &str| -> f32 {
         let d = cfg.d_model as f32;
@@ -38,6 +39,16 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
         };
         let v = if name == "visit.state" {
             visit_state(cfg.d_model as usize)
+        } else if name.ends_with("gdn.rate") {
+            raw_rates(numel)
+        } else if name.starts_with("visit.blocks.")
+            && (name.ends_with("attn.out.weight")
+                || name.ends_with("gdn.out.weight")
+                || name.ends_with("ffn.down.weight"))
+        {
+            // Each block adds to the residual stream: scale by the stack's
+            // depth, not the set encoder's.
+            noise(1.0 / (2.0 * blocks as f32).sqrt() / fan_in(&name).sqrt())
         } else if name == "tok.gamma" {
             noise(0.02).into_iter().map(|x| 1.0 + x).collect()
         } else if name == "tok.beta" {
@@ -49,6 +60,7 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
         } else if name.ends_with("ln1.weight")
             || name.ends_with("ln2.weight")
             || name == "ln_f.weight"
+            || name == "visit.ln_f.weight"
         {
             vec![1.0; numel]
         } else if name.ends_with(".bias") {
@@ -77,15 +89,22 @@ pub fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>>
 /// (raw = the inverse of softplus), so some channels forget within a visit
 /// interval and others carry a lifetime; the population state starts at 0.
 fn visit_state(d: usize) -> Vec<f32> {
-    let (fast, slow) = (10.0f64.ln(), 0.01f64.ln());
-    let mut v: Vec<f32> = (0..d)
-        .map(|c| {
-            let r = (fast + (slow - fast) * c as f64 / (d.max(2) - 1) as f64).exp();
-            (r.exp_m1().ln()) as f32
-        })
-        .collect();
+    let mut v = raw_rates(d);
     v.resize(2 * d, 0.0);
     v
+}
+
+/// `n` raw rates (inverse softplus) log-spaced from one per tenth of a time
+/// unit to one per hundred units: the time constants of the continuous-time
+/// backbones, days to a century when the unit is a year.
+fn raw_rates(n: usize) -> Vec<f32> {
+    let (fast, slow) = (10.0f64.ln(), 0.01f64.ln());
+    (0..n)
+        .map(|c| {
+            let r = (fast + (slow - fast) * c as f64 / (n.max(2) - 1) as f64).exp();
+            (r.exp_m1().ln()) as f32
+        })
+        .collect()
 }
 
 #[cfg(test)]

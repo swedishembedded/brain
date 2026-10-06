@@ -142,6 +142,30 @@ pub fn check_horizon_additive(seed: u64) -> Report {
 /// at irregular visits: one with more visits than slots, one with a single
 /// visit, one who dies, and an empty batch slot.
 pub fn fixture_visits(seed: u64, backbone: horizon::Backbone) -> Horizon {
+    visits_model(seed, 3, |cfg| cfg.backbone = backbone)
+}
+
+/// [`fixture_visits`] with a stack of `blocks` blocks mixing as `mixer`, over
+/// `visits` visit slots (more than 16 slots make the delta rule's chunked
+/// recurrence span several chunks).
+pub fn fixture_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: u32) -> Horizon {
+    let model = visits_model(seed, visits, |cfg| {
+        cfg.backbone = horizon::Backbone::Stack(horizon::StackConfig::new(mixer, blocks));
+    });
+    // The initial rates run from days to a century: at the fixture's gaps the
+    // fast head forgets everything and the slow one nothing, so the loss
+    // would not feel the rates at all. Start them where the gaps (0.5 to 3
+    // units) leave a state to decay.
+    for (name, numel) in horizon::HorizonConfig::param_list(&model.cfg) {
+        if name.ends_with("gdn.rate") {
+            let raw: Vec<f32> = (0..numel).map(|h| 0.1 - 0.7 * h as f32).collect();
+            model.gpu.write_f32(model.ps.w(&name), &raw);
+        }
+    }
+    model
+}
+
+fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig)) -> Horizon {
     let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 3.0), visits: (1, 5) };
     let (subjects, _) = drifting::population(300, seed, &gaps, 6.0);
     let visits = |s: &horizon::timeline::Subject| s.observations.len();
@@ -154,8 +178,8 @@ pub fn fixture_visits(seed: u64, backbone: horizon::Backbone) -> Horizon {
     let codes = vec![drifting::CODE.to_string()];
     let vocab = Vocab::fit(&subjects, &codes, &codes, &FitOptions { knots: 9, min_count: 1 }).expect("vocab");
     let mut cfg = HorizonConfig::tiny(vocab.len(), 1);
-    cfg.visits = 3;
-    cfg.backbone = backbone;
+    cfg.visits = slots;
+    configure(&mut cfg);
     let enc: Vec<Encoded> = [many, one, dies].iter().map(|&i| encode(&subjects[i], &vocab, &cfg)).collect();
     let refs: Vec<&Encoded> = enc.iter().collect();
     let hb = assemble(&cfg, &refs, 4, 0.5, &mut data::rng::Rng::new(seed ^ 0x77));
@@ -189,4 +213,48 @@ pub fn check_horizon_attention(seed: u64) -> Report {
         report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
     }
     report
+}
+
+/// The tensors a stack's blocks share across rows and subjects: the query
+/// embedding, a Gated DeltaNet block's per-head rates and write-strength bias
+/// (read by every row's gate), and the first block's norm.
+fn stack_shared(model: &Horizon) -> Vec<String> {
+    let mut names: Vec<String> = ["tok.gamma", "tok.beta", "visit.query", "hazard.code.bias"]
+        .map(String::from)
+        .into();
+    names.extend(
+        model
+            .ps
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .filter(|n| n.ends_with("gdn.rate") || n.ends_with("gdn.beta.bias") || n == "visit.ln_f.weight"),
+    );
+    names
+}
+
+fn check_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: &[u32], salt: u64) -> Report {
+    let mut report = Report { checks: Vec::new() };
+    for &v in visits {
+        let model = fixture_stack(seed, mixer, blocks, v);
+        report.checks.extend(directional_check(&model, 5e-3, 4, seed ^ salt).checks);
+        for name in stack_shared(&model) {
+            report.checks.extend(elementwise_check(&model, &name, 1e-2).checks);
+        }
+    }
+    report
+}
+
+/// Gated DeltaNet blocks over the visits: every tensor directionally, and
+/// element-wise the tables and the per-head rates every row shares, with the
+/// recurrence in one chunk (3 visit slots) and across two (20 slots).
+pub fn check_horizon_gdn(seed: u64) -> Report {
+    check_stack(seed, horizon::Mixer::GatedDeltaNet, 2, &[3, 20], 0x6d6e)
+}
+
+/// The 3:1 hybrid stack (three Gated DeltaNet blocks, then one attention
+/// block): every tensor of both mixers directionally, and element-wise the
+/// shared tables and rates.
+pub fn check_horizon_hybrid(seed: u64) -> Report {
+    check_stack(seed, horizon::Mixer::Hybrid, 4, &[3], 0x6879)
 }

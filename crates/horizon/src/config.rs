@@ -22,6 +22,9 @@ pub const SPECIAL_VALUE_BINS: u32 = 4;
 /// history saturates the last bin.
 pub const TIME_AGO_SPAN: f64 = 100.0;
 
+/// The largest chunk the delta rule's chunked recurrence runs over in a stack.
+const MAX_GDN_CHUNK: u32 = 16;
+
 /// Default hazard knots over time since prediction, in the dataset's unit
 /// (years): finer early, where most follow-up is, to two decades.
 pub const DEFAULT_KNOTS: [f32; 17] = [
@@ -105,6 +108,10 @@ fn default_next_weight() -> f32 {
     1.0
 }
 
+fn default_hybrid_period() -> u32 {
+    4
+}
+
 /// About one event per hundred units of time at risk: a plausible order for
 /// annual adult mortality, and harmless elsewhere.
 fn default_initial_log_hazard() -> f32 {
@@ -149,6 +156,73 @@ pub enum Backbone {
     /// One layer of attention from a query token at the prediction time over
     /// the visits, with rotary angles from real time before entry.
     Attention,
+    /// A stack of residual blocks over the visit sequence and a query token
+    /// at the prediction time, each block a [`BlockMixer`] followed by a
+    /// feed-forward layer.
+    Stack(StackConfig),
+}
+
+/// The shape of a [`Backbone::Stack`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackConfig {
+    /// How the blocks mix the visit sequence.
+    pub mixer: Mixer,
+    /// The number of blocks.
+    pub blocks: u32,
+    /// With [`Mixer::Hybrid`]: every `hybrid_period`-th block (the last of
+    /// each group of that many) is full attention, the others Gated DeltaNet
+    /// (4: three recurrent blocks per attention block).
+    #[serde(default = "default_hybrid_period")]
+    pub hybrid_period: u32,
+}
+
+impl StackConfig {
+    /// `blocks` blocks mixing as `mixer`, with the default hybrid period.
+    pub fn new(mixer: Mixer, blocks: u32) -> StackConfig {
+        StackConfig {
+            mixer,
+            blocks,
+            hybrid_period: default_hybrid_period(),
+        }
+    }
+
+    /// The mixer of each block.
+    pub fn block_mixers(&self) -> Vec<BlockMixer> {
+        (0..self.blocks)
+            .map(|l| match self.mixer {
+                Mixer::Attention => BlockMixer::Attention,
+                Mixer::GatedDeltaNet => BlockMixer::GatedDeltaNet,
+                Mixer::Hybrid if (l + 1) % self.hybrid_period == 0 => BlockMixer::Attention,
+                Mixer::Hybrid => BlockMixer::GatedDeltaNet,
+            })
+            .collect()
+    }
+}
+
+/// How a [`Backbone::Stack`] mixes the visit sequence: one pattern for the
+/// whole stack, expanded to a [`BlockMixer`] per block by
+/// [`HorizonConfig::block_mixers`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mixer {
+    /// Every block is full attention over the visits, with rotary angles
+    /// from real time.
+    Attention,
+    /// Every block is a Gated DeltaNet: a matrix-state delta rule whose decay
+    /// over each gap is `exp(-rate * elapsed time)`.
+    GatedDeltaNet,
+    /// Gated DeltaNet blocks with a full-attention block every
+    /// [`StackConfig::hybrid_period`] blocks.
+    Hybrid,
+}
+
+/// The sequence mixer of one block of a [`Backbone::Stack`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockMixer {
+    /// Full attention over the visits.
+    Attention,
+    /// Gated DeltaNet over the visits in time order.
+    GatedDeltaNet,
 }
 
 impl HorizonConfig {
@@ -214,6 +288,30 @@ impl HorizonConfig {
         self.visits.max(1)
     }
 
+    /// The stack backbone's shape, when the configuration has one.
+    pub fn stack(&self) -> Option<&StackConfig> {
+        match &self.backbone {
+            Backbone::Stack(stack) => Some(stack),
+            _ => None,
+        }
+    }
+
+    /// The mixer of each block of the stack (empty unless the backbone is
+    /// [`Backbone::Stack`]).
+    pub fn block_mixers(&self) -> Vec<BlockMixer> {
+        self.stack().map_or_else(Vec::new, StackConfig::block_mixers)
+    }
+
+    /// The stack's sequence layout `(chunk, rows per subject)`: a subject's
+    /// visit slots and the query token, padded to a whole number of the
+    /// chunks the delta rule runs over (the padding rows are never keys and
+    /// never write the state).
+    pub fn stack_layout(&self) -> (u32, u32) {
+        let t = self.sets_per_subject() + 1;
+        let chunk = t.next_power_of_two().min(MAX_GDN_CHUNK);
+        (chunk, t.div_ceil(chunk) * chunk)
+    }
+
     /// Hazard pieces.
     pub fn pieces(&self) -> u32 {
         self.knots.len() as u32 - 1
@@ -251,6 +349,22 @@ impl HorizonConfig {
                 "horizon: d_model {} is not a multiple of n_heads {}",
                 self.d_model, self.n_heads
             ));
+        }
+        if let Some(stack) = self.stack() {
+            if stack.blocks == 0 {
+                return Err("horizon: a stack needs at least one block".into());
+            }
+            if stack.mixer == Mixer::Hybrid
+                && !(2..=stack.blocks).contains(&stack.hybrid_period)
+            {
+                return Err(format!(
+                    "horizon: a hybrid stack of {} blocks needs a period in 2..={}, got {}",
+                    stack.blocks, stack.blocks, stack.hybrid_period
+                ));
+            }
+            if !(self.d_model / self.n_heads).is_multiple_of(2) {
+                return Err("horizon: a stack's head width must be even (rotary angles)".into());
+            }
         }
         if self.knots.len() < 2
             || self.knots[0] != 0.0
@@ -369,6 +483,45 @@ impl HorizonConfig {
                 // [raw rate (softplus) | population state] per channel.
                 ("visit.state".to_string(), 2 * d),
             ]),
+            (true, Backbone::Stack(_)) => {
+                // The prediction-time query token and the final norm.
+                v.extend([
+                    ("visit.query".to_string(), d),
+                    ("visit.ln_f.weight".to_string(), d),
+                    ("visit.ln_f.bias".to_string(), d),
+                ]);
+                for (l, mixer) in self.block_mixers().into_iter().enumerate() {
+                    let p = |n: &str| format!("visit.blocks.{l}.{n}");
+                    v.extend([(p("ln1.weight"), d), (p("ln1.bias"), d)]);
+                    match mixer {
+                        BlockMixer::Attention => v.extend([
+                            (p("attn.qkv.weight"), 3 * d * d),
+                            (p("attn.qkv.bias"), 3 * d),
+                            (p("attn.out.weight"), d * d),
+                            (p("attn.out.bias"), d),
+                        ]),
+                        BlockMixer::GatedDeltaNet => v.extend([
+                            (p("gdn.q.weight"), d * d),
+                            (p("gdn.k.weight"), d * d),
+                            (p("gdn.v.weight"), d * d),
+                            (p("gdn.beta.weight"), self.n_heads as usize * d),
+                            (p("gdn.beta.bias"), self.n_heads as usize),
+                            // Raw rate (softplus) per head, per unit of time.
+                            (p("gdn.rate"), self.n_heads as usize),
+                            (p("gdn.out.weight"), d * d),
+                            (p("gdn.out.bias"), d),
+                        ]),
+                    }
+                    v.extend([
+                        (p("ln2.weight"), d),
+                        (p("ln2.bias"), d),
+                        (p("ffn.up.weight"), ff * d),
+                        (p("ffn.up.bias"), ff),
+                        (p("ffn.down.weight"), d * ff),
+                        (p("ffn.down.bias"), d),
+                    ]);
+                }
+            }
             (true, Backbone::Attention) => v.extend([
                 // The prediction-time query token.
                 ("visit.query".to_string(), d),
@@ -443,5 +596,41 @@ mod tests {
         bad.additive = true;
         bad.visits = 2;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn a_stack_names_its_mixers_and_round_trips() {
+        let mut c = HorizonConfig::tiny(10, 3);
+        c.visits = 3;
+        c.backbone = Backbone::Stack(StackConfig::new(Mixer::Hybrid, 8));
+        assert_eq!(HorizonConfig::from_json(&c.to_json()).unwrap(), c);
+        let mixers = c.block_mixers();
+        let attention = |l: usize| mixers[l] == BlockMixer::Attention;
+        assert_eq!(
+            (0..8).filter(|&l| attention(l)).collect::<Vec<_>>(),
+            [3, 7],
+            "a 3:1 hybrid ends every group of four blocks with attention"
+        );
+        // Spelled out, with the period left to its default.
+        let json = r#"{"stack":{"mixer":"gated_delta_net","blocks":2}}"#;
+        let b: Backbone = serde_json::from_str(json).unwrap();
+        assert_eq!(b, Backbone::Stack(StackConfig::new(Mixer::GatedDeltaNet, 2)));
+        // The older backbones keep their spelling.
+        assert_eq!(serde_json::from_str::<Backbone>("\"attention\"").unwrap(), Backbone::Attention);
+        assert_eq!(serde_json::to_string(&Backbone::State).unwrap(), "\"state\"");
+        assert_eq!(c.stack_layout(), (4, 4), "3 visit slots and the query fill one chunk of 4");
+        c.visits = 20;
+        assert_eq!(c.stack_layout(), (16, 32), "21 rows pad to two chunks of 16");
+        assert!(c.param_list().iter().any(|(n, _)| n == "visit.blocks.7.attn.qkv.weight"));
+        assert!(c.param_list().iter().any(|(n, _)| n == "visit.blocks.0.gdn.rate"));
+        for bad in [
+            StackConfig::new(Mixer::GatedDeltaNet, 0),
+            StackConfig::new(Mixer::Hybrid, 3),
+            StackConfig { hybrid_period: 1, ..StackConfig::new(Mixer::Hybrid, 4) },
+        ] {
+            let mut b = c.clone();
+            b.backbone = Backbone::Stack(bad);
+            assert!(b.validate().is_err(), "{bad:?}");
+        }
     }
 }
