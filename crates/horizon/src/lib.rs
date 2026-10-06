@@ -28,6 +28,7 @@ pub mod calibration;
 pub mod caps;
 pub mod config;
 pub mod encode;
+pub mod history;
 pub mod init;
 pub mod model;
 pub mod saved;

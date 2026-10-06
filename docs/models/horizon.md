@@ -56,6 +56,60 @@ One JSON object per line:
 - `weight` is a sampling weight (1 when absent); `group_id` keeps records
   together across a train/test split.
 
+## Patient history: the update format
+
+`timeline-v1` is the training and evaluation format. To say "this subject's
+record, as of now" and ask for a new prediction, a caller sends a patient
+history (`horizon::history::PatientHistory`, `brain::timeline::PatientHistory`):
+
+```json
+{"id": "p1", "as_of": "2026-03-01", "birth": "1970-06-15",
+ "static": {"sex": "female"},
+ "events": [{"time": "2019-04-02", "code": "dx:diabetes"},
+            {"time": "2026-02-20", "code": "ldl", "value": 3.1, "unit": "mmol/L"},
+            {"time": 55.1, "code": "crp", "value": {"below": 0.2}}]}
+```
+
+Inference from a history is stateless: the whole history goes in, the weights
+never change for a patient and nothing is kept between calls. "Append a
+checkup" means sending the history again with one more record.
+
+- **Time.** A `time` or `as_of` is a number (the model's own clock, in years;
+  attained age for a person) or an ISO-8601 / RFC 3339 date
+  (`YYYY-MM-DD`, midnight UTC) or datetime (`YYYY-MM-DDTHH:MM:SS[.f]` with `Z`
+  or `+HH:MM`, normalised to UTC; leap seconds refused). A date needs `birth`
+  and becomes `(instant - birth) / 31 557 600 s` (the Julian year of 365.25
+  days): exact integer nanoseconds, one floating-point division, the same on
+  every machine. A date before `birth` is an error. horizon does not depend on
+  a date library.
+- **Calendar.** The model also reads the calendar time at the prediction time.
+  It is the decimal year of `as_of` (`Y + (instant - Y-01-01T00:00Z) / length
+  of Y`, UTC) whenever a date is involved (`as_of` a date, or `birth` given);
+  for a numeric `as_of` with no `birth` the history must state `"calendar"`.
+  Stating it where it could be derived is an error.
+- **Records.** Each `events` element is `{time, code, value?, unit?}`. With a
+  `value` it is a measurement of variable `code` (a number, `{"below": x}`,
+  `{"above": x}` or a category string; a `unit` only for numbers); without one
+  it is an event. `static` maps a variable to a value (or `{"value", "unit"}`)
+  known at `as_of`: a measurement at `as_of`.
+- **Future.** A record dated after `as_of` never reaches the model: it is
+  dropped and reported as `future_ignored`. Measurements at `as_of` are known;
+  an event at `as_of` is not history (as in `timeline-v1`, events count
+  strictly before the prediction time) and is dropped as `event_at_as_of`.
+- **Duplicates and order.** A record equal to another in time, code, value and
+  unit is dropped (`duplicate_ignored`), so repeating one changes nothing; two
+  measurements of one code at one time that differ in value or unit are an
+  error. Records are sorted by (time, code, value, unit) before the model sees
+  them: listing order never matters.
+- **Unknown fields**, at any level, are never read and are reported as
+  `unknown_field`.
+- **Units** are compared with the model's (see Data): a mismatch is an error.
+- **Bounds.** At most 10 000 records, 1 000 static values, 1 024 histories and
+  8 MiB of text per call; codes and categories up to 128 characters, units up
+  to 32. Every error names the record (`events[3]`, `static.sex`) and field.
+
+A file may hold one history object, an array of them, or one object per line.
+
 ## Model
 
 Each token is one observed variable (or category, or past event); its value
