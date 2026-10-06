@@ -113,6 +113,27 @@ pub fn predict_log_hazards(model: &Horizon, subjects: &[Encoded]) -> Vec<Vec<f32
     out
 }
 
+/// The log-hazards and the summary state of every subject, in order, from ONE
+/// forward pass.
+pub fn predict_hazards_and_states(
+    model: &Horizon,
+    subjects: &[Encoded],
+) -> Vec<(Vec<f32>, Vec<f32>)> {
+    let per = (model.cfg.pieces() * model.cfg.n_codes) as usize;
+    let d = model.cfg.d_model as usize;
+    let mut out = Vec::with_capacity(subjects.len());
+    for_each_batch(model, subjects, |chunk, m| {
+        let (lh, z) = (m.read_log_hazards(), m.read_state());
+        out.extend((0..chunk.len()).map(|i| {
+            (
+                lh[i * per..(i + 1) * per].to_vec(),
+                z[i * d..(i + 1) * d].to_vec(),
+            )
+        }));
+    });
+    out
+}
+
 /// The summary state `[d_model]` of every subject, in order.
 pub fn predict_states(model: &Horizon, subjects: &[Encoded]) -> Vec<Vec<f32>> {
     let d = model.cfg.d_model as usize;

@@ -3,13 +3,14 @@
 
 //! A trained model as it is kept on disk: a directory holding the weights
 //! (with the configuration in their header), the fitted vocabulary and, when
-//! they were made, the [`Calibration`]. The one place that reads, writes and
+//! they were made, the [`Calibration`] and the training [`Support`]. The one place that reads, writes and
 //! predicts from that directory - the SDK's `TimelineModel` and the serving
 //! capability ([`crate::caps`]) both go through it.
 //!
 //! The calibration is optional and a directory without it loads as
-//! uncalibrated. When present it must have been fitted for exactly these
-//! weights (it records their SHA-256): loading refuses a mismatch.
+//! uncalibrated, and one without the support loads with support unknown.
+//! When present, each must have been fitted for exactly these weights (they
+//! record their SHA-256): loading refuses a mismatch.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,9 +20,10 @@ use sha2::{Digest, Sha256};
 
 use crate::calibration::{self, Calibration};
 use crate::encode::{encode, Encoded};
+use crate::support::{self, AssessOptions, Assessment, Support};
 use crate::survival::Curves;
 use crate::timeline::Subject;
-use crate::train::predict_log_hazards;
+use crate::train::{predict_hazards_and_states, predict_log_hazards, predict_states};
 use crate::vocab::Vocab;
 use crate::Horizon;
 
@@ -40,6 +42,18 @@ pub struct Saved {
     pub vocab: Vocab,
     /// Its calibration, if one was fitted ([`Saved::calibrate`]).
     pub calibration: Option<Arc<Calibration>>,
+    /// What it was trained on, if recorded ([`Saved::fit_support`]); `None`
+    /// for a model saved before support was kept.
+    pub support: Option<Support>,
+}
+
+/// One subject's curves and standing against the training support, from one
+/// forward pass.
+pub struct Scored {
+    /// The outcome curves.
+    pub curves: Curves,
+    /// Whether the subject is inside what the model was trained on.
+    pub assessment: Assessment,
 }
 
 /// The SHA-256 of a file, as lowercase hex.
@@ -72,6 +86,7 @@ impl Saved {
             model,
             vocab,
             calibration: None,
+            support: None,
         }
     }
 
@@ -107,6 +122,56 @@ impl Saved {
         Ok(())
     }
 
+    /// Record what the model was trained on: the support of `train`, the
+    /// training subjects, which must be the ones the weights were fitted on.
+    pub fn fit_support(&mut self, train: &[Subject]) -> Result<(), String> {
+        let digest = self.weights_digest()?;
+        self.support = Some(Support::fit(self, digest, train)?);
+        Ok(())
+    }
+
+    /// Each subject against the training support. With no support recorded
+    /// every assessment is [`Assessment::unknown`].
+    pub fn assess(&self, subjects: &[Subject], opts: &AssessOptions) -> Result<Vec<Assessment>, String> {
+        let enc = self.encode(subjects)?;
+        let Some(support) = &self.support else {
+            return Ok(vec![Assessment::unknown(); subjects.len()]);
+        };
+        let states = predict_states(&self.model, &enc);
+        Ok(subjects
+            .iter()
+            .zip(&states)
+            .map(|(s, z)| support.assess(s, Some(z), opts))
+            .collect())
+    }
+
+    /// One set of outcome curves and one assessment per subject, in order,
+    /// from a single forward pass.
+    pub fn score(&self, subjects: &[Subject], opts: &AssessOptions) -> Result<Vec<Scored>, String> {
+        let enc = self.encode(subjects)?;
+        let absorbing = self.absorbing();
+        let (knots, columns) = (&self.model.cfg.knots, self.model.cfg.n_codes as usize);
+        Ok(subjects
+            .iter()
+            .zip(predict_hazards_and_states(&self.model, &enc))
+            .map(|(s, (lh, z))| Scored {
+                curves: Curves::outcomes(&lh, knots, columns, &absorbing),
+                assessment: self
+                    .support
+                    .as_ref()
+                    .map_or_else(Assessment::unknown, |sp| sp.assess(s, Some(&z), opts)),
+            })
+            .collect())
+    }
+
+    fn absorbing(&self) -> Vec<bool> {
+        self.vocab
+            .codes
+            .iter()
+            .map(|c| self.vocab.absorbing.contains(c))
+            .collect()
+    }
+
     /// Load the model [`Saved::save`] wrote into `dir`.
     pub fn load(dir: &Path) -> Result<Saved, String> {
         let weights = dir.join(WEIGHTS_FILE);
@@ -123,16 +188,24 @@ impl Saved {
         let calibration = read_optional(&dir.join(calibration::FILE))?
             .map(|text| Calibration::from_json(&text).map(Arc::new))
             .transpose()?;
-        if let Some(c) = &calibration {
+        let support = read_optional(&dir.join(support::FILE))?
+            .map(|text| Support::from_json(&text))
+            .transpose()?;
+        if calibration.is_some() || support.is_some() {
             let have = file_digest(&weights)?;
-            if c.weights_sha256 != have {
-                return Err(format!(
-                    "{}: {} was fitted for weights {} but {WEIGHTS_FILE} is {have}: refusing to serve \
-                     probabilities calibrated for a different model (calibrate again or remove the file)",
-                    dir.display(),
-                    calibration::FILE,
-                    c.weights_sha256
-                ));
+            let bound = [
+                (calibration::FILE, calibration.as_ref().map(|c| &c.weights_sha256)),
+                (support::FILE, support.as_ref().map(|s| &s.weights_sha256)),
+            ];
+            for (file, digest) in bound {
+                if let Some(d) = digest.filter(|d| **d != have) {
+                    return Err(format!(
+                        "{}: {file} was fitted for weights {d} but {WEIGHTS_FILE} is {have}: refusing to \
+                         serve a calibration or support recorded for a different model (refit it or \
+                         remove the file)",
+                        dir.display()
+                    ));
+                }
             }
         }
         let model = Horizon::load(utf8(&weights)?, PREDICT_BATCH)?;
@@ -140,13 +213,14 @@ impl Saved {
             model,
             vocab,
             calibration,
+            support,
         })
     }
 
-    /// Write the weights, the vocabulary and the calibration (if any) into
-    /// `dir`, creating it; a directory this replaces loses a calibration
-    /// this model does not have. A calibration of different weights is an
-    /// error, not a file.
+    /// Write the weights, the vocabulary and the calibration and support (if
+    /// any) into `dir`, creating it; a directory this replaces loses a
+    /// calibration or support this model does not have. A record of
+    /// different weights is an error, not a file.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let weights = dir.join(WEIGHTS_FILE);
@@ -154,27 +228,34 @@ impl Saved {
         let vocab = serde_json::to_string(&self.vocab).map_err(|e| format!("vocab: {e}"))?;
         let path = dir.join(VOCAB_FILE);
         std::fs::write(&path, vocab).map_err(|e| format!("{}: {e}", path.display()))?;
-        let calibration = dir.join(calibration::FILE);
-        match &self.calibration {
-            Some(c) => {
-                let have = file_digest(&weights)?;
-                if c.weights_sha256 != have {
-                    return Err(format!(
-                        "{}: the calibration was fitted for weights {} but these are {have}",
-                        dir.display(),
-                        c.weights_sha256
-                    ));
+        let have = file_digest(&weights)?;
+        let optional = [
+            (calibration::FILE, self.calibration.as_ref().map(|c| (&c.weights_sha256, c.to_json()))),
+            (support::FILE, self.support.as_ref().map(|s| (&s.weights_sha256, s.to_json()))),
+        ];
+        for (file, content) in optional {
+            let path = dir.join(file);
+            match content {
+                Some((digest, json)) => {
+                    if *digest != have {
+                        return Err(format!(
+                            "{}: {file} was fitted for weights {digest} but these are {have}",
+                            dir.display()
+                        ));
+                    }
+                    std::fs::write(&path, json?).map_err(|e| format!("{}: {e}", path.display()))?;
                 }
-                std::fs::write(&calibration, c.to_json()?)
-                    .map_err(|e| format!("{}: {e}", calibration.display()))
+                // This model has none: a stale one from a replaced directory
+                // would be a record of a different model.
+                None => match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(format!("{}: {e}", path.display()))
+                    }
+                    _ => {}
+                },
             }
-            None => match std::fs::remove_file(&calibration) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    Err(format!("{}: {e}", calibration.display()))
-                }
-                _ => Ok(()),
-            },
         }
+        Ok(())
     }
 
     /// Each subject validated and encoded for this model.
@@ -191,12 +272,7 @@ impl Saved {
     /// One set of outcome curves per subject, in order.
     pub fn predict(&self, subjects: &[Subject]) -> Result<Vec<Curves>, String> {
         let enc = self.encode(subjects)?;
-        let absorbing: Vec<bool> = self
-            .vocab
-            .codes
-            .iter()
-            .map(|c| self.vocab.absorbing.contains(c))
-            .collect();
+        let absorbing = self.absorbing();
         let (knots, columns) = (&self.model.cfg.knots, self.model.cfg.n_codes as usize);
         Ok(predict_log_hazards(&self.model, &enc)
             .into_iter()

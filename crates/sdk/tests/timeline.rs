@@ -273,3 +273,154 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&other).ok();
 }
+
+/// Average ranks (ties share their mean rank).
+fn ranks(v: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..v.len()).collect();
+    order.sort_by(|&a, &b| v[a].total_cmp(&v[b]));
+    let mut r = vec![0.0; v.len()];
+    let mut i = 0;
+    while i < order.len() {
+        let mut j = i;
+        while j + 1 < order.len() && v[order[j + 1]] == v[order[i]] {
+            j += 1;
+        }
+        let mean = 0.5 * (i + j) as f64 + 1.0;
+        order[i..=j].iter().for_each(|&k| r[k] = mean);
+        i = j + 1;
+    }
+    r
+}
+
+/// Spearman's rank correlation.
+fn spearman(a: &[f64], b: &[f64]) -> f64 {
+    let (ra, rb) = (ranks(a), ranks(b));
+    let n = a.len() as f64;
+    let (ma, mb) = (ra.iter().sum::<f64>() / n, rb.iter().sum::<f64>() / n);
+    let cov: f64 = ra.iter().zip(&rb).map(|(x, y)| (x - ma) * (y - mb)).sum();
+    let (va, vb): (f64, f64) = (
+        ra.iter().map(|x| (x - ma).powi(2)).sum(),
+        rb.iter().map(|y| (y - mb).powi(2)).sum(),
+    );
+    cov / (va * vb).sqrt()
+}
+
+/// On a test population shifted further and further from the training one
+/// (older entry ages, higher `x1`), the model's error against the TRUE risk
+/// grows, and so does its out-of-distribution score: the score ranks subjects
+/// by how wrong the model is about them, and the subjects it flags
+/// as unsupported are worse predicted than those it supports, while the
+/// population it was trained on is hardly flagged at all.
+#[test]
+fn the_ood_score_rises_with_the_error_under_covariate_shift() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use brain::timeline::synthetic::{population_shifted, Shift};
+    let (train, _) = synthetic::population(6000, 1);
+    let (stop, _) = synthetic::population(1000, 2);
+    let codes = ["death:a", "death:b", "onset"];
+    let spec = TimelineSpec::new(codes, ["death:a", "death:b"])
+        .knots(vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0])
+        .max_tokens(8)
+        .steps(400)
+        .batch(128)
+        .lr(3e-3);
+    let (model, _) = TimelineModel::train(&train, &stop, &spec).unwrap();
+    assert!(model.support().is_some(), "training records the support");
+
+    let t = 5.0;
+    let (mut score, mut error, mut level) = (vec![], vec![], vec![]);
+    for k in 0..4 {
+        let shift = Shift { age: 5.0 * k as f64, x1: k as f64 };
+        let (subjects, truth) = population_shifted(1000, 50 + k as u64, shift);
+        let assessed = model.assess(&subjects).unwrap();
+        let preds = model.predict(&subjects).unwrap();
+        for ((a, p), tr) in assessed.iter().zip(&preds).zip(&truth) {
+            score.push(a.ood_score.unwrap());
+            let err: f64 = codes
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (p.cif(c, t).unwrap() - tr.cif(i, t)).abs())
+                .sum::<f64>()
+                / 3.0;
+            error.push(err);
+            level.push(k);
+        }
+    }
+    let mean = |v: &[f64], k: usize| {
+        let xs: Vec<f64> = v.iter().zip(&level).filter(|(_, &l)| l == k).map(|(x, _)| *x).collect();
+        xs.iter().sum::<f64>() / xs.len() as f64
+    };
+    let within = |k: usize| {
+        let pick = |v: &[f64]| -> Vec<f64> {
+            v.iter().zip(&level).filter(|(_, &l)| l == k).map(|(x, _)| *x).collect()
+        };
+        spearman(&pick(&score), &pick(&error))
+    };
+    for k in 0..4 {
+        eprintln!(
+            "shift {k}: mean score {:.3}, mean error {:.4}, Spearman within the level {:.3}",
+            mean(&score, k),
+            mean(&error, k),
+            within(k)
+        );
+    }
+    let rho = spearman(&score, &error);
+    let (mut flagged, mut kept) = (vec![], vec![]);
+    for (s, e) in score.iter().zip(&error) {
+        if *s > 1.0 { flagged.push(*e) } else { kept.push(*e) }
+    }
+    let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    eprintln!(
+        "Spearman(ood_score, |error|) over {} subjects: {rho:.3}; flagged unsupported {} (mean error {:.4}), supported {} (mean error {:.4})",
+        score.len(), flagged.len(), avg(&flagged), kept.len(), avg(&kept)
+    );
+    let in_distribution = score.iter().zip(&level).filter(|(_, &l)| l == 0);
+    let wrongly_flagged = in_distribution.clone().filter(|(s, _)| **s > 1.0).count();
+    eprintln!("unshifted subjects flagged: {wrongly_flagged} of {}", in_distribution.count());
+    assert!(wrongly_flagged < 50, "{wrongly_flagged} of 1000 unshifted subjects flagged");
+    assert!(rho > 0.5, "rank correlation of the score with the error: {rho:.3}");
+    assert!(
+        (0..3).all(|k| mean(&score, k) < mean(&score, k + 1) && mean(&error, k) < mean(&error, k + 1)),
+        "both rise with the shift"
+    );
+    assert!(!flagged.is_empty() && !kept.is_empty());
+    assert!(
+        avg(&flagged) > 2.0 * avg(&kept),
+        "unsupported subjects are predicted worse: {:.4} vs {:.4}",
+        avg(&flagged),
+        avg(&kept)
+    );
+
+    // Abstention: the unsupported subject gets no probability, the supported
+    // one the same prediction as `predict`; an operator can accept more.
+    use brain::timeline::{Abstain, Event};
+    let (fresh, _) = synthetic::population(20, 99);
+    let mut odd = fresh[0].clone();
+    odd.events.push(Event { t: odd.entry - 1.0, code: "dx:never-seen".into() });
+    let batch = [fresh[1].clone(), odd.clone()];
+    let guarded = model.predict_or_abstain(&batch, &Abstain::default()).unwrap();
+    let plain = model.predict(&batch).unwrap();
+    assert_eq!(guarded[0].as_ref().unwrap().cif("onset", t), plain[0].cif("onset", t));
+    let refusal = guarded[1].as_ref().unwrap_err();
+    assert_eq!(refusal.to_string(), "risk unavailable: insufficient support");
+    assert_eq!(refusal.assessment.supported, Some(false));
+    assert!(refusal.assessment.warnings.iter().any(|w| matches!(w, brain::timeline::Warning::UnknownEventCode { .. })));
+    let tolerant = model.predict_or_abstain(&batch, &Abstain::above(10.0)).unwrap();
+    assert!(tolerant[1].is_ok(), "a threshold past the unknown-input score lets it through");
+
+    // The support is saved with the model and read back.
+    let dir = std::env::temp_dir().join(format!("brain-timeline-support-{}", std::process::id()));
+    model.save(&dir).unwrap();
+    let loaded = TimelineModel::load(&dir).unwrap();
+    let (a, b) = (model.assess(&batch).unwrap(), loaded.assess(&batch).unwrap());
+    assert_eq!(a[1].warnings, b[1].warnings);
+    assert!((a[0].ood_score.unwrap() - b[0].ood_score.unwrap()).abs() < 1e-3);
+    std::fs::remove_file(dir.join("support.json")).unwrap();
+    let old = TimelineModel::load(&dir).unwrap();
+    assert!(old.support().is_none());
+    assert!(old.assess(&batch).unwrap().iter().all(|a| a.supported.is_none()), "support unknown, not unsupported");
+    assert!(old.predict_or_abstain(&batch, &Abstain::default()).unwrap().iter().all(|r| r.is_ok()));
+    std::fs::remove_dir_all(&dir).ok();
+}

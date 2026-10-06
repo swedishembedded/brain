@@ -31,6 +31,7 @@ pub mod encode;
 pub mod init;
 pub mod model;
 pub mod saved;
+pub mod support;
 pub mod survival;
 pub mod synthetic;
 pub mod timeline;

@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use horizon::encode::{encode, forecast_query, Encoded};
-use horizon::saved::{parse_jsonl, Saved};
+use horizon::saved::{parse_jsonl, Saved, Scored};
 use horizon::survival::Curves;
 use horizon::train::{
     event_nll, predict_forecasts, predict_states, TimelineObjective,
@@ -38,6 +38,7 @@ use horizon::Horizon;
 /// truth before trusting it on real data.
 pub use horizon::synthetic;
 pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
+pub use horizon::support::{AssessOptions, Assessment, Support, Warning, DEFAULT_MAX_OOD_SCORE};
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
 pub use horizon::HorizonConfig as TimelineConfig;
 pub use horizon::{Backbone, Mixer, StackConfig};
@@ -285,6 +286,64 @@ impl CalibrationSpec {
     }
 }
 
+/// When a prediction is withheld for lack of support
+/// ([`TimelineModel::predict_or_abstain`]): a subject whose
+/// [`Assessment::ood_score`] is above `max_ood_score` gets no probability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Abstain {
+    max_ood_score: f64,
+    options: AssessOptions,
+}
+
+impl Default for Abstain {
+    /// Withhold at the edge of the training support (any warning): the same
+    /// default the served capability uses.
+    fn default() -> Self {
+        Abstain {
+            max_ood_score: DEFAULT_MAX_OOD_SCORE,
+            options: AssessOptions::default(),
+        }
+    }
+}
+
+impl Abstain {
+    /// Withhold when the out-of-distribution score is above `max_ood_score`
+    /// (`1.0` is the edge of the support; unknown variables, categories and
+    /// event codes score 10, so only a threshold of 10 or more lets them
+    /// through).
+    pub fn above(max_ood_score: f64) -> Abstain {
+        Abstain {
+            max_ood_score,
+            ..Abstain::default()
+        }
+    }
+    /// How strictly the support is judged (the margins beyond the trained
+    /// ranges) before the score is compared with the threshold.
+    pub fn options(mut self, options: AssessOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+/// Risk withheld: the subject is outside what the model was trained on, so
+/// no probability is given where a made-up one would look confident.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Unavailable {
+    /// Why: the score and the warnings.
+    pub assessment: Assessment,
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("risk unavailable: insufficient support")
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// A subject's prediction, or the reason there is none.
+pub type Risk = std::result::Result<Prediction, Unavailable>;
+
 /// What training did.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimelineReport {
@@ -373,7 +432,9 @@ impl TimelineModel {
             parameters,
             truncated_tokens,
         };
-        Ok((TimelineModel { saved: Saved::new(model, vocab) }, report))
+        let mut saved = Saved::new(model, vocab);
+        saved.fit_support(train).map_err(Error::Backend)?;
+        Ok((TimelineModel { saved }, report))
     }
 
     /// Load a model [`TimelineModel::save`] wrote.
@@ -384,7 +445,8 @@ impl TimelineModel {
     }
 
     /// Write the weights (with the configuration in their header), the
-    /// vocabulary and, if the model was calibrated, the calibration into `dir`.
+    /// vocabulary, the training support and, if the model was calibrated, the
+    /// calibration into `dir`.
     pub fn save(&self, dir: impl AsRef<Path>) -> Result<()> {
         self.saved.save(dir.as_ref()).map_err(Error::Backend)
     }
@@ -410,6 +472,27 @@ impl TimelineModel {
             .map_err(Error::Backend)?;
         self.calibration()
             .ok_or_else(|| Error::Backend("calibration was not stored".into()))
+    }
+
+    /// What the model was trained on, recorded at training; `None` for a
+    /// model saved before it was kept (its support is unknown).
+    pub fn support(&self) -> Option<&Support> {
+        self.saved.support.as_ref()
+    }
+
+    /// Each subject against what the model was trained on, with the default
+    /// margins: `supported`, a continuous `ood_score` (1 at the edge) and
+    /// typed warnings (unknown codes, values and clocks outside the trained
+    /// range, unusual history lengths, a state far from the training
+    /// states). `supported` is `None` for a model with no recorded support:
+    /// unknown, neither supported nor unsupported.
+    pub fn assess(&self, subjects: &[Subject]) -> Result<Vec<Assessment>> {
+        self.assess_with(subjects, &AssessOptions::default())
+    }
+
+    /// [`TimelineModel::assess`] with explicit margins.
+    pub fn assess_with(&self, subjects: &[Subject], options: &AssessOptions) -> Result<Vec<Assessment>> {
+        self.saved.assess(subjects, options).map_err(Error::Backend)
     }
 
     /// The model's calibration, if it has one.
@@ -450,6 +533,33 @@ impl TimelineModel {
                 calibrations: vec![self.saved.calibration.clone()],
                 codes: self.saved.vocab.codes.clone(),
                 last_knot,
+            })
+            .collect())
+    }
+
+    /// One prediction per subject, in order, or `Err(Unavailable)` for a
+    /// subject outside the training support (see [`Abstain`]): no probability
+    /// instead of a confident one the model cannot stand behind. A model with
+    /// no recorded support never withholds (its support is unknown) and says
+    /// so in [`TimelineModel::assess`].
+    pub fn predict_or_abstain(&self, subjects: &[Subject], policy: &Abstain) -> Result<Vec<Risk>> {
+        let last_knot = self.saved.horizon();
+        Ok(self
+            .saved
+            .score(subjects, &policy.options)
+            .map_err(Error::Backend)?
+            .into_iter()
+            .map(|Scored { curves, assessment }| {
+                if assessment.abstains(policy.max_ood_score) {
+                    Err(Unavailable { assessment })
+                } else {
+                    Ok(Prediction {
+                        members: vec![curves],
+                        calibrations: vec![self.saved.calibration.clone()],
+                        codes: self.saved.vocab.codes.clone(),
+                        last_knot,
+                    })
+                }
             })
             .collect())
     }

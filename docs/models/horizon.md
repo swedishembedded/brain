@@ -222,9 +222,65 @@ p.cif_interval("death:heart", 10.0);        // its Venn-Abers interval (p0, p1)
 - An ensemble's calibrated risk is the mean of its members' calibrated risks,
   `None` unless every member has one.
 - On a population trained on too few subjects, the first-onset risk of the
-  model is overconfident (recalibration slope 0.50, observed over expected
-  1.18); calibrating on 8000 validation subjects brings both to about one on
-  a test population neither saw (`tests/timeline.rs` in the SDK holds it).
+  model is overconfident (recalibration slope 0.49, observed over expected
+  1.20, expected calibration error 0.040); calibrating on 8000 validation
+  subjects gives slope 1.03, O/E 1.01 and error 0.015 on a test population
+  neither saw (`tests/timeline.rs` in the SDK holds it).
+
+## Training support and abstention
+
+Training records what the model was trained on in `support.json` beside the
+weights: per numeric variable the robust range of its values (0.5th to 99.5th
+percentile, detection limits counted at their limit), per categorical
+variable the levels seen, the event codes seen in histories, the ranges of
+entry clock, calendar time and history length (observations plus events, and
+distinct visits), and the mean and covariance of the learned state for a
+Mahalanobis distance (kept only when the training set has at least four
+subjects per state dimension). `timeline-v1` carries no units, so none are
+recorded: a unit mix-up shows as a value out of range, not by name.
+
+`TimelineModel::assess(subjects)` returns, per subject, `supported`, a
+continuous `ood_score` and typed warnings:
+
+| Warning | Raised when |
+|---|---|
+| `unknown_variable`, `unknown_category`, `unknown_event_code` | the name or level was never seen in training (score 10) |
+| `value_out_of_range` | a measurement is beyond the variable's range plus a margin (a quarter of the range's width by default) |
+| `entry_out_of_range`, `calendar_out_of_range` | the entry clock or calendar time is beyond the trained range plus the margin |
+| `history_length` | observations plus events, or visits, are far below or above any in training |
+| `state_out_of_support` | the Mahalanobis distance of the learned state is beyond the training set's 99.5th percentile plus half again |
+
+Each component is scaled so `1.0` is the edge of what is supported and the
+`ood_score` is the largest, so `supported` means a score of at most one. The
+score is continuous inside the support too, which is what makes it rank
+subjects.
+
+- A model saved before support was recorded has no `support.json` and
+  assesses as support UNKNOWN (`supported: None`): neither supported nor
+  unsupported, and nothing is withheld for it. Support is bound to the weights
+  by their SHA-256, like a calibration, and refused beside other weights.
+- `TimelineModel::predict_or_abstain(subjects, &Abstain::above(1.0))` returns
+  `Err(Unavailable)` ("risk unavailable: insufficient support") INSTEAD of a
+  `Prediction` for a subject whose score is above the threshold. The default
+  threshold is 1.0, the edge of the support: any warning withholds the
+  answer. Unknown inputs score 10, so only a threshold of 10 or more lets them
+  through, deliberately.
+- Measured on the synthetic population (`tests/timeline.rs` in the SDK): a
+  model trained on one population meets test populations shifted to older
+  entry ages and higher `x1` (`synthetic::population_shifted`, whose truth is
+  exact). Over four shift levels of 1000 subjects the rank correlation between
+  the score and the absolute error against the true risk is 0.78 (0.25 to
+  0.75 within one level), the mean error rises with every level, the 520
+  subjects flagged unsupported have a mean error 3.7 times that of the others,
+  and none of 1000 unshifted subjects is flagged.
+
+What it is not: the ranges are marginal, so a combination of values that
+never occurred together passes if each value is common; the state distance is
+the only joint check; a real population with heavy tails needs a larger margin
+(`AssessOptions::margin`) or it will flag legitimate subjects. The score says
+the model has not seen anything like this subject; it does not say the
+prediction is wrong, and an in-distribution subject can still be predicted
+badly.
 
 ## Serving
 
@@ -234,6 +290,14 @@ cumulative incidence at the requested times out, as JSON lines. Times past
 the last knot are refused. A calibrated model also answers `cif_calibrated`
 and `cif_interval` per code and time, `null` where that time was not
 calibrated.
+
+Every answer carries `support: {supported, ood_score, warnings}`. A subject
+whose score is above the request's `max_ood_score` (default 1, the edge of
+the support; a host parameter of the action like `times`) gets
+`{"subject_id", "risk": "unavailable", "reason": "insufficient support",
+"support"}` instead of probabilities, and the outcome's `abstained` counts
+them. A model without recorded support answers `supported: null` and never
+abstains.
 
 Concurrent requests are one batch: the resident model puts every request's
 subjects through one forward pass in device batches of the model's size and
@@ -252,6 +316,11 @@ brain horizon predict --weights model/ --times 5,10 \
 the host's, never a request parameter.
 
 ## Limits
+
+- Calibration and support describe the population the model was trained,
+  validated and assessed on; they do not transfer to another one. A
+  calibration needs events: at 30 per code and horizon the Venn-Abers
+  interval is still wide.
 
 - One prediction time per record: predicting from a later visit means a new
   record with a later `entry`. With `TimelineSpec::visits` the history before

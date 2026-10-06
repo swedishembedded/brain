@@ -143,15 +143,32 @@ pub fn population_with_followup(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth
     (subjects, truths)
 }
 
+/// A covariate shift of the population: the same hazards, applied to
+/// subjects drawn from a displaced distribution, so a model trained on the
+/// unshifted one meets inputs it never saw while the truth stays exact.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Shift {
+    /// Added to every subject's entry age.
+    pub age: f64,
+    /// Added to the mean of `x1`.
+    pub x1: f64,
+}
+
 /// `n` subjects and their truths, deterministic in `seed`.
 pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
+    population_shifted(n, seed, Shift::default())
+}
+
+/// [`population`] with a [`Shift`]; the same seed draws the same subjects
+/// displaced by it (no shift is exactly [`population`]).
+pub fn population_shifted(n: usize, seed: u64, shift: Shift) -> (Vec<Subject>, Vec<Truth>) {
     let mut rng = Rng::new(seed);
     let mut subjects = Vec::with_capacity(n);
     let mut truths = Vec::with_capacity(n);
     for i in 0..n {
         let truth = Truth {
-            age: rng.uniform(40.0, 70.0),
-            x1: rng.next_gaussian(),
+            age: rng.uniform(40.0, 70.0) + shift.age,
+            x1: rng.next_gaussian() + shift.x1,
             x2: rng.next_gaussian(),
             dx: rng.next_f64() < 0.3,
             group_b: false,
@@ -259,6 +276,29 @@ pub fn population(n: usize, seed: u64) -> (Vec<Subject>, Vec<Truth>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shift_displaces_the_covariates_and_no_shift_changes_nothing() {
+        let (plain, _) = population(200, 3);
+        let (same, _) = population_shifted(200, 3, Shift::default());
+        assert_eq!(plain, same);
+        let (moved, truths) = population_shifted(200, 3, Shift { age: 10.0, x1: 2.0 });
+        for s in &moved {
+            s.validate().unwrap();
+        }
+        // The first subject is the same draw displaced; later ones diverge
+        // because the simulation consumes the stream by their hazards.
+        assert!((moved[0].entry - plain[0].entry - 10.0).abs() < 1e-12);
+        let mean = |s: &[Subject], f: &dyn Fn(&Subject) -> f64| s.iter().map(f).sum::<f64>() / s.len() as f64;
+        let x1 = |s: &Subject| match s.observations[0].value {
+            Value::Number(v) => v,
+            _ => unreachable!(),
+        };
+        let entry = |s: &Subject| s.entry;
+        assert!((mean(&moved, &x1) - mean(&plain, &x1) - 2.0).abs() < 0.5);
+        assert!((mean(&moved, &entry) - mean(&plain, &entry) - 10.0).abs() < 3.0);
+        assert_eq!(truths.len(), 200);
+    }
 
     #[test]
     fn the_population_is_valid_deterministic_and_has_every_outcome() {

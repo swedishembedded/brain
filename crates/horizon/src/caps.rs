@@ -12,6 +12,15 @@
 //! cumulative incidence come out as JSON lines. A time past the model's last
 //! knot is refused, not extrapolated: the model says nothing there.
 //!
+//! Every answer carries `support`: whether the subject is inside what the model
+//! was trained on (`supported`: true, false, or null when the model records no
+//! support), a continuous `ood_score` (1 at the edge of the support) and typed
+//! `warnings`. A subject whose score is above the `max_ood_score` threshold
+//! (default 1: any warning) gets `{"risk": "unavailable", "reason":
+//! "insufficient support"}` INSTEAD of probabilities. Unknown variables,
+//! categories and event codes score 10, so they are refused unless an
+//! operator raises the threshold past it on purpose.
+//!
 //! A model saved with a calibration also answers `cif_calibrated` (the
 //! calibrated risk) and `cif_interval` (its Venn-Abers interval) beside the
 //! raw `cif`, per code and time; `null` at a time that was not calibrated.
@@ -30,14 +39,16 @@ use capability::{
 use serde_json::{json, Value};
 
 use crate::calibration::Calibrated;
-use crate::saved::{parse_jsonl, Saved};
-use crate::survival::Curves;
+use crate::saved::{parse_jsonl, Saved, Scored};
+use crate::support::AssessOptions;
 use crate::timeline::Subject;
 
 /// The model id on the CLI and every served surface.
 pub const MODEL: &str = "brain/horizon";
 /// The host's saved-model directory on a served surface.
 pub const DIR_VAR: &str = "BRAIN_HORIZON_DIR";
+/// The `max_ood_score` threshold when the caller names none.
+pub use crate::support::DEFAULT_MAX_OOD_SCORE;
 /// Times reported when the caller names none (in the dataset's unit).
 pub const DEFAULT_TIMES: &str = "5,10";
 
@@ -64,11 +75,19 @@ pub fn predict_spec() -> ActionSpec {
         )
         .default(json!(DEFAULT_TIMES)),
     )
+    .param(
+        ParamSpec::new(
+            "max_ood_score",
+            ParamType::Float,
+            "subjects whose out-of-distribution score is above this get `risk: unavailable` instead of probabilities (1 = the edge of the training support; unknown variables, categories and event codes score 10)",
+        )
+        .default(json!(DEFAULT_MAX_OOD_SCORE)),
+    )
     .input(BlobSpec::new("subjects", Media::Text, "timeline-v1: one subject per line").required())
     .output(BlobSpec::new(
         "predictions",
         Media::Text,
-        "JSON lines: {subject_id, times, survival, cif: {code: [...]}} (+ cif_calibrated, cif_interval of a calibrated model)",
+        "JSON lines: {subject_id, times, survival, cif: {code: [...]}, support: {supported, ood_score, warnings}} (+ cif_calibrated, cif_interval of a calibrated model); an unsupported subject: {subject_id, risk: \"unavailable\", reason, support}",
     ))
 }
 
@@ -114,10 +133,12 @@ fn times(inv: &Invocation, horizon: f64) -> Result<Vec<f64>, String> {
     Ok(parsed)
 }
 
-/// One request, parsed and validated: its subjects and the times asked for.
+/// One request, parsed and validated: its subjects, the times asked for and
+/// the support threshold above which a subject gets no probability.
 struct Request {
     subjects: Vec<Subject>,
     times: Vec<f64>,
+    max_ood_score: f64,
 }
 
 fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
@@ -128,13 +149,35 @@ fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
         .map_err(|e| format!("horizon: subjects are not UTF-8: {e}"))?;
     let subjects = parse_jsonl(text).map_err(|e| format!("horizon: subjects {e}"))?;
     let times = times(inv, saved.horizon())?;
-    Ok(Request { subjects, times })
+    let max_ood_score = match inv.get_f64("max_ood_score") {
+        None => DEFAULT_MAX_OOD_SCORE,
+        Some(m) if m > 0.0 => m,
+        Some(m) => return Err(format!("horizon: max_ood_score must be positive, got {m}")),
+    };
+    Ok(Request { subjects, times, max_ood_score })
 }
 
 /// One request's answer: a JSON line per subject.
-fn render(saved: &Saved, req: &Request, curves: &[Curves]) -> Outcome {
-    let mut out = String::new();
-    for (s, c) in req.subjects.iter().zip(curves) {
+fn render(saved: &Saved, req: &Request, scored: &[Scored]) -> Outcome {
+    let (mut out, mut abstained) = (String::new(), 0);
+    for (s, Scored { curves: c, assessment }) in req.subjects.iter().zip(scored) {
+        let support = json!({
+            "supported": assessment.supported,
+            "ood_score": assessment.ood_score,
+            "warnings": assessment.warnings,
+        });
+        if assessment.abstains(req.max_ood_score) {
+            abstained += 1;
+            let line = json!({
+                "subject_id": s.subject_id,
+                "risk": "unavailable",
+                "reason": "insufficient support",
+                "support": support,
+            });
+            out.push_str(&line.to_string());
+            out.push('\n');
+            continue;
+        }
         let cif: serde_json::Map<String, Value> = saved
             .vocab
             .codes
@@ -152,6 +195,7 @@ fn render(saved: &Saved, req: &Request, curves: &[Curves]) -> Outcome {
             "times": req.times,
             "survival": req.times.iter().map(|&t| c.survival(t)).collect::<Vec<_>>(),
             "cif": cif,
+            "support": support,
         });
         if let Some(cal) = &saved.calibration {
             // `null` where the horizon is not calibrated: absent, never 0.
@@ -177,6 +221,7 @@ fn render(saved: &Saved, req: &Request, curves: &[Curves]) -> Outcome {
     }
     Outcome::new()
         .set("subjects", json!(req.subjects.len()))
+        .set("abstained", json!(abstained))
         .blob("predictions", Blob::new(Media::Text, out.into_bytes()))
 }
 
@@ -202,7 +247,7 @@ pub fn predict_batch(saved: &Saved, invs: &[Invocation]) -> Vec<ActionResult> {
         .flatten()
         .flat_map(|r| r.subjects.iter().cloned())
         .collect();
-    let curves = match saved.predict(&subjects) {
+    let curves = match saved.score(&subjects, &AssessOptions::default()) {
         Ok(c) => c,
         // Every subject was validated at parse time, so this is a device
         // failure: it is every valid request's failure, reported as such.
