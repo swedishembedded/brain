@@ -246,7 +246,9 @@ New, each with a CPU and GPU path, a kernel header and a gradient check:
    chunked GDN recurrence's decay `-softplus(rate) * elapsed time`, per head,
    padding passing the state through): block stacks of attention, GDN or a 3:1
    hybrid, gradient-checked on the CPU JIT and CUDA, CPU/device parity,
-   batch-independence and long-gap-forgetting tests (`tests/stack.rs`).
+   batch-independence and long-gap-forgetting tests (`tests/stack.rs`). Which
+   mixer ships is a measurement: `MixerAblation` in `brain-bench`
+   (`tests/survival_mixers.rs`).
 4. **Evaluation arithmetic.** Done in the leaf crate `crates/survival`:
    weighted Kaplan-Meier, censoring distribution and Aalen-Johansen; Harrell
    and Uno concordance with competing causes; IPCW Brier score and its

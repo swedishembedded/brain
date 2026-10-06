@@ -165,6 +165,26 @@ hold them to:
   over the baseline covariates alone (`longitudinal::baseline_only`), and the
   forecast head beats the population mean for future measurements.
 
+### Mixer ablation
+
+Which sequence mixer a stack should use is a measurement on the data at hand.
+`bench::survival_bench::MixerAblation` trains the all-attention stack, the
+all-Gated-DeltaNet stack and the 3:1 hybrid (the same number of blocks, width
+and feed-forward size, so the parameter counts differ only by the mixers' own
+small tensors and are held within a stated tolerance) on identical data,
+split, seed and optimisation steps (early stopping is off so every variant
+takes every step; the best held-out evaluation's weights are kept), on two of
+the generators above: `irregular` (visit times carry the information) and
+`longitudinal` (a hidden state seen through noisy partial measurements). It
+prints one row per variant: held-out event NLL, integrated Brier score,
+time-dependent AUC at the horizon and training time.
+
+```bash
+cargo test --release -p brain-bench --test survival_mixers -- --nocapture --test-threads=1
+```
+
+The test checks that the comparison is fair, not who wins.
+
 ## SDK
 
 ```rust

@@ -60,7 +60,10 @@ use horizon::synthetic::{competing, irregular, longitudinal, single};
 use horizon::timeline::Subject;
 use horizon::train::{event_nll, predict_forecasts, predict_log_hazards, TimelineObjective};
 use horizon::vocab::{FitOptions, Vocab};
-use horizon::{Horizon, HorizonConfig};
+use horizon::{Backbone, Horizon, HorizonConfig};
+
+mod mixers;
+pub use mixers::{MixerAblation, MixerData, MixerRow};
 use serde::{de::DeserializeOwned, Serialize};
 use survival::estimate::{aalen_johansen, censoring, Step};
 use survival::Obs;
@@ -155,7 +158,11 @@ struct ModelSpec {
     forecasts: u32,
     /// Visits carried by the continuous-time state (0: one set).
     visits: u32,
+    /// What carries the visits to the prediction time (with `visits > 0`).
+    backbone: Backbone,
     steps: u32,
+    /// Held-out evaluations without improvement before training stops.
+    patience: u32,
 }
 
 /// A trained model with the vocabulary and configuration it was trained under.
@@ -164,6 +171,10 @@ struct Fitted {
     vocab: Vocab,
     cfg: HorizonConfig,
     absorbing: Vec<bool>,
+    /// Wall-clock seconds of the optimisation loop (evaluations included).
+    train_secs: f64,
+    /// Optimiser steps run.
+    steps: u32,
 }
 
 impl Fitted {
@@ -190,6 +201,7 @@ impl Fitted {
         cfg.forecasts = spec.forecasts;
         cfg.forecast_weight = if spec.forecasts > 0 { 1.0 } else { 0.0 };
         cfg.visits = spec.visits;
+        cfg.backbone = spec.backbone;
         let enc = |s: &[Subject]| -> Vec<Encoded> { s.iter().map(|x| encode(x, &vocab, &cfg)).collect() };
         let (enc_train, enc_held) = (enc(train), enc(held_out));
         let batch = 256;
@@ -203,14 +215,17 @@ impl Fitted {
             decay_iters: spec.steps,
             weight_decay: 0.1,
             eval_interval: 100,
-            patience: 5,
+            patience: spec.patience,
             checkpoint_secs: 0,
             seed,
             ..Default::default()
         };
         let objective = TimelineObjective::new(&enc_train, Some(&enc_held), 0.3);
-        let (_, model) = ::model::fit_controlled(model, objective, &opts, None, ::model::FitControl::default())?;
-        Ok(Fitted { model, vocab, cfg, absorbing: spec.absorbing.clone() })
+        let started = std::time::Instant::now();
+        let (report, model) = ::model::fit_controlled(model, objective, &opts, None, ::model::FitControl::default())?;
+        model.gpu.poll_wait();
+        let train_secs = started.elapsed().as_secs_f64();
+        Ok(Fitted { model, vocab, cfg, absorbing: spec.absorbing.clone(), train_secs, steps: report.steps_completed })
     }
 
     fn encode(&self, subjects: &[Subject]) -> Vec<Encoded> {
@@ -431,6 +446,9 @@ impl<'a> Evaluation<'a> {
 /// be defined, far too few for the scores to mean anything.
 const SMOKE_SIZES: (usize, usize, usize) = (500, 150, 300);
 
+/// Held-out evaluations without improvement before the benchmarks stop training.
+const DEFAULT_PATIENCE: u32 = 5;
+
 const REPORT: [&str; 6] = ["ibs", "ibs_oracle", "harrell", "harrell_oracle", "spearman_oracle", "oe"];
 
 // --------------------------------------------------------------- the benchmarks
@@ -484,7 +502,9 @@ impl Benchmark for SurvivalSingle {
             d_model: 24,
             forecasts: 0,
             visits: 0,
+            backbone: Backbone::State,
             steps: self.steps,
+            patience: DEFAULT_PATIENCE,
         };
         let fitted = Fitted::fit(&spec, &data.train, &data.held_out, seed)?;
         let eval = Evaluation { test: &data.test, train: &data.train, codes: &[single::CODE], grid: Grid::new(4.0, 8) };
@@ -561,7 +581,9 @@ impl Benchmark for SurvivalCompeting {
             d_model: 24,
             forecasts: 0,
             visits: 0,
+            backbone: Backbone::State,
             steps: self.steps,
+            patience: DEFAULT_PATIENCE,
         };
         let fitted = Fitted::fit(&spec, &data.train, &data.held_out, seed)?;
         let eval = Evaluation { test: &data.test, train: &data.train, codes: &competing::CODES, grid: Grid::new(5.0, 10) };
@@ -644,7 +666,9 @@ impl Benchmark for SurvivalIrregular {
             d_model: 32,
             forecasts: 0,
             visits: self.visits,
+            backbone: Backbone::State,
             steps: self.steps,
+            patience: DEFAULT_PATIENCE,
         };
         let eval = Evaluation { test: &data.test, train: &data.train, codes: &[irregular::CODE], grid: Grid::new(4.0, 8) };
         let oracle = eval.tabulate(|i, _, t| data.truth[i].oracle_cif(t));
@@ -793,7 +817,9 @@ impl Benchmark for SurvivalLongitudinal {
             d_model: 32,
             forecasts: 4,
             visits: 0,
+            backbone: Backbone::State,
             steps: self.steps,
+            patience: DEFAULT_PATIENCE,
         };
         let eval = Evaluation { test: &data.test, train: &data.train, codes: &[longitudinal::CODE], grid: Grid::new(4.0, 8) };
         let oracle = eval.tabulate(|i, _, t| data.truth[i].oracle_cif(t));
