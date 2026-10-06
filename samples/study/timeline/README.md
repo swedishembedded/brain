@@ -43,11 +43,15 @@ make samples/study/timeline/run ARGS="--out /tmp/timeline"
   subjects in `<out>/subjects.jsonl`: what
   [`samples/shell/timeline/predict`](../../shell/timeline/predict/README.md)
   serves.
+* **Datasets for the command line.** Four disjoint `timeline-v1` files of the
+  same population (training, held-out, validation, test) are written to
+  `<out>/data`: what [`samples/shell/timeline/lifecycle`](../../shell/timeline/lifecycle/README.md)
+  trains, evaluates and calibrates with `brain horizon`.
 
 ## Usage
 
 ```text
---out DIR        where the saved model and the test subjects go
+--out DIR        where the saved models, the test subjects and the datasets go
                  (default: <tmp>/sample-study-timeline)
 --subjects N     training subjects (default 20000; a fifth as many held out
                  for early stopping and calibration, a quarter tested)

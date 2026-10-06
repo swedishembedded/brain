@@ -166,8 +166,24 @@ fn run(out: &Path, n: usize, steps: u32, seed: u64) -> brain::Result<bool> {
     if !better {
         eprintln!("the model did not beat the covariate-blind estimate");
     }
+    write_datasets(out)?;
     let visits_better = visits_model(out, n, steps, seed)?;
     Ok(better && visits_better)
+}
+
+/// Four disjoint `timeline-v1` files of the synthetic population in
+/// `<out>/data`: training, held-out (early stopping), validation (calibration)
+/// and test subjects, what the `brain horizon` train, eval and calibrate
+/// actions read (`samples/shell/timeline/lifecycle`).
+fn write_datasets(out: &Path) -> brain::Result<()> {
+    let dir = out.join("data");
+    std::fs::create_dir_all(&dir)?;
+    for (name, n, seed) in [("train", 4000, 31), ("held-out", 1000, 32), ("validation", 2000, 33), ("test", 2000, 34)] {
+        let lines: String = population(n, seed).0.iter().map(|s| serde_json::to_string(s).map(|l| l + "\n")).collect::<Result<_, _>>().map_err(|e| brain::Error::Backend(e.to_string()))?;
+        std::fs::write(dir.join(format!("{name}.jsonl")), lines)?;
+    }
+    println!("\nwrote train, held-out, validation and test subjects to {}", dir.display());
+    Ok(())
 }
 
 /// A second model for histories that GROW: trained on records whose risk

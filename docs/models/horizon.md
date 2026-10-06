@@ -15,9 +15,10 @@ Nothing in the model knows the domain: variables and outcome codes are data.
 | Training from scratch | [x] |
 | Inference | [x] (SDK) |
 | LoRA fine-tune | [ ] |
-| CLI (`brain <arch> <action>`) | [x] (`brain horizon predict`) |
+| CLI (`brain <arch> <action>`) | [x] (`brain horizon train`, `eval`, `calibrate`, `predict`) |
 | HTTP API | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
 | D-Bus | [x] (`brain serve`, `BRAIN_HORIZON_DIR`) |
+| Ensembles | [x] (seeded and bootstrap, SDK and `train --members`) |
 
 ## Data: `timeline-v1`
 
@@ -456,10 +457,103 @@ number per subject set.
   risks, Brier 0.1276, integrated Brier 0.0764, calibration slope 1.07,
   observed over expected 1.10, expected calibration error 0.019.
 
+## Training, evaluation and calibration from the command line
+
+`brain horizon train`, `eval` and `calibrate` are the capability actions around
+`predict` (`brain caps horizon` lists all four with their schemas). Their inputs
+are `timeline-v1` files, validated at entry: an error names the input and the
+line. Nothing in them knows the domain.
+
+```bash
+brain horizon train --dataset train.jsonl --held-out held-out.jsonl --out model/ \
+    --absorbing death:a,death:b --knots 0,2,5,10 --steps 2000 --json
+brain horizon eval --weights model/ --dataset test.jsonl --horizons 5,10 --json
+brain horizon calibrate --weights model/ --validation validation.jsonl --horizons 5,10
+brain horizon predict --weights model/ --history patient.json --json
+```
+
+- **`train`** takes `--codes a,b,c` (default: every event code that occurs after
+  a subject's entry), `--absorbing`, `--knots`, `--steps`, `--batch`, `--seed`,
+  `--eval-interval`, `--patience`, `--next-events a,b --next-weight W`,
+  `--mixer attention|gated-delta-net|hybrid --blocks N [--visits N]`,
+  `--forecasts N`, and `--members N --ensemble seeded|bootstrap`. It is the
+  SDK's `TimelineModel::train` (one function, `horizon::fit::train`): early
+  stopping on the held-out event NLL, keeping the best model. It is long
+  running, so it reports progress at every evaluation interval and polls the
+  job's cancel token after every optimiser step. A cancelled or failed run
+  returns no model: the directory is written beside its final name and renamed
+  into place only when training is complete, an existing `--out` is refused
+  before any training starts (`--force` replaces it, after training), and
+  nothing is left behind. It prints a report (`--json`): per member the seed,
+  steps, losses, held-out event NLL, parameter count and weights digest.
+- **`eval`** is `TimelineModel::evaluate` (see Evaluation) printed as JSON: per
+  outcome code and horizon, Uno's C, the time-dependent AUC, the IPCW Brier
+  score, the integrated Brier score and calibration, and the event NLL.
+  Horizons with fewer than `--min-events` events are absent from `results` and
+  listed under `absent`. It takes a single model; evaluate an ensemble's member
+  (`members/<n>`).
+- **`calibrate`** is `TimelineModel::calibrate` (see Calibration) on the
+  `validation` subjects. It writes `calibration.json` into the model
+  directory, or a calibrated copy of the model into `--out`, and refuses to
+  overwrite either without `--force`.
+
+`--out` of `train` and `calibrate` is a directory: those two actions have no
+`--out NAME=PATH` output-blob flag (their outputs print with `--json`).
+Underscored names are also written with dashes (`--held-out`).
+
+## Ensembles and uncertainty
+
+`TimelineEnsemble::train(train, held_out, spec, members, kind)` (and `brain
+horizon train --members N --ensemble seeded|bootstrap`) trains several models
+apart:
+
+- `EnsembleKind::Seeded`: the same subjects, member `i` with the spec's seed
+  plus `i`;
+- `EnsembleKind::Bootstrap`: each member also trains on the subjects resampled
+  with replacement BY GROUP (a subject without a `group_id` is its own group).
+
+The vocabulary is fitted once on the full training set and shared, so members
+predict over the same codes, variables and knots; early stopping uses the same
+held-out subjects for every member. An ensemble is saved as one directory:
+`ensemble.json` (the kind, and per member its seed, its bootstrap draws and the
+SHA-256 of its weights) and `members/0`, `members/1`, ... each an ordinary model
+directory. Loading verifies every digest (a member swapped for another valid
+model is refused), that each member sits at `members/<index>` and that the
+members share a vocabulary. The directory is replaced only by an ensemble.
+
+`Prediction` and `RiskForecast` of an ensemble are the mean of the members with
+their disagreement kept: `member_cifs` and `cif_spread` (the standard deviation
+across members), and for a forecast the `member_range` per horizon and the
+`cif_min`/`cif_max` per knot. An ensemble abstains if any member does and has a
+calibrated risk only where every member has one. The served `predict` loads an
+ensemble directory without being told it is one: subjects answer the mean `cif`
+and an `ensemble` object (`members`, `cif_min`, `cif_max` per time), histories
+the ensemble forecast.
+
+**Monte-Carlo dropout is not available:** horizon's architecture has no dropout,
+and none was added for this. The spread of an ensemble is the model's
+uncertainty about itself (what training noise and the training subjects leave
+open), not the Venn-Abers interval (what the calibration data leave open): the
+two answer different questions and are reported separately.
+
+What was measured (synthetic populations with known truth,
+`crates/sdk/tests/ensemble.rs`, `ensemble_comparison`, two seeded data sets): the
+mean risk of both kinds of ensemble was closer to the true risk than one model's
+on the population they were trained on, and calibrated at least as well in most
+cases (neither kind was consistently better calibrated than the other); the
+member spread correlates positively with the error to the true risk at every
+shift level of `population_shifted`, weakly at the largest shift, and a seeded
+ensemble's mean risk was no worse than a bootstrap's on shifted data while the
+bootstrap's members spread more. An ensemble of `n` trains `n` models: it costs
+`n` times the steps of a single model.
+
 ## Serving
 
-A saved model directory (what `TimelineModel::save` writes) is served by one
-action, `predict`, with one of two inputs. `timeline-v1` subjects (the
+A saved model directory (what `TimelineModel::save` writes) or ensemble
+directory (what `TimelineEnsemble::save` writes) is served by `brain serve` as
+`brain/horizon` with four actions: `predict`, `eval`, `calibrate` and `train`.
+
+`predict` takes one of two inputs. `timeline-v1` subjects (the
 `subjects` blob) give survival and each code's cumulative incidence at the
 requested times, as JSON lines. A patient history (the `history` blob: one
 object, an array or one per line, see Patient history) gives a structured
@@ -471,6 +565,15 @@ request, not the batch it is in. Times past
 the last knot are refused. A calibrated model also answers `cif_calibrated`
 and `cif_interval` per code and time, `null` where that time was not
 calibrated.
+
+`eval` judges the served model on the request's `dataset` subjects. `calibrate`
+returns the `calibration` blob (the `calibration.json` content) for the
+request's `validation` subjects and writes nothing: the served directory is the
+host's, so an operator installs it with `brain horizon calibrate` on the
+host. `train` needs no served weights; it reports progress, honours the job's
+cancellation (the D-Bus `Cancel`) and writes the finished model to the host's
+`BRAIN_HORIZON_TRAIN_DIR` (an existing directory there is refused). The
+datasets travel as blobs; no request names a path on the host.
 
 Every answer carries `support: {supported, ood_score, warnings}`. A subject
 whose score is above the request's `max_ood_score` (default 1, the edge of
@@ -499,11 +602,20 @@ what `--history patient.json` is. `samples/shell/timeline/predict/history.sh`
 runs a patient through H0 to R0, an appended checkup to R1 and another to R2.
 
 `brain serve` serves it on HTTP and D-Bus as `brain/horizon` when
-`BRAIN_HORIZON_DIR` names the saved model directory; there the directory is
-the host's, never a request parameter.
+`BRAIN_HORIZON_DIR` names the saved model (or ensemble) directory; there the
+directory is the host's, never a request parameter. A served `train` is the
+long-running case: it is one job on its own instance (nothing loaded) and one
+that a caller can cancel. `samples/shell/timeline/lifecycle/lifecycle.sh` runs
+train, eval, calibrate and predict (and a bootstrap ensemble) on the study
+sample's datasets.
 
 ## Limits
 
+- `eval` and `calibrate` take one model, not an ensemble; there is no
+  ensemble-level calibration (the members' own calibrations average where all
+  members have one). A served `train` writes to the host's directory and
+  returns its report but not the model files; a remote client fetches the
+  directory on the host. There is no Monte-Carlo dropout.
 - Calibration and support describe the population the model was trained,
   validated and assessed on; they do not transfer to another one. A
   calibration needs events: at 30 per code and horizon the Venn-Abers
