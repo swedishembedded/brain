@@ -24,3 +24,4 @@ bytemuck.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-survival.workspace = true

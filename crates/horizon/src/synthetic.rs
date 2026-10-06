@@ -21,12 +21,24 @@
 //!
 //! Hazards change with age, so events are simulated on a fine grid
 //! ([`STEP`]); [`Truth::cif`] integrates the same hazards on the same grid.
+//!
+//! Submodules hold the domain-free survival generators the benchmark suite
+//! scores against, each returning the truth needed to score: [`single`] (one
+//! event, closed-form risk), [`competing`] (two causes, analytic cumulative
+//! incidence), [`irregular`] (visit times carry the information),
+//! [`longitudinal`] (hidden state, noisy partial measurements, an action) and
+//! [`drifting`] (a risk factor that drifts between visits).
 
 use data::rng::Rng;
 
 use crate::timeline::{AtRisk, Event, Observation, Subject, Value};
 
+pub mod competing;
 pub mod drifting;
+pub mod irregular;
+pub mod longitudinal;
+pub mod single;
+pub mod sim;
 
 /// Simulation and integration step, in years.
 pub const STEP: f64 = 0.02;

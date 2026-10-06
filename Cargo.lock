@@ -1539,6 +1539,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-survival",
  "brain-testutil",
  "bytemuck",
  "serde",
