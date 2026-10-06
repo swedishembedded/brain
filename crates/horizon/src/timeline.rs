@@ -119,8 +119,9 @@ impl Subject {
     }
 
     /// The semantic checks `serde` cannot make: finite times, a positive
-    /// weight, observation windows that are intervals and contain no event of
-    /// their code before they open.
+    /// weight, and observation windows that are intervals opening no earlier
+    /// than entry. An event dated before its window opens is legal (history
+    /// before entry is the input) and is simply not scored as an outcome.
     pub fn validate(&self) -> Result<(), String> {
         let who = &self.subject_id;
         let finite = |what: &str, v: f64| {
