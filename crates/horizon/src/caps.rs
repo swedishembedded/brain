@@ -26,6 +26,8 @@ use capability::{
 use serde_json::{json, Value};
 
 use crate::saved::{parse_jsonl, Saved};
+use crate::survival::Curves;
+use crate::timeline::Subject;
 
 /// The model id on the CLI and every served surface.
 pub const MODEL: &str = "brain/horizon";
@@ -107,8 +109,13 @@ fn times(inv: &Invocation, horizon: f64) -> Result<Vec<f64>, String> {
     Ok(parsed)
 }
 
-/// `predict` on a loaded model: the work every surface shares.
-pub fn predict(saved: &Saved, inv: &Invocation) -> ActionResult {
+/// One request, parsed and validated: its subjects and the times asked for.
+struct Request {
+    subjects: Vec<Subject>,
+    times: Vec<f64>,
+}
+
+fn parse_request(saved: &Saved, inv: &Invocation) -> Result<Request, String> {
     let blob = inv
         .get_blob("subjects")
         .ok_or("horizon: the 'subjects' input blob is required")?;
@@ -116,11 +123,13 @@ pub fn predict(saved: &Saved, inv: &Invocation) -> ActionResult {
         .map_err(|e| format!("horizon: subjects are not UTF-8: {e}"))?;
     let subjects = parse_jsonl(text).map_err(|e| format!("horizon: subjects {e}"))?;
     let times = times(inv, saved.horizon())?;
-    let curves = saved
-        .predict(&subjects)
-        .map_err(|e| format!("horizon: {e}"))?;
+    Ok(Request { subjects, times })
+}
+
+/// One request's answer: a JSON line per subject.
+fn render(saved: &Saved, req: &Request, curves: &[Curves]) -> Outcome {
     let mut out = String::new();
-    for (s, c) in subjects.iter().zip(&curves) {
+    for (s, c) in req.subjects.iter().zip(curves) {
         let cif: serde_json::Map<String, Value> = saved
             .vocab
             .codes
@@ -129,22 +138,67 @@ pub fn predict(saved: &Saved, inv: &Invocation) -> ActionResult {
             .map(|(k, code)| {
                 (
                     code.clone(),
-                    json!(times.iter().map(|&t| c.cif(k, t)).collect::<Vec<_>>()),
+                    json!(req.times.iter().map(|&t| c.cif(k, t)).collect::<Vec<_>>()),
                 )
             })
             .collect();
         let line = json!({
             "subject_id": s.subject_id,
-            "times": times,
-            "survival": times.iter().map(|&t| c.survival(t)).collect::<Vec<_>>(),
+            "times": req.times,
+            "survival": req.times.iter().map(|&t| c.survival(t)).collect::<Vec<_>>(),
             "cif": cif,
         });
         out.push_str(&line.to_string());
         out.push('\n');
     }
-    Ok(Outcome::new()
-        .set("subjects", json!(subjects.len()))
-        .blob("predictions", Blob::new(Media::Text, out.into_bytes())))
+    Outcome::new()
+        .set("subjects", json!(req.subjects.len()))
+        .blob("predictions", Blob::new(Media::Text, out.into_bytes()))
+}
+
+/// `predict` on a loaded model: the work every surface shares.
+pub fn predict(saved: &Saved, inv: &Invocation) -> ActionResult {
+    predict_batch(saved, std::slice::from_ref(inv))
+        .pop()
+        .ok_or_else(|| "horizon: no result".to_string())?
+}
+
+/// Several `predict` requests through ONE forward pass over all their
+/// subjects (in device batches of the model's batch size), the curves split
+/// back per request, in order. A request that cannot be answered - a missing
+/// or malformed file, a time outside the model - fails alone: the others get
+/// their answers. A subject's curves never depend on the others in the pass
+/// (padding and neighbours are masked), so each answer equals the request run
+/// by itself.
+pub fn predict_batch(saved: &Saved, invs: &[Invocation]) -> Vec<ActionResult> {
+    let parsed: Vec<Result<Request, String>> =
+        invs.iter().map(|inv| parse_request(saved, inv)).collect();
+    let subjects: Vec<Subject> = parsed
+        .iter()
+        .flatten()
+        .flat_map(|r| r.subjects.iter().cloned())
+        .collect();
+    let curves = match saved.predict(&subjects) {
+        Ok(c) => c,
+        // Every subject was validated at parse time, so this is a device
+        // failure: it is every valid request's failure, reported as such.
+        Err(e) => {
+            return parsed
+                .into_iter()
+                .map(|r| r.and_then(|_| Err(format!("horizon: {e}"))))
+                .collect()
+        }
+    };
+    let mut rest = curves.as_slice();
+    parsed
+        .into_iter()
+        .map(|req| {
+            let req = req?;
+            let (mine, tail) = rest.split_at(req.subjects.len());
+            rest = tail;
+            Ok(render(saved, &req, mine))
+        })
+        .collect()
 }
 
 /// The model loaded on first use, kept with the directory it came from.
