@@ -19,7 +19,7 @@ import numpy as np
 import sklearn
 import sksurv
 from sklearn.linear_model import LogisticRegression
-from sksurv.metrics import brier_score, concordance_index_censored, concordance_index_ipcw, integrated_brier_score
+from sksurv.metrics import brier_score, concordance_index_censored, concordance_index_ipcw, cumulative_dynamic_auc, integrated_brier_score
 from sksurv.nonparametric import CensoringDistributionEstimator, cumulative_incidence_competing_risks, kaplan_meier_estimator
 from sksurv.util import Surv
 
@@ -43,6 +43,10 @@ uno = concordance_index_ipcw(train, train, risk, tau=tau)[0]
 surv = np.array([[np.exp(-r * t / 4.0) for t in times] for r in risk])
 _, bs = brier_score(train, train, surv, times)
 ibs = integrated_brier_score(train, train, surv, times)
+
+# Time-dependent AUC (cumulative cases, dynamic controls) of the risk score.
+auc_times = [1.0, 2.5, 4.0]
+auc_by_time = cumulative_dynamic_auc(train, train, risk, auc_times)[0]
 
 # IPCW logistic recalibration at t* = 4 of F = 1 - S.
 ts = 4.0
@@ -78,6 +82,8 @@ out = {
     "harrell": harrell,
     "uno_tau": tau,
     "uno": uno,
+    "auc_times": auc_times,
+    "auc": auc_by_time.tolist(),
     "brier": bs.tolist(),
     "ibs": ibs,
     "recal_horizon": ts,

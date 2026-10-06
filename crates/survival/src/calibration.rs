@@ -87,6 +87,11 @@ pub struct Group {
 }
 
 /// Calibration of the probability of one cause by a horizon.
+///
+/// [`HorizonCalibration::ece`] is the expected calibration error of the
+/// risk-group table: with `groups` of equal weight it is the equal-mass
+/// binned ECE, with the observed side an Aalen-Johansen estimate (censoring-
+/// and competing-risk-aware) and not a raw event share.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HorizonCalibration {
     /// Aalen-Johansen cumulative incidence by the horizon.
@@ -105,6 +110,14 @@ pub struct HorizonCalibration {
     pub groups: Vec<Group>,
     /// Weighted mean absolute gap between observed and expected over the groups.
     pub mean_abs_gap: f64,
+}
+
+impl HorizonCalibration {
+    /// The expected calibration error: the weighted mean absolute gap between
+    /// observed and expected risk over the risk groups.
+    pub fn ece(&self) -> f64 {
+        self.mean_abs_gap
+    }
 }
 
 fn logit(p: f64) -> f64 {

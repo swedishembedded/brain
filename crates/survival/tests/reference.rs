@@ -7,6 +7,7 @@
 //! recorded in the file).
 
 use serde_json::Value;
+use survival::auc;
 use survival::brier::{brier, integrated_brier};
 use survival::calibration::at_horizon;
 use survival::concordance::{harrell, uno};
@@ -79,6 +80,14 @@ fn every_metric_matches_the_reference_libraries() {
         r["uno"].as_f64().unwrap(),
         "uno",
     );
+
+    for (k, &t) in floats(&r["auc_times"]).iter().enumerate() {
+        close(
+            auc::at(&risk, &obs, 0, t, &g).unwrap(),
+            floats(&r["auc"])[k],
+            &format!("time-dependent auc at {t}"),
+        );
+    }
 
     // Predicted survival exp(-risk * t / 4); the cumulative incidence is its complement.
     let cif_at = |k: usize| {
