@@ -170,7 +170,14 @@ pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
         }
     };
     let mut tokens: Vec<(f64, Token)> = Vec::new();
+    // A record listed twice is one record: an exact repeat (same variable,
+    // time and value) must not count as two pieces of evidence.
+    let mut seen_observations = std::collections::HashSet::new();
+    let mut seen_events = std::collections::HashSet::new();
     for o in s.known_observations() {
+        if !seen_observations.insert((o.var.as_str(), o.t.to_bits(), format!("{:?}", o.value))) {
+            continue;
+        }
         let ago = s.entry - o.t;
         let tok = match &o.value {
             Value::Category(level) => Token {
@@ -211,6 +218,9 @@ pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
         tokens.push((ago, tok));
     }
     for e in s.known_events() {
+        if !seen_events.insert((e.code.as_str(), e.t.to_bits())) {
+            continue;
+        }
         let tok = Token {
             id: vocab.event_token(&e.code),
             value_bins: vec![(nb + BIN_PRESENT, 1.0)],
@@ -400,6 +410,24 @@ mod tests {
         let v = Vocab::fit(std::slice::from_ref(&s), &codes, &codes[..2], &opts).unwrap();
         let cfg = HorizonConfig::tiny(v.len(), 3);
         (s, v, cfg)
+    }
+
+    #[test]
+    fn an_exact_duplicate_record_is_one_record() {
+        let (s, v, cfg) = fixture();
+        let mut dup = s.clone();
+        // The same measurement and the same past event, listed twice.
+        let o = dup.observations.iter().find(|o| o.var == "sbp").unwrap().clone();
+        dup.observations.push(o);
+        let e = dup.events.iter().find(|e| e.code == "dx" && e.t < dup.entry).unwrap().clone();
+        dup.events.push(e);
+        assert_eq!(encode(&dup, &v, &cfg), encode(&s, &v, &cfg), "a repeated identical record changes nothing");
+        // A second measurement that differs is a second measurement.
+        let mut other = s.clone();
+        let mut o2 = other.observations.iter().find(|o| o.var == "sbp" && o.t == 50.0).unwrap().clone();
+        o2.value = Value::Number(121.0);
+        other.observations.push(o2);
+        assert_ne!(encode(&other, &v, &cfg), encode(&s, &v, &cfg));
     }
 
     #[test]
