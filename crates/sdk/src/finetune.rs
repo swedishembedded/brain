@@ -103,6 +103,7 @@ pub struct ChatFineTune {
     eval_every: u32,
     patience: u32,
     keep_best: bool,
+    evaluations_dir: Option<PathBuf>,
     cycle: u64,
     device: Device,
     bf16_base: bool,
@@ -153,6 +154,7 @@ impl ChatFineTune {
             eval_every: 0,
             patience: 0,
             keep_best: false,
+            evaluations_dir: None,
             cycle: 0,
             device: Device::default(),
             bf16_base: false,
@@ -221,6 +223,16 @@ impl ChatFineTune {
     /// [`Self::patience`] implies it). Needs [`Self::eval_every`].
     pub fn keep_best(mut self, on: bool) -> Self {
         self.keep_best = on;
+        self
+    }
+
+    /// Write the adapter of every evaluation to `dir` as `step-<N>.safetensors`
+    /// (N the steps trained), so the one exported - the best by monitoring
+    /// loss, or the last - is not the only one a caller can choose from by
+    /// some other measure. The directory is created. Needs
+    /// [`Self::eval_every`].
+    pub fn keep_evaluations(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.evaluations_dir = Some(dir.into());
         self
     }
 
@@ -436,6 +448,9 @@ impl ChatFineTune {
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
         let held_out_text = self.held_out_text.as_deref().map(|path| asked.read(path)).transpose()?;
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
+        if self.eval_every == 0 && self.evaluations_dir.is_some() {
+            return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
+        }
         if self.eval_every == 0 && (self.patience > 0 || self.keep_best) {
             return Err(Error::Backend("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
         }
@@ -507,7 +522,15 @@ impl ChatFineTune {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity };
+        let snapshot_card = format!("{base_id}:local:chat:step");
+        let snapshots = match &self.evaluations_dir {
+            Some(dir) => {
+                std::fs::create_dir_all(dir).map_err(|e| Error::Backend(format!("{}: {e}", dir.display())))?;
+                Some(model::AdapterSnapshots { dir, card_id: &snapshot_card, base_id: &base_id, family: "qwen", rank, alpha, targets: Vec::new() })
+            }
+            None => None,
+        };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots };
         let start = match &self.continue_from {
             Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
             None => qwen3::finetune::LoraStart::Fresh,

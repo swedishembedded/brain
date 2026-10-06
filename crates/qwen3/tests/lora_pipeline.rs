@@ -237,7 +237,7 @@ fn a_pipeline_run_resumes_exactly() {
 
     let state = scratch.join("state.bin");
     let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone() };
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None };
     let (first, _) = model::fit_controlled(build(), data::<PipelineModel<Qwen>>(&scratch, &opts), &opts, None, control).unwrap();
     assert!(first.interrupted && state.is_file(), "stopped at step 4 with a state file");
     let control = model::FitControl { state: Some(&state), identity, ..Default::default() };

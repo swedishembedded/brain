@@ -311,7 +311,7 @@ impl PreferenceFineTune {
             on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
             !cancel.is_cancelled()
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None };
         let start = match &self.continue_from {
             Some(path) => qwen3::finetune::LoraStart::Continue(utf8(path)?),
             None => qwen3::finetune::LoraStart::Fresh,

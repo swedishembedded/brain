@@ -915,6 +915,37 @@ pub struct FitControl<'a> {
     /// A state whose identity or [`FitOpts`] differ is refused, never
     /// continued into a different run.
     pub identity: serde_json::Value,
+    /// Write the adapter every held-out evaluation measured, so the one a
+    /// run exports is not the only one a caller can choose from. Needs
+    /// [`FitOpts::eval_interval`]; a model with no adapter parameters is
+    /// refused.
+    pub snapshots: Option<AdapterSnapshots<'a>>,
+}
+
+/// Where and as what [`FitControl::snapshots`] are written: one adapter file
+/// per evaluation, `step-<N>.safetensors` in [`Self::dir`], N the number of
+/// steps trained when it was taken.
+pub struct AdapterSnapshots<'a> {
+    /// The directory the files go to; it exists.
+    pub dir: &'a Path,
+    /// The card id each file is written under.
+    pub card_id: &'a str,
+    /// The base checkpoint each adapter is an adapter of.
+    pub base_id: &'a str,
+    /// The architecture family tag of the card (`"qwen"`).
+    pub family: &'a str,
+    /// The adapter's rank, alpha and the projections it covers: whoever
+    /// builds the model fills them in.
+    pub rank: u32,
+    pub alpha: f32,
+    pub targets: Vec<String>,
+}
+
+impl AdapterSnapshots<'_> {
+    /// The file the adapter after `step` steps is written to.
+    pub fn path(&self, step: u32) -> std::path::PathBuf {
+        self.dir.join(format!("step-{step}.safetensors"))
+    }
 }
 
 /// How a [`fit_controlled`] run went.
@@ -1129,6 +1160,20 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
+                if let Some(snapshots) = &control.snapshots {
+                    let path = snapshots.path(step + 1);
+                    crate::lora::device_adapter::save_adapter(
+                        path.to_str().expect("utf-8 path"),
+                        &model,
+                        snapshots.rank,
+                        snapshots.alpha,
+                        &snapshots.targets,
+                        snapshots.card_id,
+                        snapshots.base_id,
+                        snapshots.family,
+                        None,
+                    )?;
+                }
                 match selection.watch.observe(eval_loss) {
                     Watch::Improved => {
                         selection.best_step = Some(step + 1);
@@ -1791,14 +1836,14 @@ mod tests {
 
         let state = dir.join("train.state");
         let mut stop_at_three = |s: &StepReport| s.step < 3;
-        let control = FitControl { on_step: Some(&mut stop_at_three), state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let control = FitControl { on_step: Some(&mut stop_at_three), state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None };
         let (stopped, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
         assert!(stopped.interrupted && stopped.steps_completed == 3 && stopped.kept_best.is_none(), "{stopped:?}");
         assert_eq!(stopped.evaluations.len(), 3);
 
         // The curve continues where the first run left off: its first
         // evaluation is the fourth of the whole run.
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None };
         let (resumed, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals[3..].to_vec(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
         assert_eq!(resumed.resumed_at, Some(3));
         assert_eq!(model.read_weight("w"), vec![4.0], "the best parameters of the whole run");
@@ -1807,7 +1852,7 @@ mod tests {
 
         // A state from a run that did not select is not continued by one that does.
         let plain = FitOpts { patience: 0, ..opts.clone() };
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None };
         let Err(err) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: vec![], next: std::cell::Cell::new(0) }, &plain, None, control) else {
             panic!("a state saved with another selection must not be continued")
         };

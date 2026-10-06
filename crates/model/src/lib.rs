@@ -91,7 +91,7 @@ pub use shard::{plan_balanced, Pipeline, PipelineModel, Shard, ShardCost, Sharda
 pub use objective::Objective;
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, FitControl, FitReport, StepReport};
+pub use train::{build_or_resume, causal_lm, fit, fit_controlled, fit_from, fit_with, load_dataset, load_dataset_with_itos, AdapterSnapshots, FitControl, FitReport, StepReport};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
