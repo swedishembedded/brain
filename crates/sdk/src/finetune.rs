@@ -82,6 +82,7 @@ pub struct ChatFineTune {
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
+    held_out_text: Option<PathBuf>,
     monitor: Option<PathBuf>,
     replay: Vec<PathBuf>,
     replay_share: Option<f32>,
@@ -131,6 +132,7 @@ impl ChatFineTune {
             models_dir: None,
             dataset: None,
             held_out: None,
+            held_out_text: None,
             monitor: None,
             replay: Vec::new(),
             replay_share: None,
@@ -176,6 +178,15 @@ impl ChatFineTune {
     /// outcome's scores are `None`.
     pub fn held_out(mut self, path: impl Into<PathBuf>) -> Self {
         self.held_out = Some(path.into());
+        self
+    }
+
+    /// A second set of records to score base and tuned on, never trained on:
+    /// held-out text of another kind than [`Self::held_out`] (a writer's own
+    /// passages beside the dialogues it is asked as), reported apart in the
+    /// outcome so a loss over the one is not drowned in the other.
+    pub fn held_out_text(mut self, path: impl Into<PathBuf>) -> Self {
+        self.held_out_text = Some(path.into());
         self
     }
 
@@ -423,6 +434,7 @@ impl ChatFineTune {
             weighted_samples.push((asked.read(path)?, *share));
         }
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
+        let held_out_text = self.held_out_text.as_deref().map(|path| asked.read(path)).transpose()?;
         let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
         if self.eval_every == 0 && (self.patience > 0 || self.keep_best) {
             return Err(Error::Backend("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
@@ -459,6 +471,7 @@ impl ChatFineTune {
 
         crate::device::resolve(&self.device)?;
         let base_score = held_out.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
+        let base_text_score = held_out_text.as_ref().map(|records| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
 
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
@@ -534,6 +547,8 @@ impl ChatFineTune {
             base_digest: Some(base_digest.clone()),
             base_score,
             tuned_score: None,
+            base_text_score,
+            tuned_text_score: None,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -576,6 +591,7 @@ impl ChatFineTune {
         outcome.adapter_digest = Some(digest(&adapter_path)?);
         let adapter_str = utf8(&adapter_path)?;
         outcome.tuned_score = held_out.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
+        outcome.tuned_text_score = held_out_text.as_ref().map(|records| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render));
         outcome.adapter = Some(adapter_path);
 
         let record_path = out_dir.join(RECORD_FILE);
@@ -670,6 +686,10 @@ pub struct ChatFineTuneOutcome {
     /// Base plus the new adapter on the same records; `None` unless
     /// completed with a held-out set.
     pub tuned_score: Option<HeldOutScore>,
+    /// The base on the [`ChatFineTune::held_out_text`] records.
+    pub base_text_score: Option<HeldOutScore>,
+    /// Base plus the new adapter on the same records.
+    pub tuned_text_score: Option<HeldOutScore>,
 }
 
 impl ChatFineTuneOutcome {
@@ -704,6 +724,8 @@ impl ChatFineTuneOutcome {
             "weight_decay": self.weight_decay,
             "base_score": score(&self.base_score),
             "tuned_score": score(&self.tuned_score),
+            "base_text_score": score(&self.base_text_score),
+            "tuned_text_score": score(&self.tuned_text_score),
         })
     }
 }
