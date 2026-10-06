@@ -123,7 +123,7 @@ pub mod timeline;
 #[cfg(feature = "timeline")]
 pub use timeline::{
     NextEvent as TimelineNextEvent, Prediction as TimelinePrediction, TimelineModel, TimelineReport,
-    TimelineSpec,
+    TimelineSpec, TimelineEnsemble,
 };
 /// Survival estimation and time-to-event evaluation arithmetic.
 #[cfg(feature = "timeline")]

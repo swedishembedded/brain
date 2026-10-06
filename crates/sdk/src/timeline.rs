@@ -25,19 +25,21 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use horizon::encode::{encode, forecast_query, Encoded};
+use horizon::encode::{forecast_query, Encoded};
+use horizon::ensemble::{Ensemble, Members};
 use horizon::saved::{parse_jsonl, Saved, Scored};
 use horizon::survival::Curves;
-use horizon::train::{
-    event_nll, event_nll_each, predict_forecasts, predict_states, TimelineObjective,
-};
-use horizon::vocab::{FitOptions, Vocab};
-use horizon::Horizon;
+use horizon::train::{event_nll, event_nll_each, predict_forecasts, predict_states};
 
 /// A synthetic population with KNOWN hazards, to check a pipeline against the
 /// truth before trusting it on real data.
 pub use horizon::synthetic;
 pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
+pub use horizon::ensemble::{Kind as EnsembleKind, Manifest as EnsembleManifest, MemberRecord};
+pub use horizon::fit::{
+    TrainSpec as TimelineSpec, DEFAULT_BATCH, DEFAULT_EVAL_INTERVAL, DEFAULT_LR, DEFAULT_MASK_RATE,
+    DEFAULT_PATIENCE, DEFAULT_STEPS,
+};
 pub use horizon::evaluation::{
     Absent, Bootstrap, CalibrationMetrics, Evaluation, EvaluationSpec, HorizonMetrics, Interval, Intervals,
 };
@@ -54,217 +56,11 @@ pub use horizon::{Backbone, Mixer, StackConfig};
 
 use crate::{Error, Result};
 
-/// Subjects per batch when training and predicting, unless the spec says otherwise.
-pub const DEFAULT_BATCH: u32 = 256;
-/// Optimiser steps at most (early stopping usually ends sooner).
-pub const DEFAULT_STEPS: u32 = 4000;
-/// Peak learning rate.
-pub const DEFAULT_LR: f32 = 1e-3;
-/// Held-out evaluations without improvement before training stops.
-pub const DEFAULT_PATIENCE: u32 = 8;
-/// Steps between held-out evaluations.
-pub const DEFAULT_EVAL_INTERVAL: u32 = 100;
-/// Share of each subject's numeric values hidden for the value objective.
-pub const DEFAULT_MASK_RATE: f64 = 0.3;
-
-
 /// Read a `timeline-v1` file: one subject per line, every line validated.
 pub fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<Subject>> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
     parse_jsonl(&text).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
-}
-
-/// What to train: the outcome codes, the model's shape and the optimiser's
-/// schedule. Only the codes are required; everything else has a default.
-#[derive(Clone, Debug)]
-pub struct TimelineSpec {
-    codes: Vec<String>,
-    absorbing: Vec<String>,
-    shape: Option<TimelineConfig>,
-    additive: bool,
-    knots: Option<Vec<f32>>,
-    max_tokens: Option<u32>,
-    batch: u32,
-    steps: u32,
-    lr: f32,
-    patience: u32,
-    eval_interval: u32,
-    mask_rate: f64,
-    seed: u64,
-    vocab: FitOptions,
-    forecasts: Option<(u32, f32)>,
-    visits: Option<u32>,
-    backbone: Option<horizon::Backbone>,
-    next_events: Option<(Vec<String>, f32)>,
-}
-
-impl TimelineSpec {
-    /// Predict `codes`; `absorbing` (a subset) end follow-up for all of them.
-    pub fn new<C: Into<String>, A: Into<String>>(
-        codes: impl IntoIterator<Item = C>,
-        absorbing: impl IntoIterator<Item = A>,
-    ) -> TimelineSpec {
-        TimelineSpec {
-            codes: codes.into_iter().map(Into::into).collect(),
-            absorbing: absorbing.into_iter().map(Into::into).collect(),
-            shape: None,
-            additive: false,
-            knots: None,
-            max_tokens: None,
-            batch: DEFAULT_BATCH,
-            steps: DEFAULT_STEPS,
-            lr: DEFAULT_LR,
-            patience: DEFAULT_PATIENCE,
-            eval_interval: DEFAULT_EVAL_INTERVAL,
-            mask_rate: DEFAULT_MASK_RATE,
-            seed: 1,
-            vocab: FitOptions::default(),
-            forecasts: None,
-            visits: None,
-            backbone: None,
-            next_events: None,
-        }
-    }
-    /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
-    /// by the fitted vocabulary's and the spec's codes).
-    pub fn shape(mut self, cfg: TimelineConfig) -> Self {
-        self.shape = Some(cfg);
-        self
-    }
-    /// Train the additive proportional-hazards baseline instead of the set encoder.
-    pub fn additive(mut self, on: bool) -> Self {
-        self.additive = on;
-        self
-    }
-    /// Hazard piece boundaries over time since prediction, starting at 0.
-    pub fn knots(mut self, knots: Vec<f32>) -> Self {
-        self.knots = Some(knots);
-        self
-    }
-    /// Tokens per subject, including the summary token.
-    pub fn max_tokens(mut self, n: u32) -> Self {
-        self.max_tokens = Some(n);
-        self
-    }
-    /// Subjects per batch.
-    pub fn batch(mut self, b: u32) -> Self {
-        self.batch = b;
-        self
-    }
-    /// Optimiser steps at most.
-    pub fn steps(mut self, steps: u32) -> Self {
-        self.steps = steps;
-        self
-    }
-    /// Peak learning rate.
-    pub fn lr(mut self, lr: f32) -> Self {
-        self.lr = lr;
-        self
-    }
-    /// Early-stopping patience, in held-out evaluations.
-    pub fn patience(mut self, p: u32) -> Self {
-        self.patience = p;
-        self
-    }
-    /// Steps between held-out evaluations.
-    pub fn eval_interval(mut self, n: u32) -> Self {
-        self.eval_interval = n;
-        self
-    }
-    /// Share of numeric values hidden for the value objective (0 turns it off).
-    pub fn mask_rate(mut self, r: f64) -> Self {
-        self.mask_rate = r;
-        self
-    }
-    /// Seed of the initial weights, the batches and the masks.
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = seed;
-        self
-    }
-    /// Train a forecast head on up to `per_subject` future measurements of
-    /// each subject (observations after its entry), weighted `weight`
-    /// against the event objective; [`TimelineModel::forecast`] needs it.
-    pub fn forecasts(mut self, per_subject: u32, weight: f32) -> Self {
-        self.forecasts = Some((per_subject, weight));
-        self
-    }
-    /// Carry a continuous-time state across the most recent `visits` visits
-    /// (distinct observation times) instead of reading the whole history as
-    /// one set: between visits the state reverts towards the population over
-    /// the elapsed time, so gaps longer than any in training extrapolate.
-    pub fn visits(mut self, visits: u32) -> Self {
-        self.visits = Some(visits);
-        self
-    }
-    /// What carries the visits to the prediction time with
-    /// [`TimelineSpec::visits`]: the continuous-time state (the default) or
-    /// attention with rotary angles from real time.
-    pub fn backbone(mut self, backbone: Backbone) -> Self {
-        self.backbone = Some(backbone);
-        self
-    }
-    /// Carry the visits (see [`TimelineSpec::visits`], which this needs)
-    /// through a stack of `blocks` residual blocks that mix the visit
-    /// sequence as `mixer`: [`Mixer::Attention`], [`Mixer::GatedDeltaNet`]
-    /// (a matrix-state delta rule whose decay is the exponential of the
-    /// physical time between visits) or [`Mixer::Hybrid`] (three Gated
-    /// DeltaNet blocks to every attention block). The same as
-    /// [`TimelineSpec::backbone`] with a [`Backbone::Stack`].
-    pub fn mixer(self, mixer: Mixer, blocks: u32) -> Self {
-        self.backbone(Backbone::Stack(StackConfig::new(mixer, blocks)))
-    }
-    /// Also model which of `events` (event codes, outcome codes or not) is the
-    /// FIRST to happen after the prediction time, and when, weighted `weight`
-    /// against the outcome codes: a self-supervised objective that teaches the
-    /// state what comes next from every history, whether or not an outcome
-    /// followed. [`TimelineModel::predict_next_events`] reads it back; the
-    /// outcome codes keep their meaning and the held-out event NLL stays theirs.
-    pub fn next_events<E: Into<String>>(
-        mut self,
-        events: impl IntoIterator<Item = E>,
-        weight: f32,
-    ) -> Self {
-        self.next_events = Some((events.into_iter().map(Into::into).collect(), weight));
-        self
-    }
-    /// Quantile knots per numeric variable, and the subjects a categorical
-    /// level needs to get its own token.
-    pub fn vocabulary(mut self, knots: usize, min_count: usize) -> Self {
-        self.vocab = FitOptions { knots, min_count };
-        self
-    }
-
-    fn config(&self, vocab: &Vocab) -> TimelineConfig {
-        let mut cfg = self
-            .shape
-            .clone()
-            .unwrap_or_else(|| TimelineConfig::default_for(vocab.len(), self.codes.len() as u32));
-        cfg.vocab = vocab.len();
-        cfg.n_codes = vocab.head_codes() as u32;
-        cfg.next_codes = vocab.next_events.len() as u32;
-        if let Some((_, w)) = &self.next_events {
-            cfg.next_weight = *w;
-        }
-        cfg.additive = self.additive || cfg.additive;
-        if let Some(k) = &self.knots {
-            cfg.knots = k.clone();
-        }
-        if let Some(n) = self.max_tokens {
-            cfg.max_tokens = n;
-        }
-        if let Some((n, w)) = self.forecasts {
-            cfg.forecasts = n;
-            cfg.forecast_weight = w;
-        }
-        if let Some(v) = self.visits {
-            cfg.visits = v;
-        }
-        if let Some(b) = self.backbone {
-            cfg.backbone = b;
-        }
-        cfg
-    }
 }
 
 /// How to calibrate a trained model ([`TimelineModel::calibrate`]): the
@@ -354,21 +150,7 @@ impl std::error::Error for Unavailable {}
 pub type Risk = std::result::Result<Prediction, Unavailable>;
 
 /// What training did.
-#[derive(Clone, Debug, PartialEq)]
-pub struct TimelineReport {
-    /// Optimiser steps run (early stopping may end before the spec's limit).
-    pub steps: u32,
-    /// Training loss before the first step.
-    pub initial_loss: f32,
-    /// Training loss at the last step.
-    pub final_loss: Option<f32>,
-    /// Weighted event NLL on the held-out subjects, of the model kept.
-    pub held_out_event_nll: f32,
-    /// Trainable parameters.
-    pub parameters: usize,
-    /// Known tokens left out because a subject had more than `max_tokens - 1`.
-    pub truncated_tokens: usize,
-}
+pub type TimelineReport = horizon::fit::Report;
 
 /// A trained timeline model with its vocabulary.
 pub struct TimelineModel {
@@ -398,55 +180,8 @@ impl TimelineModel {
                 "training and held-out subjects are both required".into(),
             ));
         }
-        let mut vocab =
-            Vocab::fit(train, &spec.codes, &spec.absorbing, &spec.vocab).map_err(Error::Backend)?;
-        if let Some((events, _)) = &spec.next_events {
-            vocab = vocab.with_next_events(events).map_err(Error::Backend)?;
-        }
-        // The training subjects fixed the units; held-out ones must agree.
-        for s in held_out {
-            vocab.check_units(s).map_err(Error::Backend)?;
-        }
-        let cfg = spec.config(&vocab);
-        cfg.validate().map_err(Error::Backend)?;
-        let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
-        let enc_held: Vec<Encoded> = held_out.iter().map(|s| encode(s, &vocab, &cfg)).collect();
-        let truncated_tokens = enc_train.iter().chain(&enc_held).map(|e| e.truncated).sum();
-        let model = Horizon::new(
-            cfg.clone(),
-            spec.batch,
-            &horizon::init_weights(&cfg, spec.seed),
-        );
-        let opts = model::FitOpts {
-            steps: spec.steps,
-            batch_size: spec.batch,
-            block_size: cfg.max_tokens,
-            lr: spec.lr,
-            min_lr: spec.lr / 10.0,
-            warmup: (spec.steps / 40).max(1),
-            decay_iters: spec.steps,
-            weight_decay: 0.1,
-            eval_interval: spec.eval_interval,
-            patience: spec.patience,
-            checkpoint_secs: 0,
-            seed: spec.seed,
-            ..Default::default()
-        };
-        let objective = TimelineObjective::new(&enc_train, Some(&enc_held), spec.mask_rate);
-        let (fit, model) =
-            model::fit_controlled(model, objective, &opts, None, model::FitControl::default())?;
-        let held_out_event_nll = event_nll(&model, &enc_held);
-        let parameters = cfg.param_list().iter().map(|(_, n)| n).sum();
-        let report = TimelineReport {
-            steps: fit.steps_completed,
-            initial_loss: fit.initial_loss,
-            final_loss: fit.final_loss,
-            held_out_event_nll,
-            parameters,
-            truncated_tokens,
-        };
-        let mut saved = Saved::new(model, vocab);
-        saved.fit_support(train).map_err(Error::Backend)?;
+        let (saved, report) = horizon::fit::train(train, held_out, spec, &mut horizon::fit::Hooks::default())
+            .map_err(|e| Error::Backend(e.to_string()))?;
         Ok((TimelineModel { saved }, report))
     }
 
@@ -535,19 +270,7 @@ impl TimelineModel {
 
     /// One prediction per subject, in order.
     pub fn predict(&self, subjects: &[Subject]) -> Result<Vec<Prediction>> {
-        let last_knot = self.saved.horizon();
-        Ok(self
-            .saved
-            .predict(subjects)
-            .map_err(Error::Backend)?
-            .into_iter()
-            .map(|curves| Prediction {
-                members: vec![curves],
-                calibrations: vec![self.saved.calibration.clone()],
-                codes: self.saved.vocab.codes.clone(),
-                last_knot,
-            })
-            .collect())
+        predictions(&self.saved, subjects)
     }
 
     /// One prediction per subject, in order, or `Err(Unavailable)` for a
@@ -695,6 +418,119 @@ impl TimelineModel {
     }
 }
 
+/// One prediction per subject from one model.
+fn predictions(saved: &Saved, subjects: &[Subject]) -> Result<Vec<Prediction>> {
+    let last_knot = saved.horizon();
+    Ok(saved
+        .predict(subjects)
+        .map_err(Error::Backend)?
+        .into_iter()
+        .map(|curves| Prediction {
+            members: vec![curves],
+            calibrations: vec![saved.calibration.clone()],
+            codes: saved.vocab.codes.clone(),
+            last_knot,
+        })
+        .collect())
+}
+
+/// Several models trained apart ([`EnsembleKind::Seeded`]: another seed each;
+/// [`EnsembleKind::Bootstrap`]: subjects resampled with replacement by group):
+/// the prediction is their mean and the disagreement between them is the
+/// uncertainty about it ([`Prediction::member_cifs`], [`Prediction::cif_spread`],
+/// and `member_range` and the knots' `cif_min`/`cif_max` of a forecast). Saved as
+/// one directory, `ensemble.json` with the member seeds, bootstrap draws and
+/// weights digests, and `members/`.
+///
+/// There is no Monte-Carlo dropout: horizon has no dropout in its architecture.
+pub struct TimelineEnsemble {
+    inner: Ensemble,
+}
+
+impl std::fmt::Debug for TimelineEnsemble {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelineEnsemble")
+            .field("kind", &self.inner.manifest().kind)
+            .field("members", &self.inner.members().len())
+            .finish()
+    }
+}
+
+impl TimelineEnsemble {
+    /// Train `members` (at least two) models on `train`, each early-stopped on
+    /// `held_out`; member `i` uses the spec's seed plus `i`. One report per
+    /// member.
+    pub fn train(
+        train: &[Subject],
+        held_out: &[Subject],
+        spec: &TimelineSpec,
+        members: usize,
+        kind: EnsembleKind,
+    ) -> Result<(TimelineEnsemble, Vec<TimelineReport>)> {
+        if train.is_empty() || held_out.is_empty() {
+            return Err(Error::MissingArgument(
+                "training and held-out subjects are both required".into(),
+            ));
+        }
+        let (inner, reports) =
+            Ensemble::train(train, held_out, spec, members, kind, &mut |_, _| {}, &|| false)
+                .map_err(|e| Error::Backend(e.to_string()))?;
+        Ok((TimelineEnsemble { inner }, reports))
+    }
+
+    /// Load an ensemble [`TimelineEnsemble::save`] wrote, verifying every
+    /// member's weights against the recorded digest.
+    pub fn load(dir: impl AsRef<Path>) -> Result<TimelineEnsemble> {
+        Ok(TimelineEnsemble { inner: Ensemble::load(dir.as_ref()).map_err(Error::Backend)? })
+    }
+
+    /// Write the ensemble into `dir`, atomically. An existing ensemble
+    /// directory is replaced; any other existing path is refused.
+    pub fn save(&self, dir: impl AsRef<Path>) -> Result<()> {
+        self.inner.save(dir.as_ref(), true).map_err(Error::Backend)
+    }
+
+    /// How the members differ, their seeds, bootstrap draws and digests.
+    pub fn manifest(&self) -> &EnsembleManifest {
+        self.inner.manifest()
+    }
+
+    /// The outcome codes, in the members' shared order.
+    pub fn codes(&self) -> &[String] {
+        &self.inner.members()[0].vocab.codes
+    }
+
+    /// One prediction per subject, in order: the members' mean, with every
+    /// member's curves kept.
+    pub fn predict(&self, subjects: &[Subject]) -> Result<Vec<Prediction>> {
+        let per_member: Vec<Vec<Prediction>> = self
+            .inner
+            .members()
+            .iter()
+            .map(|m| predictions(m, subjects))
+            .collect::<Result<_>>()?;
+        (0..subjects.len())
+            .map(|i| {
+                let parts: Vec<Prediction> = per_member.iter().map(|p| p[i].clone()).collect();
+                Prediction::ensemble(&parts).ok_or_else(|| Error::Backend("ensemble members disagree on codes or horizon".into()))
+            })
+            .collect()
+    }
+
+    /// The structured forecast for one history: the members' mean, the member
+    /// range per horizon and the curves' extremes (see
+    /// [`TimelineModel::forecast_history`]).
+    pub fn forecast_history(&self, history: &PatientHistory, request: &ForecastRequest) -> Result<RiskForecast> {
+        let mut all = self.forecast_histories(std::slice::from_ref(history), request)?;
+        all.pop().ok_or_else(|| Error::Backend("no forecast was produced".into()))
+    }
+
+    /// [`TimelineEnsemble::forecast_histories`] for several histories, in order.
+    pub fn forecast_histories(&self, histories: &[PatientHistory], request: &ForecastRequest) -> Result<Vec<RiskForecast>> {
+        self.inner.forecast(histories, request).map_err(Error::Backend)
+    }
+}
+
 /// One subject's forecast of which event of the next-event group comes first.
 #[derive(Clone, Debug)]
 pub struct NextEvent {
@@ -796,6 +632,17 @@ impl Prediction {
         let k = self.codes.iter().position(|c| c == code)?;
         Some(self.members.iter().map(|m| m.cif(k, t)).collect())
     }
+    /// The sample standard deviation across the members of the probability
+    /// that `code` happens within `t`: how much the models trained apart
+    /// disagree. `None` for an unknown code and for a single model.
+    pub fn cif_spread(&self, code: &str, t: f64) -> Option<f64> {
+        let v = self.member_cifs(code, t)?;
+        if v.len() < 2 {
+            return None;
+        }
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        Some((v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt())
+    }
     /// Probability of no absorbing outcome within `t`.
     pub fn survival(&self, t: f64) -> f64 {
         self.members.iter().map(|m| m.survival(t)).sum::<f64>() / self.members.len() as f64
@@ -834,25 +681,6 @@ impl Prediction {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_spec_applies_only_what_it_was_given() {
-        let s = TimelineSpec::new(["a", "b"], ["a"])
-            .knots(vec![0.0, 1.0, 2.0])
-            .steps(10);
-        let subjects = horizon::synthetic::population(50, 1).0;
-        let vocab = Vocab::fit(&subjects, &s.codes, &s.absorbing, &s.vocab).unwrap();
-        let cfg = s.config(&vocab);
-        assert_eq!(cfg.knots, vec![0.0, 1.0, 2.0]);
-        assert_eq!(cfg.n_codes, 2);
-        assert_eq!(
-            cfg.d_model,
-            TimelineConfig::default_for(1, 1).d_model,
-            "unset fields keep the default"
-        );
-        assert!(!cfg.additive);
-        assert!(s.clone().additive(true).config(&vocab).additive);
-    }
 
     #[test]
     fn reading_a_file_reports_the_bad_line() {
