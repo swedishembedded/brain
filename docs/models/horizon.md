@@ -143,12 +143,61 @@ accepting sampling weights. `brain::survival::venn_abers` turns a risk by a
 horizon into an interval `(p0, p1)`, calibrated on subjects the model was not
 trained on.
 
+## Calibration
+
+`TimelineModel::calibrate(validation, &CalibrationSpec::new([5.0, 10.0]))`
+fits, for every outcome code and every requested horizon, a Venn-Abers
+calibrator (`survival::venn_abers`) on the VALIDATION subjects: the subjects
+the model was neither trained nor early-stopped on, never the test set the
+result is judged on. Censoring is handled by inverse-probability-of-censoring
+weights with the censoring distribution estimated on the validation subjects
+themselves, and a code competes with the absorbing codes exactly as its
+cumulative incidence does.
+
+```rust
+let mut model = TimelineModel::load("model")?;
+model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0]))?;
+model.save("model")?;                       // writes calibration.json beside the weights
+let p = &model.predict(&test)?[0];
+p.cif("death:heart", 10.0);                 // the model's raw risk
+p.calibrated_cif("death:heart", 10.0);      // Some(calibrated risk) at a calibrated horizon
+p.cif_interval("death:heart", 10.0);        // its Venn-Abers interval (p0, p1)
+```
+
+- A horizon is calibrated only if the validation subjects hold at least
+  `MIN_EVENTS` (30; `CalibrationSpec::min_events`) events of the code by it
+  and as many still event-free. Otherwise it is NOT calibrated and NOT
+  exposed: `calibrated_cif` is `None`, the capability answers `null`, never
+  zero. The pairs left out, with their event counts, are listed by
+  `Calibration::uncalibrated`.
+- Only the horizons asked for are calibrated; any other time has no
+  calibrated risk (the raw risk is always there).
+- `calibration.json` records the SHA-256 of the weights it was fitted for,
+  the number of validation subjects and, per (code, horizon), the events and
+  the calibrator itself. Loading refuses a calibration beside other weights.
+  A directory without the file loads as uncalibrated.
+- An ensemble's calibrated risk is the mean of its members' calibrated risks,
+  `None` unless every member has one.
+- On a population trained on too few subjects, the first-onset risk of the
+  model is overconfident (recalibration slope 0.50, observed over expected
+  1.18); calibrating on 8000 validation subjects brings both to about one on
+  a test population neither saw (`tests/timeline.rs` in the SDK holds it).
+
 ## Serving
 
 A saved model directory (what `TimelineModel::save` writes) is served by one
 action, `predict`: `timeline-v1` subjects in, survival and each code's
 cumulative incidence at the requested times out, as JSON lines. Times past
-the last knot are refused.
+the last knot are refused. A calibrated model also answers `cif_calibrated`
+and `cif_interval` per code and time, `null` where that time was not
+calibrated.
+
+Concurrent requests are one batch: the resident model puts every request's
+subjects through one forward pass in device batches of the model's size and
+splits the answers back per request, in order. A request that cannot be
+answered (a malformed file, a time past the knots) fails alone. A subject's
+prediction never depends on its batch neighbours or on padding
+(`tests/batching.rs`).
 
 ```bash
 brain horizon predict --weights model/ --times 5,10 \

@@ -78,10 +78,7 @@ fn train(
         model::FitControl::default(),
     )
     .unwrap();
-    Saved {
-        model,
-        vocab: vocab.clone(),
-    }
+    Saved::new(model, vocab.clone())
 }
 
 /// Mean absolute distance of the predicted risk by [`HORIZON`] from the best

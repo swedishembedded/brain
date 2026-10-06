@@ -144,7 +144,7 @@ mod tests {
         cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
         let model = Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3));
         let dir = std::env::temp_dir().join(format!("catalog-horizon-{}", std::process::id()));
-        Saved { model, vocab }.save(&dir).unwrap();
+        Saved::new(model, vocab).save(&dir).unwrap();
 
         let resident = HorizonResident::new(&dir).expect("a saved model directory");
         let key = InstanceKey::new(horizon::caps::MODEL, "default");

@@ -42,6 +42,20 @@ pub struct VennAbers {
     count: usize,
 }
 
+/// A calibrator's fitted data, to store and rebuild it exactly
+/// ([`VennAbers::state`], [`VennAbers::from_state`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct State {
+    /// Distinct calibration scores, ascending.
+    pub scores: Vec<f64>,
+    /// Per score: total weight (sampling weight over the censoring probability).
+    pub weight: Vec<f64>,
+    /// Per score: the weight of the labelled events.
+    pub events: Vec<f64>,
+    /// Labelled calibration subjects.
+    pub count: usize,
+}
+
 /// One block of the pool-adjacent-violators fit.
 #[derive(Clone, Copy)]
 struct Block {
@@ -116,6 +130,40 @@ impl VennAbers {
             }
         }
         va
+    }
+
+    /// The fitted data, for storing.
+    pub fn state(&self) -> State {
+        State {
+            scores: self.scores.clone(),
+            weight: self.weight.clone(),
+            events: self.events.clone(),
+            count: self.count,
+        }
+    }
+
+    /// Rebuild a calibrator from [`VennAbers::state`]; an error names what is
+    /// inconsistent (stored data is untrusted: a calibrator with unordered
+    /// scores or negative weights would silently return wrong risks).
+    pub fn from_state(state: State) -> Result<VennAbers, String> {
+        let State { scores, weight, events, count } = state;
+        if scores.len() != weight.len() || scores.len() != events.len() {
+            return Err("venn-abers: scores, weights and events differ in length".into());
+        }
+        if count < scores.len() {
+            return Err("venn-abers: fewer labelled subjects than distinct scores".into());
+        }
+        if scores.iter().any(|s| !s.is_finite()) || scores.windows(2).any(|w| w[0] >= w[1]) {
+            return Err("venn-abers: scores must be finite and strictly ascending".into());
+        }
+        let bad = weight
+            .iter()
+            .zip(&events)
+            .any(|(&w, &e)| !(w.is_finite() && w > 0.0 && e.is_finite() && (0.0..=w * (1.0 + 1e-9)).contains(&e)));
+        if bad {
+            return Err("venn-abers: a weight must be positive and hold its events (0 <= events <= weight)".into());
+        }
+        Ok(VennAbers { scores, weight, events, count })
     }
 
     /// How many distinct calibration scores there are.
@@ -228,6 +276,31 @@ mod tests {
         // Below every calibration score, labelled 1 it stands alone.
         let (r0, r1) = va.interval(0.0, 1.0);
         assert!(r0 == 0.0 && (r1 - 0.5).abs() < 1e-12, "{r0} {r1}");
+    }
+
+    #[test]
+    fn a_calibrator_rebuilds_exactly_from_its_state_and_refuses_a_corrupt_one() {
+        let obs = [
+            Obs::event(0.5, 0),
+            Obs::censored(2.0),
+            Obs::event(0.7, 0),
+            Obs::censored(3.0),
+        ];
+        let va = VennAbers::at_horizon(&[0.15, 0.35, 0.55, 0.75], &obs, 0, 1.0, &censoring(&[]));
+        let back = VennAbers::from_state(va.state()).unwrap();
+        for s in [0.0, 0.15, 0.4, 0.9] {
+            assert_eq!(va.interval(s, 1.0), back.interval(s, 1.0));
+        }
+        assert_eq!(va.mean_weight(), back.mean_weight());
+        let mut unordered = va.state();
+        unordered.scores.swap(0, 1);
+        assert!(VennAbers::from_state(unordered).is_err());
+        let mut too_many = va.state();
+        too_many.events[0] = too_many.weight[0] * 2.0;
+        assert!(VennAbers::from_state(too_many).is_err());
+        let mut short = va.state();
+        short.weight.pop();
+        assert!(VennAbers::from_state(short).is_err());
     }
 
     #[test]

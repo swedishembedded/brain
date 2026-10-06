@@ -30,7 +30,7 @@ fn predict_serves_what_the_saved_model_predicts() {
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
     let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3));
     let dir = std::env::temp_dir().join(format!("horizon-caps-{}", std::process::id()));
-    Saved { model, vocab }.save(&dir).unwrap();
+    Saved::new(model, vocab).save(&dir).unwrap();
     let saved = Saved::load(&dir).unwrap();
 
     let some = &subjects[..5];

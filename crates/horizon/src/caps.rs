@@ -12,6 +12,10 @@
 //! cumulative incidence come out as JSON lines. A time past the model's last
 //! knot is refused, not extrapolated: the model says nothing there.
 //!
+//! A model saved with a calibration also answers `cif_calibrated` (the
+//! calibrated risk) and `cif_interval` (its Venn-Abers interval) beside the
+//! raw `cif`, per code and time; `null` at a time that was not calibrated.
+//!
 //! The model directory is the one `TimelineModel::save` (SDK) writes. On a
 //! served surface it is host configuration (`BRAIN_HORIZON_DIR`), never a
 //! caller's parameter.
@@ -25,6 +29,7 @@ use capability::{
 };
 use serde_json::{json, Value};
 
+use crate::calibration::Calibrated;
 use crate::saved::{parse_jsonl, Saved};
 use crate::survival::Curves;
 use crate::timeline::Subject;
@@ -46,7 +51,7 @@ pub fn predict_spec() -> ActionSpec {
         ParamSpec::new(
             "weights",
             ParamType::Str,
-            "directory of a saved timeline model (model.safetensors + vocab.json)",
+            "directory of a saved timeline model (model.safetensors + vocab.json, and calibration.json when calibrated)",
         )
         .required()
         .host_env(DIR_VAR),
@@ -63,7 +68,7 @@ pub fn predict_spec() -> ActionSpec {
     .output(BlobSpec::new(
         "predictions",
         Media::Text,
-        "JSON lines: {subject_id, times, survival, cif: {code: [...]}}",
+        "JSON lines: {subject_id, times, survival, cif: {code: [...]}} (+ cif_calibrated, cif_interval of a calibrated model)",
     ))
 }
 
@@ -142,12 +147,31 @@ fn render(saved: &Saved, req: &Request, curves: &[Curves]) -> Outcome {
                 )
             })
             .collect();
-        let line = json!({
+        let mut line = json!({
             "subject_id": s.subject_id,
             "times": req.times,
             "survival": req.times.iter().map(|&t| c.survival(t)).collect::<Vec<_>>(),
             "cif": cif,
         });
+        if let Some(cal) = &saved.calibration {
+            // `null` where the horizon is not calibrated: absent, never 0.
+            let per_code = |pick: &dyn Fn(Calibrated) -> Value| -> serde_json::Map<String, Value> {
+                saved
+                    .vocab
+                    .codes
+                    .iter()
+                    .enumerate()
+                    .map(|(k, code)| {
+                        let at = req.times.iter().map(|&t| {
+                            cal.apply(code, t, c.cif(k, t)).map_or(Value::Null, pick)
+                        });
+                        (code.clone(), Value::Array(at.collect()))
+                    })
+                    .collect()
+            };
+            line["cif_calibrated"] = Value::Object(per_code(&|c| json!(c.risk)));
+            line["cif_interval"] = Value::Object(per_code(&|c| json!([c.lower, c.upper])));
+        }
         out.push_str(&line.to_string());
         out.push('\n');
     }

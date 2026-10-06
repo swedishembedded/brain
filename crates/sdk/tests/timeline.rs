@@ -147,3 +147,96 @@ fn next_events_train_save_load_and_predict() {
     assert!(plain_model.predict_next_events(&held_out[..5]).unwrap().is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Calibrating a deliberately overconfident model (a wide model trained on
+/// few subjects: its first-onset risk is too extreme) on validation subjects
+/// moves its risks toward the truth on a test population neither saw: the
+/// recalibration slope and the observed-over-expected ratio both go toward
+/// one. The calibration survives save and load, is refused beside other
+/// weights, and is absent - never zero - where it was not fitted.
+#[test]
+fn calibration_repairs_an_overconfident_model_and_persists() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use brain::survival::calibration::at_horizon;
+    use brain::survival::estimate::censoring;
+    use brain::timeline::{observed, CalibrationSpec};
+    let (train, _) = synthetic::population(600, 31);
+    let (stop, _) = synthetic::population(300, 32);
+    let (validation, _) = synthetic::population(8000, 33);
+    let (test, _) = synthetic::population(8000, 34);
+    let codes = ["death:a", "death:b", "onset"];
+    let spec = TimelineSpec::new(codes, ["death:a", "death:b"])
+        .knots(vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0])
+        .max_tokens(8)
+        .steps(1500)
+        .patience(1000)
+        .batch(128)
+        .lr(3e-3);
+    let (mut model, _) = TimelineModel::train(&train, &stop, &spec).unwrap();
+    assert!(model.calibration().is_none());
+    let preds = model.predict(&test).unwrap();
+    assert!(preds[0].calibrated_cif("onset", 5.0).is_none(), "no calibration, no calibrated risk");
+    model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0])).unwrap();
+    let preds = model.predict(&test).unwrap();
+
+    // First onset competes with both deaths.
+    let (t, list) = (5.0, ["onset", "death:a", "death:b"]);
+    let obs = observed(&test, &list);
+    let g = censoring(&obs);
+    let raw: Vec<f64> = preds.iter().map(|p| p.cif("onset", t).unwrap()).collect();
+    let cal: Vec<f64> = preds.iter().map(|p| p.calibrated_cif("onset", t).unwrap()).collect();
+    let before = at_horizon(&raw, &obs, 0, t, &g, 10);
+    let after = at_horizon(&cal, &obs, 0, t, &g, 10);
+    eprintln!(
+        "onset by {t}: slope {:.3} -> {:.3}, O/E {:.3} -> {:.3}, ECE {:.4} -> {:.4}",
+        before.slope, after.slope, before.oe_ratio, after.oe_ratio, before.ece(), after.ece()
+    );
+    assert!(before.slope < 0.7, "the model must start overconfident: {before:?}");
+    assert!(
+        (after.slope - 1.0).abs() < 0.5 * (before.slope - 1.0).abs() && (after.slope - 1.0).abs() < 0.2,
+        "slope {:.3} -> {:.3}",
+        before.slope,
+        after.slope
+    );
+    assert!(
+        (after.oe_ratio - 1.0).abs() < (before.oe_ratio - 1.0).abs() && (after.oe_ratio - 1.0).abs() < 0.1,
+        "O/E {:.3} -> {:.3}",
+        before.oe_ratio,
+        after.oe_ratio
+    );
+    assert!(after.ece() < before.ece(), "ECE {:.4} -> {:.4}", before.ece(), after.ece());
+    for p in &preds {
+        let (lo, hi) = p.cif_interval("onset", t).unwrap();
+        let risk = p.calibrated_cif("onset", t).unwrap();
+        assert!(lo <= risk && risk <= hi, "{lo} <= {risk} <= {hi}");
+        assert!(p.calibrated_cif("onset", 7.0).is_none(), "a horizon that was not calibrated has no calibrated risk");
+        assert!(p.calibrated_cif("no-such-code", t).is_none());
+    }
+
+    // It survives save and load, and is refused beside other weights.
+    let dir = std::env::temp_dir().join(format!("brain-timeline-cal-{}", std::process::id()));
+    model.save(&dir).unwrap();
+    let loaded = TimelineModel::load(&dir).unwrap();
+    assert_eq!(loaded.calibration().unwrap().entries().len(), 6);
+    let again = loaded.predict(&test[..200]).unwrap();
+    for (a, b) in preds.iter().zip(&again) {
+        for code in codes {
+            let (x, y) = (a.calibrated_cif(code, t).unwrap(), b.calibrated_cif(code, t).unwrap());
+            assert!((x - y).abs() < 5e-3, "{code}: {x} vs {y}");
+        }
+    }
+    let other = std::env::temp_dir().join(format!("brain-timeline-cal-other-{}", std::process::id()));
+    let (unrelated, _) = TimelineModel::train(&train, &stop, &spec.clone().steps(5).seed(9)).unwrap();
+    unrelated.save(&other).unwrap();
+    std::fs::copy(dir.join("calibration.json"), other.join("calibration.json")).unwrap();
+    assert!(TimelineModel::load(&other).unwrap_err().to_string().contains("different model"));
+
+    // Too few events: nothing is calibrated and nothing is exposed.
+    let report = model.calibrate(&validation, &CalibrationSpec::new([5.0]).min_events(100_000)).unwrap();
+    assert!(report.entries().is_empty() && report.uncalibrated().len() == 3);
+    assert!(model.predict(&test[..3]).unwrap().iter().all(|p| p.calibrated_cif("onset", 5.0).is_none()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&other).ok();
+}

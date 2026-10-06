@@ -24,6 +24,7 @@
 //! interface.
 
 pub mod batch;
+pub mod calibration;
 pub mod caps;
 pub mod config;
 pub mod encode;

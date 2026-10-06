@@ -23,6 +23,7 @@
 //! ```
 
 use std::path::Path;
+use std::sync::Arc;
 
 use horizon::encode::{encode, forecast_query, Encoded};
 use horizon::saved::{parse_jsonl, Saved};
@@ -36,6 +37,7 @@ use horizon::Horizon;
 /// A synthetic population with KNOWN hazards, to check a pipeline against the
 /// truth before trusting it on real data.
 pub use horizon::synthetic;
+pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
 pub use horizon::HorizonConfig as TimelineConfig;
 pub use horizon::Backbone;
@@ -61,51 +63,6 @@ pub fn read_jsonl(path: impl AsRef<Path>) -> Result<Vec<Subject>> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)?;
     parse_jsonl(&text).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))
-}
-
-/// Each subject's observed outcome among `codes`, for the metrics in
-/// [`crate::survival`]: the time from entry to its first event of any of the
-/// codes inside that code's observation window (its cause is the code's
-/// index in `codes`), else censored at the end of the window of `codes[0]`.
-/// Codes listed together compete: evaluate a cause of death with the other
-/// causes listed after it, a first diagnosis with the causes of death after
-/// it.
-pub fn observed(subjects: &[Subject], codes: &[&str]) -> Vec<survival::Obs> {
-    subjects
-        .iter()
-        .map(|s| {
-            let mut first: Option<(f64, usize)> = None;
-            for e in s.events.iter().filter(|e| e.t > s.entry) {
-                let Some(k) = codes.iter().position(|c| *c == e.code) else {
-                    continue;
-                };
-                let Some(w) = s.window(&e.code) else { continue };
-                // Inside the window, with the same rounding slack the encoder allows.
-                if e.t <= w.to + 1e-9 * w.to.abs().max(1.0) && first.is_none_or(|(t, _)| e.t < t) {
-                    first = Some((e.t, k));
-                }
-            }
-            let weight = s.weight;
-            match first {
-                Some((t, k)) => survival::Obs {
-                    time: t - s.entry,
-                    cause: Some(k),
-                    weight,
-                },
-                None => {
-                    let end = codes
-                        .first()
-                        .and_then(|c| s.window(c))
-                        .map_or(s.entry, |w| w.to);
-                    survival::Obs {
-                        time: end - s.entry,
-                        cause: None,
-                        weight,
-                    }
-                }
-            }
-        })
-        .collect()
 }
 
 /// What to train: the outcome codes, the model's shape and the optimiser's
@@ -290,6 +247,34 @@ impl TimelineSpec {
     }
 }
 
+/// How to calibrate a trained model ([`TimelineModel::calibrate`]): the
+/// horizons whose risks are to be calibrated, and the event minimum a horizon
+/// needs on the validation subjects to be.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CalibrationSpec {
+    horizons: Vec<f64>,
+    min_events: usize,
+}
+
+impl CalibrationSpec {
+    /// Calibrate the risk by each of `horizons` (after entry, in the data's
+    /// unit, each within the model's knots).
+    pub fn new(horizons: impl IntoIterator<Item = f64>) -> CalibrationSpec {
+        CalibrationSpec {
+            horizons: horizons.into_iter().collect(),
+            min_events: MIN_EVENTS,
+        }
+    }
+    /// Calibrate a (code, horizon) only if the validation subjects hold at
+    /// least this many events of the code by then, and as many still
+    /// event-free ([`MIN_EVENTS`] unless set). A lower minimum fits a
+    /// calibrator to fewer events; the others are reported, not guessed.
+    pub fn min_events(mut self, n: usize) -> Self {
+        self.min_events = n;
+        self
+    }
+}
+
 /// What training did.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimelineReport {
@@ -378,7 +363,7 @@ impl TimelineModel {
             parameters,
             truncated_tokens,
         };
-        Ok((TimelineModel { saved: Saved { model, vocab } }, report))
+        Ok((TimelineModel { saved: Saved::new(model, vocab) }, report))
     }
 
     /// Load a model [`TimelineModel::save`] wrote.
@@ -388,10 +373,38 @@ impl TimelineModel {
         })
     }
 
-    /// Write the weights (with the configuration in their header) and the
-    /// vocabulary into `dir`.
+    /// Write the weights (with the configuration in their header), the
+    /// vocabulary and, if the model was calibrated, the calibration into `dir`.
     pub fn save(&self, dir: impl AsRef<Path>) -> Result<()> {
         self.saved.save(dir.as_ref()).map_err(Error::Backend)
+    }
+
+    /// Fit the model's calibration on `validation` subjects: for every outcome
+    /// code and every horizon of `spec`, a Venn-Abers calibrator under
+    /// inverse-probability-of-censoring weights, the censoring distribution
+    /// estimated on `validation` itself. Use subjects the model was neither
+    /// trained nor early-stopped on, and never the test set the result is
+    /// judged on. [`Prediction::calibrated_cif`] then answers at the
+    /// calibrated horizons; a (code, horizon) with too few validation events
+    /// is left uncalibrated and listed in the returned [`Calibration`], where
+    /// the prediction has no calibrated risk (never a zero). The calibration
+    /// is bound to these exact weights, saved with them, and replaces any
+    /// earlier one.
+    pub fn calibrate(
+        &mut self,
+        validation: &[Subject],
+        spec: &CalibrationSpec,
+    ) -> Result<&Calibration> {
+        self.saved
+            .calibrate(validation, &spec.horizons, spec.min_events)
+            .map_err(Error::Backend)?;
+        self.calibration()
+            .ok_or_else(|| Error::Backend("calibration was not stored".into()))
+    }
+
+    /// The model's calibration, if it has one.
+    pub fn calibration(&self) -> Option<&Calibration> {
+        self.saved.calibration.as_deref()
     }
 
     /// The outcome codes, in the model's order.
@@ -424,6 +437,7 @@ impl TimelineModel {
             .into_iter()
             .map(|curves| Prediction {
                 members: vec![curves],
+                calibrations: vec![self.saved.calibration.clone()],
                 codes: self.saved.vocab.codes.clone(),
                 last_knot,
             })
@@ -530,10 +544,14 @@ impl NextEvent {
 }
 
 /// One subject's predicted outcome curves: one model's, or the equal-weight
-/// mixture of several models' ([`Prediction::ensemble`]).
+/// mixture of several models' ([`Prediction::ensemble`]). The curves are the
+/// model's raw risk; a calibrated model also gives the calibrated risk at its
+/// calibrated horizons ([`Prediction::calibrated_cif`]).
 #[derive(Clone, Debug)]
 pub struct Prediction {
     members: Vec<Curves>,
+    /// Each member's calibration (`None` for an uncalibrated model).
+    calibrations: Vec<Option<Arc<Calibration>>>,
     codes: Vec<String>,
     last_knot: f64,
 }
@@ -550,15 +568,49 @@ impl Prediction {
         }
         Some(Prediction {
             members: parts.iter().flat_map(|p| p.members.iter().cloned()).collect(),
+            calibrations: parts.iter().flat_map(|p| p.calibrations.iter().cloned()).collect(),
             codes: first.codes.clone(),
             last_knot: first.last_knot,
         })
     }
-    /// Probability that `code` happens within `t` (in the dataset's unit) of
-    /// the prediction time; `None` for an unknown code. Held constant past
-    /// the last knot ([`Prediction::horizon`]): the model says nothing later.
+    /// The model's raw probability that `code` happens within `t` (in the
+    /// dataset's unit) of the prediction time; `None` for an unknown code.
+    /// Held constant past the last knot ([`Prediction::horizon`]): the model
+    /// says nothing later. Raw is not calibrated: see
+    /// [`Prediction::calibrated_cif`].
     pub fn cif(&self, code: &str, t: f64) -> Option<f64> {
         self.member_cifs(code, t).map(|v| v.iter().sum::<f64>() / v.len() as f64)
+    }
+    /// The calibrated probability that `code` happens within exactly `t`:
+    /// the Venn-Abers risk of the model's raw one, at a horizon the model was
+    /// calibrated for. `None` for an unknown code, an uncalibrated model, and
+    /// a horizon that was not calibrated (including one whose validation data
+    /// had too few events): absent, never a number made up. For an ensemble,
+    /// the mean of its members' calibrated risks, `None` unless every member
+    /// has one.
+    pub fn calibrated_cif(&self, code: &str, t: f64) -> Option<f64> {
+        let n = self.members.len() as f64;
+        Some(self.calibrated_each(code, t)?.iter().map(|c| c.risk).sum::<f64>() / n)
+    }
+    /// The Venn-Abers interval `(p0, p1)` behind [`Prediction::calibrated_cif`]:
+    /// one end is calibrated whatever the model, and the width says how little
+    /// calibration data stands behind the score. `None` wherever
+    /// [`Prediction::calibrated_cif`] is.
+    pub fn cif_interval(&self, code: &str, t: f64) -> Option<(f64, f64)> {
+        let each = self.calibrated_each(code, t)?;
+        let n = each.len() as f64;
+        Some((
+            each.iter().map(|c| c.lower).sum::<f64>() / n,
+            each.iter().map(|c| c.upper).sum::<f64>() / n,
+        ))
+    }
+    fn calibrated_each(&self, code: &str, t: f64) -> Option<Vec<horizon::calibration::Calibrated>> {
+        let k = self.codes.iter().position(|c| c == code)?;
+        self.members
+            .iter()
+            .zip(&self.calibrations)
+            .map(|(m, cal)| cal.as_ref()?.apply(code, t, m.cif(k, t)))
+            .collect()
     }
     /// Each member's probability that `code` happens within `t`: their spread
     /// is the disagreement between models trained apart.
@@ -625,43 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn observed_outcomes_compete_and_censor_at_the_window() {
-        let line = |events: &str| {
-            Subject::from_json_line(&format!(
-                r#"{{"subject_id":"a","weight":2,"source":"s","entry":50,"calendar_at_entry":2000,"events":[{events}],"at_risk":[{{"code":"*","from":50,"to":60}}]}}"#
-            ))
-            .unwrap()
-        };
-        let s = [
-            line(r#"{"t":45,"code":"x"},{"t":53,"code":"y"},{"t":55,"code":"x"}"#),
-            line(""),
-            line(r#"{"t":61,"code":"x"}"#),
-        ];
-        let o = observed(&s, &["x", "y"]);
-        assert_eq!(
-            o[0],
-            survival::Obs {
-                time: 3.0,
-                cause: Some(1),
-                weight: 2.0
-            },
-            "y came first; history before entry ignored"
-        );
-        assert_eq!(
-            o[1],
-            survival::Obs {
-                time: 10.0,
-                cause: None,
-                weight: 2.0
-            }
-        );
-        assert_eq!(
-            o[2].cause, None,
-            "an event after the window is not observed"
-        );
-    }
-
-    #[test]
     fn reading_a_file_reports_the_bad_line() {
         let dir = std::env::temp_dir().join(format!("brain-timeline-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -677,6 +692,7 @@ mod tests {
         let knots = [0.0f32, 1.0, 5.0];
         let one = |rate: f32| Prediction {
             members: vec![Curves::new(&[rate.ln(), rate.ln()], &knots, &[true])],
+            calibrations: vec![None],
             codes: vec!["death".into()],
             last_knot: 5.0,
         };

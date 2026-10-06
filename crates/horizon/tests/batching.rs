@@ -36,7 +36,7 @@ fn saved(subjects: &[Subject]) -> Saved {
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
     let model = Horizon::new(cfg.clone(), BATCH, &horizon::init_weights(&cfg, 3));
-    Saved { model, vocab }
+    Saved::new(model, vocab)
 }
 
 fn request(subjects: &[Subject], times: &str) -> Invocation {
