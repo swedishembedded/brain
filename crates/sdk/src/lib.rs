@@ -150,7 +150,7 @@ pub mod study;
 #[cfg(feature = "study")]
 mod finetune;
 #[cfg(feature = "study")]
-pub use finetune::{score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore};
+pub use finetune::{score_chat, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, FineTuneStatus, HeldOutScore, MonitorPoint, Selection};
 #[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]

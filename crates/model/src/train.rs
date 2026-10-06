@@ -41,7 +41,14 @@ pub struct FitOpts {
     pub weight_decay: f32,
     pub grad_clip: f32,
     pub grad_accum: u32,
+    /// Evaluate on the held-out split every this many steps (`0`: never). A
+    /// run that selects on held-out loss ([`Self::patience`]) also evaluates
+    /// at its last step, so the budget's end is a candidate too.
     pub eval_interval: u32,
+    /// Batches drawn from the held-out split per evaluation. `0` scores every
+    /// example of an example-indexed split exactly once, in order: the same
+    /// loss for the same parameters, which a drawn sample is not (a token
+    /// stream without example boundaries draws one batch).
     pub eval_batches: u32,
     pub seed: u64,
     /// Wall-clock checkpoint cadence: once this many seconds have elapsed since
@@ -65,7 +72,9 @@ pub struct FitOpts {
     /// throw away the thing the stop was for.
     ///
     /// Needs `eval_interval > 0` and a validation split; without either
-    /// there is no held-out loss to watch and this is inert.
+    /// there is no held-out loss to watch and this is inert. A patience the
+    /// run cannot reach (`u32::MAX`) keeps the best evaluation's parameters
+    /// and still runs every step.
     pub patience: u32,
     /// AdamW's β1, β2 and ε for every step of the run.
     pub adam: crate::Adam,
@@ -472,6 +481,11 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn eval(&mut self, model: &M, rng: &mut Rng, batches: u32) -> Option<f32> {
+        if batches == 0 {
+            if let Some(count) = self.val.example_count() {
+                return self.eval_every_example(model, count);
+            }
+        }
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
             let (x, y) = self.val.get_batch(&self.batch_cfg, rng);
@@ -484,6 +498,32 @@ impl<M: Model> Objective<M> for CausalLm {
 
     fn itos(&self) -> Option<&[char]> {
         self.itos.as_deref()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CausalLm {
+    /// The mean per-position loss over every supervised position of the
+    /// validation split's `count` examples, each a row once, in order:
+    /// [`Model::forward`] returns a batch's mean over its supervised
+    /// positions, so each batch is weighted back by them. `None` when no
+    /// position is supervised.
+    fn eval_every_example<M: Model>(&self, model: &M, count: usize) -> Option<f32> {
+        let rows = self.batch_cfg.batch_size.max(1);
+        let (mut sum, mut positions) = (0.0f64, 0usize);
+        let mut first = 0;
+        while first < count {
+            let (x, y) = self.val.example_rows(&self.batch_cfg, first)?;
+            let supervised = y.iter().filter(|&&t| t != data::loader::IGNORE).count();
+            if supervised > 0 {
+                let targets = targets_to_u32(&y);
+                model.set_batch(Batch::Lm { tokens: &x, targets: &targets });
+                sum += f64::from(model.forward()) * supervised as f64;
+                positions += supervised;
+            }
+            first += rows;
+        }
+        (positions > 0).then(|| (sum / positions as f64) as f32)
     }
 }
 
@@ -554,6 +594,12 @@ impl EarlyStop {
         EarlyStop { patience, best: f32::INFINITY, since_improved: 0 }
     }
 
+    /// [`Self::new`] as it stood after `since_improved` evaluations past a
+    /// best of `best`: a watch continued from a saved state.
+    pub fn resumed(patience: u32, best: f32, since_improved: u32) -> EarlyStop {
+        EarlyStop { best, since_improved, ..EarlyStop::new(patience) }
+    }
+
     pub fn armed(&self) -> bool {
         self.patience > 0
     }
@@ -561,6 +607,11 @@ impl EarlyStop {
     /// The best held-out loss seen. `f32::INFINITY` before the first one.
     pub fn best(&self) -> f32 {
         self.best
+    }
+
+    /// Evaluations since the best one.
+    pub fn since_improved(&self) -> u32 {
+        self.since_improved
     }
 
     /// Record one held-out loss and say what to do about it.
@@ -582,6 +633,106 @@ impl EarlyStop {
         } else {
             Watch::Wait
         }
+    }
+}
+
+/// One periodic held-out evaluation of a [`fit_controlled`] run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Evaluation {
+    /// Steps completed when it was taken.
+    pub step: u32,
+    /// The mean training loss of the steps since the previous evaluation
+    /// (since the start, for the first): the training side of the curve,
+    /// measured over the same stretch as the held-out side.
+    pub train_loss: f32,
+    /// The held-out loss [`Objective::eval`] measured.
+    pub eval_loss: f32,
+}
+
+/// The evaluation whose parameters a run that selects on held-out loss
+/// kept.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeptBest {
+    pub step: u32,
+    pub eval_loss: f32,
+}
+
+/// What a run that selects on held-out loss carries between evaluations:
+/// the watch, the best parameters, and the curve so far. Saved with the
+/// exact-resume state, so a run continued from one resumes its selection
+/// where it stood.
+struct Selection {
+    watch: EarlyStop,
+    /// The best parameters, held rather than written (see `hold_trainable`).
+    held: Option<HashMap<String, Vec<f32>>>,
+    best_step: Option<u32>,
+    evaluations: Vec<Evaluation>,
+    /// The training losses since the last evaluation.
+    interval_sum: f32,
+    interval_count: u32,
+}
+
+impl Selection {
+    fn new(opts: &FitOpts) -> Selection {
+        Selection { watch: EarlyStop::new(opts.patience), held: None, best_step: None, evaluations: Vec::new(), interval_sum: 0.0, interval_count: 0 }
+    }
+
+    /// Whether the run keeps its best evaluation's parameters.
+    fn selecting(&self) -> bool {
+        self.watch.armed()
+    }
+
+    fn step_trained(&mut self, loss: f32) {
+        self.interval_sum += loss;
+        self.interval_count += 1;
+    }
+
+    /// Close the interval since the last evaluation with its mean training loss.
+    fn take_interval(&mut self) -> f32 {
+        let mean = if self.interval_count == 0 { f32::NAN } else { self.interval_sum / self.interval_count as f32 };
+        self.interval_sum = 0.0;
+        self.interval_count = 0;
+        mean
+    }
+
+    /// The selection as the state file records it; floats as their bits.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "best_bits": self.watch.best().to_bits(),
+            "since_improved": self.watch.since_improved(),
+            "best_step": self.best_step,
+            "held": self.held.is_some(),
+            "interval_sum_bits": self.interval_sum.to_bits(),
+            "interval_count": self.interval_count,
+            "evaluations": self.evaluations.iter().map(|e| serde_json::json!([e.step, e.train_loss.to_bits(), e.eval_loss.to_bits()])).collect::<Vec<_>>(),
+        })
+    }
+
+    /// The selection a state file recorded, its held parameters read from
+    /// `tensors` by their `best:` names. `None` when the record is not one
+    /// [`Self::to_json`] wrote.
+    fn from_json(opts: &FitOpts, value: &serde_json::Value, tensors: &HashMap<String, Vec<f32>>) -> Option<Selection> {
+        let bits = |v: &serde_json::Value| v.as_u64().and_then(|b| u32::try_from(b).ok()).map(f32::from_bits);
+        let count = |v: &serde_json::Value| v.as_u64().and_then(|b| u32::try_from(b).ok());
+        let evaluations = value["evaluations"]
+            .as_array()?
+            .iter()
+            .map(|e| Some(Evaluation { step: count(&e[0])?, train_loss: bits(&e[1])?, eval_loss: bits(&e[2])? }))
+            .collect::<Option<Vec<_>>>()?;
+        let held = value["held"].as_bool()?.then(|| {
+            tensors.iter().filter_map(|(name, w)| name.strip_prefix("best:").map(|n| (n.to_string(), w.clone()))).collect::<HashMap<_, _>>()
+        });
+        Some(Selection {
+            watch: EarlyStop::resumed(opts.patience, bits(&value["best_bits"])?, count(&value["since_improved"])?),
+            held,
+            best_step: match &value["best_step"] {
+                serde_json::Value::Null => None,
+                step => Some(count(step)?),
+            },
+            evaluations,
+            interval_sum: bits(&value["interval_sum_bits"])?,
+            interval_count: count(&value["interval_count"])?,
+        })
     }
 }
 
@@ -652,7 +803,7 @@ pub struct FitControl<'a> {
 }
 
 /// How a [`fit_controlled`] run went.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FitReport {
     /// The loss estimate taken before this call's first step.
     pub initial_loss: f32,
@@ -665,6 +816,17 @@ pub struct FitReport {
     /// True when [`FitControl::on_step`] stopped the run before
     /// [`FitOpts::steps`].
     pub interrupted: bool,
+    /// Every held-out evaluation of the whole run, in order, those before a
+    /// resume included.
+    pub evaluations: Vec<Evaluation>,
+    /// The evaluation whose parameters the run kept - what the model handed
+    /// back holds, and `out` when given - when it selected on held-out loss
+    /// ([`FitOpts::patience`]) and evaluated at least once; `None` when they
+    /// are the last step's.
+    pub kept_best: Option<KeptBest>,
+    /// True when the held-out loss had not improved for
+    /// [`FitOpts::patience`] evaluations and the run stopped there.
+    pub stopped_early: bool,
 }
 
 /// The format tag of an exact-resume state file.
@@ -690,21 +852,30 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
         "mask_before": opts.mask_before.map(String::from),
         "mask_per_line": opts.mask_per_line,
         "align_to_lines": opts.align_to_lines,
+        "eval_interval": opts.eval_interval,
+        "eval_batches": opts.eval_batches,
+        "patience": opts.patience,
     })
 }
 
 /// Write the exact-resume state of a run that has completed `step` steps,
 /// atomically: a crash mid-write leaves the previous state, never half of
-/// this one.
-fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<()> {
+/// this one. A run selecting on held-out loss saves its selection with it:
+/// the watch, the curve and the best parameters so far.
+fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>) -> std::io::Result<()> {
     let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
-    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 3);
+    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 4);
     for name in &names {
         let (m, v) = model.read_moments(name).ok_or_else(|| std::io::Error::other(format!("exact resume: {name} has no optimizer moments to save")))?;
         let w = model.read_weight(name);
         tensors.push((format!("w:{name}"), vec![w.len() as u64], w));
         tensors.push((format!("m:{name}"), vec![m.len() as u64], m));
         tensors.push((format!("v:{name}"), vec![v.len() as u64], v));
+    }
+    if let Some(held) = selection.and_then(|s| s.held.as_ref()) {
+        for (name, w) in held {
+            tensors.push((format!("best:{name}"), vec![w.len() as u64], w.clone()));
+        }
     }
     let header = serde_json::json!({
         "format": TRAIN_STATE_FORMAT,
@@ -714,6 +885,7 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts
         "rng": rng.state().to_string(),
         "opts": schedule_fingerprint(opts),
         "identity": identity,
+        "selection": selection.map(Selection::to_json),
     });
     let tmp = path.with_extension("tmp");
     let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
@@ -722,8 +894,9 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, rng: &Rng, opts
 }
 
 /// Restore the state [`save_train_state`] wrote into `model`, returning the
-/// completed step count and the batch generator to continue with.
-fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, Rng)> {
+/// completed step count, the batch generator to continue with, and the
+/// selection the run had made so far when it was selecting.
+fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<(u32, Rng, Option<Selection>)> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
     let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
     let st = checkpoint::st::load_safetensors(path_str)?;
@@ -757,7 +930,12 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
         model.write_moments(name, m, v).map_err(std::io::Error::other)?;
     }
     model.poll_wait();
-    Ok((step, rng))
+    let selection = match (&header["selection"], opts.patience > 0) {
+        (serde_json::Value::Null, false) => None,
+        (serde_json::Value::Null, true) => return Err(invalid("saved by a run that did not select on held-out loss".to_string())),
+        (saved, _) => Some(Selection::from_json(opts, saved, &st.tensors).ok_or_else(|| invalid("its selection record cannot be read".to_string()))?),
+    };
+    Ok((step, rng, selection))
 }
 
 /// [`fit_with`], with the caller in the loop: a per-step report that can
@@ -766,23 +944,29 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
 /// only part of it (a LoRA adapter) need not write and re-read a whole
 /// checkpoint.
 ///
-/// Exact resume does not cover early stopping: the held best parameters and
-/// the patience count are not part of the state, so `patience > 0` with a
-/// state file is refused rather than resumed approximately.
+/// **Selecting on held-out loss.** With a [`FitOpts::patience`], every evaluation ([`FitOpts::eval_interval`],
+/// and the last step) is a candidate: the parameters of the best one are
+/// held in host memory and restored into the model before it is handed back
+/// (and written to `out` when given), so what a caller exports is the
+/// checkpoint the best held-out loss was measured on, not the last one
+/// trained. A trainable set too large to hold is written to `out` at each
+/// improvement instead, as this always did; without an `out` to write it to
+/// the run is refused. The selection is part of the exact-resume state.
 pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts: &FitOpts, out: Option<&Path>, mut control: FitControl<'_>) -> std::io::Result<(FitReport, M)> {
-    if control.state.is_some() && opts.patience > 0 {
-        return Err(std::io::Error::other("exact resume does not cover early stopping (patience > 0): the held best parameters are not part of the saved state"));
-    }
     obj.prepare(&mut model);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
     let mut first_step = 0u32;
     let mut resumed_at = None;
+    let mut selection = Selection::new(opts);
     if let Some(state) = control.state.filter(|p| p.exists()) {
-        let (step, saved_rng) = load_train_state(&model, state, opts, &control.identity)?;
+        let (step, saved_rng, saved) = load_train_state(&model, state, opts, &control.identity)?;
         println!("resuming at step {step} from {}", state.display());
         first_step = step;
         rng = saved_rng;
         resumed_at = Some(step);
+        if let Some(saved) = saved {
+            selection = saved;
+        }
     }
 
     let initial = {
@@ -797,16 +981,13 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     let mut completed = first_step;
     let mut interrupted = false;
     let mut last_save = std::time::Instant::now();
-    let mut watch = EarlyStop::new(opts.patience);
-    let mut kept_best = false;
-    let mut stopped_early = false;
-    // The best parameters, held rather than written. See `hold_trainable`:
-    // rewriting the whole checkpoint at every improvement cost a real run
-    // 19.8 GB of writes to preserve a 20 MB adapter.
-    let mut best_held: Option<HashMap<String, Vec<f32>>> = None;
+    // The best parameters were written to `out` as they were found (a
+    // trainable set too large to hold), so the final save must not overwrite them.
+    let mut best_written = false;
     // The best parameters were too large to hold and there was no path to
     // write them to: the returned model is the last one.
     let mut best_lost = false;
+    let mut stopped_early = false;
 
     for step in first_step..opts.steps {
         let lr = cosine_lr(step, opts);
@@ -820,30 +1001,38 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         let loss = step_loss / opts.grad_accum.max(1) as f32;
         last_train = Some(loss);
         completed = step + 1;
+        selection.step_trained(loss);
 
-        if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
+        let last = step + 1 == opts.steps;
+        let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || (last && selection.selecting()));
+        if due {
             if let Some(eval_loss) = obj.eval(&model, &mut rng.clone(), opts.eval_batches) {
+                let train_loss = selection.take_interval();
+                selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
                 println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
-                match watch.observe(eval_loss) {
+                match selection.watch.observe(eval_loss) {
                     Watch::Improved => {
-                        // Hold the best parameters if they fit, and restore
-                        // them into the model (and write them, given a path)
-                        // once after the loop. A trainable set too large to
-                        // hold falls back to writing the checkpoint here; with
-                        // no path to write to, the last parameters are all
-                        // there is, and the run says so when it ends.
+                        selection.best_step = Some(step + 1);
+                        // Hold the best parameters if they fit, and write them
+                        // once after the loop. See `hold_trainable`: rewriting
+                        // the whole checkpoint at every improvement cost a real
+                        // run 19.8 GB of writes to preserve a 20 MB adapter. A
+                        // trainable set too large to hold is written here, as
+                        // this always did.
                         match hold_trainable(&model, BEST_IN_MEMORY_FLOATS) {
-                            Some(held) => best_held = Some(held),
-                            None => {
-                                best_held = None;
-                                match out {
-                                    Some(p) => {
-                                        model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-                                        kept_best = true;
-                                    }
-                                    None => best_lost = true,
+                            Some(held) => selection.held = Some(held),
+                            None => match out {
+                                Some(p) => {
+                                    model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+                                    best_written = true;
                                 }
-                            }
+                                // Nowhere to keep the best parameters: the model
+                                // returned is the last one, and the run says so.
+                                None => {
+                                    selection.held = None;
+                                    best_lost = true;
+                                }
+                            },
                         }
                     }
                     Watch::Wait => {}
@@ -854,7 +1043,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
                              training rows rather than the task",
                             step + 1,
                             opts.patience,
-                            watch.best()
+                            selection.watch.best()
                         );
                         stopped_early = true;
                         break;
@@ -890,7 +1079,7 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         if let Some(state) = control.state {
             let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
             if !keep_going || periodic {
-                save_train_state(&model, state, completed, &rng, opts, &control.identity)?;
+                save_train_state(&model, state, completed, &rng, opts, &control.identity, selection.selecting().then_some(&selection))?;
             }
         }
         if !keep_going {
@@ -899,25 +1088,23 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
         }
     }
 
-    // Held parameters are restored into the model here, so the model returned
-    // - and, given a path, what lands on disk, written exactly once - is the
-    // one the best held-out loss was measured on, not the last one trained.
-    if let Some(held) = best_held.take() {
+    // Held parameters are restored into the model exactly once, here, and
+    // written once when there is somewhere to write them: what is handed
+    // back and what lands on disk is the checkpoint the best held-out loss
+    // was measured on, not the last one trained. An interrupted run is not
+    // finished: it is handed back as it stood, its selection in its state.
+    let mut kept_best = best_written;
+    if let Some(held) = selection.held.take().filter(|_| !interrupted) {
         for (name, w) in &held {
             model.write_weight(name, w);
         }
         model.poll_wait();
-        match out {
-            Some(p) => {
-                let ts = std::time::Instant::now();
-                model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
-                println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
-                kept_best = true;
-            }
-            None => println!("restored the best parameters (held-out loss {:.4})", watch.best()),
+        if let Some(p) = out {
+            let ts = std::time::Instant::now();
+            model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
+            println!("restored the best parameters -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
         }
-    } else if best_lost {
-        println!("the best parameters were too large to hold and there is no checkpoint path: the model is the last step's");
+        kept_best = true;
     }
 
     // The final save would overwrite the best checkpoint with the last one,
@@ -929,11 +1116,15 @@ pub fn fit_controlled<M: Model, O: Objective<M>>(mut model: M, mut obj: O, opts:
     } else if kept_best {
         println!(
             "kept the checkpoint with the best held-out loss ({:.4}){}",
-            watch.best(),
+            selection.watch.best(),
             if stopped_early { ", stopped early" } else { "" }
         );
     }
-    let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted };
+    if best_lost {
+        println!("the best parameters were too large to hold and there is no checkpoint path: the model is the last step's");
+    }
+    let kept_best = kept_best.then(|| selection.best_step.map(|step| KeptBest { step, eval_loss: selection.watch.best() })).flatten();
+    let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted, evaluations: selection.evaluations, kept_best, stopped_early };
     Ok((report, model))
 }
 
@@ -1188,9 +1379,13 @@ mod tests {
     }
 
     /// A model whose only parameter records which step produced it, and
-    /// which remembers every save it was asked to make.
+    /// which remembers every save it was asked to make. Its forward is the
+    /// mean of the batch's supervised targets, so an evaluation's arithmetic
+    /// can be checked; its moments are the step count, so a resume can be.
     struct Recorder {
         w: std::cell::RefCell<Vec<f32>>,
+        moments: std::cell::RefCell<(Vec<f32>, Vec<f32>)>,
+        targets: std::cell::RefCell<Vec<u32>>,
         saves: std::rc::Rc<std::cell::RefCell<Vec<Vec<f32>>>>,
         /// The AdamW hyperparameters of every step, in order.
         adams: std::rc::Rc<std::cell::RefCell<Vec<optim::Adam>>>,
@@ -1222,7 +1417,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), saves: Default::default(), adams: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -1230,9 +1425,19 @@ mod tests {
         fn config(&self) -> &RecorderCfg {
             &RecorderCfg
         }
-        fn set_batch(&self, _b: Batch) {}
+        fn set_batch(&self, b: Batch) {
+            if let Batch::Lm { targets, .. } = b {
+                *self.targets.borrow_mut() = targets.to_vec();
+            }
+        }
         fn forward(&self) -> f32 {
-            0.0
+            let targets = self.targets.borrow();
+            let supervised: Vec<f32> = targets.iter().filter(|&&t| t != IGNORE).map(|&t| t as f32).collect();
+            if supervised.is_empty() {
+                0.0
+            } else {
+                supervised.iter().sum::<f32>() / supervised.len() as f32
+            }
         }
         fn backward(&self) {}
         fn zero_grads(&self) {}
@@ -1240,9 +1445,20 @@ mod tests {
         /// step it came from.
         fn adamw_step(&self, t: u32, _lr: f32, _wd: f32, adam: optim::Adam, _clip: Option<f32>, _extra: f32) {
             *self.w.borrow_mut() = vec![t as f32];
+            *self.moments.borrow_mut() = (vec![t as f32], vec![t as f32]);
             self.adams.borrow_mut().push(adam);
         }
         fn poll_wait(&self) {}
+        fn optimized_params(&self) -> Option<Vec<String>> {
+            Some(vec!["w".into()])
+        }
+        fn read_moments(&self, _name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+            Some(self.moments.borrow().clone())
+        }
+        fn write_moments(&self, _name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+            *self.moments.borrow_mut() = (m.to_vec(), v.to_vec());
+            Ok(())
+        }
         fn param_names(&self) -> Vec<String> {
             vec!["w".into()]
         }
@@ -1349,19 +1565,125 @@ mod tests {
         assert_eq!(saves[0], vec![4.0], "the checkpoint must hold the best step's parameters");
     }
 
-    /// A caller that keeps the returned model in memory (no checkpoint path)
-    /// gets the best step's parameters too: early stopping without them only
-    /// decides when to stop, and hands back a model trained `patience`
-    /// evaluations past its best.
+    /// A caller that wants the model back rather than a checkpoint (a LoRA
+    /// run exporting its adapter) must get the best evaluation's parameters
+    /// too, and be told which evaluation they are; the curve carries every
+    /// evaluation up to the stop.
     #[test]
-    fn without_a_checkpoint_path_the_returned_model_holds_the_best_parameters() {
-        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1];
-        let opts = FitOpts { steps: 6, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() };
+    fn the_model_handed_back_holds_the_best_evaluation_and_the_report_names_it() {
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1, 1.2, 1.3];
+        let opts = FitOpts { steps: 8, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() };
         let obj = Curve { evals, next: std::cell::Cell::new(0) };
-        let (_, model) =
-            fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default()).expect("fit");
-        assert_eq!(model.read_weight("w"), vec![4.0], "the returned model must be the best step's");
-        assert!(model.saves.borrow().is_empty(), "nothing is written without a path");
+        let (report, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(model.read_weight("w"), vec![4.0], "the parameters of the best evaluation, not the last step");
+        assert_eq!(report.kept_best, Some(KeptBest { step: 4, eval_loss: 0.4 }));
+        assert!(report.stopped_early && report.steps_completed == 6 && !report.interrupted, "{report:?}");
+        assert_eq!(report.evaluations.iter().map(|e| (e.step, e.eval_loss)).collect::<Vec<_>>(), [(1, 1.0), (2, 0.8), (3, 0.6), (4, 0.4), (5, 0.9), (6, 1.1)]);
+
+        // A patience the run never reaches spends the whole budget and
+        // still hands back the best; the last step is evaluated as a
+        // candidate even off the cadence.
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 0.3];
+        let opts = FitOpts { steps: 11, eval_interval: 2, eval_batches: 1, patience: u32::MAX, ..Default::default() };
+        let (report, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals, next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(report.evaluations.iter().map(|e| e.step).collect::<Vec<_>>(), [2, 4, 6, 8, 10, 11]);
+        assert_eq!((report.kept_best, model.read_weight("w"), report.stopped_early), (Some(KeptBest { step: 11, eval_loss: 0.3 }), vec![11.0], false));
+
+        // Not selecting, evaluations are recorded and nothing is kept.
+        let opts = FitOpts { steps: 4, eval_interval: 2, eval_batches: 1, ..Default::default() };
+        let (report, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: vec![1.0, 2.0], next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!((report.kept_best, model.read_weight("w"), report.evaluations.len()), (None, vec![4.0], 2));
+    }
+
+    /// An objective whose training loss is the step count, and whose
+    /// held-out loss is constant.
+    struct Counting {
+        steps: std::cell::Cell<u32>,
+    }
+    impl Objective<Recorder> for Counting {
+        fn regime(&self) -> &'static str {
+            "counting"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            self.steps.set(self.steps.get() + 1);
+            self.steps.get() as f32
+        }
+        fn loss_probe(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn eval(&mut self, _m: &Recorder, _r: &mut Rng, _b: u32) -> Option<f32> {
+            Some(0.5)
+        }
+    }
+
+    /// The training side of the curve is the mean over the steps since the
+    /// previous evaluation - the same stretch the held-out side was measured
+    /// after - not the one step the evaluation happened to land on.
+    #[test]
+    fn an_evaluation_carries_the_mean_training_loss_of_its_interval() {
+        let opts = FitOpts { steps: 5, eval_interval: 2, eval_batches: 1, patience: u32::MAX, ..Default::default() };
+        let (report, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Counting { steps: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(report.evaluations, [Evaluation { step: 2, train_loss: 1.5, eval_loss: 0.5 }, Evaluation { step: 4, train_loss: 3.5, eval_loss: 0.5 }, Evaluation { step: 5, train_loss: 5.0, eval_loss: 0.5 }]);
+    }
+
+    /// A run that selects on held-out loss and is stopped mid-way resumes
+    /// with its selection - the best parameters, the watch and the curve -
+    /// and ends exactly where the uninterrupted run did.
+    #[test]
+    fn a_selecting_run_resumes_with_its_selection() {
+        let dir = tmp("selecting-resume");
+        let evals = vec![1.0f32, 0.8, 0.6, 0.4, 0.9, 1.1, 1.2, 1.3];
+        let opts = FitOpts { steps: 8, eval_interval: 1, eval_batches: 1, patience: 2, ..Default::default() };
+        let (straight, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!(model.read_weight("w"), vec![4.0]);
+
+        let state = dir.join("train.state");
+        let mut stop_at_three = |s: &StepReport| s.step < 3;
+        let control = FitControl { on_step: Some(&mut stop_at_three), state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let (stopped, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
+        assert!(stopped.interrupted && stopped.steps_completed == 3 && stopped.kept_best.is_none(), "{stopped:?}");
+        assert_eq!(stopped.evaluations.len(), 3);
+
+        // The curve continues where the first run left off: its first
+        // evaluation is the fourth of the whole run.
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let (resumed, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals[3..].to_vec(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
+        assert_eq!(resumed.resumed_at, Some(3));
+        assert_eq!(model.read_weight("w"), vec![4.0], "the best parameters of the whole run");
+        assert_eq!((resumed.kept_best, resumed.stopped_early, resumed.steps_completed), (straight.kept_best, straight.stopped_early, straight.steps_completed));
+        assert_eq!(resumed.evaluations, straight.evaluations, "the curve is the whole run's");
+
+        // A state from a run that did not select is not continued by one that does.
+        let plain = FitOpts { patience: 0, ..opts.clone() };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}) };
+        let Err(err) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: vec![], next: std::cell::Cell::new(0) }, &plain, None, control) else {
+            panic!("a state saved with another selection must not be continued")
+        };
+        assert!(err.to_string().contains("different training options"), "{err}");
+    }
+
+    /// Scoring the whole validation split, one example per row in order,
+    /// gives the per-position mean over every supervised position - each
+    /// batch weighted back by its positions - and the same number every time.
+    #[test]
+    fn evaluating_every_example_is_the_per_position_mean_and_deterministic() {
+        let dir = tmp("eval-every-example");
+        let mut split = data::chat::EncodedSplit::default();
+        for e in 0..3u32 {
+            split.push(&[e * 10, e * 10 + 1, e * 10 + 2, e * 10 + 3], &[false, false, true, true]);
+        }
+        data::chat::write_split(&dir, "train", &split).unwrap();
+        data::chat::write_split(&dir, "val", &split).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(64)).unwrap();
+        let opts = FitOpts { block_size: 6, batch_size: 2, eval_batches: 0, ..Default::default() };
+        let (train, val, cfg, _vocab, itos) = load_dataset_with_itos(&dir, &opts).expect("load");
+        let mut obj = causal_lm::<Recorder>(train, val, cfg, itos);
+        let model = Recorder::new(RecorderCfg, 2, 6, &HashMap::new());
+        // Supervised targets 2, 3, 12, 13, 22, 23: a mean of 12.5, which a
+        // mean of the two batch means (7.5 and 22.5) would not give.
+        let first = obj.eval(&model, &mut Rng::new(1), 0).expect("scored");
+        assert!((first - 12.5).abs() < 1e-5, "{first}");
+        assert_eq!(obj.eval(&model, &mut Rng::new(99), 0), Some(first), "the same split scores the same whatever the generator");
     }
 
     /// Every step runs with the run's AdamW hyperparameters, not constants.

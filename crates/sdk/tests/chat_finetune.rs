@@ -157,6 +157,71 @@ fn a_cancelled_run_resumes_to_the_uninterrupted_result() {
     assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
 }
 
+/// A fine-tune that evaluates a monitoring set as it trains records the
+/// curve, exports the adapter of the evaluation with the lowest monitoring
+/// loss rather than the last step's, and says so in the outcome, the
+/// training record and the adapter's card.
+#[test]
+fn a_selecting_fine_tune_exports_the_best_evaluation_and_records_the_curve() {
+    let model = chat_model_dir("select");
+    let monitor = write_dataset(&model, "monitor.jsonl", &[("dab", "bad"), ("fade", "deaf")]);
+    let out = model.join("run");
+    let outcome = fine_tune(&model, &out).monitor(&monitor).eval_every(2).keep_best(true).run().expect("the fine-tune runs");
+    assert_eq!(outcome.status, FineTuneStatus::Completed);
+    assert_eq!(outcome.curve.iter().map(|p| p.step).collect::<Vec<_>>(), [2, 4, 6], "an evaluation every two steps, the last step included");
+    assert!(outcome.curve.iter().all(|p| p.train_loss.is_finite() && p.monitor_loss.is_finite()), "{:?}", outcome.curve);
+    assert_eq!(outcome.monitor_records, 2);
+    let best = outcome.curve.iter().min_by(|a, b| a.monitor_loss.total_cmp(&b.monitor_loss)).unwrap();
+    assert_eq!((outcome.selected_step, outcome.selection), (best.step, brain::Selection::BestMonitorLoss));
+    assert!(!outcome.stopped_early, "keeping the best alone never stops a run early");
+
+    // The exported adapter is the one the best monitoring loss was measured
+    // on: scored on the same records it gives that loss back.
+    let adapter = outcome.adapter.clone().unwrap();
+    let scored = brain::score_chat(model.join("model.safetensors").to_str().unwrap(), Some(&adapter), &monitor).unwrap();
+    assert!((scored.loss.unwrap() - best.monitor_loss).abs() < 0.05, "scored {:?} but the best evaluation was {}", scored.loss, best.monitor_loss);
+
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.as_ref().unwrap()).unwrap()).unwrap();
+    assert_eq!(record["selected_step"].as_u64(), Some(u64::from(best.step)));
+    assert_eq!(record["selection"].as_str(), Some("best_monitor_loss"));
+    assert_eq!(record["curve"].as_array().map(Vec::len), Some(3));
+    assert_eq!((record["eval_every"].as_u64(), record["patience"].as_u64(), record["monitor_records"].as_u64()), (Some(2), Some(0), Some(2)));
+    let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().unwrap();
+    let hyper = card.training.unwrap().hyperparams;
+    assert_eq!((hyper["selected_step"].as_u64(), hyper["selection"].as_str()), (Some(u64::from(best.step)), Some("best_monitor_loss")));
+
+    // A run that does not select exports its last step and says so.
+    let plain = fine_tune(&model, &model.join("plain")).run().unwrap();
+    assert_eq!((plain.selected_step, plain.selection, plain.curve.len()), (6, brain::Selection::LastStep, 0));
+}
+
+/// Exact resume covers selection: a selecting run cancelled mid-way and run
+/// again exports the same adapter the uninterrupted one does, with the
+/// whole run's curve.
+#[test]
+fn a_cancelled_selecting_run_resumes_to_the_uninterrupted_result() {
+    let model = chat_model_dir("select-resume");
+    let monitor = write_dataset(&model, "monitor.jsonl", &[("dab", "bad"), ("fade", "deaf")]);
+    let selecting = |out: &Path| fine_tune(&model, out).monitor(&monitor).eval_every(1).patience(3);
+    let straight = selecting(&model.join("straight")).run().unwrap();
+
+    let out = model.join("interrupted");
+    let cancel = brain::CancelToken::armed();
+    let stopped = selecting(&out)
+        .run_with(&cancel, |p| {
+            if p.step == 3 {
+                cancel.cancel();
+            }
+        })
+        .unwrap();
+    assert_eq!(stopped.status, FineTuneStatus::Cancelled);
+    let resumed = selecting(&out).run().unwrap();
+    assert_eq!(resumed.resumed_at, Some(3));
+    assert_eq!(resumed.curve, straight.curve, "the curve is the whole run's");
+    assert_eq!((resumed.selected_step, resumed.selection), (straight.selected_step, straight.selection));
+    assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
+}
+
 /// A base that is a `transformers` directory (the way every DeepSeek
 /// checkpoint is downloaded) fine-tunes as a brain checkpoint does: it is read
 /// as it is, scored before and after, named by a digest of its files, and the

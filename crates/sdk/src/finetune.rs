@@ -33,12 +33,21 @@
 //! the one training loop; scoring is `qwen3::eval::score_chat`. Nothing here
 //! is a second implementation of any of them.
 //!
+//! **Monitoring and selection.** With [`ChatFineTune::eval_every`] the run
+//! scores a monitoring set ([`ChatFineTune::monitor`], else the held-out set)
+//! as it trains and records the curve ([`ChatFineTuneOutcome::curve`]); with
+//! [`ChatFineTune::keep_best`] or a [`ChatFineTune::patience`] it exports the
+//! adapter of the evaluation with the lowest monitoring loss instead of the
+//! last step's, and a patience stops it once that loss has not improved for
+//! that many evaluations. Which step was exported, and why, is on the
+//! outcome, in the training record and on the adapter's card.
+//!
 //! **Exact resume.** A run whose [`CancelToken`] fires stops at the next
 //! step boundary and leaves its training state in the out directory:
-//! weights, AdamW moments, step and batch position. Running the same
-//! fine-tune again continues it, and ends at the same adapter an
-//! uninterrupted run would have produced. A state from a run with different
-//! data, options or starting point is refused, never continued.
+//! weights, AdamW moments, step and batch position, and the selection so
+//! far. Running the same fine-tune again continues it, and ends at the same
+//! adapter an uninterrupted run would have produced. A state from a run with
+//! different data, options or starting point is refused, never continued.
 
 use std::path::{Path, PathBuf};
 
@@ -65,6 +74,7 @@ pub struct ChatFineTune {
     models_dir: Option<String>,
     dataset: Option<PathBuf>,
     held_out: Option<PathBuf>,
+    monitor: Option<PathBuf>,
     replay: Vec<PathBuf>,
     replay_share: Option<f32>,
     grad_accum: u32,
@@ -78,6 +88,9 @@ pub struct ChatFineTune {
     seed: u64,
     max_block: Option<u32>,
     checkpoint_every: u32,
+    eval_every: u32,
+    patience: u32,
+    keep_best: bool,
     cycle: u64,
     device: Device,
     bf16_base: bool,
@@ -107,6 +120,7 @@ impl ChatFineTune {
             models_dir: None,
             dataset: None,
             held_out: None,
+            monitor: None,
             replay: Vec::new(),
             replay_share: None,
             grad_accum: 1,
@@ -120,6 +134,9 @@ impl ChatFineTune {
             seed: 1337,
             max_block: None,
             checkpoint_every: 0,
+            eval_every: 0,
+            patience: 0,
+            keep_best: false,
             cycle: 0,
             device: Device::default(),
             bf16_base: false,
@@ -145,6 +162,40 @@ impl ChatFineTune {
     /// outcome's scores are `None`.
     pub fn held_out(mut self, path: impl Into<PathBuf>) -> Self {
         self.held_out = Some(path.into());
+        self
+    }
+
+    /// Records scored during training, every [`Self::eval_every`] steps,
+    /// never trained on: the curve, and what the best adapter is selected on.
+    /// Without it the held-out set is monitored - and a selection made on it
+    /// biases the held-out score it is then measured by, so a caller that
+    /// decides anything on that score gives the run a monitoring set of its own.
+    pub fn monitor(mut self, path: impl Into<PathBuf>) -> Self {
+        self.monitor = Some(path.into());
+        self
+    }
+
+    /// Score the monitoring set every this many steps, and at the last step
+    /// of a run that selects on it (default 0: never). Each evaluation is
+    /// one deterministic pass over every monitoring record.
+    pub fn eval_every(mut self, steps: u32) -> Self {
+        self.eval_every = steps;
+        self
+    }
+
+    /// Stop once the monitoring loss has not improved for this many
+    /// evaluations, and export the adapter of the best one (default 0:
+    /// never stop). Needs [`Self::eval_every`].
+    pub fn patience(mut self, evaluations: u32) -> Self {
+        self.patience = evaluations;
+        self
+    }
+
+    /// Export the adapter of the evaluation with the lowest monitoring loss
+    /// rather than the last step's, running every step (default off; a
+    /// [`Self::patience`] implies it). Needs [`Self::eval_every`].
+    pub fn keep_best(mut self, on: bool) -> Self {
+        self.keep_best = on;
         self
     }
 
@@ -323,6 +374,10 @@ impl ChatFineTune {
             replay_samples.extend(asked.read(path)?);
         }
         let held_out = self.held_out.as_deref().map(|path| asked.read(path)).transpose()?;
+        let monitor = self.monitor.as_deref().map(|path| asked.read(path)).transpose()?;
+        if self.eval_every == 0 && (self.patience > 0 || self.keep_best) {
+            return Err(Error::Backend("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
+        }
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
@@ -332,9 +387,10 @@ impl ChatFineTune {
             training.extend(train_samples.iter().cloned());
         }
         training.extend(replay_samples.iter().cloned());
-        // The packed validation split is only read for an eval the run does
-        // not ask for; it is the held-out set when there is one.
-        let val = held_out.as_deref().unwrap_or(&training[..]);
+        // The packed validation split is what a periodic evaluation scores:
+        // the monitoring set, else the held-out set, else (unread, when
+        // nothing is evaluated) the training set.
+        let val = monitor.as_deref().or(held_out.as_deref()).unwrap_or(&training[..]);
         let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
         let prepared_dir = out_dir.join(PREPARED_DIR);
         let prepared = data::chat::prepare_chat_samples(&training, val, &tok, &tmpl, render, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
@@ -346,12 +402,22 @@ impl ChatFineTune {
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
-        let opts = model::FitOpts { grad_accum: self.grad_accum, ..fit_opts(self.steps, block, self.lr, self.seed) };
+        let opts = model::FitOpts {
+            grad_accum: self.grad_accum,
+            eval_interval: self.eval_every,
+            // Every monitoring record, once, each time.
+            eval_batches: 0,
+            // Keeping the best without a patience is a patience the run
+            // never reaches.
+            patience: if self.keep_best && self.patience == 0 { u32::MAX } else { self.patience },
+            ..fit_opts(self.steps, block, self.lr, self.seed)
+        };
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,
             "dataset": digest(dataset)?,
             "replay": self.replay.iter().map(|p| digest(p)).collect::<Result<Vec<_>>>()?,
+            "monitor": self.monitor.as_deref().map(digest).transpose()?,
             "parent": parent,
             "rank": rank,
             "alpha_bits": alpha.to_bits(),
@@ -370,6 +436,10 @@ impl ChatFineTune {
         };
         let (report, trained) = qwen3::finetune::finetune_lora_controlled(weights_str, &prepared_dir, &opts, rank, alpha, &start, control, tier).map_err(|e| Error::Backend(format!("training: {e}")))?;
 
+        let (selected_step, selection) = match report.kept_best {
+            Some(best) => (best.step, Selection::BestMonitorLoss),
+            None => (report.steps_completed, Selection::LastStep),
+        };
         let mut outcome = ChatFineTuneOutcome {
             status: FineTuneStatus::Completed,
             adapter: None,
@@ -383,6 +453,13 @@ impl ChatFineTune {
             final_loss: report.final_loss,
             train_records: train_samples.len(),
             replay_records: replay_samples.len(),
+            monitor_records: monitor.as_ref().map_or(0, Vec::len),
+            eval_every: self.eval_every,
+            patience: self.patience,
+            curve: report.evaluations.iter().map(|e| MonitorPoint { step: e.step, train_loss: e.train_loss, monitor_loss: e.eval_loss }).collect(),
+            selected_step,
+            selection,
+            stopped_early: report.stopped_early,
             block,
             rank,
             alpha,
@@ -407,10 +484,16 @@ impl ChatFineTune {
                 "rank": rank,
                 "alpha": alpha,
                 "steps": self.steps,
+                "steps_completed": outcome.steps_completed,
+                "selected_step": outcome.selected_step,
+                "selection": outcome.selection,
+                "eval_every": self.eval_every,
+                "patience": self.patience,
                 "lr": self.lr,
                 "block": block,
                 "train_records": outcome.train_records,
                 "replay_records": outcome.replay_records,
+                "monitor_records": outcome.monitor_records,
             }),
             environment: gpu_core::backend_name().to_string(),
             gate: None,
@@ -482,6 +565,23 @@ pub struct ChatFineTuneOutcome {
     pub final_loss: Option<f32>,
     pub train_records: usize,
     pub replay_records: usize,
+    /// Records in the monitoring set ([`ChatFineTune::monitor`]); 0 without one.
+    pub monitor_records: usize,
+    /// Steps between evaluations; 0 when nothing was evaluated during training.
+    pub eval_every: u32,
+    /// Evaluations without improvement the run was allowed; 0 when it was
+    /// never to stop early.
+    pub patience: u32,
+    /// Every evaluation taken during training, in order; empty without
+    /// [`ChatFineTune::eval_every`].
+    pub curve: Vec<MonitorPoint>,
+    /// The step whose adapter was exported: the best evaluation's, or the
+    /// last step trained.
+    pub selected_step: u32,
+    /// Why that step.
+    pub selection: Selection,
+    /// True when the patience ran out before the step budget did.
+    pub stopped_early: bool,
     /// The training row length, sized to the longest record.
     pub block: u32,
     pub rank: u32,
@@ -518,6 +618,13 @@ impl ChatFineTuneOutcome {
             "final_loss": self.final_loss,
             "train_records": self.train_records,
             "replay_records": self.replay_records,
+            "monitor_records": self.monitor_records,
+            "eval_every": self.eval_every,
+            "patience": self.patience,
+            "curve": self.curve.iter().map(|p| serde_json::json!({ "step": p.step, "train_loss": p.train_loss, "monitor_loss": p.monitor_loss })).collect::<Vec<_>>(),
+            "selected_step": self.selected_step,
+            "selection": self.selection,
+            "stopped_early": self.stopped_early,
             "block": self.block,
             "rank": self.rank,
             "alpha": self.alpha,
@@ -525,6 +632,27 @@ impl ChatFineTuneOutcome {
             "tuned_score": score(&self.tuned_score),
         })
     }
+}
+
+/// One evaluation of the monitoring set during training.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonitorPoint {
+    /// Steps completed when it was taken.
+    pub step: u32,
+    /// The mean training loss of the steps since the previous evaluation.
+    pub train_loss: f32,
+    /// The mean per-token loss over the monitoring records.
+    pub monitor_loss: f32,
+}
+
+/// Which step's adapter a fine-tune exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    /// The last step trained: the run did not select on the monitoring loss.
+    LastStep,
+    /// The evaluation with the lowest monitoring loss.
+    BestMonitorLoss,
 }
 
 /// Teacher-forced cross-entropy of a model on held-out chat records, over

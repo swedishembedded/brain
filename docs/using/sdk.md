@@ -237,13 +237,27 @@ let chat = brain::ChatPipeline::from(
 - `.rank`, `.alpha`, `.steps`, `.lr`, `.seed`, `.max_block` (the longest
   training row; a longer record is refused, not truncated) and `.device`
   are the knobs.
+- `.monitor(path)` is a set of records scored during training, every
+  `.eval_every(n)` steps (one deterministic pass over every record each
+  time), never trained on; without one the held-out set is monitored. The
+  evaluations are the run's curve (`outcome.curve`: step, the mean training
+  loss since the previous evaluation, the monitoring loss). With
+  `.patience(k)` the run stops once the monitoring loss has not improved for
+  `k` evaluations, and with either `.patience(k)` or `.keep_best(true)` the
+  adapter exported is the evaluation's with the lowest monitoring loss, not
+  the last step's; `outcome.selected_step` and `outcome.selection` say which
+  and why, as do the training record and the adapter card's hyperparameters.
+  A selection made on the held-out set biases the held-out score it is then
+  measured by, so a caller that decides anything on that score gives the run
+  a monitoring set of its own.
 - `run_with(&cancel, |progress| ..)` reports every optimizer step and stops
   at the next step boundary once the `CancelToken` fires. A cancelled run
   exports nothing and leaves its training state in the out directory
   (`outcome.resume_state`); running the same fine-tune again continues it
-  and ends at the same adapter, bit for bit, an uninterrupted run produces.
-  `.checkpoint_every(n)` also saves that state every `n` steps. A state from
-  a run with different data, options or starting point is refused.
+  and ends at the same adapter, bit for bit, an uninterrupted run produces -
+  its monitoring curve and best adapter so far included. `.checkpoint_every(n)`
+  also saves that state every `n` steps. A state from a run with different
+  data, options or starting point is refused.
 - The outcome's losses and scores are `Option`s: a value that was not
   measured (no held-out set, a cancelled run) is `None`.
 - The adapter card records the digest of the base it was trained against

@@ -214,6 +214,35 @@ impl TokenDataset {
         self.examples.as_ref().and_then(|e| e.bounds.iter().map(|&(a, b)| b - a).max())
     }
 
+    /// The batch whose rows are the examples `first..first + batch_size`, in
+    /// order, laid out exactly as [`TokenDataset::get_batch`] lays a drawn
+    /// example out; a row past the last example is padding with [`IGNORE`]
+    /// targets throughout. `None` for a plain token stream, which has no
+    /// examples to walk. Walking a split this way, `batch_size` examples at a
+    /// time, visits every example exactly once: the deterministic pass a
+    /// held-out evaluation needs, where a drawn sample would score a
+    /// different subset every time.
+    pub fn example_rows(&self, cfg: &BatchConfig, first: usize) -> Option<(Vec<u32>, Vec<i32>)> {
+        let ex = self.examples.as_ref()?;
+        let (bs, bl) = (cfg.batch_size, cfg.block_size);
+        let mut x = vec![ex.pad; bs * bl];
+        let mut y = vec![IGNORE; bs * bl];
+        for b in 0..bs {
+            let Some(&(a, e)) = ex.bounds.get(first + b) else { break };
+            for t in 0..bl {
+                let target = a + 1 + t;
+                let supervised = target < e && self.mask.as_ref().is_none_or(|m| m[target]);
+                if a + t < e {
+                    x[b * bl + t] = self.data[a + t];
+                }
+                if supervised {
+                    y[b * bl + t] = self.data[target] as i32;
+                }
+            }
+        }
+        Some((x, y))
+    }
+
     /// Wrap a token array with an explicit per-token reward/advantage weight
     /// (see [`TokenDataset::weights`]). `weights.len()` must equal
     /// `data.len()`. Composable with [`TokenDataset::new_with_mask`]'s
@@ -606,6 +635,27 @@ mod tests {
             }
         }
         assert_eq!(seen, [0, 10, 20].into_iter().collect(), "some example is unreachable");
+    }
+
+    /// Walked in order, `batch_size` at a time, every example is a row
+    /// exactly once, laid out as a drawn one is, and the rows past the last
+    /// example supervise nothing - the deterministic pass an evaluation makes.
+    #[test]
+    fn examples_walked_in_order_are_each_one_row_once() {
+        let (data, mut mask) = three_examples();
+        // The second example's first target is not supervised.
+        mask[5] = false;
+        let cfg = BatchConfig { batch_size: 2, block_size: 6, ..Default::default() };
+        let ds = TokenDataset::new_examples(data, mask, &STARTS, PAD, &cfg).expect("each example fits");
+        let (x, y) = ds.example_rows(&cfg, 0).expect("an example-indexed split walks");
+        assert_eq!(x, [0, 1, 2, 3, PAD, PAD, 10, 11, 12, 13, PAD, PAD]);
+        assert_eq!(y, [1, 2, 3, IGNORE, IGNORE, IGNORE, IGNORE, 12, 13, IGNORE, IGNORE, IGNORE]);
+        let (x, y) = ds.example_rows(&cfg, 2).expect("the last batch");
+        assert_eq!(&x[..6], [20, 21, 22, 23, PAD, PAD]);
+        assert!(x[6..].iter().all(|&t| t == PAD) && y[6..].iter().all(|&t| t == IGNORE), "past the last example is padding");
+        assert_eq!(&y[..6], [21, 22, 23, IGNORE, IGNORE, IGNORE]);
+        let stream = TokenDataset::new((0..40).collect(), &cfg);
+        assert!(stream.example_rows(&cfg, 0).is_none(), "a token stream has no examples to walk");
     }
 
     /// Refused, not truncated: a row too short for an example would cut the
