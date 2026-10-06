@@ -38,6 +38,15 @@ use horizon::Horizon;
 /// truth before trusting it on real data.
 pub use horizon::synthetic;
 pub use horizon::calibration::{observed, Calibration, Gap, MIN_EVENTS};
+pub use horizon::evaluation::{
+    Absent, Bootstrap, CalibrationMetrics, Evaluation, EvaluationSpec, HorizonMetrics, Interval, Intervals,
+};
+pub use horizon::forecast::{
+    AsOf, CodeRisk, Coverage, CurveSet, EnsembleSummary, ForecastRequest, HorizonRisks, RiskForecast,
+    RiskStatus, DISCLAIMER,
+};
+pub use horizon::history::{HistoryWarning, PatientHistory};
+pub use horizon::saved::ModelIdentity;
 pub use horizon::support::{AssessOptions, Assessment, Support, Warning, DEFAULT_MAX_OOD_SCORE};
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
 pub use horizon::HorizonConfig as TimelineConfig;
@@ -632,6 +641,44 @@ impl TimelineModel {
                     .collect()
             })
             .collect())
+    }
+
+    /// The structured forecast for one patient history (the stateless
+    /// "append a checkup and re-predict" call): the whole history goes in and
+    /// nothing is kept, so the forecast depends only on the history and the
+    /// model. It reports the model's identity, what the history covered and
+    /// missed, the risk curves over the knots, the risks at the request's
+    /// horizons (calibrated, with the Venn-Abers interval, only where the model
+    /// was calibrated for exactly that horizon: absent, never zero) and the
+    /// data-quality assessment, or `risk: unavailable` with no numbers when the
+    /// history is outside what the model was trained on.
+    ///
+    /// A forecast does not diagnose and recommends no treatment: its risks are
+    /// associations in the training population, not effects of any action.
+    /// A horizon past the last knot, or a unit other than the one the model
+    /// was trained on, is an error.
+    pub fn forecast_history(&self, history: &PatientHistory, request: &ForecastRequest) -> Result<RiskForecast> {
+        let mut all = self.forecast_histories(std::slice::from_ref(history), request)?;
+        all.pop().ok_or_else(|| Error::Backend("no forecast was produced".into()))
+    }
+
+    /// [`TimelineModel::forecast_history`] for several histories, in order,
+    /// through one forward pass. One history the model cannot read fails the
+    /// call, naming it.
+    pub fn forecast_histories(&self, histories: &[PatientHistory], request: &ForecastRequest) -> Result<Vec<RiskForecast>> {
+        horizon::forecast::forecast(&self.saved, histories, request).map_err(Error::Backend)
+    }
+
+    /// Judge the model on held-out `subjects` (never ones it was trained,
+    /// early-stopped or calibrated on): per outcome code and horizon of
+    /// `spec`, Uno's concordance, the time-dependent AUC, the IPCW Brier score
+    /// and its integral, the calibration slope, intercept, observed over
+    /// expected and error, and, when the subjects carry groups, cluster-
+    /// bootstrap intervals; plus the held-out event NLL. A (code, horizon)
+    /// with fewer than [`EvaluationSpec::min_events`] events is left out and
+    /// listed, never reported from noise.
+    pub fn evaluate(&self, subjects: &[Subject], spec: &EvaluationSpec) -> Result<Evaluation> {
+        horizon::evaluation::evaluate(&self.saved, subjects, spec).map_err(Error::Backend)
     }
 
     /// The weighted mean event NLL over `subjects` (lower is better; the

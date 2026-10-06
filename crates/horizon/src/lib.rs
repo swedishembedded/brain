@@ -28,6 +28,8 @@ pub mod calibration;
 pub mod caps;
 pub mod config;
 pub mod encode;
+pub mod evaluation;
+pub mod forecast;
 pub mod history;
 pub mod init;
 pub mod model;

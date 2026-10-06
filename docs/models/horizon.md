@@ -373,6 +373,89 @@ the model has not seen anything like this subject; it does not say the
 prediction is wrong, and an in-distribution subject can still be predicted
 badly.
 
+## Structured forecast
+
+`TimelineModel::forecast_history(&PatientHistory, &ForecastRequest) ->
+RiskForecast` (and `forecast_histories` for a batch, one forward pass) is the
+call behind "append a checkup and re-predict":
+
+```rust
+use brain::timeline::{ForecastRequest, PatientHistory, TimelineModel};
+let model = TimelineModel::load("model")?;
+let history = PatientHistory::parse_all(&std::fs::read_to_string("patient.json")?)?.remove(0);
+let forecast = model.forecast_history(&history, &ForecastRequest::new([5.0, 10.0]))?;
+if forecast.is_available() {
+    let r = &forecast.horizons[1].risks["death:heart"];
+    println!("raw {} calibrated {:?} interval {:?}", r.raw, r.calibrated, r.interval);
+}
+```
+
+A `RiskForecast` (serialises to JSON) holds:
+
+- `as_of` (as written, on the model's clock, and the calendar time read) and
+  `model`: the SHA-256 of the weights, the SHA-256 of the configuration and the
+  brain version, so two answers can be told apart or matched long afterwards;
+- `coverage`: the variables and event codes the history had, the number of
+  observations and events used, the oldest and newest observation (`time` on
+  the model's clock and `ago` before `as_of`) and `missing_variables`, the
+  model's variables the history did not measure;
+- `curves`: survival and every outcome code's cumulative incidence at the
+  model's knots;
+- `horizons`: for each requested horizon the survival and per code the `raw`
+  probability and, ONLY where the model was calibrated for exactly that code at
+  exactly that horizon, `calibrated` and its Venn-Abers `interval`. Otherwise
+  those keys are ABSENT, never zero. A horizon outside `(0, last knot]` is an
+  error: the model is not extrapolated;
+- uncertainty: that interval, and, for `RiskForecast::ensemble` of forecasts
+  from models trained apart, the members' identities, the mean of every
+  probability, and per horizon `member_range` (and per knot `cif_min` /
+  `cif_max`); an ensemble abstains if any member does and has a calibrated risk
+  only where every member has one;
+- `support` (the `assess` output: `supported`, `ood_score`, typed `warnings`,
+  `advisories`) and `input_warnings` (what the history format dropped);
+- `risk: "unavailable"` with `reason: "insufficient support"` and NO `curves`
+  or `horizons` when the support score is above the request's `max_ood_score`
+  (default 1, the edge of the support), exactly as `predict_or_abstain` does;
+- a `disclaimer`.
+
+A forecast does not diagnose and recommends no treatment, and says so in every
+answer. Its probabilities are associations in the training population, not the
+effect of any action, and they hold only as far as the model's calibration and
+support do (see Limits).
+
+On the synthetic population (`tests/timeline.rs`, SDK) the history route gives
+bit-for-bit the probabilities, calibrated risks and intervals that `predict`
+gives the equivalent subject, whatever order the records are listed in.
+
+## Evaluation
+
+`TimelineModel::evaluate(&subjects, &EvaluationSpec::new([5.0, 10.0]))` judges
+the model on held-out subjects (never trained, early-stopped or calibrated on).
+Per outcome code and horizon, under the subjects' sampling weights and with a
+code competing with the absorbing codes as its cumulative incidence does:
+Uno's concordance truncated at the horizon, the time-dependent AUC and the
+IPCW Brier score at the horizon, the Brier score integrated over `(0, horizon]`
+(20 grid points), and calibration (recalibration slope and intercept,
+observed over expected with an Aalen-Johansen observed side, and the expected
+calibration error over ten risk groups). Subjects with a `group_id` get
+percentile intervals (95%, 200 resamples, seeded) of the concordance, AUC and
+Brier score from a bootstrap that resamples whole groups
+(`survival::compare::cluster_bootstrap_by`). The held-out event NLL is one
+number per subject set.
+
+- A (code, horizon) with fewer than `min_events` events by then (30 by
+  default, the same minimum a calibration needs) is absent from `results` and
+  listed in `absent` with its count. A metric that cannot be computed is
+  `None`, never zero.
+- The censoring distribution behind the IPCW weights is estimated on the
+  evaluated subjects unless `censoring_from(training subjects)` names a
+  reference set.
+- Measured (`forecast_history_and_evaluate_a_trained_model`, SDK; 6000 trained
+  subjects, 6000 evaluated in households of two): for `death:a` by 10 years,
+  953 events, Uno C 0.729, AUC 0.771 against 0.781 for the generator's true
+  risks, Brier 0.1276, integrated Brier 0.0764, calibration slope 1.07,
+  observed over expected 1.10, expected calibration error 0.019.
+
 ## Serving
 
 A saved model directory (what `TimelineModel::save` writes) is served by one

@@ -215,6 +215,21 @@ impl Vocab {
         false
     }
 
+    /// Every variable the model reads, numeric or categorical, sorted.
+    pub fn variables(&self) -> Vec<String> {
+        let categorical = self
+            .tokens
+            .iter()
+            .filter_map(|t| t.strip_prefix("c:")?.strip_suffix("=?"));
+        let all: std::collections::BTreeSet<&str> = self
+            .knots
+            .keys()
+            .map(String::as_str)
+            .chain(categorical)
+            .collect();
+        all.into_iter().map(str::to_string).collect()
+    }
+
     /// The token id of a numeric variable.
     pub fn numeric_token(&self, var: &str) -> u32 {
         self.id(&format!("v:{var}"))

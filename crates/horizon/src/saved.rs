@@ -14,8 +14,9 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::calibration::{self, Calibration};
@@ -45,6 +46,21 @@ pub struct Saved {
     /// What it was trained on, if recorded ([`Saved::fit_support`]); `None`
     /// for a model saved before support was kept.
     pub support: Option<Support>,
+    /// The weights digest, computed once: the weights of a `Saved` are fixed
+    /// (replace the whole value to change them).
+    digest: OnceLock<String>,
+}
+
+/// Which model produced an answer: enough to tell, long after, whether two
+/// answers came from the same weights, configuration and code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModelIdentity {
+    /// SHA-256 (hex) of the weights file [`Saved::save`] writes.
+    pub weights_sha256: String,
+    /// SHA-256 (hex) of the model configuration's JSON.
+    pub config_sha256: String,
+    /// The brain version that produced the answer.
+    pub brain_version: String,
 }
 
 /// One subject's curves and standing against the training support, from one
@@ -59,10 +75,11 @@ pub struct Scored {
 /// The SHA-256 of a file, as lowercase hex.
 fn file_digest(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(hex(&Sha256::digest(&bytes)))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `path`'s text, or `None` when the file does not exist.
@@ -87,13 +104,28 @@ impl Saved {
             vocab,
             calibration: None,
             support: None,
+            digest: OnceLock::new(),
         }
+    }
+
+    /// Which model this is: its weights digest ([`Saved::weights_digest`]),
+    /// the digest of its configuration and this build's version.
+    pub fn identity(&self) -> Result<ModelIdentity, String> {
+        let config = serde_json::to_vec(&self.model.cfg).map_err(|e| format!("config: {e}"))?;
+        Ok(ModelIdentity {
+            weights_sha256: self.weights_digest()?,
+            config_sha256: hex(&Sha256::digest(&config)),
+            brain_version: env!("CARGO_PKG_VERSION").to_string(),
+        })
     }
 
     /// The SHA-256 (hex) of the weights file [`Saved::save`] writes for this
     /// model: what a calibration is bound to. The model lives on the device,
     /// so its weights are written to a scratch file to be hashed.
     pub fn weights_digest(&self) -> Result<String, String> {
+        if let Some(d) = self.digest.get() {
+            return Ok(d.clone());
+        }
         static SCRATCH: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "horizon-digest-{}-{}.safetensors",
@@ -103,7 +135,8 @@ impl Saved {
         self.model.save(utf8(&path)?);
         let digest = file_digest(&path);
         std::fs::remove_file(&path).ok();
-        digest
+        let digest = digest?;
+        Ok(self.digest.get_or_init(|| digest).clone())
     }
 
     /// Fit a calibration on `validation` (never test) for every outcome code
@@ -226,6 +259,7 @@ impl Saved {
             vocab,
             calibration,
             support,
+            digest: OnceLock::new(),
         })
     }
 

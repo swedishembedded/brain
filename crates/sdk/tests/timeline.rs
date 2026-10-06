@@ -274,6 +274,114 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
     std::fs::remove_dir_all(&other).ok();
 }
 
+/// A subject as a patient history: every observation and past event on the
+/// model's own clock, as the update format states them.
+fn history_of(s: &brain::timeline::Subject) -> brain::timeline::PatientHistory {
+    use brain::timeline::Value;
+    let value = |v: &Value| match v {
+        Value::Number(x) => serde_json::json!(x),
+        Value::Below { below } => serde_json::json!({ "below": below }),
+        Value::Above { above } => serde_json::json!({ "above": above }),
+        Value::Category(c) => serde_json::json!(c),
+    };
+    let mut records: Vec<serde_json::Value> = s
+        .known_observations()
+        .map(|o| serde_json::json!({ "time": o.t, "code": o.var, "value": value(&o.value) }))
+        .collect();
+    records.extend(s.known_events().map(|e| serde_json::json!({ "time": e.t, "code": e.code })));
+    let doc = serde_json::json!({
+        "id": s.subject_id, "as_of": s.entry, "calendar": s.calendar_at_entry, "events": records,
+    });
+    brain::timeline::PatientHistory::parse_all(&doc.to_string()).unwrap().remove(0)
+}
+
+/// A trained model forecasts a patient history exactly as it predicts the
+/// equivalent subject, reports calibrated risks only at calibrated horizons,
+/// refuses a horizon beyond its knots, and its evaluation agrees with the
+/// survival arithmetic computed by hand and with the truth of the synthetic
+/// population.
+#[test]
+fn forecast_history_and_evaluate_a_trained_model() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use brain::survival::estimate::censoring;
+    use brain::survival::{auc, concordance};
+    use brain::timeline::{observed, CalibrationSpec, EvaluationSpec, ForecastRequest};
+    let (train, _) = synthetic::population(6000, 71);
+    let (stop, _) = synthetic::population(1000, 72);
+    let (validation, _) = synthetic::population(4000, 73);
+    let (mut test, truth) = synthetic::population(6000, 74);
+    let codes = ["death:a", "death:b", "onset"];
+    let spec = TimelineSpec::new(codes, ["death:a", "death:b"])
+        .knots(vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0])
+        .max_tokens(8)
+        .steps(400)
+        .batch(128)
+        .lr(3e-3);
+    let (mut model, _) = TimelineModel::train(&train, &stop, &spec).unwrap();
+    model.calibrate(&validation, &CalibrationSpec::new([5.0, 10.0])).unwrap();
+
+    // The history route equals the subject route, bit for bit.
+    let request = ForecastRequest::new([5.0, 7.0, 10.0]);
+    let sample = &test[..30];
+    let histories: Vec<_> = sample.iter().map(history_of).collect();
+    let forecasts = model.forecast_histories(&histories, &request).unwrap();
+    let predictions = model.predict(sample).unwrap();
+    let mut abstained = 0;
+    for (f, p) in forecasts.iter().zip(&predictions) {
+        if !f.is_available() {
+            abstained += 1;
+            assert!(f.curves.is_none() && f.horizons.is_empty());
+            continue;
+        }
+        for h in &f.horizons {
+            for code in codes {
+                let r = &h.risks[code];
+                assert_eq!(r.raw, p.cif(code, h.horizon).unwrap(), "{code} at {}", h.horizon);
+                assert_eq!(r.calibrated, p.calibrated_cif(code, h.horizon), "{code} at {}", h.horizon);
+                assert_eq!(r.interval, p.cif_interval(code, h.horizon).map(|(lo, hi)| [lo, hi]));
+                if h.horizon == 7.0 {
+                    assert!(r.calibrated.is_none() && r.interval.is_none(), "7 was not calibrated: absent");
+                } else {
+                    assert!(r.calibrated.is_some() && r.interval.is_some());
+                }
+            }
+        }
+        let curves = f.curves.as_ref().unwrap();
+        assert_eq!(curves.times, vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0]);
+        assert_eq!(curves.cif["onset"][5], p.cif("onset", 10.0).unwrap());
+    }
+    eprintln!("abstained {abstained} of {}", sample.len());
+    assert!(abstained <= 3, "an in-distribution sample is almost never withheld");
+    assert!(model.forecast_history(&histories[0], &ForecastRequest::new([15.5])).is_err(), "beyond the last knot");
+    assert_eq!(forecasts[0].model.weights_sha256.len(), 64);
+
+    // Evaluation agrees with the arithmetic done by hand.
+    for (i, s) in test.iter_mut().enumerate() {
+        s.group_id = Some(format!("household-{}", i / 2));
+    }
+    let eval = model.evaluate(&test, &EvaluationSpec::new([5.0, 10.0])).unwrap();
+    let m = eval.at("death:a", 10.0).expect("death:a by 10 has events");
+    let obs = observed(&test, &["death:a", "death:b"]);
+    let g = censoring(&obs);
+    let preds = model.predict(&test).unwrap();
+    let risk: Vec<f64> = preds.iter().map(|p| p.cif("death:a", 10.0).unwrap()).collect();
+    assert_eq!(m.uno_c, concordance::uno(&risk, &obs, 0, 10.0, &g));
+    assert_eq!(m.auc, auc::at(&risk, &obs, 0, 10.0, &g));
+    let true_risk: Vec<f64> = truth.iter().map(|t| t.cif(0, 10.0)).collect();
+    let true_auc = auc::at(&true_risk, &obs, 0, 10.0, &g).unwrap();
+    eprintln!(
+        "death:a by 10: events {}, C {:.3}, AUC {:.3} (truth {:.3}), Brier {:.4}, IBS {:.4}, slope {:.3}, O/E {:.3}, ECE {:.4}, NLL {:.4}",
+        m.events, m.uno_c.unwrap(), m.auc.unwrap(), true_auc, m.brier.unwrap(), m.integrated_brier.unwrap(),
+        m.calibration.slope.unwrap(), m.calibration.observed_over_expected.unwrap(), m.calibration.ece.unwrap(), eval.event_nll
+    );
+    assert!((m.auc.unwrap() - true_auc).abs() < 0.03, "AUC {:.3} vs truth {true_auc:.3}", m.auc.unwrap());
+    let ci = m.intervals.expect("households are groups").auc.unwrap();
+    assert!(ci.lo <= m.auc.unwrap() && m.auc.unwrap() <= ci.hi && ci.hi - ci.lo > 0.0, "{ci:?}");
+    assert!(eval.event_nll.is_finite() && !eval.results.is_empty());
+}
+
 /// Average ranks (ties share their mean rank).
 fn ranks(v: &[f64]) -> Vec<f64> {
     let mut order: Vec<usize> = (0..v.len()).collect();
