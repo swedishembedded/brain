@@ -269,20 +269,20 @@ model.save("model")?;
 Training early-stops on the held-out event likelihood and keeps the best
 model. Evaluate with `brain::survival`: Uno's concordance, the IPCW Brier
 score and its integral, D-calibration and calibration at a horizon, all
-accepting sampling weights. `brain::survival::venn_abers` turns a risk by a
-horizon into an interval `(p0, p1)`, calibrated on subjects the model was not
-trained on.
+accepting sampling weights. `brain::survival::recalibration` maps a risk by a
+horizon through a logistic recalibration fitted on subjects the model was not
+trained on, and `brain::survival::venn_abers` turns it into an interval
+`(p0, p1)` instead.
 
 ## Calibration
 
 `TimelineModel::calibrate(validation, &CalibrationSpec::new([5.0, 10.0]))`
-fits, for every outcome code and every requested horizon, a Venn-Abers
-calibrator (`survival::venn_abers`) on the VALIDATION subjects: the subjects
-the model was neither trained nor early-stopped on, never the test set the
-result is judged on. Censoring is handled by inverse-probability-of-censoring
-weights with the censoring distribution estimated on the validation subjects
-themselves, and a code competes with the absorbing codes exactly as its
-cumulative incidence does.
+fits, for every outcome code and every requested horizon, a calibrator on the
+VALIDATION subjects: the subjects the model was neither trained nor
+early-stopped on, never the test set the result is judged on. Censoring is
+handled by inverse-probability-of-censoring weights with the censoring
+distribution estimated on the validation subjects themselves, and a code
+competes with the absorbing codes exactly as its cumulative incidence does.
 
 ```rust
 let mut model = TimelineModel::load("model")?;
@@ -291,28 +291,60 @@ model.save("model")?;                       // writes calibration.json beside th
 let p = &model.predict(&test)?[0];
 p.cif("death:heart", 10.0);                 // the model's raw risk
 p.calibrated_cif("death:heart", 10.0);      // Some(calibrated risk) at a calibrated horizon
-p.cif_interval("death:heart", 10.0);        // its Venn-Abers interval (p0, p1)
+p.cif_interval("death:heart", 10.0);        // None for the default kind; (p0, p1) for Venn-Abers
 ```
 
-- A horizon is calibrated only if the validation subjects hold at least
-  `MIN_EVENTS` (30; `CalibrationSpec::min_events`) events of the code by it
-  and as many still event-free. Otherwise it is NOT calibrated and NOT
-  exposed: `calibrated_cif` is `None`, the capability answers `null`, never
-  zero. The pairs left out, with their event counts, are listed by
-  `Calibration::uncalibrated`.
+Two kinds of calibrator, selected with `CalibrationSpec::kind` (`kind` of the
+`calibrate` action) and recorded in `calibration.json`:
+
+| Kind | Calibrated risk | Interval | Events needed |
+|---|---|---|---|
+| `logistic` (default) | `logit P = a + b logit F`, fitted under IPCW; the slope `b` is estimated only where the validation subjects show it differs from one by more than two standard errors, otherwise the intercept alone is (calibration in the large) | none: `cif_interval` is `None` (`null` when served) | 100 |
+| `venn_abers` | the merged probability of an isotonic fit with its Venn-Abers interval | `(p0, p1)`: one end is calibrated whatever the model, the width is how little calibration data stand behind the score | 500 |
+
+The default was chosen by measurement, on populations whose true risk is known
+per subject (a large independent test population, several validation sizes,
+models trained apart; `crates/horizon/tests/calibration_measure.rs`). An
+isotonic fit is a free-form step function; fitted on a few hundred events it
+chases noise, so its output is more spread than the truth. The recalibration
+slope measured on new data then falls below one - on a model that was already
+calibrated, and even on the true risk itself - and the shortfall shrinks only
+slowly with events. The same happens to the midpoint of the interval and to
+a smoothed version of the steps, so it is the noise and not the step shape. A
+logistic map has two parameters at most: its error falls steadily with
+events, it leaves a calibrated model essentially unchanged, and it undoes any
+distortion that is linear in the log-odds (a shift, over- or under-confidence).
+It cannot correct anything else; use `venn_abers` when the model's error is not
+of that form and events are plentiful. A calibration step cannot make a model
+better than its calibration data allow: with too few events, it is better left
+out, which is what the minimum does.
+
+- A horizon is calibrated only if the validation subjects hold at least the
+  kind's minimum (`CalibrationKind::min_events`; `CalibrationSpec::min_events`
+  sets another) events of the code by it and as many still event-free.
+  Otherwise it is NOT calibrated and NOT exposed: `calibrated_cif` is `None`,
+  the capability answers `null`, never zero. The pairs left out, with their
+  event counts, are listed by `Calibration::uncalibrated`; a horizon with
+  enough events whose data give no usable map (no spread in the predictions, a
+  separable fit, a slope that is not positive) is listed with the reason
+  `no_fit`. A model that is left raw at a horizon is judged raw there.
 - Only the horizons asked for are calibrated; any other time has no
   calibrated risk (the raw risk is always there).
-- `calibration.json` records the SHA-256 of the weights it was fitted for,
-  the number of validation subjects and, per (code, horizon), the events and
-  the calibrator itself. Loading refuses a calibration beside other weights.
-  A directory without the file loads as uncalibrated.
+- `calibration.json` records the format version, the kind, the SHA-256 of the
+  weights it was fitted for, the number of validation subjects and, per (code,
+  horizon), the events and the calibrator itself (the intercept and slope, or
+  the isotonic fit). Loading refuses a calibration beside other weights. A
+  directory without the file loads as uncalibrated. A file written before
+  kinds existed (version 1) is a Venn-Abers calibration and loads as it did.
 - An ensemble's calibrated risk is the mean of its members' calibrated risks,
-  `None` unless every member has one.
+  `None` unless every member has one; its interval exists only where every
+  member has one.
 - On a population trained on too few subjects, the first-onset risk of the
   model is overconfident (recalibration slope 0.49, observed over expected
   1.20, expected calibration error 0.040); calibrating on 8000 validation
-  subjects gives slope 1.03, O/E 1.01 and error 0.015 on a test population
-  neither saw (`tests/timeline.rs` in the SDK holds it).
+  subjects with either kind brings the slope and the observed over expected
+  toward one and the error down on a test population neither saw
+  (`tests/timeline.rs` in the SDK holds it).
 
 ## Training support and abstention
 
@@ -404,8 +436,8 @@ A `RiskForecast` (serialises to JSON) holds:
   model's knots;
 - `horizons`: for each requested horizon the survival and per code the `raw`
   probability and, ONLY where the model was calibrated for exactly that code at
-  exactly that horizon, `calibrated` and its Venn-Abers `interval`. Otherwise
-  those keys are ABSENT, never zero. A horizon outside `(0, last knot]` is an
+  exactly that horizon, `calibrated` and, for a Venn-Abers calibration, its
+  `interval`. Otherwise those keys are ABSENT, never zero. A horizon outside `(0, last knot]` is an
   error: the model is not extrapolated;
 - uncertainty: that interval, and, for `RiskForecast::ensemble` of forecasts
   from models trained apart, the members' identities, the mean of every
@@ -445,7 +477,7 @@ Brier score from a bootstrap that resamples whole groups
 number per subject set.
 
 - A (code, horizon) with fewer than `min_events` events by then (30 by
-  default, the same minimum a calibration needs) is absent from `results` and
+  default) is absent from `results` and
   listed in `absent` with its count. A metric that cannot be computed is
   `None`, never zero.
 - The censoring distribution behind the IPCW weights is estimated on the
@@ -618,8 +650,9 @@ sample's datasets.
   directory on the host. There is no Monte-Carlo dropout.
 - Calibration and support describe the population the model was trained,
   validated and assessed on; they do not transfer to another one. A
-  calibration needs events: at 30 per code and horizon the Venn-Abers
-  interval is still wide.
+  calibration needs events: a recalibration slope estimated from a hundred
+  events is itself too noisy to trust much, and an isotonic fit needs several
+  hundred before it stops flattening the slope of even a perfect model.
 
 - One prediction time per record: predicting from a later visit means a new
   record with a later `entry`. With `TimelineSpec::visits` the history before
