@@ -1233,17 +1233,29 @@ impl Horizon {
         event + value + self.forecast_loss() as f32
     }
 
-    /// `(event NLL, value NLL)` of the last forward.
+    /// `(event NLL, value NLL)` of the last forward; the event NLL covers every
+    /// hazard column, the next-event group included (the training objective).
     pub fn loss_parts(&self) -> (f32, f32) {
+        let (outcome, next, value) = self.loss_split();
+        (outcome + next, value)
+    }
+
+    /// `(outcome-code NLL, next-event-group NLL, value NLL)` of the last
+    /// forward. The first is what held-out evaluation of the outcomes uses:
+    /// the group is a training signal, not a result.
+    pub fn loss_split(&self) -> (f32, f32, f32) {
         let c = &self.cfg;
+        let (k, outcomes) = (c.n_codes as usize, c.outcome_codes() as usize);
         let bpk = (self.b * c.pieces() * c.n_codes) as usize;
         let bn = (self.sets * c.max_tokens) as usize;
-        let event: f64 = self
-            .gpu
-            .read(&self.hloss, bpk)
-            .iter()
-            .map(|&x| x as f64)
-            .sum();
+        let (mut outcome, mut next) = (0.0f64, 0.0f64);
+        for (e, &x) in self.gpu.read(&self.hloss, bpk).iter().enumerate() {
+            if e % k < outcomes {
+                outcome += x as f64;
+            } else {
+                next += x as f64;
+            }
+        }
         let value: f64 = if c.additive {
             0.0 // no value head
         } else {
@@ -1253,7 +1265,7 @@ impl Horizon {
                 .map(|&x| x as f64)
                 .sum()
         };
-        (event as f32, value as f32)
+        (outcome as f32, next as f32, value as f32)
     }
 
     /// Forward and loss.

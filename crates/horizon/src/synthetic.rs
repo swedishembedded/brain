@@ -87,6 +87,26 @@ impl Truth {
     }
 }
 
+impl Truth {
+    /// The true probability that code `k` is the FIRST of the three codes to
+    /// happen by `t` years after entry (every code competes with the others,
+    /// the next-event process): `h_k / H * (1 - exp(-H dt))` over the
+    /// survival of the whole group, on the same grid as [`Truth::cif`].
+    pub fn first_event_cif(&self, k: usize, t: f64) -> f64 {
+        let (mut free, mut cif, mut s) = (1.0, 0.0, 0.0);
+        while s < t {
+            let dt = STEP.min(t - s);
+            let h = self.hazards(s + 0.5 * dt);
+            let lam: f64 = h.iter().sum();
+            let leave = 1.0 - (-lam * dt).exp();
+            cif += h[k] / lam * free * leave;
+            free *= 1.0 - leave;
+            s += dt;
+        }
+        cif
+    }
+}
+
 /// Standard deviation of the noise around `x1`'s trajectory after entry.
 pub const X1_NOISE: f64 = 0.3;
 /// Times after entry at which [`population_with_followup`] measures `x1`.

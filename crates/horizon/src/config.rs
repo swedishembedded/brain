@@ -87,6 +87,22 @@ pub struct HorizonConfig {
     /// first and fastest; it only sets where training starts).
     #[serde(default = "default_initial_log_hazard")]
     pub initial_log_hazard: f32,
+    /// How many of the LAST `n_codes` hazard columns are the next-event
+    /// group (see [`crate::vocab::Vocab::with_next_events`]): codes whose
+    /// first occurrence after the prediction time, among the group, is
+    /// modelled. They are the self-supervised objective; the first
+    /// `n_codes - next_codes` columns are the outcome codes.
+    #[serde(default)]
+    pub next_codes: u32,
+    /// The next-event group's weight in the loss, relative to the outcome
+    /// codes (applied to the group's exposure and events, which the
+    /// piecewise-exponential likelihood is linear in).
+    #[serde(default = "default_next_weight")]
+    pub next_weight: f32,
+}
+
+fn default_next_weight() -> f32 {
+    1.0
 }
 
 /// About one event per hundred units of time at risk: a plausible order for
@@ -161,6 +177,8 @@ impl HorizonConfig {
             backbone: Backbone::State,
             clocks: Clocks::default(),
             initial_log_hazard: default_initial_log_hazard(),
+            next_codes: 0,
+            next_weight: default_next_weight(),
         }
     }
 
@@ -186,6 +204,8 @@ impl HorizonConfig {
             backbone: Backbone::State,
             clocks: Clocks::default(),
             initial_log_hazard: default_initial_log_hazard(),
+            next_codes: 0,
+            next_weight: default_next_weight(),
         }
     }
 
@@ -249,7 +269,24 @@ impl HorizonConfig {
         {
             return Err("horizon: max_tokens >= 2, vocab >= 3, n_codes >= 1, value_bins >= 2, time_bins >= 2".into());
         }
+        if self.next_codes >= self.n_codes {
+            return Err(format!(
+                "horizon: next_codes ({}) must leave at least one outcome code of the {} hazard columns",
+                self.next_codes, self.n_codes
+            ));
+        }
+        if !(self.next_weight.is_finite() && self.next_weight > 0.0) {
+            return Err(format!(
+                "horizon: next_weight must be positive and finite, got {}",
+                self.next_weight
+            ));
+        }
         Ok(())
+    }
+
+    /// Hazard columns that are outcome codes (the rest are the next-event group).
+    pub fn outcome_codes(&self) -> u32 {
+        self.n_codes - self.next_codes
     }
 
     /// Parameter list, `(name, numel)`, weights in the `out = x @ W^T` layout.

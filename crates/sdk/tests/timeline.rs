@@ -100,3 +100,50 @@ fn visit_backbones_save_and_load() {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+/// The next-event group trains beside the outcomes, saves with the model and
+/// reads back identically; its first-event probabilities add up to the
+/// probability that any event has happened, and the held-out event NLL
+/// reported is the outcome codes' alone.
+#[test]
+fn next_events_train_save_load_and_predict() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    let (train, _) = synthetic::population(6000, 1);
+    let (held_out, _) = synthetic::population(1000, 2);
+    let codes = ["death:a", "death:b", "onset"];
+    let spec = TimelineSpec::new(codes, ["death:a", "death:b"])
+        .next_events(codes, 0.5)
+        .knots(vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0])
+        .max_tokens(8)
+        .steps(400)
+        .batch(128)
+        .lr(3e-3);
+    let (model, report) = TimelineModel::train(&train, &held_out, &spec).unwrap();
+    assert!(report.held_out_event_nll.is_finite());
+    assert_eq!(model.next_event_codes(), codes);
+    assert_eq!(model.config().n_codes, 6, "three outcomes and three next events");
+    let dir = std::env::temp_dir().join(format!("brain-timeline-next-{}", std::process::id()));
+    model.save(&dir).unwrap();
+    let loaded = TimelineModel::load(&dir).unwrap();
+    let (a, b) = (
+        model.predict_next_events(&held_out[..40]).unwrap(),
+        loaded.predict_next_events(&held_out[..40]).unwrap(),
+    );
+    for (x, y) in a.iter().zip(&b) {
+        for code in codes {
+            assert_eq!(x.first(code, 8.0), y.first(code, 8.0), "{code} survives a reload");
+        }
+        let sum: f64 = codes.iter().map(|c| x.first(c, 8.0).unwrap()).sum();
+        assert!((sum - x.any(8.0)).abs() < 1e-6, "first events sum to any event: {sum} vs {}", x.any(8.0));
+        assert_eq!(x.first("no-such-code", 1.0), None);
+    }
+    // The outcome curves are still served, and a model without the group
+    // returns no next-event forecasts.
+    assert!(model.predict(&held_out[..5]).unwrap()[0].cif("onset", 8.0).is_some());
+    let plain = TimelineSpec::new(codes, ["death:a", "death:b"]).steps(10).batch(128);
+    let (plain_model, _) = TimelineModel::train(&train, &held_out, &plain).unwrap();
+    assert!(plain_model.predict_next_events(&held_out[..5]).unwrap().is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}

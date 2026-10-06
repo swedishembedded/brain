@@ -245,12 +245,16 @@ pub fn assemble(
                 forecast_total += s.weight;
             }
         }
+        // The likelihood is linear in (exposure, event), so a column's weight
+        // is applied to both: w * (exp(l) * expo - event * l).
+        let first_next = cfg.outcome_codes() as usize;
         for (code, o) in s.outcomes.iter().enumerate() {
+            let w = if code >= first_next { cfg.next_weight } else { 1.0 };
             for (piece, &x) in o.exposure.iter().enumerate() {
-                hb.exposure[(i * p + piece) * k + code] = x;
+                hb.exposure[(i * p + piece) * k + code] = w * x;
             }
             if let Some(piece) = o.event_piece {
-                hb.event[(i * p + piece as usize) * k + code] = 1.0;
+                hb.event[(i * p + piece as usize) * k + code] = w;
             }
         }
     }

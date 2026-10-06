@@ -146,6 +146,14 @@ pub(crate) fn normal_score(u: f64, knots: usize) -> f32 {
 
 /// Encode one subject.
 pub fn encode(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Encoded {
+    assert_eq!(
+        cfg.n_codes as usize,
+        vocab.head_codes(),
+        "the model has {} hazard columns but the vocabulary names {} outcome and {} next-event codes",
+        cfg.n_codes,
+        vocab.codes.len(),
+        vocab.next_events.len()
+    );
     let nb = cfg.value_bins;
     // With a state across visits time enters only through the gaps the state
     // decays over: every token is "at its own visit", so a gap longer than any
@@ -300,7 +308,8 @@ fn forecasts(s: &Subject, vocab: &Vocab, cfg: &HorizonConfig) -> Vec<Forecast> {
     out
 }
 
-/// Exposure and event piece per outcome code.
+/// Exposure and event piece per hazard column: the outcome codes, then the
+/// next-event group.
 fn outcomes(s: &Subject, vocab: &Vocab, knots: &[f32]) -> Vec<Outcome> {
     let after = |code: &str| {
         s.events
@@ -314,44 +323,57 @@ fn outcomes(s: &Subject, vocab: &Vocab, knots: &[f32]) -> Vec<Outcome> {
         .iter()
         .map(|c| after(c))
         .fold(f64::INFINITY, f64::min);
-    vocab
-        .codes
+    // The group's first event, and the code that owns it when several share
+    // the instant (the earliest listed: one event is scored once).
+    let first_next = vocab
+        .next_events
         .iter()
-        .map(|code| {
-            let pieces = knots.len() - 1;
-            let Some(w) = s.window(code) else {
-                return Outcome {
-                    exposure: vec![0.0; pieces],
-                    event_piece: None,
-                };
+        .map(|c| after(c))
+        .fold(f64::INFINITY, f64::min);
+    let next_owner = vocab
+        .next_events
+        .iter()
+        .position(|c| after(c) == first_next);
+    let pieces = knots.len() - 1;
+    // One code's observation: exposure ends at `stop`, an event counts only if
+    // it is `event`, observed inside the window while the subject was still at
+    // risk, and inside the knots.
+    let observe = |code: &str, stop: f64, event: f64, counts: bool| {
+        let Some(w) = s.window(code) else {
+            return Outcome {
+                exposure: vec![0.0; pieces],
+                event_piece: None,
             };
-            let event = after(code);
-            // An event within a rounding distance past its window's end is
-            // inside it: window ends are typically computed from the event
-            // time, and a one-ulp difference must not turn an event into a
-            // censoring (it silently biases every hazard down).
-            let to = w.to + WINDOW_SLACK * w.to.abs().max(1.0);
-            let end = to.min(absorbed).min(event);
-            let (a, b) = ((w.from - s.entry) as f32, (end - s.entry) as f32);
-            let exposure: Vec<f32> = knots
-                .windows(2)
-                .map(|k| (b.min(k[1]) - a.max(k[0])).max(0.0))
-                .collect();
-            // The event counts only if observed inside the window, while the
-            // subject was still at risk (an event dated after an absorbing
-            // one would be scored with no exposure behind it), and inside the
-            // knots.
-            let rel = (event - s.entry) as f32;
-            let event_piece = (event <= to && event <= absorbed && event.is_finite() && rel > a)
-                .then(|| knots.windows(2).position(|k| rel > k[0] && rel <= k[1]))
-                .flatten()
-                .map(|p| p as u32);
-            Outcome {
-                exposure,
-                event_piece,
-            }
-        })
-        .collect()
+        };
+        // An event within a rounding distance past its window's end is inside
+        // it: window ends are typically computed from the event time, and a
+        // one-ulp difference must not turn an event into a censoring (it
+        // silently biases every hazard down).
+        let to = w.to + WINDOW_SLACK * w.to.abs().max(1.0);
+        let end = to.min(absorbed).min(stop);
+        let (a, b) = ((w.from - s.entry) as f32, (end - s.entry) as f32);
+        let exposure: Vec<f32> = knots
+            .windows(2)
+            .map(|k| (b.min(k[1]) - a.max(k[0])).max(0.0))
+            .collect();
+        let rel = (event - s.entry) as f32;
+        let event_piece = (counts && event <= to && event <= absorbed && event.is_finite() && rel > a)
+            .then(|| knots.windows(2).position(|k| rel > k[0] && rel <= k[1]))
+            .flatten()
+            .map(|p| p as u32);
+        Outcome {
+            exposure,
+            event_piece,
+        }
+    };
+    let outcome_codes = vocab.codes.iter().map(|code| {
+        let event = after(code);
+        observe(code, event, event, true)
+    });
+    let next_codes = vocab.next_events.iter().enumerate().map(|(g, code)| {
+        observe(code, first_next, first_next, next_owner == Some(g))
+    });
+    outcome_codes.chain(next_codes).collect()
 }
 
 #[cfg(test)]

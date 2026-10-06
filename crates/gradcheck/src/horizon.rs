@@ -35,6 +35,15 @@ pub const SHARED: [&str; 7] = [
 /// selects the additive baseline in place of the set encoder, and the set
 /// encoder carries a forecast head scored on the follow-up measurements.
 pub fn fixture(seed: u64, additive: bool) -> Horizon {
+    build(seed, additive, false)
+}
+
+/// [`fixture`] with a next-event group over the three codes, weighted 0.6.
+pub fn fixture_next_events(seed: u64) -> Horizon {
+    build(seed, false, true)
+}
+
+fn build(seed: u64, additive: bool, next_events: bool) -> Horizon {
     let (subjects, _) = population_with_followup(200, seed);
     let has = |code: &str| {
         subjects
@@ -49,7 +58,7 @@ pub fn fixture(seed: u64, additive: bool) -> Horizon {
     let pick = [has("death:a"), has("onset"), censored, has("death:b")];
     let chosen: Vec<_> = pick.iter().map(|&i| subjects[i].clone()).collect();
     let codes: Vec<String> = CODES.iter().map(|c| c.to_string()).collect();
-    let vocab = Vocab::fit(
+    let mut vocab = Vocab::fit(
         &subjects,
         &codes,
         &codes[..2],
@@ -59,7 +68,14 @@ pub fn fixture(seed: u64, additive: bool) -> Horizon {
         },
     )
     .expect("vocab");
-    let mut cfg = HorizonConfig::tiny(vocab.len(), CODES.len() as u32);
+    if next_events {
+        vocab = vocab.with_next_events(&codes).expect("next-event group");
+    }
+    let mut cfg = HorizonConfig::tiny(vocab.len(), vocab.head_codes() as u32);
+    if next_events {
+        cfg.next_codes = codes.len() as u32;
+        cfg.next_weight = 0.6;
+    }
     cfg.additive = additive;
     if !additive {
         cfg.forecasts = 2;
@@ -81,6 +97,19 @@ pub fn fixture(seed: u64, additive: bool) -> Horizon {
 pub fn check_horizon(seed: u64) -> Report {
     let model = fixture(seed, false);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x1234);
+    for name in SHARED {
+        report
+            .checks
+            .extend(elementwise_check(&model, name, 1e-2).checks);
+    }
+    report
+}
+
+/// The set encoder with the next-event group in the hazard head: the weighted
+/// group likelihood must differentiate like the outcome codes'.
+pub fn check_horizon_next_events(seed: u64) -> Report {
+    let model = fixture_next_events(seed);
+    let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x2468);
     for name in SHARED {
         report
             .checks

@@ -121,7 +121,10 @@ mod music;
 #[cfg(feature = "timeline")]
 pub mod timeline;
 #[cfg(feature = "timeline")]
-pub use timeline::{Prediction as TimelinePrediction, TimelineModel, TimelineReport, TimelineSpec};
+pub use timeline::{
+    NextEvent as TimelineNextEvent, Prediction as TimelinePrediction, TimelineModel, TimelineReport,
+    TimelineSpec,
+};
 /// Survival estimation and time-to-event evaluation arithmetic.
 #[cfg(feature = "timeline")]
 pub use survival;

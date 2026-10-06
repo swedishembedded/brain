@@ -89,12 +89,14 @@ fn for_each_batch(
     }
 }
 
-/// The weighted mean event NLL over all of `subjects` (per unit of weight).
+/// The weighted mean event NLL of the OUTCOME codes over all of `subjects`
+/// (per unit of weight): the next-event group, a training signal, is not part
+/// of it.
 pub fn event_nll(model: &Horizon, subjects: &[Encoded]) -> f32 {
     let (mut total, mut weight) = (0.0f64, 0.0f64);
     for_each_batch(model, subjects, |chunk, m| {
         let w: f64 = chunk.iter().map(|s| s.weight as f64).sum();
-        total += m.loss_parts().0 as f64 * w;
+        total += m.loss_split().0 as f64 * w;
         weight += w;
     });
     (total / weight) as f32

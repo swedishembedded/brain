@@ -53,6 +53,55 @@ impl Curves {
         }
     }
 
+    /// The curves of the LAST `group` hazard columns of `log_hazards`
+    /// (`[pieces * columns]` row-major, `outcomes` outcome columns first), every
+    /// one absorbing: the next-event group, in which the codes compete for being
+    /// first, so their cumulative incidences sum to the probability that any
+    /// event has happened.
+    pub fn first_events(
+        log_hazards: &[f32],
+        knots: &[f32],
+        outcomes: usize,
+        group: usize,
+    ) -> Curves {
+        let columns = outcomes + group;
+        let pieces = knots.len() - 1;
+        assert_eq!(
+            log_hazards.len(),
+            pieces * columns,
+            "log-hazards for {pieces} pieces and {columns} columns"
+        );
+        let group_lh: Vec<f32> = (0..pieces)
+            .flat_map(|p| log_hazards[p * columns + outcomes..(p + 1) * columns].iter().copied())
+            .collect();
+        Curves::new(&group_lh, knots, &vec![true; group])
+    }
+
+    /// The curves of the FIRST `outcomes` hazard columns of `log_hazards`
+    /// (`[pieces * columns]`), with `absorbing` flagging which of them end
+    /// follow-up.
+    pub fn outcomes(
+        log_hazards: &[f32],
+        knots: &[f32],
+        columns: usize,
+        absorbing: &[bool],
+    ) -> Curves {
+        let pieces = knots.len() - 1;
+        assert_eq!(
+            log_hazards.len(),
+            pieces * columns,
+            "log-hazards for {pieces} pieces and {columns} columns"
+        );
+        let own: Vec<f32> = (0..pieces)
+            .flat_map(|p| {
+                log_hazards[p * columns..p * columns + absorbing.len()]
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        Curves::new(&own, knots, absorbing)
+    }
+
     /// The hazard of `code` in `piece`.
     pub fn hazard(&self, piece: usize, code: usize) -> f64 {
         self.hazard[piece][code]

@@ -60,6 +60,11 @@ pub struct Vocab {
     pub codes: Vec<String>,
     /// Outcome codes that end observation of every code (death).
     pub absorbing: Vec<String>,
+    /// Event codes whose FIRST occurrence after the prediction time, among
+    /// them, is modelled by extra hazard columns after `codes`: the
+    /// self-supervised next-event objective. Empty for a pure outcome model.
+    #[serde(default)]
+    pub next_events: Vec<String>,
     #[serde(skip)]
     index: HashMap<String, u32>,
 }
@@ -125,10 +130,33 @@ impl Vocab {
             knots,
             codes: codes.to_vec(),
             absorbing: absorbing.to_vec(),
+            next_events: Vec::new(),
             index: HashMap::new(),
         };
         v.reindex();
         Ok(v)
+    }
+
+    /// The same vocabulary with a next-event group: `events` are event codes
+    /// (not necessarily outcome codes) that compete with one another for being
+    /// the next to happen, each owning a hazard column after the outcome
+    /// columns. A subject's death, if it is an outcome, ends follow-up for the
+    /// group as it does for every code.
+    pub fn with_next_events(mut self, events: &[String]) -> Result<Vocab, String> {
+        if events.is_empty() {
+            return Err("vocab: a next-event group needs at least one event code".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if let Some(d) = events.iter().find(|e| !seen.insert(e.as_str())) {
+            return Err(format!("vocab: next-event code {d} is listed twice"));
+        }
+        self.next_events = events.to_vec();
+        Ok(self)
+    }
+
+    /// Hazard columns: the outcome codes, then the next-event group.
+    pub fn head_codes(&self) -> usize {
+        self.codes.len() + self.next_events.len()
     }
 
     /// Rebuild the name -> id index (after deserialising).

@@ -129,6 +129,7 @@ pub struct TimelineSpec {
     forecasts: Option<(u32, f32)>,
     visits: Option<u32>,
     backbone: Option<horizon::Backbone>,
+    next_events: Option<(Vec<String>, f32)>,
 }
 
 impl TimelineSpec {
@@ -155,6 +156,7 @@ impl TimelineSpec {
             forecasts: None,
             visits: None,
             backbone: None,
+            next_events: None,
         }
     }
     /// Use exactly this model shape (its `vocab` and `n_codes` are replaced
@@ -235,6 +237,20 @@ impl TimelineSpec {
         self.backbone = Some(backbone);
         self
     }
+    /// Also model which of `events` (event codes, outcome codes or not) is the
+    /// FIRST to happen after the prediction time, and when, weighted `weight`
+    /// against the outcome codes: a self-supervised objective that teaches the
+    /// state what comes next from every history, whether or not an outcome
+    /// followed. [`TimelineModel::predict_next_events`] reads it back; the
+    /// outcome codes keep their meaning and the held-out event NLL stays theirs.
+    pub fn next_events<E: Into<String>>(
+        mut self,
+        events: impl IntoIterator<Item = E>,
+        weight: f32,
+    ) -> Self {
+        self.next_events = Some((events.into_iter().map(Into::into).collect(), weight));
+        self
+    }
     /// Quantile knots per numeric variable, and the subjects a categorical
     /// level needs to get its own token.
     pub fn vocabulary(mut self, knots: usize, min_count: usize) -> Self {
@@ -248,7 +264,11 @@ impl TimelineSpec {
             .clone()
             .unwrap_or_else(|| TimelineConfig::default_for(vocab.len(), self.codes.len() as u32));
         cfg.vocab = vocab.len();
-        cfg.n_codes = self.codes.len() as u32;
+        cfg.n_codes = vocab.head_codes() as u32;
+        cfg.next_codes = vocab.next_events.len() as u32;
+        if let Some((_, w)) = &self.next_events {
+            cfg.next_weight = *w;
+        }
         cfg.additive = self.additive || cfg.additive;
         if let Some(k) = &self.knots {
             cfg.knots = k.clone();
@@ -315,8 +335,11 @@ impl TimelineModel {
                 "training and held-out subjects are both required".into(),
             ));
         }
-        let vocab =
+        let mut vocab =
             Vocab::fit(train, &spec.codes, &spec.absorbing, &spec.vocab).map_err(Error::Backend)?;
+        if let Some((events, _)) = &spec.next_events {
+            vocab = vocab.with_next_events(events).map_err(Error::Backend)?;
+        }
         let cfg = spec.config(&vocab);
         cfg.validate().map_err(Error::Backend)?;
         let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
@@ -376,6 +399,12 @@ impl TimelineModel {
         &self.saved.vocab.codes
     }
 
+    /// The next-event group's codes (empty without
+    /// [`TimelineSpec::next_events`]).
+    pub fn next_event_codes(&self) -> &[String] {
+        &self.saved.vocab.next_events
+    }
+
     /// The model's configuration.
     pub fn config(&self) -> &TimelineConfig {
         &self.saved.model.cfg
@@ -396,6 +425,24 @@ impl TimelineModel {
             .map(|curves| Prediction {
                 members: vec![curves],
                 codes: self.saved.vocab.codes.clone(),
+                last_knot,
+            })
+            .collect())
+    }
+
+    /// One next-event forecast per subject, in order: which code of the
+    /// next-event group happens first and when. Empty for a model trained
+    /// without [`TimelineSpec::next_events`].
+    pub fn predict_next_events(&self, subjects: &[Subject]) -> Result<Vec<NextEvent>> {
+        let last_knot = self.saved.horizon();
+        Ok(self
+            .saved
+            .predict_next_events(subjects)
+            .map_err(Error::Backend)?
+            .into_iter()
+            .map(|curves| NextEvent {
+                curves,
+                codes: self.saved.vocab.next_events.clone(),
                 last_knot,
             })
             .collect())
@@ -453,6 +500,32 @@ impl TimelineModel {
     /// quantity training early-stops on).
     pub fn event_nll(&self, subjects: &[Subject]) -> Result<f32> {
         Ok(event_nll(&self.saved.model, &self.encode(subjects)?))
+    }
+}
+
+/// One subject's forecast of which event of the next-event group comes first.
+#[derive(Clone, Debug)]
+pub struct NextEvent {
+    curves: Curves,
+    codes: Vec<String>,
+    last_knot: f64,
+}
+
+impl NextEvent {
+    /// Probability that `code` is the first event of the group and happens
+    /// within `t` of the prediction time; `None` for a code outside the group.
+    /// Held constant past [`NextEvent::horizon`].
+    pub fn first(&self, code: &str, t: f64) -> Option<f64> {
+        let k = self.codes.iter().position(|c| c == code)?;
+        Some(self.curves.cif(k, t))
+    }
+    /// Probability that any event of the group has happened within `t`.
+    pub fn any(&self, t: f64) -> f64 {
+        1.0 - self.curves.survival(t)
+    }
+    /// The longest horizon the model predicts to.
+    pub fn horizon(&self) -> f64 {
+        self.last_knot
     }
 }
 

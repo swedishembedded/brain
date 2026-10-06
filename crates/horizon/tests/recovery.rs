@@ -65,6 +65,8 @@ fn recovers(additive: bool) {
         backbone: horizon::Backbone::State,
         clocks: horizon::Clocks::default(),
         initial_log_hazard: -4.6,
+        next_codes: 0,
+        next_weight: 1.0,
     };
     let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let enc_test: Vec<Encoded> = test.iter().map(|s| encode(s, &vocab, &cfg)).collect();

@@ -5,7 +5,8 @@
 //! `BRAIN_DEVICE` selects (run it under both `cpu` and the GPU).
 
 use gradcheck::horizon::{
-    check_horizon, check_horizon_additive, check_horizon_attention, check_horizon_visits,
+    check_horizon, check_horizon_additive, check_horizon_attention, check_horizon_next_events,
+    check_horizon_visits,
 };
 use gradcheck::Report;
 
@@ -40,6 +41,19 @@ fn horizon_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(check_horizon(seed), &format!("set encoder, seed {seed}"));
+    }
+}
+
+#[test]
+fn horizon_next_event_group_analytic_grads_match_finite_differences() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    for seed in [3u64, 11] {
+        gate(
+            check_horizon_next_events(seed),
+            &format!("next-event group, seed {seed}"),
+        );
     }
 }
 

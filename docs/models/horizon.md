@@ -81,6 +81,21 @@ distribution; the state is the closer of the two in distribution and the
 attention out of it, on one seed of the data - which ships is a measurement
 on the data at hand.
 
+With `TimelineSpec::next_events(codes, weight)` the hazard head carries a
+second group of columns after the outcome codes: the codes in the group
+compete for being the FIRST to happen after the prediction time, whether or
+not an outcome followed, so every history teaches the state which event comes
+next and when (a subject's death ends follow-up for the group, a code's
+window is its own, and only the earliest event of the group is scored). It is
+the same piecewise-exponential likelihood, weighted by `weight` through the
+group's exposure and events, so it needs no new kernel. The group is a
+training signal: the held-out event NLL that early stopping and evaluation
+use is the outcome codes' alone, and `TimelineModel::predict_next_events`
+reads the group's curves back (`first(code, t)`, `any(t)`). On the synthetic
+population the trained group's first-event distribution is closer to the
+generator's than the covariate-blind mean at every code and horizon
+(`tests/next_event.rs`).
+
 ## Benchmarks with known truth
 
 Four domain-free generators (`horizon::synthetic::{single, competing,

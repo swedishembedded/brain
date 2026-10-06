@@ -83,10 +83,27 @@ impl Saved {
             .iter()
             .map(|c| self.vocab.absorbing.contains(c))
             .collect();
-        let knots = &self.model.cfg.knots;
+        let (knots, columns) = (&self.model.cfg.knots, self.model.cfg.n_codes as usize);
         Ok(predict_log_hazards(&self.model, &enc)
             .into_iter()
-            .map(|lh| Curves::new(&lh, knots, &absorbing))
+            .map(|lh| Curves::outcomes(&lh, knots, columns, &absorbing))
+            .collect())
+    }
+
+    /// One set of next-event curves per subject, in order: for each code of
+    /// the vocabulary's next-event group, the probability that it is the
+    /// first of the group to happen by a time. Empty when the model was
+    /// trained without the group.
+    pub fn predict_next_events(&self, subjects: &[Subject]) -> Result<Vec<Curves>, String> {
+        let group = self.vocab.next_events.len();
+        if group == 0 {
+            return Ok(Vec::new());
+        }
+        let enc = self.encode(subjects)?;
+        let (knots, outcomes) = (&self.model.cfg.knots, self.vocab.codes.len());
+        Ok(predict_log_hazards(&self.model, &enc)
+            .into_iter()
+            .map(|lh| Curves::first_events(&lh, knots, outcomes, group))
             .collect())
     }
 
