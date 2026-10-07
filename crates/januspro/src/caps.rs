@@ -109,8 +109,27 @@ fn draw_request(inv: &Invocation) -> Result<DrawRequest, String> {
     })
 }
 
+/// What [`text2image_batch`] draws with: a loaded [`TextToImage`], or a
+/// stand-in that needs no checkpoint.
+pub trait DrawMany {
+    /// Images per batch.
+    fn parallel(&self) -> usize;
+    /// [`TextToImage::generate_many`]: one image per request, `cancelled`
+    /// polled every step.
+    fn generate_many(&mut self, reqs: &[Request], cancelled: &dyn Fn() -> bool, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<imaging::pixels::Rgb8>, String>;
+}
+
+impl DrawMany for TextToImage {
+    fn parallel(&self) -> usize {
+        TextToImage::parallel(self)
+    }
+    fn generate_many(&mut self, reqs: &[Request], cancelled: &dyn Fn() -> bool, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<imaging::pixels::Rgb8>, String> {
+        TextToImage::generate_many(self, reqs, cancelled, progress)
+    }
+}
+
 /// Run one `text2image` invocation on a loaded generation path.
-pub fn text2image(t2i: &mut TextToImage, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+pub fn text2image<D: DrawMany + ?Sized>(t2i: &mut D, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     text2image_batch(t2i, std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().expect("one result per invocation")
 }
 
@@ -118,13 +137,19 @@ pub fn text2image(t2i: &mut TextToImage, inv: &Invocation, progress: &mut dyn Fn
 /// batch share the decoder, each with its own prompt, guidance, temperature
 /// and seed. A request that is not valid fails alone. `progress` gets the
 /// invocation's index.
-pub fn text2image_batch(t2i: &mut TextToImage, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-    let drawn: Vec<Result<DrawRequest, String>> = invs.iter().map(draw_request).collect();
+///
+/// Cancellation: a request whose token has fired is refused before it is
+/// drawn. A batch's images share one decode, so it stops at the next step
+/// only once every request in it is cancelled; a request cancelled while its
+/// neighbours still want their images is refused when the batch ends.
+pub fn text2image_batch<D: DrawMany + ?Sized>(t2i: &mut D, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+    let drawn: Vec<Result<DrawRequest, String>> = invs.iter().map(|inv| if inv.cancel.is_cancelled() { Err("cancelled".to_string()) } else { draw_request(inv) }).collect();
     let mut results: Vec<ActionResult> = drawn.iter().map(|d| d.as_ref().map(|_| Outcome::new()).map_err(|e| e.clone())).collect();
     let valid: Vec<usize> = (0..invs.len()).filter(|&i| drawn[i].is_ok()).collect();
     for chunk in valid.chunks(t2i.parallel()) {
         let reqs: Vec<Request> = chunk.iter().map(|&i| drawn[i].as_ref().expect("valid")).map(|d| Request { prompt: &d.prompt, cfg_weight: d.cfg_weight, temperature: d.temperature, seed: d.seed }).collect();
-        let images = t2i.generate_many(&reqs, &|| false, &mut |step, total| {
+        let cancelled = || chunk.iter().all(|&i| invs[i].cancel.is_cancelled());
+        let images = t2i.generate_many(&reqs, &cancelled, &mut |step, total| {
             for &i in chunk {
                 progress(i, Progress::step(step as u32, total as u32, ""));
             }
@@ -132,6 +157,10 @@ pub fn text2image_batch(t2i: &mut TextToImage, invs: &[Invocation], progress: &m
         match images {
             Ok(images) => {
                 for (&i, img) in chunk.iter().zip(images) {
+                    if invs[i].cancel.is_cancelled() {
+                        results[i] = Err("cancelled".into());
+                        continue;
+                    }
                     let hwc: Vec<f32> = img.px.iter().map(|&v| v as f32 / 255.0).collect();
                     results[i] = Ok(Outcome::new().set("seed", json!(drawn[i].as_ref().expect("valid").seed)).blob("image", capability::blob::image_blob(&hwc, img.w, img.h, 3)));
                 }
@@ -219,6 +248,76 @@ impl Action for JanusAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capability::CancelToken;
+    use imaging::pixels::Rgb8;
+
+    /// A generation path that takes `total` steps, polling `cancelled` before
+    /// each the way `TextToImage::generate_many` does.
+    struct Steps {
+        total: usize,
+        ran: usize,
+    }
+
+    impl DrawMany for Steps {
+        fn parallel(&self) -> usize {
+            4
+        }
+        fn generate_many(&mut self, reqs: &[Request], cancelled: &dyn Fn() -> bool, progress: &mut dyn FnMut(usize, usize)) -> Result<Vec<Rgb8>, String> {
+            for step in 0..self.total {
+                if cancelled() {
+                    return Err("cancelled".into());
+                }
+                self.ran += 1;
+                progress(step + 1, self.total);
+            }
+            Ok(reqs.iter().map(|_| Rgb8 { w: 1, h: 1, px: vec![0; 3] }).collect())
+        }
+    }
+
+    fn request(cancel: &CancelToken) -> Invocation {
+        let mut inv = Invocation::new().set("prompt", json!("a lighthouse"));
+        inv.cancel = cancel.clone();
+        inv
+    }
+
+    #[test]
+    fn text2image_stops_at_the_next_step_once_cancelled() {
+        let token = CancelToken::armed();
+        let mut draw = Steps { total: 576, ran: 0 };
+        let result = text2image(&mut draw, &request(&token), &mut |p| {
+            if p.step == 3 {
+                token.cancel();
+            }
+        });
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert_eq!(draw.ran, 3, "the step after the cancel never ran");
+    }
+
+    #[test]
+    fn a_request_cancelled_before_it_starts_draws_nothing() {
+        let token = CancelToken::armed();
+        token.cancel();
+        let mut draw = Steps { total: 576, ran: 0 };
+        assert_eq!(text2image(&mut draw, &request(&token), &mut |_| {}).unwrap_err(), "cancelled");
+        assert_eq!(draw.ran, 0);
+    }
+
+    /// Requests share one decode, so one caller leaving does not stop the
+    /// others: the batch runs on, and only the cancelled request is refused.
+    #[test]
+    fn one_cancelled_request_does_not_stop_its_batch() {
+        let (gone, stays) = (CancelToken::armed(), CancelToken::armed());
+        let invs = [request(&gone), request(&stays)];
+        let mut draw = Steps { total: 8, ran: 0 };
+        let results = text2image_batch(&mut draw, &invs, &mut |i, p| {
+            if i == 0 && p.step == 2 {
+                gone.cancel();
+            }
+        });
+        assert_eq!(draw.ran, 8);
+        assert_eq!(results[0].as_ref().unwrap_err(), "cancelled");
+        assert!(results[1].as_ref().unwrap().blobs.contains_key("image"));
+    }
 
     #[test]
     fn both_actions_have_the_shapes_the_api_serves() {

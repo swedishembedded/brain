@@ -185,6 +185,11 @@ impl Session {
     /// Run `invs` as one batch: every request is prefilled and the sequences
     /// then decode together, each streaming its own tokens (`progress` gets
     /// the request's index). A request that cannot be prepared fails alone.
+    ///
+    /// Cancellation is per request: one whose token has fired is refused
+    /// before it is prepared, and one that fires mid-decode stops at its next
+    /// token, keeping what it streamed with `finish_reason: "cancelled"`. Its
+    /// neighbours decode on.
     pub fn generate_batch(&mut self, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         // The reference processors stop on the next user turn as well as on
         // the end-of-sentence token.
@@ -211,16 +216,23 @@ impl Session {
             }
             st.printed = now;
             st.stop_at = stop;
-            st.stop_at.is_none()
+            st.cancelled = st.stop_at.is_none() && invs[at[r]].cancel.is_cancelled();
+            st.stop_at.is_none() && !st.cancelled
         });
         let mut results: Vec<ActionResult> = prepared.iter().map(|p| p.as_ref().map(|_| Outcome::new()).map_err(|e| e.clone())).collect();
         for (r, generated) in generated.into_iter().enumerate() {
             let (i, st, p) = (at[r], &streams[r], prepared[at[r]].as_ref().expect("prepared requests only"));
+            if st.cancelled && st.out_ids.is_empty() {
+                results[i] = Err("cancelled".into());
+                continue;
+            }
             results[i] = generated.map(|ids_out| {
                 let mut text = text_of(&st.out_ids);
                 let finish = if let Some(cut) = st.stop_at.or_else(|| qwen3::chat::find_stop(&text, &stops)) {
                     text.truncate(cut);
                     "stop"
+                } else if st.cancelled {
+                    "cancelled"
                 } else if ids_out.len() < p.max_new {
                     "stop"
                 } else {
@@ -242,6 +254,9 @@ impl Session {
 
     /// One request's prompt ids, image rows and token budget.
     fn prepare(&self, inv: &Invocation) -> Result<Prepared, String> {
+        if inv.cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let images = decode_images(inv)?;
         let (system, turns) = conversation(inv, images.len(), self.image_sep)?;
         let ids = self.vlm.prompt_ids_with(system.as_deref(), &turns)?;
@@ -271,6 +286,8 @@ struct Stream {
     out_ids: Vec<u32>,
     printed: String,
     stop_at: Option<usize>,
+    /// The request's token fired and stopped its decode.
+    cancelled: bool,
 }
 
 /// Direct provider: builds (and caches) one [`Session`] per checkpoint
@@ -385,6 +402,97 @@ mod tests {
         let inv = inv_with(json!([{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}, {"role": "user", "content": "Look"}]));
         let (_, turns) = conversation(&inv, 1, "").unwrap();
         assert_eq!((turns.len(), turns[0].content.as_str(), turns[2].content.as_str()), (3, "Hi", &*format!("{IMAGE_TAG}Look")));
+    }
+
+    /// A tower for a session that is never shown an image.
+    struct NoTower;
+
+    impl crate::tower::VisionTower for NoTower {
+        fn rows(&self) -> usize {
+            1
+        }
+        fn image_size(&self) -> usize {
+            16
+        }
+        fn encode(&self, _pixel_values: &[f32]) -> crate::tower::Features {
+            unreachable!("these requests carry no image")
+        }
+        fn aligner_config(&self) -> model::projector::ProjectorConfig {
+            model::projector::ProjectorConfig::from_type("mlp_gelu", 2, 8, 16).unwrap()
+        }
+        fn set_aligner(&self, _weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A text-only session over a tiny random decoder and a letters-only
+    /// vocabulary: the real batched decode, with no checkpoint on disk.
+    fn tiny_session() -> Session {
+        let byte_encoder = data::bpe::bytes_to_unicode();
+        let vocab: serde_json::Map<String, Value> = (b'a'..=b'w').enumerate().map(|(id, b)| (byte_encoder[b as usize].to_string(), json!(id))).collect();
+        let mut tok = data::qwen_tokenizer::QwenBpe::from_json_bytes(&serde_json::to_vec(&json!({"model": {"vocab": vocab, "merges": []}})).unwrap()).unwrap();
+        tok.add_special_tokens(&["<s>", "</s>", IMAGE_TAG]);
+        let cfg = qwen3::QwenConfig { vocab: tok.vocab_size() as u32, block_size: 64, max_position_embeddings: 64, ..qwen3::QwenConfig::tiny() };
+        let decoder = qwen3::serve::Engine::from_map(cfg.clone(), &qwen3::init_weights(&cfg, 7), 4, 64, crate::model::MAX_BATCH, 16, 64, false, false);
+        let (eos_id, image_id) = (tok.special_id("</s>").unwrap(), tok.special_id(IMAGE_TAG).unwrap());
+        let frontend = crate::model::Frontend {
+            decoder_cfg: cfg,
+            processor: crate::preprocess::ImageProcessor { image_size: 16, min_size: 14, background: [0; 3], rescale_factor: 1.0 / 255.0, normalize: None },
+            tower: Box::new(NoTower),
+            tokenizer: std::sync::Arc::new(tok),
+            style: crate::prompt::DEEPSEEK_VL,
+            splice: crate::prompt::ImageSplice { image_id, rows: 1, wrap: None },
+            bos: "<s>".into(),
+            eos: "</s>".into(),
+            eos_id,
+        };
+        Session::new(Vlm::from_parts(frontend, decoder), "")
+    }
+
+    fn chat(cancel: &capability::CancelToken) -> Invocation {
+        let mut inv = inv_with(json!([{"role": "system", "content": "a"}, {"role": "user", "content": "abc"}])).set("max_new", json!(40));
+        inv.cancel = cancel.clone();
+        inv
+    }
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// The caller leaves after the first token: the decode stops at the next
+    /// one, and the text already streamed is kept and reported as cancelled,
+    /// never as a finished answer.
+    #[test]
+    fn generate_stops_at_the_next_token_once_cancelled() {
+        if gpu_disabled() {
+            return;
+        }
+        let mut session = tiny_session();
+        let token = capability::CancelToken::armed();
+        let out = session.generate(&chat(&token), &mut |_| token.cancel()).expect("streamed text is an outcome");
+        assert_eq!(out.outputs["finish_reason"], "cancelled", "{}", out.outputs);
+        assert_eq!(out.outputs["completion_tokens"], 1, "{}", out.outputs);
+
+        // The same request left alone runs on: the stop above was the token's.
+        let full = session.generate(&chat(&capability::CancelToken::armed()), &mut |_| {}).unwrap();
+        assert!(full.outputs["completion_tokens"].as_u64().unwrap() > 1, "{}", full.outputs);
+    }
+
+    /// A request cancelled before it starts is refused, and its batch
+    /// neighbour is not.
+    #[test]
+    fn a_request_cancelled_before_it_starts_decodes_nothing() {
+        if gpu_disabled() {
+            return;
+        }
+        let mut session = tiny_session();
+        let gone = capability::CancelToken::armed();
+        gone.cancel();
+        let mut seen = Vec::new();
+        let results = session.generate_batch(&[chat(&gone), chat(&capability::CancelToken::armed())], &mut |i, _| seen.push(i));
+        assert_eq!(results[0].as_ref().unwrap_err(), "cancelled");
+        assert!(results[1].is_ok());
+        assert!(!seen.contains(&0), "a cancelled request streamed nothing");
     }
 
     #[test]

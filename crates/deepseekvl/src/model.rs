@@ -144,6 +144,13 @@ impl Frontend {
 }
 
 impl Vlm {
+    /// A composite from parts already built: what a test assembles around a
+    /// tiny random decoder, with no checkpoint on disk.
+    #[cfg(test)]
+    pub(crate) fn from_parts(frontend: Frontend, decoder: Engine) -> Vlm {
+        Vlm { frontend, decoder }
+    }
+
     /// Assemble a composite from `parts` and the tokenizer, processor config
     /// and decoder in `dir` (read through `rd`), the decoder at `dtype` with
     /// a KV pool of `ctx` tokens shared by up to [`MAX_BATCH`] sequences.

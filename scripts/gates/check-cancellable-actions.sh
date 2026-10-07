@@ -29,7 +29,6 @@ cosyvoice
 deepseek2ocr
 deepseekocr2
 fastvlm
-lfm2
 llava
 minimaxmusic3
 moondream3
@@ -39,7 +38,9 @@ qwen3omnimoe
 fail=0
 for caps in crates/*/src/caps.rs; do
   crate=$(basename "$(dirname "$(dirname "$caps")")")
-  grep -q "streaming()" "$caps" || continue
+  # Code lines only: a doc comment that says an action is deliberately NOT
+  # `.streaming()` must not make its crate look like a streaming one.
+  grep -v '^[[:space:]]*//' "$caps" | grep -q "streaming()" || continue
   if grep -rq "inv\.cancel\|\.cancel\.is_cancelled()\|cancel: &CancelToken" "crates/$crate/src"; then
     polls=yes
   else
