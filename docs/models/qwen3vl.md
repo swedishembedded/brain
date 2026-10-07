@@ -271,8 +271,11 @@ brain do qwen3vl lora_train \
 
 - `data` - folder with images + `captions.yaml`/`captions.jsonl` (required).
 - `save` - output path for the trained adapter (required). Also returned as
-  the `adapter` output blob - a remote client has no filesystem access to
-  `save` on the server.
+  the `adapter` output blob.
+- `data` and `save` name files on the serving machine, so only a caller on
+  that machine (`brain do`) may set them: D-Bus and HTTP neither list nor
+  accept them, and `lora_train` is therefore not reachable from a remote
+  caller until it takes its dataset as an input blob.
 - `weights` - the base checkpoint to adapt (defaults to the model-store
   resolver's own pick, `qwen3vl::spec::Qwen3VlSpec`).
 - `rank`/`alpha` - LoRA capacity/scale (defaults 8 / 16.0).

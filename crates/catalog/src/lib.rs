@@ -1270,39 +1270,10 @@ mod tests {
     const WEIGHT_LOCATION_PARAMS: &[&str] =
         &["weights", "weights_dir", "weights_path", "tokenizer", "ckpt", "checkpoint", "checkpoint_path", "model_path", "safetensors_path"];
 
-    /// THE REGRESSION THIS EXISTS FOR: brain's catalog manifest is what an
-    /// off-machine consumer -- a scheduler placing work, a graph editor
-    /// listing what a node can do -- builds its own node/action list from.
-    /// Every model that took its checkpoint as an ordinary
-    /// action param therefore published a REQUIRED "path to a .safetensors
-    /// checkpoint" field to a workflow author who has no idea which machine
-    /// will run the graph - a question with no correct answer, at the wrong
-    /// layer entirely. The location is the HOST's fact, resolved from that
-    /// machine's own `BRAIN_*` variable at activation time; [`serving_manifests`]
-    /// is where that guarantee is kept, so it is pinned here over the REAL
-    /// catalog rather than a hand-written sample.
-    #[test]
-    fn no_served_manifest_asks_a_remote_caller_where_the_weights_are() {
-        for m in serving_manifests() {
-            for a in &m.actions {
-                for p in &a.params {
-                    assert!(
-                        !WEIGHT_LOCATION_PARAMS.contains(&p.name.as_str()),
-                        "served manifest '{}' action '{}' still advertises '{}' - mark it \
-                         `.host_env(\"BRAIN_…\")` in that model's caps.rs so the host resolves it",
-                        m.model,
-                        a.name,
-                        p.name
-                    );
-                }
-            }
-        }
-    }
-
-    /// The other side of the same coin, and what makes the test above mean
-    /// something: the LOCAL surface (`brain caps`/`brain do`, run by somebody
-    /// standing on the machine that holds the weights) still offers the
-    /// override. If this ever went empty, the test above would be passing
+    /// The other side of `tests/served_paths.rs` (which reads every served
+    /// manifest for a path param), and what keeps it meaningful: the LOCAL
+    /// surface (`brain caps`/`brain do`, run by somebody standing on the
+    /// machine that holds the weights) still offers the override. If this ever went empty, that test would be passing
     /// vacuously.
     #[test]
     fn the_local_surface_still_offers_an_explicit_checkpoint_override() {
@@ -1343,7 +1314,7 @@ mod tests {
         for m in serving_manifests() {
             for a in &m.actions {
                 for p in &a.params {
-                    assert!(p.host_env.is_none(), "'{}':'{}' leaked host-resolved param '{}'", m.model, a.name, p.name);
+                    assert!(p.host_env.is_none() && !p.host_resolved, "'{}':'{}' leaked host-resolved param '{}'", m.model, a.name, p.name);
                 }
             }
         }

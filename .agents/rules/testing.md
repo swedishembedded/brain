@@ -220,7 +220,7 @@ tuned from the environment instead of a recompile.
 **Host-resolved-param mechanism** (`crates/capability`'s own unit tests for
 `ParamSpec::host_env` - stand-ins for a real `BRAIN_*_WEIGHTS`/`_DIR`, never
 read by anything that ships): `BRAIN_TEST_HOST_WEIGHTS`,
-`BRAIN_TEST_HOST_OVERRIDE`, `BRAIN_TEST_HOST_EMPTY`, `BRAIN_TEST_HOST_UNSET`
+`BRAIN_TEST_HOST_OVERRIDE`, `BRAIN_TEST_HOST_SERVED`, `BRAIN_TEST_HOST_EMPTY`, `BRAIN_TEST_HOST_UNSET`
 (deliberately never set - it is what "this machine has not configured it"
 looks like).
 

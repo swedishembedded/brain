@@ -83,13 +83,13 @@ pub fn manifest() -> Manifest {
     .param(ParamSpec::new("fps", ParamType::Int, "frame rate reported with the clip").default(json!(d.fps)))
     .param(ParamSpec::new("solver", ParamType::Enum(SOLVERS.iter().map(|s| s.to_string()).collect()), "multistep flow-matching solver").default(json!("unipc")))
     .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; the checkpoint at BRAIN_WAN_DIT must match").default(json!("t2v-1.3B")))
-    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to fold in before generation"))
+    .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to fold in before generation").host_resolved())
     .output(BlobSpec::new("video", Media::Video, "the generated clip: N interleaved-HWC f32 RGB frames, meta {frames,w,h,c,fps}").required());
 
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned video clips (a data::episode dataset plus captions.json; GPU-resident DiT trainer where a device is available, host f32 otherwise)")
         .streaming()
-        .param(ParamSpec::new("data", ParamType::Str, "server-side folder holding a data::episode dataset plus captions.json").required())
-        .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required())
+        .param(ParamSpec::new("data", ParamType::Str, "server-side folder holding a data::episode dataset plus captions.json").required().host_resolved())
+        .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required().host_resolved())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(16)))
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(200)))
         .param(ParamSpec::new("frames", ParamType::Int, "training window length in frames; must be 1 + 4k").default(json!(9)))

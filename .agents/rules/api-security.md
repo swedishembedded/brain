@@ -37,6 +37,13 @@ them, so treat all request input as hostile.
 - [ ] Numeric params are range-checked before use: `max_tokens`/`max_new`,
       `n`, `top_k`, `dimensions`, batch/`input` array length, image `size`. Reject
       absurd values (400) rather than allocating on them.
+- [ ] No caller-settable param names a file on the serving machine. A path param
+      (`weights`, `data`, `save`, `adapter`, `start_frame`, ...) is declared
+      `.host_env(..)`/`.host_resolved()`; `/v1/run`, `/v1/jobs` and D-Bus
+      `Run`/`Subscribe`/`Plan` validate through `ActionSpec::validate_served`,
+      which refuses it as unknown, and `/v1/capabilities` and D-Bus `Manifests`
+      list `for_serving` manifests. `crates/catalog/tests/served_paths.rs` pins
+      this over every catalog manifest.
 - [ ] Sampling parameters go through `crates/apiserve/src/sampling.rs` on every text
       surface (chat and `/completions`): an omitted `seed`/`top_k` is NOT filled in (the action's own default
       applies; an unseeded request must not decode a fixed sequence), `top_k` outside

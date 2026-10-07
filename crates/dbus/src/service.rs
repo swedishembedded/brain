@@ -263,6 +263,18 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
 }
 
 /// Drop a finished job's cancel token from the registry.
+/// `inv` checked as a call from off this machine: the spec `model`'s
+/// `action` declares, with every host-resolved param refused as unknown
+/// ([`capability::ActionSpec::validate_served`]) - the same check
+/// `apiserve`'s `/v1/run` makes, so neither transport lets a caller name a
+/// file on the serving machine.
+fn served_invocation(exec: &Executor, model: &str, action: &str, inv: Invocation) -> Result<Invocation, String> {
+    let manifests = exec.manifests();
+    let manifest = manifests.iter().find(|m| m.model == model).ok_or_else(|| format!("no model '{model}'"))?;
+    let spec = manifest.actions.iter().find(|a| a.name == action).ok_or_else(|| format!("model '{model}' has no action '{action}'"))?;
+    spec.validate_served(inv)
+}
+
 fn finish_job(jobs: &JobRegistry, job: u64) {
     jobs.remove(&job);
 }
@@ -348,6 +360,19 @@ fn submit_subscribed_job(
     token: CancelToken,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    // Checked again for the fetched path (idempotent for the resident one,
+    // which `subscribe` already checked): the job never reaches the model.
+    let inv = match served_invocation(&exec, &model, &action, inv) {
+        Ok(inv) => inv,
+        Err(e) => {
+            finish_job(&jobs, job);
+            if let Ok(mut s) = stream.lock() {
+                s.error(&e);
+            }
+            drop(permit);
+            return;
+        }
+    };
     let (sp, sr) = (stream.clone(), stream.clone());
     let (admit_tx, mut admit_rx) = tokio::sync::oneshot::channel::<()>();
     let mut admit_tx = Some(admit_tx);
@@ -414,9 +439,10 @@ fn submit_subscribed_job(
 
 #[zbus::interface(name = "com.swedishembedded.Brain1.Manager")]
 impl Manager {
-    /// JSON array of every model's manifest (discovery).
+    /// JSON array of every model's manifest as a caller sees it: only the
+    /// params a caller may set (`Manifest::for_serving`).
     async fn manifests(&self) -> String {
-        serde_json::to_string(&Value::Array(self.executor.manifests().iter().map(|m| m.to_json()).collect())).unwrap_or_else(|_| "[]".into())
+        serde_json::to_string(&Value::Array(self.executor.manifests().iter().map(|m| m.clone().for_serving().to_json()).collect())).unwrap_or_else(|_| "[]".into())
     }
 
     /// The served model names.
@@ -446,7 +472,8 @@ impl Manager {
         let _permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         self.ensure_resident(&model).await?;
-        let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        let inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        let mut inv = served_invocation(&self.executor, &model, &action, inv).map_err(fdo::Error::Failed)?;
         // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
         // token is only ever dropped here (the reply), never cancelled by Cancel.
         let (job, token) = self.register_job(&mut inv);
@@ -507,6 +534,12 @@ impl Manager {
         let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        // A resident model's call is checked here, so a refusal is this
+        // method's own error; a model still to be fetched is checked once it
+        // is resident, in `submit_subscribed_job`.
+        if self.executor.manifests().iter().any(|m| m.model == model) {
+            inv = served_invocation(&self.executor, &model, &action, inv).map_err(fdo::Error::Failed)?;
+        }
         // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
         // the running action aborts at its next poll.
         let (job, token) = self.register_job(&mut inv);
@@ -697,6 +730,22 @@ impl Manager {
     async fn plan(&self, model: String, action: String, params: String) -> fdo::Result<String> {
         let model = resolve_model_alias(model);
         let inv = self.build_inv(&params, HashMap::new(), "").map_err(fdo::Error::Failed)?;
+        // A plan may be asked of a partial call, so it is not validated in
+        // full; but it may not name a param only the host may set (an
+        // adapter path keys an instance), and an unserved model or action is
+        // `plan`'s own honest PlanError below.
+        let host_only = self
+            .executor
+            .manifests()
+            .iter()
+            .filter(|m| m.model == model)
+            .flat_map(|m| m.actions.iter().filter(|a| a.name == action))
+            .flat_map(|a| a.params.iter().filter(|p| p.host_env.is_some() || p.host_resolved))
+            .find(|p| inv.params.get(&p.name).is_some())
+            .map(|p| p.name.clone());
+        if let Some(name) = host_only {
+            return Err(fdo::Error::Failed(format!("unknown param '{name}' for action '{action}'")));
+        }
         let exec = self.executor.clone();
         let planned = tokio::task::spawn_blocking(move || exec.plan(&model, &action, inv)).await.map_err(|e| fdo::Error::Failed(format!("plan task failed: {e}")))?;
         planned.map(|plan| plan.to_json().to_string()).map_err(|e| fdo::Error::Failed(e.to_string()))
@@ -999,5 +1048,73 @@ mod tests {
         let mgr = Manager::new(empty_exec()).with_supplier(Some(std::sync::Arc::new(AlwaysFails) as std::sync::Arc<dyn residency::ModelSupplier>));
         let err = mgr.ensure_resident("vendor/will-fail").await.unwrap_err().to_string();
         assert!(!err.contains("secret-internal-path"), "internal fetch error leaked: {err}");
+    }
+
+    /// `ingest(prompt)` with a dataset folder only the host may name. Counts
+    /// how often an invocation actually reached the model.
+    struct HostPathResident(std::sync::Arc<AtomicUsize>);
+    struct HostPathInst(std::sync::Arc<AtomicUsize>);
+    const HOST_PATH_MODEL: &str = "brain/host-path-stub";
+    impl ResidentModel for HostPathResident {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(
+                HOST_PATH_MODEL,
+                "stub",
+                vec![capability::ActionSpec::new("ingest", "reads a host folder")
+                    .param(capability::ParamSpec::new("prompt", capability::ParamType::Str, "text").default(serde_json::json!("")))
+                    .param(capability::ParamSpec::new("data", capability::ParamType::Str, "folder on the host").host_resolved())],
+            )
+        }
+        fn instance_key(&self, _action: &str, _inv: &capability::Invocation) -> InstanceKey {
+            InstanceKey::new(HOST_PATH_MODEL, "default")
+        }
+        fn estimate(&self, _key: &InstanceKey) -> MemCost {
+            MemCost::default()
+        }
+        fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(HostPathInst(self.0.clone())))
+        }
+    }
+    impl Instance for HostPathInst {
+        fn run(&mut self, _action: &str, _inv: &capability::Invocation, _progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(capability::Outcome::new())
+        }
+    }
+
+    fn host_path_manager() -> (Manager, std::sync::Arc<AtomicUsize>) {
+        let reached = std::sync::Arc::new(AtomicUsize::new(0));
+        let mgr = Manager::new(empty_exec());
+        mgr.executor.register(std::sync::Arc::new(HostPathResident(reached.clone())));
+        (mgr, reached)
+    }
+
+    /// D-Bus is an off-machine surface like HTTP: discovery shows only what a
+    /// caller may set.
+    #[tokio::test]
+    async fn manifests_never_advertise_a_host_resolved_param() {
+        let (mgr, _) = host_path_manager();
+        let all: serde_json::Value = serde_json::from_str(&mgr.manifests().await).unwrap();
+        let stub = all.as_array().unwrap().iter().find(|m| m["model"] == HOST_PATH_MODEL).expect("the stub is listed");
+        let names: Vec<&str> = stub["actions"][0]["params"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["prompt"]);
+    }
+
+    /// ...and none of `Run`, `Subscribe` or `Plan` lets a caller name one: the call
+    /// is refused before it reaches the model.
+    #[tokio::test]
+    async fn run_and_subscribe_refuse_a_host_resolved_param() {
+        let (mgr, reached) = host_path_manager();
+        let params = r#"{"data": "/etc"}"#.to_string();
+        let err = mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new(), String::new()).await.expect_err("Run must refuse 'data'");
+        assert!(err.to_string().contains("unknown param 'data'"), "{err}");
+        let err = mgr.subscribe(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new()).await.expect_err("Subscribe must refuse 'data'");
+        assert!(err.to_string().contains("unknown param 'data'"), "{err}");
+        let err = mgr.plan(HOST_PATH_MODEL.into(), "ingest".into(), params).await.expect_err("Plan must refuse 'data'");
+        assert!(err.to_string().contains("unknown param 'data'"), "{err}");
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "a refused call never reaches the model");
+        // A call that names only what a caller may set still runs.
+        mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), r#"{"prompt": "hi"}"#.into(), Default::default(), String::new(), String::new()).await.expect("a served param is accepted");
+        assert_eq!(reached.load(Ordering::SeqCst), 1);
     }
 }

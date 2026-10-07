@@ -1997,6 +1997,11 @@ a metric that isn't there was simply forgotten.
   that has one - the resident surface and any off-machine surface cannot
   drift, because they are the same projection of one definition.
   `crates/catalog`'s own tests pin both directions over the REAL catalog.
+  The same holds for EVERY param that names a file on the serving machine,
+  not only weights: a dataset folder, an output path, an adapter file, a
+  conditioning image file is `.host_resolved()` (or `.host_env`), so HTTP and
+  D-Bus neither list nor accept it (`ActionSpec::validate_served`);
+  `crates/catalog/tests/served_paths.rs` reads every manifest for one.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) - never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,

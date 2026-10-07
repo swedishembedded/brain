@@ -79,7 +79,11 @@ The same model is also reachable through the generalized capability
 interface's `text2image`/`edit`/`lora_train` actions (`brain caps
 brain/flux2-klein` lists them) over D-Bus and over HTTP at
 `/v1/images/generations` - those three are not CLI-reachable today, only
-`generate`/`infer` above are.
+`generate`/`infer` above are. The params that name files on the serving
+machine - `text2image`'s `adapter`, `lora_train`'s `data` and `save` - are
+host-only: `brain do` on the machine takes them, while D-Bus and HTTP do not
+list or accept them, so `lora_train` runs from the machine that holds the
+dataset (`brain flux2 finetune`, `brain do`).
 
 ## Options
 

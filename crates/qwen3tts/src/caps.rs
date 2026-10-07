@@ -114,7 +114,7 @@ pub fn manifest() -> Manifest {
     let synth = common_params(ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)"))
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech as a 24 kHz mono WAV"));
     let clone = common_params(ActionSpec::new("clone", "voice cloning from a reference wav (x-vector-only, or in-context when ref_text is given)"))
-        .param(ParamSpec::new("ref", ParamType::Str, "reference audio wav path").required())
+        .param(ParamSpec::new("ref", ParamType::Str, "reference audio wav path").required().host_env("BRAIN_QWEN3TTS_REF"))
         .param(ParamSpec::new("ref_text", ParamType::Str, "transcript of the reference wav - given, runs in-context (ICL) cloning; omitted, x-vector-only").default(json!("")))
         .output(BlobSpec::new("audio", Media::Audio, "the cloned-voice speech as a 24 kHz mono WAV"));
     let design = common_params(ActionSpec::new("design", "VoiceDesign (instruct) and/or CustomVoice preset speakers - needs a CustomVoice/VoiceDesign checkpoint"))

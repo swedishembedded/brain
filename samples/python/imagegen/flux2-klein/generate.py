@@ -74,18 +74,15 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
-    ap.add_argument("--adapter", default="", help="server-side path of a trained LoRA adapter")
     args = ap.parse_args()
 
     params = {"prompt": args.prompt, "width": args.width, "height": args.height, "seed": args.seed}
-    # `steps`/`variant`/`adapter` are FLUX.2-specific params the mock model
+    # `steps`/`variant` are FLUX.2-specific params the mock model
     # doesn't declare - ActionSpec.validate rejects unknown params, so only send
     # them to a model that actually advertises them.
     if args.model != "brain/mock":
         params["steps"] = args.steps
         params["variant"] = args.variant
-        if args.adapter:
-            params["adapter"] = args.adapter
 
     with BrainDBus() as brain:
         models = brain.models()

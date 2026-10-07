@@ -39,6 +39,14 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 Every model's actions are discoverable the same way as on the CLI (`brain caps`) —
 see [`docs/using/cli.md`](cli.md) if that page exists yet.
 
+The bus is a serving surface like HTTP: `Manifests()` lists only the params a
+caller may set, and `Run`, `Subscribe` and `Plan` refuse any other as an unknown
+param. That leaves out every param that names something on the serving
+machine: a checkpoint (`weights`), a training dataset or output path
+(`data`, `save`), an adapter file (`adapter`), a conditioning image file
+(`start_frame`, `end_frame`, `mid_frame`). The host answers those itself, or
+they are set by someone on the machine with `brain do`.
+
 ### `Run` — one-shot
 
 A single request/response call: input blobs (images, audio) go in as file

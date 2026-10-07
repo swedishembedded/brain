@@ -116,12 +116,9 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<(String, String, Invocat
         let meta = if wire.meta.is_null() { json!({}) } else { wire.meta };
         inv.blobs.insert(name, Blob::new(media, bytes).with_meta(meta));
     }
-    // Two passes, in this order. First the caller's call against what a caller
-    // may see: a param the host resolves (a weights path) is refused as unknown,
-    // so a remote caller can never name a file on this machine. Then the full
-    // spec, which is where the host fills in its own answers.
-    let inv = spec.clone().for_serving().validate(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
-    let inv = spec.validate(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
+    // A param the host resolves (a weights path, a dataset folder) is refused
+    // as unknown, so a remote caller can never name a file on this machine.
+    let inv = spec.validate_served(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
     Ok((call.model, call.action, inv))
 }
 

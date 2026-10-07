@@ -54,7 +54,7 @@ pub fn manifest() -> Manifest {
         .param(prompt())
         .param(neg())
         .param(cap_len_param())
-        .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply"))
+        .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply").host_resolved())
         .output(image_out());
 
     let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming())
@@ -85,8 +85,8 @@ pub fn manifest() -> Manifest {
 
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
         .streaming()
-        .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required())
-        .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required())
+        .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required().host_resolved())
+        .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required().host_resolved())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(16)))
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)))
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px").default(json!(512)))

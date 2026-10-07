@@ -41,6 +41,20 @@ Implement `capability::Action` for each action and advertise them in a
   — a remote client has no access to the server's filesystem, and the D-Bus layer
   already turns outcome blobs into result fds for free. Reference:
   `zimage::caps` `lora_train`.
+- **No param a remote caller can set names a file on the serving machine.**
+  A dataset folder (`data`), an output path (`save`), an adapter to load
+  (`adapter`), a conditioning image (`start_frame`), a reference clip (`ref`):
+  each is a path only a caller standing on this machine can answer, and from
+  anyone else it is a probe of the host's disk. Declare it `.host_resolved()`
+  (or `.host_env("BRAIN_…")` when one variable answers it), so
+  `for_serving` drops it and every off-machine surface (`/v1/run`,
+  `/v1/jobs`, `/v1/capabilities`, D-Bus `Manifests`/`Run`/`Subscribe`/`Plan`)
+  refuses it as an unknown param through `ActionSpec::validate_served`; the
+  local `brain do` still takes it. Content a remote caller should supply
+  travels as an input blob instead (`qwen3::caps` `lora_train` takes its
+  dataset as a JSONL blob). `crates/catalog/tests/served_paths.rs` reads every
+  catalog manifest and fails on a served param whose name or help text says
+  path, file, folder or directory.
 - **A checkpoint location is `.host_env("BRAIN_…")`, never a plain param.** If an
   action needs to know where its weights/tokenizer live, that is a fact about the
   MACHINE the action runs on, not a request the caller composes. Declare it

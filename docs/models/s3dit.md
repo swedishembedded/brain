@@ -72,7 +72,9 @@ brain s3dit text2image --prompt "a red apple on a wooden table" \
 
 The same interface covers `image2image`, `inpaint`, `outpaint`, and
 `lora_train` (`brain s3dit image2image ...` etc.) and is reachable over
-D-Bus as well.
+D-Bus as well. `adapter`, and `lora_train`'s `data` and `save`, name files on
+the serving machine, so only `brain do` on that machine takes them; D-Bus
+and HTTP neither list nor accept them.
 
 ## Options
 

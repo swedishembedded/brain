@@ -117,6 +117,12 @@ pub struct ParamSpec {
     /// supplies the resolved value as its own fallback when a request omits
     /// it (see e.g. `fastvlm::caps::FastVlmProvider`), so there is no
     /// still-checked environment variable standing behind it.
+    ///
+    /// It is also how any OTHER param naming a file on this machine is
+    /// declared - a training dataset folder, an output path, an adapter file,
+    /// a conditioning image file - when nothing on the host answers it at
+    /// all: only a caller standing on this machine (`brain do`) may set it,
+    /// and every off-machine surface refuses it ([`ActionSpec::validate_served`]).
     pub host_resolved: bool,
 }
 
@@ -300,6 +306,18 @@ impl ActionSpec {
     pub fn for_serving(mut self) -> ActionSpec {
         self.params.retain(|p| p.host_env.is_none() && !p.host_resolved);
         self
+    }
+
+    /// [`Self::validate`] for a call from a caller that does not share this
+    /// machine's filesystem - every HTTP and D-Bus request. Two passes, in
+    /// this order: first against [`Self::for_serving`], so a host-resolved
+    /// param the caller names is refused as unknown (a remote caller can
+    /// never point an action at a file on this machine, whether or not it
+    /// read the served manifest); then against the full spec, which is where
+    /// the host fills in its own answers.
+    pub fn validate_served(&self, inv: Invocation) -> Result<Invocation, String> {
+        let inv = self.clone().for_serving().validate(inv)?;
+        self.validate(inv)
     }
 
     /// Validate + normalize an invocation against this spec: reject unknown or
@@ -1123,6 +1141,23 @@ mod tests {
         let inv = host_env_spec("BRAIN_TEST_HOST_WEIGHTS").validate(Invocation::new()).unwrap();
         assert_eq!(inv.get_str("weights").as_deref(), Some("/models/x.safetensors"));
         unsafe { std::env::remove_var("BRAIN_TEST_HOST_WEIGHTS") };
+    }
+
+    /// What every off-machine transport runs: a caller naming a host-resolved
+    /// param is refused as if the param did not exist, whichever of the two
+    /// declarations it carries, and an omitted one is still the host's to fill.
+    #[test]
+    fn validate_served_refuses_what_only_the_host_may_choose() {
+        let spec = host_env_spec("BRAIN_TEST_HOST_SERVED").param(ParamSpec::new("data", ParamType::Str, "a folder on the host").host_resolved());
+        for param in ["weights", "data"] {
+            let err = spec.validate_served(Invocation::new().set(param, json!("/etc/passwd"))).unwrap_err();
+            assert!(err.contains(&format!("unknown param '{param}'")), "{param}: {err}");
+        }
+        // SAFETY: a test-only variable no other test in this process reads.
+        unsafe { std::env::set_var("BRAIN_TEST_HOST_SERVED", "/models/x.safetensors") };
+        let inv = spec.validate_served(Invocation::new()).unwrap();
+        assert_eq!(inv.get_str("weights").as_deref(), Some("/models/x.safetensors"));
+        unsafe { std::env::remove_var("BRAIN_TEST_HOST_SERVED") };
     }
 
     /// A caller that DOES share the filesystem (the local CLI) still wins.
