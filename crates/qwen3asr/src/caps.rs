@@ -74,6 +74,16 @@ pub fn pad_to_window(wav: &[f32], window_samples: usize) -> Vec<f32> {
     out
 }
 
+/// The log-mel features of `wav` padded or truncated to the window, and how many
+/// of their frames are valid (all of them: the window is always full). The
+/// front end returns `(mel, n_mels, n_frames)`; the frame count is the third
+/// field.
+pub fn window_features(wav: &[f32], window_samples: usize) -> (Vec<f32>, u32) {
+    let padded = pad_to_window(wav, window_samples);
+    let (mel, _n_mels, n_frames) = audio::asr_frontend::qwen_logmel(&padded, window_samples);
+    (mel, n_frames as u32)
+}
+
 /// The manifest (one `transcribe` action; schema shared via [`audio::asr_caps`]).
 pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "Qwen3-ASR 1.7B — offline speech-to-text (fixed audio window).", vec![transcribe_spec()])
@@ -131,10 +141,9 @@ impl QwenAsrProvider {
 impl QwenAsrInner {
     /// The shared transcribe path (also used by the resident adapter).
     pub fn transcribe(&self, wav: &[f32]) -> Result<(String, Vec<u32>), String> {
-        let padded = pad_to_window(wav, self.window_samples);
-        let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&padded, self.window_samples);
+        let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
-        let embeds = model.encode_audio(&mel, valid as u32);
+        let embeds = model.encode_audio(&mel, valid);
         self.decode(&model, &embeds)
     }
 
@@ -145,10 +154,9 @@ impl QwenAsrInner {
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
-        let padded = pad_to_window(wav, self.window_samples);
-        let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&padded, self.window_samples);
+        let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
-        let embeds = model.encode_audio_with_head(&mel, valid as u32, head);
+        let embeds = model.encode_audio_with_head(&mel, valid, head);
         self.decode(&model, &embeds)
     }
 
@@ -215,6 +223,18 @@ mod tests {
         assert_eq!(pad_to_window(&[1.0, 2.0], 4), vec![1.0, 2.0, 0.0, 0.0]);
         assert_eq!(pad_to_window(&[1.0, 2.0, 3.0, 4.0, 5.0], 3), vec![1.0, 2.0, 3.0]);
         assert_eq!(manifest().model, MODEL);
+    }
+
+    /// The encoder is told how many mel FRAMES are valid. `qwen_logmel` returns
+    /// `(mel, n_mels, n_frames)`; reading the second field as the frame count
+    /// told the encoder it had 128 frames (about 1.3 s) whatever the clip, so
+    /// every transcript stopped after the first few words.
+    #[test]
+    fn the_encoder_is_told_every_frame_of_the_window_is_valid() {
+        let window = 16_000 * 4;
+        let (mel, valid_frames) = window_features(&vec![0.01f32; 16_000], window);
+        assert_eq!(valid_frames as usize, window / 160, "one frame per 10 ms hop over the whole window");
+        assert_eq!(mel.len(), 128 * valid_frames as usize, "128 mel bins per frame");
     }
 
     #[test]

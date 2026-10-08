@@ -162,6 +162,23 @@ fn nemotron_transcribes_synthesized_speech_one_shot() {
     assert!(wer < 0.5, "round-trip WER {wer:.3}: {:?}", out.text);
 }
 
+/// Qwen3-ASR hears a whole utterance, not its first words: the encoder is told
+/// how many mel frames are valid, and once read the mel-bin count (128, about
+/// 1.3 s of audio) for it. Skips when either checkpoint is absent.
+#[test]
+fn qwen3_asr_transcribes_the_whole_of_synthesized_speech() {
+    let _serial = brain_testutil::env_lock();
+    let (Ok(tts), Ok(asr)) = (brain::TtsPipeline::from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), brain::TranscribePipeline::from_pretrained("Qwen/Qwen3-ASR-1.7B")) else {
+        brain_testutil::skip("Qwen3-TTS and Qwen3-ASR checkpoints are not both in the model store");
+        return;
+    };
+    let text = "The quick brown fox jumps over the lazy dog.";
+    let clip = tts.speak_with(text, brain::TtsOptions::new().seed(1)).expect("synthesize");
+    let out = asr.transcribe_audio(&clip).expect("transcribe");
+    let wer = eval::asr::corpus_wer([(text, out.text.as_str())]).expect("reference has words");
+    assert!(wer < 0.2, "round-trip WER {wer:.3}: {:?}", out.text);
+}
+
 /// The model asked for decides the architecture, not the order the
 /// architectures are tried in: with both a Qwen3-ASR and a Nemotron checkpoint
 /// in the store, asking for the Nemotron one must reach the Nemotron loader.

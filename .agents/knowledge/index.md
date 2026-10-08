@@ -251,3 +251,4 @@ What belongs where:
 | 208 | What lives in the binary is outside every library invariant | [`208-what-lives-in-the-binary-is-outside-every-library-invariant.md`](208-what-lives-in-the-binary-is-outside-every-library-invariant.md) |
 | 209 | Early stopping that only decides when to stop | [`209-early-stopping-that-only-decides-when-to-stop.md`](209-early-stopping-that-only-decides-when-to-stop.md) |
 | 210 | A two-architecture resolver that ignores the requested checkpoint | [`210-a-two-architecture-resolver-that-ignores-the-requested-checkpoint.md`](210-a-two-architecture-resolver-that-ignores-the-requested-checkpoint.md) |
+| 211 | A positional tuple told the audio encoder it had 128 frames | [`211-a-positional-tuple-told-the-encoder-it-had-128-frames.md`](211-a-positional-tuple-told-the-encoder-it-had-128-frames.md) |

@@ -76,10 +76,9 @@ impl Qwen3Asr {
         let aweights = crate::import::map_audio_encoder(&src, &cfg.audio)?;
         let agpu = Gpu::new_cpu(audio_pipelines());
         // Probe: encode a full window of silence to get the actual audio-token count.
-        let silence = vec![0.0f32; window_samples];
-        let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&silence, window_samples);
+        let (mel, valid) = crate::caps::window_features(&[], window_samples);
         let enc = AudioEncoder::new(&agpu, cfg.audio, &aweights);
-        let embeds = enc.encode(&mel, valid as u32).1;
+        let embeds = enc.encode(&mel, valid).1;
         let n_audio = (embeds.len() / cfg.audio.output_dim as usize) as u32;
         drop(enc);
         // Assemble the decoder for that fixed placement.
