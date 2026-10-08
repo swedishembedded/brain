@@ -156,8 +156,7 @@ fn nemotron_transcribes_synthesized_speech_one_shot() {
     // over eight seconds, and a short rendering can drop words before
     // recognition ever sees them.
     let clip = tts.speak_with(text, brain::TtsOptions::new().seed(1)).expect("synthesize");
-    let samples = audio::resample_linear(clip.samples(), clip.sample_rate(), 16_000);
-    let out = asr.transcribe(&samples).expect("transcribe");
+    let out = asr.transcribe_audio(&clip).expect("transcribe");
     assert!(out.truncated.is_none(), "Nemotron has no fixed window");
     let wer = eval::asr::corpus_wer([(text, out.text.as_str())]).expect("reference has words");
     assert!(wer < 0.5, "round-trip WER {wer:.3}: {:?}", out.text);

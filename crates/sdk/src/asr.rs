@@ -51,6 +51,9 @@ enum Backend {
     Nemotron { model: nemotronasr::model::NemotronAsr, detokenizer: nemotronasr::tokenizer::Detokenizer },
 }
 
+/// The rate recognition takes: 16 kHz mono.
+const ASR_SAMPLE_RATE: u32 = 16_000;
+
 /// Language prompt index for English, the only prompt this pipeline selects.
 const NEMOTRON_ENGLISH_PROMPT: usize = 0;
 
@@ -95,6 +98,14 @@ impl TranscribePipeline {
                 Ok(Transcript { text: detokenizer.decode(&tokens), tokens, truncated: None })
             }
         }
+    }
+
+    /// Transcribe a synthesized or loaded [`crate::Audio`] clip at whatever
+    /// rate it has, resampled to 16 kHz by the SAME `audio::resample_linear`
+    /// every surface in this workspace uses. This is the step a speech round
+    /// trip needs between [`crate::TtsPipeline`] (24 kHz) and recognition.
+    pub fn transcribe_audio(&self, clip: &crate::Audio) -> Result<Transcript> {
+        self.transcribe(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE))
     }
 
     /// Decode a WAV file's bytes (any channel count/sample rate - downmixed
