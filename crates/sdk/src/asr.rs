@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! [`TranscribePipeline`]: brain's speech-to-text surface, over qwen3-asr
-//! (Qwen3-ASR-1.7B, offline, a fixed audio decode window). Resolved through
-//! `crates/loader`'s resolver against `qwen3asr::spec::Qwen3AsrSpec`'s one
-//! `"weights"` role.
+//! [`TranscribePipeline`]: brain's speech-to-text surface, one-shot, over
+//! qwen3-asr (Qwen3-ASR-1.7B, offline, a fixed audio decode window) or
+//! nemotronasr (Nemotron-3.5-ASR, a transducer with no fixed window).
+//! Resolved through `crates/loader`'s resolver over the requested model's own directory, against
+//! `qwen3asr::spec::Qwen3AsrSpec` and `nemotronasr::spec::NemotronAsrSpec`;
+//! one public type that dispatches on the resolved architecture, like
+//! [`crate::TtsPipeline`].
 //!
-//! nemotronasr (the *streaming* ASR model in this workspace, true batched
-//! forward across concurrent windows) is deliberately not covered here: a
-//! streaming transcriber needs a genuinely different call shape (feed
-//! chunks, get segments back incrementally) than this pipeline's one-shot
-//! `transcribe(wav) -> Transcript` - tracked as a real, separate extension,
-//! not forced into this type by pretending the two models work alike.
+//! Nemotron is a *streaming* model, and only its one-shot path is exposed
+//! here: a streaming transcriber needs a genuinely different call shape
+//! (feed chunks, get segments back incrementally) than this pipeline's
+//! `transcribe(wav) -> Transcript`, tracked as a separate extension. The
+//! one-shot path matters because an independent second recognizer is what a
+//! speech round trip is judged with.
 //!
 //! ```no_run
 //! let pipe = brain::TranscribePipeline::from_pretrained("Qwen/Qwen3-ASR-1.7B")?;
@@ -40,12 +43,25 @@ pub struct Transcript {
 
 /// `brain`'s speech-to-text pipeline. See this module's doc for scope.
 pub struct TranscribePipeline {
-    provider: qwen3asr::caps::QwenAsrProvider,
+    backend: Backend,
 }
+
+enum Backend {
+    Qwen3Asr(qwen3asr::caps::QwenAsrProvider),
+    Nemotron { model: nemotronasr::model::NemotronAsr, detokenizer: nemotronasr::tokenizer::Detokenizer },
+}
+
+/// Language prompt index for English, the only prompt this pipeline selects.
+const NEMOTRON_ENGLISH_PROMPT: usize = 0;
 
 impl std::fmt::Debug for TranscribePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TranscribePipeline").field("window_samples", &self.provider.window_samples()).finish()
+        let mut d = f.debug_struct("TranscribePipeline");
+        match &self.backend {
+            Backend::Qwen3Asr(p) => d.field("backend", &"qwen3asr").field("window_samples", &p.window_samples()),
+            Backend::Nemotron { .. } => d.field("backend", &"nemotronasr"),
+        };
+        d.finish()
     }
 }
 
@@ -67,9 +83,18 @@ impl TranscribePipeline {
 
     /// Transcribe already-16 kHz mono f32 PCM.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
-        let truncated = qwen3asr::caps::window_truncation(self.provider.window_samples(), samples);
-        let (text, tokens) = self.provider.transcribe(samples).map_err(Error::Backend)?;
-        Ok(Transcript { text, tokens, truncated })
+        match &self.backend {
+            Backend::Qwen3Asr(provider) => {
+                let truncated = qwen3asr::caps::window_truncation(provider.window_samples(), samples);
+                let (text, tokens) = provider.transcribe(samples).map_err(Error::Backend)?;
+                Ok(Transcript { text, tokens, truncated })
+            }
+            Backend::Nemotron { model, detokenizer } => {
+                let blank = model.config().blank_token_id;
+                let tokens: Vec<u32> = model.transcribe(samples, NEMOTRON_ENGLISH_PROMPT).into_iter().filter(|&t| t != blank).collect();
+                Ok(Transcript { text: detokenizer.decode(&tokens), tokens, truncated: None })
+            }
+        }
     }
 
     /// Decode a WAV file's bytes (any channel count/sample rate - downmixed
@@ -130,31 +155,54 @@ impl TranscribePipelineBuilder {
     ///
     /// 1. [`Device`] is applied to this process (see [`crate::device::apply`]).
     /// 2. `crates/loader`'s resolver is tried FIRST against
-    ///    `qwen3asr::spec::Qwen3AsrSpec`'s one `"weights"` role. Only on
-    ///    `Missing` does `model_id` get parsed and, under
+    ///    `qwen3asr::spec::Qwen3AsrSpec`'s one `"weights"` role, then
+    ///    against `nemotronasr::spec::NemotronAsrSpec`'s, and only on
+    ///    `Missing` everywhere does `model_id` get parsed and, under
     ///    [`TranscribePipelineBuilder::download_policy`] (default
     ///    [`loader::DownloadPolicy::IfMissing`]), fetched - then resolution
-    ///    is retried once. See [`crate::resolve_policy::resolve_with_policy`],
-    ///    shared by every pipeline builder that resolves this way -
-    ///    qwen3asr has a working recipe, so unlike some siblings this
-    ///    reorder closes no live bug, only unifies every pipeline builder
-    ///    onto one resolve strategy.
-    /// 3. `qwen3asr::caps::QwenAsrProvider::load` reads the checkpoint's own
-    ///    tokenizer from the SAME directory (`QwenBpe::from_dir`) and builds
-    ///    the audio encoder + Qwen3 decoder at the fixed window this builder
-    ///    chose.
+    ///    is retried once. See [`crate::resolve_policy::resolve_either_for_reference`]: the
+    ///    model asked for, not the order the architectures are tried in,
+    ///    decides which one loads.
+    /// 3. The resolved architecture's own loader runs on that directory:
+    ///    `qwen3asr::caps::QwenAsrProvider::load` builds the audio encoder and
+    ///    Qwen3 decoder at the fixed window this builder chose (`window_secs`
+    ///    and `max_new_tokens` apply to it alone);
+    ///    `nemotronasr::model::NemotronAsr::from_hf` builds the transducer.
     pub fn load(self) -> Result<TranscribePipeline> {
         let TranscribePipelineBuilder { model_id, device, window_secs, max_new_tokens, download_policy } = self;
 
         crate::device::apply(&device)?;
 
         let overrides: BTreeMap<String, String> = BTreeMap::new();
-        let assembly = crate::resolve_policy::resolve_with_policy("qwen3asr", &qwen3asr::spec::Qwen3AsrSpec, &model_id, &overrides, download_policy)?;
-        let dir = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3asr: resolved assembly {:?} has no weights role", assembly.id)))?;
+        let resolved = crate::resolve_policy::resolve_either_for_reference(
+            "qwen3asr",
+            &qwen3asr::spec::Qwen3AsrSpec,
+            "nemotronasr",
+            &nemotronasr::spec::NemotronAsrSpec,
+            &model_id,
+            &overrides,
+            download_policy,
+        )?;
+        let weights_dir = |assembly: &capability::Assembly, arch: &str| -> Result<String> {
+            let dir = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("{arch}: resolved assembly {:?} has no weights role", assembly.id)))?;
+            Ok(dir.to_string_lossy().into_owned())
+        };
 
-        let cfg = qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b();
-        let provider = qwen3asr::caps::QwenAsrProvider::load(&dir.to_string_lossy(), cfg, window_secs, max_new_tokens).map_err(Error::Backend)?;
+        let backend = match resolved {
+            crate::resolve_policy::Resolved2::A(assembly) => {
+                let dir = weights_dir(&assembly, "qwen3asr")?;
+                let cfg = qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b();
+                Backend::Qwen3Asr(qwen3asr::caps::QwenAsrProvider::load(&dir, cfg, window_secs, max_new_tokens).map_err(Error::Backend)?)
+            }
+            crate::resolve_policy::Resolved2::B(assembly) => {
+                let dir = weights_dir(&assembly, "nemotronasr")?;
+                let cfg = nemotronasr::NemotronConfig::nemotron_3_5_asr_0_6b();
+                let model = nemotronasr::model::NemotronAsr::from_hf(&dir, cfg).map_err(|e| Error::Backend(format!("nemotronasr: {e}")))?;
+                let detokenizer = nemotronasr::tokenizer::Detokenizer::from_hf(&dir).map_err(|e| Error::Backend(format!("nemotronasr: {e}")))?;
+                Backend::Nemotron { model, detokenizer }
+            }
+        };
 
-        Ok(TranscribePipeline { provider })
+        Ok(TranscribePipeline { backend })
     }
 }

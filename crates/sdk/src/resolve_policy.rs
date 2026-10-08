@@ -183,3 +183,62 @@ pub(crate) fn resolve_two_with_policy(
         other => other,
     }
 }
+
+/// [`resolve_with_policy`] against TWO architectures, directed by `model_id`
+/// itself: each side resolves over what `model_id`'s own repo directory holds,
+/// so the model asked for decides the architecture. [`try_two`] and
+/// [`resolve_two_with_policy`] cannot do this: they resolve over the whole
+/// store, so an architecture tried first wins whenever any of its checkpoints
+/// is present, whichever one was asked for. That is right for a task with one
+/// canonical checkpoint per architecture and wrong where several
+/// architectures hold different models of one task.
+///
+/// `a` is tried first, then `b`. Only when both are `Missing` is the model
+/// fetched (under `download_policy`, as in [`resolve_with_policy`]) and both
+/// tried again. A side that finds the directory but fails (ambiguous roles,
+/// a read error) ends the search with that error rather than falling through
+/// to the other side.
+#[cfg(feature = "audio")]
+pub(crate) fn resolve_either_for_reference(
+    a_arch: &str,
+    a_spec: &dyn ArchSpec,
+    b_arch: &str,
+    b_spec: &dyn ArchSpec,
+    model_id: &str,
+    overrides: &BTreeMap<String, String>,
+    download_policy: loader::DownloadPolicy,
+) -> Result<Resolved2> {
+    let reference = brain_modelref::ModelRef::parse(model_id).map_err(|e| Error::ModelNotFound(format!("{model_id}: {e}")))?;
+    let models_dir = loader::model_dir::resolve(None);
+
+    // Resolved, or the first side's `Missing` report when neither side holds it.
+    let try_both = || -> Result<std::result::Result<Resolved2, Box<brain_modelstore::resolve::Missing>>> {
+        let a = loader::resolver::resolve_reference(models_dir.as_deref(), a_arch, a_spec, &reference, overrides).map_err(Error::Backend)?;
+        let a_missing = match a {
+            Resolution::Resolved(assembly) => return Ok(Ok(Resolved2::A(*assembly))),
+            Resolution::Ambiguous(found) => return Err(Error::Ambiguous(found)),
+            Resolution::Missing(missing) => missing,
+        };
+        match loader::resolver::resolve_reference(models_dir.as_deref(), b_arch, b_spec, &reference, overrides).map_err(Error::Backend)? {
+            Resolution::Resolved(assembly) => Ok(Ok(Resolved2::B(*assembly))),
+            Resolution::Ambiguous(found) => Err(Error::Ambiguous(found)),
+            Resolution::Missing(_) => Ok(Err(a_missing)),
+        }
+    };
+
+    if download_policy == loader::DownloadPolicy::AlwaysCheck {
+        fetch(&reference, model_id)?;
+    }
+    let missing = match try_both()? {
+        Ok(resolved) => return Ok(resolved),
+        Err(missing) => missing,
+    };
+    if download_policy == loader::DownloadPolicy::Offline {
+        return Err(Error::Missing(missing));
+    }
+    let root = models_dir.clone().ok_or_else(|| Error::Backend("no models directory configured (set BRAIN_MODELS_DIR, or $HOME)".to_string()))?;
+    if brain_modelstore::Store::new(root).local(&reference).is_none() {
+        fetch(&reference, model_id)?;
+    }
+    try_both()?.map_err(Error::Missing)
+}

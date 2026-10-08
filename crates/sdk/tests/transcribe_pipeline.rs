@@ -116,3 +116,65 @@ fn download_policy_offline_never_touches_the_network() {
 
     assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
 }
+
+fn write_nemotronasr_hfdir(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    let config = serde_json::json!({"architectures": ["Nemotron3_5AsrForRNNT"]});
+    std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+    checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
+}
+
+/// A Nemotron checkpoint resolves through the same entry point as a Qwen3-ASR
+/// one: the failure is the Nemotron loader's own (the fixture holds no real
+/// tensors), not "no such model" and not the Qwen3-ASR loader's.
+#[test]
+fn from_pretrained_resolves_nemotronasr_from_a_real_local_fixture_with_no_network_access() {
+    let root = scratch_root("nemotronasr");
+    write_nemotronasr_hfdir(&root.join("nvidia").join("nemotron-3.5-asr-streaming-0.6b"));
+    mark_locally_present(&root, "local", "nemotron-sdk-test", "nemotronasr");
+
+    let err = with_models_dir(&root, || brain::TranscribePipeline::from_pretrained("local/nemotron-sdk-test").unwrap_err());
+    match &err {
+        brain::Error::Backend(msg) => assert!(msg.to_lowercase().contains("nemotron"), "must come from the Nemotron loader: {msg}"),
+        other => panic!("expected the Nemotron loader's Error::Backend, got {other:?}"),
+    }
+}
+
+/// A real Nemotron checkpoint transcribes speech one-shot, through the
+/// pipeline that also serves Qwen3-ASR. The speech is a Qwen3-TTS rendering of
+/// a known sentence, so the transcript can be scored against it. Skips when
+/// either checkpoint is absent from the model store.
+#[test]
+fn nemotron_transcribes_synthesized_speech_one_shot() {
+    let _serial = brain_testutil::env_lock();
+    let (Ok(tts), Ok(asr)) = (brain::TtsPipeline::from_pretrained("Qwen/Qwen3-TTS-12Hz-0.6B-Base"), brain::TranscribePipeline::from_pretrained("nvidia/nemotron-3.5-asr-streaming-0.6b")) else {
+        brain_testutil::skip("Qwen3-TTS and Nemotron ASR checkpoints are not both in the model store");
+        return;
+    };
+    let text = "The quick brown fox jumps over the lazy dog.";
+    // Seeded: unseeded synthesis of one sentence ranges from under four to
+    // over eight seconds, and a short rendering can drop words before
+    // recognition ever sees them.
+    let clip = tts.speak_with(text, brain::TtsOptions::new().seed(1)).expect("synthesize");
+    let samples = audio::resample_linear(clip.samples(), clip.sample_rate(), 16_000);
+    let out = asr.transcribe(&samples).expect("transcribe");
+    assert!(out.truncated.is_none(), "Nemotron has no fixed window");
+    let wer = eval::asr::corpus_wer([(text, out.text.as_str())]).expect("reference has words");
+    assert!(wer < 0.5, "round-trip WER {wer:.3}: {:?}", out.text);
+}
+
+/// The model asked for decides the architecture, not the order the
+/// architectures are tried in: with both a Qwen3-ASR and a Nemotron checkpoint
+/// in the store, asking for the Nemotron one must reach the Nemotron loader.
+#[test]
+fn the_requested_checkpoint_selects_the_backend_when_both_are_in_the_store() {
+    let root = scratch_root("both");
+    write_qwen3asr_hfdir(&root.join("Qwen").join("Qwen3-ASR-1.7B"));
+    write_nemotronasr_hfdir(&root.join("nvidia").join("nemotron-3.5-asr-streaming-0.6b"));
+
+    let err = with_models_dir(&root, || brain::TranscribePipeline::from_pretrained("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_err());
+    match &err {
+        brain::Error::Backend(msg) => assert!(msg.to_lowercase().contains("nemotron"), "must come from the Nemotron loader: {msg}"),
+        other => panic!("expected the Nemotron loader's Error::Backend, got {other:?}"),
+    }
+}
