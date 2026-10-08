@@ -41,3 +41,9 @@ fn a_saved_clip_reads_back_at_its_own_rate_within_16_bit_quantisation() {
 fn bytes_that_are_not_a_wav_file_are_refused() {
     assert!(Audio::from_wav(b"not a wav file").is_err());
 }
+
+#[test]
+fn the_word_error_rate_that_judges_a_round_trip_is_reachable_from_the_sdk() {
+    assert_eq!(brain::wer::word_error_rate("the cat sat", "the cat"), 1.0 / 3.0);
+    assert_eq!(brain::wer::corpus_wer([("a b", "a"), ("a b c d e f g h", "a b c d e f g x")]), Some(0.2));
+}

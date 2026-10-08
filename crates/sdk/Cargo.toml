@@ -125,7 +125,7 @@ reader = ["study", "dep:brain-audit"]
 # contract `qwen3tts::caps::gen_opts_from` already established for the wire
 # path. minimaxmusic3 (this bucket's third served architecture) stays a
 # tracked future extension - see the roadmap for why.
-audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-nemotronasr", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-cosyvoice", "dep:brain-minimaxmusic3", "dep:brain-data"]
+audio = ["resolve", "dep:brain-qwen3asr", "dep:brain-nemotronasr", "dep:brain-eval", "dep:brain-audio", "dep:brain-qwen3tts", "dep:brain-cosyvoice", "dep:brain-minimaxmusic3", "dep:brain-data"]
 # `brain::VideoPipeline` (Wan2.1 text-to-video). Selects `imagetype` for
 # `imaging::video`'s encode helper `Video::save` writes through - the same
 # "cheap to select twice" reasoning `vision` already uses for `Image`.
@@ -239,6 +239,7 @@ brain-search = { workspace = true, optional = true }
 brain-promote = { workspace = true, optional = true }
 brain-qwen3asr = { workspace = true, optional = true }
 brain-nemotronasr = { workspace = true, optional = true }
+brain-eval = { workspace = true, optional = true }
 brain-qwen3tts = { workspace = true, optional = true }
 brain-qwen3vl = { workspace = true, optional = true }
 brain-recon = { workspace = true, optional = true }
@@ -262,7 +263,6 @@ tempfile = { workspace = true, optional = true }
 [dev-dependencies]
 brain-checkpoint.workspace = true
 brain-testutil.workspace = true
-brain-eval.workspace = true
 serde_json.workspace = true
 # An independent SHA-256, so the chat surface's identity test checks the
 # digest it reports against the file's bytes rather than against itself.

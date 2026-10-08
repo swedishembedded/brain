@@ -291,6 +291,12 @@ pub use loader::DownloadPolicy;
 
 #[cfg(feature = "audio")]
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
+/// Word error rate, the measure a speech round trip is judged by: re-exported
+/// so a caller scores transcripts exactly as brain's own gates do.
+#[cfg(feature = "audio")]
+pub mod wer {
+    pub use eval::asr::{corpus_wer, normalize, word_edits, word_error_rate};
+}
 #[cfg(feature = "auto")]
 pub use auto::{AutoPipeline, AutoPipelineBuilder};
 #[cfg(feature = "creature")]
