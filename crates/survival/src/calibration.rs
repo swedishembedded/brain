@@ -352,6 +352,44 @@ mod tests {
     }
 
     #[test]
+    fn calibration_in_the_large_ignores_a_slope_error_the_two_parameter_intercept_absorbs() {
+        let mut s = 21u64;
+        let mut u = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let n = 40_000;
+        let (mut obs, mut rate) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for _ in 0..n {
+            let r = 0.2 * (3.0 * u() - 1.5).exp();
+            let (t, c) = (-u().ln() / r, -u().ln() / 0.1);
+            obs.push(if t <= c { Obs::event(t, 0) } else { Obs::censored(c) });
+            rate.push(r);
+        }
+        let g = censoring(&obs);
+        let t = 0.5; // low risks: far from the 50% at which the intercept is read
+        let truth: Vec<f64> = rate.iter().map(|r| 1.0 - (-r * t).exp()).collect();
+        let mean_logit = truth.iter().map(|&p| logit(p)).sum::<f64>() / n as f64;
+        // Pull the log-odds towards their mean: centred on the truth, spread too small.
+        let squeezed: Vec<f64> = truth
+            .iter()
+            .map(|&p| sigmoid(mean_logit + 0.6 * (logit(p) - mean_logit)))
+            .collect();
+        let cal = at_horizon(&squeezed, &obs, 0, t, &g, 10);
+        assert!(cal.slope > 1.4, "{cal:?}");
+        assert!(cal.intercept.abs() > 0.8, "the two-parameter intercept absorbs the slope: {cal:?}");
+        assert!(cal.intercept_in_the_large.abs() < 0.25, "the average risk is right: {cal:?}");
+        // Squeezing the log-odds moves the mean risk a little (Jensen), hence the loose band.
+        assert!((cal.oe_ratio - 1.0).abs() < 0.2, "{cal:?}");
+        // A shifted average, by contrast, shows in calibration in the large.
+        let shifted: Vec<f64> = truth.iter().map(|&p| sigmoid(logit(p) - 0.7)).collect();
+        let off = at_horizon(&shifted, &obs, 0, t, &g, 10);
+        assert!((off.intercept_in_the_large - 0.7).abs() < 0.15, "{off:?}");
+    }
+
+    #[test]
     fn predictions_without_spread_have_no_slope() {
         let obs: Vec<Obs> = (0..20)
             .map(|i| {

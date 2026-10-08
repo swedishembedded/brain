@@ -257,6 +257,11 @@ fn evaluation_reports_what_it_can_and_leaves_out_what_has_too_few_events() {
     let (c, auc, b, ibs) = (m.uno_c.unwrap(), m.auc.unwrap(), m.brier.unwrap(), m.integrated_brier.unwrap());
     assert!((0.0..=1.0).contains(&c) && (0.0..=1.0).contains(&auc) && (0.0..1.0).contains(&b) && (0.0..1.0).contains(&ibs));
     assert!(m.calibration.slope.is_some() && m.calibration.ece.is_some());
+    // Calibration in the large (the intercept with the slope fixed at one) says which way
+    // the average risk is off, as observed over expected does.
+    let citl = m.calibration.intercept_in_the_large.expect("reported beside the two-parameter intercept");
+    let oe = m.calibration.observed_over_expected.unwrap();
+    assert!((oe - 1.0).abs() < 0.03 || citl.signum() == (oe - 1.0).signum(), "citl {citl} against oe {oe}");
     let ci = m.intervals.unwrap().uno_c.unwrap();
     assert!(ci.lo <= ci.estimate && ci.estimate <= ci.hi, "{ci:?}");
     assert_eq!(ci.estimate, c, "the interval is centred on the full-sample statistic");

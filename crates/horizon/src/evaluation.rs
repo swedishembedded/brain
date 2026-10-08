@@ -20,7 +20,8 @@
 //! - Uno's concordance truncated at the horizon, the time-dependent AUC and
 //!   the IPCW Brier score at the horizon;
 //! - the Brier score integrated over `(0, horizon]` on an even grid;
-//! - the recalibration slope and intercept, observed over expected and the
+//! - the recalibration slope and intercept, the intercept with the slope fixed
+//!   at one (calibration in the large), observed over expected and the
 //!   expected calibration error, the observed side an Aalen-Johansen estimate;
 //! - when subjects carry a `group_id`, percentile intervals of the
 //!   concordance, AUC and Brier score from a bootstrap that resamples whole
@@ -142,8 +143,15 @@ pub struct Intervals {
 pub struct CalibrationMetrics {
     /// Recalibration slope (1 is ideal).
     pub slope: Option<f64>,
-    /// Recalibration intercept (0 is ideal).
+    /// Recalibration intercept (0 is ideal). It is read at a predicted risk of
+    /// one half, so a slope away from one moves it a long way for risks that
+    /// are nowhere near that: judge the average risk by
+    /// [`Self::intercept_in_the_large`].
     pub intercept: Option<f64>,
+    /// Calibration in the large: the intercept with the slope fixed at one
+    /// (0 is ideal), the shift in log-odds that makes the average predicted
+    /// risk the observed one.
+    pub intercept_in_the_large: Option<f64>,
     /// Observed (Aalen-Johansen) over expected (mean predicted) risk.
     pub observed_over_expected: Option<f64>,
     /// Weighted mean absolute gap between observed and expected over
@@ -320,6 +328,7 @@ pub fn evaluate(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec) -> R
                 calibration: CalibrationMetrics {
                     slope: finite(calibration.slope),
                     intercept: finite(calibration.intercept),
+                    intercept_in_the_large: finite(calibration.intercept_in_the_large),
                     observed_over_expected: finite(calibration.oe_ratio),
                     ece: finite(calibration.ece()),
                 },
