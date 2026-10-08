@@ -30,6 +30,9 @@
 //!   adjusted by a model's prognostic score (PROCOVA), with HC3 errors.
 //! - [`recalibration`]: a predicted risk by a horizon mapped through a fitted
 //!   logistic recalibration (intercept, or intercept and slope), under IPCW.
+//! - [`rmst`]: restricted mean survival time (Kaplan-Meier or from a predicted
+//!   curve), its calibration by risk group, and a Gompertz reference table with
+//!   delayed entry that maps an RMST to an equivalent age.
 //! - [`venn_abers`]: a predicted risk by a horizon as a Venn-Abers interval,
 //!   calibrated by isotonic regression on held-out subjects under IPCW.
 //!
@@ -46,6 +49,7 @@ pub mod concordance;
 pub mod effect;
 pub mod estimate;
 pub mod recalibration;
+pub mod rmst;
 mod special;
 pub mod venn_abers;
 
