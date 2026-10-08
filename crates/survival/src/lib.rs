@@ -28,6 +28,9 @@
 //! - [`calibration`]: D-calibration over predicted survival, and calibration
 //!   at a horizon (observed-over-expected, IPCW logistic recalibration
 //!   intercept and slope, a risk-group table).
+//! - [`curve`]: summaries of the whole calibration curve at a horizon: the
+//!   integrated calibration index and the median, 90th-percentile and maximum
+//!   gap between predicted and smoothed observed risk.
 //! - [`effect`]: the effect of an assigned treatment in a randomised trial,
 //!   adjusted by a model's prognostic score (PROCOVA), with HC3 errors.
 //! - [`recalibration`]: a predicted risk by a horizon mapped through a fitted
@@ -49,6 +52,7 @@ pub mod brier;
 pub mod calibration;
 pub mod compare;
 pub mod concordance;
+pub mod curve;
 pub mod effect;
 pub mod estimate;
 pub mod recalibration;
