@@ -68,6 +68,19 @@ pub struct Audio {
 }
 
 impl Audio {
+    /// A clip of mono `f32` PCM `samples` at `sample_rate` Hz.
+    pub fn new(samples: Vec<f32>, sample_rate: u32) -> Audio {
+        Audio { samples, sample_rate }
+    }
+
+    /// Decode a WAV file's bytes (any channel count, downmixed to mono) at the
+    /// file's own sample rate. Use `TranscribePipeline::transcribe_wav` to go
+    /// straight to recognition, which also resamples to its 16 kHz.
+    pub fn from_wav(bytes: &[u8]) -> Result<Audio> {
+        let wav = audio::wav::parse(bytes).map_err(|e| Error::Backend(e.to_string()))?;
+        Ok(Audio { samples: wav.samples, sample_rate: wav.sample_rate })
+    }
+
     pub fn samples(&self) -> &[f32] {
         &self.samples
     }
