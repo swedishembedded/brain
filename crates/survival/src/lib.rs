@@ -20,6 +20,8 @@
 //!   competing causes, in `O(n log n)`.
 //! - [`auc`]: the time-dependent AUROC at a horizon (cumulative cases
 //!   against dynamic controls, IPCW-weighted), with competing causes.
+//! - [`binary`]: a probability for an outcome observed in full: weighted
+//!   AUROC and average precision, calibration, and screening operating points.
 //! - [`brier`]: the IPCW Brier score at a horizon and its integral.
 //! - [`compare`]: two models on the same data - the corrected resampled
 //!   t-test across folds and a cluster bootstrap over units.
@@ -42,6 +44,7 @@
 //! and calibration, never alone.
 
 pub mod auc;
+pub mod binary;
 pub mod brier;
 pub mod calibration;
 pub mod compare;
