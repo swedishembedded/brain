@@ -15,52 +15,8 @@
 //! present; skips cleanly otherwise, the same convention as every other
 //! real-checkpoint test in this crate.
 
+use eval::asr::{normalize, word_error_rate};
 use qwen3tts::{GenOpts, TtsPaths};
-
-/// Word-level Levenshtein distance / reference length - the standard ASR
-/// quality metric. Case-insensitive (word tokens are compared with
-/// `eq_ignore_ascii_case`); punctuation should already be stripped by
-/// [`normalize`] before this is called.
-fn word_error_rate(reference: &str, hypothesis: &str) -> f32 {
-    let r: Vec<&str> = reference.split_whitespace().collect();
-    let h: Vec<&str> = hypothesis.split_whitespace().collect();
-    if r.is_empty() {
-        return if h.is_empty() { 0.0 } else { 1.0 };
-    }
-    let (n, m) = (r.len(), h.len());
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for (i, row) in dp.iter_mut().enumerate().take(n + 1) {
-        row[0] = i;
-    }
-    for (j, cell) in dp[0].iter_mut().enumerate() {
-        *cell = j;
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            dp[i][j] = if r[i - 1].eq_ignore_ascii_case(h[j - 1]) {
-                dp[i - 1][j - 1]
-            } else {
-                1 + dp[i - 1][j - 1].min(dp[i - 1][j]).min(dp[i][j - 1])
-            };
-        }
-    }
-    dp[n][m] as f32 / n as f32
-}
-
-/// Strip punctuation and case, matching what a WER comparison should ignore
-/// (the ASR's own text normalization convention, not the TTS's).
-fn normalize(s: &str) -> String {
-    let cleaned: String = s.chars().map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' }).collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
-}
-
-#[test]
-fn word_error_rate_matches_known_cases() {
-    assert_eq!(word_error_rate("the cat sat", "the cat sat"), 0.0);
-    assert_eq!(word_error_rate("the cat sat", "the cat"), 1.0 / 3.0);
-    assert_eq!(word_error_rate("the cat sat", "the dog sat"), 1.0 / 3.0);
-    assert_eq!(word_error_rate("THE Cat Sat", "the cat sat"), 0.0, "case-insensitive");
-}
 
 #[test]
 fn synth_then_transcribe_recovers_the_text() {

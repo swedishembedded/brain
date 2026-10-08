@@ -19,6 +19,7 @@
 /// heavier dependency closure.
 pub use rlcd::metrics as calibration;
 
+pub mod asr;
 pub mod detection;
 pub mod mlm;
 pub mod tts;

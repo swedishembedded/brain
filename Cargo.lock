@@ -2188,6 +2188,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-ecapatdnn",
+ "brain-eval",
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-kernels",
