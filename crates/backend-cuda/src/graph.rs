@@ -665,6 +665,15 @@ pub(crate) struct Frozen {
 unsafe impl Send for Frozen {}
 unsafe impl Sync for Frozen {}
 
+/// A [`Frozen`] program that stamps its own timeline on every run: `start`
+/// before the first dispatch, then one event after each dispatch, named by the
+/// kernel it follows.
+pub struct Profiled {
+    pub frozen: Frozen,
+    pub stamps: Vec<(String, exec::Event)>,
+    pub start: exec::Event,
+}
+
 impl Frozen {
     /// Capture `segments` - `(buffers to zero first, resolved dispatches)`, in
     /// order - as one program. Fails, having issued nothing, if the driver
@@ -676,14 +685,11 @@ impl Frozen {
     /// [`Self::capture`] with an event recorded after every dispatch (and one
     /// before the first), returned with each dispatch's kernel name: the program
     /// then carries its own device-side timeline.
-    pub fn capture_profiled(
-        ctx: &exec::Context,
-        segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>,
-    ) -> Result<(Frozen, Vec<(String, exec::Event)>, exec::Event), String> {
+    pub fn capture_profiled(ctx: &exec::Context, segments: Vec<(Vec<Arc<exec::DeviceMem>>, Vec<Resolved>)>) -> Result<Profiled, String> {
         let mut stamps = Vec::new();
         let start = ctx.event()?;
         let (frozen, _) = Self::capture_inner(ctx, segments, Some((&start, &mut stamps)))?;
-        Ok((frozen, stamps, start))
+        Ok(Profiled { frozen, stamps, start })
     }
 
     fn capture_inner(
@@ -714,7 +720,7 @@ impl Frozen {
 
         let capture = ctx.begin_capture()?;
         if let Some((start, _)) = &stamps {
-            ctx.record(start)?;
+            ctx.record_in_capture(start)?;
         }
         let mut touched: Vec<Arc<exec::DeviceMem>> = Vec::new();
         let mut modules: Vec<Arc<crate::backend::Compiled>> = Vec::new();
@@ -741,7 +747,7 @@ impl Frozen {
                 dispatches += 1;
                 if let Some((_, out)) = stamps.as_mut() {
                     let ev = ctx.event()?;
-                    ctx.record(&ev)?;
+                    ctx.record_in_capture(&ev)?;
                     out.push((s.compiled.name.clone(), ev));
                 }
             }

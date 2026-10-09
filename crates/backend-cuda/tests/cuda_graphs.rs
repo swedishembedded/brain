@@ -491,3 +491,31 @@ fn concurrent_handles_replay_their_own_graphs_correctly() {
     });
     assert!(failures.is_empty(), "{} corrupted iteration(s), e.g.:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
 }
+
+/// A profiled program times every dispatch from INSIDE its graph. The stamps
+/// have to be real event-record nodes: an event recorded with a plain
+/// `cuEventRecord` during capture only tracks the capture's dependencies,
+/// never fires on replay, and every elapsed-time query on it fails - which
+/// made `profile_program` answer `None` for every program it was asked about.
+#[test]
+fn a_profiled_program_reports_every_dispatch_of_every_kernel() {
+    let Some(b) = backend() else { return };
+    let inp = b.storage_init("inp", &input());
+    let outs: Vec<_> = (0..CHAIN).map(|_| b.storage(N as u64)).collect();
+    let params = [N as u32, 0.5f32.to_bits()];
+    let steps: Vec<_> = outs.iter().map(|o| b.step(AXPY, &[o, &inp], &params, N as u32)).collect();
+    let rows = b.profile_program(&[(Vec::new(), &steps)], 3).expect("a CUDA backend with graphs profiles a program");
+    assert_eq!(rows.len(), 1, "one kernel kind: {rows:?}");
+    let (name, ms, calls) = &rows[0];
+    assert_eq!(name, "axpy");
+    assert_eq!(*calls, CHAIN as u64, "every dispatch of one run is counted once");
+    assert!(ms.is_finite() && *ms > 0.0, "a real device time: {ms}");
+    // The program ran four times (one warm-up, three measured), every one an
+    // accumulate, so the outputs prove it executed rather than only timed.
+    b.poll_wait();
+    let want = input();
+    for o in &outs {
+        let got = b.read(o, N);
+        assert!(got.iter().zip(&want).all(|(g, w)| (g - 4.0 * 0.5 * w).abs() <= 1e-5 * w.abs()), "profiled runs must execute the program");
+    }
+}

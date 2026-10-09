@@ -64,7 +64,7 @@ use backend_api::{
 
 use crate::driver::{CuDevicePtr, CuFunction};
 use crate::exec;
-use crate::graph::{Frozen, GraphCache, GraphCounters, NodeSig, Plan, Resolved, SubmitSig, STAGING_ALIGN_WORDS};
+use crate::graph::{Frozen, GraphCache, GraphCounters, NodeSig, Plan, Profiled, Resolved, SubmitSig, STAGING_ALIGN_WORDS};
 
 /// One device allocation, behind an `Arc` so a [`DeviceBuffer`] clone and a
 /// recorded [`Step`] both keep it alive - `DeviceBuffer` aliasing is by design
@@ -1484,30 +1484,39 @@ impl backend_api::Backend for CudaBackend {
         self.capturing.store(true, Ordering::Release);
         let captured = Frozen::capture_profiled(&self.ctx, resolved);
         self.capturing.store(false, Ordering::Release);
-        let (frozen, stamps, start) = captured
+        let Profiled { frozen, stamps, start } = captured
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: capturing a program for profiling failed"))
             .ok()?;
         let reps = reps.max(1);
-        let mut totals: HashMap<String, (f64, u64)> = HashMap::new();
+        // Each dispatch's span, minimised over the measured runs: another
+        // context time-sliced onto the device only ever lengthens a span, so
+        // the minimum is the dispatch's own cost where a mean would fold the
+        // neighbour in.
+        let mut best = vec![f64::INFINITY; stamps.len()];
         // One launch to warm the graph (first launch uploads and may stall), then `reps` measured.
-        for rep in 0..=reps {
+        let measured = (0..=reps).try_for_each(|rep| -> Result<(), String> {
             self.fence_in(frozen.touched.iter());
-            self.ctx.launch_graph(&frozen.exec).ok()?;
+            self.ctx.launch_graph(&frozen.exec)?;
             self.fence_out(frozen.touched.iter());
-            self.ctx.sync().ok()?;
+            self.ctx.sync()?;
             if rep == 0 {
-                continue;
+                return Ok(());
             }
             let mut prev = &start;
-            for (name, ev) in &stamps {
-                let ms = self.ctx.elapsed_ms(prev, ev).ok()? as f64;
-                let e = totals.entry(name.clone()).or_insert((0.0, 0));
-                e.0 += ms;
-                e.1 += 1;
+            for (slot, (_, ev)) in best.iter_mut().zip(&stamps) {
+                *slot = slot.min(f64::from(self.ctx.elapsed_ms(prev, ev)?));
                 prev = ev;
             }
+            Ok(())
+        });
+        measured.map_err(|e| tracing::warn!(reason = %e, "backend-cuda: timing a profiled program failed")).ok()?;
+        let mut totals: HashMap<&str, (f64, u64)> = HashMap::new();
+        for ((name, _), ms) in stamps.iter().zip(&best) {
+            let e = totals.entry(name.as_str()).or_insert((0.0, 0));
+            e.0 += ms;
+            e.1 += 1;
         }
-        let mut rows: Vec<(String, f64, u64)> = totals.into_iter().map(|(n, (ms, c))| (n, ms / reps as f64, c / reps as u64)).collect();
+        let mut rows: Vec<(String, f64, u64)> = totals.into_iter().map(|(n, (ms, c))| (n.to_string(), ms, c)).collect();
         rows.sort_by(|a, b| b.1.total_cmp(&a.1));
         Some(rows)
     }

@@ -333,7 +333,17 @@ pub struct GraphFns {
         unsafe extern "C" fn(CuGraphExec, CuGraphNode, *const CuKernelNodeParams) -> CuResult,
     pub(crate) graph_destroy: unsafe extern "C" fn(CuGraph) -> CuResult,
     pub(crate) graph_exec_destroy: unsafe extern "C" fn(CuGraphExec) -> CuResult,
+    /// `cuEventRecordWithFlags`. Inside a stream capture a plain
+    /// `cuEventRecord` only tracks the capture's own dependencies and records
+    /// nothing when the graph runs; with [`CU_EVENT_RECORD_EXTERNAL`] it becomes
+    /// an event-record node that stamps the event on every launch, which is
+    /// what timing a program from inside its graph needs.
+    pub(crate) event_record_with_flags: unsafe extern "C" fn(CuEvent, CuStream, u32) -> CuResult,
 }
+
+/// `CU_EVENT_RECORD_EXTERNAL`: an event recorded during stream capture becomes
+/// an event-record node of the graph (see [`GraphFns::event_record_with_flags`]).
+pub const CU_EVENT_RECORD_EXTERNAL: u32 = 1;
 
 /// The stream-ordered memory pool entry points, resolved as their own group.
 ///
@@ -521,6 +531,7 @@ unsafe fn load_graph(lib: &libloading::Library) -> Result<GraphFns, String> {
         graph_exec_kernel_node_set_params: sym(lib, b"cuGraphExecKernelNodeSetParams\0")?,
         graph_destroy: sym(lib, b"cuGraphDestroy\0")?,
         graph_exec_destroy: sym(lib, b"cuGraphExecDestroy\0")?,
+        event_record_with_flags: sym(lib, b"cuEventRecordWithFlags\0")?,
     })
 }
 

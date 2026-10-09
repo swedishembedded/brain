@@ -1562,14 +1562,17 @@ pub trait Backend: Send + Sync {
     }
 
     /// Per-kernel DEVICE time of `segments` run as one program `reps` times:
-    /// `(kernel, mean milliseconds per run, dispatches per run)`, slowest first,
-    /// or `None` if this backend cannot time a program (the default).
+    /// `(kernel, milliseconds per run, dispatches per run)`, slowest first, or
+    /// `None` if this backend cannot time a program (the default).
     ///
     /// The run is the program's own - the dispatches launch back to back as they
     /// would in a replay - so a kernel's figure is the span from the previous
     /// dispatch finishing to its own finishing: its duration plus whatever the
     /// device spent getting to it, with none of the host's launch latency a
-    /// per-dispatch timing of eager launches carries. Executes the segments.
+    /// per-dispatch timing of eager launches carries. Each dispatch's span is
+    /// the MINIMUM over the `reps` runs, summed per kernel: another context
+    /// sharing the device only ever lengthens a span, so the minimum is the
+    /// figure that does not depend on the neighbour. Executes the segments.
     fn profile_program(&self, _segments: &[(Vec<&DeviceBuffer>, &[Step])], _reps: u32) -> Option<Vec<(String, f64, u64)>> {
         None
     }

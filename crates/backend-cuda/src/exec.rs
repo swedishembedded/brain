@@ -35,7 +35,7 @@
 //! at module load or, worse, silently mis-scheduled.
 
 use crate::driver::{
-    CU_EVENT_DISABLE_TIMING, CU_STREAM_NON_BLOCKING,
+    CU_EVENT_DISABLE_TIMING, CU_EVENT_RECORD_EXTERNAL, CU_STREAM_NON_BLOCKING,
     CuContext, CuDevicePtr, CuFunction, CuGraph, CuGraphExec, CuGraphNode, CuKernelNodeParams,
     CuEvent, CuMemLocation, CuMemPool, CuMemPoolProps, MEM_ATTACH_GLOBAL, CuModule, CuStream, Driver, ExecFns, GraphFns, PoolFns,
     CAPTURE_MODE_THREAD_LOCAL, CAPTURE_STATUS_ACTIVE, MEMPOOL_ATTR_RELEASE_THRESHOLD,
@@ -769,6 +769,17 @@ impl Context {
         self.make_current()?;
         // SAFETY: both handles belong to this context.
         self.d.check(unsafe { (self.fns.event_record)(event.ev, self.stream) }, "cuEventRecord")
+    }
+
+    /// Record `event` from INSIDE an open stream capture, as an event-record
+    /// node of the graph being captured: it stamps the event each time the
+    /// graph runs, at its position in the captured work. [`Self::record`]
+    /// there would only add a capture dependency and stamp nothing.
+    pub fn record_in_capture(&self, event: &Event) -> Result<(), String> {
+        let g = self.graphs().map_err(str::to_string)?;
+        self.make_current()?;
+        // SAFETY: both handles belong to this context; the flag is a driver constant.
+        self.d.check(unsafe { (g.event_record_with_flags)(event.ev, self.stream, CU_EVENT_RECORD_EXTERNAL) }, "cuEventRecordWithFlags")
     }
 
     /// Device time in milliseconds between two recorded events. Both must have

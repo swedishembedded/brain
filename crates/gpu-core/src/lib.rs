@@ -2085,8 +2085,9 @@ mod native_facade {
         }
 
         /// Per-kernel DEVICE time of a recorded tape: it is run `reps` times as one
-        /// program and each dispatch is timed from the previous one's completion
-        /// (`(kernel, mean ms per run, dispatches per run)`, slowest first). Unlike
+        /// program and each dispatch is timed from the previous one's completion,
+        /// minimised over the runs (`(kernel, ms per run, dispatches per run)`,
+        /// slowest first - see `Backend::profile_program`). Unlike
         /// per-dispatch timing of eagerly launched kernels this carries none of the
         /// host's launch latency, so it prices a step the way a replay runs it.
         /// `None` on a backend that cannot time a program. Executes the tape.
