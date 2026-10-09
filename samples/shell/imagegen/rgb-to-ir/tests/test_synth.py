@@ -318,6 +318,35 @@ class Generation(World):
         self.assertEqual(self.calls(), [])
 
 
+class VaeRoundTrip(World):
+    """The control arm: the REAL IR through the autoencoder alone, so its artefacts can be measured as an arm."""
+
+    def test_the_real_ir_replicated_to_three_channels_is_the_reference_at_strength_zero_without_the_adapter(self):
+        self.generate(modes=("vae-roundtrip",), limit=1)
+        argv = self.calls()[0]
+        self.assertEqual(opt(argv, "--strength"), "0.0")
+        self.assertNotIn("--adapter", argv)
+        self.assertEqual(opt(argv, "--prompt"), C.NEUTRAL_CAPTION)
+        rec = next(iter(self.records("vae-roundtrip").values()))
+        self.assertEqual((rec["mode"], rec["source"], rec["adapter_sha256"], rec["strength"]), ("vae-roundtrip", "real-ir", None, 0.0))
+        out = cv2.imread(os.path.join(self.out, "vae-roundtrip", rec["output"]))
+        ir = self.ir[int(rec["id"][1:])][1:49, 3:67]
+        for channel in range(3):
+            np.testing.assert_array_equal(out[..., channel], ir)
+
+    def test_the_config_strength_does_not_leak_into_the_round_trip(self):
+        self.generate(modes=("neutral", "vae-roundtrip"), limit=1)
+        strengths = [opt(argv, "--strength") for argv in self.calls()]
+        self.assertEqual(strengths, ["1.0", "0.0"])
+
+    def test_an_ingested_round_trip_is_the_real_ir_exactly_when_no_sensor_model_is_applied(self):
+        self.generate(modes=("vae-roundtrip",))
+        arm_dir = self.path("arms/v0")
+        S.ingest(S.IngestRequest(self.doc, os.path.join(self.out, "vae-roundtrip"), arm_dir, "v0", None, S.Selection(),
+                                 ("person", "car", "bicycle")))
+        np.testing.assert_array_equal(cv2.imread(os.path.join(arm_dir, "d_f1.png"), cv2.IMREAD_UNCHANGED), self.ir[1][1:49, 3:67])
+
+
 class Failures(World):
     def test_memory_pressure_is_retried_after_a_sleep_and_then_succeeds(self):
         self.set_plan(["oom", "oom", "ok"])

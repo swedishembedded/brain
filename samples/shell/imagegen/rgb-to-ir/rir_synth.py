@@ -54,6 +54,12 @@ Modes (the instruction and the source image):
     neutral   the neutral caption; the RGB frame
     prior     the neutral caption plus one clause per class of the frame that has a
               class prior (`prior_polarities`); the RGB frame
+    vae-roundtrip
+              the frame's REAL IR (one channel replicated to three) as the reference at
+              `--strength 0`, which `brain flux2 generate` documents as the source itself
+              through the autoencoder with no denoising step: a control arm that carries the
+              autoencoder's artefacts and nothing a translator learned, to tell whether a
+              detector learns those artefacts. The adapter is not applied.
 
 Class priors come from the caption report of split T. A polarity is a prior for
 a class only if it is warmer or cooler (never the held-out wording: the clauses
@@ -233,7 +239,8 @@ class ModeSpec:
     strength: float | None  # None: the config's
 
 
-MODES = {"neutral": ModeSpec("rgb", True, None), "prior": ModeSpec("rgb", True, None)}
+MODES = {"neutral": ModeSpec("rgb", True, None), "prior": ModeSpec("rgb", True, None),
+         "vae-roundtrip": ModeSpec("real-ir", False, 0.0)}
 
 
 def mode_instruction(mode: str, row: dict, classes, priors: dict[str, str] | None, seed: int) -> str:
