@@ -210,6 +210,7 @@ impl VaeDecoder {
     pub fn decode(&self, latent: &[f32]) -> Vec<f32> {
         let bits: Vec<u32> = latent.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.z_in, &bits);
+        gpu_core::profile::program_table(&self.gpu, "vae decode", &self.steps);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, self.out_len)
     }
@@ -230,13 +231,13 @@ impl VaeDecoder {
         &self.cfg
     }
 
-    /// The device the graph was built on (profiling / benches).
     /// Device bytes this graph holds: weights plus its resident activation
     /// set. The ground truth [`crate::decoder_device_bytes`] is gated against.
     pub fn device_bytes(&self) -> u64 {
         self.device_bytes
     }
 
+    /// The device the graph was built on (profiling / benches).
     pub fn gpu(&self) -> &Gpu {
         &self.gpu
     }
@@ -361,6 +362,7 @@ impl VaeEncoder {
     pub fn encode(&self, image: &[f32]) -> Vec<f32> {
         let bits: Vec<u32> = image.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.img_in, &bits);
+        gpu_core::profile::program_table(&self.gpu, "vae encode", &self.steps);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, self.out_len)
     }
@@ -376,6 +378,11 @@ impl VaeEncoder {
     /// Device bytes this graph holds - see [`VaeDecoder::device_bytes`].
     pub fn device_bytes(&self) -> u64 {
         self.device_bytes
+    }
+
+    /// The device the graph was built on (profiling / benches).
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {

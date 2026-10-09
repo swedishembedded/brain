@@ -1764,13 +1764,15 @@ impl Pipeline {
             // Under the part's placement, so that even a backend that cannot
             // hand out a second handle onto `vae_gpu` (and so builds a fresh
             // device) still builds it on the card the plan chose.
+            let t_build = std::time::Instant::now();
             let built = self
                 .homes
                 .run("vae_dec", || vae::VaeEncoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, h, w))?;
+            gpu_core::profile::stage_time("flux2 vae encode build", t_build);
             *slot = Some(((h, w), built));
         }
         let enc = &slot.as_ref().expect("just populated").1;
-        Ok(enc.encode_mean(chw, h / 8, w / 8))
+        Ok(gpu_core::profile::device_table(enc.gpu(), "flux2 vae encode", || enc.encode_mean(chw, h / 8, w / 8)))
     }
 
     /// Whether the denoiser's weights are currently resident. False once a
@@ -1832,10 +1834,12 @@ impl Pipeline {
             eprintln!("flux2: VAE decode tiled - {h}x{w} over {total} tiles");
             self.homes.run("vae_dec", || dec.decode(&unpacked))?
         } else {
+            let t_build = std::time::Instant::now();
             let dec = self.homes.run("vae_dec", || {
                 vae::VaeDecoder::from_diffusers_on(&self.vae_gpu, self.vae_cfg.clone(), &self.vae_tensors, (lh * 2) as u32, (lw * 2) as u32)
             })?;
-            dec.decode(&unpacked)
+            gpu_core::profile::stage_time("flux2 vae decode build", t_build);
+            gpu_core::profile::device_table(dec.gpu(), "flux2 vae decode", || dec.decode(&unpacked))
         };
         // clamp FIRST, then rescale (reference order — reversed produces artifacts)
         let n = (h * w) as usize;
@@ -1958,8 +1962,12 @@ impl Denoiser for Pipeline {
     fn cfg(&self) -> &Flux2Config {
         &self.cfg
     }
+    // The text encoder and the DiT print their per-kernel device tables under
+    // `BRAIN_PROFILE` (`gpu_core::profile::device_table`); the VAE graphs time
+    // themselves on their own handles (`Pipeline::decode_tokens`,
+    // `Pipeline::encode_image_whole`). Otherwise these are plain calls.
     fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
-        Pipeline::encode_prompt(self, prompt)
+        gpu_core::profile::device_table(self.te.gpu(), "flux2 text encoder", || Pipeline::encode_prompt(self, prompt))
     }
     fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
         Pipeline::encode_image(self, chw, h, w)
@@ -1972,7 +1980,8 @@ impl Denoiser for Pipeline {
     }
     fn forward_batch(&self, samples: &[crate::model::Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
         let m = self.ensure_denoiser().unwrap_or_else(|e| panic!("flux2: {e}"));
-        m.as_ref().expect("ensured").forward_batch(samples, ids, n_pred)
+        let m = m.as_ref().expect("ensured");
+        gpu_core::profile::device_table(m.gpu(), "flux2 dit forward", || m.forward_batch(samples, ids, n_pred))
     }
 }
 

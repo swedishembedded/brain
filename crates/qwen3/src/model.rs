@@ -3010,7 +3010,9 @@ impl Qwen {
         }
         let ignore = vec![IGNORE; t_use as usize];
         self.set_batch(tokens, &ignore);
-        self.gpu.submit(&[], &self.body_steps(1, t_use));
+        let steps = self.body_steps(1, t_use);
+        gpu_core::profile::program_table(&self.gpu, "qwen3 encode", &steps);
+        self.gpu.submit(&[], &steps);
         layers
             .iter()
             .map(|&l| self.gpu.read(&self.res[l], (t_use * self.cfg.d_model) as usize))

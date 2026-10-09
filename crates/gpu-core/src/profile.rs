@@ -342,6 +342,72 @@ pub fn stage_time(name: &str, since: Instant) {
     }
 }
 
+/// Run `f` and, under `BRAIN_PROFILE`, print the DEVICE time each kernel kind
+/// spent inside it on `gpu`, largest first, with the stage's wall time beside
+/// the kernel total - the gap between the two is host time the card waited
+/// through. Without `BRAIN_PROFILE` this is `f()` and nothing else.
+///
+/// Kernel timing is switched on for the stage only (a backend times launches
+/// one by one while it is on, so it is never left on behind a caller), and the
+/// accumulators are reset first so each table is that stage's alone. A backend
+/// that cannot time kernels says so instead of printing an empty table.
+pub fn device_table<R>(gpu: &Gpu, label: &str, f: impl FnOnce() -> R) -> R {
+    if !enabled() {
+        return f();
+    }
+    let timed = gpu.set_kernel_timing(true);
+    gpu.reset_kernel_times();
+    let t0 = Instant::now();
+    let out = f();
+    let rows = timed.then(|| gpu.kernel_times()).flatten();
+    let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
+    gpu.set_kernel_timing(false);
+    print_device_table(label, wall_ms, rows);
+    out
+}
+
+/// `BRAIN_PROFILE_REPS=N`: how many times [`program_table`] replays a pass.
+/// Unset, empty or `0` turns it off.
+pub fn program_reps() -> Option<u32> {
+    std::env::var("BRAIN_PROFILE_REPS").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|&n| n > 0)
+}
+
+/// Under `BRAIN_PROFILE_REPS=N`, print the per-kernel device time of `steps`
+/// run as ONE program N times, each dispatch at its minimum over the runs
+/// ([`Gpu::profile_tape`]). That is the table to rank kernels by on a device
+/// another process is using: a time-sliced neighbour inflates whichever
+/// launches it interrupts, and per-launch timing of eager dispatches
+/// ([`device_table`]) bills those slices to the kernels that happened to be
+/// running, while the minimum over replays of the same program does not.
+///
+/// Executes `steps` N + 1 more times, so the pass must be idempotent (every
+/// buffer it reads is either an input or rewritten before it is read). A
+/// backend that cannot profile a program says so.
+pub fn program_table(gpu: &Gpu, label: &str, steps: &[Step]) {
+    let Some(reps) = program_reps() else { return };
+    gpu.begin_tape();
+    gpu.submit(&[], steps);
+    let tape = gpu.end_tape();
+    let t0 = Instant::now();
+    let rows = gpu.profile_tape(&tape, reps);
+    let wall_ms = t0.elapsed().as_secs_f64() * 1e3 / f64::from(reps + 1);
+    print_device_table(&format!("{label}, min of {reps} replays"), wall_ms, rows);
+}
+
+/// The table [`device_table`] prints, from `(kernel, ms, calls)` rows.
+pub fn print_device_table(label: &str, wall_ms: f64, rows: Option<Vec<(String, f64, u64)>>) {
+    let Some(mut rows) = rows else {
+        eprintln!("kernel table [{label}]: this backend cannot time kernels ({wall_ms:.1} ms wall)");
+        return;
+    };
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let total: f64 = rows.iter().map(|r| r.1).sum();
+    eprintln!("kernel table [{label}]: {total:.1} ms device over {} kernel kinds, {wall_ms:.1} ms wall", rows.len());
+    for (name, ms, calls) in &rows {
+        eprintln!("  {name:<44} {ms:>10.2} ms {calls:>7} calls {:>5.1}%", 100.0 * ms / total.max(f64::MIN_POSITIVE));
+    }
+}
+
 /// Time one submit of `steps`, best of `reps`.
 ///
 /// Every timed region is `poll_wait`-bracketed. This is not defensive style: on

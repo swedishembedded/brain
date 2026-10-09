@@ -647,6 +647,11 @@ impl Flux2Model {
         }
     }
 
+    /// The device the forward runs on (profiling/observability).
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
     /// The numeric tier this model was built at.
     pub fn precision(&self) -> Precision {
         self.precision
@@ -1230,6 +1235,7 @@ impl Flux2Model {
         let take = std::env::var("SMOKE_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(s.len());
         let t_rec = t_start.elapsed();
         let nsteps = s.len();
+        gpu_core::profile::program_table(&self.gpu, "flux2 dit forward", &s);
         self.gpu.submit(&[], &s[..take.min(s.len())]);
         let flat = self.gpu.read(&self.scr.out, bsz as usize * n_pred * cfg.in_channels);
         if timed {
