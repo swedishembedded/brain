@@ -317,9 +317,9 @@ impl Yolo {
         let d_dn3_in = ctx.act(n3.numel());
         let d_dn4_in = ctx.act(n4.numel());
 
-        // backbone input-grad scratch (one per backbone stage input).
+        // backbone input-grad scratch: one per backbone stage input, except the
+        // stem's - its input is the image, which takes no gradient.
         let back_shapes = [
-            img_shape,
             b_conv0.out_shape,
             b_conv1.out_shape,
             b_c2f0.out_shape,
@@ -911,23 +911,25 @@ impl Yolo {
         self.copy(&self.cat_t4p3.d_b, &self.d_p3_from_n3, self.b_c2f1.out_shape.numel());
 
         // ---- backbone backward (reverse), routing the P3/P4/P5 grads in ----
+        // d[k] = grad wrt the output of backbone stage k.
         let d = self.d_back.borrow_mut();
-        // sppf: input grad -> d[9] (= grad wrt b_c2f3 output)
-        self.b_sppf.backward(&ctx, ps, self.b_c2f3.out(), &self.d_p5_total.out, &d[9]);
-        self.b_c2f3.backward(&ctx, ps, self.b_conv4.out(), &d[9], &d[8]);
-        // d[7] receives grad wrt P4 from the backbone-conv4 path.
-        self.b_conv4.backward(&ctx, ps, self.b_c2f2.out(), &d[8], &d[7]);
+        // sppf: input grad -> d[8] (= grad wrt b_c2f3 output)
+        self.b_sppf.backward(&ctx, ps, self.b_c2f3.out(), &self.d_p5_total.out, &d[8]);
+        self.b_c2f3.backward(&ctx, ps, self.b_conv4.out(), &d[8], &d[7]);
+        // d[6] receives grad wrt P4 from the backbone-conv4 path.
+        self.b_conv4.backward(&ctx, ps, self.b_c2f2.out(), &d[7], &d[6]);
         // add the neck path (cat_p5p4 -> d_p4_from_t4) to get the total P4 grad.
-        self.d_p4_total.add(&ctx, &d[7], &self.d_p4_from_t4);
-        self.b_c2f2.backward(&ctx, ps, self.b_conv3.out(), &self.d_p4_total.out, &d[6]);
-        self.b_conv3.backward(&ctx, ps, self.b_c2f1.out(), &d[6], &d[5]);
-        // d[5] holds grad wrt P3 from backbone-conv3 path; add the neck path.
-        self.d_p3_total.add(&ctx, &d[5], &self.d_p3_from_n3);
-        self.b_c2f1.backward(&ctx, ps, self.b_conv2.out(), &self.d_p3_total.out, &d[4]);
-        self.b_conv2.backward(&ctx, ps, self.b_c2f0.out(), &d[4], &d[3]);
-        self.b_c2f0.backward(&ctx, ps, self.b_conv1.out(), &d[3], &d[2]);
-        self.b_conv1.backward(&ctx, ps, self.b_conv0.out(), &d[2], &d[1]);
-        self.b_conv0.backward(&ctx, ps, &self.img, &d[1], &d[0]);
+        self.d_p4_total.add(&ctx, &d[6], &self.d_p4_from_t4);
+        self.b_c2f2.backward(&ctx, ps, self.b_conv3.out(), &self.d_p4_total.out, &d[5]);
+        self.b_conv3.backward(&ctx, ps, self.b_c2f1.out(), &d[5], &d[4]);
+        // d[4] holds grad wrt P3 from backbone-conv3 path; add the neck path.
+        self.d_p3_total.add(&ctx, &d[4], &self.d_p3_from_n3);
+        self.b_c2f1.backward(&ctx, ps, self.b_conv2.out(), &self.d_p3_total.out, &d[3]);
+        self.b_conv2.backward(&ctx, ps, self.b_c2f0.out(), &d[3], &d[2]);
+        self.b_c2f0.backward(&ctx, ps, self.b_conv1.out(), &d[2], &d[1]);
+        self.b_conv1.backward(&ctx, ps, self.b_conv0.out(), &d[1], &d[0]);
+        // The stem's input is the image: parameter gradients only.
+        self.b_conv0.backward_params(&ctx, ps, &self.img, &d[0]);
     }
 
     /// d_n4_in = d_dn4_in (from dn4 backward) + d_n4 (from head).

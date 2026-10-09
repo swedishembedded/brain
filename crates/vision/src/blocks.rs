@@ -1130,7 +1130,25 @@ impl Conv {
         d_out: &DeviceBuffer,
         d_in: &DeviceBuffer,
     ) {
+        self.backward_into(ctx, ps, x_in, d_out, Some(d_in));
+    }
+
+    /// [`Conv::backward`] for a unit whose input needs no gradient - the first
+    /// layer of a network, whose input is the data: only the parameter
+    /// gradients accumulate. Skips the input-gradient convolution, which for a
+    /// stem over full-resolution images is one of the most expensive passes of
+    /// the whole backward.
+    pub fn backward_params(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer) {
+        self.backward_into(ctx, ps, x_in, d_out, None);
+    }
+
+    /// The backward with the input gradient written into `d_in` when one is
+    /// asked for.
+    fn backward_into(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: Option<&DeviceBuffer>) {
         let on = self.out_shape.numel();
+        let dx_step = |d_conv: &DeviceBuffer, d_in: &DeviceBuffer| {
+            ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel())
+        };
 
         if self.spec.norm == Norm::None {
             // Raw conv: act backward straight into d_conv, then the conv
@@ -1144,7 +1162,7 @@ impl Conv {
                 d_out
             };
             let mut steps = self.dw_steps(ctx, ps, d_conv, x_in);
-            steps.push(ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel()));
+            steps.extend(d_in.map(|d| dx_step(d_conv, d)));
             ctx.gpu.submit(&[], &steps);
             self.bias_backward(ctx, ps, d_conv);
             return;
@@ -1153,7 +1171,6 @@ impl Conv {
             Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &act_params(self.spec.act, on), on),
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),
         };
-        let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
         // The act backward produces d_bn, which the BN backward reads; the BN
         // backward produces d_conv, which both conv adjoints read. Submit in
         // this order. The gamma/beta grads accumulate into buffers the model's
@@ -1161,7 +1178,7 @@ impl Conv {
         let mut steps = vec![s_act];
         steps.extend(self.bn.backward_steps(ctx, ps, &self.conv_out, &self.d_bn, &self.d_conv));
         steps.extend(self.dw_steps(ctx, ps, &self.d_conv, x_in));
-        steps.push(s_dxin);
+        steps.extend(d_in.map(|d| dx_step(&self.d_conv, d)));
         ctx.gpu.submit(&[], &steps);
         self.bias_backward(ctx, ps, &self.d_conv);
     }
