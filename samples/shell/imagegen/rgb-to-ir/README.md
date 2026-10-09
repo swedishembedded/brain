@@ -48,29 +48,33 @@ person,car,bicycle) and boxes of other classes are dropped.
 ## Run it
 
 ```bash
-S=samples/shell/imagegen/rgb-to-ir
-$S/rgb_to_ir.sh manifest --dataset d1 --rgb-glob 'DIR/rgb/*.jpg' --ir-glob 'DIR/ir/*.png' \
+WORK=DIR                                  # any directory outside the checkout: every output goes there
+R="samples/shell/imagegen/rgb-to-ir/rgb_to_ir.sh --work $WORK"
+$R manifest --dataset d1 --rgb-glob 'DIR/rgb/*.jpg' --ir-glob 'DIR/ir/*.png' \
     --labels-dir DIR/labels --label-format voc --sequence-rule dir
-$S/rgb_to_ir.sh validate --check-files           # every manifest against the contract
-$S/rgb_to_ir.sh splits                           # splits.json + leaks.json
-$S/rgb_to_ir.sh arms --limit 64                  # sensor-model.json + arms/<arm>/ for 64 frames of S
-$S/rgb_to_ir.sh pack a2 --size 512               # packed/a2/{images.f32,boxes.bin,meta.json}
-brain yolov8 fine-tune "$RIR_WORK/packed/a2" --nc 3 --input 512 \
+$R validate --check-files           # every manifest against the contract
+$R splits                           # splits.json + leaks.json
+$R arms --limit 64                  # sensor-model.json + arms/<arm>/ for 64 frames of S
+$R pack a2 --size 512               # packed/a2/{images.f32,boxes.bin,meta.json}
+brain yolov8 fine-tune "$WORK/packed/a2" --nc 3 --input 512 \
   --weights <yolov8 checkpoint> --out ft-a2.safetensors
-$S/rgb_to_ir.sh tiles --limit 1100               # lora-set/: aligned RGB / IR tiles of split T + pairs.yaml
-$S/rgb_to_ir.sh measure                          # lora-set/regions/*.json (needs a resident SAM 2, see below)
-$S/rgb_to_ir.sh captions                         # lora-set/captions.yaml + captions-report.json
-$S/rgb_to_ir.sh sheet                            # lora-set/sheet.png, 12 random tiles to look at
-brain flux2 finetune "$RIR_WORK/lora-set" --out rgb2ir.brain --size 512
-$S/rgb_to_ir.sh evalset --split Test --size 512  # packed/eval-Test/: real IR frames of split Test + sequences.json
-$S/rgb_to_ir.sh evaluate a2 1 ft-a2.safetensors  # results/Test/a2/seed1.jsonl: brain yolov8 eval --dump-preds
-$S/rgb_to_ir.sh decide --config decision-config.json   # decision-Test/decision.md and decision.json
-$S/rgb_to_ir.sh test                             # unit tests, no data needed
+$R tiles --limit 1100               # lora-set/: aligned RGB / IR tiles of split T + pairs.yaml
+$R measure                          # lora-set/regions/*.json (needs a resident SAM 2, see below)
+$R captions                         # lora-set/captions.yaml + captions-report.json
+$R sheet                            # lora-set/sheet.png, 12 random tiles to look at
+brain flux2 finetune "$WORK/lora-set" --out rgb2ir.brain --size 512
+$R evalset --split Test --size 512  # packed/eval-Test/: real IR frames of split Test + sequences.json
+$R evaluate a2 1 ft-a2.safetensors  # results/Test/a2/seed1.jsonl: brain yolov8 eval --dump-preds
+$R decide --config decision-config.json   # decision-Test/decision.md and decision.json
+$R test                             # unit tests, no data needed
 ```
 
-`RIR_WORK` (default `${TMPDIR:-/tmp}/rgb-to-ir`) holds every output; nothing
-is written into the repository. `SEED` (default 1) seeds splits, sensor fit,
-frame selection and packing order. Run `manifest` once per dataset (each with
+`--work DIR` (required) holds every output; nothing is written into the
+repository. The driver's settings are flags placed before the stage and the
+environment configures nothing: `--seed N` (default 1) seeds splits, sensor fit,
+frame selection and packing order, `--brain PATH` (default `brain` on `PATH`)
+is the binary the stages that run brain use and `--device gpuN` names the card
+for them. Run `manifest` once per dataset (each with
 its own `--dataset` id); `splits` and `arms` use all manifests. Each stage is
 also a script with `--help`: `rir_readers.py`, `rir_manifest.py validate`,
 `rir_splits.py`, `rir_arms.py {fit-sensor,render}`, `rir_pack.py`.

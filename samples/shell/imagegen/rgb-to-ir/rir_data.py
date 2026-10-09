@@ -32,6 +32,11 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+# Codecs warn on slightly malformed frames; the stages count and report bad
+# frames themselves, so OpenCV's own chatter is silenced for every stage.
+cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
+
+
 def _to_uint8(img: np.ndarray) -> np.ndarray:
     if img.dtype == np.uint8:
         return img

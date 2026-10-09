@@ -7,13 +7,19 @@
 # in RGB / thermal-IR detector training data, you can procure our services by
 # sending an email to info@swedishembedded.com.
 
-# Driver for the data stages of the rgb-to-ir study. Stages share one work
-# directory ($RIR_WORK, default ${TMPDIR:-/tmp}/rgb-to-ir); nothing is written
-# elsewhere.
+# Driver for the data stages of the rgb-to-ir study:
 #
-#   rgb_to_ir.sh manifest --dataset ID --rgb-glob G ...  -> $RIR_WORK/manifests/ID.jsonl
+#   rgb_to_ir.sh --work DIR [--seed N] [--brain PATH] [--device gpuN] STAGE [STAGE FLAGS]
+#
+# Stages share the work directory DIR (required); nothing is written elsewhere.
+# The settings are these flags and nothing else: the environment configures
+# nothing. --seed (default 1) seeds splits, sensor fit, frame selection and
+# packing order; --brain (default `brain` on PATH) is the binary the stages
+# that run brain use; --device names the card for them (default: the binary's).
+#
+#   rgb_to_ir.sh manifest --dataset ID --rgb-glob G ...  -> DIR/manifests/ID.jsonl
 #   rgb_to_ir.sh validate [--check-files]                check every manifest against the contract
-#   rgb_to_ir.sh splits                                  -> $RIR_WORK/splits.json (+ leaks.json)
+#   rgb_to_ir.sh splits                                  -> DIR/splits.json (+ leaks.json)
 #   rgb_to_ir.sh arms [--limit N] [--arms a1,a2,b1,b2,b3,b4] [--datasets id,...]
 #                                                        -> sensor-model.json, arms/<arm>/
 #   rgb_to_ir.sh pack <arm> [--size 512] [--limit N]     -> packed/<arm>/ for `brain yolov8 fine-tune`
@@ -30,21 +36,39 @@
 #   rgb_to_ir.sh decide --config FILE [--split Test|V]   -> decision-<split>/decision.md, decision.json (see rir_decide.py)
 #   rgb_to_ir.sh test                                    unit tests of the stages (no data needed)
 #
-# `manifest` takes the flags of rir_readers.py (see its --help). SEED (default 1)
-# seeds splits, sensor fit, frame selection and packing order. BRAIN (default
-# `brain`) is the binary `evaluate` runs.
+# `manifest` takes the flags of rir_readers.py (see its --help).
 
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-WORK="${RIR_WORK:-${TMPDIR:-/tmp}/rgb-to-ir}"
-SEED="${SEED:-1}"
-export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
+WORK=""
+SEED=1
+BRAIN="brain"
+DEVICE=""
 
-usage() { sed -n '10,34p' "$0"; exit "${1:-2}"; }
+usage() { sed -n '/^# Driver for/,/^# `manifest` takes/p' "$0"; exit "${1:-2}"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --work) WORK="${2:?--work needs a directory}"; shift 2 ;;
+    --seed) SEED="${2:?--seed needs an integer}"; shift 2 ;;
+    --brain) BRAIN="${2:?--brain needs the path of the brain binary}"; shift 2 ;;
+    --device) DEVICE="${2:?--device needs a card, e.g. gpu1}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
-mkdir -p "$WORK/manifests"
+brain_global=()
+[ -z "$DEVICE" ] || brain_global=(--device "$DEVICE")
+
+case "$cmd" in
+  test|-h|--help) ;;
+  *)
+    [ -n "$WORK" ] || { echo "$0: --work DIR is required (the directory every stage reads and writes)" >&2; exit 2; }
+    mkdir -p "$WORK/manifests"
+    ;;
+esac
 
 # Splits `--split NAME` (default Test) out of the arguments: sets $split and the array $rest.
 take_split() {
@@ -121,7 +145,7 @@ case "$cmd" in
     [ -f "$data/sequences.json" ] || { echo "no $data/sequences.json: run '$0 evalset --split $split' first" >&2; exit 1; }
     out="$WORK/results/$split/$arm"
     mkdir -p "$out"
-    "${BRAIN:-brain}" yolov8 eval --weights "$weights" --data "$data" --split all --conf 0.001 \
+    "$BRAIN" ${brain_global[@]+"${brain_global[@]}"} yolov8 eval --weights "$weights" --data "$data" --split all --conf 0.001 \
       --dump-preds "$out/seed$seed.jsonl" ${rest[@]+"${rest[@]}"}
     python3 "$HERE/rir_eval.py" "$out/seed$seed.jsonl" --json > "$out/seed$seed.score.json"
     ;;
