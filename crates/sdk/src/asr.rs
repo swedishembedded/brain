@@ -130,6 +130,18 @@ impl TranscribePipeline {
         provider.features(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE)).map_err(Error::Backend)
     }
 
+    /// [`Self::features`] for several clips with the audio encoder built once,
+    /// on the ambient device. Building it uploads the whole audio tower, which
+    /// costs more than encoding a short clip.
+    pub fn features_many(&self, clips: &[&crate::Audio]) -> Result<Vec<AudioFeatures>> {
+        let Backend::Qwen3Asr(provider) = &self.backend else {
+            return Err(Error::MissingArgument("nemotronasr: has no spliceable audio features; use a Qwen3-ASR pipeline".to_string()));
+        };
+        let resampled: Vec<Vec<f32>> = clips.iter().map(|c| audio::resample_linear(c.samples(), c.sample_rate(), ASR_SAMPLE_RATE)).collect();
+        let views: Vec<&[f32]> = resampled.iter().map(Vec::as_slice).collect();
+        provider.features_many(&views).map_err(Error::Backend)
+    }
+
     /// Decode a WAV file's bytes (any channel count/sample rate - downmixed
     /// to mono and resampled to 16 kHz by the SAME shared decode every
     /// other surface in this workspace uses,

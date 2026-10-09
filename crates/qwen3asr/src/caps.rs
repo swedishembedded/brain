@@ -134,6 +134,12 @@ impl QwenAsrProvider {
         Ok(model.features(wav))
     }
 
+    /// [`Self::features`] for several clips, the encoder built once.
+    pub fn features_many(&self, wavs: &[&[f32]]) -> Result<Vec<crate::AudioFeatures>, String> {
+        let model = self.inner.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
+        Ok(model.features_many(wavs))
+    }
+
     /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
     /// — the seam the NPU resident uses to run the audio-tower ONNX head on the
     /// Intel NPU while the conv stem + Qwen decoder stay on the device backend.

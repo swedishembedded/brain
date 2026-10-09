@@ -231,3 +231,23 @@ fn nemotron_has_no_spliceable_features() {
     };
     assert!(matches!(asr.features(&tone(1.0, 16_000)), Err(brain::Error::MissingArgument(_))));
 }
+
+/// Features of several clips with the encoder built once are the features of
+/// each clip alone, in order.
+#[test]
+fn features_of_several_clips_are_those_of_each_in_order() {
+    let _serial = brain_testutil::env_lock();
+    let Ok(asr) = brain::TranscribePipeline::from_pretrained("Qwen/Qwen3-ASR-1.7B") else {
+        brain_testutil::skip("Qwen3-ASR is not in the model store");
+        return;
+    };
+    let (a, b) = (tone(1.0, 16_000), tone(2.5, 24_000));
+    let many = asr.features_many(&[&a, &b]).expect("features");
+    assert_eq!(many.len(), 2);
+    for (together, alone) in many.iter().zip([asr.features(&a).unwrap(), asr.features(&b).unwrap()]) {
+        assert_eq!(together.rows, alone.rows);
+        let worst = together.embeds.iter().zip(&alone.embeds).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "worst difference {worst}");
+    }
+    assert_eq!((many[0].rows, many[1].rows), (13, 33));
+}

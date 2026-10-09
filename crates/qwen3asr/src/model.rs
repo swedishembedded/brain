@@ -103,13 +103,23 @@ impl Qwen3Asr {
     /// length): the front end pads it up to whole seconds, the encoder is told
     /// only `wav.len() / 160` frames are real, and the decoder is not involved.
     pub fn features(&self, wav: &[f32]) -> crate::AudioFeatures {
-        let target = crate::features::padded_samples(wav.len());
-        let mel = audio::asr_frontend::qwen_logmel(wav, target);
-        let valid = (wav.len() / 160) as u32;
-        let enc = AudioEncoder::new(&self.agpu, self.cfg.audio, &self.aweights);
-        let (encoder_out, embeds) = enc.encode(&mel.mel, valid);
+        self.features_many(&[wav]).remove(0)
+    }
+
+    /// [`Self::features`] for several clips with the encoder built once, on the
+    /// ambient device: building it uploads the whole audio tower, which costs
+    /// more than encoding a short clip.
+    pub fn features_many(&self, wavs: &[&[f32]]) -> Vec<crate::AudioFeatures> {
+        let gpu = Gpu::new(audio_pipelines());
+        let enc = AudioEncoder::new(&gpu, self.cfg.audio, &self.aweights);
         let (encoder_dim, embed_dim) = (self.cfg.audio.d_model as usize, self.cfg.audio.output_dim as usize);
-        crate::AudioFeatures { rows: embeds.len() / embed_dim, encoder_out, embeds, encoder_dim, embed_dim }
+        wavs.iter()
+            .map(|wav| {
+                let mel = audio::asr_frontend::qwen_logmel(wav, crate::features::padded_samples(wav.len()));
+                let (encoder_out, embeds) = enc.encode(&mel.mel, (wav.len() / 160) as u32);
+                crate::AudioFeatures { rows: embeds.len() / embed_dim, encoder_out, embeds, encoder_dim, embed_dim }
+            })
+            .collect()
     }
 
     /// [`encode_audio`](Self::encode_audio) with the windowed-transformer HEAD run
