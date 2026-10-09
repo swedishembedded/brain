@@ -3915,6 +3915,9 @@ mod tests {
 
     // ---- tiled (MultiDiffusion) generation ---------------------------------
 
+    /// One joint sequence the sampler handed the DiT: its tokens and ids.
+    type DitCall = (Vec<f32>, Vec<u32>);
+
     /// One stub generation under `tile`, returning the rendered bytes AND
     /// every joint sequence the sampler handed to the DiT.
     ///
@@ -3927,7 +3930,7 @@ mod tests {
         h: u32,
         refs: Vec<(Vec<f32>, u32, u32)>,
         steps: u32,
-    ) -> (Vec<u8>, Vec<(Vec<f32>, Vec<u32>)>) {
+    ) -> (Vec<u8>, Vec<DitCall>) {
         let d = Stub::new();
         let opts = GenOpts {
             width: w,
