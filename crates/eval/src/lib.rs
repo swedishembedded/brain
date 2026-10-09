@@ -21,6 +21,7 @@ pub use rlcd::metrics as calibration;
 
 pub mod asr;
 pub mod detection;
+pub mod detection_report;
 pub mod mlm;
 pub mod tts;
 

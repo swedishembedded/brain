@@ -8,7 +8,8 @@
 //!
 //!   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
 //!                                          --input S --seed S --arch tiny|yolov8n]
-//!   brain yolov8 eval  --weights F --data <dir> [--conf X --iou X]
+//!   brain yolov8 eval  --weights F --data <dir> [--split all|val --conf X --iou X
+//!                                                --dump-preds <path.jsonl>]
 //!   brain yolov8 detect --weights F --image <path> [--conf X --iou X --input S]
 //!         [--identity-ref <embedding.bin> --identity-name NAME
 //!          --identity-threshold X --identity-class N --identity-class-name NAME
@@ -57,7 +58,8 @@
 use std::path::Path;
 
 use data::gen_detect::{load_dataset, DetectData};
-use eval::detection::{self, GtBox as EvalGt};
+use eval::detection::GtBox as EvalGt;
+use eval::detection_report::{self, ImageRecord};
 use yolov8::model::{GtBox, LossMode, Yolo};
 use yolov8::YoloConfig;
 
@@ -407,75 +409,141 @@ fn fine_tune(args: &[String]) {
     train(args, Some(&weights));
 }
 
-fn eval(args: &[String]) {
-    let mut weights = String::new();
-    let mut data_dir = String::new();
-    let mut conf = 0.25f32;
-    let mut iou = 0.45f32;
+/// Which part of the dataset `eval` scores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvalSplit {
+    /// The held-out tail (last 10%) that `train` never sees.
+    Val,
+    /// Every image, for a checkpoint that was not trained on this dataset.
+    All,
+}
+
+impl EvalSplit {
+    fn first_index(self, n: usize) -> usize {
+        match self {
+            EvalSplit::Val => split_at(n),
+            EvalSplit::All => 0,
+        }
+    }
+}
+
+const EVAL_USAGE: &str = "usage: brain yolov8 eval --weights F --data <dir> [--split all|val] \
+[--conf X] [--iou X] [--dump-preds <path.jsonl>]\n  \
+--split      images to score: val = last 10% (default), all = every image\n  \
+--conf       confidence floor, default 0.25; use 0.001 for mAP\n  \
+--dump-preds write one JSON line per image (index, ground truth, predictions)";
+
+struct EvalCfg {
+    weights: String,
+    data_dir: String,
+    split: EvalSplit,
+    conf: f32,
+    iou: f32,
+    dump_preds: Option<String>,
+}
+
+fn parse_eval_flags(args: &[String]) -> Result<EvalCfg, String> {
+    let mut cfg = EvalCfg {
+        weights: String::new(),
+        data_dir: String::new(),
+        split: EvalSplit::Val,
+        conf: 0.25,
+        iou: 0.45,
+        dump_preds: None,
+    };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--data" => data_dir = val(args, &mut i, "--data"),
-            "--conf" => conf = val(args, &mut i, "--conf").parse().unwrap_or(conf),
-            "--iou" => iou = val(args, &mut i, "--iou").parse().unwrap_or(iou),
-            other => eprintln!("ignoring unknown flag {other:?}"),
+            "--weights" => cfg.weights = val(args, &mut i, "--weights"),
+            "--data" => cfg.data_dir = val(args, &mut i, "--data"),
+            "--split" => {
+                cfg.split = match val(args, &mut i, "--split").as_str() {
+                    "val" => EvalSplit::Val,
+                    "all" => EvalSplit::All,
+                    other => return Err(format!("--split must be `all` or `val`, got {other:?}")),
+                }
+            }
+            "--conf" => cfg.conf = val(args, &mut i, "--conf").parse().map_err(|e| format!("--conf: {e}"))?,
+            "--iou" => cfg.iou = val(args, &mut i, "--iou").parse().map_err(|e| format!("--iou: {e}"))?,
+            "--dump-preds" => cfg.dump_preds = Some(val(args, &mut i, "--dump-preds")),
+            other => return Err(format!("unknown flag {other:?}")),
         }
         i += 1;
     }
-    if weights.is_empty() || data_dir.is_empty() {
-        eprintln!("usage: brain yolov8 eval --weights F --data <dir> [--conf X --iou X]");
-        return;
+    if cfg.weights.is_empty() || cfg.data_dir.is_empty() {
+        return Err("--weights and --data are required".into());
     }
-    let data = match load_dataset(Path::new(&data_dir)) {
+    if !(0.0..=1.0).contains(&cfg.conf) {
+        return Err(format!("--conf must be in [0, 1], got {}", cfg.conf));
+    }
+    Ok(cfg)
+}
+
+/// Ground truth of dataset image `i` as pixel `xyxy` boxes.
+fn eval_gts(data: &DetectData, i: usize) -> Vec<EvalGt> {
+    data.boxes[i]
+        .iter()
+        .map(|b| {
+            let (cx, cy) = (b.cx * data.w as f32, b.cy * data.h as f32);
+            let (hw, hh) = (b.w * data.w as f32 * 0.5, b.h * data.h as f32 * 0.5);
+            EvalGt { class: b.class, bbox: [cx - hw, cy - hh, cx + hw, cy + hh] }
+        })
+        .collect()
+}
+
+fn eval(args: &[String]) {
+    let cfg = match parse_eval_flags(args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("brain yolov8 eval: {e}\n{EVAL_USAGE}");
+            std::process::exit(2);
+        }
+    };
+    let data = match load_dataset(Path::new(&cfg.data_dir)) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("brain yolov8 eval: loading {data_dir}: {e}");
+            eprintln!("brain yolov8 eval: loading {}: {e}", cfg.data_dir);
             std::process::exit(1);
         }
     };
-    // Batch=1 inference over the val split.
-    let model = Yolo::load(&weights, 1);
-    let side = model.cfg.input as usize;
-    let nc = model.cfg.nc;
-    let val0 = split_at(data.n);
-
-    let mut all_preds: Vec<[f32; 6]> = Vec::new();
-    let mut all_gts: Vec<EvalGt> = Vec::new();
-    // Each image is scored in its OWN pixel coordinate frame; to score them
-    // jointly with the model-free `map50`, we offset every image's boxes into a
-    // disjoint horizontal strip so they never cross-match across images.
+    // Batch=1 inference.
+    let model = Yolo::load(&cfg.weights, 1);
+    let first = cfg.split.first_index(data.n);
     let stride = data.image_stride();
-    for (k, i) in (val0..data.n).enumerate() {
-        let off = (k as f32) * (data.w as f32 + 16.0);
-        // CHW -> HWC for detect (it expects interleaved RGB).
-        let chw = &data.images[i * stride..(i + 1) * stride];
-        let hwc = imaging::pixels::chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
-        let dets = model.detect(&hwc, data.w, data.h, conf, iou);
-        for mut d in dets {
-            d[0] += off;
-            d[2] += off;
-            all_preds.push(d);
-        }
-        for b in &data.boxes[i] {
-            let cx = b.cx * data.w as f32 + off;
-            let cy = b.cy * data.h as f32;
-            let bw = b.w * data.w as f32;
-            let bh = b.h * data.h as f32;
-            all_gts.push(EvalGt {
-                class: b.class,
-                bbox: [cx - bw * 0.5, cy - bh * 0.5, cx + bw * 0.5, cy + bh * 0.5],
-            });
+    let records: Vec<ImageRecord> = (first..data.n)
+        .map(|i| {
+            // CHW -> HWC for detect (it expects interleaved RGB).
+            let chw = &data.images[i * stride..(i + 1) * stride];
+            let hwc = imaging::pixels::chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
+            let preds = model.detect(&hwc, data.w, data.h, cfg.conf, cfg.iou);
+            ImageRecord { index: i, gts: eval_gts(&data, i), preds }
+        })
+        .collect();
+
+    if let Some(path) = &cfg.dump_preds {
+        let written = std::fs::File::create(path)
+            .map(std::io::BufWriter::new)
+            .and_then(|mut w| detection_report::write_jsonl(&mut w, &records).and_then(|()| std::io::Write::flush(&mut w)));
+        if let Err(e) = written {
+            eprintln!("brain yolov8 eval: writing {path}: {e}");
+            std::process::exit(1);
         }
     }
-    let _ = side;
-    let map = detection::map50(&all_preds, &all_gts, nc);
-    let (p, r) = detection::precision_recall(&all_preds, &all_gts, 0.5);
-    println!("metric        value");
-    println!("mAP@0.5       {map:.4}");
-    println!("precision@0.5 {p:.4}");
-    println!("recall@0.5    {r:.4}");
-    println!("preds {}  gts {}  (val images {})", all_preds.len(), all_gts.len(), data.n - val0);
+
+    let report = detection_report::score(&records, model.cfg.nc);
+    println!("metric         value");
+    println!("mAP@0.5        {:.4}", report.map50);
+    println!("mAP@0.5:0.95   {:.4}", report.map50_95);
+    println!("precision@0.5  {:.4}", report.precision50);
+    println!("recall@0.5     {:.4}", report.recall50);
+    println!("class  AP@0.5  AP@0.5:0.95");
+    for c in &report.per_class {
+        println!("{:<5}  {:.4}   {:.4}", c.class, c.ap50, c.ap50_95);
+    }
+    println!(
+        "conf {}  iou {}  split {:?}  preds {}  gts {}  (images {})",
+        cfg.conf, cfg.iou, cfg.split, report.n_preds, report.n_gts, report.n_images
+    );
 }
 
 /// The identity half of `detect`'s flags - all optional, and inert unless
@@ -569,7 +637,7 @@ fn read_f32_le(path: &str) -> Result<Vec<f32>, String> {
     if bytes.is_empty() || bytes.len() % 4 != 0 {
         return Err(format!("{path}: {} bytes is not a little-endian f32 vector", bytes.len()));
     }
-    Ok(bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect())
+    Ok(bytes.as_chunks::<4>().0.iter().map(|q| f32::from_le_bytes(*q)).collect())
 }
 
 /// Build the detect-then-verify gate + embedder, or exit with a real message.

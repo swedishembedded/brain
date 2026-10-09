@@ -41,7 +41,7 @@ use yolov8::boxmath::iou;
 use yolov8::Detection;
 
 /// A ground-truth box for one image: class id + pixel `xyxy`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GtBox {
     pub class: u32,
     pub bbox: [f32; 4],

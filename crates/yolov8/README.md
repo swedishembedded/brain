@@ -32,9 +32,15 @@ BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
 #   flags: --steps --batch --lr --wd --nc --input --seed
 #   prints the loss every 10 steps; saves a `.safetensors` checkpoint at the end.
 
-# 3. Evaluate: mAP@0.5 + precision/recall over the 10% val split (eval::detection).
+# 3. Evaluate: mAP@0.5, mAP@0.5:0.95 (COCO, ten IoU thresholds), per-class AP and
+#    precision/recall (eval::detection_report). Scores the 10% val split by default;
+#    `--split all` scores every image. Use `--conf 0.001` for mAP (the default 0.25 is
+#    a detection operating point and truncates the precision-recall curve).
+#    `--dump-preds F.jsonl` writes one line per image with its index, ground-truth
+#    boxes and predictions ({class, score, xyxy}) for offline analysis such as a
+#    clustered bootstrap.
 BRAIN_DEVICE=cpu brain yolo eval --weights out/yolo.safetensors --data data/detect \
-    --conf 0.1 --iou 0.45
+    --conf 0.001 --iou 0.45 --split all --dump-preds out/preds.jsonl
 
 # 4. Detect on one image — a binary PPM (P6) file OR a dataset dir (image 0):
 BRAIN_DEVICE=cpu brain yolo detect --weights out/yolo.safetensors --image data/detect \

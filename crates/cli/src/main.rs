@@ -273,7 +273,7 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mi
 YOLOv8 (from-scratch anchor-free object detector)
   brain yolov8 train <data_dir> --out F [--steps N --batch B --lr X --nc C
                                        --input S --seed S]
-  brain yolov8 eval  --weights F --data <dir> [--conf X --iou X]   # mAP/precision/recall
+  brain yolov8 eval  --weights F --data <dir> [--split all|val --conf X --iou X --dump-preds F.jsonl]   # mAP@0.5, mAP@0.5:0.95, per-class AP, P/R
   brain yolov8 detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
                                                                 # prints [x1,y1,x2,y2,conf,class] JSON lines
   brain yolov8 fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
