@@ -945,40 +945,22 @@ pub fn effective_dit_precision(dit: &str, requested: crate::Precision, f32_was_e
     Ok(requested)
 }
 
-/// The text encoder's device footprint: weights plus the activation buffers
-/// its blocks hold.
+/// The text encoder's device footprint: what `qwen3` itself says the shard
+/// this pipeline builds will allocate - `[0, layers)` plus the embedding, no
+/// head, one sample of `seq` tokens, inference only
+/// (`qwen3::footprint::estimate_vram_bytes`).
 ///
 /// `layers` is how much of the stack is actually built - a truncated shard
 /// keeps `[0, deepest_tap)` and nothing past it, so a whole encoder and a
 /// truncated one differ by real bytes and the placement must see the
-/// difference.
-///
-/// A `Qwen` shard allocates its activation buffers per block rather than
-/// sharing one slab, so the scratch term scales with `layers`, not with 1 -
-/// which is the difference between "the f32 encoder fits a 24 GiB card on
-/// paper" and the two-card layout the FLUX.2 roadmap records as the one that
-/// actually runs. This is a PLACEMENT INPUT, deliberately an approximation
-/// of the same shape `resident_flux2`'s own estimate uses for the DiT; the
-/// per-card headroom automatic placement keeps free absorbs the remainder.
+/// difference. The estimate is the encoder crate's, not a copy of it here: a
+/// copy kept charging one activation scratch per layer after the encoder
+/// began sharing one across all of them.
 pub fn te_bytes(te_cfg: &qwen3::QwenConfig, layers: usize, seq: u64, int8: bool) -> u64 {
-    let precision = if int8 { crate::Precision::Int8 } else { crate::Precision::F32 };
-    let scratch = layers as u64 * seq * (16 * te_cfg.d_model as u64 + 3 * te_cfg.d_ff as u64) * 4;
-    scratch
-        + te_cfg
-        .param_list()
-        .iter()
-        .filter(|(name, _)| match name.strip_prefix("blocks.") {
-            Some(rest) => rest.split('.').next().and_then(|l| l.parse::<usize>().ok()).is_some_and(|l| l < layers),
-            None => !name.starts_with("out.") && !name.starts_with("lm_head"),
-        })
-        // `param_list` gives element counts, not shapes; every quantisable
-        // leaf here is a 2-D linear and every f32-in-both-tiers leaf is a 1-D
-        // norm scale, so element count alone decides the width.
-        .map(|(name, numel)| {
-            let two_d = name.ends_with(".weight") && !name.contains("norm") && !name.contains("ln");
-            *numel as u64 * if precision == crate::Precision::Int8 && two_d { 1 } else { 4 }
-        })
-        .sum::<u64>()
+    let dt = if int8 { gpu_core::select::Dtype::I8 } else { gpu_core::select::Dtype::F32 };
+    let shard = qwen3::Shard { start: 0, end: layers, embed: true, head: false, gpu_index: 0 };
+    let seq = u32::try_from(seq).expect("a caption length fits a u32");
+    qwen3::footprint::estimate_vram_bytes(te_cfg, &shard, dt, 1, seq, false, false)
 }
 
 /// The VAE DECODE graph's device footprint - the largest graph this pipeline

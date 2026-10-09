@@ -228,7 +228,7 @@ fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
     let _ = std::fs::remove_file(path);
 }
 
-/// The measured constraint this whole mechanism exists for: on a 24 GiB card
+/// The measured constraint this whole mechanism exists for: on a 24 GB card
 /// an f32 truncated Qwen3-8B text encoder does NOT fit, and the int8 one
 /// does. That is what makes the automatic decision pick int8 for klein-9b -
 /// and it must fall out of the architecture, not out of a remembered number.
@@ -239,9 +239,29 @@ fn the_nine_b_text_encoder_needs_int8_to_fit_a_twenty_four_gib_card() {
     let te = qwen3::QwenConfig::qwen3_8b();
     let f32_bytes = te_bytes(&te, 27, 512, false);
     let i8_bytes = te_bytes(&te, 27, 512, true);
-    assert!(gib(f32_bytes) > 24.0, "an f32 truncated Qwen3-8B must not be claimed to fit a 24 GiB card: {:.1} GiB", gib(f32_bytes));
+    // A "24 GB" card holds 24e9 bytes, and automatic placement keeps 1 GiB of
+    // every card free on top of what a part declares.
+    let card = 24e9 / GIB;
+    assert!(gib(f32_bytes) + 1.0 > card, "an f32 truncated Qwen3-8B must not be claimed to fit a 24 GB card: {:.1} GiB", gib(f32_bytes));
     assert!(gib(i8_bytes) < 16.0, "the int8 shard must fit beside a driver context: {:.1} GiB", gib(i8_bytes));
     assert!(i8_bytes * 2 < f32_bytes, "int8 must be several times smaller: {:.1} vs {:.1} GiB", gib(i8_bytes), gib(f32_bytes));
+}
+
+/// The encoder's charge is the encoder crate's own estimate of the shard the
+/// pipeline builds - the truncated, headless, one-sample shard at the caption
+/// length - so the placer and the build cannot drift apart. A private copy of
+/// that arithmetic in this crate still charged one activation scratch per
+/// layer after qwen3 began sharing one across every layer, and refused a
+/// klein-4B generation on a card with room for it.
+#[test]
+fn the_text_encoder_charge_is_the_encoder_crates_own_estimate() {
+    for te in [qwen3::QwenConfig::qwen3_4b(), qwen3::QwenConfig::qwen3_8b()] {
+        for (int8, dt) in [(false, gpu_core::select::Dtype::F32), (true, gpu_core::select::Dtype::I8)] {
+            let shard = qwen3::Shard { start: 0, end: 27, embed: true, head: false, gpu_index: 0 };
+            let want = qwen3::footprint::estimate_vram_bytes(&te, &shard, dt, 1, 512, false, false);
+            assert_eq!(te_bytes(&te, 27, 512, int8), want, "{} int8={int8}", te.d_model);
+        }
+    }
 }
 
 /// ...and the 4B pipeline's encoder does fit in f32, so its conditioning is
