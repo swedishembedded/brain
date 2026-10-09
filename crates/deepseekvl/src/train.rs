@@ -25,10 +25,9 @@ use std::path::{Path, PathBuf};
 use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
 use data::tokenizer::Tokenizer;
-use gpu_core::{DeviceBuffer, Gpu};
 use imaging::pixels::Rgb8;
-use model::projector::{MlpProjector, ProjectorConfig, PROJECTOR_PIPELINES};
-use model::{cosine_lr, grad_multiplier, Adam};
+use model::projector::ProjectorConfig;
+use model::{cosine_lr, Adam};
 use qwen3::finetune::Trained;
 use qwen3::{Dtype, QwenConfig, IGNORE};
 
@@ -98,116 +97,7 @@ pub struct Hyper {
     pub grad_clip: f32,
 }
 
-/// A projector (an aligner, a generation head) on the device with its
-/// host-side AdamW state: what a trainable `model::projector::MlpProjector`
-/// needs around it.
-pub struct TrainableProjector {
-    gpu: Gpu,
-    projector: MlpProjector,
-    inputs: Vec<DeviceBuffer>,
-    d_out: DeviceBuffer,
-    d_inputs: Vec<DeviceBuffer>,
-    /// `(master weights, m, v)` by parameter name.
-    state: HashMap<String, (Vec<f32>, Vec<f32>, Vec<f32>)>,
-    rows: usize,
-}
-
-impl TrainableProjector {
-    /// `weights` (every [`ProjectorConfig::param_list`] name) for `rows`
-    /// rows of feature streams.
-    pub fn new(cfg: ProjectorConfig, weights: HashMap<String, Vec<f32>>, rows: usize) -> Result<TrainableProjector, String> {
-        let gpu = Gpu::new(PROJECTOR_PIPELINES);
-        let projector = MlpProjector::new(&gpu, cfg, rows as u32, &weights)?;
-        let stream = |_| gpu.storage(rows as u64 * cfg.input_dim as u64);
-        let inputs = (0..cfg.inputs()).map(stream).collect();
-        let d_inputs = (0..cfg.inputs()).map(stream).collect();
-        let d_out = gpu.storage(rows as u64 * cfg.out_dim as u64);
-        let state = weights.into_iter().map(|(n, w)| (n, (w.clone(), vec![0.0; w.len()], vec![0.0; w.len()]))).collect();
-        Ok(TrainableProjector { gpu, projector, inputs, d_out, d_inputs, state, rows })
-    }
-
-    pub fn cfg(&self) -> ProjectorConfig {
-        self.projector.cfg
-    }
-
-    /// The projector's `[rows, out_dim]` output for `streams`
-    /// (`[rows, input_dim]` each).
-    pub fn forward(&self, streams: &[Vec<f32>]) -> Vec<f32> {
-        assert_eq!(streams.len(), self.inputs.len(), "the projector reads {} feature stream(s)", self.inputs.len());
-        for (buf, s) in self.inputs.iter().zip(streams) {
-            self.gpu.write_f32(buf, s);
-        }
-        let refs: Vec<&DeviceBuffer> = self.inputs.iter().collect();
-        self.gpu.submit(&[], &self.projector.forward(&self.gpu, &refs));
-        self.gpu.read(self.projector.out(), self.rows * self.projector.cfg.out_dim as usize)
-    }
-
-    pub fn zero_grads(&self) {
-        self.projector.zero_grads(&self.gpu);
-    }
-
-    /// Accumulate the parameter gradients for `d_rows`, the loss's gradient
-    /// at the output (after a [`Self::forward`] on the same streams), and
-    /// return the gradient at each input stream.
-    pub fn backward(&self, d_rows: &[f32]) -> Vec<Vec<f32>> {
-        self.gpu.write_f32(&self.d_out, d_rows);
-        let refs: Vec<&DeviceBuffer> = self.inputs.iter().collect();
-        let d_refs: Vec<&DeviceBuffer> = self.d_inputs.iter().collect();
-        self.gpu.submit(&[], &self.projector.backward(&self.gpu, &refs, &self.d_out, Some(&d_refs)));
-        let n = self.rows * self.projector.cfg.input_dim as usize;
-        self.d_inputs.iter().map(|b| self.gpu.read(b, n)).collect()
-    }
-
-    /// The accumulated gradient of every parameter.
-    pub fn grads(&self) -> HashMap<String, Vec<f32>> {
-        self.projector.cfg.param_list().into_iter().map(|(n, len)| (n.clone(), self.gpu.read(self.projector.grad(&n), len))).collect()
-    }
-
-    /// The parameters as trained so far.
-    pub fn weights(&self) -> HashMap<String, Vec<f32>> {
-        self.state.iter().map(|(n, (w, _, _))| (n.clone(), w.clone())).collect()
-    }
-
-    /// Replace the parameters (all of them).
-    pub fn set_weights(&mut self, weights: &HashMap<String, Vec<f32>>) {
-        for (name, w) in weights {
-            self.gpu.write_f32(self.projector.param(name), w);
-            self.state.get_mut(name).expect("a parameter of the projector").0 = w.clone();
-        }
-    }
-
-    /// The row-major shape of parameter `name`: `[out, in]` for a weight,
-    /// `[out]` for a bias.
-    pub fn shape(&self, name: &str) -> Vec<u64> {
-        let cfg = self.projector.cfg;
-        let len = self.state[name].0.len() as u64;
-        if name.ends_with(".bias") {
-            return vec![len];
-        }
-        let inputs = if name.starts_with("in") { cfg.input_dim } else { cfg.n_embed } as u64;
-        vec![len / inputs, inputs]
-    }
-
-    /// One AdamW step (1-based `t`) on the accumulated gradients, clipped to
-    /// `grad_clip` in global norm when it is positive.
-    pub fn step(&mut self, t: u32, lr: f32, weight_decay: f32, grad_clip: f32) {
-        self.step_scaled(t, lr, weight_decay, grad_clip, 1.0);
-    }
-
-    /// [`Self::step`] on the accumulated gradients multiplied by `mean`
-    /// (`1/K` after `K` examples), the clip applied to the scaled norm.
-    pub fn step_scaled(&mut self, t: u32, lr: f32, weight_decay: f32, grad_clip: f32, mean: f32) {
-        let grads = self.grads();
-        let sum_sq: f64 = grads.values().flatten().map(|g| (*g as f64).powi(2)).sum();
-        let scale = grad_multiplier(sum_sq, (grad_clip > 0.0).then_some(grad_clip), mean);
-        let adam = Adam::default();
-        for (name, g) in &grads {
-            let (w, m, v) = self.state.get_mut(name).expect("a parameter of the projector");
-            adam.update_slice(t, lr, weight_decay, scale, w, m, v, g);
-            self.gpu.write_f32(self.projector.param(name), w);
-        }
-    }
-}
+pub use model::projector::TrainableProjector;
 
 /// A fine-tune of the composite: the decoder, the aligner, and the splice
 /// between them.
