@@ -41,6 +41,10 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `conv2d_dx_f32` | Conv2dBackward | F32 | tuned | 5.0 | `brain_conv2d_dx` | dense fp32 conv2d input gradient as an implicit GEMM per stride class (only the live taps of each (h mod s, w mod s) class are gathered); the forward's tile and register block |
 | `conv2d_dw_partial_f32` | Conv2dBackward | F32 | tuned | 5.0 | `brain_conv2d_dw_partial` | dense fp32 conv2d weight gradient as an implicit GEMM over a slice of the output positions; 16/32/64 x 64 tile, 32 positions staged per iteration, partial sums to scratch (or straight into dw for one slice) |
 | `conv2d_dw_reduce_f32` | Conv2dBackward | F32 | tuned | 5.0 | `brain_conv2d_dw_reduce` | folds the weight gradient's per-slice partial sums into dw in ascending slice order (deterministic, no atomics) |
+| `bn_stats_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_stats` | BatchNorm batch mean and population variance of an NCHW channel: one 512-thread block per channel, coalesced 16-byte loads, two passes, fixed-order tree reduction |
+| `bn_dstats_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dstats` | BatchNorm backward sums of an NCHW channel (sum dy, sum dy*xhat) into the packed bp layout: one 512-thread block per channel |
+| `bn_dgamma_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dgamma` | BatchNorm gamma gradient (dgamma += sum dy*xhat) of an NCHW channel: one 512-thread block per channel |
+| `bn_dbeta_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dbeta` | BatchNorm beta gradient (dbeta += sum dy) of an NCHW channel: one 512-thread block per channel |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 

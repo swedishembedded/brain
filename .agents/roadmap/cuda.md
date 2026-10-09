@@ -954,6 +954,7 @@ position of the batch). `kernels-cuda/cu/conv2d_f32.cu` replaces all three:
 | forward, implicit GEMM, 16/32/64-channel x 128-position tile, double-buffered 16-deep k slices | `native_upgrade` row for `conv2d` (same uniform, same bindings) | f64 oracle at the fp32 summation bound + bit-exact on integer data at the real geometry (`gpu-core/tests/conv2d_native.rs`) |
 | input gradient, implicit GEMM per stride class (only the live taps of each `(h mod s, w mod s)` class) | `native_upgrade` row for `conv2d_dx` | same |
 | weight gradient, implicit GEMM split over output positions, fixed-order reduction (no atomics) | `Gpu::conv2d_dw_steps`, called by `vision::blocks::Conv` (it needs a scratch plane the WGSL slot cannot carry) | same |
+| BatchNorm per-channel reductions (`bn_stats`, `bn_dstats`, `bn_dgamma`, `bn_dbeta`): one 512-thread block per channel, coalesced 16-byte loads, fixed-order tree (`cu/bn_f32.cu`) | `native_upgrade` rows (same uniform, same bindings) | f64 oracle at the summation bound + bit-exact on exactly-summable integer data at every YOLOv8n BN shape (`gpu-core/tests/bn_native.rs`) |
 
 `BRAIN_NO_NATIVE_KERNELS=1` restores the WGSL kernels (the A/B switch).
 
@@ -967,6 +968,13 @@ arithmetic, 2.0 TFLOP/s. The same step's WGSL conv kernels took 7.5 s of
 device time under the same contention (5.7 s on a quiet card). First-step loss
 is unchanged at the printed precision (50.8109) and 40 steps converge
 (50.81 -> 6.56).
+
+<!-- perf-number: ledger of one measurement session on a P40 -->
+With the BN reductions native as well, on the same card once the neighbouring
+process had finished (per-kind minimum of three `BRAIN_PROFILE` runs): the four
+reductions went from 933 ms to 11.8 ms of the step and the whole step's kernel
+time to about 187 ms. Step-1 loss moved to 50.8131 (the forward's batch
+statistics are re-associated) and is identical run to run.
 
 ## Not delivered - what is still missing
 

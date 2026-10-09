@@ -215,7 +215,36 @@ pub(crate) const ROWS: &[Row] = &[
     // holds them to the fp32 summation-order bound instead of to raw bits.
     Row { slow: "conv2d", target: Target::Named("conv2d_fwd_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false },
     Row { slow: "conv2d_dx", target: Target::Named("conv2d_dx_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_dx_blocks, requires_wgsl_upgrade: false },
+    // BatchNorm's per-channel reductions: one block per channel instead of
+    // one thread. Re-associated sums, gated like the conv rows
+    // (`tests/bn_native.rs`).
+    Row { slow: "bn_stats", target: Target::Named("bn_stats_f32"), bindings: BN_STATS_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "bn_dstats", target: Target::Named("bn_dstats_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "bn_dgamma", target: Target::Named("bn_dgamma_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "bn_dbeta", target: Target::Named("bn_dbeta_f32"), bindings: BN_DBETA_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
 ];
+
+/// `bn_stats.wgsl`'s bindings: params, `x`, then the written `mean` and `var`.
+const BN_STATS_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
+
+/// `bn_dstats.wgsl`'s and `bn_dgamma.wgsl`'s bindings: params, three read
+/// operands, one written output.
+const BN_FOUR_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `bn_dbeta.wgsl`'s bindings: params, `dy`, the accumulated `dbeta`.
+const BN_DBETA_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// The BatchNorm uniform `[N, C, H, W]` with every extent non-zero.
+fn serves_bn(p: &[u32]) -> bool {
+    matches!(p, [n, c, h, w] if *n >= 1 && *c >= 1 && *h >= 1 && *w >= 1)
+        && p.iter().map(|&v| u64::from(v)).product::<u64>() <= u64::from(u32::MAX)
+}
+
+/// One block per channel.
+fn bn_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[1]
+}
 
 /// A native kernel with no WGSL twin: it fuses a chain of dispatches the MODEL
 /// builds, so there is nothing to redirect and a model asks for it by name -

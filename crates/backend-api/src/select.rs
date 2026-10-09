@@ -195,6 +195,14 @@ pub enum Op {
     /// key a persistent kernel on. Shape: `m` = chunk length, `n` = value
     /// width, `k` = key width.
     GatedDeltaChunkLoop,
+    /// BatchNorm's per-channel reductions over an NCHW map - the batch
+    /// statistics (`bn_stats`) and the backward's sums (`bn_dstats`,
+    /// `bn_dgamma`, `bn_dbeta`). The portable kernels give one invocation a
+    /// whole channel; a cooperative form needs a reduction across a workgroup
+    /// per channel, which the native registry keys on this operator.
+    /// [`candidates`] offers only the reference. Shape: `m` = channels, `n` =
+    /// `N*H*W` (the reduction length).
+    BatchNormReduce,
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
     /// [`Op::Conv2d`] shape one dimension up, migrated from
@@ -1128,6 +1136,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         },
         // No portable fused form: see the variant's own doc.
         Op::GatedDeltaChunkLoop => vec![Reference],
+        // No portable cooperative form: see the variant's own doc.
+        Op::BatchNormReduce => vec![Reference],
     };
     let filtered: Vec<KernelVariant> =
         raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();
