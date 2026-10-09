@@ -338,6 +338,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         cards: inv.get_i64("cards").unwrap_or(1).max(1) as usize,
         // A served request is already placed by the residency layer.
         card: None,
+        train_base: None,
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
         seed: inv
             .get_i64("seed")

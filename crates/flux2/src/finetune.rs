@@ -426,15 +426,25 @@ pub fn change_stats(x0: &[f32], refs: &[f32], cin: usize) -> Option<f32> {
 /// having to know that. Training used to hard-code the full f32 encoder
 /// regardless, which meant the context vectors an adapter was fitted against
 /// were not the ones its deployment produces.
-/// The precision the frozen base is held at while training an adapter that
-/// will be deployed at `requested` on the DiT at `dit` - the deployed DiT
-/// precision, resolved as `generate` resolves it, for the device trainer; the
-/// host trainer has no int8 base and always differentiates fp32.
-pub fn base_precision(dit: &str, requested: crate::Precision, trainer: Trainer) -> Result<crate::devgrad::BasePrecision, String> {
-    let effective = crate::pipeline::effective_dit_precision(dit, requested, false)?;
-    Ok(match (trainer, effective) {
-        (Trainer::Device, crate::Precision::Int8) => crate::devgrad::BasePrecision::Int8,
-        _ => crate::devgrad::BasePrecision::F32,
+/// The precision the frozen base is held at while training the DiT at `dit`
+/// under `opts`: `opts.train_base` when the caller named one, otherwise the
+/// deployed DiT precision (`opts.precision`, resolved as `generate` resolves
+/// it) - an adapter is fitted against the base it will be served on. The host
+/// trainer has no int8 base and always differentiates fp32.
+pub fn base_precision(dit: &str, opts: &TrainOpts) -> Result<crate::devgrad::BasePrecision, String> {
+    use crate::devgrad::BasePrecision;
+    if opts.trainer == Trainer::Host {
+        return match opts.train_base {
+            Some(BasePrecision::Int8) => Err("flux2 finetune: the host trainer has no int8 base; use --trainer device".into()),
+            _ => Ok(BasePrecision::F32),
+        };
+    }
+    if let Some(b) = opts.train_base {
+        return Ok(b);
+    }
+    Ok(match crate::pipeline::effective_dit_precision(dit, opts.precision, false)? {
+        crate::Precision::Int8 => BasePrecision::Int8,
+        crate::Precision::F32 => BasePrecision::F32,
     })
 }
 
@@ -669,6 +679,10 @@ pub struct TrainOpts {
     /// it to the enclosing placement scope (see
     /// [`crate::devtrain::TrainerSpec::card`]).
     pub card: Option<u32>,
+    /// The precision the device trainer holds the frozen base at, when the
+    /// caller names one; `None` is the deployed DiT precision
+    /// ([`base_precision`]).
+    pub train_base: Option<crate::devgrad::BasePrecision>,
     /// Square training image size in pixels (multiple of 16; latent grid =
     /// size/16 per side).
     pub size: u32,
@@ -909,7 +923,7 @@ pub fn run(
     }
     if opts.trainer == Trainer::Device {
         progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
-        let base_at = base_precision(&paths.dit, opts.precision, opts.trainer)?;
+        let base_at = base_precision(&paths.dit, opts)?;
         let spec = crate::devtrain::TrainerSpec { card: opts.card, cards: opts.cards.max(1), base: base_at };
         let t = DeviceTrainer::build(&spec, cfg.clone(), opts.rank, host.as_ref().expect("base"))?;
         // The QK-RMSNorm scales are frozen in a LoRA run, so their gain

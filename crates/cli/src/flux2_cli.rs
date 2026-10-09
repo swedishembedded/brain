@@ -142,7 +142,7 @@ const HELP: &str = "brain flux2 <cmd>
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--dit <path>] [--vae <path>] [--text-encoder <path>] [--tokenizer <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
-           [--precision fp32|int8] [--warmup N] [--min-lr X]
+           [--precision fp32|int8] [--train-base fp32|int8] [--warmup N] [--min-lr X]
            [--edit-weight A] [--detail-weight B] [--ref-dropout P]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
@@ -244,6 +244,10 @@ const HELP: &str = "brain flux2 <cmd>
            #                   minutes per step at klein scale)
            #   --cards N       GPUs the device trainer spreads the stack over
            #                   (default 1; klein-9b's fp32 base needs 2)
+           #   --train-base P  precision the device trainer holds the frozen base
+           #                   at (default: the deployed DiT precision - int8 for
+           #                   a .gguf, as generate serves it; fp32 trains against
+           #                   fp32 arithmetic the adapter will not be served with)
            #   --method M      lora (default, alpha/rank) or rslora
            #                   (alpha/sqrt(rank) - does not suppress the update
            #                   as rank grows)
@@ -783,6 +787,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         cards: 1,
         // Filled from the global `--device` once the arguments are parsed.
         card: None,
+        train_base: None,
         size: 512,
         seed: 0,
         save_path: String::new(),
@@ -871,6 +876,13 @@ fn finetune(args: &[String]) -> Result<(), String> {
                     other => return Err(format!("--precision: {other} is not one of fp32, int8")),
                 }
             }
+            "--train-base" => {
+                opts.train_base = Some(match need(i)?.as_str() {
+                    "fp32" | "f32" => flux2::devgrad::BasePrecision::F32,
+                    "int8" | "i8" => flux2::devgrad::BasePrecision::Int8,
+                    other => return Err(format!("--train-base: {other} is not one of fp32, int8")),
+                })
+            }
             "--freeze-a" => {
                 opts.freeze_a = true;
                 i += 1;
@@ -933,7 +945,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
     eprintln!(
         "flux2 finetune: {variant_name} {} trainer, {} frozen base, rank {} ({}) steps {} size {} lr {:.3e} held to step {} then cooled to {:.3e} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
         opts.trainer.name(),
-        match flux2::finetune::base_precision(&paths.dit, opts.precision, opts.trainer)? {
+        match flux2::finetune::base_precision(&paths.dit, &opts)? {
             flux2::devgrad::BasePrecision::Int8 => "int8",
             flux2::devgrad::BasePrecision::F32 => "fp32",
         },
