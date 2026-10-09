@@ -688,16 +688,32 @@ pub(crate) fn measure_compute(gpu: &Gpu) -> Option<f32> {
 fn measure_int8(gpu: &Gpu) -> Option<f32> {
     let inp = gpu.storage(FMA_THREADS as u64);
     let out = gpu.storage(FMA_THREADS as u64);
-    // Four int8 lanes packed per u32; values chosen so the accumulator cannot
-    // overflow i32 across the loop.
+    // Four int8 lanes packed per u32. The probes feed each accumulator back as
+    // the packed operand, so its value only has to be non-trivial.
     let (a, b) = (0x01010101u32, 0x01010101u32);
+    // The instruction itself where the backend compiles native kernels (see
+    // `kernels_cuda`'s `roof_dp4a`): the portable probe reaches such a device
+    // as a dot plus a separate add and would report about half the rate a
+    // native int8 kernel actually gets. The portable probe everywhere else.
+    // The roof is the silicon's, so this does not follow the native-kernel
+    // opt-out.
+    let native = gpu
+        .caps()
+        .arch
+        .compute_capability
+        .and_then(|cc| kernels_cuda::get("roof_dp4a").filter(|k| k.min_cc <= cc))
+        .and_then(|k| gpu.native_kernel(k, NATIVE_DP4A_BINDINGS).map(|id| (id, k.block_dim)));
     let deadline = Instant::now() + roof_budget();
     let mut iters: u32 = 256;
     loop {
         if Instant::now() >= deadline {
             return None;
         }
-        let step = gpu.step(K_DP4A, &[&inp, &out], &[FMA_THREADS, iters, a, b], FMA_THREADS);
+        let params = [FMA_THREADS, iters, a, b];
+        let step = match native {
+            Some((id, block)) => gpu.step_native(id, &[&inp, &out], &params, FMA_THREADS.div_ceil(block))?,
+            None => gpu.step(K_DP4A, &[&inp, &out], &params, FMA_THREADS),
+        };
         let secs = best_of(gpu, std::slice::from_ref(&step), 3, deadline)?;
         if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
             let ops = FMA_THREADS as u64 * iters as u64 * DP4A_OPS_PER_ITER;
@@ -707,6 +723,9 @@ fn measure_int8(gpu: &Gpu) -> Option<f32> {
         iters = (want as u32).max(iters.saturating_mul(2)).min(1 << 20);
     }
 }
+
+/// The native int8 probe's bindings: params, `inp`, `out`.
+const NATIVE_DP4A_BINDINGS: &[backend_api::BindKind] = &[backend_api::BindKind::Uniform, backend_api::BindKind::StorageRead, backend_api::BindKind::StorageReadWrite];
 
 /// Peak native-`f16` FMA rate (B11's `enable f16;` register-typed arithmetic,
 /// NOT the storage-tier `#w=f16` decode, which stays fp32 compute the whole
@@ -850,8 +869,11 @@ mod persist {
     /// from before this existed.
     pub fn store(key: &DeviceKey) -> Option<RoofStore> {
         let dir = cache_dir()?;
+        // The native int8 probe is part of what is measured, so a change to
+        // it re-measures exactly like a change to a portable one.
+        let native = kernels_cuda::get("roof_dp4a").map(|k| k.src);
         let hash = crate::tune::source_fingerprint(
-            &super::PROBE_KERNELS.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+            &super::PROBE_KERNELS.iter().map(|(_, s)| *s).chain(native).collect::<Vec<_>>(),
         );
         let desc = match &key.identity {
             Some(id) => id.name.clone(),

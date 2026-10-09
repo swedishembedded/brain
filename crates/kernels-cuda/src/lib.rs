@@ -414,6 +414,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/softmax_rows_dx.cu"),
     },
     CudaKernel {
+        name: "roof_dp4a",
+        // The int8 roof probe `gpu_core::roof` runs where the backend compiles
+        // native kernels; not a model operator, so asked for by name.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_roof_dp4a",
+        what: "peak packed-int8 dot rate: eight loop-carried __dp4a chains per thread, the int8 roof probe",
+        reported: "native:roof_dp4a",
+        block_dim: 256,
+        tile: (1, 256),
+        shared_bytes: 0,
+        src: include_str!("../cu/roof_dp4a.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8w_dx",
         // A training kernel with no WGSL twin, asked for by name
         // (`gpu_core::Fused::I8wDx`): the input gradient of a linear whose

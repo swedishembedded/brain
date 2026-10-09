@@ -38,6 +38,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `matmul_f32_dx_fma` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_dx_fma` | fp32 dX = dY @ W (optionally accumulated) with fused multiply-adds (training; matmul_f32_dx_reg's tile and contract) |
 | `matmul_f32_dw_fma` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_dw_fma` | fp32 dW += A^T @ B with fused multiply-adds (training; matmul_f32_dw_reg's tile and contract) |
 | `softmax_rows_dx` | Softmax | F32 | tuned | 5.0 | `brain_softmax_rows_dx` | softmax Jacobian dx = y * (dy - sum(dy * y)) over contiguous rows, one warp per row, coalesced 16-byte loads and a shuffle reduction |
+| `roof_dp4a` | MatMul | I8 | tuned | 6.1 | `brain_roof_dp4a` | peak packed-int8 dot rate: eight loop-carried __dp4a chains per thread, the int8 roof probe |
 | `matmul_i8w_dx` | MatMul | I8 | tuned | 5.0 | `brain_matmul_i8w_dx` | fp32 dX = dY @ deq(W) for a packed int8 group-32 weight dequantised while staged, fused multiply-adds; 128x128 tile, 8x8 per thread |
 | `matmul_i8_dp4a` | MatMul | I8 | tuned | 6.1 | `brain_matmul_i8_dp4a` | packed-int8 GEMM (dp4a), dynamic per-row activation scale, group-32 weight scale folded per group in ascending order; 128x128 tile, 8x8 per thread, bit-identical to matmul_i8_dyn |
 | `moe_i8_grouped_mma` | MoeExpertLinear | I8 | tuned | 8.0 | `brain_moe_i8_grouped_mma` | sparse-MoE int8 GEMM over a fused expert bank with each expert's slots grouped, on int8 tensor cores (mma.sync m16n8k32), group-32 weight scale folded per MMA; bit-identical to moe_i8_grouped |

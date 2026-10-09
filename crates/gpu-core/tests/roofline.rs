@@ -77,6 +77,13 @@ fn the_measured_roofs_are_physically_plausible() {
     if let Some(g) = r.int8_gops {
         println!("  int8/fp32 rate ratio: {:.2}x", g / r.gflops);
         assert!(g.is_finite() && g > 0.0, "int8 roof {g}");
+        // A packed four-lane int8 dot retires four multiply-adds where an
+        // fp32 FMA retires one, at most at the same issue rate - 8 ops against
+        // 2. A measured ratio far above 4x is not a fast dot path; it is a
+        // probe whose dot product the compiler hoisted out of its loop (one
+        // backend reported 29x, every "% of int8 roof" then a fifth of the
+        // truth). The margin covers a throttled fp32 measurement.
+        assert!(g < 6.0 * r.gflops, "int8 roof {g} GOP/s is {:.1}x the fp32 FMA roof {}: the dot product folded out of the probe loop", g / r.gflops, r.gflops);
     }
 
     assert!(r.gflops.is_finite() && r.gflops > 0.0, "compute roof {}", r.gflops);
