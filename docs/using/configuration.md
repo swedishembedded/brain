@@ -79,7 +79,6 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | `BRAIN_GPU_CHECKED` | enables extra wgpu-side checked-mode assertions | off |
 | `BRAIN_GPU_MEM_PERF` | switches wgpu's memory allocator to its performance-hint mode | off |
 | `BRAIN_PROFILE` | enables per-kernel dispatch timing, printed at exit | off |
-| `BRAIN_PROFILE_REPS` | `N` > 0: passes that support it (the FLUX.2 DiT forward, the Qwen3 encoder forward, the VAE encode/decode graphs) are also replayed `N` times as one captured program and print each kernel's device time at its per-dispatch minimum over the replays - the ranking to trust on a GPU another process is using, since a time-sliced neighbour only ever lengthens a dispatch. CUDA backend only; other backends say they cannot | off |
 | `BRAIN_VERBOSE` | CLI/serving log verbosity (`0` = quiet) | 0 |
 
 **NPU capability boundary.** brain can run a subset of models on an Intel NPU

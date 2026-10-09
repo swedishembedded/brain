@@ -366,13 +366,23 @@ pub fn device_table<R>(gpu: &Gpu, label: &str, f: impl FnOnce() -> R) -> R {
     out
 }
 
-/// `BRAIN_PROFILE_REPS=N`: how many times [`program_table`] replays a pass.
-/// Unset, empty or `0` turns it off.
-pub fn program_reps() -> Option<u32> {
-    std::env::var("BRAIN_PROFILE_REPS").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|&n| n > 0)
+/// How many times [`program_table`] replays a pass; 0 (the default) is off.
+/// A process-wide option the APPLICATION sets from its own arguments (the
+/// CLI's `--profile-replays N`) - a measurement switch, not a model setting,
+/// and never read from the environment.
+static PROGRAM_REPLAYS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Set how many replays [`program_table`] runs; 0 turns it off.
+pub fn set_program_replays(n: u32) {
+    PROGRAM_REPLAYS.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Under `BRAIN_PROFILE_REPS=N`, print the per-kernel device time of `steps`
+/// The replay count [`set_program_replays`] last set, or `None` when off.
+pub fn program_replays() -> Option<u32> {
+    Some(PROGRAM_REPLAYS.load(std::sync::atomic::Ordering::Relaxed)).filter(|&n| n > 0)
+}
+
+/// With [`set_program_replays`]`(N)`, print the per-kernel device time of `steps`
 /// run as ONE program N times, each dispatch at its minimum over the runs
 /// ([`Gpu::profile_tape`]). That is the table to rank kernels by on a device
 /// another process is using: a time-sliced neighbour inflates whichever
@@ -384,7 +394,7 @@ pub fn program_reps() -> Option<u32> {
 /// buffer it reads is either an input or rewritten before it is read). A
 /// backend that cannot profile a program says so.
 pub fn program_table(gpu: &Gpu, label: &str, steps: &[Step]) {
-    let Some(reps) = program_reps() else { return };
+    let Some(reps) = program_replays() else { return };
     gpu.begin_tape();
     gpu.submit(&[], steps);
     let tape = gpu.end_tape();

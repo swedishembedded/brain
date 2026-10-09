@@ -589,6 +589,16 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--profile-replays" {
+            // Passes that support it print a min-of-N-replays kernel table.
+            match argv.get(i + 1).and_then(|v| v.parse::<u32>().ok()) {
+                Some(n) => gpu_core::profile::set_program_replays(n),
+                None => {
+                    eprintln!("brain: --profile-replays needs a replay count (a non-negative integer)");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
         } else {
             out.push(argv[i].clone());
             i += 1;

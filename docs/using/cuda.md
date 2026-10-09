@@ -95,6 +95,13 @@ conflicts with a few of its math headers; the installer patches them, so
 
 `--device gpu0` still says *which* card; the backend says *how* it is driven.
 
+`--profile-replays N` (a global flag, like `--device`) makes the passes that
+support it - the FLUX.2 DiT forward, the Qwen3 encoder forward, the VAE
+encode and decode graphs - also replay their recorded dispatches `N` times as
+one captured program and print each kernel's device time at its per-dispatch
+minimum over the replays. That is the ranking to trust on a GPU another
+process is using: a time-sliced neighbour only ever lengthens a dispatch.
+
 ## What runs on it
 
 Every kernel is written once, in WGSL. The CUDA backend translates each to CUDA
