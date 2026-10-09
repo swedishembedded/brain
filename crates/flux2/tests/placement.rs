@@ -228,6 +228,57 @@ fn gguf_plan_uses_the_header_cost_and_the_int8_build_precision() {
     let _ = std::fs::remove_file(path);
 }
 
+/// When the card cannot hold the encoder beside the denoiser, the encoder is
+/// planned in a phase BEFORE it - it encodes, is released, and the denoiser is
+/// built in its room - rather than the run being refused. The plan says so
+/// (`TePlacement::before_denoiser`), because the pipeline owes that eviction.
+/// A card with room for both keeps the encoder resident, as before.
+#[test]
+fn an_encoder_that_cannot_stay_beside_the_denoiser_is_planned_to_go_before_it() {
+    /// One card that holds every phase on its own but refuses any plan with
+    /// the encoder resident in the denoiser's phase.
+    struct OneTightCard(std::sync::Mutex<Option<Vec<gpu_core::devices::Need>>>);
+    impl Placer for OneTightCard {
+        fn place(&self, needs: &[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String> {
+            let Some(te) = needs.iter().find(|n| n.name == "te") else {
+                return Ok(vec![gpu_core::devices::Home::Gpu(0); needs.len()]);
+            };
+            if te.phase.is_none() {
+                return Err("encoder and denoiser together exceed the card".to_string());
+            }
+            *self.0.lock().unwrap() = Some(needs.to_vec());
+            Ok(vec![gpu_core::devices::Home::Gpu(0); needs.len()])
+        }
+    }
+    let _serial = PLACER_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    let (cfg, g, path) = tiny_q8_dit();
+    let _ = &g;
+    let recorded = Arc::new(OneTightCard(Mutex::new(None)));
+    install_placer(recorded.clone());
+    let paths = flux2::Paths { dit: path.clone(), vae: "unused".to_string(), te: "unused".to_string(), tokenizer: "unused".to_string() };
+    let vae = vae::VaeConfig::flux2();
+    let (homes, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).expect("the phased plan fits");
+    assert_eq!(homes.of("dit"), Some(gpu_core::devices::Home::Gpu(0)));
+    assert_eq!(te.gpu_index, Some(0));
+    assert!(te.before_denoiser, "the encoder shares the denoiser's card in an earlier phase, so the pipeline must evict it");
+    let needs = recorded.0.lock().unwrap().take().unwrap();
+    let te_need = needs.iter().find(|n| n.name == "te").unwrap();
+    let dit_need = needs.iter().find(|n| n.name == "dit").unwrap();
+    assert!(te_need.phase.unwrap() < dit_need.phase.unwrap(), "the encoder's phase precedes the denoiser's");
+
+    // A placer that takes the first plan keeps the encoder resident.
+    struct Roomy;
+    impl Placer for Roomy {
+        fn place(&self, needs: &[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String> {
+            Ok(vec![gpu_core::devices::Home::Gpu(0); needs.len()])
+        }
+    }
+    install_placer(Arc::new(Roomy));
+    let (_, te) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1).unwrap();
+    assert!(!te.before_denoiser, "with room for both the encoder stays resident");
+    let _ = std::fs::remove_file(path);
+}
+
 /// The measured constraint this whole mechanism exists for: on a 24 GB card
 /// an f32 truncated Qwen3-8B text encoder does NOT fit, and the int8 one
 /// does. That is what makes the automatic decision pick int8 for klein-9b -

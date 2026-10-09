@@ -1027,19 +1027,24 @@ pub struct TePlacement {
     /// whole encoder on whatever device the caller is already on.
     pub gpu_index: Option<usize>,
     pub int8: bool,
+    /// The plan put the encoder on the denoiser's card in an EARLIER phase:
+    /// the card holds either but not both, so the encoder must be released
+    /// after it encodes and before the denoiser is built (and the denoiser
+    /// before the encoder is rebuilt for a later prompt).
+    pub before_denoiser: bool,
 }
 
 impl TePlacement {
     /// The historical default: the whole encoder, here, in f32.
     pub fn here() -> TePlacement {
-        TePlacement { gpu_index: None, int8: false }
+        TePlacement { gpu_index: None, int8: false, before_denoiser: false }
     }
 
     /// The whole encoder, here, at the tier a DiT of `precision` asks for
     /// ([`te_tier_int8`]) - what a caller with no placement in hand should
     /// build when it wants the conditioning `generate` would produce.
     pub fn here_for(precision: crate::Precision) -> TePlacement {
-        TePlacement { gpu_index: None, int8: te_tier_int8(precision) }
+        TePlacement { gpu_index: None, int8: te_tier_int8(precision), before_denoiser: false }
     }
 }
 
@@ -1066,7 +1071,7 @@ fn te_device_override() -> Result<Option<TePlacement>, String> {
         None => (rest, false),
     };
     let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
-    Ok(Some(TePlacement { gpu_index: Some(idx), int8 }))
+    Ok(Some(TePlacement { gpu_index: Some(idx), int8, before_denoiser: false }))
 }
 
 /// Ask the engine where this pipeline's parts go.
@@ -1134,6 +1139,10 @@ pub fn part_needs(
     needs
 }
 
+/// The phase the text encoder is planned in when it cannot stay resident
+/// beside the denoiser (phase 1) and the decode graph (phase 2): before both.
+const TE_PHASE: u32 = 0;
+
 pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, precision: crate::Precision, n_joint: u64, n_out_max: u64, max_batch: u64) -> Result<(gpu_core::devices::Homes, TePlacement), String> {
     let te_cfg = te_config(cfg);
     let layers = *TAP_LAYERS.iter().max().unwrap();
@@ -1149,8 +1158,16 @@ pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, pr
     // The DiT's tier first, then the smaller one as a fallback. For an int8
     // run those are the same value, so the loop tries int8 once.
     let tiers = if te_tier_int8(precision) { [true, true] } else { [false, true] };
-    for int8 in tiers {
-        let te = gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, int8), 0).apart();
+    // At each tier the encoder is first planned resident throughout, and only
+    // where that does not fit, in a phase of its own before the denoiser's:
+    // it encodes the prompt and is released before the denoiser is built.
+    // Keeping it resident is preferred - a pipeline that serves many prompts
+    // would otherwise rebuild both models for every one.
+    for (int8, before_denoiser) in tiers.into_iter().flat_map(|t| [(t, false), (t, true)]) {
+        let mut te = gpu_core::devices::Need::sized("te", te_bytes(&te_cfg, layers, cfg.txt_len as u64, int8), 0).apart();
+        if before_denoiser {
+            te = te.phase(TE_PHASE);
+        }
         let mut all = vec![dit.clone(), te];
         all.extend(vae_parts.iter().cloned());
         let homes = match gpu_core::devices::place(&all) {
@@ -1168,7 +1185,10 @@ pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, pr
         // building the whole one on the same card is a plan that was never
         // about the model that got built, and it OOMs.)
         if let gpu_core::devices::Home::Gpu(i) = t {
-            return Ok((homes, TePlacement { gpu_index: Some(i as usize), int8 }));
+            // Phased onto another card it never meets the denoiser, so there
+            // is nothing to take turns over.
+            let shares = before_denoiser && homes.of("dit") == Some(t);
+            return Ok((homes, TePlacement { gpu_index: Some(i as usize), int8, before_denoiser: shares }));
         }
         return Ok((homes, TePlacement::here()));
     }
@@ -1366,7 +1386,13 @@ pub struct Pipeline {
     /// `max_batch` stays answerable while the denoiser is evicted.
     max_batch: u32,
     tok: data::qwen_tokenizer::QwenBpe,
-    te: qwen3::Qwen,
+    /// The text encoder, held behind an option for the same reason as the
+    /// denoiser: when the plan could not keep it beside the denoiser
+    /// (`TePlacement::before_denoiser`), it is released after each encode and
+    /// rebuilt by `reload_te` for the next prompt.
+    te: std::sync::Mutex<Option<qwen3::Qwen>>,
+    reload_te: Box<dyn Fn() -> Result<qwen3::Qwen, String> + Send + Sync>,
+    te_before_denoiser: bool,
     vae_cfg: vae::VaeConfig,
     vae_tensors: std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>,
     /// Where this pipeline's parts were placed. Held because the VAE is built
@@ -1623,10 +1649,18 @@ impl Pipeline {
                 None => "whole encoder beside the DiT".to_string(),
             }
         );
-        let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
         let max_batch = max_batch.max(1);
-        let model = homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu))??;
-        let dit_max_batch = model.max_batch();
+        // When the encoder takes its turn on the denoiser's card first, the
+        // denoiser is built only after the first prompt is encoded - by
+        // `reload_dit`, on first use.
+        let model = match te_place.before_denoiser {
+            true => None,
+            false => {
+                let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
+                Some(homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu))??)
+            }
+        };
+        let dit_max_batch = model.as_ref().map_or(max_batch, Flux2Model::max_batch);
         // The denoiser may be evicted by its own decode (the plan charged
         // them to take turns on one card); this rebuilds it, from the same
         // source, placement and precision the build just used.
@@ -1643,6 +1677,11 @@ impl Pipeline {
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
         let te = build_text_encoder_on(cfg, paths, te_place)?;
+        let reload_te = {
+            let cfg = cfg.clone();
+            let paths = paths.clone();
+            Box::new(move || build_text_encoder_on(&cfg, &paths, te_place)) as Box<dyn Fn() -> Result<qwen3::Qwen, String> + Send + Sync>
+        };
         // ONE device for every VAE graph this pipeline will ever build. Each
         // encode/decode used to stand up its own - recompiling every kernel,
         // and (on a two-card box) re-resolving the ambient selection, which
@@ -1670,11 +1709,13 @@ impl Pipeline {
 
         Ok(Pipeline {
             cfg: cfg.clone(),
-            model: std::sync::Mutex::new(Some(model)),
+            model: std::sync::Mutex::new(model),
             reload_dit,
             max_batch: dit_max_batch,
             tok,
-            te,
+            te: std::sync::Mutex::new(Some(te)),
+            reload_te,
+            te_before_denoiser: te_place.before_denoiser,
             vae_cfg,
             vae_tensors: map,
             bn_mean,
@@ -1700,7 +1741,21 @@ impl Pipeline {
         check_prompt_length(ids.len(), self.cfg.txt_len)?;
         let content = ids.len();
         ids.resize(self.cfg.txt_len, PAD_TOKEN);
-        let taps = self.te.encode_hiddens_padded(&ids, content, &TAP_LAYERS);
+        let mut slot = self.te.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            // Released after the previous prompt: the denoiser holds its room
+            // now, and has to give it back first.
+            if self.te_before_denoiser {
+                *self.model.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            *slot = Some((self.reload_te)()?);
+            eprintln!("flux2: text encoder rebuilt for this prompt (it takes turns with the denoiser on one card)");
+        }
+        let te = slot.as_ref().expect("just made resident");
+        let taps = gpu_core::profile::device_table(te.gpu(), "flux2 text encoder", || te.encode_hiddens_padded(&ids, content, &TAP_LAYERS));
+        if self.te_before_denoiser {
+            *slot = None;
+        }
         let d = taps[0].len() / self.cfg.txt_len;
         let mut ctx = Vec::with_capacity(self.cfg.txt_len * 3 * d);
         for row in 0..self.cfg.txt_len {
@@ -1770,7 +1825,7 @@ impl Pipeline {
         let mut m = self.model.lock().unwrap_or_else(|e| e.into_inner());
         if m.is_none() {
             *m = Some((self.reload_dit)()?);
-            eprintln!("flux2: denoiser reloaded after decode eviction");
+            eprintln!("flux2: denoiser built in its turn on the card");
         }
         Ok(m)
     }
@@ -1945,11 +2000,12 @@ impl Denoiser for Pipeline {
         &self.cfg
     }
     // The text encoder and the DiT print their per-kernel device tables under
-    // `BRAIN_PROFILE` (`gpu_core::profile::device_table`); the VAE graphs time
+    // `BRAIN_PROFILE` (`gpu_core::profile::device_table`, the encoder's inside
+    // `Pipeline::encode_prompt`, where it is resident); the VAE graphs time
     // themselves on their own handles (`Pipeline::decode_tokens`,
     // `Pipeline::encode_image_whole`). Otherwise these are plain calls.
     fn encode_prompt(&self, prompt: &str) -> Result<Vec<f32>, String> {
-        gpu_core::profile::device_table(self.te.gpu(), "flux2 text encoder", || Pipeline::encode_prompt(self, prompt))
+        Pipeline::encode_prompt(self, prompt)
     }
     fn encode_image(&self, chw: &[f32], h: u32, w: u32) -> Result<Vec<f32>, String> {
         Pipeline::encode_image(self, chw, h, w)
