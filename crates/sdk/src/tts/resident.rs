@@ -58,9 +58,14 @@ impl ResidentTts {
     pub fn speak_stream(&self, text: &str, opts: TtsOptions, cancel: &CancelToken, on_audio: &mut dyn FnMut(&[f32])) -> Result<Audio> {
         let gen_opts = opts.to_gen_opts();
         let mut engine = self.engine.lock().map_err(|_| Error::Backend("qwen3tts: the resident engine lock is poisoned".to_string()))?;
-        let samples = engine
-            .speak_streaming(text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm))
-            .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+        let samples = match &opts.voice {
+            Some((reference, reference_text)) => {
+                let reference = reference.to_str().ok_or_else(|| Error::Backend(format!("{} is not UTF-8", reference.display())))?;
+                engine.clone_voice_streaming(text, reference, reference_text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm))
+            }
+            None => engine.speak_streaming(text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm)),
+        }
+        .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
         Ok(Audio::new(samples, SAMPLE_RATE))
     }
 

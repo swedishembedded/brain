@@ -139,3 +139,45 @@ fn a_streamed_utterance_is_the_same_audio_and_its_first_sound_comes_before_it_is
     assert!(first_sound.unwrap() < finished / 2, "first sound {first_sound:?} of {finished:?}");
     assert!(engine.last_timings().first_audio.is_some());
 }
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (norm(a) * norm(b))
+}
+
+#[test]
+fn a_pinned_voice_holds_the_speaker_tighter_than_the_free_voice_which_already_varies_little_across_seeds() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let never = CancelToken::default();
+    let mut engine = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    let sampled = |seed: u64| GenOpts { max_frames: 60, seed, sampling: SamplingRequest::default(), ..GenOpts::default() };
+
+    // The reference is the engine's own rendering: a synthetic voice.
+    let reference = engine.speak(TEXT, "english", &sampled(1), &never, &mut |_, _| {}).unwrap();
+    let dir = std::env::temp_dir().join(format!("qwen3tts-voice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav = dir.join("reference.wav").to_string_lossy().into_owned();
+    audio::wav::write(&wav, &reference, 24_000).unwrap();
+
+    let encoder = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
+    let embed = |pcm: &[f32]| encoder.embed_wav(pcm, 24_000);
+    let mut pinned = Vec::new();
+    let mut free = Vec::new();
+    for seed in 2..=5u64 {
+        let take = engine.clone_voice_streaming(TEXT, &wav, "", "english", &sampled(seed), &never, &mut |_, _| {}).unwrap();
+        pinned.push(embed(&take));
+        free.push(embed(&engine.speak(TEXT, "english", &sampled(seed), &never, &mut |_, _| {}).unwrap()));
+    }
+    let reference = embed(&reference);
+    let mean = |set: &[Vec<f32>]| set.iter().map(|e| cosine(e, &reference)).sum::<f32>() / set.len() as f32;
+    eprintln!("speaker similarity to the reference: pinned {:.3}, free {:.3}", mean(&pinned), mean(&free));
+    // Measured on the 0.6B base: the free voice already sits near the reference
+    // (the sampling seed moves delivery far more than the speaker), and pinning
+    // holds it closer still. What matters for takes of one voice is that the
+    // pinned ones are both close and closer than the free ones.
+    assert!(mean(&pinned) > mean(&free), "pinning must hold the speaker: pinned {} free {}", mean(&pinned), mean(&free));
+    assert!(mean(&pinned) > 0.95, "pinned takes sound like the reference: {}", mean(&pinned));
+    let _ = std::fs::remove_dir_all(&dir);
+}

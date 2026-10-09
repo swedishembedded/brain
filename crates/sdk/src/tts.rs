@@ -138,17 +138,28 @@ pub struct TtsOptions {
     seed: Option<u64>,
     variant: Option<String>,
     n_timesteps: Option<usize>,
+    voice: Option<(std::path::PathBuf, String)>,
 }
 
 impl Default for TtsOptions {
     fn default() -> TtsOptions {
-        TtsOptions { lang: "english".to_string(), max_frames: 256, temperature: None, top_k: None, top_p: None, repetition_penalty: None, seed: None, variant: None, n_timesteps: None }
+        TtsOptions { lang: "english".to_string(), max_frames: 256, temperature: None, top_k: None, top_p: None, repetition_penalty: None, seed: None, variant: None, n_timesteps: None, voice: None }
     }
 }
 
 impl TtsOptions {
     pub fn new() -> TtsOptions {
         TtsOptions::default()
+    }
+
+    /// Speak in the voice of the recording `reference` (a resident Qwen3-TTS
+    /// speaker only): its speaker is pinned, so takes with different seeds vary
+    /// in delivery and not in who is speaking. With the words of the recording,
+    /// `reference_text`, the voice is also given as an in-context example; with
+    /// an empty string only the speaker is taken from it.
+    pub fn voice(mut self, reference: impl Into<std::path::PathBuf>, reference_text: impl Into<String>) -> Self {
+        self.voice = Some((reference.into(), reference_text.into()));
+        self
     }
 
     pub fn lang(mut self, lang: impl Into<String>) -> Self {

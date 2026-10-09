@@ -81,3 +81,25 @@ fn only_qwen3_tts_has_a_resident_form() {
     let Some(pipe) = pipeline() else { return };
     assert!(pipe.resident().is_ok());
 }
+
+#[test]
+fn a_pinned_voice_speaks_every_seed_and_a_missing_reference_is_an_error() {
+    let _serial = brain_testutil::env_lock();
+    let Some(pipe) = pipeline() else { return };
+    let resident = pipe.resident().unwrap();
+    let dir = std::env::temp_dir().join(format!("sdk-voice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let reference = dir.join("reference.wav");
+    resident.speak_with(TEXT, TtsOptions::new().seed(1)).unwrap().save(&reference).unwrap();
+
+    let a = resident.speak_with(TEXT, TtsOptions::new().seed(2).voice(&reference, "")).unwrap();
+    let b = resident.speak_with(TEXT, TtsOptions::new().seed(3).voice(&reference, "")).unwrap();
+    assert!(!a.samples().is_empty() && !b.samples().is_empty());
+    assert_ne!(a.samples(), b.samples(), "different seeds are different takes");
+
+    let missing = dir.join("nothing.wav");
+    let err = resident.speak_with(TEXT, TtsOptions::new().voice(&missing, "")).unwrap_err();
+    assert!(err.to_string().contains("nothing.wav"), "{err}");
+    resident.speak_with(TEXT, TtsOptions::new().seed(1)).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

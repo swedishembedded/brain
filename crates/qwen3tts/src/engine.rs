@@ -347,6 +347,42 @@ impl ResidentEngine {
         let language_id = self.sp.language_id(lang);
         let (role_ids, text_ids) = self.text_ids(text)?;
         let prompt = self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id);
+        self.stream_prompt(&prompt, opts, cancel, on_audio, began)
+    }
+
+    /// [`Self::clone_voice`] with the sound handed out as it is made, as
+    /// [`Self::speak_streaming`] does: the same reference conditioning, cached
+    /// per `(ref_wav, ref_text)`, so a voice is fixed and only the sampling
+    /// varies between takes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_voice_streaming(
+        &mut self,
+        text: &str,
+        ref_wav: &str,
+        ref_text: &str,
+        lang: &str,
+        opts: &GenOpts,
+        cancel: &CancelToken,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+    ) -> Result<Vec<f32>, String> {
+        if !matches!(self.codec, CodecPath::Device(_)) {
+            return self.clone_voice(text, ref_wav, ref_text, lang, opts, cancel, on_audio);
+        }
+        let began = std::time::Instant::now();
+        let prompt = self.clone_prompt(text, ref_wav, ref_text, lang)?;
+        self.stream_prompt(&prompt, opts, cancel, on_audio, began)
+    }
+
+    /// Generate `prompt` and hand out its sound as the codes grow (device
+    /// codec only; see [`Self::speak_streaming`]).
+    fn stream_prompt(
+        &mut self,
+        prompt: &Prompt,
+        opts: &GenOpts,
+        cancel: &CancelToken,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+        began: std::time::Instant,
+    ) -> Result<Vec<f32>, String> {
         let opts = &opts.clone().resolved_with(self.gencfg);
         let CodecPath::Device(codec) = &self.codec else { unreachable!("checked above") };
 
@@ -368,7 +404,7 @@ impl ResidentEngine {
                 *pcm = all;
             }
         };
-        let codes = self.core.generate(&self.sp, &prompt, opts, cancel, &mut |codes| {
+        let codes = self.core.generate(&self.sp, prompt, opts, cancel, &mut |codes| {
             if codes.len() / 16 >= next_at {
                 emit(codes, &mut pcm);
                 next_at *= 3;
@@ -429,6 +465,14 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        let prompt = self.clone_prompt(text, ref_wav, ref_text, lang)?;
+        self.run_prompt(&prompt, opts, cancel, on_audio)
+    }
+
+    /// The prompt that speaks `text` in the voice of `(ref_wav, ref_text)`:
+    /// the speaker's x-vector alone when `ref_text` is empty, an in-context
+    /// prompt with the reference's own codes otherwise.
+    fn clone_prompt(&mut self, text: &str, ref_wav: &str, ref_text: &str, lang: &str) -> Result<Prompt, String> {
         let language_id = self.sp.language_id(lang);
         self.ensure_ref(ref_wav, ref_text)?;
         let cached = self.ref_cache.as_ref().expect("ensure_ref populated the cache");
@@ -447,7 +491,7 @@ impl ResidentEngine {
             }
             None => self.core.xvector(&self.sp, &role_ids, &text_ids, Some(&xvec), language_id),
         };
-        self.run_prompt(&prompt, opts, cancel, on_audio)
+        Ok(prompt)
     }
 
     /// Populate [`Self::ref_cache`] for `(ref_wav, ref_text)` if it does not
