@@ -41,6 +41,14 @@ sensor model with the function B3 and B4 use (`rir_arms.apply_sensor`, the same 
 leaves the luma alone. One of the two is required. Outputs without a record (made by other means) are mapped by the
 default crop or taken as the whole frame, by their size. Frames without an output are counted, never invented.
 
+`gate` runs the label-preservation gates of rir_gates over an ingested arm: for every frame the edge correlation
+inside each ground-truth box against the 10th percentile of the same quantity over the real pairs of split T, and the
+global alignment shift (phase correlation, 2 px); with `--sam2` also the SAM 2 mask IoU of the box on the RGB and on
+the synthetic IR (the resident D-Bus segmenter of rir_sam2, made from `--dbus-address` and `--brain-py`), for the
+boxes that passed the model-free gates. Failing frames are written to `rejects.jsonl` with their reasons and leave
+`manifest.jsonl` (the file `rir_pack.py` packs) unless `--keep-rejected`; `manifest.all.jsonl` keeps the whole arm and
+`gate-stats.json` is the per-arm rejection statistics rir_decide reads for K4.
+
 Modes (the instruction and the source image):
 
     neutral   the neutral caption; the RGB frame
@@ -67,6 +75,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -80,6 +89,8 @@ import numpy as np
 import rir_arms as A
 import rir_captions as C
 import rir_data as D
+import rir_gates as G
+import rir_sam2 as SAM2
 
 OUT_MULTIPLE = 16
 OOM_PATTERN = re.compile(r"no GPU placement fits|out of memory|\bOOM\b|OUT_OF_MEMORY", re.IGNORECASE)
@@ -534,6 +545,91 @@ def ingest(req: IngestRequest) -> dict:
     return stats
 
 
+# ------------------------------------------------------------------------ gate
+
+
+@dataclass(frozen=True)
+class GateRequest:
+    doc: dict  # a splits.json document: the frames' RGB and the real pairs of split T
+    arm_dir: str  # <arms>/<arm>, as ingest wrote it
+    arm: str
+    classes: tuple
+    mask_iou: G.MaskIou | None = None  # the SAM 2 gate (G.segmenter_mask_iou); None: that gate is absent
+    keep_rejected: bool = False
+    reference_limit: int = 300  # real split-T frames the edge threshold is read off
+    max_shift_px: float = 2.0
+    seed: int = 1
+
+
+def _read_jsonl(path: str) -> list[dict]:
+    with open(path) as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def _write_jsonl(path: str, rows: list[dict]) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    os.replace(tmp, path)
+
+
+def _reference(req: GateRequest, datasets: set[str]) -> G.Reference:
+    pairs = [r for r in req.doc["frames"] if r["split"] == "T" and r["usable"] and r["dataset"] in datasets]
+    if not pairs:
+        raise ValueError(f"no usable split T frames of {sorted(datasets)}: the edge threshold is the 10th percentile "
+                         "of the real pairs of split T")
+    return G.reference_distribution(G.manifest_pairs(pairs, req.classes, req.reference_limit, req.seed))
+
+
+def _gate_record(entry: dict, gate: G.ImageGate) -> dict:
+    return {"dataset": entry["dataset"], "id": entry["id"], "image": entry["image"], "reasons": list(gate.reasons),
+            "shift": None if gate.shift is None else list(gate.shift),
+            "boxes": [{"box": list(b.box), "edge_correlation": b.edge_correlation, "mask_iou": b.mask_iou,
+                       "reasons": list(b.reasons)} for b in gate.boxes]}
+
+
+def gate(req: GateRequest) -> dict:
+    """Run the label-preservation gates over an ingested arm.
+
+    Every frame gets the model-free gates (box edge correlation against the 10th percentile of the real pairs of
+    split T, global shift by phase correlation) and, with `mask_iou`, the mask gate on the boxes that passed them.
+    Writes `rejects.jsonl` (reason per failing frame), `gate-stats.json` (rir_gates.RejectionStats plus the
+    threshold and the counts; the file rir_decide reads for K4) and prunes `manifest.jsonl` to the passing frames
+    unless `keep_rejected`. The whole arm is kept in `manifest.all.jsonl`, which a rerun starts from."""
+    manifest, everything = (os.path.join(req.arm_dir, n) for n in ("manifest.jsonl", "manifest.all.jsonl"))
+    if not os.path.isfile(everything):
+        shutil.copyfile(manifest, everything)
+    entries = _read_jsonl(everything)
+    frames = {(r["dataset"], r["id"]): r for r in req.doc["frames"]}
+    reference = _reference(req, {e["dataset"] for e in entries})
+    config = G.GateConfig(edge_threshold=reference.threshold, max_shift_px=req.max_shift_px)
+    stats, rejects, kept = G.RejectionStats(req.arm), [], []
+    for entry in entries:
+        row = frames.get((entry["dataset"], entry["id"]))
+        if row is None:
+            raise ValueError(f"{entry['dataset']}/{entry['id']} of the arm is not a frame of the splits")
+        rgb = D.read_rgb(row)
+        rgb = crop_image(rgb, Crop.from_dict(entry["crop"])) if "crop" in entry else rgb
+        ir = cv2.imread(os.path.join(req.arm_dir, entry["image"]), cv2.IMREAD_GRAYSCALE)
+        if ir is None:
+            raise FileNotFoundError(os.path.join(req.arm_dir, entry["image"]))
+        result = G.check_image(rgb, ir, [tuple(b) for b in entry["boxes"]], config, mask_iou=req.mask_iou)
+        stats.add(result)
+        if result.passed:
+            kept.append(entry)
+        else:
+            rejects.append(_gate_record(entry, result))
+    _write_jsonl(os.path.join(req.arm_dir, "rejects.jsonl"), rejects)
+    _write_jsonl(manifest, entries if req.keep_rejected else kept)
+    report = {**stats.to_dict(), "edge_threshold": reference.threshold, "reference_boxes": reference.n,
+              "reference_percentile": reference.percentile, "max_shift_px": req.max_shift_px,
+              "mask_gate": req.mask_iou is not None, "keep_rejected": req.keep_rejected, "kept": len(kept),
+              "excluded": 0 if req.keep_rejected else len(rejects)}
+    _write_json_atomic(os.path.join(req.arm_dir, "gate-stats.json"), report)
+    return report
+
+
 # ------------------------------------------------------------------------- CLI
 
 
@@ -604,15 +700,50 @@ def _run_ingest(a, ap) -> int:
     return 0
 
 
+def _add_gate(sub) -> None:
+    g = sub.add_parser("gate", help="label-preservation gates over an ingested arm; rejected frames leave the packed arm")
+    g.add_argument("--splits", required=True, help="splits.json: the frames' RGB and the real pairs of split T")
+    g.add_argument("--arm", required=True, help="arm name; the arm is read from <out>/<arm>")
+    g.add_argument("--out", required=True, help="the arms directory")
+    g.add_argument("--keep-rejected", action="store_true", help="keep the rejected frames in manifest.jsonl (they are still listed)")
+    g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
+    g.add_argument("--reference-limit", type=int, default=GateRequest.reference_limit,
+                   help="real split-T frames the edge threshold is read off")
+    g.add_argument("--max-shift", type=float, default=GateRequest.max_shift_px, help="global shift limit in pixels")
+    g.add_argument("--seed", type=int, default=1, help="which split-T frames form the reference")
+    g.add_argument("--sam2", action="store_true", help="also gate the mask IoU of SAM 2 on RGB and IR (resident D-Bus segmenter)")
+    g.add_argument("--dbus-address", help="bus address of the resident `brain serve --dbus` (with --sam2)")
+    g.add_argument("--brain-py", help="location of brain-py (with --sam2; default: the repository's)")
+    g.add_argument("--sam2-variant", default="tiny", help="SAM 2 variant the server loaded")
+
+
+def _run_gate(a, ap) -> int:
+    if a.sam2 and not a.dbus_address:
+        ap.error("--sam2 needs --dbus-address (the bus of the resident segmenter)")
+    segmenter = SAM2.DbusSegmenter(a.dbus_address, a.sam2_variant, a.brain_py) if a.sam2 else None
+    try:
+        request = GateRequest(_load_json(a.splits), os.path.join(a.out, a.arm), a.arm, _csv(a.classes),
+                              None if segmenter is None else G.segmenter_mask_iou(segmenter), a.keep_rejected,
+                              a.reference_limit, a.max_shift, a.seed)
+        stats = gate(request)
+    finally:
+        if segmenter is not None:
+            segmenter.close()
+    print(json.dumps({k: stats[k] for k in ("arm", "n_images", "n_failed", "fail_fraction", "by_reason", "kept", "excluded")}),
+          file=sys.stderr)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="rir_synth.py", description="Generate, ingest and gate synthetic IR for the frames of a split.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     _add_generate(sub)
     _add_ingest(sub)
+    _add_gate(sub)
     a = ap.parse_args(argv)
     try:
-        return {"generate": _run_generate, "ingest": _run_ingest}[a.cmd](a, ap)
-    except (GenerationError, ConfigMismatch, ValueError, FileNotFoundError) as e:
+        return {"generate": _run_generate, "ingest": _run_ingest, "gate": _run_gate}[a.cmd](a, ap)
+    except (RuntimeError, ValueError, OSError) as e:
         print(f"rir_synth {a.cmd}: {e}", file=sys.stderr)
         return 1
 

@@ -27,9 +27,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import synth  # noqa: E402,F401  (sets the OpenCV log level before cv2 loads)
 import cv2  # noqa: E402
+import test_gates as TG  # noqa: E402
 import rir_arms as A  # noqa: E402
 import rir_captions as C  # noqa: E402
 import rir_data as D  # noqa: E402
+import rir_gates as G  # noqa: E402
 import rir_synth as S  # noqa: E402
 
 W, H = 70, 50  # not multiples of 16: the crop is 64 x 48 at (3, 1)
@@ -500,6 +502,146 @@ class IngestCli(World):
         self.write_json("sensor-model.json", {"datasets": {"d": MODEL.to_dict()}})
         self.assertEqual(S.main([*base[:-2], "--out", self.path("arms2"), "--sensor-model", self.path("sensor-model.json")]), 0)
         self.assertTrue(os.path.isfile(self.path("arms2/c2/manifest.jsonl")))
+
+
+GATE_BOXES = [{"class": "person", "x1": 30.0, "y1": 30.0, "x2": 110.0, "y2": 120.0},
+              {"class": "car", "x1": 140.0, "y1": 60.0, "x2": 230.0, "y2": 160.0}]
+
+
+class GateWorld(unittest.TestCase):
+    """Real pairs in split T, and an ingested arm of four synthetic frames with planted failures:
+    g0 faithful, g1 shifted by 7 px, g2 a foreign texture inside the second box, g3 faithful."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        frames = []
+        for k in range(8):  # real pairs: related but imperfect, as in test_gates.real_pairs
+            gray = TG.blocks(100 + k)
+            write_png(self.path(f"t{k}_rgb.png"), TG.to_rgb(gray))
+            write_png(self.path(f"t{k}_ir.png"), TG.to_ir(gray, invert=bool(k % 2), noise=6.0, seed=k))
+            frames.append(self.row(f"t{k}", "T", f"t{k}_rgb.png", f"t{k}_ir.png"))
+        self.scenes = {f"g{k}": TG.blocks(7 + k) for k in range(4)}
+        irs = {"g0": TG.to_ir(self.scenes["g0"]),
+               "g1": TG.to_ir(self.scenes["g1"], shift=(0, 7)),
+               "g2": TG.to_ir(self.scenes["g2"]),
+               "g3": TG.to_ir(self.scenes["g3"])}
+        x1, y1, x2, y2 = (int(v) for v in list(GATE_BOXES[1].values())[1:])
+        irs["g2"][y1:y2, x1:x2] = TG.to_ir(TG.blocks(99))[y1:y2, x1:x2]
+        self.arm_dir = os.path.join(self.dir, "arms", "c2")
+        os.makedirs(self.arm_dir)
+        crop = S.Crop(0, 0, TG.W, TG.H, TG.W, TG.H)
+        with open(os.path.join(self.arm_dir, "manifest.jsonl"), "w") as fh:
+            for fid, ir in irs.items():
+                write_png(self.path(f"{fid}_rgb.png"), TG.to_rgb(self.scenes[fid]))
+                frames.append(self.row(fid, "S", f"{fid}_rgb.png", f"{fid}_rgb.png"))
+                write_png(os.path.join(self.arm_dir, f"d_{fid}.png"), ir)
+                fh.write(json.dumps({"arm": "c2", "dataset": "d", "id": fid, "sequence_id": f"s{fid}", "split": "S",
+                                     "day_night": "day", "image": f"d_{fid}.png", "width": TG.W, "height": TG.H,
+                                     "boxes": [[0, 30.0, 30.0, 110.0, 120.0], [1, 140.0, 60.0, 230.0, 160.0]],
+                                     "crop": crop.to_dict()}) + "\n")
+        self.doc = {"frames": frames}
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    def row(self, fid, split, rgb, ir):
+        return {"id": fid, "dataset": "d", "rgb": self.path(rgb), "ir": self.path(ir), "boxes": GATE_BOXES,
+                "sequence_id": f"s{fid}", "split": split, "usable": True, "day_night": "day", "width": TG.W, "height": TG.H}
+
+    def gate(self, mask_iou=None, keep_rejected=False, **kw):
+        return S.gate(S.GateRequest(self.doc, self.arm_dir, "c2", ("person", "car", "bicycle"), mask_iou=mask_iou,
+                                    keep_rejected=keep_rejected, **kw))
+
+    def ids(self, name):
+        with open(os.path.join(self.arm_dir, name)) as fh:
+            return [json.loads(line)["id"] for line in fh]
+
+
+
+class Gate(GateWorld):
+    def test_planted_failures_are_rejected_with_their_reason_and_faithful_frames_pass(self):
+        stats = self.gate()
+        with open(os.path.join(self.arm_dir, "rejects.jsonl")) as fh:
+            rejects = {r["id"]: r for r in map(json.loads, fh)}
+        self.assertEqual(sorted(rejects), ["g1", "g2"])
+        self.assertIn("global_shift", rejects["g1"]["reasons"])
+        self.assertEqual(rejects["g2"]["reasons"], ["box_edge_correlation"])
+        self.assertEqual([b["reasons"] for b in rejects["g2"]["boxes"]], [[], ["box_edge_correlation"]])
+        self.assertEqual((stats["n_images"], stats["n_failed"]), (4, 2))
+
+    def test_rejected_frames_are_excluded_from_the_manifest_that_pack_reads_by_default(self):
+        self.gate()
+        self.assertEqual(self.ids("manifest.jsonl"), ["g0", "g3"])
+        self.assertEqual(self.ids("manifest.all.jsonl"), ["g0", "g1", "g2", "g3"])
+
+    def test_keeping_the_rejected_leaves_the_manifest_whole_and_still_lists_the_rejects(self):
+        self.gate(keep_rejected=True)
+        self.assertEqual(self.ids("manifest.jsonl"), ["g0", "g1", "g2", "g3"])
+        self.assertEqual(self.ids("rejects.jsonl"), ["g1", "g2"])
+
+    def test_gating_again_starts_from_the_whole_arm_not_from_the_pruned_manifest(self):
+        self.gate()
+        self.gate(keep_rejected=True)
+        self.assertEqual(self.ids("manifest.jsonl"), ["g0", "g1", "g2", "g3"])
+
+    def test_the_statistics_are_the_json_rir_decide_reads_for_k4(self):
+        stats = self.gate()
+        with open(os.path.join(self.arm_dir, "gate-stats.json")) as fh:
+            self.assertEqual(json.load(fh), stats)
+        self.assertEqual(stats["arm"], "c2")
+        self.assertAlmostEqual(stats["fail_fraction"], 0.5)
+        self.assertEqual(stats["by_reason"]["global_shift"], 1)
+        self.assertEqual((stats["kept"], stats["excluded"]), (2, 2))
+        self.assertFalse(stats["mask_gate"])
+
+    def test_the_edge_threshold_is_the_tenth_percentile_of_the_real_pairs_of_split_t_only(self):
+        stats = self.gate()
+        t_rows = [r for r in self.doc["frames"] if r["split"] == "T"]
+        ref = G.reference_distribution(G.manifest_pairs(t_rows, ("person", "car", "bicycle")))
+        self.assertEqual(stats["edge_threshold"], ref.threshold)
+        self.assertEqual((stats["reference_boxes"], stats["reference_percentile"]), (ref.n, 10))
+
+    def test_without_real_pairs_in_split_t_there_is_no_threshold_and_that_is_an_error(self):
+        self.doc["frames"] = [r for r in self.doc["frames"] if r["split"] != "T"]
+        with self.assertRaisesRegex(ValueError, "split T"):
+            self.gate()
+
+    def test_the_mask_gate_runs_only_for_boxes_that_passed_and_fails_a_collapsed_mask(self):
+        seg = TG.FakeSegmenter()
+        stats = self.gate(mask_iou=G.segmenter_mask_iou(seg))
+        self.assertTrue(stats["mask_gate"])
+        # g0 and g3 pass both boxes (2 calls each, RGB and IR); g1 fails the shift gate, g2's second box its edges
+        self.assertEqual(len(seg.calls), 2 * (2 + 2 + 1))
+        self.assertEqual(stats["by_reason"]["box_mask_iou"], 3)
+        self.assertEqual(stats["n_failed"], 4)
+
+
+class GateCli(GateWorld):
+    def args(self, *extra):
+        self.splits = self.path("splits.json")
+        with open(self.splits, "w") as fh:
+            json.dump(self.doc, fh)
+        return ["gate", "--splits", self.splits, "--arm", "c2", "--out", self.path("arms"), *extra]
+
+    def test_the_model_free_gates_run_from_the_command_line(self):
+        self.assertEqual(S.main(self.args()), 0)
+        self.assertEqual(self.ids("manifest.jsonl"), ["g0", "g3"])
+
+    def test_the_sam2_gate_needs_the_bus_address_explicitly(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            S.main(self.args("--sam2"))
+        self.assertIn("--dbus-address", err.getvalue())
+
+    def test_an_unusable_brain_py_is_a_clear_failure(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = S.main(self.args("--sam2", "--dbus-address", "unix:path=/nonexistent", "--brain-py", self.path("nope")))
+        self.assertEqual(code, 1)
+        self.assertIn("brain-py", err.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.arm_dir, "rejects.jsonl")))
 
 
 if __name__ == "__main__":
