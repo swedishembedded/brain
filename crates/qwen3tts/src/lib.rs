@@ -28,6 +28,7 @@ pub mod sampling;
 pub mod serve;
 pub mod prompt;
 pub mod sft;
+pub mod train;
 pub mod spec;
 pub mod talker;
 #[cfg(test)]
@@ -35,7 +36,7 @@ mod testsupport;
 
 pub use batch::run_batch;
 pub use config::{MtpConfig, TalkerConfig};
-pub use engine::{Placement, ResidentEngine, SpeakTimings};
+pub use engine::{Placement, ResidentEngine, Rollout, SpeakTimings};
 pub use genconfig::{GenerationConfig, GenerationPlan, PlanSource, SamplingRequest, SubtalkerRequest};
 pub use sampling::{sample_residual, DegenerationWatch, Draw, SamplerCfg};
 pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};

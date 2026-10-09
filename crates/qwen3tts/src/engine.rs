@@ -210,6 +210,20 @@ pub struct SpeakTimings {
     pub first_audio: Option<std::time::Duration>,
 }
 
+/// One sampled utterance and what it was generated from.
+#[derive(Clone)]
+pub struct Rollout {
+    /// The prompt the Talker was given.
+    pub prompt: Prompt,
+    /// The codes it produced, `[frames, 16]` row-major.
+    pub codes: Vec<u32>,
+    /// Whether it stopped on its own end-of-speech token (not at a length cap).
+    pub ended_by_eos: bool,
+}
+
+/// Codebooks per codec frame.
+const CODEBOOKS: usize = 16;
+
 /// Everything a resident TTS instance holds hot between requests.
 pub struct ResidentEngine {
     last: SpeakTimings,
@@ -417,6 +431,71 @@ impl ResidentEngine {
         emit(&codes, &mut pcm);
         self.last = SpeakTimings { generate, decode: decoding.get(), frames: codes.len() / 16, first_audio: first_audio.get() };
         Ok(pcm)
+    }
+
+    /// Sample one utterance and keep what it was generated from, so it can be
+    /// scored, trained on or compared under other weights. Device engines only.
+    /// `voice` pins the speaker as [`Self::clone_voice`] does.
+    pub fn rollout(&mut self, text: &str, lang: &str, voice: Option<(&str, &str)>, opts: &GenOpts, cancel: &CancelToken) -> Result<Rollout, String> {
+        if !matches!(self.core, Core::Device { .. }) {
+            return Err("a rollout needs the engine on the device".to_string());
+        }
+        let prompt = match voice {
+            Some((wav, words)) => self.clone_prompt(text, wav, words, lang)?,
+            None => {
+                let language_id = self.sp.language_id(lang);
+                let (role_ids, text_ids) = self.text_ids(text)?;
+                self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id)
+            }
+        };
+        let opts = opts.clone().resolved_with(self.gencfg);
+        let codes = self.core.generate(&self.sp, &prompt, &opts, cancel, &mut |_| {})?;
+        if codes.is_empty() {
+            return Err("no codec frames were generated".to_string());
+        }
+        let ended_by_eos = codes.len() / CODEBOOKS < opts.max_frames;
+        Ok(Rollout { prompt, codes, ended_by_eos })
+    }
+
+    /// The rows `rollout` was fed and what each predicted; see [`crate::train`].
+    pub fn policy_rows(&self, rollout: &Rollout) -> Result<crate::train::PolicyRows, String> {
+        match &self.core {
+            Core::Device { talker, mtp } => {
+                Ok(crate::train::policy_rows(talker, mtp, &rollout.prompt, &rollout.codes, CODEBOOKS, rollout.ended_by_eos.then_some(self.sp.codec_eos)))
+            }
+            Core::Host { .. } => Err("policy rows need the engine on the device".to_string()),
+        }
+    }
+
+    /// Replace Talker decoder tensors by name (see [`crate::train::TalkerTrainer::
+    /// folded_weights`]), so rollouts are drawn from the updated policy.
+    pub fn set_talker_weights(&mut self, weights: &std::collections::HashMap<String, Vec<f32>>) -> Result<(), String> {
+        let Core::Device { talker, .. } = &self.core else {
+            return Err("setting weights needs the engine on the device".to_string());
+        };
+        for (name, data) in weights {
+            talker.set_weight(name, data);
+        }
+        Ok(())
+    }
+
+    /// The first-codebook logits this engine's Talker gives at every row of
+    /// `rows` that has a target, `[targets, vocab]` row-major: the rollout
+    /// scored under these weights.
+    pub fn score(&self, rows: &crate::train::PolicyRows) -> Result<Vec<f32>, String> {
+        let Core::Device { talker, .. } = &self.core else {
+            return Err("scoring needs the engine on the device".to_string());
+        };
+        let d = rows.d;
+        talker.reset_cache();
+        let mut logits = Vec::new();
+        for (position, row) in rows.rows.chunks(d).enumerate() {
+            let hidden = talker.step(row);
+            if rows.targets[position] != crate::sft::IGNORE {
+                logits.extend(talker.codec_head_logits(&hidden));
+            }
+        }
+        Ok(logits)
     }
 
     /// [`Self::speak`] stopping before the codec: the `[frames, 16]` codes.

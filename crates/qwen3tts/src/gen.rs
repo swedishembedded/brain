@@ -398,6 +398,14 @@ impl TalkerGen {
         self.cfg.d_model as usize
     }
 
+    /// Overwrite the decoder tensor `name` in place (a fold of a trained
+    /// adapter, say). The device buffers keep their addresses, so a recorded
+    /// decode graph stays valid. Panics on an unknown name or a wrong size.
+    pub fn set_weight(&self, name: &str, data: &[f32]) {
+        assert_eq!(self.ps.numel(name), data.len(), "{name}: {} values given, {} expected", data.len(), self.ps.numel(name));
+        self.gpu.write(self.ps.w(name), bytemuck::cast_slice(data));
+    }
+
     /// Talker codebook-0 embedding row for `id` (`[d_model]`).
     pub fn codec_embed(&self, id: u32) -> &[f32] {
         let d = self.d();

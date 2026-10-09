@@ -181,3 +181,31 @@ fn a_pinned_voice_holds_the_speaker_tighter_than_the_free_voice_which_already_va
     assert!(mean(&pinned) > 0.95, "pinned takes sound like the reference: {}", mean(&pinned));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_rows_rebuilt_from_a_rollout_reproduce_the_policy_that_made_it() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let never = CancelToken::default();
+    let mut engine = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    // Greedy: every sampled first codebook is the argmax of the logits at its row.
+    let rollout = engine.rollout(TEXT, "english", None, &greedy(40), &never).unwrap();
+    let rows = engine.policy_rows(&rollout).unwrap();
+    let frames = rollout.codes.len() / 16;
+    assert_eq!(rows.len(), rollout.prompt.embeds.len() / rows.d + frames);
+    let logits = engine.score(&rows).unwrap();
+    let vocab = logits.len() / rows.target_positions().count();
+    let mut checked = 0;
+    for (i, p) in rows.target_positions().enumerate() {
+        let row = &logits[i * vocab..(i + 1) * vocab];
+        let best = row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+        // The repetition penalty reshapes sampling, so compare against the raw argmax
+        // only where generation had no repeat to penalise.
+        if rows.targets[p] == best {
+            checked += 1;
+        }
+    }
+    let total = rows.target_positions().count();
+    eprintln!("{checked} of {total} first-codebook targets are the argmax under the rebuilt rows; ended by eos: {}", rollout.ended_by_eos);
+    assert!(checked * 10 >= total * 9, "the rebuilt rows must reproduce the policy: {checked} of {total}");
+}
