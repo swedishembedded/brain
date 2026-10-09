@@ -34,6 +34,13 @@ anyway; the crop is recorded with every output so that boxes and pixels map
 back to the source exactly (`crop_boxes`). A frame under 16 px on a side is an
 error. Nothing is padded or resampled.
 
+`ingest` turns a directory of outputs into an ARM in the format `rir_arms.py render` writes
+(`<arm>/manifest.jsonl` and single-channel 8-bit white-hot PNGs), so `rir_pack.py` packs it unchanged: the RGB output
+becomes luma, the boxes of the source frame go through the recorded crop, and `--sensor-model` applies the fitted
+sensor model with the function B3 and B4 use (`rir_arms.apply_sensor`, the same per-frame noise stream); `--no-sensor`
+leaves the luma alone. One of the two is required. Outputs without a record (made by other means) are mapped by the
+default crop or taken as the whole frame, by their size. Frames without an output are counted, never invented.
+
 Modes (the instruction and the source image):
 
     neutral   the neutral caption; the RGB frame
@@ -440,6 +447,93 @@ def generate(job: Job, runner: BrainRunner) -> dict:
             "seconds_per_image": round(seconds / counts["generated"], 2) if counts["generated"] else None}
 
 
+# ----------------------------------------------------------------------- ingest
+
+
+@dataclass(frozen=True)
+class IngestRequest:
+    doc: dict  # a splits.json document
+    generated_dir: str  # the outputs of one mode: `generate`'s <out>/<mode>, or any directory of <frame>.ppm / .png
+    arm_dir: str  # <arms>/<arm>: manifest.jsonl, the PNGs and ingest-stats.json go here
+    arm: str
+    models: dict | None  # dataset -> SensorModel, or None for no sensor model
+    selection: Selection
+    classes: tuple
+    seed: int = 1  # the per-frame sensor noise
+
+
+def _find_output(generated_dir: str, name: str) -> tuple[str, Crop | None] | None:
+    """(image path, crop of its record or None) of a frame's output, None when it has none."""
+    record_path = os.path.join(generated_dir, f"{name}.json")
+    if os.path.isfile(record_path):
+        record = _load_json(record_path)
+        path = os.path.join(generated_dir, record["output"])
+        return (path, Crop.from_dict(record["crop"])) if os.path.isfile(path) else None
+    for ext in (".ppm", ".png"):
+        if os.path.isfile(os.path.join(generated_dir, name + ext)):
+            return os.path.join(generated_dir, name + ext), None
+    return None
+
+
+def _resolve_crop(row: dict, image: np.ndarray, recorded: Crop | None) -> Crop:
+    """The crop the output was made with: its record's, else (no record) the default crop or the whole frame,
+    whichever has the output's size."""
+    h, w = image.shape[:2]
+    width, height = D.image_size(row)
+    candidates = [recorded] if recorded else [crop_for(width, height), Crop(0, 0, width, height, width, height)]
+    for crop in candidates:
+        if (crop.width, crop.height) == (w, h):
+            return crop
+    raise ValueError(f"{row['dataset']}/{row['id']}: the output is {w}x{h}, not the {candidates[0].width}x{candidates[0].height} "
+                     f"{'its record says' if recorded else 'of the default crop or the whole'} frame")
+
+
+def ingest(req: IngestRequest) -> dict:
+    """Turn the outputs into an arm in the format rir_arms writes (single-channel 8-bit white-hot PNGs and a
+    manifest.jsonl with boxes in output pixels); returns, and writes as ingest-stats.json, the statistics."""
+    os.makedirs(req.arm_dir, exist_ok=True)
+    rows = select_frames(req.doc, req.selection)
+    stats = {"arm": req.arm, "frames": len(rows), "ingested": 0, "missing_output": 0, "boxes_in": 0, "boxes_kept": 0,
+             "boxes_dropped": 0, "sensor": {"applied": req.models is not None,
+                                           "models": {k: m.to_dict() for k, m in (req.models or {}).items()}}}
+    means, stds = [], []
+    with open(os.path.join(req.arm_dir, "manifest.jsonl"), "w") as manifest:
+        for row in rows:
+            name = frame_name(row)
+            found = _find_output(req.generated_dir, name)
+            if found is None:
+                stats["missing_output"] += 1
+                continue
+            image = cv2.imread(found[0], cv2.IMREAD_COLOR)
+            if image is None:
+                raise ValueError(f"cannot read {found[0]}")
+            crop = _resolve_crop(row, image, found[1])
+            luma = D.to_gray(image)
+            if req.models is not None:
+                model = req.models.get(row["dataset"])
+                if model is None:
+                    raise ValueError(f"no sensor model for dataset {row['dataset']!r}")
+                luma = A.apply_sensor(luma, model, A.frame_rng(req.seed, row["dataset"], row["id"]))
+            if not cv2.imwrite(os.path.join(req.arm_dir, f"{name}.png"), luma):
+                raise OSError(f"could not write {os.path.join(req.arm_dir, name)}.png")
+            source_boxes = D.class_boxes(row, req.classes)
+            boxes = crop_boxes(source_boxes, crop)
+            manifest.write(json.dumps({
+                "arm": req.arm, "dataset": row["dataset"], "id": row["id"], "sequence_id": row["sequence_id"],
+                "split": row["split"], "day_night": row["day_night"], "image": f"{name}.png", "width": crop.width,
+                "height": crop.height, "boxes": [list(b) for b in boxes], "crop": crop.to_dict()}) + "\n")
+            stats["ingested"] += 1
+            stats["boxes_in"] += len(source_boxes)
+            stats["boxes_kept"] += len(boxes)
+            means.append(float(luma.mean()))
+            stds.append(float(luma.std()))
+    stats["boxes_dropped"] = stats["boxes_in"] - stats["boxes_kept"]
+    stats["luma_mean"] = float(np.mean(means)) if means else None
+    stats["luma_std"] = float(np.mean(stds)) if stds else None
+    _write_json_atomic(os.path.join(req.arm_dir, "ingest-stats.json"), stats)
+    return stats
+
+
 # ------------------------------------------------------------------------- CLI
 
 
@@ -486,13 +580,38 @@ def _run_generate(a, ap) -> int:
     return 0
 
 
+def _add_ingest(sub) -> None:
+    g = sub.add_parser("ingest", help="turn generated outputs into an arm rir_pack.py packs")
+    g.add_argument("--splits", required=True, help="splits.json from rir_splits.py")
+    g.add_argument("--generated", required=True, help="directory of the outputs of one mode (<generate --out>/<mode>)")
+    g.add_argument("--arm", required=True, help="arm name, e.g. c2; the arm is written to <out>/<arm>")
+    g.add_argument("--out", required=True, help="the arms directory")
+    sensor = g.add_mutually_exclusive_group(required=True)
+    sensor.add_argument("--sensor-model", help="sensor-model.json: apply the fitted sensor model (rir_arms.apply_sensor)")
+    sensor.add_argument("--no-sensor", action="store_true", help="leave the generated luma as it is")
+    g.add_argument("--split", default="S", choices=("T", "S", "V", "Test"))
+    g.add_argument("--datasets", default="", help="comma-separated dataset ids; default: all in splits.json")
+    g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
+    g.add_argument("--seed", type=int, default=1, help="seeds the sensor noise, per frame")
+
+
+def _run_ingest(a, ap) -> int:
+    models = None if a.no_sensor else {k: A.SensorModel.from_dict(v) for k, v in _load_json(a.sensor_model)["datasets"].items()}
+    request = IngestRequest(_load_json(a.splits), a.generated, os.path.join(a.out, a.arm), a.arm, models,
+                            Selection(a.split, _csv(a.datasets)), _csv(a.classes), a.seed)
+    stats = ingest(request)
+    print(json.dumps({k: v for k, v in stats.items() if k != "sensor"}), file=sys.stderr)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="rir_synth.py", description="Generate, ingest and gate synthetic IR for the frames of a split.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     _add_generate(sub)
+    _add_ingest(sub)
     a = ap.parse_args(argv)
     try:
-        return {"generate": _run_generate}[a.cmd](a, ap)
+        return {"generate": _run_generate, "ingest": _run_ingest}[a.cmd](a, ap)
     except (GenerationError, ConfigMismatch, ValueError, FileNotFoundError) as e:
         print(f"rir_synth {a.cmd}: {e}", file=sys.stderr)
         return 1

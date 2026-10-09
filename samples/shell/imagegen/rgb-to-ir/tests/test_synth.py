@@ -27,7 +27,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import synth  # noqa: E402,F401  (sets the OpenCV log level before cv2 loads)
 import cv2  # noqa: E402
+import rir_arms as A  # noqa: E402
 import rir_captions as C  # noqa: E402
+import rir_data as D  # noqa: E402
 import rir_synth as S  # noqa: E402
 
 W, H = 70, 50  # not multiples of 16: the crop is 64 x 48 at (3, 1)
@@ -377,6 +379,127 @@ class Cli(World):
     def test_the_device_flag_overrides_the_config(self):
         S.main(self.args("--device", "gpu0", "--limit", "1", "--modes", "neutral"))
         self.assertEqual(self.calls()[0][1], "gpu0")
+
+
+MODEL = A.SensorModel(blur_sigma=1.2, noise_sigma=3.0, stripe_amplitude=1.5, mean_mu=120.0, mean_sd=5.0, std_mu=50.0, std_sd=4.0)
+
+
+class Ingest(World):
+    def setUp(self):
+        super().setUp()
+        self.generate()
+        self.arm_dir = self.path("arms/c2")
+
+    def ingest(self, models=None, arm_dir=None, generated=None, **selection):
+        request = S.IngestRequest(self.doc, generated or os.path.join(self.out, "neutral"), arm_dir or self.arm_dir, "c2",
+                                  models, S.Selection(**selection), ("person", "car", "bicycle"), seed=5)
+        return S.ingest(request)
+
+    def manifest(self, arm_dir=None):
+        with open(os.path.join(arm_dir or self.arm_dir, "manifest.jsonl")) as fh:
+            return [json.loads(line) for line in fh]
+
+    def png(self, name, arm_dir=None):
+        return cv2.imread(os.path.join(arm_dir or self.arm_dir, name), cv2.IMREAD_UNCHANGED)
+
+    def test_the_arm_has_the_format_rir_arms_writes_single_channel_eight_bit_pngs_and_a_manifest(self):
+        stats = self.ingest()
+        rows = self.manifest()
+        self.assertEqual([r["id"] for r in rows], ["f0", "f1", "f2"])
+        r = rows[0]
+        self.assertEqual((r["arm"], r["dataset"], r["sequence_id"], r["split"], r["day_night"], r["image"]),
+                         ("c2", "d", "s0", "S", "day", "d_f0.png"))
+        self.assertEqual((r["width"], r["height"]), (64, 48))
+        img = self.png("d_f0.png")
+        self.assertEqual((img.dtype, img.shape), (np.uint8, (48, 64)))
+        self.assertEqual((stats["ingested"], stats["missing_output"]), (3, 0))
+
+    def test_without_the_sensor_model_the_image_is_exactly_the_luma_of_the_output(self):
+        self.ingest()
+        expected = D.to_gray(self.rgb[1][1:49, 3:67])
+        np.testing.assert_array_equal(self.png("d_f1.png"), expected)
+
+    def test_the_sensor_model_is_the_one_rir_arms_applies_bit_for_bit(self):
+        self.ingest(models={"d": MODEL})
+        luma = D.to_gray(self.rgb[1][1:49, 3:67])
+        expected = A.apply_sensor(luma, MODEL, A.frame_rng(5, "d", "f1"))
+        np.testing.assert_array_equal(self.png("d_f1.png"), expected)
+        self.assertFalse(np.array_equal(expected, luma))
+
+    def test_boxes_map_through_the_recorded_crop_exactly(self):
+        self.ingest()
+        rows = {r["id"]: r for r in self.manifest()}
+        self.assertEqual(rows["f0"]["boxes"], [[0, 7.0, 7.0, 27.0, 39.0], [1, 37.0, 9.0, 64.0, 44.0]])
+        self.assertEqual(rows["f2"]["boxes"], [])
+
+    def test_ingesting_twice_gives_identical_bytes(self):
+        self.ingest(models={"d": MODEL})
+        again = self.path("arms/again")
+        self.ingest(models={"d": MODEL}, arm_dir=again)
+        for name in ("d_f0.png", "d_f1.png", "d_f2.png", "manifest.jsonl"):
+            with open(os.path.join(self.arm_dir, name), "rb") as a, open(os.path.join(again, name), "rb") as b:
+                self.assertEqual(a.read(), b.read(), name)
+
+    def test_the_arm_packs_with_the_unchanged_packer(self):
+        import rir_pack
+
+        self.ingest()
+        items = rir_pack.read_manifest(os.path.join(self.arm_dir, "manifest.jsonl"))
+        keys = rir_pack.pack(items, self.path("packed"), 64, 3, 1)
+        self.assertEqual(sorted(keys), ["d:f0", "d:f1", "d:f2"])
+
+    def test_a_frame_without_an_output_is_counted_not_invented(self):
+        os.remove(os.path.join(self.out, "neutral", "d_f1.ppm"))
+        os.remove(os.path.join(self.out, "neutral", "d_f1.json"))
+        stats = self.ingest()
+        self.assertEqual((stats["ingested"], stats["missing_output"]), (2, 1))
+        self.assertEqual([r["id"] for r in self.manifest()], ["f0", "f2"])
+
+    def test_a_model_missing_for_a_dataset_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "sensor model.*'d'"):
+            self.ingest(models={"other": MODEL})
+
+    def test_outputs_without_records_are_mapped_by_the_default_crop_or_taken_whole(self):
+        bare = self.path("bare")
+        os.makedirs(bare)
+        S.write_ppm(os.path.join(bare, "d_f0.ppm"), self.rgb[0][1:49, 3:67])  # the default crop of a 70 x 50 frame
+        write_png(os.path.join(bare, "d_f1.png"), self.rgb[1])  # the whole 70 x 50 frame
+        self.ingest(generated=bare)
+        rows = {r["id"]: r for r in self.manifest()}
+        self.assertEqual((rows["f0"]["width"], rows["f0"]["height"]), (64, 48))
+        self.assertEqual((rows["f1"]["width"], rows["f1"]["height"]), (70, 50))
+        self.assertEqual(rows["f1"]["boxes"][0], [0, 10.0, 8.0, 30.0, 40.0])
+
+    def test_an_output_of_neither_size_is_an_error(self):
+        bare = self.path("bare")
+        os.makedirs(bare)
+        write_png(os.path.join(bare, "d_f0.png"), np.zeros((20, 20, 3), np.uint8))
+        with self.assertRaisesRegex(ValueError, "20x20"):
+            self.ingest(generated=bare)
+
+    def test_the_statistics_json_counts_frames_boxes_and_the_sensor(self):
+        stats = self.ingest(models={"d": MODEL})
+        self.assertEqual((stats["boxes_in"], stats["boxes_kept"], stats["boxes_dropped"]), (4, 4, 0))
+        self.assertEqual(stats["sensor"], {"applied": True, "models": {"d": MODEL.to_dict()}})
+        self.assertGreater(stats["luma_std"], 0)
+        with open(os.path.join(self.arm_dir, "ingest-stats.json")) as fh:
+            self.assertEqual(json.load(fh), stats)
+
+
+class IngestCli(World):
+    def test_sensor_or_no_sensor_must_be_chosen_explicitly(self):
+        self.generate()
+        base = ["ingest", "--splits", self.splits, "--generated", os.path.join(self.out, "neutral"), "--arm", "c2",
+                "--out", self.path("arms")]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            S.main(base)
+        self.assertIn("--sensor-model", err.getvalue())
+        self.assertEqual(S.main([*base, "--no-sensor"]), 0)
+        self.assertTrue(os.path.isfile(self.path("arms/c2/manifest.jsonl")))
+        self.write_json("sensor-model.json", {"datasets": {"d": MODEL.to_dict()}})
+        self.assertEqual(S.main([*base[:-2], "--out", self.path("arms2"), "--sensor-model", self.path("sensor-model.json")]), 0)
+        self.assertTrue(os.path.isfile(self.path("arms2/c2/manifest.jsonl")))
 
 
 if __name__ == "__main__":

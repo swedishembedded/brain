@@ -248,7 +248,7 @@ def safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text)
 
 
-def _frame_rng(seed: int, dataset: str, frame_id: str) -> np.random.Generator:
+def frame_rng(seed: int, dataset: str, frame_id: str) -> np.random.Generator:
     return np.random.default_rng([seed, zlib.crc32(f"{dataset}/{frame_id}".encode())])
 
 
@@ -283,7 +283,7 @@ def render_arms(doc: dict, models: dict[str, SensorModel], out_dir: str, arms, s
                 raise ValueError(f"no sensor model for dataset {row['dataset']!r}")
             name = f"{safe_name(row['dataset'])}_{safe_name(row['id'])}.png"
             for arm in arms:
-                rng = _frame_rng(seed, row["dataset"], row["id"])
+                rng = frame_rng(seed, row["dataset"], row["id"])
                 img = {"a1": lambda: rgb, "a2": lambda: ir, "b1": lambda: render_b1(rgb), "b2": lambda: render_b2(rgb),
                        "b3": lambda: render_b3(rgb, model, rng),
                        "b4": lambda: render_b4(height, width, boxes, model, rng, classes)}[arm]()
