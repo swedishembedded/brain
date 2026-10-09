@@ -1750,6 +1750,7 @@ gpu1 --backend cuda`) and printed `Tesla P40, pci 0000:82:00.0`.
 | `gn_apply` -> `gn_apply_f32` | decode 640x512, 30 calls | 98.5 ms | 26.0 ms | bandwidth |
 | trainer `rmsnorm_dx` -> `rmsnorm_dx_rows` | paired 512 px step, 60 calls | 745 ms | 42 ms | bandwidth |
 | DiT `layernorm` -> `layernorm_rows` | 640x512 step, 41 calls | 77-85 ms | 7.9 ms | bandwidth |
+| `softmax_rows` -> `softmax_rows_f32_k*` (row in registers) | one 2560 x 2560 head | 0.481 ms | 0.297 ms | bit-identical; trainer step 708 -> 392 ms |
 
 Accuracy: the attention kernels are not bit-identical (a reordered sum) and
 are gated against an f64 oracle at |out - f64| <= 2^-17 max|v| AND at no more
@@ -1806,12 +1807,13 @@ gpu1=3.0 GiB" with 11.5 GiB free; after: both text-to-image and the edit run.
 klein-4B paired 512 px, rank 16, int8 base (`dev_step_time
 --profile-replays 5`, which now replays each of the step's segments as one
 program): 24.1 s wall best of 3 on the busy card, 11.57 s of device time ->
-10.73 s after `rmsnorm_dx_rows`. Ranked after: `matmul_i8w_dx` 2.50 s
-(~6.3 TFLOP/s, ~55% of FMA), fp32 FMA GEMMs 2.17 s (3653 calls, mostly
-per-head attention), DP4A GEMM 2.11 s (~15 TOP/s, 32% of DP4A), fp32 dw 0.85,
-fp32 dx 0.71, `softmax_rows` 0.71 (1200 calls), `softmax_rows_dx` 0.36,
-head pack/unpack 0.58. The materialised attention (its GEMMs, both softmax
-passes and the packs) is about 5 s of the 10.7.
+10.73 s after `rmsnorm_dx_rows` -> 10.42 s after the native `softmax_rows`.
+Ranked after: `matmul_i8w_dx` 2.49 s (~6.3 TFLOP/s, ~55% of FMA), fp32 FMA
+GEMMs 2.15 s (3653 calls, mostly per-head attention), DP4A GEMM 2.14 s
+(~15 TOP/s, 32% of DP4A), fp32 dw 0.83, fp32 dx 0.73, `softmax_rows` 0.39
+(1200 calls), `softmax_rows_dx` 0.36, head pack/unpack 0.61. The
+materialised attention (its GEMMs, both softmax passes and the packs) is
+about 4.5 s of the 10.4.
 
 ### Not done
 
