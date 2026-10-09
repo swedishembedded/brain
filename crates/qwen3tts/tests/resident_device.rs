@@ -106,3 +106,36 @@ fn the_device_codec_decodes_the_same_audio_as_the_host_codec() {
     eprintln!("codec device vs host: relative rms error {relative:.5}");
     assert!(relative < 0.02, "relative rms error {relative}");
 }
+
+#[test]
+fn a_streamed_utterance_is_the_same_audio_and_its_first_sound_comes_before_it_is_finished() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let never = CancelToken::default();
+    let mut engine = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    // Warm the kernels so the timing below is of the engine, not of the compiler.
+    engine.speak_codes(TEXT, "english", &greedy(8), &never).unwrap();
+
+    let whole = engine.speak(TEXT, "english", &greedy(60), &never, &mut |_, _| {}).unwrap();
+    let mut chunks = Vec::new();
+    let began = Instant::now();
+    let mut first_sound = None;
+    let streamed = engine
+        .speak_streaming(TEXT, "english", &greedy(60), &never, &mut |pcm, seq| {
+            first_sound.get_or_insert_with(|| began.elapsed());
+            chunks.push((seq, pcm.len()));
+        })
+        .unwrap();
+    let finished = began.elapsed();
+
+    assert_eq!(streamed.len(), whole.len());
+    let energy: f64 = whole.iter().map(|x| f64::from(*x).powi(2)).sum();
+    let error: f64 = whole.iter().zip(&streamed).map(|(a, b)| f64::from(a - b).powi(2)).sum();
+    let relative = (error / energy).sqrt();
+    eprintln!("streamed vs whole: relative rms error {relative:.6}; first sound {first_sound:?} of {finished:?}; chunks {chunks:?}");
+    assert!(relative < 1e-3, "relative rms error {relative}");
+    assert!(chunks.len() >= 2, "the sound reached the caller in pieces: {chunks:?}");
+    assert_eq!(chunks.iter().map(|c| c.1).sum::<usize>(), streamed.len(), "the pieces make the whole");
+    assert!(first_sound.unwrap() < finished / 2, "first sound {first_sound:?} of {finished:?}");
+    assert!(engine.last_timings().first_audio.is_some());
+}

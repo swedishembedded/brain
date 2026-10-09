@@ -49,16 +49,17 @@ impl ResidentTts {
     /// [`ResidentTts::speak_with`], handing each decoded chunk of audio to
     /// `on_audio` as it is produced and stopping when `cancel` fires.
     ///
-    /// Chunks are decoded from the whole generated utterance, so the first
-    /// one arrives when generation of the piece has finished, not before: speak
-    /// sentence-sized pieces for a short wait. A cancelled request returns
-    /// [`Error::Cancelled`] having delivered no audio, and leaves the
-    /// synthesizer usable.
+    /// On a device engine the first chunk arrives once about 0.6 s of speech
+    /// has been generated and the rest as the utterance grows; on a host engine
+    /// chunks are decoded from the finished utterance, so speak sentence-sized
+    /// pieces for a short wait. A request cancelled before it starts delivers
+    /// no audio; one cancelled part-way returns [`Error::Cancelled`] after the
+    /// chunks already delivered. Either way the synthesizer stays usable.
     pub fn speak_stream(&self, text: &str, opts: TtsOptions, cancel: &CancelToken, on_audio: &mut dyn FnMut(&[f32])) -> Result<Audio> {
         let gen_opts = opts.to_gen_opts();
         let mut engine = self.engine.lock().map_err(|_| Error::Backend("qwen3tts: the resident engine lock is poisoned".to_string()))?;
         let samples = engine
-            .speak(text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm))
+            .speak_streaming(text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm))
             .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
         Ok(Audio::new(samples, SAMPLE_RATE))
     }

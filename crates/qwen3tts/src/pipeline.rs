@@ -293,6 +293,21 @@ pub fn generate_codes(
     opts: &GenOpts,
     cancel: &CancelToken,
 ) -> Result<Vec<u32>, Cancelled> {
+    generate_codes_hooked(gen, mtp, sp, prompt, opts, cancel, &mut |_| {})
+}
+
+/// [`generate_codes`], handing `on_frames` every frame generated so far
+/// (`[n_frames*16]`, row-major) as each new one is committed, so a caller can
+/// start turning the codes into sound before the utterance is finished.
+pub fn generate_codes_hooked(
+    gen: &TalkerGen,
+    mtp: &MtpModel,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    cancel: &CancelToken,
+    on_frames: &mut dyn FnMut(&[u32]),
+) -> Result<Vec<u32>, Cancelled> {
     use std::time::Instant;
     // Coarse per-stage profiling, gated on `TTS_PROFILE`, matching
     // `generate_codes_cached`'s. This is the path every default
@@ -360,6 +375,7 @@ pub fn generate_codes(
         t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
+        on_frames(&frames);
 
         // feedback embedding = Σ codec embeds + (trailing text | tts_pad)
         let mut feed = cb0_embed;

@@ -138,15 +138,17 @@ impl Core {
     /// The codec codes of `prompt`. A device engine's KV cache holds
     /// [`DEVICE_CONTEXT`] positions, so a request that would not fit is
     /// refused rather than silently cut.
-    fn generate(&mut self, sp: &TtsSpecials, prompt: &Prompt, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
+    fn generate(&mut self, sp: &TtsSpecials, prompt: &Prompt, opts: &GenOpts, cancel: &CancelToken, on_frames: &mut dyn FnMut(&[u32])) -> Result<Vec<u32>, String> {
         let codes = match self {
+            // The host loop reports no partial frames: its codec is already
+            // streamed from the finished codes.
             Core::Host { talker, mtp } => pipeline::generate_codes_cached(talker, mtp, sp, prompt, opts, cancel),
             Core::Device { talker, mtp } => {
                 let prefix = prompt.embeds.len() / talker.d();
                 if prefix + opts.max_frames + 1 > DEVICE_CONTEXT as usize {
                     return Err(format!("a device engine holds {DEVICE_CONTEXT} positions; a prompt of {prefix} with up to {} frames does not fit", opts.max_frames));
                 }
-                pipeline::generate_codes(talker, mtp, sp, prompt, opts, cancel)
+                pipeline::generate_codes_hooked(talker, mtp, sp, prompt, opts, cancel, on_frames)
             }
         };
         codes.map_err(|Cancelled { .. }| "cancelled".to_string())
@@ -189,6 +191,10 @@ impl CodecPath {
     }
 }
 
+/// Frames generated before the first sound of a streamed utterance is decoded
+/// (8 frames, 0.64 s of speech).
+pub const FIRST_STREAM_FRAMES: usize = 8;
+
 /// Samples of 24 kHz audio one codec frame (12.5 Hz) stands for.
 const SAMPLES_PER_FRAME: usize = 1920;
 
@@ -199,6 +205,9 @@ pub struct SpeakTimings {
     pub generate: std::time::Duration,
     pub decode: std::time::Duration,
     pub frames: usize,
+    /// From the request to the first sound handed out; absent when the whole
+    /// utterance was finished first.
+    pub first_audio: Option<std::time::Duration>,
 }
 
 /// Everything a resident TTS instance holds hot between requests.
@@ -305,7 +314,7 @@ impl ResidentEngine {
         let generate = began.elapsed();
         let began = std::time::Instant::now();
         let pcm = self.decode(&codes, on_audio)?;
-        self.last = SpeakTimings { generate, decode: began.elapsed(), frames: codes.len() / 16 };
+        self.last = SpeakTimings { generate, decode: began.elapsed(), frames: codes.len() / 16, first_audio: None };
         Ok(pcm)
     }
 
@@ -313,6 +322,65 @@ impl ResidentEngine {
     #[must_use]
     pub fn last_timings(&self) -> SpeakTimings {
         self.last
+    }
+
+    /// [`Self::speak`], handing `on_audio` the first sound as soon as
+    /// [`FIRST_STREAM_FRAMES`] frames exist and the rest as the utterance
+    /// grows, instead of after it is finished. On the device the codec is
+    /// causal, so the samples of a prefix of the codes are the first samples of
+    /// the whole: each decode re-runs the prefix and emits only what is new,
+    /// at a geometric schedule (8, 24, 72, ... frames) so the repeated work
+    /// stays a small multiple of one decode. A host engine, whose codec is
+    /// already streamed from finished codes, speaks as [`Self::speak`] does.
+    pub fn speak_streaming(
+        &mut self,
+        text: &str,
+        lang: &str,
+        opts: &GenOpts,
+        cancel: &CancelToken,
+        on_audio: &mut dyn FnMut(&[f32], u32),
+    ) -> Result<Vec<f32>, String> {
+        if !matches!(self.codec, CodecPath::Device(_)) {
+            return self.speak(text, lang, opts, cancel, on_audio);
+        }
+        let began = std::time::Instant::now();
+        let language_id = self.sp.language_id(lang);
+        let (role_ids, text_ids) = self.text_ids(text)?;
+        let prompt = self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id);
+        let opts = &opts.clone().resolved_with(self.gencfg);
+        let CodecPath::Device(codec) = &self.codec else { unreachable!("checked above") };
+
+        let mut pcm: Vec<f32> = Vec::new();
+        let mut seq = 0u32;
+        let mut next_at = FIRST_STREAM_FRAMES;
+        let first_audio: std::cell::Cell<Option<std::time::Duration>> = std::cell::Cell::new(None);
+        let decoding = std::cell::Cell::new(std::time::Duration::ZERO);
+        let mut emit = |codes: &[u32], pcm: &mut Vec<f32>| {
+            let at = std::time::Instant::now();
+            let all = codec.decode(codes);
+            decoding.set(decoding.get() + at.elapsed());
+            if all.len() > pcm.len() {
+                on_audio(&all[pcm.len()..], seq);
+                seq += 1;
+                if first_audio.get().is_none() {
+                    first_audio.set(Some(began.elapsed()));
+                }
+                *pcm = all;
+            }
+        };
+        let codes = self.core.generate(&self.sp, &prompt, opts, cancel, &mut |codes| {
+            if codes.len() / 16 >= next_at {
+                emit(codes, &mut pcm);
+                next_at *= 3;
+            }
+        })?;
+        let generate = began.elapsed().saturating_sub(decoding.get());
+        if codes.is_empty() {
+            return Err("no codec frames were generated".to_string());
+        }
+        emit(&codes, &mut pcm);
+        self.last = SpeakTimings { generate, decode: decoding.get(), frames: codes.len() / 16, first_audio: first_audio.get() };
+        Ok(pcm)
     }
 
     /// [`Self::speak`] stopping before the codec: the `[frames, 16]` codes.
@@ -432,7 +500,7 @@ impl ResidentEngine {
     /// one-shot `brain tts synth` honours.
     fn generate(&mut self, prompt: &Prompt, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
         let opts = &opts.clone().resolved_with(self.gencfg);
-        let codes = self.core.generate(&self.sp, prompt, opts, cancel)?;
+        let codes = self.core.generate(&self.sp, prompt, opts, cancel, &mut |_| {})?;
         if codes.is_empty() {
             return Err("no codec frames were generated".to_string());
         }
