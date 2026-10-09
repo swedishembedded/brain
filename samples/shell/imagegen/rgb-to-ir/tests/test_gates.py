@@ -194,6 +194,23 @@ class WholeImage(unittest.TestCase):
         self.assertEqual(r.reasons, ["box_mask_iou"])
         self.assertEqual([b.mask_iou for b in r.boxes], [0.2, 0.9])
 
+    def test_the_mask_gate_runs_only_on_boxes_that_passed_the_model_free_gates(self):
+        ir = to_ir(self.gray)
+        x1, y1, x2, y2 = BOXES[1][1:]
+        ir[y1:y2, x1:x2] = to_ir(blocks(99))[y1:y2, x1:x2]
+        seen = []
+        r = G.check_image(self.rgb, ir, BOXES, config(), mask_iou=lambda rgb, ir, box: seen.append(box) or 0.9)
+        self.assertEqual(seen, [(30, 30, 110, 120)])
+        self.assertEqual([b.mask_iou for b in r.boxes], [0.9, None])
+        self.assertEqual(r.reasons, ["box_edge_correlation"])
+
+    def test_the_mask_gate_is_not_run_on_an_image_that_already_fails_the_shift_gate(self):
+        seen = []
+        r = G.check_image(self.rgb, to_ir(self.gray, shift=(0, 6)), BOXES, config(),
+                          mask_iou=lambda rgb, ir, box: seen.append(box) or 0.9)
+        self.assertEqual(seen, [])
+        self.assertEqual(r.reasons, ["global_shift"])
+
     def test_a_mask_gate_that_cannot_decide_is_not_a_failure_and_is_counted(self):
         r = G.check_image(self.rgb, to_ir(self.gray), BOXES, config(), mask_iou=lambda *a: None)
         self.assertTrue(r.passed)
@@ -203,6 +220,45 @@ class WholeImage(unittest.TestCase):
         r = G.check_image(self.rgb, to_ir(self.gray), BOXES, config())
         self.assertTrue(r.passed)
         self.assertFalse(r.hallucinations_checked)
+
+
+class FakeSegmenter:
+    """Masks the box on an RGB image; on an IR image (identical channels) only the left quarter of it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def segment(self, bgr, boxes):
+        self.calls.append(boxes)
+        is_ir = bool(np.array_equal(bgr[..., 0], bgr[..., 1]))
+        masks = []
+        for x1, y1, x2, y2 in boxes:
+            m = np.zeros(bgr.shape[:2], bool)
+            m[y1:y2, x1:(x1 + (x2 - x1) // 4 if is_ir else x2)] = True
+            masks.append(m)
+        return masks
+
+
+class SegmenterMaskGate(unittest.TestCase):
+    def test_the_iou_of_the_masks_segmented_on_the_rgb_and_on_the_ir_is_the_gate_value(self):
+        seg = FakeSegmenter()
+        gray = blocks(7)
+        iou = G.segmenter_mask_iou(seg)(to_rgb(gray), to_ir(gray), (30, 30, 110, 120))
+        self.assertAlmostEqual(iou, 0.25)
+        self.assertEqual(seg.calls, [[(30, 30, 110, 120)]] * 2)
+
+    def test_a_segmenter_finding_nothing_on_either_image_cannot_decide(self):
+        class Empty:
+            def segment(self, bgr, boxes):
+                return [np.zeros(bgr.shape[:2], bool) for _ in boxes]
+
+        gray = blocks(7)
+        self.assertIsNone(G.segmenter_mask_iou(Empty())(to_rgb(gray), to_ir(gray), (30, 30, 110, 120)))
+
+    def test_wired_into_the_gate_a_collapsed_ir_mask_fails_the_box(self):
+        gray = blocks(7)
+        r = G.check_image(to_rgb(gray), to_ir(gray), BOXES, config(), mask_iou=G.segmenter_mask_iou(FakeSegmenter()))
+        self.assertEqual(r.reasons, ["box_mask_iou"])
 
 
 class Statistics(unittest.TestCase):

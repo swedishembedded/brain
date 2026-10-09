@@ -27,7 +27,10 @@ rejections per reason in the JSON that `rir_decide.py` reads for K4.
                          image (the pipeline wires a SAM 2 segmenter prompted with `box`); `rgb` is the
                          BGR uint8 image, `ir` the single-channel uint8 synthetic IR, `box` the integer
                          (x1, y1, x2, y2). None means "could not be computed": not a failure, kept as
-                         None in the box record. Below `mask_iou_min` the box fails.
+                         None in the box record. Below `mask_iou_min` the box fails. The callable (a
+                         segmenter is expensive) is called only for boxes that passed the model-free
+                         gates, on an image that passed the shift gate; `segmenter_mask_iou` builds
+                         one from a segmenter.
     hallucination        detections of a reference detector run on the synthetic IR image
                          (`Detection`, e.g. from `brain yolov8 detect`) that have no ground truth of
                          their class at `halluc_iou` and at least `halluc_conf` confidence.
@@ -169,6 +172,23 @@ def find_hallucinations(detections: list[Detection], boxes: list[Box], conf_min:
                                                for c, x1, y1, x2, y2 in boxes)]
 
 
+# ------------------------------------------------------------------ mask gate
+
+
+def segmenter_mask_iou(segmenter) -> MaskIou:
+    """A `mask_iou` callable over `segmenter.segment(bgr, boxes) -> [bool mask]` (rir_sam2's segmenters): the box
+    prompts the segmenter on the RGB image and on the IR image (replicated to three channels), and the value is the
+    IoU of the two masks. None when neither image yields a mask."""
+
+    def mask_iou(rgb: np.ndarray, ir: np.ndarray, box) -> float | None:
+        on_rgb = segmenter.segment(rgb, [box])[0]
+        on_ir = segmenter.segment(cv2.cvtColor(D.to_gray(ir), cv2.COLOR_GRAY2BGR), [box])[0]
+        union = int(np.logical_or(on_rgb, on_ir).sum())
+        return None if union == 0 else float(np.logical_and(on_rgb, on_ir).sum()) / union
+
+    return mask_iou
+
+
 # ----------------------------------------------------------------- whole image
 
 
@@ -210,7 +230,9 @@ def check_image(rgb: np.ndarray, ir: np.ndarray, boxes: list[Box], config: GateC
         failed = []
         if corr is not None and corr < config.edge_threshold:
             failed.append("box_edge_correlation")
-        iou = None if mask_iou is None else mask_iou(rgb, ir, tuple(int(v) for v in box[1:]))
+        iou = None
+        if mask_iou is not None and not failed and not reasons:
+            iou = mask_iou(rgb, ir, tuple(int(v) for v in box[1:]))
         if iou is not None and iou < config.mask_iou_min:
             failed.append("box_mask_iou")
         gates.append(BoxGate(tuple(box), corr, iou, tuple(failed)))
