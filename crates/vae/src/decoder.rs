@@ -385,6 +385,12 @@ impl VaeEncoder {
         &self.gpu
     }
 
+    /// The pre-recorded encode dispatch sequence (profiling / benches). Each
+    /// [`Step`]'s `meta()` names its slot in [`KERNELS`].
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
+
     pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
         self.taps.iter().find(|(n, _, _)| n == name).map(|(_, buf, len)| self.gpu.read(buf, *len))
     }

@@ -1201,6 +1201,15 @@ impl<'a> Builder<'a> {
     ///   what makes it chunkable: a spatial chunk is a contiguous row range
     ///   of both `col` and the output, so the 2.4 GB whole-image operand
     ///   becomes a bounded scratch (see `im2col_at.wgsl`).
+    ///
+    /// Where the device redirects the direct kernel to a NATIVE implicit GEMM
+    /// (`gpu_core::native_upgrade`'s `conv_bias_reg` row) the direct dispatch
+    /// is taken whatever the selector says: that kernel gathers its operand
+    /// from the NCHW input as it stages it, so the lowering would only add the
+    /// nine-times-wider `col` traffic and its scratch. The question is asked
+    /// through `Gpu::native_kernel_for` - the same answer the dispatch will
+    /// get - so a conv the native kernel declines (the padded stride-2
+    /// downsample) still takes the selector's choice.
     #[allow(clippy::too_many_arguments)]
     pub fn conv_s(
         &mut self,
@@ -1221,7 +1230,8 @@ impl<'a> Builder<'a> {
         let bias = self.dev(&bn);
         let hw = ho * wo;
         let cinkk = cin * k * k;
-        if self.train || !Self::conv2d_lowered(self.gpu, hw, cout, cinkk) {
+        let native = self.gpu.native_kernel_for(K_CONV, &[self.n, cin, h, w, cout, k, stride, pad, ho, wo]).is_some();
+        if self.train || native || !Self::conv2d_lowered(self.gpu, hw, cout, cinkk) {
             return self.conv_direct(wn, bn, &wgt, &bias, cin, cout, k, stride, pad, h, w, ho, wo, x);
         }
         let y = self.act((self.n as u64) * (cout * ho * wo) as u64);
