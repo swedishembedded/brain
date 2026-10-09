@@ -28,11 +28,11 @@
 //! two Convs) + `head.{s}.cls.2.{weight,bias}` (the final biased 1x1); the reg
 //! branch is `head.{s}.reg.{0,1,2}` likewise.
 
-use gpu_core::DeviceBuffer;
+use gpu_core::{DeviceBuffer, Step};
 use paramstore::ParamStore;
 
 use crate::blocks::{Act, Conv, ConvNames, ConvSpec, Norm};
-use crate::net::{Ctx, Shape};
+use crate::net::{Ctx, Shape, NCHW_NLC_AT, NLC_NCHW_AT};
 
 /// Repack per-scale NCHW logit maps into a flat `[N, A, C]` host tensor with
 /// anchors ordered scale-major then row-major over `(H,W)` — the layout the loss
@@ -40,9 +40,11 @@ use crate::net::{Ctx, Shape};
 /// `data_nchw` laid out `[N,C,H,W]` with the SAME `c` across scales;
 /// `a = Σ_s h·w`.
 ///
-/// This is the one definition shared by the engine path ([`Head::gather_flat`])
-/// and the NPU path (which feeds OpenVINO's per-scale outputs straight in), so
-/// both produce byte-identical anchor ordering.
+/// For logit maps that are already on the HOST - the NPU path feeds
+/// OpenVINO's per-scale outputs straight in. Maps on a device are flattened
+/// there ([`Head::flatten_steps`], the `nchw_nlc_at` kernel); the
+/// `the_flat_repack_is_the_anchor_row_index_map` test and the yolov8
+/// `p12_npu_refactor` comparison hold the two to the same anchor ordering.
 ///
 /// A transpose between the two layouts, blocked by [`TRANSPOSE_TILE`] anchors:
 /// the `[tile, c]` side is a small contiguous block that stays in cache while
@@ -73,31 +75,7 @@ pub fn repack_heads_to_flat(scales: &[(&[f32], u32, u32)], n: usize, c: usize, a
     flat
 }
 
-/// The inverse of [`repack_heads_to_flat`] for one scale: the `[N, hw, c]`
-/// slice of a flat `[N, A, c]` tensor starting at anchor `anchor_base`, back to
-/// that scale's NCHW `[N, c, H, W]` map, each channel `ch` multiplied by
-/// `gate(ch)` (a gate of exactly 0 writes 0, whatever the flat value).
-/// Blocked like the repack, for the same reason.
-pub fn unpack_flat_to_head(flat: &[f32], n: usize, c: usize, a: usize, anchor_base: usize, hw: usize, gate: impl Fn(usize) -> f32) -> Vec<f32> {
-    let gates: Vec<f32> = (0..c).map(gate).collect();
-    let mut nchw = vec![0.0f32; n * c * hw];
-    for nn in 0..n {
-        let src = &flat[(nn * a + anchor_base) * c..(nn * a + anchor_base + hw) * c];
-        let dst = &mut nchw[nn * c * hw..(nn + 1) * c * hw];
-        for p0 in (0..hw).step_by(TRANSPOSE_TILE) {
-            let t = TRANSPOSE_TILE.min(hw - p0);
-            for (ch, &g) in gates.iter().enumerate() {
-                let row = &mut dst[ch * hw + p0..ch * hw + p0 + t];
-                for (i, v) in row.iter_mut().enumerate() {
-                    *v = if g == 0.0 { 0.0 } else { src[(p0 + i) * c + ch] * g };
-                }
-            }
-        }
-    }
-    nchw
-}
-
-/// Anchors per block of the layout transposes: one 64-byte cache line of a
+/// Anchors per block of the layout transpose: one 64-byte cache line of a
 /// channel row.
 const TRANSPOSE_TILE: usize = 16;
 
@@ -320,44 +298,44 @@ impl Head {
         self.in_shapes.iter().map(|s| s.h * s.w).sum()
     }
 
-    /// Class logits flattened + concatenated across scales into a host `[N, A,
-    /// nc]` row-major tensor (anchors ordered scale-major, then row-major over
-    /// H,W). This is the network's raw cls output; the loss (P3) consumes it.
-    pub fn cls_logits_flat(&self, ctx: &Ctx) -> Vec<f32> {
-        self.gather_flat(ctx, |sc| sc.cls.out(), self.nc, |sc| sc.cls.out_shape)
+    /// The steps that flatten every scale's logit maps into the loss's anchor
+    /// rows ON THE DEVICE: class logits into `cls_flat` `[N, A, nc]`, box
+    /// logits into `box_flat` `[N, A, 4*reg_max]` (DFL bins kept interleaved per
+    /// side), anchors scale-major then row-major over (H, W) - the layout
+    /// [`repack_heads_to_flat`] builds on the host for data that is already
+    /// there. One `nchw_nlc_at` dispatch per scale and branch.
+    pub fn flatten_steps(&self, ctx: &Ctx, cls_flat: &DeviceBuffer, box_flat: &DeviceBuffer) -> Vec<Step> {
+        let a = self.num_anchors();
+        let mut base = 0u32;
+        let mut steps = Vec::with_capacity(2 * self.scales.len());
+        for scale in &self.scales {
+            for (branch, flat) in [(&scale.cls, cls_flat), (&scale.reg, box_flat)] {
+                let sh = branch.out_shape;
+                let hw = sh.h * sh.w;
+                steps.push(ctx.step(NCHW_NLC_AT, &[branch.out(), flat], &[sh.n, sh.c, hw, a, base], sh.numel()));
+            }
+            base += scale.cls.out_shape.h * scale.cls.out_shape.w;
+        }
+        steps
     }
 
-    /// Box-distribution logits flattened + concatenated across scales into a host
-    /// `[N, A, 4*reg_max]` tensor (DFL bins kept interleaved per side). Raw box
-    /// output; DFL decode (P6) turns these into boxes.
-    pub fn box_logits_flat(&self, ctx: &Ctx) -> Vec<f32> {
-        self.gather_flat(ctx, |sc| sc.reg.out(), 4 * self.reg_max, |sc| sc.reg.out_shape)
-    }
-
-    /// Read each scale's `[N,C,H,W]` logit map and repack to `[N, (sum H*W), C]`
-    /// with anchors scale-major then row-major. `c` is the per-cell channel
-    /// count (nc or 4*reg_max). Delegates the host repack to
-    /// [`repack_heads_to_flat`] so the engine path and the NPU decode path share
-    /// one definition.
-    fn gather_flat(
-        &self,
-        ctx: &Ctx,
-        out: impl Fn(&ScaleHead) -> &DeviceBuffer,
-        c: u32,
-        shape: impl Fn(&ScaleHead) -> Shape,
-    ) -> Vec<f32> {
-        let n = self.in_shapes[0].n as usize;
-        let a = self.num_anchors() as usize;
-        let datas: Vec<(Vec<f32>, u32, u32)> = self
-            .scales
-            .iter()
-            .map(|scale| {
-                let sh = shape(scale);
-                (ctx.gpu.read(out(scale), sh.numel() as usize), sh.h, sh.w)
-            })
-            .collect();
-        let refs: Vec<(&[f32], u32, u32)> = datas.iter().map(|(d, h, w)| (d.as_slice(), *h, *w)).collect();
-        repack_heads_to_flat(&refs, n, c as usize, a)
+    /// The inverse of [`Self::flatten_steps`] for the loss gradient: the anchor
+    /// rows `d_cls_flat` / `d_box_flat` back into each branch's NCHW grad buffer
+    /// `d_logit` (head order: s0.cls, s0.reg, s1.cls, ...). One `nlc_nchw_at`
+    /// dispatch per scale and branch.
+    pub fn unflatten_steps(&self, ctx: &Ctx, d_cls_flat: &DeviceBuffer, d_box_flat: &DeviceBuffer, d_logit: &[DeviceBuffer]) -> Vec<Step> {
+        let a = self.num_anchors();
+        let mut base = 0u32;
+        let mut steps = Vec::with_capacity(2 * self.scales.len());
+        for (s, scale) in self.scales.iter().enumerate() {
+            for (k, (branch, flat)) in [(&scale.cls, d_cls_flat), (&scale.reg, d_box_flat)].into_iter().enumerate() {
+                let sh = branch.out_shape;
+                let hw = sh.h * sh.w;
+                steps.push(ctx.step(NLC_NCHW_AT, &[flat, &d_logit[2 * s + k]], &[sh.n, sh.c, hw, a, base], sh.numel()));
+            }
+            base += scale.cls.out_shape.h * scale.cls.out_shape.w;
+        }
+        steps
     }
 
     /// Anchor-point centers `(ax, ay)` per cell, in FEATURE units (`ax =
@@ -417,10 +395,9 @@ mod tests {
     use super::*;
 
     /// The repack is the plain `NCHW -> [N, A, C]` index map, anchors
-    /// scale-major then row-major, and the per-scale unpack is its exact
-    /// inverse (a gate of 1 is a bit-exact copy; a gate of 0 writes 0).
+    /// scale-major then row-major.
     #[test]
-    fn the_flat_repack_and_its_unpack_are_inverse_index_maps() {
+    fn the_flat_repack_is_the_anchor_row_index_map() {
         let (n, c) = (3usize, 5usize);
         let scales_hw = [(4u32, 3u32), (2, 2), (1, 1)];
         let a: usize = scales_hw.iter().map(|&(h, w)| (h * w) as usize).sum();
@@ -440,14 +417,6 @@ mod tests {
                     for p in 0..hw {
                         assert_eq!(flat[(nn * a + base + p) * c + ch], m[(nn * c + ch) * hw + p]);
                     }
-                }
-            }
-            assert_eq!(&unpack_flat_to_head(&flat, n, c, a, base, hw, |_| 1.0), m);
-            let gated = unpack_flat_to_head(&flat, n, c, a, base, hw, |ch| if ch == 2 { 0.0 } else { 2.0 });
-            for nn in 0..n {
-                for p in 0..hw {
-                    assert_eq!(gated[(nn * c + 2) * hw + p], 0.0);
-                    assert_eq!(gated[(nn * c + 1) * hw + p], 2.0 * m[(nn * c + 1) * hw + p]);
                 }
             }
             base += hw;

@@ -37,12 +37,12 @@
 //! Both grad tensors come back flat and are scattered into the per-branch NCHW
 //! head grad buffers by the model.
 
-use gpu_core::Gpu;
+use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::assign::{assign, Anchor, AnchorTarget, Gt, TalParams};
 use crate::boxmath::{dist_to_xyxy, xywhn_to_xyxy, Xyxy};
 use crate::model::GtBox;
-use crate::net::{BCE_LOGITS, BCE_LOGITS_GRAD, CIOU, CIOU_GRAD, DFL_DECODE, DFL_GRAD, DFL_LOSS, DFL_LOSS_GRAD};
+use crate::net::{BCE_LOGITS, BCE_LOGITS_GRAD, CIOU, CIOU_GRAD, DFL_GRAD, DFL_LOSS, DFL_LOSS_GRAD};
 
 /// Loss gains (Ultralytics defaults).
 #[derive(Clone, Copy, Debug)]
@@ -78,7 +78,21 @@ pub struct LossInput<'a> {
     pub cls_logits: &'a [f32],
     /// Raw box logits flat `[N, A, 4*reg_max]`.
     pub box_logits: &'a [f32],
+    /// The same two tensors resident on the device, when the caller has them
+    /// there: the loss kernels then read them in place instead of uploading
+    /// the host copies again.
+    pub on_device: Option<DeviceLogits<'a>>,
+    /// Per-side DFL distances `[N, A, 4]` of `box_logits` ([`decode_dist`]),
+    /// decoded once per evaluation and shared by the assigner and the loss.
+    pub dist: &'a [f32],
     pub gains: Gains,
+}
+
+/// [`LossInput`]'s logits as device buffers, same layouts as the host slices.
+#[derive(Clone, Copy)]
+pub struct DeviceLogits<'a> {
+    pub cls: &'a DeviceBuffer,
+    pub boxes: &'a DeviceBuffer,
 }
 
 /// Output of a forward+backward loss evaluation.
@@ -100,23 +114,21 @@ fn sigmoid(z: f32) -> f32 {
     }
 }
 
-/// Run `dfl_decode` over flat box logits `[N,A,4*reg_max]` -> per-side distances
-/// flat `[N,A,4]`. The kernel layout is `[(anchor)*4+side]*reg_max + bin`, which
-/// (treating each (image,anchor) as one decode anchor) matches the flat box
-/// logit layout exactly: row `(n*A+i)` is `4*reg_max` contiguous values =
-/// side-major then bin, i.e. `[4][reg_max]`.
-fn decode_dist(gpu: &Gpu, box_logits: &[f32], na: usize, reg_max: usize) -> Vec<f32> {
-    let lb = gpu.storage_init("dfl_logits", box_logits);
-    let db = gpu.storage((na * 4) as u64);
-    let s = gpu.step(DFL_DECODE, &[&lb, &db], &[na as u32, reg_max as u32], (na * 4) as u32);
-    gpu.submit(&[], &[s]);
-    gpu.read(&db, na * 4)
+/// The per-side DFL distances `[N*A, 4]` of flat box logits `[N*A, 4*reg_max]`:
+/// [`crate::infer::dfl_decode_dist_on`] over the device-resident logits when
+/// the caller has them, else [`crate::infer::dfl_decode_dist`] over the host
+/// copy. Decode once per loss evaluation and put the result in
+/// [`LossInput::dist`].
+pub fn decode_dist(gpu: &Gpu, box_logits: &[f32], on_device: Option<DeviceLogits>, na: usize, reg_max: usize) -> Vec<f32> {
+    match on_device {
+        Some(d) => crate::infer::dfl_decode_dist_on(gpu, d.boxes, na, reg_max),
+        None => crate::infer::dfl_decode_dist(gpu, box_logits, na, reg_max),
+    }
 }
 
 /// Compute the frozen assignment from the current logits (one forward pass).
 pub fn compute_assignment(inp: &LossInput, gts: &[GtBox], img_size: f32) -> Assignment {
-    let na = inp.n * inp.a;
-    let dist = decode_dist(inp.gpu, inp.box_logits, na, inp.reg_max);
+    let dist = inp.dist;
 
     let mut targets = Vec::with_capacity(inp.n);
     for img in 0..inp.n {
@@ -153,8 +165,8 @@ pub fn eval(inp: &LossInput, asg: &Assignment) -> LossOutput {
     let na = n * a;
     let g = inp.gains;
 
-    // ---- decode distances + boxes for the CURRENT logits ----
-    let dist = decode_dist(inp.gpu, inp.box_logits, na, reg_max);
+    // ---- boxes for the CURRENT logits ----
+    let dist = inp.dist;
     let mut pred_boxes = vec![[0.0f32; 4]; na];
     for img in 0..n {
         for i in 0..a {
@@ -191,20 +203,62 @@ pub fn eval(inp: &LossInput, asg: &Assignment) -> LossOutput {
     // Ultralytics normaliser: sum of assigned target scores, floored at 1.
     let norm = score_sum.max(1.0);
 
-    // ---- BCE over the full grid ----
+    // ---- every loss kernel that needs only host-prepared inputs, in ONE
+    // submission: the BCE over the full grid, and over the fg anchors the CIoU
+    // and the DFL loss. Their results are read back after the device has run
+    // them all, so the loss costs one wait here and one for the DFL gradient
+    // below, not one per kernel. ----
     let total = (na * nc) as u32;
-    let clsb = inp.gpu.storage_init("bce_logits", inp.cls_logits);
-    let tgtb = inp.gpu.storage_init("bce_tgt", &bce_tgt);
-    let bce_out = inp.gpu.storage(total as u64);
-    let s = inp.gpu.step(BCE_LOGITS, &[&clsb, &tgtb, &bce_out], &[total], total);
-    inp.gpu.submit(&[], &[s]);
-    let bce_sum: f32 = inp.gpu.read(&bce_out, na * nc).iter().sum();
+    let gpu = inp.gpu;
+    let uploaded_cls;
+    let clsb = match inp.on_device {
+        Some(d) => d.cls,
+        None => {
+            uploaded_cls = gpu.storage_init("bce_logits", inp.cls_logits);
+            &uploaded_cls
+        }
+    };
+    let tgtb = gpu.storage_init("bce_tgt", &bce_tgt);
+    let bce_out = gpu.storage(total as u64);
+    let dcls_buf = gpu.storage(total as u64);
+    let mut steps = vec![
+        gpu.step(BCE_LOGITS, &[clsb, &tgtb, &bce_out], &[total], total),
+        gpu.step(BCE_LOGITS_GRAD, &[clsb, &tgtb, &dcls_buf], &[total], total),
+    ];
+    // The fg-only operands, gathered into compact [nfg, ..] tensors.
+    let fg = (nfg > 0).then(|| {
+        let mut pred_flat = vec![0.0f32; nfg * 4];
+        let mut tgt_flat = vec![0.0f32; nfg * 4];
+        let mut tdist = vec![0.0f32; nfg * 4];
+        // Per-fg box logits (the reg_max bins), packed for the DFL kernels.
+        let mut fg_box_logits = vec![0.0f32; nfg * 4 * reg_max];
+        for (k, &fi) in fg_idx.iter().enumerate() {
+            pred_flat[k * 4..k * 4 + 4].copy_from_slice(&pred_boxes[fi]);
+            tgt_flat[k * 4..k * 4 + 4].copy_from_slice(&fg_target_box[k]);
+            tdist[k * 4..k * 4 + 4].copy_from_slice(&fg_target_dist[k]);
+            let src = fi * 4 * reg_max;
+            fg_box_logits[k * 4 * reg_max..(k + 1) * 4 * reg_max].copy_from_slice(&inp.box_logits[src..src + 4 * reg_max]);
+        }
+        let pb = gpu.storage_init("ciou_pred", &pred_flat);
+        let tb = gpu.storage_init("ciou_tgt", &tgt_flat);
+        let flb = gpu.storage_init("dfl_fg_logits", &fg_box_logits);
+        let tdb = gpu.storage_init("dfl_tdist", &tdist);
+        let ob = gpu.storage(nfg as u64);
+        let dpb = gpu.storage(nfg as u64 * 4);
+        let dlo = gpu.storage(nfg as u64);
+        let dflg = gpu.storage((nfg * 4 * reg_max) as u64);
+        let (nf, rm) = (nfg as u32, reg_max as u32);
+        steps.push(gpu.step(CIOU, &[&pb, &tb, &ob], &[nf], nf));
+        steps.push(gpu.step(CIOU_GRAD, &[&pb, &tb, &dpb], &[nf], nf));
+        steps.push(gpu.step(DFL_LOSS, &[&flb, &tdb, &dlo], &[nf, rm], nf));
+        steps.push(gpu.step(DFL_LOSS_GRAD, &[&flb, &tdb, &dflg], &[nf, rm], nf * 4));
+        (flb, ob, dpb, dlo, dflg)
+    });
+    gpu.submit(&[], &steps);
 
-    // BCE grad (full grid) -> scaled later.
-    let dcls_buf = inp.gpu.storage(total as u64);
-    let s = inp.gpu.step(BCE_LOGITS_GRAD, &[&clsb, &tgtb, &dcls_buf], &[total], total);
-    inp.gpu.submit(&[], &[s]);
-    let mut d_cls = inp.gpu.read(&dcls_buf, na * nc);
+    let bce_sum: f32 = gpu.read(&bce_out, na * nc).iter().sum();
+    // BCE grad (full grid), scaled by cls_gain/norm.
+    let mut d_cls = gpu.read(&dcls_buf, na * nc);
     let cls_scale = g.cls / norm;
     for v in d_cls.iter_mut() {
         *v *= cls_scale;
@@ -214,34 +268,18 @@ pub fn eval(inp: &LossInput, asg: &Assignment) -> LossOutput {
     let mut d_box = vec![0.0f32; na * 4 * reg_max];
     let mut ciou_sum = 0.0f32;
     let mut dfl_sum = 0.0f32;
-    if nfg > 0 {
-        // Gather fg decoded boxes + targets into compact [nfg,4] tensors.
-        let mut pred_flat = vec![0.0f32; nfg * 4];
-        let mut tgt_flat = vec![0.0f32; nfg * 4];
-        for (k, &fi) in fg_idx.iter().enumerate() {
-            pred_flat[k * 4..k * 4 + 4].copy_from_slice(&pred_boxes[fi]);
-            tgt_flat[k * 4..k * 4 + 4].copy_from_slice(&fg_target_box[k]);
-        }
-        // CIoU value.
-        let pb = inp.gpu.storage_init("ciou_pred", &pred_flat);
-        let tb = inp.gpu.storage_init("ciou_tgt", &tgt_flat);
-        let ob = inp.gpu.storage(nfg as u64);
-        let s = inp.gpu.step(CIOU, &[&pb, &tb, &ob], &[nfg as u32], nfg as u32);
-        inp.gpu.submit(&[], &[s]);
-        ciou_sum = inp.gpu.read(&ob, nfg).iter().sum();
+    if let Some((flb, ob, dpb, dlo, dflg)) = fg {
+        ciou_sum = gpu.read(&ob, nfg).iter().sum();
         // CIoU grad wrt the decoded boxes.
-        let dpb = inp.gpu.storage(nfg as u64 * 4);
-        let s = inp.gpu.step(CIOU_GRAD, &[&pb, &tb, &dpb], &[nfg as u32], nfg as u32);
-        inp.gpu.submit(&[], &[s]);
-        let dbox = inp.gpu.read(&dpb, nfg * 4);
+        let dbox = gpu.read(&dpb, nfg * 4);
+        dfl_sum = gpu.read(&dlo, nfg).iter().sum();
+        let dfl_loss_grad = gpu.read(&dflg, nfg * 4 * reg_max);
 
         // Chain d(box) -> d(dist) and assemble the dE buffer for dfl_grad over
         // the fg anchors: dE = (dl,dt,dr,db) = (-s·dx1,-s·dy1, s·dx2, s·dy2),
         // already scaled by box_gain/norm.
         let box_scale = g.box_ / norm;
         let mut de = vec![0.0f32; nfg * 4];
-        // Per-fg box logits (the reg_max bins) packed for dfl_grad.
-        let mut fg_box_logits = vec![0.0f32; nfg * 4 * reg_max];
         for (k, &fi) in fg_idx.iter().enumerate() {
             let an = inp.anchors[fi % a];
             let s_ = an.stride;
@@ -249,33 +287,13 @@ pub fn eval(inp: &LossInput, asg: &Assignment) -> LossOutput {
             de[k * 4 + 1] = -s_ * dbox[k * 4 + 1] * box_scale; // dt
             de[k * 4 + 2] = s_ * dbox[k * 4 + 2] * box_scale; // dr
             de[k * 4 + 3] = s_ * dbox[k * 4 + 3] * box_scale; // db
-            let src = fi * 4 * reg_max;
-            fg_box_logits[k * 4 * reg_max..(k + 1) * 4 * reg_max]
-                .copy_from_slice(&inp.box_logits[src..src + 4 * reg_max]);
         }
         // dfl_grad: dE[nfg*4] -> dlogit[nfg*4*reg_max].
-        let flb = inp.gpu.storage_init("dfl_fg_logits", &fg_box_logits);
-        let deb = inp.gpu.storage_init("dfl_de", &de);
-        let dlb = inp.gpu.storage((nfg * 4 * reg_max) as u64);
-        let s = inp.gpu.step(DFL_GRAD, &[&flb, &deb, &dlb], &[nfg as u32, reg_max as u32], (nfg * 4) as u32);
-        inp.gpu.submit(&[], &[s]);
-        let dfl_box_grad = inp.gpu.read(&dlb, nfg * 4 * reg_max);
-
-        // DFL loss value + grad over fg (target_dist).
-        let mut tdist = vec![0.0f32; nfg * 4];
-        for (k, d) in fg_target_dist.iter().enumerate() {
-            tdist[k * 4..k * 4 + 4].copy_from_slice(d);
-        }
-        let tdb = inp.gpu.storage_init("dfl_tdist", &tdist);
-        let dlo = inp.gpu.storage(nfg as u64);
-        let s = inp.gpu.step(DFL_LOSS, &[&flb, &tdb, &dlo], &[nfg as u32, reg_max as u32], nfg as u32);
-        inp.gpu.submit(&[], &[s]);
-        dfl_sum = inp.gpu.read(&dlo, nfg).iter().sum();
-
-        let dflg = inp.gpu.storage((nfg * 4 * reg_max) as u64);
-        let s = inp.gpu.step(DFL_LOSS_GRAD, &[&flb, &tdb, &dflg], &[nfg as u32, reg_max as u32], (nfg * 4) as u32);
-        inp.gpu.submit(&[], &[s]);
-        let dfl_loss_grad = inp.gpu.read(&dflg, nfg * 4 * reg_max);
+        let deb = gpu.storage_init("dfl_de", &de);
+        let dlb = gpu.storage((nfg * 4 * reg_max) as u64);
+        let s = gpu.step(DFL_GRAD, &[&flb, &deb, &dlb], &[nfg as u32, reg_max as u32], (nfg * 4) as u32);
+        gpu.submit(&[], &[s]);
+        let dfl_box_grad = gpu.read(&dlb, nfg * 4 * reg_max);
 
         // Scatter the two box-logit grad contributions into the full tensor.
         let dfl_scale = g.dfl / norm;

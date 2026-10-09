@@ -50,8 +50,14 @@ fn sigmoid(z: f32) -> f32 {
 /// side-major then bin, i.e. `[4][reg_max]`, exactly the kernel's `[A,4,reg_max]`.
 pub fn dfl_decode_dist(gpu: &gpu_core::Gpu, box_logits: &[f32], na: usize, reg_max: usize) -> Vec<f32> {
     let lb = gpu.storage_init("dfl_logits_infer", box_logits);
+    dfl_decode_dist_on(gpu, &lb, na, reg_max)
+}
+
+/// [`dfl_decode_dist`] over box logits that are already on the device - no
+/// upload.
+pub fn dfl_decode_dist_on(gpu: &gpu_core::Gpu, box_logits: &gpu_core::DeviceBuffer, na: usize, reg_max: usize) -> Vec<f32> {
     let db = gpu.storage((na * 4) as u64);
-    let s = gpu.step(DFL_DECODE, &[&lb, &db], &[na as u32, reg_max as u32], (na * 4) as u32);
+    let s = gpu.step(DFL_DECODE, &[box_logits, &db], &[na as u32, reg_max as u32], (na * 4) as u32);
     gpu.submit(&[], &[s]);
     gpu.read(&db, na * 4)
 }

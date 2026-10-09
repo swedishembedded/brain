@@ -147,10 +147,18 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // A plain device-side buffer copy (one row of the full width) for the
     // backward's grad snapshots, which used to round-trip through the host.
     ("region_copy", kernels::REGION_COPY),
+    // The head's per-scale NCHW logit maps into (and the loss gradient back
+    // out of) the loss's flat [N, A, C] anchor rows, on the device.
+    ("nchw_nlc_at", kernels::NCHW_NLC_AT),
+    ("nlc_nchw_at", kernels::NLC_NCHW_AT),
 ];
 
 /// [`PIPELINES`] slot of `region_copy`.
 pub const REGION_COPY: usize = 49;
+/// [`PIPELINES`] slot of `nchw_nlc_at`.
+pub const NCHW_NLC_AT: usize = 50;
+/// [`PIPELINES`] slot of `nlc_nchw_at`.
+pub const NLC_NCHW_AT: usize = 51;
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against
 /// [`PIPELINES`] above — so the blocks never depend on this array's order.
@@ -217,6 +225,8 @@ mod tests {
             (CONV_BIAS, "conv_bias"),
             (ADD_INPLACE, "add_inplace"),
             (REGION_COPY, "region_copy"),
+            (NCHW_NLC_AT, "nchw_nlc_at"),
+            (NLC_NCHW_AT, "nlc_nchw_at"),
         ];
         for (idx, name) in named {
             assert_eq!(PIPELINES[idx].0, name, "constant {idx} does not name `{name}`");

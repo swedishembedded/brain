@@ -841,6 +841,8 @@ pub const NA3D_APPLY: &str = include_str!("../wgsl/na3d_apply.wgsl");
 pub const NA3D_SCORES: &str = include_str!("../wgsl/na3d_scores.wgsl");
 /// `wgsl/nchw_nlc.wgsl`
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
+/// `wgsl/nchw_nlc_at.wgsl`
+pub const NCHW_NLC_AT: &str = include_str!("../wgsl/nchw_nlc_at.wgsl");
 /// `wgsl/neuro_elig.wgsl`
 pub const NEURO_ELIG: &str = include_str!("../wgsl/neuro_elig.wgsl");
 /// `wgsl/neuro_learn.wgsl`
@@ -853,6 +855,8 @@ pub const NEURO_TRACE: &str = include_str!("../wgsl/neuro_trace.wgsl");
 pub const NLC_BIAS_NCHW: &str = include_str!("../wgsl/nlc_bias_nchw.wgsl");
 /// `wgsl/nlc_nchw.wgsl`
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
+/// `wgsl/nlc_nchw_at.wgsl`
+pub const NLC_NCHW_AT: &str = include_str!("../wgsl/nlc_nchw_at.wgsl");
 /// `wgsl/pack_qkv.wgsl`
 pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
 /// `wgsl/pad1d_edge.wgsl`
@@ -1655,12 +1659,14 @@ pub const ALL: &[(&str, &str)] = &[
     ("na3d_apply", NA3D_APPLY),
     ("na3d_scores", NA3D_SCORES),
     ("nchw_nlc", NCHW_NLC),
+    ("nchw_nlc_at", NCHW_NLC_AT),
     ("neuro_elig", NEURO_ELIG),
     ("neuro_learn", NEURO_LEARN),
     ("neuro_modulate", NEURO_MODULATE),
     ("neuro_trace", NEURO_TRACE),
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
+    ("nlc_nchw_at", NLC_NCHW_AT),
     ("pack_qkv", PACK_QKV),
     ("pad1d_edge", PAD1D_EDGE),
     ("pad2d", PAD2D),

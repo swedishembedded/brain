@@ -155,6 +155,16 @@ pub struct Yolo {
     r: Vec<Vec<f32>>,
     /// Device grad buffers seeded with `r` for each head branch (head order).
     d_logit: Vec<DeviceBuffer>,
+    /// The head's logits flattened across scales into the loss's anchor rows
+    /// on the device, `[N, A, nc]` and `[N, A, 4*reg_max]` - written by
+    /// [`Yolo::raw_logits`], read back once and read in place by the loss
+    /// kernels.
+    cls_flat: DeviceBuffer,
+    box_flat: DeviceBuffer,
+    /// The loss gradient in the same anchor-row layouts, uploaded whole and
+    /// permuted into `d_logit` on the device.
+    d_cls_flat: DeviceBuffer,
+    d_box_flat: DeviceBuffer,
 
     // ---- detection loss (P4) ----
     /// Ground-truth boxes for the current batch (set via `set_targets`).
@@ -344,8 +354,14 @@ impl Yolo {
                 d_logit.push(ctx.act(n));
             }
         }
+        let anchor_rows = b * head.num_anchors();
+        let (cls_rows, box_rows) = (anchor_rows * cfg.nc, anchor_rows * 4 * cfg.reg_max);
 
         Yolo {
+            cls_flat: ctx.act(cls_rows),
+            box_flat: ctx.act(box_rows),
+            d_cls_flat: ctx.act(cls_rows),
+            d_box_flat: ctx.act(box_rows),
             gpu,
             cfg,
             ps,
@@ -638,7 +654,8 @@ impl Yolo {
         self.forward_net();
         let (cls, boxl) = self.raw_logits();
         let anchors = self.head.anchor_geometry();
-        let inp = self.loss_input(&cls, &boxl, &anchors);
+        let dist = self.decode_dist(&boxl);
+        let inp = self.loss_input(&cls, &boxl, &anchors, &dist);
         let asg = crate::loss::compute_assignment(&inp, &self.gts.borrow(), self.cfg.input as f32);
         *self.frozen.borrow_mut() = Some(asg);
         self.head_grads_seeded.set(false);
@@ -650,12 +667,26 @@ impl Yolo {
         self.head_grads_seeded.set(false);
     }
 
-    /// Assemble the loss-module input view over the (already-read) flat logits.
+    /// The flat logits [`Self::raw_logits`] left on the device.
+    fn device_logits(&self) -> crate::loss::DeviceLogits<'_> {
+        crate::loss::DeviceLogits { cls: &self.cls_flat, boxes: &self.box_flat }
+    }
+
+    /// The DFL distances of the logits [`Self::raw_logits`] just flattened,
+    /// decoded from the device copy.
+    fn decode_dist(&self, boxl: &[f32]) -> Vec<f32> {
+        let na = (self.b * self.head.num_anchors()) as usize;
+        crate::loss::decode_dist(&self.gpu, boxl, Some(self.device_logits()), na, self.cfg.reg_max as usize)
+    }
+
+    /// Assemble the loss-module input view over the (already-read) flat logits,
+    /// whose device copies [`Self::raw_logits`] left in place.
     fn loss_input<'a>(
         &'a self,
         cls: &'a [f32],
         boxl: &'a [f32],
         anchors: &'a [crate::assign::Anchor],
+        dist: &'a [f32],
     ) -> crate::loss::LossInput<'a> {
         crate::loss::LossInput {
             gpu: &self.gpu,
@@ -666,6 +697,8 @@ impl Yolo {
             anchors,
             cls_logits: cls,
             box_logits: boxl,
+            on_device: Some(self.device_logits()),
+            dist,
             gains: crate::loss::Gains::default(),
         }
     }
@@ -679,7 +712,10 @@ impl Yolo {
         let (cls, boxl) = self.raw_logits();
         gpu_core::profile::stage_time("yolov8 loss.raw_logits(readback)", t);
         let anchors = self.head.anchor_geometry();
-        let inp = self.loss_input(&cls, &boxl, &anchors);
+        let t = std::time::Instant::now();
+        let dist = self.decode_dist(&boxl);
+        gpu_core::profile::stage_time("yolov8 loss.decode", t);
+        let inp = self.loss_input(&cls, &boxl, &anchors, &dist);
 
         // The frozen assignment (or a fresh one) — clone out to drop the borrow.
         let t = std::time::Instant::now();
@@ -700,31 +736,22 @@ impl Yolo {
 
     /// Scatter flat cls grads `[N,A,nc]` and box grads `[N,A,4*reg_max]` into the
     /// per-branch NCHW head grad buffers `self.d_logit` (head order:
-    /// s0.cls,s0.reg,s1.cls,s1.reg,s2.cls,s2.reg). Inverse of
-    /// `Head::gather_flat`: flat anchor `(n*A + base + p)` channel `ch` maps to
-    /// the per-scale NCHW index `((n*C + ch)*hw + p)`.
+    /// s0.cls,s0.reg,s1.cls,s1.reg,s2.cls,s2.reg): both tensors uploaded whole,
+    /// then each scale's window permuted into its branch's buffer on the device
+    /// ([`Head::unflatten_steps`], the inverse of the forward's flatten).
     fn scatter_head_grads(&self, d_cls: &[f32], d_box: &[f32]) {
-        let n = self.b as usize;
-        let a = self.head.num_anchors() as usize;
-        let nc = self.cfg.nc as usize;
-        let four_rm = 4 * self.cfg.reg_max as usize;
-
         // Per-class gradient gate (see `train_only_classes`). Applied HERE, the
         // one point every class gradient passes through on its way from the loss
-        // into the network.
+        // into the network; a gate of exactly 0 writes 0 whatever the gradient.
         let mask = self.cls_grad_mask.borrow();
-        let gate = |ch: usize| mask.as_ref().map_or(1.0, |m| m[ch]);
-
-        let mut anchor_base = 0usize;
-        for (s, scale) in self.head.scales.iter().enumerate() {
-            let sh = scale.cls.out_shape; // [n, nc, h, w]
-            let hw = (sh.h * sh.w) as usize;
-            let cls_nchw = crate::head::unpack_flat_to_head(d_cls, n, nc, a, anchor_base, hw, gate);
-            self.gpu.write(&self.d_logit[s * 2], bytemuck::cast_slice(&cls_nchw));
-            let box_nchw = crate::head::unpack_flat_to_head(d_box, n, four_rm, a, anchor_base, hw, |_| 1.0);
-            self.gpu.write(&self.d_logit[s * 2 + 1], bytemuck::cast_slice(&box_nchw));
-            anchor_base += hw;
-        }
+        let gated: Option<Vec<f32>> = mask.as_ref().map(|m| {
+            let nc = m.len();
+            d_cls.iter().enumerate().map(|(i, &v)| if m[i % nc] == 0.0 { 0.0 } else { v * m[i % nc] }).collect()
+        });
+        self.gpu.write(&self.d_cls_flat, bytemuck::cast_slice(gated.as_deref().unwrap_or(d_cls)));
+        self.gpu.write(&self.d_box_flat, bytemuck::cast_slice(d_box));
+        let ctx = self.ctx();
+        self.gpu.submit(&[], &self.head.unflatten_steps(&ctx, &self.d_cls_flat, &self.d_box_flat, &self.d_logit));
     }
 
     fn ctx(&self) -> Ctx<'_> {
@@ -1000,7 +1027,9 @@ impl Yolo {
     /// `[N,A,4*reg_max]` (the loss module's input).
     pub fn raw_logits(&self) -> (Vec<f32>, Vec<f32>) {
         let ctx = self.ctx();
-        (self.head.cls_logits_flat(&ctx), self.head.box_logits_flat(&ctx))
+        self.gpu.submit(&[], &self.head.flatten_steps(&ctx, &self.cls_flat, &self.box_flat));
+        let na = (self.b * self.head.num_anchors()) as usize;
+        (self.gpu.read(&self.cls_flat, na * self.cfg.nc as usize), self.gpu.read(&self.box_flat, na * 4 * self.cfg.reg_max as usize))
     }
 
     pub fn save(&self, path: &str) {
@@ -1128,5 +1157,40 @@ impl model::Model for Yolo {
     }
     fn config_json(&self) -> Value {
         self.cfg.to_json()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The logits the loss reads - flattened across scales ON THE DEVICE by
+    /// `raw_logits` - are exactly the host repack (`repack_heads_to_flat`, the
+    /// NPU path's layout) of the per-scale maps, bit for bit: one anchor
+    /// ordering, whichever side assembles it.
+    #[test]
+    fn the_device_flatten_is_the_host_repack() {
+        let cfg = YoloConfig::tiny(3);
+        let b = 2u32;
+        let init = crate::init_weights(&cfg, 0xF1A7);
+        let model = Yolo::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), b, 0, &init);
+        let side = cfg.input as usize;
+        let img: Vec<f32> = data::rng::Lcg::new(5).vec(b as usize * 3 * side * side);
+        model.set_image(&img);
+        model.forward_net();
+        let (cls, boxl) = model.raw_logits();
+
+        let a = model.head.num_anchors() as usize;
+        let read = |br: &crate::head::Branch| (model.gpu.read(br.out(), br.out_shape.numel() as usize), br.out_shape.h, br.out_shape.w);
+        let cls_maps: Vec<_> = model.head.scales.iter().map(|s| read(&s.cls)).collect();
+        let box_maps: Vec<_> = model.head.scales.iter().map(|s| read(&s.reg)).collect();
+        fn refs(m: &[(Vec<f32>, u32, u32)]) -> Vec<(&[f32], u32, u32)> {
+            m.iter().map(|(d, h, w)| (d.as_slice(), *h, *w)).collect()
+        }
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let host_cls = crate::head::repack_heads_to_flat(&refs(&cls_maps), b as usize, cfg.nc as usize, a);
+        let host_box = crate::head::repack_heads_to_flat(&refs(&box_maps), b as usize, 4 * cfg.reg_max as usize, a);
+        assert_eq!(bits(&cls), bits(&host_cls), "class logits");
+        assert_eq!(bits(&boxl), bits(&host_box), "box logits");
     }
 }
