@@ -271,6 +271,20 @@ fn used_classes(data: &DetectData) -> std::collections::BTreeSet<u32> {
 
 /// Run the shared training loop over the train split. Prints loss periodically
 /// and returns `(first_loss, last_loss)`.
+/// Per-kernel device time of the step just run, largest first (BRAIN_PROFILE).
+fn print_kernel_table(gpu: &gpu_core::Gpu) {
+    let Some(mut rows) = gpu.kernel_times() else {
+        eprintln!("kernel table: this backend cannot time kernels");
+        return;
+    };
+    rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let total: f64 = rows.iter().map(|r| r.1).sum();
+    eprintln!("kernel table: {:.1} ms device time over {} kernel kinds", total, rows.len());
+    for (name, ms, calls) in rows.iter().take(25) {
+        eprintln!("  {name:<44} {ms:>9.2} ms {calls:>6} calls {:>5.1}%", 100.0 * ms / total);
+    }
+}
+
 fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32) {
     let n_train = split_at(data.n).max(1);
     let b = cfg.batch as usize;
@@ -309,13 +323,32 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
             dst[..n].copy_from_slice(&src[..n]);
             gts.extend(gts_for(data, idx, j as u32));
         }
+        let t_step = std::time::Instant::now();
+        // Under BRAIN_PROFILE, attribute the second step's DEVICE time per kernel
+        // (the first step pays one-time kernel compilation).
+        let kernel_table = gpu_core::profile::enabled() && step == 1;
+        if kernel_table {
+            model.gpu.reset_kernel_times();
+            model.gpu.set_kernel_timing(true);
+        }
         model.set_image(&img_batch);
         model.set_targets(&gts);
         model.zero_grads();
+        let t = std::time::Instant::now();
         let loss = model.forward();
+        gpu_core::profile::stage_time("yolov8 step.forward+loss", t);
+        let t = std::time::Instant::now();
         model.backward();
+        gpu_core::profile::stage_time("yolov8 step.backward", t);
+        let t = std::time::Instant::now();
         model.adamw_step((step + 1) as u32, cfg.lr, cfg.wd, Default::default(), Some(1.0), 1.0);
         model.poll_wait();
+        gpu_core::profile::stage_time("yolov8 step.adamw+sync", t);
+        gpu_core::profile::stage_time("yolov8 step.total", t_step);
+        if kernel_table {
+            print_kernel_table(&model.gpu);
+            model.gpu.set_kernel_timing(false);
+        }
 
         if first.is_nan() {
             first = loss;

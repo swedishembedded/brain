@@ -661,18 +661,26 @@ impl Yolo {
     /// Caches the scalar loss and scatters the flat cls/box logit grads into the
     /// per-branch NCHW head grad buffers. Returns the scalar loss.
     fn detection_eval(&self) -> f32 {
+        let t = std::time::Instant::now();
         let (cls, boxl) = self.raw_logits();
+        gpu_core::profile::stage_time("yolov8 loss.raw_logits(readback)", t);
         let anchors = self.head.anchor_geometry();
         let inp = self.loss_input(&cls, &boxl, &anchors);
 
         // The frozen assignment (or a fresh one) — clone out to drop the borrow.
+        let t = std::time::Instant::now();
         let asg = match self.frozen.borrow().as_ref() {
             Some(a) => a.clone(),
             None => crate::loss::compute_assignment(&inp, &self.gts.borrow(), self.cfg.input as f32),
         };
+        gpu_core::profile::stage_time("yolov8 loss.assign", t);
+        let t = std::time::Instant::now();
         let out = crate::loss::eval(&inp, &asg);
+        gpu_core::profile::stage_time("yolov8 loss.eval", t);
         self.det_loss.set(out.loss);
+        let t = std::time::Instant::now();
         self.scatter_head_grads(&out.d_cls, &out.d_box);
+        gpu_core::profile::stage_time("yolov8 loss.scatter+upload", t);
         out.loss
     }
 
@@ -808,7 +816,10 @@ impl Yolo {
     }
 
     pub fn forward(&self) -> f32 {
+        let t = std::time::Instant::now();
         self.forward_net();
+        self.gpu.poll_wait();
+        gpu_core::profile::stage_time("yolov8 forward_net", t);
         match self.mode.get() {
             LossMode::Proxy => self.proxy_loss(),
             LossMode::Detection => self.detection_eval(),

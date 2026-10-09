@@ -42,6 +42,11 @@ BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
 BRAIN_DEVICE=cpu brain yolo eval --weights out/yolo.safetensors --data data/detect \
     --conf 0.001 --iou 0.45 --split all --dump-preds out/preds.jsonl
 
+# Where a training step spends its time: BRAIN_PROFILE=1 prints the host stage times
+# (forward, loss, backward, optimiser) for every step and, for the second step, a
+# per-kernel DEVICE-time table. The first step pays one-time kernel compilation.
+BRAIN_PROFILE=1 brain yolo train data/detect --out out/yolo.safetensors --steps 3 --batch 4
+
 # 4. Detect on one image — a binary PPM (P6) file OR a dataset dir (image 0):
 BRAIN_DEVICE=cpu brain yolo detect --weights out/yolo.safetensors --image data/detect \
     --conf 0.1 --iou 0.45
