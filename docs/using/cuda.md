@@ -130,8 +130,20 @@ The int8 decode GEMV reads weights at about three times the rate of the
 generated kernel, and a handful of fused kernels each replace a whole chain of
 small ones in a decode step - the residual add + norm + int8 quantiser, the
 SwiGLU and attention-gate epilogues, a Gated DeltaNet layer's step, a gated-
-attention layer's prep, and a layer's projections of one activation. All of
-them return bit-identical results to the chains they replace.
+attention layer's prep, and a layer's projections of one activation. Those
+return bit-identical results to the chains they replace, as do the redirected
+fp32 and int8 GEMMs and the elementwise and normalisation passes.
+
+Two families are not bit-identical to the generated tier, and are held to a
+stated bound against an f64 reference instead. The convolutions accumulate
+with fused multiply-adds (one rounding where the generated kernel has two);
+the 3x3 direct form returns the same bits as the general one. And attention
+at head width 128 runs natively in fp32 - the bidirectional attention of the
+diffusion transformers, and a padded text encoder's causal grouped-query
+attention with its key mask in one launch that never visits the padding's
+keys - summing in a different order, so it is also held to no more than twice
+the generated tier's own error on the same inputs
+(`crates/gpu-core/tests/flash_bidir_native.rs`, `flash_gqa_kmask_native.rs`).
 `--no-native-kernels` (a global flag, like `--device`) keeps every dispatch on
 the generated tier - the A/B switch the native kernels are measured with.
 
