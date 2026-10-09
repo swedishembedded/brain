@@ -119,3 +119,7 @@ harness = false
 [[test]]
 name = "cuda_impl_policy"
 harness = false
+
+[[test]]
+name = "softmax_rows_native"
+harness = false

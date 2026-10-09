@@ -431,6 +431,78 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/flash_attn_f32.cu"),
     },
     CudaKernel {
+        name: "softmax_rows_f32_k8",
+        // Redirected to by name from the WGSL `softmax_rows` for rows of at
+        // most 512 columns (`gpu_core::native_upgrade`, smallest bucket first).
+        op: Op::Softmax,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_softmax_rows_k8",
+        what: "row softmax, 64 lanes a row holding up to 8 values each in registers: the row read once and written once, bit-identical to softmax_rows",
+        reported: "native:softmax_rows_f32_k8",
+        block_dim: 256,
+        // Four rows per block.
+        tile: (4, 512),
+        shared_bytes: 4 * 64 * 4,
+        src: include_str!("../cu/softmax_rows_f32.cu"),
+    },
+    CudaKernel {
+        name: "softmax_rows_f32_k16",
+        // Redirected to by name from the WGSL `softmax_rows` for rows of at
+        // most 1024 columns (`gpu_core::native_upgrade`, smallest bucket first).
+        op: Op::Softmax,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_softmax_rows_k16",
+        what: "row softmax, 64 lanes a row holding up to 16 values each in registers: the row read once and written once, bit-identical to softmax_rows",
+        reported: "native:softmax_rows_f32_k16",
+        block_dim: 256,
+        // Four rows per block.
+        tile: (4, 1024),
+        shared_bytes: 4 * 64 * 4,
+        src: include_str!("../cu/softmax_rows_f32.cu"),
+    },
+    CudaKernel {
+        name: "softmax_rows_f32_k32",
+        // Redirected to by name from the WGSL `softmax_rows` for rows of at
+        // most 2048 columns (`gpu_core::native_upgrade`, smallest bucket first).
+        op: Op::Softmax,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_softmax_rows_k32",
+        what: "row softmax, 64 lanes a row holding up to 32 values each in registers: the row read once and written once, bit-identical to softmax_rows",
+        reported: "native:softmax_rows_f32_k32",
+        block_dim: 256,
+        // Four rows per block.
+        tile: (4, 2048),
+        shared_bytes: 4 * 64 * 4,
+        src: include_str!("../cu/softmax_rows_f32.cu"),
+    },
+    CudaKernel {
+        name: "softmax_rows_f32_k64",
+        // Redirected to by name from the WGSL `softmax_rows` for rows of at
+        // most 4096 columns (`gpu_core::native_upgrade`, smallest bucket first).
+        op: Op::Softmax,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_softmax_rows_k64",
+        what: "row softmax, 64 lanes a row holding up to 64 values each in registers: the row read once and written once, bit-identical to softmax_rows",
+        reported: "native:softmax_rows_f32_k64",
+        block_dim: 256,
+        // Four rows per block.
+        tile: (4, 4096),
+        shared_bytes: 4 * 64 * 4,
+        src: include_str!("../cu/softmax_rows_f32.cu"),
+    },
+    CudaKernel {
         name: "softmax_rows_dx",
         // Asked for by name (`gpu_core::Fused::SoftmaxRowsDx`) by a trainer:
         // `softmax_k_dx`'s result over contiguous rows with a reordered

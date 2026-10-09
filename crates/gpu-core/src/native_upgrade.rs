@@ -356,6 +356,14 @@ pub(crate) const ROWS: &[Row] = &[
     // GroupNorm's apply pass, plane-blocked like BatchNorm's: the same
     // arithmetic per element, bit-identical (`tests/gn_apply_native.rs`).
     Row { slow: "gn_apply", target: Target::Named("gn_apply_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_gn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
+    // The row softmax with each lane's columns in registers: the WGSL
+    // kernel's partition and fold order, bit-identical
+    // (`tests/softmax_rows_native.rs`). One row per register bucket, the
+    // smallest first - `apply` takes the first that serves the row length.
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k8"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k8, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k16"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k16, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k32"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k32, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "softmax_rows", target: Target::Named("softmax_rows_f32_k64"), bindings: COPY_BINDINGS, serves: serves_softmax_rows_k64, blocks: softmax_rows_blocks, requires_wgsl_upgrade: false },
     // The CSP plumbing and the SiLU pair: copies and elementwise expressions,
     // bit-identical, gated so (`tests/plumb_native.rs`).
     Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
@@ -469,7 +477,38 @@ fn serves_gn(p: &[u32]) -> bool {
         && p[..4].iter().map(|&v| u64::from(v)).product::<u64>() <= u64::from(u32::MAX)
 }
 
-/// One block per channel.
+/// Lanes a row of the native row softmax spreads over, and rows per block
+/// (`BRAIN_SMR_LANES`, `BRAIN_SMR_ROWS` in `cu/softmax_rows_f32.cu`).
+const SOFTMAX_ROWS_LANES: u32 = 64;
+const SOFTMAX_ROWS_PER_BLOCK: u32 = 4;
+
+/// `[rows, cols]` with `cols` in the register bucket `(lo, hi]` of `kmax`
+/// values a lane.
+fn serves_softmax_rows_bucket(p: &[u32], kmax: u32) -> bool {
+    let (lo, hi) = ((kmax / 2) * SOFTMAX_ROWS_LANES, kmax * SOFTMAX_ROWS_LANES);
+    let lo = if kmax == 8 { 0 } else { lo };
+    matches!(p, [rows, cols] if *rows >= 1 && *cols > lo && *cols <= hi
+        && u64::from(*rows) * u64::from(*cols) <= u64::from(u32::MAX))
+}
+fn serves_softmax_rows_k8(p: &[u32]) -> bool {
+    serves_softmax_rows_bucket(p, 8)
+}
+fn serves_softmax_rows_k16(p: &[u32]) -> bool {
+    serves_softmax_rows_bucket(p, 16)
+}
+fn serves_softmax_rows_k32(p: &[u32]) -> bool {
+    serves_softmax_rows_bucket(p, 32)
+}
+fn serves_softmax_rows_k64(p: &[u32]) -> bool {
+    serves_softmax_rows_bucket(p, 64)
+}
+
+/// Four rows per block.
+fn softmax_rows_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0].div_ceil(SOFTMAX_ROWS_PER_BLOCK)
+}
+
+/// One block per channel./// One block per channel.
 fn bn_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
     p[1]
 }
