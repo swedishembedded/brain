@@ -30,11 +30,16 @@ What it means in practice:
    cost. Check `nvidia-smi --query-compute-apps` before trusting one, and
    compare a known-trivial kernel's per-call time against its size: if
    `bn_running` costs milliseconds the table is measuring the neighbour.
-2. **Per-kernel numbers on a shared card come from one step per submission,
-   fastest of several.** `gpu-core/tests/conv2d_native_bench.rs` times each
-   step alone and keeps the minimum of seven; that reproduces the quiet-card
-   numbers for the kernel itself, though not the cost of the uploads between
-   steps that a real submission pays.
+2. **The fix is in the timer, not in every bench.** `backend-cuda` now waits
+   for a timed launch's upload to land before it records the start event
+   (kernel timing already issues launch by launch, so this costs a wait and
+   no batching). With it the same step's table read `bn_running` at 0.38 ms
+   over 57 calls instead of 134 ms, and the native conv rows summed to 64 ms
+   against 61 ms from `gpu-core/tests/conv2d_native_bench.rs`, which times
+   each step in its own submission and keeps the fastest of seven - two
+   independent methods that now agree. What the timer still cannot exclude is
+   a slice that preempts a kernel mid-run; on a busy shared card repeat and
+   take the minimum.
 3. **The uniform upload is itself the reason the slice lands there.** A
    kernel whose parameters reach it without a copy on the stream (a captured
    graph's single parameter block, or by-value kernel arguments) gives the

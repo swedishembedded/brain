@@ -945,6 +945,7 @@ impl CudaBackend {
     /// Issue one resolved dispatch on its own - the unbatched path, and the
     /// answer whenever a submission's shape is new.
     fn issue(&self, r: &Resolved) {
+        let timed = self.timing.load(Ordering::Acquire);
         if let (Some(u), false) = (r.uniform.as_ref(), r.params.is_empty()) {
             // Enqueued on the dispatch stream, NOT performed synchronously.
             // A synchronous copy would run on the legacy stream and therefore
@@ -953,9 +954,18 @@ impl CudaBackend {
             // step's kernel has read this shared uniform before the next step
             // overwrites it.
             self.stage_upload(u, &r.params);
+            if timed {
+                // A timed launch starts its clock only once its upload has
+                // landed. While the copy engine runs it, the compute engine is
+                // idle and a device shared with another context may switch to
+                // it; started earlier, the clock would bill that context's whole
+                // time slice to this kernel (knowledge #210). Timing already
+                // issues launch by launch, so this costs a wait, not batching.
+                self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
+            }
         }
         let (gx, gy) = grid_ws(r.threads, r.per_block);
-        let start = self.timing.load(Ordering::Acquire).then(|| self.stamp()).flatten();
+        let start = timed.then(|| self.stamp()).flatten();
         // SAFETY: `r.func` was resolved from `r.compiled`'s module, which `r`
         // holds an `Arc` to, and `r.args` is that entry point's argument list.
         unsafe { self.ctx.launch_shaped(r.func, (gx, gy, 1), (r.compiled.block_dim, 1, 1), &r.compiled.shape, &r.args) }
