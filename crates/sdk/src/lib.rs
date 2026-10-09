@@ -260,6 +260,8 @@ mod three_d;
 pub mod qa;
 #[cfg(feature = "audio")]
 mod tts;
+#[cfg(all(feature = "audio", feature = "study"))]
+mod speech_ingress;
 #[cfg(feature = "image")]
 mod upscale;
 #[cfg(feature = "video")]
@@ -289,6 +291,8 @@ pub use model::dispatch::Precision as DType;
 #[cfg(feature = "resolve")]
 pub use loader::DownloadPolicy;
 
+#[cfg(all(feature = "audio", feature = "study"))]
+pub use speech_ingress::{IngressHyper, SpeechExample, SpeechIngress, SpeechIngressOptions};
 #[cfg(feature = "audio")]
 pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
 /// Word error rate, the measure a speech round trip is judged by: re-exported
