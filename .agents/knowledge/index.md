@@ -253,3 +253,4 @@ What belongs where:
 | 210 | A two-architecture resolver that ignores the requested checkpoint | [`210-a-two-architecture-resolver-that-ignores-the-requested-checkpoint.md`](210-a-two-architecture-resolver-that-ignores-the-requested-checkpoint.md) |
 | 211 | A positional tuple told the audio encoder it had 128 frames | [`211-a-positional-tuple-told-the-encoder-it-had-128-frames.md`](211-a-positional-tuple-told-the-encoder-it-had-128-frames.md) |
 | 212 | A shared device bills another context's time slice to your next kernel | [`212-a-shared-device-bills-another-contexts-time-slice-to-your-next-kernel.md`](212-a-shared-device-bills-another-contexts-time-slice-to-your-next-kernel.md) |
+| 213 | A roof probe must issue the instruction it names | [`213-a-roof-probe-must-issue-the-instruction-it-names.md`](213-a-roof-probe-must-issue-the-instruction-it-names.md) |

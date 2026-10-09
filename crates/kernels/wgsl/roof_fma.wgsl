@@ -35,6 +35,12 @@
 //     iterations and then stay exactly 1.0 — no overflow, no denormals (which
 //     are slow on some hardware and would understate the roof), no NaNs.
 //   * The result is written out, so nothing is dead code.
+//   * `fma(a, c, d)`, never `a * c + d`. The latter is a multiply rounded and
+//     THEN an add rounded, and a backend that honours that (the CUDA generated
+//     tier compiles with `--fmad=false`, so every backend agrees to the bit)
+//     emits two instructions for it - the probe then reports HALF the fused
+//     rate that a kernel issuing explicit fused multiply-adds really reaches,
+//     and such a kernel would appear to beat the silicon.
 //
 // FLOPs = n * iters * 8 * 2 (one FMA is a multiply and an add).
 
@@ -70,14 +76,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var a7 = s + 7.0;
 
     for (var i: u32 = 0u; i < p.iters; i = i + 1u) {
-        a0 = a0 * c + d;
-        a1 = a1 * c + d;
-        a2 = a2 * c + d;
-        a3 = a3 * c + d;
-        a4 = a4 * c + d;
-        a5 = a5 * c + d;
-        a6 = a6 * c + d;
-        a7 = a7 * c + d;
+        a0 = fma(a0, c, d);
+        a1 = fma(a1, c, d);
+        a2 = fma(a2, c, d);
+        a3 = fma(a3, c, d);
+        a4 = fma(a4, c, d);
+        a5 = fma(a5, c, d);
+        a6 = fma(a6, c, d);
+        a7 = fma(a7, c, d);
     }
 
     out[idx] = ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7));
