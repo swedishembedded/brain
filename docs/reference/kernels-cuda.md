@@ -44,6 +44,8 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `bn_stats_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_stats` | BatchNorm batch mean and population variance of an NCHW channel: one 512-thread block per channel, coalesced 16-byte loads, two passes, fixed-order tree reduction |
 | `bn_dstats_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dstats` | BatchNorm backward sums of an NCHW channel (sum dy, sum dy*xhat) into the packed bp layout: one 512-thread block per channel |
 | `bn_dgamma_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dgamma` | BatchNorm gamma gradient (dgamma += sum dy*xhat) of an NCHW channel: one 512-thread block per channel |
+| `bn_train_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_train` | BatchNorm train-mode normalisation of an NCHW map: a block per run of one (n, c) plane, channel constants once per thread, 16-byte accesses; bit-identical to bn_train |
+| `bn_dx_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dx` | BatchNorm input gradient of an NCHW map from bn_dstats' packed sums: a block per run of one (n, c) plane; bit-identical to bn_dx |
 | `bn_dbeta_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dbeta` | BatchNorm beta gradient (dbeta += sum dy) of an NCHW channel: one 512-thread block per channel |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.

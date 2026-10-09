@@ -326,3 +326,54 @@ fn every_yolov8n_batchnorm_is_within_the_fp32_summation_bound_of_an_f64_oracle()
         eprintln!("{b:?}: worst error at {wn:.3} of the bound native, {wr:.3} reference");
     }
 }
+
+const ELEM_KERNELS: &[(&str, &str)] = &[
+    ("bn_train", kernels::BN_TRAIN),
+    ("bn_dx", kernels::BN_DX),
+    ("bn_train_ref", kernels::BN_TRAIN),
+    ("bn_dx_ref", kernels::BN_DX),
+];
+
+/// `bn_train` and `bn_dx` are elementwise: no reduction, so the native kernels
+/// do the reference's arithmetic in the reference's order and must reproduce
+/// its RAW BITS, at every YOLOv8n BatchNorm map and on the scalar path
+/// (`H*W` not a multiple of four), from random data with non-trivial
+/// statistics and sums.
+#[test]
+fn the_native_bn_elementwise_passes_are_bit_identical_to_the_reference() {
+    let gpu = gpu_core::testgpu::dev(ELEM_KERNELS);
+    if !is_cuda(&gpu) {
+        assert_eq!(gpu.native_kernel_for(0, &[2, 16, 8, 8]), None, "only a CUDA device takes a native kernel");
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    assert_eq!(gpu.native_kernel_for(0, &[2, 16, 8, 8]), Some("bn_train_f32"));
+    assert_eq!(gpu.native_kernel_for(1, &[2, 16, 8, 8]), Some("bn_dx_f32"));
+    for (i, b) in shapes().iter().enumerate() {
+        let inp = inputs(b, 600 + i as u64);
+        let c = b.c as usize;
+        let mut r = data::rng::Lcg::new(700 + i as u64);
+        let gb: Vec<f32> = (0..c).flat_map(|_| [r.signed(), r.signed()]).collect();
+        let bp: Vec<f32> =
+            (0..c).flat_map(|ch| [inp.mvg[3 * ch], inp.mvg[3 * ch + 1], inp.mvg[3 * ch + 2], r.scaled(50.0), r.scaled(50.0)]).collect();
+        let x = gpu.storage_init("x", &inp.x);
+        let dy = gpu.storage_init("dy", &inp.dy);
+        let mv = gpu.storage_init("mv", &inp.mv);
+        let gbb = gpu.storage_init("gb", &gb);
+        let bpb = gpu.storage_init("bp", &bp);
+        let outs: Vec<_> = (0..4).map(|_| gpu.storage(b.len() as u64)).collect();
+        let p = b.params();
+        let n = b.len() as u32;
+        let steps = [
+            gpu.step(0, &[&x, &mv, &gbb, &outs[0]], &p, n),
+            gpu.step(1, &[&x, &dy, &bpb, &outs[1]], &p, n),
+            gpu.step(2, &[&x, &mv, &gbb, &outs[2]], &p, n),
+            gpu.step(3, &[&x, &dy, &bpb, &outs[3]], &p, n),
+        ];
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        let rd = |k: usize| bits(&gpu.read(&outs[k], b.len()));
+        assert!(rd(0) == rd(2), "{b:?}: bn_train differs from the reference");
+        assert!(rd(1) == rd(3), "{b:?}: bn_dx differs from the reference");
+    }
+}

@@ -222,7 +222,17 @@ pub(crate) const ROWS: &[Row] = &[
     Row { slow: "bn_dstats", target: Target::Named("bn_dstats_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
     Row { slow: "bn_dgamma", target: Target::Named("bn_dgamma_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
     Row { slow: "bn_dbeta", target: Target::Named("bn_dbeta_f32"), bindings: BN_DBETA_BINDINGS, serves: serves_bn, blocks: bn_blocks, requires_wgsl_upgrade: false },
+    // BatchNorm's elementwise passes: the same arithmetic per element as the
+    // WGSL kernels, so these ARE bit-identical, and gated so.
+    Row { slow: "bn_train", target: Target::Named("bn_train_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "bn_dx", target: Target::Named("bn_dx_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
 ];
+
+/// `brain_bn_train`/`brain_bn_dx`: one block per run of `tile.1` elements of
+/// one `(n, c)` plane - the kernels number them plane-major.
+fn bn_elem_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0] * p[1] * (p[2] * p[3]).div_ceil(tile.1)
+}
 
 /// `bn_stats.wgsl`'s bindings: params, `x`, then the written `mean` and `var`.
 const BN_STATS_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
