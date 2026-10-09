@@ -900,16 +900,28 @@ impl BlockDev {
             // has already consumed (never aliasing probs or dscores).
             s.push(self.mmh("dcpk", h * hs, "vpk", h * hs, "scores", h * ss, n, hd, n));
         }
-        for h in 0..nh {
-            // Softmax Jacobian in place of the probabilities:
-            // dscores = p ⊙ (dprobs − Σ_j p·dprobs).
-            s.push(self.gpu.step_sliced(
-                K_SMDX,
-                &[self.g("probs"), self.g("scores"), self.g("dscores")],
-                &[self.sl(h * ss, n * n), self.sl(h * ss, n * n), self.sl(h * ss, n * n)],
-                &[n as u32, n as u32, 1],
-                n as u32,
-            ));
+        // Softmax Jacobian in place of the probabilities:
+        // dscores = p ⊙ (dprobs − Σ_j p·dprobs). The warp-per-row native
+        // kernel where the device offers it - over every head in ONE launch
+        // when the per-head slabs are contiguous - and `softmax_k_dx` per head
+        // otherwise.
+        let (probs, dprobs, dscores) = (self.g("probs"), self.g("scores"), self.g("dscores"));
+        let all = (ss == n * n).then(|| {
+            let whole = self.sl(0, nh * n * n);
+            self.gpu.fused_step_sliced(gpu_core::Fused::SoftmaxRowsDx, &[probs, dprobs, dscores], &[whole, whole, whole], &[(nh * n) as u32, n as u32])
+        });
+        match all.flatten() {
+            Some(step) => s.push(step),
+            None => {
+                for h in 0..nh {
+                    let head = self.sl(h * ss, n * n);
+                    let params = [n as u32, n as u32];
+                    let step = self.gpu.fused_step_sliced(gpu_core::Fused::SoftmaxRowsDx, &[probs, dprobs, dscores], &[head, head, head], &params);
+                    s.push(step.unwrap_or_else(|| {
+                        self.gpu.step_sliced(K_SMDX, &[probs, dprobs, dscores], &[head, head, head], &[n as u32, n as u32, 1], n as u32)
+                    }));
+                }
+            }
         }
         for h in 0..nh {
             // dq'[h] = dscores[h] · k[h]

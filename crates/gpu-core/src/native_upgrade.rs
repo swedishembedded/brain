@@ -481,6 +481,11 @@ pub enum Fused {
     /// `matmul_f32_dw_fma`: `matmul_dw_reg`'s contract (params `[m, k, n]`,
     /// always accumulating into the `n x k` output) with fused multiply-adds.
     F32DwFma,
+    /// `softmax_rows_dx`: the softmax Jacobian `dx = y * (dy - sum(dy * y))`
+    /// over `rows` contiguous rows of `k`, one warp per row. Params `[rows,
+    /// k]`; bindings `y`, `dy` read, `dx` written. A reordered reduction of
+    /// `softmax_k_dx`'s `M = 1` case - for a trainer, not a redirect.
+    SoftmaxRowsDx,
 }
 
 /// Output positions one block of [`Fused::Conv2dDwPartial`] stages per
@@ -650,6 +655,7 @@ impl Fused {
             Fused::F32Fma => "matmul_f32_fma",
             Fused::F32DxFma => "matmul_f32_dx_fma",
             Fused::F32DwFma => "matmul_f32_dw_fma",
+            Fused::SoftmaxRowsDx => "softmax_rows_dx",
         }
     }
 
@@ -664,7 +670,7 @@ impl Fused {
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
-            Fused::F32Fma | Fused::F32DxFma | Fused::F32DwFma => F32_GEMM_BINDINGS,
+            Fused::F32Fma | Fused::F32DxFma | Fused::F32DwFma | Fused::SoftmaxRowsDx => F32_GEMM_BINDINGS,
         }
     }
 
@@ -711,6 +717,9 @@ impl Fused {
             Fused::F32Fma => serves_f32_gemm(params),
             Fused::F32DxFma => serves_f32_dx(params),
             Fused::F32DwFma => serves_f32_dw(params),
+            Fused::SoftmaxRowsDx => {
+                matches!(params, [rows, k] if *rows >= 1 && *k >= 1 && u64::from(*rows) * u64::from(*k) <= u64::from(u32::MAX))
+            }
         }
     }
 
@@ -735,6 +744,7 @@ impl Fused {
             Fused::I8wDx | Fused::F32DxFma => dx_blocks(params, self.tile()),
             Fused::F32Fma => gemm_blocks(params, self.tile()),
             Fused::F32DwFma => dw_blocks(params, self.tile()),
+            Fused::SoftmaxRowsDx => params[0].div_ceil(self.tile().0),
         }
     }
 

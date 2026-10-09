@@ -395,6 +395,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
+        name: "softmax_rows_dx",
+        // Asked for by name (`gpu_core::Fused::SoftmaxRowsDx`) by a trainer:
+        // `softmax_k_dx`'s result over contiguous rows with a reordered
+        // reduction, so never a redirect of that kernel.
+        op: Op::Softmax,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_softmax_rows_dx",
+        what: "softmax Jacobian dx = y * (dy - sum(dy * y)) over contiguous rows, one warp per row, coalesced 16-byte loads and a shuffle reduction",
+        reported: "native:softmax_rows_dx",
+        block_dim: 256,
+        // Eight rows (one per warp) per block.
+        tile: (8, 1),
+        shared_bytes: 0,
+        src: include_str!("../cu/softmax_rows_dx.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8w_dx",
         // A training kernel with no WGSL twin, asked for by name
         // (`gpu_core::Fused::I8wDx`): the input gradient of a linear whose
