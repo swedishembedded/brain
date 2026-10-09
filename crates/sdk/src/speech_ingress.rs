@@ -179,7 +179,7 @@ impl SpeechIngress {
             self.decoder.enable_mm_splices(&[(ex.row0, self.rows as u32)]);
             self.splice_at = Some(ex.row0);
         }
-        let rows = self.projector.forward(&[ex.features.clone()]);
+        let rows = self.projector.forward(std::slice::from_ref(&ex.features));
         self.decoder.write_img_embeds(&rows);
         let (mut x, mut y) = (ex.tokens.clone(), ex.targets.clone());
         x.resize(self.block as usize, 0);
@@ -201,7 +201,7 @@ impl SpeechIngress {
         let d_rows = self.decoder.read_d_img_embeds();
         // The projector's activations hold the last forward: run it again for
         // this example before its gradient.
-        self.projector.forward(&[ex.features.clone()]);
+        self.projector.forward(std::slice::from_ref(&ex.features));
         self.projector.backward(&d_rows);
         loss
     }
