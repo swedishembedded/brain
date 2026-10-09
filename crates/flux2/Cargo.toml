@@ -53,3 +53,7 @@ harness = false
 [[test]]
 name = "int8_trainer"
 harness = false
+
+[[test]]
+name = "layernorm_rows"
+harness = false

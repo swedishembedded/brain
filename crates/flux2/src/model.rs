@@ -68,6 +68,9 @@ pub const KERNELS: &[(&str, &str)] = &[
     // Runtime LoRA epilogue (`y += B·(A·x)`), dispatched only for a linear an
     // adapter targets on a quantized build - see `LinA`.
     ("lora_delta", kernels::LORA_DELTA),
+    // The modulated LayerNorm's workgroup-per-row twin, chosen by
+    // `model::block::ln_variant` where the device runs reductions.
+    ("layernorm_rows", kernels::LAYERNORM_ROWS),
 ];
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
@@ -92,6 +95,7 @@ const K_MATMUL_I8: usize = 16;
 const K_FLASH_REG: usize = 17;
 const K_FLASH_REG2: usize = 18;
 const K_LORA: usize = 19;
+const K_LN_ROWS: usize = 20;
 
 const EPS: f32 = 1e-6;
 
@@ -852,18 +856,17 @@ impl Flux2Model {
     /// `LN_noaffine·gamma[b] + beta[b]`. `layernorm` takes ONE `[D]` gamma/beta
     /// pair, so the sample selection is a binding slice — at `b = 0` this is the
     /// same binding the unbatched model made (its buffers were exactly `[D]`).
+    ///
+    /// One workgroup per row where the device runs reductions
+    /// (`model::block::ln_variant`): the per-row kernel walks a whole
+    /// 3072-wide row three times on one thread.
     fn ln_rows(&self, x: &DeviceBuffer, site: usize, o: &DeviceBuffer, b: u32, r0: u32, r1: u32) -> Step {
         let d = self.cfg.hidden as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
         let mo = (b as u64 * d as u64, d as u64);
-        self.gpu.step_sliced(
-            K_LN,
-            &[x, &self.modb.gamma[site], &self.modb.beta[site], o],
-            &[off, mo, mo, off],
-            &[d, m, f(EPS)],
-            m,
-        )
+        let (kind, grid) = model::block::ln_variant(&self.gpu, K_LN, Some(K_LN_ROWS), m, d);
+        self.gpu.dispatch_sliced(kind, &[x, &self.modb.gamma[site], &self.modb.beta[site], o], &[off, mo, mo, off], &[d, m, f(EPS)], grid)
     }
 
     /// Gated residual over rows `r0..r1`: `y = x + gate[b] ⊙ h` (one condition
