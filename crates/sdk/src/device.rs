@@ -17,7 +17,8 @@ use crate::{Device, Error, Result};
 /// to resolve a second time.
 pub(crate) fn resolve(device: &Device) -> Result<gpu_core::devices::ComputeSet> {
     let probe = gpu_core::Inventory::probe();
-    let set = device.resolve(&probe).map_err(Error::Backend)?;
+    let mut set = device.resolve(&probe).map_err(Error::Backend)?;
+    gpu_core::devices::apply_env_backend(&mut set);
     set.apply().map_err(Error::Backend)?;
     gpu_core::publish_compute_set(set.clone());
     Ok(set)

@@ -173,6 +173,29 @@ struct DecScratch {
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     xn_final: DeviceBuffer,
+    /// Every residual head's `[(t-1)*vocab]` logits for the position just
+    /// decoded; the caller reads the one block its position owns.
+    logits: DeviceBuffer,
+}
+
+/// Which position-dependent uniform a cached decode step rewrites each call.
+#[derive(Clone, Copy)]
+enum PosUniform {
+    Rope,
+    RopeKv,
+    Append,
+    Scores,
+    Softmax,
+    Apply,
+}
+
+/// The single incremental-decode tape and the uniforms that carry its
+/// position. One tape for every position (not one per position) is what lets
+/// the CUDA backend capture it once and replay it: a submission is captured
+/// when it repeats, and sixteen distinct per-position tapes never do.
+struct DecCache {
+    steps: Vec<Step>,
+    uniforms: Vec<(DeviceBuffer, PosUniform)>,
 }
 
 struct Layer {
@@ -213,7 +236,11 @@ pub struct MtpModel {
     kcache: Vec<DeviceBuffer>,
     vcache: Vec<DeviceBuffer>,
     dec: DecScratch,
-    dec_tapes: std::cell::RefCell<Option<Vec<Vec<Step>>>>,
+    /// Every `lm_head[i]` stacked as one `[(t-1)*vocab, d_model]` device
+    /// matrix, so the decode tape is the same for every position and a graph
+    /// can replay it. `None` for a training build.
+    heads: Option<DeviceBuffer>,
+    dec_cache: std::cell::RefCell<Option<DecCache>>,
     // CPU input-embedding tables (residual codebooks) and output heads.
     codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*embedding_dim]
     lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d_model]
@@ -500,7 +527,12 @@ impl MtpModel {
             proj: st(d),
             mlp_out: st(d),
             xn_final: st(d),
+            logits: st((cfg.vocab * (cfg.num_code_groups - 1)) as u64),
         };
+        // An inference build keeps the residual heads on the device too, so a
+        // decoded position costs one round trip for its logits instead of one
+        // for its hidden state plus a host matvec (scalar on aarch64).
+        let heads = (!train).then(|| gpu.storage_init("mtp.lm_head", &lm_head.concat()));
         let mut kcache = Vec::new();
         let mut vcache = Vec::new();
         for _ in 0..cfg.n_layers {
@@ -521,7 +553,8 @@ impl MtpModel {
             kcache,
             vcache,
             dec,
-            dec_tapes: std::cell::RefCell::new(None),
+            heads,
+            dec_cache: std::cell::RefCell::new(None),
             codec_embedding,
             lm_head,
             small_to_mtp_projection,
@@ -668,81 +701,82 @@ impl MtpModel {
         s
     }
 
-    /// One prebuilt incremental-decode tape per position `0..num_code_groups`.
+    /// The incremental-decode tape: the same 5-layer block [`Self::forward_steps`]
+    /// records, but for ONE new row against a per-layer key/value cache (`O(1)`
+    /// projections, `O(pos)` attention), followed by every residual head.
     ///
-    /// The same 5-layer block [`Self::forward_steps`] records, but for ONE new
-    /// row against a per-layer key/value cache: `O(1)` projections and
-    /// `O(pos)` attention instead of the whole `num_code_groups`-long sequence
-    /// re-projected from scratch. Every uniform is a constant of `(layer,
-    /// pos)`, so all `num_code_groups` tapes are recorded once and replayed -
-    /// no per-step tape rebuild and no per-step uniform rewrite.
-    ///
-    /// The cache needs no explicit reset between frames: position `pos`'s tape
-    /// always WRITES cache row `pos` before attending, and `attn_decode_*`
-    /// only ever read rows `0..=pos`, so the previous frame's rows above `pos`
-    /// are unreachable rather than stale.
-    fn build_dec_tapes(&self) -> Vec<Vec<Step>> {
+    /// The position-dependent steps bind reusable uniforms that
+    /// [`Self::dec_submit`] rewrites for each call, so the tape is built once
+    /// and is identical for every position. The cache needs no reset between
+    /// frames: position `pos` overwrites its row and attends `0..=pos` only.
+    fn build_dec_cache(&self) -> DecCache {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
         let (nh, nkv) = (c.n_heads, c.n_kv_heads);
         let half = hd / 2;
         let cap = self.t;
-        let theta = c.rope_theta.to_bits();
         let g = &self.gpu;
         let sc = &self.dec;
         let ids = Self::only_fwd_ids();
         let tier = self.gemm_tier();
-        let gd = block::GqaDecodeIds {
-            kv_append: KV_APPEND,
-            attn_decode_scores: ATTN_DECODE_SCORES,
-            decode_softmax: DECODE_SOFTMAX,
-            attn_decode_apply: ATTN_DECODE_APPLY,
-        };
         let w = |name: &str| self.ps.w(name);
-        (0..cap)
-            .map(|pos| {
-                let mut s: Vec<Step> = Vec::new();
-                for l in 0..c.n_layers as usize {
-                    let p = |name: &str| format!("blocks.{l}.{name}");
-                    s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1, self.cfg.rms_norm_eps));
-                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
-                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
-                    s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
-                    s.push(g.step(ROPE_AT, &[&sc.q], &[1, nh, hd, hq, 0, pos, theta], nh * half));
-                    s.push(g.step(ROPE_AT, &[&sc.k], &[1, nkv, hd, hkv, 0, pos, theta], nkv * half));
-                    s.extend(block::gqa_decode_step(
-                        g,
-                        &gd,
-                        nh,
-                        nkv,
-                        hd,
-                        pos,
-                        cap,
-                        &sc.q,
-                        &sc.k,
-                        &sc.v,
-                        &self.kcache[l],
-                        &self.vcache[l],
-                        &sc.scores,
-                        &sc.probs,
-                        &sc.ctx,
-                    ));
-                    s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
-                    s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
-                    s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));
-                    s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
-                    s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
-                    s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
-                    s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, 1, ff, d));
-                    s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
-                }
-                s.push(block::rmsnorm_fwd(g, &ids, &self.res[c.n_layers as usize], w("norm.weight"), &sc.xn_final, d, 1, self.cfg.rms_norm_eps));
-                s
-            })
-            .collect()
+        let mut s: Vec<Step> = Vec::new();
+        let mut us: Vec<(DeviceBuffer, PosUniform)> = Vec::new();
+        for l in 0..c.n_layers as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1, self.cfg.rms_norm_eps));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, 1, d, hq));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, 1, d, hkv));
+            s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
+            let mut pos_step = |kind: usize, nfields: usize, bufs: &[&DeviceBuffer], threads: u32, pu: PosUniform| {
+                let ub = g.uniform_dynamic(nfields);
+                s.push(g.step_buf(kind, &ub, bufs, threads));
+                us.push((ub, pu));
+            };
+            pos_step(ROPE_AT, 7, &[&sc.q], nh * half, PosUniform::Rope);
+            pos_step(ROPE_AT, 7, &[&sc.k], nkv * half, PosUniform::RopeKv);
+            pos_step(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv, PosUniform::Append);
+            pos_step(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv, PosUniform::Append);
+            pos_step(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap, PosUniform::Scores);
+            pos_step(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh, PosUniform::Softmax);
+            pos_step(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd, PosUniform::Apply);
+            s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
+            s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, 1, d, ff));
+            s.push(self.mm(tier, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, 1, d, ff));
+            s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
+            s.push(self.mm(tier, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, 1, ff, d));
+            s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
+        }
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[c.n_layers as usize], w("norm.weight"), &sc.xn_final, d, 1, self.cfg.rms_norm_eps));
+        if let Some(heads) = &self.heads {
+            s.push(self.mm(tier, &sc.xn_final, heads, &sc.logits, 1, d, c.vocab * (self.t - 1)));
+        }
+        DecCache { steps: s, uniforms: us }
+    }
+
+    /// Position-dependent uniform contents for a decode step at `pos`.
+    fn pos_params(&self, k: PosUniform, pos: u32) -> Vec<u32> {
+        let c = &self.cfg;
+        let (hd, hq, hkv) = (c.head_dim, c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let group = nh / nkv;
+        let cap = self.t;
+        let t = pos + 1;
+        let scale = (1.0f32 / (hd as f32).sqrt()).to_bits();
+        let theta = c.rope_theta.to_bits();
+        match k {
+            PosUniform::Rope => vec![1, nh, hd, hq, 0, pos, theta],
+            PosUniform::RopeKv => vec![1, nkv, hd, hkv, 0, pos, theta],
+            PosUniform::Append => vec![hkv, pos],
+            PosUniform::Scores => vec![nh, group, hd, t, cap, hkv, scale],
+            PosUniform::Softmax => vec![nh, t, cap],
+            PosUniform::Apply => vec![nh, group, hd, t, cap, hkv],
+        }
     }
 
     /// Record (never read back) one incremental decode step: put `embed`'s
@@ -755,8 +789,8 @@ impl MtpModel {
         let d = self.cfg.d_model as usize;
         assert_eq!(embed.len(), d, "dec_step embed must be [d_model]");
         assert!(pos < self.t, "dec_step pos {pos} exceeds num_code_groups {}", self.t);
-        if self.dec_tapes.borrow().is_none() {
-            *self.dec_tapes.borrow_mut() = Some(self.build_dec_tapes());
+        if self.dec_cache.borrow().is_none() {
+            *self.dec_cache.borrow_mut() = Some(self.build_dec_cache());
         }
         let g = &self.gpu;
         // `res[0]` is `[num_code_groups, d_model]`; a decode step uses row 0
@@ -764,8 +798,12 @@ impl MtpModel {
         // `Gpu::write` submits everything recorded before it first, so the
         // previous position's tape can never read this row.
         g.write(&self.res[0], bytemuck::cast_slice(embed));
-        let tapes = self.dec_tapes.borrow();
-        g.submit(&[], &tapes.as_ref().unwrap()[pos as usize]);
+        let cache = self.dec_cache.borrow();
+        let cache = cache.as_ref().unwrap();
+        for (ub, k) in &cache.uniforms {
+            g.write(ub, &self.pos_params(*k, pos));
+        }
+        g.submit(&[], &cache.steps);
     }
 
     /// [`Self::dec_submit`] plus the readback: this position's final-norm
@@ -773,6 +811,21 @@ impl MtpModel {
     fn dec_step(&self, embed: &[f32], pos: u32) -> Vec<f32> {
         self.dec_submit(embed, pos);
         self.gpu.read(&self.dec.xn_final, self.cfg.d_model as usize)
+    }
+
+    /// [`Self::dec_submit`] for position `pos >= 1`, then the logits of the
+    /// codebook that position predicts (`lm_head[pos - 1]`, `[vocab]`). On the
+    /// device when the heads live there, else the hidden-state round trip and
+    /// the host matvec.
+    fn dec_logits(&self, embed: &[f32], pos: u32) -> Vec<f32> {
+        if self.heads.is_none() {
+            let hidden = self.dec_step(embed, pos);
+            return self.head_row(pos as usize - 1, &hidden);
+        }
+        self.dec_submit(embed, pos);
+        let v = self.cfg.vocab as usize;
+        let all = self.gpu.read(&self.dec.logits, v * (self.t as usize - 1));
+        all[(pos as usize - 1) * v..pos as usize * v].to_vec()
     }
 
     /// Run the decoder over an assembled `[num_code_groups, d_model]` input
@@ -940,13 +993,12 @@ impl MtpModel {
 
         // pos 0: the Talker hidden state. No head reads it; it is decoded only
         // to put its key/value into the cache.
-        let _ = self.dec_step(&self.project_to_hidden(talker_hidden), 0);
+        self.dec_submit(&self.project_to_hidden(talker_hidden), 0);
         // pos k (1..=nres): input is codebook (k-1)'s embedding (pos 1 = cb0);
         // `lm_head[k-1]` reads pos k to predict codebook k.
         let mut input_raw = cb0_embed.to_vec();
         for k in 1..=nres {
-            let hidden = self.dec_step(&self.project_to_hidden(&input_raw), k as u32);
-            let row = self.head_row(k - 1, &hidden);
+            let row = self.dec_logits(&self.project_to_hidden(&input_raw), k as u32);
             let best = crate::sampling::sample_residual(&row, cfg, rng).token as usize;
             codes[k - 1] = best as u32;
             // codec_embedding[k-1] embeds codebook k.

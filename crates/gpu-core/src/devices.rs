@@ -1229,11 +1229,20 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
     // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
     // test binary, an embedding application): how the selected hardware is
     // driven. The CLI layers its own flag on top of this, so a flag wins.
+    apply_env_backend(&mut set);
+    set
+}
+
+/// Layer `BRAIN_BACKEND` onto `set`, for a library caller that resolved its
+/// own [`DeviceSpec`] and would otherwise silently drop the override (the set
+/// then runs on whatever the probe preferred, Vulkan on a CUDA host). A bad
+/// value is reported and ignored.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_env_backend(set: &mut ComputeSet) {
     let backend = std::env::var("BRAIN_BACKEND").unwrap_or_default();
-    if let Err(e) = apply_backend_text(&mut set, &backend) {
+    if let Err(e) = apply_backend_text(set, &backend) {
         eprintln!("brain: {e}; ignoring it");
     }
-    set
 }
 
 /// Apply a `BRAIN_BACKEND` value to `set`. Empty means no override. Pure, so
