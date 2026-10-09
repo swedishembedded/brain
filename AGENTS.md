@@ -1321,7 +1321,14 @@ cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
 ./target/release/brain gpt2 train data/calculator --device cpu --out out/gpt.safetensors
 ./target/release/brain perf run sweep --device gpu0 --target qwen-synth:12x768x12
 BRAIN_DEVICE=cpu make test            # whole suite on CPU, no GPU needed
+cargo test -p brain-gpu-core --test f32_reg_native -- --device gpu1 --backend cuda
 ```
+
+A device gate declared with `gpu_core::card_tests!` (a `[[test]]` target with
+`harness = false`) takes its card as an ARGUMENT - the CLI's own `--device`,
+`--backend`, `--no-native-kernels` and `--profile-replays` - and opens no card
+at all without `--device`. Write new device gates that way, and convert an
+environment-driven one when you touch it.
 
 **Tracing** - `--trace-<family> <0-5>` is a GLOBAL option like `--device`,
 valid on any subcommand, stripped from the args before dispatch. It is

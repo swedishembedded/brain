@@ -351,6 +351,11 @@ pub fn hard_exit(code: i32) -> ! {
 }
 
 
+/// Device tests whose card is a command-line argument (`-- --device gpu1`),
+/// never the environment - see the module doc.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod card_tests;
+
 /// A process-wide device fixture for **test binaries** - explicit, documented,
 /// and torn down before exit.
 ///

@@ -67,3 +67,7 @@ brain-data.workspace = true
 # fixtures - the same crate `crates/gguf/src/kquant.rs` uses for the real
 # encode/decode, dev-only here since this crate's own kernels never touch f16.
 half.workspace = true
+
+[[test]]
+name = "f32_reg_native"
+harness = false

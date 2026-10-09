@@ -122,7 +122,6 @@ fn device() -> Option<Gpu> {
     Some(gpu)
 }
 
-#[test]
 fn the_native_kernel_is_selected_for_every_reg3_dispatch() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -140,7 +139,6 @@ fn the_native_kernel_is_selected_for_every_reg3_dispatch() {
 }
 
 /// Partial tiles, K tails of every residue mod 8, aligned and unaligned windows.
-#[test]
 fn the_native_kernel_is_bit_identical_to_matmul_reg3() {
     let Some(gpu) = device() else { return };
     for k in [1u32, 3, 8, 13, 16, 31, 64] {
@@ -152,7 +150,6 @@ fn the_native_kernel_is_bit_identical_to_matmul_reg3() {
     }
 }
 
-#[test]
 fn random_shapes_and_windows_are_bit_identical() {
     let Some(gpu) = device() else { return };
     let mut r = data::rng::Lcg::new(0x0f32_5eed);
@@ -166,7 +163,6 @@ fn random_shapes_and_windows_are_bit_identical() {
 /// Shapes the models this was written for dispatch: FLUX.2 klein-4B's fp32
 /// linears (double-block mlp.2 over text and image rows, txt_in, final layer)
 /// and a VAE attention projection and conv-as-GEMM chunk.
-#[test]
 fn the_model_shapes_are_bit_identical() {
     let Some(gpu) = device() else { return };
     for (m, k, n) in [(512u32, 9216u32, 3072u32), (1280, 9216, 3072), (512, 7680, 3072), (1280, 3072, 128), (5120, 512, 512), (4096, 1152, 128)] {
@@ -202,7 +198,6 @@ fn check_dx(gpu: &Gpu, m: u32, k: u32, n: u32, accumulate: u32, lead: [u64; 3]) 
     );
 }
 
-#[test]
 fn the_input_gradient_is_redirected_and_bit_identical() {
     let Some(gpu) = device() else { return };
     assert_eq!(gpu.native_kernel_for(K_DX, &[128, 64, 128, 0]), Some("matmul_f32_dx_reg"));
@@ -256,7 +251,6 @@ fn check_dw(gpu: &Gpu, m: u32, k: u32, n: u32, lead: [u64; 3]) {
     );
 }
 
-#[test]
 fn the_weight_gradient_is_redirected_and_bit_identical() {
     let Some(gpu) = device() else { return };
     assert_eq!(gpu.native_kernel_for(K_DW, &[128, 64, 128]), Some("matmul_f32_dw_reg"));
@@ -280,3 +274,12 @@ fn the_weight_gradient_is_redirected_and_bit_identical() {
         check_dw(&gpu, m, k, n, [0; 3]);
     }
 }
+
+gpu_core::card_tests!(
+    the_native_kernel_is_selected_for_every_reg3_dispatch,
+    the_native_kernel_is_bit_identical_to_matmul_reg3,
+    random_shapes_and_windows_are_bit_identical,
+    the_model_shapes_are_bit_identical,
+    the_input_gradient_is_redirected_and_bit_identical,
+    the_weight_gradient_is_redirected_and_bit_identical,
+);
