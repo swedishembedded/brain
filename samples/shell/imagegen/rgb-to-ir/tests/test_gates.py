@@ -121,6 +121,59 @@ class ShiftGate(unittest.TestCase):
         self.assertIsNone(G.global_shift(to_rgb(blocks(3)), np.full((H, W), 90, np.uint8)))
 
 
+def offset_pairs(dx_values, n_per=2):
+    """Real-pair stand-ins registered with a constant offset of a few pixels, as the study's real pairs are."""
+    for k, dx in enumerate(dx_values * n_per):
+        gray = blocks(300 + k)
+        yield to_rgb(gray), to_ir(gray, noise=4.0, seed=k, shift=(0, dx)), BOXES
+
+
+class ShiftCalibration(unittest.TestCase):
+    """The limit is what real pairs do: no more misaligned than they are."""
+
+    def setUp(self):
+        self.ref = G.real_reference(offset_pairs([3, 3, 4, 3, 2, 3], 3))
+        self.gray = blocks(7)
+
+    def synthetic(self, dx):
+        return G.check_image(to_rgb(self.gray), to_ir(self.gray, shift=(0, dx)), BOXES,
+                             G.GateConfig(edge_threshold=-1.0, **self.ref.shift.config_args()))
+
+    def test_the_reference_is_the_median_offset_and_the_spread_of_the_real_pairs(self):
+        sh = self.ref.shift
+        self.assertEqual(sh.n, 18)
+        self.assertAlmostEqual(abs(sh.median[0]), 3.0, delta=0.7)
+        self.assertLess(abs(sh.median[1]), 0.7)
+        self.assertGreater(sh.p95, 0.0)
+        self.assertLess(sh.p95, 2.0)
+        self.assertEqual(sh.floor, G.SHIFT_FLOOR_PX)
+        self.assertAlmostEqual(sh.limit, sh.p95 + sh.floor)
+        json.dumps(sh.to_dict())
+
+    def test_a_synthetic_image_shifted_by_the_real_median_offset_passes(self):
+        r = self.synthetic(3)
+        self.assertNotIn("global_shift", r.reasons)
+
+    def test_one_shifted_six_pixels_further_fails(self):
+        self.assertIn("global_shift", self.synthetic(9).reasons)
+
+    def test_a_fixed_limit_is_centred_on_zero_so_it_fails_the_real_offset(self):
+        r = G.check_image(to_rgb(self.gray), to_ir(self.gray, shift=(0, 3)), BOXES, G.GateConfig(edge_threshold=-1.0))
+        self.assertIn("global_shift", r.reasons)
+
+    def test_the_edge_reference_reports_its_percentiles(self):
+        e = self.ref.edge
+        self.assertEqual(e.n, 18 * len(BOXES))
+        pct = e.percentiles()
+        self.assertEqual(sorted(pct), ["10", "25", "5", "50", "75", "90", "95"])
+        self.assertAlmostEqual(pct["10"], e.threshold)
+
+    def test_pairs_without_a_measurable_shift_do_not_count_toward_it(self):
+        flat = (np.dstack([np.full((H, W), 90, np.uint8)] * 3), np.full((H, W), 90, np.uint8), BOXES)
+        ref = G.real_reference(list(offset_pairs([3], 2)) + [flat])
+        self.assertEqual(ref.shift.n, 2)
+
+
 class Hallucinations(unittest.TestCase):
     def test_a_confident_unmatched_detection_is_flagged(self):
         planted = G.Detection(1, 0.9, (150, 10, 200, 40))

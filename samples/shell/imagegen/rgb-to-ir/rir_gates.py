@@ -14,7 +14,12 @@ no longer describe the IR image. Each gate asks one question; an image that
 trips any of them is rejected (`check_image`), and `RejectionStats` counts the
 rejections per reason in the JSON that `rir_decide.py` reads for K4.
 
-    global_shift         the whole image is within `max_shift_px` (2) of the RGB. Phase correlation
+    global_shift         the whole image is within `max_shift_px` of `shift_center` (default: no
+                         shift, a limit of 2 px). The study's real pairs are themselves registered a few
+                         pixels apart and a translator learns that offset, so the pipeline calibrates the
+                         gate on real pairs instead (`ShiftReference`: the centre is the real median shift,
+                         the limit the 95th percentile of the real pairs' distance from it plus
+                         `SHIFT_FLOOR_PX`): "no more misaligned than real pairs are". Phase correlation
                          of the two edge maps (edges, because the grey levels of the modalities differ
                          and may be inverted). A featureless pair has no measurable shift: it is
                          reported as such and does not fail this gate (the edge gate sees it).
@@ -49,6 +54,8 @@ import numpy as np
 import rir_data as D
 
 REASONS = ("global_shift", "box_edge_correlation", "box_mask_iou", "hallucination")
+SHIFT_FLOOR_PX = 0.5  # added to the real pairs' own spread: phase correlation resolves about half a pixel
+REPORT_PERCENTILES = (5, 10, 25, 50, 75, 90, 95)
 MIN_PHASE_RESPONSE = 0.02  # below this phase-correlation peak there is nothing to measure a shift from
 
 Box = tuple  # (class, x1, y1, x2, y2), pixels
@@ -59,6 +66,7 @@ MaskIou = Callable[[np.ndarray, np.ndarray, tuple], "float | None"]
 class GateConfig:
     edge_threshold: float  # 10th percentile of real pairs: see reference_distribution
     max_shift_px: float = 2.0
+    shift_center: tuple = (0.0, 0.0)  # (dx, dy) the shift is measured from: the real pairs' median offset
     min_box_px: int = 8
     halluc_conf: float = 0.5
     halluc_iou: float = 0.5
@@ -105,6 +113,10 @@ class Reference:
     def from_dict(d: dict) -> "Reference":
         return Reference(tuple(d["values"]), float(d["percentile"]), float(d["threshold"]))
 
+    def percentiles(self) -> dict[str, float]:
+        """The distribution the threshold was read off, for the report."""
+        return {str(p): float(np.percentile(self.values, p)) for p in REPORT_PERCENTILES}
+
 
 def reference_distribution(pairs: Iterable, percentile: float = 10.0, min_box_px: int = 8) -> Reference:
     """Per-box edge correlations over real pairs `(rgb, ir, boxes)`; `threshold` is their `percentile`-th percentile."""
@@ -113,6 +125,53 @@ def reference_distribution(pairs: Iterable, percentile: float = 10.0, min_box_px
         raise ValueError("no boxes to build the reference distribution from: the real pairs have no box of at least "
                          f"{min_box_px} px")
     return Reference(tuple(values), percentile, float(np.percentile(values, percentile)))
+
+
+@dataclass(frozen=True)
+class ShiftReference:
+    """(dx, dy) phase-correlation shifts of real RGB / IR pairs: their median and the 95th percentile of the
+    distance from it."""
+    median: tuple
+    p95: float
+    n: int
+    floor: float = SHIFT_FLOOR_PX
+
+    @property
+    def limit(self) -> float:
+        return self.p95 + self.floor
+
+    def config_args(self) -> dict:
+        return {"shift_center": self.median, "max_shift_px": self.limit}
+
+    def to_dict(self) -> dict:
+        return {"median": list(self.median), "p95": self.p95, "floor": self.floor, "limit": self.limit, "n": self.n}
+
+
+@dataclass(frozen=True)
+class RealReference:
+    edge: Reference
+    shift: ShiftReference
+
+
+def real_reference(pairs: Iterable, percentile: float = 10.0, min_box_px: int = 8, floor: float = SHIFT_FLOOR_PX) -> RealReference:
+    """Both reference distributions of real pairs `(rgb, ir, boxes)` in one pass over the images. A pair with no
+    measurable shift is left out of the shift reference."""
+    edge, shifts = [], []
+    for rgb, ir, boxes in pairs:
+        edge += [c for c in box_edge_correlations(rgb, ir, boxes, min_box_px) if c is not None]
+        shift = global_shift(rgb, ir)
+        if shift is not None:
+            shifts.append(shift)
+    if not edge:
+        raise ValueError("no boxes to build the reference distribution from: the real pairs have no box of at least "
+                         f"{min_box_px} px")
+    if not shifts:
+        raise ValueError("no real pair has a measurable shift to calibrate the shift gate on")
+    arr = np.asarray(shifts, float)
+    median = np.median(arr, axis=0)
+    p95 = float(np.percentile(np.hypot(*(arr - median).T), 95))
+    return RealReference(Reference(tuple(edge), percentile, float(np.percentile(edge, percentile))),
+                         ShiftReference((float(median[0]), float(median[1])), p95, len(shifts), floor))
 
 
 def manifest_pairs(records: list[dict], classes: tuple[str, ...], limit: int = 0, seed: int = 1):
@@ -222,7 +281,7 @@ def check_image(rgb: np.ndarray, ir: np.ndarray, boxes: list[Box], config: GateC
     """Run the gates on one pair. `detections=None` / `mask_iou=None` leave those gates out."""
     shift = global_shift(rgb, ir)
     reasons = []
-    if shift is not None and float(np.hypot(*shift)) > config.max_shift_px:
+    if shift is not None and float(np.hypot(shift[0] - config.shift_center[0], shift[1] - config.shift_center[1])) > config.max_shift_px:
         reasons.append("global_shift")
     correlations = box_edge_correlations(rgb, ir, boxes, config.min_box_px)
     gates = []
