@@ -137,8 +137,17 @@ __device__ __forceinline__ BrainCvRadix brain_cv_split3(unsigned v, unsigned r1,
 // ---------------------------------------------------------------------------
 // The register-block multiply shared by the forward and the input gradient:
 // a [BK x BM] A slice and a [BK x BN] B slice in shared memory, thread
-// (ty, tx) owning rows ty*TM.. and positions tx*8..
+// (ty, tx) owning rows ty*TM.. and the two runs of four positions
+// [tx*4, tx*4+4) and [64 + tx*4, 64 + tx*4 + 4) - so the eight threads of a
+// quarter-warp read 128 contiguous bytes of a B row per vector load and hit
+// every bank once. (Eight contiguous positions per thread would put threads
+// tx and tx+4 on the same banks: a two-way conflict on the hottest load.)
 // ---------------------------------------------------------------------------
+#define BRAIN_CV_HALF (BRAIN_CV_BN / 2)
+
+// The block-relative position of a thread's register column j.
+__device__ __forceinline__ unsigned brain_cv_col(int tx, int j) { return (j < 4 ? 0u : (unsigned)BRAIN_CV_HALF) + 4u * tx + (j & 3); }
+
 template <int TM>
 __device__ __forceinline__ void brain_cv_mma(const float* as, int as_stride, const float* bs, float (&acc)[TM][BRAIN_CV_TN],
                                              int ty, int tx) {
@@ -154,8 +163,8 @@ __device__ __forceinline__ void brain_cv_mma(const float* as, int as_stride, con
         } else {
             a[0] = as[kk * as_stride + ty * TM];
         }
-        const float4 b0 = *reinterpret_cast<const float4*>(bs + kk * BRAIN_CV_BN + tx * BRAIN_CV_TN);
-        const float4 b1 = *reinterpret_cast<const float4*>(bs + kk * BRAIN_CV_BN + tx * BRAIN_CV_TN + 4);
+        const float4 b0 = *reinterpret_cast<const float4*>(bs + kk * BRAIN_CV_BN + 4 * tx);
+        const float4 b1 = *reinterpret_cast<const float4*>(bs + kk * BRAIN_CV_BN + BRAIN_CV_HALF + 4 * tx);
         const float b[BRAIN_CV_TN] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
 #pragma unroll
         for (int i = 0; i < TM; ++i) {
@@ -276,12 +285,11 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
         cur ^= 1;
     }
 
-    // Write: thread owns rows co0 + ty*TM + i and positions p0 + tx*8 .. +7.
-    const unsigned pb = p0 + tx * BRAIN_CV_TN;
-    if (pb >= P) { return; }
-    const unsigned n = pb / HoWo;
-    const unsigned q = pb - n * HoWo;
-    const bool vec = (HoWo % 4u == 0u) && (q + BRAIN_CV_TN <= HoWo) && ((reinterpret_cast<unsigned long long>(y) & 15ull) == 0ull);
+    // Write: rows co0 + ty*TM + i; columns as `brain_cv_col` lays them out, in
+    // two runs of four positions. A run is one 16-byte store where the map is
+    // a whole number of vectors (four consecutive positions then never straddle
+    // two images) and the binding is aligned.
+    const bool vec = (HoWo % 4u == 0u) && ((reinterpret_cast<unsigned long long>(y) & 15ull) == 0ull);
 #pragma unroll
     for (int i = 0; i < TM; ++i) {
         const unsigned co = co0 + ty * TM + i;
@@ -292,16 +300,23 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
 #pragma unroll
             for (int j = 0; j < BRAIN_CV_TN; ++j) { acc[i][j] = acc[i][j] + b; }
         }
-        float* yrow = y + ((unsigned long long)n * c.Cout + co) * HoWo + q;
-        if (vec) {
-            reinterpret_cast<float4*>(yrow)[0] = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
-            reinterpret_cast<float4*>(yrow)[1] = make_float4(acc[i][4], acc[i][5], acc[i][6], acc[i][7]);
-        } else {
-            unsigned nn = n, qq = q;
 #pragma unroll
-            for (int j = 0; j < BRAIN_CV_TN; ++j) {
-                if (pb + j < P) { y[((unsigned long long)nn * c.Cout + co) * HoWo + qq] = acc[i][j]; }
-                if (++qq == HoWo) { qq = 0; ++nn; }
+        for (int run = 0; run < 2; ++run) {
+            const unsigned pr = p0 + brain_cv_col(tx, 4 * run);
+            if (pr >= P) { continue; }
+            if (vec) {
+                const unsigned n = pr / HoWo, q = pr - (pr / HoWo) * HoWo;
+                *reinterpret_cast<float4*>(y + ((unsigned long long)n * c.Cout + co) * HoWo + q) =
+                    make_float4(acc[i][4 * run], acc[i][4 * run + 1], acc[i][4 * run + 2], acc[i][4 * run + 3]);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const unsigned p = pr + j;
+                    if (p < P) {
+                        const unsigned n = p / HoWo;
+                        y[((unsigned long long)n * c.Cout + co) * HoWo + (p - n * HoWo)] = acc[i][4 * run + j];
+                    }
+                }
             }
         }
     }
@@ -312,10 +327,10 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
 __device__ __forceinline__ void brain_conv2d_fwd_block(const unsigned int* params, const float* x, const float* w, const float* bias,
                                                        float* y, float* smem) {
     const BrainConvP c = brain_cv_params(params);
-    const unsigned bm = brain_cv_bm(c.Cout);
-    const unsigned tiles_m = (c.Cout + bm - 1u) / bm;
     const unsigned P = c.N * c.Ho * c.Wo;
     const unsigned tiles_n = (P + BRAIN_CV_BN - 1u) / BRAIN_CV_BN;
+    const unsigned bm = brain_cv_bm(c.Cout);
+    const unsigned tiles_m = (c.Cout + bm - 1u) / bm;
     const unsigned blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (tiles_m == 0u || blk >= tiles_m * tiles_n) { return; }  // block-uniform
     const unsigned tile_m = blk % tiles_m;
@@ -458,37 +473,34 @@ __device__ __forceinline__ void brain_conv2d_dx_tile(const BrainConvP& c, const 
         }
     }
 
-    // Write: rows ci0 + ty*TM + i, class positions p0 + tx*8 .. +7, scattered
-    // back to (n, rh + s*i, rw + s*j). A class with no live tap writes zeros:
-    // dx is overwritten, never accumulated.
-    const unsigned pb = p0 + tx * BRAIN_CV_TN;
-    if (pb >= Pc) { return; }
-    const unsigned n = pb / HWc;
-    const unsigned r = pb - n * HWc;
-    const unsigned i0 = r / Wc;
-    const unsigned j0 = r - i0 * Wc;
+    // Write: rows ci0 + ty*TM + i; class positions as `brain_cv_col` lays them
+    // out, scattered back to (n, rh + s*i, rw + s*j). A class with no live tap
+    // writes zeros: dx is overwritten, never accumulated. With stride 1 the
+    // class IS the whole map and a run of four is one 16-byte store where the
+    // map is a whole number of vectors and the binding is aligned.
     const unsigned HW = c.H * c.W;
-    const bool vec = (s == 1u) && (HW % 4u == 0u) && (r + BRAIN_CV_TN <= HWc) && ((reinterpret_cast<unsigned long long>(dx) & 15ull) == 0ull);
+    const bool vec = (s == 1u) && (HW % 4u == 0u) && ((reinterpret_cast<unsigned long long>(dx) & 15ull) == 0ull);
 #pragma unroll
     for (int i = 0; i < TM; ++i) {
         const unsigned ci = ci0 + ty * TM + i;
         if (ci >= c.Cin) { continue; }
-        if (vec) {
-            // Stride 1: the class IS the whole map, positions are contiguous.
-            float* row = dx + ((unsigned long long)n * c.Cin + ci) * HW + r;
-            reinterpret_cast<float4*>(row)[0] = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
-            reinterpret_cast<float4*>(row)[1] = make_float4(acc[i][4], acc[i][5], acc[i][6], acc[i][7]);
-        } else {
-            unsigned nn = n, ii = i0, jj = j0;
 #pragma unroll
-            for (int j = 0; j < BRAIN_CV_TN; ++j) {
-                if (pb + j < Pc) {
-                    const unsigned h = rh + s * ii, ww = rw + s * jj;
-                    dx[((unsigned long long)nn * c.Cin + ci) * HW + h * c.W + ww] = acc[i][j];
-                }
-                if (++jj == Wc) {
-                    jj = 0;
-                    if (++ii == Hc) { ii = 0; ++nn; }
+        for (int run = 0; run < 2; ++run) {
+            const unsigned pr = p0 + brain_cv_col(tx, 4 * run);
+            if (pr >= Pc) { continue; }
+            if (vec) {
+                const unsigned n = pr / HWc, r = pr - (pr / HWc) * HWc;
+                *reinterpret_cast<float4*>(dx + ((unsigned long long)n * c.Cin + ci) * HW + r) =
+                    make_float4(acc[i][4 * run], acc[i][4 * run + 1], acc[i][4 * run + 2], acc[i][4 * run + 3]);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const unsigned p = pr + j;
+                    if (p < Pc) {
+                        const unsigned n = p / HWc, r = p - (p / HWc) * HWc;
+                        const unsigned ii = r / Wc, jj = r - (r / Wc) * Wc;
+                        dx[((unsigned long long)n * c.Cin + ci) * HW + (rh + s * ii) * c.W + (rw + s * jj)] = acc[i][4 * run + j];
+                    }
                 }
             }
         }
@@ -499,13 +511,13 @@ extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_d
                                                                              float* dx) {
     __shared__ __align__(16) float smem[2 * BRAIN_CV_AS + 2 * BRAIN_CV_BS];
     const BrainConvP c = brain_cv_params(params);
-    const unsigned bm = brain_cv_bm(c.Cin);
-    const unsigned tiles_m = (c.Cin + bm - 1u) / bm;
     const unsigned s = c.stride;
     // Class (0, 0) has the most positions; smaller classes exit early.
-    const unsigned pc_max = c.N * ((c.H + s - 1u) / s) * ((c.W + s - 1u) / s);
+    const unsigned pc_max = s ? c.N * ((c.H + s - 1u) / s) * ((c.W + s - 1u) / s) : 0u;
     const unsigned tiles_n = (pc_max + BRAIN_CV_BN - 1u) / BRAIN_CV_BN;
     const unsigned classes = s * s;
+    const unsigned bm = brain_cv_bm(c.Cin);
+    const unsigned tiles_m = (c.Cin + bm - 1u) / bm;
     const unsigned blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (tiles_m == 0u || s == 0u || blk >= tiles_m * classes * tiles_n) { return; }
     const unsigned tile_m = blk % tiles_m;
