@@ -287,6 +287,28 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_i8_dp4a",
+        // The native twin of `matmul_i8_dyn.wgsl`, redirected to BY NAME by
+        // `gpu_core::native_upgrade` for every dispatch of that kernel. The
+        // (MatMul, I8) operator answer stays the decode GEMV, which `find`
+        // must keep returning for the GEMV's own row.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: DP4A_MIN_CC,
+        entry: "brain_matmul_i8_dp4a",
+        what: "packed-int8 GEMM (dp4a), dynamic per-row activation scale, group-32 weight scale folded per group in ascending order; 128x128 tile, 8x8 per thread, bit-identical to matmul_i8_dyn",
+        reported: "native:matmul_i8_dp4a",
+        block_dim: 256,
+        // 128 rows of x by 128 weight rows per block, row-tile-major.
+        tile: (128, 128),
+        // Double-buffered k-major tiles of 16 words x (128 + 4 pad) for each
+        // operand, and the chunk's two groups of 128 weight scales.
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4 + 2 * 2 * 128 * 4,
+        src: include_str!("../cu/matmul_i8_dp4a.cu"),
+    },
+    CudaKernel {
         name: "moe_i8_grouped_mma",
         // The native twin of `moe_i8_grouped.wgsl`, redirected to by
         // `gpu_core::native_upgrade`: the (MoeExpertLinear, I8) answer. The decode

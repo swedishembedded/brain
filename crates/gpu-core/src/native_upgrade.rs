@@ -111,6 +111,20 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
     (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(&m) && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
+/// `matmul_i8_dyn`'s `Params { m, kg, n }` (same bindings as the GEMV): any
+/// non-empty output whose `K` is a whole number of 32-element weight-scale
+/// groups, the WGSL kernel's own contract, with every operand inside the
+/// kernel's 32-bit row arithmetic.
+fn serves_i8_dyn(p: &[u32]) -> bool {
+    match p {
+        [m, kg, n] => {
+            let limit = u64::from(u32::MAX);
+            *m >= 1 && *n >= 1 && *kg >= 8 && kg % 8 == 0 && u64::from(*m) * u64::from(*n) <= limit
+        }
+        _ => false,
+    }
+}
+
 /// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
 /// `out`.
 const MOE_I8_GROUPED_BINDINGS: &[BindKind] = &[
@@ -204,6 +218,18 @@ pub(crate) const ROWS: &[Row] = &[
         serves: serves_i8_gemv,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: true,
+    },
+    // The prefill/DiT GEMM, at every shape the WGSL kernel serves. Its
+    // grouped int32 sums are exact and folded in the reference's order with
+    // the reference's two roundings, so this row is bit-identical too
+    // (`tests/i8_dyn_native.rs`).
+    Row {
+        slow: "matmul_i8_dyn",
+        target: Target::Named("matmul_i8_dp4a"),
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_dyn,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
     },
     Row {
         slow: "moe_i8_grouped",
