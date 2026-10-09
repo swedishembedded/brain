@@ -959,7 +959,7 @@ impl CudaBackend {
                 // landed. While the copy engine runs it, the compute engine is
                 // idle and a device shared with another context may switch to
                 // it; started earlier, the clock would bill that context's whole
-                // time slice to this kernel (knowledge #210). Timing already
+                // time slice to this kernel (knowledge #212). Timing already
                 // issues launch by launch, so this costs a wait, not batching.
                 self.ctx.sync().unwrap_or_else(|e| panic!("backend-cuda: device synchronise failed: {e}"));
             }
