@@ -344,6 +344,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
+        name: "matmul_i8w_dx",
+        // A training kernel with no WGSL twin, asked for by name
+        // (`gpu_core::Fused::I8wDx`): the input gradient of a linear whose
+        // frozen base is resident as packed int8. A fourth entry of the fp32
+        // GEMM file, sharing its block function.
+        op: Op::MatMul,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_i8w_dx",
+        what: "fp32 dX = dY @ deq(W) for a packed int8 group-32 weight dequantised while staged, fused multiply-adds; 128x128 tile, 8x8 per thread",
+        reported: "native:matmul_i8w_dx",
+        block_dim: 256,
+        tile: (128, 128),
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        src: include_str!("../cu/matmul_f32_reg.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8_dp4a",
         // The native twin of `matmul_i8_dyn.wgsl`, redirected to BY NAME by
         // `gpu_core::native_upgrade` for every dispatch of that kernel. The

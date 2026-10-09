@@ -464,6 +464,13 @@ pub enum Fused {
     /// the partial kernel's blocks were scheduled. Params `[total, S]`;
     /// bindings `part` read, `dw` read-written.
     Conv2dDwReduce,
+    /// `matmul_i8w_dx`: the input gradient of a linear whose frozen weight is
+    /// resident as packed int8, `out[m,k] (+)= sum_n dy[m,n] * q[n,k] *
+    /// sw[n,k/32]` - the weight dequantised exactly as it is staged, fp32
+    /// fused multiply-adds. Params `[m, k, n, accumulate]` (K a multiple of
+    /// 32); bindings `dy`, `wq` (`[n, k/4]` u32), `sw` (`[n, k/32]`) read,
+    /// `out` read-written.
+    I8wDx,
 }
 
 /// Output positions one block of [`Fused::Conv2dDwPartial`] stages per
@@ -608,6 +615,9 @@ const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `matmul_i8w_dx`'s bindings: params, `dy`, `wq`, `sw`, `out`.
+const I8W_DX_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
 /// `conv2d_dw_partial`'s bindings: params, `dy`, `x`, `out`.
 const CONV2D_DW_PARTIAL_BINDINGS: &[BindKind] = CONV2D_BINDINGS;
 
@@ -626,6 +636,7 @@ impl Fused {
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
+            Fused::I8wDx => "matmul_i8w_dx",
         }
     }
 
@@ -639,6 +650,7 @@ impl Fused {
             Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
+            Fused::I8wDx => I8W_DX_BINDINGS,
         }
     }
 
@@ -680,6 +692,8 @@ impl Fused {
                 }
             }
             Fused::Conv2dDwReduce => matches!(params, [total, splits] if *total >= 1 && *splits >= 1),
+            Fused::I8wDx => matches!(params, [m, k, n, _] if *m >= 1 && *n >= 1 && *k >= 32 && k % 32 == 0
+                && u64::from(*m) * u64::from(*k) <= u64::from(u32::MAX)),
         }
     }
 
@@ -701,6 +715,10 @@ impl Fused {
                 cout.div_ceil(conv_rows_tile(cout)) * (cin * k * k).div_ceil(CONV_DW_COLS) * params[10]
             }
             Fused::Conv2dDwReduce => params[0].div_ceil(CONV_DW_REDUCE_BLOCK),
+            Fused::I8wDx => {
+                let tile = kernels_cuda::get("matmul_i8w_dx").map_or((128, 128), |k| k.tile);
+                params[0].div_ceil(tile.0) * params[1].div_ceil(tile.1)
+            }
         }
     }
 }

@@ -23,6 +23,16 @@
 //     params : u32 [m, k, n]
 //     a : [M, N]   b : [M, K]   out : [N, K] += a^T @ b (always accumulated)
 //
+// and one training kernel with no WGSL twin, held to a host oracle instead of
+// to bits:
+//
+//   brain_matmul_i8w_dx      the input gradient through an int8 weight
+//     params : u32 [m, k, n, accumulate]   (K a multiple of 32)
+//     dy : [M, N]  wq : [N, K/4] u32  sw : [N, K/32] f32
+//     out : [M, K] = dy @ deq(W), deq(W)[n, c] = q[n, c] * sw[n, c/32]
+//     The weight is dequantised exactly while it is staged, and the terms
+//     accumulate with fused multiply-adds.
+//
 // All three are one GEMM over a contraction axis of length L (K, N and M
 // respectively); they differ only in whether each operand holds a row per
 // output or a row per contraction step, and in the epilogue.
@@ -151,12 +161,54 @@ struct BrainMmrStage {
     }
 };
 
+// The second operand of the int8-weight input gradient: a packed int8 matrix
+// `[L, cols/4]` u32 with one fp32 scale per 32 of its columns (`[L, cols/32]`,
+// `model::int8`'s group-wise layout), staged as the exact fp32 values
+// `q * scale` - the dequantised weight, formed on the way into shared memory
+// so the matrix is never resident as fp32. A thread's four outputs are one
+// packed word, inside one scale group.
+struct BrainMmrStageI8 {
+    const unsigned int* q;
+    const float* s;
+    unsigned int r;
+    unsigned int k0;
+    float4 v[2];
+
+    __device__ __forceinline__ void init(const unsigned int* wq, const float* sw, unsigned int o0, unsigned int tid) {
+        q = wq;
+        s = sw;
+        r = o0 + (tid % 32) * 4;
+        k0 = tid / 32;
+    }
+    __device__ __forceinline__ void load(unsigned int l0, unsigned int cols, unsigned int len) {
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            const unsigned int l = l0 + k0 + 8 * p;
+            if (l < len && r < cols) {
+                const unsigned int w = __ldg(q + (size_t)l * (cols / 4) + r / 4);
+                const float sc = __ldg(s + (size_t)l * (cols / 32) + r / 32);
+                v[p] = make_float4(__fmul_rn((float)(signed char)(w & 0xffu), sc), __fmul_rn((float)(signed char)((w >> 8) & 0xffu), sc),
+                                   __fmul_rn((float)(signed char)((w >> 16) & 0xffu), sc), __fmul_rn((float)(signed char)(w >> 24), sc));
+            } else {
+                v[p] = make_float4(0.f, 0.f, 0.f, 0.f);
+            }
+        }
+    }
+    __device__ __forceinline__ void store(float (*dst)[BRAIN_MMR_SP], unsigned int o0) {
+#pragma unroll
+        for (int p = 0; p < 2; ++p) { *reinterpret_cast<float4*>(&dst[k0 + 8 * p][r - o0]) = v[p]; }
+    }
+};
+
 // One 128 x 128 output tile of out[r, c] = sum_l A(r, l) * B(c, l), each
 // operand either [outputs, L] (`*_ROW_MAJOR`) or [L, outputs]. `rows`/`cols`/
-// `len` are the output height and width and L.
-template <bool VEC, bool A_ROW_MAJOR, bool B_ROW_MAJOR>
+// `len` are the output height and width and L. `FUSED` accumulates with one
+// fused multiply-add per term instead of the reference's two roundings - for
+// the training-only kernels, which have no WGSL twin to reproduce.
+template <bool VEC, bool A_ROW_MAJOR, bool B_ROW_MAJOR, bool FUSED = false, bool B_I8 = false>
 __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int rows, unsigned int cols, unsigned int len, const float* a,
-                                                const float* b, float* out, bool accumulate) {
+                                                const float* b, float* out, bool accumulate, const unsigned int* bq = nullptr,
+                                                const float* bs = nullptr) {
     const unsigned int tiles_n = (cols + BRAIN_MMR_BN - 1) / BRAIN_MMR_BN;
     const unsigned int tiles = ((rows + BRAIN_MMR_BM - 1) / BRAIN_MMR_BM) * tiles_n;
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
@@ -170,8 +222,13 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int
 
     BrainMmrStage<VEC, A_ROW_MAJOR> sa;
     BrainMmrStage<VEC, B_ROW_MAJOR> sb;
+    BrainMmrStageI8 sq;
     sa.init(a, row0, rows, len, tid);
-    sb.init(b, col0, cols, len, tid);
+    if (B_I8) {
+        sq.init(bq, bs, col0, tid);
+    } else {
+        sb.init(b, col0, cols, len, tid);
+    }
 
     float c[8][8];
 #pragma unroll
@@ -182,9 +239,9 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int
 
     const unsigned int nchunks = (len + BRAIN_MMR_BK - 1) / BRAIN_MMR_BK;
     sa.load(0, rows, len, row0, rows);
-    sb.load(0, cols, len, col0, cols);
+    if (B_I8) { sq.load(0, cols, len); } else { sb.load(0, cols, len, col0, cols); }
     sa.store(sh.a[0]);
-    sb.store(sh.b[0]);
+    if (B_I8) { sq.store(sh.b[0], col0); } else { sb.store(sh.b[0]); }
     __syncthreads();
 
     for (unsigned int ch = 0; ch < nchunks; ++ch) {
@@ -192,7 +249,7 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int
         const bool has_next = ch + 1 < nchunks;
         if (has_next) {
             sa.load((ch + 1) * BRAIN_MMR_BK, rows, len, row0, rows);
-            sb.load((ch + 1) * BRAIN_MMR_BK, cols, len, col0, cols);
+            if (B_I8) { sq.load((ch + 1) * BRAIN_MMR_BK, cols, len); } else { sb.load((ch + 1) * BRAIN_MMR_BK, cols, len, col0, cols); }
         }
 #pragma unroll
         for (int k = 0; k < BRAIN_MMR_BK; ++k) {
@@ -205,12 +262,12 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int
 #pragma unroll
             for (int i = 0; i < 8; ++i) {
 #pragma unroll
-                for (int j = 0; j < 8; ++j) { c[i][j] = __fadd_rn(c[i][j], __fmul_rn(av[i], bv[j])); }
+                for (int j = 0; j < 8; ++j) { c[i][j] = FUSED ? __fmaf_rn(av[i], bv[j], c[i][j]) : __fadd_rn(c[i][j], __fmul_rn(av[i], bv[j])); }
             }
         }
         if (has_next) {
             sa.store(sh.a[buf ^ 1u]);
-            sb.store(sh.b[buf ^ 1u]);
+            if (B_I8) { sq.store(sh.b[buf ^ 1u], col0); } else { sb.store(sh.b[buf ^ 1u]); }
         }
         __syncthreads();
     }
@@ -274,5 +331,17 @@ brain_matmul_f32_dw_reg(const unsigned int* params, const float* a, const float*
         brain_mmr_block<true, false, false>(sh, n, k, m, a, b, out, true);
     } else {
         brain_mmr_block<false, false, false>(sh, n, k, m, a, b, out, true);
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_MMR_THREADS, 2)
+brain_matmul_i8w_dx(const unsigned int* params, const float* dy, const unsigned int* wq, const float* sw, float* out) {
+    __shared__ BrainMmrShared sh;
+    const unsigned int m = params[0], k = params[1], n = params[2];
+    const bool accumulate = params[3] != 0;
+    if (brain_mmr_vec(dy, dy, n, n)) {
+        brain_mmr_block<true, true, false, true, true>(sh, m, k, n, dy, nullptr, out, accumulate, wq, sw);
+    } else {
+        brain_mmr_block<false, true, false, true, true>(sh, m, k, n, dy, nullptr, out, accumulate, wq, sw);
     }
 }

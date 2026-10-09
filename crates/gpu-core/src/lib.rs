@@ -1902,6 +1902,18 @@ mod native_facade {
             self.step_native(id, bufs, params, which.blocks(params))
         }
 
+        /// [`Self::fused_step`] binding a sub-range of each buffer, with
+        /// [`Self::step_sliced`]'s `(offset_words, len_words)` convention.
+        /// `None` where the kernel is not offered, does not serve `params`, or
+        /// the backend has no native slicing path.
+        pub fn fused_step_sliced(&self, which: crate::native_upgrade::Fused, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32]) -> Option<Step> {
+            if !which.serves(params) {
+                return None;
+            }
+            let id = self.fused_id(which)?;
+            self.step_native_sliced(id, bufs, offsets, params, which.blocks(params))
+        }
+
         /// How the native dense-conv weight gradient of `params` (the ten-word
         /// conv uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`) is split
         /// on this device: `(slices, positions per slice)`. `None` where the
