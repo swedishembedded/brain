@@ -49,6 +49,9 @@ const KERNELS: &[(&str, &str)] = &[
     ("conv2d_ref", kernels::CONV2D),
     ("conv2d_dx_ref", kernels::CONV2D_DX),
     ("conv2d_dw_ref", kernels::CONV2D_DW),
+    ("conv_bias", kernels::CONV_BIAS),
+    ("conv_bias_reg", kernels::CONV_BIAS_REG),
+    ("conv_bias_ref", kernels::CONV_BIAS),
 ];
 const CONV: usize = 0;
 const CONV_DX: usize = 1;
@@ -56,6 +59,9 @@ const CONV_DW: usize = 2;
 const CONV_REF: usize = 3;
 const CONV_DX_REF: usize = 4;
 const CONV_DW_REF: usize = 5;
+const CONV_BIAS: usize = 6;
+const CONV_BIAS_REG: usize = 7;
+const CONV_BIAS_REF: usize = 8;
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && !std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
@@ -437,5 +443,58 @@ fn the_real_yolov8n_geometry_is_exact_on_integer_data() {
         assert!(bits(&y) == bits(&y_r), "forward differs: {tag}");
         assert!(bits(&dx) == bits(&dx_r), "dx differs: {tag}");
         assert!(bits(&dw) == bits(&dw_r), "dw differs: {tag}");
+    }
+}
+
+/// `y = conv(x, w) + bias[co]` from the slot `slot`.
+fn run_bias(gpu: &Gpu, c: &Conv, x: &[f32], w: &[f32], bias: &[f32], slot: usize) -> Vec<f32> {
+    let xb = gpu.storage_init("x", x);
+    let wb = gpu.storage_init("w", w);
+    let bb = gpu.storage_init("bias", bias);
+    let y = gpu.storage(c.y_len() as u64);
+    gpu.submit(&[], &[gpu.step(slot, &[&xb, &wb, &bb, &y], &c.params(), c.y_len() as u32)]);
+    gpu.poll_wait();
+    gpu.read(&y, c.y_len())
+}
+
+/// The biased forward (`conv_bias`, and its register-tiled sibling
+/// `conv_bias_reg`, both redirected to the native kernel): within the
+/// summation bound of the f64 oracle, the bias counting as one more term, and
+/// bit-exact with the WGSL reference on integer data at the detection head's
+/// real geometry.
+#[test]
+fn the_biased_forward_is_within_the_bound_and_exact_on_integer_data() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS, &Conv { n: 1, cin: 4, h: 4, w: 4, cout: 3, k: 1, s: 1, pad: 0 }.params()), None);
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    for (i, c) in oracle_shapes().iter().enumerate() {
+        let b = inputs(c, 2000 + i as u64);
+        let bias = data::rng::Lcg::new(3000 + i as u64).vec(c.cout as usize);
+        let p = c.params();
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS, &p), Some("conv2d_bias_fwd_f32"), "{c:?}");
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS_REG, &p), Some("conv2d_bias_fwd_f32"), "{c:?}");
+        let mut o = oracle_fwd(c, &b.x, &b.w);
+        let plane = (c.ho() * c.wo()) as usize;
+        for (k, (e, a)) in o.exact.iter_mut().zip(o.abs.iter_mut()).enumerate() {
+            let co = (k / plane) % c.cout as usize;
+            *e += f64::from(bias[co]);
+            *a += f64::from(bias[co]).abs();
+        }
+        o.len += 1;
+        check_bound(&run_bias(&gpu, c, &b.x, &b.w, &bias, CONV_BIAS_REF), &o, &format!("reference conv_bias {c:?}"));
+        check_bound(&run_bias(&gpu, c, &b.x, &b.w, &bias, CONV_BIAS), &o, &format!("native conv_bias {c:?}"));
+        check_bound(&run_bias(&gpu, c, &b.x, &b.w, &bias, CONV_BIAS_REG), &o, &format!("native conv_bias_reg {c:?}"));
+    }
+    // The detection head's biased projections, batch 8 at a 512 input.
+    for (i, &(cin, cout, side)) in [(64u32, 64u32, 64u32), (64, 3, 64), (64, 64, 32), (64, 3, 32), (64, 64, 16), (64, 3, 16)].iter().enumerate() {
+        let c = Conv { n: 8, cin, h: side, w: side, cout, k: 1, s: 1, pad: 0 };
+        let b = integer_inputs(&c, 4000 + i as u64);
+        let bias = integer_inputs(&Conv { n: 1, cin: 1, h: 1, w: 1, cout, k: 1, s: 1, pad: 0 }, 5000 + i as u64).dy;
+        let reference = run_bias(&gpu, &c, &b.x, &b.w, &bias, CONV_BIAS_REF);
+        assert!(bits(&run_bias(&gpu, &c, &b.x, &b.w, &bias, CONV_BIAS)) == bits(&reference), "conv_bias differs: {c:?}");
+        assert!(bits(&run_bias(&gpu, &c, &b.x, &b.w, &bias, CONV_BIAS_REG)) == bits(&reference), "conv_bias_reg differs: {c:?}");
     }
 }

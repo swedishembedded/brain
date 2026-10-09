@@ -138,6 +138,11 @@ fn serves_moe_i8_grouped(p: &[u32]) -> bool {
 /// two read operands, the written output.
 const CONV2D_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// `conv_bias.wgsl`'s and `conv_bias_reg.wgsl`'s bindings: params, `x`, `w`,
+/// `bias`, the written `y`.
+const CONV_BIAS_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
 /// The dense conv uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`, when
 /// it describes a convolution the native kernels serve: every extent non-zero,
 /// the output extent the one the input, kernel, stride and padding give, and
@@ -215,6 +220,11 @@ pub(crate) const ROWS: &[Row] = &[
     // holds them to the fp32 summation-order bound instead of to raw bits.
     Row { slow: "conv2d", target: Target::Named("conv2d_fwd_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false },
     Row { slow: "conv2d_dx", target: Target::Named("conv2d_dx_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_dx_blocks, requires_wgsl_upgrade: false },
+    // The biased forward, and its register-tiled WGSL sibling (same uniform,
+    // same bindings - only the WGSL dispatch geometry differs, and the native
+    // kernel derives its own block count from the uniform).
+    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false },
     // BatchNorm's per-channel reductions: one block per channel instead of
     // one thread. Re-associated sums, gated like the conv rows
     // (`tests/bn_native.rs`).

@@ -175,7 +175,7 @@ __device__ __forceinline__ void brain_cv_mma(const float* as, int as_stride, con
 // Forward.
 // ---------------------------------------------------------------------------
 template <int BM>
-__device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const float* x, const float* w, float* y,
+__device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const float* x, const float* w, const float* bias, float* y,
                                                       unsigned tile_m, unsigned tile_n, float* smem) {
     constexpr int TM = BM / 16;
     constexpr int AS = BM + 4;                      // A row stride, floats
@@ -286,6 +286,12 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
     for (int i = 0; i < TM; ++i) {
         const unsigned co = co0 + ty * TM + i;
         if (co >= c.Cout) { continue; }
+        if (bias != nullptr) {
+            // `conv_bias`: the bias joins the finished sum, as in the reference.
+            const float b = bias[co];
+#pragma unroll
+            for (int j = 0; j < BRAIN_CV_TN; ++j) { acc[i][j] = acc[i][j] + b; }
+        }
         float* yrow = y + ((unsigned long long)n * c.Cout + co) * HoWo + q;
         if (vec) {
             reinterpret_cast<float4*>(yrow)[0] = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
@@ -301,9 +307,10 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
     }
 }
 
-extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_fwd(const unsigned int* params, const float* x, const float* w,
-                                                                              float* y) {
-    __shared__ __align__(16) float smem[2 * BRAIN_CV_AS + 2 * BRAIN_CV_BS];
+// The forward's block: decode the tile, pick the channel-tile width. `bias`
+// is null for `conv2d` and the per-output-channel bias for `conv_bias`.
+__device__ __forceinline__ void brain_conv2d_fwd_block(const unsigned int* params, const float* x, const float* w, const float* bias,
+                                                       float* y, float* smem) {
     const BrainConvP c = brain_cv_params(params);
     const unsigned bm = brain_cv_bm(c.Cout);
     const unsigned tiles_m = (c.Cout + bm - 1u) / bm;
@@ -314,12 +321,25 @@ extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_f
     const unsigned tile_m = blk % tiles_m;
     const unsigned tile_n = blk / tiles_m;
     if (bm == 16u) {
-        brain_conv2d_fwd_tile<16>(c, x, w, y, tile_m, tile_n, smem);
+        brain_conv2d_fwd_tile<16>(c, x, w, bias, y, tile_m, tile_n, smem);
     } else if (bm == 32u) {
-        brain_conv2d_fwd_tile<32>(c, x, w, y, tile_m, tile_n, smem);
+        brain_conv2d_fwd_tile<32>(c, x, w, bias, y, tile_m, tile_n, smem);
     } else {
-        brain_conv2d_fwd_tile<64>(c, x, w, y, tile_m, tile_n, smem);
+        brain_conv2d_fwd_tile<64>(c, x, w, bias, y, tile_m, tile_n, smem);
     }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_fwd(const unsigned int* params, const float* x, const float* w,
+                                                                              float* y) {
+    __shared__ __align__(16) float smem[2 * BRAIN_CV_AS + 2 * BRAIN_CV_BS];
+    brain_conv2d_fwd_block(params, x, w, nullptr, y, smem);
+}
+
+// `conv_bias.wgsl`'s form: the same forward, plus `bias[co]` on each output.
+extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_bias_fwd(const unsigned int* params, const float* x,
+                                                                                   const float* w, const float* bias, float* y) {
+    __shared__ __align__(16) float smem[2 * BRAIN_CV_AS + 2 * BRAIN_CV_BS];
+    brain_conv2d_fwd_block(params, x, w, bias, y, smem);
 }
 
 // ---------------------------------------------------------------------------
