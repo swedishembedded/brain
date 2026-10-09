@@ -4,7 +4,8 @@
 //! The gate for the native fp32 GEMMs of `kernels_cuda`'s
 //! `cu/matmul_f32_reg.cu` that `gpu_core::native_upgrade` substitutes on a
 //! CUDA device: `matmul_f32_reg` for the WGSL `matmul_reg3` forward and
-//! `matmul_f32_dx_reg` for `matmul_dx_reg`, its input gradient.
+//! `matmul_f32_dx_reg` for `matmul_dx_reg`, its input gradient, and
+//! `matmul_f32_dw_reg` for the accumulating weight gradient `matmul_dw_reg`.
 //!
 //! Swedish Embedded AB implements bit-exact native fp32 GEMMs. If your team
 //! needs expertise in replacing a generated kernel with a hand-written one
@@ -25,12 +26,16 @@ const KERNELS: &[(&str, &str)] = &[
     ("matmul_reg3_ref", kernels::MATMUL_REG3),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
     ("matmul_dx_reg_ref", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("matmul_dw_reg_ref", kernels::MATMUL_DW_REG),
 ];
 
 const K_REG3: usize = 0;
 const K_REF: usize = 1;
 const K_DX: usize = 2;
 const K_DX_REF: usize = 3;
+const K_DW: usize = 4;
+const K_DW_REF: usize = 5;
 /// The WGSL kernel's output tile, which sets its dispatch geometry.
 const WGSL_TILE: u32 = 128;
 /// Written around every window so an out-of-window write shows.
@@ -222,5 +227,56 @@ fn the_input_gradient_is_redirected_and_bit_identical() {
     // fused linear1 and of linear2 over a paired 512 px joint sequence.
     for (m, k, n) in [(2560u32, 3072u32, 27648u32), (2560, 12288, 3072), (2560, 3072, 3072)] {
         check_dx(&gpu, m, k, n, 0, [0; 3]);
+    }
+}
+
+/// `out[n,k] += sum_m a[m,n] * b[m,k]`, from identical prior contents.
+fn check_dw(gpu: &Gpu, m: u32, k: u32, n: u32, lead: [u64; 3]) {
+    let seed = u64::from(m) * 41 + u64::from(k) * 13 + u64::from(n);
+    let a_in = Windowed::new(gpu, &values((m * n) as usize, seed + 1), lead[0]);
+    let b_in = Windowed::new(gpu, &values((m * k) as usize, seed + 2), lead[1]);
+    let prior = values((n * k) as usize, seed + 3);
+    let a = Windowed::new(gpu, &prior, lead[2]);
+    let b = Windowed::new(gpu, &prior, lead[2]);
+    let tiles = n.div_ceil(WGSL_TILE) * k.div_ceil(WGSL_TILE);
+    let dispatch = |kind: usize, o: &Windowed| {
+        gpu.dispatch_sliced(kind, &[&a_in.buf, &b_in.buf, &o.buf], &[a_in.range(), b_in.range(), o.range()], &[m, k, n], Dispatch::Workgroups(tiles))
+    };
+    gpu.submit(&[], &[dispatch(K_DW, &a), dispatch(K_DW_REF, &b)]);
+    gpu.poll_wait();
+    let (ga, gb) = (a.bits(gpu), b.bits(gpu));
+    let (lo, hi) = (a.lead as usize, a.lead as usize + a.len);
+    assert!(ga[..lo].iter().chain(&ga[hi..]).all(|&v| v == SENTINEL), "native dw wrote outside its window at {m}x{k}x{n}");
+    let first = ga[lo..hi].iter().zip(&gb[lo..hi]).position(|(p, q)| p != q);
+    assert!(
+        first.is_none(),
+        "native dw GEMM differs from matmul_dw_reg at m={m} k={k} n={n} lead={lead:?}: first at {first:?} ({:?} vs {:?})",
+        first.map(|i| f32::from_bits(ga[lo + i])),
+        first.map(|i| f32::from_bits(gb[lo + i])),
+    );
+}
+
+#[test]
+fn the_weight_gradient_is_redirected_and_bit_identical() {
+    let Some(gpu) = device() else { return };
+    assert_eq!(gpu.native_kernel_for(K_DW, &[128, 64, 128]), Some("matmul_f32_dw_reg"));
+    assert_eq!(gpu.native_kernel_for(K_DW_REF, &[128, 64, 128]), None);
+    for m in [1u32, 5, 16, 33] {
+        for (n, k) in [(1u32, 1u32), (1, 130), (127, 129), (128, 128), (129, 3), (200, 257)] {
+            for lead in [[0, 0, 0], [1, 3, 5], [4, 4, 4]] {
+                check_dw(&gpu, m, k, n, lead);
+            }
+        }
+    }
+    let mut r = data::rng::Lcg::new(0xd_e1a7);
+    for _ in 0..30 {
+        let (m, k, n) = (1 + r.next_u32() % 400, 1 + r.next_u32() % 400, 1 + r.next_u32() % 300);
+        let lead = [0, 1, 2].map(|_| u64::from(r.next_u32() % 8));
+        check_dw(&gpu, m, k, n, lead);
+    }
+    // FLUX.2 klein-4B training: a head's attention weight gradient over a
+    // paired 512 px joint sequence, and a full-width one.
+    for (m, k, n) in [(2560u32, 128u32, 2560u32), (2560, 3072, 3072)] {
+        check_dw(&gpu, m, k, n, [0; 3]);
     }
 }

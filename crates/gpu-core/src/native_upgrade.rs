@@ -145,6 +145,17 @@ fn dx_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     p[0].div_ceil(tile.0) * p[1].div_ceil(tile.1)
 }
 
+/// `matmul_dw_reg`'s `Params { m, k, n }`: any non-empty product whose
+/// `n x k` output fits the kernel's 32-bit element arithmetic.
+fn serves_f32_dw(p: &[u32]) -> bool {
+    matches!(p, [m, k, n] if *m >= 1 && *k >= 1 && *n >= 1 && u64::from(*n) * u64::from(*k) <= u64::from(u32::MAX))
+}
+
+/// The weight gradient's output is `n x k`.
+fn dw_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[2].div_ceil(tile.0) * p[1].div_ceil(tile.1)
+}
+
 /// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
 /// `out`.
 const MOE_I8_GROUPED_BINDINGS: &[BindKind] = &[
@@ -269,6 +280,15 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: F32_GEMM_BINDINGS,
         serves: serves_f32_dx,
         blocks: dx_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    // The accumulating weight gradient: `Params { m, k, n }`, the output `n x k`.
+    Row {
+        slow: "matmul_dw_reg",
+        target: Target::Named("matmul_f32_dw_reg"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_dw,
+        blocks: dw_blocks,
         requires_wgsl_upgrade: false,
     },
     Row {
