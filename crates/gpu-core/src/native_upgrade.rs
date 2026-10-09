@@ -236,7 +236,53 @@ pub(crate) const ROWS: &[Row] = &[
     // WGSL kernels, so these ARE bit-identical, and gated so.
     Row { slow: "bn_train", target: Target::Named("bn_train_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
     Row { slow: "bn_dx", target: Target::Named("bn_dx_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
+    // The CSP plumbing and the SiLU pair: copies and elementwise expressions,
+    // bit-identical, gated so (`tests/plumb_native.rs`).
+    Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "chan_place", target: Target::Named("chan_place_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "concat2", target: Target::Named("concat2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_concat2, blocks: concat2_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
 ];
+
+/// One read operand, one written output (`concat_split`, `chan_place`, `silu`).
+const COPY_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// Two read operands, one written output (`concat2`, `silu_bwd`).
+const CONCAT2_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `[N, Ctot, Csrc, c_off, H, W]` with the window inside the wider map.
+fn serves_chan_window(p: &[u32]) -> bool {
+    matches!(p, [n, ctot, csrc, off, h, w] if *n >= 1 && *csrc >= 1 && *h >= 1 && *w >= 1
+        && u64::from(*off) + u64::from(*csrc) <= u64::from(*ctot)
+        && u64::from(*n) * u64::from(*ctot) * u64::from(*h) * u64::from(*w) <= u64::from(u32::MAX))
+}
+
+/// A block per run of `tile.1` floats of one window plane, plane-major.
+fn chan_window_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0] * p[2] * (p[4] * p[5]).div_ceil(tile.1)
+}
+
+/// `[N, Ca, Cb, H, W]`, both inputs non-empty.
+fn serves_concat2(p: &[u32]) -> bool {
+    matches!(p, [n, ca, cb, h, w] if *n >= 1 && *ca >= 1 && *cb >= 1 && *h >= 1 && *w >= 1
+        && u64::from(*n) * (u64::from(*ca) + u64::from(*cb)) * u64::from(*h) * u64::from(*w) <= u64::from(u32::MAX))
+}
+
+/// A block per run of `tile.1` floats of one output plane, plane-major.
+fn concat2_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0] * (p[1] + p[2]) * (p[3] * p[4]).div_ceil(tile.1)
+}
+
+/// `[total]`, non-empty.
+fn serves_flat(p: &[u32]) -> bool {
+    matches!(p, [total] if *total >= 1)
+}
+
+/// A block per run of `tile.1` elements.
+fn flat_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0].div_ceil(tile.1)
+}
 
 /// `brain_bn_train`/`brain_bn_dx`: one block per run of `tile.1` elements of
 /// one `(n, c)` plane - the kernels number them plane-major.

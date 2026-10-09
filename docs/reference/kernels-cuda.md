@@ -47,6 +47,11 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `bn_dgamma_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dgamma` | BatchNorm gamma gradient (dgamma += sum dy*xhat) of an NCHW channel: one 512-thread block per channel |
 | `bn_train_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_train` | BatchNorm train-mode normalisation of an NCHW map: a block per run of one (n, c) plane, channel constants once per thread, 16-byte accesses; bit-identical to bn_train |
 | `bn_dx_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dx` | BatchNorm input gradient of an NCHW map from bn_dstats' packed sums: a block per run of one (n, c) plane; bit-identical to bn_dx |
+| `concat_split_f32` | Elementwise | F32 | tuned | 5.0 | `brain_concat_split` | a channel window of an NCHW map, copied plane by plane (a block per run of one plane, 16-byte accesses); bit-identical to concat_split |
+| `chan_place_f32` | Elementwise | F32 | tuned | 5.0 | `brain_chan_place` | an NCHW map written into a channel window of a wider one, plane by plane; bit-identical to chan_place |
+| `concat2_f32` | Elementwise | F32 | tuned | 5.0 | `brain_concat2` | two NCHW maps concatenated along channels, plane by plane; bit-identical to concat2 |
+| `silu_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_fwd` | SiLU over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu |
+| `silu_bwd_f32` | Elementwise | F32 | tuned | 5.0 | `brain_silu_bwd` | SiLU's input gradient over a flat array, four elements a thread with 16-byte accesses; bit-identical to silu_bwd |
 | `bn_dbeta_f32` | BatchNormReduce | F32 | tuned | 5.0 | `brain_bn_dbeta` | BatchNorm beta gradient (dbeta += sum dy) of an NCHW channel: one 512-thread block per channel |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.

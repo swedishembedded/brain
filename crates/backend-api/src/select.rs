@@ -203,6 +203,12 @@ pub enum Op {
     /// [`candidates`] offers only the reference. Shape: `m` = channels, `n` =
     /// `N*H*W` (the reduction length).
     BatchNormReduce,
+    /// Memory-bound elementwise and data-movement passes - activations and
+    /// their gradients, channel concatenation, splitting and placement. They
+    /// have one portable kernel each; the operator exists so the native
+    /// registry can name what its plane-blocked replacements implement.
+    /// [`candidates`] offers only the reference. Shape: `m` = elements.
+    Elementwise,
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
     /// [`Op::Conv2d`] shape one dimension up, migrated from
@@ -1138,6 +1144,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::GatedDeltaChunkLoop => vec![Reference],
         // No portable cooperative form: see the variant's own doc.
         Op::BatchNormReduce => vec![Reference],
+        // One portable kernel per pass: see the variant's own doc.
+        Op::Elementwise => vec![Reference],
     };
     let filtered: Vec<KernelVariant> =
         raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();
