@@ -274,6 +274,21 @@ impl TalkerTrainer {
         stats
     }
 
+    /// The most rows one example can have.
+    #[must_use]
+    pub fn block(&self) -> usize {
+        self.block
+    }
+
+    /// Write the trained adapter (`.lora_a`/`.lora_b` tensors, rank and alpha) to `path`
+    /// as a safetensors file; [`fold_saved_adapter`] reads it back.
+    pub fn save_adapter(&self, path: &std::path::Path) -> Result<(), String> {
+        let names: Vec<String> = self.param_names();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = names.iter().map(|n| (n.clone(), vec![self.model.read_weight(n).len() as u64], self.model.read_weight(n))).collect();
+        let meta = serde_json::json!({ "rank": self.rank, "alpha": self.lora_scale * self.rank as f32 });
+        checkpoint::st::save_safetensors(path.to_str().ok_or("adapter path is not UTF-8")?, &tensors, &meta, None).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     /// The names of the trained parameters.
     pub fn param_names(&self) -> Vec<String> {
         model::Model::param_names(&self.model)
@@ -314,6 +329,25 @@ pub fn logprobs(logits: &[f32], rows: &PolicyRows) -> Vec<f32> {
             row[t as usize] - max - row.iter().map(|x| (x - max).exp()).sum::<f32>().ln()
         })
         .collect()
+}
+
+/// The Talker's adapted attention tensors with the adapter saved at `path`
+/// folded in, by name: what [`TalkerTrainer::folded_weights`] gave when it was
+/// saved. `talker` is the base Talker checkpoint.
+pub fn fold_saved_adapter(talker: &str, path: &std::path::Path) -> Result<HashMap<String, Vec<f32>>, String> {
+    let adapter = checkpoint::st::load_safetensors(path.to_str().ok_or("adapter path is not UTF-8")?).map_err(|e| format!("{}: {e}", path.display()))?;
+    let meta = adapter.config();
+    let rank = meta["rank"].as_u64().ok_or("the adapter records no rank")? as usize;
+    let alpha = meta["alpha"].as_f64().ok_or("the adapter records no alpha")? as f32;
+    let base = crate::import::load_talker(talker).by_role("");
+    let mut folded = HashMap::new();
+    for (name, a) in &adapter.tensors {
+        let Some(weight_name) = name.strip_suffix(".lora_a") else { continue };
+        let b = adapter.tensors.get(&format!("{weight_name}.lora_b")).ok_or_else(|| format!("{weight_name} has an A matrix and no B"))?;
+        let weight = base.get(weight_name).ok_or_else(|| format!("the Talker has no tensor {weight_name}"))?;
+        folded.insert(weight_name.to_string(), fold_one(weight, a, b, rank, alpha / rank as f32));
+    }
+    Ok(folded)
 }
 
 /// Rows `positions` of the `[*, d]` matrix `hidden`, concatenated.

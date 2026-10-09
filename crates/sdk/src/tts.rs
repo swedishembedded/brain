@@ -45,7 +45,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+mod policy;
 mod resident;
+pub use policy::{PolicyOptions, PolicyStats, PolicyUpdate, Take, TtsPolicy};
 pub use resident::ResidentTts;
 
 use capability::CancelToken;

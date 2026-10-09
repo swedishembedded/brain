@@ -128,3 +128,26 @@ fn the_folded_adapter_gives_the_inference_talker_the_trainers_weights() {
     assert!(moved > 0.05, "the update changed the policy: {moved}");
     assert!(worst < 0.05, "folded inference weights equal the trained ones: {worst}");
 }
+
+#[test]
+fn a_saved_adapter_folds_back_to_the_weights_it_was_saved_from() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let mut s = setup(&paths);
+    let rows = s.engine.policy_rows(&s.good).unwrap();
+    let reference = vec![-1.0; rows.target_positions().count()];
+    for _ in 0..3 {
+        let samples = [Sample { rows: &rows, advantage: 1.0, reference_logprobs: reference.clone() }];
+        s.trainer.update(&samples, &UpdateOpts { lr: 3e-4, kl_beta: 0.0, ..UpdateOpts::default() });
+    }
+    let path = std::env::temp_dir().join(format!("talker-adapter-{}.safetensors", std::process::id()));
+    s.trainer.save_adapter(&path).unwrap();
+    let live = s.trainer.folded_weights();
+    let reloaded = qwen3tts::train::fold_saved_adapter(&paths.talker, &path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(live.len(), reloaded.len());
+    for (name, weights) in &live {
+        let worst = max_abs(weights, &reloaded[name]);
+        assert!(worst < 1e-6, "{name} differs by {worst}");
+    }
+}
