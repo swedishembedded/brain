@@ -18,7 +18,9 @@
 //! are gated on the raw bits; the dense conv rows accumulate the same
 //! reduction with fused multiply-adds and are gated on the fp32 summation
 //! bound against an f64 oracle and on exact agreement where the arithmetic is
-//! exact (`tests/conv2d_native.rs`).
+//! exact (`tests/conv2d_native.rs`); the flash attention row reorders its sums
+//! and is held to a stated tolerance against an f64 oracle and to no worse
+//! accuracy than the WGSL tier (`tests/flash_bidir_native.rs`).
 //!
 //! Three conditions, each a queried fact and none a backend name:
 //!
@@ -331,7 +333,42 @@ pub(crate) const ROWS: &[Row] = &[
     Row { slow: "concat2", target: Target::Named("concat2_f32"), bindings: CONCAT2_BINDINGS, serves: serves_concat2, blocks: concat2_blocks, requires_wgsl_upgrade: false },
     Row { slow: "silu", target: Target::Named("silu_f32"), bindings: COPY_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
     Row { slow: "silu_bwd", target: Target::Named("silu_bwd_f32"), bindings: CONCAT2_BINDINGS, serves: serves_flat, blocks: flat_blocks, requires_wgsl_upgrade: false },
+    // Bidirectional flash attention at head_dim 128. A reordered sum, so not
+    // bit-identical: the gate holds both tiers to one stated tolerance
+    // against an f64 oracle (`tests/flash_bidir_native.rs`).
+    Row {
+        slow: "flash_attn_bidir_reg2",
+        target: Target::Named("flash_bidir_f32"),
+        bindings: FLASH_BIDIR_BINDINGS,
+        serves: serves_flash_bidir,
+        blocks: flash_bidir_blocks,
+        requires_wgsl_upgrade: false,
+    },
 ];
+
+/// The flash attention family's bindings: params, the packed `qkv` slab, the
+/// written `out`.
+const FLASH_BIDIR_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// The head width the native flash kernel is compiled for.
+const FLASH_BIDIR_HEAD_DIM: u32 = 128;
+
+/// Query rows one block of the native flash kernel covers - its registry
+/// tile, which a unit test holds this to.
+const FLASH_BIDIR_ROWS: u32 = 64;
+
+/// `[bsz, n_heads, T, head_dim, qkv_stride, q_off, k_off, v_off, d_model]`
+/// with something to attend, at the one head width the kernel serves, and a
+/// grid the 32-bit block index covers.
+fn serves_flash_bidir(p: &[u32]) -> bool {
+    matches!(p, [bsz, heads, t, hd, _, _, _, _, _] if *bsz >= 1 && *heads >= 1 && *t >= 1 && *hd == FLASH_BIDIR_HEAD_DIM
+        && u64::from(*bsz) * u64::from(*heads) * u64::from(t.div_ceil(FLASH_BIDIR_ROWS)) <= u64::from(u32::MAX))
+}
+
+/// One block per `tile.0` query rows of one (sample, head).
+fn flash_bidir_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0] * p[1] * p[2].div_ceil(tile.0)
+}
 
 /// One read operand, one written output (`concat_split`, `chan_place`, `silu`).
 const COPY_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
@@ -893,6 +930,17 @@ mod tests {
         assert!(serves_moe_i8_grouped(&[40, 512, 2048, 9, 257]));
         assert!(!serves_moe_i8_grouped(&[40, 516, 2048, 9, 257]), "K not a whole number of scale groups");
         assert!(!serves_moe_i8_grouped(&[40, 512, 2048]), "short params");
+    }
+
+    #[test]
+    fn the_flash_row_agrees_with_its_registry_entry() {
+        let row = ROWS.iter().find(|r| r.slow == "flash_attn_bidir_reg2").expect("the row");
+        let k = row.target.resolve(kernels_cuda::BASELINE_MIN_CC).expect("registry entry");
+        assert_eq!(k.tile.0, FLASH_BIDIR_ROWS);
+        let declared = kernels::FLASH_ATTN_BIDIR_REG2.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
+        assert_eq!(declared, row.bindings.len());
+        assert_eq!(flash_bidir_blocks(&[2, 24, 1792, 128, 9216, 0, 3072, 6144, 3072], k.tile), 2 * 24 * 28);
+        assert!(!serves_flash_bidir(&[1, 24, 1792, 64, 9216, 0, 3072, 6144, 3072]), "another head width");
     }
 
     #[test]

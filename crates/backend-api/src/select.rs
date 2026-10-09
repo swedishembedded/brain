@@ -209,6 +209,14 @@ pub enum Op {
     /// registry can name what its plane-blocked replacements implement.
     /// [`candidates`] offers only the reference. Shape: `m` = elements.
     Elementwise,
+    /// Fused bidirectional (flash) attention over a packed qkv slab - the
+    /// `flash_attn_bidir*` family's online-softmax forward. The portable
+    /// rungs are chosen by `model::block::flash_bidir_variant` from the
+    /// device's workgroup limits; the operator exists so the native registry
+    /// can name what its replacement implements. [`candidates`] offers only
+    /// the reference. Shape: `m` = query rows, `n` = key rows, `k` = head
+    /// width.
+    FlashAttention,
     /// Forward 3D convolution, NCTHW (`conv3d` direct vs the `im2col3d_at` +
     /// `matmul_reg3` + `nlc_bias_nchw` GEMM lowering) - the exact
     /// [`Op::Conv2d`] shape one dimension up, migrated from
@@ -1146,6 +1154,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::BatchNormReduce => vec![Reference],
         // One portable kernel per pass: see the variant's own doc.
         Op::Elementwise => vec![Reference],
+        Op::FlashAttention => vec![Reference],
     };
     let filtered: Vec<KernelVariant> =
         raw.into_iter().filter(|v| v.requires(shape.dtype).satisfied_by(caps)).collect();

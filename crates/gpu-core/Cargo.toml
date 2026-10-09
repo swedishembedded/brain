@@ -71,3 +71,11 @@ half.workspace = true
 [[test]]
 name = "f32_reg_native"
 harness = false
+
+[[test]]
+name = "flash_bidir_native"
+harness = false
+
+[[test]]
+name = "flash_bidir_native_bench"
+harness = false

@@ -37,6 +37,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `matmul_f32_fma` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_fma` | fp32 out = x @ W^T with one fused multiply-add per term (training; matmul_f32_reg's tile and contract) |
 | `matmul_f32_dx_fma` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_dx_fma` | fp32 dX = dY @ W (optionally accumulated) with fused multiply-adds (training; matmul_f32_dx_reg's tile and contract) |
 | `matmul_f32_dw_fma` | MatMul | F32 | tuned | 5.0 | `brain_matmul_f32_dw_fma` | fp32 dW += A^T @ B with fused multiply-adds (training; matmul_f32_dw_reg's tile and contract) |
+| `flash_bidir_f32` | FlashAttention | F32 | tuned | 5.0 | `brain_flash_bidir_f32` | bidirectional flash attention at head_dim 128, fp32: 64 query rows per 128-thread block with q resident in shared memory, 32-key k/v tiles, 4x4 score and 4x16 output register blocks, probabilities moved by shuffle |
 | `softmax_rows_dx` | Softmax | F32 | tuned | 5.0 | `brain_softmax_rows_dx` | softmax Jacobian dx = y * (dy - sum(dy * y)) over contiguous rows, one warp per row, coalesced 16-byte loads and a shuffle reduction |
 | `roof_dp4a` | MatMul | I8 | tuned | 6.1 | `brain_roof_dp4a` | peak packed-int8 dot rate: eight loop-carried __dp4a chains per thread, the int8 roof probe |
 | `matmul_i8w_dx` | MatMul | I8 | tuned | 5.0 | `brain_matmul_i8w_dx` | fp32 dX = dY @ deq(W) for a packed int8 group-32 weight dequantised while staged, fused multiply-adds; 128x128 tile, 8x8 per thread |

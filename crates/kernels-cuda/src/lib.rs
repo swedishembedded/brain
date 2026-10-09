@@ -395,6 +395,25 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
+        name: "flash_bidir_f32",
+        // Redirected to by name from the WGSL `flash_attn_bidir_reg2`
+        // (`gpu_core::native_upgrade`) at head_dim 128.
+        op: Op::FlashAttention,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_flash_bidir_f32",
+        what: "bidirectional flash attention at head_dim 128, fp32: 64 query rows per 128-thread block with q resident in shared memory, 32-key k/v tiles, 4x4 score and 4x16 output register blocks, probabilities moved by shuffle",
+        reported: "native:flash_bidir_f32",
+        block_dim: 128,
+        // 64 query rows of one (sample, head) per block, all 128 channels.
+        tile: (64, 128),
+        // q: 64 x 128 floats; one k/v tile: 32 x 128 floats.
+        shared_bytes: (64 * 128 + 32 * 128) * 4,
+        src: include_str!("../cu/flash_bidir_f32.cu"),
+    },
+    CudaKernel {
         name: "softmax_rows_dx",
         // Asked for by name (`gpu_core::Fused::SoftmaxRowsDx`) by a trainer:
         // `softmax_k_dx`'s result over contiguous rows with a reordered
