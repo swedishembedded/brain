@@ -15,7 +15,11 @@
 //!
 //! Knobs: `BRAIN_FLUX2_TRAIN_VARIANT` (klein-4b | klein-9b, default klein-4b),
 //! `BRAIN_FLUX2_TRAIN_SIZE` (square px, multiple of 16, default 512),
-//! `BRAIN_FLUX2_TRAIN_RANK` (default 16), `BRAIN_FLUX2_TRAIN_ITERS` (timed
+//! `BRAIN_FLUX2_TRAIN_RANK` (default 16), `BRAIN_FLUX2_TRAIN_REFS` (reference
+//! images at the target's size, as a paired edit fine-tune conditions on;
+//! default 0), `BRAIN_FLUX2_TRAIN_BLOCKS` (`D,S` double and single blocks
+//! instead of the variant's depth - same per-block shapes, for a card that
+//! cannot hold the whole stack), `BRAIN_FLUX2_TRAIN_ITERS` (timed
 //! steps after the warm-up, default 3), `BRAIN_FLUX2_TRAIN_CARDS` (GPUs the
 //! block stack is spread over, default 1).
 //!
@@ -41,7 +45,7 @@
 use flux2::devtrain::{step_flops, DeviceTrainer};
 use flux2::grad::{DoubleW, SingleW, StreamW};
 use flux2::lora::{LoraAdapter, LoraCfg};
-use flux2::modelgrad::{make_flow_batch, Cfg, ModelWeights};
+use flux2::modelgrad::{make_flow_batch_paired, Cfg, ModelWeights};
 use flux2::Flux2Config;
 
 // perf-number: this file's own reviewed, dated hardware roofline baseline; "2x" here names the GPU count, not a speedup
@@ -117,8 +121,19 @@ fn device_lora_step_time() {
     let iters = envn("BRAIN_FLUX2_TRAIN_ITERS", 3);
     let cards = envn("BRAIN_FLUX2_TRAIN_CARDS", 1).max(1);
     assert!(size.is_multiple_of(16), "size must be a multiple of 16");
-    let fc = Flux2Config::from_name(&variant).expect("variant");
-    let c = Cfg::from_flux2(&fc, size / 16, size / 16);
+    let mut fc = Flux2Config::from_name(&variant).expect("variant");
+    // `D,S` double and single blocks instead of the variant's own depth: every
+    // block of a kind has the same shapes, so a shallow stack measures the
+    // per-block cost of the real one on a card that cannot hold all of it.
+    if let Ok(v) = std::env::var("BRAIN_FLUX2_TRAIN_BLOCKS") {
+        let (d, s) = v.split_once(',').expect("BRAIN_FLUX2_TRAIN_BLOCKS is D,S");
+        fc.depth_double = d.trim().parse().expect("double-block count");
+        fc.depth_single = s.trim().parse().expect("single-block count");
+    }
+    // Paired (edit) training conditions on reference images at the target's
+    // own size, each adding its tokens to the joint sequence.
+    let refs = envn("BRAIN_FLUX2_TRAIN_REFS", 0);
+    let c = Cfg::from_flux2_with_refs(&fc, size / 16, size / 16, vec![(size / 16, size / 16); refs]);
     eprintln!("flux2 device step time: {variant} at {size}px - {} joint tokens ({} txt + {} img), hidden {}, rank {rank}", c.n(), c.txt_len, c.n_img(), c.hidden);
 
     let t0 = std::time::Instant::now();
@@ -144,10 +159,11 @@ fn device_lora_step_time() {
     // training run ever pays.
     tr.set_qk_grads(false);
     let mut ad = LoraAdapter::new(&c, LoraCfg::new(rank));
-    let x0 = fill(c.n_img() * c.in_channels, 0.3);
+    let x0 = fill(c.n_gen() * c.in_channels, 0.3);
+    let reference = fill(c.n_ref() * c.in_channels, 0.25);
     let ctx = fill(c.txt_len * c.context_in_dim, 0.1);
     let noise = fill(x0.len(), -0.2);
-    let batch = make_flow_batch(&c, &x0, &ctx, 0.5, &noise);
+    let batch = make_flow_batch_paired(&c, &x0, &reference, &ctx, 0.5, &noise);
 
     // Warm-up: never enters the statistics.
     let t0 = std::time::Instant::now();
