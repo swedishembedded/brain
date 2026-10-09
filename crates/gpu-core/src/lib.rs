@@ -2190,8 +2190,7 @@ mod native_facade {
         /// of [`Gpu::physical_kernel_names`], for tests and diagnostics to
         /// assert the redirect really fired.
         pub fn native_kernel_for(&self, kind: usize, params: &[u32]) -> Option<&'static str> {
-            let a = self.native_upgrades.iter().find(|a| a.slow == kind)?;
-            crate::native_upgrade::apply(&self.native_upgrades, kind, params).map(|_| a.kernel)
+            crate::native_upgrade::serving(&self.native_upgrades, kind, params).map(|a| a.kernel)
         }
 
         /// The pipeline slot a kernel name occupies on this handle, or `None`

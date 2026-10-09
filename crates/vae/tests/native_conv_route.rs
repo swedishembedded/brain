@@ -22,16 +22,13 @@
 //! fp32 rounding, not bit for bit - the bound below is that rounding with
 //! headroom, two orders of magnitude under a wrong tap or a dropped channel.
 //!
-//! GPU-gated: `BRAIN_VAE_DEVICE` names the card (default `gpu`), and the test
-//! skips where that device offers no native conv.
+//! The card is an argument (`cargo test -p brain-vae --test native_conv_route
+//! -- --device gpu1 --backend cuda`), and the test skips where that device
+//! offers no native conv.
 
 mod zeros;
 
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
-
-fn device() -> String {
-    std::env::var("BRAIN_VAE_DEVICE").unwrap_or_else(|_| "gpu".to_string())
-}
 
 /// Seeded weights at every shape `zeros` lists: conv weights uniform in
 /// `±1/sqrt(fan_in)`, biases and GroupNorm shifts small, GroupNorm gains near
@@ -83,12 +80,11 @@ fn compare(what: &str, got: &[f32], want: &[f32]) {
     assert!(worst <= 2e-4 * peak, "{what}: max |delta| {worst:.3e} exceeds the fp32 rounding bound {:.3e}", 2e-4 * peak);
 }
 
-#[test]
 fn a_decoder_takes_the_native_conv_and_matches_the_reference() {
     let cfg = VaeConfig::flux2();
     let ts = seeded(zeros::decoder(&cfg));
     let (lh, lw) = (8u32, 6u32);
-    let dec = VaeDecoder::from_diffusers(cfg.clone(), &ts, lh, lw, Some(&device()));
+    let dec = VaeDecoder::from_diffusers(cfg.clone(), &ts, lh, lw, None);
     if !offers_native_conv(dec.gpu()) {
         brain_testutil::skip_unavailable("this device offers no native conv kernel");
         return;
@@ -103,14 +99,13 @@ fn a_decoder_takes_the_native_conv_and_matches_the_reference() {
     compare("decode", &got, &want);
 }
 
-#[test]
 fn an_encoder_lowers_only_the_convs_the_native_kernel_does_not_serve() {
     let cfg = VaeConfig::flux2();
     let ts = seeded(zeros::encoder(&cfg));
     // Large enough that every downsample's output plane is past the lowering's
     // own position threshold, so all of them would be lowered on any GPU.
     let (h, w) = (128u32, 96u32);
-    let enc = VaeEncoder::from_diffusers(cfg.clone(), &ts, h, w, Some(&device()));
+    let enc = VaeEncoder::from_diffusers(cfg.clone(), &ts, h, w, None);
     if !offers_native_conv(enc.gpu()) {
         brain_testutil::skip_unavailable("this device offers no native conv kernel");
         return;
@@ -126,3 +121,8 @@ fn an_encoder_lowers_only_the_convs_the_native_kernel_does_not_serve() {
     let want = VaeEncoder::from_diffusers(cfg, &ts, h, w, Some("cpu")).encode(&img);
     compare("encode", &got, &want);
 }
+
+gpu_core::card_tests!(
+    a_decoder_takes_the_native_conv_and_matches_the_reference,
+    an_encoder_lowers_only_the_convs_the_native_kernel_does_not_serve,
+);

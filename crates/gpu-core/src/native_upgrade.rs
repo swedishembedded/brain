@@ -245,6 +245,25 @@ fn conv2d_dx_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     cin.div_ceil(conv_rows_tile(cin)) * s * s * (n * h.div_ceil(s) * w.div_ceil(s)).div_ceil(tile.1)
 }
 
+/// Output channels and output positions (a square patch, side
+/// `CONV3X3_SIDE`) one block of the direct 3x3 forward covers:
+/// `BRAIN_C3_CO`, `BRAIN_C3_TH` and `BRAIN_C3_TW` in `cu/conv2d_f32.cu`.
+const CONV3X3_CHANNELS: u32 = 64;
+const CONV3X3_SIDE: u32 = 16;
+
+/// A dense conv the direct 3x3 forward serves: 3x3, stride 1, pad 1 (so the
+/// output extent is the input's) and at least one full channel tile wide -
+/// `brain_c3_serves` in `cu/conv2d_f32.cu`.
+fn serves_conv3x3(p: &[u32]) -> bool {
+    serves_conv(p) && p[5] == 3 && p[6] == 1 && p[7] == 1 && p[4] >= CONV3X3_CHANNELS
+}
+
+/// Channel tiles x images x patch rows x patch columns.
+fn conv3x3_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    let (n, h, w, cout) = (p[0], p[2], p[3], p[4]);
+    cout.div_ceil(CONV3X3_CHANNELS) * n * h.div_ceil(CONV3X3_SIDE) * w.div_ceil(CONV3X3_SIDE)
+}
+
 pub(crate) const ROWS: &[Row] = &[
     Row {
         slow: "matmul_i8_gemv",
@@ -303,6 +322,14 @@ pub(crate) const ROWS: &[Row] = &[
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
+    // The 3x3 / stride-1 / pad-1 forward of a layer at least one 64-channel
+    // tile wide, as a direct convolution: the same bits as the implicit GEMM
+    // rows below (same reduction order, same fused multiply-adds), which
+    // serve every other shape. These come FIRST: `apply` takes the first row
+    // of a slot that serves the dispatch.
+    Row { slow: "conv2d", target: Target::Named("conv2d_fwd3x3_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "conv_bias", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "conv_bias_reg", target: Target::Named("conv2d_bias_fwd3x3_f32"), bindings: CONV_BIAS_BINDINGS, serves: serves_conv3x3, blocks: conv3x3_blocks, requires_wgsl_upgrade: false },
     // The dense convolution and its input gradient. Unlike the two rows above
     // these do NOT reproduce the WGSL kernel's bits: they sum the same
     // reduction in the same order with a fused multiply-add, one rounding
@@ -910,14 +937,19 @@ pub(crate) fn resolve(
 /// `None` to keep the WGSL tier. `params` is the caller's own uniform; a call
 /// without one (`Gpu::step_buf`, whose uniform lives in a caller-owned
 /// buffer) is never redirected, exactly as a shape-specialised
-/// [`crate::upgrade`] row is not.
+/// [`crate::upgrade`] row is not. A slot may have several rows - a kernel
+/// specialised for some shapes before the general one - and the first that
+/// serves `params` wins.
 #[inline]
 pub(crate) fn apply(active: &[Active], kind: usize, params: &[u32]) -> Option<(NativeId, u32)> {
-    let a = active.iter().find(|a| a.slow == kind)?;
-    if !(a.serves)(params) {
-        return None;
-    }
+    let a = serving(active, kind, params)?;
     Some((a.id, (a.blocks)(params, a.tile)))
+}
+
+/// The first active row of slot `kind` that serves `params`.
+#[inline]
+pub(crate) fn serving<'a>(active: &'a [Active], kind: usize, params: &[u32]) -> Option<&'a Active> {
+    active.iter().find(|a| a.slow == kind && (a.serves)(params))
 }
 
 #[cfg(test)]

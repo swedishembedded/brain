@@ -25,3 +25,7 @@ brain-testutil.workspace = true
 # private helper here would be the copy AGENTS.md's "one implementation" rule
 # names by example.
 brain-data.workspace = true
+
+[[test]]
+name = "native_conv_route"
+harness = false

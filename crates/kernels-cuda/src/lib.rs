@@ -667,6 +667,43 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/conv2d_f32.cu"),
     },
     CudaKernel {
+        name: "conv2d_fwd3x3_f32",
+        // Redirected to by name from the WGSL `conv2d` for a 3x3, stride-1,
+        // pad-1 conv at least 64 channels wide; every other shape keeps
+        // `conv2d_fwd_f32`.
+        op: Op::Conv2d,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_fwd3x3",
+        what: "dense fp32 3x3 stride-1 pad-1 conv2d forward as a direct convolution: 64 channels x a 16x16 patch per block, the input slice staged once with its halo, 8x8 register block, bit-identical to conv2d_fwd_f32",
+        reported: "native:conv2d_fwd3x3_f32",
+        block_dim: 256,
+        // 64 output channels x 256 output positions (a 16 x 16 patch).
+        tile: (64, 256),
+        // Two stages of a 4 x 18 x 20 input slice and 36 x 68 weights.
+        shared_bytes: 2 * (4 * 18 * 20 + 4 * 9 * 68) * 4,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
+    CudaKernel {
+        name: "conv2d_bias_fwd3x3_f32",
+        // Redirected to by name from the WGSL `conv_bias` and `conv_bias_reg`
+        // at the shapes `conv2d_fwd3x3_f32` serves.
+        op: Op::Conv2d,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_bias_fwd3x3",
+        what: "conv2d_fwd3x3_f32 with a per-output-channel bias added to the finished sum (the conv_bias contract)",
+        reported: "native:conv2d_bias_fwd3x3_f32",
+        block_dim: 256,
+        tile: (64, 256),
+        shared_bytes: 2 * (4 * 18 * 20 + 4 * 9 * 68) * 4,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
+    CudaKernel {
         name: "conv2d_dx_f32",
         op: Op::Conv2dBackward,
         weight: Dtype::F32,

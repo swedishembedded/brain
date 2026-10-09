@@ -350,7 +350,6 @@ fn oracle_shapes() -> Vec<Conv> {
     v
 }
 
-#[test]
 fn the_native_conv_kernels_are_redirected_to_only_on_cuda() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let p = Conv { n: 1, cin: 16, h: 8, w: 8, cout: 32, k: 3, s: 2, pad: 1 }.params();
@@ -378,7 +377,6 @@ fn the_native_conv_kernels_are_redirected_to_only_on_cuda() {
     assert_eq!(gpu.native_kernel_for(CONV, &bad), None);
 }
 
-#[test]
 fn every_yolov8n_conv_shape_is_within_the_fp32_summation_bound_of_an_f64_oracle() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -388,7 +386,8 @@ fn every_yolov8n_conv_shape_is_within_the_fp32_summation_bound_of_an_f64_oracle(
     for (i, c) in oracle_shapes().iter().enumerate() {
         let b = inputs(c, 1000 + i as u64);
         let p = c.params();
-        assert_eq!(gpu.native_kernel_for(CONV, &p), Some("conv2d_fwd_f32"), "{c:?}");
+        let fwd = if direct_3x3(c) { "conv2d_fwd3x3_f32" } else { "conv2d_fwd_f32" };
+        assert_eq!(gpu.native_kernel_for(CONV, &p), Some(fwd), "{c:?}");
         assert_eq!(gpu.native_kernel_for(CONV_DX, &p), Some("conv2d_dx_f32"), "{c:?}");
         let (y, dx, dw) = run(&gpu, c, &b, CONV, CONV_DX, None);
         let (y_r, dx_r, dw_r) = run(&gpu, c, &b, CONV_REF, CONV_DX_REF, Some(CONV_DW_REF));
@@ -422,7 +421,6 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
 
-#[test]
 fn the_real_yolov8n_geometry_is_exact_on_integer_data() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -462,7 +460,6 @@ fn run_bias(gpu: &Gpu, c: &Conv, x: &[f32], w: &[f32], bias: &[f32], slot: usize
 /// summation bound of the f64 oracle, the bias counting as one more term, and
 /// bit-exact with the WGSL reference on integer data at the detection head's
 /// real geometry.
-#[test]
 fn the_biased_forward_is_within_the_bound_and_exact_on_integer_data() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -474,8 +471,9 @@ fn the_biased_forward_is_within_the_bound_and_exact_on_integer_data() {
         let b = inputs(c, 2000 + i as u64);
         let bias = data::rng::Lcg::new(3000 + i as u64).vec(c.cout as usize);
         let p = c.params();
-        assert_eq!(gpu.native_kernel_for(CONV_BIAS, &p), Some("conv2d_bias_fwd_f32"), "{c:?}");
-        assert_eq!(gpu.native_kernel_for(CONV_BIAS_REG, &p), Some("conv2d_bias_fwd_f32"), "{c:?}");
+        let want = if direct_3x3(c) { "conv2d_bias_fwd3x3_f32" } else { "conv2d_bias_fwd_f32" };
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS, &p), Some(want), "{c:?}");
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS_REG, &p), Some(want), "{c:?}");
         let mut o = oracle_fwd(c, &b.x, &b.w);
         let plane = (c.ho() * c.wo()) as usize;
         for (k, (e, a)) in o.exact.iter_mut().zip(o.abs.iter_mut()).enumerate() {
@@ -498,3 +496,91 @@ fn the_biased_forward_is_within_the_bound_and_exact_on_integer_data() {
         assert!(bits(&run_bias(&gpu, &c, &b.x, &b.w, &bias, CONV_BIAS_REG)) == bits(&reference), "conv_bias_reg differs: {c:?}");
     }
 }
+
+/// Whether a forward takes the direct 3x3 kernel: stride 1, pad 1, the same
+/// extent out as in, and at least one full 64-channel output tile.
+fn direct_3x3(c: &Conv) -> bool {
+    c.k == 3 && c.s == 1 && c.pad == 1 && c.cout >= 64
+}
+
+/// The general implicit-GEMM forward (`conv2d_bias_fwd_f32`), launched by
+/// name, for a shape the redirect now sends to the direct kernel.
+fn run_bias_implicit_gemm(gpu: &Gpu, c: &Conv, x: &[f32], w: &[f32], bias: &[f32]) -> Vec<f32> {
+    static BIND: [backend_api::BindKind; 5] = [
+        backend_api::BindKind::Uniform,
+        backend_api::BindKind::StorageRead,
+        backend_api::BindKind::StorageRead,
+        backend_api::BindKind::StorageRead,
+        backend_api::BindKind::StorageReadWrite,
+    ];
+    let k = kernels_cuda::get("conv2d_bias_fwd_f32").expect("registry entry");
+    let id = gpu.native_kernel(k, &BIND).expect("the backend compiles the implicit GEMM");
+    let bm = [16u32, 32, 64].into_iter().find(|b| c.cout <= *b).unwrap_or(64);
+    let blocks = c.cout.div_ceil(bm) * (c.n * c.ho() * c.wo()).div_ceil(k.tile.1);
+    let xb = gpu.storage_init("x", x);
+    let wb = gpu.storage_init("w", w);
+    let bb = gpu.storage_init("bias", bias);
+    let y = gpu.storage(c.y_len() as u64);
+    gpu.submit(&[], &[gpu.step_native(id, &[&xb, &wb, &bb, &y], &c.params(), blocks).expect("step")]);
+    gpu.poll_wait();
+    gpu.read(&y, c.y_len())
+}
+
+/// The FLUX.2 VAE's convs are 3x3, stride 1, pad 1 and 64-512 channels wide:
+/// those take the direct kernel, which sums every output in the implicit
+/// GEMM's own order with the same fused multiply-adds - so it must match it
+/// BIT FOR BIT, at every tile edge (rows and columns past a 16-wide tile,
+/// channel counts past a 64-wide tile and off a 4-channel slice, a batch, a
+/// single pixel), and stay within the f64 oracle's bound. A narrower output
+/// keeps the implicit GEMM.
+fn the_vae_3x3_convs_take_the_direct_kernel_bit_identical_to_the_implicit_gemm() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    let narrow = Conv { n: 1, cin: 64, h: 16, w: 16, cout: 63, k: 3, s: 1, pad: 1 };
+    assert_eq!(gpu.native_kernel_for(CONV_BIAS, &narrow.params()), Some("conv2d_bias_fwd_f32"));
+    let strided = Conv { n: 1, cin: 64, h: 16, w: 16, cout: 64, k: 3, s: 2, pad: 1 };
+    assert_eq!(gpu.native_kernel_for(CONV_BIAS, &strided.params()), Some("conv2d_bias_fwd_f32"));
+    let shapes = [
+        Conv { n: 1, cin: 64, h: 16, w: 16, cout: 64, k: 3, s: 1, pad: 1 },
+        Conv { n: 2, cin: 67, h: 17, w: 33, cout: 65, k: 3, s: 1, pad: 1 },
+        Conv { n: 1, cin: 3, h: 20, w: 18, cout: 128, k: 3, s: 1, pad: 1 },
+        Conv { n: 1, cin: 130, h: 5, w: 40, cout: 192, k: 3, s: 1, pad: 1 },
+        Conv { n: 3, cin: 64, h: 1, w: 1, cout: 64, k: 3, s: 1, pad: 1 },
+        Conv { n: 1, cin: 32, h: 31, w: 15, cout: 512, k: 3, s: 1, pad: 1 },
+    ];
+    for (i, c) in shapes.iter().enumerate() {
+        let p = c.params();
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS, &p), Some("conv2d_bias_fwd3x3_f32"), "{c:?}");
+        assert_eq!(gpu.native_kernel_for(CONV_BIAS_REG, &p), Some("conv2d_bias_fwd3x3_f32"), "{c:?}");
+        assert_eq!(gpu.native_kernel_for(CONV, &p), Some("conv2d_fwd3x3_f32"), "{c:?}");
+        let b = inputs(c, 7000 + i as u64);
+        let bias = data::rng::Lcg::new(8000 + i as u64).vec(c.cout as usize);
+        let direct = run_bias(&gpu, c, &b.x, &b.w, &bias, CONV_BIAS);
+        let gemm = run_bias_implicit_gemm(&gpu, c, &b.x, &b.w, &bias);
+        let first = bits(&direct).iter().zip(bits(&gemm).iter()).position(|(a, g)| a != g);
+        assert!(first.is_none(), "direct 3x3 differs from the implicit GEMM at {first:?}: {c:?}");
+        let mut o = oracle_fwd(c, &b.x, &b.w);
+        let plane = (c.ho() * c.wo()) as usize;
+        for (k, (e, a)) in o.exact.iter_mut().zip(o.abs.iter_mut()).enumerate() {
+            let co = (k / plane) % c.cout as usize;
+            *e += f64::from(bias[co]);
+            *a += f64::from(bias[co]).abs();
+        }
+        o.len += 1;
+        check_bound(&direct, &o, &format!("direct conv_bias {c:?}"));
+        // The unbiased entry is the same kernel without the epilogue.
+        let (y, _, _) = run(&gpu, c, &b, CONV, CONV_DX_REF, Some(CONV_DW_REF));
+        check_bound(&y, &oracle_fwd(c, &b.x, &b.w), &format!("direct conv2d {c:?}"));
+    }
+}
+
+gpu_core::card_tests!(
+    the_native_conv_kernels_are_redirected_to_only_on_cuda,
+    every_yolov8n_conv_shape_is_within_the_fp32_summation_bound_of_an_f64_oracle,
+    the_real_yolov8n_geometry_is_exact_on_integer_data,
+    the_biased_forward_is_within_the_bound_and_exact_on_integer_data,
+    the_vae_3x3_convs_take_the_direct_kernel_bit_identical_to_the_implicit_gemm,
+);

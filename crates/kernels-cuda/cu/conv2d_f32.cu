@@ -8,7 +8,8 @@
 //
 // Dense fp32 2D convolution, NCHW, square K x K kernel, any stride and zero
 // padding: the forward, the input gradient and the weight gradient as
-// implicit GEMMs. The hand-written forms of `conv2d.wgsl`, `conv2d_dx.wgsl`
+// implicit GEMMs, and the 3x3 / stride 1 / pad 1 forward of a layer at least
+// 64 channels wide as a direct convolution with the same bits. The hand-written forms of `conv2d.wgsl`, `conv2d_dx.wgsl`
 // and `conv2d_dw.wgsl`, reading the identical buffers and the identical
 // uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`:
 //
@@ -322,6 +323,202 @@ __device__ __forceinline__ void brain_conv2d_fwd_tile(const BrainConvP& c, const
     }
 }
 
+// ---------------------------------------------------------------------------
+// Forward, 3x3 / stride 1 / pad 1, as a DIRECT convolution
+// (`brain_conv2d_fwd3x3`, `brain_conv2d_bias_fwd3x3`).
+//
+// The implicit GEMM above gathers every input element once per tap it feeds -
+// nine times for a 3x3 kernel - each with its own index arithmetic and bounds
+// check, and on a wide layer (the diffusion VAEs: 128-512 channels at large
+// maps) that staging, not the multiply, is what bounds it. Here a block owns
+// 64 output channels x a 16 x 16 output patch of one image, and per 4-channel
+// slice stages the patch's input WITH its one-pixel halo (4 x 18 x 18, zero
+// outside the image) and the slice's 4 x 9 x 64 weights (transposed so one
+// tap's channels are contiguous) - each staged element is read once from
+// global memory. A thread owns 8 channels x 8 consecutive positions of one
+// output row; for each (channel, kernel row) it reads the 10 inputs that row
+// needs as three 16-byte loads and slides them across the three taps in
+// registers, so a tap costs two 16-byte weight loads (a warp-wide broadcast)
+// for 64 multiply-adds.
+//
+// Every output is summed in ascending (ci, kh, kw) - the implicit GEMM's own
+// reduction order - with one fused multiply-add per term, so the two forms
+// produce the same bits, and the gate holds them to it.
+//
+// Banks: the staged input row stride is 20 floats (five 16-byte units, odd),
+// and the eight lanes of a quarter-warp read eight consecutive rows at the
+// same column, so their 16-byte loads land on distinct bank groups.
+//
+// One block per SM: the 64 accumulators, the register-staged next slice
+// (15 values) and the 12 inputs and 8 weights of a tap need more than the 128
+// registers two resident blocks would allow, and capped there the compiler
+// spilled; the uncapped kernel ran at twice the rate of the capped one.
+// ---------------------------------------------------------------------------
+#define BRAIN_C3_CO 64       // output channels per block
+#define BRAIN_C3_TH 16       // output rows per block
+#define BRAIN_C3_TW 16       // output columns per block
+#define BRAIN_C3_CS 4        // input channels staged per iteration
+#define BRAIN_C3_IW 20       // staged input row stride: TW + 2 halo, padded to an odd number of float4
+#define BRAIN_C3_IN (BRAIN_C3_CS * (BRAIN_C3_TH + 2) * BRAIN_C3_IW)
+#define BRAIN_C3_WS 68       // staged weight row stride (64 channels + 4)
+#define BRAIN_C3_WN (BRAIN_C3_CS * 9 * BRAIN_C3_WS)
+#define BRAIN_C3_STAGE (BRAIN_C3_IN + BRAIN_C3_WN)
+
+__device__ __forceinline__ bool brain_c3_serves(const BrainConvP& c) {
+    return c.K == 3u && c.stride == 1u && c.pad == 1u && c.Ho == c.H && c.Wo == c.W && c.Cout >= 64u;
+}
+
+__device__ __forceinline__ void brain_conv3x3_tile(const BrainConvP& c, const float* x, const float* w, const float* bias, float* y,
+                                                   unsigned blk, float* smem) {
+    const unsigned tiles_w = (c.W + BRAIN_C3_TW - 1u) / BRAIN_C3_TW;
+    const unsigned tiles_h = (c.H + BRAIN_C3_TH - 1u) / BRAIN_C3_TH;
+    const unsigned tiles_co = (c.Cout + BRAIN_C3_CO - 1u) / BRAIN_C3_CO;
+    const unsigned tco = blk % tiles_co;
+    unsigned r = blk / tiles_co;
+    const unsigned tw = r % tiles_w;
+    r /= tiles_w;
+    const unsigned th = r % tiles_h;
+    const unsigned n = r / tiles_h;
+    const unsigned co0 = tco * BRAIN_C3_CO, h0 = th * BRAIN_C3_TH, w0 = tw * BRAIN_C3_TW;
+    const unsigned HW = c.H * c.W;
+    const unsigned KK9 = c.Cin * 9u;
+
+    const int tid = threadIdx.x;
+    const int cog = tid / 32;          // eight output channels: co0 + 8*cog
+    const int lane = tid % 32;
+    const int orow = lane % 16;        // output row within the tile
+    const int ocol = (lane / 16) * 8;  // first of eight output columns
+
+    auto in_buf = [smem](int b) { return smem + b * BRAIN_C3_STAGE; };
+    auto w_buf = [smem](int b) { return smem + b * BRAIN_C3_STAGE + BRAIN_C3_IN; };
+
+    // Staging: the input slice (CS channels x 18 rows x 18 columns, zero
+    // outside the image) and the weight slice (CS x 9 taps x 64 channels,
+    // transposed so a tap's channels are contiguous).
+    constexpr int IN_ELEMS = BRAIN_C3_CS * (BRAIN_C3_TH + 2) * (BRAIN_C3_TW + 2);
+    constexpr int IN_LOADS = (IN_ELEMS + BRAIN_CV_THREADS - 1) / BRAIN_CV_THREADS;
+    constexpr int W_ELEMS = BRAIN_C3_CS * 9 * BRAIN_C3_CO;
+    constexpr int W_LOADS = W_ELEMS / BRAIN_CV_THREADS;
+    float rin[IN_LOADS];
+    float rw[W_LOADS];
+    const float* xn = x + (unsigned long long)n * c.Cin * HW;
+    auto load = [&](unsigned ci0) {
+#pragma unroll
+        for (int i = 0; i < IN_LOADS; ++i) {
+            const int e = tid + BRAIN_CV_THREADS * i;
+            const int ci = e / ((BRAIN_C3_TH + 2) * (BRAIN_C3_TW + 2));
+            const int rem = e - ci * ((BRAIN_C3_TH + 2) * (BRAIN_C3_TW + 2));
+            const int ih = rem / (BRAIN_C3_TW + 2);
+            const int iw = rem - ih * (BRAIN_C3_TW + 2);
+            const int hh = (int)h0 + ih - 1, ww = (int)w0 + iw - 1;
+            const bool ok = e < IN_ELEMS && ci0 + ci < c.Cin && (unsigned)hh < c.H && (unsigned)ww < c.W;
+            rin[i] = ok ? xn[(unsigned long long)(ci0 + ci) * HW + hh * c.W + ww] : 0.0f;
+        }
+#pragma unroll
+        for (int i = 0; i < W_LOADS; ++i) {
+            const int e = tid + BRAIN_CV_THREADS * i;
+            const int col = e / (BRAIN_C3_CS * 9);       // output channel within the tile
+            const int kt = e - col * (BRAIN_C3_CS * 9);  // (ci, kh, kw) within the slice
+            const unsigned co = co0 + col;
+            const unsigned k = ci0 * 9u + kt;
+            rw[i] = (co < c.Cout && k < KK9) ? w[(unsigned long long)co * KK9 + k] : 0.0f;
+        }
+    };
+    auto store = [&](int b) {
+        float* ib = in_buf(b);
+#pragma unroll
+        for (int i = 0; i < IN_LOADS; ++i) {
+            const int e = tid + BRAIN_CV_THREADS * i;
+            if (e < IN_ELEMS) {
+                const int ci = e / ((BRAIN_C3_TH + 2) * (BRAIN_C3_TW + 2));
+                const int rem = e - ci * ((BRAIN_C3_TH + 2) * (BRAIN_C3_TW + 2));
+                const int ih = rem / (BRAIN_C3_TW + 2);
+                const int iw = rem - ih * (BRAIN_C3_TW + 2);
+                ib[(ci * (BRAIN_C3_TH + 2) + ih) * BRAIN_C3_IW + iw] = rin[i];
+            }
+        }
+        float* wb = w_buf(b);
+#pragma unroll
+        for (int i = 0; i < W_LOADS; ++i) {
+            const int e = tid + BRAIN_CV_THREADS * i;
+            const int col = e / (BRAIN_C3_CS * 9);
+            const int kt = e - col * (BRAIN_C3_CS * 9);
+            wb[kt * BRAIN_C3_WS + col] = rw[i];
+        }
+    };
+
+    float acc[8][8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+#pragma unroll
+        for (int j = 0; j < 8; ++j) { acc[i][j] = 0.0f; }
+    }
+
+    load(0u);
+    store(0);
+    __syncthreads();
+    int cur = 0;
+    for (unsigned ci0 = 0; ci0 < c.Cin; ci0 += BRAIN_C3_CS) {
+        const bool more = ci0 + BRAIN_C3_CS < c.Cin;
+        if (more) { load(ci0 + BRAIN_C3_CS); }
+        const float* ib = in_buf(cur);
+        const float* wb = w_buf(cur);
+#pragma unroll 1
+        for (int ci = 0; ci < BRAIN_C3_CS; ++ci) {
+#pragma unroll
+            for (int kh = 0; kh < 3; ++kh) {
+                const float* row = ib + (ci * (BRAIN_C3_TH + 2) + orow + kh) * BRAIN_C3_IW + ocol;
+                const float4 r0 = *reinterpret_cast<const float4*>(row);
+                const float4 r1 = *reinterpret_cast<const float4*>(row + 4);
+                const float4 r2 = *reinterpret_cast<const float4*>(row + 8);
+                const float b[12] = {r0.x, r0.y, r0.z, r0.w, r1.x, r1.y, r1.z, r1.w, r2.x, r2.y, r2.z, r2.w};
+#pragma unroll
+                for (int kw = 0; kw < 3; ++kw) {
+                    const float* wr = wb + (ci * 9 + kh * 3 + kw) * BRAIN_C3_WS + 8 * cog;
+                    const float4 a0 = *reinterpret_cast<const float4*>(wr);
+                    const float4 a1 = *reinterpret_cast<const float4*>(wr + 4);
+                    const float a[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) {
+#pragma unroll
+                        for (int j = 0; j < 8; ++j) { acc[i][j] = fmaf(a[i], b[kw + j], acc[i][j]); }
+                    }
+                }
+            }
+        }
+        if (more) { store(cur ^ 1); }
+        __syncthreads();
+        cur ^= 1;
+    }
+
+    const unsigned oh = h0 + orow;
+    if (oh >= c.H) { return; }
+    const bool vec = (c.W % 4u == 0u) && ((reinterpret_cast<unsigned long long>(y) & 15ull) == 0ull);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const unsigned co = co0 + 8 * cog + i;
+        if (co >= c.Cout) { continue; }
+        if (bias != nullptr) {
+            const float bv = bias[co];
+#pragma unroll
+            for (int j = 0; j < 8; ++j) { acc[i][j] = acc[i][j] + bv; }
+        }
+        float* dst = y + ((unsigned long long)n * c.Cout + co) * HW + oh * c.W;
+#pragma unroll
+        for (int run = 0; run < 2; ++run) {
+            const unsigned ow = w0 + ocol + 4 * run;
+            if (vec && ow + 3 < c.W) {
+                *reinterpret_cast<float4*>(dst + ow) = make_float4(acc[i][4 * run], acc[i][4 * run + 1], acc[i][4 * run + 2], acc[i][4 * run + 3]);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (ow + j < c.W) { dst[ow + j] = acc[i][4 * run + j]; }
+                }
+            }
+        }
+    }
+}
+
 // The forward's block: decode the tile, pick the channel-tile width. `bias`
 // is null for `conv2d` and the per-output-channel bias for `conv_bias`.
 __device__ __forceinline__ void brain_conv2d_fwd_block(const unsigned int* params, const float* x, const float* w, const float* bias,
@@ -355,6 +552,30 @@ extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 2) brain_conv2d_b
                                                                                    const float* w, const float* bias, float* y) {
     __shared__ __align__(16) float smem[2 * BRAIN_CV_AS + 2 * BRAIN_CV_BS];
     brain_conv2d_fwd_block(params, x, w, bias, y, smem);
+}
+
+// The direct 3x3 forward's block: decode the tile, or exit if the grid has
+// more blocks than the shape (block-uniform).
+__device__ __forceinline__ void brain_conv3x3_block(const unsigned int* params, const float* x, const float* w, const float* bias, float* y,
+                                                    float* smem) {
+    const BrainConvP c = brain_cv_params(params);
+    if (!brain_c3_serves(c)) { return; }
+    const unsigned blocks = ((c.Cout + BRAIN_C3_CO - 1u) / BRAIN_C3_CO) * c.N * ((c.H + BRAIN_C3_TH - 1u) / BRAIN_C3_TH) *
+                            ((c.W + BRAIN_C3_TW - 1u) / BRAIN_C3_TW);
+    const unsigned blk = blockIdx.y * gridDim.x + blockIdx.x;
+    if (blk < blocks) { brain_conv3x3_tile(c, x, w, bias, y, blk, smem); }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 1) brain_conv2d_fwd3x3(const unsigned int* params, const float* x,
+                                                                                const float* w, float* y) {
+    __shared__ __align__(16) float smem[2 * BRAIN_C3_STAGE];
+    brain_conv3x3_block(params, x, w, nullptr, y, smem);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_CV_THREADS, 1) brain_conv2d_bias_fwd3x3(const unsigned int* params, const float* x,
+                                                                                     const float* w, const float* bias, float* y) {
+    __shared__ __align__(16) float smem[2 * BRAIN_C3_STAGE];
+    brain_conv3x3_block(params, x, w, bias, y, smem);
 }
 
 // ---------------------------------------------------------------------------

@@ -83,3 +83,7 @@ harness = false
 [[test]]
 name = "flash_gqa_kmask_native"
 harness = false
+
+[[test]]
+name = "conv2d_native"
+harness = false
