@@ -75,3 +75,27 @@ samples/shell/imagegen/rgb-to-ir/tests/test_readers.py	skip	unit tests of the sa
 samples/shell/imagegen/rgb-to-ir/tests/test_splits.py	skip	unit tests of the sample, run by make check/samples
 samples/shell/imagegen/rgb-to-ir/tests/test_pack.py	skip	unit tests of the sample, run by make check/samples
 samples/shell/imagegen/rgb-to-ir/tests/test_arms.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/rir_bootstrap.py	skip	sequence-clustered bootstrap over scored detector runs; needs result files, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_captions.py	skip	writes instruction captions for a measured tile folder; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_decide.py	skip	pre-registered decision rules over evaluation results; needs result files, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_eval.py	skip	offline detection scoring of a brain yolov8 eval dump; needs a dump, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_gates.py	skip	internal module: label-preservation gates for synthetic IR, driven by rir_synth.py gate; covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_obey.py	skip	measures instruction obedience of generated tiles; needs generated tiles, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_regions.py	skip	measures region contrast with SAM 2 over tiles; needs a resident segmenter and data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_sam2.py	skip	internal module: SAM 2 and grounder adapters over brain; needs weights, covered by the sample unit tests against a fake brain
+samples/shell/imagegen/rgb-to-ir/rir_sheet.py	skip	contact sheet of measured tiles; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_synth.py	skip	generates, ingests and gates synthetic IR with a trained translator; needs flux2 weights, an adapter and data, covered by the sample unit tests against a fake brain
+samples/shell/imagegen/rgb-to-ir/rir_tiles.py	skip	cuts aligned tiles of split-T pairs for brain flux2 finetune; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/tests/predsynth.py	skip	synthetic detector dumps for the sample unit tests, not run directly
+samples/shell/imagegen/rgb-to-ir/tests/test_bootstrap.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_captions.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_decide.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_driver.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_eval.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_gates.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_obey.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_regions.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_sam2.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_sheet.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_synth.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_tiles.py	skip	unit tests of the sample, run by make check/samples
