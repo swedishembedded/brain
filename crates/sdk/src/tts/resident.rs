@@ -14,7 +14,7 @@ use super::{Audio, Backend, TtsOptions, TtsPipeline, SAMPLE_RATE};
 use crate::{Error, Result};
 
 /// A synthesizer with its checkpoints resident, the Talker and the MTP on the
-/// GPU when the process has one (`BRAIN_QWEN3TTS_PLACEMENT=host` forces the host). One request is spoken at a
+/// GPU when the process has one. One request is spoken at a
 /// time; a second caller waits for the first.
 pub struct ResidentTts {
     engine: Mutex<qwen3tts::engine::ResidentEngine>,

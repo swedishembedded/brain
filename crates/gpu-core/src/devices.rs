@@ -1229,19 +1229,37 @@ pub fn resolve_ambient_compute_set() -> ComputeSet {
     // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
     // test binary, an embedding application): how the selected hardware is
     // driven. The CLI layers its own flag on top of this, so a flag wins.
-    apply_env_backend(&mut set);
+    let backend = std::env::var("BRAIN_BACKEND").unwrap_or_default();
+    if let Err(e) = apply_backend_text(&mut set, &backend) {
+        eprintln!("brain: {e}; ignoring it");
+    }
     set
 }
 
-/// Layer `BRAIN_BACKEND` onto `set`, for a library caller that resolved its
-/// own [`DeviceSpec`] and would otherwise silently drop the override (the set
-/// then runs on whatever the probe preferred, Vulkan on a CUDA host). A bad
-/// value is reported and ignored.
+/// The backend a library caller asked for with [`request_backend`], if any.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn apply_env_backend(set: &mut ComputeSet) {
-    let backend = std::env::var("BRAIN_BACKEND").unwrap_or_default();
-    if let Err(e) = apply_backend_text(set, &backend) {
-        eprintln!("brain: {e}; ignoring it");
+static REQUESTED_BACKEND: std::sync::Mutex<Option<Backend>> = std::sync::Mutex::new(None);
+
+/// Ask for `backend` to drive the hardware of every device set a library
+/// caller resolves from now on - the `--backend` flag, for a program that is
+/// not the brain CLI. Refused when it is not a backend name.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn request_backend(name: &str) -> Result<(), String> {
+    let backend = Backend::parse(name).map_err(|e| format!("backend {name:?}: {e}"))?;
+    *REQUESTED_BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = Some(backend);
+    Ok(())
+}
+
+/// Layer the backend asked for with [`request_backend`] onto `set`, so a
+/// library caller that resolved its own [`DeviceSpec`] does not silently run on
+/// whatever the probe preferred (Vulkan on a CUDA host). An unsatisfiable
+/// request is an error, never a quiet demotion.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply_requested_backend(set: &mut ComputeSet) -> Result<(), String> {
+    let requested = *REQUESTED_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
+    match requested {
+        Some(backend) => set.set_backend(backend),
+        None => Ok(()),
     }
 }
 
@@ -1336,6 +1354,12 @@ impl fmt::Display for ComputeSet {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_library_caller_cannot_request_a_backend_that_does_not_exist() {
+        let err = request_backend("tensor-core-9000").unwrap_err();
+        assert!(err.contains("tensor-core-9000"), "{err}");
+    }
+
     use super::*;
 
     fn inv(gpus: u32, cores: usize, npus: u32) -> Inventory {

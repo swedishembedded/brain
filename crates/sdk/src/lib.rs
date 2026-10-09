@@ -97,6 +97,8 @@ mod depth;
 mod detect;
 #[cfg(feature = "device")]
 mod device;
+#[cfg(feature = "device")]
+pub use device::select_backend;
 mod error;
 #[cfg(any(feature = "vision", feature = "text"))]
 mod embedding;

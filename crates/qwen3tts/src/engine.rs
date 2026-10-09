@@ -80,16 +80,15 @@ pub enum Placement {
 }
 
 impl Placement {
-    /// Where an engine should run: `BRAIN_QWEN3TTS_PLACEMENT=host|device` if
-    /// set, else the device when the process's ambient device is a real GPU
-    /// and the host otherwise (the CPU JIT is slower than the host decoder).
+    /// Where an engine should run: the device when the process's ambient
+    /// device is a real GPU, the host otherwise (the CPU JIT is slower than
+    /// the host decoder).
     #[must_use]
     pub fn ambient() -> Placement {
-        match std::env::var("BRAIN_QWEN3TTS_PLACEMENT").as_deref() {
-            Ok("host") => Placement::Host,
-            Ok("device") => Placement::Device,
-            _ if gpu_core::Gpu::new(&[]).kind() == "cpu" => Placement::Host,
-            _ => Placement::Device,
+        if gpu_core::Gpu::new(&[]).kind() == "cpu" {
+            Placement::Host
+        } else {
+            Placement::Device
         }
     }
 }

@@ -6,7 +6,7 @@
 //! Wall-clock profile of the resident synthesizer: load, the first (cold)
 //! request, and warm requests of one and several sentences. It asserts nothing
 //! about speed; it prints one `profile:` line per request so a run can be
-//! stored. Set `BRAIN_PROFILE=1` to run it; it is quiet and skipped otherwise.
+//! stored. It is ignored by default: run it with `--ignored --nocapture`.
 
 use brain::{TtsOptions, TtsPipeline};
 use std::time::Instant;
@@ -16,10 +16,8 @@ const ONE: &str = "I think it is tyranny.";
 const THREE: &str = "I think it is tyranny. A tax imposed upon us without our consent is an affront to our rights as free men. We have a right to be represented in the laws that govern us.";
 
 #[test]
+#[ignore = "prints a profile; run with --ignored --nocapture"]
 fn profile_resident_synthesis() {
-    if std::env::var("BRAIN_PROFILE").is_err() {
-        return;
-    }
     let _serial = brain_testutil::env_lock();
     let Ok(pipe) = TtsPipeline::from_pretrained(MODEL) else {
         brain_testutil::skip("Qwen3-TTS checkpoint is not in the model store");

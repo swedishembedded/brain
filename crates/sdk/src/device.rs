@@ -18,7 +18,7 @@ use crate::{Device, Error, Result};
 pub(crate) fn resolve(device: &Device) -> Result<gpu_core::devices::ComputeSet> {
     let probe = gpu_core::Inventory::probe();
     let mut set = device.resolve(&probe).map_err(Error::Backend)?;
-    gpu_core::devices::apply_env_backend(&mut set);
+    gpu_core::devices::apply_requested_backend(&mut set).map_err(Error::Backend)?;
     set.apply().map_err(Error::Backend)?;
     gpu_core::publish_compute_set(set.clone());
     Ok(set)
@@ -37,4 +37,14 @@ pub(crate) fn apply(device: &Device) -> Result<()> {
     let cpu_allowed = set.cpu_enabled();
     loader::install_default_placer(gpus, cpu_allowed);
     Ok(())
+}
+
+/// Drive the hardware with `backend` (`wgpu | vulkan | cuda | cpu`) in every
+/// pipeline this process builds from now on: the `--backend` flag, for a
+/// program that is not the brain CLI. Call it before building a pipeline.
+///
+/// # Errors
+/// `backend` is not a backend name.
+pub fn select_backend(backend: &str) -> Result<()> {
+    gpu_core::devices::request_backend(backend).map_err(Error::Backend)
 }
