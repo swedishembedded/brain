@@ -287,6 +287,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_i8_gemv.cu"),
     },
     CudaKernel {
+        name: "matmul_f32_reg",
+        // The native twin of `matmul_reg3.wgsl`, redirected to BY NAME by
+        // `gpu_core::native_upgrade`; the (MatMul, F32) operator answer stays
+        // the provider's `matmul_f32_tiled`.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_reg",
+        what: "fp32 out = x @ W^T; 128x128 tile, 8x8 per thread, product and sum each rounded in ascending k, bit-identical to matmul_reg3",
+        reported: "native:matmul_f32_reg",
+        block_dim: 256,
+        // 128 rows of x by 128 weight rows per block, row-tile-major.
+        tile: (128, 128),
+        // Double-buffered k-major tiles of 16 k x (128 + 4 pad) floats per operand.
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        src: include_str!("../cu/matmul_f32_reg.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8_dp4a",
         // The native twin of `matmul_i8_dyn.wgsl`, redirected to BY NAME by
         // `gpu_core::native_upgrade` for every dispatch of that kernel. The

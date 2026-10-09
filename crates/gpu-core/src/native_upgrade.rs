@@ -125,6 +125,15 @@ fn serves_i8_dyn(p: &[u32]) -> bool {
     }
 }
 
+/// The fp32 GEMM family's bindings (`matmul_reg3.wgsl`): params, `x`, `w`, `out`.
+const F32_GEMM_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// `Params { m, k, n }`: any non-empty product whose output fits the kernel's
+/// 32-bit element arithmetic.
+fn serves_f32_gemm(p: &[u32]) -> bool {
+    matches!(p, [m, k, n] if *m >= 1 && *k >= 1 && *n >= 1 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX))
+}
+
 /// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
 /// `out`.
 const MOE_I8_GROUPED_BINDINGS: &[BindKind] = &[
@@ -228,6 +237,17 @@ pub(crate) const ROWS: &[Row] = &[
         target: Target::Named("matmul_i8_dp4a"),
         bindings: I8_GEMV_BINDINGS,
         serves: serves_i8_dyn,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    // The register-tiled fp32 GEMM half the workspace dispatches. One fp32
+    // accumulator per output, product and sum each rounded, k ascending: the
+    // reference's own arithmetic, so bit-identical (`tests/f32_reg_native.rs`).
+    Row {
+        slow: "matmul_reg3",
+        target: Target::Named("matmul_f32_reg"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_gemm,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
