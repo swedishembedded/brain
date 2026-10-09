@@ -95,3 +95,35 @@ fn dfl_cpu_matches_gpu_kernel() {
     let maxd = cpu.iter().zip(&gpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(maxd < 1e-4, "dfl cpu/gpu mismatch: {maxd}");
 }
+
+/// Records every name the tap is called with.
+#[derive(Default)]
+struct NameTap(std::cell::RefCell<std::collections::BTreeSet<String>>);
+impl ActTap for NameTap {
+    fn tap(&self, name: &str, _x: &mut [f32]) {
+        self.0.borrow_mut().insert(name.to_string());
+    }
+}
+
+/// The tap sites are exactly the units the quantized export puts a Q/DQ pair
+/// in front of: every conv+BN unit (one per `P.conv.weight`), and NOT the
+/// detection head's final biased 1x1 projections (`P.2.weight`), which the
+/// export keeps in full precision. A site the export does not have would give
+/// the calibrator a scale the fake-quant simulation then applies to an input
+/// the device never quantizes.
+#[test]
+fn the_tap_sites_are_exactly_the_quantized_conv_units() {
+    if skip() {
+        return;
+    }
+    let (model, img_len) = tiny_model();
+    model.set_eval(true);
+    model.set_image(&fill(img_len, 0x77));
+    let tap = NameTap::default();
+    model.forward_net_tapped(&tap);
+    let tapped = tap.0.into_inner();
+    let quantized: std::collections::BTreeSet<String> =
+        model.cfg.full_param_list().into_iter().filter_map(|(n, _)| n.strip_suffix(".conv.weight").map(str::to_string)).collect();
+    assert_eq!(tapped, quantized, "tap sites differ from the quantized conv units");
+    assert!(!tapped.iter().any(|n| n.starts_with("head.") && n.ends_with(".2")), "a head projection is a tap site: {tapped:?}");
+}

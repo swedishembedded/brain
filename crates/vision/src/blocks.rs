@@ -478,6 +478,9 @@ pub struct Conv {
     /// [`ConvNames`]: the tap identifies the CONV SITE, the names identify its
     /// weights, and they are not the same concept.
     prefix: String,
+    /// Whether an installed [`crate::ActTap`] observes this unit's input - see
+    /// [`Conv::without_tap`].
+    tap_site: bool,
     names: ConvNames,
     pub in_shape: Shape,
     pub out_shape: Shape,
@@ -574,6 +577,7 @@ impl Conv {
         };
         Conv {
             prefix: prefix.to_string(),
+            tap_site: true,
             names,
             in_shape,
             out_shape,
@@ -956,9 +960,25 @@ impl Conv {
 
     /// This conv's calibration / fake-quant tap — see [`apply_tap`]. Every conv
     /// variant routes through here so the calibrator sees a complete, consistent
-    /// set of tensors.
+    /// set of tensors. A unit built [`Conv::without_tap`] is not a tap site.
     fn tap_input(&self, ctx: &Ctx, x_in: &DeviceBuffer) -> Option<DeviceBuffer> {
+        if !self.tap_site {
+            return None;
+        }
         apply_tap(ctx, &self.prefix, self.in_shape.numel() as usize, &self.q_in, x_in)
+    }
+
+    /// Make this unit NOT a calibration / fake-quant tap site: its input is
+    /// never routed through an installed [`crate::ActTap`].
+    ///
+    /// A tap fires where the exported quantized graph puts a Q/DQ pair, so a
+    /// unit the export deliberately keeps in full precision must not be one -
+    /// otherwise the calibrator records a scale for it and the fake-quant
+    /// simulation quantizes an input the device never quantizes. YOLOv8's final
+    /// detection-head 1x1 projections are such units.
+    pub fn without_tap(mut self) -> Conv {
+        self.tap_site = false;
+        self
     }
 
     /// Eligible for the conv-as-GEMM eval path (see the call site).

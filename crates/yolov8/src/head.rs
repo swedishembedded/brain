@@ -12,25 +12,9 @@
 //! The two `Conv`s in each branch are the full Conv (conv+BN+SiLU); the final
 //! 1x1 is a bare convolution (no BN/activation) plus a per-output-channel learned
 //! bias, matching Ultralytics' detection head (its last layer is a plain biased
-//! `nn.Conv2d`).
-//!
-//! ## Head bias (P12): NCHW + the `[M,N]` bias kernels
-//!
-//! The logits are NCHW `[N,C,H,W]` and the bias is per-channel `C`. The shared
-//! `bias_add`/`bias_grad` kernels are hardwired to `[M,N]` row-major where the
-//! biased dim `N` is the TRAILING (contiguous) dim — i.e. they compute
-//! `out[idx] += b[idx % N]` / `db[col] += sum_m dy[m*N + col]`. In NCHW the
-//! channel is NOT the trailing dim, so we cannot pass the `[C]` bias directly.
-//!
-//! Instead we view the buffer as `[M=N, N=C*H*W]` and use a per-image-independent
-//! BROADCAST bias `bcast[c*HW + p] = bias[c]` (length `C*H*W`):
-//!   * forward: `bias_add(m=N, n=C*HW, bcast)` -> `out[idx] += bcast[idx % (C*HW)]`
-//!     and `idx % (C*HW) = c*HW + p`, so each element gets `bias[c]`. Correct.
-//!   * backward: `bias_grad(m=N, n=C*HW)` -> `dbcast[c*HW+p] = sum_n dy[...]`
-//!     (sum over the N images); then host-reduce `dbias[c] = sum_p dbcast[c*HW+p]`
-//!     (sum over spatial), giving the per-channel grad summed over N and H*W.
-//!
-//! Both use the EXISTING kernels verbatim; no new kernel is added.
+//! `nn.Conv2d`). It is the shared [`Conv`] unit too, specified as exactly that
+//! (`Norm::None`, `Act::None`, biased), so its forward, input/weight gradients
+//! and bias gradient are the ones every other biased conv in brain runs.
 //!
 //! [`Head`] wires the three scales; [`Head::forward`] runs them. The raw logit
 //! maps are concatenated across scales into `[A, nc]` (cls) and
@@ -41,14 +25,14 @@
 //! decode->box path is P6.
 //!
 //! Param-naming: per scale `s`, the cls branch is `head.{s}.cls.0` / `.1` (the
-//! two Convs) + `head.{s}.cls.2.weight` (the final bias-free 1x1); the reg
+//! two Convs) + `head.{s}.cls.2.{weight,bias}` (the final biased 1x1); the reg
 //! branch is `head.{s}.reg.{0,1,2}` likewise.
 
 use gpu_core::DeviceBuffer;
 use paramstore::ParamStore;
 
-use crate::blocks::Conv;
-use crate::net::{Ctx, Shape, BIAS_GRAD, CONV2D_DW, CONV2D_DX, CONV_BIAS};
+use crate::blocks::{Act, Conv, ConvNames, ConvSpec, Norm};
+use crate::net::{Ctx, Shape};
 
 /// Repack per-scale NCHW logit maps into a flat `[N, A, C]` host tensor with
 /// anchors ordered scale-major then row-major over `(H,W)` — the layout the loss
@@ -83,42 +67,35 @@ pub fn repack_heads_to_flat(scales: &[(&[f32], u32, u32)], n: usize, c: usize, a
 pub struct Branch {
     pub c0: Conv,
     pub c1: Conv,
-    prefix: String,
+    /// The final biased 1x1 (`P.2.{weight,bias}`): a raw conv, no BN, no act.
+    pub c2: Conv,
     pub mid: u32,
     pub out_c: u32,
     pub out_shape: Shape,
 
-    logits: DeviceBuffer, // final 1x1 output [n,out_c,h,w]
-    d_c1: DeviceBuffer,   // grad wrt c1.out  [n,mid,h,w]
-    d_c0: DeviceBuffer,   // grad wrt c0.out  [n,mid,h,w]
-
-    // head-bias plumbing (see module docs). C*H*W elements.
-    dbcast: DeviceBuffer, // bias_grad output before the host spatial-reduce
+    d_c1: DeviceBuffer, // grad wrt c1.out  [n,mid,h,w]
+    d_c0: DeviceBuffer, // grad wrt c0.out  [n,mid,h,w]
 }
 
 impl Branch {
     pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, mid: u32, out_c: u32, train: bool) -> Branch {
         let c0 = Conv::new(ctx, &format!("{prefix}.0"), in_shape, mid, 3, 1, 1, train);
         let c1 = Conv::new(ctx, &format!("{prefix}.1"), c0.out_shape, mid, 3, 1, 1, train);
-        let out_shape = c1.out_shape.conv_out(out_c, 1, 1, 0);
+        // Ultralytics names the plain `nn.Conv2d` by its position: `P.2.weight`
+        // and `P.2.bias`. It has no BatchNorm, so the BN names are never read.
+        let c2_prefix = format!("{prefix}.2");
+        let names = ConvNames { weight: format!("{c2_prefix}.weight"), bias: format!("{c2_prefix}.bias"), ..ConvNames::torch_flat(&c2_prefix) };
+        let spec = ConvSpec { norm: Norm::None, act: Act::None, ..ConvSpec::silu(out_c, 1, 1, 0) }.with_bias();
+        // Not a tap site: the quantized export keeps these logits' projection
+        // in full precision (no Q/DQ pair in front of it).
+        let c2 = Conv::with_names(ctx, &c2_prefix, names, c1.out_shape, spec, train).without_tap();
+        let out_shape = c2.out_shape;
         let mid_n = c1.out_shape.numel();
-        let chw = out_c * out_shape.h * out_shape.w; // C*H*W (per image)
-        Branch {
-            c0,
-            c1,
-            prefix: prefix.to_string(),
-            mid,
-            out_c,
-            out_shape,
-            logits: ctx.act(out_shape.numel()),
-            d_c1: ctx.act(mid_n),
-            d_c0: ctx.act(mid_n),
-            dbcast: ctx.act(chw),
-        }
+        Branch { c0, c1, c2, mid, out_c, out_shape, d_c1: ctx.act(mid_n), d_c0: ctx.act(mid_n) }
     }
 
     pub fn out(&self) -> &DeviceBuffer {
-        &self.logits
+        self.c2.out()
     }
 
     /// Propagate the eval/train BN toggle to the two Convs (the final bias-free
@@ -138,31 +115,14 @@ impl Branch {
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.c0.param_list();
         v.extend(self.c1.param_list());
-        v.push((format!("{}.2.weight", self.prefix), (self.out_c * self.mid) as usize));
-        v.push((format!("{}.2.bias", self.prefix), self.out_c as usize));
+        v.extend(self.c2.param_list());
         v
-    }
-
-    fn conv1x1_params(&self) -> [u32; 10] {
-        let cin = self.c1.out_shape;
-        [cin.n, cin.c, cin.h, cin.w, self.out_c, 1, 1, 0, cin.h, cin.w]
     }
 
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         self.c0.forward(ctx, ps, x_in);
         self.c1.forward(ctx, ps, self.c0.out());
-        // Fused conv + per-output-channel bias in one kernel: the bias param
-        // `[Cout]` is bound directly (always current, train or eval), so there is
-        // no separate bias_add pass and no host-built `[C*HW]` broadcast buffer.
-        let w = ps.w(&format!("{}.2.weight", self.prefix));
-        let bias = ps.w(&format!("{}.2.bias", self.prefix));
-        let s = ctx.step(
-            CONV_BIAS,
-            &[self.c1.out(), w, bias, &self.logits],
-            &self.conv1x1_params(),
-            self.out_shape.numel(),
-        );
-        ctx.gpu.submit(&[], &[s]);
+        self.c2.forward(ctx, ps, self.c1.out());
     }
 
     /// Backward. `d_out` = grad wrt this branch's raw-logit output; `d_in`
@@ -175,38 +135,7 @@ impl Branch {
         d_out: &DeviceBuffer,
         d_in: &DeviceBuffer,
     ) {
-        let wname = format!("{}.2.weight", self.prefix);
-        let bname = format!("{}.2.bias", self.prefix);
-        let dw_n = self.out_c * self.mid; // K=1
-        // Bias grad: sum d_out over N (via bias_grad on the [N, C*HW] view) into
-        // dbcast, then host-reduce over the HW spatial positions per channel and
-        // accumulate into the [C] bias grad buffer. d(conv_out) = d_out (the bias
-        // add is the identity wrt the conv output, so it does not change d_c1/d_x).
-        let hw = self.out_shape.h * self.out_shape.w;
-        let n = self.out_c * hw; // C*HW
-        let m = self.out_shape.n; // N images
-        // Clear dbcast first: bias_grad ACCUMULATES (`dbcast[col] += ...`), and
-        // dbcast is reused across backward passes, so it must start at zero.
-        let s_bias = ctx.step(BIAS_GRAD, &[d_out, &self.dbcast], &[m, n], n);
-        ctx.gpu.submit(&[&self.dbcast], &[s_bias]);
-        let dbcast = ctx.gpu.read(&self.dbcast, n as usize);
-        let mut dbias = vec![0.0f32; self.out_c as usize];
-        for (ch, db) in dbias.iter_mut().enumerate() {
-            let base = ch * hw as usize;
-            let mut acc = 0.0f32;
-            for p in 0..hw as usize {
-                acc += dbcast[base + p];
-            }
-            *db = acc;
-        }
-        // Accumulate into the (pre-zeroed) grad buffer (single consumer/backward).
-        let cur = ctx.gpu.read(ps.g(&bname), self.out_c as usize);
-        let merged: Vec<f32> = cur.iter().zip(&dbias).map(|(a, b)| a + b).collect();
-        ctx.gpu.write(ps.g(&bname), bytemuck::cast_slice(&merged));
-
-        let s_dw = ctx.step(CONV2D_DW, &[d_out, self.c1.out(), ps.g(&wname)], &self.conv1x1_params(), dw_n);
-        let s_dx = ctx.step(CONV2D_DX, &[d_out, ps.w(&wname), &self.d_c1], &self.conv1x1_params(), self.c1.out_shape.numel());
-        ctx.gpu.submit(&[], &[s_dw, s_dx]);
+        self.c2.backward(ctx, ps, self.c1.out(), d_out, &self.d_c1);
         self.c1.backward(ctx, ps, self.c0.out(), &self.d_c1, &self.d_c0);
         self.c0.backward(ctx, ps, x_in, &self.d_c0, d_in);
     }
