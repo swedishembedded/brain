@@ -20,8 +20,9 @@ that sits next to it.
 Grammar. A clause is `<subject> <predicate>.` with the subject drawn from
 SUBJECTS ("The car", "The visible car"; a part is "The bonnet of the car") and
 the predicate from the polarity's TRAIN_PREDICATES. A caption names one clause
-or up to three, one per class, from a seeded draw. A class whose instances
-disagree in one tile (one warm car, one cool car) is not stated, and the
+or up to three, one per class, from a seeded draw. A class is stated
+with the polarity at least two thirds of its measured instances in the tile
+share; when they split (one warm car, one cool car) it is not stated and the
 conflict is counted. Two predicates, one warmer and one cooler, are HELD_OUT:
 they are never written into captions.yaml and appear only in
 heldout-captions.jsonl, to test whether the adapter follows an instruction in
@@ -60,6 +61,7 @@ import rir_tiles as T
 NEUTRAL_CAPTION = T.NEUTRAL_CAPTION
 POLARITIES = ("warmer", "cooler", "same")
 MAX_OBJECTS = 3
+AGREE_SHARE = 2 / 3
 FLAG_BELOW = 0.10
 FLAG_TEXT = "not controllable from natural data"
 
@@ -102,15 +104,17 @@ def has_polarity(caption: str, cls: str, polarity: str, part: str | None = None)
 
 
 def agreed_statements(objects: list[dict]) -> tuple[dict[tuple[str, str | None], tuple[str, int]], int]:
-    """({(class, part): (polarity, mask pixels)}, conflicts): instances of one class agree or the class is omitted."""
+    """({(class, part): (polarity, mask pixels)}, conflicts): a class is stated when at least AGREE_SHARE of its
+    measured instances in the tile share a polarity, and omitted (one conflict) when they split."""
     seen: dict[tuple[str, str | None], list[dict]] = {}
     for o in objects:
         if o.get("polarity") is not None:
             seen.setdefault((o["class"], o.get("part")), []).append(o)
     agreed, conflicts = {}, 0
     for key, group in seen.items():
-        if len({o["polarity"] for o in group}) == 1:
-            agreed[key] = (group[0]["polarity"], sum(o.get("mask_px", 0) for o in group))
+        top = max(POLARITIES, key=lambda p: sum(o["polarity"] == p for o in group))
+        if sum(o["polarity"] == top for o in group) >= AGREE_SHARE * len(group):
+            agreed[key] = (top, sum(o.get("mask_px", 0) for o in group))
         else:
             conflicts += 1
     return agreed, conflicts

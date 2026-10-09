@@ -141,6 +141,15 @@ class Training(unittest.TestCase):
         _, caps, _ = self.build([[obj("car", "warmer"), obj("car", "cooler")]] * 10, neutral_share=0.0)
         self.assertEqual(set(caps.values()), {C.NEUTRAL_CAPTION})
 
+    def test_a_clear_majority_of_instances_is_stated_and_a_split_is_not(self):
+        three_one = [obj("car", "warmer")] * 3 + [obj("car", "same")]
+        _, caps, report = self.build([three_one] * 20, neutral_share=0.0)
+        self.assertTrue(all(C.has_polarity(t, "car", "warmer") for t in caps.values()))
+        self.assertEqual(report["conflicting_classes"], 0)
+        _, caps, report = self.build([[obj("car", "warmer")] * 2 + [obj("car", "same")] * 2] * 20, neutral_share=0.0)
+        self.assertEqual(set(caps.values()), {C.NEUTRAL_CAPTION})
+        self.assertEqual(report["conflicting_classes"], 20)
+
     def test_a_part_gets_its_own_subject(self):
         _, caps, _ = self.build([[obj("car", None), obj("car", "warmer", part="bonnet")]] * 30, neutral_share=0.0)
         self.assertTrue(any("bonnet of the car" in t for t in caps.values()))
