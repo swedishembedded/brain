@@ -647,6 +647,45 @@ class Gate(GateWorld):
         self.assertEqual(stats["n_failed"], 4)
 
 
+class GateCalibration(GateWorld):
+    """Real pairs registered 3 px apart; g0 carries that offset, g1 six pixels more."""
+
+    def setUp(self):
+        super().setUp()
+        for k in range(8):
+            gray = TG.blocks(100 + k)
+            write_png(self.path(f"t{k}_ir.png"), TG.to_ir(gray, invert=bool(k % 2), noise=6.0, seed=k, shift=(0, 3)))
+        for fid, dx in (("g0", 3), ("g1", 9)):
+            write_png(os.path.join(self.arm_dir, f"d_{fid}.png"), TG.to_ir(self.scenes[fid], shift=(0, dx)))
+
+    def rejects(self):
+        with open(os.path.join(self.arm_dir, "rejects.jsonl")) as fh:
+            return {r["id"]: r["reasons"] for r in map(json.loads, fh)}
+
+    def test_by_default_the_limit_is_what_real_pairs_do_so_the_real_offset_passes_and_six_more_fails(self):
+        stats = self.gate()
+        self.assertNotIn("g0", self.rejects())
+        self.assertIn("global_shift", self.rejects()["g1"])
+        cal = stats["shift_calibration"]
+        self.assertEqual(cal["mode"], "auto")
+        self.assertAlmostEqual(abs(cal["median"][0]), 3.0, delta=0.7)
+        self.assertEqual((cal["n"], cal["floor"]), (8, 0.5))
+        self.assertAlmostEqual(cal["limit"], cal["p95"] + cal["floor"])
+        self.assertEqual(stats["max_shift_px"], cal["limit"])
+
+    def test_a_number_is_a_fixed_limit_from_zero_and_is_recorded_as_such(self):
+        stats = self.gate(max_shift_px=2.0)
+        self.assertIn("global_shift", self.rejects()["g0"])
+        self.assertEqual(stats["shift_calibration"], {"mode": "fixed", "median": [0.0, 0.0], "limit": 2.0})
+
+    def test_the_real_edge_distribution_is_reported_with_its_percentiles(self):
+        stats = self.gate()
+        edge = stats["edge_reference"]
+        self.assertEqual(edge["n"], stats["reference_boxes"])
+        self.assertEqual(edge["threshold"], stats["edge_threshold"])
+        self.assertEqual(sorted(edge["percentiles"], key=int), ["5", "10", "25", "50", "75", "90", "95"])
+
+
 class GateCli(GateWorld):
     def args(self, *extra):
         self.splits = self.path("splits.json")
@@ -657,6 +696,15 @@ class GateCli(GateWorld):
     def test_the_model_free_gates_run_from_the_command_line(self):
         self.assertEqual(S.main(self.args()), 0)
         self.assertEqual(self.ids("manifest.jsonl"), ["g0", "g3"])
+
+    def test_max_shift_takes_auto_or_a_number_and_rejects_anything_else(self):
+        self.assertEqual(S.parse_max_shift("auto"), None)
+        self.assertEqual(S.parse_max_shift("2.5"), 2.5)
+        with self.assertRaises(ValueError):
+            S.parse_max_shift("-1")
+        with self.assertRaises(ValueError):
+            S.parse_max_shift("fast")
+        self.assertEqual(S.main(self.args("--max-shift", "50")), 0)
 
     def test_the_sam2_gate_needs_the_bus_address_explicitly(self):
         err = io.StringIO()

@@ -43,7 +43,11 @@ default crop or taken as the whole frame, by their size. Frames without an outpu
 
 `gate` runs the label-preservation gates of rir_gates over an ingested arm: for every frame the edge correlation
 inside each ground-truth box against the 10th percentile of the same quantity over the real pairs of split T, and the
-global alignment shift (phase correlation, 2 px); with `--sam2` also the SAM 2 mask IoU of the box on the RGB and on
+global alignment shift (phase correlation), calibrated on the same real pairs:
+the median real shift is the centre and the limit is the 95th percentile of the real pairs' distance from it plus
+half a pixel (`--max-shift auto`, the default, because the real pairs are registered a few pixels apart and the
+translator learns that offset; `--max-shift N` is a fixed limit from zero). `gate-stats.json` records the
+calibration and the percentiles of the real edge-correlation distribution; with `--sam2` also the SAM 2 mask IoU of the box on the RGB and on
 the synthetic IR (the resident D-Bus segmenter of rir_sam2, made from `--dbus-address` and `--brain-py`), for the
 boxes that passed the model-free gates. Failing frames are written to `rejects.jsonl` with their reasons and leave
 `manifest.jsonl` (the file `rir_pack.py` packs) unless `--keep-rejected`; `manifest.all.jsonl` keeps the whole arm and
@@ -564,7 +568,7 @@ class GateRequest:
     mask_iou: G.MaskIou | None = None  # the SAM 2 gate (G.segmenter_mask_iou); None: that gate is absent
     keep_rejected: bool = False
     reference_limit: int = 300  # real split-T frames the edge threshold is read off
-    max_shift_px: float = 2.0
+    max_shift_px: float | None = None  # None: calibrated on the real pairs of split T; a number: fixed, from zero
     seed: int = 1
 
 
@@ -581,12 +585,22 @@ def _write_jsonl(path: str, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def _reference(req: GateRequest, datasets: set[str]) -> G.Reference:
+def _reference(req: GateRequest, datasets: set[str]) -> G.RealReference:
     pairs = [r for r in req.doc["frames"] if r["split"] == "T" and r["usable"] and r["dataset"] in datasets]
     if not pairs:
         raise ValueError(f"no usable split T frames of {sorted(datasets)}: the edge threshold is the 10th percentile "
                          "of the real pairs of split T")
-    return G.reference_distribution(G.manifest_pairs(pairs, req.classes, req.reference_limit, req.seed))
+    return G.real_reference(G.manifest_pairs(pairs, req.classes, req.reference_limit, req.seed))
+
+
+def parse_max_shift(text: str) -> float | None:
+    """`auto` (None: calibrate on real pairs) or a limit in pixels."""
+    if text == "auto":
+        return None
+    value = float(text)
+    if not value >= 0:
+        raise ValueError(f"--max-shift wants auto or a number of pixels of at least 0, got {text!r}")
+    return value
 
 
 def _gate_record(entry: dict, gate: G.ImageGate) -> dict:
@@ -610,7 +624,13 @@ def gate(req: GateRequest) -> dict:
     entries = _read_jsonl(everything)
     frames = {(r["dataset"], r["id"]): r for r in req.doc["frames"]}
     reference = _reference(req, {e["dataset"] for e in entries})
-    config = G.GateConfig(edge_threshold=reference.threshold, max_shift_px=req.max_shift_px)
+    edge = reference.edge
+    if req.max_shift_px is None:
+        shift_args, calibration = reference.shift.config_args(), {"mode": "auto", **reference.shift.to_dict()}
+    else:
+        shift_args = {"max_shift_px": req.max_shift_px}
+        calibration = {"mode": "fixed", "median": [0.0, 0.0], "limit": req.max_shift_px}
+    config = G.GateConfig(edge_threshold=edge.threshold, **shift_args)
     stats, rejects, kept = G.RejectionStats(req.arm), [], []
     for entry in entries:
         row = frames.get((entry["dataset"], entry["id"]))
@@ -629,8 +649,10 @@ def gate(req: GateRequest) -> dict:
             rejects.append(_gate_record(entry, result))
     _write_jsonl(os.path.join(req.arm_dir, "rejects.jsonl"), rejects)
     _write_jsonl(manifest, entries if req.keep_rejected else kept)
-    report = {**stats.to_dict(), "edge_threshold": reference.threshold, "reference_boxes": reference.n,
-              "reference_percentile": reference.percentile, "max_shift_px": req.max_shift_px,
+    report = {**stats.to_dict(), "edge_threshold": edge.threshold, "reference_boxes": edge.n,
+              "reference_percentile": edge.percentile, "max_shift_px": config.max_shift_px,
+              "shift_calibration": calibration,
+              "edge_reference": {"n": edge.n, "threshold": edge.threshold, "percentiles": edge.percentiles()},
               "mask_gate": req.mask_iou is not None, "keep_rejected": req.keep_rejected, "kept": len(kept),
               "excluded": 0 if req.keep_rejected else len(rejects)}
     _write_json_atomic(os.path.join(req.arm_dir, "gate-stats.json"), report)
@@ -716,7 +738,9 @@ def _add_gate(sub) -> None:
     g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
     g.add_argument("--reference-limit", type=int, default=GateRequest.reference_limit,
                    help="real split-T frames the edge threshold is read off")
-    g.add_argument("--max-shift", type=float, default=GateRequest.max_shift_px, help="global shift limit in pixels")
+    g.add_argument("--max-shift", type=parse_max_shift, default=None,
+                   help="global shift limit: `auto` (default) calibrates it on the real pairs of split T, no more "
+                        "misaligned than they are; a number is a fixed limit in pixels from no shift")
     g.add_argument("--seed", type=int, default=1, help="which split-T frames form the reference")
     g.add_argument("--sam2", action="store_true", help="also gate the mask IoU of SAM 2 on RGB and IR (resident D-Bus segmenter)")
     g.add_argument("--dbus-address", help="bus address of the resident `brain serve --dbus` (with --sam2)")

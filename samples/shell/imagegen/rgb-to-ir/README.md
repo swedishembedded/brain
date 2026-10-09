@@ -396,8 +396,16 @@ whichever has the output's size. Frames without an output are counted in
 edge correlation inside each ground-truth box must reach the 10th percentile of
 the same quantity over real pairs of split T (the threshold is read off at most
 `--reference-limit` seeded split-T frames, and it is an error if split T has
-none), and the whole image must be within `--max-shift` (2) px of the RGB by
-phase correlation. With `--sam2 --dbus-address ADDR [--brain-py DIR]` the SAM 2
+none), and the whole image must be no more misaligned with the RGB than real
+pairs are. The shift is the phase correlation of the edge maps; the real pairs of
+split T are themselves registered a few pixels apart and the translator learns
+that offset, so a fixed limit from zero would fail every translator. With
+`--max-shift auto` (the default) the centre is the median (dx, dy) of the real
+pairs and the limit the 95th percentile of their own distance from it plus a
+half-pixel floor; a number is a fixed limit from zero. `gate-stats.json` records
+the calibration (`shift_calibration`: mode, median, p95, floor, limit, n) and the
+percentiles of the real edge-correlation distribution (`edge_reference`).
+With `--sam2 --dbus-address ADDR [--brain-py DIR]` the SAM 2
 mask IoU of each box on the RGB and on the synthetic IR is gated too, through the
 resident D-Bus segmenter of `rir_sam2.py`, only for boxes that passed the
 model-free gates (a segmenter call is the expensive part). Failing frames are
