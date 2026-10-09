@@ -10,11 +10,15 @@ splits, a packer for the detector's flat dataset format, and the training-image
 arms that need no generative model.
 
 **What is here, and what is not.** The manifest contract and validator, the
-readers, the splits, the packer, the arms below and the training data of the
+readers, the splits, the packer, the arms below, the training data of the
 instruction-conditioned translator (tiles, region contrast, instruction
-captions) are implemented and tested. The translator itself is trained with
-`brain flux2 finetune` and is not part of this sample; neither is the
-evaluation harness (fine-tune per arm, score on real IR, paired statistics).
+captions) and the evaluation and decision harness (offline mAP scoring, the
+sequence-clustered bootstrap, the pre-registered decision rules, the
+label-preservation gates, the instruction-obedience measurement) are
+implemented and tested on synthetic inputs. The translator itself is trained
+with `brain flux2 finetune` and the detectors with `brain yolov8 fine-tune`;
+neither is run by this sample, and no real result is claimed here: the numbers
+that decide the study come from those runs, scored by the stages below.
 
 ## Study design
 
@@ -58,6 +62,9 @@ $S/rgb_to_ir.sh measure                          # lora-set/regions/*.json (need
 $S/rgb_to_ir.sh captions                         # lora-set/captions.yaml + captions-report.json
 $S/rgb_to_ir.sh sheet                            # lora-set/sheet.png, 12 random tiles to look at
 brain flux2 finetune "$RIR_WORK/lora-set" --out rgb2ir.brain --size 512
+$S/rgb_to_ir.sh evalset --split Test --size 512  # packed/eval-Test/: real IR frames of split Test + sequences.json
+$S/rgb_to_ir.sh evaluate a2 1 ft-a2.safetensors  # results/Test/a2/seed1.jsonl: brain yolov8 eval --dump-preds
+$S/rgb_to_ir.sh decide --config decision-config.json   # decision-Test/decision.md and decision.json
 $S/rgb_to_ir.sh test                             # unit tests, no data needed
 ```
 
@@ -159,7 +166,9 @@ padding), boxes transformed with the same scale and padding and clipped (a box
 thinner than 1 px is dropped), RGB CHW f32 in [0, 1]. The detector trainer
 neither shuffles nor augments and consumes batches round-robin, so the item
 order is shuffled with the seed; `order.json` records which frame sits at each
-index.
+index and `sequences.json` (written when the items carry a sequence) its
+`dataset:sequence` - a prediction dump names images by index, and held-out images
+are scored in clusters of sequences.
 
 `rir_arms.py fit-sensor` fits, per dataset and ONLY on split-T frames (it
 refuses anything else), single-frame estimators: noise sigma (Immerkaer's
@@ -292,6 +301,107 @@ Captions: 30.0 percent neutral, 1147 name one object, 227 two, 37 three.
   written for the class; the caption does not say which.
 - Part-level captions need a grounder that was not available: object level only.
 
+## Evaluation and decision
+
+Every arm is fine-tuned (`brain yolov8 fine-tune`) from one or more seeds and
+scored on the REAL IR frames of a held-out split. `evalset` renders the real-IR
+twins of split Test (or V, for tuning) and packs them; `evaluate` runs
+`brain yolov8 eval --split all --conf 0.001 --dump-preds` for one arm and seed
+into `results/<split>/<arm>/seed<N>.jsonl`; `decide` reads the whole results
+directory. The low confidence floor matters: the default 0.25 is a detection
+operating point and truncates the precision-recall curve.
+
+**Scoring (`rir_eval.py`).** The dump has one line per image (`image` index,
+`gts`, `preds`). `rir_eval.py preds.jsonl [--nc N]` reproduces
+`eval::detection_report` in numpy: greedy class-aware matching by score within
+each image (never across images), the all-points area under the precision
+envelope, ten IoU thresholds 0.50 to 0.95, classes without ground truth left
+out of the mean. Matching depends on one image only, so a run is matched once
+and then re-scored under any image weights, which is what the bootstrap needs.
+The sample's test checks it against the real binary: a detector is trained and
+evaluated on CPU, and every number the binary prints (both mAPs, precision,
+recall, per-class AP, counts) is reproduced to the four printed decimals. The
+binary prints four decimals, so that is the resolution of the comparison; it
+sums the area in float32 where this code sums in float64, which differs by
+rounding (about 1e-7). The test is skipped, with its reason, when no binary is
+found (`BRAIN_BIN`, `brain` on `PATH`, or a built `target/release/brain`
+above the checkout).
+
+**Statistics (`rir_bootstrap.py`).** The resampling unit is the SEQUENCE: a
+resample draws as many test sequences as there are, with replacement, and
+counts every image of a drawn sequence as often as the sequence was drawn
+(2000 resamples, seeded). A frame-level bootstrap would count near-duplicate
+frames as independent evidence; a test plants a leaked copy of every frame and
+checks the interval does not shrink. One set of resamples scores EVERY run of
+EVERY arm, so arms are paired, and an arm's value on a resample is the mean of
+its seeds' mAP (the alternative, bootstrapping each seed separately, breaks the
+pairing). Seed-to-seed variation is reported apart as the sample standard
+deviation of the seeds' mAP on the full test set. A difference COUNTS only if
+its 95 percent percentile interval excludes 0, its size exceeds twice the seed
+noise of a difference of two single trainings, 2 x sqrt(sd_a^2 + sd_b^2), and
+its two-sided bootstrap p survives Holm's correction over the pre-registered
+family of three comparisons (a comparison that cannot be tested still counts
+toward the family size). With one seed the seed noise is not measured, and the
+rule is reported as not evaluable rather than passed.
+
+**Decision (`rir_decide.py`).** The config (JSON, paths relative to it):
+
+```json
+{"sequences": "packed/eval-Test/sequences.json",
+ "roles": {"A1": "a1", "A2": "a2", "B3": "b3", "C2": "c2",
+           "REAL_K": "real-k", "REAL_K_PLUS_SYNTHETIC": "real-k+c2"},
+ "resamples": 2000, "seed": 1, "nc": 3,
+ "instruction_model": true,
+ "gate_statistics": "gates-c2.json", "obedience": "obedience.json"}
+```
+
+`decision.md` (and `decision.json`) holds per-arm mAP@0.5:0.95 and mAP@0.5 with
+intervals and seed std; the three pre-registered comparisons, P1 (C2 against
+the trivial-transform arm B3), P2 (real-k plus synthetic against real-k alone)
+and P3, the gap closure g = (C2 - A1) / (A2 - A1) with its bootstrap interval;
+and the kill criteria. K1: A2 - A1 under 3 mAP points (the premise fails). K2:
+g under 0.25 and P2 not positive. K3: C2 not better than B3. K4: more than 30
+percent of C2's images fail the geometry gates (from the gate-statistics JSON
+of `rir_gates.py`). K5, instruction model only: the controllability (or, with
+no counterfactuals, the direction margin) interval includes 0 for every region
+type (from `rir_obey.py`). Verdict: "reliable transform" iff P1 favours C2 AND
+g >= 0.5 AND P2 is positive; "useful but not reliable" iff P2 is positive and
+g < 0.5; otherwise "no reliable transform", naming the triggered kill
+criteria. Kill criteria that fire next to one of the first two verdicts are
+listed beside it and do not change it. An arm without predictions is NOT
+measured: it is absent from the tables, never a 0, and every rule that needs it
+is "not evaluable"; when that leaves the verdict open the verdict is "not
+evaluable" (when the known parts already settle it, it stands). A K1 verdict
+with a gap under 3 points makes g undefined and the transform cannot be
+reliable. All runs must have been scored on the same images; others are refused.
+
+**Label-preservation gates (`rir_gates.py`).** For a synthetic IR image made
+from a labelled RGB image: (a) inside each box the edge correlation of the RGB
+luma and the synthetic IR must reach the 10th percentile of the same quantity
+over REAL pairs (`reference_distribution` on `manifest_pairs`); (b) the whole
+image must be within 2 px of the RGB by phase correlation of the edge maps;
+(c) detections of a reference detector on the synthetic image with no ground
+truth of their class at IoU 0.5 and confidence of at least 0.5 are
+hallucinations; (d) the SAM 2 mask-IoU gate is a pluggable callable
+`mask_iou(rgb, ir, box) -> float | None` that the pipeline wires (this sample
+has no segmenter in the loop; without it that gate is absent, not passed).
+`RejectionStats` counts rejections per reason and writes the JSON K4 reads.
+The edge gate is model-free and modest: it checks that edges line up, not that
+the object looks like itself.
+
+**Instruction obedience (`rir_obey.py`).** For generated IR tiles, the region
+mask on the source RGB tile and the instruction (warmer, cooler, same), it
+measures `c_gen` with `rir_regions.object_contrast`, direction accuracy
+(`polarity(c_gen, tau) == instruction`, "same" being inside the noise floor;
+tau is the 75th percentile of the null, so a perfect "same" is read as same
+only about three times in four), controllability s x (c(a) - c(b)) against a
+counterfactual generation of the same tile with the flipped instruction, the
+luminance shortcut (partial correlation of `c_gen` with the RGB luma contrast
+of the region, holding the instruction fixed) and fidelity |c_gen - c_real|,
+with sequence-clustered intervals, for oracle instructions (measured from the
+real IR) and prior instructions (`class_priors` of the caption report)
+separately.
+
 ## What is verified
 
 `rgb_to_ir.sh test` runs the spec tests, all on tiny synthetic pairs written by
@@ -326,9 +436,35 @@ txt with IR in an alpha channel, COCO json with a replicated 3-channel IR):
   in captions.yaml, the 30 percent neutral share, at most three objects, the
   majority rule, the paraphraser hook, determinism, the balance flag;
 - sheet: grid size and sampling from measured tiles only.
+- eval: Rust goldens (perfect, shifted, cross-image, ties at the threshold, class
+  handling), the ranking across images, weights equal to repeated images, the
+  image-index to sequence map, and parity with the table printed by the built
+  binary on a CPU-trained detector;
+- bootstrap: whole sequences get one weight, seeded resamples, a planted
+  improvement detected and equal arms not, about 95 percent coverage of the
+  interval on null data over 120 seeded simulations (116 covered), a planted
+  leak of one frame per sequence leaving the interval unchanged while frame-level
+  resampling narrows it, seed std apart, the 2 x seed-std rule, Holm, gap closure;
+- decide: every branch of the verdict (reliable, useful, none naming K2 and K3,
+  not evaluable, settled despite a missing arm), K1 to K5 each way, unmeasured
+  arms absent rather than 0, mismatched test sets refused, the written files;
+- gates: planted shifts, planted objects, a planted mismatching texture in one
+  box, the 10th percentile of real pairs, the pluggable mask callable, the
+  rejection statistics JSON;
+- obey: fake generators that obey, ignore the instruction or copy luminance,
+  the "same" band, oracle against prior, the fall-back to direction without
+  counterfactuals, duplicate pairs not narrowing the interval, the CLI.
+
+All of these use synthetic inputs. They show that the harness computes what it
+says; they say nothing about whether a translator works. The SAM 2 mask gate
+and the detector-in-the-loop hallucination gate are interfaces here, not wired
+runs, and the full pipeline (training the detectors and the translator on real
+data, then `evaluate` and `decide`) has not been run. The first real run
+should check the sequence map of its evaluation set and that every arm and seed
+was scored on the same `packed/eval-<split>`.
 
 ## Dependencies
 
 `python3` with `numpy`, `opencv-python` and `Pillow`; the `brain` binary for the
-fine-tune steps and for `measure`, which also needs `jeepney` for the default
+fine-tune steps, for `evaluate` and for `measure`, which also needs `jeepney` for the default
 D-Bus backend.

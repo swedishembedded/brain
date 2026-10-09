@@ -21,10 +21,18 @@
 #                                                        + pairs.yaml for `brain flux2 finetune`
 #   rgb_to_ir.sh captions [--neutral-share 0.3]          -> lora-set/captions.yaml, captions-report.json (needs `measure`)
 #   rgb_to_ir.sh sheet                                   -> lora-set/sheet.png : random tiles, captions, mask overlays
+#   rgb_to_ir.sh evalset [--split Test|V] [--size 512] [--limit N]
+#                                                        -> packed/eval-<split>/ : the REAL IR frames of that split, packed
+#                                                        for `brain yolov8 eval`, with sequences.json (image index -> sequence)
+#   rgb_to_ir.sh evaluate <arm> <seed> <weights> [--split Test|V]
+#                                                        -> results/<split>/<arm>/seed<seed>.jsonl (+ .score.json): the
+#                                                        detector scored on the eval set, predictions dumped at --conf 0.001
+#   rgb_to_ir.sh decide --config FILE [--split Test|V]   -> decision-<split>/decision.md, decision.json (see rir_decide.py)
 #   rgb_to_ir.sh test                                    unit tests of the stages (no data needed)
 #
 # `manifest` takes the flags of rir_readers.py (see its --help). SEED (default 1)
-# seeds splits, sensor fit, frame selection and packing order.
+# seeds splits, sensor fit, frame selection and packing order. BRAIN (default
+# `brain`) is the binary `evaluate` runs.
 
 set -euo pipefail
 
@@ -33,10 +41,19 @@ WORK="${RIR_WORK:-${TMPDIR:-/tmp}/rgb-to-ir}"
 SEED="${SEED:-1}"
 export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
 
-usage() { sed -n '10,26p' "$0"; exit "${1:-2}"; }
+usage() { sed -n '10,34p' "$0"; exit "${1:-2}"; }
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
 mkdir -p "$WORK/manifests"
+
+# Splits `--split NAME` (default Test) out of the arguments: sets $split and the array $rest.
+take_split() {
+  split="Test"
+  rest=()
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--split" ]; then split="${2:?--split needs V or Test}"; shift 2; else rest+=("$1"); shift; fi
+  done
+}
 
 manifests() {
   local found=("$WORK"/manifests/*.jsonl)
@@ -85,6 +102,33 @@ case "$cmd" in
   sheet)
     [ -f "$WORK/lora-set/captions.yaml" ] || { echo "no $WORK/lora-set/captions.yaml: run '$0 captions' first" >&2; exit 1; }
     exec python3 "$HERE/rir_sheet.py" "$WORK/lora-set" --out "$WORK/lora-set/sheet.png" --seed "$SEED" "$@"
+    ;;
+  evalset)
+    [ -f "$WORK/splits.json" ] || { echo "no $WORK/splits.json: run '$0 splits' first" >&2; exit 1; }
+    take_split "$@"
+    python3 "$HERE/rir_arms.py" render --splits "$WORK/splits.json" --out "$WORK/evalsets/$split" \
+      --arms a2 --split "$split" --seed "$SEED"
+    exec python3 "$HERE/rir_pack.py" --manifest "$WORK/evalsets/$split/a2/manifest.jsonl" \
+      --out "$WORK/packed/eval-$split" --seed "$SEED" ${rest[@]+"${rest[@]}"}
+    ;;
+  evaluate)
+    arm="${1:?usage: $0 evaluate <arm> <seed> <weights> [--split Test|V]}"
+    seed="${2:?usage: $0 evaluate <arm> <seed> <weights> [--split Test|V]}"
+    weights="${3:?usage: $0 evaluate <arm> <seed> <weights> [--split Test|V]}"
+    shift 3
+    take_split "$@"
+    data="$WORK/packed/eval-$split"
+    [ -f "$data/sequences.json" ] || { echo "no $data/sequences.json: run '$0 evalset --split $split' first" >&2; exit 1; }
+    out="$WORK/results/$split/$arm"
+    mkdir -p "$out"
+    "${BRAIN:-brain}" yolov8 eval --weights "$weights" --data "$data" --split all --conf 0.001 \
+      --dump-preds "$out/seed$seed.jsonl" ${rest[@]+"${rest[@]}"}
+    python3 "$HERE/rir_eval.py" "$out/seed$seed.jsonl" --json > "$out/seed$seed.score.json"
+    ;;
+  decide)
+    take_split "$@"
+    [ -d "$WORK/results/$split" ] || { echo "no $WORK/results/$split: run '$0 evaluate' for each arm and seed first" >&2; exit 1; }
+    exec python3 "$HERE/rir_decide.py" "$WORK/results/$split" --out "$WORK/decision-$split" ${rest[@]+"${rest[@]}"}
     ;;
   test)
     exec python3 -m unittest discover -s "$HERE/tests" "$@"
