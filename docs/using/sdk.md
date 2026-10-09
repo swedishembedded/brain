@@ -131,7 +131,15 @@ println!("{}", reply.text);
 
 Every loader knob - tokenizer, a LoRA adapter, context capacity, device - is
 `TextGenerationPipeline::builder`'s; a chat pipeline is the model that
-builder loaded. Tools, streaming and cancellation:
+builder loaded.
+
+A program that is not the brain CLI chooses how the hardware is driven
+(`wgpu`, `vulkan`, `cuda` or `cpu`) with `brain::select_backend("cuda")`,
+called before it builds a pipeline: it is the CLI's `--backend` flag for your own program, which should
+take the value from its own flag. Without it brain uses the backend its hardware probe prefers,
+which on a CUDA host is not CUDA. Ask `Gpu::kind()` what a run executed on;
+the `adapter:` line names the card either way. Tools, streaming and
+cancellation:
 
 ```rust
 use brain::chat::{ChatDelta, ToolChoice, ToolSchema};
@@ -472,7 +480,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
 | `study` | `ChatFineTune`, `score_chat` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
-| `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, with streamed chunks and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) |
+| `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, on the device when there is one (the host otherwise), with chunks handed out as the utterance grows (the first after 8 frames, 0.64 s of speech) and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) |
 | `full` | every surface; this is the default |
 
 ## Errors
