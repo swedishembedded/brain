@@ -17,6 +17,8 @@
 #   rgb_to_ir.sh arms [--limit N] [--arms a1,a2,b1,b2,b3,b4] [--datasets id,...]
 #                                                        -> sensor-model.json, arms/<arm>/
 #   rgb_to_ir.sh pack <arm> [--size 512] [--limit N]     -> packed/<arm>/ for `brain yolov8 fine-tune`
+#   rgb_to_ir.sh tiles [--size 512] [--limit N]          -> lora-set/ : aligned RGB / IR tiles of split T
+#                                                        + pairs.yaml for `brain flux2 finetune`
 #   rgb_to_ir.sh test                                    unit tests of the stages (no data needed)
 #
 # `manifest` takes the flags of rir_readers.py (see its --help). SEED (default 1)
@@ -29,7 +31,7 @@ WORK="${RIR_WORK:-${TMPDIR:-/tmp}/rgb-to-ir}"
 SEED="${SEED:-1}"
 export OPENCV_LOG_LEVEL="${OPENCV_LOG_LEVEL:-ERROR}"
 
-usage() { sed -n '10,24p' "$0"; exit "${1:-2}"; }
+usage() { sed -n '10,26p' "$0"; exit "${1:-2}"; }
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
 mkdir -p "$WORK/manifests"
@@ -69,6 +71,10 @@ case "$cmd" in
     [ -f "$WORK/arms/$arm/manifest.jsonl" ] || { echo "no rendered arm '$arm': run '$0 arms' first" >&2; exit 1; }
     exec python3 "$HERE/rir_pack.py" --manifest "$WORK/arms/$arm/manifest.jsonl" \
       --out "$WORK/packed/$arm" --seed "$SEED" "$@"
+    ;;
+  tiles)
+    [ -f "$WORK/splits.json" ] || { echo "no $WORK/splits.json: run '$0 splits' first" >&2; exit 1; }
+    exec python3 "$HERE/rir_tiles.py" --splits "$WORK/splits.json" --out "$WORK/lora-set" --seed "$SEED" "$@"
     ;;
   test)
     exec python3 -m unittest discover -s "$HERE/tests" "$@"

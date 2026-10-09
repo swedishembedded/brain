@@ -244,7 +244,7 @@ def render_b4(height: int, width: int, boxes, model: SensorModel, rng: np.random
 # ------------------------------------------------------------------- rendering
 
 
-def _safe(text: str) -> str:
+def safe_name(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text)
 
 
@@ -281,7 +281,7 @@ def render_arms(doc: dict, models: dict[str, SensorModel], out_dir: str, arms, s
             model = models.get(row["dataset"])
             if model is None and any(a in arms for a in ("b3", "b4")):
                 raise ValueError(f"no sensor model for dataset {row['dataset']!r}")
-            name = f"{_safe(row['dataset'])}_{_safe(row['id'])}.png"
+            name = f"{safe_name(row['dataset'])}_{safe_name(row['id'])}.png"
             for arm in arms:
                 rng = _frame_rng(seed, row["dataset"], row["id"])
                 img = {"a1": lambda: rgb, "a2": lambda: ir, "b1": lambda: render_b1(rgb), "b2": lambda: render_b2(rgb),
