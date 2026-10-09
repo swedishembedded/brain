@@ -88,6 +88,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
 
 /// Which position-dependent uniform a cached decode step needs refreshed each token.
 #[derive(Clone, Copy)]
+#[repr(usize)]
 enum PosUniform {
     RopeQ,
     RopeK,
@@ -570,14 +571,27 @@ impl TalkerGen {
         let mut pus: Vec<(DeviceBuffer, PosUniform)> = Vec::new();
         // A pos-dependent step: allocate its reusable uniform, record via step_buf,
         // return both so the caller pushes into `s` and `pus` (no captured borrows).
-        let posstep = |kind: usize, nfields: usize, bufs: &[&DeviceBuffer], threads: u32| -> (Step, DeviceBuffer) {
-            let ub = g.uniform_dynamic(nfields);
-            let st = g.step_buf(kind, &ub, bufs, threads);
-            (st, ub)
+        // A position uniform depends on the position alone, so every layer
+        // binds one buffer per kind instead of its own: a decode call then
+        // rewrites a handful of buffers, not one per layer per kind.
+        let shared: std::cell::RefCell<Vec<(usize, DeviceBuffer)>> = std::cell::RefCell::new(Vec::new());
+        let posstep = |kind: usize, nfields: usize, bufs: &[&DeviceBuffer], threads: u32, pu: PosUniform| -> (Step, Option<DeviceBuffer>) {
+            let existing = shared.borrow().iter().find(|(k, _)| *k == pu as usize).map(|(_, b)| b.clone());
+            let (ub, fresh) = match existing {
+                Some(ub) => (ub, false),
+                None => {
+                    let ub = g.uniform_dynamic(nfields);
+                    shared.borrow_mut().push((pu as usize, ub.clone()));
+                    (ub, true)
+                }
+            };
+            (g.step_buf(kind, &ub, bufs, threads), fresh.then_some(ub))
         };
-        let add_pos = |s: &mut Vec<Step>, pus: &mut Vec<(DeviceBuffer, PosUniform)>, pair: (Step, DeviceBuffer), pu: PosUniform| {
+        let add_pos = |s: &mut Vec<Step>, pus: &mut Vec<(DeviceBuffer, PosUniform)>, pair: (Step, Option<DeviceBuffer>), pu: PosUniform| {
             s.push(pair.0);
-            pus.push((pair.1, pu));
+            if let Some(ub) = pair.1 {
+                pus.push((ub, pu));
+            }
         };
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
@@ -590,19 +604,19 @@ impl TalkerGen {
             // when the device supports cooperative reductions, in place of
             // the four separate rmsnorm_fwd/ROPE_AT dispatches below.
             if g.caps().workgroup_reductions {
-                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q], nh * 64), PosUniform::QkNormAtQ);
-                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k], nkv * 64), PosUniform::QkNormAtK);
+                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q], nh * 64, PosUniform::QkNormAtQ), PosUniform::QkNormAtQ);
+                add_pos(&mut s, &mut pus, posstep(QKNORM_ROPE_AT_FUSED, 5, &[&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k], nkv * 64, PosUniform::QkNormAtK), PosUniform::QkNormAtK);
             } else {
                 s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
                 s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
-                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
-                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half), PosUniform::RopeK);
+                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half, PosUniform::RopeQ), PosUniform::RopeQ);
+                add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half, PosUniform::RopeK), PosUniform::RopeK);
             }
-            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv), PosUniform::Append);
-            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv), PosUniform::Append);
-            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap), PosUniform::Scores);
-            add_pos(&mut s, &mut pus, posstep(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh), PosUniform::Softmax);
-            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd), PosUniform::Apply);
+            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv, PosUniform::Append), PosUniform::Append);
+            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv, PosUniform::Append), PosUniform::Append);
+            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap, PosUniform::Scores), PosUniform::Scores);
+            add_pos(&mut s, &mut pus, posstep(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh, PosUniform::Softmax), PosUniform::Softmax);
+            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd, PosUniform::Apply), PosUniform::Apply);
             s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));

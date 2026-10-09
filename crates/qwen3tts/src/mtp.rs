@@ -722,7 +722,11 @@ impl MtpModel {
         let tier = self.gemm_tier();
         let w = |name: &str| self.ps.w(name);
         let mut s: Vec<Step> = Vec::new();
-        let mut us: Vec<(DeviceBuffer, PosUniform)> = Vec::new();
+        // The position uniforms depend on the position alone, so every layer
+        // binds the same six rather than carrying its own copies: a decode
+        // call rewrites six buffers, not thirty-five.
+        let ub = |len: usize| g.uniform_dynamic(len);
+        let (u_rope, u_rope_kv, u_append, u_scores, u_softmax, u_apply) = (ub(7), ub(7), ub(2), ub(7), ub(3), ub(6));
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1, self.cfg.rms_norm_eps));
@@ -731,18 +735,13 @@ impl MtpModel {
             s.push(self.mm(tier, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, 1, d, hkv));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh, self.cfg.rms_norm_eps));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv, self.cfg.rms_norm_eps));
-            let mut pos_step = |kind: usize, nfields: usize, bufs: &[&DeviceBuffer], threads: u32, pu: PosUniform| {
-                let ub = g.uniform_dynamic(nfields);
-                s.push(g.step_buf(kind, &ub, bufs, threads));
-                us.push((ub, pu));
-            };
-            pos_step(ROPE_AT, 7, &[&sc.q], nh * half, PosUniform::Rope);
-            pos_step(ROPE_AT, 7, &[&sc.k], nkv * half, PosUniform::RopeKv);
-            pos_step(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv, PosUniform::Append);
-            pos_step(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv, PosUniform::Append);
-            pos_step(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap, PosUniform::Scores);
-            pos_step(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh, PosUniform::Softmax);
-            pos_step(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd, PosUniform::Apply);
+            s.push(g.step_buf(ROPE_AT, &u_rope, &[&sc.q], nh * half));
+            s.push(g.step_buf(ROPE_AT, &u_rope_kv, &[&sc.k], nkv * half));
+            s.push(g.step_buf(KV_APPEND, &u_append, &[&sc.k, &self.kcache[l]], hkv));
+            s.push(g.step_buf(KV_APPEND, &u_append, &[&sc.v, &self.vcache[l]], hkv));
+            s.push(g.step_buf(ATTN_DECODE_SCORES, &u_scores, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap));
+            s.push(g.step_buf(DECODE_SOFTMAX, &u_softmax, &[&sc.scores, &sc.probs], nh));
+            s.push(g.step_buf(ATTN_DECODE_APPLY, &u_apply, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd));
             s.push(self.mm(tier, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, 1, hq, d));
             s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
             s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1, self.cfg.rms_norm_eps));
@@ -756,7 +755,15 @@ impl MtpModel {
         if let Some(heads) = &self.heads {
             s.push(self.mm(tier, &sc.xn_final, heads, &sc.logits, 1, d, c.vocab * (self.t - 1)));
         }
-        DecCache { steps: s, uniforms: us }
+        let uniforms = vec![
+            (u_rope, PosUniform::Rope),
+            (u_rope_kv, PosUniform::RopeKv),
+            (u_append, PosUniform::Append),
+            (u_scores, PosUniform::Scores),
+            (u_softmax, PosUniform::Softmax),
+            (u_apply, PosUniform::Apply),
+        ];
+        DecCache { steps: s, uniforms }
     }
 
     /// Position-dependent uniform contents for a decode step at `pos`.
