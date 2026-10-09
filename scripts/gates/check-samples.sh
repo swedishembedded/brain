@@ -85,6 +85,14 @@ if [ "${#script_dirs[@]}" -gt 0 ]; then
 			head -3 "$e" | grep -q 'SPDX-License-Identifier' || bad "$e: no SPDX header"
 		done
 
+		# A sample may carry unit tests of its own helpers in tests/test_*.py; they are part of its contract.
+		if compgen -G "$d/tests/test_*.py" >/dev/null; then
+			if ! out="$(python3 -m unittest discover -s "$d/tests" 2>&1)"; then
+				printf '%s\n' "$out" | tail -20
+				bad "$d: unit tests fail"
+			fi
+		fi
+
 		while read -r f; do
 			bad "$f: looks like a committed fixture - samples fetch/generate their own input (see samples/README.md), never commit one"
 		done < <(find "$d" -maxdepth 1 -type f -regextype posix-extended -regex ".*$fixture_re" 2>/dev/null)

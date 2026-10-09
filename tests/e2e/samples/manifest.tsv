@@ -62,3 +62,16 @@ samples/shell/restore/upscale/upscale.sh	skip	direct-CLI (no D-Bus); needs BRAIN
 samples/python/tts/voice-server/brain_tts_client.py	skip	internal helper (socket client) shared by voice-clone.py and voice-design.py, not an independent entry point; not run standalone here
 samples/python/tts/voice-server/voice-clone.py	skip	needs a running `brain qwen3tts serve` with BRAIN_QWEN3TTS_REF/_REF_TEXT set; not a D-Bus client, out of this harness's scope
 samples/python/tts/voice-server/voice-design.py	skip	needs a running `brain qwen3tts serve`; not a D-Bus client, out of this harness's scope
+samples/shell/imagegen/rgb-to-ir/rir_data.py	skip	internal helper module of the rgb-to-ir stages, not an entry point
+samples/shell/imagegen/rgb-to-ir/rir_manifest.py	skip	validates a user-supplied pairs manifest; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_readers.py	skip	builds a pairs manifest from a user-supplied dataset layout; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_splits.py	skip	splits a user-supplied pairs manifest; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_pack.py	skip	packs rendered arm images for brain yolov8 fine-tune; needs data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rir_arms.py	skip	fits the sensor model and renders training arms from user-supplied data, covered by the sample unit tests
+samples/shell/imagegen/rgb-to-ir/rgb_to_ir.sh	skip	driver over user-supplied datasets; its stages are covered by the sample unit tests (rgb_to_ir.sh test)
+samples/shell/imagegen/rgb-to-ir/tests/synth.py	skip	synthetic fixtures for the sample unit tests, not run directly
+samples/shell/imagegen/rgb-to-ir/tests/test_manifest.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_readers.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_splits.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_pack.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/imagegen/rgb-to-ir/tests/test_arms.py	skip	unit tests of the sample, run by make check/samples
