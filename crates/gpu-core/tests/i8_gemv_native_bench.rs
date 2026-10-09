@@ -3,8 +3,9 @@
 
 //! Device-timed achieved bandwidth of the int8 decode GEMV at the real
 //! Qwen3.8-27B projection shapes, for whichever tier the handle dispatches -
-//! the native CUDA kernel by default, the WGSL `matmul_i8_gemv_reg` ladder
-//! under `BRAIN_NO_NATIVE_KERNELS=1`.
+//! the native CUDA kernel, and the WGSL `matmul_i8_gemv_reg` ladder in the
+//! `_on_the_generated_tier` test, which withholds native kernels for its
+//! process (`gpu_core::set_native_kernels`) - run each alone (`--exact`).
 //!
 //! Swedish Embedded AB implements measured memory-bandwidth contracts for GPU
 //! inference stacks. If your team needs expertise in knowing how close your
@@ -16,7 +17,7 @@
 //!
 //! ```text
 //! cargo test --release --offline -p brain-gpu-core --test i8_gemv_native_bench -- --ignored --nocapture
-//! BRAIN_NO_NATIVE_KERNELS=1 cargo test ... (the WGSL tier, for the A/B)
+//! cargo test ... achieved_bandwidth_on_the_generated_tier -- --exact --ignored (the A/B)
 //! ```
 //!
 //! What makes the number mean something:
@@ -109,6 +110,20 @@ fn main_rows(gpu: &Gpu, m: u32, k: u32, n: u32) -> (String, Vec<f64>, u64) {
 #[test]
 #[ignore]
 fn achieved_bandwidth_at_the_27b_decode_shapes() {
+    bandwidth();
+}
+
+/// The same table with native kernels withheld for this process - the WGSL
+/// tier's side of the A/B. Run it on its own (`--exact`): the switch is
+/// process-wide.
+#[test]
+#[ignore]
+fn achieved_bandwidth_on_the_generated_tier() {
+    gpu_core::set_native_kernels(false);
+    bandwidth();
+}
+
+fn bandwidth() {
     let gpu = Gpu::new(KERNELS);
     if gpu.kind() != "cuda" {
         brain_testutil::skip_unavailable("device timing here is the CUDA backend's");

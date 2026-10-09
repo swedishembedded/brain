@@ -36,11 +36,12 @@ const MAX_ABS: usize = 3;
 const QUANT: usize = 4;
 
 /// Whether this device is offered the native kernels: a CUDA device, with
-/// `BRAIN_NO_NATIVE_KERNELS` (the A/B switch that pins the WGSL tier) unset.
+/// native kernels not withheld (`gpu_core::set_native_kernels`, the A/B
+/// switch that pins the WGSL tier).
 /// Under it these gates skip, and the "offered only where it can run" test
 /// asserts the withholding.
 fn is_cuda(gpu: &Gpu) -> bool {
-    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && !std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
+    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
 fn values(n: usize, seed: u64, spread: f32) -> Vec<f32> {

@@ -589,6 +589,11 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 }
             }
             i += 2;
+        } else if argv[i] == "--no-native-kernels" {
+            // Every dispatch stays on the generated tier: the A/B switch the
+            // native kernels are measured with. Set before any device is built.
+            gpu_core::set_native_kernels(false);
+            i += 1;
         } else if argv[i] == "--profile-replays" {
             // Passes that support it print a min-of-N-replays kernel table.
             match argv.get(i + 1).and_then(|v| v.parse::<u32>().ok()) {

@@ -91,11 +91,12 @@ fn the_fused_decode_tape_is_bit_identical_with_128_wide_linear_attention_heads()
     bit_identical(wide_gdn());
 }
 
-/// Whether the native kernels are withheld process-wide (`BRAIN_NO_NATIVE_KERNELS`):
-/// a decode step is then the unfused chain whatever the toggle says, so the
-/// launch-count claims below have nothing to compare.
+/// Whether the native kernels are withheld process-wide
+/// (`gpu_core::set_native_kernels`): a decode step is then the unfused chain
+/// whatever the toggle says, so the launch-count claims below have nothing to
+/// compare.
 fn withheld() -> bool {
-    std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
+    !gpu_core::native_kernels_enabled()
 }
 
 /// A fresh model's first two decode steps are issued and recorded launch by
@@ -116,7 +117,7 @@ fn launches(gpu: &Gpu, cfg: &Qwen35Config, fusion: bool) -> u64 {
 fn the_fused_decode_tape_launches_fewer_kernels() {
     let _s = serial();
     if withheld() {
-        brain_testutil::skip_unavailable("BRAIN_NO_NATIVE_KERNELS withholds the fused kernels");
+        brain_testutil::skip_unavailable("native kernels are withheld in this process");
         return;
     }
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
@@ -139,7 +140,7 @@ fn the_fused_decode_tape_launches_fewer_kernels() {
 fn the_gdn_step_is_one_launch_with_128_wide_heads() {
     let _s = serial();
     if withheld() {
-        brain_testutil::skip_unavailable("BRAIN_NO_NATIVE_KERNELS withholds the fused kernels");
+        brain_testutil::skip_unavailable("native kernels are withheld in this process");
         return;
     }
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {

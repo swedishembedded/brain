@@ -104,6 +104,19 @@ fn min_median(mut v: Vec<f64>) -> (f64, f64) {
 #[test]
 #[ignore]
 fn int8_gemm_throughput_against_the_measured_packed_dot_peak() {
+    throughput();
+}
+
+/// The same table with native kernels withheld for this process (the
+/// generated tier's side of the A/B); run it on its own (`--exact`).
+#[test]
+#[ignore]
+fn int8_gemm_throughput_on_the_generated_tier() {
+    gpu_core::set_native_kernels(false);
+    throughput();
+}
+
+fn throughput() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let Some(cc) = gpu.caps().arch.compute_capability.filter(|_| gpu.kind() == "cuda") else {
         brain_testutil::skip_unavailable("needs a CUDA device");

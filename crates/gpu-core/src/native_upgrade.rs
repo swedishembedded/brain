@@ -34,8 +34,10 @@
 //! A dispatch whose shape is outside what the native kernel serves keeps the
 //! WGSL tier: the redirect is per dispatch, not per handle.
 //!
-//! `BRAIN_NO_NATIVE_KERNELS=1` pins every dispatch to the WGSL tier - the A/B
-//! switch the native kernel's own measurements are taken with.
+//! [`set_native_kernels`]`(false)` - which an application calls before it
+//! builds any handle, the CLI from its `--no-native-kernels` flag - pins every
+//! dispatch to the WGSL tier: the A/B switch the native kernels' own
+//! measurements are taken with.
 
 use backend_api::select::{Dtype, Op};
 use backend_api::{BindKind, Backend, CudaLaunch, NativeId, NativeSpec};
@@ -405,8 +407,8 @@ fn bn_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
 ///
 /// The conditions are [`resolve`]'s, minus the first (there is no WGSL upgrade
 /// to be active): a queried compute capability at or above the kernel's own
-/// floor, a backend that accepts the source, and `BRAIN_NO_NATIVE_KERNELS`
-/// unset. A shape outside [`Fused::serves`] is the caller's to route to its
+/// floor, a backend that accepts the source, and native kernels not withheld
+/// ([`set_native_kernels`]). A shape outside [`Fused::serves`] is the caller's to route to its
 /// WGSL chain, exactly like a redirected dispatch the native kernel declines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fused {
@@ -775,11 +777,29 @@ pub(crate) fn resolve_fused(backend: &dyn Backend, which: Fused) -> Option<Nativ
     })
 }
 
-/// `BRAIN_NO_NATIVE_KERNELS=1` disables the tier. Read once: the policy must
-/// stay fixed for a given process.
+/// Whether native kernels are withheld - see [`set_native_kernels`].
+static WITHHELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Offer native kernels (`true`, the default) or withhold them process-wide
+/// (`false`), so every dispatch stays on the generated WGSL tier. A handle
+/// settles which native kernels it uses when it is built and when it first
+/// asks for a fused one, so this is set by the APPLICATION before it builds
+/// any `Gpu` - the CLI from its `--no-native-kernels` flag, a benchmark that
+/// measures the generated tier as its first statement. Never read from the
+/// environment.
+pub fn set_native_kernels(enabled: bool) {
+    WITHHELD.store(!enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether native kernels are offered (not withheld by
+/// [`set_native_kernels`]). A test that asserts a native kernel ran asks this
+/// rather than assuming it.
+pub fn native_kernels_enabled() -> bool {
+    !disabled()
+}
+
 fn disabled() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("BRAIN_NO_NATIVE_KERNELS").map(|v| v != "0").unwrap_or(false))
+    WITHHELD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// One resolved redirect for a handle.

@@ -60,7 +60,7 @@ fn gamma(n: usize) -> f64 {
 }
 
 fn is_cuda(gpu: &Gpu) -> bool {
-    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && !std::env::var("BRAIN_NO_NATIVE_KERNELS").is_ok_and(|v| v != "0")
+    gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -71,7 +71,6 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | `BRAIN_VK_SERIAL` | forces one-dispatch-at-a-time submission on the native-Vulkan backend; works around a hang on some Intel integrated-GPU drivers | auto-detected by vendor |
 | `BRAIN_VK_NO_SERIAL` | forces the opposite of `BRAIN_VK_SERIAL` even on a vendor that's normally auto-serialized | unset |
 | `BRAIN_NO_PROVIDER` | comma-separated compute-provider names to disable, for bisecting a suspected provider-specific bug (mirrors `BRAIN_NO_KERNEL_UPGRADE` one level down) | none disabled |
-| `BRAIN_NO_NATIVE_KERNELS` | any value but `0` keeps every dispatch on the generated WGSL tier instead of a hand-written native CUDA kernel (int8 GEMV and GEMM, dense conv, BatchNorm and the other rows of `gpu_core::native_upgrade`); this is the A/B switch for measuring them or bisecting a driver problem, and each native kernel's own gate states whether its result is bit-identical or within a stated fp32 bound | native kernels on where the backend can compile them |
 | `BRAIN_STREAM_SHARD` | `0`/`false`/`off` opts a streaming checkpoint out of automatic multi-GPU placement, forcing a single stage; a split plan is always bit-identical to the unsplit one, so this is for bisecting a driver problem or freeing a card for another process, not correctness | on (splits when it helps) |
 | `BRAIN_VK_VALIDATE` | enables Vulkan validation layers on the native-Vulkan backend | off |
 | `BRAIN_GPU_GL` | forces the OpenGL backend instead of Vulkan (wgpu) | off |

@@ -254,7 +254,7 @@ mod native_upgrade;
 
 /// Native kernels a model asks for by name - see [`native_upgrade::Fused`].
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_upgrade::Fused;
+pub use native_upgrade::{native_kernels_enabled, set_native_kernels, Fused};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -1879,8 +1879,9 @@ mod native_facade {
         }
 
         /// Whether this device is offered the native fused kernel `which`: a
-        /// CUDA device whose capability meets the kernel's floor, with
-        /// `BRAIN_NO_NATIVE_KERNELS` unset. A model that gets `false` builds its
+        /// CUDA device whose capability meets the kernel's floor, with native
+        /// kernels not withheld ([`crate::set_native_kernels`]). A model that
+        /// gets `false` builds its
         /// own chain of WGSL dispatches instead.
         pub fn has_fused(&self, which: crate::native_upgrade::Fused) -> bool {
             self.fused_id(which).is_some()

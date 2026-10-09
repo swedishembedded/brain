@@ -131,7 +131,8 @@ small ones in a decode step - the residual add + norm + int8 quantiser, the
 SwiGLU and attention-gate epilogues, a Gated DeltaNet layer's step, a gated-
 attention layer's prep, and a layer's projections of one activation. All of
 them return bit-identical results to the chains they replace.
-`BRAIN_NO_NATIVE_KERNELS=1` keeps every dispatch on the generated tier.
+`--no-native-kernels` (a global flag, like `--device`) keeps every dispatch on
+the generated tier - the A/B switch the native kernels are measured with.
 
 A repeated submission is also recorded into a CUDA graph and replayed, and a
 decode step is replayed whole, from recycled scratch buffers, in a few chunks so

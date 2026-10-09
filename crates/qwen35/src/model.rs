@@ -1552,7 +1552,8 @@ impl Qwen35 {
 
     /// **Turn the decode step's native fused kernels off (or back on).** On by
     /// default, and on only matters where the device is offered them (a CUDA
-    /// device; `BRAIN_NO_NATIVE_KERNELS=1` withholds them process-wide). Off,
+    /// device; `gpu_core::set_native_kernels(false)` withholds them
+    /// process-wide). Off,
     /// a decode step is the chain of WGSL dispatches the fused kernels replace,
     /// which is what their output is gated bit-for-bit against - so this is the
     /// A/B switch for that gate and for measuring the fusion, not a tuning knob.
