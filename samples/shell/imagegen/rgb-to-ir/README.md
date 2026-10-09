@@ -524,7 +524,8 @@ reliable. All runs must have been scored on the same images; others are refused.
 from a labelled RGB image: (a) inside each box the edge correlation of the RGB
 luma and the synthetic IR must reach the 10th percentile of the same quantity
 over REAL pairs (`reference_distribution` on `manifest_pairs`); (b) the whole
-image must be within 2 px of the RGB by phase correlation of the edge maps;
+image must be no more misaligned with the RGB than real pairs are, by phase
+correlation of the edge maps (a limit calibrated on split T, or a fixed one);
 (c) detections of a reference detector on the synthetic image with no ground
 truth of their class at IoU 0.5 and confidence of at least 0.5 are
 hallucinations; (d) the SAM 2 mask-IoU gate is a pluggable callable
