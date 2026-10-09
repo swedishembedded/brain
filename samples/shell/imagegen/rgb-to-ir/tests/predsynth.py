@@ -18,6 +18,8 @@ what a frame-level bootstrap gets wrong and a sequence-level one gets right.
 """
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
 import rir_eval as E
@@ -63,3 +65,14 @@ def detect(ds: Dataset, skill: float, seed: int, false_positives: int = 2) -> li
 def arm(ds: Dataset, skill: float, seeds=(1, 2, 3), salt: int = 0) -> list[E.Prepared]:
     """One prepared run per training seed."""
     return [E.prepare(detect(ds, skill, 1000 * salt + s)) for s in seeds]
+
+
+def write_dump(path: str, images: list[E.Image]) -> None:
+    """The jsonl `brain yolov8 eval --dump-preds` writes."""
+    with open(path, "w") as fh:
+        for im in images:
+            fh.write(json.dumps({
+                "image": im.index,
+                "gts": [{"class": int(c), "xyxy": [float(v) for v in b]} for c, b in zip(im.gt_class, im.gt_box)],
+                "preds": [{"class": int(c), "score": float(s), "xyxy": [float(v) for v in b]}
+                          for c, s, b in zip(im.pred_class, im.pred_score, im.pred_box)]}) + "\n")
