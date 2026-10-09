@@ -793,6 +793,10 @@ impl Yolo {
         let ps = &self.ps;
         // New logits: whatever gradient the head buffers hold is for the old ones.
         self.head_grads_seeded.set(false);
+        // The whole network forward repeats submission for submission from one
+        // step to the next (no host read inside it), so it is one pass: a
+        // backend that records passes issues it as one and replays it.
+        let _pass = self.gpu.pass_scope();
 
         // ---- backbone ----
         self.b_conv0.forward(ctx, ps, &self.img);
@@ -899,6 +903,8 @@ impl Yolo {
     fn backward_net(&self) {
         let ctx = self.ctx();
         let ps = &self.ps;
+        // One pass, like the forward (see `forward_net_with`).
+        let _pass = self.gpu.pass_scope();
         let n3 = self.n_n3.out();
         let n4 = self.n_n4.out();
 
