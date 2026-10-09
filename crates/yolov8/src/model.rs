@@ -169,6 +169,14 @@ pub struct Yolo {
     /// Per-class gradient gate, `nc` long, `1.0` = learn (see
     /// [`Yolo::train_only_classes`]). `None` = every class learns.
     cls_grad_mask: RefCell<Option<Vec<f32>>>,
+    /// Whether the head grad buffers (`d_logit`) already hold the detection
+    /// loss's gradient for the logits the last forward cached. A Detection
+    /// [`Yolo::forward`] computes that gradient anyway (`detection_eval` is the
+    /// loss and its gradient in one pass), so [`Yolo::backward`] reuses it
+    /// instead of reading the logits back and running the whole loss a second
+    /// time. Cleared by anything that would change it: another forward, new
+    /// targets, a frozen or released assignment, a mode or class-gate change.
+    head_grads_seeded: Cell<bool>,
 }
 
 impl Yolo {
@@ -397,11 +405,13 @@ impl Yolo {
             frozen: RefCell::new(None),
             det_loss: Cell::new(0.0),
             cls_grad_mask: RefCell::new(None),
+            head_grads_seeded: Cell::new(false),
         }
     }
 
     pub fn set_mode(&self, mode: LossMode) {
         self.mode.set(mode);
+        self.head_grads_seeded.set(false);
     }
 
     /// Is `name` a backbone/neck (shared feature-extractor) parameter?
@@ -518,6 +528,7 @@ impl Yolo {
             }
         }
         *self.cls_grad_mask.borrow_mut() = Some(mask);
+        self.head_grads_seeded.set(false);
     }
 
     /// Re-assert eval-mode BN + no running-stat updates on whatever is frozen.
@@ -614,6 +625,7 @@ impl Yolo {
     pub fn set_targets(&self, gts: &[GtBox]) {
         *self.gts.borrow_mut() = gts.to_vec();
         *self.frozen.borrow_mut() = None;
+        self.head_grads_seeded.set(false);
     }
 
     /// P4: compute the Task-Aligned assignment ONCE from the current logits and
@@ -629,11 +641,13 @@ impl Yolo {
         let inp = self.loss_input(&cls, &boxl, &anchors);
         let asg = crate::loss::compute_assignment(&inp, &self.gts.borrow(), self.cfg.input as f32);
         *self.frozen.borrow_mut() = Some(asg);
+        self.head_grads_seeded.set(false);
     }
 
     /// Drop a frozen assignment (return to per-forward recomputation).
     pub fn unfreeze_assignment(&self) {
         *self.frozen.borrow_mut() = None;
+        self.head_grads_seeded.set(false);
     }
 
     /// Assemble the loss-module input view over the (already-read) flat logits.
@@ -759,6 +773,8 @@ impl Yolo {
     /// untapped paths share one definition).
     fn forward_net_with(&self, ctx: &Ctx) {
         let ps = &self.ps;
+        // New logits: whatever gradient the head buffers hold is for the old ones.
+        self.head_grads_seeded.set(false);
 
         // ---- backbone ----
         self.b_conv0.forward(ctx, ps, &self.img);
@@ -822,7 +838,11 @@ impl Yolo {
         gpu_core::profile::stage_time("yolov8 forward_net", t);
         match self.mode.get() {
             LossMode::Proxy => self.proxy_loss(),
-            LossMode::Detection => self.detection_eval(),
+            LossMode::Detection => {
+                let loss = self.detection_eval();
+                self.head_grads_seeded.set(true);
+                loss
+            }
         }
     }
 
@@ -838,11 +858,15 @@ impl Yolo {
             }
             LossMode::Detection => {
                 // The detection loss writes dL/draw into self.d_logit[i] (cls
-                // then reg per scale). `detection_eval` runs the full loss
-                // forward+grad and scatters those grads into the head buffers, so
-                // they are consistent with the CURRENT weights even when called
-                // standalone (it reuses the frozen assignment when present).
-                self.detection_eval();
+                // then reg per scale). A Detection forward has just done exactly
+                // that for the cached logits, and nothing since has changed them
+                // (see `head_grads_seeded`), so only a backward without its
+                // forward runs the loss again - over the same cached logits,
+                // reusing the frozen assignment when present.
+                if !self.head_grads_seeded.get() {
+                    self.detection_eval();
+                    self.head_grads_seeded.set(true);
+                }
             }
         }
     }

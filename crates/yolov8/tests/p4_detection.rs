@@ -163,3 +163,34 @@ fn detection_empty_targets_finite() {
         assert!(g.iter().all(|v| v.is_finite()), "non-finite grad in {name} (empty targets)");
     }
 }
+
+/// A Detection forward computes the loss AND its gradient for the logits it
+/// cached; the backward that follows must reuse that seed rather than read the
+/// logits back and run the whole loss again - and must produce bit-identical
+/// gradients to the recomputing path, which a backward without its own forward
+/// (here: after a mode reset) still takes.
+#[test]
+fn backward_reuses_the_forwards_loss_gradient() {
+    let (model, _cfg) = build_model(11);
+    let grads = |m: &Yolo| -> Vec<Vec<u32>> { m.param_names().iter().map(|n| m.read_grad(n).iter().map(|v| v.to_bits()).collect()).collect() };
+    let readbacks = |m: &Yolo| m.gpu.stats().expect("the CPU backend counts readbacks").readbacks;
+
+    model.zero_grads();
+    let loss_a = model.forward();
+    let r0 = readbacks(&model);
+    model.backward();
+    let reused = readbacks(&model) - r0;
+    let grads_a = grads(&model);
+
+    model.zero_grads();
+    let loss_b = model.forward();
+    model.set_mode(LossMode::Detection); // drops the seed: the backward recomputes it
+    let r1 = readbacks(&model);
+    model.backward();
+    let recomputed = readbacks(&model) - r1;
+    let grads_b = grads(&model);
+
+    assert_eq!(loss_a.to_bits(), loss_b.to_bits(), "the same forward twice");
+    assert!(grads_a == grads_b, "reusing the forward's loss gradient changed the gradients");
+    assert!(reused < recomputed, "the backward still read the logits back: {reused} readbacks vs {recomputed} recomputing");
+}
