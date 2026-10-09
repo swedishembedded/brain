@@ -7,6 +7,7 @@
 //! novel-view synthesis is conventionally reported in next to PSNR and SSIM.
 //! Lower is closer; identical images are exactly 0.
 //!
+//! * [`caps`] - the metric as a `brain/lpips` capability (`distance`);
 //! * [`config`] - the fixed architecture, read off the reference sources;
 //! * [`import`] - torchvision's `alexnet-owt-7be5be79.pth` and the v0.1
 //!   heads, validated by shape;
@@ -19,6 +20,7 @@
 //! needs expertise in perceptual metrics or GPU inference, you can procure
 //! our services by sending an email to info@swedishembedded.com.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;

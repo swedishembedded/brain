@@ -196,6 +196,17 @@ Without them the example says LPIPS was not scored and reports the other two.
 In your own code, `recon::eval::Viewer::with_lpips(lpips::Lpips::from_store(&gpu)?)`
 adds the same column to every score.
 
+The metric is also a standalone capability. `brain lpips distance --in a=<image>
+--in b=<image> --json` scores two same-sized RGB images (at least 31 px on each
+side) and prints the scalar plus each AlexNet tap's share of it:
+
+```json
+{"distance":0.7218807823956013,"layers":[0.018,0.287,0.160,0.119,0.138]}
+```
+
+Identical images give exactly 0. The weights are found in the models directory
+by content, as above; `brain caps brain/lpips` lists the action.
+
 ## Density control: when the fit may ADD gaussians
 
 Without it, a fit has exactly one way to cover a region it cannot represent:

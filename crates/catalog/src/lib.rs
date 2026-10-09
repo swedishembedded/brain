@@ -519,6 +519,17 @@ pub fn models() -> Vec<ModelEntry> {
             spec: None,
             resident: None,
         },
+        // Two weights roles (`trunk`, `heads`), both resolved from the model
+        // store by `lpips::spec::LpipsSpec`; the provider reads them lazily.
+        ModelEntry {
+            manifest: lpips::caps::manifest,
+            provider: |assembly: &Assembly| {
+                let (trunk, heads) = (assembly.role_path("trunk")?, assembly.role_path("heads")?);
+                Ok(Arc::new(lpips::caps::LpipsProvider::new(trunk, heads)) as Arc<dyn Provider>)
+            },
+            spec: Some(("lpips", &lpips::spec::LpipsSpec)),
+            resident: None,
+        },
         ModelEntry {
             manifest: zipdepth::caps::manifest,
             provider: always!(zipdepth::caps::DepthProvider::new()),

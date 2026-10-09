@@ -578,6 +578,9 @@ pub const ARCHS: &[Arch] = &[
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
     arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
+    // No `weights_env`: lpips resolves its `trunk` and `heads` roles through
+    // `brain_modelstore::resolve` (`crates/lpips/src/spec.rs`).
+    arch!("lpips", "LPIPS (AlexNet) perceptual image distance", Vision, Brain, "brain-lpips"),
     // No GGUF/llama.cpp conversion exists upstream for Florence-2 (an open,
     // unresolved llama.cpp issue) - `gguf` is left unset, so `id` itself
     // ("florence2", the checkpoint's own real `config.json` model_type)

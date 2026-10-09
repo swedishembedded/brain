@@ -24,10 +24,10 @@ brain-paramstore.workspace = true
 # `spec.rs` - this metric's rules for the model-store resolver, and the
 # store scan and resolve that find its two files.
 brain-modelstore.workspace = true
-brain-capability.workspace = true # ArchSpec::validate's Assembly
+brain-capability.workspace = true # ArchSpec::validate's Assembly, and `caps`
+serde_json.workspace = true # `caps`' JSON outputs
 
 [dev-dependencies]
 brain-testutil.workspace = true
 # `data::rng::Lcg` - the one deterministic test PRNG.
 brain-data.workspace = true
-serde_json.workspace = true
