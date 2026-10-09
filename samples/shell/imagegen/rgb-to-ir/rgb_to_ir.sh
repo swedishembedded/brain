@@ -15,7 +15,8 @@
 # The settings are these flags and nothing else: the environment configures
 # nothing. --seed (default 1) seeds splits, sensor fit, frame selection and
 # packing order; --brain (default `brain` on PATH) is the binary the stages
-# that run brain use; --device names the card for them (default: the binary's).
+# that run brain use (evaluate, generate); --device names the card for them
+# (default: the binary's).
 #
 #   rgb_to_ir.sh manifest --dataset ID --rgb-glob G ...  -> DIR/manifests/ID.jsonl
 #   rgb_to_ir.sh validate [--check-files]                check every manifest against the contract
@@ -27,6 +28,14 @@
 #                                                        + pairs.yaml for `brain flux2 finetune`
 #   rgb_to_ir.sh captions [--neutral-share 0.3]          -> lora-set/captions.yaml, captions-report.json (needs `measure`)
 #   rgb_to_ir.sh sheet                                   -> lora-set/sheet.png : random tiles, captions, mask overlays
+#   rgb_to_ir.sh generate RUN --config FILE [--modes neutral,prior,vae-roundtrip] [--split S] [--shard i/n] [--limit N]
+#                                                        -> generated/RUN/<mode>/<frame>.ppm and .json: synthetic IR per frame
+#                                                        (resumable; FILE names the components, adapter, strength, seed; see rir_synth.py)
+#   rgb_to_ir.sh ingest ARM RUN/MODE (--sensor-model FILE | --no-sensor) [--split S]
+#                                                        -> arms/ARM/ : the outputs as an arm (luma PNGs, manifest, boxes through the crop)
+#   rgb_to_ir.sh gate ARM [--keep-rejected] [--sam2 --dbus-address A [--brain-py P]]
+#                                                        -> arms/ARM/rejects.jsonl, gate-stats.json; rejected frames leave the
+#                                                        manifest that `pack` reads
 #   rgb_to_ir.sh evalset [--split Test|V] [--size 512] [--limit N]
 #                                                        -> packed/eval-<split>/ : the REAL IR frames of that split, packed
 #                                                        for `brain yolov8 eval`, with sequences.json (image index -> sequence)
@@ -114,6 +123,27 @@ case "$cmd" in
     [ -f "$WORK/arms/$arm/manifest.jsonl" ] || { echo "no rendered arm '$arm': run '$0 arms' first" >&2; exit 1; }
     exec python3 "$HERE/rir_pack.py" --manifest "$WORK/arms/$arm/manifest.jsonl" \
       --out "$WORK/packed/$arm" --seed "$SEED" "$@"
+    ;;
+  generate)
+    run="${1:?usage: $0 generate RUN --config FILE [--modes M,...] [--split S] [--shard i/n] [--limit N]}"; shift
+    [ -f "$WORK/splits.json" ] || { echo "no $WORK/splits.json: run '$0 splits' first" >&2; exit 1; }
+    report=()
+    [ ! -f "$WORK/lora-set/captions-report.json" ] || report=(--captions-report "$WORK/lora-set/captions-report.json")
+    exec python3 "$HERE/rir_synth.py" generate --splits "$WORK/splits.json" --brain "$BRAIN" --out "$WORK/generated/$run" \
+      --seed "$SEED" ${brain_global[@]+"${brain_global[@]}"} ${report[@]+"${report[@]}"} "$@"
+    ;;
+  ingest)
+    arm="${1:?usage: $0 ingest ARM RUN/MODE (--sensor-model FILE | --no-sensor) [--split S]}"
+    src="${2:?usage: $0 ingest ARM RUN/MODE (--sensor-model FILE | --no-sensor) [--split S]}"
+    shift 2
+    [ -d "$WORK/generated/$src" ] || { echo "no $WORK/generated/$src: run '$0 generate' first" >&2; exit 1; }
+    exec python3 "$HERE/rir_synth.py" ingest --splits "$WORK/splits.json" --generated "$WORK/generated/$src" \
+      --arm "$arm" --out "$WORK/arms" --seed "$SEED" "$@"
+    ;;
+  gate)
+    arm="${1:?usage: $0 gate ARM [--keep-rejected] [--sam2 --dbus-address A [--brain-py P]]}"; shift
+    [ -f "$WORK/arms/$arm/manifest.jsonl" ] || { echo "no arm '$arm' in $WORK/arms: run '$0 ingest' first" >&2; exit 1; }
+    exec python3 "$HERE/rir_synth.py" gate --splits "$WORK/splits.json" --arm "$arm" --out "$WORK/arms" --seed "$SEED" "$@"
     ;;
   tiles)
     [ -f "$WORK/splits.json" ] || { echo "no $WORK/splits.json: run '$0 splits' first" >&2; exit 1; }

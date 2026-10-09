@@ -23,6 +23,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import synth  # noqa: E402,F401  (sets the OpenCV log level before cv2 loads)
 import cv2  # noqa: E402
+import test_gates as TG  # noqa: E402
+import test_synth as TS  # noqa: E402
 
 DRIVER = os.path.join(os.path.dirname(__file__), "..", "rgb_to_ir.sh")
 
@@ -92,6 +94,71 @@ class Driver(unittest.TestCase):
             call = json.loads(fh.readline())
         self.assertEqual(call[:4], ["--device", "gpu1", "yolov8", "eval"])
         self.assertTrue(os.path.isfile(os.path.join(self.work, "results", "Test", "a2", "seed1.score.json")))
+
+
+class SyntheticArmChain(unittest.TestCase):
+    """generate -> ingest -> gate -> pack, each a driver stage, over a fake brain."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = os.path.join(self.tmp.name, "work")
+        os.makedirs(self.work)
+        frames = []
+        for k in range(8):
+            gray = TG.blocks(100 + k)
+            for kind, img in (("rgb", TG.to_rgb(gray)), ("ir", TG.to_ir(gray, noise=6.0, seed=k))):
+                cv2.imwrite(os.path.join(self.work, f"t{k}_{kind}.png"), img)
+        for k in range(8):
+            frames.append(self.row(f"t{k}", "T", f"t{k}_rgb.png", f"t{k}_ir.png"))
+        for k in range(2):
+            cv2.imwrite(os.path.join(self.work, f"s{k}_rgb.png"), TG.to_rgb(TG.blocks(7 + k)))
+            cv2.imwrite(os.path.join(self.work, f"s{k}_ir.png"), TG.to_ir(TG.blocks(7 + k)))
+            frames.append(self.row(f"s{k}", "S", f"s{k}_rgb.png", f"s{k}_ir.png"))
+        with open(os.path.join(self.work, "splits.json"), "w") as fh:
+            json.dump({"frames": frames}, fh)
+        self.log, self.plan = os.path.join(self.tmp.name, "log"), os.path.join(self.tmp.name, "plan.json")
+        with open(self.plan, "w") as fh:
+            json.dump([], fh)
+        self.brain = os.path.join(self.tmp.name, "brain")
+        with open(self.brain, "w") as fh:
+            fh.write(TS.FAKE_BRAIN % {"log": self.log, "plan": self.plan})
+        os.chmod(self.brain, os.stat(self.brain).st_mode | stat.S_IXUSR)
+        with open(os.path.join(self.work, "synth.json"), "w") as fh:
+            json.dump({"dit": "d", "vae": "v", "text_encoder": "t", "tokenizer": "k", "strength": 1.0, "seed": 4}, fh)
+
+    def row(self, fid, split, rgb, ir):
+        boxes = [{"class": "person", "x1": 30.0, "y1": 30.0, "x2": 110.0, "y2": 120.0}]
+        return {"id": fid, "dataset": "d", "rgb": os.path.join(self.work, rgb), "ir": os.path.join(self.work, ir), "boxes": boxes,
+                "sequence_id": fid, "split": split, "usable": True, "day_night": "day", "width": TG.W, "height": TG.H}
+
+    def drive(self, *args):
+        done = run_driver("--work", self.work, "--brain", self.brain, "--device", "gpu1", *args)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_the_four_stages_chain_into_a_packed_arm(self):
+        cfg = os.path.join(self.work, "synth.json")
+        self.drive("generate", "run1", "--config", cfg, "--modes", "neutral,vae-roundtrip")
+        with open(self.log) as fh:
+            calls = [json.loads(line) for line in fh]
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0][:5], ["--device", "gpu1", "flux2", "generate", "--variant"])
+        self.assertEqual(calls[0][calls[0].index("--seed") + 1], "4")
+        self.drive("ingest", "c2", "run1/neutral", "--no-sensor")
+        self.drive("ingest", "v0", "run1/vae-roundtrip", "--no-sensor")
+        self.drive("gate", "c2", "--keep-rejected")
+        self.drive("pack", "c2", "--size", "64")
+        self.assertTrue(os.path.isfile(os.path.join(self.work, "packed", "c2", "images.f32")))
+        self.assertTrue(os.path.isfile(os.path.join(self.work, "arms", "c2", "gate-stats.json")))
+        self.assertTrue(os.path.isfile(os.path.join(self.work, "arms", "v0", "ingest-stats.json")))
+
+    def test_a_stage_that_needs_an_earlier_one_says_which(self):
+        done = run_driver("--work", self.work, "ingest", "c2", "run1/neutral", "--no-sensor")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("generate", done.stderr)
+        done = run_driver("--work", self.work, "gate", "c2")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("ingest", done.stderr)
 
 
 if __name__ == "__main__":

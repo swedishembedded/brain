@@ -17,12 +17,15 @@ scored on the SAME packed held-out set; a run on another image set is refused.
 The decision config (JSON, paths relative to it):
 
     sequences         sequences.json of the packed evaluation set (rir_pack.py)
-    roles             {role: arm directory name}; roles A1 A2 B3 C2 REAL_K REAL_K_PLUS_SYNTHETIC
+    roles             {role: arm directory name}; roles A1 A2 B3 C2 REAL_K REAL_K_PLUS_SYNTHETIC. The names are
+                      those the arm was ingested, gated, packed and evaluated under (rir_synth.py), e.g. "c2";
+                      arms without a role (C1, C3, V0) are reported by directory name beside the others
     resamples, seed   bootstrap size (2000) and seed (1)
     alpha             0.05
     nc                number of classes of the detector head (default: from the data)
     instruction_model true when the translator is the instruction-conditioned one (enables K5)
-    gate_statistics   JSON of the geometry-gate rejections of C2 (rir_gates.py), for K4
+    gate_statistics   JSON of the geometry-gate rejections of C2 (rir_synth.py gate writes it as
+                      arms/<arm>/gate-stats.json; rir_gates.RejectionStats), for K4
     obedience         JSON report of rir_obey.py, for K5
     obedience_source  which instructions K5 reads: "oracle" (default, measured from the real IR) or "prior"
 

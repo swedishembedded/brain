@@ -18,7 +18,9 @@ label-preservation gates, the instruction-obedience measurement) are
 implemented and tested on synthetic inputs. The translator itself is trained
 with `brain flux2 finetune` and the detectors with `brain yolov8 fine-tune`;
 neither is run by this sample, and no real result is claimed here: the numbers
-that decide the study come from those runs, scored by the stages below.
+that decide the study come from those runs, scored by the stages below. The
+synthetic-IR arms (a driver that runs the translator over the frames of split S,
+ingests its outputs as an arm and gates them) are in `rir_synth.py`.
 
 ## Study design
 
@@ -40,6 +42,15 @@ near-duplicates, so a frame-level split would train on what it is scored on.
 | B2 | inverted grayscale |
 | B3 | grayscale, CLAHE, then a sensor model fitted on T: extra blur, contrast match, noise, stripe noise |
 | B4 | semantic renderer: class-prior intensities painted from the GT boxes on a cold-sky gradient, then the same sensor model |
+
+The synthetic arms are made from the same frames of S by `rir_synth.py`:
+
+| arm | training image for frames of S |
+|---|---|
+| C1 | zero-shot edit: the base model (no adapter) told the neutral instruction |
+| C2 | the translator (adapter), neutral instruction |
+| C3 | the translator, instructions built from class priors (no IR measured) |
+| V0 | the REAL IR passed through the autoencoder alone: a control for whether a detector learns the autoencoder's artefacts |
 
 IR images are 8-bit, single channel, white-hot; the packer replicates a single
 channel to three. Classes are chosen by name (`--classes`, default
@@ -63,6 +74,10 @@ $R measure                          # lora-set/regions/*.json (needs a resident 
 $R captions                         # lora-set/captions.yaml + captions-report.json
 $R sheet                            # lora-set/sheet.png, 12 random tiles to look at
 brain flux2 finetune "$WORK/lora-set" --out rgb2ir.brain --size 512
+$R generate c2 --config synth.json --modes neutral,prior   # generated/c2/<mode>/: synthetic IR for the frames of S
+$R ingest c2 c2/neutral --sensor-model "$WORK/sensor-model.json"   # arms/c2/ (add --no-sensor to skip the sensor model)
+$R gate c2                                       # rejects.jsonl, gate-stats.json; rejected frames leave the manifest
+$R pack c2 --size 512                            # packed/c2/ like any other arm
 $R evalset --split Test --size 512  # packed/eval-Test/: real IR frames of split Test + sequences.json
 $R evaluate a2 1 ft-a2.safetensors  # results/Test/a2/seed1.jsonl: brain yolov8 eval --dump-preds
 $R decide --config decision-config.json   # decision-Test/decision.md and decision.json
@@ -305,6 +320,115 @@ Captions: 30.0 percent neutral, 1147 name one object, 227 two, 37 three.
   written for the class; the caption does not say which.
 - Part-level captions need a grounder that was not available: object level only.
 
+## Synthetic IR arms (`rir_synth.py`)
+
+Three subcommands, one driver stage each, turn the translator into training
+arms for the same frames of S as the arms above.
+
+**`generate`** runs `brain flux2 generate` once per frame and mode. The CLI takes
+one prompt and one output per process, so the model is loaded for every image;
+`--shard i/n` splits the selected frames over n processes (one per card) and
+`--limit N` takes a seeded subset first. A frame is cut to the largest centred
+window whose sides are multiples of 16 (a 640x512 frame is not cut); the crop
+(offset, size, source size) is recorded with the output so that boxes and pixels
+map back to the source exactly. Nothing is padded or resampled, and a frame
+under 16 px on a side is an error.
+
+```bash
+$R generate c2 --config synth.json --modes neutral,prior --shard 0/2 --device gpu1   # and 1/2 on another card
+```
+
+The config names the components, the adapter and the sampler settings, with
+paths relative to the file; `adapter` is omitted for the zero-shot arm:
+
+```json
+{"device": "gpu1", "backend": "cuda", "variant": "klein-4b",
+ "dit": "models/dit.gguf", "vae": "models/vae.safetensors",
+ "text_encoder": "models/text_encoder", "tokenizer": "models/tokenizer.json",
+ "adapter": "rgb2ir.brain", "strength": 1.0, "seed": 1}
+```
+
+The generation `seed` is the same for every frame and mode, so the modes are
+paired; the driver's `--seed` selects frames and words the prior instructions.
+
+| mode | instruction | source image |
+|---|---|---|
+| `neutral` | the neutral caption | RGB |
+| `prior` | the neutral caption plus one clause per class of the frame that has a prior | RGB |
+| `vae-roundtrip` | the neutral caption (unused at strength 0) | the REAL IR, replicated to 3 channels; strength 0, no adapter |
+
+Priors come from `lora-set/captions-report.json` (the driver passes it when it
+exists). For each class the prior is the commonest of warmer and cooler among
+those that at least a tenth of the class's statements state, which is what the
+adapter has seen enough to follow; the wording is a training template of
+`rir_captions.py` and never a held-out one. A polarity that natural data almost
+never shows (here, for instance, a cooler person) is never asked for, and a
+frame without a class that has a prior gets the neutral caption. No IR is
+measured for it: a prior instruction uses the class and nothing else about the
+frame. `vae-roundtrip` is the exact codec round trip that `--strength 0` is
+documented as in `brain flux2 generate --help`, applied to real IR.
+
+Each output is `<mode>/<frame>.ppm` with a `<frame>.json` record (frame, mode,
+instruction, seed, strength, crop, source, the adapter path and its sha256, the
+command line, duration and attempts); `progress.log` appends one line per
+frame. A rerun skips frames whose output is a complete PPM of the recorded size;
+a damaged output is regenerated. A record made with another instruction, seed,
+strength, crop or adapter hash aborts the run (`ConfigMismatch`): one output
+directory holds one configuration. A run that fails because the card has no
+room (the placement or out-of-memory messages) is retried after `--retry-sleep`
+seconds, at most `--max-retries` times, then fails saying so; any other
+failure, a timeout, or an exit 0 without a valid output stops the run at once
+with the stderr. Unfinished frames carry no record, so a stopped run resumes.
+
+**`ingest`** turns a directory of outputs (a mode directory of `generate`, or any
+directory of `<dataset>_<frame>.ppm` / `.png`) into an arm in the format
+`rir_arms.py render` writes: single-channel 8-bit white-hot PNGs and a
+`manifest.jsonl` whose boxes went through the recorded crop (a box with under
+half its area inside the crop is dropped and counted). RGB output becomes luma.
+`--sensor-model sensor-model.json` applies the fitted sensor model with
+`rir_arms.apply_sensor` and the same per-frame noise stream as B3 and B4;
+`--no-sensor` leaves the luma alone, and one of the two must be given. Outputs
+without a record are mapped by the default crop, or taken as the whole frame,
+whichever has the output's size. Frames without an output are counted in
+`ingest-stats.json`, never invented.
+
+**`gate`** runs the label-preservation gates over the arm. For every frame: the
+edge correlation inside each ground-truth box must reach the 10th percentile of
+the same quantity over real pairs of split T (the threshold is read off at most
+`--reference-limit` seeded split-T frames, and it is an error if split T has
+none), and the whole image must be within `--max-shift` (2) px of the RGB by
+phase correlation. With `--sam2 --dbus-address ADDR [--brain-py DIR]` the SAM 2
+mask IoU of each box on the RGB and on the synthetic IR is gated too, through the
+resident D-Bus segmenter of `rir_sam2.py`, only for boxes that passed the
+model-free gates (a segmenter call is the expensive part). Failing frames are
+written to `rejects.jsonl` with their reasons and, by default, leave
+`manifest.jsonl`, the file `pack` reads; `--keep-rejected` keeps them there.
+`manifest.all.jsonl` is the whole arm and a rerun starts from it.
+`gate-stats.json` is the per-arm rejection statistics (`n_images`, `n_failed`,
+per reason, the threshold and counts) and the file `gate_statistics` of the
+decision config points at for K4.
+
+Filling the arms of the study, with the ingest of C2 and C3 using the sensor
+model fitted on T and V0 left as the autoencoder made it:
+
+```bash
+$R generate c1 --config zero-shot.json --modes neutral                    # config without "adapter"
+$R generate c2 --config synth.json --modes neutral,prior                   # C2 and C3
+$R generate v0 --config synth.json --modes vae-roundtrip
+$R ingest c1 c1/neutral --sensor-model "$WORK/sensor-model.json"
+$R ingest c2 c2/neutral --sensor-model "$WORK/sensor-model.json"
+$R ingest c3 c2/prior   --sensor-model "$WORK/sensor-model.json"
+$R ingest v0 v0/vae-roundtrip --no-sensor
+for a in c1 c2 c3; do $R gate $a; done
+for a in c1 c2 c3 v0; do $R pack $a --size 512; done
+```
+
+The gates are model-free proxies for "the boxes still describe the image"; the
+edge gate checks that edges line up, not that an object looks like itself, and
+the hallucination gate (a reference detector on the synthetic image) is still a
+function of `rir_gates.py` that this stage does not run. V0 is not gated: it is
+a real frame through a codec and its boxes are the real ones.
+
 ## Evaluation and decision
 
 Every arm is fine-tuned (`brain yolov8 fine-tune`) from one or more seeds and
@@ -356,8 +480,17 @@ rule is reported as not evaluable rather than passed.
            "REAL_K": "real-k", "REAL_K_PLUS_SYNTHETIC": "real-k+c2"},
  "resamples": 2000, "seed": 1, "nc": 3,
  "instruction_model": true,
- "gate_statistics": "gates-c2.json", "obedience": "obedience.json"}
+ "gate_statistics": "arms/c2/gate-stats.json", "obedience": "obedience.json"}
 ```
+
+A role names the results directory (`results/<split>/<arm>/`) of the arm that
+plays it: the arm names of `generate` / `ingest` / `gate` / `pack` are the
+directory names (`c2` above is the C2 arm ingested from `neutral` outputs, and
+`gate_statistics` is its `gate-stats.json`). C1, C3 and V0 take no role in the
+rules: `evaluate` them like any arm and they appear in the per-arm tables next
+to the others by their directory names (`c1`, `c3`, `v0`), as do all arms found
+in the results. A role set to C3's directory (`"C2": "c3"`) decides the study on
+the prior-instruction arm instead.
 
 `decision.md` (and `decision.json`) holds per-arm mAP@0.5:0.95 and mAP@0.5 with
 intervals and seed std; the three pre-registered comparisons, P1 (C2 against
@@ -387,8 +520,9 @@ image must be within 2 px of the RGB by phase correlation of the edge maps;
 (c) detections of a reference detector on the synthetic image with no ground
 truth of their class at IoU 0.5 and confidence of at least 0.5 are
 hallucinations; (d) the SAM 2 mask-IoU gate is a pluggable callable
-`mask_iou(rgb, ir, box) -> float | None` that the pipeline wires (this sample
-has no segmenter in the loop; without it that gate is absent, not passed).
+`mask_iou(rgb, ir, box) -> float | None`, wired to the resident segmenter by
+`rir_synth.py gate --sam2` (`segmenter_mask_iou`), and run only on boxes that
+passed the model-free gates; without it that gate is absent, not passed.
 `RejectionStats` counts rejections per reason and writes the JSON K4 reads.
 The edge gate is model-free and modest: it checks that edges line up, not that
 the object looks like itself.
@@ -459,10 +593,23 @@ txt with IR in an alpha channel, COCO json with a replicated 3-channel IR):
   the "same" band, oracle against prior, the fall-back to direction without
   counterfactuals, duplicate pairs not narrowing the interval, the CLI.
 
+- synth: against a fake `brain` executable, resume (a damaged output is redone),
+  bounded retry on memory pressure and its exhaustion, a non-memory failure and an
+  exit 0 without an output aborting with the stderr, the crop record mapping
+  outputs and boxes back to source pixels, prior instructions from the report's
+  controllable polarities with training templates only, the adapter's sha256 in
+  every record, a changed configuration refused, shards partitioning the frames,
+  the vae-roundtrip source and strength; ingest matching `rir_arms.apply_sensor`
+  bit for bit and packing with the unchanged packer; gate with planted shifts and
+  planted textures, the split-T threshold, exclusion from the manifest, and the
+  mask gate through a fake segmenter. The driver is tested for its flags (the
+  environment configures nothing) and the generate, ingest, gate, pack chain.
+
 All of these use synthetic inputs. They show that the harness computes what it
-says; they say nothing about whether a translator works. The SAM 2 mask gate
-and the detector-in-the-loop hallucination gate are interfaces here, not wired
-runs, and the full pipeline (training the detectors and the translator on real
+says; they say nothing about whether a translator works. The detector-in-the-loop
+hallucination gate is an interface here, not a wired run, the SAM 2 mask gate was
+exercised against a fake segmenter only, the generation, ingest and model-free
+gate stages were run on a few real frames, and the full pipeline (training the detectors and the translator on real
 data, then `evaluate` and `decide`) has not been run. The first real run
 should check the sequence map of its evaluation set and that every arm and seed
 was scored on the same `packed/eval-<split>`.
@@ -470,5 +617,5 @@ was scored on the same `packed/eval-<split>`.
 ## Dependencies
 
 `python3` with `numpy`, `opencv-python` and `Pillow`; the `brain` binary for the
-fine-tune steps, for `evaluate` and for `measure`, which also needs `jeepney` for the default
-D-Bus backend.
+fine-tune steps, for `evaluate`, for `generate` and for `measure`, which also needs `jeepney` for the default
+D-Bus backend (as does `gate --sam2`).
