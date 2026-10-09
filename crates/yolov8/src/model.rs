@@ -719,31 +719,9 @@ impl Yolo {
         for (s, scale) in self.head.scales.iter().enumerate() {
             let sh = scale.cls.out_shape; // [n, nc, h, w]
             let hw = (sh.h * sh.w) as usize;
-            // cls branch.
-            let mut cls_nchw = vec![0.0f32; n * nc * hw];
-            for nn in 0..n {
-                for ch in 0..nc {
-                    let g = gate(ch);
-                    if g == 0.0 {
-                        continue; // buffer is already zero
-                    }
-                    for p in 0..hw {
-                        let src = (nn * a + anchor_base + p) * nc + ch;
-                        cls_nchw[(nn * nc + ch) * hw + p] = d_cls[src] * g;
-                    }
-                }
-            }
+            let cls_nchw = crate::head::unpack_flat_to_head(d_cls, n, nc, a, anchor_base, hw, gate);
             self.gpu.write(&self.d_logit[s * 2], bytemuck::cast_slice(&cls_nchw));
-            // reg branch.
-            let mut box_nchw = vec![0.0f32; n * four_rm * hw];
-            for nn in 0..n {
-                for ch in 0..four_rm {
-                    for p in 0..hw {
-                        let src = (nn * a + anchor_base + p) * four_rm + ch;
-                        box_nchw[(nn * four_rm + ch) * hw + p] = d_box[src];
-                    }
-                }
-            }
+            let box_nchw = crate::head::unpack_flat_to_head(d_box, n, four_rm, a, anchor_base, hw, |_| 1.0);
             self.gpu.write(&self.d_logit[s * 2 + 1], bytemuck::cast_slice(&box_nchw));
             anchor_base += hw;
         }

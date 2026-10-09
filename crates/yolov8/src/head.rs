@@ -43,18 +43,28 @@ use crate::net::{Ctx, Shape};
 /// This is the one definition shared by the engine path ([`Head::gather_flat`])
 /// and the NPU path (which feeds OpenVINO's per-scale outputs straight in), so
 /// both produce byte-identical anchor ordering.
+///
+/// A transpose between the two layouts, blocked by [`TRANSPOSE_TILE`] anchors:
+/// the `[tile, c]` side is a small contiguous block that stays in cache while
+/// each of the `c` channel rows contributes one contiguous run of `tile`
+/// floats. Walking either layout element by element instead strides the other
+/// by `c` (or by `H*W`) floats, and with power-of-two map sizes the `c`
+/// channel rows are exactly a cache-way apart, so every access misses.
 pub fn repack_heads_to_flat(scales: &[(&[f32], u32, u32)], n: usize, c: usize, a: usize) -> Vec<f32> {
     let mut flat = vec![0.0f32; n * a * c];
     let mut anchor_base = 0usize;
     for &(data, h, w) in scales {
         let hw = (h * w) as usize;
         for nn in 0..n {
-            for ch in 0..c {
-                for p in 0..hw {
-                    // NCHW src; flat dst groups all C of an anchor contiguously.
-                    let src = (nn * c + ch) * hw + p;
-                    let dst = (nn * a + anchor_base + p) * c + ch;
-                    flat[dst] = data[src];
+            let src = &data[nn * c * hw..(nn + 1) * c * hw];
+            let dst = &mut flat[(nn * a + anchor_base) * c..(nn * a + anchor_base + hw) * c];
+            for p0 in (0..hw).step_by(TRANSPOSE_TILE) {
+                let t = TRANSPOSE_TILE.min(hw - p0);
+                for ch in 0..c {
+                    let row = &src[ch * hw + p0..ch * hw + p0 + t];
+                    for (i, &v) in row.iter().enumerate() {
+                        dst[(p0 + i) * c + ch] = v;
+                    }
                 }
             }
         }
@@ -62,6 +72,34 @@ pub fn repack_heads_to_flat(scales: &[(&[f32], u32, u32)], n: usize, c: usize, a
     }
     flat
 }
+
+/// The inverse of [`repack_heads_to_flat`] for one scale: the `[N, hw, c]`
+/// slice of a flat `[N, A, c]` tensor starting at anchor `anchor_base`, back to
+/// that scale's NCHW `[N, c, H, W]` map, each channel `ch` multiplied by
+/// `gate(ch)` (a gate of exactly 0 writes 0, whatever the flat value).
+/// Blocked like the repack, for the same reason.
+pub fn unpack_flat_to_head(flat: &[f32], n: usize, c: usize, a: usize, anchor_base: usize, hw: usize, gate: impl Fn(usize) -> f32) -> Vec<f32> {
+    let gates: Vec<f32> = (0..c).map(gate).collect();
+    let mut nchw = vec![0.0f32; n * c * hw];
+    for nn in 0..n {
+        let src = &flat[(nn * a + anchor_base) * c..(nn * a + anchor_base + hw) * c];
+        let dst = &mut nchw[nn * c * hw..(nn + 1) * c * hw];
+        for p0 in (0..hw).step_by(TRANSPOSE_TILE) {
+            let t = TRANSPOSE_TILE.min(hw - p0);
+            for (ch, &g) in gates.iter().enumerate() {
+                let row = &mut dst[ch * hw + p0..ch * hw + p0 + t];
+                for (i, v) in row.iter_mut().enumerate() {
+                    *v = if g == 0.0 { 0.0 } else { src[(p0 + i) * c + ch] * g };
+                }
+            }
+        }
+    }
+    nchw
+}
+
+/// Anchors per block of the layout transposes: one 64-byte cache line of a
+/// channel row.
+const TRANSPOSE_TILE: usize = 16;
 
 /// One scale's cls or reg branch: two `Conv`s then a BIASED 1x1 conv.
 pub struct Branch {
@@ -371,5 +409,48 @@ impl Head {
             }
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The repack is the plain `NCHW -> [N, A, C]` index map, anchors
+    /// scale-major then row-major, and the per-scale unpack is its exact
+    /// inverse (a gate of 1 is a bit-exact copy; a gate of 0 writes 0).
+    #[test]
+    fn the_flat_repack_and_its_unpack_are_inverse_index_maps() {
+        let (n, c) = (3usize, 5usize);
+        let scales_hw = [(4u32, 3u32), (2, 2), (1, 1)];
+        let a: usize = scales_hw.iter().map(|&(h, w)| (h * w) as usize).sum();
+        let maps: Vec<Vec<f32>> = scales_hw
+            .iter()
+            .enumerate()
+            .map(|(s, &(h, w))| (0..n * c * (h * w) as usize).map(|i| (s * 1000 + i) as f32 - 0.5).collect())
+            .collect();
+        let refs: Vec<(&[f32], u32, u32)> = maps.iter().zip(&scales_hw).map(|(m, &(h, w))| (m.as_slice(), h, w)).collect();
+        let flat = repack_heads_to_flat(&refs, n, c, a);
+
+        let mut base = 0usize;
+        for (m, &(h, w)) in maps.iter().zip(&scales_hw) {
+            let hw = (h * w) as usize;
+            for nn in 0..n {
+                for ch in 0..c {
+                    for p in 0..hw {
+                        assert_eq!(flat[(nn * a + base + p) * c + ch], m[(nn * c + ch) * hw + p]);
+                    }
+                }
+            }
+            assert_eq!(&unpack_flat_to_head(&flat, n, c, a, base, hw, |_| 1.0), m);
+            let gated = unpack_flat_to_head(&flat, n, c, a, base, hw, |ch| if ch == 2 { 0.0 } else { 2.0 });
+            for nn in 0..n {
+                for p in 0..hw {
+                    assert_eq!(gated[(nn * c + 2) * hw + p], 0.0);
+                    assert_eq!(gated[(nn * c + 1) * hw + p], 2.0 * m[(nn * c + 1) * hw + p]);
+                }
+            }
+            base += hw;
+        }
     }
 }
