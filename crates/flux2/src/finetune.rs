@@ -464,43 +464,63 @@ pub fn encode_samples(
     fc: &Flux2Config,
     paths: &Paths,
     samples: &[data::imageset::Sample],
-    size: u32,
-    te: crate::pipeline::TePlacement,
+    spec: &EncodeSpec<'_>,
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
+    let size = spec.size;
     if !size.is_multiple_of(16) {
         return Err("size must be a multiple of 16".into());
     }
     let n = samples.len();
-    let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
     // --- captions → Qwen taps (layers 9/18/27 concatenated per token) ---
     // The SAME encoder generation builds (`pipeline::build_text_encoder`),
     // built here directly because `Pipeline::encode_prompt` needs the whole
     // built Pipeline, DiT included, which finetune must NOT keep resident
     // while training. Conditioning an adapter on features the generation path
-    // would not reproduce is the failure this shares code to avoid - and the
-    // copy that used to live here also slurped the whole encoder as an fp32
-    // `HashMap` before uploading it, the largest single host allocation the
-    // run made.
+    // would not reproduce is the failure this shares code to avoid.
     // Keyed by the exact prompt STRING, not by sample index: the encoder's
-    // output depends on nothing else, so two samples that happen to share a
-    // caption (a fixed-prompt/single-concept dataset does this for every
-    // sample) get the encode done once and the identical result reused. A
-    // dataset where every caption differs pays exactly what it paid before -
-    // this is a cache miss on first sight of each string, never a behavior
-    // change on what gets encoded.
-    let ctxs: Vec<Vec<f32>> = {
-        let te = crate::pipeline::build_text_encoder_on(fc, paths, te)?;
-        let mut cache: std::collections::HashMap<&str, Vec<f32>> = std::collections::HashMap::new();
-        let mut out = Vec::with_capacity(n);
+    // output depends on nothing else, so two samples that share a caption get
+    // the encode done once. With a persistent cache (`spec.cache`) a prompt
+    // already encoded by an earlier run under the same encoder, tokenizer and
+    // tier is read back instead, and the encoder is not even built when every
+    // prompt is found.
+    let caption_key = |prompt: &str, id: &str| -> String {
+        format!(
+            "caption|{id}|int8={}|truncated={}|txt_len={}|taps={:?}|prompt={prompt}",
+            spec.te.int8,
+            spec.te.gpu_index.is_some(),
+            fc.txt_len,
+            TAP_LAYERS
+        )
+    };
+    let te_id = match spec.cache {
+        Some(_) => format!(
+            "te={}|tokenizer={}",
+            crate::enccache::weights_identity(Path::new(&paths.te))?,
+            crate::enccache::weights_identity(Path::new(&paths.tokenizer))?
+        ),
+        None => String::new(),
+    };
+    let mut contexts: std::collections::HashMap<&str, Vec<f32>> = std::collections::HashMap::new();
+    if let Some(c) = spec.cache {
+        for s in samples {
+            if !contexts.contains_key(s.prompt.as_str()) {
+                if let Some(ctx) = c.get(&caption_key(&s.prompt, &te_id)) {
+                    contexts.insert(s.prompt.as_str(), ctx);
+                }
+            }
+        }
+    }
+    if samples.iter().any(|s| !contexts.contains_key(s.prompt.as_str())) {
+        let tok = QwenBpe::from_file(&paths.tokenizer)?;
+        let te = crate::pipeline::build_text_encoder_on(fc, paths, spec.te)?;
         for (i, s) in samples.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());
             }
-            if let Some(ctx) = cache.get(s.prompt.as_str()) {
-                out.push(ctx.clone());
+            if contexts.contains_key(s.prompt.as_str()) {
                 continue;
             }
             progress(i, n, "encoding captions (Qwen)");
@@ -517,65 +537,106 @@ pub fn encode_samples(
                     ctx.extend_from_slice(&tap[row * d..(row + 1) * d]);
                 }
             }
-            cache.insert(s.prompt.as_str(), ctx.clone());
-            out.push(ctx);
+            if let Some(c) = spec.cache {
+                c.put(&caption_key(&s.prompt, &te_id), &ctx)?;
+            }
+            contexts.insert(s.prompt.as_str(), ctx);
         }
-        out
-    }; // text encoder dropped here
+    } // text encoder dropped here
 
     // --- images → packed latent tokens (FLUX.2 VAE + pixel-unshuffle pack) ---
-    let vp = Path::new(&paths.vae);
-    let (vae_file, vae_json) = if vp.is_dir() {
-        (vp.join("diffusion_pytorch_model.safetensors"), std::fs::read_to_string(vp.join("config.json")).ok())
-    } else {
-        (vp.to_path_buf(), None)
+    // Keyed by the exact pixels encoded: a persistent hit is the latent of
+    // these bits under this VAE at this size.
+    let vae_id = match spec.cache {
+        Some(_) => crate::enccache::weights_identity(Path::new(&paths.vae))?,
+        None => String::new(),
     };
-    let vae_cfg = match vae_json {
-        Some(j) => vae::VaeConfig::from_json(&serde_json::from_str(&j).map_err(|e| e.to_string())?),
-        None => vae::VaeConfig::flux2(),
+    let latent_key = |hwc: &[f32]| -> String {
+        format!("latent|vae={vae_id}|size={size}|in_channels={}|pixels={}", fc.in_channels, crate::enccache::content_digest(hwc))
     };
-    let vae_ts = checkpoint::safetensors::read(vae_file.to_str().unwrap())?;
-    let mut map = std::collections::HashMap::new();
-    let (mut bn_mean, mut bn_var) = (Vec::new(), Vec::new());
-    for t in vae_ts {
-        if t.name == "bn.running_mean" {
-            bn_mean = t.data.clone();
-        }
-        if t.name == "bn.running_var" {
-            bn_var = t.data.clone();
-        }
-        map.insert(t.name, (t.shape, t.data));
-    }
-    if bn_mean.is_empty() || bn_var.is_empty() {
-        return Err("vae checkpoint missing bn.running_{mean,var}".into());
-    }
-    let enc = vae::VaeEncoder::from_diffusers(vae_cfg.clone(), &map, size, size, None);
-    let (lh8, lw8) = ((size / 8) as usize, (size / 8) as usize);
-    let mut encoded = Vec::with_capacity(n);
-    // One image → packed DiT tokens. The pixel conversion is
-    // `pipeline::ref_from_hwc` (HWC `[0,1]` → CHW `[-1,1]`, the layout
-    // `Pipeline::generate` takes a `--ref` in) and the latent packing is
-    // `refcond::pack_tokens` - both shared with generation, so a training
-    // image and a `--ref` photograph of the same pixels become the same
-    // tokens.
-    let tokens_of = |hwc: &[f32]| -> Result<Vec<f32>, String> {
-        let (chw, h, w) = crate::pipeline::ref_from_hwc(hwc, size, size)?;
-        let mean = enc.encode_mean(&chw, h / 8, w / 8);
-        Ok(crate::refcond::pack_tokens(&mean, lh8, lw8, &bn_mean, &bn_var, vae_cfg.batch_norm_eps, fc.in_channels))
-    };
-    for (i, (s, ctx)) in samples.iter().zip(ctxs).enumerate() {
-        if cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
-        progress(i, n, "encoding images (VAE)");
-        let x0 = tokens_of(&s.hwc)?;
-        let refs = match &s.reference {
-            Some(r) => tokens_of(r)?,
-            None => Vec::new(),
+    let lookup = |hwc: &[f32]| spec.cache.and_then(|c| c.get(&latent_key(hwc)));
+    let mut x0s: Vec<Option<Vec<f32>>> = samples.iter().map(|s| lookup(&s.hwc)).collect();
+    let mut refs: Vec<Option<Vec<f32>>> = samples.iter().map(|s| s.reference.as_ref().map_or(Some(Vec::new()), |r| lookup(r))).collect();
+
+    if x0s.iter().chain(&refs).any(Option::is_none) {
+        let vp = Path::new(&paths.vae);
+        let (vae_file, vae_json) = if vp.is_dir() {
+            (vp.join("diffusion_pytorch_model.safetensors"), std::fs::read_to_string(vp.join("config.json")).ok())
+        } else {
+            (vp.to_path_buf(), None)
         };
-        encoded.push(Encoded { x0, refs, ctx });
+        let vae_cfg = match vae_json {
+            Some(j) => vae::VaeConfig::from_json(&serde_json::from_str(&j).map_err(|e| e.to_string())?),
+            None => vae::VaeConfig::flux2(),
+        };
+        let vae_ts = checkpoint::safetensors::read(vae_file.to_str().unwrap())?;
+        let mut map = std::collections::HashMap::new();
+        let (mut bn_mean, mut bn_var) = (Vec::new(), Vec::new());
+        for t in vae_ts {
+            if t.name == "bn.running_mean" {
+                bn_mean = t.data.clone();
+            }
+            if t.name == "bn.running_var" {
+                bn_var = t.data.clone();
+            }
+            map.insert(t.name, (t.shape, t.data));
+        }
+        if bn_mean.is_empty() || bn_var.is_empty() {
+            return Err("vae checkpoint missing bn.running_{mean,var}".into());
+        }
+        let enc = vae::VaeEncoder::from_diffusers(vae_cfg.clone(), &map, size, size, None);
+        let (lh8, lw8) = ((size / 8) as usize, (size / 8) as usize);
+        // One image → packed DiT tokens. The pixel conversion is
+        // `pipeline::ref_from_hwc` (HWC `[0,1]` → CHW `[-1,1]`, the layout
+        // `Pipeline::generate` takes a `--ref` in) and the latent packing is
+        // `refcond::pack_tokens` - both shared with generation, so a training
+        // image and a `--ref` photograph of the same pixels become the same
+        // tokens.
+        let tokens_of = |hwc: &[f32]| -> Result<Vec<f32>, String> {
+            let (chw, h, w) = crate::pipeline::ref_from_hwc(hwc, size, size)?;
+            let mean = enc.encode_mean(&chw, h / 8, w / 8);
+            let t = crate::refcond::pack_tokens(&mean, lh8, lw8, &bn_mean, &bn_var, vae_cfg.batch_norm_eps, fc.in_channels);
+            if let Some(c) = spec.cache {
+                c.put(&latent_key(hwc), &t)?;
+            }
+            Ok(t)
+        };
+        for (i, s) in samples.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            if x0s[i].is_some() && refs[i].is_some() {
+                continue;
+            }
+            progress(i, n, "encoding images (VAE)");
+            if x0s[i].is_none() {
+                x0s[i] = Some(tokens_of(&s.hwc)?);
+            }
+            if refs[i].is_none() {
+                refs[i] = Some(tokens_of(s.reference.as_ref().expect("only a present reference can miss"))?);
+            }
+        }
     }
-    Ok(encoded)
+    Ok(samples
+        .iter()
+        .zip(x0s.into_iter().zip(refs))
+        .map(|(s, (x0, refs))| Encoded {
+            x0: x0.expect("every latent is encoded or cached"),
+            refs: refs.expect("every reference is encoded or cached"),
+            ctx: contexts[s.prompt.as_str()].clone(),
+        })
+        .collect())
+}
+
+/// What [`encode_samples`] encodes at, and where it may cache the result.
+pub struct EncodeSpec<'a> {
+    /// The square image size in pixels (a multiple of 16).
+    pub size: u32,
+    /// The text encoder's placement and tier.
+    pub te: crate::pipeline::TePlacement,
+    /// A persistent cache to read encodings from and write new ones to;
+    /// `None` encodes everything and keeps nothing.
+    pub cache: Option<&'a crate::enccache::EncodeCache>,
 }
 
 /// The reference grids a dataset trains under, or an error naming the samples
@@ -683,6 +744,10 @@ pub struct TrainOpts {
     /// caller names one; `None` is the deployed DiT precision
     /// ([`base_precision`]).
     pub train_base: Option<crate::devgrad::BasePrecision>,
+    /// Where caption contexts and image latents persist between runs, so a
+    /// restarted or resumed run skips encoding what it already encoded
+    /// ([`crate::enccache`]); `None` keeps nothing.
+    pub cache_dir: Option<std::path::PathBuf>,
     /// Square training image size in pixels (multiple of 16; latent grid =
     /// size/16 per side).
     pub size: u32,
@@ -841,7 +906,15 @@ pub fn run(
         opts.steps + 1,
         format!("text encoder: {} (matching what generate builds for this DiT)", if te_place.int8 { "int8" } else { "fp32" }),
     );
-    let encoded = encode_samples(fc, paths, &samples, opts.size, te_place, cancel, |i, tot, stage| {
+    let cache = match &opts.cache_dir {
+        Some(dir) => {
+            progress(0, opts.steps + 1, format!("encoding cache: {}", dir.display()));
+            Some(crate::enccache::EncodeCache::open(dir)?)
+        }
+        None => None,
+    };
+    let spec = EncodeSpec { size: opts.size, te: te_place, cache: cache.as_ref() };
+    let encoded = encode_samples(fc, paths, &samples, &spec, cancel, |i, tot, stage| {
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))
     })?;
     drop(samples);

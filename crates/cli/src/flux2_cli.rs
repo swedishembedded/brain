@@ -142,7 +142,7 @@ const HELP: &str = "brain flux2 <cmd>
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
            [--dit <path>] [--vae <path>] [--text-encoder <path>] [--tokenizer <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
-           [--precision fp32|int8] [--train-base fp32|int8] [--warmup N] [--min-lr X]
+           [--precision fp32|int8] [--train-base fp32|int8] [--cache-dir D] [--warmup N] [--min-lr X]
            [--edit-weight A] [--detail-weight B] [--ref-dropout P]
            # Train a LoRA on a folder of captioned images (see data::imageset for
            # the caption formats; `brain label` writes one). The adapter it writes
@@ -244,6 +244,10 @@ const HELP: &str = "brain flux2 <cmd>
            #                   minutes per step at klein scale)
            #   --cards N       GPUs the device trainer spreads the stack over
            #                   (default 1; klein-9b's fp32 base needs 2)
+           #   --cache-dir D   keep caption contexts and image latents in D, so a
+           #                   restarted or resumed run skips encoding them again
+           #                   (entries are keyed by prompt / pixels and by the
+           #                   encoder, tokenizer and VAE weights; none by default)
            #   --train-base P  precision the device trainer holds the frozen base
            #                   at (default: the deployed DiT precision - int8 for
            #                   a .gguf, as generate serves it; fp32 trains against
@@ -788,6 +792,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
         // Filled from the global `--device` once the arguments are parsed.
         card: None,
         train_base: None,
+        cache_dir: None,
         size: 512,
         seed: 0,
         save_path: String::new(),
@@ -876,6 +881,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
                     other => return Err(format!("--precision: {other} is not one of fp32, int8")),
                 }
             }
+            "--cache-dir" => opts.cache_dir = Some(std::path::PathBuf::from(need(i)?)),
             "--train-base" => {
                 opts.train_base = Some(match need(i)?.as_str() {
                     "fp32" | "f32" => flux2::devgrad::BasePrecision::F32,

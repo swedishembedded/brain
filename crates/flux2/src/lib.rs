@@ -28,6 +28,7 @@ pub mod caps;
 pub mod config;
 pub mod devgrad;
 pub mod devtrain;
+pub mod enccache;
 pub mod finetune;
 pub mod grad;
 pub mod import;

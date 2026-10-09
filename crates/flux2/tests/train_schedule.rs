@@ -45,6 +45,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
         cards: 1,
         card: None,
         train_base: None,
+        cache_dir: None,
         size: 512,
         seed: 0,
         save_path: String::new(),
