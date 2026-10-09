@@ -25,6 +25,8 @@
 
 use std::collections::BTreeMap;
 
+pub use qwen3asr::AudioFeatures;
+
 use crate::{Device, Error, Result};
 
 /// One transcription. `truncated` is `Some((available_secs, window_secs))`
@@ -106,6 +108,18 @@ impl TranscribePipeline {
     /// trip needs between [`crate::TtsPipeline`] (24 kHz) and recognition.
     pub fn transcribe_audio(&self, clip: &crate::Audio) -> Result<Transcript> {
         self.transcribe(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE))
+    }
+
+    /// The audio encoder's features of `clip` at any rate and length: what a
+    /// caller needs to splice speech into a language model of its own rather
+    /// than turn it into text. Qwen3-ASR only; the Nemotron backend is a
+    /// transducer with no features of that kind and returns
+    /// [`Error::MissingArgument`].
+    pub fn features(&self, clip: &crate::Audio) -> Result<AudioFeatures> {
+        let Backend::Qwen3Asr(provider) = &self.backend else {
+            return Err(Error::MissingArgument("nemotronasr: has no spliceable audio features; use a Qwen3-ASR pipeline".to_string()));
+        };
+        provider.features(&audio::resample_linear(clip.samples(), clip.sample_rate(), ASR_SAMPLE_RATE)).map_err(Error::Backend)
     }
 
     /// Decode a WAV file's bytes (any channel count/sample rate - downmixed

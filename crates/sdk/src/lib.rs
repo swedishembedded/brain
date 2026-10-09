@@ -294,7 +294,7 @@ pub use loader::DownloadPolicy;
 #[cfg(all(feature = "audio", feature = "study"))]
 pub use speech_ingress::{IngressHyper, SpeechExample, SpeechIngress, SpeechIngressOptions};
 #[cfg(feature = "audio")]
-pub use asr::{Transcript, TranscribePipeline, TranscribePipelineBuilder};
+pub use asr::{AudioFeatures, Transcript, TranscribePipeline, TranscribePipelineBuilder};
 /// Word error rate, the measure a speech round trip is judged by: re-exported
 /// so a caller scores transcripts exactly as brain's own gates do.
 #[cfg(feature = "audio")]

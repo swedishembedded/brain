@@ -99,6 +99,19 @@ impl Qwen3Asr {
         enc.encode(mel, valid_frames).1
     }
 
+    /// The encoder output and projected embeddings of `wav` (16 kHz mono, any
+    /// length): the front end pads it up to whole seconds, the encoder is told
+    /// only `wav.len() / 160` frames are real, and the decoder is not involved.
+    pub fn features(&self, wav: &[f32]) -> crate::AudioFeatures {
+        let target = crate::features::padded_samples(wav.len());
+        let mel = audio::asr_frontend::qwen_logmel(wav, target);
+        let valid = (wav.len() / 160) as u32;
+        let enc = AudioEncoder::new(&self.agpu, self.cfg.audio, &self.aweights);
+        let (encoder_out, embeds) = enc.encode(&mel.mel, valid);
+        let (encoder_dim, embed_dim) = (self.cfg.audio.d_model as usize, self.cfg.audio.output_dim as usize);
+        crate::AudioFeatures { rows: embeds.len() / embed_dim, encoder_out, embeds, encoder_dim, embed_dim }
+    }
+
     /// [`encode_audio`](Self::encode_audio) with the windowed-transformer HEAD run
     /// by a closure — the seam the NPU resident uses to run the audio-encoder ONNX
     /// head on the Intel NPU (conv stem + packing stay host-side). Returns the

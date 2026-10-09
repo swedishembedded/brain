@@ -8,12 +8,14 @@
 pub mod caps;
 pub mod config;
 pub mod encoder;
+pub mod features;
 pub mod import;
 pub mod model;
 pub mod spec;
 
 pub use config::{AudioEncoderConfig, QwenAsrConfig};
 pub use encoder::AudioEncoder;
+pub use features::AudioFeatures;
 pub use model::Qwen3Asr;
 
 /// Resolve a test-fixture path under the gitignored `testdata/` tree — never a

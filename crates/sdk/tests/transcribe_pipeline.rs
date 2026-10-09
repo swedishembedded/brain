@@ -194,3 +194,40 @@ fn the_requested_checkpoint_selects_the_backend_when_both_are_in_the_store() {
         other => panic!("expected the Nemotron loader's Error::Backend, got {other:?}"),
     }
 }
+
+fn tone(seconds: f32, rate: u32) -> brain::Audio {
+    let n = (seconds * rate as f32) as usize;
+    brain::Audio::new((0..n).map(|i| ((i as f32) * 0.07).sin() * 0.3 + ((i as f32) * 0.011).sin() * 0.2).collect(), rate)
+}
+
+/// Qwen3-ASR's encoder features of a clip of any length and rate: thirteen
+/// rows per second, no decode window, the same for the same audio. Skips
+/// without the checkpoint.
+#[test]
+fn qwen3_asr_exposes_features_of_speech() {
+    let _serial = brain_testutil::env_lock();
+    let Ok(asr) = brain::TranscribePipeline::from_pretrained("Qwen/Qwen3-ASR-1.7B") else {
+        brain_testutil::skip("Qwen3-ASR is not in the model store");
+        return;
+    };
+    let three = asr.features(&tone(3.0, 16_000)).expect("features");
+    assert_eq!((three.encoder_dim, three.embed_dim), (1024, 2048));
+    assert_eq!(three.encoder_out.len(), three.rows * three.encoder_dim);
+    assert_eq!(three.embeds.len(), three.rows * three.embed_dim);
+    assert_eq!(three.rows, 39, "three seconds are three 100-frame chunks of 13 rows");
+    assert!(three.embeds.iter().chain(&three.encoder_out).all(|x| x.is_finite()));
+    assert_eq!(asr.features(&tone(3.0, 16_000)).unwrap(), three, "deterministic");
+    assert_eq!(asr.features(&tone(6.0, 16_000)).unwrap().rows, 78);
+    assert_eq!(asr.features(&tone(3.0, 24_000)).unwrap().rows, 39, "resampled to 16 kHz first");
+    assert_eq!(asr.features(&tone(35.0, 16_000)).unwrap().rows, 455, "longer than the 30 s decode window is not truncated");
+}
+
+#[test]
+fn nemotron_has_no_spliceable_features() {
+    let _serial = brain_testutil::env_lock();
+    let Ok(asr) = brain::TranscribePipeline::from_pretrained("nvidia/nemotron-3.5-asr-streaming-0.6b") else {
+        brain_testutil::skip("Nemotron ASR is not in the model store");
+        return;
+    };
+    assert!(matches!(asr.features(&tone(1.0, 16_000)), Err(brain::Error::MissingArgument(_))));
+}

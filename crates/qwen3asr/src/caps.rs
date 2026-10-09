@@ -127,6 +127,13 @@ impl QwenAsrProvider {
         self.inner.window_samples
     }
 
+    /// The audio features of a 16 kHz mono clip of ANY length (not limited to
+    /// the decode window), for splicing into a different language model.
+    pub fn features(&self, wav: &[f32]) -> Result<crate::AudioFeatures, String> {
+        let model = self.inner.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
+        Ok(model.features(wav))
+    }
+
     /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
     /// — the seam the NPU resident uses to run the audio-tower ONNX head on the
     /// Intel NPU while the conv stem + Qwen decoder stay on the device backend.
