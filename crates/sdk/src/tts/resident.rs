@@ -62,4 +62,10 @@ impl ResidentTts {
             .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
         Ok(Audio::new(samples, SAMPLE_RATE))
     }
+
+    /// Where the time of the last completed request went.
+    pub fn last_timings(&self) -> Result<qwen3tts::SpeakTimings> {
+        let engine = self.engine.lock().map_err(|_| Error::Backend("qwen3tts: the resident engine lock is poisoned".to_string()))?;
+        Ok(engine.last_timings())
+    }
 }

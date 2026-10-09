@@ -154,10 +154,59 @@ impl Core {
     }
 }
 
+/// The codec that turns codes into samples, on the same placement as the
+/// Talker. The host decoder is pure CPU and carries conv state between chunks;
+/// the device decoder runs the whole clip as one graph.
+#[allow(clippy::large_enum_variant)] // one engine per process
+enum CodecPath {
+    Host(StreamingCodecDecoder),
+    Device(mimi::Codec),
+}
+
+impl CodecPath {
+    fn load(paths: &TtsPaths, placement: Placement) -> CodecPath {
+        match placement {
+            Placement::Host => CodecPath::Host(StreamingCodecDecoder::load(&paths.codec)),
+            Placement::Device => CodecPath::Device(mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), &paths.codec)),
+        }
+    }
+
+    /// Hand `on_audio` the samples of `codes`, `chunk` frames at a time. The
+    /// device decoder has the whole clip in one pass, so it slices the result.
+    fn decode(&self, codes: &[u32], chunk: usize, on_audio: &mut dyn FnMut(&[f32], u32)) {
+        match self {
+            CodecPath::Host(codec) => codec.decode_streaming_cb(codes, chunk, on_audio),
+            CodecPath::Device(codec) => {
+                if codes.is_empty() {
+                    return;
+                }
+                let pcm = codec.decode(codes);
+                let per_chunk = chunk.max(1) * SAMPLES_PER_FRAME;
+                for (seq, piece) in pcm.chunks(per_chunk).enumerate() {
+                    on_audio(piece, seq as u32);
+                }
+            }
+        }
+    }
+}
+
+/// Samples of 24 kHz audio one codec frame (12.5 Hz) stands for.
+const SAMPLES_PER_FRAME: usize = 1920;
+
+/// Where the time of one request went: code generation (Talker and MTP) and
+/// the codec that turns the codes into samples.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpeakTimings {
+    pub generate: std::time::Duration,
+    pub decode: std::time::Duration,
+    pub frames: usize,
+}
+
 /// Everything a resident TTS instance holds hot between requests.
 pub struct ResidentEngine {
+    last: SpeakTimings,
     core: Core,
-    codec: StreamingCodecDecoder,
+    codec: CodecPath,
     tok: data::qwen_tokenizer::QwenBpe,
     sp: TtsSpecials,
     /// The checkpoint's `generation_config.json`, parsed once at load. A
@@ -203,8 +252,9 @@ impl ResidentEngine {
         let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
         let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
         Ok(ResidentEngine {
+            last: SpeakTimings::default(),
             core: Core::load(paths, placement),
-            codec: StreamingCodecDecoder::load(&paths.codec),
+            codec: CodecPath::load(paths, placement),
             tok,
             sp,
             gencfg: crate::genconfig::GenerationConfig::from_config_dir(&paths.ckpt_dir),
@@ -251,8 +301,19 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        let began = std::time::Instant::now();
         let codes = self.speak_codes(text, lang, opts, cancel)?;
-        self.decode(&codes, on_audio)
+        let generate = began.elapsed();
+        let began = std::time::Instant::now();
+        let pcm = self.decode(&codes, on_audio)?;
+        self.last = SpeakTimings { generate, decode: began.elapsed(), frames: codes.len() / 16 };
+        Ok(pcm)
+    }
+
+    /// Where the time of the last completed [`Self::speak`] went.
+    #[must_use]
+    pub fn last_timings(&self) -> SpeakTimings {
+        self.last
     }
 
     /// [`Self::speak`] stopping before the codec: the `[frames, 16]` codes.
@@ -380,9 +441,9 @@ impl ResidentEngine {
     }
 
     /// Decode `codes` through the streaming codec, `chunk_frames` at a time.
-    fn decode(&mut self, codes: &[u32], on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<Vec<f32>, String> {
+    pub fn decode(&mut self, codes: &[u32], on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<Vec<f32>, String> {
         let mut full: Vec<f32> = Vec::new();
-        self.codec.decode_streaming_cb(codes, self.chunk_frames, &mut |pcm, seq| {
+        self.codec.decode(codes, self.chunk_frames, &mut |pcm, seq| {
             full.extend_from_slice(pcm);
             on_audio(pcm, seq);
         });

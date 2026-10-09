@@ -82,3 +82,27 @@ fn a_request_that_does_not_fit_the_device_context_is_refused() {
     let err = device.speak_codes(TEXT, "english", &greedy(5_000), &CancelToken::default()).unwrap_err();
     assert!(err.contains("does not fit"), "{err}");
 }
+
+#[test]
+fn the_device_codec_decodes_the_same_audio_as_the_host_codec() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let never = CancelToken::default();
+
+    let mut host = ResidentEngine::load_with(&paths, Placement::Host).unwrap();
+    let codes = host.speak_codes(TEXT, "english", &greedy(40), &never).unwrap();
+    let on_host = host.decode(&codes, &mut |_, _| {}).unwrap();
+    drop(host);
+
+    let mut device = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    let mut chunks = 0;
+    let on_device = device.decode(&codes, &mut |_, _| chunks += 1).unwrap();
+
+    assert_eq!(on_device.len(), on_host.len(), "the same number of samples");
+    assert!(chunks > 1, "the device clip still reaches the caller in chunks");
+    let energy: f64 = on_host.iter().map(|x| f64::from(*x).powi(2)).sum();
+    let error: f64 = on_host.iter().zip(&on_device).map(|(a, b)| f64::from(a - b).powi(2)).sum();
+    let relative = (error / energy).sqrt();
+    eprintln!("codec device vs host: relative rms error {relative:.5}");
+    assert!(relative < 0.02, "relative rms error {relative}");
+}
