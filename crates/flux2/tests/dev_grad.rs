@@ -21,7 +21,8 @@
 //! scale-invariant, so a uniformly mis-scaled gradient (a wrong `α/r`, a
 //! forgotten epsilon) passes it at 1.000000.
 //!
-//! Needs a GPU: `BRAIN_DEV_GPU=1`.
+//! The device tests take their card as an argument:
+//! `cargo test -p brain-flux2 --release --test dev_grad -- --device gpu1 --backend cuda`; the `backend-cpu` twins run without one.
 
 use flux2::devgrad::{BlockDev, DoubleDev, SingleDev, N_SITES};
 use flux2::grad::{double_backward, double_forward, single_backward, single_forward, Dims, DoubleMods, DoubleW, Mod, SingleW, StreamW};
@@ -151,14 +152,6 @@ fn rope_tables(n: usize, hd: usize) -> (Vec<f32>, Vec<f32>) {
     (cos, sin)
 }
 
-fn skip() -> bool {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the FLUX.2 device block-backward parity test");
-        return true;
-    }
-    false
-}
-
 /// How the engine under test gets its device. The CPU arm exists because a
 /// workgroup-barrier reduction with no barrier-free sibling can return
 /// all-zero gradients on `backend-cpu` alone, and this graph is built almost
@@ -212,17 +205,12 @@ fn stream_w64(s: &Stream) -> StreamW<f64> {
     }
 }
 
-#[test]
 fn device_double_block_backward_matches_host() {
-    if skip() {
-        return;
-    }
     double_block_gate(false);
 }
 
 /// The same gate on `backend-cpu` - no GPU needed, so it runs in the ordinary
 /// test pass.
-#[test]
 fn cpu_backend_double_block_backward_matches_host() {
     double_block_gate(true);
 }
@@ -294,16 +282,11 @@ fn double_block_gate(cpu: bool) {
 
 // ---- single block ----
 
-#[test]
 fn device_single_block_backward_matches_host() {
-    if skip() {
-        return;
-    }
     single_block_gate(false);
 }
 
 /// The `backend-cpu` twin of [`device_single_block_backward_matches_host`].
-#[test]
 fn cpu_backend_single_block_backward_matches_host() {
     single_block_gate(true);
 }
@@ -379,3 +362,9 @@ fn single_block_gate(cpu: bool) {
     w.add("dx", &f64v(&eng.gpu().read(&dxb, n * D)), &hg.dx);
     w.assert_within(0.9999999, 1e-5, &format!("FLUX.2 {} SINGLE block backward", if cpu { "backend-cpu" } else { "device" }));
 }
+
+gpu_core::card_tests!(
+    device_double_block_backward_matches_host,
+    device_single_block_backward_matches_host,
+    ; host: cpu_backend_double_block_backward_matches_host, cpu_backend_single_block_backward_matches_host,
+);

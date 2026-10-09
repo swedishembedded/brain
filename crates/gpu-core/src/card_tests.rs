@@ -19,8 +19,9 @@
 //! every handle a test builds (`testgpu::dev`, `Gpu::new`) lands on the card
 //! named on the command line and nowhere else.
 //!
-//! Without `--device` the binary opens no card at all: every test is reported
-//! skipped, with the command line that would run it. A device test never
+//! Without `--device` the binary opens no card at all: every device test is
+//! reported skipped, with the command line that would run it, and only the
+//! binary's host tests (declared after `host:`) run. A device test never
 //! guesses a card.
 //!
 //! The rest of the command line follows libtest where a caller relies on it:
@@ -37,6 +38,10 @@ use std::process::ExitCode;
 pub struct CardTest {
     pub name: &'static str,
     pub run: fn(),
+    /// Whether the test needs the card the command line names. A host test
+    /// (one that builds the CPU backend, or no device at all) runs with or
+    /// without `--device`.
+    pub needs_card: bool,
 }
 
 /// What the command line asked for.
@@ -112,42 +117,44 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
     }
     let selected: Vec<&CardTest> = tests.iter().filter(|t| args.selects(t.name)).collect();
     let filtered = tests.len() - selected.len();
-    let Some(device) = args.device.as_deref() else {
-        println!("\nrunning {} tests", selected.len());
-        for t in &selected {
-            println!("test {} ... ignored, no --device given", t.name);
-        }
-        eprintln!("SKIP: device tests need their card named: cargo test ... -- --device gpu<i> [--backend cuda]");
-        println!("\ntest result: ok. 0 passed; 0 failed; {} ignored; 0 measured; {filtered} filtered out\n", selected.len());
-        return ExitCode::SUCCESS;
-    };
-    let card = match select(device, args.backend.as_deref()) {
-        Ok(card) => card,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(2);
-        }
+    let header = match args.device.as_deref() {
+        Some(device) => match select(device, args.backend.as_deref()) {
+            Ok(card) => format!(" on {device}{card}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => String::new(),
     };
     crate::set_native_kernels(args.native_kernels);
     if let Some(n) = args.profile_replays {
         crate::profile::set_program_replays(n);
     }
-    println!("\nrunning {} tests on {device}{card}", selected.len());
-    let mut failed = Vec::new();
+    println!("\nrunning {} tests{header}", selected.len());
+    let (mut failed, mut ignored) = (Vec::new(), 0usize);
     for t in &selected {
+        if t.needs_card && args.device.is_none() {
+            println!("test {} ... ignored, no --device given", t.name);
+            ignored += 1;
+            continue;
+        }
         let ok = std::panic::catch_unwind(t.run).is_ok();
         println!("test {} ... {}", t.name, if ok { "ok" } else { "FAILED" });
         if !ok {
             failed.push(t.name);
         }
     }
-    let passed = selected.len() - failed.len();
+    if ignored > 0 {
+        eprintln!("SKIP: device tests need their card named: cargo test ... -- --device gpu<i> [--backend cuda]");
+    }
+    let passed = selected.len() - failed.len() - ignored;
     if failed.is_empty() {
-        println!("\ntest result: ok. {passed} passed; 0 failed; 0 ignored; 0 measured; {filtered} filtered out\n");
+        println!("\ntest result: ok. {passed} passed; 0 failed; {ignored} ignored; 0 measured; {filtered} filtered out\n");
         ExitCode::SUCCESS
     } else {
         println!("\nfailures:\n    {}", failed.join("\n    "));
-        println!("\ntest result: FAILED. {passed} passed; {} failed; 0 ignored; 0 measured; {filtered} filtered out\n", failed.len());
+        println!("\ntest result: FAILED. {passed} passed; {} failed; {ignored} ignored; 0 measured; {filtered} filtered out\n", failed.len());
         ExitCode::FAILURE
     }
 }
@@ -172,18 +179,23 @@ fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
     Ok(card)
 }
 
-/// Declare a test binary's `main` from its test functions:
+/// Declare a test binary's `main` from its test functions - the ones that
+/// need the named card, then, after `host:`, any that do not:
 ///
 /// ```ignore
 /// gpu_core::card_tests!(the_kernel_matches_the_reference, the_kernel_is_selected);
+/// gpu_core::card_tests!(device_block_backward_matches_host; host: cpu_backend_block_backward_matches_host);
 /// ```
 ///
 /// The target needs `harness = false` in its `[[test]]` entry.
 #[macro_export]
 macro_rules! card_tests {
-    ($($test:path),* $(,)?) => {
+    ($($test:path),* $(,)? $(; host: $($host:path),* $(,)?)?) => {
         fn main() -> ::std::process::ExitCode {
-            $crate::card_tests::run(&[$($crate::card_tests::CardTest { name: stringify!($test), run: $test }),*])
+            $crate::card_tests::run(&[
+                $($crate::card_tests::CardTest { name: stringify!($test), run: $test, needs_card: true },)*
+                $($($crate::card_tests::CardTest { name: stringify!($host), run: $host, needs_card: false },)*)?
+            ])
         }
     };
 }

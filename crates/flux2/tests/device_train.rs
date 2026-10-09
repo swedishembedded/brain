@@ -17,7 +17,7 @@
 //! the host projects from. Cosine AND rel_l2 are both asserted (an epsilon
 //! mutation scores cosine 1.000000 - see `tests/dev_grad.rs`).
 //!
-//! Needs a GPU: `BRAIN_DEV_GPU=1`.
+//! The card is an argument: `cargo test -p brain-flux2 --release --test device_train -- --device gpu1 --backend cuda`.
 
 use flux2::devtrain::DeviceTrainer;
 use flux2::lora::{LoraAdapter, LoraCfg};
@@ -82,14 +82,6 @@ fn rel_l2(dev: &[f32], host: &[f32]) -> f64 {
     diff / nh.max(1e-12)
 }
 
-fn skip() -> bool {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the FLUX.2 device training test");
-        return true;
-    }
-    false
-}
-
 /// A batch and a base model at [`cfg_with`]'s dims, caption-only.
 fn fixture(seed: u64) -> (Cfg, ModelWeights<f32>, modelgrad::Batch<f32>) {
     fixture_with(Vec::new(), seed)
@@ -130,11 +122,7 @@ fn adapter(c: &Cfg, seed: u64) -> LoraAdapter {
 /// the two backends - a slab sized for the wrong row count, a `dx` region left
 /// uncleared - produces exactly the kind of silently-wrong gradient this
 /// comparison exists to catch.
-#[test]
 fn device_lora_grads_match_host() {
-    if skip() {
-        return;
-    }
     for refs in [Vec::new(), vec![(4usize, 4usize)]] {
         device_matches_host(refs, 0x5eed_0001);
     }
@@ -204,11 +192,7 @@ fn device_matches_host(refs: Vec<(usize, usize)>, seed: u64) {
     assert!(wr < 1e-5, "worst rel_l2 {wr:.3e} on {wrn} (paired={paired})");
 }
 
-#[test]
 fn a_fresh_adapter_is_a_device_no_op() {
-    if skip() {
-        return;
-    }
     let (c, base, batch) = fixture(0x5eed_0002);
     // The SHIPPED init (B = 0), not the perturbed one: this is the invariant a
     // LoRA run depends on - step 0 must see exactly the base model.
@@ -220,11 +204,7 @@ fn a_fresh_adapter_is_a_device_no_op() {
     assert!((hloss - dloss).abs() / hloss.abs().max(1e-12) < 1e-5, "a B=0 adapter must reproduce the base loss ({hloss} vs {dloss})");
 }
 
-#[test]
 fn device_lora_only_training_drives_the_loss_down() {
-    if skip() {
-        return;
-    }
     let (c, base, batch) = fixture(0x5eed_0003);
     let mut ad = LoraAdapter::new(&c, LoraCfg::new(RANK));
     let tr = DeviceTrainer::new(c, RANK, &base);
@@ -249,13 +229,11 @@ fn device_lora_only_training_drives_the_loss_down() {
     assert!(last < 0.85 * l0, "final loss did not hold near the floor ({last:.6} vs {l0:.6})");
 }
 
-#[test]
 fn a_two_card_split_is_the_same_step_as_one_card() {
-    if skip() {
-        return;
-    }
-    if gpu_core::discrete_gpu_count() < 2 {
-        brain_testutil::skip_unavailable("needs two discrete GPUs for the split-stack test");
+    // The cards `--device` names, never the machine's: a run pinned to one
+    // card must not open the other.
+    if gpu_core::devices::schedulable_gpu_count() < 2 {
+        brain_testutil::skip_unavailable("needs two GPUs named by --device for the split-stack test");
         return;
     }
     // Splitting the stack inserts a host round trip at the cut and nothing
@@ -284,11 +262,7 @@ fn a_two_card_split_is_the_same_step_as_one_card() {
     eprintln!("FLUX.2 two-card split reproduces the single-card step exactly.");
 }
 
-#[test]
 fn turning_the_frozen_qk_gain_gradient_off_changes_no_adapter_gradient() {
-    if skip() {
-        return;
-    }
     // The QK-RMSNorm scales are frozen in a LoRA run, so the trainer skips
     // the two kernels that produce their gain gradient. That is only a valid
     // saving if it is invisible to everything the optimiser consumes - so
@@ -317,3 +291,11 @@ fn turning_the_frozen_qk_gain_gradient_off_changes_no_adapter_gradient() {
     }
     eprintln!("Skipping the frozen QK gain gradient leaves all {} adapter gradients bit-identical.", g_on.lora.len());
 }
+
+gpu_core::card_tests!(
+    device_lora_grads_match_host,
+    a_fresh_adapter_is_a_device_no_op,
+    device_lora_only_training_drives_the_loss_down,
+    a_two_card_split_is_the_same_step_as_one_card,
+    turning_the_frozen_qk_gain_gradient_off_changes_no_adapter_gradient,
+);

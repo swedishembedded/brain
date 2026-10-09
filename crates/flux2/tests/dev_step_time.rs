@@ -5,13 +5,19 @@
 //! configuration and a real training resolution - the number a caller has to
 //! budget a run against, and the one an optimisation pass is measured from.
 //!
-//! Ignored by default (it wants a whole card to itself and several minutes).
-//! Re-measure with:
+//! A measurement, not a gate, and its card is an argument; one case at a
+//! time, by name:
 //!
 //! ```text
-//! BRAIN_DEV_GPU=1 BRAIN_GPU_INDEX=<i> cargo test -p brain-flux2 --release \
-//!     --test dev_step_time -- --ignored --nocapture
+//! cargo test -p brain-flux2 --release --test dev_step_time -- \
+//!     --device gpu1 --backend cuda --profile-replays 5 klein_4b_paired_512_int8_base
 //! ```
+//!
+//! With `--profile-replays N` it also prints the step's per-kernel device
+//! time with each dispatch at its minimum over N replays of the recorded step
+//! (`DeviceTrainer::profile_step`) - the ranking to trust on a card another
+//! process is using; the per-launch table above it carries the neighbour's
+//! time slices.
 //!
 //! Each configuration is its own test, built from a [`StepCase`] value:
 //! the variant, the square training size, the adapter rank, the reference
@@ -121,50 +127,34 @@ fn weights(c: &Cfg) -> ModelWeights<f32> {
     }
 }
 
-#[test]
-#[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
 fn klein_4b_caption_512() {
     measure(&KLEIN_4B_512);
 }
 
-#[test]
-#[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
 fn klein_4b_paired_512() {
     measure(&StepCase { refs: 1, ..KLEIN_4B_512 });
 }
 
-#[test]
-#[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
 fn klein_4b_paired_512_int8_base() {
     measure(&StepCase { refs: 1, base: BasePrecision::Int8, ..KLEIN_4B_512 });
 }
 
 /// One single block: the per-block cost and kernel ranking of the paired
 /// stack, on a card with room for little else.
-#[test]
-#[ignore = "wants a GPU and a minute; re-measure explicitly"]
 fn klein_4b_paired_512_one_single_block() {
     measure(&StepCase { refs: 1, blocks: Some((0, 1)), ..KLEIN_4B_512 });
 }
 
-#[test]
-#[ignore = "wants a GPU and a minute; re-measure explicitly"]
 fn klein_4b_paired_512_int8_base_one_single_block() {
     measure(&StepCase { refs: 1, blocks: Some((0, 1)), base: BasePrecision::Int8, ..KLEIN_4B_512 });
 }
 
 /// klein-9B's fp32 base is larger than one 24 GiB card.
-#[test]
-#[ignore = "wants two whole GPUs and several minutes; re-measure explicitly"]
 fn klein_9b_caption_512_two_cards() {
     measure(&StepCase { variant: "klein-9b", cards: 2, ..KLEIN_4B_512 });
 }
 
 fn measure(case: &StepCase) {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the device step-time measurement");
-        return;
-    }
     let StepCase { variant, size, rank, refs, blocks, base: base_at, cards, iters } = *case;
     assert!(size.is_multiple_of(16), "size must be a multiple of 16");
     let mut fc = Flux2Config::from_name(variant).expect("variant");
@@ -312,5 +302,19 @@ fn measure(case: &StepCase) {
     } else {
         eprintln!("  (no GPU timestamp queries on this backend)");
     }
+    if let Some(reps) = gpu_core::profile::program_replays() {
+        for (card, rows) in tr.profile_step(&ad, &batch, reps).into_iter().enumerate() {
+            gpu_core::profile::print_device_table(&format!("training step, card {card}, min of {reps} replays"), 0.0, Some(rows));
+        }
+    }
     assert!(best.is_finite() && best > 0.0, "a step must take measurable time");
 }
+
+gpu_core::card_tests!(
+    klein_4b_caption_512,
+    klein_4b_paired_512,
+    klein_4b_paired_512_int8_base,
+    klein_4b_paired_512_one_single_block,
+    klein_4b_paired_512_int8_base_one_single_block,
+    klein_9b_caption_512_two_cards,
+);

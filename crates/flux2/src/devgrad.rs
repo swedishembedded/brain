@@ -286,6 +286,17 @@ pub struct BlockDev {
     /// The int8 activation scratch when the frozen base is resident as int8
     /// ([`BasePrecision::Int8`]); `None` for an fp32 base.
     i8: Option<model::dispatch::I8Scratch>,
+    /// While armed ([`BlockDev::arm_profile`]): what the segments run since
+    /// have cost.
+    profile: std::cell::RefCell<Option<SegmentProfile>>,
+}
+
+/// A min-of-replays kernel profile being collected over the segments of a
+/// step: the replay count, and per kernel the device milliseconds and
+/// dispatches summed over the segments.
+struct SegmentProfile {
+    reps: u32,
+    rows: HashMap<String, (f64, u64)>,
 }
 
 /// How a [`BlockDev`] holds its frozen base linears.
@@ -304,6 +315,37 @@ pub enum BasePrecision {
 }
 
 impl BlockDev {
+    /// Run one segment of the step - submit it and wait for it - and, while
+    /// profiling is armed, replay it as one program to add each dispatch's
+    /// minimum over the replays to the profile. The segment's own clears go
+    /// with every replay, so its accumulators restart each time.
+    fn run(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+        self.gpu.submit(clears, steps);
+        self.gpu.poll_wait();
+        let mut profile = self.profile.borrow_mut();
+        let Some(p) = profile.as_mut() else { return };
+        self.gpu.begin_tape();
+        self.gpu.submit(clears, steps);
+        let tape = self.gpu.end_tape();
+        for (kernel, ms, calls) in self.gpu.profile_tape(&tape, p.reps).unwrap_or_default() {
+            let row = p.rows.entry(kernel).or_insert((0.0, 0));
+            row.0 += ms;
+            row.1 += calls;
+        }
+    }
+
+    /// Start collecting a min-of-`reps`-replays kernel profile of every
+    /// segment this engine runs (see `run`). Each segment then runs `reps + 1`
+    /// more times, so what a profiled step computes is not to be used.
+    pub fn arm_profile(&self, reps: u32) {
+        *self.profile.borrow_mut() = Some(SegmentProfile { reps, rows: HashMap::new() });
+    }
+
+    /// Stop profiling and return `(kernel, ms, dispatches)` per kernel kind.
+    pub fn take_profile(&self) -> Vec<(String, f64, u64)> {
+        self.profile.borrow_mut().take().map(|p| p.rows.into_iter().map(|(k, (ms, n))| (k, ms, n)).collect()).unwrap_or_default()
+    }
+
     /// Build an engine on a fresh wgpu device.
     pub fn new(n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize) -> BlockDev {
         BlockDev::from_gpu(Gpu::new_gpu(KERNELS), n_max, d, nh, mlp, rank)
@@ -384,7 +426,7 @@ impl BlockDev {
             mk("dgt", d);
         }
         let coop = gpu.caps().workgroup_reductions;
-        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b, i8 };
+        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b, i8, profile: std::cell::RefCell::new(None) };
         eng.gpu.write_f32(&eng.b["ones"], &vec![1.0f32; d]);
         eng.gpu.write_f32(&eng.b["zeros"], &vec![0.0f32; d]);
         eng
@@ -1002,8 +1044,7 @@ impl BlockDev {
             self.mm_rows((ctx, 0), txt_in, (x, 0), nt, cdim, d),
             self.mm_rows((tok, 0), img_in, (x, (nt * d) as u64), ni, cin, d),
         ];
-        self.gpu.submit(&[], &s);
-        self.gpu.poll_wait();
+        self.run(&[], &s);
     }
 
     /// Final layer over the GENERATED image rows: modulated LN under
@@ -1025,8 +1066,7 @@ impl BlockDev {
             self.film(self.g("xh1"), SITE_FINAL, self.g("n1"), nt, n_pred),
             self.mm_rows((self.g("n1"), nt), final_w, (pred, 0), n_pred, d, cin),
         ];
-        self.gpu.submit(&[], &s);
-        self.gpu.poll_wait();
+        self.run(&[], &s);
     }
 
     /// Final-layer backward from `dpred [n_pred, cin]` into `dx [n, d]`. The
@@ -1043,8 +1083,7 @@ impl BlockDev {
         let off = self.sl(nt * d, n_pred * d);
         s.push(self.gpu.step_sliced(K_FILM_DX, &[self.g("dn1"), self.g(&format!("sb{SITE_FINAL}")), self.g("dxh")], &[off, (0, 0), off], &[n_pred as u32, d as u32, n_pred as u32], (n_pred * d) as u32));
         s.push(self.ln_dx(x, off, self.g("dxh"), off, dx, n_pred));
-        self.gpu.submit(&[dx], &s);
-        self.gpu.poll_wait();
+        self.run(&[dx], &s);
     }
 }
 
@@ -1094,8 +1133,7 @@ impl BlockDev {
     pub fn double_forward(&self, w: &DoubleDev, dm: Dims, x: &DeviceBuffer, out: &DeviceBuffer) {
         let mut s = Vec::new();
         self.double_fwd(&mut s, w, dm, x, out);
-        self.gpu.submit(&[], &s);
-        self.gpu.poll_wait();
+        self.run(&[], &s);
     }
 
     /// Backward one double block: recompute the forward from the saved input
@@ -1151,8 +1189,7 @@ impl BlockDev {
             self.modln_bwd(&mut s, x, r0, self.g("xh1"), self.g("dn1"), s1, r0, m);
         }
         s.push(self.gpu.step(K_ADD2, &[self.g("dx1"), self.g("dtmp"), dx], &[(n * d) as u32], (n * d) as u32));
-        self.gpu.submit(&self.double_clears(w), &s);
-        self.gpu.poll_wait();
+        self.run(&self.double_clears(w), &s);
     }
 }
 
@@ -1185,8 +1222,7 @@ impl BlockDev {
     pub fn single_forward(&self, w: &SingleDev, dm: Dims, x: &DeviceBuffer, out: &DeviceBuffer) {
         let mut s = Vec::new();
         self.single_fwd(&mut s, w, dm, x, out);
-        self.gpu.submit(&[], &s);
-        self.gpu.poll_wait();
+        self.run(&[], &s);
     }
 
     /// Backward one single block (recompute + backprop), writing `dx`.
@@ -1213,7 +1249,6 @@ impl BlockDev {
         self.lin_bwd(&mut s, &w.wv, 2, 0, self.g("n1"), 0, self.g("dv"), 0, self.g("dn1"), 0, n, true);
         self.modln_bwd(&mut s, x, 0, self.g("xh1"), self.g("dn1"), SITE_SGL, 0, n);
         s.push(self.gpu.step(K_ADD2, &[dout, self.g("dtmp"), dx], &[(n * d) as u32], (n * d) as u32));
-        self.gpu.submit(&self.single_clears(w), &s);
-        self.gpu.poll_wait();
+        self.run(&self.single_clears(w), &s);
     }
 }

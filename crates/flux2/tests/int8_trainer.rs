@@ -23,7 +23,7 @@
 //! common machinery cannot hide inside the int8 tolerance.
 //!
 //! Needs a device offering the native int8-weight input gradient (CUDA):
-//! `BRAIN_DEV_GPU=1`.
+//! the card named on the command line: `cargo test -p brain-flux2 --release --test int8_trainer -- --device gpu1 --backend cuda`.
 
 use flux2::devgrad::BasePrecision;
 use flux2::devtrain::{DeviceTrainer, TrainerSpec};
@@ -169,10 +169,6 @@ fn spec(base: BasePrecision) -> TrainerSpec {
 }
 
 fn skip() -> bool {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the FLUX.2 int8 trainer test");
-        return true;
-    }
     let probe = gpu_core::Gpu::new_gpu(flux2::devgrad::KERNELS);
     if !probe.has_fused(gpu_core::Fused::I8wDx) {
         brain_testutil::skip_unavailable("this device does not offer the native int8-weight input gradient");
@@ -181,7 +177,6 @@ fn skip() -> bool {
     false
 }
 
-#[test]
 fn an_int8_base_trains_the_gradients_of_its_dequantised_weights() {
     if skip() {
         return;
@@ -225,3 +220,7 @@ fn an_int8_base_trains_the_gradients_of_its_dequantised_weights() {
         assert!(ir < INT8_MAX_REL_L2, "int8 base worst rel_l2 {ir:.3e} >= {INT8_MAX_REL_L2}");
     }
 }
+
+gpu_core::card_tests!(
+    an_int8_base_trains_the_gradients_of_its_dequantised_weights,
+);

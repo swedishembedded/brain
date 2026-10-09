@@ -37,3 +37,19 @@ sha2.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
+
+[[test]]
+name = "dev_step_time"
+harness = false
+
+[[test]]
+name = "dev_grad"
+harness = false
+
+[[test]]
+name = "device_train"
+harness = false
+
+[[test]]
+name = "int8_trainer"
+harness = false

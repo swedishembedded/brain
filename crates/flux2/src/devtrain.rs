@@ -673,6 +673,22 @@ impl DeviceTrainer {
         (loss, StepGrads { lora, sites, qk })
     }
 
+    /// The per-kernel device time of one gradient step on each card, each
+    /// dispatch at its MINIMUM over `reps` replays: every segment the step
+    /// runs (a block's forward, its backward, the embedders, the head) is
+    /// replayed `reps + 1` times as one program right after it ran
+    /// ([`BlockDev::arm_profile`]), and the rows are summed over the segments.
+    /// That is the table to rank kernels by on a card another process is
+    /// using - a neighbour's time slice only ever lengthens a launch. The
+    /// adapter is not stepped, and what the profiled step computes is not used.
+    pub fn profile_step(&self, ad: &LoraAdapter, b: &Batch<f32>, reps: u32) -> Vec<Vec<(String, f64, u64)>> {
+        for e in &self.engs {
+            e.arm_profile(reps);
+        }
+        let _ = self.grads(ad, b);
+        self.engs.iter().map(BlockDev::take_profile).collect()
+    }
+
     /// One optimiser step: device gradients → Adam on the adapter's `A,B`.
     pub fn step(&self, ad: &mut LoraAdapter, b: &Batch<f32>, lr: f32) -> f64 {
         let (loss, g) = self.grads(ad, b);
