@@ -133,12 +133,14 @@ def probe_rgb(rgb: np.ndarray) -> Probe:
     return Probe(thumb(gray), dhash(gray), float(gray[y0:y1, x0:x1].mean()), valid_fraction(gray))
 
 
-def _edges(gray: np.ndarray) -> np.ndarray:
+def edge_magnitude(gray: np.ndarray) -> np.ndarray:
+    """Sobel magnitude of the 1.5-sigma smoothed image: contrast polarity does not matter."""
     g = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), 1.5)
     return cv2.magnitude(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
 
 
-def _ncc(a: np.ndarray, b: np.ndarray) -> float:
+def ncc(a: np.ndarray, b: np.ndarray) -> float:
+    """Normalised cross-correlation of two equally shaped arrays; 0 when either is constant."""
     a, b = a - a.mean(), b - b.mean()
     d = float(np.sqrt((a * a).sum() * (b * b).sum()))
     return float((a * b).sum() / d) if d > 0 else 0.0
@@ -150,7 +152,7 @@ def edge_alignment(rgb: np.ndarray, ir: np.ndarray, search: int = 8, margin: int
     g, i = to_gray(rgb), to_gray(ir)
     if g.shape != i.shape:
         i = cv2.resize(i, (g.shape[1], g.shape[0]), interpolation=cv2.INTER_AREA)
-    eg, ei = _edges(g), _edges(i)
+    eg, ei = edge_magnitude(g), edge_magnitude(i)
     x0, y0, x1, y1 = valid_bbox(g)
     h, w = eg.shape
     x0, y0 = max(x0 + margin, search), max(y0 + margin, search)
@@ -158,11 +160,11 @@ def edge_alignment(rgb: np.ndarray, ir: np.ndarray, search: int = 8, margin: int
     if x1 - x0 < 8 or y1 - y0 < 8:
         return 0.0, 0.0, (0, 0)
     core = eg[y0:y1, x0:x1]
-    zero = _ncc(core, ei[y0:y1, x0:x1])
+    zero = ncc(core, ei[y0:y1, x0:x1])
     best, shift = zero, (0, 0)
     for dy in range(-search, search + 1, 2):
         for dx in range(-search, search + 1, 2):
-            v = _ncc(core, ei[y0 + dy:y1 + dy, x0 + dx:x1 + dx])
+            v = ncc(core, ei[y0 + dy:y1 + dy, x0 + dx:x1 + dx])
             if v > best:
                 best, shift = v, (dx, dy)
     return zero, best, shift
