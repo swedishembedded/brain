@@ -50,11 +50,18 @@ pub struct TranscribePipeline {
 
 enum Backend {
     Qwen3Asr(qwen3asr::caps::QwenAsrProvider),
-    Nemotron { model: nemotronasr::model::NemotronAsr, detokenizer: nemotronasr::tokenizer::Detokenizer },
+    Nemotron(Box<Nemotron>),
 }
 
 /// The rate recognition takes: 16 kHz mono.
 const ASR_SAMPLE_RATE: u32 = 16_000;
+
+/// The Nemotron model with its detokenizer, boxed in [`Backend`] because it is
+/// far larger than the other variant.
+struct Nemotron {
+    model: nemotronasr::model::NemotronAsr,
+    detokenizer: nemotronasr::tokenizer::Detokenizer,
+}
 
 /// Language prompt index for English, the only prompt this pipeline selects.
 const NEMOTRON_ENGLISH_PROMPT: usize = 0;
@@ -64,7 +71,7 @@ impl std::fmt::Debug for TranscribePipeline {
         let mut d = f.debug_struct("TranscribePipeline");
         match &self.backend {
             Backend::Qwen3Asr(p) => d.field("backend", &"qwen3asr").field("window_samples", &p.window_samples()),
-            Backend::Nemotron { .. } => d.field("backend", &"nemotronasr"),
+            Backend::Nemotron(_) => d.field("backend", &"nemotronasr"),
         };
         d.finish()
     }
@@ -94,7 +101,8 @@ impl TranscribePipeline {
                 let (text, tokens) = provider.transcribe(samples).map_err(Error::Backend)?;
                 Ok(Transcript { text, tokens, truncated })
             }
-            Backend::Nemotron { model, detokenizer } => {
+            Backend::Nemotron(n) => {
+                let (model, detokenizer) = (&n.model, &n.detokenizer);
                 let blank = model.config().blank_token_id;
                 let tokens: Vec<u32> = model.transcribe(samples, NEMOTRON_ENGLISH_PROMPT).into_iter().filter(|&t| t != blank).collect();
                 Ok(Transcript { text: detokenizer.decode(&tokens), tokens, truncated: None })
@@ -224,7 +232,7 @@ impl TranscribePipelineBuilder {
                 let cfg = nemotronasr::NemotronConfig::nemotron_3_5_asr_0_6b();
                 let model = nemotronasr::model::NemotronAsr::from_hf(&dir, cfg).map_err(|e| Error::Backend(format!("nemotronasr: {e}")))?;
                 let detokenizer = nemotronasr::tokenizer::Detokenizer::from_hf(&dir).map_err(|e| Error::Backend(format!("nemotronasr: {e}")))?;
-                Backend::Nemotron { model, detokenizer }
+                Backend::Nemotron(Box::new(Nemotron { model, detokenizer }))
             }
         };
 
