@@ -24,6 +24,7 @@ The decision config (JSON, paths relative to it):
     instruction_model true when the translator is the instruction-conditioned one (enables K5)
     gate_statistics   JSON of the geometry-gate rejections of C2 (rir_gates.py), for K4
     obedience         JSON report of rir_obey.py, for K5
+    obedience_source  which instructions K5 reads: "oracle" (default, measured from the real IR) or "prior"
 
 Roles: A1 trained on RGB, A2 on real IR (upper bound), B3 on the trivial
 transform (grayscale, CLAHE, sensor model), C2 on the learned translator's
@@ -75,7 +76,8 @@ K1_MIN_GAIN = 0.03
 K2_MAX_G = 0.25
 RELIABLE_MIN_G = 0.5
 K4_MAX_FAIL_FRACTION = 0.30
-CONFIG_KEYS = ("sequences", "roles", "resamples", "seed", "alpha", "nc", "instruction_model", "gate_statistics", "obedience")
+CONFIG_KEYS = ("sequences", "roles", "resamples", "seed", "alpha", "nc", "instruction_model", "gate_statistics", "obedience",
+               "obedience_source")
 
 
 class DecisionError(ValueError):
@@ -93,6 +95,7 @@ class Config:
     instruction_model: bool = False
     gate_statistics: str | None = None
     obedience: str | None = None
+    obedience_source: str = "oracle"
 
 
 def load_config(path: str) -> Config:
@@ -240,10 +243,10 @@ def _kill_k5(config: Config, report):
     rule = "K5: controllability interval includes 0 for every region type (instruction model only)"
     if not config.instruction_model:
         return Kill(rule, None, False, "not an instruction model")
-    types = (report or {}).get("region_types") or {}
+    types = ((report or {}).get("sources", {}).get(config.obedience_source) or {}).get("region_types") or {}
     effects = {t: v["effect"] for t, v in types.items() if v.get("effect")}
     if not effects:
-        return Kill(rule, None, True, "no obedience measurement given")
+        return Kill(rule, None, True, f"no obedience measurement with {config.obedience_source} instructions given")
     includes_zero = {t: e["ci"][0] <= 0 <= e["ci"][1] for t, e in effects.items()}
     detail = ", ".join(f"{t}: {'includes 0' if z else 'excludes 0'}" for t, z in sorted(includes_zero.items()))
     return Kill(rule, all(includes_zero.values()), True, detail)

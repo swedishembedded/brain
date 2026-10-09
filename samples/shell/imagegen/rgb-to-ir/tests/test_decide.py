@@ -69,9 +69,11 @@ def gates(n_failed, n=100):
     return {"n_images": n, "n_failed": n_failed, "by_reason": {}}
 
 
-def obedience(*cis):
-    return {"region_types": {f"type{i}": {"effect": {"measure": "controllability", "estimate": 0.0, "ci": list(ci), "n": 30}}
-                             for i, ci in enumerate(cis)}}
+def obedience(*cis, source="oracle"):
+    """The shape rir_obey.evaluate writes: instruction source -> region type -> effect."""
+    return {"sources": {source: {"region_types": {
+        f"type{i}": {"effect": {"measure": "controllability", "estimate": 0.0, "ci": list(ci), "n": 30}}
+        for i, ci in enumerate(cis)}}}}
 
 
 class Verdicts(unittest.TestCase):
@@ -147,6 +149,15 @@ class KillCriteria(unittest.TestCase):
         one_clear = Study(RELIABLE, instruction_model=True, obedience=obedience([-0.2, 0.3], [0.2, 0.9])).decide()
         self.assertTrue(every.kills["K5"].triggered)
         self.assertFalse(one_clear.kills["K5"].triggered)
+
+    def test_k5_reads_the_oracle_instructions_unless_told_otherwise(self):
+        prior_only = Study(RELIABLE, instruction_model=True, obedience=obedience([-0.2, 0.3], source="prior")).decide()
+        self.assertIsNone(prior_only.kills["K5"].triggered)  # nothing measured with oracle instructions
+        study = Study(RELIABLE, instruction_model=True, obedience=obedience([-0.2, 0.3], source="prior"))
+        study.config["obedience_source"] = "prior"
+        with open(study.config_path, "w") as fh:
+            json.dump(study.config, fh)
+        self.assertTrue(study.decide().kills["K5"].triggered)
 
     def test_k5_applies_to_the_instruction_model_only(self):
         d = Study(RELIABLE, instruction_model=False, obedience=obedience([-0.2, 0.3])).decide()
