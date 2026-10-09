@@ -409,6 +409,74 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 512 * 4 + 4,
         src: include_str!("../cu/gqa_decode_prep.cu"),
     },
+    CudaKernel {
+        name: "conv2d_fwd_f32",
+        // Redirected to by name from the WGSL `conv2d` (`gpu_core::native_upgrade`);
+        // `Op::Conv2d`'s selector arm belongs to a different call site
+        // (`vae::blocks`), so `find` must never offer this for it.
+        op: Op::Conv2d,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_fwd",
+        what: "dense fp32 conv2d forward (NCHW, any K/stride/pad) as an implicit GEMM; 16/32/64-channel x 128-position tile, double-buffered 16-deep k slices, register block, explicit FMA",
+        reported: "native:conv2d_fwd_f32",
+        block_dim: 256,
+        // Up to 64 output channels (16 or 32 for narrower layers) x 128 positions.
+        tile: (64, 128),
+        // Two A slices of 16 x (64 + 4) and two B slices of 16 x 128 floats.
+        shared_bytes: (2 * 16 * (64 + 4) + 2 * 16 * 128) * 4,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
+    CudaKernel {
+        name: "conv2d_dx_f32",
+        op: Op::Conv2dBackward,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_dx",
+        what: "dense fp32 conv2d input gradient as an implicit GEMM per stride class (only the live taps of each (h mod s, w mod s) class are gathered); the forward's tile and register block",
+        reported: "native:conv2d_dx_f32",
+        block_dim: 256,
+        // Up to 64 input channels x 128 positions of one stride class.
+        tile: (64, 128),
+        shared_bytes: (2 * 16 * (64 + 4) + 2 * 16 * 128) * 4,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
+    CudaKernel {
+        name: "conv2d_dw_partial_f32",
+        op: Op::Conv2dBackward,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_dw_partial",
+        what: "dense fp32 conv2d weight gradient as an implicit GEMM over a slice of the output positions; 16/32/64 x 64 tile, 32 positions staged per iteration, partial sums to scratch (or straight into dw for one slice)",
+        reported: "native:conv2d_dw_partial_f32",
+        block_dim: 256,
+        // Up to 64 output channels x 64 weight columns (ci, kh, kw).
+        tile: (64, 64),
+        // Two A slices of 32 x (64 + 4) and two B slices of 32 x (64 + 4) floats.
+        shared_bytes: (2 * 32 * (64 + 4) + 2 * 32 * (64 + 4)) * 4,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
+    CudaKernel {
+        name: "conv2d_dw_reduce_f32",
+        op: Op::Conv2dBackward,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_conv2d_dw_reduce",
+        what: "folds the weight gradient's per-slice partial sums into dw in ascending slice order (deterministic, no atomics)",
+        reported: "native:conv2d_dw_reduce_f32",
+        block_dim: 256,
+        tile: (1, 256),
+        shared_bytes: 0,
+        src: include_str!("../cu/conv2d_f32.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

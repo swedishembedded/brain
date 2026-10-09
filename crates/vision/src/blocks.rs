@@ -525,6 +525,11 @@ pub struct Conv {
     /// eval path (dense convs with large Cout, where `conv_act_reg` collapses on
     /// the P40). Allocated once, reused across frames.
     col: std::cell::RefCell<Option<DeviceBuffer>>,
+    /// Lazily-allocated partial-sum planes of the native split weight gradient
+    /// ([`gpu_core::Gpu::conv2d_dw_steps`]); never allocated where that path is
+    /// not offered or the gradient fits one slice. Sized once from the device's
+    /// own split, reused every backward.
+    dw_scratch: std::cell::RefCell<Option<DeviceBuffer>>,
 }
 
 impl Conv {
@@ -599,6 +604,7 @@ impl Conv {
             dbcast: if spec.bias { Some(ctx.act(cout * out_shape.h * out_shape.w)) } else { None },
             q_in: std::cell::RefCell::new(None),
             col: std::cell::RefCell::new(None),
+            dw_scratch: std::cell::RefCell::new(None),
         }
     }
 
@@ -776,6 +782,33 @@ impl Conv {
         } else {
             ctx.ids.need(ctx.ids.conv2d_gd_dw, "conv2d_gd_dw")
         }
+    }
+
+    /// The weight-gradient dispatch(es): `dw += conv2d_dw(d_conv, x_in)`.
+    ///
+    /// A dense unit takes the device's native split weight gradient where it is
+    /// offered ([`gpu_core::Gpu::conv2d_dw_steps`]: a partial-sum dispatch plus
+    /// a fixed-order reduction, or one dispatch when the gradient fits one
+    /// slice); everything else - and every device without that path - runs the
+    /// registered WGSL kernel. Both accumulate into the pre-zeroed grad, so the
+    /// caller submits the returned steps in order exactly where the single
+    /// dispatch used to go.
+    fn dw_steps(&self, ctx: &Ctx, ps: &ParamStore, d_conv: &DeviceBuffer, x_in: &DeviceBuffer) -> Vec<gpu_core::Step> {
+        let params = self.conv_params();
+        let dw = ps.g(&self.names.weight);
+        if self.spec.is_dense() {
+            if let Some(words) = ctx.gpu.conv2d_dw_scratch_words(&params) {
+                if words > 0 && self.dw_scratch.borrow().is_none() {
+                    *self.dw_scratch.borrow_mut() = Some(ctx.gpu.storage(words));
+                }
+                let scratch = self.dw_scratch.borrow();
+                if let Some(steps) = ctx.gpu.conv2d_dw_steps(d_conv, x_in, dw, scratch.as_ref(), &params) {
+                    return steps;
+                }
+            }
+        }
+        let dw_n = self.out_shape.c * (self.in_shape.c / self.spec.groups) * self.k * self.k;
+        vec![ctx.step(self.conv_dw_kind(ctx), &[d_conv, x_in, dw], &params, dw_n)]
     }
     /// Can this unit take the fused conv->BN(eval)->act path?
     ///
@@ -1157,7 +1190,6 @@ impl Conv {
     ) {
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
-        let dw_n = self.out_shape.c * self.in_shape.c * self.k * self.k;
 
         if self.spec.norm == Norm::None {
             // Raw conv: act backward straight into d_conv, then the conv
@@ -1170,10 +1202,9 @@ impl Conv {
             } else {
                 d_out
             };
-            let dw_n = self.out_shape.c * (self.in_shape.c / self.spec.groups) * self.k * self.k;
-            let s_dw = ctx.step(self.conv_dw_kind(ctx), &[d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
-            let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
-            ctx.gpu.submit(&[], &[s_dw, s_dxin]);
+            let mut steps = self.dw_steps(ctx, ps, d_conv, x_in);
+            steps.push(ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel()));
+            ctx.gpu.submit(&[], &steps);
             self.bias_backward(ctx, ps, d_conv);
             return;
         }
@@ -1187,11 +1218,14 @@ impl Conv {
         let s_dgamma = ctx.step(ctx.ids.bn_dgamma, &[&self.conv_out, &self.d_bn, &self.mv, ps.g(&self.names.gamma)], &self.nchw(), c);
         let s_dbeta = ctx.step(ctx.ids.bn_dbeta, &[&self.d_bn, ps.g(&self.names.beta)], &self.nchw(), c);
         let s_dx = ctx.step(ctx.ids.bn_dx, &[&self.conv_out, &self.d_bn, &self.bp, &self.d_conv], &self.nchw(), on);
-        let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
         let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
         // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
-        // must precede s_dx (reads bp). Submit in this order.
-        ctx.gpu.submit(&[], &[s_act, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
+        // must precede s_dx (reads bp); the weight gradient reads d_conv. Submit
+        // in this order.
+        let mut steps = vec![s_act, s_dstats, s_dgamma, s_dbeta, s_dx];
+        steps.extend(self.dw_steps(ctx, ps, &self.d_conv, x_in));
+        steps.push(s_dxin);
+        ctx.gpu.submit(&[], &steps);
         self.bias_backward(ctx, ps, &self.d_conv);
     }
 }

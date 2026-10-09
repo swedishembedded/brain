@@ -941,6 +941,33 @@ the ~7,800 stream operations (a launch and a parameter upload per step).
 - `head_dim != 256`, `dk/dv != 128`, group-16 (Q6_K) scales and chunks above 64
   decline to the portable path by construction.
 
+### Dense convolution training - YOLOv8n fine-tune, P40 (cc 6.1)
+
+`brain yolov8 fine-tune` at batch 8, 512 x 512 spent nearly all of its device
+time in the three naive WGSL conv kernels (`conv2d`, `conv2d_dx`, `conv2d_dw`:
+one thread per output, a serial walk of the whole reduction in global memory,
+and a weight gradient with one thread per weight element reducing over every
+position of the batch). `kernels-cuda/cu/conv2d_f32.cu` replaces all three:
+
+| piece | how it is reached | held to |
+|---|---|---|
+| forward, implicit GEMM, 16/32/64-channel x 128-position tile, double-buffered 16-deep k slices | `native_upgrade` row for `conv2d` (same uniform, same bindings) | f64 oracle at the fp32 summation bound + bit-exact on integer data at the real geometry (`gpu-core/tests/conv2d_native.rs`) |
+| input gradient, implicit GEMM per stride class (only the live taps of each `(h mod s, w mod s)` class) | `native_upgrade` row for `conv2d_dx` | same |
+| weight gradient, implicit GEMM split over output positions, fixed-order reduction (no atomics) | `Gpu::conv2d_dw_steps`, called by `vision::blocks::Conv` (it needs a scratch plane the WGSL slot cannot carry) | same |
+
+`BRAIN_NO_NATIVE_KERNELS=1` restores the WGSL kernels (the A/B switch).
+
+<!-- perf-number: ledger of one measurement session on a shared P40 -->
+Measured on one P40 that another process kept at 100% utilisation throughout,
+so every per-kernel figure is the fastest of seven single-step submissions
+(see knowledge #212 for why a busy neighbour inflates anything else), at every
+conv of the network (`conv2d_native_bench`): forward 20.9 ms, input gradient
+24.6 ms, weight gradient 15.2 ms per step - 60.8 ms for 124 GFLOP of conv
+arithmetic, 2.0 TFLOP/s. The same step's WGSL conv kernels took 7.5 s of
+device time under the same contention (5.7 s on a quiet card). First-step loss
+is unchanged at the printed precision (50.8109) and 40 steps converge
+(50.81 -> 6.56).
+
 ## Not delivered - what is still missing
 
 **One model's forward, one tuned kernel. Backward, breadth and every other

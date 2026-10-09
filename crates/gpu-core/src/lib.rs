@@ -1902,6 +1902,56 @@ mod native_facade {
             self.step_native(id, bufs, params, which.blocks(params))
         }
 
+        /// How the native dense-conv weight gradient of `params` (the ten-word
+        /// conv uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`) is split
+        /// on this device: `(slices, positions per slice)`. `None` where the
+        /// native kernels are not offered or do not serve the shape - the
+        /// caller dispatches `conv2d_dw` instead.
+        pub fn conv2d_dw_split(&self, params: &[u32]) -> Option<(u32, u32)> {
+            if !self.has_fused(crate::Fused::Conv2dDwPartial) || !self.has_fused(crate::Fused::Conv2dDwReduce) {
+                return None;
+            }
+            crate::native_upgrade::conv2d_dw_split(params, self.caps().compute_units.unwrap_or(1))
+        }
+
+        /// Scratch words [`Self::conv2d_dw_steps`] needs for `params`: `Some(0)`
+        /// when the gradient fits one slice and needs none, `None` where the
+        /// native path is not offered.
+        pub fn conv2d_dw_scratch_words(&self, params: &[u32]) -> Option<u64> {
+            let (splits, _) = self.conv2d_dw_split(params)?;
+            let weights = u64::from(params[4]) * u64::from(params[1]) * u64::from(params[5]) * u64::from(params[5]);
+            Some(if splits > 1 { u64::from(splits) * weights } else { 0 })
+        }
+
+        /// The native dense-conv weight gradient: `dw += conv2d_dw(dy, x)`, the
+        /// same contract as the `conv2d_dw` kernel, as one dispatch or - when
+        /// the reduction is split over positions - a partial-sum dispatch into
+        /// `scratch` followed by the fixed-order reduction into `dw`. Submit the
+        /// steps in order. `scratch` must hold
+        /// [`Self::conv2d_dw_scratch_words`] words; `None` where the native path
+        /// is not offered or `scratch` is missing.
+        pub fn conv2d_dw_steps(
+            &self,
+            dy: &DeviceBuffer,
+            x: &DeviceBuffer,
+            dw: &DeviceBuffer,
+            scratch: Option<&DeviceBuffer>,
+            params: &[u32],
+        ) -> Option<Vec<Step>> {
+            let (splits, chunk) = self.conv2d_dw_split(params)?;
+            let mut partial = params.to_vec();
+            partial.extend([splits, chunk]);
+            if splits == 1 {
+                return Some(vec![self.fused_step(crate::Fused::Conv2dDwPartial, &[dy, x, dw], &partial)?]);
+            }
+            let scratch = scratch?;
+            let total = params[4] * params[1] * params[5] * params[5];
+            Some(vec![
+                self.fused_step(crate::Fused::Conv2dDwPartial, &[dy, x, scratch], &partial)?,
+                self.fused_step(crate::Fused::Conv2dDwReduce, &[scratch, dw], &[total, splits])?,
+            ])
+        }
+
         /// The id under which this handle's backend holds the hand-written CUDA
         /// kernel `kernel`, offering it on the first ask and remembering the
         /// answer. `None` is the backend declining - it cannot compile CUDA C++

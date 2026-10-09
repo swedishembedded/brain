@@ -10,13 +10,15 @@
 //! services by sending an email to info@swedishembedded.com.
 //!
 //! [`crate::upgrade`] redirects a registered WGSL kernel to a faster WGSL
-//! sibling. This module is its second tier: where `upgrade` has already
-//! resolved a row for a kernel on this device, a row here may redirect the
-//! same dispatch to a registry kernel from `kernels_cuda` instead, through
-//! `Backend::register_native`/`step_native`. The bar is `upgrade`'s bar -
-//! identical contract (same uniform, same bindings, same output layout) and
-//! identical results - so no call site sees the substitution, and the
-//! results are gated on the raw bits against the WGSL tier.
+//! sibling. This module is its second tier: a row here may redirect a
+//! dispatch to a registry kernel from `kernels_cuda` instead, through
+//! `Backend::register_native`/`step_native`. The contract is `upgrade`'s -
+//! same uniform, same bindings, same output layout - so no call site sees the
+//! substitution. The int8 rows also keep the WGSL tier's reduction order and
+//! are gated on the raw bits; the dense conv rows accumulate the same
+//! reduction with fused multiply-adds and are gated on the fp32 summation
+//! bound against an f64 oracle and on exact agreement where the arithmetic is
+//! exact (`tests/conv2d_native.rs`).
 //!
 //! Three conditions, each a queried fact and none a backend name:
 //!
@@ -38,23 +40,51 @@
 use backend_api::select::{Dtype, Op};
 use backend_api::{BindKind, Backend, CudaLaunch, NativeId, NativeSpec};
 
+/// How a [`Row`] names the registry entry it redirects to.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Target {
+    /// The registry's best entry for an operator over a weight tier at the
+    /// device's capability ([`kernels_cuda::find`]).
+    Operator { op: Op, weight: Dtype },
+    /// One named entry - a kernel asked for by name rather than resolved by
+    /// operator - offered when the device meets its own floor.
+    Named(&'static str),
+}
+
+impl Target {
+    fn resolve(self, cc: kernels_cuda::Cc) -> Option<&'static kernels_cuda::CudaKernel> {
+        match self {
+            Target::Operator { op, weight } => kernels_cuda::find(op, weight, cc),
+            Target::Named(name) => kernels_cuda::get(name).filter(|k| k.min_cc <= cc),
+        }
+    }
+}
+
 /// One drop-in native replacement for a registered kernel.
 pub(crate) struct Row {
     /// The kernel name models register and dispatch by index.
     pub slow: &'static str,
-    /// The `kernels_cuda` registry entry's weight tier, which with
-    /// [`Self::op`] names the entry.
-    pub weight: Dtype,
-    pub op: Op,
+    /// The `kernels_cuda` registry entry the dispatch is redirected to.
+    pub target: Target,
     /// The storage/uniform bindings of `slow`, in order - the native kernel
     /// takes the identical list.
     pub bindings: &'static [BindKind],
     /// Whether the native kernel serves a dispatch of these caller params.
     pub serves: fn(&[u32]) -> bool,
+    /// The BLOCK count a served dispatch launches, from the caller's params
+    /// and the registry entry's declared tile. The kernel reconstructs its
+    /// own tile from the flat block index by the same rule.
+    pub blocks: fn(&[u32], (u32, u32)) -> u32,
     /// Whether `slow` must also have an ACTIVE [`crate::upgrade`] row on this
     /// device (condition 1 of the module doc). A kernel with no WGSL sibling to
     /// upgrade to - there is no regime choice to defer to - says `false`.
     pub requires_wgsl_upgrade: bool,
+}
+
+/// `Params { m, .., n }`: one block covers `tile.0` rows of x by `tile.1`
+/// weight rows, the count `CudaKernel::blocks_for` states.
+fn gemm_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0].div_ceil(tile.0) * p[2].div_ceil(tile.1)
 }
 
 /// `matmul_i8_gemv.wgsl`'s bindings: params, `xq`, `wq`, `sx`, `sw`, `out`.
@@ -78,7 +108,7 @@ fn serves_i8_gemv(p: &[u32]) -> bool {
         [m, kg, n, ..] => (*m, *kg, *n),
         _ => return false,
     };
-    m >= 1 && m <= backend_api::select::DECODE_REGIME_MAX_ROWS && n >= 1 && kg >= 8 && kg % 8 == 0
+    (1..=backend_api::select::DECODE_REGIME_MAX_ROWS).contains(&m) && n >= 1 && kg >= 8 && kg % 8 == 0
 }
 
 /// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
@@ -104,16 +134,87 @@ fn serves_moe_i8_grouped(p: &[u32]) -> bool {
     }
 }
 
+/// The dense conv family's bindings (`conv2d.wgsl`, `conv2d_dx.wgsl`): params,
+/// two read operands, the written output.
+const CONV2D_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// The dense conv uniform `[N, Cin, H, W, Cout, K, stride, pad, Ho, Wo]`, when
+/// it describes a convolution the native kernels serve: every extent non-zero,
+/// the output extent the one the input, kernel, stride and padding give, and
+/// every tensor small enough for the kernels' 32-bit signed element offsets.
+/// The grouped/dilated ABI is twelve words long and never matches.
+fn conv_shape(p: &[u32]) -> Option<[u64; 10]> {
+    let p: [u32; 10] = p.get(..10)?.try_into().ok()?;
+    let [n, cin, h, w, cout, k, s, pad, ho, wo] = p.map(u64::from);
+    if [n, cin, h, w, cout, k, s, ho, wo].contains(&0) || h + 2 * pad < k || w + 2 * pad < k {
+        return None;
+    }
+    if (h + 2 * pad - k) / s + 1 != ho || (w + 2 * pad - k) / s + 1 != wo {
+        return None;
+    }
+    let limit = i32::MAX as u64;
+    (n * cin * h * w <= limit && n * cout * ho * wo <= limit && cout * cin * k * k <= limit).then_some([n, cin, h, w, cout, k, s, pad, ho, wo])
+}
+
+/// The ten-word dense conv uniform, and nothing longer: a dispatch that
+/// carries more words is a different ABI.
+fn serves_conv(p: &[u32]) -> bool {
+    p.len() == 10 && conv_shape(p).is_some()
+}
+
+/// Output channels (forward, weight gradient) or input channels (input
+/// gradient) one block of the conv kernels covers: the smallest of 16/32/64
+/// that holds them. The SAME rule as `brain_cv_bm` in `cu/conv2d_f32.cu`; a
+/// disagreement leaves a tail of the output unwritten, which the conv gate's
+/// 16- and 32-channel shapes would show.
+fn conv_rows_tile(rows: u32) -> u32 {
+    if rows <= 16 {
+        16
+    } else if rows <= 32 {
+        32
+    } else {
+        64
+    }
+}
+
+/// `brain_conv2d_fwd`: channel tiles x position tiles of `tile.1`.
+fn conv2d_fwd_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    let (n, cout, ho, wo) = (p[0], p[4], p[8], p[9]);
+    cout.div_ceil(conv_rows_tile(cout)) * (n * ho * wo).div_ceil(tile.1)
+}
+
+/// `brain_conv2d_dx`: input-channel tiles x stride classes x position tiles
+/// of the LARGEST class (`ceil(H/s) * ceil(W/s)` per image); blocks of the
+/// smaller classes past their own extent exit at once.
+fn conv2d_dx_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    let (n, cin, h, w, s) = (p[0], p[1], p[2], p[3], p[6]);
+    cin.div_ceil(conv_rows_tile(cin)) * s * s * (n * h.div_ceil(s) * w.div_ceil(s)).div_ceil(tile.1)
+}
+
 pub(crate) const ROWS: &[Row] = &[
-    Row { slow: "matmul_i8_gemv", weight: Dtype::I8, op: Op::MatMul, bindings: I8_GEMV_BINDINGS, serves: serves_i8_gemv, requires_wgsl_upgrade: true },
+    Row {
+        slow: "matmul_i8_gemv",
+        target: Target::Operator { op: Op::MatMul, weight: Dtype::I8 },
+        bindings: I8_GEMV_BINDINGS,
+        serves: serves_i8_gemv,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: true,
+    },
     Row {
         slow: "moe_i8_grouped",
-        weight: Dtype::I8,
-        op: Op::MoeExpertLinear,
+        target: Target::Operator { op: Op::MoeExpertLinear, weight: Dtype::I8 },
         bindings: MOE_I8_GROUPED_BINDINGS,
         serves: serves_moe_i8_grouped,
+        blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
     },
+    // The dense convolution and its input gradient. Unlike the two rows above
+    // these do NOT reproduce the WGSL kernel's bits: they sum the same
+    // reduction in the same order with a fused multiply-add, one rounding
+    // where the reference has two. Their gate (`tests/conv2d_native.rs`)
+    // holds them to the fp32 summation-order bound instead of to raw bits.
+    Row { slow: "conv2d", target: Target::Named("conv2d_fwd_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_fwd_blocks, requires_wgsl_upgrade: false },
+    Row { slow: "conv2d_dx", target: Target::Named("conv2d_dx_f32"), bindings: CONV2D_BINDINGS, serves: serves_conv, blocks: conv2d_dx_blocks, requires_wgsl_upgrade: false },
 ];
 
 /// A native kernel with no WGSL twin: it fuses a chain of dispatches the MODEL
@@ -169,7 +270,66 @@ pub enum Fused {
     /// n3]` (`n_i == 0` leaves set `i` unused); bindings `xq`, `sx`, then for
     /// each set its `wq`, `sw` (read) and `out` (written).
     I8GemvMulti,
+    /// `conv2d_dw_partial`: the dense conv weight gradient over `S` slices of
+    /// `chunk` output positions each. Params: the conv uniform `[N, Cin, H, W,
+    /// Cout, K, stride, pad, Ho, Wo]` then `[S, chunk]`; bindings `dy`, `x`
+    /// read, `out` written. With `S == 1` `out` IS `dw` and is accumulated
+    /// into, exactly like `conv2d_dw`; with `S > 1` it is an `[S, Cout,
+    /// Cin*K*K]` scratch [`Fused::Conv2dDwReduce`] folds into `dw`.
+    /// [`conv2d_dw_split`] picks `S` and `chunk`.
+    Conv2dDwPartial,
+    /// `conv2d_dw_reduce`: `dw[i] += part[0][i] + .. + part[S-1][i]`, the
+    /// slices added in ascending order so the result does not depend on how
+    /// the partial kernel's blocks were scheduled. Params `[total, S]`;
+    /// bindings `part` read, `dw` read-written.
+    Conv2dDwReduce,
 }
+
+/// Output positions one block of [`Fused::Conv2dDwPartial`] stages per
+/// iteration - its slices are a whole number of these. `BRAIN_CV_DW_BP` in
+/// `cu/conv2d_f32.cu`.
+const CONV_DW_STAGE: u32 = 32;
+
+/// Positions below which a slice of the weight-gradient reduction is not
+/// worth its own block: each slice costs a full `[Cout, Cin*K*K]` plane of
+/// scratch written once and read once by the reduction, so a slice must
+/// carry enough multiply-adds to pay for that traffic many times over.
+const CONV_DW_MIN_SLICE: u32 = 512;
+
+/// Resident blocks per multiprocessor the slice count aims to fill several
+/// waves of: the weight-gradient block's shared memory and registers allow
+/// two per multiprocessor on any device whose limits are the portable ones.
+const CONV_DW_WAVES_BLOCKS_PER_UNIT: u32 = 8;
+
+/// How the dense conv weight gradient of `params` (the ten-word conv uniform)
+/// is split over output positions on a device with `compute_units`
+/// multiprocessors: `(S, chunk)`. The output alone is often a handful of
+/// blocks (a 16-channel 3x3 layer's gradient is 16 x 144), while the reduction
+/// runs over every position of the batch, so the positions are split until
+/// the grid fills the device several times over - and no further than
+/// [`CONV_DW_MIN_SLICE`] positions a slice. `None` for a shape the native
+/// kernel does not serve.
+pub fn conv2d_dw_split(params: &[u32], compute_units: u32) -> Option<(u32, u32)> {
+    if !serves_conv(params) {
+        return None;
+    }
+    let (n, cin, cout, k, ho, wo) = (params[0], params[1], params[4], params[5], params[8], params[9]);
+    let positions = n * ho * wo;
+    let tiles = cout.div_ceil(conv_rows_tile(cout)) * (cin * k * k).div_ceil(CONV_DW_COLS);
+    let target = compute_units.max(1) * CONV_DW_WAVES_BLOCKS_PER_UNIT;
+    let max_splits = (positions / CONV_DW_MIN_SLICE).max(1);
+    let splits = target.div_ceil(tiles).clamp(1, max_splits);
+    let chunk = positions.div_ceil(splits).div_ceil(CONV_DW_STAGE) * CONV_DW_STAGE;
+    // Re-derive the count from the rounded slice so no slice is empty.
+    Some((positions.div_ceil(chunk), chunk))
+}
+
+/// Weight-gradient columns `(ci, kh, kw)` one block of
+/// [`Fused::Conv2dDwPartial`] covers: `BRAIN_CV_DW_BN` in `cu/conv2d_f32.cu`.
+const CONV_DW_COLS: u32 = 64;
+
+/// Threads per block of [`Fused::Conv2dDwReduce`], one weight element each.
+const CONV_DW_REDUCE_BLOCK: u32 = 256;
 
 /// `add_rms_quant`'s bindings: params, `a`, `b`, `w`, `sum`, `xn`, `xq`, `sx`.
 const ADD_RMS_QUANT_BINDINGS: &[BindKind] = &[
@@ -267,8 +427,13 @@ const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
-impl Fused {
+/// `conv2d_dw_partial`'s bindings: params, `dy`, `x`, `out`.
+const CONV2D_DW_PARTIAL_BINDINGS: &[BindKind] = CONV2D_BINDINGS;
 
+/// `conv2d_dw_reduce`'s bindings: params, `part`, `dw`.
+const CONV2D_DW_REDUCE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+impl Fused {
     /// The `kernels_cuda` registry entry's name.
     pub fn registry_name(self) -> &'static str {
         match self {
@@ -278,6 +443,8 @@ impl Fused {
             Fused::GdnDecodePool => "gdn_decode_pool",
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::I8GemvMulti => "matmul_i8_gemv_multi",
+            Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
+            Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
         }
     }
 
@@ -289,6 +456,8 @@ impl Fused {
             Fused::GdnDecodePool => GDN_DECODE_POOL_BINDINGS,
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::I8GemvMulti => I8_GEMV_MULTI_BINDINGS,
+            Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
+            Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
         }
     }
 
@@ -320,6 +489,16 @@ impl Fused {
                 let rows = kernels_cuda::get("matmul_i8_gemv").map_or(0, |k| k.tile.0);
                 matches!(params, [m, kg, n0, ..] if params.len() == 6 && *m >= 1 && *m <= rows && *kg >= 8 && kg % 8 == 0 && *n0 >= 1)
             }
+            // The dense conv uniform plus a split whose slices are whole
+            // stages and together cover every position, none of them empty.
+            Fused::Conv2dDwPartial => {
+                params.len() == 12 && conv_shape(params).is_some() && {
+                    let (splits, chunk) = (params[10], params[11]);
+                    let positions = params[0] * params[8] * params[9];
+                    splits >= 1 && chunk >= CONV_DW_STAGE && chunk % CONV_DW_STAGE == 0 && positions.div_ceil(chunk) == splits
+                }
+            }
+            Fused::Conv2dDwReduce => matches!(params, [total, splits] if *total >= 1 && *splits >= 1),
         }
     }
 
@@ -334,6 +513,13 @@ impl Fused {
                 let (rows, cols) = kernels_cuda::get("matmul_i8_gemv").map_or((1, 1), |k| k.tile);
                 params[0].div_ceil(rows) * params[2..6].iter().map(|n| n.div_ceil(cols)).sum::<u32>()
             }
+            // Channel tiles x column tiles x slices; the kernel numbers them
+            // channel-tile fastest.
+            Fused::Conv2dDwPartial => {
+                let (cin, cout, k) = (params[1], params[4], params[5]);
+                cout.div_ceil(conv_rows_tile(cout)) * (cin * k * k).div_ceil(CONV_DW_COLS) * params[10]
+            }
+            Fused::Conv2dDwReduce => params[0].div_ceil(CONV_DW_REDUCE_BLOCK),
         }
     }
 }
@@ -374,9 +560,10 @@ pub(crate) struct Active {
     pub id: NativeId,
     /// The registry entry's name, for diagnostics.
     pub kernel: &'static str,
-    /// Output tile a block covers, `(rows of x, weight rows)`.
+    /// Output tile a block covers, as the registry entry declares it.
     pub tile: (u32, u32),
     serves: fn(&[u32]) -> bool,
+    blocks: fn(&[u32], (u32, u32)) -> u32,
 }
 
 /// The active native redirects for a handle. Empty on every backend that
@@ -400,7 +587,7 @@ pub(crate) fn resolve(
             if row.requires_wgsl_upgrade {
                 wgsl_upgrades.iter().find(|a| a.slow == slow)?;
             }
-            let k = kernels_cuda::find(row.op, row.weight, cc)?;
+            let k = row.target.resolve(cc)?;
             let id = backend.register_native(&NativeSpec::Cuda {
                 src: k.src,
                 entry: k.entry,
@@ -409,7 +596,7 @@ pub(crate) fn resolve(
                 shared_bytes: k.shared_bytes,
                 launch: CudaLaunch::NONE,
             })?;
-            Some(Active { slow, id, kernel: k.name, tile: k.tile, serves: row.serves })
+            Some(Active { slow, id, kernel: k.name, tile: k.tile, serves: row.serves, blocks: row.blocks })
         })
         .collect()
 }
@@ -425,10 +612,7 @@ pub(crate) fn apply(active: &[Active], kind: usize, params: &[u32]) -> Option<(N
     if !(a.serves)(params) {
         return None;
     }
-    // `Params { m, .., n }`: one block covers `tile.0` rows of x by `tile.1`
-    // weight rows, the count `CudaKernel::blocks_for` states.
-    let blocks = params[0].div_ceil(a.tile.0) * params[2].div_ceil(a.tile.1);
-    Some((a.id, blocks))
+    Some((a.id, (a.blocks)(params, a.tile)))
 }
 
 #[cfg(test)]
@@ -439,7 +623,7 @@ mod tests {
     fn the_int8_gemv_row_names_a_registry_entry_with_its_own_bindings() {
         let row = &ROWS[0];
         let k = kernels_cuda::get("matmul_i8_gemv").expect("registry entry");
-        assert_eq!((k.op, k.weight), (row.op, row.weight));
+        assert_eq!(row.target.resolve(kernels_cuda::DP4A_MIN_CC).map(|r| r.name), Some(k.name));
         // Same binding list as the WGSL kernel's own declaration: one uniform
         // and five storage buffers.
         let wgsl = kernels::MATMUL_I8_GEMV_REG;
@@ -451,7 +635,7 @@ mod tests {
     fn the_grouped_moe_row_names_a_registry_entry_with_its_own_bindings() {
         let row = ROWS.iter().find(|r| r.slow == "moe_i8_grouped").expect("the row");
         let k = kernels_cuda::get("moe_i8_grouped_mma").expect("registry entry");
-        assert_eq!((k.op, k.weight), (row.op, row.weight));
+        assert_eq!(row.target.resolve(kernels_cuda::MMA_S8_MIN_CC).map(|r| r.name), Some(k.name));
         let declared = kernels::MOE_I8_GROUPED.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
         assert_eq!(declared, row.bindings.len());
         // No WGSL sibling exists to upgrade to, so the row must not wait for one.
