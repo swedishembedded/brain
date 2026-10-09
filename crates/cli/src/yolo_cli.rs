@@ -331,6 +331,9 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
             model.gpu.reset_kernel_times();
             model.gpu.set_kernel_timing(true);
         }
+        // Under BRAIN_PROFILE, count the step's host round trips: every
+        // readback drains the device and leaves it idle while the host works.
+        let ops_before = if gpu_core::profile::enabled() { model.gpu.stats() } else { None };
         model.set_image(&img_batch);
         model.set_targets(&gts);
         model.zero_grads();
@@ -345,6 +348,15 @@ fn run_train_loop(model: &Yolo, data: &DetectData, cfg: &TrainCfg) -> (f32, f32)
         model.poll_wait();
         gpu_core::profile::stage_time("yolov8 step.adamw+sync", t);
         gpu_core::profile::stage_time("yolov8 step.total", t_step);
+        if let (Some(a), Some(b)) = (ops_before, model.gpu.stats()) {
+            eprintln!(
+                "device ops this step: {} submits, {} dispatches, {} readbacks, {} writes",
+                b.submits - a.submits,
+                b.dispatches - a.dispatches,
+                b.readbacks - a.readbacks,
+                b.writes - a.writes
+            );
+        }
         if kernel_table {
             print_kernel_table(&model.gpu);
             model.gpu.set_kernel_timing(false);
