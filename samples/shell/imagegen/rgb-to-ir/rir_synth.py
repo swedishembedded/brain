@@ -482,6 +482,7 @@ class IngestRequest:
     selection: Selection
     classes: tuple
     seed: int = 1  # the per-frame sensor noise
+    only_existing: bool = False  # restrict to the selected frames that have an output (else the rest count as missing)
 
 
 def _find_output(generated_dir: str, name: str) -> tuple[str, Crop | None] | None:
@@ -515,6 +516,8 @@ def ingest(req: IngestRequest) -> dict:
     manifest.jsonl with boxes in output pixels); returns, and writes as ingest-stats.json, the statistics."""
     os.makedirs(req.arm_dir, exist_ok=True)
     rows = select_frames(req.doc, req.selection)
+    if req.only_existing:
+        rows = [r for r in rows if _find_output(req.generated_dir, frame_name(r)) is not None]
     stats = {"arm": req.arm, "frames": len(rows), "ingested": 0, "missing_output": 0, "boxes_in": 0, "boxes_kept": 0,
              "boxes_dropped": 0, "sensor": {"applied": req.models is not None,
                                            "models": {k: m.to_dict() for k, m in (req.models or {}).items()}}}
@@ -718,12 +721,14 @@ def _add_ingest(sub) -> None:
     g.add_argument("--datasets", default="", help="comma-separated dataset ids; default: all in splits.json")
     g.add_argument("--classes", default=",".join(A.DEFAULT_CLASSES), help="class names, in class-index order")
     g.add_argument("--seed", type=int, default=1, help="seeds the sensor noise, per frame")
+    g.add_argument("--only-existing", action="store_true",
+                   help="ingest only the selected frames that have an output (default: the others count as missing)")
 
 
 def _run_ingest(a, ap) -> int:
     models = None if a.no_sensor else {k: A.SensorModel.from_dict(v) for k, v in _load_json(a.sensor_model)["datasets"].items()}
     request = IngestRequest(_load_json(a.splits), a.generated, os.path.join(a.out, a.arm), a.arm, models,
-                            Selection(a.split, _csv(a.datasets)), _csv(a.classes), a.seed)
+                            Selection(a.split, _csv(a.datasets)), _csv(a.classes), a.seed, a.only_existing)
     stats = ingest(request)
     print(json.dumps({k: v for k, v in stats.items() if k != "sensor"}), file=sys.stderr)
     return 0

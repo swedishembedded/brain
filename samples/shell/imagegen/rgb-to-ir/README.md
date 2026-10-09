@@ -390,7 +390,8 @@ half its area inside the crop is dropped and counted). RGB output becomes luma.
 `--no-sensor` leaves the luma alone, and one of the two must be given. Outputs
 without a record are mapped by the default crop, or taken as the whole frame,
 whichever has the output's size. Frames without an output are counted in
-`ingest-stats.json`, never invented.
+`ingest-stats.json`, never invented; `--only-existing` restricts the arm to the
+selected frames that have one (a partial run), so they are not counted as missing.
 
 **`gate`** runs the label-preservation gates over the arm. For every frame: the
 edge correlation inside each ground-truth box must reach the 10th percentile of

@@ -421,9 +421,10 @@ class Ingest(World):
         self.generate()
         self.arm_dir = self.path("arms/c2")
 
-    def ingest(self, models=None, arm_dir=None, generated=None, **selection):
+    def ingest(self, models=None, arm_dir=None, generated=None, only_existing=False, **selection):
         request = S.IngestRequest(self.doc, generated or os.path.join(self.out, "neutral"), arm_dir or self.arm_dir, "c2",
-                                  models, S.Selection(**selection), ("person", "car", "bicycle"), seed=5)
+                                  models, S.Selection(**selection), ("person", "car", "bicycle"), seed=5,
+                                  only_existing=only_existing)
         return S.ingest(request)
 
     def manifest(self, arm_dir=None):
@@ -486,6 +487,13 @@ class Ingest(World):
         self.assertEqual((stats["ingested"], stats["missing_output"]), (2, 1))
         self.assertEqual([r["id"] for r in self.manifest()], ["f0", "f2"])
 
+    def test_only_existing_restricts_the_arm_to_frames_that_have_an_output_and_counts_none_as_missing(self):
+        os.remove(os.path.join(self.out, "neutral", "d_f1.ppm"))
+        os.remove(os.path.join(self.out, "neutral", "d_f1.json"))
+        stats = self.ingest(only_existing=True)
+        self.assertEqual((stats["frames"], stats["ingested"], stats["missing_output"]), (2, 2, 0))
+        self.assertEqual([r["id"] for r in self.manifest()], ["f0", "f2"])
+
     def test_a_model_missing_for_a_dataset_is_an_error(self):
         with self.assertRaisesRegex(ValueError, "sensor model.*'d'"):
             self.ingest(models={"other": MODEL})
@@ -526,7 +534,7 @@ class IngestCli(World):
         with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
             S.main(base)
         self.assertIn("--sensor-model", err.getvalue())
-        self.assertEqual(S.main([*base, "--no-sensor"]), 0)
+        self.assertEqual(S.main([*base, "--no-sensor", "--only-existing"]), 0)
         self.assertTrue(os.path.isfile(self.path("arms/c2/manifest.jsonl")))
         self.write_json("sensor-model.json", {"datasets": {"d": MODEL.to_dict()}})
         self.assertEqual(S.main([*base[:-2], "--out", self.path("arms2"), "--sensor-model", self.path("sensor-model.json")]), 0)
