@@ -199,11 +199,11 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     // linears are dispatched by `layer_fwd_steps`.
     check(function_body(&model_src, "forward_steps"), "qwen3::model::Qwen::forward_steps");
     check(function_body(&model_src, "layer_fwd_steps"), "qwen3::model::Qwen::layer_fwd_steps");
-    check(function_body(&model_src, "decode_steps"), "qwen3::model::Qwen::decode_steps");
+    check(function_body(&model_src, "decode_steps_at"), "qwen3::model::Qwen::decode_steps");
     // Both migrated model.rs functions must actually call the façade -
     // otherwise a body that dispatches NOTHING for the 7 linears would
     // vacuously pass the bans above.
-    for name in ["layer_fwd_steps", "decode_steps"] {
+    for name in ["layer_fwd_steps", "decode_steps_at"] {
         let body = function_body(&model_src, name);
         assert!(
             body.contains("self.ops.act(") || body.contains("self.ops_act("),

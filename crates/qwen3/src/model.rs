@@ -715,6 +715,11 @@ pub struct Qwen {
     // for the whole model; the decode path requires a single-device (whole) shard.
     kv: std::cell::OnceCell<KvCache>,
     dec_pos: Cell<u32>,
+    /// The plain decode tape, built on first use and replayed with its
+    /// position uniforms rewritten each token (index 1: with the token
+    /// embedding step, 0: without). Cleared whenever what it was recorded
+    /// under changes.
+    decode_tape: std::cell::RefCell<[Option<DecodeTape>; 2]>,
     /// Rows every activation buffer holds ([`activation_rows`]).
     rows: u32,
     /// Elements `scores` and each layer's `probs` hold - what bounds a
@@ -1135,6 +1140,15 @@ impl Qwen {
         // physical-device sharing, is required here) for the `Ops` façade
         // (B7).
         let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
+        if !train {
+            // A decode step allocates and frees the same few hundred
+            // temporaries every token; on CUDA each is a driver call (and a
+            // free synchronises the device) unless the backend keeps the
+            // freed blocks. Both handles allocate: `gpu` the activations,
+            // `ops` the quantised ones and the GEMM outputs.
+            gpu.hold_freed_blocks(true);
+            ops.gpu().hold_freed_blocks(true);
+        }
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
         // At any non-fp32 tier the 7 per-layer linears live in `weights`
@@ -1484,6 +1498,7 @@ impl Qwen {
             kmask_scratch: std::cell::OnceCell::new(),
             kv,
             dec_pos: Cell::new(0),
+            decode_tape: std::cell::RefCell::new([None, None]),
             rows: n as u32,
             score_elems: bht2,
             chunk_blocks,
@@ -3236,8 +3251,55 @@ impl Qwen {
 
     /// Record + submit one incremental decode step WITHOUT reading back.
     fn decode_submit(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) {
+        // The plain step (no M-RoPE table, no DeepStack row, analytic RoPE) is
+        // the one a generation loop repeats: record it once and replay it, so
+        // the CUDA backend sees the same submission every token and can run
+        // it as a graph instead of launching a thousand kernels one by one.
+        if mrope.is_none() && deepstack_row.is_none() && self.rope_table.is_none() && self.shard.is_whole(self.cfg.n_layers as usize) {
+            self.decode_replay(token_id, pos);
+            return;
+        }
         let s = self.decode_steps(token_id, pos, mrope, deepstack_row);
         self.gpu.submit(&[], &s);
+    }
+
+    /// [`Self::decode_submit`] for the plain step, from the recorded tape.
+    fn decode_replay(&self, token_id: Option<u32>, pos: u32) {
+        assert!(pos < self.t, "decode pos {pos} exceeds ctx_len {}", self.t);
+        let slot = usize::from(token_id.is_some());
+        if self.decode_tape.borrow()[slot].is_none() {
+            let g = &self.gpu;
+            let pos_bufs = DecodePosBufs {
+                rope_q: g.uniform_dynamic(7),
+                rope_k: g.uniform_dynamic(7),
+                append: g.uniform_dynamic(2),
+                scores: g.uniform_dynamic(7),
+                softmax: g.uniform_dynamic(3),
+                apply: g.uniform_dynamic(6),
+            };
+            let steps = self.decode_steps_at(token_id.map(|_| 0), DecodePos::Dynamic(&pos_bufs), None, None);
+            self.decode_tape.borrow_mut()[slot] = Some(DecodeTape { steps, pos: pos_bufs });
+        }
+        if let Some(token) = token_id {
+            assert!((token as usize) < self.cfg.vocab as usize, "decode token id {token} exceeds vocab {} (checkpoint/tokenizer mismatch?)", self.cfg.vocab);
+            self.gpu.write(&self.tokens, &[token]);
+        }
+        let tape = self.decode_tape.borrow();
+        let tape = tape[slot].as_ref().expect("recorded above");
+        let c = &self.cfg;
+        let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (group, t, cap) = (nh / nkv, pos + 1, self.t);
+        let scale = f(1.0 / (hd as f32).sqrt());
+        let theta = f(c.rope_theta);
+        let g = &self.gpu;
+        g.write(&tape.pos.rope_q, &[1, nh, hd, hq, 0, pos, theta]);
+        g.write(&tape.pos.rope_k, &[1, nkv, hd, hkv, 0, pos, theta]);
+        g.write(&tape.pos.append, &[hkv, pos]);
+        g.write(&tape.pos.scores, &[nh, group, hd, t, cap, hkv, scale]);
+        g.write(&tape.pos.softmax, &[nh, t, cap]);
+        g.write(&tape.pos.apply, &[nh, group, hd, t, cap, hkv]);
+        g.submit(&[], &tape.steps);
     }
 
     /// The dispatches of one incremental decode step, in submit order, WITHOUT
@@ -3258,10 +3320,21 @@ impl Qwen {
     /// `None` (every existing caller before this parameter existed, and
     /// every non-image-row step) is a no-op, bit-for-bit unchanged.
     pub fn decode_steps(&self, token_id: Option<u32>, pos: u32, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) -> Vec<Step> {
+        self.decode_steps_at(token_id, DecodePos::At(pos), mrope, deepstack_row)
+    }
+
+    /// [`Self::decode_steps`] with the position baked in or read from
+    /// uniforms. With [`DecodePos::Dynamic`] the token id is only a marker for
+    /// "include the embedding step": the id itself is written per token.
+    fn decode_steps_at(&self, token_id: Option<u32>, position: DecodePos<'_>, mrope: Option<(&DeviceBuffer, &DeviceBuffer)>, deepstack_row: Option<u32>) -> Vec<Step> {
         assert!(
             self.shard.is_whole(self.cfg.n_layers as usize),
             "KV-cache decode requires a whole (single-device) model"
         );
+        let pos = match position {
+            DecodePos::At(pos) => pos,
+            DecodePos::Dynamic(_) => 0,
+        };
         assert!(pos < self.t, "decode pos {pos} exceeds ctx_len {}", self.t);
         // A token id the tokenizer produced but this checkpoint's embedding
         // table doesn't cover (a checkpoint/tokenizer vocab mismatch) used to
@@ -3333,7 +3406,9 @@ impl Qwen {
         // (`step_embed`).
         let mut s: Vec<Step> = Vec::new();
         if let Some(token_id) = token_id {
-            g.write(&self.tokens, &[token_id]);
+            if matches!(position, DecodePos::At(_)) {
+                g.write(&self.tokens, &[token_id]);
+            }
             s.extend(self.embed_tiled(g, &self.res[0], 1));
         }
 
@@ -3378,12 +3453,28 @@ impl Qwen {
                     s.push(block::rope2d_fwd(g, ROPE2D, q_buf, cos, sin, 1, nh, hd, hq));
                     s.push(block::rope2d_fwd(g, ROPE2D, k_buf, cos, sin, 1, nkv, hd, hkv));
                 }
-                None => self.rope_at_steps(&mut s, q_buf, k_buf, 1, pos),
+                None => match position {
+                    DecodePos::At(pos) => self.rope_at_steps(&mut s, q_buf, k_buf, 1, pos),
+                    DecodePos::Dynamic(u) => {
+                        let half = hd / 2;
+                        s.push(g.step_buf(ROPE_AT, &u.rope_q, &[q_buf], nh * half));
+                        s.push(g.step_buf(ROPE_AT, &u.rope_k, &[k_buf], nkv * half));
+                    }
+                },
             }
             // Hoisted to model::block (see Self::decode_ids's doc) -- same
             // append+decode-attend dispatch this function always did, now
             // shared with qwen3omnimoe::thinker instead of duplicated.
-            s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &kv.k[l], &kv.v[l], &self.scores, &lb.probs, &lb.ctx));
+            match position {
+                DecodePos::At(pos) => s.extend(block::gqa_decode_step(g, &decode_ids, nh, nkv, hd, pos, cap, q_buf, k_buf, &lb.v, &kv.k[l], &kv.v[l], &self.scores, &lb.probs, &lb.ctx)),
+                DecodePos::Dynamic(u) => {
+                    s.push(g.step_buf(decode_ids.kv_append, &u.append, &[k_buf, &kv.k[l]], hkv));
+                    s.push(g.step_buf(decode_ids.kv_append, &u.append, &[&lb.v, &kv.v[l]], hkv));
+                    s.push(g.step_buf(decode_ids.attn_decode_scores, &u.scores, &[q_buf, &kv.k[l], &self.scores], nh * cap));
+                    s.push(g.step_buf(decode_ids.decode_softmax, &u.softmax, &[&self.scores, &lb.probs], nh));
+                    s.push(g.step_buf(decode_ids.attn_decode_apply, &u.apply, &[&lb.probs, &kv.v[l], &lb.ctx], nh * hd));
+                }
+            }
             let act_o = self.ops_act(&mut s, &lb.ctx, 1, hq);
             self.ops_linear(&mut s, &act_o, &p("attn.wo.weight"), &self.proj);
             self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, 1, hq, d, false);
@@ -3545,6 +3636,7 @@ impl Qwen {
     /// an override, so neither needs more).
     fn set_override(&mut self, over: Option<AdapterOverride>) {
         self.attached = over;
+        *self.decode_tape.borrow_mut() = [None, None];
         self.reset_cache();
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
@@ -3649,6 +3741,32 @@ impl Qwen {
         checkpoint::save(path, config, &tensors);
     }
 }
+
+/// The six uniforms a decode step's position drives. Every layer binds the
+/// same buffer for a kind, so a token rewrites six buffers, not one per layer.
+struct DecodePosBufs {
+    rope_q: DeviceBuffer,
+    rope_k: DeviceBuffer,
+    append: DeviceBuffer,
+    scores: DeviceBuffer,
+    softmax: DeviceBuffer,
+    apply: DeviceBuffer,
+}
+
+/// A recorded decode step list and the uniforms that carry its position.
+struct DecodeTape {
+    steps: Vec<Step>,
+    pos: DecodePosBufs,
+}
+
+/// Where a decode step list gets its position from.
+enum DecodePos<'a> {
+    /// Baked into this one list (the list is rebuilt per token).
+    At(u32),
+    /// Read from uniforms rewritten per token (the list is recorded once).
+    Dynamic(&'a DecodePosBufs),
+}
+
 
 /// One prefill position: a token id or a raw d_model embedding row.
 pub enum PrefillInput<'a> {
