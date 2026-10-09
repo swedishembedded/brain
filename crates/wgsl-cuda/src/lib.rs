@@ -1885,13 +1885,17 @@ __device__ __forceinline__ void __brain_sf32(unsigned int* p, size_t off, float 
   p[off >> 2u] = __float_as_uint(v);
 }
 
-// WGSL dot4I8Packed: four SIGNED int8 lanes multiplied and accumulated. Written
-// out rather than emitted as __dp4a because this tier must be valid on every
-// compute capability, and because the sign extension is where a transliteration
-// goes wrong: a zero-extended lane is correct for every positive byte and wrong
-// for every negative one. The masking form below is exact and has no
-// implementation-defined shift in it.
+// WGSL dot4I8Packed: four SIGNED int8 lanes multiplied and accumulated. The
+// packed-dot instruction where the target has it (an exact integer sum, so the
+// same bits); written out below that capability, because this tier must be
+// valid on every compute capability. The sign extension is where a
+// transliteration goes wrong - a zero-extended lane is correct for every
+// positive byte and wrong for every negative one - and the masking form is
+// exact with no implementation-defined shift in it.
 __device__ __forceinline__ int __brain_dot4i8(unsigned int a, unsigned int b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+  return __dp4a((int)a, (int)b, 0);
+#else
   int acc = 0;
   for (int i = 0; i < 4; ++i) {
     int x = (int)((a >> (unsigned int)(i * 8)) & 0xffu);
@@ -1901,6 +1905,7 @@ __device__ __forceinline__ int __brain_dot4i8(unsigned int a, unsigned int b) {
     acc += x * y;
   }
   return acc;
+#endif
 }
 
 "#;
