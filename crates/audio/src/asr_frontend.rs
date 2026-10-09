@@ -3,7 +3,7 @@
 
 //! Log-mel front ends for the ASR models, computed in f64 internally and
 //! parity-gated (byte-for-byte inputs) against the HuggingFace feature
-//! extractors — see `tools/goldens/asr_dump_reference.py` and the tests below.
+//! extractors - see `tools/goldens/asr_dump_reference.py` and the tests below.
 //!
 //! This is deliberately separate from [`crate::mel`] (which is f32, radix-2 only
 //! and tuned for the TTS/speaker front end). The ASR extractors need: arbitrary
@@ -414,12 +414,27 @@ impl NemotronMelStream {
 
 // ─────────────────────────── Qwen3-ASR ───────────────────────────
 
+/// Named result of [`qwen_logmel`].
+///
+/// Layout: `mel` holds `n_mels` rows of `n_frames` values, row-major,
+/// channels-first (the first `n_frames` elements are mel bin 0, the next
+/// `n_frames` are mel bin 1, and so on).
+///
+/// * `n_mels` - number of mel-frequency bins (128).
+/// * `n_frames` - number of time frames produced from the padded signal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogMel {
+    pub mel: Vec<f32>,
+    pub n_mels: usize,
+    pub n_frames: usize,
+}
+
 /// `Qwen3ASRFeatureExtractor`: pad raw audio to a whole number of seconds
 /// (`target_samples`), STFT(n_fft 400, hop 160, 400-Hann periodic, reflect pad,
 /// center=True), drop the last time frame, power → slaney mel(128, fmax 8000) →
 /// log10(clamp 1e-10) → dynamic-range compress (max−8) → (x+4)/4.
 /// Output `[128, n_frames]` (channels-first) row-major.
-pub fn qwen_logmel(samples: &[f32], target_samples: usize) -> (Vec<f32>, usize, usize) {
+pub fn qwen_logmel(samples: &[f32], target_samples: usize) -> LogMel {
     const N_FFT: usize = 400;
     const HOP: usize = 160;
     const N_MELS: usize = 128;
@@ -465,7 +480,11 @@ pub fn qwen_logmel(samples: &[f32], target_samples: usize) -> (Vec<f32>, usize, 
             out[m * n_frames + fr] = ((v + 4.0) / 4.0) as f32;
         }
     }
-    (out, N_MELS, n_frames)
+    LogMel {
+        mel: out,
+        n_mels: N_MELS,
+        n_frames,
+    }
 }
 
 #[cfg(test)]
@@ -520,7 +539,7 @@ fn repo_path(rel: &str) -> String {
         if !have_goldens() {
             return;
         }
-        // reference [201, 128] (freq-major) — transpose our [128, 201]
+        // reference [201, 128] (freq-major) - transpose our [128, 201]
         let refm = read_f32(&format!("{GOLD}/qwen_mel_filters.f32"));
         let fb = mel_filterbank_slaney(16000, 400, 128, 0.0, 8000.0); // [128, 201]
         let bins = 201;
@@ -549,7 +568,7 @@ fn repo_path(rel: &str) -> String {
     }
 
     /// The streaming front end, fed in ragged pushes, must reproduce the offline
-    /// extractor's valid frames bit-for-bit (pure math — no fixtures needed).
+    /// extractor's valid frames bit-for-bit (pure math - no fixtures needed).
     #[test]
     fn nemotron_mel_stream_matches_offline() {
         // deterministic pseudo-random signal, awkward length (not a hop multiple)
@@ -588,9 +607,20 @@ fn repo_path(rel: &str) -> String {
         let wav = read_f32(&format!("{GOLD}/waveform.f32"));
         let refm = read_f32(&format!("{GOLD}/qwen_mel.f32")); // [128, 3000]
         // reference pads raw audio to 30 s (480000 samples)
-        let (mel, mels, t) = qwen_logmel(&wav, 480000);
-        assert_eq!(mels * t, refm.len(), "shape {mels}x{t} vs golden {}", refm.len());
-        let d = max_abs_diff(&mel, &refm);
+        let lm = qwen_logmel(&wav, 480000);
+        assert_eq!(lm.n_mels * lm.n_frames, refm.len(), "shape {}x{} vs golden {}", lm.n_mels, lm.n_frames, refm.len());
+        let d = max_abs_diff(&lm.mel, &refm);
         assert!(d < 2e-3, "qwen log-mel maxdiff {d}");
+    }
+
+    /// The struct's own fields must agree with the buffer length.
+    #[test]
+    fn qwen_logmel_reports_its_own_shape() {
+        // 1 s of silence at 16 kHz, target 3 s (48000 samples).
+        let samples = vec![0.0f32; 16000];
+        let lm = qwen_logmel(&samples, 48000);
+        assert_eq!(lm.n_mels, 128);
+        assert_eq!(lm.n_frames, 300, "one frame per 160-sample hop over the padded window");
+        assert_eq!(lm.mel.len(), lm.n_mels * lm.n_frames);
     }
 }

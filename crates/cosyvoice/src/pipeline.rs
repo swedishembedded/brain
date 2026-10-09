@@ -377,7 +377,7 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
         let campplus_model = campplus::model::Campplus::new(gpu, campplus_cfg, &campplus_weights);
         let xvec = campplus_model.forward(&fbank, t);
 
-        let (mel, n_mels, n_frames) = audio::asr_frontend::qwen_logmel(&samples_16k, samples_16k.len());
+        let audio::asr_frontend::LogMel { mel, n_mels, n_frames } = audio::asr_frontend::qwen_logmel(&samples_16k, samples_16k.len());
         let s3_cfg = s3tokenizer::config::S3TokenizerConfig::v2();
         if n_mels != s3_cfg.n_mels as usize {
             return Err(format!("cosyvoice::generate: whisper mel produced {n_mels} mels, s3tokenizer wants {}", s3_cfg.n_mels));

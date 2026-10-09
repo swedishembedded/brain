@@ -114,7 +114,7 @@ pub fn encode_audio(reader: &WeightReader, gpu: &Gpu, samples: &[f32]) -> Result
     const HOP: usize = 160;
     const CHUNK_SAMPLES: usize = 16000; // chunk_len(100) * hop(160), for n_window=50
     let target_samples = samples.len().max(1).div_ceil(CHUNK_SAMPLES) * CHUNK_SAMPLES;
-    let (mel, _n_mels, _n_frames) = audio::asr_frontend::qwen_logmel(samples, target_samples);
+    let mel = audio::asr_frontend::qwen_logmel(samples, target_samples).mel;
     let valid_frames = (samples.len() / HOP) as u32;
 
     let cfg = AudioEncoderConfig::qwen3_omni();

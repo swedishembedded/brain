@@ -76,12 +76,12 @@ pub fn pad_to_window(wav: &[f32], window_samples: usize) -> Vec<f32> {
 
 /// The log-mel features of `wav` padded or truncated to the window, and how many
 /// of their frames are valid (all of them: the window is always full). The
-/// front end returns `(mel, n_mels, n_frames)`; the frame count is the third
-/// field.
+/// front end returns an [`audio::asr_frontend::LogMel`] whose `n_frames` field is
+/// the frame count.
 pub fn window_features(wav: &[f32], window_samples: usize) -> (Vec<f32>, u32) {
     let padded = pad_to_window(wav, window_samples);
-    let (mel, _n_mels, n_frames) = audio::asr_frontend::qwen_logmel(&padded, window_samples);
-    (mel, n_frames as u32)
+    let fm = audio::asr_frontend::qwen_logmel(&padded, window_samples);
+    (fm.mel, fm.n_frames as u32)
 }
 
 /// The manifest (one `transcribe` action; schema shared via [`audio::asr_caps`]).
