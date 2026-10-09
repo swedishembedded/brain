@@ -45,6 +45,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+mod resident;
+pub use resident::ResidentTts;
+
 use capability::CancelToken;
 
 use crate::{Device, Error, Result};

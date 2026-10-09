@@ -346,7 +346,7 @@ pub use chat_tokens::ChatTokenizer;
 #[cfg(any(feature = "text", feature = "study"))]
 pub use capability::CancelToken;
 #[cfg(feature = "audio")]
-pub use tts::{Audio, TtsOptions, TtsPipeline, TtsPipelineBuilder};
+pub use tts::{Audio, ResidentTts, TtsOptions, TtsPipeline, TtsPipelineBuilder};
 #[cfg(feature = "audio")]
 pub use music::{MusicOptions, MusicPipeline, MusicPipelineBuilder, Song};
 #[cfg(feature = "image")]
