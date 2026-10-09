@@ -411,7 +411,24 @@ pub const ALL: &[CudaKernel] = &[
         tile: (64, 128),
         // q: 64 x 128 floats; one k/v tile: 32 x 128 floats.
         shared_bytes: (64 * 128 + 32 * 128) * 4,
-        src: include_str!("../cu/flash_bidir_f32.cu"),
+        src: include_str!("../cu/flash_attn_f32.cu"),
+    },
+    CudaKernel {
+        name: "flash_gqa_kmask_f32",
+        // Asked for by name (`gpu_core::Fused::FlashGqaKmask`) by a padded
+        // encoder in place of its scores -> softmax -> apply chain.
+        op: Op::FlashAttention,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_flash_gqa_kmask_f32",
+        what: "causal grouped-query flash attention with an additive per-key mask at head_dim 128, fp32: flash_bidir_f32's tiling, key tiles past the causal bound and the last live key never visited",
+        reported: "native:flash_gqa_kmask_f32",
+        block_dim: 128,
+        tile: (64, 128),
+        shared_bytes: (64 * 128 + 32 * 128) * 4,
+        src: include_str!("../cu/flash_attn_f32.cu"),
     },
     CudaKernel {
         name: "softmax_rows_dx",

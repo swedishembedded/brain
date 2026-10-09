@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The gate for `kernels_cuda`'s native bidirectional flash attention
-//! (`cu/flash_bidir_f32.cu`), which `gpu_core::native_upgrade` substitutes for
+//! (`cu/flash_attn_f32.cu`), which `gpu_core::native_upgrade` substitutes for
 //! the WGSL `flash_attn_bidir_reg2` on a CUDA device at `head_dim == 128`.
 //!
 //! Swedish Embedded AB implements fused attention kernels for GPUs without

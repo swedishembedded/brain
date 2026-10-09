@@ -2211,7 +2211,18 @@ impl Qwen {
                     s.push(self.rope_step(&ids, q_buf, n, nh, hd, hq, t_use, c.rope_theta, false));
                     s.push(self.rope_step(&ids, k_buf, n, nkv, hd, hkv, t_use, c.rope_theta, false));
                 }
+                // The masked encoder path as one native launch where the
+                // device offers it: it never visits the key tiles past the
+                // last live key, so a short caption padded far costs its
+                // content, and it needs no materialised scores.
+                let fused = if self.kmask_on.get() {
+                    let p = [ga.b, ga.n_heads, ga.n_kv_heads, ga.t, ga.head_dim, ga.group()];
+                    self.gpu.fused_step(gpu_core::Fused::FlashGqaKmask, &[q_buf, k_buf, &self.kmask, &lb.v, &lb.ctx], &p)
+                } else {
+                    None
+                };
                 match (self.flash, self.kmask_on.get()) {
+                    _ if fused.is_some() => s.extend(fused),
                     (Some(fl), false) => s.push(block::flash_gqa_causal_fwd(&self.gpu, fl.fwd, &ga, q_buf, k_buf, &lb.v, &lb.ctx, &self.attn_lse)),
                     // The padded-key mask is an encoder path the flash kernel
                     // does not take; a training build serves it on

@@ -525,6 +525,14 @@ pub enum Fused {
     /// k]`; bindings `y`, `dy` read, `dx` written. A reordered reduction of
     /// `softmax_k_dx`'s `M = 1` case - for a trainer, not a redirect.
     SoftmaxRowsDx,
+    /// `flash_gqa_kmask_f32`: causal grouped-query attention with an additive
+    /// per-key mask - `gqa_scores_kmask`, a row softmax and `gqa_apply` in one
+    /// launch, at head_dim 128. Params `[bsz, n_heads, n_kv_heads, T,
+    /// head_dim, group]` (the chain's own uniform); bindings `q`, `k`,
+    /// `kmask`, `v` read, `out` written. Every query row must see a live key
+    /// (key 0 live is the padded encoder's case). A reordered reduction of the
+    /// chain, gated against an f64 oracle (`tests/flash_gqa_kmask_native.rs`).
+    FlashGqaKmask,
 }
 
 /// Output positions one block of [`Fused::Conv2dDwPartial`] stages per
@@ -672,6 +680,10 @@ const I8_GEMV_MULTI_BINDINGS: &[BindKind] = &[
 /// `matmul_i8w_dx`'s bindings: params, `dy`, `wq`, `sw`, `out`.
 const I8W_DX_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// `flash_gqa_kmask_f32`'s bindings: params, `q`, `k`, `kmask`, `v`, `out`.
+const FLASH_GQA_KMASK_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
 /// `conv2d_dw_partial`'s bindings: params, `dy`, `x`, `out`.
 const CONV2D_DW_PARTIAL_BINDINGS: &[BindKind] = CONV2D_BINDINGS;
 
@@ -695,6 +707,7 @@ impl Fused {
             Fused::F32DxFma => "matmul_f32_dx_fma",
             Fused::F32DwFma => "matmul_f32_dw_fma",
             Fused::SoftmaxRowsDx => "softmax_rows_dx",
+            Fused::FlashGqaKmask => "flash_gqa_kmask_f32",
         }
     }
 
@@ -710,6 +723,7 @@ impl Fused {
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
             Fused::F32Fma | Fused::F32DxFma | Fused::F32DwFma | Fused::SoftmaxRowsDx => F32_GEMM_BINDINGS,
+            Fused::FlashGqaKmask => FLASH_GQA_KMASK_BINDINGS,
         }
     }
 
@@ -759,6 +773,9 @@ impl Fused {
             Fused::SoftmaxRowsDx => {
                 matches!(params, [rows, k] if *rows >= 1 && *k >= 1 && u64::from(*rows) * u64::from(*k) <= u64::from(u32::MAX))
             }
+            Fused::FlashGqaKmask => matches!(params, [bsz, nh, nkv, t, hd, group]
+                if *bsz >= 1 && *nkv >= 1 && *t >= 1 && *hd == FLASH_BIDIR_HEAD_DIM && nh % nkv == 0 && *group == nh / nkv && *group >= 1
+                    && u64::from(*bsz) * u64::from(*nh) * u64::from(t.div_ceil(FLASH_BIDIR_ROWS)) <= u64::from(u32::MAX)),
         }
     }
 
@@ -784,6 +801,7 @@ impl Fused {
             Fused::F32Fma => gemm_blocks(params, self.tile()),
             Fused::F32DwFma => dw_blocks(params, self.tile()),
             Fused::SoftmaxRowsDx => params[0].div_ceil(self.tile().0),
+            Fused::FlashGqaKmask => params[0] * params[1] * params[3].div_ceil(self.tile().0),
         }
     }
 

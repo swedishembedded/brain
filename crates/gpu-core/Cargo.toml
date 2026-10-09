@@ -79,3 +79,7 @@ harness = false
 [[test]]
 name = "flash_bidir_native_bench"
 harness = false
+
+[[test]]
+name = "flash_gqa_kmask_native"
+harness = false
