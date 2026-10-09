@@ -226,6 +226,36 @@ existing caller. Assume nothing about units.
    pointers where one serves both rows) was enough to push one entry point of
    a shared file into spills while its siblings stayed clean.
 
+9. **A fully unrolled hot loop can fall out of the instruction cache.** The
+   native flash attention's output update (32 keys x 64 FMAs, unrolled whole)
+   was some 25 KB of straight-line code per key tile, and ran at HALF the rate
+   of its score phase, which did the same number of FMAs in a loop that fit.
+   Removing its shuffles and then its shared loads each moved nothing; rolling
+   the key loop (8 trips of 4 keys) took the kernel from 19.0 to 7.8 ms. *When
+   a phase is slow and neither its memory traffic nor its exchange explains
+   it, count the bytes of code a warp streams per iteration.*
+
+10. **A native reordering can be LESS accurate than the generated kernel it
+    replaces, and an absolute tolerance will not notice.** The first native
+    attention summed each score as one 128-long FMA chain; the WGSL kernel's
+    lane partials amount to chains of eight. Both met a 2^-17 bound against
+    an f64 oracle, and the native one was 2-5x further from it. Summing each
+    16-byte chunk on its own and the chunks in two chains closed the gap at no
+    measured cost. *Gate a non-bit-identical redirect on BOTH an absolute
+    bound and "no worse than twice the reference tier's own error on the same
+    data" - the second clause is the one that fails the shortcut.*
+
+11. **An implicit-GEMM conv on a wide layer is bound by its gather, not its
+    register block.** The VAE's 3x3 convs ran at 25% of FMA; a 128x128 tile
+    with an 8x8 block moved them under 10%, and replacing the input gather by
+    constants moved one shape from 2.8 to 4.3 TFLOP/s. The gather re-reads each
+    input once per tap, with index arithmetic and a bounds check per element.
+    A direct 3x3 kernel that stages the input slice with its halo once and
+    slides each staged row across the taps in registers reached 49% - and,
+    summing in the GEMM's own (ci, kh, kw) order with the same FMAs, the SAME
+    BITS. *Before widening a conv's tile, remove its staging and time what is
+    left.*
+
 ## D. Constraints that will bite you
 
 - **No atomics, no subgroups, no f16** — a tree reduction is
@@ -308,6 +338,14 @@ sample, with the number that killed each one:
 | a native implicit-GEMM conv on a deep, small-map layer (few positions, many channels) launches too few blocks, so narrowing its channel tile to reach ~128 blocks will speed it up | **KILLED, measured on the YOLOv8n conv set (`gpu-core/tests/conv2d_native_bench.rs`, P40)**: halving the 64-channel tile down to 16 until the grid reached 128 blocks made exactly those layers SLOWER (128->128 3x3 at 16x16, forward 0.334 -> 0.506 ms; 256->64 3x3 at 16x16, 0.486 -> 0.568 ms). A 16-channel tile gives each thread one output row, so every staged B value is reused once instead of four times and the multiply becomes shared-load bound; an idle multiprocessor cost less than that. *Grid size is not the only occupancy lever - check what the narrower tile does to register reuse before trading one for the other* |
 | the generated (WGSL -> CUDA) tier's elementwise kernels are memory-bound, so a native rewrite can only win back bandwidth | **KILLED (`bn_elem_f32.cu`, `plumb_f32.cu`)**: the generated `bn_train` / `concat_split` were COMPUTE-bound on index arithmetic - two to four 32-bit integer divisions per element to recover `(n, c, h, w)` or a channel, plus clamped 64-bit index checks - and ran at ~40 GB/s on a ~300 GB/s card, while `silu`, which moves the same bytes with no division, ran three times faster. Blocking by `(n, c)` plane so the channel is known per block, and the same arithmetic per element, gave 3x and 2.6x with BIT-IDENTICAL output. *Before calling a generated elementwise kernel bandwidth-bound, count its integer divisions per element* |
 
+An int8 pipeline amplifies last-bit differences, so A/B the INT8 path against
+the FP32 one, not against itself. The text encoder's native attention agreed
+with the materialised chain to rel_l2 7e-7 in fp32; with per-row int8
+activation quantisation between layers the two int8 runs differed by 1.7e-2
+and 1.8e-1 (rounding flips) - while each was exactly as far from the fp32
+encoder (0.3278 / 0.39). Only the comparison to the higher tier says whether
+accuracy was lost.
+
 A native kernel that reads its shared-memory tile as `float4` must check its
 bank map under the VECTOR load, not the scalar one: in the conv kernels each
 thread owned eight contiguous positions and read them as two `float4`, which
@@ -351,6 +389,14 @@ small elementwise kernel read 2.3-3.9 ms a call regardless of its size, against
 * a probe compared against a kernel must be short enough to escape the time
   slice too, or the ratio compares a sliced probe with an unsliced kernel: a
   25 ms peak probe measured 22 TOP/s (half the card), a 1 ms one 45.9.
+
+Two more instruments that lie on a shared card. `nvidia-smi
+--query-compute-apps` inside a container reports HOST process ids, so it
+cannot attribute device memory to your process at all: confirm the card from
+inside the process (a `gpu_core::card_tests!` binary prints the resolved
+card's PCI bus). And a step that drains between segments cannot be captured
+whole; replay each segment as one program right after it runs
+(`flux2::devgrad::BlockDev::arm_profile`) and sum the per-dispatch minima.
 
 And a timing event recorded inside a CUDA stream capture with plain
 `cuEventRecord` only tracks the capture's dependencies - it never fires on

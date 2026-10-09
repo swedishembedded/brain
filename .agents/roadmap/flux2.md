@@ -1722,12 +1722,108 @@ A restarted run no longer re-encodes: `--cache-dir` keeps caption contexts
 and latents, a warm run built neither encoder and reproduced the cold run's
 losses and adapter bytes exactly.
 
+### Not done (then)
+
+The DiT's `flash_attn_bidir_reg2`, the text encoder's materialised-score
+attention and the VAE conv at 25% of FMA were the three largest rows left;
+the next section is what became of them.
+
+## Attention, the text encoder, the VAE and placement on a shared P40 (2026-10-09)
+
+Tesla P40 gpu1, shared throughout with a ~10 GiB LoRA training job and a
+second process at 100% utilisation (medians ran at 1.5-2x the minima). Kernel
+numbers are the minimum of 9-15 device-timed launches with an FMA peak probe
+interleaved (`flash_bidir_native_bench`, the conv lab), measuring 11.24-11.31
+TFLOP/s; stage numbers are `--profile-replays 5` tables. Every gate named
+below takes its card as an argument now (`gpu_core::card_tests!`, `-- --device
+gpu1 --backend cuda`) and printed `Tesla P40, pci 0000:82:00.0`.
+
+### Kernels
+
+| kernel | shape | before | after | of the FMA peak |
+|---|---|---|---|---|
+| `flash_attn_bidir_reg2` -> `flash_bidir_f32` | 24 heads x 1792 | 17.51 ms | 8.74 ms | 20% -> 40% |
+| same | 24 x 3072 (edit, one 640x512 ref) | 51.63 ms | 25.84 ms | 20% -> 40% |
+| same | 24 x 4608 | 115.4 ms | 56.8 ms | 20% -> 41% |
+| `gqa_scores_kmask` + `softmax_rows` + `gqa_apply` -> `flash_gqa_kmask_f32` | Qwen3-4B, 512 tokens, 27 layers | 801 ms | 5.6 ms | pad keys never visited |
+| VAE conv set, 512x512 encode + decode shapes | implicit GEMM -> direct 3x3 | 1211.5 ms | 627.2 ms | 25.4% -> 49.1% |
+| `gn_apply` -> `gn_apply_f32` | decode 640x512, 30 calls | 98.5 ms | 26.0 ms | bandwidth |
+| trainer `rmsnorm_dx` -> `rmsnorm_dx_rows` | paired 512 px step, 60 calls | 745 ms | 42 ms | bandwidth |
+| DiT `layernorm` -> `layernorm_rows` | 640x512 step, 41 calls | 77-85 ms | 7.9 ms | bandwidth |
+
+Accuracy: the attention kernels are not bit-identical (a reordered sum) and
+are gated against an f64 oracle at |out - f64| <= 2^-17 max|v| AND at no more
+than twice the generated tier's own error on the same data. The first native
+attention, one 128-long FMA chain per score, met the first bound and was 2-5x
+less accurate than the WGSL tier; scoring each 16-byte chunk on its own and
+summing even and odd chunks in two chains made it as accurate (worst ratio
+0.83 of the clause) at no measured cost. The masked encoder kernel is 2-5x
+MORE accurate than the chain it replaces, and the two row kernels the DiT and
+the trainer now select are more accurate than the per-row kernels they
+replace (the DiT's LayerNorm 3.5e-6 against 6.6e-5 at the f64 reference). The
+direct conv and the GroupNorm apply pass are bit-identical.
+
+### Stages, klein-4B Q8_0, 4 steps, 640x512
+
+| stage | before (device, min of 5) | after |
+|---|---|---|
+| prompt encode | 1044 ms (1681 ms wall) | 249 ms (375 ms wall) |
+| DiT step, text-to-image (1792 tokens) | 1369 ms, attention 439 | 1163 ms, attention 219 (same busy run as the before) |
+| DiT step, edit (3072 tokens) | could not be placed | 2682 ms, attention 803 (busier card) |
+| VAE decode | 1306 ms | 742 ms |
+| VAE encode of the 640x512 reference | could not be placed | 391 ms |
+
+The edit run end to end, unprofiled, beside the training job: 22.5 s wall
+(prompt 0.85 s, reference 0.79 s, denoising 19.07 s including the denoiser's
+build in its turn, decode 1.73 s). The text-to-image image changed only with
+the attention kernels (max 209 / mean 2.1 grey levels after the DiT kernel,
+max 240 / mean 5.7 after the encoder kernel - the same scene with detail
+moved), and with the LayerNorm row kernel (max 230 / mean 2.1); every other
+change in this pass left it byte-identical.
+
+The encoder's last-bit changes do not stay last-bit: on the fp32 truncated
+encoder native and chain agree to rel_l2 7.4e-7 (layer 9) and 7.5e-6 (layer
+18), but the int8 encoder's per-row activation quantiser turns them into
+rounding flips (1.7e-2 / 1.8e-1 between the two int8 runs). Against the fp32
+encoder the int8 encoder is equally far either way (0.3278 / 0.3923 native,
+0.3278 / 0.3952 chain), so nothing was lost; an A/B between two int8 runs is
+the wrong instrument for an int8 pipeline's accuracy.
+
+### Placement beside another job
+
+Two things refused this pipeline on a card with room for it. The text
+encoder's charge was a private copy of the encoder's footprint that still
+counted one activation scratch per layer (qwen3 shares one); it is now
+`qwen3::footprint::estimate_vram_bytes` for the built shard, ~3.6 GiB less.
+And the encoder was planned resident for the whole run although it is used
+once: where encoder and denoiser do not fit together it is now planned in a
+phase before the denoiser, released after it encodes, and rebuilt for a later
+prompt. Before: "cannot place 'dit' (5.3 GiB) after placing te=gpu1; free:
+gpu1=3.0 GiB" with 11.5 GiB free; after: both text-to-image and the edit run.
+
+### The LoRA trainer, min of 5 replays per segment
+
+klein-4B paired 512 px, rank 16, int8 base (`dev_step_time
+--profile-replays 5`, which now replays each of the step's segments as one
+program): 24.1 s wall best of 3 on the busy card, 11.57 s of device time ->
+10.73 s after `rmsnorm_dx_rows`. Ranked after: `matmul_i8w_dx` 2.50 s
+(~6.3 TFLOP/s, ~55% of FMA), fp32 FMA GEMMs 2.17 s (3653 calls, mostly
+per-head attention), DP4A GEMM 2.11 s (~15 TOP/s, 32% of DP4A), fp32 dw 0.85,
+fp32 dx 0.71, `softmax_rows` 0.71 (1200 calls), `softmax_rows_dx` 0.36,
+head pack/unpack 0.58. The materialised attention (its GEMMs, both softmax
+passes and the packs) is about 5 s of the 10.7.
+
 ### Not done
 
-- The DiT's `flash_attn_bidir_reg2` (0.84 s of the 2.6 s step, generated
-  tier) and the text encoder's materialised-score attention
-  (`gqa_scores_kmask`, about 70% of its 1.5 s) are the largest remaining rows;
-  both want a native fused attention at head_dim 128 for cc 6.1.
-- The int8 GEMM's shared-memory feed (above).
-- The VAE conv at 25% of FMA is the YOLO campaign's kernel at the VAE's much
-  wider channel counts; it was not retuned for them.
+- A fused training attention (forward with the row log-sum-exp, a dK/dV and a
+  dQ backward) would replace about 5 s of the trainer step with roughly half
+  that. At head_dim 128 in fp32 a dK/dV block needs K, V, a query tile and a
+  dO tile resident - 64 KiB at 32-row tiles against 48 KiB a block may
+  declare - so it needs 16-row query tiles or a split that materialises part
+  of the backward; not started.
+- The DP4A GEMM at a third of its peak (the shared-memory feed above) is now
+  the largest row of the DiT step (48-53%) and of the encoder (82%).
+- The VAE convs are at half the FMA peak; a 512x512 decode at 0.3 s needs
+  about 75%. The one-block-per-SM direct kernel spills when capped at two
+  blocks; a tile that fits two is the next experiment. The encoder's padded
+  stride-2 downsamples still take the im2col lowering.
