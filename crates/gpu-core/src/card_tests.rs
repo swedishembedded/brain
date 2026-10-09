@@ -42,6 +42,9 @@ pub struct CardTest {
     /// (one that builds the CPU backend, or no device at all) runs with or
     /// without `--device`.
     pub needs_card: bool,
+    /// A developer sweep that asserts nothing: run only when asked for with
+    /// `--ignored` or `--include-ignored`, as libtest runs `#[ignore]`.
+    pub ignored: bool,
 }
 
 /// What the command line asked for.
@@ -134,6 +137,11 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
     println!("\nrunning {} tests{header}", selected.len());
     let (mut failed, mut ignored) = (Vec::new(), 0usize);
     for t in &selected {
+        if t.ignored && !args.include_ignored {
+            println!("test {} ... ignored", t.name);
+            ignored += 1;
+            continue;
+        }
         if t.needs_card && args.device.is_none() {
             println!("test {} ... ignored, no --device given", t.name);
             ignored += 1;
@@ -180,7 +188,8 @@ fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
 }
 
 /// Declare a test binary's `main` from its test functions - the ones that
-/// need the named card, then, after `host:`, any that do not:
+/// need the named card, then, after `host:`, any that do not, then, after
+/// `ignored:`, developer sweeps that run only with `--ignored`:
 ///
 /// ```ignore
 /// gpu_core::card_tests!(the_kernel_matches_the_reference, the_kernel_is_selected);
@@ -190,11 +199,12 @@ fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
 /// The target needs `harness = false` in its `[[test]]` entry.
 #[macro_export]
 macro_rules! card_tests {
-    ($($test:path),* $(,)? $(; host: $($host:path),* $(,)?)?) => {
+    ($($test:path),* $(,)? $(; host: $($host:path),* $(,)?)? $(; ignored: $($ign:path),* $(,)?)?) => {
         fn main() -> ::std::process::ExitCode {
             $crate::card_tests::run(&[
-                $($crate::card_tests::CardTest { name: stringify!($test), run: $test, needs_card: true },)*
-                $($($crate::card_tests::CardTest { name: stringify!($host), run: $host, needs_card: false },)*)?
+                $($crate::card_tests::CardTest { name: stringify!($test), run: $test, needs_card: true, ignored: false },)*
+                $($($crate::card_tests::CardTest { name: stringify!($host), run: $host, needs_card: false, ignored: false },)*)?
+                $($($crate::card_tests::CardTest { name: stringify!($ign), run: $ign, needs_card: true, ignored: true },)*)?
             ])
         }
     };

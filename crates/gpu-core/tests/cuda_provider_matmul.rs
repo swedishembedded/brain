@@ -27,6 +27,8 @@
 //!
 //! # Skipped without a device, by design
 //!
+//! The card is an argument (`cargo test -p brain-gpu-core --test cuda_provider_matmul --
+//! --device gpu1 --backend cuda`); without one nothing here opens a card.
 //! `Gpu::try_new_cuda` returning `Err` is an ordinary outcome (most machines
 //! are not NVIDIA machines) and every assertion here is about a real launch,
 //! so there is nothing to assert without one - the same skip-if-absent shape
@@ -81,8 +83,8 @@ const MAXABS: f32 = 1e-6;
 /// the generated tier's uncoalesced weight reads actually cost something.
 const SHAPE: (u32, u32, u32) = (512, 512, 512);
 
-/// Timed repetitions per trial, and trials per side. The median of the
-/// trials is compared, not the mean: a machine shared with other work
+/// Timed repetitions per trial, and trials per side. The fastest trial is
+/// compared, not the mean or the median: a machine shared with other work
 /// produces outliers in one direction only.
 const REPS: u32 = 8;
 const TRIALS: usize = 5;
@@ -162,15 +164,14 @@ fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuf
     Timed { wall, device: std::time::Duration::from_secs_f64(ms / 1e3) }
 }
 
-fn median(mut v: Vec<std::time::Duration>) -> std::time::Duration {
-    v.sort();
-    v[v.len() / 2]
-}
-
-fn medians(runs: &[Timed]) -> Timed {
+/// The fastest run of each measure. On a card another process is using, a
+/// neighbour's time slice only ever LENGTHENS a run, so the minimum is the
+/// statistic it cannot inflate; a median of a few runs swung the measured
+/// speedup between 5.6x and 7.9x on one shared card within minutes.
+fn fastest(runs: &[Timed]) -> Timed {
     Timed {
-        wall: median(runs.iter().map(|t| t.wall).collect()),
-        device: median(runs.iter().map(|t| t.device).collect()),
+        wall: runs.iter().map(|t| t.wall).min().expect("at least one run"),
+        device: runs.iter().map(|t| t.device).min().expect("at least one run"),
     }
 }
 
@@ -178,7 +179,6 @@ fn medians(runs: &[Timed]) -> Timed {
 /// selected against the compute capability the driver was ASKED for, must
 /// clear a measured speedup floor against the generated tier and still agree
 /// with it to `MAXABS`.
-#[test]
 fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
@@ -228,7 +228,7 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
         t_ref.push(time_provider(&gpu, &reference, &x, &w, &y_ref));
         t_got.push(time_provider(&gpu, &provider, &x, &w, &y_got));
     }
-    let (t_ref, t_got) = (medians(&t_ref), medians(&t_got));
+    let (t_ref, t_got) = (fastest(&t_ref), fastest(&t_got));
     let speedup = t_ref.device.as_secs_f64() / t_got.device.as_secs_f64();
     eprintln!(
         "cuda_provider_matmul: {m}x{n}x{k} f32, {REPS} dispatches - device time: generated {:?}, tuned {:?}, speedup {speedup:.2}x \
@@ -261,7 +261,6 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
 /// Asserted from the DISPATCH RECORD rather than from the output, because
 /// every tier computes the same numbers: which tier answered is exactly the
 /// fact nothing else can observe.
-#[test]
 fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
@@ -333,7 +332,6 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
 /// row offset. Same oracle (the WGSL reference provider), same seeded
 /// inputs, tolerance widened from the table's own `BitIdentical` to the
 /// absolute `MAXABS` bar a tuned kernel is held to.
-#[test]
 fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         eprintln!("cuda_provider_matmul: no CUDA device on this box - skipping");
@@ -379,3 +377,9 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
         parity::assert_provider_parity(&gpu, &provider, &case);
     }
 }
+
+gpu_core::card_tests!(
+    the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it,
+    the_production_registry_routes_a_real_matmul_to_the_tuned_kernel,
+    the_tuned_cuda_matmul_clears_every_shared_parity_case,
+);

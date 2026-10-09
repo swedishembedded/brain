@@ -113,7 +113,6 @@ fn selector() -> Arc<dyn KernelSelector> {
 /// THE ratchet. An op the policy declares `Tuned` that resolves to a
 /// `Generated` implementation is a policy violation, reported with both
 /// tiers named - never a silent success.
-#[test]
 fn a_policy_tuned_op_resolved_to_generated_is_a_violation() {
     let reg = ProviderRegistry::reference(selector()).prefer(fixture("fixture-generated", ImplSource::Generated));
     let caps = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
@@ -135,7 +134,6 @@ fn a_policy_tuned_op_resolved_to_generated_is_a_violation() {
 
 /// The converse, so the ratchet is not vacuously red: the same op resolved
 /// to a genuinely tuned implementation satisfies the same policy.
-#[test]
 fn the_same_op_resolved_to_a_tuned_impl_satisfies_the_policy() {
     let reg = ProviderRegistry::reference(selector()).prefer(fixture("fixture-tuned", ImplSource::Tuned));
     let caps = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
@@ -150,7 +148,6 @@ fn the_same_op_resolved_to_a_tuned_impl_satisfies_the_policy() {
 /// tuned tier was required. "It still computes the right answer" is the
 /// property that makes this failure invisible, which is why the tier, not
 /// the numerics, is what the gate reads.
-#[test]
 fn the_portable_reference_does_not_satisfy_a_tuned_requirement_either() {
     let reg = ProviderRegistry::reference(selector());
     let caps = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
@@ -166,7 +163,6 @@ fn the_portable_reference_does_not_satisfy_a_tuned_requirement_either() {
 /// and the highest applicable entry wins - the same "highest `min_cc` <=
 /// device cc" resolution the kernel registry uses, so a policy cannot
 /// require of an older device what only a newer one can do.
-#[test]
 fn a_policy_entry_does_not_apply_below_the_compute_capability_it_names() {
     const TIERED: &[PolicyEntry] = &[
         PolicyEntry { op: select::Op::MatMul, min_cc: (7, 0), required: ImplSource::Generated },
@@ -183,7 +179,6 @@ fn a_policy_entry_does_not_apply_below_the_compute_capability_it_names() {
 /// The datum that did not exist before: *why each provider that did not run
 /// was skipped*. Without it, "the tuned provider did not run" and "the tuned
 /// provider was never asked" look identical from the outside.
-#[test]
 fn every_skipped_provider_records_why_it_declined() {
     // SAFETY (test-only): this test binary is its own process and nothing
     // else in it reads BRAIN_NO_PROVIDER concurrently.
@@ -232,7 +227,6 @@ fn every_skipped_provider_records_why_it_declined() {
 /// worst case of all - the work still happens, on the fallback, and today
 /// the only trace is a `tracing::warn` nobody has a subscriber for. It must
 /// appear on the record as a decline carrying the error.
-#[test]
 fn a_failed_lower_is_recorded_on_the_choice_not_only_warned() {
     gpu_core::set_default_backend(gpu_core::Backend::Cpu);
     static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
@@ -273,7 +267,6 @@ fn a_failed_lower_is_recorded_on_the_choice_not_only_warned() {
 /// the capability the policy names. This is what stops the policy table
 /// from becoming a wish list - and what stops a tuned kernel from being
 /// deleted while the claim that it exists stays behind.
-#[test]
 fn the_shipped_policy_is_backed_by_the_shipped_cuda_registry() {
     // Measured 2026-09-13: 0. No hand-written CUDA kernel exists yet, so the
     // shipped policy honestly demands nothing of any device.
@@ -313,3 +306,8 @@ fn the_shipped_policy_is_backed_by_the_shipped_cuda_registry() {
          statement about what IS, not about what should be"
     );
 }
+
+gpu_core::card_tests!(
+    a_failed_lower_is_recorded_on_the_choice_not_only_warned,
+    ; host: a_policy_tuned_op_resolved_to_generated_is_a_violation, the_same_op_resolved_to_a_tuned_impl_satisfies_the_policy, the_portable_reference_does_not_satisfy_a_tuned_requirement_either, a_policy_entry_does_not_apply_below_the_compute_capability_it_names, every_skipped_provider_records_why_it_declined, the_shipped_policy_is_backed_by_the_shipped_cuda_registry,
+);

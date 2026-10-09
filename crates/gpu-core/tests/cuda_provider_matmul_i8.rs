@@ -28,6 +28,10 @@
 //!
 //! `Gpu::try_new_cuda` returning `Err` is an ordinary outcome, and every
 //! assertion here is about a real launch.
+//!
+//! The card is an argument (`cargo test -p brain-gpu-core --test
+//! cuda_provider_matmul_i8 -- --device gpu1 --backend cuda`); without one
+//! nothing here opens a card.
 
 use std::sync::Arc;
 
@@ -224,7 +228,6 @@ fn registries(gpu: &Gpu) -> (ProviderRegistry, ProviderRegistry) {
 /// ragged ones) the production registry must answer with the tensor-core
 /// kernel, agree with the portable kernel to [`REL_TOL`], and agree with an
 /// f64 host oracle.
-#[test]
 fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on_real_shapes() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         eprintln!("cuda_provider_matmul_i8: no CUDA device on this box - skipping");
@@ -285,7 +288,6 @@ fn the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on
 /// A hand-written tensor-core kernel that is not materially faster than the
 /// DP4A kernel it displaces is a maintenance cost with a `Tuned` claim
 /// attached. Device time, at the real prefill round shape.
-#[test]
 fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         eprintln!("cuda_provider_matmul_i8: no CUDA device on this box - skipping");
@@ -320,9 +322,7 @@ fn the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel() {
 /// exposes) and print device-timed TOPS at the real prefill shapes, so a tile
 /// choice is a measurement rather than a guess.
 ///
-///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --ignored --nocapture sweep
-#[test]
-#[ignore = "developer sweep over tile configurations; prints a table, asserts nothing"]
+///   cargo test --release -p brain-gpu-core --test cuda_provider_matmul_i8 -- --device gpu1 --backend cuda --ignored sweep
 fn sweep_tile_configurations() {
     use backend_api::{BindKind, NativeSpec};
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
@@ -385,7 +385,13 @@ fn sweep_tile_configurations() {
 
 /// The selector hands rows to the tensor-core GEMM from the capability the kernel
 /// itself needs; the two constants are one fact stated in two crates.
-#[test]
 fn the_selector_and_the_kernel_agree_on_the_tensor_core_floor() {
     assert_eq!(select::I8_MMA_MIN_CC, kernels_cuda::MMA_S8_MIN_CC);
 }
+
+gpu_core::card_tests!(
+    the_int8_tensor_core_gemm_is_routed_to_and_agrees_with_the_portable_kernel_on_real_shapes,
+    the_int8_tensor_core_gemm_is_materially_faster_than_the_portable_kernel,
+    ; host: the_selector_and_the_kernel_agree_on_the_tensor_core_floor,
+    ; ignored: sweep_tile_configurations,
+);

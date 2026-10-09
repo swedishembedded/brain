@@ -127,8 +127,8 @@ fn inputs(b: &Bn, seed: u64) -> Inputs {
     let dy = r.vec(b.len());
     let mut mvg = Vec::with_capacity(3 * c);
     let mut mv = Vec::with_capacity(2 * c);
-    for ch in 0..c {
-        let (mean, var, g) = (off[ch] + r.scaled(0.1), 0.05 + r.unit(), r.signed());
+    for &o in &off {
+        let (mean, var, g) = (o + r.scaled(0.1), 0.05 + r.unit(), r.signed());
         mvg.extend([mean, var, g]);
         mv.extend([mean, var]);
     }
@@ -259,7 +259,6 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
 
-#[test]
 fn the_real_yolov8n_batchnorms_are_exact_on_integer_data() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -291,7 +290,6 @@ fn the_real_yolov8n_batchnorms_are_exact_on_integer_data() {
     }
 }
 
-#[test]
 fn the_native_bn_reductions_are_redirected_to_only_on_cuda() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let p = [2, 16, 8, 8];
@@ -310,7 +308,6 @@ fn the_native_bn_reductions_are_redirected_to_only_on_cuda() {
     assert_eq!(gpu.native_kernel_for(STATS, &[2, 0, 8, 8]), None, "no channels is not served");
 }
 
-#[test]
 fn every_yolov8n_batchnorm_is_within_the_fp32_summation_bound_of_an_f64_oracle() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -339,7 +336,6 @@ const ELEM_KERNELS: &[(&str, &str)] = &[
 /// its RAW BITS, at every YOLOv8n BatchNorm map and on the scalar path
 /// (`H*W` not a multiple of four), from random data with non-trivial
 /// statistics and sums.
-#[test]
 fn the_native_bn_elementwise_passes_are_bit_identical_to_the_reference() {
     let gpu = gpu_core::testgpu::dev(ELEM_KERNELS);
     if !is_cuda(&gpu) {
@@ -377,3 +373,10 @@ fn the_native_bn_elementwise_passes_are_bit_identical_to_the_reference() {
         assert!(rd(1) == rd(3), "{b:?}: bn_dx differs from the reference");
     }
 }
+
+gpu_core::card_tests!(
+    the_real_yolov8n_batchnorms_are_exact_on_integer_data,
+    the_native_bn_reductions_are_redirected_to_only_on_cuda,
+    every_yolov8n_batchnorm_is_within_the_fp32_summation_bound_of_an_f64_oracle,
+    the_native_bn_elementwise_passes_are_bit_identical_to_the_reference,
+);

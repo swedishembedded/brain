@@ -189,7 +189,6 @@ fn device() -> Option<Gpu> {
 /// The redirect fired where it should and nowhere else. Without this the
 /// identity tests below would pass trivially on a handle that never left the
 /// WGSL tier.
-#[test]
 fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -215,7 +214,6 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
 
 /// RAW-BIT identical to the WGSL tier over partial tiles, odd group counts and
 /// aligned and unaligned binding windows.
-#[test]
 fn the_native_kernel_is_bit_identical_to_the_wgsl_tier() {
     let Some(gpu) = device() else { return };
     let aligned = [0, 0, 0, 0, 0];
@@ -234,7 +232,6 @@ fn the_native_kernel_is_bit_identical_to_the_wgsl_tier() {
 
 /// Seeded random shapes and windows, so the grid above is not the only place
 /// the tile edges and the scalar-load path have been looked at.
-#[test]
 fn random_shapes_and_windows_are_bit_identical() {
     let Some(gpu) = device() else { return };
     let mut r = data::rng::Lcg::new(0x1d8d_ea7a);
@@ -252,7 +249,6 @@ fn random_shapes_and_windows_are_bit_identical() {
 /// 640x512 generation and an edit, hidden 3072, MLP 9216) and its Qwen3-4B
 /// text encoder over a 512-token prompt (hidden 2560, q 4096, kv 1024, MLP
 /// 9728).
-#[test]
 fn the_model_shapes_are_bit_identical() {
     let Some(gpu) = device() else { return };
     let shapes = [
@@ -269,3 +265,10 @@ fn the_model_shapes_are_bit_identical() {
         check(&gpu, &Case { m, kg: k / 4, n, lead: [0; 5] });
     }
 }
+
+gpu_core::card_tests!(
+    the_native_kernel_is_selected_exactly_for_the_shapes_it_serves,
+    the_native_kernel_is_bit_identical_to_the_wgsl_tier,
+    random_shapes_and_windows_are_bit_identical,
+    the_model_shapes_are_bit_identical,
+);

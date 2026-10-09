@@ -72,7 +72,6 @@ fn same_bits(gpu: &Gpu, k: usize, inputs: &[&[f32]], params: &[u32], out_len: us
     assert!(bits(&native) == bits(&reference), "{what}: native differs from the reference");
 }
 
-#[test]
 fn the_native_plumbing_is_bit_identical_to_the_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     if !is_cuda(&gpu) {
@@ -115,3 +114,7 @@ fn the_native_plumbing_is_bit_identical_to_the_reference() {
         same_bits(&gpu, SILU_BWD, &[&x, &dy], &[total], total as usize, total, &format!("silu_bwd {total}"));
     }
 }
+
+gpu_core::card_tests!(
+    the_native_plumbing_is_bit_identical_to_the_reference,
+);

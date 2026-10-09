@@ -108,7 +108,6 @@ fn check(gpu: &Gpu, m: usize, k: usize, n: usize, accumulate: bool, lead: u64) {
     }
 }
 
-#[test]
 fn the_int8_weight_input_gradient_matches_an_f64_oracle() {
     let Some(gpu) = device() else { return };
     for accumulate in [false, true] {
@@ -120,7 +119,6 @@ fn the_int8_weight_input_gradient_matches_an_f64_oracle() {
     }
 }
 
-#[test]
 fn shapes_it_does_not_serve_are_declined() {
     let Some(gpu) = device() else { return };
     let b = gpu.storage(64);
@@ -128,3 +126,8 @@ fn shapes_it_does_not_serve_are_declined() {
     assert!(gpu.fused_step(Fused::I8wDx, &[&b, &b, &b, &b], &[4, 32, 4]).is_none(), "short params");
     assert!(gpu.fused_step(Fused::I8wDx, &[&b, &b, &b, &b], &[0, 32, 4, 0]).is_none(), "no rows");
 }
+
+gpu_core::card_tests!(
+    the_int8_weight_input_gradient_matches_an_f64_oracle,
+    shapes_it_does_not_serve_are_declined,
+);

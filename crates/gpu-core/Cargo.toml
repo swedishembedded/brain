@@ -91,3 +91,31 @@ harness = false
 [[test]]
 name = "gn_apply_native"
 harness = false
+
+[[test]]
+name = "i8_dyn_native"
+harness = false
+
+[[test]]
+name = "i8w_dx_native"
+harness = false
+
+[[test]]
+name = "plumb_native"
+harness = false
+
+[[test]]
+name = "bn_native"
+harness = false
+
+[[test]]
+name = "cuda_provider_matmul"
+harness = false
+
+[[test]]
+name = "cuda_provider_matmul_i8"
+harness = false
+
+[[test]]
+name = "cuda_impl_policy"
+harness = false
