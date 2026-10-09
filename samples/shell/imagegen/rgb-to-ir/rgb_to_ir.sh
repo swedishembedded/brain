@@ -20,6 +20,7 @@
 #   rgb_to_ir.sh tiles [--size 512] [--limit N]          -> lora-set/ : aligned RGB / IR tiles of split T
 #                                                        + pairs.yaml for `brain flux2 finetune`
 #   rgb_to_ir.sh captions [--neutral-share 0.3]          -> lora-set/captions.yaml, captions-report.json (needs `measure`)
+#   rgb_to_ir.sh sheet                                   -> lora-set/sheet.png : random tiles, captions, mask overlays
 #   rgb_to_ir.sh test                                    unit tests of the stages (no data needed)
 #
 # `manifest` takes the flags of rir_readers.py (see its --help). SEED (default 1)
@@ -80,6 +81,10 @@ case "$cmd" in
   captions)
     [ -d "$WORK/lora-set/regions" ] || { echo "no $WORK/lora-set/regions: run '$0 measure' first" >&2; exit 1; }
     exec python3 "$HERE/rir_captions.py" "$WORK/lora-set" --seed "$SEED" "$@"
+    ;;
+  sheet)
+    [ -f "$WORK/lora-set/captions.yaml" ] || { echo "no $WORK/lora-set/captions.yaml: run '$0 captions' first" >&2; exit 1; }
+    exec python3 "$HERE/rir_sheet.py" "$WORK/lora-set" --out "$WORK/lora-set/sheet.png" --seed "$SEED" "$@"
     ;;
   test)
     exec python3 -m unittest discover -s "$HERE/tests" "$@"
