@@ -24,10 +24,11 @@ import synth  # noqa: E402,F401  (sets the OpenCV log level before cv2 loads)
 import rir_sam2 as S  # noqa: E402
 
 FAKE_BRAIN = """#!/usr/bin/env python3
+LOG_PATH = %(log)r
 import json, os, sys
 import cv2, numpy as np
 argv = sys.argv[1:]
-with open(os.environ["FAKE_BRAIN_LOG"], "a") as fh:
+with open(LOG_PATH, "a") as fh:
     fh.write(json.dumps(argv) + "\\n")
 opt = lambda name: argv[argv.index(name) + 1]
 image = cv2.imread(opt("--in").split("=", 1)[1])
@@ -48,12 +49,10 @@ class CliPlumbing(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.brain = os.path.join(self.tmp.name, "brain")
-        with open(self.brain, "w") as fh:
-            fh.write(FAKE_BRAIN)
-        os.chmod(self.brain, os.stat(self.brain).st_mode | stat.S_IXUSR)
         self.log = os.path.join(self.tmp.name, "log")
-        os.environ["FAKE_BRAIN_LOG"] = self.log
-        self.addCleanup(os.environ.pop, "FAKE_BRAIN_LOG")
+        with open(self.brain, "w") as fh:
+            fh.write(FAKE_BRAIN % {"log": self.log})
+        os.chmod(self.brain, os.stat(self.brain).st_mode | stat.S_IXUSR)
 
     def calls(self):
         import json

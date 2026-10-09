@@ -319,7 +319,8 @@ def main(argv=None) -> int:
     ap.add_argument("--backend", choices=("cli", "dbus"), default="dbus",
                     help="dbus: one resident SAM 2 (needs a running `brain serve --dbus`, see --dbus-address); "
                          "cli: one `brain sam2 segment` process per box (slow: every process loads the model)")
-    ap.add_argument("--dbus-address", default=os.environ.get("DBUS_SESSION_BUS_ADDRESS", "SESSION"))
+    ap.add_argument("--brain-py", default=None, help="directory of the brain-py package (default: the one in this repository)")
+    ap.add_argument("--dbus-address", default="SESSION")
     ap.add_argument("--brain", default="brain", help="the brain binary, for --backend cli")
     ap.add_argument("--brain-args", default="", help="global flags before the verb, e.g. '--device gpu1 --backend cuda'")
     ap.add_argument("--variant", default="tiny", choices=("tiny", "large"))
@@ -329,7 +330,7 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args(argv)
     if a.backend == "dbus":
-        segmenter = S.DbusSegmenter(a.dbus_address, a.variant)
+        segmenter = S.DbusSegmenter(a.dbus_address, a.variant, a.brain_py)
     else:
         segmenter = S.CliSegmenter(a.brain, a.brain_args.split(), a.variant)
     grounder = S.CliGrounder(a.brain, a.brain_args.split()) if a.grounder else None

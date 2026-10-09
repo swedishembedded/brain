@@ -17,7 +17,7 @@ dependency-free path and not the one for a tile set.
 the checkpoint is loaded once, the image encoding is cached per image, and the
 boxes of a tile after the first cost only the mask decoder. It needs the
 `jeepney` package (brain-py's D-Bus client) and finds brain-py at the
-repository root, or at $BRAIN_PY.
+repository root, or at the directory given as `brain_py` / `--brain-py`.
 
 `CliGrounder` boxes named parts of an object with `brain florence2 ground`
 (image + a phrase in, normalised [x0,y0,x1,y1] boxes out). The object is
@@ -67,20 +67,21 @@ class CliSegmenter:
             return masks
 
 
-def _brain_py_path() -> str:
+def _brain_py_path(override: str | None = None) -> str:
+    """The brain-py directory: the explicit `override`, else the one in this repository."""
     here = os.path.dirname(os.path.abspath(__file__))
-    return os.environ.get("BRAIN_PY") or os.path.normpath(os.path.join(here, "..", "..", "..", "..", "brain-py"))
+    return override or os.path.normpath(os.path.join(here, "..", "..", "..", "..", "brain-py"))
 
 
 class DbusSegmenter:
     """SAM 2 resident in `brain serve --dbus`; `address` is the bus address (or SESSION / SYSTEM)."""
 
-    def __init__(self, address: str = "SESSION", variant: str = "tiny"):
-        sys.path.insert(0, _brain_py_path())
+    def __init__(self, address: str = "SESSION", variant: str = "tiny", brain_py: str | None = None):
+        sys.path.insert(0, _brain_py_path(brain_py))
         try:
             from brain_py.dbus import BrainDBus
         except ImportError as e:
-            raise RuntimeError(f"the D-Bus backend needs brain-py ({_brain_py_path()}, or $BRAIN_PY) and its "
+            raise RuntimeError(f"the D-Bus backend needs brain-py ({_brain_py_path(brain_py)}, or pass --brain-py) and its "
                                f"`jeepney` dependency: {e}") from e
         self._brain = BrainDBus(bus=address)
         self.variant = variant

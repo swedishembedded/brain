@@ -84,9 +84,10 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--count", type=int, default=12)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--dbus-address", default=os.environ.get("DBUS_SESSION_BUS_ADDRESS", "SESSION"))
+    ap.add_argument("--brain-py", default=None, help="directory of the brain-py package (default: the one in this repository)")
+    ap.add_argument("--dbus-address", default="SESSION")
     a = ap.parse_args(argv)
-    names = contact_sheet(a.tiles, a.out, S.DbusSegmenter(a.dbus_address), a.count, seed=a.seed)
+    names = contact_sheet(a.tiles, a.out, S.DbusSegmenter(a.dbus_address, brain_py=a.brain_py), a.count, seed=a.seed)
     print(json.dumps(names), file=sys.stderr)
     return 0
 

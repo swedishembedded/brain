@@ -221,7 +221,7 @@ not the default.
 SAM 2 through the CLI loads the checkpoint in every process: measured at 37 to
 43 s per box on a GPU (14 s on the CPU backend), unusable for thousands of
 boxes. `--backend dbus` (default) uses one resident `brain serve --dbus` and
-brain-py (needs `pip install jeepney`; `BRAIN_PY` overrides the brain-py
+brain-py (needs `pip install jeepney`; `--brain-py` names the brain-py
 location): the first box of a tile costs the image encoder (about 2.5 s), the
 rest about 0.1 s each. Start the server with `BRAIN_SAM2_WEIGHTS=<ckpt> brain
 --device gpu1 --backend cuda serve --dbus --dbus-address <addr>` and pass
@@ -324,7 +324,7 @@ recall, per-class AP, counts) is reproduced to the four printed decimals. The
 binary prints four decimals, so that is the resolution of the comparison; it
 sums the area in float32 where this code sums in float64, which differs by
 rounding (about 1e-7). The test is skipped, with its reason, when no binary is
-found (`BRAIN_BIN`, `brain` on `PATH`, or a built `target/release/brain`
+found (`brain` on `PATH`, or a built `target/release/brain`
 above the checkout).
 
 **Statistics (`rir_bootstrap.py`).** The resampling unit is the SEQUENCE: a

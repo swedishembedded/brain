@@ -196,10 +196,7 @@ class Sequences(unittest.TestCase):
 
 
 def find_brain():
-    """$BRAIN_BIN, `brain` on PATH, or a built target/release/brain in an ancestor of this checkout."""
-    env = os.environ.get("BRAIN_BIN")
-    if env:
-        return env if os.path.isfile(env) else None
+    """`brain` on PATH, or a built target/release/brain in an ancestor of this checkout."""
     on_path = shutil.which("brain")
     if on_path:
         return on_path
@@ -219,7 +216,7 @@ PARITY_STEPS = "150"
 PRINTED = 0.5e-4 + 1e-6  # half a unit of the fourth decimal
 
 
-@unittest.skipIf(BRAIN is None, "no brain binary: set BRAIN_BIN, put brain on PATH, or build target/release/brain")
+@unittest.skipIf(BRAIN is None, "no brain binary: put brain on PATH or build target/release/brain")
 class RustParity(unittest.TestCase):
     """Score the dump the real `brain yolov8 eval` wrote and compare with the table it printed.
 
@@ -230,11 +227,10 @@ class RustParity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
-        env = {**os.environ, "BRAIN_DEVICE": "cpu"}
         data, weights = (os.path.join(cls.tmp, n) for n in ("data", "w.safetensors"))
 
         def brain(*args):
-            done = subprocess.run([BRAIN, *args], env=env, capture_output=True, text=True, timeout=600)
+            done = subprocess.run([BRAIN, "--device", "cpu", *args], capture_output=True, text=True, timeout=600)
             assert done.returncode == 0, f"brain {args}: {done.stderr}"
             return done.stdout
 
