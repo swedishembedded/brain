@@ -192,8 +192,7 @@ def _estimate(arm: B.ArmScore, metric: int, alpha: float) -> Estimate:
 
 
 def _unavailable(*missing: str) -> B.Contrast:
-    names = ", ".join(repr(m) for m in missing)
-    return B.Contrast(float("nan"), np.zeros(0), None, False, f"not evaluable: arm {names} not measured")
+    return B.Contrast(float("nan"), np.zeros(0), None, False, f"not evaluable: {', '.join(missing)} not measured")
 
 
 def _and3(a, b):
@@ -292,7 +291,7 @@ def decide(results_dir: str, config: Config) -> Decision:
 
     def need(*roles):
         arms = [role(r) for r in roles]
-        missing = [a if a else r for a, r in zip(arms, roles) if a not in scores]
+        missing = [f"arm {a!r}" if a else f"role {r} (no arm in the config)" for a, r in zip(arms, roles) if a not in scores]
         return arms, missing
 
     contrasts = {}

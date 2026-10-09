@@ -175,7 +175,7 @@ class Unmeasured(unittest.TestCase):
         self.assertIn("c2", d.not_measured)
         md = D.render_markdown(d)
         self.assertRegex(md, r"c2.*not measured")
-        self.assertIn("not evaluable", d.comparisons["P1"].reason)
+        self.assertEqual(d.comparisons["P1"].reason, "not evaluable: arm 'c2' not measured")
         self.assertIsNone(d.comparisons["P1"].counts)
         self.assertFalse(d.gap_closure.evaluable)
         self.assertIsNone(d.kills["K3"].triggered)
