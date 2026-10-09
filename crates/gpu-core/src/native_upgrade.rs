@@ -353,6 +353,9 @@ pub(crate) const ROWS: &[Row] = &[
     // WGSL kernels, so these ARE bit-identical, and gated so.
     Row { slow: "bn_train", target: Target::Named("bn_train_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
     Row { slow: "bn_dx", target: Target::Named("bn_dx_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_bn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
+    // GroupNorm's apply pass, plane-blocked like BatchNorm's: the same
+    // arithmetic per element, bit-identical (`tests/gn_apply_native.rs`).
+    Row { slow: "gn_apply", target: Target::Named("gn_apply_f32"), bindings: BN_FOUR_BINDINGS, serves: serves_gn, blocks: bn_elem_blocks, requires_wgsl_upgrade: false },
     // The CSP plumbing and the SiLU pair: copies and elementwise expressions,
     // bit-identical, gated so (`tests/plumb_native.rs`).
     Row { slow: "concat_split", target: Target::Named("concat_split_f32"), bindings: COPY_BINDINGS, serves: serves_chan_window, blocks: chan_window_blocks, requires_wgsl_upgrade: false },
@@ -457,6 +460,13 @@ const BN_DBETA_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRea
 fn serves_bn(p: &[u32]) -> bool {
     matches!(p, [n, c, h, w] if *n >= 1 && *c >= 1 && *h >= 1 && *w >= 1)
         && p.iter().map(|&v| u64::from(v)).product::<u64>() <= u64::from(u32::MAX)
+}
+
+/// The GroupNorm uniform `[N, C, H, W, G]`: every extent non-zero and the
+/// channels a whole number of groups.
+fn serves_gn(p: &[u32]) -> bool {
+    matches!(p, [n, c, h, w, g] if *n >= 1 && *c >= 1 && *h >= 1 && *w >= 1 && *g >= 1 && c % g == 0)
+        && p[..4].iter().map(|&v| u64::from(v)).product::<u64>() <= u64::from(u32::MAX)
 }
 
 /// One block per channel.

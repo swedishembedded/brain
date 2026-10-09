@@ -87,3 +87,7 @@ harness = false
 [[test]]
 name = "conv2d_native"
 harness = false
+
+[[test]]
+name = "gn_apply_native"
+harness = false

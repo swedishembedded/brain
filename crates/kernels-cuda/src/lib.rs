@@ -816,6 +816,22 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/bn_elem_f32.cu"),
     },
     CudaKernel {
+        name: "gn_apply_f32",
+        // Redirected to by name from the WGSL `gn_apply` (`gpu_core::native_upgrade`).
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_gn_apply",
+        what: "GroupNorm apply over an NCHW map from per-(n, group) mean and rstd: a block per run of one (n, c) plane, its group decoded once, 16-byte accesses; bit-identical to gn_apply",
+        reported: "native:gn_apply_f32",
+        block_dim: 256,
+        tile: (1, 1024),
+        shared_bytes: 0,
+        src: include_str!("../cu/bn_elem_f32.cu"),
+    },
+    CudaKernel {
         name: "bn_dx_f32",
         op: Op::BatchNormReduce,
         weight: Dtype::F32,

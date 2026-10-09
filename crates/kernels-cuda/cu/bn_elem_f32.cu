@@ -9,7 +9,9 @@
 // BatchNorm's elementwise passes over an NCHW map, fp32: the hand-written
 // forms of `bn_train.wgsl` (normalise with batch statistics) and `bn_dx.wgsl`
 // (the input gradient), reading the identical buffers and the identical
-// uniform `[N, C, H, W]`.
+// uniform `[N, C, H, W]` - and GroupNorm's apply pass, `gn_apply.wgsl`
+// (uniform `[N, C, H, W, G]`), which recovers a channel and a group per
+// element the same way.
 //
 // The WGSL kernels give one invocation one element and recover its channel
 // with two integer divisions, then recompute the channel's `1 / sqrt(var +
@@ -117,4 +119,29 @@ extern "C" __global__ void __launch_bounds__(BRAIN_BE_THREADS) brain_bn_dx(const
             *reinterpret_cast<float4*>(dx + o) = make_float4(one(a.x, d.x), one(a.y, d.y), one(a.z, d.z), one(a.w, d.w));
         },
         [&](unsigned long long o) { dx[o] = one(x[o], dy[o]); });
+}
+
+// GroupNorm's apply: y = gb[c] * ((x - mean[k]) * rstd[k]) + gb[C + c], with
+// k = n * G + c / (C / G) and stats = [mean, rstd] per (n, group). The group
+// is per plane, so the divisions run once per block.
+extern "C" __global__ void __launch_bounds__(BRAIN_BE_THREADS) brain_gn_apply(const unsigned int* params, const float* x, const float* stats,
+                                                                            const float* gb, float* y) {
+    const BrainBePlane pl = brain_be_plane(params);
+    if (!pl.ok) { return; }
+    const unsigned C = params[1], G = params[4];
+    const unsigned n = (unsigned)(pl.base / ((unsigned long long)C * pl.hw));
+    const unsigned k = n * G + pl.c / (C / G);
+    const float mean = stats[2u * k];
+    const float rstd = stats[2u * k + 1u];
+    const float g = gb[pl.c];
+    const float b = gb[C + pl.c];
+    auto one = [&](float v) { return g * ((v - mean) * rstd) + b; };
+    const bool vec = (pl.hw % 4u == 0u) && brain_be_aligned(x) && brain_be_aligned(y);
+    brain_be_run(
+        pl, vec,
+        [&](unsigned long long o) {
+            const float4 v = *reinterpret_cast<const float4*>(x + o);
+            *reinterpret_cast<float4*>(y + o) = make_float4(one(v.x), one(v.y), one(v.z), one(v.w));
+        },
+        [&](unsigned long long o) { y[o] = one(x[o]); });
 }
