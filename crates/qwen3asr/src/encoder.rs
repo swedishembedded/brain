@@ -80,6 +80,25 @@ pub const BLOCK_LEAVES: &[&str] = &[
     "fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias",
 ];
 
+/// The audio tower's weights uploaded once to a device. An encoder built
+/// from them with [`AudioEncoder::with_weights`] costs nothing to make, where
+/// [`AudioEncoder::new`] uploads the whole tower again.
+#[derive(Clone)]
+pub struct DeviceWeights {
+    w: HashMap<String, DeviceBuffer>,
+    pos: Vec<f32>,
+}
+
+impl DeviceWeights {
+    /// Upload `weights` to `gpu`.
+    pub fn upload(gpu: &Gpu, cfg: &AudioEncoderConfig, weights: &HashMap<String, Vec<f32>>) -> DeviceWeights {
+        DeviceWeights {
+            w: weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect(),
+            pos: sinusoids(cfg.max_pos, cfg.d_model, 10000.0),
+        }
+    }
+}
+
 pub struct AudioEncoder<'g> {
     gpu: &'g Gpu,
     cfg: AudioEncoderConfig,
@@ -96,6 +115,11 @@ impl<'g> AudioEncoder<'g> {
         let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         let pos = sinusoids(cfg.max_pos, cfg.d_model, 10000.0);
         AudioEncoder { gpu, cfg, w, pos }
+    }
+
+    /// An encoder over weights already on `gpu` (see [`DeviceWeights`]).
+    pub fn with_weights(gpu: &'g Gpu, cfg: AudioEncoderConfig, weights: &DeviceWeights) -> AudioEncoder<'g> {
+        AudioEncoder { gpu, cfg, w: weights.w.clone(), pos: weights.pos.clone() }
     }
 
     fn wb(&self, name: &str) -> &DeviceBuffer {

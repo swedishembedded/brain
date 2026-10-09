@@ -13,17 +13,19 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpu_core::Gpu;
+use qwen3::model::PrefillInput;
 use qwen3::Qwen;
 
 use crate::config::QwenAsrConfig;
-use crate::encoder::{audio_pipelines, AudioEncoder};
+use crate::encoder::{audio_pipelines, AudioEncoder, DeviceWeights};
 
 /// An assembled Qwen3-ASR model for one fixed audio placement (`audio_row0`,
 /// `n_audio`) and sequence budget.
 pub struct Qwen3Asr {
     agpu: Gpu,
     cfg: QwenAsrConfig,
-    aweights: HashMap<String, Vec<f32>>,
+    /// The audio tower on `agpu`, uploaded once.
+    aweights: DeviceWeights,
     decoder: Qwen,
     audio_row0: u32,
     n_audio: u32,
@@ -49,7 +51,9 @@ impl Qwen3Asr {
         let shard = qwen3::Shard::whole(cfg.text.n_layers as usize);
         let mut decoder = Qwen::new_shard(cfg.text.clone(), 1, seq_budget, &dweights, false, shard);
         decoder.enable_mm_splice(audio_row0, n_audio);
-        Ok(Qwen3Asr { agpu: Gpu::new_cpu(audio_pipelines()), cfg, aweights, decoder, audio_row0, n_audio })
+        let agpu = Gpu::new(audio_pipelines());
+        let aweights = DeviceWeights::upload(&agpu, &cfg.audio, &aweights);
+        Ok(Qwen3Asr { agpu, cfg, aweights, decoder, audio_row0, n_audio })
     }
 
     /// Load a Hugging Face Qwen3-ASR checkpoint directory (bf16 → f32).
@@ -74,10 +78,11 @@ impl Qwen3Asr {
         let tensors = checkpoint::safetensors::read_model_dir(Path::new(dir))?;
         let src: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
         let aweights = crate::import::map_audio_encoder(&src, &cfg.audio)?;
-        let agpu = Gpu::new_cpu(audio_pipelines());
+        let agpu = Gpu::new(audio_pipelines());
         // Probe: encode a full window of silence to get the actual audio-token count.
         let (mel, valid) = crate::caps::window_features(&[], window_samples);
-        let enc = AudioEncoder::new(&agpu, cfg.audio, &aweights);
+        let aweights = DeviceWeights::upload(&agpu, &cfg.audio, &aweights);
+        let enc = AudioEncoder::with_weights(&agpu, cfg.audio, &aweights);
         let embeds = enc.encode(&mel, valid).1;
         let n_audio = (embeds.len() / cfg.audio.output_dim as usize) as u32;
         drop(enc);
@@ -95,7 +100,7 @@ impl Qwen3Asr {
     /// Encode a `[num_mel, T]` log-mel spectrogram (first `valid_frames` columns
     /// real audio) into `[n_audio, output_dim]` decoder-space audio embeddings.
     pub fn encode_audio(&self, mel: &[f32], valid_frames: u32) -> Vec<f32> {
-        let enc = AudioEncoder::new(&self.agpu, self.cfg.audio, &self.aweights);
+        let enc = AudioEncoder::with_weights(&self.agpu, self.cfg.audio, &self.aweights);
         enc.encode(mel, valid_frames).1
     }
 
@@ -110,8 +115,7 @@ impl Qwen3Asr {
     /// ambient device: building it uploads the whole audio tower, which costs
     /// more than encoding a short clip.
     pub fn features_many(&self, wavs: &[&[f32]]) -> Vec<crate::AudioFeatures> {
-        let gpu = Gpu::new(audio_pipelines());
-        let enc = AudioEncoder::new(&gpu, self.cfg.audio, &self.aweights);
+        let enc = AudioEncoder::with_weights(&self.agpu, self.cfg.audio, &self.aweights);
         let (encoder_dim, embed_dim) = (self.cfg.audio.d_model as usize, self.cfg.audio.output_dim as usize);
         wavs.iter()
             .map(|wav| {
@@ -130,48 +134,48 @@ impl Qwen3Asr {
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
-        let enc = AudioEncoder::new(&self.agpu, self.cfg.audio, &self.aweights);
+        let enc = AudioEncoder::with_weights(&self.agpu, self.cfg.audio, &self.aweights);
         enc.encode_with_head(mel, valid_frames, head).1
     }
 
     /// Greedy transcription: splice `audio_embeds` at the placeholder run, then
     /// argmax-decode from `input_ids` until an EOS token or `max_new` tokens.
-    /// Returns the generated token ids (excluding the prompt). Cache-free
-    /// (recompute) — correct but O(n²); the KV-cache path is a Phase-5 optimisation.
+    /// Returns the generated token ids (excluding the prompt).
     /// Greedy transcription with a **KV-cache** prefill + incremental decode.
-    /// The prompt is prefilled token-by-token into the cache; at the contiguous
-    /// audio-placeholder run the projected audio embeddings are injected via
-    /// `step_embed` (no re-embedding of the placeholder id). O(n) per token
-    /// instead of the cache-free O(n²) recompute.
+    /// The prompt is prefilled in one batched pass; at the contiguous
+    /// audio-placeholder run the projected audio embeddings are injected as raw
+    /// rows (no re-embedding of the placeholder id). The LM head runs on the
+    /// device.
     pub fn transcribe(&self, input_ids: &[u32], audio_embeds: &[f32], eos: &[u32], max_new: usize) -> Vec<u32> {
         let d = self.cfg.text.d_model as usize;
         assert_eq!(audio_embeds.len(), self.n_audio as usize * d, "audio_embeds shape");
-        let vocab = self.cfg.text.vocab as usize;
-        let head = self.decoder.read_weight(self.cfg.text.head_weight()); // [vocab, d]
-        let logits_of = |h: &[f32]| -> Vec<f32> {
-            (0..vocab).map(|o| head[o * d..o * d + d].iter().zip(h).map(|(a, b)| a * b).sum()).collect()
-        };
-
         self.decoder.reset_cache();
         let (row0, n) = (self.audio_row0 as usize, self.n_audio as usize);
-        // prefill: audio embeds at the placeholder run, token embeddings elsewhere
-        let mut hidden = Vec::new();
-        for (pos, &tok) in input_ids.iter().enumerate() {
-            hidden = if pos >= row0 && pos < row0 + n {
-                self.decoder.step_embed(&audio_embeds[(pos - row0) * d..(pos - row0 + 1) * d])
-            } else {
-                self.decoder.step(tok)
-            };
-        }
+        // Prefill in one batched pass: audio embeds at the placeholder run,
+        // token embeddings elsewhere. The head runs on the device, so neither the
+        // vocabulary-by-width matrix nor a hidden row ever crosses to the host
+        // per token (the matrix is over a gigabyte in fp32).
+        let inputs: Vec<PrefillInput<'_>> = input_ids
+            .iter()
+            .enumerate()
+            .map(|(pos, &tok)| {
+                if pos >= row0 && pos < row0 + n {
+                    PrefillInput::Embed(&audio_embeds[(pos - row0) * d..(pos - row0 + 1) * d])
+                } else {
+                    PrefillInput::Token(tok)
+                }
+            })
+            .collect();
+        self.decoder.prefill(&inputs);
         // incremental greedy decode
         let mut out = Vec::new();
         while out.len() < max_new {
-            let next = argmax(&logits_of(&hidden));
+            let next = argmax(&self.decoder.decode_logits());
             out.push(next);
             if eos.contains(&next) {
                 break;
             }
-            hidden = self.decoder.step(next);
+            self.decoder.step(next);
         }
         out
     }
