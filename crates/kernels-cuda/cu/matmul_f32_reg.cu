@@ -6,14 +6,23 @@
 // portable reference to the last bit then you can procure our services by
 // sending an email to info@swedishembedded.com.
 //
-// Register-tiled fp32 matmul, out = x @ W^T - the hand-written CUDA form of
-// `matmul_reg3.wgsl`, with the identical buffer layout, the identical uniform
-// and the identical RESULT TO THE LAST BIT.
+// Register-tiled fp32 matmuls, each the hand-written CUDA form of a WGSL kernel
+// with the identical buffer layout, the identical uniform and the identical
+// RESULT TO THE LAST BIT:
 //
-//   params : u32 [m, k, n]
-//   x      : [M, K] f32
-//   w      : [N, K] f32
-//   out    : [M, N] f32
+//   brain_matmul_f32_reg     `matmul_reg3.wgsl`, out = x @ W^T
+//     params : u32 [m, k, n]
+//     x : [M, K]   w : [N, K]   out : [M, N]
+//
+//   brain_matmul_f32_dx_reg  `matmul_dx_reg.wgsl`, its input gradient
+//     params : u32 [m, k, n, accumulate]
+//     dy : [M, N]  w : [N, K]   out : [M, K] = dy @ W (added to `out` when
+//     `accumulate` is non-zero, as one rounded addition after the sum)
+//
+// Both are the same GEMM over a contraction axis of length L (K for the
+// forward, N for the input gradient); they differ only in how the second
+// operand is laid out (W rows are output COLUMNS in the forward, contraction
+// steps in the input gradient) and in the epilogue.
 //
 // What it computes, exactly
 // -------------------------
@@ -34,8 +43,9 @@
 // k-MAJOR, double-buffered, one barrier per 16-wide chunk; the next chunk's
 // global loads are issued before the current chunk is consumed. Four
 // consecutive threads stage the 64 contiguous bytes of one row's chunk.
-// Bindings that are not 16-byte aligned, or a K that is not a multiple of
-// four, take the scalar-load instantiation, which computes the same bits.
+// Bindings that are not 16-byte aligned, or a row length that is not a
+// multiple of four, take the scalar-load instantiation, which computes the
+// same bits.
 //
 // The register budget is capped so TWO blocks fit per SM (`__launch_bounds__`
 // minimum 2, 128 registers, no spills): with one block, every chunk's barrier
@@ -61,36 +71,91 @@ struct BrainMmrShared {
     float b[2][BRAIN_MMR_BK][BRAIN_MMR_SP];
 };
 
-// Four consecutive values of a row starting at `k`, zero past K or for a row
-// outside the operand.
+// Four consecutive floats of `row` starting at `i`, zero at and past `lim` or
+// for a row outside the operand.
 template <bool VEC>
-__device__ __forceinline__ float4 brain_mmr_load(const float* row, bool ok, unsigned int k, unsigned int kk) {
+__device__ __forceinline__ float4 brain_mmr_load(const float* row, bool ok, unsigned int i, unsigned int lim) {
     if (VEC) {
-        if (!ok || k >= kk) { return make_float4(0.f, 0.f, 0.f, 0.f); }
-        return __ldg(reinterpret_cast<const float4*>(row + k));
+        if (!ok || i >= lim) { return make_float4(0.f, 0.f, 0.f, 0.f); }
+        return __ldg(reinterpret_cast<const float4*>(row + i));
     }
     float4 v;
-    v.x = (ok && k + 0 < kk) ? __ldg(row + k + 0) : 0.f;
-    v.y = (ok && k + 1 < kk) ? __ldg(row + k + 1) : 0.f;
-    v.z = (ok && k + 2 < kk) ? __ldg(row + k + 2) : 0.f;
-    v.w = (ok && k + 3 < kk) ? __ldg(row + k + 3) : 0.f;
+    v.x = (ok && i + 0 < lim) ? __ldg(row + i + 0) : 0.f;
+    v.y = (ok && i + 1 < lim) ? __ldg(row + i + 1) : 0.f;
+    v.z = (ok && i + 2 < lim) ? __ldg(row + i + 2) : 0.f;
+    v.w = (ok && i + 3 < lim) ? __ldg(row + i + 3) : 0.f;
     return v;
 }
 
-__device__ __forceinline__ void brain_mmr_store(float (*dst)[BRAIN_MMR_SP], unsigned int q, unsigned int r, float4 v) {
-    dst[q + 0][r] = v.x;
-    dst[q + 1][r] = v.y;
-    dst[q + 2][r] = v.z;
-    dst[q + 3][r] = v.w;
-}
+// One operand's share of a 16-step chunk, staged into a k-major shared tile.
+// ROW_MAJOR: the operand is [outputs, L] (a row per output, contraction
+// contiguous) - four consecutive threads read one row's 16 steps and the
+// store transposes. Otherwise it is [L, outputs] (contraction rows, outputs
+// contiguous) - a thread reads four consecutive outputs of one step and the
+// store is a straight copy.
+template <bool VEC, bool ROW_MAJOR>
+struct BrainMmrStage {
+    const float* base[2];
+    bool ok[2];
+    unsigned int r[2];
+    unsigned int q[2];
+    float4 v[2];
 
-template <bool VEC>
-__device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, const unsigned int* params, const float* x, const float* w, float* out) {
-    const unsigned int m = params[0];
-    const unsigned int kk = params[1];
-    const unsigned int n = params[2];
-    const unsigned int tiles_n = (n + BRAIN_MMR_BN - 1) / BRAIN_MMR_BN;
-    const unsigned int tiles = ((m + BRAIN_MMR_BM - 1) / BRAIN_MMR_BM) * tiles_n;
+    // `op` is the operand, `o0` its first output in this tile, `outs` the
+    // output count, `len` the contraction length L.
+    __device__ __forceinline__ void init(const float* op, unsigned int o0, unsigned int outs, unsigned int len, unsigned int tid) {
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            const unsigned int t = tid + p * BRAIN_MMR_THREADS;
+            if (ROW_MAJOR) {
+                r[p] = t / 4;
+                q[p] = (t % 4) * 4;
+                ok[p] = o0 + r[p] < outs;
+                base[p] = op + (size_t)(ok[p] ? o0 + r[p] : 0) * len;
+            } else {
+                // Both vectors of a thread are the same four outputs, eight
+                // contraction steps apart, so they share one column pointer.
+                r[p] = (t % 32) * 4;
+                q[p] = t / 32;
+                ok[p] = true;
+                base[p] = op + o0 + r[0];
+            }
+        }
+    }
+    __device__ __forceinline__ void load(unsigned int k0, unsigned int outs, unsigned int len, unsigned int o0, unsigned int stride) {
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            if (ROW_MAJOR) {
+                v[p] = brain_mmr_load<VEC>(base[p], ok[p], k0 + q[p], len);
+            } else {
+                const unsigned int l = k0 + q[0] + 8 * p;
+                v[p] = brain_mmr_load<VEC>(base[0] + (size_t)l * stride, l < len, 0, outs - min(outs, o0 + r[0]));
+            }
+        }
+    }
+    __device__ __forceinline__ void store(float (*dst)[BRAIN_MMR_SP]) {
+#pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            if (ROW_MAJOR) {
+                dst[q[p] + 0][r[p]] = v[p].x;
+                dst[q[p] + 1][r[p]] = v[p].y;
+                dst[q[p] + 2][r[p]] = v[p].z;
+                dst[q[p] + 3][r[p]] = v[p].w;
+            } else {
+                *reinterpret_cast<float4*>(&dst[q[p]][r[p]]) = v[p];
+            }
+        }
+    }
+};
+
+// One 128 x 128 output tile of out[m, c] = sum_l A[m, l] * B(c, l), with A
+// row-major [M, L] and B as `B_ROW_MAJOR` says. `rows`/`cols`/`len` are M, the
+// output width and L; `stride` is B's row length when it is [L, cols].
+template <bool VEC, bool B_ROW_MAJOR>
+__device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, unsigned int rows, unsigned int cols, unsigned int len, const float* a,
+                                                const float* b, float* out, bool accumulate) {
+    const unsigned int tiles_n = (cols + BRAIN_MMR_BN - 1) / BRAIN_MMR_BN;
+    const unsigned int tiles = ((rows + BRAIN_MMR_BM - 1) / BRAIN_MMR_BM) * tiles_n;
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
     if (blk >= tiles) { return; }
     const unsigned int row0 = (blk / tiles_n) * BRAIN_MMR_BM;
@@ -100,19 +165,10 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, const unsign
     const unsigned int ty = tid / 16;
     const unsigned int tx = tid % 16;
 
-    // Staging: thread t covers vectors t and t + 256 of a chunk's 512 per
-    // operand (128 rows x 4 vectors of 4 k); four consecutive threads share a row.
-    const unsigned int sr0 = tid / 4;
-    const unsigned int sr1 = sr0 + 64;
-    const unsigned int sq = (tid % 4) * 4;
-    const bool a0_ok = row0 + sr0 < m;
-    const bool a1_ok = row0 + sr1 < m;
-    const bool b0_ok = col0 + sr0 < n;
-    const bool b1_ok = col0 + sr1 < n;
-    const float* a0_row = x + (size_t)(a0_ok ? row0 + sr0 : 0) * kk;
-    const float* a1_row = x + (size_t)(a1_ok ? row0 + sr1 : 0) * kk;
-    const float* b0_row = w + (size_t)(b0_ok ? col0 + sr0 : 0) * kk;
-    const float* b1_row = w + (size_t)(b1_ok ? col0 + sr1 : 0) * kk;
+    BrainMmrStage<VEC, true> sa;
+    BrainMmrStage<VEC, B_ROW_MAJOR> sb;
+    sa.init(a, row0, rows, len, tid);
+    sb.init(b, col0, cols, len, tid);
 
     float c[8][8];
 #pragma unroll
@@ -121,24 +177,19 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, const unsign
         for (int j = 0; j < 8; ++j) { c[i][j] = 0.0f; }
     }
 
-    const unsigned int nchunks = (kk + BRAIN_MMR_BK - 1) / BRAIN_MMR_BK;
-
-    brain_mmr_store(sh.a[0], sq, sr0, brain_mmr_load<VEC>(a0_row, a0_ok, sq, kk));
-    brain_mmr_store(sh.a[0], sq, sr1, brain_mmr_load<VEC>(a1_row, a1_ok, sq, kk));
-    brain_mmr_store(sh.b[0], sq, sr0, brain_mmr_load<VEC>(b0_row, b0_ok, sq, kk));
-    brain_mmr_store(sh.b[0], sq, sr1, brain_mmr_load<VEC>(b1_row, b1_ok, sq, kk));
+    const unsigned int nchunks = (len + BRAIN_MMR_BK - 1) / BRAIN_MMR_BK;
+    sa.load(0, rows, len, row0, len);
+    sb.load(0, cols, len, col0, cols);
+    sa.store(sh.a[0]);
+    sb.store(sh.b[0]);
     __syncthreads();
 
     for (unsigned int ch = 0; ch < nchunks; ++ch) {
         const unsigned int buf = ch & 1u;
         const bool has_next = ch + 1 < nchunks;
-        float4 na0, na1, nb0, nb1;
         if (has_next) {
-            const unsigned int k1 = (ch + 1) * BRAIN_MMR_BK + sq;
-            na0 = brain_mmr_load<VEC>(a0_row, a0_ok, k1, kk);
-            na1 = brain_mmr_load<VEC>(a1_row, a1_ok, k1, kk);
-            nb0 = brain_mmr_load<VEC>(b0_row, b0_ok, k1, kk);
-            nb1 = brain_mmr_load<VEC>(b1_row, b1_ok, k1, kk);
+            sa.load((ch + 1) * BRAIN_MMR_BK, rows, len, row0, len);
+            sb.load((ch + 1) * BRAIN_MMR_BK, cols, len, col0, cols);
         }
 #pragma unroll
         for (int k = 0; k < BRAIN_MMR_BK; ++k) {
@@ -155,11 +206,8 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, const unsign
             }
         }
         if (has_next) {
-            const unsigned int nb = buf ^ 1u;
-            brain_mmr_store(sh.a[nb], sq, sr0, na0);
-            brain_mmr_store(sh.a[nb], sq, sr1, na1);
-            brain_mmr_store(sh.b[nb], sq, sr0, nb0);
-            brain_mmr_store(sh.b[nb], sq, sr1, nb1);
+            sa.store(sh.a[buf ^ 1u]);
+            sb.store(sh.b[buf ^ 1u]);
         }
         __syncthreads();
     }
@@ -167,28 +215,50 @@ __device__ __forceinline__ void brain_mmr_block(BrainMmrShared& sh, const unsign
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
         const unsigned int r = row0 + (i < 4 ? ty * 4 + i : 64 + ty * 4 + (i - 4));
-        if (r >= m) { continue; }
-        float* orow = out + (size_t)r * n;
+        if (r >= rows) { continue; }
+        float* orow = out + (size_t)r * cols;
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
             const unsigned int cbase = col0 + h * 64 + tx * 4;
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
-                if (cbase + j < n) { orow[cbase + j] = c[i][h * 4 + j]; }
+                if (cbase + j < cols) {
+                    const float v = c[i][h * 4 + j];
+                    orow[cbase + j] = accumulate ? __fadd_rn(orow[cbase + j], v) : v;
+                }
             }
         }
     }
 }
 
+// Whether 16-byte loads are legal: both operand bases aligned and both row
+// lengths whole numbers of four floats.
+__device__ __forceinline__ bool brain_mmr_vec(const float* a, const float* b, unsigned int la, unsigned int lb) {
+    return la % 4 == 0 && lb % 4 == 0 && ((reinterpret_cast<size_t>(a) | reinterpret_cast<size_t>(b)) & 15u) == 0;
+}
+
+// The register budget is capped so two blocks share an SM (see the header).
+// One shared allocation per entry serves both instantiations: a `__shared__`
+// inside the templated body would be one per instantiation.
 extern "C" __global__ void __launch_bounds__(BRAIN_MMR_THREADS, 2)
 brain_matmul_f32_reg(const unsigned int* params, const float* x, const float* w, float* out) {
-    // One shared allocation for both instantiations: a `__shared__` inside
-    // the templated body would be one per instantiation, twice the footprint.
     __shared__ BrainMmrShared sh;
-    const bool vec = (params[1] % 4 == 0) && ((reinterpret_cast<size_t>(x) | reinterpret_cast<size_t>(w)) & 15u) == 0;
-    if (vec) {
-        brain_mmr_block<true>(sh, params, x, w, out);
+    const unsigned int m = params[0], k = params[1], n = params[2];
+    if (brain_mmr_vec(x, w, k, k)) {
+        brain_mmr_block<true, true>(sh, m, n, k, x, w, out, false);
     } else {
-        brain_mmr_block<false>(sh, params, x, w, out);
+        brain_mmr_block<false, true>(sh, m, n, k, x, w, out, false);
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_MMR_THREADS, 2)
+brain_matmul_f32_dx_reg(const unsigned int* params, const float* dy, const float* w, float* out) {
+    __shared__ BrainMmrShared sh;
+    const unsigned int m = params[0], k = params[1], n = params[2];
+    const bool accumulate = params[3] != 0;
+    if (brain_mmr_vec(dy, w, n, k)) {
+        brain_mmr_block<true, false>(sh, m, k, n, dy, w, out, accumulate);
+    } else {
+        brain_mmr_block<false, false>(sh, m, k, n, dy, w, out, accumulate);
     }
 }

@@ -134,6 +134,17 @@ fn serves_f32_gemm(p: &[u32]) -> bool {
     matches!(p, [m, k, n] if *m >= 1 && *k >= 1 && *n >= 1 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX))
 }
 
+/// `matmul_dx_reg`'s `Params { m, k, n, accumulate }`: any non-empty product
+/// whose `m x k` output fits the kernel's 32-bit element arithmetic.
+fn serves_f32_dx(p: &[u32]) -> bool {
+    matches!(p, [m, k, n, _] if *m >= 1 && *k >= 1 && *n >= 1 && u64::from(*m) * u64::from(*k) <= u64::from(u32::MAX))
+}
+
+/// The input gradient's output is `m x k`: `params[1]` is its width.
+fn dx_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
+    p[0].div_ceil(tile.0) * p[1].div_ceil(tile.1)
+}
+
 /// `moe_i8_grouped.wgsl`'s bindings: params, `xq`, `sx`, `tab`, `perm`, `wq`, `sw`,
 /// `out`.
 const MOE_I8_GROUPED_BINDINGS: &[BindKind] = &[
@@ -249,6 +260,15 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: F32_GEMM_BINDINGS,
         serves: serves_f32_gemm,
         blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+    },
+    // Its input gradient: `Params { m, k, n, accumulate }`, the output `m x k`.
+    Row {
+        slow: "matmul_dx_reg",
+        target: Target::Named("matmul_f32_dx_reg"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_dx,
+        blocks: dx_blocks,
         requires_wgsl_upgrade: false,
     },
     Row {

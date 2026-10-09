@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The gate for the native `matmul_f32_reg` kernel (`kernels_cuda`,
-//! `cu/matmul_f32_reg.cu`) that `gpu_core::native_upgrade` substitutes for the
-//! WGSL `matmul_reg3` GEMM on a CUDA device.
+//! The gate for the native fp32 GEMMs of `kernels_cuda`'s
+//! `cu/matmul_f32_reg.cu` that `gpu_core::native_upgrade` substitutes on a
+//! CUDA device: `matmul_f32_reg` for the WGSL `matmul_reg3` forward and
+//! `matmul_f32_dx_reg` for `matmul_dx_reg`, its input gradient.
 //!
 //! Swedish Embedded AB implements bit-exact native fp32 GEMMs. If your team
 //! needs expertise in replacing a generated kernel with a hand-written one
@@ -19,10 +20,17 @@
 
 use gpu_core::{Dispatch, Gpu};
 
-const KERNELS: &[(&str, &str)] = &[("matmul_reg3", kernels::MATMUL_REG3), ("matmul_reg3_ref", kernels::MATMUL_REG3)];
+const KERNELS: &[(&str, &str)] = &[
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("matmul_reg3_ref", kernels::MATMUL_REG3),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dx_reg_ref", kernels::MATMUL_DX_REG),
+];
 
 const K_REG3: usize = 0;
 const K_REF: usize = 1;
+const K_DX: usize = 2;
+const K_DX_REF: usize = 3;
 /// The WGSL kernel's output tile, which sets its dispatch geometry.
 const WGSL_TILE: u32 = 128;
 /// Written around every window so an out-of-window write shows.
@@ -158,5 +166,61 @@ fn the_model_shapes_are_bit_identical() {
     let Some(gpu) = device() else { return };
     for (m, k, n) in [(512u32, 9216u32, 3072u32), (1280, 9216, 3072), (512, 7680, 3072), (1280, 3072, 128), (5120, 512, 512), (4096, 1152, 128)] {
         check(&gpu, m, k, n, [0; 3]);
+    }
+}
+
+/// `dX[m,k] = sum_n dY[m,n] * W[n,k]`, optionally added to what `out` holds.
+/// Both outputs start from the same prior contents so the accumulating mode
+/// is compared on equal terms.
+fn check_dx(gpu: &Gpu, m: u32, k: u32, n: u32, accumulate: u32, lead: [u64; 3]) {
+    let seed = u64::from(m) * 37 + u64::from(k) * 11 + u64::from(n) + u64::from(accumulate);
+    let dy = Windowed::new(gpu, &values((m * n) as usize, seed + 1), lead[0]);
+    let w = Windowed::new(gpu, &values((n * k) as usize, seed + 2), lead[1]);
+    let prior = values((m * k) as usize, seed + 3);
+    let a = Windowed::new(gpu, &prior, lead[2]);
+    let b = Windowed::new(gpu, &prior, lead[2]);
+    let tiles = m.div_ceil(WGSL_TILE) * k.div_ceil(WGSL_TILE);
+    let dispatch = |kind: usize, o: &Windowed| {
+        gpu.dispatch_sliced(kind, &[&dy.buf, &w.buf, &o.buf], &[dy.range(), w.range(), o.range()], &[m, k, n, accumulate], Dispatch::Workgroups(tiles))
+    };
+    gpu.submit(&[], &[dispatch(K_DX, &a), dispatch(K_DX_REF, &b)]);
+    gpu.poll_wait();
+    let (ga, gb) = (a.bits(gpu), b.bits(gpu));
+    let (lo, hi) = (a.lead as usize, a.lead as usize + a.len);
+    assert!(ga[..lo].iter().chain(&ga[hi..]).all(|&v| v == SENTINEL), "native dx wrote outside its window at {m}x{k}x{n}");
+    let first = ga[lo..hi].iter().zip(&gb[lo..hi]).position(|(p, q)| p != q);
+    assert!(
+        first.is_none(),
+        "native dx GEMM differs from matmul_dx_reg at m={m} k={k} n={n} accumulate={accumulate} lead={lead:?}: first at {first:?} ({:?} vs {:?})",
+        first.map(|i| f32::from_bits(ga[lo + i])),
+        first.map(|i| f32::from_bits(gb[lo + i])),
+    );
+}
+
+#[test]
+fn the_input_gradient_is_redirected_and_bit_identical() {
+    let Some(gpu) = device() else { return };
+    assert_eq!(gpu.native_kernel_for(K_DX, &[128, 64, 128, 0]), Some("matmul_f32_dx_reg"));
+    assert_eq!(gpu.native_kernel_for(K_DX, &[128, 64, 128]), None, "short params");
+    assert_eq!(gpu.native_kernel_for(K_DX_REF, &[128, 64, 128, 0]), None);
+    for accumulate in [0u32, 1] {
+        for n in [1u32, 5, 16, 33] {
+            for (m, k) in [(1u32, 1u32), (1, 130), (127, 129), (128, 128), (129, 3), (200, 257)] {
+                for lead in [[0, 0, 0], [1, 3, 5], [4, 4, 4]] {
+                    check_dx(&gpu, m, k, n, accumulate, lead);
+                }
+            }
+        }
+    }
+    let mut r = data::rng::Lcg::new(0xd0_0dad);
+    for _ in 0..30 {
+        let (m, k, n) = (1 + r.next_u32() % 400, 1 + r.next_u32() % 400, 1 + r.next_u32() % 300);
+        let lead = [0, 1, 2].map(|_| u64::from(r.next_u32() % 8));
+        check_dx(&gpu, m, k, n, r.next_u32() % 2, lead);
+    }
+    // FLUX.2 klein-4B training shapes: the input gradient of a single block's
+    // fused linear1 and of linear2 over a paired 512 px joint sequence.
+    for (m, k, n) in [(2560u32, 3072u32, 27648u32), (2560, 12288, 3072), (2560, 3072, 3072)] {
+        check_dx(&gpu, m, k, n, 0, [0; 3]);
     }
 }
