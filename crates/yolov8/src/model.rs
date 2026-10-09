@@ -652,10 +652,10 @@ impl Yolo {
     /// would straddle a discontinuity. Requires `set_image`/`set_targets` first.
     pub fn freeze_assignment(&self) {
         self.forward_net();
-        let (cls, boxl) = self.raw_logits();
+        let cls = self.flatten_logits();
         let anchors = self.head.anchor_geometry();
-        let dist = self.decode_dist(&boxl);
-        let inp = self.loss_input(&cls, &boxl, &anchors, &dist);
+        let dist = self.decode_dist();
+        let inp = self.loss_input(&cls, &anchors, &dist);
         let asg = crate::loss::compute_assignment(&inp, &self.gts.borrow(), self.cfg.input as f32);
         *self.frozen.borrow_mut() = Some(asg);
         self.head_grads_seeded.set(false);
@@ -667,27 +667,25 @@ impl Yolo {
         self.head_grads_seeded.set(false);
     }
 
-    /// The flat logits [`Self::raw_logits`] left on the device.
-    fn device_logits(&self) -> crate::loss::DeviceLogits<'_> {
-        crate::loss::DeviceLogits { cls: &self.cls_flat, boxes: &self.box_flat }
+    /// Flatten the head's logits into the loss's anchor rows on the device
+    /// (`cls_flat`, `box_flat`) and read back the class logits - the only ones
+    /// the loss needs on the host.
+    fn flatten_logits(&self) -> Vec<f32> {
+        let ctx = self.ctx();
+        self.gpu.submit(&[], &self.head.flatten_steps(&ctx, &self.cls_flat, &self.box_flat));
+        self.gpu.read(&self.cls_flat, (self.b * self.head.num_anchors() * self.cfg.nc) as usize)
     }
 
-    /// The DFL distances of the logits [`Self::raw_logits`] just flattened,
-    /// decoded from the device copy.
-    fn decode_dist(&self, boxl: &[f32]) -> Vec<f32> {
+    /// The DFL distances of the box logits [`Self::flatten_logits`] left on
+    /// the device.
+    fn decode_dist(&self) -> Vec<f32> {
         let na = (self.b * self.head.num_anchors()) as usize;
-        crate::loss::decode_dist(&self.gpu, boxl, Some(self.device_logits()), na, self.cfg.reg_max as usize)
+        crate::infer::dfl_decode_dist_on(&self.gpu, &self.box_flat, na, self.cfg.reg_max as usize)
     }
 
-    /// Assemble the loss-module input view over the (already-read) flat logits,
-    /// whose device copies [`Self::raw_logits`] left in place.
-    fn loss_input<'a>(
-        &'a self,
-        cls: &'a [f32],
-        boxl: &'a [f32],
-        anchors: &'a [crate::assign::Anchor],
-        dist: &'a [f32],
-    ) -> crate::loss::LossInput<'a> {
+    /// Assemble the loss-module input view: the host class logits, and both
+    /// flat logit tensors where [`Self::flatten_logits`] left them on the device.
+    fn loss_input<'a>(&'a self, cls: &'a [f32], anchors: &'a [crate::assign::Anchor], dist: &'a [f32]) -> crate::loss::LossInput<'a> {
         crate::loss::LossInput {
             gpu: &self.gpu,
             n: self.b as usize,
@@ -696,8 +694,7 @@ impl Yolo {
             reg_max: self.cfg.reg_max as usize,
             anchors,
             cls_logits: cls,
-            box_logits: boxl,
-            on_device: Some(self.device_logits()),
+            device: crate::loss::DeviceLogits { cls: &self.cls_flat, boxes: &self.box_flat },
             dist,
             gains: crate::loss::Gains::default(),
         }
@@ -709,13 +706,13 @@ impl Yolo {
     /// per-branch NCHW head grad buffers. Returns the scalar loss.
     fn detection_eval(&self) -> f32 {
         let t = std::time::Instant::now();
-        let (cls, boxl) = self.raw_logits();
-        gpu_core::profile::stage_time("yolov8 loss.raw_logits(readback)", t);
+        let cls = self.flatten_logits();
+        gpu_core::profile::stage_time("yolov8 loss.flatten+cls readback", t);
         let anchors = self.head.anchor_geometry();
         let t = std::time::Instant::now();
-        let dist = self.decode_dist(&boxl);
+        let dist = self.decode_dist();
         gpu_core::profile::stage_time("yolov8 loss.decode", t);
-        let inp = self.loss_input(&cls, &boxl, &anchors, &dist);
+        let inp = self.loss_input(&cls, &anchors, &dist);
 
         // The frozen assignment (or a fresh one) — clone out to drop the borrow.
         let t = std::time::Instant::now();
@@ -729,17 +726,19 @@ impl Yolo {
         gpu_core::profile::stage_time("yolov8 loss.eval", t);
         self.det_loss.set(out.loss);
         let t = std::time::Instant::now();
-        self.scatter_head_grads(&out.d_cls, &out.d_box);
+        self.scatter_head_grads(&out.d_cls, &out.fg_rows, &out.d_box_rows);
         gpu_core::profile::stage_time("yolov8 loss.scatter+upload", t);
         out.loss
     }
 
-    /// Scatter flat cls grads `[N,A,nc]` and box grads `[N,A,4*reg_max]` into the
-    /// per-branch NCHW head grad buffers `self.d_logit` (head order:
-    /// s0.cls,s0.reg,s1.cls,s1.reg,s2.cls,s2.reg): both tensors uploaded whole,
-    /// then each scale's window permuted into its branch's buffer on the device
+    /// Scatter flat cls grads `[N,A,nc]` and the box grads of the fg rows
+    /// `fg_rows` (`d_box_rows`, `[fg, 4*reg_max]`; every other row is zero) into
+    /// the per-branch NCHW head grad buffers `self.d_logit` (head order:
+    /// s0.cls,s0.reg,s1.cls,s1.reg,s2.cls,s2.reg). On the device: the class
+    /// gradient is uploaded whole, the box rows are scattered into a cleared
+    /// flat tensor, and each scale's window is permuted into its branch's buffer
     /// ([`Head::unflatten_steps`], the inverse of the forward's flatten).
-    fn scatter_head_grads(&self, d_cls: &[f32], d_box: &[f32]) {
+    fn scatter_head_grads(&self, d_cls: &[f32], fg_rows: &[u32], d_box_rows: &[f32]) {
         // Per-class gradient gate (see `train_only_classes`). Applied HERE, the
         // one point every class gradient passes through on its way from the loss
         // into the network; a gate of exactly 0 writes 0 whatever the gradient.
@@ -749,9 +748,23 @@ impl Yolo {
             d_cls.iter().enumerate().map(|(i, &v)| if m[i % nc] == 0.0 { 0.0 } else { v * m[i % nc] }).collect()
         });
         self.gpu.write(&self.d_cls_flat, bytemuck::cast_slice(gated.as_deref().unwrap_or(d_cls)));
-        self.gpu.write(&self.d_box_flat, bytemuck::cast_slice(d_box));
         let ctx = self.ctx();
-        self.gpu.submit(&[], &self.head.unflatten_steps(&ctx, &self.d_cls_flat, &self.d_box_flat, &self.d_logit));
+        let mut steps = Vec::new();
+        // Kept alive until the submission below has recorded them.
+        let fg = (!fg_rows.is_empty()).then(|| {
+            let rows = self.gpu.storage(fg_rows.len() as u64);
+            self.gpu.write(&rows, fg_rows);
+            (rows, self.gpu.storage_init("d_box_rows", d_box_rows))
+        });
+        if let Some((rows, grads)) = &fg {
+            let row = 4 * self.cfg.reg_max;
+            let n_rows = self.b * self.head.num_anchors();
+            let n_fg = fg_rows.len() as u32;
+            steps.push(ctx.step(net::ROW_SCATTER, &[rows, grads, &self.d_box_flat], &[n_fg, row, n_rows], n_fg * row));
+        }
+        steps.extend(self.head.unflatten_steps(&ctx, &self.d_cls_flat, &self.d_box_flat, &self.d_logit));
+        // The box gradient is zero outside the fg rows: clear it first.
+        self.gpu.submit(&[&self.d_box_flat], &steps);
     }
 
     fn ctx(&self) -> Ctx<'_> {

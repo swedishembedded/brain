@@ -151,6 +151,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // out of) the loss's flat [N, A, C] anchor rows, on the device.
     ("nchw_nlc_at", kernels::NCHW_NLC_AT),
     ("nlc_nchw_at", kernels::NLC_NCHW_AT),
+    // The loss's foreground rows of the flat box logits gathered on the device,
+    // and their gradient rows scattered back, by anchor index.
+    ("embed", kernels::EMBED),
+    ("row_scatter", kernels::ROW_SCATTER),
 ];
 
 /// [`PIPELINES`] slot of `region_copy`.
@@ -159,6 +163,10 @@ pub const REGION_COPY: usize = 49;
 pub const NCHW_NLC_AT: usize = 50;
 /// [`PIPELINES`] slot of `nlc_nchw_at`.
 pub const NLC_NCHW_AT: usize = 51;
+/// [`PIPELINES`] slot of `embed` (row gather by `u32` index).
+pub const ROW_GATHER: usize = 52;
+/// [`PIPELINES`] slot of `row_scatter` (its inverse for unique indices).
+pub const ROW_SCATTER: usize = 53;
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against
 /// [`PIPELINES`] above — so the blocks never depend on this array's order.
@@ -227,6 +235,8 @@ mod tests {
             (REGION_COPY, "region_copy"),
             (NCHW_NLC_AT, "nchw_nlc_at"),
             (NLC_NCHW_AT, "nlc_nchw_at"),
+            (ROW_GATHER, "embed"),
+            (ROW_SCATTER, "row_scatter"),
         ];
         for (idx, name) in named {
             assert_eq!(PIPELINES[idx].0, name, "constant {idx} does not name `{name}`");
