@@ -138,6 +138,28 @@ class Layout(unittest.TestCase):
             i = int(key[1:])
             self.assertAlmostEqual(float(imgs[idx, 0, SIZE // 2, SIZE // 2]), (10 + 30 * i) / 255, places=2)
 
+    def test_sequences_json_names_the_sequence_of_each_stored_image(self):
+        # Scoring clusters held-out images by sequence, so the image index in a
+        # prediction dump must lead back to its sequence.
+        items = [P.PackItem(f"d:f{i}", self.items(6)[i].image, [], sequence=f"d:s{i // 2}") for i in range(6)]
+        out = os.path.join(self.tmp, "pack")
+        P.pack(items, out, SIZE, 3, seed=3)
+        keys = jload(os.path.join(out, "order.json"))
+        self.assertEqual(jload(os.path.join(out, "sequences.json")), [f"d:s{int(k.split('f')[1]) // 2}" for k in keys])
+
+    def test_no_sequences_json_when_items_carry_none(self):
+        out = os.path.join(self.tmp, "pack")
+        P.pack(self.items(2), out, SIZE, 3, seed=0)
+        self.assertFalse(os.path.exists(os.path.join(out, "sequences.json")))
+
+    def test_manifest_items_carry_dataset_qualified_sequences(self):
+        # Two datasets may reuse a sequence id; the pair must stay distinct.
+        path = os.path.join(self.tmp, "manifest.jsonl")
+        with open(path, "w") as fh:
+            for ds in ("d1", "d2"):
+                fh.write(json.dumps({"dataset": ds, "id": "a", "sequence_id": "s", "image": "x.png", "boxes": []}) + "\n")
+        self.assertEqual([i.sequence for i in P.read_manifest(path)], ["d1:s", "d2:s"])
+
     def test_class_outside_nc_is_rejected(self):
         path = os.path.join(self.tmp, "x.png")
         write_png(path, 5)

@@ -14,6 +14,10 @@
                 with cx, cy, w, h normalised to the S x S canvas
     meta.json   {"n": N, "c": 3, "h": S, "w": S, "nc": NC}
     order.json  (extra, ignored by brain) the item key stored at each index
+    sequences.json  (extra, ignored by brain) the sequence of the item at each
+                index, written when every item has one: a prediction dump of
+                `brain yolov8 eval` names images by index, and held-out
+                images are scored in clusters of sequences
 
 Images are letterboxed to S x S (scale to fit, centre, grey 114 padding) and
 boxes follow the same transform. The detector trainer neither shuffles nor
@@ -42,6 +46,7 @@ class PackItem:
     key: str  # stable identity, recorded in order.json
     image: str  # path to a PNG/JPEG, 1 or 3 channels
     boxes: list  # (class_id, x1, y1, x2, y2) in source-image pixels
+    sequence: str = ""  # dataset-qualified sequence id; "" when unknown
 
 
 def letterbox(img: np.ndarray, size: int):
@@ -106,20 +111,26 @@ def pack(items: list[PackItem], out_dir: str, size: int, nc: int, seed: int) -> 
         json.dump({"n": len(items), "c": 3, "h": size, "w": size, "nc": nc}, fh)
     with open(os.path.join(out_dir, "order.json"), "w") as fh:
         json.dump(keys, fh)
+    sequences = [items[int(idx)].sequence for idx in order]
+    if all(sequences):
+        with open(os.path.join(out_dir, "sequences.json"), "w") as fh:
+            json.dump(sequences, fh)
     return keys
 
 
 def read_manifest(path: str) -> list[PackItem]:
     """Items from an arms `manifest.jsonl`: rows with `dataset`, `id`, `image`
-    (relative to the manifest) and `boxes` [[cls, x1, y1, x2, y2], ...]."""
+    (relative to the manifest) and `boxes` [[cls, x1, y1, x2, y2], ...]; a row's
+    `sequence_id` becomes the item's `dataset:sequence_id`."""
     base = os.path.dirname(os.path.abspath(path))
     items = []
     with open(path) as fh:
         for line in fh:
             if line.strip():
                 row = json.loads(line)
+                sequence = f"{row['dataset']}:{row['sequence_id']}" if row.get("sequence_id") else ""
                 items.append(PackItem(f"{row['dataset']}:{row['id']}", os.path.join(base, row["image"]),
-                                      [tuple(b) for b in row["boxes"]]))
+                                      [tuple(b) for b in row["boxes"]], sequence))
     return items
 
 
