@@ -35,7 +35,7 @@ mod testsupport;
 
 pub use batch::run_batch;
 pub use config::{MtpConfig, TalkerConfig};
-pub use engine::ResidentEngine;
+pub use engine::{Placement, ResidentEngine};
 pub use genconfig::{GenerationConfig, GenerationPlan, PlanSource, SamplingRequest, SubtalkerRequest};
 pub use sampling::{sample_residual, DegenerationWatch, Draw, SamplerCfg};
 pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};

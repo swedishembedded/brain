@@ -13,7 +13,8 @@ use capability::CancelToken;
 use super::{Audio, Backend, TtsOptions, TtsPipeline, SAMPLE_RATE};
 use crate::{Error, Result};
 
-/// A synthesizer with its checkpoints resident. One request is spoken at a
+/// A synthesizer with its checkpoints resident, the Talker and the MTP on the
+/// GPU when the process has one (`BRAIN_QWEN3TTS_PLACEMENT=host` forces the host). One request is spoken at a
 /// time; a second caller waits for the first.
 pub struct ResidentTts {
     engine: Mutex<qwen3tts::engine::ResidentEngine>,
@@ -33,7 +34,7 @@ impl TtsPipeline {
         let Backend::Qwen3Tts(paths) = &self.backend else {
             return Err(Error::MissingArgument("cosyvoice: has no resident form".to_string()));
         };
-        let engine = qwen3tts::engine::ResidentEngine::load(paths).map_err(Error::Backend)?;
+        let engine = qwen3tts::engine::ResidentEngine::load_with(paths, qwen3tts::engine::Placement::ambient()).map_err(Error::Backend)?;
         Ok(ResidentTts { engine: Mutex::new(engine) })
     }
 }

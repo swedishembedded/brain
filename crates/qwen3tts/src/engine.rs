@@ -44,9 +44,11 @@
 //! adapter's declared cost - RAM, zero VRAM - honest. A GPU-resident variant
 //! would be a different `MemCost` and a different engine.
 
+use crate::gen::TalkerGen;
 use crate::gen_kv::CpuTalker;
 use crate::gen_kv_mtp::CpuMtp;
-use crate::pipeline::{self, GenOpts, TtsPaths};
+use crate::mtp::MtpModel;
+use crate::pipeline::{self, Cancelled, GenOpts, TtsPaths};
 use crate::prompt::{self, Prompt, TtsSpecials};
 use capability::CancelToken;
 use data::tokenizer::Tokenizer;
@@ -66,10 +68,95 @@ pub fn chunk_frames_from_env() -> usize {
     std::env::var("BRAIN_QWEN3TTS_STREAM_CHUNK").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(DEFAULT_CHUNK_FRAMES).max(1)
 }
 
+/// Where the Talker and the MTP run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// On the host: [`CpuTalker`] and [`CpuMtp`], no VRAM.
+    Host,
+    /// On the ambient device (CUDA when the process selects it): the
+    /// KV-cached [`TalkerGen`] and [`MtpModel`] that [`crate::pipeline`]'s
+    /// one-shot path runs, loaded once.
+    Device,
+}
+
+impl Placement {
+    /// Where an engine should run: `BRAIN_QWEN3TTS_PLACEMENT=host|device` if
+    /// set, else the device when the process's ambient device is a real GPU
+    /// and the host otherwise (the CPU JIT is slower than the host decoder).
+    #[must_use]
+    pub fn ambient() -> Placement {
+        match std::env::var("BRAIN_QWEN3TTS_PLACEMENT").as_deref() {
+            Ok("host") => Placement::Host,
+            Ok("device") => Placement::Device,
+            _ if gpu_core::Gpu::new(&[]).kind() == "cpu" => Placement::Host,
+            _ => Placement::Device,
+        }
+    }
+}
+
+/// The largest context (prompt plus generated frames) a device engine's KV
+/// cache is built for; about 80 seconds of speech.
+pub const DEVICE_CONTEXT: u32 = 1024;
+
+/// The Talker and the MTP, on whichever placement the engine was built for.
+#[allow(clippy::large_enum_variant)] // one engine per process; boxing the variant buys nothing
+enum Core {
+    Host { talker: CpuTalker, mtp: CpuMtp },
+    Device { talker: TalkerGen, mtp: MtpModel },
+}
+
+impl Core {
+    fn load(paths: &TtsPaths, placement: Placement) -> Core {
+        match placement {
+            Placement::Host => Core::Host { talker: CpuTalker::load(&paths.talker), mtp: CpuMtp::load(&paths.mtp) },
+            Placement::Device => Core::Device { talker: TalkerGen::load(&paths.talker, DEVICE_CONTEXT), mtp: MtpModel::load_inference(&paths.mtp) },
+        }
+    }
+
+    fn xvector(&self, sp: &TtsSpecials, role_ids: &[u32], text_ids: &[u32], speaker: Option<&[f32]>, language_id: Option<u32>) -> Prompt {
+        match self {
+            Core::Host { talker, .. } => prompt::build_xvector_prompt(talker, sp, role_ids, text_ids, speaker, language_id),
+            Core::Device { talker, .. } => prompt::build_xvector_prompt(talker, sp, role_ids, text_ids, speaker, language_id),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn instruct(&self, sp: &TtsSpecials, role_ids: &[u32], text_ids: &[u32], instruct_ids: &[u32], speaker_id: Option<u32>, language_id: Option<u32>) -> Prompt {
+        match self {
+            Core::Host { talker, .. } => prompt::build_instruct_prompt(talker, sp, role_ids, text_ids, instruct_ids, speaker_id, language_id),
+            Core::Device { talker, .. } => prompt::build_instruct_prompt(talker, sp, role_ids, text_ids, instruct_ids, speaker_id, language_id),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn icl(&self, sp: &TtsSpecials, role_ids: &[u32], text_ids: &[u32], ref_ids: &[u32], ref_code: &[u32], speaker: &[f32], language_id: Option<u32>) -> Prompt {
+        match self {
+            Core::Host { talker, mtp } => prompt::build_icl_prompt(talker, mtp, sp, role_ids, text_ids, ref_ids, ref_code, speaker, language_id),
+            Core::Device { talker, mtp } => prompt::build_icl_prompt(talker, mtp, sp, role_ids, text_ids, ref_ids, ref_code, speaker, language_id),
+        }
+    }
+
+    /// The codec codes of `prompt`. A device engine's KV cache holds
+    /// [`DEVICE_CONTEXT`] positions, so a request that would not fit is
+    /// refused rather than silently cut.
+    fn generate(&mut self, sp: &TtsSpecials, prompt: &Prompt, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
+        let codes = match self {
+            Core::Host { talker, mtp } => pipeline::generate_codes_cached(talker, mtp, sp, prompt, opts, cancel),
+            Core::Device { talker, mtp } => {
+                let prefix = prompt.embeds.len() / talker.d();
+                if prefix + opts.max_frames + 1 > DEVICE_CONTEXT as usize {
+                    return Err(format!("a device engine holds {DEVICE_CONTEXT} positions; a prompt of {prefix} with up to {} frames does not fit", opts.max_frames));
+                }
+                pipeline::generate_codes(talker, mtp, sp, prompt, opts, cancel)
+            }
+        };
+        codes.map_err(|Cancelled { .. }| "cancelled".to_string())
+    }
+}
+
 /// Everything a resident TTS instance holds hot between requests.
 pub struct ResidentEngine {
-    talker: CpuTalker,
-    mtp: CpuMtp,
+    core: Core,
     codec: StreamingCodecDecoder,
     tok: data::qwen_tokenizer::QwenBpe,
     sp: TtsSpecials,
@@ -107,12 +194,16 @@ impl ResidentEngine {
     /// not a panic inside a loader) when a file is missing - a served model
     /// must report a bad configuration, not abort the worker.
     pub fn load(paths: &TtsPaths) -> Result<ResidentEngine, String> {
+        Self::load_with(paths, Placement::Host)
+    }
+
+    /// [`Self::load`] with the Talker and the MTP on `placement`.
+    pub fn load_with(paths: &TtsPaths, placement: Placement) -> Result<ResidentEngine, String> {
         paths.require(false).map_err(|e| format!("tts: {e}"))?;
         let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
         let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
         Ok(ResidentEngine {
-            talker: CpuTalker::load(&paths.talker),
-            mtp: CpuMtp::load(&paths.mtp),
+            core: Core::load(paths, placement),
             codec: StreamingCodecDecoder::load(&paths.codec),
             tok,
             sp,
@@ -160,10 +251,16 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        let codes = self.speak_codes(text, lang, opts, cancel)?;
+        self.decode(&codes, on_audio)
+    }
+
+    /// [`Self::speak`] stopping before the codec: the `[frames, 16]` codes.
+    pub fn speak_codes(&mut self, text: &str, lang: &str, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
         let language_id = self.sp.language_id(lang);
         let (role_ids, text_ids) = self.text_ids(text)?;
-        let prompt = prompt::build_xvector_prompt(&self.talker, &self.sp, &role_ids, &text_ids, None, language_id);
-        self.run_prompt(&prompt, opts, cancel, on_audio)
+        let prompt = self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id);
+        self.generate(&prompt, opts, cancel)
     }
 
     /// **VoiceDesign / CustomVoice** - the resident mirror of
@@ -184,7 +281,7 @@ impl ResidentEngine {
         let (role_ids, text_ids) = self.text_ids(text)?;
         let instruct_ids = if instruct.trim().is_empty() { Vec::new() } else { self.tok.encode(&pipeline::instruct_text(instruct)) };
         let prompt =
-            prompt::build_instruct_prompt(&self.talker, &self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
+            self.core.instruct(&self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
         self.run_prompt(&prompt, opts, cancel, on_audio)
     }
 
@@ -218,9 +315,9 @@ impl ResidentEngine {
                     return Err("ref_text tokenized too short".to_string());
                 }
                 let ref_ids = &full[3..full.len() - 2];
-                prompt::build_icl_prompt(&self.talker, &self.mtp, &self.sp, &role_ids, &text_ids, ref_ids, codes, &xvec, language_id)
+                self.core.icl(&self.sp, &role_ids, &text_ids, ref_ids, codes, &xvec, language_id)
             }
-            None => prompt::build_xvector_prompt(&self.talker, &self.sp, &role_ids, &text_ids, Some(&xvec), language_id),
+            None => self.core.xvector(&self.sp, &role_ids, &text_ids, Some(&xvec), language_id),
         };
         self.run_prompt(&prompt, opts, cancel, on_audio)
     }
@@ -263,19 +360,29 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
-        // Resolve the sampling plan once per request, here, because this is the
-        // resident mirror of what `pipeline::synth` does at its entry point:
-        // caller override > the checkpoint's generation_config.json > the
-        // reference. Without it a resident caller would silently skip the
-        // checkpoint layer that a one-shot `brain tts synth` honours.
+        let codes = self.generate(prompt, opts, cancel)?;
+        self.decode(&codes, on_audio)
+    }
+
+    /// The codec codes of `prompt`. The sampling plan is resolved once per
+    /// request, here, because this is the resident mirror of what
+    /// `pipeline::synth` does at its entry point: caller override > the
+    /// checkpoint's generation_config.json > the reference. Without it a
+    /// resident caller would silently skip the checkpoint layer that a
+    /// one-shot `brain tts synth` honours.
+    fn generate(&mut self, prompt: &Prompt, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
         let opts = &opts.clone().resolved_with(self.gencfg);
-        let codes = pipeline::generate_codes_cached(&mut self.talker, &mut self.mtp, &self.sp, prompt, opts, cancel)
-            .map_err(|_| "cancelled".to_string())?;
+        let codes = self.core.generate(&self.sp, prompt, opts, cancel)?;
         if codes.is_empty() {
             return Err("no codec frames were generated".to_string());
         }
+        Ok(codes)
+    }
+
+    /// Decode `codes` through the streaming codec, `chunk_frames` at a time.
+    fn decode(&mut self, codes: &[u32], on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<Vec<f32>, String> {
         let mut full: Vec<f32> = Vec::new();
-        self.codec.decode_streaming_cb(&codes, self.chunk_frames, &mut |pcm, seq| {
+        self.codec.decode_streaming_cb(codes, self.chunk_frames, &mut |pcm, seq| {
             full.extend_from_slice(pcm);
             on_audio(pcm, seq);
         });
