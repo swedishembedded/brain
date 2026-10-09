@@ -121,15 +121,18 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
         println!("\ntest result: ok. 0 passed; 0 failed; {} ignored; 0 measured; {filtered} filtered out\n", selected.len());
         return ExitCode::SUCCESS;
     };
-    if let Err(e) = select(device, args.backend.as_deref()) {
-        eprintln!("error: {e}");
-        return ExitCode::from(2);
-    }
+    let card = match select(device, args.backend.as_deref()) {
+        Ok(card) => card,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
     crate::set_native_kernels(args.native_kernels);
     if let Some(n) = args.profile_replays {
         crate::profile::set_program_replays(n);
     }
-    println!("\nrunning {} tests on {device}", selected.len());
+    println!("\nrunning {} tests on {device}{card}", selected.len());
     let mut failed = Vec::new();
     for t in &selected {
         let ok = std::panic::catch_unwind(t.run).is_ok();
@@ -152,7 +155,9 @@ pub fn run(tests: &[CardTest]) -> ExitCode {
 /// Resolve `device` (the `--device` grammar) with an optional `backend`
 /// override and publish it as the process's compute set - the CLI's
 /// `select_backend`, for a process whose arguments are a test binary's.
-fn select(device: &str, backend: Option<&str>) -> Result<(), String> {
+/// Returns how the card is named in the run's header: its model and PCI bus,
+/// so a log shows which physical card the tests ran on.
+fn select(device: &str, backend: Option<&str>) -> Result<String, String> {
     let spec = crate::DeviceSpec::parse(device).map_err(|e| format!("--device {device:?}: {e}"))?;
     let mut set = spec.resolve(&crate::Inventory::probe()).map_err(|e| format!("--device {device:?}: {e}"))?;
     if let Some(b) = backend {
@@ -160,8 +165,11 @@ fn select(device: &str, backend: Option<&str>) -> Result<(), String> {
         set.set_backend(b)?;
     }
     set.apply_backend()?;
+    let card = set.single_gpu().and_then(|i| crate::devices::device(i).ok()).map_or(String::new(), |d| {
+        format!(" ({}, pci {})", d.identity.name, d.identity.pci_bus.as_deref().unwrap_or("unknown"))
+    });
     crate::publish_compute_set(set);
-    Ok(())
+    Ok(card)
 }
 
 /// Declare a test binary's `main` from its test functions:
