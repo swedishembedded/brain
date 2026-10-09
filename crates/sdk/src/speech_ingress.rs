@@ -247,6 +247,51 @@ impl SpeechIngress {
     }
 }
 
+/// A trained projector on the host, for turning a clip's features into the rows
+/// a language model reads in place of a user's words. It needs neither the
+/// model nor a device: the projection of a few dozen rows is a few gigaflops.
+pub struct SpeechProjector {
+    cfg: ProjectorConfig,
+    weights: HashMap<String, Vec<f32>>,
+    rows: usize,
+}
+
+impl SpeechProjector {
+    /// Read the projector [`SpeechIngress::save_projector`] wrote at `path`.
+    pub fn load(path: &Path) -> Result<SpeechProjector> {
+        let path_str = path.to_str().ok_or_else(|| backend(format!("{} is not UTF-8", path.display())))?;
+        let st = checkpoint::st::load_safetensors(path_str).map_err(|e| backend(format!("{}: {e}", path.display())))?;
+        let rows = st.config()["rows"].as_u64().map(|r| r as usize).ok_or_else(|| backend(format!("{}: the file names no row count", path.display())))?;
+        let weights: HashMap<String, Vec<f32>> = st.tensors.into_iter().collect();
+        let len = |name: &str| weights.get(name).map(Vec::len).ok_or_else(|| backend(format!("{}: no tensor {name}", path.display())));
+        let (n_embed, out_dim) = (len("in.bias")?, len("layers.1.bias")?);
+        let input_dim = len("in.weight")? / n_embed.max(1);
+        let cfg = ProjectorConfig::from_type("mlp2x_gelu", 2, input_dim as u32, n_embed as u32).and_then(|c| c.with_out_dim(out_dim as u32)).map_err(backend)?;
+        Ok(SpeechProjector { cfg, weights, rows })
+    }
+
+    /// Rows of audio every example had.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Width of the rows it produces: the language model's embedding width.
+    #[must_use]
+    pub fn out_dim(&self) -> usize {
+        self.cfg.out_dim as usize
+    }
+
+    /// Project `features` (`rows * input_dim` values) into `rows * out_dim`.
+    pub fn project(&self, features: &[f32]) -> Result<Vec<f32>> {
+        let expected = self.rows * self.cfg.input_dim as usize;
+        if features.len() != expected {
+            return Err(backend(format!("{} feature values, expected {} rows of {}", features.len(), self.rows, self.cfg.input_dim)));
+        }
+        Ok(model::projector::forward_host(&self.cfg, &self.weights, &[features], self.rows))
+    }
+}
+
 /// A projector's initial weights: uniform in `+-1/sqrt(fan_in)`, biases zero,
 /// from a splitmix64 stream seeded by `seed`.
 fn initial_weights(cfg: ProjectorConfig, seed: u64) -> HashMap<String, Vec<f32>> {

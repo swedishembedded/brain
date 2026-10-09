@@ -533,6 +533,19 @@ impl ChatPipeline {
         self.engine.detach_adapter()
     }
 
+    /// Generate a reply to a prompt in which a run of positions is embedding
+    /// `rows` instead of tokens: `before` (the chat template up to where the
+    /// user's words go), one position per row of `rows` (row-major, the model's
+    /// embedding width), then `after`. Greedy, ending at the model's
+    /// end-of-turn token or after `max_new` tokens; `on_text` sees each new
+    /// piece as it is decoded and `cancel` stops it between tokens. This is how
+    /// speech, projected into the model's input space, is answered. It
+    /// returns the reply's text only: no reasoning or tool-call parsing.
+    pub fn generate_with_rows(&self, before: &str, rows: &[f32], after: &str, max_new: usize, cancel: &CancelToken, on_text: impl FnMut(&str)) -> Result<String> {
+        let mut on_text = on_text;
+        self.engine.generate_rows(before, rows, after, max_new, cancel, self.prefill_chunk, &mut on_text)
+    }
+
     /// Generate the next assistant turn.
     pub fn generate(&self, request: &ChatRequest) -> Result<ChatResponse> {
         self.generate_stream(request, &CancelToken::default(), |_| {})

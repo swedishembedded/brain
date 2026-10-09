@@ -292,7 +292,7 @@ pub use model::dispatch::Precision as DType;
 pub use loader::DownloadPolicy;
 
 #[cfg(all(feature = "audio", feature = "study"))]
-pub use speech_ingress::{IngressHyper, SpeechExample, SpeechIngress, SpeechIngressOptions};
+pub use speech_ingress::{IngressHyper, SpeechExample, SpeechIngress, SpeechIngressOptions, SpeechProjector};
 #[cfg(feature = "audio")]
 pub use asr::{AudioFeatures, Transcript, TranscribePipeline, TranscribePipelineBuilder};
 /// Word error rate, the measure a speech round trip is judged by: re-exported

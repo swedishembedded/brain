@@ -175,7 +175,7 @@ pub fn generate_kv_stream_cancellable(
     // Row-parallel: the single-threaded head was measured at hundreds of ms
     // PER TOKEN at real vocabularies (one implementation: model::hostmath).
     let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
-    generate_kv_core(model, prompt, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
+    generate_kv_core(model, prompt, None, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
 }
 
 /// [`generate_kv_stream_cancellable`] with the LM head applied **on the
@@ -204,7 +204,41 @@ pub fn generate_kv_stream_on_device(
     on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
     let logits_of = |_hidden: &[f32]| -> Vec<f32> { model.decode_logits() };
-    generate_kv_core(model, prompt, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
+    generate_kv_core(model, prompt, None, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
+}
+
+/// A run of prompt positions whose input is a given embedding row rather than a
+/// token's: speech (or any other modality) projected into the model's input
+/// space, standing where a user's words would be.
+#[derive(Clone, Copy, Debug)]
+pub struct RowRun<'a> {
+    /// The first prompt position the rows replace.
+    pub at: usize,
+    /// The rows, row-major, `width` values each.
+    pub rows: &'a [f32],
+    /// The model's embedding width.
+    pub width: usize,
+}
+
+/// [`generate_kv_stream_on_device`] for a prompt in which a run of positions is
+/// embedding rows: the token ids at those positions are ignored.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream_on_device_rows(
+    model: &Qwen,
+    prompt: &[u32],
+    run: &RowRun<'_>,
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    eos: &[u32],
+    rng: &mut Rng,
+    cancel: &capability::CancelToken,
+    prefill_chunk: usize,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
+) -> Vec<u32> {
+    let logits_of = |_hidden: &[f32]| -> Vec<f32> { model.decode_logits() };
+    generate_kv_core(model, prompt, Some(run), max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
 }
 
 /// The chunked-prefill, KV-cached decode loop both heads share; `logits_of`
@@ -213,6 +247,7 @@ pub fn generate_kv_stream_on_device(
 fn generate_kv_core(
     model: &Qwen,
     prompt: &[u32],
+    run: Option<&RowRun<'_>>,
     max_new: usize,
     temperature: f32,
     top_k: usize,
@@ -234,11 +269,22 @@ fn generate_kv_core(
     // (Empty prompt → seed a single newline-like id 0.)
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
     let mut hidden = Vec::new();
-    for chunk in seed_prompt.chunks(prefill_chunk.max(1)) {
+    for (n, chunk) in seed_prompt.chunks(prefill_chunk.max(1)).enumerate() {
         if cancel.is_cancelled() {
             return out;
         }
-        let prefill_inputs: Vec<PrefillInput<'_>> = chunk.iter().map(|&t| PrefillInput::Token(t)).collect();
+        let first = n * prefill_chunk.max(1);
+        let prefill_inputs: Vec<PrefillInput<'_>> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| match run {
+                Some(r) if (r.at..r.at + r.rows.len() / r.width).contains(&(first + i)) => {
+                    let row = first + i - r.at;
+                    PrefillInput::Embed(&r.rows[row * r.width..(row + 1) * r.width])
+                }
+                _ => PrefillInput::Token(t),
+            })
+            .collect();
         hidden = model.prefill(&prefill_inputs);
     }
     for _ in 0..max_new {

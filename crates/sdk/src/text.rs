@@ -425,6 +425,56 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// Greedy generation for a prompt in which a run of positions is embedding
+    /// `rows` rather than tokens: `before`, then one position per row, then
+    /// `after`. `on_text` sees each new piece of the reply as it is decoded.
+    /// The reply ends at an end-of-turn token or after `max_new` tokens.
+    pub(crate) fn generate_rows(&self, before: &str, rows: &[f32], after: &str, max_new: usize, cancel: &capability::CancelToken, prefill_chunk: usize, on_text: &mut dyn FnMut(&str)) -> Result<String> {
+        use data::tokenizer::Tokenizer;
+        let width = self.model.cfg.d_model as usize;
+        if rows.is_empty() || !rows.len().is_multiple_of(width) {
+            return Err(Error::Backend(format!("generate_rows: {} values are not whole rows of the model's {width}", rows.len())));
+        }
+        let count = rows.len() / width;
+        let mut ids = self.tok.encode(before);
+        let at = ids.len();
+        ids.extend(std::iter::repeat_n(0u32, count));
+        ids.extend(self.tok.encode(after));
+        let capacity = self.capacity as usize;
+        if ids.len() >= capacity {
+            return Err(Error::Backend(format!("generate_rows: the prompt ({} positions) fills this pipeline's built capacity ({capacity} tokens)", ids.len())));
+        }
+        let max_new = max_new.min(capacity - ids.len());
+        let mut rng = data::rng::Rng::new(0);
+        let mut out: Vec<u32> = Vec::with_capacity(max_new);
+        let mut shown = 0usize;
+        qwen3::sample::generate_kv_stream_on_device_rows(
+            &self.model,
+            &ids,
+            &qwen3::sample::RowRun { at, rows, width },
+            max_new,
+            0.0,
+            0,
+            1.0,
+            &self.eos,
+            &mut rng,
+            cancel,
+            prefill_chunk,
+            &mut |_i, t| {
+                out.push(t);
+                let text = self.tok.decode(&out);
+                if text.len() > shown && text.is_char_boundary(shown) {
+                    on_text(&text[shown..]);
+                    shown = text.len();
+                }
+                true
+            },
+        );
+        Ok(self.tok.decode(&out))
+    }
+}
+
 /// An adapter file's identity: its card id and content digest.
 fn adapter_identity(path: &str) -> Result<crate::chat::WeightsIdentity> {
     let card = checkpoint::st::read_card(path).map_err(|e| Error::Backend(format!("{path}: reading the adapter card: {e}")))?;

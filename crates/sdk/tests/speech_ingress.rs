@@ -99,3 +99,52 @@ fn features_of_the_wrong_size_are_refused_with_the_expected_shape() {
     let err = ingress.example(&[0.0; 5], "p", "s", "r").unwrap_err();
     assert!(err.to_string().contains("expected 4 rows of 32"), "{err}");
 }
+
+#[test]
+fn a_trained_projector_saved_and_loaded_makes_the_untouched_model_answer_what_it_hears() {
+    let _serial = brain_testutil::env_lock();
+    let Some(base) = base() else {
+        brain_testutil::skip("Qwen3-1.7B is not in the model store");
+        return;
+    };
+    let system = "You are a patriot.";
+    let dir = std::env::temp_dir().join(format!("brain-ingress-gen-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("projector.safetensors");
+    {
+        let mut ingress = SpeechIngress::new(&SpeechIngressOptions { base: base.clone(), adapter: None, input_dim: DIM, rows: ROWS, block: 96, seed: 1, bf16: true }).unwrap();
+        let (prefix, suffix) = (SpeechIngress::prefix(system), SpeechIngress::suffix(""));
+        let examples: Vec<_> = PHRASES.iter().enumerate().map(|(i, (_, reply))| ingress.example(&rows_of(i), &prefix, &suffix, reply).unwrap()).collect();
+        let hyper = IngressHyper { projector_lr: 3e-3, model_lr: 0.0, weight_decay: 0.0, grad_clip: 1.0 };
+        let batch: Vec<_> = examples.iter().collect();
+        for step in 1..=80 {
+            ingress.step(&batch, step, &hyper);
+        }
+        ingress.save_projector(&file).unwrap();
+    }
+
+    let projector = brain::SpeechProjector::load(&file).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(projector.rows(), ROWS);
+
+    // A different pipeline, the model exactly as it was: it answers each phrase
+    // from the projected rows alone.
+    let chat = brain::ChatPipeline::from_pretrained(base.to_str().unwrap()).unwrap();
+    for (i, (_, reply)) in PHRASES.iter().enumerate() {
+        let rows = projector.project(&rows_of(i)).unwrap();
+        let said = chat.generate_with_rows(&SpeechIngress::prefix(system), &rows, &SpeechIngress::suffix(""), 24, &brain::CancelToken::default(), |_| {}).unwrap();
+        assert_eq!(said.trim(), *reply, "phrase {i}");
+    }
+}
+
+#[test]
+fn rows_that_are_not_whole_rows_of_the_model_are_refused() {
+    let _serial = brain_testutil::env_lock();
+    let Some(base) = base() else {
+        brain_testutil::skip("Qwen3-1.7B is not in the model store");
+        return;
+    };
+    let chat = brain::ChatPipeline::from_pretrained(base.to_str().unwrap()).unwrap();
+    let err = chat.generate_with_rows("a", &[0.0; 7], "b", 4, &brain::CancelToken::default(), |_| {}).unwrap_err();
+    assert!(err.to_string().contains("not whole rows"), "{err}");
+}
