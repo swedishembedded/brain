@@ -141,7 +141,7 @@ const HELP: &str = "brain flux2 <cmd>
                                     #   --adapter style.safetensors --lora-scale 0.4
   finetune <data_dir> --out <adapter.brain> [--variant V] [--steps N] [--rank R] [--lr X]
            [--size S] [--seed K] [--ckpt-every N] [--resume] [--trainer device|host] [--cards N]
-           [--text-encoder <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
+           [--dit <path>] [--vae <path>] [--text-encoder <path>] [--tokenizer <path>] [--method lora|rslora] [--lr-ratio X] [--freeze-a]
            [--precision fp32|int8] [--warmup N] [--min-lr X]
            [--edit-weight A] [--detail-weight B] [--ref-dropout P]
            # Train a LoRA on a folder of captioned images (see data::imageset for
@@ -260,7 +260,7 @@ const HELP: &str = "brain flux2 <cmd>
            # factors. Which one ran is printed at the top of every run.
 Weights: both `generate` and `finetune` resolve dit/vae/text_encoder/tokenizer
 from the models directory (--brain-data-dir / BRAIN_MODELS_DIR) -
---dit/--text-encoder/--variant (--variant only, on `finetune`) name a role
+--dit/--vae/--text-encoder/--tokenizer/--variant (--variant only, on `finetune`) name a role
 outright, and an ambiguous or missing outcome prints every real candidate and
 exits rather than guessing. The BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER} variables
 are read by the SERVED path (`resident_flux2`), not by this command: here a
@@ -769,6 +769,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
     // works.
     let mut variant_explicit = false;
     let mut ft_text_encoder: Option<String> = None;
+    let mut ft_dit: Option<String> = None;
+    let mut ft_vae: Option<String> = None;
+    let mut ft_tokenizer: Option<String> = None;
     let mut opts = flux2::finetune::TrainOpts {
         steps: 200,
         rank: 16,
@@ -847,6 +850,9 @@ fn finetune(args: &[String]) -> Result<(), String> {
             }
             "--trainer" => opts.trainer = flux2::finetune::Trainer::from_name(need(i)?)?,
             "--text-encoder" => ft_text_encoder = Some(need(i)?.clone()),
+            "--dit" => ft_dit = Some(need(i)?.clone()),
+            "--vae" => ft_vae = Some(need(i)?.clone()),
+            "--tokenizer" => ft_tokenizer = Some(need(i)?.clone()),
             "--cards" => opts.cards = need(i)?.parse().map_err(|e| format!("--cards: {e}"))?,
             "--method" => {
                 opts.rank_stabilized = match need(i)?.as_str() {
@@ -910,7 +916,7 @@ fn finetune(args: &[String]) -> Result<(), String> {
     // conditioning it was shown, so training on one encoder and generating on
     // another silently degrades every result), and the resolver's own
     // override contract is exactly "name this role outright".
-    let (paths, _assembly) = resolve_flux2(None, None, ft_text_encoder.as_deref(), None, variant_explicit.then_some(variant_name.as_str()))?;
+    let (paths, _assembly) = resolve_flux2(ft_dit.as_deref(), ft_vae.as_deref(), ft_text_encoder.as_deref(), ft_tokenizer.as_deref(), variant_explicit.then_some(variant_name.as_str()))?;
     // Bound against the frozen base's own shapes, not trusted as `--variant`
     // stated it - see `bind_variant`'s doc. `variant_name` is reassigned to
     // the bound truth so the log line below names what is actually training.
