@@ -94,6 +94,9 @@ const K_LN_DX_ROWS: usize = 29;
 const K_MAXABS: usize = 30;
 const K_QUANT: usize = 31;
 const K_MM_I8: usize = 32;
+// The QK-RMSNorm input gradient's workgroup-per-row twin, selected like the
+// forward's (`model::block::rms_variant`).
+const K_RDX_ROWS: usize = 33;
 
 /// The kernel set the device trainer registers. Every entry is an existing,
 /// gradient-checked kernel - the trainer adds no WGSL of its own.
@@ -133,6 +136,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
 ];
 
 /// LayerNorm / QK-RMSNorm epsilon - 1e-6 in every FLUX.2 variant, matching
@@ -839,7 +843,11 @@ impl BlockDev {
             s.push(self.gpu.step_sliced(K_RINV, &[x, invb], &[off, ib], &[hd as u32, rows, f(EPS)], rows));
             s.push(self.gpu.step_sliced(K_RDW, &[dy, x, invb, gw], &[off, off, ib, (0, 0)], &[hd as u32, rows], hd as u32));
         }
-        s.push(self.gpu.step_sliced(K_RDX, &[x, scale, dy, dx], &[off, (0, 0), off, off], &[hd as u32, rows, f(EPS)], rows));
+        // One workgroup per row where the device runs reductions: one
+        // thread walking a 128-wide row three times is a scattered sector
+        // per load.
+        let (kind, threads) = model::block::rms_variant(&self.gpu, K_RDX, Some(K_RDX_ROWS), rows, hd as u32);
+        s.push(self.gpu.dispatch_sliced(kind, &[x, scale, dy, dx], &[off, (0, 0), off, off], &[hd as u32, rows, f(EPS)], threads));
     }
 
     /// Per-head stride of the packed attention operands (`[nh, n, hd]`,
