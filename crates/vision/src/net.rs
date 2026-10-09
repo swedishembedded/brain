@@ -25,10 +25,11 @@
 //! `ctx.step(ctx.ids.conv2d, ...)` for a dispatch.
 //!
 //! NOTE: blocks do not uniformly pre-record and replay. BatchNorm in train mode
-//! needs a host-side interleave between `bn_stats` and `bn_train` (the host reads
-//! mean/var between two submits), so those forwards run imperatively. Preserve
-//! that split — collapsing the two submits into one reads stale statistics, and
-//! only a train-mode value pin catches it.
+//! interleaves its statistics between `bn_stats` and `bn_train` - on the device
+//! when the model registers `bn_pack`, otherwise on the host between two
+//! submits - so those forwards run imperatively. Preserve the host path's split:
+//! collapsing its two submits into one reads stale statistics, and only a
+//! train-mode value pin catches it.
 
 use gpu_core::{Gpu, Step};
 

@@ -136,10 +136,10 @@ mod tests {
         assert_eq!(out, vec![(0, "weights".to_string(), Confidence::Derived)], "{out:?}");
     }
 
-    /// `YoloConfig::from_json` never fails - it defaults every missing field
-    /// - so an unrelated `.safetensors` file with SOME `brain.config` JSON
-    /// but none of YOLOv8's real tensors must still be rejected: parse
-    /// success alone is never enough.
+    /// `YoloConfig::from_json` never fails (it defaults every missing field),
+    /// so an unrelated `.safetensors` file with SOME `brain.config` JSON but
+    /// none of YOLOv8's real tensors must still be rejected: parse success
+    /// alone is never enough.
     #[test]
     fn classify_rejects_a_safetensors_file_with_an_unrelated_config_and_no_real_tensors() {
         let dir = tmp("unrelated-config");

@@ -139,7 +139,18 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
     ("gradnorm_part", kernels::GRADNORM_PART),
     ("clip_coef_wg", kernels::CLIP_COEF_WG),
+    // BatchNorm statistics interleaved on the device and gamma/beta grads read
+    // out of `bn_dstats`' sums: the shared conv blocks pick them up BY NAME
+    // (`vision::ConvKernelIds`), so registering them is the whole opt-in.
+    ("bn_pack", kernels::BN_PACK),
+    ("bn_dparams", kernels::BN_DPARAMS),
+    // A plain device-side buffer copy (one row of the full width) for the
+    // backward's grad snapshots, which used to round-trip through the host.
+    ("region_copy", kernels::REGION_COPY),
 ];
+
+/// [`PIPELINES`] slot of `region_copy`.
+pub const REGION_COPY: usize = 49;
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against
 /// [`PIPELINES`] above — so the blocks never depend on this array's order.
@@ -152,4 +163,63 @@ pub const PIPELINES: &[(&str, &str)] = &[
 pub fn ids() -> &'static ConvKernelIds {
     static IDS: OnceLock<ConvKernelIds> = OnceLock::new();
     IDS.get_or_init(|| ConvKernelIds::resolve(PIPELINES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every positional constant names its own `PIPELINES` entry: an index
+    /// that drifts from the array dispatches whatever kernel sits there.
+    #[test]
+    fn the_index_constants_name_their_pipeline_entries() {
+        let named = [
+            (CONV2D, "conv2d"),
+            (CONV2D_DX, "conv2d_dx"),
+            (CONV2D_DW, "conv2d_dw"),
+            (BN_STATS, "bn_stats"),
+            (BN_RUNNING, "bn_running"),
+            (BN_TRAIN, "bn_train"),
+            (BN_EVAL, "bn_eval"),
+            (BN_DSTATS, "bn_dstats"),
+            (BN_DX, "bn_dx"),
+            (BN_DGAMMA, "bn_dgamma"),
+            (BN_DBETA, "bn_dbeta"),
+            (SILU, "silu"),
+            (SILU_BWD, "silu_bwd"),
+            (MAXPOOL2D, "maxpool2d"),
+            (MAXPOOL2D_DX, "maxpool2d_dx"),
+            (UPSAMPLE2, "upsample2"),
+            (UPSAMPLE2_DX, "upsample2_dx"),
+            (CONCAT2, "concat2"),
+            (CONCAT_SPLIT, "concat_split"),
+            (ADD2, "add2"),
+            (ADAMW, "adamw"),
+            (GRADNORM_SQ, "gradnorm_sq"),
+            (GRAD_SCALE, "grad_scale"),
+            (CLIP_COEF, "clip_coef"),
+            (GRAD_SCALE_BUF, "grad_scale_buf"),
+            (DFL_DECODE, "dfl_decode"),
+            (DFL_GRAD, "dfl_grad"),
+            (DFL_LOSS, "dfl_loss"),
+            (DFL_LOSS_GRAD, "dfl_loss_grad"),
+            (CIOU, "ciou"),
+            (CIOU_GRAD, "ciou_grad"),
+            (BCE_LOGITS, "bce_logits"),
+            (BCE_LOGITS_GRAD, "bce_logits_grad"),
+            (BIAS_ADD, "bias_add"),
+            (BIAS_GRAD, "bias_grad"),
+            (CONV_ACT, "conv_act"),
+            (CHAN_PLACE, "chan_place"),
+            (CONV2D_TILED, "conv2d_tiled"),
+            (CONV_ACT_TILED, "conv_act_tiled"),
+            (CONV_ACT_REG, "conv_act_reg"),
+            (CONV_BIAS, "conv_bias"),
+            (ADD_INPLACE, "add_inplace"),
+            (REGION_COPY, "region_copy"),
+        ];
+        for (idx, name) in named {
+            assert_eq!(PIPELINES[idx].0, name, "constant {idx} does not name `{name}`");
+        }
+    }
 }

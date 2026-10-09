@@ -22,9 +22,9 @@
 //! `O(L u)` per reduction of length `L` that compounds through the depth of the
 //! net. The bar is a fraction of each tensor's own largest gradient, set more
 //! than an order of magnitude above what correct kernels produce on this model
-//! - on CUDA both the generated WGSL tier and the native conv kernels measured
-//! under 4e-5 - and two below what a dropped or misplaced term does (one
-//! missing input column in the native forward moved the proxy loss by 38%).
+//! (on CUDA both the generated WGSL tier and the native conv kernels measured
+//! under 4e-5) and two below what a dropped or misplaced term does (one missing
+//! input column in the native forward moved the proxy loss by 38%).
 
 use model::Model;
 use yolov8::net::PIPELINES;

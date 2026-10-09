@@ -68,6 +68,14 @@ pub struct ConvKernelIds {
     pub bn_dx: usize,
     pub bn_dgamma: usize,
     pub bn_dbeta: usize,
+    /// Device-side interleave of the batch statistics and the affine params
+    /// into `mv`/`gb`/`mvg`. Optional: without it the host interleaves them,
+    /// which costs a device drain per BatchNorm per forward.
+    pub bn_pack: usize,
+    /// `dgamma`/`dbeta` read out of `bn_dstats`' packed sums. Optional:
+    /// without it `bn_dgamma` and `bn_dbeta` recompute those sums with two
+    /// more passes over the activations.
+    pub bn_dparams: usize,
     // ---- activations. `leaky_relu` at slope 0 IS relu in both directions, so
     // ReLU models need no kernel of their own.
     pub silu: usize,
@@ -200,6 +208,8 @@ impl ConvKernelIds {
             bn_dx: k("bn_dx"),
             bn_dgamma: k("bn_dgamma"),
             bn_dbeta: k("bn_dbeta"),
+            bn_pack: k("bn_pack"),
+            bn_dparams: k("bn_dparams"),
             silu: k("silu"),
             silu_bwd: k("silu_bwd"),
             leaky_relu: k("leaky_relu"),

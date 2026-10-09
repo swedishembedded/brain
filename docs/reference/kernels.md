@@ -146,9 +146,11 @@ load of it must already be bare-identifier-indexed.
 | [`bmm_tiled`](../../crates/kernels/wgsl/bmm_tiled.wgsl) | Batched matmul, overwrite or accumulate: out[b,m,n] (+)= alpha * sum_k A[b,·]·B[b,·], 64x64 tile per workgroup - the fast form of `bmm.wgsl` / `bmm_acc.wgsl` | register block per thread, 256-thread workgroup tile, 2 barriers | 4/5 | ✗ | ✓ (256) | - | - | f32 |
 | [`bn_dbeta`](../../crates/kernels/wgsl/bn_dbeta.wgsl) | BatchNorm backward w.r.t. beta | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bn_dgamma`](../../crates/kernels/wgsl/bn_dgamma.wgsl) | BatchNorm backward w.r.t. gamma | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
+| [`bn_dparams`](../../crates/kernels/wgsl/bn_dparams.wgsl) | BatchNorm backward: accumulate the gamma and beta gradients from bn_dstats' packed sums | one thread per channel | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bn_dstats`](../../crates/kernels/wgsl/bn_dstats.wgsl) | BatchNorm backward: per-channel reduced sums for the input-grad formula | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bn_dx`](../../crates/kernels/wgsl/bn_dx.wgsl) | BatchNorm backward w.r.t. x | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bn_eval`](../../crates/kernels/wgsl/bn_eval.wgsl) | BatchNorm forward for INFERENCE using RUNNING statistics, NCHW x[N,C,H,W] | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
+| [`bn_pack`](../../crates/kernels/wgsl/bn_pack.wgsl) | BatchNorm statistic packing: interleave mean/var/gamma/beta into the mv, gb and mvg layouts | one thread per channel | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`bn_running`](../../crates/kernels/wgsl/bn_running.wgsl) | BatchNorm momentum update of running statistics | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bn_stats`](../../crates/kernels/wgsl/bn_stats.wgsl) | BatchNorm training batch statistics for an NCHW tensor x[N,C,H,W] | one thread per output element, 6 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`bn_train`](../../crates/kernels/wgsl/bn_train.wgsl) | BatchNorm forward using BATCH statistics, NCHW tensor x[N,C,H,W] | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |

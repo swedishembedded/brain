@@ -942,12 +942,12 @@ impl Yolo {
     }
 
     /// Snapshot a transient grad buffer (`src`) into an owned buffer (`dst`)
-    /// before its producer is reused later in the backward chain. There is no
-    /// device-side copy/identity kernel, so on the CPU backend we round-trip
-    /// through the host (these neck grad buffers are small).
+    /// before its producer is reused later in the backward chain: a device-side
+    /// copy (`region_copy` over one row of the whole width), ordered after the
+    /// steps that wrote `src` like any other dispatch - no host round trip.
     fn copy(&self, src: &DeviceBuffer, dst: &DeviceBuffer, numel: u32) {
-        let v = self.gpu.read(src, numel as usize);
-        self.gpu.write(dst, bytemuck::cast_slice(&v));
+        let s = self.gpu.step(net::REGION_COPY, &[src, dst], &[1, numel, numel, 0], numel);
+        self.gpu.submit(&[], &[s]);
     }
 
     pub fn zero_grads(&self) {

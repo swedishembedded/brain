@@ -222,12 +222,16 @@ pub const BMM_TILED: &str = include_str!("../wgsl/bmm_tiled.wgsl");
 pub const BN_DBETA: &str = include_str!("../wgsl/bn_dbeta.wgsl");
 /// `wgsl/bn_dgamma.wgsl`
 pub const BN_DGAMMA: &str = include_str!("../wgsl/bn_dgamma.wgsl");
+/// `wgsl/bn_dparams.wgsl`
+pub const BN_DPARAMS: &str = include_str!("../wgsl/bn_dparams.wgsl");
 /// `wgsl/bn_dstats.wgsl`
 pub const BN_DSTATS: &str = include_str!("../wgsl/bn_dstats.wgsl");
 /// `wgsl/bn_dx.wgsl`
 pub const BN_DX: &str = include_str!("../wgsl/bn_dx.wgsl");
 /// `wgsl/bn_eval.wgsl`
 pub const BN_EVAL: &str = include_str!("../wgsl/bn_eval.wgsl");
+/// `wgsl/bn_pack.wgsl`
+pub const BN_PACK: &str = include_str!("../wgsl/bn_pack.wgsl");
 /// `wgsl/bn_running.wgsl`
 pub const BN_RUNNING: &str = include_str!("../wgsl/bn_running.wgsl");
 /// `wgsl/bn_stats.wgsl`
@@ -1359,9 +1363,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("bmm_tiled", BMM_TILED),
     ("bn_dbeta", BN_DBETA),
     ("bn_dgamma", BN_DGAMMA),
+    ("bn_dparams", BN_DPARAMS),
     ("bn_dstats", BN_DSTATS),
     ("bn_dx", BN_DX),
     ("bn_eval", BN_EVAL),
+    ("bn_pack", BN_PACK),
     ("bn_running", BN_RUNNING),
     ("bn_stats", BN_STATS),
     ("bn_train", BN_TRAIN),

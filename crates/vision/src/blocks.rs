@@ -19,13 +19,13 @@
 //! Why imperative submit (vs. one pre-recorded replay like `gpt`): BatchNorm's
 //! `bn_train`/`bn_dx` kernels read the per-channel stats as INTERLEAVED packed
 //! buffers (`mv[2C]` = mean|var, `mvg[3C]` = mean|var|gamma), but `bn_stats`
-//! emits `mean[C]`/`var[C]` as separate tensors and there is no interleave
-//! kernel (and P2 must add none). So between `bn_stats` and `bn_train` we must
-//! interleave on the host. A model can't splice a host write into the middle of
-//! a single recorded `submit`, so each block submits its forward in the natural
-//! data-dependency order, host-packing the BN stats at the one boundary where it
-//! is required. Backward is likewise submitted block-by-block. Buffers are still
-//! SSA and the grad-accumulating kernels (`*_dw`, `bn_dgamma/beta`, residual
+//! emits `mean[C]`/`var[C]` as separate tensors. A model that registers
+//! `bn_pack` interleaves them on the device and a unit's forward is one
+//! submission; one that does not interleaves on the host, which cannot be
+//! spliced into a recorded `submit`, so each block submits its forward in the
+//! natural data-dependency order (see `crate::bn::BnCore::forward_train`).
+//! Backward is likewise submitted block-by-block. Buffers are still SSA and the
+//! grad-accumulating kernels (`*_dw`, `bn_dgamma/beta`/`bn_dparams`, residual
 //! `add2`) compose exactly as in `gpt`.
 //!
 //! SSA discipline: every forward stage writes a FRESH buffer that doubles as the
@@ -80,16 +80,6 @@ fn gemm_conv_min_cout() -> u32 {
 fn use_naive_conv() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("BRAIN_NAIVE_CONV").map(|v| v != "0").unwrap_or(false))
-}
-
-/// Interleave two per-channel vectors into a `[2C]` packed buffer.
-fn pack2(a: &[f32], b: &[f32]) -> Vec<f32> {
-    let mut v = Vec::with_capacity(2 * a.len());
-    for i in 0..a.len() {
-        v.push(a[i]);
-        v.push(b[i]);
-    }
-    v
 }
 
 // ===========================================================================
@@ -179,27 +169,40 @@ fn act_params(act: Act, n: u32) -> Vec<u32> {
 }
 
 /// Accumulate a per-output-channel bias gradient from `d_out`, the grad wrt the
-/// biased unit's output: `dbias[c] = sum over n,h,w of d_out[n,c,h,w]`.
+/// biased unit's output: `dbias[c] += sum over n,h,w of d_out[n,c,h,w]`.
 ///
-/// The `bias_grad` kernel is `[M,N]` row-major and reduces over M, so `d_out` is
-/// viewed as `[M=N, N=C*HW]`: element `(n, c*HW+p)` IS `d_out[n,c,h,w]`, and the
-/// kernel gives `dbcast[c*HW+p] = sum_n d_out[n,c,h,w]`. The remaining spatial
-/// sum is done on the host — the same host-reduce split `gradnorm_sq` uses.
+/// That sum is exactly BatchNorm's `dbeta`, so where the model registers
+/// `bn_dbeta` it is one dispatch on the device, accumulating into the
+/// pre-zeroed grad. Otherwise the `bias_grad` kernel (`[M,N]` row-major,
+/// reducing over M) sums over the batch with `d_out` viewed as `[M=N, N=C*HW]`,
+/// in which element `(n, c*HW+p)` IS `d_out[n,c,h,w]`, into `dbcast` (allocated
+/// on that first use), and the spatial sum is done on the host, which reads
+/// `d_out`'s producer's results back.
 ///
 /// Shared by [`Conv`] and [`ConvTranspose`]: the reduction is a property of the
 /// NCHW layout, not of which convolution produced it.
 ///
-/// Must run AFTER the caller's submit — it reads `d_out` back.
+/// Must run AFTER the caller's submit of the steps that write `d_out`.
 fn accumulate_bias_grad(
     ctx: &Ctx,
     ps: &ParamStore,
     name: &str,
-    dbcast: &DeviceBuffer,
+    dbcast: &std::cell::RefCell<Option<DeviceBuffer>>,
     shape: Shape,
     d_out: &DeviceBuffer,
 ) {
     let (cout, hw) = (shape.c, shape.h * shape.w);
+    if ctx.ids.bn_dbeta != crate::NONE {
+        let s = ctx.step(ctx.ids.bn_dbeta, &[d_out, ps.g(name)], &[shape.n, cout, shape.h, shape.w], cout);
+        ctx.gpu.submit(&[], &[s]);
+        return;
+    }
     let n = cout * hw;
+    if dbcast.borrow().is_none() {
+        *dbcast.borrow_mut() = Some(ctx.act(n));
+    }
+    let dbcast = dbcast.borrow();
+    let dbcast = dbcast.as_ref().expect("allocated above");
     // bias_grad ACCUMULATES into its output, and `dbcast` persists across
     // backward passes -> it must be zeroed first (submit's clear list).
     let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[d_out, dbcast], &[shape.n, n], n);
@@ -487,35 +490,27 @@ pub struct Conv {
     /// [`Conv::set_eval`] WITHOUT rebuilding the graph (the only thing the flag
     /// changes is which BN kernel `forward` dispatches; see P6 infer).
     train: std::cell::Cell<bool>,
-    momentum: f32,
-    /// Apply the running-stat momentum EMA update during forward. Interior-mutable
-    /// (like `train`) so real training can enable it via [`Conv::set_update_running`]
-    /// without rebuilding the graph. Disabled for the gradient check (it mutates
-    /// `run_mean`/`run_var`, breaking forward determinism; those tensors carry no
-    /// train-mode gradient anyway), so it defaults OFF.
-    update_running: std::cell::Cell<bool>,
+    /// The BatchNorm stage's statistics, packed forms and train-mode passes -
+    /// the same core `crate::BatchNorm` runs (see `crate::bn`). Its running-stat
+    /// update flag is what [`Conv::set_update_running`] sets.
+    bn: crate::bn::BnCore,
 
     conv_out: DeviceBuffer, // post-conv pre-BN [out]
-    mean: DeviceBuffer,     // batch mean [C]
-    var: DeviceBuffer,      // batch var  [C]
-    mv: DeviceBuffer,       // packed mean|var [2C]
-    gb: DeviceBuffer,       // packed gamma|beta [2C]
     sb: DeviceBuffer,       // packed scale|bias [2C] = BN-eval collapsed (fused conv_act)
     /// Whether `sb` holds the current BN-eval collapse. Computed lazily on the
     /// first eval-mode forward and reused across frames (constant in inference);
     /// invalidated when the block re-enters train mode.
     sb_ready: std::cell::Cell<bool>,
-    mvg: DeviceBuffer,      // packed mean|var|gamma [3C]
     bn_out: DeviceBuffer,   // post-BN pre-SiLU [out]
     act: DeviceBuffer,      // SiLU output (block output) [out]
 
     d_bn: DeviceBuffer,   // grad wrt bn_out [out]
-    bp: DeviceBuffer,     // packed [5C] from bn_dstats
     d_conv: DeviceBuffer, // grad wrt conv_out [out]
 
-    /// `bias_grad`'s output before the host spatial reduce: `[C*HW]`. Allocated
-    /// only for a biased unit (see `bias_backward` for why the view is [N, C*HW]).
-    dbcast: Option<DeviceBuffer>,
+    /// `bias_grad`'s output before the host spatial reduce: `[C*HW]`, allocated
+    /// on first use, and only where the model has no `bn_dbeta` to sum the bias
+    /// gradient on the device (see [`accumulate_bias_grad`]).
+    dbcast: std::cell::RefCell<Option<DeviceBuffer>>,
 
     /// Lazily-allocated [in] scratch holding the tapped (possibly fake-quantized)
     /// conv input, used only when a [`crate::ActTap`] is installed (NPU
@@ -571,7 +566,12 @@ impl Conv {
         assert_eq!(cout % spec.groups, 0, "cout {cout} not divisible by groups {}", spec.groups);
         let out_shape = spec.out_shape(in_shape);
         let on = out_shape.numel();
-        let c = cout;
+        let bn_names = crate::BnNames {
+            gamma: names.gamma.clone(),
+            beta: names.beta.clone(),
+            run_mean: names.run_mean.clone(),
+            run_var: names.run_var.clone(),
+        };
         Conv {
             prefix: prefix.to_string(),
             names,
@@ -582,26 +582,15 @@ impl Conv {
             stride,
             pad,
             train: std::cell::Cell::new(train),
-            // Running-stat EMA momentum. PyTorch's default (0.03) converges too
-            // slowly for the short from-scratch runs here, so use 0.1 — the BN
-            // running mean/var reach usable eval-mode values in a few hundred
-            // steps (validated by the p11 eval-inference test).
-            momentum: 0.1,
-            update_running: std::cell::Cell::new(false),
+            bn: crate::bn::BnCore::new(ctx, bn_names, out_shape),
             conv_out: ctx.act(on),
-            mean: ctx.act(c),
-            var: ctx.act(c),
-            mv: ctx.act(2 * c),
-            gb: ctx.act(2 * c),
-            sb: ctx.act(2 * c),
+            sb: ctx.act(2 * cout),
             sb_ready: std::cell::Cell::new(false),
-            mvg: ctx.act(3 * c),
             bn_out: ctx.act(on),
             act: ctx.act(on),
             d_bn: ctx.act(on),
-            bp: ctx.act(5 * c),
             d_conv: ctx.act(on),
-            dbcast: if spec.bias { Some(ctx.act(cout * out_shape.h * out_shape.w)) } else { None },
+            dbcast: std::cell::RefCell::new(None),
             q_in: std::cell::RefCell::new(None),
             col: std::cell::RefCell::new(None),
             dw_scratch: std::cell::RefCell::new(None),
@@ -648,7 +637,7 @@ impl Conv {
     /// forward. Must be ON during real training so `run_mean`/`run_var` track the
     /// data and eval-mode inference works; left OFF for the gradient check.
     pub fn set_update_running(&self, on: bool) {
-        self.update_running.set(on);
+        self.bn.update_running.set(on);
     }
 
     /// The unit's tensor names — read-only. Lets a block-level fusion (e.g.
@@ -866,24 +855,11 @@ impl Conv {
         let blocks = psz.div_ceil(64);
         self.out_shape.n * self.out_shape.c * blocks * 64
     }
-    fn nchw(&self) -> [u32; 4] {
-        [self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w]
-    }
-
-    /// Pack gamma|beta into `gb` from the current weights (host). BN affine
-    /// params can't be aliased as the interleaved buffer the kernel wants.
-    fn pack_gb(&self, ctx: &Ctx, ps: &ParamStore) {
-        let c = self.out_shape.c as usize;
-        let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
-        let beta = ctx.gpu.read(ps.w(&self.names.beta), c);
-        ctx.gpu.write(&self.gb, bytemuck::cast_slice(&pack2(&gamma, &beta)));
-    }
 
     /// Run the full forward and return this block's output buffer. Submits in
-    /// dependency order, host-packing the BN stats at the one required boundary.
+    /// dependency order (see `BnCore::forward_train` for the train-mode BN).
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         let on = self.out_shape.numel();
-        let c = self.out_shape.c;
 
         if self.spec.norm == Norm::None {
             // Raw conv -> act. No stats, no host interleave, no mode distinction:
@@ -967,28 +943,15 @@ impl Conv {
             return;
         }
 
-        // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
-        self.pack_gb(ctx, ps);
-        let mut pre = self.conv_steps(ctx, ps, x_in, &self.conv_out);
-        pre.push(ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c));
-        if self.update_running.get() {
-            pre.push(ctx.step(
-                ctx.ids.bn_running,
-                &[&self.mean, &self.var, ps.w(&self.names.run_mean), ps.w(&self.names.run_var)],
-                &[c, f(self.momentum)],
-                c,
-            ));
-        }
-        ctx.gpu.submit(&[], &pre);
-        self.pack_stats_host(ctx, ps);
-        let s_train = ctx.step(ctx.ids.bn_train, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
+        // Train mode: conv -> batch-stat BN -> act.
+        let conv = self.conv_steps(ctx, ps, x_in, &self.conv_out);
         let s_act = match act_pair(ctx, self.spec.act) {
             Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on),
-            // Act::None: the block's output IS the BN output. Copying via a
-            // slope-1 leaky_relu would be a wasted dispatch, so alias instead.
+            // Act::None: the block's output is the BN output, copied into `act`
+            // by a slope-1 leaky_relu (`out()` aliases only for a raw conv).
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.bn_out, &self.act], &[on, f(1.0)], on),
         };
-        ctx.gpu.submit(&[], &[s_train, s_act]);
+        self.bn.forward_train(ctx, ps, &self.conv_out, &self.bn_out, conv, vec![s_act]);
     }
 
     /// This conv's calibration / fake-quant tap — see [`apply_tap`]. Every conv
@@ -1069,8 +1032,8 @@ impl Conv {
             unreachable!("Norm::None short-circuits before reaching the eval path");
         }
         if !self.sb_ready.get() {
-            self.pack_running_mv(ctx, ps);
-            self.pack_gb(ctx, ps);
+            self.bn.pack_running_mv(ctx, ps);
+            self.bn.pack_gb(ctx, ps);
             self.sb_ready.set(true);
         }
         let on = self.out_shape.numel();
@@ -1086,39 +1049,15 @@ impl Conv {
         // `bn_eval` at act=0 into `bn_out` and then its own kernel. Pushing a
         // fabricated code would silently drop the activation.
         let mut steps = self.conv_steps(ctx, ps, src, &self.conv_out);
-        let mut bn_params = self.nchw().to_vec();
         match self.spec.act.fused_code() {
-            Some(code) => {
-                bn_params.push(code);
-                steps.push(ctx.step(
-                    ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
-                    &[&self.conv_out, &self.mv, &self.gb, &self.act],
-                    &bn_params,
-                    on,
-                ));
-            }
+            Some(code) => steps.push(self.bn.eval_step(ctx, &self.conv_out, &self.act, code)),
             None => {
-                bn_params.push(0);
-                steps.push(ctx.step(
-                    ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
-                    &[&self.conv_out, &self.mv, &self.gb, &self.bn_out],
-                    &bn_params,
-                    on,
-                ));
+                steps.push(self.bn.eval_step(ctx, &self.conv_out, &self.bn_out, 0));
                 let (fwd, _) = act_pair(ctx, self.spec.act).expect("fused_code()==None implies a real activation");
                 steps.push(ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on));
             }
         }
         ctx.gpu.submit(&[], &steps);
-    }
-
-    /// Interleave the RUNNING mean/var into `mv` for `bn_eval` (which shares
-    /// `bn_train`'s signature and simply expects running stats there).
-    fn pack_running_mv(&self, ctx: &Ctx, ps: &ParamStore) {
-        let c = self.out_shape.c as usize;
-        let rmean = ctx.gpu.read(ps.w(&self.names.run_mean), c);
-        let rvar = ctx.gpu.read(ps.w(&self.names.run_var), c);
-        ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&rmean, &rvar)));
     }
 
     /// Collapse the BN-eval transform into per-channel `scale|bias` packed in
@@ -1127,7 +1066,7 @@ impl Conv {
     /// `bn_eval`'s, so the fused and unfused paths agree by construction.
     ///
     /// Only the fused path uses this. `bn_eval` wants `mv`+`gb`, not `sb` — see
-    /// [`Conv::pack_running_mv`].
+    /// `BnCore::pack_running_mv`.
     fn pack_sb(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
         let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
@@ -1147,24 +1086,6 @@ impl Conv {
         ctx.gpu.write(&self.sb, bytemuck::cast_slice(&sb));
     }
 
-    /// Interleave the freshly-computed batch mean/var into `mv` and mean|var|gamma
-    /// into `mvg` (the BN-backward input). Called between `bn_stats` and
-    /// `bn_train` during forward.
-    fn pack_stats_host(&self, ctx: &Ctx, ps: &ParamStore) {
-        let c = self.out_shape.c as usize;
-        let mean = ctx.gpu.read(&self.mean, c);
-        let var = ctx.gpu.read(&self.var, c);
-        let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
-        ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&mean, &var)));
-        let mut mvg = Vec::with_capacity(3 * c);
-        for i in 0..c {
-            mvg.push(mean[i]);
-            mvg.push(var[i]);
-            mvg.push(gamma[i]);
-        }
-        ctx.gpu.write(&self.mvg, bytemuck::cast_slice(&mvg));
-    }
-
     /// Accumulate this unit's bias gradient from `d_conv` (the grad wrt the
     /// conv+bias output) via [`accumulate_bias_grad`]. No-op for an unbiased unit.
     ///
@@ -1173,8 +1094,9 @@ impl Conv {
     /// copy dispatch) — reading `self.d_conv` there would reduce a buffer that
     /// was never written.
     fn bias_backward(&self, ctx: &Ctx, ps: &ParamStore, d_conv: &DeviceBuffer) {
-        let Some(dbcast) = self.dbcast.as_ref() else { return };
-        accumulate_bias_grad(ctx, ps, &self.names.bias, dbcast, self.out_shape, d_conv);
+        if self.spec.bias {
+            accumulate_bias_grad(ctx, ps, &self.names.bias, &self.dbcast, self.out_shape, d_conv);
+        }
     }
 
     /// Backward. `d_out` = grad wrt this block's output; `d_in` receives the grad
@@ -1189,7 +1111,6 @@ impl Conv {
         d_in: &DeviceBuffer,
     ) {
         let on = self.out_shape.numel();
-        let c = self.out_shape.c;
 
         if self.spec.norm == Norm::None {
             // Raw conv: act backward straight into d_conv, then the conv
@@ -1212,17 +1133,13 @@ impl Conv {
             Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &act_params(self.spec.act, on), on),
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),
         };
-        let s_dstats = ctx.step(ctx.ids.bn_dstats, &[&self.conv_out, &self.d_bn, &self.mvg, &self.bp], &self.nchw(), c);
-        // bn_dgamma / bn_dbeta accumulate -> their grad buffers are pre-zeroed by
-        // the model's zero_grads (clears list), exactly like gpt.
-        let s_dgamma = ctx.step(ctx.ids.bn_dgamma, &[&self.conv_out, &self.d_bn, &self.mv, ps.g(&self.names.gamma)], &self.nchw(), c);
-        let s_dbeta = ctx.step(ctx.ids.bn_dbeta, &[&self.d_bn, ps.g(&self.names.beta)], &self.nchw(), c);
-        let s_dx = ctx.step(ctx.ids.bn_dx, &[&self.conv_out, &self.d_bn, &self.bp, &self.d_conv], &self.nchw(), on);
         let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
-        // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
-        // must precede s_dx (reads bp); the weight gradient reads d_conv. Submit
-        // in this order.
-        let mut steps = vec![s_act, s_dstats, s_dgamma, s_dbeta, s_dx];
+        // The act backward produces d_bn, which the BN backward reads; the BN
+        // backward produces d_conv, which both conv adjoints read. Submit in
+        // this order. The gamma/beta grads accumulate into buffers the model's
+        // zero_grads pre-zeroes.
+        let mut steps = vec![s_act];
+        steps.extend(self.bn.backward_steps(ctx, ps, &self.conv_out, &self.d_bn, &self.d_conv));
         steps.extend(self.dw_steps(ctx, ps, &self.d_conv, x_in));
         steps.push(s_dxin);
         ctx.gpu.submit(&[], &steps);
@@ -1855,9 +1772,9 @@ pub struct ConvTranspose {
     pre: DeviceBuffer,  // convtr2d output (+ bias), pre-activation [out]
     act: DeviceBuffer,  // activation output [out]; unused for Act::None
     d_pre: DeviceBuffer,// grad wrt `pre` [out]
-    /// `bias_grad`'s output before the host spatial reduce, `[C*HW]`. Allocated
-    /// only for a biased unit.
-    dbcast: Option<DeviceBuffer>,
+    /// `bias_grad`'s output before the host spatial reduce, `[C*HW]` - see
+    /// [`accumulate_bias_grad`], which allocates it on first use.
+    dbcast: std::cell::RefCell<Option<DeviceBuffer>>,
     q_in: std::cell::RefCell<Option<DeviceBuffer>>,
 }
 
@@ -1896,7 +1813,7 @@ impl ConvTranspose {
             // zero-sized buffer is a hard error on wgpu — allocate one element.
             act: ctx.act(if spec.act == Act::None { 1 } else { on }),
             d_pre: ctx.act(on),
-            dbcast: if spec.bias { Some(ctx.act(spec.cout * out_shape.h * out_shape.w)) } else { None },
+            dbcast: std::cell::RefCell::new(None),
             q_in: std::cell::RefCell::new(None),
         }
     }
@@ -2015,8 +1932,8 @@ impl ConvTranspose {
             self.in_shape.numel(),
         );
         ctx.gpu.submit(&[], &[s_dw, s_dx]);
-        if let Some(dbcast) = self.dbcast.as_ref() {
-            accumulate_bias_grad(ctx, ps, &self.names.bias, dbcast, self.out_shape, d_pre);
+        if self.spec.bias {
+            accumulate_bias_grad(ctx, ps, &self.names.bias, &self.dbcast, self.out_shape, d_pre);
         }
     }
 }
