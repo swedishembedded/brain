@@ -215,6 +215,17 @@ existing caller. Assume nothing about units.
    divided by the new instruction's width, and the tile has to widen its loads
    to match or the win is capped at the load-store rate.
 
+8. **On a register-tiled GEMM the second resident block is worth more than
+   any change to the inner loop.** An 8x8-per-thread fp32 GEMM at 142
+   registers fits one 256-thread block per SM, and every chunk's barrier and
+   staging then stalls the whole SM. Capping it at 128 (`__launch_bounds__`
+   minimum 2, no spills) took the native `matmul_reg3` twin from 3.0 to 5.3
+   TFLOP/s on a P40 - 90% of what its separately rounded multiply-add allows.
+   Check the spill line after every edit: register allocation at the cap is
+   fragile, and a staging struct that carries fields it never uses (two row
+   pointers where one serves both rows) was enough to push one entry point of
+   a shared file into spills while its siblings stayed clean.
+
 ## D. Constraints that will bite you
 
 - **No atomics, no subgroups, no f16** — a tree reduction is
@@ -306,6 +317,14 @@ conflict on the multiply's hottest instruction. Owning `[4tx, 4tx+4)` and
 bytes; the forward went from 20.2 to 16.6 ms over the YOLOv8n step
 (`conv2d_native_bench`).
 
+A roofline probe is a measurement under test too. An int8 probe computing
+`dot4I8Packed(a, b) + acc` with loop-invariant `a, b` reported six times the
+card's packed-dot rate on a backend whose compiler could see through the dot:
+it hoisted the dot and timed additions. Make every probe operation depend on
+the previous one through its OPERANDS, not only its accumulator, and assert the
+ratio physics allows (a four-lane int8 dot retires four multiply-adds where an
+FMA retires one) - `tests/roofline.rs` does.
+
 ### E.0 Bracket every timed region with `poll_wait()` — or you are timing the host
 
 A backend `submit` call with an empty clear list can simply append to a
@@ -319,6 +338,23 @@ flushes the pending pass and blocks until the device is done.
 If a measurement comes out faster than the device can move memory, you
 measured the CPU. Compute the roof first and sanity-check against it before
 believing a result.
+
+### E.0a On a SHARED device, rank by the minimum over replays
+
+Per-launch device timing on a card another context is time-slicing bills the
+neighbour's slices to whatever kernel was running: on one FLUX.2 forward every
+small elementwise kernel read 2.3-3.9 ms a call regardless of its size, against
+0.1-0.6 ms at its minimum. Two consequences:
+
+* rank kernels by each dispatch's MINIMUM over several replays of the same
+  captured program (`--profile-replays N`), never by per-launch totals;
+* a probe compared against a kernel must be short enough to escape the time
+  slice too, or the ratio compares a sliced probe with an unsliced kernel: a
+  25 ms peak probe measured 22 TOP/s (half the card), a 1 ms one 45.9.
+
+And a timing event recorded inside a CUDA stream capture with plain
+`cuEventRecord` only tracks the capture's dependencies - it never fires on
+replay. It has to be `cuEventRecordWithFlags(.., CU_EVENT_RECORD_EXTERNAL)`.
 
 ### E.0b Ramp the device first - an idle GPU is not the GPU
 

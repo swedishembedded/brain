@@ -1655,3 +1655,79 @@ The control is in any case no longer the load-bearing evidence. The autoencoder
 experiments above establish the mechanism causally and without any adapter at
 all - a smooth latent from any source wakes the grid, a pure sinusoid included -
 which is a stronger statement than a second adapter agreeing would have been.
+
+## The CUDA backend on a P40: from the generated tier to native kernels (2026-10-09)
+
+Klein-4B Q8_0 on `--backend cuda`, Tesla P40 (cc 6.1), the card shared with
+another process for nearly every number below. Numbers marked "min of
+replays" are `--profile-replays N` (each dispatch at its minimum over N graph
+replays); "per-launch" numbers are `BRAIN_PROFILE`'s eager-launch timing and
+carry the neighbour's time slices.
+
+### Where the time was
+
+640x512 text-to-image, 4 steps (1792 joint tokens), per-launch:
+
+| stage | before | after |
+|---|---|---|
+| DiT step | 41.2 s (matmul_i8_dyn 38.6 s, 200 calls) | 4.0 s per-launch, 2.6 s min of replays |
+| prompt encode | 14.7 s (matmul_i8_dyn 11.8 s) | 3.4 s per-launch, 1.5 s min of replays |
+| VAE decode (device) | 6.1 s min of replays | 1.43 s |
+| VAE encode 640x512 | 2.06 s min of replays | 0.70 s |
+
+The generated tier emulated `dot4I8Packed` byte by byte: `matmul_i8_dyn` ran
+at 0.8% of the card's packed-dot peak. The image is byte-identical before and
+after the GEMM redirect.
+
+### Kernels, against the measured roof
+
+The DP4A roof measured 45.9 TOP/s (a 1 ms native probe, its minimum); the
+fp32 FMA roof about 10 TFLOP/s, and separately rounded multiply-add (what a
+bit-identical fp32 redirect must do) half of that.
+
+| kernel | shape | before | after | of its roof |
+|---|---|---|---|---|
+| matmul_i8_dyn -> matmul_i8_dp4a | 1792x3072x3072 | 86.7 ms | 1.83 ms | 40% of dp4a; the bit-exact group fold is 3 fp32 ops per 8 dp4a, so 55% of what this computation allows |
+| matmul_reg3 -> matmul_f32_reg | 1280x9216x3072 | 32.6 ms | 13.7 ms (5.3 TFLOP/s) | 90% of the separately rounded rate |
+| matmul_dx_reg -> matmul_f32_dx_reg | trainer | 1.6 TFLOP/s | ~4.5 TFLOP/s | ~76% |
+| trainer fp32 GEMMs, fused | 2560x3072x3072 | 2.45 TFLOP/s | 5.97 TFLOP/s | ~60% of FMA (busy card) |
+| softmax_k_dx -> softmax_rows_dx | trainer, all heads | 1.04x the dp4a row | 0.17x | bandwidth-bound |
+| VAE conv: im2col_at + matmul_reg3 -> conv2d_bias_fwd_f32 | decode 640x512 | 3.9 s | 1.21 s | ~2.5 TFLOP/s, 25% of FMA |
+
+What did not move the int8 GEMM, measured on the kernel itself: two blocks
+per SM at a 128x64 tile, explicit register double-buffering of the shared
+fragments, and a 4x8-thread warp layout (one shared wavefront per fragment
+load) - all within a few percent. Replacing the fold by one integer add
+reaches 45%, removing most shared fragment loads 61%, the same 8x8 outer
+product from registers alone 84%: the remaining gap is the shared-memory feed
+and the chunk machinery together, not one of them.
+
+### The LoRA trainer
+
+Paired 512 px (2560 joint tokens), rank 16, `dev_step_time`:
+
+| configuration | step | resident base |
+|---|---|---|
+| fp32 base, generated tier | 31.5 s | 13.93 GiB |
+| fp32 base, native fp32 GEMMs | 18.1 s (idle card) | 13.93 GiB |
+| int8 base (served quantiser, DP4A forward, int8-weight dx) | 12.8 s (idle card) | 4.83 GiB |
+
+The int8 base trains against the base it is served on. Against the host
+reference over the same dequantised weights its adapter gradients measured
+worst cosine 0.99994, rel_l2 1.1e-2 (`tests/int8_trainer.rs` holds 0.9995 and
+0.03); on 48 real paired tiles over 20 steps its loss curve differed from the
+fp32 base's by a mean of +0.00013 per step (sd 0.0011, largest 0.0025).
+
+A restarted run no longer re-encodes: `--cache-dir` keeps caption contexts
+and latents, a warm run built neither encoder and reproduced the cold run's
+losses and adapter bytes exactly.
+
+### Not done
+
+- The DiT's `flash_attn_bidir_reg2` (0.84 s of the 2.6 s step, generated
+  tier) and the text encoder's materialised-score attention
+  (`gqa_scores_kmask`, about 70% of its 1.5 s) are the largest remaining rows;
+  both want a native fused attention at head_dim 128 for cc 6.1.
+- The int8 GEMM's shared-memory feed (above).
+- The VAE conv at 25% of FMA is the YOLO campaign's kernel at the VAE's much
+  wider channel counts; it was not retuned for them.
