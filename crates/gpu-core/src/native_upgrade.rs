@@ -471,6 +471,16 @@ pub enum Fused {
     /// 32); bindings `dy`, `wq` (`[n, k/4]` u32), `sw` (`[n, k/32]`) read,
     /// `out` read-written.
     I8wDx,
+    /// `matmul_f32_fma`: `matmul_reg3`'s contract (params `[m, k, n]`,
+    /// bindings `x`, `w` read, `out` written) with one fused multiply-add per
+    /// term - for a trainer, whose gate is its host reference, not bits.
+    F32Fma,
+    /// `matmul_f32_dx_fma`: `matmul_dx_reg`'s contract (params `[m, k, n,
+    /// accumulate]`) with fused multiply-adds.
+    F32DxFma,
+    /// `matmul_f32_dw_fma`: `matmul_dw_reg`'s contract (params `[m, k, n]`,
+    /// always accumulating into the `n x k` output) with fused multiply-adds.
+    F32DwFma,
 }
 
 /// Output positions one block of [`Fused::Conv2dDwPartial`] stages per
@@ -637,6 +647,9 @@ impl Fused {
             Fused::Conv2dDwPartial => "conv2d_dw_partial_f32",
             Fused::Conv2dDwReduce => "conv2d_dw_reduce_f32",
             Fused::I8wDx => "matmul_i8w_dx",
+            Fused::F32Fma => "matmul_f32_fma",
+            Fused::F32DxFma => "matmul_f32_dx_fma",
+            Fused::F32DwFma => "matmul_f32_dw_fma",
         }
     }
 
@@ -651,6 +664,7 @@ impl Fused {
             Fused::Conv2dDwPartial => CONV2D_DW_PARTIAL_BINDINGS,
             Fused::Conv2dDwReduce => CONV2D_DW_REDUCE_BINDINGS,
             Fused::I8wDx => I8W_DX_BINDINGS,
+            Fused::F32Fma | Fused::F32DxFma | Fused::F32DwFma => F32_GEMM_BINDINGS,
         }
     }
 
@@ -694,6 +708,9 @@ impl Fused {
             Fused::Conv2dDwReduce => matches!(params, [total, splits] if *total >= 1 && *splits >= 1),
             Fused::I8wDx => matches!(params, [m, k, n, _] if *m >= 1 && *n >= 1 && *k >= 32 && k % 32 == 0
                 && u64::from(*m) * u64::from(*k) <= u64::from(u32::MAX)),
+            Fused::F32Fma => serves_f32_gemm(params),
+            Fused::F32DxFma => serves_f32_dx(params),
+            Fused::F32DwFma => serves_f32_dw(params),
         }
     }
 
@@ -715,11 +732,15 @@ impl Fused {
                 cout.div_ceil(conv_rows_tile(cout)) * (cin * k * k).div_ceil(CONV_DW_COLS) * params[10]
             }
             Fused::Conv2dDwReduce => params[0].div_ceil(CONV_DW_REDUCE_BLOCK),
-            Fused::I8wDx => {
-                let tile = kernels_cuda::get("matmul_i8w_dx").map_or((128, 128), |k| k.tile);
-                params[0].div_ceil(tile.0) * params[1].div_ceil(tile.1)
-            }
+            Fused::I8wDx | Fused::F32DxFma => dx_blocks(params, self.tile()),
+            Fused::F32Fma => gemm_blocks(params, self.tile()),
+            Fused::F32DwFma => dw_blocks(params, self.tile()),
         }
+    }
+
+    /// The registry entry's output tile.
+    fn tile(self) -> (u32, u32) {
+        kernels_cuda::get(self.registry_name()).map_or((128, 128), |k| k.tile)
     }
 }
 

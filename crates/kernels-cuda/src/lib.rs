@@ -344,6 +344,57 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/matmul_f32_reg.cu"),
     },
     CudaKernel {
+        name: "matmul_f32_fma",
+        // Asked for by name (`gpu_core::Fused`) by a trainer, whose contract is
+        // agreement with its host reference rather than bits of a WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_fma",
+        what: "fp32 out = x @ W^T with one fused multiply-add per term (training; matmul_f32_reg's tile and contract)",
+        reported: "native:matmul_f32_fma",
+        block_dim: 256,
+        tile: (128, 128),
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        src: include_str!("../cu/matmul_f32_reg.cu"),
+    },
+    CudaKernel {
+        name: "matmul_f32_dx_fma",
+        // Asked for by name (`gpu_core::Fused`) by a trainer, whose contract is
+        // agreement with its host reference rather than bits of a WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_dx_fma",
+        what: "fp32 dX = dY @ W (optionally accumulated) with fused multiply-adds (training; matmul_f32_dx_reg's tile and contract)",
+        reported: "native:matmul_f32_dx_fma",
+        block_dim: 256,
+        tile: (128, 128),
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        src: include_str!("../cu/matmul_f32_reg.cu"),
+    },
+    CudaKernel {
+        name: "matmul_f32_dw_fma",
+        // Asked for by name (`gpu_core::Fused`) by a trainer, whose contract is
+        // agreement with its host reference rather than bits of a WGSL twin.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_dw_fma",
+        what: "fp32 dW += A^T @ B with fused multiply-adds (training; matmul_f32_dw_reg's tile and contract)",
+        reported: "native:matmul_f32_dw_fma",
+        block_dim: 256,
+        tile: (128, 128),
+        shared_bytes: 2 * 2 * 16 * (128 + 4) * 4,
+        src: include_str!("../cu/matmul_f32_reg.cu"),
+    },
+    CudaKernel {
         name: "matmul_i8w_dx",
         // A training kernel with no WGSL twin, asked for by name
         // (`gpu_core::Fused::I8wDx`): the input gradient of a linear whose
