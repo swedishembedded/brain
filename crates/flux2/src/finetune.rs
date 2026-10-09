@@ -426,6 +426,18 @@ pub fn change_stats(x0: &[f32], refs: &[f32], cin: usize) -> Option<f32> {
 /// having to know that. Training used to hard-code the full f32 encoder
 /// regardless, which meant the context vectors an adapter was fitted against
 /// were not the ones its deployment produces.
+/// The precision the frozen base is held at while training an adapter that
+/// will be deployed at `requested` on the DiT at `dit` - the deployed DiT
+/// precision, resolved as `generate` resolves it, for the device trainer; the
+/// host trainer has no int8 base and always differentiates fp32.
+pub fn base_precision(dit: &str, requested: crate::Precision, trainer: Trainer) -> Result<crate::devgrad::BasePrecision, String> {
+    let effective = crate::pipeline::effective_dit_precision(dit, requested, false)?;
+    Ok(match (trainer, effective) {
+        (Trainer::Device, crate::Precision::Int8) => crate::devgrad::BasePrecision::Int8,
+        _ => crate::devgrad::BasePrecision::F32,
+    })
+}
+
 pub fn text_encoder_placement(dit: &str, requested: crate::Precision) -> Result<crate::pipeline::TePlacement, String> {
     let effective = crate::pipeline::effective_dit_precision(dit, requested, false)?;
     Ok(crate::pipeline::TePlacement::here_for(effective))
@@ -653,6 +665,10 @@ pub struct TrainOpts {
     /// card and needs two. Never auto-grabbed: taking a second card is a
     /// decision about a shared machine, so a caller has to make it.
     pub cards: usize,
+    /// The canonical GPU a one-card device trainer is built on; `None` leaves
+    /// it to the enclosing placement scope (see
+    /// [`crate::devtrain::TrainerSpec::card`]).
+    pub card: Option<u32>,
     /// Square training image size in pixels (multiple of 16; latent grid =
     /// size/16 per side).
     pub size: u32,
@@ -678,15 +694,14 @@ pub struct TrainOpts {
     pub lr_ratio: f32,
     /// LoRA-FA: freeze `A` at its random init: only `B` trains.
     pub freeze_a: bool,
-    /// The DiT precision the trained adapter will be **deployed** at.
+    /// The DiT precision the trained adapter will be **deployed** at,
+    /// resolved exactly as `generate` resolves it (a `.gguf` DiT runs int8).
     ///
-    /// It does not change what is differentiated - the frozen base is fp32 on
-    /// both trainers either way - it selects the TEXT ENCODER tier the
-    /// captions are embedded through ([`text_encoder_placement`]), which is
-    /// the input the adapter is actually keyed on. `generate` picks the
-    /// encoder's tier from the DiT's, so training has to resolve it the same
-    /// way or the adapter is fitted against conditioning vectors its
-    /// deployment does not produce.
+    /// It selects the TEXT ENCODER tier the captions are embedded through
+    /// ([`text_encoder_placement`]), which is the input the adapter is keyed
+    /// on, and the precision the DEVICE trainer holds its frozen base at
+    /// ([`base_precision`]): an adapter is fitted against the base it will be
+    /// served on. The host trainer differentiates an fp32 base either way.
     pub precision: crate::Precision,
 }
 
@@ -894,7 +909,9 @@ pub fn run(
     }
     if opts.trainer == Trainer::Device {
         progress(0, opts.steps + 1, "uploading the frozen base to the device".into());
-        let t = DeviceTrainer::new_multi(opts.cards.max(1), cfg.clone(), opts.rank, host.as_ref().expect("base"));
+        let base_at = base_precision(&paths.dit, opts.precision, opts.trainer)?;
+        let spec = crate::devtrain::TrainerSpec { card: opts.card, cards: opts.cards.max(1), base: base_at };
+        let t = DeviceTrainer::build(&spec, cfg.clone(), opts.rank, host.as_ref().expect("base"))?;
         // The QK-RMSNorm scales are frozen in a LoRA run, so their gain
         // gradient is work nothing consumes. It stays on under the parity
         // gate, which is what proves turning it off changes no adapter

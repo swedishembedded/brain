@@ -35,7 +35,7 @@
 
 use gpu_core::{DeviceBuffer, Gpu};
 
-use crate::devgrad::{BlockDev, DoubleDev, SingleDev, N_SITES, SITE_FINAL, SITE_IMG1, SITE_IMG2, SITE_SGL, SITE_TXT1, SITE_TXT2};
+use crate::devgrad::{BasePrecision, BlockDev, DoubleDev, SingleDev, N_SITES, SITE_FINAL, SITE_IMG1, SITE_IMG2, SITE_SGL, SITE_TXT1, SITE_TXT2};
 use crate::grad::{linear, silu, Dims, Mod, ModGrad};
 use crate::lora::LoraAdapter;
 use crate::modelgrad::{timestep_embedding, Batch, Cfg, ModelWeights, TDIM};
@@ -289,6 +289,20 @@ fn place_blocks(n_double: usize, n_single: usize, engines: usize) -> Vec<usize> 
     out
 }
 
+/// Where and how a [`DeviceTrainer`] holds its frozen base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrainerSpec {
+    /// The canonical GPU a one-card trainer is built on. `None` leaves the
+    /// choice to the enclosing placement scope (`gpu_core::devices::with_gpu`,
+    /// which is how a served request arrives already placed). A split over
+    /// several cards always spans cards `0..cards` and takes `None`.
+    pub card: Option<u32>,
+    /// GPUs the block stack is spread over.
+    pub cards: usize,
+    /// The frozen base's precision - see [`BasePrecision`].
+    pub base: BasePrecision,
+}
+
 impl DeviceTrainer {
     /// Build a trainer on a single fresh device. `w` is uploaded in full, so
     /// the caller should drop its host copy afterwards.
@@ -299,7 +313,7 @@ impl DeviceTrainer {
     /// [`Self::new`] over an existing device (card selection, or sharing one
     /// device with the rest of a pipeline).
     pub fn with_gpu(gpu: Gpu, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        DeviceTrainer::over(vec![gpu], cfg, rank, w)
+        DeviceTrainer::over(vec![gpu], cfg, rank, w, BasePrecision::F32)
     }
 
     /// Build across `cards` physical GPUs through a SINGLE device enumeration
@@ -307,22 +321,30 @@ impl DeviceTrainer {
     /// sharding uses). This is what makes klein-9B trainable at all: its fp32
     /// frozen base is larger than one 24 GiB card.
     pub fn new_multi(cards: usize, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
-        assert!(cards >= 1, "need at least one card");
-        if cards == 1 {
-            // One card goes through the ordinary selection ladder, so
-            // `--device` / `BRAIN_GPU_INDEX` still choose which card. The
-            // multi-device enumeration deliberately ignores that ladder (it
-            // matches cards by identity), which is right for a real split and
-            // wrong for a single-card run.
-            return DeviceTrainer::new(cfg, rank, w);
-        }
-        DeviceTrainer::over(Gpu::new_wgpu_multi(crate::devgrad::KERNELS, cards), cfg, rank, w)
+        let spec = TrainerSpec { card: None, cards, base: BasePrecision::F32 };
+        DeviceTrainer::build(&spec, cfg, rank, w).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    fn over(gpus: Vec<Gpu>, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> DeviceTrainer {
+    /// Build the trainer `spec` describes. `w` is the fp32 view of the base
+    /// either way; at [`BasePrecision::Int8`] each block linear is quantised on
+    /// upload with the quantiser generation serves through.
+    pub fn build(spec: &TrainerSpec, cfg: Cfg, rank: usize, w: &ModelWeights<f32>) -> Result<DeviceTrainer, String> {
+        let gpus = match (spec.cards, spec.card) {
+            (0, _) => return Err("flux2 device trainer: need at least one card".into()),
+            (1, Some(i)) => vec![Gpu::new_on_index(i, crate::devgrad::KERNELS)?],
+            // No card named: the enclosing placement scope decides (a served
+            // request, placed by the residency layer).
+            (1, None) => vec![Gpu::new_gpu(crate::devgrad::KERNELS)],
+            (n, None) => Gpu::new_wgpu_multi(crate::devgrad::KERNELS, n),
+            (n, Some(i)) => return Err(format!("flux2 device trainer: a {n}-card split spans cards 0..{n}; it cannot also be pinned to card {i}")),
+        };
+        Ok(DeviceTrainer::over(gpus, cfg, rank, w, spec.base))
+    }
+
+    fn over(gpus: Vec<Gpu>, cfg: Cfg, rank: usize, w: &ModelWeights<f32>, base: BasePrecision) -> DeviceTrainer {
         let (d, mlp, cin) = (cfg.hidden, cfg.mlp, cfg.in_channels);
         let n = cfg.n();
-        let engs: Vec<BlockDev> = gpus.into_iter().map(|g| BlockDev::from_gpu(g, n, d, cfg.n_heads, mlp, rank)).collect();
+        let engs: Vec<BlockDev> = gpus.into_iter().map(|g| BlockDev::from_gpu_with(g, n, d, cfg.n_heads, mlp, rank, base)).collect();
         let blk_eng = place_blocks(w.dbl.len(), w.sgl.len(), engs.len());
         let depth = blk_eng.len();
         assert_eq!(depth, w.dbl.len() + w.sgl.len(), "placement covers every block");

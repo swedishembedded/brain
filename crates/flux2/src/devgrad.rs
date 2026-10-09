@@ -91,6 +91,9 @@ const K_ADD_INPLACE: usize = 26;
 const K_SOFTMAX_ROWS: usize = 27;
 const K_LN_ROWS: usize = 28;
 const K_LN_DX_ROWS: usize = 29;
+const K_MAXABS: usize = 30;
+const K_QUANT: usize = 31;
+const K_MM_I8: usize = 32;
 
 /// The kernel set the device trainer registers. Every entry is an existing,
 /// gradient-checked kernel - the trainer adds no WGSL of its own.
@@ -125,6 +128,11 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
+    // The int8 frozen base (`BlockDev::from_gpu_with`): per-row activation
+    // quantisation and the DP4A GEMM, the exact forward `crate::model` serves.
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
 ];
 
 /// LayerNorm / QK-RMSNorm epsilon - 1e-6 in every FLUX.2 variant, matching
@@ -158,6 +166,14 @@ fn d128(x: usize) -> u32 {
     x.div_ceil(128) as u32
 }
 
+/// How a frozen base linear `W [out,in]` is resident.
+enum Base {
+    F32(DeviceBuffer),
+    /// `model::int8`'s group-wise layout: `[out, in/4]` packed words and
+    /// `[out, in/32]` scales - the bytes `crate::model` serves.
+    I8 { wq: DeviceBuffer, sw: DeviceBuffer },
+}
+
 /// One targeted linear on the device: the **frozen** base `W [out,in]` plus the
 /// adapter factors `A [r,in]` and `B̃ᵀ [r,out]` (`B̃ = (α/r)·B`, transposed so
 /// both the up-projection and its backward are plain GEMMs), and the two
@@ -166,7 +182,7 @@ pub struct LinDev {
     pub out: usize,
     pub inn: usize,
     pub r: usize,
-    w: DeviceBuffer,
+    w: Base,
     a: DeviceBuffer,
     bt: DeviceBuffer,
     ga: DeviceBuffer,
@@ -176,7 +192,16 @@ pub struct LinDev {
 impl LinDev {
     /// Device bytes this linear holds (base + adapter + adapter grads).
     pub fn bytes(&self) -> u64 {
-        4 * (self.out * self.inn + 2 * self.r * self.inn + 2 * self.r * self.out) as u64
+        let base = match self.w {
+            Base::F32(_) => 4 * self.out * self.inn,
+            Base::I8 { .. } => self.out * self.inn + 4 * self.out * (self.inn / model::int8::GROUP),
+        };
+        (base + 4 * (2 * self.r * self.inn + 2 * self.r * self.out)) as u64
+    }
+
+    /// Whether the frozen base is resident as int8.
+    pub fn is_i8(&self) -> bool {
+        matches!(self.w, Base::I8 { .. })
     }
 }
 
@@ -258,6 +283,24 @@ pub struct BlockDev {
     /// gradient bit-identical.
     qk_grads: std::cell::Cell<bool>,
     b: HashMap<String, DeviceBuffer>,
+    /// The int8 activation scratch when the frozen base is resident as int8
+    /// ([`BasePrecision::Int8`]); `None` for an fp32 base.
+    i8: Option<model::dispatch::I8Scratch>,
+}
+
+/// How a [`BlockDev`] holds its frozen base linears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BasePrecision {
+    /// fp32, `matmul_reg3` forward and `matmul_dx_reg` input gradient.
+    F32,
+    /// Packed int8 with group-32 scales, exactly as `crate::model` serves a
+    /// Q8_0 checkpoint: the forward quantises each activation per row and
+    /// runs the DP4A GEMM (`matmul_i8_dyn`) - the served arithmetic - and the
+    /// input gradient runs through the dequantised weight in fp32
+    /// (`gpu_core::Fused::I8wDx`, the activation quantisation passed straight
+    /// through). The double blocks' `mlp.2` stays fp32, as it does when
+    /// served. Needs a device that offers that native kernel.
+    Int8,
 }
 
 impl BlockDev {
@@ -269,7 +312,23 @@ impl BlockDev {
     /// Build over an existing device (so a caller can place the trainer on a
     /// chosen card, or share one device with the rest of a pipeline).
     pub fn from_gpu(gpu: Gpu, n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize) -> BlockDev {
+        BlockDev::from_gpu_with(gpu, n_max, d, nh, mlp, rank, BasePrecision::F32)
+    }
+
+    /// [`Self::from_gpu`] with the frozen base held at `base`. Panics, naming
+    /// the reason, for [`BasePrecision::Int8`] on a device without the native
+    /// int8-weight input gradient, or widths that are not whole scale groups.
+    pub fn from_gpu_with(gpu: Gpu, n_max: usize, d: usize, nh: usize, mlp: usize, rank: usize, base: BasePrecision) -> BlockDev {
         let n = n_max.div_ceil(ALIGN) * ALIGN;
+        let i8 = (base == BasePrecision::Int8).then(|| {
+            assert!(
+                gpu.has_fused(gpu_core::Fused::I8wDx),
+                "flux2: an int8 frozen base needs the native int8-weight input gradient, which this {} device does not offer; train at fp32",
+                gpu.kind()
+            );
+            assert!(d.is_multiple_of(model::int8::GROUP) && mlp.is_multiple_of(model::int8::GROUP), "int8 base: widths {d}/{mlp} must be whole scale groups");
+            model::dispatch::I8Scratch::new(&gpu, n as u64, n as u64, &[d as u32, mlp as u32])
+        });
         let hd = d / nh;
         assert!(d.is_multiple_of(nh), "hidden {d} must divide by n_heads {nh}");
         assert!(hd.is_multiple_of(2), "head_dim {hd} must be even for interleaved RoPE");
@@ -325,7 +384,7 @@ impl BlockDev {
             mk("dgt", d);
         }
         let coop = gpu.caps().workgroup_reductions;
-        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b };
+        let eng = BlockDev { gpu, d, nh, hd, mlp, n_max: n, rank, coop, qk_grads: std::cell::Cell::new(true), b, i8 };
         eng.gpu.write_f32(&eng.b["ones"], &vec![1.0f32; d]);
         eng.gpu.write_f32(&eng.b["zeros"], &vec![0.0f32; d]);
         eng
@@ -408,15 +467,31 @@ impl BlockDev {
 
     // ---- weight holders ----
 
-    /// Upload one frozen base linear and allocate its adapter buffers.
+    /// Upload one frozen base linear at the engine's base precision and
+    /// allocate its adapter buffers.
     pub fn lin(&self, w: &[f32], out: usize, inn: usize) -> LinDev {
+        self.lin_at(w, out, inn, self.i8.is_some())
+    }
+
+    /// [`Self::lin`] with the base precision chosen per linear: `int8` uses
+    /// `model::int8::quantize_weight`, the quantiser `crate::model` serves
+    /// through, so the trained base is the served one bit for bit.
+    fn lin_at(&self, w: &[f32], out: usize, inn: usize, int8: bool) -> LinDev {
         assert_eq!(w.len(), out * inn, "base linear [{out},{inn}] size");
         let r = self.rank;
+        let base = if int8 {
+            let (packed, sw) = model::int8::quantize_weight(w, out, inn);
+            let wq = self.gpu.storage(packed.len() as u64);
+            self.gpu.write(&wq, &packed);
+            Base::I8 { wq, sw: self.gpu.storage_init("flux2 base scales", &sw) }
+        } else {
+            Base::F32(self.gpu.storage_init("flux2 base", w))
+        };
         let l = LinDev {
             out,
             inn,
             r,
-            w: self.gpu.storage_init("flux2 base", w),
+            w: base,
             a: self.gpu.storage((r * inn) as u64),
             bt: self.gpu.storage((r * out) as u64),
             ga: self.gpu.storage((r * inn) as u64),
@@ -465,7 +540,8 @@ impl BlockDev {
             wo: self.lin(wo, d, d),
             w1: self.lin(w1, mlp, d),
             w3: self.lin(w3, mlp, d),
-            w2: self.lin(w2, d, mlp),
+            // fp32 at every tier, as `crate::model` serves it.
+            w2: self.lin_at(w2, d, mlp, false),
             nq: nqb,
             nk: nkb,
             gnq,
@@ -576,7 +652,21 @@ impl BlockDev {
     #[allow(clippy::too_many_arguments)]
     fn lin_fwd(&self, s: &mut Vec<Step>, l: &LinDev, i: usize, slot: usize, x: &DeviceBuffer, xr0: usize, y: &DeviceBuffer, yr0: usize, m: usize) {
         let (inn, out, r) = (l.inn, l.out, l.r);
-        s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), x, &l.w, y, xr0 as u32, (yr0 * out) as u64, m as u32, inn as u32, out as u32));
+        match (&l.w, &self.i8) {
+            (Base::F32(w), _) => {
+                s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), x, w, y, xr0 as u32, (yr0 * out) as u64, m as u32, inn as u32, out as u32));
+            }
+            (Base::I8 { wq, sw }, Some(scr)) => {
+                // The served forward: this activation quantised per row, then
+                // the DP4A GEMM. Re-quantised per linear rather than shared
+                // between the linears that read it, which costs a pass over
+                // `x` each and changes nothing they compute.
+                scr.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, xr0 as u32, (xr0 + m) as u32, inn as u32);
+                let tier = model::block::GemmVariants::Fast { gemv: None, tiled: K_MM_I8 };
+                s.push(model::dispatch::mm8_rows_off(&self.gpu, tier, scr, wq, sw, y, xr0 as u32, (yr0 * out) as u64, m as u32, inn as u32, out as u32));
+            }
+            (Base::I8 { .. }, None) => unreachable!("an int8 linear only exists on an int8 engine"),
+        }
         let xa = self.g(&format!("xa{i}"));
         let ab = slot * self.n_max * r;
         s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), x, &l.a, xa, xr0 as u32, ab as u64, m as u32, inn as u32, r as u32));
@@ -604,13 +694,15 @@ impl BlockDev {
         // dxa = dy · B̃ᵀ  (B̃ᵀ is [r,out]; a plain forward GEMM over k = out)
         s.push(model::dispatch::mm_rows_off(&self.gpu, self.tier(), dy, &l.bt, dxa, dyr0 as u32, ab as u64, m as u32, out as u32, r as u32));
         // dx = dy · W (+= when this is not the first contributor)
-        s.push(self.gpu.dispatch_sliced(
-            K_DX,
-            &[dy, &l.w, dx],
-            &[dyo, (0, 0), self.sl(dxr0 * inn, m * inn)],
-            &[m as u32, inn as u32, out as u32, u32::from(acc)],
-            gpu_core::Dispatch::Workgroups(d128(m) * d128(inn)),
-        ));
+        let dxo = self.sl(dxr0 * inn, m * inn);
+        let params = [m as u32, inn as u32, out as u32, u32::from(acc)];
+        s.push(match &l.w {
+            Base::F32(w) => self.gpu.dispatch_sliced(K_DX, &[dy, w, dx], &[dyo, (0, 0), dxo], &params, gpu_core::Dispatch::Workgroups(d128(m) * d128(inn))),
+            Base::I8 { wq, sw } => self
+                .gpu
+                .fused_step_sliced(gpu_core::Fused::I8wDx, &[dy, wq, sw, dx], &[dyo, (0, 0), (0, 0), dxo], &params)
+                .expect("the int8-weight input gradient serves every base linear (checked at construction)"),
+        });
         // dx += dxa · A
         s.push(self.gpu.dispatch_sliced(
             K_DX,

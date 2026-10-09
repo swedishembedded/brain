@@ -43,6 +43,7 @@ fn opts(steps: u32, lr: f32) -> TrainOpts {
         lr,
         trainer: Trainer::Device,
         cards: 1,
+        card: None,
         size: 512,
         seed: 0,
         save_path: String::new(),

@@ -336,6 +336,8 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         // caller can still name it, and the choice is echoed in the log.
         trainer: crate::finetune::Trainer::from_name(&inv.get_str("trainer").unwrap_or_else(|| "device".into()))?,
         cards: inv.get_i64("cards").unwrap_or(1).max(1) as usize,
+        // A served request is already placed by the residency layer.
+        card: None,
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
         seed: inv
             .get_i64("seed")

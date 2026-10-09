@@ -781,6 +781,8 @@ fn finetune(args: &[String]) -> Result<(), String> {
         // every run and `--trainer host` selects the oracle explicitly.
         trainer: flux2::finetune::Trainer::Device,
         cards: 1,
+        // Filled from the global `--device` once the arguments are parsed.
+        card: None,
         size: 512,
         seed: 0,
         save_path: String::new(),
@@ -924,10 +926,17 @@ fn finetune(args: &[String]) -> Result<(), String> {
     flux2::caps::check_license(&variant_name)?; // 9B = FLUX Non-Commercial license
     let cfg = Flux2Config::from_name(&variant_name)?;
 
+    // The card is the one the global `--device` flag named, passed down as a
+    // value: a one-card selection builds the trainer on exactly that card.
+    opts.card = gpu_core::devices::published_compute_set().filter(|s| s.gpus.len() == 1).map(|s| s.gpus[0]);
     let lr_curve = opts.lr_schedule();
     eprintln!(
-        "flux2 finetune: {variant_name} {} trainer, rank {} ({}) steps {} size {} lr {:.3e} held to step {} then cooled to {:.3e} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
+        "flux2 finetune: {variant_name} {} trainer, {} frozen base, rank {} ({}) steps {} size {} lr {:.3e} held to step {} then cooled to {:.3e} (x{} on B) seed {} ckpt-every {}{}{} -> {}",
         opts.trainer.name(),
+        match flux2::finetune::base_precision(&paths.dit, opts.precision, opts.trainer)? {
+            flux2::devgrad::BasePrecision::Int8 => "int8",
+            flux2::devgrad::BasePrecision::F32 => "fp32",
+        },
         opts.rank,
         if opts.rank_stabilized { "rslora" } else { "lora" },
         opts.steps,

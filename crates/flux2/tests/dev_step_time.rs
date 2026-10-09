@@ -13,17 +13,15 @@
 //!     --test dev_step_time -- --ignored --nocapture
 //! ```
 //!
-//! Knobs: `BRAIN_FLUX2_TRAIN_VARIANT` (klein-4b | klein-9b, default klein-4b),
-//! `BRAIN_FLUX2_TRAIN_SIZE` (square px, multiple of 16, default 512),
-//! `BRAIN_FLUX2_TRAIN_RANK` (default 16), `BRAIN_FLUX2_TRAIN_REFS` (reference
-//! images at the target's size, as a paired edit fine-tune conditions on;
-//! default 0), `BRAIN_FLUX2_TRAIN_BLOCKS` (`D,S` double and single blocks
-//! instead of the variant's depth - same per-block shapes, for a card that
-//! cannot hold the whole stack), `BRAIN_FLUX2_TRAIN_ITERS` (timed
-//! steps after the warm-up, default 3), `BRAIN_FLUX2_TRAIN_CARDS` (GPUs the
-//! block stack is spread over, default 1).
+//! Each configuration is its own test, built from a [`StepCase`] value:
+//! the variant, the square training size, the adapter rank, the reference
+//! images a paired (edit) fine-tune conditions on, an optional shallow stack
+//! (every block of a kind has the same shapes, so a few blocks measure the
+//! real stack's per-block cost on a card that cannot hold all of it), the
+//! frozen base's precision, the cards the stack is spread over and the timed
+//! steps.
 //!
-//! `BRAIN_FLUX2_TRAIN_CARDS` exists because without it this harness cannot
+//! A two-card case exists because without it this harness cannot
 //! measure the variant it names in its own default list: klein-9B's fp32
 //! frozen base is larger than one 24 GiB card, so `klein-9b` here could only
 //! ever out-of-memory. `finetune::run` builds its trainer with
@@ -42,7 +40,8 @@
 //! set by its shapes and its dispatch sequence, and this test is about the
 //! shapes. Correctness lives in `dev_grad.rs` / `device_train.rs`.
 
-use flux2::devtrain::{step_flops, DeviceTrainer};
+use flux2::devgrad::BasePrecision;
+use flux2::devtrain::{step_flops, DeviceTrainer, TrainerSpec};
 use flux2::grad::{DoubleW, SingleW, StreamW};
 use flux2::lora::{LoraAdapter, LoraCfg};
 use flux2::modelgrad::{make_flow_batch_paired, Cfg, ModelWeights};
@@ -54,12 +53,26 @@ use flux2::Flux2Config;
 const ROOF_FP32_GFLOPS: f64 = 10_517.0;
 const ROOF_DRAM_GBS: f64 = 287.5;
 
-fn envs(k: &str, d: &str) -> String {
-    std::env::var(k).unwrap_or_else(|_| d.to_string())
+/// One step-time configuration.
+struct StepCase {
+    variant: &'static str,
+    /// Square training size in pixels, a multiple of 16.
+    size: usize,
+    rank: usize,
+    /// Reference images at the target's size (a paired edit fine-tune has 1).
+    refs: usize,
+    /// `(double, single)` blocks instead of the variant's own depth.
+    blocks: Option<(usize, usize)>,
+    base: BasePrecision,
+    /// GPUs the block stack is spread over.
+    cards: usize,
+    /// Timed steps after the warm-up.
+    iters: usize,
 }
-fn envn(k: &str, d: usize) -> usize {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
-}
+
+/// klein-4B at 512 px, rank 16, one card, fp32 base, three timed steps.
+const KLEIN_4B_512: StepCase =
+    StepCase { variant: "klein-4b", size: 512, rank: 16, refs: 0, blocks: None, base: BasePrecision::F32, cards: 1, iters: 3 };
 
 /// A constant fill of the right shape. Values do not affect the clock; the
 /// alternative (a per-element RNG over billions of parameters) would dominate
@@ -110,37 +123,72 @@ fn weights(c: &Cfg) -> ModelWeights<f32> {
 
 #[test]
 #[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
-fn device_lora_step_time() {
+fn klein_4b_caption_512() {
+    measure(&KLEIN_4B_512);
+}
+
+#[test]
+#[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
+fn klein_4b_paired_512() {
+    measure(&StepCase { refs: 1, ..KLEIN_4B_512 });
+}
+
+#[test]
+#[ignore = "wants a whole GPU and several minutes; re-measure explicitly"]
+fn klein_4b_paired_512_int8_base() {
+    measure(&StepCase { refs: 1, base: BasePrecision::Int8, ..KLEIN_4B_512 });
+}
+
+/// One single block: the per-block cost and kernel ranking of the paired
+/// stack, on a card with room for little else.
+#[test]
+#[ignore = "wants a GPU and a minute; re-measure explicitly"]
+fn klein_4b_paired_512_one_single_block() {
+    measure(&StepCase { refs: 1, blocks: Some((0, 1)), ..KLEIN_4B_512 });
+}
+
+#[test]
+#[ignore = "wants a GPU and a minute; re-measure explicitly"]
+fn klein_4b_paired_512_int8_base_one_single_block() {
+    measure(&StepCase { refs: 1, blocks: Some((0, 1)), base: BasePrecision::Int8, ..KLEIN_4B_512 });
+}
+
+/// klein-9B's fp32 base is larger than one 24 GiB card.
+#[test]
+#[ignore = "wants two whole GPUs and several minutes; re-measure explicitly"]
+fn klein_9b_caption_512_two_cards() {
+    measure(&StepCase { variant: "klein-9b", cards: 2, ..KLEIN_4B_512 });
+}
+
+fn measure(case: &StepCase) {
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
         brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the device step-time measurement");
         return;
     }
-    let variant = envs("BRAIN_FLUX2_TRAIN_VARIANT", "klein-4b");
-    let size = envn("BRAIN_FLUX2_TRAIN_SIZE", 512);
-    let rank = envn("BRAIN_FLUX2_TRAIN_RANK", 16);
-    let iters = envn("BRAIN_FLUX2_TRAIN_ITERS", 3);
-    let cards = envn("BRAIN_FLUX2_TRAIN_CARDS", 1).max(1);
+    let StepCase { variant, size, rank, refs, blocks, base: base_at, cards, iters } = *case;
     assert!(size.is_multiple_of(16), "size must be a multiple of 16");
-    let mut fc = Flux2Config::from_name(&variant).expect("variant");
-    // `D,S` double and single blocks instead of the variant's own depth: every
-    // block of a kind has the same shapes, so a shallow stack measures the
-    // per-block cost of the real one on a card that cannot hold all of it.
-    if let Ok(v) = std::env::var("BRAIN_FLUX2_TRAIN_BLOCKS") {
-        let (d, s) = v.split_once(',').expect("BRAIN_FLUX2_TRAIN_BLOCKS is D,S");
-        fc.depth_double = d.trim().parse().expect("double-block count");
-        fc.depth_single = s.trim().parse().expect("single-block count");
+    let mut fc = Flux2Config::from_name(variant).expect("variant");
+    if let Some((d, s)) = blocks {
+        fc.depth_double = d;
+        fc.depth_single = s;
     }
-    // Paired (edit) training conditions on reference images at the target's
-    // own size, each adding its tokens to the joint sequence.
-    let refs = envn("BRAIN_FLUX2_TRAIN_REFS", 0);
     let c = Cfg::from_flux2_with_refs(&fc, size / 16, size / 16, vec![(size / 16, size / 16); refs]);
-    eprintln!("flux2 device step time: {variant} at {size}px - {} joint tokens ({} txt + {} img), hidden {}, rank {rank}", c.n(), c.txt_len, c.n_img(), c.hidden);
+    eprintln!(
+        "flux2 device step time: {variant} at {size}px - {} joint tokens ({} txt + {} img), hidden {}, rank {rank}, {} double + {} single blocks, {base_at:?} base",
+        c.n(),
+        c.txt_len,
+        c.n_img(),
+        c.hidden,
+        c.depth_double,
+        c.depth_single
+    );
 
     let t0 = std::time::Instant::now();
     let base = weights(&c);
     eprintln!("  host weights built in {:.1}s", t0.elapsed().as_secs_f64());
     let t0 = std::time::Instant::now();
-    let tr = DeviceTrainer::new_multi(cards, c.clone(), rank, &base);
+    let spec = TrainerSpec { card: None, cards, base: base_at };
+    let tr = DeviceTrainer::build(&spec, c.clone(), rank, &base).expect("trainer");
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
     let per: Vec<String> = tr.weight_bytes_per_card().iter().map(|b| format!("{:.2}", gib(*b))).collect();
     eprintln!(
