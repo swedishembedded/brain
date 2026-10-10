@@ -629,3 +629,66 @@ was scored on the same `packed/eval-<split>`.
 `python3` with `numpy`, `opencv-python` and `Pillow`; the `brain` binary for the
 fine-tune steps, for `evaluate`, for `generate` and for `measure`, which also needs `jeepney` for the default
 D-Bus backend (as does `gate --sam2`).
+
+## Pilot results
+
+One run of the whole pipeline on a single paired dataset (about 5000 frames, 1231
+sequences; split sizes T 2369, S 800, V 293, Test 1013 frames). Everything below is
+scored on the REAL IR frames of split V (293 frames, 90 sequences). The Test split
+was not scored. Detector: YOLOv8n fine-tuned from the pretrained checkpoint at
+512 px, batch 8, 8 epochs of the arm's images, lr 1e-4, one recipe for every arm
+(tuned on the real-IR arm only, which may favour that arm). Translator: a FLUX.2
+Klein-4B LoRA (rank 16, 800 steps, int8 base) trained on aligned tiles of split T.
+The numbers are mean mAP@0.5:0.95 over seeds; they are a pilot, not a frozen
+evaluation: V is small, the recipe was tuned on V, and the sequence bootstrap of
+`rir_decide.py` was not run on them.
+
+| arm | training images | seeds | mAP@0.5:0.95 |
+|---|---|---|---|
+| RGB only (A1) | 800 | 3 | 0.114 |
+| real IR (A2) | 800 | 3 | 0.255 |
+| gray (B1) | 800 | 3 | 0.120 |
+| inverted gray (B2) | 800 | 3 | 0.154 |
+| gray + fitted sensor model (B3) | 800 | 3 | 0.136 |
+| class-prior box renderer (B4) | 800 | 3 | 0.002 |
+| translator, neutral instruction (C2) | 800 | 3 | 0.163 |
+| translator, neutral, gated frames only | 575 | 3 | 0.150 (matched A1 0.115, A2 0.225, B2 0.146, B3 0.130) |
+| 100 real IR images | 100 | 3 | 0.208 |
+| 186 real IR images | 186 | 3 | 0.232 |
+| 100 real + 800 RGB | 900 | 3 | 0.190 |
+| 100 real + 800 inverted gray | 900 | 3 | 0.197 |
+| 100 real + 800 translator frames | 900 | 3 | 0.219 |
+
+On a 400-frame subset (one seed each, indicative only): RGB 0.117, inverted gray 0.149,
+translator neutral 0.171, translator with class-prior instructions 0.188, real IR
+0.229. A real-IR round trip through the autoencoder alone (200 frames, one seed)
+scores 0.220 against 0.227 for the same frames unprocessed, so the autoencoder's
+artefacts are not what limits the synthetic arms.
+
+What the pilot supports, and what it does not:
+
+- Real IR beats RGB-only by 14 points, so the premise (a detector trained on RGB
+  loses a lot on IR) holds on this data.
+- The neutral translator closes about a third of that gap (g about 0.35 on the full
+  arm, about 0.3 on the gated one), little more than inverted gray does (0.28). It
+  is not a reliable transform by the rule in `rir_decide.py` (g >= 0.5).
+- Class-prior instructions help (about 0.6 of the gap on the subset, one seed): the
+  instruction carries information a pure image translator lacks. Part-level
+  instructions were not tried (no part grounder weights were available).
+- Adding translator frames to 100 real images gives +0.011 over the real images alone
+  (0.219 against 0.208, three seeds, within about one standard deviation of the
+  real-100 seeds), more than adding RGB or inverted-gray frames (which lower it).
+  That is suggestive, not established.
+- A detector trained on real IR scores 0.48 on the real frames of S but 0.13 on their
+  translations: the synthetic frames are smoother and lower in contrast than real
+  IR, and a faint grid from the decoder shows on flat surfaces. Matching the global
+  tone histogram to real IR made this worse, so tone is not the missing piece.
+- The label gates fail 28 percent of the translator frames, 29 percent with
+  instructions and 31 percent for a translator trained on 100 pairs; almost all on
+  box edge correlation, a weak test because cross-modal edge correlation is near zero
+  even for real pairs. Both gates are calibrated on the real pairs' own spread (about
+  7 px of registration), so they admit a lot.
+- Not run: the evaluation on the Test split, the matched-data comparison at more than
+  one size, the SAM 2 and detector-in-the-loop gates on real outputs, a second
+  dataset, and the instruction-obedience measurement on held-out frames beyond the
+  code that computes it.
