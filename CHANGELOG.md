@@ -6,6 +6,10 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+### Features
+
+- SDK `brain::ChatFullFineTune` and `brain::merge_adapter` (feature `study`): full-parameter fine-tuning of a Qwen3 chat model on a chat dataset with replay, and folding a LoRA adapter into the weights it targets; both write a checkpoint directory (fp32 `model.safetensors`, `config.json`, tokenizer files) that is a base for further fine-tuning and for `brain serve`
+
 ## [2.0.0] - 2026-10-01
 
 ### Breaking Changes

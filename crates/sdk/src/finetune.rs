@@ -435,7 +435,7 @@ impl ChatFineTune {
         let no_think = if self.thinking { None } else { tmpl.no_think_block() };
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
         let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
-        let mut train_samples = asked.read(dataset)?;
+        let train_samples = asked.read(dataset)?;
         let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();
         for path in &self.replay {
@@ -457,24 +457,7 @@ impl ChatFineTune {
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha)?;
 
-        // The groups of the mix, the dataset first: the replay files at
-        // their share when one is set, else in the dataset's own group as
-        // the plain union they always were; then each weighted file.
-        let replay_records = replay_samples.len() + weighted_samples.iter().map(|(s, _)| s.len()).sum::<usize>();
-        let mut groups: Vec<(Vec<ChatSample>, f32)> = Vec::new();
-        match self.replay_share {
-            Some(share) => groups.push((std::mem::take(&mut replay_samples), share)),
-            None => train_samples.append(&mut replay_samples),
-        }
-        groups.extend(weighted_samples);
-        let shares: Vec<(usize, f32)> = std::iter::once((train_samples.len(), 0.0)).chain(groups.iter().map(|(s, share)| (s.len(), *share))).collect();
-        let repeats = mix_repeats(&shares)?;
-        let mut training = Vec::new();
-        for (samples, &times) in std::iter::once(&train_samples).chain(groups.iter().map(|(s, _)| s)).zip(&repeats) {
-            for _ in 0..times {
-                training.extend(samples.iter().cloned());
-            }
-        }
+        let Mix { rows: training, replay_records, repeats } = mix_rows(train_samples, replay_samples, self.replay_share, weighted_samples)?;
         // The packed validation split is what a periodic evaluation scores:
         // the monitoring set, else the held-out set, else (unread, when
         // nothing is evaluated) the training set.
@@ -852,11 +835,11 @@ pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha:
 /// Validate `path` against the base's tokenizer and template, then read it.
 /// How a fine-tune's records are asked for: the base's tokenizer and template,
 /// and for a model trained for no-think mode the block its prompt leaves open.
-struct Asked<'a> {
-    tok: &'a QwenBpe,
-    tmpl: &'a ChatTemplate,
-    no_think: Option<&'a str>,
-    render: data::chat::RenderOpts,
+pub(crate) struct Asked<'a> {
+    pub tok: &'a QwenBpe,
+    pub tmpl: &'a ChatTemplate,
+    pub no_think: Option<&'a str>,
+    pub render: data::chat::RenderOpts,
 }
 
 impl Asked<'_> {
@@ -865,7 +848,7 @@ impl Asked<'_> {
     /// dialogue is one example per answer, each as the model is asked for it
     /// ([`ChatSample::answers_as_asked`]); a record that is not made of plain
     /// answers keeps its shape, its answers following the block.
-    fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
+    pub(crate) fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
         let summary = crate::validate_chat_dataset(path).map_err(Error::Backend)?;
         if summary.trained_messages == 0 {
             return Err(Error::Backend(format!("{}: holds no supervised turns (`\"train\": true`)", path.display())));
@@ -921,6 +904,38 @@ pub(crate) fn block_for(longest: usize, max: Option<u32>) -> Result<u32> {
         block *= 2;
     }
     Ok(max.map_or(block, |m| block.min(m)))
+}
+
+/// The rows a fine-tune trains on, and how they were mixed.
+pub(crate) struct Mix {
+    /// Every row, each group listed as many times as its share needs.
+    pub rows: Vec<ChatSample>,
+    /// Records of the replay files and the weighted files, each counted once.
+    pub replay_records: usize,
+    /// How many times each group was listed, the dataset first.
+    pub repeats: Vec<usize>,
+}
+
+/// The groups of the mix, the dataset first: the replay files at their share
+/// when one is set, else in the dataset's own group as the plain union they
+/// always were; then each weighted file.
+pub(crate) fn mix_rows(mut train_samples: Vec<ChatSample>, mut replay_samples: Vec<ChatSample>, replay_share: Option<f32>, weighted_samples: Vec<(Vec<ChatSample>, f32)>) -> Result<Mix> {
+    let replay_records = replay_samples.len() + weighted_samples.iter().map(|(s, _)| s.len()).sum::<usize>();
+    let mut groups: Vec<(Vec<ChatSample>, f32)> = Vec::new();
+    match replay_share {
+        Some(share) => groups.push((std::mem::take(&mut replay_samples), share)),
+        None => train_samples.append(&mut replay_samples),
+    }
+    groups.extend(weighted_samples);
+    let shares: Vec<(usize, f32)> = std::iter::once((train_samples.len(), 0.0)).chain(groups.iter().map(|(s, share)| (s.len(), *share))).collect();
+    let repeats = mix_repeats(&shares)?;
+    let mut rows = Vec::new();
+    for (samples, &times) in std::iter::once(&train_samples).chain(groups.iter().map(|(s, _)| s)).zip(&repeats) {
+        for _ in 0..times {
+            rows.extend(samples.iter().cloned());
+        }
+    }
+    Ok(Mix { rows, replay_records, repeats })
 }
 
 /// The most times the smallest group of a mix is listed in search of a closer

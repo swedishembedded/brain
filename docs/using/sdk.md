@@ -277,6 +277,36 @@ let chat = brain::ChatPipeline::from(
 - `samples/study/chat` is the worked example: train, score, resume a
   cancelled run, chat with the adapter.
 
+### Consolidating into the weights: full fine-tuning and merging
+
+`brain::ChatFullFineTune` (the `study` feature) trains every weight of a
+Qwen3 chat model on the same datasets, replay files and shares
+`ChatFineTune` takes, and `brain::merge_adapter` folds a LoRA adapter into
+the weights it targets (`W + alpha/r * B A`). Each writes a checkpoint
+directory - one fp32 `model.safetensors`, `config.json` and the base's
+tokenizer files - that is a base like any other: an adapter can be trained
+on it, `brain serve` serves it, and it can be fine-tuned again.
+
+```rust
+let outcome = brain::ChatFullFineTune::from_pretrained("/models/qwen3-0.6b/model.brain.safetensors")
+    .dataset("train.jsonl")
+    .out_dir("runs/consolidate-1")
+    .steps(200)
+    .lr(1e-5)
+    .run()?;
+let next_base = outcome.checkpoint.unwrap(); // a base for the next fine-tune
+let merged = brain::merge_adapter("/models/qwen3-0.6b", adapter, std::path::Path::new("runs/merged"))?;
+```
+
+- Every weight trains in fp32; the AdamW moments and the master weights
+  live in system RAM, the weights and gradients on the card. A model needs
+  twice its fp32 size on the card for the pair (about 4.4 GiB for 0.6B, 61
+  GiB for 8B, which fits no two 24 GiB cards): merging, which runs on the
+  host, is the way to fold an adapter in at any size.
+- The default learning rate is 1e-5, two orders below a LoRA's.
+- A cancelled run (`run_with`) writes no checkpoint and cannot be resumed:
+  the optimizer state is three times the model.
+
 ### Preference (DPO) fine-tuning a chat model
 
 `brain::PreferenceFineTune` (also `study`) is the DPO counterpart of
@@ -478,7 +508,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `creature` | `Creature`, `View` - a connectome running a body, and a window onto it |
 | `forecast` | `ForecastPipeline` - time-series forecasting |
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
-| `study` | `ChatFineTune`, `score_chat` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
+| `study` | `ChatFineTune`, `score_chat` - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
 | `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, on the device when there is one (the host otherwise), with chunks handed out as the utterance grows (the first after 8 frames, 0.64 s of speech) and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) |
 | `full` | every surface; this is the default |

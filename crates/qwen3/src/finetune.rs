@@ -114,6 +114,35 @@ pub fn finetune_from(
     model::fit_with(m, obj, opts, Some(Path::new(out)))
 }
 
+/// A full-parameter fine-tune of `base` under `control`, over the masked
+/// dataset in `dir`: every weight trains in fp32 with the AdamW moments held
+/// in system RAM ([`Mode::FullOffload`]), and the trained model is written to
+/// `out` as a brain checkpoint. Always a fresh start from `base`; a run
+/// stopped by `control` writes nothing (the optimizer state a resume needs is
+/// three times the model), so the report says it was interrupted.
+pub fn finetune_full_controlled(base: &str, dir: &Path, opts: &FitOpts, out: &Path, control: model::FitControl<'_>) -> std::io::Result<model::FitReport> {
+    let (cfg, init) = crate::open_checkpoint(base).map_err(std::io::Error::other)?;
+    // BRAIN_OFFLOAD_ADAM governs Role::Offload at construction; the caller's
+    // value is restored whether or not the build succeeds, as in
+    // `finetune_from`.
+    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
+    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
+    let built = build_for_training(cfg, opts, &*init, Dtype::F32);
+    match prev_off {
+        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
+        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
+    }
+    let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
+    let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
+    let (report, _) = model::fit_controlled(built?, obj, opts, Some(out), control)?;
+    if report.interrupted {
+        // fit_controlled does not write an interrupted run's model; make sure
+        // a periodic save did not leave a partial one under the final name.
+        let _ = std::fs::remove_file(out);
+    }
+    Ok(report)
+}
+
 /// The trainable model at `opts`' batch and context, its frozen base
 /// linears at `dt` (anything but fp32 needs a LoRA configuration), placed
 /// through the footprint check: a context the devices cannot hold is refused

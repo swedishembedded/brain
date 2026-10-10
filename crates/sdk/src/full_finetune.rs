@@ -1,0 +1,351 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+//
+// Swedish Embedded AB implements full-parameter fine-tuning and adapter
+// merging of open-weight chat models for its clients. If your team needs
+// expertise in consolidating what a model learned into its own weights, you
+// can procure our services by sending an email to info@swedishembedded.com.
+
+//! [`ChatFullFineTune`]: full-parameter fine-tuning of a Qwen3 chat model on
+//! a chat dataset, and [`merge_adapter`]: folding a LoRA adapter into the
+//! weights it targets. Both produce a checkpoint directory in the
+//! `transformers` layout (one fp32 `model.safetensors`, `config.json` and the
+//! base's tokenizer files) that is a base like any other: [`crate::ChatFineTune`]
+//! trains an adapter on it, `brain serve` serves it, and either can be asked
+//! to fine-tune it again.
+//!
+//! ```no_run
+//! # fn main() -> brain::Result<()> {
+//! let outcome = brain::ChatFullFineTune::from_pretrained("/models/qwen3-0.6b/model.brain.safetensors")
+//!     .dataset("train.jsonl")
+//!     .out_dir("runs/consolidate-1")
+//!     .steps(200)
+//!     .lr(1e-5)
+//!     .run()?;
+//! if let Some(checkpoint) = outcome.checkpoint {
+//!     println!("trained base: {}", checkpoint.display());
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! **What trains and where it lives.** Every weight trains, in fp32 (the one
+//! precision the trainable build runs in), with the AdamW moments and the
+//! master weights held in system RAM and only the weights and their gradients
+//! on the card: `qwen3::finetune::finetune_full_controlled`, the same build
+//! `brain qwen3 finetune` runs, over `model::fit_controlled`, the one training
+//! loop. That is two copies of the parameters on one card (a 0.6B model needs
+//! about 4.4 GiB for them), which is the limit of the method: an 8B model
+//! needs 61 GiB for the pair and does not fit two 24 GiB cards. The dataset,
+//! the replay files and their shares are [`crate::ChatFineTune`]'s, validated
+//! against the base's own template before a device is claimed.
+//!
+//! **Cancellation.** A run whose [`crate::CancelToken`] fires stops at the
+//! next step boundary and writes no checkpoint: the optimizer state a resume
+//! needs is three times the model, so a cancelled full fine-tune starts over.
+
+use std::path::{Path, PathBuf};
+
+use crate::finetune::{base_digest, block_for, digest, fit_opts, mix_rows, tokenizer_and_template, utf8, Asked, Mix};
+use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
+
+/// The training format the run writes before it is exported, and removes.
+const TUNED_FILE: &str = "tuned.brain.safetensors";
+/// The packed dataset, inside the out directory.
+const PREPARED_DIR: &str = "prepared";
+/// The checkpoint directory, inside the out directory.
+const CHECKPOINT_DIR: &str = "checkpoint";
+/// The weights file of a checkpoint directory.
+const WEIGHTS_FILE: &str = "model.safetensors";
+
+/// AdamW weight decay of a full fine-tune unless named: none, so the trained
+/// weights are pulled towards the data and nowhere else.
+const FULL_WEIGHT_DECAY: f32 = 0.0;
+
+/// A full-parameter fine-tune of a Qwen3 chat model. See this module's doc.
+#[derive(Clone, Debug)]
+pub struct ChatFullFineTune {
+    base: String,
+    models_dir: Option<String>,
+    dataset: Option<PathBuf>,
+    replay: Vec<PathBuf>,
+    replay_share: Option<f32>,
+    weighted_replay: Vec<(PathBuf, f32)>,
+    grad_accum: u32,
+    out_dir: Option<PathBuf>,
+    weight_decay: f32,
+    steps: u32,
+    lr: f32,
+    seed: u64,
+    max_block: Option<u32>,
+    device: Device,
+    thinking: bool,
+}
+
+impl ChatFullFineTune {
+    /// A full fine-tune of `base`: a checkpoint file, a checkpoint directory
+    /// (a previous full fine-tune's or merge's, or a `transformers` one), or
+    /// a `vendor/repo` reference in the model store. The tokenizer and chat
+    /// template are read from the checkpoint's directory.
+    pub fn from_pretrained(base: impl Into<String>) -> ChatFullFineTune {
+        ChatFullFineTune {
+            base: base.into(),
+            models_dir: None,
+            dataset: None,
+            replay: Vec::new(),
+            replay_share: None,
+            weighted_replay: Vec::new(),
+            grad_accum: 1,
+            out_dir: None,
+            weight_decay: FULL_WEIGHT_DECAY,
+            steps: 100,
+            lr: 1e-5,
+            seed: 1337,
+            max_block: None,
+            device: Device::default(),
+            thinking: true,
+        }
+    }
+
+    /// The models directory a `vendor/repo` base resolves in.
+    pub fn models_dir(mut self, dir: impl Into<String>) -> Self {
+        self.models_dir = Some(dir.into());
+        self
+    }
+
+    /// The chat dataset to train on (required).
+    pub fn dataset(mut self, path: impl Into<PathBuf>) -> Self {
+        self.dataset = Some(path.into());
+        self
+    }
+
+    /// Mix every record of another chat dataset into training; see
+    /// [`crate::ChatFineTune::replay`].
+    pub fn replay(mut self, path: impl Into<PathBuf>) -> Self {
+        self.replay.push(path.into());
+        self
+    }
+
+    /// The share of the draws the [`Self::replay`] files take in all; see
+    /// [`crate::ChatFineTune::replay_share`].
+    pub fn replay_share(mut self, share: f32) -> Self {
+        self.replay_share = Some(share);
+        self
+    }
+
+    /// Mix another chat dataset into training at `share` of the draws of its
+    /// own; see [`crate::ChatFineTune::replay_at`].
+    pub fn replay_at(mut self, path: impl Into<PathBuf>, share: f32) -> Self {
+        self.weighted_replay.push((path.into(), share));
+        self
+    }
+
+    /// Micro-batches summed into each optimizer step (default 1).
+    pub fn grad_accum(mut self, micro_batches: u32) -> Self {
+        self.grad_accum = micro_batches;
+        self
+    }
+
+    /// Where the checkpoint directory and the packed dataset go (required).
+    /// One directory per run.
+    pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.out_dir = Some(dir.into());
+        self
+    }
+
+    /// AdamW's decoupled weight decay (default 0).
+    pub fn weight_decay(mut self, decay: f32) -> Self {
+        self.weight_decay = decay;
+        self
+    }
+
+    /// Optimizer steps (default 100). The first twentieth warms the rate up,
+    /// and it decays to a tenth over all of them.
+    pub fn steps(mut self, steps: u32) -> Self {
+        self.steps = steps;
+        self
+    }
+
+    /// The peak learning rate (default 1e-5: every weight moves, so the rate
+    /// is two orders below a LoRA's).
+    pub fn lr(mut self, lr: f32) -> Self {
+        self.lr = lr;
+        self
+    }
+
+    /// The seed of the batch order (default 1337).
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// The longest training row in tokens; a record past it is refused
+    /// (default: the smallest power of two that holds the longest record).
+    pub fn max_block(mut self, tokens: u32) -> Self {
+        self.max_block = Some(tokens);
+        self
+    }
+
+    /// The device the run is placed on (default: the automatic placement).
+    pub fn device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// Whether the model is trained to reason before it answers (default
+    /// true); `false` trains it for no-think mode, as
+    /// [`crate::ChatFineTune::thinking`] does.
+    pub fn thinking(mut self, on: bool) -> Self {
+        self.thinking = on;
+        self
+    }
+
+    /// Run to completion.
+    pub fn run(&self) -> Result<ChatFullFineTuneOutcome> {
+        self.run_with(&CancelToken::default(), |_| {})
+    }
+
+    /// Run, reporting every optimizer step to `on_progress` and stopping at
+    /// the next step boundary once `cancel` fires; a stopped run writes no
+    /// checkpoint.
+    pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
+        let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
+        let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
+        if self.grad_accum == 0 {
+            return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
+        }
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, _base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+        let weights_str = utf8(&open)?;
+
+        let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
+        let no_think = if self.thinking { None } else { tmpl.no_think_block() };
+        let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render };
+        let train_samples = asked.read(dataset)?;
+        let dataset_records = train_samples.len();
+        let mut replay_samples = Vec::new();
+        for path in &self.replay {
+            replay_samples.extend(asked.read(path)?);
+        }
+        let mut weighted_samples = Vec::with_capacity(self.weighted_replay.len());
+        for (path, share) in &self.weighted_replay {
+            weighted_samples.push((asked.read(path)?, *share));
+        }
+        let Mix { rows, replay_records, .. } = mix_rows(train_samples, replay_samples, self.replay_share, weighted_samples)?;
+
+        let cfg = qwen3::checkpoint_config(weights_str).map_err(Error::Backend)?;
+        let prepared_dir = out_dir.join(PREPARED_DIR);
+        // No evaluation runs during a full fine-tune; the validation split is
+        // the rows themselves, unread.
+        let prepared = data::chat::prepare_chat_samples(&rows, &rows, &tok, &tmpl, render, cfg.vocab as usize, &prepared_dir).map_err(|e| Error::Backend(format!("preparing the dataset: {e}")))?;
+        let block = block_for(prepared.longest_example, self.max_block)?;
+        crate::device::resolve(&self.device)?;
+
+        let opts = model::FitOpts { grad_accum: self.grad_accum, weight_decay: self.weight_decay, ..fit_opts(self.steps, block, self.lr, self.seed) };
+        let base_digest = base_digest(&open)?;
+        let mut on_step = |s: &model::StepReport| {
+            on_progress(&FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr });
+            !cancel.is_cancelled()
+        };
+        let control = model::FitControl { on_step: Some(&mut on_step), ..Default::default() };
+        let tuned = out_dir.join(TUNED_FILE);
+        let report = qwen3::finetune::finetune_full_controlled(weights_str, &prepared_dir, &opts, &tuned, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
+
+        let mut outcome = ChatFullFineTuneOutcome {
+            status: FineTuneStatus::Completed,
+            checkpoint: None,
+            weights: None,
+            weights_digest: None,
+            base_digest: Some(base_digest),
+            steps: self.steps,
+            steps_completed: report.steps_completed,
+            initial_loss: Some(report.initial_loss),
+            final_loss: report.final_loss,
+            train_records: dataset_records,
+            replay_records,
+            block,
+            lr: self.lr,
+        };
+        if report.interrupted {
+            std::fs::remove_file(&tuned).ok();
+            outcome.status = FineTuneStatus::Cancelled;
+            return Ok(outcome);
+        }
+
+        let checkpoint = out_dir.join(CHECKPOINT_DIR);
+        export_trained(&tuned, &model_dir, &checkpoint, None)?;
+        std::fs::remove_file(&tuned).ok();
+        let weights = checkpoint.join(WEIGHTS_FILE);
+        outcome.weights_digest = Some(digest(&weights)?);
+        outcome.weights = Some(weights);
+        outcome.checkpoint = Some(checkpoint);
+        Ok(outcome)
+    }
+}
+
+/// What one full fine-tune did. Anything not measured is `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatFullFineTuneOutcome {
+    /// How the run ended.
+    pub status: FineTuneStatus,
+    /// The checkpoint directory; `None` unless completed.
+    pub checkpoint: Option<PathBuf>,
+    /// The directory's `model.safetensors`; `None` unless completed.
+    pub weights: Option<PathBuf>,
+    /// `sha256:<hex>` of the weights file.
+    pub weights_digest: Option<String>,
+    /// `sha256:<hex>` naming the base the run started from.
+    pub base_digest: Option<String>,
+    /// Optimizer steps asked for.
+    pub steps: u32,
+    /// Steps completed.
+    pub steps_completed: u32,
+    /// The training loss estimated before the first step.
+    pub initial_loss: Option<f32>,
+    /// The last step's training loss.
+    pub final_loss: Option<f32>,
+    /// Records of the dataset.
+    pub train_records: usize,
+    /// Records of the replay and weighted files.
+    pub replay_records: usize,
+    /// The training row length, sized to the longest record.
+    pub block: u32,
+    /// The peak learning rate of the run.
+    pub lr: f32,
+}
+
+/// Writes the brain checkpoint `trained` to `checkpoint` as a checkpoint
+/// directory: fp32, one weights file, the tokenizer files of `tokenizer_dir`,
+/// with `adapter` folded in when one is given.
+fn export_trained(trained: &Path, tokenizer_dir: &Path, checkpoint: &Path, adapter: Option<&str>) -> Result<()> {
+    let (cfg, src) = qwen3::open_checkpoint(utf8(trained)?).map_err(Error::Backend)?;
+    let opts = qwen3::export::HfExport { dtype: qwen3::export::HfDtype::F32, shard_bytes: u64::MAX, tokenizer_dir: Some(tokenizer_dir), adapter };
+    qwen3::export::export_hf(&*src, &cfg, checkpoint, &opts).map_err(|e| Error::Backend(format!("{}: writing the checkpoint: {e}", checkpoint.display())))
+}
+
+/// Folds the LoRA `adapter` into the weights of `base` it targets
+/// (`W + alpha/r * B A`) and writes the result to `out_dir` as a checkpoint
+/// directory: the base with the adapter, in one set of weights, that needs no
+/// adapter to be served. `base` is whatever [`ChatFullFineTune::from_pretrained`]
+/// takes; the tokenizer files are copied from the base's directory. Returns
+/// `out_dir`, with the weights file and its digest.
+pub fn merge_adapter(base: &str, adapter: &Path, out_dir: &Path) -> Result<MergedCheckpoint> {
+    let store_root = loader::model_dir::resolve(None);
+    let (weights, model_dir, _) = loader::model_dir::resolve_base(base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+    let open = qwen3::store_checkpoint_path(&weights, &model_dir);
+    export_trained(&open, &model_dir, out_dir, Some(utf8(adapter)?))?;
+    let weights = out_dir.join(WEIGHTS_FILE);
+    Ok(MergedCheckpoint { weights_digest: digest(&weights)?, dir: out_dir.to_path_buf(), weights })
+}
+
+/// The checkpoint directory [`merge_adapter`] wrote.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MergedCheckpoint {
+    /// The directory.
+    pub dir: PathBuf,
+    /// Its `model.safetensors`.
+    pub weights: PathBuf,
+    /// `sha256:<hex>` of the weights file.
+    pub weights_digest: String,
+}
